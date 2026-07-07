@@ -1,0 +1,178 @@
+# config/limits.yaml — Tier-2 deterministic risk limit table (§7.1).
+#
+# ⚠ PROTECTED STORE (R4). The risk gate loads this ONLY if its SHA-256 matches the signature
+# recorded in SQLite table `protected_config` (written solely by the owner-confirmed change flow,
+# §2.4). The learning system has NO write path here. To change a value, use the owner-confirmed
+# flow (ProtectedStore.owner_update / Telegram two-step / dashboard with token) which re-signs it.
+#
+# Every value here is [tunable] by the OWNER ONLY, with exactly one exception: `edge_multiple_min`
+# is read from `envelope_state` at gate time (learner-movable STRICTLY inside its §6.3 bounds).
+# `analyst_confidence_min` is owner-only (dashboard-suggested-then-owner-approved, §6.3/§5.5).
+# Everything else is non-learnable (R4).
+#
+# "MTM basis" = realized + open mark-to-market. Platform equity = ₹20,000 + Σ platform-attributed
+# realized net P&L − costs + open platform-position MTM (§7.1 preamble).
+
+schema_version: 1
+
+# --- O1: the immutable capital anchor. Changeable ONLY via owner-confirmed protected-config flow. ---
+capital_base_inr: 20000          # ₹20,000 hard cap (O1); FLOOR anchor for all percentage halts
+
+limits:
+  capital_cap:
+    # Deployed CAPITAL (margin for MIS, cash/notional for CNC) ≤ ₹20,000. Bounds deployed cash, NOT
+    # economic exposure (at 3× MIS, long exposure can reach ~₹40–60k; bounded by max_leverage). (O1)
+    max_deployed_capital_inr: 20000
+    on_breach: reject_entry
+
+  per_trade_risk:
+    intraday_pct: 1.0            # risk-at-stop ≤ 1.0% (₹200) intraday
+    swing_position_pct: 2.0      # ≤ 2.0% (₹400) swing/position — owner-confirmed 2026-07-07 (plan §7.1 aligned)
+    overnight_gap_mult: 2.5      # overnight risk = qty × max(2.5×stop_distance, instrument daily band %) (R2)
+    on_breach: shrink_else_reject
+
+  daily_loss_soft:
+    day_mtm_pct: -5.0            # ≤ −5% (−₹1000) ⇒ FREEZE: no new entries rest of day, manage existing
+    on_breach: risk_state_frozen
+
+  daily_loss_hard:
+    day_mtm_pct: -7.0            # ≤ −7% (−₹1,400) ⇒ flatten MIS now, keep CNC protected, CLOSE_ONLY, AUTO→RECOMMEND
+    on_breach: forced_downgrade
+
+  weekly_drawdown:
+    rolling_sessions: 5
+    drawdown_pct: 8.0           # rolling-5-session equity DD ≥ 8% ⇒ AUTO→RECOMMEND, CLOSE_ONLY; owner re-arm only
+    on_breach: forced_downgrade
+
+  equity_floor_rung:
+    equity_pct_of_base: -10.0   # equity ≤ ₹18,000 ⇒ GO FLAT (exit ALL) + CLOSE_ONLY + AUTO→RECOMMEND; owner re-arm
+    on_breach: forced_exit_close_only
+
+  cumulative_floor:
+    equity_pct_of_base: -15.0   # equity < ₹17,000 ⇒ kill sequence (§7.2) AND mode forced OFF; owner reset only
+    on_breach: kill_forced_off
+
+  consecutive_losses:
+    max_per_session: 3          # 3 losing closes in a session ⇒ no new entries until next session (offline closes fold in, §2.6)
+    on_breach: frozen_entries
+
+  max_new_trades_day:
+    count: 5                    # C3 churn protection
+    on_breach: reject_entry
+
+  max_open_positions:
+    total: 3
+    max_mis: 2
+    max_cnc: 2
+    on_breach: reject_entry
+
+  per_stock_exposure:
+    max_positions_per_symbol: 1
+    cnc_notional_inr: 8000      # ≤ ₹8,000/symbol (40%) (C4)
+    on_breach: reject_or_shrink
+
+  per_sector_exposure:
+    max_positions_per_sector: 2 # NSE sector from the weekly sector_map job (§4.4); UNCLASSIFIED ⇒ cap 1
+    unclassified_cap: 1
+    on_breach: reject_entry
+
+  co_movement_cap:
+    corr_max: 0.7               # reject a new entry whose 20d return corr with an open position exceeds this (R1)
+    on_breach: reject_entry
+
+  max_leverage:
+    platform_cap_x: 3.0         # envelope [1×, cap]; Phase 4 starts at 1.0× via limits_overlay.phase4.yaml; cap never learnable
+    phase4_start_x: 1.0
+    on_breach: shrink_to_cap_else_reject
+
+  no_trade_windows:
+    mis_entry_start: "09:30"
+    mis_entry_end: "14:30"
+    cnc_entry_start: "09:20"
+    cnc_entry_end: "15:00"
+    no_entry_on_results_day: true          # earnings calendar (R2) — day T only; T+1 PEAD via `cat` is legal (O13)
+    nifty50_no_new_mis_after_on_expiry: "14:00"   # index-derivative expiry distortion
+    on_breach: reject_entry
+
+  catalyst_guard:
+    # News-origination guards (O11 — §2.4 item 4 / §2.7). OWNER-ONLY, NEVER LEARNABLE (§6.3):
+    # this block is the anti-manipulation surface for the one news→origination carve-out.
+    min_source_domains: 2                  # 'originating' grade needs ≥2 distinct source domains; else context-only
+    sentiment_min_long: 0.30               # long-direction sentiment floor for origination (§2.7 step 5)
+    max_catalyst_entries_day: 2            # `cat` entries/day, enforced at the pre-screen; within max_new_trades_day
+    digest_stale_max_h: 20                 # stale/missing digest ⇒ `cat` disabled for the day (fails to zero, §2.7)
+    originating_event_types:               # §5.4 closed taxonomy subset; pump_promo_suspect/other NEVER originate
+      [earnings_result, earnings_guidance, order_win, m_and_a,
+       regulatory_policy, govt_program, sector_policy, rating_change]
+    on_breach: reject_catalyst_entry_or_disable_cat
+
+  trade_window:
+    # The owner-set daily window is a STICKY control-plane value in SQLite `trade_window_state`,
+    # SEEDED from settings.yaml `trade_window` and owner-adjustable at runtime (§3.2.7). It is NOT
+    # learnable and absent from envelope.yaml. This block documents only the static guardrails the
+    # setter validates against; the live values live in SQLite, not here.
+    must_be_within_session: true
+    mis_sub_window_must_be_nonempty_after_buffer: true
+    on_breach: reject_entry
+
+  stale_data_guard:
+    max_tick_age_s: 5           # entry-time, per symbol + index
+    feed_heartbeat_silence_s: 10  # ⇒ FROZEN + ticker respawn (A4/R2); suppressed while WARMING (§2.6)
+    on_breach: reject_entry_or_frozen
+
+  warmup_ready:
+    # entries FROZEN until enough contiguous bars cover each strategy's feature lookbacks (§2.6)
+    on_breach: frozen_entries_until_sufficient
+
+  regime_data_ready:
+    # NIFTY 50 + India VIX history present for regime lookbacks; else regime strategies FROZEN
+    on_breach: frozen_regime_strategies
+
+  clock_skew:
+    max_skew_s: 2               # NTP skew > 2 s ⇒ no new entries until resync (R6)
+    on_breach: frozen_entries
+
+  entry_sanity_band:
+    mis_pct: 1.0                # LIMIT entry within ±1% of LTP (MIS)
+    cnc_pct: 2.0                # ±2% (CNC)
+    on_breach: reject
+
+  circuit_proximity:
+    band_proximity_pct: 2.0     # LTP within 2% of band edge ⇒ no entry; MIS must be F&O-list (C7)
+    mis_requires_fno: true
+    on_breach: reject
+
+  max_holding:
+    # MIS: hard square-off at trade-window end (see trade_window / §3.2.8). Backstops if offline (§2.6).
+    swing_trading_days: 20
+    position_trading_days: 120
+    on_breach: forced_exit_or_alert
+
+  min_residual_window:
+    min_hold_min: 10            # reject a new MIS when < this remains to (trade_window end − buffer) (§2.6)
+    on_breach: reject_entry
+
+  order_rate:
+    sustained_per_s: 1          # token bucket; ≤10 OPS by construction (B3/A2)
+    burst: 2
+    entry_calls_per_day: 70     # entry place/modify/cancel hard-capped; alert at 80%
+    # risk-reducing orders are PACED but UNCAPPED and never budget-rejected (R3). No single 100/day total cap.
+    broker_hard_ceiling_per_day: 5000   # the only real hard ceiling, unreachable at 1/s (A2)
+    on_breach: entry_queue_then_reject__risk_reducing_pace_only
+
+  order_modifications:
+    self_cap: 20                # broker cap 25 (A2); past 18 ⇒ cancel-and-replace
+    on_breach: replace_order
+
+  margin_buffer:
+    min_ratio: 1.1              # available margin ≥ 1.1 × requirement, checked before EVERY order (C6)
+    on_breach: reject
+
+  min_viable_size:
+    # post-shrink expected edge ≥ edge_multiple_min × breakeven (C2/C3). edge_multiple_min is the ONE
+    # learner-movable gate value — read from envelope_state at gate time (§6.3), NOT hard-coded here.
+    edge_multiple_min_default: 2.0
+    on_breach: reject
+
+# Owner-only analyst gate (no longer learner-movable — §7.1/§6.3):
+analyst_confidence_min: 0.55   # below this, an LLM proposal is dropped to no_action (owner-tuned to hit-rate)

@@ -1,0 +1,92 @@
+[project]
+name = "market-trading"
+version = "0.0.0"
+description = "Personal single-user AI trading platform for Indian equities (NSE / Zerodha Kite Connect). See IMPLEMENTATION_PLAN.md."
+readme = "README.md"
+requires-python = ">=3.12"          # A4: pin ONE tested interpreter. River needs >=3.11; plan pins 3.12.x.
+license = { text = "Proprietary - single-user, not for distribution (B5)" }
+authors = [{ name = "Owner" }]
+
+# Runtime dependencies. Versions follow the IMPLEMENTATION_PLAN.md fact sheet (A4/D1/E1-E3).
+# Heavy analytics/LLM deps are present because the Phase-0 install smoke test (scripts/smoke_test.py, A4)
+# imports + minimally runs each of them under the service account.
+dependencies = [
+    # --- Broker / market data (A4) ---
+    "kiteconnect==5.2.0",              # PyPI dist name is `kiteconnect` (repo is zerodha/pykiteconnect); pins autobahn[twisted]==19.11.2 + Twisted transitively (KiteTicker, A4)
+    "msgpack>=1.0",                    # length-prefixed ticker<->engine TCP frames (§2.2)
+    # --- LLM (D1) — bundles the Claude Code CLI subprocess; pinned at implementation time ---
+    "claude-agent-sdk>=0.2.97",
+    # --- Storage (E4) ---
+    "duckdb>=1.1",                     # bars / features / analytics
+    # SQLite is stdlib; no dependency.
+    # --- Learning / backtesting (E1/E2/E3) ---
+    "river>=0.21",                     # online learning + drift detection (Python >=3.11, E3)
+    "vectorbt>=0.26",                  # vectorized parameter sweeps (Apache-2.0 + Commons Clause, E1)
+    "skfolio>=0.5",                    # CombinatorialPurgedCV (CPCV, E2)
+    # --- Config / validation ---
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+    "python-ulid>=2.2",               # platform-assigned ULID ids (proposals, orders, ...)
+    # --- Owner I/O surfaces (O8) ---
+    "python-telegram-bot>=21.0",      # two-way Telegram control plane (R10)
+    "fastapi>=0.110",                 # dashboard API + Kite login callback (R6)
+    "uvicorn[standard]>=0.29",
+    # --- Ops / time discipline (R6/E7) ---
+    "APScheduler>=3.10,<4",           # AsyncIOScheduler, IST tz (§3.2.12)
+    "ntplib>=0.4",                    # clock-skew check (Clock.check_skew, R6)
+    "keyring>=24.0",                  # Windows Credential Manager / DPAPI secrets (R10)
+    "structlog>=24.1",                # structured logging (core.log)
+    "httpx>=0.27",                    # async HTTP for data feeds (best-effort, E5/E6)
+    "tenacity>=8.2",                  # bounded retry/backoff helpers (rate-limit budget, A2)
+    "tzdata>=2024.1",                 # IANA tz DB — REQUIRED on Windows (zoneinfo has no system DB), R6
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6.100",              # property tests for the OMS state machine (§9.2)
+    "freezegun>=1.4",                 # deterministic Clock in tests (§9.1)
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+mt-engine = "engine.ops.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/engine"]
+
+[tool.uv]
+# Pin the interpreter via .python-version (3.12.x). `uv python install 3.12` fetches it (A4).
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "needs_heavy_deps: requires pykiteconnect/claude-agent-sdk/vectorbt/skfolio/river (smoke-test tier)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]   # line length handled by formatter; long fact-sheet comments are intentional
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["engine"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+disallow_untyped_defs = false

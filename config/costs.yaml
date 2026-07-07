@@ -1,0 +1,52 @@
+# config/costs.yaml — Zerodha brokerage / STT / txn / GST / DP rates (C2).
+#
+# Single source of truth for the CostModel (§3.2.5), used IDENTICALLY in backtests, recommendations,
+# and live decisions (C3). RE-SCRAPE zerodha.com/charges before EACH release — broker fees now change
+# mid-year (C2 warning). Verified 2026-06-11 per the plan's fact sheet.
+#
+# ⚠ STALE-KNOWLEDGE TRAP (C2): the NSE transaction charge is 0.00307% per side. Training data often
+# says 0.00325% or 0.00297% — BOTH wrong now. The effective date of the 0.00307% revision is
+# unconfirmed; flagged for re-verification.
+
+schema_version: 1
+verified_on: "2026-06-11"
+source: "https://zerodha.com/charges"
+
+currency: INR
+
+brokerage:
+  delivery_cnc: { pct: 0.0, flat_inr: 0.0 }                 # delivery is free
+  # intraday/MIS: 0.03% or ₹20 per order, whichever is LOWER (binds at ₹20 only above ₹66,667/order)
+  intraday_mis: { pct: 0.03, cap_inr: 20.0 }
+
+stt:                                                          # Securities Transaction Tax
+  delivery: { buy_pct: 0.1,  sell_pct: 0.1 }                 # 0.1% both sides (delivery)
+  intraday: { buy_pct: 0.0,  sell_pct: 0.025 }               # 0.025% sell-side only (intraday)
+
+exchange_txn_charge:
+  nse_pct_per_side: 0.00307                                  # ⚠ NOT 0.00325 / 0.00297 (stale) — C2
+
+sebi_charge:
+  per_crore_inr: 10.0                                        # ₹10 per crore, both sides
+  applies_to: both_sides
+
+stamp_duty:                                                  # buy-side only
+  delivery_buy_pct: 0.015
+  intraday_buy_pct: 0.003
+
+gst:
+  pct: 18.0                                                  # 18% on (brokerage + txn charge + SEBI charge)
+  applies_to: [brokerage, exchange_txn_charge, sebi_charge]
+
+dp_charge:
+  per_scrip_per_sell_day_inr: 15.34                          # delivery sells only; makes multi-scrip diversification
+                                                             # disproportionately expensive at small size (C4)
+
+# Worked round-trips the CostModel unit test asserts to the paisa (§9.1, from C3):
+#   intraday ₹20,000 notional  ≈ ₹21   (breakeven 0.106%)
+#   delivery ₹20,000           ≈ ₹60   (breakeven 0.30%; dominated by ₹40 STT + ₹15.34 DP)
+#   5× MIS    ₹1,00,000 notional ≈ ₹83  (breakeven 0.083% of notional = 0.41% of capital/round-trip)
+reference_roundtrips:
+  - { label: "intraday_20k",  product: MIS, notional_inr: 20000,  expected_total_inr: 21, breakeven_pct: 0.106 }
+  - { label: "delivery_20k",  product: CNC, notional_inr: 20000,  expected_total_inr: 60, breakeven_pct: 0.30 }
+  - { label: "mis_1L_5x",     product: MIS, notional_inr: 100000, expected_total_inr: 83, breakeven_pct: 0.083 }

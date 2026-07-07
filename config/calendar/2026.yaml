@@ -1,0 +1,42 @@
+# config/calendar/2026.yaml — NSE trading calendar for 2026 (R6).
+#
+# ⚠⚠ DRAFT — `verified: false`. THE OWNER MUST VERIFY THIS LIST against the official NSE holiday
+# circular before Phase 1 (§4.4 job 12), then set `verified: true` and `verified_through` to the
+# last date covered. FAIL-SAFE (R6): NSECalendar refuses to mark any date a trading day beyond
+# `verified_through` (or at all while `verified: false` in prod) — "no calendar, no trading". Without
+# this, ~15 days/year misbehave and the LLM loop burns credit on closed markets (R6).
+#
+# Only the FIXED-DATE national holidays below are filled with confidence. The LUNAR/MOVABLE holidays
+# (Holi, Mahashivratri, Ram Navami, Mahavir Jayanti, Good Friday, Id-ul-Fitr, Bakri Id, Muharram,
+# Ganesh Chaturthi, Dussehra, Diwali Laxmi Pujan [Muhurat], Diwali Balipratipada, Guru Nanak Jayanti)
+# shift year to year and are intentionally LEFT BLANK rather than guessed — fill from the circular.
+
+year: 2026
+verified: false                           # ⚠ DRAFT — movable/lunar holidays below are still BLANK. Do NOT
+                                          # set true until the FULL list is filled from the NSE circular
+                                          # (§4.4 job 12, owner task). While false, strict/prod mode refuses
+                                          # every 2026 date ("no calendar, no trading", R6) — the safe default.
+verified_through:                         # set to e.g. "2026-12-31" once the owner confirms the full list
+source: "NSE holiday circular (to be attached by owner)"
+
+# Regular session times (IST). Stable; A14 pre-open + continuous + post-close.
+sessions:
+  pre_open:   { start: "09:00", end: "09:15" }      # auction; ticks excluded from bars (A14)
+  continuous: { start: "09:15", end: "15:30" }
+  post_close: { start: "15:40", end: "16:00" }      # CNC/MTF market orders at close price
+
+# Full-day market holidays (no trading). FIXED-DATE national holidays only — VERIFY + COMPLETE.
+holidays:
+  - { date: "2026-01-26", name: "Republic Day" }
+  - { date: "2026-05-01", name: "Maharashtra Day" }
+  - { date: "2026-10-02", name: "Gandhi Jayanti" }
+  - { date: "2026-12-25", name: "Christmas" }
+  # TODO(owner): add all movable/lunar holidays from the official NSE 2026 circular before Phase 1.
+
+# Muhurat trading (Diwali evening special session) — date + times from the circular; left blank.
+special_sessions: [{ date: "2026-11-08", name: "Diwali Muhurat Trading", start: "09:15", end: "10:15" }]
+  # Example shape once known:
+  # - { date: "2026-11-08", name: "Diwali Muhurat Trading", start: "18:15", end: "19:15" }
+
+# Shortened / special sessions (e.g. BCP days) — fill if/when the circular announces any.
+shortened_sessions: []

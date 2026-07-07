@@ -1,0 +1,105 @@
+# config/agents.yaml — Tier-1 agent roster + budget governor config (D6/D9, §5/§5.6).
+#
+# NOT a protected store (it is operational config, owner-editable), but the gate/learner never read
+# it — only engine.intelligence does. Model is ALWAYS set explicitly per agent: the SDK defaults to
+# Opus on Max plans and would burn credit at 5× Haiku rates (D4). Every knob (model, max output
+# tokens, max turns, thinking) is verified against the actual SDK surface in the Phase-0 smoke test;
+# note `effort` does NOT exist on Haiku 4.5 (D9).
+
+schema_version: 1
+
+llm:
+  # O6: Max 5x => $100 Agent SDK credit/month (D3). 20x => 200. Confirm tier at implementation time.
+  monthly_credit_usd: 100
+  # Pay-as-you-go overflow default OFF (D6). If owner enables, this hard monthly cap applies.
+  overflow_enabled: false
+  overflow_cap_usd: 25
+  # Auth path: Max-subscription OAuth (D2). A stray ANTHROPIC_API_KEY silently outranks it — the
+  # startup self-test asserts it absent unless overflow is deliberately enabled (D2/§5.6).
+  auth_mode: oauth_subscription            # oauth_subscription | api_key (the §13 swap seam)
+  setting_sources: []                      # D10: load NOTHING from filesystem CLAUDE.md/settings
+  # T8 / §14 Q1 — Claude Max consumer-plan Terms-of-Service for UNATTENDED / scheduled / service-account
+  # use of the Agent SDK credit: CONFIRMED by the owner (headless use sanctioned), so the engine relies on
+  # the Max OAuth credit above; the metered ANTHROPIC_API_KEY fallback (§13 swap seam / api_key mode) stays
+  # available but unused (overflow_enabled:false). Satisfies the G0 ToS condition.
+  tos_headless_confirmed: true
+  tos_confirmed_on: "2026-07-07"
+
+# Standard per-MTok rates (USD), D4 — the governor prices ledger usage from these (no balance API, D6).
+model_pricing_usd_per_mtok:
+  haiku-4.5:  { input: 1,  output: 5 }
+  sonnet-4.6: { input: 3,  output: 15 }
+  opus-4.8:   { input: 5,  output: 25 }
+  fable-5:    { input: 10, output: 50 }
+
+# Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $93 + $7 reserve = $100.
+# Rebalanced 2026-07-06 for the news layer (§2.7 owner decision, §14 Q16): intraday 45→42,
+# weekly 15→12, sentiment/news 8→14. The catalyst digest is deterministic — $0.
+budget_allocations_usd:
+  intraday_analyst: 42
+  nightly_reviewer: 20
+  weekly_researcher: 12
+  news_analyst: 14
+  preopen_planner: 5
+  reserve: 7
+
+# Degrade ladder trip points (§5.6) — cache-aware; shrink context before switching models (D8).
+degrade_ladder:
+  DG1: { pro_rata_pct: 110, agent_alloc_pct: 85 }
+  DG2: { pro_rata_pct: 125, global_alloc_pct: 85 }
+  DG3: { global_alloc_pct: 95 }
+  # DG4 = credit exhausted / SDK billing errors => zero SDK calls (== LLM-unavailable safe state, D7)
+
+agents:
+  # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
+  intraday_analyst:
+    model: sonnet-4.6           # D9/§5.2: thesis quality materially better for entry decisions; owner-confirmed
+    shape: single_shot
+    tools_enabled: false
+    max_output_tokens: 1200
+    timeout_s: 45
+    triggers: [signal_candidate, position_event, heartbeat]   # (a)+(c) window-gated; (b) whenever up (§5.2)
+    heartbeat_min: 20          # [tunable]; window-bounded (§5.6)
+    prescreen_cap_per_day: 6   # [tunable]
+
+  preopen_planner:
+    model: sonnet-4.6
+    shape: single_shot
+    tools_enabled: false
+    max_output_tokens: 2000
+    timeout_s: 60
+    triggers: [schedule]
+    schedule_ist: "08:50"
+
+  news_analyst:                # formerly sentiment_scorer — upgraded per §5.4/§2.7 (2026-07-06)
+    model: haiku-4.5           # lean prompt < 4096-token min cacheable prefix => priced 100% miss (D8)
+    shape: single_shot
+    tools_enabled: false
+    max_output_tokens: 1500    # richer per-CLUSTER schema: scope/entities/sectors/themes/sentiment/
+                               # materiality/event_type(closed enum)/novelty (§5.4); batched ≤30 clusters/call
+    timeout_s: 45
+    triggers: [schedule, batch]
+    # market hours + 19:00–22:00 sweep + pre-open batch that MUST complete before the ~08:35
+    # catalyst digest (§4.4 job 14); NOT window-gated (§5.6). Scores are UNTRUSTED (§2.4);
+    # analyst down => clusters unscored => empty watchlist => `cat` originates nothing (§2.7)
+
+  # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps (D5) ---
+  nightly_reviewer:
+    model: sonnet-4.6
+    shape: agentic
+    tools_enabled: true
+    max_turns: 12
+    max_output_tokens: 6000    # per-call knob; the cumulative run budget below is a different lever (§5.5)
+    run_budget_tokens: { billed_in_max: 120000, billed_out_max: 10000 }   # governor-enforced billed cap/run (§5.5/§11.2)
+    triggers: [schedule]
+    schedule_ist: "21:00"
+
+  weekly_researcher:
+    model: opus-4.8            # weekly deep review (D9); realistically ~$1/agentic run (D4)
+    shape: agentic
+    tools_enabled: true
+    max_turns: 20
+    max_output_tokens: 10000   # per-call knob (§5.5)
+    run_budget_tokens: { billed_in_max: 200000, billed_out_max: 16000 }   # governor-enforced billed cap/run (§5.5/§11.2)
+    triggers: [schedule]
+    schedule_ist: "Sun 18:00"
