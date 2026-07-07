@@ -1,0 +1,52 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version.local
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# --- Runtime data + state (NEVER committed; §3.1, §4.1) ---
+data/
+!data/.gitkeep
+
+# --- Secrets (R10: secrets live in Windows Credential Manager / DPAPI, never on disk) ---
+.env
+*.env
+!.env.example
+*.token
+*.key
+*.pem
+secrets.*
+
+# --- Dashboard build output (O8) ---
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.vite/
+
+# --- OS / editor ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# --- Claude Code harness transient state (keep .claude/settings*.json if you add them) ---
+.claude/scheduled_tasks.lock
+.claude/projects/
+
+# uv lockfile IS committed (reproducible builds) — do not ignore uv.lock
+
+node_modules/
