@@ -1,0 +1,59 @@
+# config/envelope.yaml — the learnable-parameter envelope (§6.3).
+#
+# ⚠ PROTECTED STORE (R4). Hash-verified against `protected_config` exactly like limits.yaml (§2.4).
+# This file defines the BOUNDS (range + default) of every parameter the online learner may move.
+# NOTHING outside this table is learnable. The learner writes only the live VALUE into SQLite
+# `envelope_state` (set_by='promotion'), strictly inside these bounds; the gate re-validates
+# value ∈ [min, max] on EVERY read (§6.5). The bounds themselves move only via the owner-confirmed
+# protected-config flow.
+#
+# CI test (§9.1): every range here must lie within the corresponding §7.1 limit
+# (e.g. mom.rebalance_days max 20 ≤ swing max_holding 20 td). A range that violates a hard limit
+# fails CI.
+
+schema_version: 1
+
+parameters:
+  orb.orb_minutes:        { min: 15,   max: 45,   default: 30,   used_by: orb }
+  orb.vol_mult:           { min: 1.2,  max: 3.0,  default: 1.5,  used_by: orb }
+  orb.stop_atr_mult:      { min: 0.8,  max: 2.0,  default: 1.2,  used_by: orb }
+  orb.rr_target:          { min: 1.0,  max: 3.0,  default: 1.5,  used_by: orb }
+
+  rsi2.rsi_entry:         { min: 2,    max: 15,   default: 10,   used_by: rsi2 }
+  rsi2.rsi_exit:          { min: 50,   max: 80,   default: 65,   used_by: rsi2 }
+  rsi2.stop_pct:          { min: 2.0,  max: 6.0,  default: 4.0,  used_by: rsi2 }
+  rsi2.max_hold_days:     { min: 3,    max: 15,   default: 10,   used_by: rsi2 }
+
+  trend.adx_min:          { min: 15,   max: 30,   default: 20,   used_by: trend }
+  trend.trail_atr_mult:   { min: 1.5,  max: 4.0,  default: 2.5,  used_by: trend }
+
+  mom.top_n:              { min: 1,    max: 3,    default: 2,    used_by: mom }
+  # upper bound 20 == §7.1 swing max_holding (20 td); ranges must lie within §7.1 (CI-asserted)
+  mom.rebalance_days:     { min: 10,   max: 20,   default: 15,   used_by: mom }
+
+  # News-catalyst drift baseline (§6.1 `cat`, §2.7 — O11/O12/O13, added 2026-07-06). Behaviour params only;
+  # the anti-manipulation guards live in limits.yaml `catalyst_guard` and are NEVER learnable (§6.3).
+  cat.materiality_min:    { min: 0.55, max: 0.85, default: 0.70, used_by: cat }   # watchlist 'originating' threshold
+  cat.confirm_move_pct:   { min: 0.5,  max: 3.0,  default: 1.0,  used_by: cat }   # price confirmation vs prior close (%)
+  cat.confirm_vol_mult:   { min: 1.2,  max: 3.0,  default: 1.5,  used_by: cat }   # relative-volume confirmation
+  cat.stop_atr_mult:      { min: 1.0,  max: 2.5,  default: 1.5,  used_by: cat }
+  cat.rr_target:          { min: 1.0,  max: 3.0,  default: 1.5,  used_by: cat }
+  # upper bound 10 << §7.1 swing max_holding (20 td); CI-asserted like mom.rebalance_days
+  cat.max_hold_days:      { min: 3,    max: 10,   default: 5,    used_by: cat }
+  # counted in TRADING SESSIONS from cluster first_seen (§2.7 step 5 — Friday event = age 1 on Monday)
+  cat.max_event_age_days: { min: 1,    max: 3,    default: 2,    used_by: cat }
+  cat.novelty_min:        { min: 0.3,  max: 0.8,  default: 0.5,  used_by: cat }   # freshness for 'originating' (§2.7)
+  cat.decay_halflife_h:   { min: 12,   max: 48,   default: 24,   used_by: sentiment_agg }  # §2.7 step 5 / §6.2 v2
+
+  # River filter threshold; output calibrated to historical hit-rate before thresholding (§6.4)
+  signal_quality_threshold: { min: 0.55, max: 0.80, default: 0.60, used_by: river_filter }
+
+  # The ONLY learner-movable gate knob (§7.1 min_viable_size / C3). The gate reads the live value
+  # from envelope_state; this row defines its legal range.
+  edge_multiple_min:      { min: 1.5,  max: 3.0,  default: 2.0,  used_by: cost_gate }
+
+# Explicitly NOT learnable (documented for auditors; enforced by absence from `parameters`):
+# every §7.1 risk limit, the leverage cap, kill-switch config, budget allocations, mode gates,
+# analyst_confidence_min (owner-only, §6.3), the entire limits.yaml `catalyst_guard` block
+# (min source domains / per-day catalyst cap / originating event types / digest staleness —
+# the §2.4/§2.7 anti-manipulation surface), and the bounds of this table itself (R4).

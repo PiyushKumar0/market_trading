@@ -1,0 +1,1 @@
+"""Tier 1 (non-deterministic). The ONLY module that calls the Claude Agent SDK. Proposes only; outputs are schema-validated data, never code/config (R1). Imported by NOTHING in risk/oms (enforced by test)."""

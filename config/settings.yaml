@@ -1,0 +1,98 @@
+# config/settings.yaml — non-secret runtime config (paths, ports, schedules, feature flags).
+#
+# NOT a protected store. Secrets are NEVER here (they live in Windows Credential Manager, R10).
+# The trade_window below is only the SEED default; the live value is sticky in SQLite
+# `trade_window_state` and owner-adjustable at runtime (§3.2.7/§7.1).
+
+schema_version: 1
+env: dev                                  # dev | prod (overridable via MT_ENV)
+timezone: "Asia/Kolkata"                  # IST always; all scheduling tz-aware (R6)
+
+paths:
+  data_dir: "data"                        # overridable via MT_DATA_DIR
+  duckdb: "data/market.duckdb"
+  parquet_dir: "data/parquet"
+  sqlite: "data/state.db"                 # WAL mode (§4.1)
+  logs_dir: "data/logs"
+  backups_dir: "data/backups"
+
+api:
+  host: "0.0.0.0"                         # binds LAN (R6 phone login redirect needs LAN reachability)
+  port: 8400                              # dashboard + Kite login callback (§3.2.11)
+  # GET /kite/callback is the ONLY unauthenticated route; everything else needs the bearer token (R10)
+
+ticker:
+  tcp_host: "127.0.0.1"                   # loopback only, not routable (§2.4 trust boundary)
+  tcp_port: 8401                          # length-prefixed msgpack frames, 1 s heartbeat (§2.2)
+  heartbeat_silence_kill_s: 10            # silence > 10 s => kill+respawn+stale-data guard (R2/A4)
+  max_instruments_per_conn: 3000          # A3
+
+# Process-lifecycle notifications + liveness watchdog (§2.2/§3.2.12). Distinct from the ticker heartbeat above:
+# this is the ENGINE's own liveness marker (SQLite engine_lifecycle.last_alive_at) read by the OUT-OF-BAND watchdog.
+lifecycle:
+  heartbeat_write_s: 20                   # engine writes last_alive_at this often (HealthMonitor)
+  down_stale_s: 90                         # watchdog: intend_to_run true AND heartbeat older than this => ENGINE_DOWN
+                                          #   (> 3× heartbeat_write_s so a single slow tick never false-alarms)
+  watchdog_poll_s: 60                     # scripts/watchdog.py Scheduled-Task cadence (non-wake, §10.7)
+  notify_planned_stop: true               # send ENGINE_STOPPED on a clean/planned stop (owner chose: notify both, 2026-07-07)
+  notify_started: true                    # send ENGINE_STARTED immediately on boot
+
+broker:
+  kite_login_redirect_path: "/kite/callback"   # MUST match the Kite app registered redirect URL (R6)
+  token_expiry_ist: "06:00"               # A5 [RE-VERIFY: A5 06:00 vs forum 07:30]; token_valid() is
+                                          # driven off last successful call / 403s, NOT a hard clock
+  instruments_refresh_ist: "08:15"        # daily dump (A10/A8)
+
+# SEED default for the owner-set daily trade window (§7.1 trade_window). Live value is sticky in
+# SQLite, owner-adjustable via /trade_window and POST /config/trade_window (§3.2.7).
+trade_window:
+  start_ist: "10:00"
+  end_ist: "10:30"
+  squareoff_buffer_min: 5                 # MIS entries cut off at end − buffer; force-flat by end (§3.2.8)
+
+telegram:
+  # The owner's Telegram chat ID (NOT a secret — just an integer ID). Inbound commands are accepted
+  # ONLY from this chat ID (R10). The bot TOKEN is a secret (Credential Manager). 0 = not configured
+  # yet (the engine starts without Telegram and warns).
+  owner_chat_id: -5586756347
+
+clock:
+  ntp_servers: ["time.windows.com", "pool.ntp.org"]
+  max_skew_s: 2                           # > 2 s => no new entries until resync (R6); mirrors limits.clock_skew
+
+data:
+  # A11 empirical answer (scripts/a11_check.py): are Kite minute candles corp-action adjusted?
+  # RESOLVED 2026-07-05 -> true (ADJUSTED). Verified against the BSE 2:1 bonus (ex-date 2025-05-23,
+  # factor R~3): Kite's historical minute pre-ex close 2338.5 ~= raw Rs 7015 / 3, continuous with the
+  # ex-date open Rs 2358 (no raw jump); daily agrees (2332). So the backfill / bar-stitching job needs
+  # NO re-adjustment of Kite minute history across ex-dates (A11). Recorded also in plan section 14 Q10.
+  minute_candles_adjusted: true
+  universe_max_watchlist: 50              # active intraday watchlist cap [tunable] (A3 not the binding constraint)
+  min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
+  backfill_daily_years: 2
+  backfill_minute_years: 1
+
+# --- News-intelligence layer (§2.7) — owner-only operational config; changes audited (config_audit) ---
+news:
+  # Feed set (§3.2.4 NewsIngest). URLs are SEEDS to be VERIFIED at Phase-1 implementation (feeds move;
+  # the G1 gate exercises them live for ≥5 sessions). Headline-level only; bodies never fetched.
+  feeds:
+    et_markets_rss:   "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"  # 5-min poll [VERIFY Phase-1]
+    moneycontrol_rss: "https://www.moneycontrol.com/rss/business.xml"                         # 15-min, polite [VERIFY Phase-1]
+    gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query, 15-min [VERIFY Phase-1]
+  cluster_sim_threshold: 0.75    # §3.2.4 pinned clustering similarity [tunable, owner] — drives the
+                                 # corroboration count, so owner-only (never in envelope.yaml)
+
+cat:
+  fanout_weight: 0.5             # §2.7 step 5: sector/theme fan-out multiplier on materiality AND |sentiment|
+                                 # before threshold comparison. Owner-only, deliberately NOT learnable.
+
+auth:
+  totp_automation:
+    # OWNER-ACCEPTED RISK ITEM (A5/§7.3): scripted TOTP auto-login violates Zerodha policy
+    # (account/API suspension risk). Default OFF; enabling is an explicit owner act.
+    enabled: false
+
+feature_flags:
+  paper_only: true                        # Phase 0–3: no live order routing possible
+  onedrive_backup_mirror: false           # §14 Q8 owner choice

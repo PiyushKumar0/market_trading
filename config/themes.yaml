@@ -1,0 +1,38 @@
+# config/themes.yaml — theme → keyword seed map (§2.7 / §4.3 theme_map / §4.4 job 13).
+#
+# NOT a protected store (owner-editable operational config, like agents.yaml). Themes are
+# cross-sector narratives that NSE sector indices don't capture; the EntityResolver tags a
+# news cluster with a theme on keyword match, and the theme fans out to `symbols` (universe-
+# intersected) at reduced weight (§2.7 scope levels).
+#
+# `symbols` lists start EMPTY and are filled ONLY via the owner-approval loop: the weekly
+# researcher SUGGESTS additions from unresolved-entity/theme logs (§5.5), the owner applies
+# (platform-suggests-owner-sets, §6.3). Keyword matching is case-insensitive whole-word.
+
+schema_version: 1
+
+themes:
+  ev_mobility:
+    keywords: [electric vehicle, EV, e-mobility, battery, charging infrastructure, lithium]
+    symbols: []
+  defence:
+    keywords: [defence, defense, DRDO, ordnance, missile, military procurement]
+    symbols: []
+  railways:
+    keywords: [railway, railways, rail corridor, metro rail, rolling stock]
+    symbols: []
+  infra_capex:
+    keywords: [infrastructure, capex, highway, port, airport, construction order]
+    symbols: []
+  renewables:
+    keywords: [solar, wind energy, renewable, green hydrogen, green energy]
+    symbols: []
+  psu_disinvestment:
+    keywords: [disinvestment, divestment, PSU stake sale, privatisation, privatization]
+    symbols: []
+  data_ai:
+    keywords: [data centre, data center, artificial intelligence, semiconductor, chip fab]
+    symbols: []
+  make_in_india:
+    keywords: [PLI scheme, production linked incentive, make in india, manufacturing incentive]
+    symbols: []
