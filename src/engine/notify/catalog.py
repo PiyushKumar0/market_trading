@@ -101,6 +101,34 @@ class MessageKind(StrEnum):
     order call. Owner confirms via ``/taken`` (one tap) ⇒ ``origin='recommended'``; dismiss/expiry ⇒
     ``no_action``. Never auto-adopted."""
 
+    RECONCILE_DRIFT = "reconcile_drift"
+    """Nightly self-built-vs-official bar reconciliation drifted beyond thresholds (A13/§3.2.3:
+    |Δvol|>``reconcile.vol_drift_pct`` or |Δclose|>``reconcile.close_drift_ticks`` on more than
+    ``reconcile.max_bad_bar_fraction`` of compared bars). Offline spans are excluded from the
+    denominator (§2.6) — this alert means genuine self-vs-official divergence, investigate the feed."""
+
+    BACKFILL_REPORT = "backfill_report"
+    """A ``BackfillJob`` run (historical or §2.6 warm-up gap-fill) finished — bars written, span,
+    failures (§3.2.3/§4.4 jobs 1+3). Warning when any symbol failed; info otherwise."""
+
+    WARMUP_FROZEN = "warmup_frozen"
+    """The §2.6 step-6 cold-start warm-up gate: entries stay FROZEN because contiguous bar coverage
+    is insufficient for a strategy's feature lookbacks (§7.1 ``warmup_ready``; §10.3
+    ``WARMUP_FROZEN(symbol/strategy)``). Never trade on thin data — distinct from feed-stale."""
+
+    CATCHUP_REPORT = "catchup_report"
+    """The §2.6 step-5 ``CatchUpRunner`` finished replaying missed jobs after an off period: which
+    jobs were caught up, in dependency order, and which failed (feeding the STARTUP_REPORT)."""
+
+    ENGINE_CRASHLOOP = "engine_crashloop"
+    """Repeated fast respawns inside ``lifecycle.crashloop_window_s`` coalesced into one loud alert
+    (§2.2/§10.7) instead of a page per restart. Always critical — something is structurally wrong."""
+
+    DATA_FRESHNESS_FROZEN = "data_freshness_frozen"
+    """A safety/deadline-critical daily job (instruments/tick-size A10, surveillance A8, earnings
+    calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
+    FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3)."""
+
 
 class CatalogMessage(BaseModel):
     """A single rendered, typed owner notification consumed by ``TelegramBot.send`` (§3.2.11).
@@ -260,4 +288,156 @@ def rec_fill_suspected(
             [{"text": f"✓ /taken {symbol} {qty}@{price_s}", "command": f"/taken {rec_id} {qty} {price_s}"}],
             [{"text": "✗ No action", "command": f"/reject {rec_id}"}],
         ],
+    )
+
+
+def reconcile_drift(
+    *,
+    d: str,
+    symbols_flagged: list[str],
+    bars_compared: int,
+    bad_bar_fraction: float,
+    max_bad_bar_fraction: float,
+) -> CatalogMessage:
+    """Self-built vs official 1m bars drifted beyond the §3.2.3 thresholds on day ``d`` (A13).
+
+    ``symbols_flagged`` lists the symbols whose bad-bar fraction exceeded
+    ``reconcile.max_bad_bar_fraction``; offline (gap-backfilled) spans were already excluded from the
+    denominator (§2.6), so this is genuine divergence. Official candles have replaced the drifted
+    self-built rows (``src='kite_official'`` canonical, §4.4 job 2) — the alert is for investigation.
+    """
+    shown = ", ".join(symbols_flagged[:10]) + ("…" if len(symbols_flagged) > 10 else "")
+    return CatalogMessage(
+        kind=MessageKind.RECONCILE_DRIFT,
+        title=f"Bar reconcile drift on {d}",
+        body=(
+            f"{len(symbols_flagged)} symbol(s) drifted beyond thresholds "
+            f"(bad-bar fraction {bad_bar_fraction:.4f} > {max_bad_bar_fraction:.4f} "
+            f"over {bars_compared} compared bars): {shown}\n"
+            "Official candles are now canonical for the drifted rows; investigate the tick feed."
+        ),
+        severity="warning",
+        data={
+            "d": d,
+            "symbols_flagged": symbols_flagged,
+            "bars_compared": bars_compared,
+            "bad_bar_fraction": bad_bar_fraction,
+            "max_bad_bar_fraction": max_bad_bar_fraction,
+        },
+    )
+
+
+def backfill_report(
+    *,
+    interval: str,
+    symbols: int,
+    bars_written: int,
+    frm: str,
+    to: str,
+    duration_s: float,
+    failures: list[str],
+) -> CatalogMessage:
+    """A ``BackfillJob`` run finished (§3.2.3; historical §4.4 job 3 or §2.6 warm-up gap-fill).
+
+    ``frm``/``to`` are already-rendered IST strings (callers pass Clock-derived values; no Clock
+    access here). Warning when any symbol failed — those symbols stay behind their checkpoint and the
+    next run resumes them (A2 resumable)."""
+    fail = f"\nFailed: {', '.join(failures)}" if failures else ""
+    return CatalogMessage(
+        kind=MessageKind.BACKFILL_REPORT,
+        title=f"Backfill {interval} complete" + (" (with failures)" if failures else ""),
+        body=(
+            f"{bars_written} bars across {symbols} symbol(s) for [{frm} .. {to}] "
+            f"in {duration_s:.1f}s (≤3 req/s, A2).{fail}"
+        ),
+        severity="warning" if failures else "info",
+        data={
+            "interval": interval,
+            "symbols": symbols,
+            "bars_written": bars_written,
+            "frm": frm,
+            "to": to,
+            "duration_s": duration_s,
+            "failures": failures,
+        },
+    )
+
+
+def warmup_frozen(*, blockers: list[str]) -> CatalogMessage:
+    """Entries FROZEN by the cold-start warm-up gate (§2.6 step 6 / §7.1 ``warmup_ready``).
+
+    Each blocker is a rendered "scope: have/need" line (e.g. ``"orb:RELIANCE bars 12/30"``) — the
+    strategies/symbols whose feature lookbacks lack contiguous bar coverage. Entries reopen
+    automatically once coverage is met; risk-reducing actions were never gated (R3)."""
+    return CatalogMessage(
+        kind=MessageKind.WARMUP_FROZEN,
+        title="Warm-up incomplete — entries frozen",
+        body=(
+            "Insufficient contiguous bar coverage for feature lookbacks (never trade on thin data):\n"
+            + "\n".join(f"• {b}" for b in blockers)
+        ),
+        severity="warning",
+        data={"blockers": blockers},
+    )
+
+
+def catchup_report(
+    *,
+    off_duration_s: float,
+    jobs_caught_up: list[str],
+    jobs_failed: list[str],
+) -> CatalogMessage:
+    """§2.6 step-5 ``CatchUpRunner`` summary: missed jobs replayed in dependency order after an off
+    period. Failures of safety/deadline-critical jobs additionally raise DATA_FRESHNESS_FROZEN."""
+    caught = ", ".join(jobs_caught_up) if jobs_caught_up else "none"
+    failed = ", ".join(jobs_failed) if jobs_failed else "none"
+    hours = off_duration_s / 3600.0
+    return CatalogMessage(
+        kind=MessageKind.CATCHUP_REPORT,
+        title="Missed-job catch-up complete" + (" (with failures)" if jobs_failed else ""),
+        body=(
+            f"Off for {hours:.1f}h. Jobs caught up: {caught}\nFailed: {failed}"
+        ),
+        severity="warning" if jobs_failed else "info",
+        data={
+            "off_duration_s": off_duration_s,
+            "jobs_caught_up": jobs_caught_up,
+            "jobs_failed": jobs_failed,
+        },
+    )
+
+
+def engine_crashloop(*, restarts: int, window_s: int) -> CatalogMessage:
+    """Coalesced crash-loop alarm (§2.2/§10.7): ``restarts`` fast respawns inside ``window_s``.
+
+    One loud page instead of one per restart. The engine should be held STOPPED for investigation —
+    open positions remain broker-protected throughout (R3)."""
+    return CatalogMessage(
+        kind=MessageKind.ENGINE_CRASHLOOP,
+        title="Engine crash-looping",
+        body=(
+            f"{restarts} restarts within {window_s}s — holding down for investigation. "
+            "Open positions remain broker-protected (R3); check logs before restarting."
+        ),
+        severity="critical",
+        data={"restarts": restarts, "window_s": window_s},
+    )
+
+
+def data_freshness_frozen(*, job_id: str, last_success: str | None, reason: str) -> CatalogMessage:
+    """A safety/deadline-critical daily job is not fresh ⇒ entries FROZEN (§2.6 step 5).
+
+    ``last_success`` is a rendered IST timestamp of the job's last good run (or None if never).
+    Entries stay frozen until the job runs/verifies; risk-reducing actions continue (R3)."""
+    last = last_success or "never"
+    return CatalogMessage(
+        kind=MessageKind.DATA_FRESHNESS_FROZEN,
+        title=f"Entries frozen — {job_id} not fresh",
+        body=(
+            f"Safety-critical job '{job_id}' could not run/verify before entries open "
+            f"(last success: {last}). Reason: {reason}\n"
+            "Entries FROZEN until fresh; exits/protection unaffected (R3)."
+        ),
+        severity="critical",
+        data={"job_id": job_id, "last_success": last_success, "reason": reason},
     )

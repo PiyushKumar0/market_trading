@@ -1,0 +1,8 @@
+{
+  "_note": "LIVE-VERIFIED 2026-07-16: BSE SHPQNewFormat/w?scripcode=500325. qtrid is a float; qtr is a '<Month> <Year>' label (not a date).",
+  "Table": [
+    {"yr": "2026 - 2027", "qtrid": 130.0, "qtr": "June 2026", "status": "New", "filing_date_time": "2026-07-16T19:24:36.37", "revised_date_time": null, "XbrlFile": "500325_1672026192434_SHP.xml"},
+    {"yr": "2025 - 2026", "qtrid": 129.0, "qtr": "March 2026", "status": "New", "filing_date_time": "2026-04-21T13:17:10.383", "revised_date_time": null, "XbrlFile": "500325_2104_SHP.xml"},
+    {"yr": "2025 - 2026", "qtrid": 128.0, "qtr": "December 2025", "status": "New", "filing_date_time": "2026-01-20T11:00:00.0", "revised_date_time": null, "XbrlFile": "500325_2001_SHP.xml"}
+  ]
+}

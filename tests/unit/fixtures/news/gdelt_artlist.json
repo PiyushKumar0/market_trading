@@ -1,0 +1,43 @@
+{
+  "articles": [
+    {
+      "url": "https://www.livemint.com/market/rbi-rate-cut-liveblog.html",
+      "url_mobile": "",
+      "title": "Surprise move: RBI cuts repo rate by 25 basis points",
+      "seendate": "20260617T043000Z",
+      "domain": "livemint.com",
+      "language": "English",
+      "sourcecountry": "India"
+    },
+    {
+      "url": "https://www.reuters.com/world/india/rbi-cuts-rates.html",
+      "title": "India central bank cuts rates in surprise move",
+      "seendate": "20260617T043100Z",
+      "domain": "reuters.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://economictimes.indiatimes.com/markets/rbi-rate-cut.cms",
+      "title": "RBI cuts repo rate by 25 basis points in surprise move",
+      "seendate": "20260617T050000Z",
+      "domain": "economictimes.indiatimes.com",
+      "language": "English",
+      "sourcecountry": "India"
+    },
+    {
+      "url": "",
+      "title": "Malformed article with no url",
+      "seendate": "20260617T051500Z",
+      "domain": "livemint.com"
+    },
+    {
+      "url": "https://www.business-standard.com/markets/bad-seendate.html",
+      "title": "Bad seendate falls back to ingest time",
+      "seendate": "17-06-2026 10:00",
+      "domain": "business-standard.com",
+      "language": "English",
+      "sourcecountry": "India"
+    }
+  ]
+}

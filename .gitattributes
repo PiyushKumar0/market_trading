@@ -1,0 +1,6 @@
+# Protected config (R4): the ProtectedStore registers the SHA-256 of the LF bytes it writes
+# (protected_store.owner_update rewrites CRLF -> LF). Pin LF here so a future checkout on a
+# core.autocrlf=true box cannot re-materialize CRLF and re-trigger a hash mismatch / FROZEN boot.
+# (See runbooks/boot-log-investigation-2026-07-10.md, B1.)
+config/*.yaml text eol=lf
+config/calendar/*.yaml text eol=lf

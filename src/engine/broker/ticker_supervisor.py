@@ -38,30 +38,118 @@ Subscription set (§3.2.2):
     the universe ticks. Changes go over a **control frame** on the live TCP link via
     :meth:`update_subscriptions`, not a respawn.
 
-Phase 0 scope: real subprocess spawn/terminate (``asyncio.create_subprocess_exec``), real per-spawn
-secret + stdin orphan-protection, and a real :meth:`health` that computes ages from ``clock.now()``. The
-connection read loop + msgpack frame parsing + control-frame writing are documented **skeletons** —
-real framing is Phase 1.
+Phase 1 scope: real subprocess spawn/terminate (``asyncio.create_subprocess_exec``), per-spawn
+secret + stdin orphan-protection, a real :meth:`health` computed from ``clock.now()``, AND the real
+framing: the loopback ``asyncio`` server, the §2.4 handshake validation, length-prefixed msgpack
+frame parsing (tick → :class:`~engine.core.types.Tick` → ``bus.publish("tick", …)``; order →
+``order.update``; heartbeat → health), the ``subscribe`` control frame, and the stdin credentials
+frame.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets as _secrets
+import struct
 import sys
+from collections.abc import Callable
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel
+import msgpack
+from pydantic import BaseModel, Field
 
-from engine.core.clock import Clock
+from engine.core.clock import IST, Clock
 from engine.core.config import Settings
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
+from engine.core.types import Tick
 
 _log = get_logger("engine.broker.ticker_supervisor")
 
 #: Canonical event bus topic for feed-health transitions (§3.2.1).
 FEED_HEALTH_TOPIC = "feed.health"
+#: Canonical event bus topic for parsed live ticks (§3.2.1) — consumed by ``BarBuilder`` (§3.2.3).
+TICK_TOPIC = "tick"
+#: Canonical event bus topic for broker order postbacks (§3.2.1, A3) — drives the OMS (§3.5.1).
+ORDER_UPDATE_TOPIC = "order.update"
+
+#: Length prefix on every frame: 4-byte big-endian unsigned int (mirror of ticker/main.py).
+_LEN_PREFIX = struct.Struct(">I")
+#: Wire-protocol version we accept from the child's ``hello`` (ticker/main.py ``_PROTOCOL_VERSION``).
+PROTOCOL_VERSION = 1
+
+
+class OrderUpdateFrame(BaseModel):
+    """A verbatim Kite order postback (A3) as forwarded by the mt-ticker child.
+
+    ``data`` is the raw ``on_order_update`` payload, untouched — the OMS correlates it against
+    platform orders on the broker's own field names (§3.5.1). Published on ``order.update``.
+    """
+
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+def _wire_decimal(value: Any) -> Decimal | None:
+    """A wire decimal-string (or number) → ``Decimal``; None/empty passes through (§3.2 money)."""
+    if value is None or value == "":
+        return None
+    return Decimal(str(value))
+
+
+def _wire_timestamp(value: Any) -> datetime | None:
+    """A wire ISO-8601 NAIVE-IST timestamp → tz-aware IST ``datetime`` (§3.2 convention).
+
+    ticker/main.py forwards KiteTicker's naive IST wall time as an ISO string; we attach
+    ``Asia/Kolkata`` here. A tz-aware value (defensive) is converted, not re-stamped.
+    """
+    if value is None or value == "":
+        return None
+    ts = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if not isinstance(ts, datetime):
+        return None
+    return ts.replace(tzinfo=IST) if ts.tzinfo is None else ts.astimezone(IST)
+
+
+def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
+    """Parse one PINNED wire tick frame (ticker/main.py ``_frame_tick``) into a core ``Tick``.
+
+    The exact mirror of the child's serializer: prices arrive as decimal strings and re-wrap to
+    ``Decimal`` exactly; ``volume_traded`` is the broker's CUMULATIVE day volume, verbatim (A13);
+    ``exchange_timestamp`` is naive-IST ISO and becomes tz-aware IST. ``tradingsymbol`` is resolved
+    by the caller (the wire carries only the instrument token). Raises ``ValueError`` on a frame
+    missing its load-bearing fields — the caller logs and drops it (never crashes the read loop).
+    """
+    ltp = _wire_decimal(frame.get("last_price"))
+    if ltp is None:
+        raise ValueError("tick frame missing last_price")
+    exchange_ts = _wire_timestamp(frame.get("exchange_timestamp"))
+    if exchange_ts is None:
+        raise ValueError("tick frame missing exchange_timestamp")
+    token = frame.get("instrument_token")
+    if token is None:
+        raise ValueError("tick frame missing instrument_token")
+    ohlc = frame.get("ohlc") or {}
+    depth = frame.get("depth") or {}
+    buy = depth.get("buy") or []
+    sell = depth.get("sell") or []
+    return Tick(
+        instrument_token=int(token),
+        tradingsymbol=tradingsymbol,
+        ltp=ltp,
+        volume_traded=int(frame.get("volume_traded") or 0),
+        exchange_ts=exchange_ts,
+        ohlc_open=_wire_decimal(ohlc.get("open")),
+        ohlc_high=_wire_decimal(ohlc.get("high")),
+        ohlc_low=_wire_decimal(ohlc.get("low")),
+        ohlc_close=_wire_decimal(ohlc.get("close")),
+        avg_price=_wire_decimal(frame.get("average_traded_price")),
+        bid=_wire_decimal(buy[0].get("price")) if buy else None,
+        ask=_wire_decimal(sell[0].get("price")) if sell else None,
+    )
 
 # WIRE CONTRACT (single source of truth — ticker/main.py implements exactly this):
 #   * TOPOLOGY: the ENGINE is the TCP SERVER — it listens on 127.0.0.1:<tcp_port> (loopback-only, §2.4)
@@ -112,13 +200,32 @@ class TickerSupervisor:
         The single source of "now" — every age in :meth:`health` is derived from ``clock.now()``
         (never a bare ``datetime.now()``; §3.2 convention / R6).
     bus:
-        Event bus for publishing ``feed.health`` transitions.
+        Event bus for ``feed.health`` transitions and the parsed ``tick`` / ``order.update``
+        streams. May be ``None`` in bare harnesses/tests — publishing is then skipped.
+    symbol_for_token:
+        Resolver from instrument token → tradingsymbol (the wire carries only the token; the core
+        ``Tick`` requires the symbol). The composition root wires ``InstrumentStore``. A tick whose
+        token cannot be resolved is dropped (logged once per token) — downstream consumers are
+        keyed by symbol, so an unresolvable tick is unusable.
+    api_key:
+        Kite api_key handed to the child over stdin together with the access token (§2.4 — never
+        env, never a routable frame).
     """
 
-    def __init__(self, settings: Settings, clock: Clock, bus: EventBus) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Clock,
+        bus: EventBus | None,
+        *,
+        symbol_for_token: Callable[[int], str | None] | None = None,
+        api_key: str = "",
+    ) -> None:
         self._settings = settings
         self._clock = clock
         self._bus = bus
+        self._symbol_for_token = symbol_for_token
+        self._api_key = api_key
 
         # --- child process state ---
         self._proc: asyncio.subprocess.Process | None = None
@@ -126,7 +233,12 @@ class TickerSupervisor:
         self._access_token: str | None = None
         self._tokens: list[int] = []
 
-        # --- supervision / read-loop tasks (Phase-1 frame parsing lives behind these) ---
+        # --- the loopback server + the (single) authenticated child link ---
+        self._server: asyncio.AbstractServer | None = None
+        self._child_writer: asyncio.StreamWriter | None = None
+        self._unresolved_tokens_logged: set[int] = set()
+
+        # --- supervision / read-loop tasks ---
         self._read_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
 
@@ -158,9 +270,9 @@ class TickerSupervisor:
     async def update_subscriptions(self, tokens: list[int]) -> None:
         """Update the live subscription set via a control frame on the TCP link (no respawn).
 
-        Phase-0 skeleton: records the desired set and (Phase 1) writes a length-prefixed msgpack control
-        frame instructing the child to (un)subscribe. The set is capped at
-        ``settings.ticker.max_instruments_per_conn`` (A3, ≤3,000/conn).
+        Writes a length-prefixed msgpack ``{"type":"subscribe","tokens":[…]}`` frame; the child
+        diffs the set, (un)subscribes, and re-asserts FULL mode (ticker/main.py). The set is capped
+        at ``settings.ticker.max_instruments_per_conn`` (A3, ≤3,000/conn).
         """
         cap = self._settings.ticker.max_instruments_per_conn
         if len(tokens) > cap:
@@ -169,8 +281,21 @@ class TickerSupervisor:
         if self._proc is None or self._proc.returncode is not None:
             _log.info("ticker_update_subscriptions_deferred_not_running", count=len(self._tokens))
             return
-        # Phase 1: await self._write_control_frame({"type": "subscribe", "tokens": self._tokens})
+        await self._write_control_frame({"type": "subscribe", "tokens": self._tokens})
         _log.info("ticker_update_subscriptions", count=len(self._tokens))
+
+    async def _write_control_frame(self, obj: dict[str, Any]) -> None:
+        """Send one control frame to the connected child (deferred+logged if the link is down)."""
+        writer = self._child_writer
+        if writer is None:
+            _log.info("ticker_control_frame_deferred_no_link", frame_type=obj.get("type"))
+            return
+        try:
+            body = msgpack.packb(obj, use_bin_type=True)
+            writer.write(_LEN_PREFIX.pack(len(body)) + body)
+            await writer.drain()
+        except (ConnectionError, RuntimeError) as exc:
+            _log.warning("ticker_control_frame_write_failed", error=str(exc))
 
     async def stop(self) -> None:
         """Stop the child: close stdin (orphan protection, §2.4) then terminate (A4)."""
@@ -200,10 +325,13 @@ class TickerSupervisor:
     # ------------------------------------------------------------------ spawn / terminate (real)
 
     def _ticker_entrypoint(self) -> Path:
-        """Resolve ``ticker/main.py`` — the separate Twisted program (§3.2.2)."""
-        # src/engine/broker/ticker_supervisor.py -> parents[2] == src/
-        src_root = Path(__file__).resolve().parents[2]
-        return src_root / "ticker" / "main.py"
+        """Resolve ``ticker/main.py`` — the separate Twisted program at the REPO ROOT (§3.2.2).
+
+        ``ticker/`` deliberately lives outside ``src/engine`` (it must never import ``engine.*``,
+        §2.2): src/engine/broker/ticker_supervisor.py → parents[3] == the repo root.
+        """
+        repo_root = Path(__file__).resolve().parents[3]
+        return repo_root / "ticker" / "main.py"
 
     async def _spawn_child(self) -> None:
         """Launch a fresh child with a new per-spawn secret; arm the read + monitor loops.
@@ -213,6 +341,11 @@ class TickerSupervisor:
         """
         self._shared_secret = _secrets.token_hex(32)
         entrypoint = self._ticker_entrypoint()
+
+        # The ENGINE is the TCP server (WIRE CONTRACT at module top): bind the loopback listener
+        # BEFORE spawning the child, or the child's immediate connect would be refused.
+        self._read_task = asyncio.create_task(self._read_loop(), name="ticker-read-loop")
+        await self._wait_server_ready()
 
         env = {
             _ENV_SHARED_SECRET: self._shared_secret,
@@ -242,7 +375,6 @@ class TickerSupervisor:
         self._last_heartbeat_at = None
         self._set_state("WARMING")  # suppress false feed-stale alarms until first ticks (§2.6)
 
-        self._read_task = asyncio.create_task(self._read_loop(), name="ticker-read-loop")
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="ticker-monitor-loop")
 
         _log.info(
@@ -254,20 +386,31 @@ class TickerSupervisor:
         )
 
     async def _send_startup_handshake(self) -> None:
-        """Phase-0 skeleton: deliver the access token + initial subscriptions to the child over stdin.
+        """Deliver the credentials + initial subscriptions to the child over stdin (§2.4).
 
-        Phase 1 writes the access token and the initial subscription set as the first framed message;
-        the child must present the shared secret back on the TCP link before any tick/order frame is
-        honoured (§2.4). Here we only document the channel and keep stdin open as the liveness signal.
+        One length-prefixed msgpack frame ``{"api_key", "access_token", "tokens"}`` — the SECRETS
+        CHANNEL of the wire contract: never env, never a routable frame, so credentials never land
+        in the process table. The child reads it before connecting KiteTicker
+        (ticker/main.py ``_read_stdin_credentials``). Stdin then stays OPEN as the liveness signal
+        (closing it is the orphan-protection kill, §2.4) — the child ignores further stdin bytes.
         """
         proc = self._proc
         if proc is None or proc.stdin is None:
             return
-        # Phase 1:
-        #   payload = msgpack.packb({"access_token": self._access_token, "tokens": self._tokens})
-        #   proc.stdin.write(_length_prefix(payload)); await proc.stdin.drain()
-        # Phase 0: leave stdin open (do NOT close) so the child stays adopted (§2.4 orphan protection).
-        return
+        payload = msgpack.packb(
+            {
+                "api_key": self._api_key,
+                "access_token": self._access_token or "",
+                "tokens": list(self._tokens),
+            },
+            use_bin_type=True,
+        )
+        try:
+            proc.stdin.write(_LEN_PREFIX.pack(len(payload)) + payload)
+            await proc.stdin.drain()
+        except (ConnectionError, RuntimeError) as exc:  # pragma: no cover - child died mid-spawn
+            _log.warning("ticker_stdin_handshake_failed", error=str(exc))
+        # Leave stdin OPEN (do NOT close) so the child stays adopted (§2.4 orphan protection).
 
     async def _terminate_child(self) -> None:
         """Close stdin (orphan protection) then terminate, escalating to kill if it does not exit."""
@@ -292,7 +435,7 @@ class TickerSupervisor:
             return
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _log.warning("ticker_terminate_timeout_killing", pid=proc.pid)
             try:
                 proc.kill()
@@ -300,32 +443,161 @@ class TickerSupervisor:
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:  # pragma: no cover - OS-level wedge
+            except TimeoutError:  # pragma: no cover - OS-level wedge
                 _log.error("ticker_kill_timeout", pid=proc.pid)
 
-    # ------------------------------------------------------------------ read + monitor loops (skeleton)
+    # ------------------------------------------------------------------ read loop (the loopback server)
+
+    async def _wait_server_ready(self, timeout_s: float = 5.0) -> None:
+        """Poll until :meth:`_read_loop` has bound its listener (or it died / timed out).
+
+        Uses real short sleeps (not Clock) — this is I/O readiness, not trading time.
+        """
+        for _ in range(int(timeout_s / 0.01)):
+            if self._server is not None:
+                return
+            task = self._read_task
+            if task is not None and task.done():
+                exc = task.exception() if not task.cancelled() else None
+                _log.error("ticker_server_bind_failed", error=str(exc))
+                return
+            await asyncio.sleep(0.01)
+        _log.error("ticker_server_bind_timeout", timeout_s=timeout_s)
 
     async def _read_loop(self) -> None:
-        """Connection read loop over 127.0.0.1:<tcp_port> (documented skeleton; Phase 1 parses frames).
+        """The loopback TCP server owning the child's data link (WIRE CONTRACT at module top).
 
-        Phase 1 responsibilities (the ENGINE is the server — see the WIRE CONTRACT at module top):
-            * run an ``asyncio`` server (``asyncio.start_server``) on the loopback endpoint and ACCEPT
-              the child's inbound connection (the child is the client, ``reactor.connectTCP``);
-            * validate the §2.4 shared-secret handshake on the child's first frame, else drop it;
-            * read **length-prefixed msgpack** frames and dispatch by type:
-                - ``tick``  → update ``_last_tick_at``; publish ``tick`` on the bus;
-                - ``order`` → publish ``order.update`` (drives the OMS, A3) — a fabricated frame is
-                  blocked by the handshake + loopback bind + reconciliation backstop (§2.4);
-                - ``heartbeat`` (1 s) → update ``_last_heartbeat_at``; first heartbeat + warm-up done
-                  promotes WARMING → HEALTHY (§2.6).
-
-        Phase 0: park until cancelled so the task structure (and its cancellation on stop/respawn) is
-        real and tested, without opening a real socket.
+        The ENGINE is the server: ``asyncio.start_server`` on ``127.0.0.1:<tcp_port>`` accepts the
+        child's inbound connection (the child is the client, ``reactor.connectTCP``). Frame parsing
+        and dispatch live in :meth:`_handle_child_connection`. Cancellation (stop/respawn) closes
+        the listener so a respawn can rebind the port.
         """
+        server = await asyncio.start_server(
+            self._handle_child_connection,
+            host=self._settings.ticker.tcp_host,
+            port=int(self._settings.ticker.tcp_port),
+        )
+        self._server = server
+        _log.info(
+            "ticker_server_listening",
+            tcp=f"{self._settings.ticker.tcp_host}:{self._settings.ticker.tcp_port}",
+        )
         try:
-            await asyncio.Event().wait()  # replaced by the real connect+read in Phase 1
+            await asyncio.Event().wait()  # serve until cancelled (stop/respawn)
+        finally:
+            self._server = None
+            self._child_writer = None
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+
+    async def _handle_child_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        """Authenticate one inbound child connection (§2.4) and pump its frames.
+
+        The FIRST frame must be a ``hello`` echoing this spawn's shared secret — else the
+        connection is dropped before any tick/order frame is honoured (a fabricated local frame
+        must not be able to inject a phantom fill; loopback bind + per-spawn secret + REST
+        reconciliation backstop, §2.4).
+        """
+        peer = writer.get_extra_info("peername")
+        try:
+            hello = await self._read_frame(reader)
+            if (
+                hello is None
+                or hello.get("type") != "hello"
+                or not self._shared_secret
+                or hello.get("secret") != self._shared_secret
+            ):
+                _log.warning(
+                    "ticker_handshake_rejected",
+                    peer=str(peer),
+                    frame_type=None if hello is None else hello.get("type"),
+                )
+                return
+            _log.info(
+                "ticker_handshake_ok",
+                child_pid=hello.get("pid"),
+                protocol_v=hello.get("v"),
+                tokens=hello.get("tokens"),
+            )
+            self._child_writer = writer
+            while True:
+                frame = await self._read_frame(reader)
+                if frame is None:
+                    _log.info("ticker_link_closed", peer=str(peer))
+                    return
+                await self._handle_frame(frame)
         except asyncio.CancelledError:  # pragma: no cover - normal on stop/respawn
             raise
+        except Exception:  # noqa: BLE001 - never let a link error kill the server silently
+            _log.exception("ticker_link_error", peer=str(peer))
+        finally:
+            if self._child_writer is writer:
+                self._child_writer = None
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    @staticmethod
+    async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+        """Read one length-prefixed msgpack frame; ``None`` on EOF/connection loss.
+
+        An undecodable body yields ``{}`` (logged) so one corrupt frame never tears the link down —
+        the heartbeat-silence guard is the backstop for a systematically broken stream.
+        """
+        try:
+            header = await reader.readexactly(_LEN_PREFIX.size)
+            (length,) = _LEN_PREFIX.unpack(header)
+            body = await reader.readexactly(length)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            return None
+        try:
+            frame = msgpack.unpackb(body, raw=False)
+        except Exception as exc:  # noqa: BLE001 - corrupt frame is dropped, not fatal
+            _log.warning("ticker_frame_decode_error", error=str(exc))
+            return {}
+        return frame if isinstance(frame, dict) else {}
+
+    async def _handle_frame(self, frame: dict[str, Any]) -> None:
+        """Dispatch one authenticated frame by ``type`` (WIRE CONTRACT at module top)."""
+        ftype = frame.get("type")
+        if ftype == "heartbeat":
+            self._last_heartbeat_at = self._clock.now()
+            if self._state == "WARMING":
+                # First heartbeat proves the link + child are live: promote WARMING → HEALTHY (§2.6).
+                # The §7.1 warm-up ENTRY gate (ops.warmup) is separate — this is feed health only.
+                self._set_state("HEALTHY")
+                await self._publish_health()
+        elif ftype == "tick":
+            self._last_tick_at = self._clock.now()
+            tick = self._parse_tick(frame)
+            if tick is not None and self._bus is not None:
+                self._bus.publish(TICK_TOPIC, tick)
+        elif ftype == "order":
+            # Verbatim Kite postback (A3); the OMS correlates it (§3.5.1).
+            if self._bus is not None:
+                self._bus.publish(ORDER_UPDATE_TOPIC, OrderUpdateFrame(data=frame.get("data") or {}))
+        else:
+            _log.warning("ticker_unknown_frame", frame_type=str(ftype))
+
+    def _parse_tick(self, frame: dict[str, Any]) -> Tick | None:
+        """Wire tick frame → core ``Tick`` (symbol resolved via the injected resolver); None = drop."""
+        token = frame.get("instrument_token")
+        symbol: str | None = None
+        if token is not None and self._symbol_for_token is not None:
+            symbol = self._symbol_for_token(int(token))
+        if symbol is None:
+            tok = -1 if token is None else int(token)
+            if tok not in self._unresolved_tokens_logged:   # log once per token, not per tick
+                self._unresolved_tokens_logged.add(tok)
+                _log.warning("ticker_tick_symbol_unresolved", instrument_token=tok)
+            return None
+        try:
+            return parse_tick_frame(frame, symbol)
+        except Exception:  # noqa: BLE001 - malformed frame is dropped, never crashes the read loop
+            _log.exception("ticker_tick_parse_error", instrument_token=token)
+            return None
 
     async def _monitor_loop(self) -> None:
         """Heartbeat-silence watchdog: kill + respawn on >``heartbeat_silence_kill_s`` (R2/A4).
@@ -423,7 +695,9 @@ class TickerSupervisor:
         self._state = state
 
     async def _publish_health(self) -> None:
-        """Publish the current :class:`FeedHealth` on ``feed.health`` (R2)."""
+        """Publish the current :class:`FeedHealth` on ``feed.health`` (R2). No-op without a bus."""
+        if self._bus is None:
+            return
         await self._bus.apublish(FEED_HEALTH_TOPIC, self.health())
 
 

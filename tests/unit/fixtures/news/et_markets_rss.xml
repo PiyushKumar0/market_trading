@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ET Markets RSS fixture (§3.2.4 NewsIngest offline test). 4 good items + 3 malformed (no title /
+     no link / relative link). One item has an unparsable pubDate (kept, published_at = ingest Clock);
+     one item's URL is duplicated in the Moneycontrol fixture (cross-feed URL dedupe). -->
+<rss version="2.0">
+  <channel>
+    <title>Markets-Economic Times</title>
+    <link>https://economictimes.indiatimes.com/markets</link>
+    <description>ET Markets fixture feed</description>
+    <item>
+      <title>Infosys beats Q1 profit estimates raises FY27 revenue guidance</title>
+      <link>https://economictimes.indiatimes.com/markets/infosys-q1.cms</link>
+      <pubDate>Wed, 17 Jun 2026 03:30:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>RBI cuts repo rate by 25 basis points in surprise move</title>
+      <link>https://economictimes.indiatimes.com/markets/rbi-rate-cut.cms</link>
+      <pubDate>Wed, 17 Jun 2026 09:00:00 +0530</pubDate>
+    </item>
+    <item>
+      <!-- malformed: no title -->
+      <link>https://economictimes.indiatimes.com/markets/no-title.cms</link>
+      <pubDate>Wed, 17 Jun 2026 04:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Malformed item with no link at all</title>
+      <pubDate>Wed, 17 Jun 2026 04:05:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Malformed item with a relative link and no domain</title>
+      <link>/markets/relative.cms</link>
+      <pubDate>Wed, 17 Jun 2026 04:10:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Unparsable pubDate falls back to ingest time</title>
+      <link>https://economictimes.indiatimes.com/markets/bad-date.cms</link>
+      <pubDate>not a date at all</pubDate>
+    </item>
+    <item>
+      <title>Shared story headline syndicated across feeds</title>
+      <link>https://www.moneycontrol.com/news/business/markets/shared-story.html</link>
+      <pubDate>Wed, 17 Jun 2026 04:15:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

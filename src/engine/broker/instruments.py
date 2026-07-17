@@ -11,6 +11,13 @@ the rest of the platform reads — never re-derived inline:
 - ``lot_size`` / ``instrument_token`` / ``segment``: order sizing, ticker subscription, routing.
 - F&O membership (C7): :meth:`is_fno` backs the dynamic-circuit-band rule (MIS candidates must be on
   the F&O list because F&O names get the wider ±10–20% dynamic band rather than a fixed ±x% band).
+- Index rows (NSE ``INDICES`` segment — e.g. ``NIFTY 50`` token 256265, ``INDIA VIX`` token 264969) are
+  non-tradable and carry ``tick_size=0``/``lot_size=0``, so they cannot be an :class:`Instrument`
+  (which requires a positive tick, A10). They get a SEPARATE token-only seam: :meth:`refresh` harvests
+  ``tradingsymbol -> instrument_token`` into ``_index_tokens`` (+ reverse), and
+  :meth:`token_for_symbol` / :meth:`symbol_for_token` fall back to it so daily-bar backfill can resolve
+  a regime symbol's token (A2). :meth:`by_symbol` / :meth:`round_to_tick` / :meth:`is_fno` still
+  raise/deny for indices — you never price, size, or route an index, so fail-closed there is correct.
 
 Phase 0 ships the in-memory store, the indexing in :meth:`refresh`, and the load-bearing
 :meth:`round_to_tick`. DuckDB persistence of the daily snapshot (A8 surveillance/leverage join, §4.3)
@@ -77,6 +84,11 @@ class InstrumentStore:
     def __init__(self, clock: Clock) -> None:
         self._clock = clock
         self._by_symbol: dict[str, Instrument] = {}
+        self._by_token: dict[int, str] = {}   # reverse index: instrument_token -> tradingsymbol (ticker)
+        # A2 — non-tradable INDICES seam: tradingsymbol -> token (+ reverse), kept OUT of the tradable
+        # maps so by_symbol/round_to_tick/is_fno still fail-closed for indices.
+        self._index_tokens: dict[str, int] = {}
+        self._index_by_token: dict[int, str] = {}
         self._refreshed_at = None  # tz-aware IST datetime of the last successful refresh (None until)
 
     async def refresh(self, kite_client: Any) -> int:
@@ -85,7 +97,13 @@ class InstrumentStore:
         Phase-0 skeleton: fetch the dump, build :class:`Instrument` rows, and index by
         ``tradingsymbol``. ``kite_client.instruments()`` is the ``KiteClient``/pykiteconnect surface
         (sync or async — both are awaited defensively). The build replaces the prior snapshot
-        atomically (a failed refresh leaves the previous day's store intact rather than half-loaded).
+        atomically (a failed refresh leaves the previous day's store intact rather than half-loaded) —
+        the tradable AND index maps are swapped in together at the end for that reason.
+
+        Index rows (``segment`` contains ``INDICES`` — e.g. ``NIFTY 50``/``INDIA VIX``) are harvested
+        into a SEPARATE token map rather than built as tradable :class:`Instrument`s (their
+        ``tick_size=0`` would fail the ``gt=0`` model). They are NOT counted as malformed/skipped; only
+        an index row missing its symbol or token is skipped like any other bad row (A2).
 
         TODO(Phase 1): persist the snapshot to the DuckDB ``instruments_daily`` table (one row-set per
         trading day, §4.3) and join the Zerodha MIS-leverage + NSE surveillance files (A8) so
@@ -97,8 +115,28 @@ class InstrumentStore:
             raw = await raw
 
         indexed: dict[str, Instrument] = {}
+        index_tokens: dict[str, int] = {}
+        index_by_token: dict[int, str] = {}
         skipped = 0
         for row in raw:
+            # Detect index rows BEFORE building an Instrument: they carry tick_size=0 and would be
+            # swallowed by the ValidationError branch below, so route them to the token-only seam (A2).
+            segment = str(self._row_get(row, "segment", "") or "").upper()
+            if "INDICES" in segment:
+                try:
+                    symbol = str(self._row_get(row, "tradingsymbol") or "")
+                    token = int(self._row_get(row, "instrument_token"))
+                except (KeyError, ValueError, TypeError) as exc:
+                    skipped += 1
+                    _log.warning("instrument.row_skipped", error=str(exc))
+                    continue
+                if not symbol:
+                    skipped += 1
+                    _log.warning("instrument.row_skipped", error="index row missing tradingsymbol")
+                    continue
+                index_tokens[symbol] = token
+                index_by_token[token] = symbol
+                continue
             try:
                 instrument = self._row_to_instrument(row)
             except (KeyError, ValueError, TypeError) as exc:
@@ -107,23 +145,38 @@ class InstrumentStore:
                 continue
             indexed[instrument.tradingsymbol] = instrument
 
+        # Atomic swap: tradable + index maps replace the prior snapshot together, so a raise anywhere
+        # above leaves the previous day's store fully intact (never half of one dump + half of another).
         self._by_symbol = indexed
+        self._by_token = {ins.instrument_token: sym for sym, ins in indexed.items()}
+        self._index_tokens = index_tokens
+        self._index_by_token = index_by_token
         self._refreshed_at = self._clock.now()
         _log.info(
             "instruments.refreshed",
             count=len(indexed),
             skipped=skipped,
+            indices=len(index_tokens),
             at=self._refreshed_at.isoformat(),
         )
         return len(indexed)
 
-    def seed(self, instruments: list[Instrument]) -> int:
-        """Load instruments from a list (unit-test / replay helper). Returns the count loaded.
+    def seed(
+        self, instruments: list[Instrument], *, index_tokens: dict[str, int] | None = None
+    ) -> int:
+        """Load instruments from a list (unit-test / replay helper). Returns the tradable count loaded.
 
-        Replaces the current snapshot. Does not touch the clock-stamped ``_refreshed_at`` semantics of
-        a real :meth:`refresh` beyond recording that a load happened, so tests stay deterministic.
+        Replaces the current snapshot — including the index seam: ``index_tokens`` (``tradingsymbol ->
+        instrument_token``, A2) replaces ``_index_tokens`` (+ reverse), and passing it as ``None``/
+        omitting it clears any prior index entries (replace-snapshot semantics, mirroring
+        :meth:`refresh`). Does not touch the clock-stamped ``_refreshed_at`` semantics of a real
+        :meth:`refresh` beyond recording that a load happened, so tests stay deterministic.
         """
         self._by_symbol = {ins.tradingsymbol: ins for ins in instruments}
+        self._by_token = {ins.instrument_token: ins.tradingsymbol for ins in instruments}
+        idx = dict(index_tokens or {})
+        self._index_tokens = idx
+        self._index_by_token = {tok: sym for sym, tok in idx.items()}
         self._refreshed_at = self._clock.now()
         return len(self._by_symbol)
 
@@ -156,6 +209,32 @@ class InstrumentStore:
         snapped = steps * tick
         return snapped.quantize(tick, rounding=ROUND_HALF_UP)
 
+    def token_for_symbol(self, symbol: str) -> int | None:
+        """``tradingsymbol -> instrument_token`` (the ticker-subscription / backfill resolver seam).
+
+        Resolves tradable instruments first, then falls back to the non-tradable index token map (A2)
+        so a regime symbol like ``NIFTY 50``/``INDIA VIX`` resolves for daily-bar backfill even though
+        it has no tradable tick. Returns ``None`` for an unknown symbol (never guesses a token) so
+        callers such as :class:`~engine.marketdata.backfill.BackfillJob` can report that symbol failed
+        rather than request candles for the wrong instrument (§3.2.3).
+        """
+        instrument = self._by_symbol.get(symbol)
+        if instrument is not None:
+            return instrument.instrument_token
+        return self._index_tokens.get(symbol)
+
+    def symbol_for_token(self, token: int) -> str | None:
+        """``instrument_token -> tradingsymbol`` reverse index (the ticker frame → symbol mapping).
+
+        Tradable reverse index first, then the index reverse map (A2). Returns ``None`` for a token not
+        in today's dump so the ``TickerSupervisor`` drops an unrecognised frame rather than mislabelling
+        it (A3/§3.2.2).
+        """
+        symbol = self._by_token.get(token)
+        if symbol is not None:
+            return symbol
+        return self._index_by_token.get(token)
+
     def is_fno(self, symbol: str) -> bool:
         """True if ``symbol`` is F&O-listed (C7 — dynamic-band membership).
 
@@ -166,6 +245,17 @@ class InstrumentStore:
         return bool(instrument and instrument.is_fno)
 
     # -- internals -----------------------------------------------------------------------------
+
+    @staticmethod
+    def _row_get(row: Any, key: str, default: Any = None) -> Any:
+        """One tolerant field read from a Kite dump row (dict-shaped or attribute-shaped).
+
+        Mirrors the accessor built inline in :meth:`_row_to_instrument`; used by :meth:`refresh` to
+        sniff a row's ``segment`` (index detection) before committing to the tradable model path.
+        """
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return getattr(row, key, default)
 
     @staticmethod
     def _row_to_instrument(row: Any) -> Instrument:

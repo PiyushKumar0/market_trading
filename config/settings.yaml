@@ -36,6 +36,11 @@ lifecycle:
   watchdog_poll_s: 60                     # scripts/watchdog.py Scheduled-Task cadence (non-wake, §10.7)
   notify_planned_stop: true               # send ENGINE_STOPPED on a clean/planned stop (owner chose: notify both, 2026-07-07)
   notify_started: true                    # send ENGINE_STARTED immediately on boot
+  active_period_starts: ["08:00"]         # expected active-period starts (IST); watchdog raises
+                                          #   SCHEDULED_START_MISSED past start_grace_s (§2.6/§10.4)
+  start_grace_s: 900                      # grace after an expected start before the missed-start alert
+  catchup_grace_s: 900                    # §2.6 startup catch-up budget before FROZEN escalation alerts
+  crashloop_window_s: 600                 # fast respawns inside this window => ENGINE_CRASHLOOP (§2.2/§10.7)
 
 broker:
   kite_login_redirect_path: "/kite/callback"   # MUST match the Kite app registered redirect URL (R6)
@@ -82,10 +87,72 @@ news:
     gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query, 15-min [VERIFY Phase-1]
   cluster_sim_threshold: 0.75    # §3.2.4 pinned clustering similarity [tunable, owner] — drives the
                                  # corroboration count, so owner-only (never in envelope.yaml)
+  et_poll_s: 300                 # ET Markets RSS poll cadence (§3.2.4: 5 min)
+  mc_poll_s: 900                 # Moneycontrol RSS poll cadence (15 min, polite)
+  gdelt_poll_s: 900              # GDELT DOC 2.0 poll cadence (15-min update granularity)
+  backfill_lookback_h: 72        # off-period startup headline backfill window (§4.4 job 10)
+  gdelt_backfill_max_days: 90    # GDELT DOC ~3-month window — no deeper backfill dependency (E6)
 
 cat:
   fanout_weight: 0.5             # §2.7 step 5: sector/theme fan-out multiplier on materiality AND |sentiment|
                                  # before threshold comparison. Owner-only, deliberately NOT learnable.
+  max_event_age_days: 2          # §2.7 HeadlineClusterer near-duplicate assignment window + `cat` catalyst
+                                 # age horizon (owner-only, NOT learnable; wired into HeadlineClusterer)
+
+# §2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
+# envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: read by NO decision
+# path yet (event typing §2.8.2 + catalyst wiring are later stages, gated on the §2.8.4 event study).
+filings:
+  insider_min_value_inr: 10000000    # abs ₹ floor for an insider_net_buy event (₹1cr, §2.8.2)
+  insider_min_value_over_adv: 0.05   # AND value/20d-ADV floor (§2.8.2)
+  pledge_delta_min_pct: 5.0          # QoQ promoter-pledge %-point change to flag (§2.8.2)
+
+# §3.2.5 pre-screen candidate-origination throttles (owner-tunable). Scanner PARAMETERS live in the
+# learner-writable envelope_state (R4), never here — these are coarse per-day caps only.
+strategy:
+  prescreen:
+    max_candidates_per_day: 20   # signal.candidate publications per trading day (SignalPreScreen)
+    max_per_strategy_day:        # optional per-strategy sub-cap (blank = only the daily total applies)
+
+# §3.2.3 ReconcileJob drift thresholds (A13) [tunable]: alert when >max_bad_bar_fraction of compared
+# bars drift by >vol_drift_pct volume or >close_drift_ticks ticks on close. Offline spans are
+# gap-backfilled and EXCLUDED from the denominator (§2.6) — never counted as drift.
+reconcile:
+  vol_drift_pct: 2.0
+  close_drift_ticks: 1
+  max_bad_bar_fraction: 0.01
+
+# §3.2.3 BackfillJob pacing + Kite historical per-request range caps (A2).
+backfill:
+  req_per_s: 3                   # hard ≤3 req/s budget (A2), shared through broker.rate_limiter
+  minute_chunk_days: 60          # max span per minute-interval historical request
+  day_chunk_days: 2000           # max span per day-interval historical request
+
+# §3.2.4 UniverseBuilder inputs (A8). The NSE list fetch is best-effort (E5); the seed CSV is the
+# offline fallback so universe build never hard-depends on an NSE page.
+universe:
+  nifty200_source_url: "https://archives.nseindia.com/content/indices/ind_nifty200list.csv"  # [VERIFY Phase-1]
+  nifty200_seed_path: "config/universe/nifty200_seed.csv"
+
+# §10.1 scheduler fire-times (IST, trading days, R6). Fire-times only — every job is also §2.6
+# catch-up-eligible on the next startup if its fire-time passed while the engine was off.
+jobs:
+  instruments_ist: "08:15"       # §4.4 job 4 (A10/A8)
+  surveillance_ist: "08:20"      # §4.4 job 5 (A8)
+  universe_build_ist: "08:30"    # §3.2.4 UniverseBuilder
+  catalyst_digest_ist: "08:35"   # §4.4 job 14 (§2.7 step 5)
+  preopen_planner_ist: "08:50"   # §5.3 pre-open planner
+  reconcile_ist: "15:50"         # §4.4 job 2 (A13)
+  bhavcopy_ist: "18:00"          # §4.4 job 6
+  corp_actions_ist: "18:15"      # §4.4 job 7 (A12)
+  earnings_ist: "18:30"          # §4.4 job 8 (R2)
+  deals_ist: "18:45"             # §4.4 job 9 (flagged_instrument_days)
+  filings_pit_ist: "18:35"       # §2.8 filings_pit — insider trades (date-keyed)
+  filings_results_ist: "18:45"   # §2.8 filings_results — results + board-meeting dates (date-keyed)
+  filings_shp_ist: "18:50"       # §2.8 filings_shp — SHP + pledge (run-latest)
+  nightly_review_ist: "21:00"    # §5.5/§6.4
+  backup_ist: "21:00"            # §10.5 (watermark-driven, not pinned to being up at 21:00)
+  sector_map_weekly_day: "SUN"   # §4.4 job 13 (sector_map + theme_map weekly refresh)
 
 auth:
   totp_automation:

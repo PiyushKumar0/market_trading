@@ -16,7 +16,12 @@ schema_version: 1
 parameters:
   orb.orb_minutes:        { min: 15,   max: 45,   default: 30,   used_by: orb }
   orb.vol_mult:           { min: 1.2,  max: 3.0,  default: 1.5,  used_by: orb }
-  orb.stop_atr_mult:      { min: 0.8,  max: 2.0,  default: 1.2,  used_by: orb }
+  # v2 2026-07-12 (owner-directed): replaces orb.stop_atr_mult {0.8–2.0, default 1.2}. The
+  # ATR(14,1m) stop unit (~0.14% of price median) sat BELOW the cost floor — the ₹20k MIS
+  # round-trip (~0.106%) consumed 40–90% of the stop distance, making negative net expectancy
+  # structural (2026-07-12 CPCV report: 0/15 folds, zero-edge win rates). The stop now anchors
+  # to the OPPOSITE opening-range edge: risk = stop_range_frac × (entry − range_low) for BUY.
+  orb.stop_range_frac:    { min: 0.5,  max: 1.0,  default: 1.0,  used_by: orb }
   orb.rr_target:          { min: 1.0,  max: 3.0,  default: 1.5,  used_by: orb }
 
   rsi2.rsi_entry:         { min: 2,    max: 15,   default: 10,   used_by: rsi2 }

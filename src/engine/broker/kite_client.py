@@ -289,3 +289,15 @@ class KiteClient:
                 continue
             out[int(tok)] = Decimal(str(price))
         return out
+
+    async def instruments(self, exchange: str | None = None) -> list:
+        """Full daily instruments dump for ``exchange`` (all exchanges if None).
+
+        Once-per-day reference download consumed by InstrumentStore.refresh (§3.2.2, A10).
+        pykiteconnect's instruments() is a bulk CSV dump, not an order/quote/historical API
+        call, but it still funnels through the single limiter/logging chokepoint using the
+        conservative "quote" bucket - a once-a-day acquire never stalls.
+        """
+        return await self._call(
+            "quote", "instruments", lambda: self._kc.instruments(exchange=exchange)
+        )

@@ -1,0 +1,26 @@
+[
+  {
+    "symbol": "TCS",
+    "company": "Tata Consultancy Services Limited",
+    "purpose": "Financial Results",
+    "date": "09-Jul-2026"
+  },
+  {
+    "symbol": "INFY",
+    "company": "Infosys Limited",
+    "purpose": "Board Meeting - Fund Raising",
+    "date": "18-Jul-2026"
+  },
+  {
+    "symbol": "RELIANCE",
+    "company": "Reliance Industries Limited",
+    "purpose": "To consider and approve the financial results",
+    "bm_date": "19-Jul-2026"
+  },
+  {
+    "symbol": "",
+    "company": "Nameless Co",
+    "purpose": "Financial Results",
+    "date": "10-Jul-2026"
+  }
+]

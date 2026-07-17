@@ -32,10 +32,11 @@ challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()`
 from __future__ import annotations
 
 import secrets as _secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
@@ -168,8 +169,8 @@ class TelegramBot:
         owner_chat_id: int,
         clock: Clock,
         *,
-        mode_manager: "ModeManager | None" = None,
-        kill_switch: "KillSwitch | None" = None,
+        mode_manager: ModeManager | None = None,
+        kill_switch: KillSwitch | None = None,
         bus: EventBus | None = None,
     ) -> None:
         self._token = token

@@ -148,6 +148,18 @@ class SessionManager:
         """The current access token, or ``None`` if none has been minted/loaded yet."""
         return self._access_token
 
+    def kite_connect(self) -> KiteConnect | None:
+        """The api_key-bound :class:`KiteConnect` (access token armed if present), or ``None`` when no
+        api_key is configured yet — so the composition root can build a :class:`KiteClient` ONLY once
+        credentials exist (a fresh install stays runnable with entries FROZEN until login, §2.6/R6).
+
+        The same instance backs the login flow, so a later :meth:`complete_login` arms the token on the
+        very object the KiteClient already holds — no rewiring needed on daily re-login.
+        """
+        if not self._secrets.has(KITE_API_KEY):
+            return None
+        return self._connect()
+
     # -- internals ------------------------------------------------------------------------------
 
     def _connect(self) -> KiteConnect:
