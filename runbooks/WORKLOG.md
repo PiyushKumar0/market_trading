@@ -8,6 +8,39 @@ the top of each dated section.
 
 ## 2026-07-17
 
+- **E1–E3 VERDICTS** (single-pass, as pre-registered; reports `experiment_e{1,2,3}_20260717T*.md`):
+  - **E3 insider_net_buy robustness: PASSED** — T+20 net mean positive in 4/4 year slices
+    (2023H2 +4.02 / 2024 +0.54 / 2025 +1.81 / 2026H1 +0.21%), 3/3 person categories (promoter
+    +1.13 the consistent core), 3/3 liquidity terciles. Caveats: 2024 median negative (45.7% hit);
+    biggest gains in the LOW-liquidity tercile ⇒ slippage sensitivity to watch in paper. → stage 3
+    proceeds.
+  - **E1 catalyst-conditioned ORB: REFUTED** — conditioned breakout cohorts are WORSE than
+    unconditioned (insider-cluster A: −0.039% gross, 40.7% win, n=177; results-T+1/2 B: −0.029%,
+    41.5%, n=826; unconditioned C: +0.028%, 43.0%, n=43,474). The insider edge is slow (T+10/20)
+    and does NOT express as day-of breakout continuation. Intraday slot has now failed every
+    hypothesis (momentum, structural-stop momentum, catalyst-conditioned momentum; fade sub-cost)
+    — **ORB/intraday parked with the question closed**; any revival = new owner-specced concept.
+  - **E2 RSI2 catalyst-veto: UNANSWERABLE (n=1)** — only 1 of 102 champion trades carried adverse
+    filings context (it won), 0 favorable. The flag rate on deep-oversold quality dips is ~1% —
+    no historical basis to build a filings-based veto. Decision: do NOT build it; RSI2 improvement
+    rides on Phase-2 concentration/sizing + live-corpus (news) features when they exist.
+- **universe_daily 50/200 anomaly RESOLVED — designed behavior**: `data.universe_max_watchlist: 50`
+  (settings.yaml:75) caps the active intraday watchlist; 149/150 exclusions on 2026-07-16 are
+  `watchlist_cap` (liquidity-ranked overflow) + 1 `surveillance_asm`. Note: 2026-07-10's build
+  produced 0 included (degraded first run — engine was mostly off that week; self-heals daily).
+  Follow-up: none needed; historical tools must pass `--symbols` (recorded in COMMANDS.md).
+- **Phase-1 checkpoint committed**: `a48f099` (134 files, +27,512). Push withheld per directive
+  item 7 — owner permission required at phase end.
+- **Pre-registered next experiments** (single-pass each, §6.4 N-accounting, verdicts stand as
+  found): (E1) **catalyst-conditioned ORB** — H: breakouts WITH a fresh exchange-verified event
+  (insider-buy cluster ≤5 sessions old, or results T+1/T+2) trend, unconditioned ones fade;
+  discriminator = per-trade gross of the conditioned subset vs the known −0.02% unconditioned
+  base; implemented as an offline analysis over ORB-v2 entry signals × filings flags (no sweep
+  change until it passes). (E2) **RSI2 catalyst-veto** — H: dips WITH adverse filings/news context
+  (insider selling, pledge increase, negative sentiment) are the losing tail of the 70%-win
+  distribution; discriminator = win-rate/expectancy split of the 102 historical trades by context
+  flag. (E3) **insider_net_buy robustness slices** — year-by-year, person-category
+  (promoter vs employee), liquidity tier; stage-3 gate input.
 - **Owner autonomy granted** — full iterate/test/update autonomy; push-to-remote requires owner
   permission at phase end; live-origination enablement (§8.6/R4) and money-spending remain
   owner-only. This log + COMMANDS.md created as required by the directive.

@@ -164,10 +164,28 @@ def is_open_market_buy(txn_type: object, acq_mode: object) -> bool:
     return not any(excl in mode for excl in INSIDER_ACQ_MODE_EXCLUSIONS)
 
 
-def insider_buy_events(sessions: list[date], filings: list[dict], threshold: object) -> list[int]:
-    """Session indices T at which the trailing-``INSIDER_TRAILING_SESSIONS`` sum of open-market insider
-    BUY value first crosses ≥ ``threshold`` (§2.8.2/§2.8.4). Re-arms only after the trailing sum falls
-    back below the threshold, so one event per crossing.
+def is_open_market_sell(txn_type: object, acq_mode: object) -> bool:
+    """Mirror of :func:`is_open_market_buy` for the SELL side (the filings_experiments E2 adverse-context
+    leg). True iff ``txn_type`` == 'Sell' AND ``acq_mode`` is not one of the non-market modes
+    (:data:`INSIDER_ACQ_MODE_EXCLUSIONS`). The SAME §2.8.2 exclusion taxonomy applies, so an
+    ESOP-exercise SELL (acq_mode contains 'esop') is deliberately NOT counted as an open-market sell —
+    an insider disposing of just-exercised ESOP stock is not the bearish open-market signal the adverse
+    cohort is after. A blank/None acq_mode on a Sell defaults to open-market (symmetry with the buy
+    side)."""
+    if str(txn_type or "").strip().lower() != "sell":
+        return False
+    mode = str(acq_mode or "").strip().lower()
+    return not any(excl in mode for excl in INSIDER_ACQ_MODE_EXCLUSIONS)
+
+
+def insider_cluster_events(
+    sessions: list[date], filings: list[dict], threshold: object, predicate=is_open_market_buy
+) -> list[int]:
+    """Session indices at which the trailing-``INSIDER_TRAILING_SESSIONS`` sum of the value of filings
+    matching ``predicate`` first crosses ≥ ``threshold``, re-arming only after the trailing sum falls
+    back below (one event per crossing). Generalizes the transaction SIDE via ``predicate``:
+    :func:`is_open_market_buy` for the BUY cluster (the §2.8.4 ``insider_net_buy`` proxy),
+    :func:`is_open_market_sell` for the SELL cluster (E2 adverse context).
 
     Pure. ``sessions`` = ascending session dates; ``filings`` = plain row dicts (``txn_type``,
     ``acq_mode``, ``value``, ``broadcast_dt``). Each eligible filing's value lands on its point-in-time
@@ -178,7 +196,7 @@ def insider_buy_events(sessions: list[date], filings: list[dict], threshold: obj
     thr = Decimal(str(threshold))
     per_session = [Decimal("0")] * len(sessions)
     for f in filings:
-        if not is_open_market_buy(f.get("txn_type"), f.get("acq_mode")):
+        if not predicate(f.get("txn_type"), f.get("acq_mode")):
             continue
         value = f.get("value")
         bdt = f.get("broadcast_dt")
@@ -202,6 +220,14 @@ def insider_buy_events(sessions: list[date], filings: list[dict], threshold: obj
         elif not armed and trailing < thr:
             armed = True
     return events
+
+
+def insider_buy_events(sessions: list[date], filings: list[dict], threshold: object) -> list[int]:
+    """Session indices T at which the trailing-``INSIDER_TRAILING_SESSIONS`` sum of open-market insider
+    BUY value first crosses ≥ ``threshold`` (§2.8.2/§2.8.4). Re-arms only after the trailing sum falls
+    back below the threshold, so one event per crossing. Thin wrapper over
+    :func:`insider_cluster_events` with the open-market BUY predicate (kept as the pinned §2.8.4 API)."""
+    return insider_cluster_events(sessions, filings, threshold, is_open_market_buy)
 
 
 def event_session_indices(sessions: list[date], broadcast_dts: list[datetime]) -> list[int]:
