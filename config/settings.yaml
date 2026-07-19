@@ -147,7 +147,8 @@ jobs:
   corp_actions_ist: "18:15"      # §4.4 job 7 (A12)
   earnings_ist: "18:30"          # §4.4 job 8 (R2)
   deals_ist: "18:45"             # §4.4 job 9 (flagged_instrument_days)
-  filings_pit_ist: "18:35"       # §2.8 filings_pit — insider trades (date-keyed)
+  filings_pit_ist: "18:35"       # §2.8 filings_pit — insider trades (NSE PIT, historical; date-keyed)
+  filings_pit_fresh_ist: "19:00" # §2.8 filings_pit_fresh — BSE fresh insider, same-day (date-keyed)
   filings_results_ist: "18:45"   # §2.8 filings_results — results + board-meeting dates (date-keyed)
   filings_shp_ist: "18:50"       # §2.8 filings_shp — SHP + pledge (run-latest)
   nightly_review_ist: "21:00"    # §5.5/§6.4

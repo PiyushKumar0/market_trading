@@ -70,7 +70,7 @@ def calendar(clock):
 def test_registry_covers_every_phase1_job() -> None:
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 16   # +3 §2.8 filings jobs
+    assert len(reg) == len(PHASE1_JOB_IDS) == 17   # +4 §2.8 filings jobs (incl. stage-3 fresh insider)
 
 
 def test_registry_classes_and_fire_times_match_the_schedule() -> None:
@@ -93,8 +93,9 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_DAILY_BARS:   (JobClass.DATE_KEYED,      time(18, 5)),
         opsmain.JOB_DEALS:        (JobClass.DATE_KEYED,      time(18, 45)),
         opsmain.JOB_FEATURES:     (JobClass.DATE_KEYED,      time(18, 50)),
-        opsmain.JOB_FILINGS_PIT:     (JobClass.DATE_KEYED,   time(18, 35)),
-        opsmain.JOB_FILINGS_RESULTS: (JobClass.DATE_KEYED,   time(18, 45)),
+        opsmain.JOB_FILINGS_PIT:       (JobClass.DATE_KEYED, time(18, 35)),
+        opsmain.JOB_FILINGS_PIT_FRESH: (JobClass.DATE_KEYED, time(19, 0)),
+        opsmain.JOB_FILINGS_RESULTS:   (JobClass.DATE_KEYED, time(18, 45)),
         opsmain.JOB_FILINGS_SHP:     (JobClass.RUN_LATEST,   time(18, 50)),
     }
     for jid, (cls, at) in expected.items():

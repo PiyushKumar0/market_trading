@@ -588,6 +588,18 @@ def _ist(value: Any) -> Any:
     return value
 
 
+def _norm_scrip_code(raw: Any) -> str:
+    """Normalize a BSE scrip code (int/str, possibly ``'500325.0'``) to a bare-int string; ``''`` for
+    blank/None (§2.8 fresh-insider reverse lookup). Keeps a non-numeric code as its stripped self."""
+    s = str(raw if raw is not None else "").strip()
+    if not s:
+        return ""
+    try:
+        return str(int(float(s)))
+    except ValueError:
+        return s
+
+
 class MarketStore:
     """Single-writer DuckDB/Parquet store for all §4.3 analytical data (E4).
 
@@ -1246,6 +1258,20 @@ class MarketStore:
         """``symbol -> row`` map — the filings_shp job's BSE-scrip-code lookup (§2.8 filings_shp)."""
         return {r["symbol"]: r for r in self.get_symbol_isin()}
 
+    def bse_scrip_symbol_map(self) -> dict[str, str]:
+        """``bse_scrip_code -> symbol`` REVERSE map — the §2.8 fresh-insider feed resolves a BSE
+        ``Fld_ScripCode`` back to our symbol (the whole market is served, so most scrips are
+        out-of-universe and simply absent). Codes are normalized to a bare-int string so ``500325``,
+        ``'500325'`` and ``'500325.0'`` all collide (idempotent with the stored TEXT column). If two
+        symbols ever share a scrip code the last-seen wins (deterministic; scrip codes are unique in
+        practice)."""
+        out: dict[str, str] = {}
+        for r in self.get_symbol_isin():
+            key = _norm_scrip_code(r.get("bse_scrip_code"))
+            if key:
+                out[key] = r["symbol"]
+        return out
+
     def upsert_insider_trades(self, rows: Sequence[dict[str, Any]]) -> int:
         """Upsert NSE-PIT insider trades (idempotent on the content-hash ``id``, §2.8.1)."""
         now = self._clock.now()
@@ -1554,3 +1580,6 @@ class MarketStore:
 
     async def asymbol_isin_map(self) -> dict[str, dict[str, Any]]:
         return await asyncio.to_thread(self.symbol_isin_map)
+
+    async def abse_scrip_symbol_map(self) -> dict[str, str]:
+        return await asyncio.to_thread(self.bse_scrip_symbol_map)

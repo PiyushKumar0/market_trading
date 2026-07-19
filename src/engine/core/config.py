@@ -223,6 +223,7 @@ class JobTimesCfg(BaseModel):
     earnings_ist: time = time(18, 30)           # §4.4 job 8 (R2)
     deals_ist: time = time(18, 45)              # §4.4 job 9 (flagged_instrument_days)
     filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)
+    filings_pit_fresh_ist: time = time(19, 0)   # §2.8 filings_pit_fresh (BSE fresh insider, date-keyed)
     filings_results_ist: time = time(18, 45)    # §2.8 filings_results (results + board-meeting dates, date-keyed)
     filings_shp_ist: time = time(18, 50)        # §2.8 filings_shp (SHP + pledge, run-latest)
     nightly_review_ist: time = time(21, 0)      # §5.5/§6.4

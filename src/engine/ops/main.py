@@ -55,6 +55,7 @@ from engine.datafeeds.corp_actions import CorpActionsJob
 from engine.datafeeds.deals import DealsJob
 from engine.datafeeds.earnings_calendar import EarningsCalendarJob
 from engine.datafeeds.filings_pit import FilingsPitJob
+from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob
 from engine.datafeeds.filings_results import FilingsResultsJob
 from engine.datafeeds.filings_shp import FilingsShpJob
 from engine.datafeeds.news import NewsIngest
@@ -77,6 +78,7 @@ from engine.ops.jobs import (
     JOB_EARNINGS,
     JOB_FEATURES,
     JOB_FILINGS_PIT,
+    JOB_FILINGS_PIT_FRESH,
     JOB_FILINGS_RESULTS,
     JOB_FILINGS_SHP,
     JOB_INSTRUMENTS,
@@ -131,7 +133,7 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CORP_ACTIONS, JOB_SECTOR_MAP, JOB_BACKUP,  # run-latest
     JOB_FILINGS_SHP,                                                             # run-latest (§2.8)
     JOB_RECONCILE, JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_DEALS, JOB_FEATURES,        # date-keyed
-    JOB_FILINGS_PIT, JOB_FILINGS_RESULTS,                                        # date-keyed (§2.8)
+    JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
 )
 
 
@@ -172,6 +174,7 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
         JobSpec(JOB_FEATURES, JobClass.DATE_KEYED, _FEATURES_IST, fns[JOB_FEATURES], order=50),
         # §2.8 filings: insider trades (PIT) + results/board-meeting dates — one run per missed day.
         JobSpec(JOB_FILINGS_PIT, JobClass.DATE_KEYED, settings.jobs.filings_pit_ist, fns[JOB_FILINGS_PIT], order=60),
+        JobSpec(JOB_FILINGS_PIT_FRESH, JobClass.DATE_KEYED, settings.jobs.filings_pit_fresh_ist, fns[JOB_FILINGS_PIT_FRESH], order=65),
         JobSpec(JOB_FILINGS_RESULTS, JobClass.DATE_KEYED, settings.jobs.filings_results_ist, fns[JOB_FILINGS_RESULTS], order=70),
     ):
         registry.register(spec)
@@ -317,6 +320,7 @@ async def run() -> int:
     # §2.8 corporate-filings feeds (data-only in stage 1; never entry-blocking, E5). filings_results
     # reuses the earnings provider's historical leg (run_range) for board-meeting dates.
     filings_pit = FilingsPitJob(store, clock, http, notify=notify)
+    filings_pit_fresh = FilingsPitFreshJob(store, clock, http, notify=notify)
     filings_results = FilingsResultsJob(store, clock, http, earnings=earnings, notify=notify)
     filings_shp = FilingsShpJob(store, clock, http, notify=notify)
     sector_map = SectorMapJob(store, clock, http, data_dir / "datafeeds" / "sector_lists.json", notify=notify)
@@ -407,6 +411,9 @@ async def run() -> int:
     async def job_filings_pit(d) -> None:
         await filings_pit.run(d)
 
+    async def job_filings_pit_fresh(d) -> None:
+        await filings_pit_fresh.run(d)
+
     async def job_filings_results(d) -> None:
         await filings_results.run(d)
 
@@ -441,6 +448,7 @@ async def run() -> int:
         JOB_DEALS: job_deals,
         JOB_FEATURES: job_features,
         JOB_FILINGS_PIT: job_filings_pit,
+        JOB_FILINGS_PIT_FRESH: job_filings_pit_fresh,
         JOB_FILINGS_RESULTS: job_filings_results,
         JOB_FILINGS_SHP: job_filings_shp,
     })

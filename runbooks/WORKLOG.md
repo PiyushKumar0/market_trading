@@ -1,5 +1,25 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-19
+
+- **Fresh insider-disclosure source FOUND (stage-3 unblock)**: NSE PIT embargo re-verified
+  structural (~70 days rolling: boundary 2026-05-02 → 2026-05-10 over 3 days; no param variant
+  unlocks it) and NSE announcements carry only trading-window closures — but BSE
+  `getCorp_Regulation_ng/w` (browser network capture) serves fully structured PIT rows SAME-DAY
+  (person/category/txn-type/mode/qty/VALUE/pre-post-%/timestamps/xbrl). Isdefault=1 = rolling
+  ~100-row latest view; Isdefault=2 date-filtered, ~25-row cap, YYYYMMDD params. Plan §2.8 source
+  table updated. Probe artifacts: scratchpad bse_insider_probe*.py + bse_insider_out/*.json.
+- **Stage-3 build COMPLETE + validated** (494 tests green): `filings_pit_fresh` (BSE
+  getCorp_Regulation_ng feed, 19:00 date-keyed job; id-prefix `bse:` source tagging — no ALTER
+  path in the store; "Equity Shares" label + Pledge txn-type quirks fixture-pinned) ran LIVE:
+  13 in-universe fresh rows same-day (111 out-of-universe skips expected; one day capped at 25
+  even per-day — pagination-less endpoint, logged limitation). `FilingsEventBuilder` library
+  (pure; cross-source dedup preferring NSE). **§6.4 validation (`scripts/validate_insider.py`,
+  N=1 pre-registered): `insider` PROMOTABLE — CPCV 60.0%/60%, expectancy +0.0361%/day, 732 obs,
+  620 position-days, 110 events** — param_set 01KXXNRT2M8TJWZXRT1836PB8A persisted. Highest
+  expectancy on the platform. Remaining for live: Phase-2 digest/scanner wiring + §8.6 OWNER GATE
+  (explicitly not self-served). Catalyst-watchlist writing stays deferred to Phase 2's digest.
+
 Owner directive 2026-07-17: every substantive operation gets an entry — **what / why / outcome /
 artifact pointer**. Recurring command lines live in [COMMANDS.md](COMMANDS.md). Newest entries at
 the top of each dated section.
