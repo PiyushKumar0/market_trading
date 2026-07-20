@@ -129,6 +129,14 @@ class MessageKind(StrEnum):
     calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
     FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3)."""
 
+    POST_LOGIN_RECOVERY = "post_login_recovery"
+    """The §2.6 cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
+    ``/kite/callback`` route or the Telegram ``/token`` fallback both land in
+    ``SessionManager.complete_login``), the post-login recovery re-runs the startup steps a pre-login
+    boot could not — instruments load/persist, regime + warm-up-gap backfill, warm-up re-evaluation
+    (and freeze-lift once coverage is met), and ticker start — and reports the per-step outcome so a
+    BACKGROUND recovery is never silent. Info severity unless a step failed (then warning)."""
+
 
 class CatalogMessage(BaseModel):
     """A single rendered, typed owner notification consumed by ``TelegramBot.send`` (§3.2.11).
@@ -421,6 +429,30 @@ def engine_crashloop(*, restarts: int, window_s: int) -> CatalogMessage:
         ),
         severity="critical",
         data={"restarts": restarts, "window_s": window_s},
+    )
+
+
+def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
+    """Post-login recovery summary (§2.6 cold-start RE-TRIGGER).
+
+    ``steps`` is the ordered ``(name, status, detail)`` list, ``status`` in {ok, skipped, failed}.
+    Info severity unless any step failed (then warning). The owner SEES this on Telegram so a
+    background recovery (the login HTTP/Telegram path returned immediately) is never silent — it is
+    the visible proof the engine re-armed after a boot BEFORE the daily login."""
+    any_failed = any(status == "failed" for _name, status, _detail in steps)
+    lines = [
+        f"- {name}: {status}" + (f" ({detail})" if detail else "")
+        for name, status, detail in steps
+    ]
+    return CatalogMessage(
+        kind=MessageKind.POST_LOGIN_RECOVERY,
+        title="Post-login recovery" + (" (with failures)" if any_failed else ""),
+        body="Login complete - re-ran the startup recovery sequence:\n" + "\n".join(lines),
+        severity="warning" if any_failed else "info",
+        data={
+            "steps": [{"name": n, "status": s, "detail": d} for n, s, d in steps],
+            "any_failed": any_failed,
+        },
     )
 
 

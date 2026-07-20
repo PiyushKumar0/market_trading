@@ -104,6 +104,22 @@ class StartupReport(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class WarmupReapply(BaseModel):
+    """Outcome of a post-login :meth:`SessionLifecycle.reapply_warmup_gate` (§2.6 cold-start RE-TRIGGER).
+
+    ``outcome`` is one of ``deferred`` (no gate wired), ``frozen`` (coverage still short — re-frozen),
+    or ``ready_<why>`` where ``why`` ∈ {``lifted`` (freeze cleared), ``already_normal``, ``kill_held``,
+    ``latched`` (CLOSE_ONLY/KILLED — owner re-arm only), ``other_freeze`` (a non-warm-up precondition
+    still stands)}."""
+
+    ready: bool
+    blockers: list[str] = Field(default_factory=list)
+    young_excluded: list[str] = Field(default_factory=list)
+    froze: bool = False
+    lifted: bool = False
+    outcome: str = ""
+
+
 class SessionLifecycle:
     """Drives the §2.6 every-startup recovery & catch-up sequence and the shutdown guard.
 
@@ -471,15 +487,14 @@ class SessionLifecycle:
 
     # ----------------------------------------------------------------- warm-up gate (§2.6 step 6)
     async def _apply_warmup_gate(self, report: StartupReport) -> None:
+        """§2.6 step 6 (startup): FREEZE-when-not-ready. Startup never LIFTS here — the other startup
+        steps own their own freezes, so the composite FROZEN must stand while any reason holds; the
+        reopen once coverage is met is the post-login re-trigger's job (:meth:`reapply_warmup_gate`)."""
         if self._warmup_gate is None:
             report.deferred_steps.append("warmup_gate")
             _log.info("startup_step_deferred", step="warmup_gate")
             return
-        try:
-            status = await self._warmup_gate.status()
-        except Exception:  # noqa: BLE001 - coverage that cannot be VERIFIED is treated as missing (R6-style)
-            _log.exception("warmup_gate_check_failed")
-            status = None
+        status = await self._warmup_gate_status()
         # Young listings excluded from the lookback gate are surfaced whether or not the gate is ready
         # (an exclusion is never silent), so capture them before the ready-path early return.
         report.warmup_young_excluded = list(getattr(status, "young_excluded", []) or [])
@@ -489,12 +504,74 @@ class SessionLifecycle:
         blockers = list(status.blockers) if status is not None else ["warmup check failed"]
         report.frozen_reasons.append("warmup_ready")
         report.warmup_blockers = blockers
-        # Never trade on thin data: FROZEN-for-entries via the risk-state setter + alert (§2.6).
-        # Entries reopen only once coverage is met (the gate is re-checked by the integrator's
-        # scheduler / before entries open) — a start too close to the window simply stays FROZEN.
+        await self._freeze_for_warmup(blockers)
+
+    async def _warmup_gate_status(self):
+        """Query the injected warm-up gate; a raise means coverage cannot be VERIFIED ⇒ treated as
+        missing (R6-style: never trade on data you could not confirm). ``None`` ⇒ unverifiable."""
+        try:
+            return await self._warmup_gate.status()
+        except Exception:  # noqa: BLE001 - coverage that cannot be VERIFIED is treated as missing
+            _log.exception("warmup_gate_check_failed")
+            return None
+
+    async def _freeze_for_warmup(self, blockers: list[str]) -> bool:
+        """Never trade on thin data: FROZEN-for-entries via the risk-state setter + WARMUP_FROZEN alert
+        (§2.6 step 6). Shared by startup step 6 and the post-login reapply. Entries reopen only once
+        coverage is met (the gate is re-checked before entries open). Returns True if this call
+        transitioned the state to FROZEN (it was not already)."""
+        froze = False
         if not self._kill.is_killed():
+            before = self._mode.risk_state()
             await self._mode.set_risk_state(RiskState.FROZEN, "warmup_ready", Actor.RISK_GATE)
+            froze = before != RiskState.FROZEN
         await self._notify_safe(catalog.warmup_frozen(blockers=blockers), "warmup_frozen")
+        return froze
+
+    async def reapply_warmup_gate(self) -> WarmupReapply:
+        """Post-login re-evaluation of the §2.6 step-6 warm-up gate — the RE-TRIGGER half of the
+        cold-start-family fix. Uses the SAME injected :class:`~engine.ops.warmup.WarmupGate` and the
+        SAME risk-state seam as startup (never a direct bypass): FREEZE while coverage is still short,
+        and LIFT the warm-up FROZEN-for-entries once coverage is met — conservatively (see
+        :meth:`_maybe_lift_warmup_freeze`). Called by
+        :class:`~engine.ops.post_login.PostLoginRecovery`."""
+        if self._warmup_gate is None:
+            _log.info("warmup_reapply_deferred", reason="no warmup gate wired")
+            return WarmupReapply(ready=False, outcome="deferred")
+        status = await self._warmup_gate_status()
+        young = list(getattr(status, "young_excluded", []) or [])
+        if status is not None and status.ready:
+            lifted, why = await self._maybe_lift_warmup_freeze()
+            return WarmupReapply(ready=True, young_excluded=young, lifted=lifted, outcome=f"ready_{why}")
+        blockers = list(status.blockers) if status is not None else ["warmup check failed"]
+        froze = await self._freeze_for_warmup(blockers)
+        return WarmupReapply(
+            ready=False, blockers=blockers, young_excluded=young, froze=froze, outcome="frozen"
+        )
+
+    async def _maybe_lift_warmup_freeze(self) -> tuple[bool, str]:
+        """Lift the warm-up FROZEN-for-entries once coverage is met — SAFELY (§2.6 step-6 reopen).
+
+        Conservative by construction: never overrides the kill switch, never clears a CLOSE_ONLY /
+        KILLED latch (those re-arm only on owner action, R3/R5), and re-runs the CHEAP self-test
+        preconditions (no NTP, no catch-up) so a still-standing secrets / clock / trade-window /
+        integrity / token freeze is respected — the warm-up reopen must never clear a warranted freeze.
+        Multi-reason data-freshness arbitration is the Phase-2 gate's job (risk/mode.py: "most-
+        restrictive-wins / latch logic is the gate's"). Returns ``(lifted, why)``."""
+        if self._kill.is_killed():
+            return False, "kill_held"
+        state = self._mode.risk_state()
+        if state == RiskState.NORMAL:
+            return False, "already_normal"
+        if state != RiskState.FROZEN:
+            return False, "latched"   # CLOSE_ONLY / KILLED — owner re-arm only (R3/R5)
+        st = await self._selftest.run(check_skew=False, include_freshness=False)
+        if st.needs_login or st.frozen_reasons:
+            _log.info("warmup_lift_held", needs_login=st.needs_login, other_frozen=st.frozen_reasons)
+            return False, "other_freeze"
+        await self._mode.set_risk_state(RiskState.NORMAL, "warmup_ready_lifted", Actor.RISK_GATE)
+        _log.warning("warmup_freeze_lifted")
+        return True, "lifted"
 
     # ----------------------------------------------------------------- notifications
     async def _notify_safe(self, msg: CatalogMessage, what: str) -> None:

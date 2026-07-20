@@ -1,5 +1,37 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-20 (evening — owner stopped the engine ~21:28 IST; date corrected from a mislabeled 07-21 entry)
+
+- **Deferred G1 store checks ran** (engine-off window): `instruments_daily` EMPTY confirmed (0 rows
+  ever). **NEW FINDING — zero LIVE minute bars have ever been captured**: bars_1m max = 2026-07-16
+  (backfill), sessions 07-17/07-20 captured nothing despite logins; NIFTY 50/INDIA VIX dailies
+  stale since 07-10. reconcile_log has ONE day (07-16, vs backfilled bars). News corpus: 369
+  headlines / 343 clusters (span to 2026-07-20). CORRECTION to 07-20 entry: the G1 ticker-session
+  counter is at ZERO, not 1.
+- **Third cold-start-family defect: NO post-login hook exists** (kite_callback only stores the
+  token; grep confirms no on_login listener anywhere). Ticker start / regime backfill / warmup-gap
+  backfill / warm-up re-eval run once at boot — a pre-login boot never recovers. This blocks ALL
+  live G1 evidence. Fix building: PostLoginRecovery hook (guarded steps, same lifecycle gate, both
+  login paths, idempotent, Telegram-visible). **Interim operator procedure: LOGIN FIRST, then
+  start the engine** — a token-valid boot runs everything in one shot.
+
+## 2026-07-20
+
+- **Warm-up-frozen incident diagnosed + FIXED (`5d34e77`)**: owner's Telegram ping ("insufficient
+  contiguous bar coverage") was a cold-start defect, not a data problem. `instruments_daily` was
+  never written (Phase-1 TODO never landed) and the token map is in-memory, so any restart after
+  the 08:15 instruments job booted token-less → unknown_token storm → warmup 0/77 → FROZEN.
+  Fix: persist-on-refresh + startup hydrate (pre-login capable) + live-refresh fallback +
+  `instruments_unavailable` explicit branch. Also: young listings (GROWW/TMCV 167/200 — zero-gap
+  coverage since listing but structurally short of the lookback) no longer freeze warmup forever;
+  excluded AND reported (`young_excluded`). 503 tests green. **Operator action: restart the engine
+  (the 10:32 session still carries the dead token map; tonight's EOD jobs would fail in it).**
+- **Offline G1 sweep run** (engine-safe half): suite 503 green; smoke test 22/22; cost model
+  0-drift vs Zerodha live page (12/12 rates); calendar 2026 verified-through 2026-12-31; protected
+  hashes MATCH; checkpoints healthy; job_runs shows clean catch-up incl. 07-16/17 replay. Live
+  evidence accumulating: today counts toward ticker/news session tallies (morning session).
+  Pending store-lock window: reconcile_log drift history, news-corpus inventory (watcher armed).
+
 ## 2026-07-19
 
 - **Fresh insider-disclosure source FOUND (stage-3 unblock)**: NSE PIT embargo re-verified

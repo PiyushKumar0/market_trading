@@ -93,6 +93,12 @@ from engine.ops.jobs import (
     JobSpec,
 )
 from engine.ops.lifecycle import SessionLifecycle
+from engine.ops.post_login import (
+    PostLoginRecovery,
+    hydrate_instruments_at_startup,
+    regime_and_warmup_backfill,
+    resume_ticker,
+)
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
 from engine.ops.warmup import WarmupGate
@@ -485,27 +491,18 @@ async def run() -> int:
     async def backfill_hook() -> None:
         # Step 4: warm-up the regime history (NIFTY50/VIX daily — checkpointed, cheap on re-runs) and
         # gap-fill today's intraday minute bars from official candles so warm-up never needs live ticks.
+        # Shared with the post-login re-trigger so both issue the IDENTICAL calls (engine.ops.post_login).
         if backfill is None:
             return
-        today = clock.today()
-        await backfill.run([INDEX_SYMBOL, VIX_SYMBOL], "day",
-                           today - timedelta(days=365 * settings.data.backfill_daily_years), today)
-        session_ = calendar.session(today)
-        watch = watchlist_symbols()
-        if session_ is not None and watch:
-            await backfill.warmup_gap(watch, session_.open, clock.now())
+        await regime_and_warmup_backfill(
+            backfill, clock, calendar, settings, watchlist_symbols, INDEX_SYMBOL, VIX_SYMBOL
+        )
 
     async def ticker_resume_hook() -> None:
         # Step 7: resume the ticker into WARMING (feed-stale alarms suppressed) once a token exists.
-        token = session.access_token()
-        if kite is None or not session.token_valid() or token is None:
-            _log.info("ticker_resume_skipped", reason="no valid Kite token")
-            return
-        tokens = ticker_tokens()
-        if not tokens:
-            _log.info("ticker_resume_skipped", reason="no subscription tokens (universe not built yet)")
-            return
-        await ticker.start(tokens, token)
+        # Extracted to engine.ops.post_login so startup and the post-login re-trigger share the exact
+        # same resume logic rather than duplicating it.
+        await resume_ticker(session, kite, ticker, ticker_tokens)
 
     async def backup_hook() -> None:
         # §10.5 backup is best-effort — a failure must never block the §10.8 shutdown guard (whose job
@@ -523,6 +520,20 @@ async def run() -> int:
         boot_history_path=data_dir / "lifecycle_boots.json",
         backfill_hook=backfill_hook, ticker_resume_hook=ticker_resume_hook, backup_hook=backup_hook,
     )
+
+    # --- §2.6 post-login RE-TRIGGER: a boot BEFORE the daily login is token-less, so the step-4/6/7
+    #     broker-touching recovery no-ops and (until this fix) NOTHING re-ran it when the token arrived —
+    #     the ticker never started (zero live 1m bars ever captured), warm-up stayed frozen. The
+    #     PostLoginRecovery re-runs those steps (each guarded + logged) the moment EITHER login path
+    #     mints a valid token; it registers as a SessionManager login hook fired fire-and-forget so the
+    #     login HTTP/Telegram path returns at once and the recovery reports its outcome on Telegram. ---
+    post_login_recovery = PostLoginRecovery(
+        instruments=instruments, store=store, kite=kite, session=session, clock=clock,
+        calendar=calendar, settings=settings, backfill=backfill, ticker=ticker, lifecycle=lifecycle,
+        ticker_tokens=ticker_tokens, watchlist_symbols=watchlist_symbols,
+        index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL, notify=notify, alert=alert,
+    )
+    session.add_login_hook(post_login_recovery.run)
 
     # --- dashboard API ---
     app = _create_app(session, mode, kill, secrets, clock, bus)
@@ -587,54 +598,10 @@ async def run() -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- cold-start hydration (F2)
-async def hydrate_instruments_at_startup(
-    instruments: InstrumentStore,
-    store: MarketStore,
-    kite: KiteClient | None,
-    *,
-    session_valid: bool,
-    clock: Clock,
-) -> str:
-    """Cold-start token-map recovery ladder (§2.6 / §4.3, F2). Returns the branch tag taken.
-
-    A fresh process holds an EMPTY :class:`InstrumentStore`. If this boot is a restart after the 08:15
-    ``instruments`` job, that job's ``job_runs`` watermark makes the catch-up runner skip it, so nothing
-    would repopulate the token map — every backfill/warm-up/ticker lookup then fails (``unknown_token``
-    storm, warm-up frozen). Run this BEFORE the §2.6 step-4 backfill and step-6 warm-up (both inside
-    ``lifecycle.startup``) to rebuild the map, cheapest source first:
-
-    - ``already_loaded`` — the store is non-empty (a refresh already ran this process); nothing to do.
-    - ``hydrated`` — rebuild from the latest persisted ``instruments_daily`` snapshot (works pre-login).
-    - ``startup_refresh`` — table empty but a valid Kite session exists: live refresh + persist (as the
-      08:15 job would), so the next restart can hydrate.
-    - ``unavailable`` — neither possible (no snapshot, no session): log a WARNING with the explicit
-      cause. Behaviour then matches today (entries stay FROZEN), but with a named reason in the startup
-      report instead of a silent ``unknown_token`` storm.
-
-    Extracted from the composition root so the ladder is unit-testable without booting the engine.
-    """
-    if not instruments.is_empty:
-        _log.info("instruments_startup_skip", reason="store already populated this process")
-        return "already_loaded"
-    latest = await store.arun(store.get_latest_instruments_daily)
-    if latest is not None:
-        d, rows = latest
-        count = instruments.hydrate(rows)
-        _log.info("instruments_hydrated", d=d.isoformat(), count=count, indices=instruments.index_count)
-        return "hydrated"
-    if kite is not None and session_valid:
-        count = await instruments.refresh(kite)
-        today = clock.today()
-        persisted = await store.arun(store.upsert_instruments_daily, instruments.snapshot_rows(today))
-        _log.info("instruments_startup_refresh", d=today.isoformat(), count=count, persisted=persisted)
-        return "startup_refresh"
-    _log.warning(
-        "instruments_unavailable",
-        reason="no persisted instruments_daily snapshot and no valid Kite session",
-        effect="token map empty — backfill/warm-up/ticker lookups fail; entries stay FROZEN until login",
-    )
-    return "unavailable"
+# NOTE: ``hydrate_instruments_at_startup`` (the F2 cold-start ladder) now lives in
+# ``engine.ops.post_login`` so the composition root AND the post-login re-trigger share the exact same
+# ladder; it is imported above and re-exported here (existing callers/tests keep importing it from
+# ``engine.ops.main``).
 
 
 # --------------------------------------------------------------------------- scheduler arming

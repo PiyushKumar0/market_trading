@@ -47,6 +47,13 @@ _log = get_logger("engine.broker.session")
 # constructor signature stays the one the plan mandates and ``broker`` need not import ``risk``.
 InvalidationHook = Callable[[], Awaitable[None]]
 
+# Async hook invoked when the session transitions to a VALID token via :meth:`complete_login` — the
+# convergence point of BOTH login paths (the LAN ``/kite/callback`` route and the Telegram ``/token``
+# fallback both land there, §3.2.11). The wiring layer registers the §2.6 post-login recovery here so
+# a boot BEFORE the daily login (token-less ⇒ ticker never started, warm-up frozen forever) is
+# RE-TRIGGERED the instant a token arrives. Fired fire-and-forget (see :meth:`_fire_login_hooks`).
+LoginHook = Callable[[], Awaitable[None]]
+
 
 class SessionManager:
     """Owns the daily Kite token: minting it (login flow) and tracking its validity (R6/A5)."""
@@ -73,11 +80,22 @@ class SessionManager:
         # Optional async hook fired on mid-day invalidation; wired by the caller (R6).
         self._on_invalidated: InvalidationHook | None = None
 
+        # Post-login re-trigger hooks (§2.6) fired fire-and-forget when a token becomes valid, plus the
+        # set of in-flight hook tasks held so the loop cannot GC a running recovery mid-flight.
+        self._login_hooks: list[LoginHook] = []
+        self._login_tasks: set[asyncio.Task[None]] = set()
+
     # -- wiring ---------------------------------------------------------------------------------
 
     def set_invalidation_hook(self, hook: InvalidationHook | None) -> None:
         """Register the coroutine fired by :meth:`on_token_rejected` (publishes risk/feed event, R6)."""
         self._on_invalidated = hook
+
+    def add_login_hook(self, hook: LoginHook) -> None:
+        """Register a coroutine fired (fire-and-forget) whenever :meth:`complete_login` mints a valid
+        token — BOTH login paths land there (§2.6 re-trigger). The wiring layer registers the
+        post-login recovery so a boot before the daily login re-arms the moment the owner logs in."""
+        self._login_hooks.append(hook)
 
     # -- login flow -----------------------------------------------------------------------------
 
@@ -115,6 +133,38 @@ class SessionManager:
         self._rejected = False
         self._last_success = self._clock.now()
         _log.info("session_live", at=self._last_success.isoformat())
+        # §2.6 RE-TRIGGER: a token just became valid — fire the post-login recovery hooks. Both login
+        # paths reach here, so this is the single place that catches "the token is now good".
+        self._fire_login_hooks()
+
+    def _fire_login_hooks(self) -> None:
+        """Fire every registered post-login hook fire-and-forget (§2.6 re-trigger).
+
+        Deliberately unlike :meth:`on_token_rejected` (which awaits its hook inline): the recovery a
+        login hook runs — instruments / backfill / warm-up / ticker — can take seconds to minutes, and
+        the login HTTP callback (the owner's phone) plus the Telegram ``/token`` command must return at
+        once. So this mirrors :meth:`EventBus.publish` semantics — schedule each hook as a task on the
+        running loop. A hook that raises is isolated + logged; it can never affect the login result or a
+        sibling hook. Tasks are held in ``_login_tasks`` so the loop cannot GC a recovery mid-flight."""
+        if not self._login_hooks:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        for hook in list(self._login_hooks):
+            if loop is not None:
+                task = loop.create_task(self._run_login_hook(hook))
+                self._login_tasks.add(task)
+                task.add_done_callback(self._login_tasks.discard)
+            else:  # pragma: no cover - complete_login is always awaited inside a running loop
+                asyncio.run(self._run_login_hook(hook))
+
+    async def _run_login_hook(self, hook: LoginHook) -> None:
+        try:
+            await hook()
+        except Exception:  # noqa: BLE001 - a post-login hook must never affect the login result
+            _log.exception("login_hook_failed")
 
     # -- validity tracking ----------------------------------------------------------------------
 
