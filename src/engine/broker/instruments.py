@@ -19,15 +19,20 @@ the rest of the platform reads — never re-derived inline:
   a regime symbol's token (A2). :meth:`by_symbol` / :meth:`round_to_tick` / :meth:`is_fno` still
   raise/deny for indices — you never price, size, or route an index, so fail-closed there is correct.
 
-Phase 0 ships the in-memory store, the indexing in :meth:`refresh`, and the load-bearing
-:meth:`round_to_tick`. DuckDB persistence of the daily snapshot (A8 surveillance/leverage join, §4.3)
-is a Phase-1 TODO. This module talks only to ``core`` + the injected ``kite_client``; it never imports
-``engine.intelligence`` (R1).
+The store is in-memory: a process holds today's dump only after a :meth:`refresh` (or a cold-start
+:meth:`hydrate`). Because the map is rebuilt from scratch each boot, an engine restart AFTER the
+08:15 ``instruments`` job — whose ``job_runs`` watermark makes the catch-up runner skip it — would
+otherwise leave every token lookup empty (the cold-start ``unknown_token`` storm). Two seams close
+that gap (§4.3): :meth:`snapshot_rows` renders the current dump as ``instruments_daily`` rows the
+08:15 job persists, and :meth:`hydrate` rebuilds the in-memory index from the latest stored snapshot
+at startup — pre-login, so recovery never waits on a Kite session. This module talks only to ``core``
++ the injected ``kite_client``; it never imports ``engine.intelligence`` (R1).
 """
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -89,7 +94,8 @@ class InstrumentStore:
         # maps so by_symbol/round_to_tick/is_fno still fail-closed for indices.
         self._index_tokens: dict[str, int] = {}
         self._index_by_token: dict[int, str] = {}
-        self._refreshed_at = None  # tz-aware IST datetime of the last successful refresh (None until)
+        self._refreshed_at: datetime | None = None  # tz-aware IST datetime of last refresh/hydrate (None until)
+        self._hydrated = False     # True only when the live snapshot came from hydrate() (provenance)
 
     async def refresh(self, kite_client: Any) -> int:
         """Pull the full instruments dump via ``kite_client`` and index it. Returns the row count.
@@ -105,10 +111,12 @@ class InstrumentStore:
         ``tick_size=0`` would fail the ``gt=0`` model). They are NOT counted as malformed/skipped; only
         an index row missing its symbol or token is skipped like any other bad row (A2).
 
-        TODO(Phase 1): persist the snapshot to the DuckDB ``instruments_daily`` table (one row-set per
-        trading day, §4.3) and join the Zerodha MIS-leverage + NSE surveillance files (A8) so
-        ``is_fno`` (C7) and per-stock leverage come from the real NFO/margins join rather than the
-        per-row heuristic below.
+        The daily snapshot is persisted to the DuckDB ``instruments_daily`` table by the 08:15 job
+        (via :meth:`snapshot_rows`) so a later restart can :meth:`hydrate` the token map pre-login
+        (§4.3). TODO(Phase 1): join the Zerodha MIS-leverage + NSE surveillance files (A8) so
+        ``is_fno`` (C7), ``surveillance`` and per-stock leverage come from the real NFO/margins join
+        rather than the per-row heuristic below (that join is surveillance's own job — snapshot_rows
+        leaves those columns at their spec defaults).
         """
         raw = kite_client.instruments()
         if hasattr(raw, "__await__"):
@@ -152,6 +160,7 @@ class InstrumentStore:
         self._index_tokens = index_tokens
         self._index_by_token = index_by_token
         self._refreshed_at = self._clock.now()
+        self._hydrated = False   # a live dump supersedes any prior cold-start hydrate (provenance)
         _log.info(
             "instruments.refreshed",
             count=len(indexed),
@@ -178,7 +187,144 @@ class InstrumentStore:
         self._index_tokens = idx
         self._index_by_token = {tok: sym for sym, tok in idx.items()}
         self._refreshed_at = self._clock.now()
+        self._hydrated = False
         return len(self._by_symbol)
+
+    # -- persistence / cold-start hydration (§4.3, F1/F2) --------------------------------------
+    #: The ``instruments_daily`` column order (§4.3 DDL / store ``_TABLE_SPEC``). Pinned here so
+    #: :meth:`snapshot_rows` emits exactly these keys; the test asserts it against the store spec so a
+    #: DDL column add/rename fails loudly instead of silently dropping data.
+    _SNAPSHOT_COLUMNS: tuple[str, ...] = (
+        "d", "instrument_token", "tradingsymbol", "name", "exchange", "segment", "instrument_type",
+        "tick_size", "lot_size", "mis_leverage", "mis_eligible", "surveillance", "fno", "extra",
+    )
+
+    def snapshot_rows(self, d: date) -> list[dict[str, Any]]:
+        """Render today's dump as ``instruments_daily`` rows for day ``d`` (§4.3, F1).
+
+        One dict per tradable :class:`Instrument` PLUS one per index token (the non-tradable
+        ``INDICES`` seam), each carrying exactly the :attr:`_SNAPSHOT_COLUMNS` keys so the store's
+        pinned-column upsert accepts them. The A8 surveillance/MIS-leverage join is surveillance's own
+        job, so ``name``/``mis_leverage``/``mis_eligible``/``surveillance``/``extra`` are left at the
+        table's ``NULL`` default here — this writer persists only what the dump itself carries.
+
+        Index rows are representable within the DDL (``tick_size``/``lot_size`` are nullable): they
+        get ``segment='INDICES'`` (the discriminator :meth:`hydrate`/:meth:`refresh` route on) and
+        ``instrument_type='INDEX'``, with ``tick_size``/``lot_size`` NULL (an index is never priced or
+        sized, A2) and ``fno=False`` (an index is not an F&O underlying, C7).
+        """
+        rows: list[dict[str, Any]] = []
+        for ins in self._by_symbol.values():
+            rows.append({
+                "d": d,
+                "instrument_token": ins.instrument_token,
+                "tradingsymbol": ins.tradingsymbol,
+                "name": None,
+                "exchange": ins.exchange,
+                "segment": ins.segment,
+                "instrument_type": ins.instrument_type,
+                "tick_size": ins.tick_size,
+                "lot_size": ins.lot_size,
+                "mis_leverage": None,
+                "mis_eligible": None,
+                "surveillance": None,
+                "fno": ins.is_fno,
+                "extra": None,
+            })
+        for symbol, token in self._index_tokens.items():
+            rows.append({
+                "d": d,
+                "instrument_token": token,
+                "tradingsymbol": symbol,
+                "name": None,
+                "exchange": None,
+                "segment": "INDICES",
+                "instrument_type": "INDEX",
+                "tick_size": None,
+                "lot_size": None,
+                "mis_leverage": None,
+                "mis_eligible": None,
+                "surveillance": None,
+                "fno": False,
+                "extra": None,
+            })
+        return rows
+
+    def hydrate(self, rows: list[dict[str, Any]]) -> int:
+        """Rebuild the in-memory index from persisted ``instruments_daily`` rows (§4.3, F2).
+
+        The cold-start inverse of :meth:`snapshot_rows`: split the stored rows by segment (``INDICES``
+        → the non-tradable token seam, everything else → tradable :class:`Instrument`s) and swap all
+        four maps in atomically, exactly like :meth:`refresh` — a raise mid-build leaves the prior
+        (empty) store intact. A malformed stored row (missing token, ``NULL``/zero tick, bad type) is
+        skipped and counted, never aborting the hydrate; the count is logged. Sets the :attr:`hydrated`
+        provenance flag so the startup report can say the token map is a stored snapshot, not a live
+        dump. Returns the tradable row count loaded.
+
+        Unlike :meth:`refresh`, ``is_fno`` is read from the stored ``fno`` column verbatim (not
+        re-derived) so hydrate stays a faithful inverse even once F&O membership comes from the A8 NFO
+        join rather than the exchange/type heuristic.
+        """
+        indexed: dict[str, Instrument] = {}
+        index_tokens: dict[str, int] = {}
+        index_by_token: dict[int, str] = {}
+        skipped = 0
+        for row in rows:
+            segment = str(self._row_get(row, "segment", "") or "").upper()
+            if "INDICES" in segment:
+                try:
+                    symbol = str(self._row_get(row, "tradingsymbol") or "")
+                    token = int(self._row_get(row, "instrument_token"))
+                except (KeyError, ValueError, TypeError) as exc:
+                    skipped += 1
+                    _log.warning("instrument.hydrate_row_skipped", error=str(exc))
+                    continue
+                if not symbol:
+                    skipped += 1
+                    _log.warning("instrument.hydrate_row_skipped", error="index row missing tradingsymbol")
+                    continue
+                index_tokens[symbol] = token
+                index_by_token[token] = symbol
+                continue
+            try:
+                instrument = self._stored_row_to_instrument(row)
+            except (KeyError, ValueError, TypeError, InvalidOperation) as exc:
+                skipped += 1
+                _log.warning("instrument.hydrate_row_skipped", error=str(exc))
+                continue
+            indexed[instrument.tradingsymbol] = instrument
+
+        self._by_symbol = indexed
+        self._by_token = {ins.instrument_token: sym for sym, ins in indexed.items()}
+        self._index_tokens = index_tokens
+        self._index_by_token = index_by_token
+        self._refreshed_at = self._clock.now()
+        self._hydrated = True
+        _log.info(
+            "instruments.hydrated",
+            count=len(indexed),
+            skipped=skipped,
+            indices=len(index_tokens),
+            at=self._refreshed_at.isoformat(),
+        )
+        return len(indexed)
+
+    @property
+    def is_empty(self) -> bool:
+        """True when no dump is loaded (no tradable rows AND no index tokens) — the F2 hydrate trigger."""
+        return not self._by_symbol and not self._index_tokens
+
+    @property
+    def hydrated(self) -> bool:
+        """Provenance: True when the current snapshot came from :meth:`hydrate` (a stored dump at cold
+        start) rather than a live :meth:`refresh`. Cleared by any subsequent refresh/seed."""
+        return self._hydrated
+
+    @property
+    def index_count(self) -> int:
+        """Number of resolvable non-tradable index tokens (the A2 ``INDICES`` seam) — for the startup
+        report line, where a hydrated dump reports ``count`` tradables + ``indices`` regime tokens."""
+        return len(self._index_tokens)
 
     def by_symbol(self, tradingsymbol: str) -> Instrument:
         """Return the :class:`Instrument` for ``tradingsymbol``.
@@ -278,4 +424,26 @@ class InstrumentStore:
             lot_size=int(get("lot_size") or 1),
             instrument_type=instrument_type,
             is_fno=is_fno,
+        )
+
+    @staticmethod
+    def _stored_row_to_instrument(row: dict[str, Any]) -> Instrument:
+        """Rebuild an :class:`Instrument` from a persisted ``instruments_daily`` row (:meth:`hydrate`).
+
+        Distinct from :meth:`_row_to_instrument` (the live-dump path that DERIVES ``is_fno`` from the
+        exchange/type heuristic): a stored snapshot already carries the authoritative ``fno`` value, so
+        read it verbatim. Any missing/NULL/zero required field (token, tick, lot) raises through the
+        tolerant accessor + the ``Instrument`` model (``tick_size``/``lot_size`` ``gt=0``) so
+        :meth:`hydrate` skip-and-counts it.
+        """
+        get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
+        return Instrument(
+            tradingsymbol=str(get("tradingsymbol")),
+            instrument_token=int(get("instrument_token")),
+            exchange=str(get("exchange", "") or ""),
+            segment=str(get("segment", "") or ""),
+            tick_size=Decimal(str(get("tick_size"))),
+            lot_size=int(get("lot_size")),
+            instrument_type=str(get("instrument_type", "") or ""),
+            is_fno=bool(get("fno")),
         )

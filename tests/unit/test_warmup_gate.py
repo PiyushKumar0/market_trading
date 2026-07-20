@@ -40,6 +40,10 @@ class FakeStore:
         self.gaps: dict[str, list[datetime]] = {}
         self.daily: dict[str, list[date]] = {}
         self.intraday_ranges: list[tuple[str, datetime, datetime]] = []
+        # Optional (first_bar, total) override for the young-listing probe. Unset ⇒ derived from
+        # ``daily`` (min/len) — i.e. the daily dict IS the symbol's whole history. Set it to model an
+        # OLD security whose in-window shortfall is a real gap, not a fresh listing.
+        self.spans: dict[str, tuple[date | None, int]] = {}
 
     async def acoverage_gaps(self, symbol, start, end):
         self.intraday_ranges.append((symbol, start, end))
@@ -47,6 +51,12 @@ class FakeStore:
 
     async def aget_bars_1d(self, symbol, start, end):
         return [SimpleNamespace(d=d) for d in self.daily.get(symbol, []) if start <= d <= end]
+
+    async def adaily_bar_span(self, symbol):
+        if symbol in self.spans:
+            return self.spans[symbol]
+        days = self.daily.get(symbol, [])
+        return (min(days) if days else None, len(days))
 
 
 def _gate(store, clock, *, symbols=("RELIANCE",), **kw):
@@ -93,6 +103,7 @@ async def test_daily_shortfall_blocks_daily_strategies(clock):
     store = FakeStore()
     _fill_ready(store)
     store.daily["RELIANCE"] = RECENT_5[:3]   # 3/5 sessions
+    store.spans["RELIANCE"] = (date(2007, 1, 1), 4000)  # an OLD stock: 3/5 is a real gap, not a listing
     gate = _gate(store, clock)
     blockers = await gate.missing()
     assert "rsi2/trend/mom:RELIANCE daily bars 3/5" in blockers
@@ -105,6 +116,7 @@ async def test_missing_regime_history_blocks_regime(clock):
     _fill_ready(store)
     store.daily["NIFTY 50"] = []
     store.daily["INDIA VIX"] = RECENT_5[:1]  # 1/3
+    store.spans["INDIA VIX"] = (date(2008, 3, 1), 4000)  # ancient index: 1/3 is a real gap, not a listing
     gate = _gate(store, clock)
     blockers = await gate.missing()
     assert "regime:NIFTY 50 daily bars 0/5" in blockers
@@ -135,6 +147,46 @@ async def test_before_open_accrues_no_intraday_requirement():
     gate = _gate(store, early)
     assert await gate.missing() == []
     assert store.intraday_ranges == []
+
+
+# --------------------------------------------------------------------- young-listing exclusion (F3)
+@pytest.mark.asyncio
+async def test_young_listing_alone_does_not_block(clock):
+    """A fresh listing (a bar for every session since it listed < the lookback ago) can never satisfy
+    the 200-session gate, so it is EXCLUDED from blockers and reported in young_excluded — not frozen
+    forever. With everything else covered, the gate is READY despite the shortfall."""
+    store = FakeStore()
+    _fill_ready(store)
+    # GROWW listed 3 sessions ago and has a bar for each: full coverage since its first bar (3/5).
+    store.daily["GROWW"] = [date(2026, 6, 16), date(2026, 6, 15), date(2026, 6, 12)]
+    gate = _gate(store, clock, symbols=("RELIANCE", "GROWW"))
+    status = await gate.status()
+    assert status.ready is True
+    assert status.young_excluded == ["GROWW(3/5)"]
+    assert not any(b.startswith("rsi2/trend/mom:GROWW") for b in status.blockers)
+
+
+@pytest.mark.asyncio
+async def test_young_excluded_but_gaps_and_old_shortfalls_still_block(clock):
+    """The exclusion must not weaken the gate: only a fresh listing with FULL coverage is excluded.
+    A young-aged symbol WITH an interior gap, and an OLD symbol with a gap, both still block."""
+    store = FakeStore()
+    store.daily["NIFTY 50"] = list(RECENT_5)          # regime covered (5/5)
+    store.daily["INDIA VIX"] = list(RECENT_5[:3])     # regime covered (3/3)
+    # (a) genuine young listing → EXCLUDED + reported
+    store.daily["GROWW"] = [date(2026, 6, 16), date(2026, 6, 15), date(2026, 6, 12)]
+    # (b) first bar is recent BUT there is an interior gap (missing 6/15) → NOT young → BLOCKS
+    store.daily["GAPYOUNG"] = [date(2026, 6, 16), date(2026, 6, 12)]
+    # (c) an OLD security (first bar 2019) with an in-window gap → NOT young → BLOCKS
+    store.daily["OLDGAP"] = [date(2026, 6, 16), date(2026, 6, 12), date(2026, 6, 10)]
+    store.spans["OLDGAP"] = (date(2019, 5, 1), 1700)
+    gate = _gate(store, clock, symbols=("GROWW", "GAPYOUNG", "OLDGAP"))
+    status = await gate.status()
+    assert status.young_excluded == ["GROWW(3/5)"]
+    assert status.ready is False
+    assert "rsi2/trend/mom:GAPYOUNG daily bars 2/5" in status.blockers
+    assert "rsi2/trend/mom:OLDGAP daily bars 3/5" in status.blockers
+    assert not any(b.startswith("rsi2/trend/mom:GROWW") for b in status.blockers)
 
 
 # --------------------------------------------------------------------- lifecycle consequence (§2.6)

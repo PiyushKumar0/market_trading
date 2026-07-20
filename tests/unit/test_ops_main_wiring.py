@@ -18,8 +18,10 @@ from datetime import date, time
 
 import pytest
 
+from engine.broker.instruments import InstrumentStore
 from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_settings
+from engine.marketdata.store import MarketStore
 from engine.ops import main as opsmain
 from engine.ops.jobs import (
     JOB_BHAVCOPY,
@@ -37,8 +39,10 @@ from engine.ops.main import (
     _arm_registry_jobs,
     _scheduled_runner,
     build_job_registry,
+    hydrate_instruments_at_startup,
 )
 from engine.ops.scheduler import Scheduler
+from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
 
 
 async def _noop() -> None:
@@ -62,6 +66,80 @@ def _all_noop_fns() -> dict:
 @pytest.fixture
 def calendar(clock):
     return NSECalendar(config_dir() / "calendar", clock, strict=False)
+
+
+@pytest.fixture
+def market_store(tmp_path, clock):
+    s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
+    s.open()
+    yield s
+    s.close()
+
+
+# --------------------------------------------------------------------------- cold-start hydrate ladder (F2)
+@pytest.mark.asyncio
+async def test_startup_hydrates_from_persisted_snapshot(market_store, clock):
+    """Restart after 08:15: the table has yesterday's dump, no Kite session needed → HYDRATE branch."""
+    # Persist a snapshot the way the 08:15 job does (a separate populated store -> snapshot_rows -> upsert).
+    seeded = InstrumentStore(clock)
+    await seeded.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW]))
+    market_store.upsert_instruments_daily(seeded.snapshot_rows(clock.today()))
+
+    instruments = InstrumentStore(clock)                     # fresh process: empty in-memory store
+    assert instruments.is_empty is True
+    branch = await hydrate_instruments_at_startup(
+        instruments, market_store, kite=None, session_valid=False, clock=clock,
+    )
+    assert branch == "hydrated"
+    assert instruments.hydrated is True
+    assert instruments.token_for_symbol("RELIANCE") == 408065
+    assert instruments.token_for_symbol("NIFTY 50") == 256265   # index seam rebuilt too
+
+
+@pytest.mark.asyncio
+async def test_startup_refreshes_live_when_table_empty_and_session_valid(market_store, clock):
+    """Fresh install, table empty, valid session → REFRESH branch: live pull + persist for next boot."""
+    instruments = InstrumentStore(clock)
+    kite = FakeKite([RELIANCE_ROW, NIFTY50_ROW])
+    branch = await hydrate_instruments_at_startup(
+        instruments, market_store, kite=kite, session_valid=True, clock=clock,
+    )
+    assert branch == "startup_refresh"
+    assert kite.calls == 1
+    assert instruments.hydrated is False                     # a live refresh, not a hydrate
+    assert instruments.token_for_symbol("RELIANCE") == 408065
+    # And it persisted, so the NEXT restart can hydrate pre-login.
+    latest = market_store.get_latest_instruments_daily()
+    assert latest is not None
+    d, stored = latest
+    assert d == clock.today()
+    assert any(r["tradingsymbol"] == "RELIANCE" for r in stored)
+
+
+@pytest.mark.asyncio
+async def test_startup_unavailable_when_no_snapshot_and_no_session(market_store, clock):
+    """Neither a stored snapshot nor a valid session → UNAVAILABLE: token map stays empty (entries
+    FROZEN), but with a named cause rather than a silent unknown_token storm."""
+    instruments = InstrumentStore(clock)
+    branch = await hydrate_instruments_at_startup(
+        instruments, market_store, kite=None, session_valid=False, clock=clock,
+    )
+    assert branch == "unavailable"
+    assert instruments.is_empty is True
+    assert instruments.token_for_symbol("RELIANCE") is None
+
+
+@pytest.mark.asyncio
+async def test_startup_skips_when_store_already_populated(market_store, clock):
+    """A store already populated this process (refresh already ran) short-circuits to already_loaded —
+    no redundant hydrate, no clobbering a live dump with a stale snapshot."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW]))
+    branch = await hydrate_instruments_at_startup(
+        instruments, market_store, kite=None, session_valid=False, clock=clock,
+    )
+    assert branch == "already_loaded"
+    assert instruments.hydrated is False                     # untouched: still the live refresh
 
 
 # --------------------------------------------------------------------------- registry structure

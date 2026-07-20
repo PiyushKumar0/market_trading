@@ -961,6 +961,17 @@ class MarketStore:
             for r in rows
         ]
 
+    def daily_bar_span(self, symbol: str) -> tuple[date | None, int]:
+        """``(earliest d, total bar count)`` across ALL of ``symbol``'s ``bars_1d`` — the warm-up
+        gate's young-listing probe (§2.6 step 6). ``(None, 0)`` when the symbol has no daily bars.
+
+        The gate compares ``total`` to the number of sessions since ``earliest d``: a symbol with a bar
+        for every session since its (recent) first bar is a fresh LISTING short of the lookback, not a
+        gap — the gate excludes it from the freeze rather than blocking entries forever. A shortfall
+        with ``total`` below that span is a real gap and still blocks."""
+        first, count = self._fetchall("SELECT MIN(d), COUNT(*) FROM bars_1d WHERE symbol = ?", [symbol])[0]
+        return (first, int(count))
+
     # ================================================================== corrections_log (§4.4 job 1)
     def append_correction(
         self,
@@ -1009,6 +1020,16 @@ class MarketStore:
 
     def get_instruments_daily(self, d: date) -> list[dict[str, Any]]:
         return self._fetch_dicts("SELECT * FROM instruments_daily WHERE d = ? ORDER BY tradingsymbol", [d])
+
+    def get_latest_instruments_daily(self) -> tuple[date, list[dict[str, Any]]] | None:
+        """Most recent persisted ``instruments_daily`` snapshot on-or-before today (the F2 cold-start
+        hydrate source). Returns ``(d, rows)`` for the latest day carrying rows, or ``None`` when the
+        table is empty. A pure DuckDB read — usable pre-login, before any Kite session exists (§2.6)."""
+        row = self._fetchall("SELECT MAX(d) FROM instruments_daily WHERE d <= ?", [self._clock.today()])
+        d = row[0][0] if row else None
+        if d is None:
+            return None
+        return d, self.get_instruments_daily(d)
 
     def upsert_universe_daily(self, rows: Sequence[dict[str, Any]]) -> int:
         return self._upsert_rows("universe_daily", rows)
@@ -1542,6 +1563,9 @@ class MarketStore:
 
     async def aget_bars_1d(self, symbol: str, start: date, end: date) -> list[DailyBar]:
         return await asyncio.to_thread(self.get_bars_1d, symbol, start, end)
+
+    async def adaily_bar_span(self, symbol: str) -> tuple[date | None, int]:
+        return await asyncio.to_thread(self.daily_bar_span, symbol)
 
     async def aflush_ticks(self) -> list[Path]:
         return await asyncio.to_thread(self.flush_ticks)

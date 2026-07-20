@@ -370,6 +370,12 @@ async def run() -> int:
 
     async def job_instruments() -> None:
         await instruments.refresh(_require_kite())
+        # Persist today's dump so a restart after this job (whose watermark makes catch-up skip it) can
+        # hydrate the token map pre-login instead of an unknown_token storm (§4.3, F1). Surveillance/MIS
+        # columns are left NULL here — the 08:20 surveillance job owns that join.
+        today = clock.today()
+        persisted = await store.arun(store.upsert_instruments_daily, instruments.snapshot_rows(today))
+        _log.info("instruments_persisted", d=today.isoformat(), rows=persisted)
 
     async def job_surveillance() -> None:
         await surveillance.refresh()
@@ -532,11 +538,24 @@ async def run() -> int:
     if telegram is not None:
         await telegram.start()
 
+    # --- F2 cold-start token-map recovery: rebuild the in-memory instruments index (from the persisted
+    #     snapshot pre-login, or a live refresh) BEFORE the §2.6 step-4 backfill + step-6 warm-up run
+    #     inside lifecycle.startup — otherwise a restart after 08:15 finds an empty map (unknown_token). ---
+    try:
+        instruments_source = await hydrate_instruments_at_startup(
+            instruments, store, kite, session_valid=session.token_valid(), clock=clock,
+        )
+    except Exception:  # noqa: BLE001 - a recovery step must never crash the boot (§2.6): degrade to
+        # an empty token map (entries stay FROZEN via the warm-up gate) with a loud, named cause.
+        _log.exception("instruments_hydrate_failed")
+        instruments_source = "failed"
+
     # --- every-startup recovery (§2.6). check_skew honours NTP; degrades to FROZEN if unreachable (R6). ---
     report = await lifecycle.startup(check_skew=True)
     _log.info("startup_complete", mode=report.sticky_mode, killed=report.killed,
               needs_login=report.needs_login, integrity_ok=report.integrity_ok,
-              jobs_caught_up=len(report.jobs_caught_up), frozen=report.frozen_reasons)
+              jobs_caught_up=len(report.jobs_caught_up), frozen=report.frozen_reasons,
+              instruments=instruments_source)
     await health.check(check_skew=False)
 
     # --- start remaining services + idle until a stop signal (§2.6: being up is an active period) ---
@@ -566,6 +585,56 @@ async def run() -> int:
     conn.close()
     _log.info("engine_stopped")
     return 0
+
+
+# --------------------------------------------------------------------------- cold-start hydration (F2)
+async def hydrate_instruments_at_startup(
+    instruments: InstrumentStore,
+    store: MarketStore,
+    kite: KiteClient | None,
+    *,
+    session_valid: bool,
+    clock: Clock,
+) -> str:
+    """Cold-start token-map recovery ladder (§2.6 / §4.3, F2). Returns the branch tag taken.
+
+    A fresh process holds an EMPTY :class:`InstrumentStore`. If this boot is a restart after the 08:15
+    ``instruments`` job, that job's ``job_runs`` watermark makes the catch-up runner skip it, so nothing
+    would repopulate the token map — every backfill/warm-up/ticker lookup then fails (``unknown_token``
+    storm, warm-up frozen). Run this BEFORE the §2.6 step-4 backfill and step-6 warm-up (both inside
+    ``lifecycle.startup``) to rebuild the map, cheapest source first:
+
+    - ``already_loaded`` — the store is non-empty (a refresh already ran this process); nothing to do.
+    - ``hydrated`` — rebuild from the latest persisted ``instruments_daily`` snapshot (works pre-login).
+    - ``startup_refresh`` — table empty but a valid Kite session exists: live refresh + persist (as the
+      08:15 job would), so the next restart can hydrate.
+    - ``unavailable`` — neither possible (no snapshot, no session): log a WARNING with the explicit
+      cause. Behaviour then matches today (entries stay FROZEN), but with a named reason in the startup
+      report instead of a silent ``unknown_token`` storm.
+
+    Extracted from the composition root so the ladder is unit-testable without booting the engine.
+    """
+    if not instruments.is_empty:
+        _log.info("instruments_startup_skip", reason="store already populated this process")
+        return "already_loaded"
+    latest = await store.arun(store.get_latest_instruments_daily)
+    if latest is not None:
+        d, rows = latest
+        count = instruments.hydrate(rows)
+        _log.info("instruments_hydrated", d=d.isoformat(), count=count, indices=instruments.index_count)
+        return "hydrated"
+    if kite is not None and session_valid:
+        count = await instruments.refresh(kite)
+        today = clock.today()
+        persisted = await store.arun(store.upsert_instruments_daily, instruments.snapshot_rows(today))
+        _log.info("instruments_startup_refresh", d=today.isoformat(), count=count, persisted=persisted)
+        return "startup_refresh"
+    _log.warning(
+        "instruments_unavailable",
+        reason="no persisted instruments_daily snapshot and no valid Kite session",
+        effect="token map empty — backfill/warm-up/ticker lookups fail; entries stay FROZEN until login",
+    )
+    return "unavailable"
 
 
 # --------------------------------------------------------------------------- scheduler arming

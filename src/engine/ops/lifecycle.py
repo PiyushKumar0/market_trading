@@ -99,6 +99,7 @@ class StartupReport(BaseModel):
     jobs_caught_up: list[str] = Field(default_factory=list)
     jobs_failed: list[str] = Field(default_factory=list)
     warmup_blockers: list[str] = Field(default_factory=list)
+    warmup_young_excluded: list[str] = Field(default_factory=list)  # young listings off the lookback gate
     deferred_steps: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -479,6 +480,9 @@ class SessionLifecycle:
         except Exception:  # noqa: BLE001 - coverage that cannot be VERIFIED is treated as missing (R6-style)
             _log.exception("warmup_gate_check_failed")
             status = None
+        # Young listings excluded from the lookback gate are surfaced whether or not the gate is ready
+        # (an exclusion is never silent), so capture them before the ready-path early return.
+        report.warmup_young_excluded = list(getattr(status, "young_excluded", []) or [])
         if status is not None and status.ready:
             report.notes.append("warmup_ready")
             return
@@ -518,6 +522,7 @@ class SessionLifecycle:
             crash_recovered=report.crash_recovered, off_duration_s=report.off_duration_s,
             jobs_caught_up=report.jobs_caught_up, jobs_failed=report.jobs_failed,
             frozen=report.frozen_reasons, warmup_blockers=report.warmup_blockers,
+            warmup_young_excluded=report.warmup_young_excluded,
             deferred=report.deferred_steps,
         )
         if self._suppress_report_notify:

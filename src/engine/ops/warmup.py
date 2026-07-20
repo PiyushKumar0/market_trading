@@ -11,7 +11,11 @@ Per-strategy lookback requirements (§6.1/§6.2):
   live inside this span, so contiguity from the open covers them. (The ``cat`` scanner's fixed
   09:15–09:45 range is likewise inside this span, §6.1.)
 - ``rsi2``/``trend``/``mom`` (daily): 200 completed sessions of ``bars_1d`` per symbol (200-DMA is
-  the deepest lookback; trend's EMA/ADX and mom's 4-week rank sit inside it).
+  the deepest lookback; trend's EMA/ADX and mom's 4-week rank sit inside it). A YOUNG LISTING — one
+  that listed fewer than 200 sessions ago and has a bar for every session since (full coverage, no
+  gaps) — can never satisfy this gate, so gating on it would freeze entries forever; such symbols are
+  EXCLUDED from the blockers and reported separately (``young_excluded``) instead. A shortfall with
+  any gap is NOT a young listing and still blocks.
 - **regime** (§7.1 ``regime_data_ready``): NIFTY 50 index + India VIX daily history present for the
   market-context/regime lookbacks. Missing regime data on a cold/late start freezes regime-dependent
   strategies; in Phase 1 the lifecycle applies the coarser FROZEN-for-entries (the per-strategy
@@ -48,6 +52,11 @@ DAILY_STRATEGY_SCOPE = "rsi2/trend/mom"
 class WarmupStatus(BaseModel):
     ready: bool
     blockers: list[str] = Field(default_factory=list)   # rendered "scope:symbol have/need" lines
+    #: Young LISTINGS short of the daily lookback ONLY because they listed < the lookback ago, with
+    #: full coverage since listing (no gaps). Excluded from ``blockers`` (they can never satisfy a
+    #: 200-session gate, so gating on them freezes entries forever) but surfaced here for the operator
+    #: as "symbol(have/need)". A shortfall WITH gaps is a real blocker, not a young listing.
+    young_excluded: list[str] = Field(default_factory=list)
 
 
 class WarmupGate:
@@ -96,27 +105,44 @@ class WarmupGate:
         return not await self.missing()
 
     async def status(self) -> WarmupStatus:
-        blockers = await self.missing()
-        return WarmupStatus(ready=not blockers, blockers=blockers)
+        blockers, young = await self._evaluate()
+        return WarmupStatus(ready=not blockers, blockers=blockers, young_excluded=young)
 
     async def missing(self) -> list[str]:
-        """Every unmet lookback as a rendered blocker line; empty ⇒ warm-up satisfied."""
+        """Every unmet lookback as a rendered blocker line; empty ⇒ warm-up satisfied (young listings
+        excluded — see :meth:`status`.``young_excluded``)."""
+        blockers, _young = await self._evaluate()
+        return blockers
+
+    async def _evaluate(self) -> tuple[list[str], list[str]]:
+        """Single pass over every lookback ⇒ ``(blockers, young_excluded)``.
+
+        Young listings (full coverage since a listing more recent than the lookback) are pulled OUT of
+        blockers so they never freeze entries forever, but reported in ``young_excluded`` so the
+        exclusion is visible, never silent (§2.6 step 6 — the freeze may only get MORE visible)."""
         blockers: list[str] = []
+        young: list[str] = []
         blockers.extend(await self._missing_intraday())
         for sym in self._daily_symbols:
-            b = await self._missing_daily(DAILY_STRATEGY_SCOPE, sym, self._daily_n)
+            b, y = await self._classify_daily(DAILY_STRATEGY_SCOPE, sym, self._daily_n)
             if b:
                 blockers.append(b)
+            if y:
+                young.append(y)
         # §7.1 regime_data_ready — NIFTY 50 + India VIX history for market-context features.
-        b = await self._missing_daily("regime", self._index_symbol, self._daily_n)
+        b, y = await self._classify_daily("regime", self._index_symbol, self._daily_n)
         if b:
             blockers.append(b)
-        b = await self._missing_daily("regime", self._vix_symbol, self._vix_n)
+        if y:
+            young.append(y)
+        b, y = await self._classify_daily("regime", self._vix_symbol, self._vix_n)
         if b:
             blockers.append(b)
+        if y:
+            young.append(y)
         if blockers:
-            _log.warning("warmup_not_ready", blockers=blockers)
-        return blockers
+            _log.warning("warmup_not_ready", blockers=blockers, young_excluded=young)
+        return blockers, young
 
     # ------------------------------------------------------------------ intraday (orb, today 09:15+)
     async def _missing_intraday(self) -> list[str]:
@@ -138,18 +164,30 @@ class WarmupGate:
         return out
 
     # ------------------------------------------------------------------ daily lookbacks
-    async def _missing_daily(self, scope: str, symbol: str, n: int) -> str | None:
+    async def _classify_daily(self, scope: str, symbol: str, n: int) -> tuple[str | None, str | None]:
+        """Classify ``symbol``'s daily coverage ⇒ ``(blocker, young_label)`` (exactly one is non-None,
+        or both None when covered). ``young_label`` fires ONLY for a fresh listing (full coverage since
+        a first bar more recent than ``n`` sessions); a shortfall with any gap stays a blocker."""
         sessions = self._recent_sessions(n)
         if sessions is None:
             # Calendar horizon can't even ENUMERATE n sessions — conservative blocker ("no calendar,
             # no trading", R6): coverage that cannot be verified is treated as missing.
-            return f"{scope}:{symbol} calendar horizon < {n} sessions"
+            return f"{scope}:{symbol} calendar horizon < {n} sessions", None
         bars = await self._store.aget_bars_1d(symbol, sessions[-1], sessions[0])
         present = {b.d for b in bars}
         have = sum(1 for d in sessions if d in present)
-        if have < n:
-            return f"{scope}:{symbol} daily bars {have}/{n}"
-        return None
+        if have >= n:
+            return None, None
+        # Short of the lookback. Distinguish a YOUNG LISTING from a real gap: a young listing has its
+        # FIRST-EVER bar inside the lookback window (so it cannot supply n sessions) AND a bar for every
+        # session since that first bar (total available == sessions-since-listing, full coverage). A
+        # shortfall that fails EITHER test is a genuine gap and still blocks (never weakened).
+        first_bar, total = await self._store.adaily_bar_span(symbol)
+        if first_bar is not None and first_bar > sessions[-1]:
+            since_listing = sum(1 for d in sessions if d >= first_bar)
+            if total == since_listing:
+                return None, f"{symbol}({total}/{n})"
+        return f"{scope}:{symbol} daily bars {have}/{n}", None
 
     def _recent_sessions(self, n: int) -> list[date] | None:
         """The most recent ``n`` completed trading sessions strictly before today, DESCENDING

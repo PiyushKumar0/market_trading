@@ -12,11 +12,21 @@ and an async-returning ``instruments()`` are awaited defensively.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from engine.broker.instruments import Instrument, InstrumentStore, UnknownInstrument
+from engine.marketdata.store import _TABLE_SPEC
+
+# An F&O underlying (NFO future): is_fno is DERIVED True on refresh, and must round-trip verbatim
+# through snapshot_rows -> hydrate (which reads the stored ``fno`` column, not the heuristic).
+NIFTY_FUT_ROW = {
+    "tradingsymbol": "NIFTY26JANFUT", "instrument_token": 12345678, "exchange": "NFO",
+    "segment": "NFO-FUT", "tick_size": 0.05, "lot_size": 50, "instrument_type": "FUT",
+}
+SNAPSHOT_DAY = date(2026, 6, 17)
 
 # One valid EQ row, the two INDICES rows (tick/lot 0), and a genuinely malformed row (no token) that
 # must be counted as skipped and resolve to None everywhere — mirroring the live Kite dump shape.
@@ -161,3 +171,103 @@ async def test_malformed_index_row_is_skipped_not_indexed(clock):
     assert store.token_for_symbol("NIFTY IT") is None        # missing-token index dropped
     assert store.symbol_for_token(999999) is None            # missing-symbol index dropped
     assert store.token_for_symbol("NIFTY 50") == 256265      # well-formed index still resolves
+
+
+# ================================================================== F1/F2 persistence + hydration
+# ------------------------------------------------------------------ snapshot_rows column-exactness
+async def test_snapshot_rows_columns_match_table_spec(clock):
+    """The emitted dicts must carry EXACTLY the store's pinned ``instruments_daily`` columns — a DDL
+    column add/rename then fails here instead of silently dropping data at upsert time (F1)."""
+    spec_cols, _pk = _TABLE_SPEC["instruments_daily"]
+    # The store spec is the single source of truth; the store-side pinned tuple must track it.
+    assert InstrumentStore._SNAPSHOT_COLUMNS == spec_cols
+
+    store = InstrumentStore(clock)
+    await store.refresh(FakeKite([RELIANCE_ROW, NIFTY_FUT_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    rows = store.snapshot_rows(SNAPSHOT_DAY)
+
+    assert len(rows) == 4                                     # 2 tradable + 2 index tokens
+    for row in rows:
+        assert set(row) == set(spec_cols)                    # no unknown/missing keys (upsert would raise)
+        assert row["d"] == SNAPSHOT_DAY
+    by_sym = {r["tradingsymbol"]: r for r in rows}
+    # Tradable rows carry the dump's own fields; the A8 surveillance/MIS join is left NULL (its own job).
+    assert by_sym["RELIANCE"]["tick_size"] == Decimal("0.05")
+    assert by_sym["RELIANCE"]["fno"] is False
+    assert by_sym["RELIANCE"]["surveillance"] is None and by_sym["RELIANCE"]["mis_leverage"] is None
+    assert by_sym["NIFTY26JANFUT"]["fno"] is True            # F&O membership preserved for the store
+    # Index rows are representable within the spec: segment discriminator + null tick/lot.
+    assert by_sym["NIFTY 50"]["segment"] == "INDICES"
+    assert by_sym["NIFTY 50"]["instrument_type"] == "INDEX"
+    assert by_sym["NIFTY 50"]["tick_size"] is None and by_sym["NIFTY 50"]["lot_size"] is None
+    assert by_sym["NIFTY 50"]["instrument_token"] == 256265
+
+
+# ------------------------------------------------------------------ snapshot -> hydrate round-trip
+async def test_snapshot_hydrate_round_trip_is_identical(clock):
+    """refresh -> snapshot_rows -> hydrate rebuilds an identical token map (tradable + index, both
+    directions), with is_fno read verbatim from the stored column (F2)."""
+    src = InstrumentStore(clock)
+    await src.refresh(FakeKite([RELIANCE_ROW, NIFTY_FUT_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    rows = src.snapshot_rows(SNAPSHOT_DAY)
+
+    dst = InstrumentStore(clock)
+    assert dst.is_empty is True
+    loaded = dst.hydrate(rows)
+
+    assert loaded == 2                                        # two tradable instruments
+    assert dst.is_empty is False
+    assert dst.hydrated is True                               # provenance flag flipped
+    assert dst.index_count == 2
+
+    # Tradable seam identical, both directions + the load-bearing metadata.
+    for sym, tok in [("RELIANCE", 408065), ("NIFTY26JANFUT", 12345678)]:
+        assert dst.token_for_symbol(sym) == src.token_for_symbol(sym) == tok
+        assert dst.symbol_for_token(tok) == sym
+        assert dst.by_symbol(sym).tick_size == src.by_symbol(sym).tick_size
+        assert dst.is_fno(sym) == src.is_fno(sym)
+    assert dst.is_fno("NIFTY26JANFUT") is True               # stored fno honoured (not re-derived)
+
+    # Index seam identical, both directions; still fail-closed on the tradable seam (A2).
+    assert dst.token_for_symbol("NIFTY 50") == 256265
+    assert dst.symbol_for_token(264969) == "INDIA VIX"
+    with pytest.raises(UnknownInstrument):
+        dst.by_symbol("NIFTY 50")
+
+
+# ------------------------------------------------------------------ hydrate skips malformed rows
+def _stored_row(**over) -> dict:
+    """A well-formed persisted ``instruments_daily`` row (RELIANCE), overridable per-field."""
+    row = {
+        "d": SNAPSHOT_DAY, "instrument_token": 408065, "tradingsymbol": "RELIANCE", "name": None,
+        "exchange": "NSE", "segment": "NSE", "instrument_type": "EQ", "tick_size": Decimal("0.05"),
+        "lot_size": 1, "mis_leverage": None, "mis_eligible": None, "surveillance": None,
+        "fno": False, "extra": None,
+    }
+    row.update(over)
+    return row
+
+
+async def test_hydrate_skips_and_counts_malformed_rows(clock):
+    """A malformed stored row (missing token, NULL/zero tick, missing index symbol) is skipped and
+    counted, never aborting the hydrate — the one good tradable + one good index still resolve (F2)."""
+    good_index = {"d": SNAPSHOT_DAY, "instrument_token": 256265, "tradingsymbol": "NIFTY 50",
+                  "segment": "INDICES", "instrument_type": "INDEX", "tick_size": None, "lot_size": None,
+                  "fno": False}
+    rows = [
+        _stored_row(),                                       # OK tradable
+        _stored_row(tradingsymbol="NOTOK", instrument_token=None),   # int(None) -> TypeError
+        _stored_row(tradingsymbol="ZEROTICK", instrument_token=1, tick_size=Decimal("0")),  # gt=0 fails
+        _stored_row(tradingsymbol="NULLTICK", instrument_token=2, tick_size=None),  # Decimal('None') fails
+        {"d": SNAPSHOT_DAY, "instrument_token": 9, "segment": "INDICES", "tick_size": None},  # index, no symbol
+        good_index,
+    ]
+    store = InstrumentStore(clock)
+    loaded = store.hydrate(rows)
+
+    assert loaded == 1                                        # only the one good tradable row
+    assert store.token_for_symbol("RELIANCE") == 408065
+    assert store.token_for_symbol("NIFTY 50") == 256265      # good index resolves
+    assert store.index_count == 1                            # the symbol-less index row was skipped
+    for bad in ("NOTOK", "ZEROTICK", "NULLTICK"):
+        assert store.token_for_symbol(bad) is None
