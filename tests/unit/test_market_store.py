@@ -468,3 +468,68 @@ def test_upsert_rows_is_transactional_rollback_on_midbatch_failure(store, clock)
     # Connection still usable after the rollback (no wedged transaction state).
     assert store.upsert_instruments_daily([row(738561, "TCS")]) == 1
     assert {r["tradingsymbol"] for r in store.get_instruments_daily(d)} == {"RELIANCE", "TCS"}
+
+
+# --------------------------------------------------------------------------- vectorized large-batch upsert (2026-07-21)
+def _ins_row(d, token, symbol, **kw):
+    """One instruments_daily dict row (helper for the vectorized-path tests)."""
+    return {
+        "d": d, "instrument_token": token, "tradingsymbol": symbol,
+        "exchange": kw.get("exchange", "NSE"), "segment": kw.get("segment", "NSE"),
+        "instrument_type": kw.get("instrument_type", "EQ"),
+        "tick_size": kw.get("tick_size", Decimal("0.05")), "lot_size": kw.get("lot_size", 1),
+        "fno": kw.get("fno", False),
+    }
+
+
+def test_upsert_rows_vectorized_large_batch_is_lossless(store, clock):
+    """2026-07-21 third finding: >=2000-row batches take the _bulk_write path (executemany ground at
+    ~128 rows/s — the 08:15 persist held the writer lock ~12 min). The vectorized path must keep
+    executemany's EXACT semantics: sub-paisa Decimals, NULL-bearing index rows, int lot sizes, bools —
+    the precise type-fidelity class that caused the incident."""
+    d = clock.today()
+    rows = [_ins_row(d, 1000 + i, f"SYM{i}") for i in range(2400)]
+    rows[7] = _ins_row(d, 1007, "SYM7", tick_size=Decimal("0.0025"), fno=True)      # sub-paisa CDS tick
+    rows[11] = _ins_row(d, 256265, "NIFTY 50", exchange=None, segment="INDICES",
+                        instrument_type="INDEX", tick_size=None, lot_size=None)      # index row, NULLs
+    assert store.upsert_instruments_daily(rows) == 2400
+
+    got = {r["tradingsymbol"]: r for r in store.get_instruments_daily(d)}
+    assert len(got) == 2400
+    assert got["SYM7"]["tick_size"] == Decimal("0.0025")          # exact sub-paisa Decimal survives
+    assert got["SYM7"]["fno"] is True
+    assert got["NIFTY 50"]["tick_size"] is None                   # NULLs stay NULL (not 0 / NaN)
+    assert got["NIFTY 50"]["lot_size"] is None
+    assert got["NIFTY 50"]["segment"] == "INDICES"
+    assert got["SYM0"]["lot_size"] == 1 and isinstance(got["SYM0"]["lot_size"], int)
+    assert got["SYM0"]["tick_size"] == Decimal("0.05")
+
+    # ON CONFLICT update path on the vectorized route: re-upsert with a changed tick actually updates.
+    rows[7] = _ins_row(d, 1007, "SYM7", tick_size=Decimal("0.10"))
+    assert store.upsert_instruments_daily(rows) == 2400
+    got2 = {r["tradingsymbol"]: r for r in store.get_instruments_daily(d)}
+    assert got2["SYM7"]["tick_size"] == Decimal("0.10")
+
+    # Intra-batch duplicate pk keeps executemany's last-wins semantics (no "update same row twice").
+    dup = [_ins_row(d, 5000 + i, f"DUP{i}") for i in range(2100)]
+    dup.append(_ins_row(d, 5000, "DUP0", tick_size=Decimal("0.20")))
+    store.upsert_instruments_daily(dup)
+    got3 = {r["tradingsymbol"]: r for r in store.get_instruments_daily(d)}
+    assert got3["DUP0"]["tick_size"] == Decimal("0.20")
+
+
+def test_upsert_rows_vectorized_bad_row_aborts_whole_batch(store, clock):
+    """Statement atomicity on the vectorized path: a NOT NULL pk violation anywhere in a >=2000-row
+    batch aborts the WHOLE insert (torn-write guarantee, 8824ce6) and leaves the connection usable."""
+    d = clock.today()
+    assert store.upsert_instruments_daily([_ins_row(d, 408065, "RELIANCE")]) == 1
+
+    bad = [_ins_row(d, 2000 + i, f"BB{i}") for i in range(2050)]
+    bad[1024] = _ins_row(d, None, "BROKEN")                       # NULL pk mid-batch
+    with pytest.raises(duckdb.Error):
+        store.upsert_instruments_daily(bad)
+    after = store.get_instruments_daily(d)
+    assert [r["tradingsymbol"] for r in after] == ["RELIANCE"]    # nothing from the bad batch landed
+
+    assert store.upsert_instruments_daily([_ins_row(d, 738561, "TCS")]) == 1
+    assert {r["tradingsymbol"] for r in store.get_instruments_daily(d)} == {"RELIANCE", "TCS"}

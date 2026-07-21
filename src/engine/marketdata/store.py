@@ -749,6 +749,10 @@ class MarketStore:
             cols = [d[0] for d in cur.description]
             return [{c: _ist(v) for c, v in zip(cols, row, strict=True)} for row in cur.fetchall()]
 
+    #: Row count at which _upsert_rows switches from executemany (~128 rows/s) to the vectorized
+    #: _bulk_write path (2026-07-21). In practice only instruments_daily (~113k rows/day) crosses it.
+    _VECTORIZED_UPSERT_MIN_ROWS = 2000
+
     def _bulk_write(
         self,
         table: str,
@@ -814,11 +818,26 @@ class MarketStore:
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
         else:
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO NOTHING"
-        # Deliberately executemany, NOT _bulk_write: free-form dict rows can mix date/datetime or
+        # 2026-07-21 (third finding of the incident day): instruments_daily is ~113k rows/day and
+        # executemany binds row-at-a-time (~128 rows/s measured here) — the 08:15 persist and the
+        # degraded-snapshot heal each held the single-writer lock for ~12 MINUTES, starving every
+        # other store consumer (the 13:33 backfill silence). Large batches therefore take
+        # _bulk_write's registered-view INSERT…SELECT (~200x): its dtype=object frame keeps
+        # executemany's per-element semantics (Decimals stringified and cast per value against the
+        # REAL column type — the GMRAIRPORT lesson; None → NULL; ints stay ints), and its pk dedupe
+        # keeps last-wins for intra-batch duplicate keys, exactly like sequential upserts. The
+        # single INSERT…SELECT is one statement, so the torn-write guarantee holds (statement
+        # atomicity; a kill leaves the prior complete day).
+        if len(rows) >= self._VECTORIZED_UPSERT_MIN_ROWS:
+            self._bulk_write(
+                table, cols, [[row.get(c) for c in cols] for row in rows], pk=pk, conflict=conflict
+            )
+            return len(rows)
+        # SMALL free-form batches stay on executemany: dict rows can mix date/datetime or
         # naive/aware values in one column, which per-row binding coerces per element but a single
-        # DataFrame column cannot (one inferred type per column — silent first-wins or a
-        # ConversionException). These batches are small (≤ a few hundred rows/day); the vectorized
-        # path is for the typed high-volume writers (bars_1m / bars_1d / ticks).
+        # DataFrame column cannot (one inferred type per column). No small-batch caller needed the
+        # speed; a heterogeneous column that ever DID cross the threshold fails LOUD (ConversionException
+        # + rollback), never silently.
         placeholders = ", ".join("?" for _ in cols)
         collist = ", ".join(f'"{c}"' for c in cols)
         sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) {conflict}"

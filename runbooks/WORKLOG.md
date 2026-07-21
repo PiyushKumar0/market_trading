@@ -1,5 +1,24 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-21 (late afternoon — torn-snapshot HEAL confirmed live + persist made ~1,300× faster)
+
+- **Heal verified in production (15:01:25 IST):** the degraded-snapshot escalation fired on the
+  owner's 14:49 restart — hydrated the torn day (expected one-last-time warning burst), detected
+  `indices=0`, live-refreshed, and persisted 112,997 rows with all 233 indices. Immediately after:
+  regime backfill `NIFTY 50`+`INDIA VIX` `failed=0` (first success all day) and warm-up gap filled
+  17,350 bars `failed=0`. Incident chain closed; warnings will not recur.
+- **Fourth finding: the persist itself took ~11.5 min holding the store writer lock.**
+  `_upsert_rows` ran DuckDB `executemany` at ~76–128 rows/s; instruments_daily is ~113k rows/day —
+  so the 08:15 daily job AND any heal starved every store consumer for ~12–25 min (this is also
+  what the 13:33 post-login backfill silently queued behind before the 13:34 hang). **Fix:** batches
+  ≥2,000 rows route through `_bulk_write`'s registered-view `INSERT…SELECT` (dtype=object frame,
+  Decimals stringified + cast per value against the real column type, pk last-wins dedupe, single
+  statement = torn-write-safe). Benchmarked on a tmp store: **113k rows in 1.11 s** (~102k rows/s)
+  vs 24.8 min extrapolated for executemany. 546 tests green (fidelity: sub-paisa Decimals, NULL
+  index rows, int/bool round-trip, update path, mid-batch-abort atomicity).
+- Note: the vectorize workflow's 4 subagents died on the session usage limit (resets 17:30 IST);
+  implemented inline per the delegation-unavailable rule.
+
 ## 2026-07-21 (afternoon — stop-hang zombie + hydrate data-loss pair, diagnosed + FIXED)
 
 - **Incident 3 (13:34 IST): Ctrl-C logged `engine_interrupted` but the process never exited** —
