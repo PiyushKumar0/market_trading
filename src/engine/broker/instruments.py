@@ -208,6 +208,10 @@ class InstrumentStore:
         job, so ``name``/``mis_leverage``/``mis_eligible``/``surveillance``/``extra`` are left at the
         table's ``NULL`` default here — this writer persists only what the dump itself carries.
 
+        Each tradable ``tick_size`` is emitted verbatim (a ``Decimal``); the store column is
+        ``DECIMAL(18,6)`` so a sub-₹0.01 tick (₹0.0025 currency/commodity derivatives) survives the
+        round-trip instead of truncating to 0.00 and being rejected on :meth:`hydrate` (2026-07-21).
+
         Index rows are representable within the DDL (``tick_size``/``lot_size`` are nullable): they
         get ``segment='INDICES'`` (the discriminator :meth:`hydrate`/:meth:`refresh` route on) and
         ``instrument_type='INDEX'``, with ``tick_size``/``lot_size`` NULL (an index is never priced or
@@ -253,13 +257,23 @@ class InstrumentStore:
     def hydrate(self, rows: list[dict[str, Any]]) -> int:
         """Rebuild the in-memory index from persisted ``instruments_daily`` rows (§4.3, F2).
 
-        The cold-start inverse of :meth:`snapshot_rows`: split the stored rows by segment (``INDICES``
-        → the non-tradable token seam, everything else → tradable :class:`Instrument`s) and swap all
-        four maps in atomically, exactly like :meth:`refresh` — a raise mid-build leaves the prior
-        (empty) store intact. A malformed stored row (missing token, ``NULL``/zero tick, bad type) is
-        skipped and counted, never aborting the hydrate; the count is logged. Sets the :attr:`hydrated`
-        provenance flag so the startup report can say the token map is a stored snapshot, not a live
-        dump. Returns the tradable row count loaded.
+        The cold-start inverse of :meth:`snapshot_rows`: classify the stored rows the way :meth:`refresh`
+        classifies live-dump rows (``INDICES``/``INDEX`` → the non-tradable token seam, everything else →
+        tradable :class:`Instrument`s) and swap all four maps in atomically, exactly like :meth:`refresh`
+        — a raise mid-build leaves the prior (empty) store intact. A malformed stored row (missing token,
+        ``NULL``/zero tick, bad type) is skipped and counted, never aborting the hydrate; the count is
+        logged. Sets the :attr:`hydrated` provenance flag so the startup report can say the token map is a
+        stored snapshot, not a live dump. Returns the tradable row count loaded.
+
+        2026-07-21 (lossless round-trip): a full round-trip (``refresh`` → ``snapshot_rows`` → store →
+        ``get_latest`` → ``hydrate``) must reconstruct EXACTLY what ``refresh`` loaded — same token map,
+        same :attr:`index_count`, zero spurious skips. The prerequisite lives in the store: ``refresh``
+        builds an :class:`Instrument` straight from the live dump (so a sub-₹0.01 tick like ₹0.0025 is a
+        valid ``tick_size>0`` row), but ``hydrate`` rebuilds from the PERSISTED tick — which the
+        ``instruments_daily.tick_size`` column must not have truncated to 0.00 (the widened
+        ``DECIMAL(18,6)`` column, §4.3, is what keeps this lossless). A row whose stored tick is genuinely
+        non-positive (corrupt EQUITY data) still fails the ``gt=0`` model and is skip-counted here — that
+        A10 invariant is deliberately NOT weakened.
 
         Unlike :meth:`refresh`, ``is_fno`` is read from the stored ``fno`` column verbatim (not
         re-derived) so hydrate stays a faithful inverse even once F&O membership comes from the A8 NFO
@@ -270,8 +284,15 @@ class InstrumentStore:
         index_by_token: dict[int, str] = {}
         skipped = 0
         for row in rows:
+            # Route non-tradable INDEX rows to the token-only seam BEFORE constructing an Instrument —
+            # symmetric with the discriminators :meth:`snapshot_rows` writes (BOTH ``segment='INDICES'``
+            # AND ``instrument_type='INDEX'``, with a NULL tick). Recognising EITHER hardens the round-trip
+            # against a snapshot where one field drifted (2026-07-21); a genuine tradable never carries
+            # ``instrument_type='INDEX'``, so a corrupt EQUITY row still falls through to the tradable
+            # path below and is rejected (the A10 ``tick_size>0`` invariant stays intact).
             segment = str(self._row_get(row, "segment", "") or "").upper()
-            if "INDICES" in segment:
+            instrument_type = str(self._row_get(row, "instrument_type", "") or "").upper()
+            if "INDICES" in segment or instrument_type == "INDEX":
                 try:
                     symbol = str(self._row_get(row, "tradingsymbol") or "")
                     token = int(self._row_get(row, "instrument_token"))

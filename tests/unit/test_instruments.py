@@ -12,13 +12,14 @@ and an async-returning ``instruments()`` are awaited defensively.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from engine.broker.instruments import Instrument, InstrumentStore, UnknownInstrument
-from engine.marketdata.store import _TABLE_SPEC
+from engine.marketdata.store import _TABLE_SPEC, MarketStore
 
 # An F&O underlying (NFO future): is_fno is DERIVED True on refresh, and must round-trip verbatim
 # through snapshot_rows -> hydrate (which reads the stored ``fno`` column, not the heuristic).
@@ -45,6 +46,13 @@ INDIA_VIX_ROW = {
 MALFORMED_ROW = {  # tradable segment, no instrument_token → int(None) raises → skipped
     "tradingsymbol": "BROKEN", "exchange": "NSE", "segment": "NSE",
     "tick_size": 0.05, "lot_size": 1, "instrument_type": "EQ",
+}
+# A legitimately tradable currency-derivative future with a sub-₹0.01 tick (₹0.0025): refresh accepts it
+# (0.0025 > 0), but a DECIMAL(10,2) store column truncated it to 0.00 so hydrate rejected it — the
+# 2026-07-21 8072-skip mechanism the widened DECIMAL(18,6) column fixes.
+CDS_FUT_ROW = {
+    "tradingsymbol": "USDINR26JANFUT", "instrument_token": 111111, "exchange": "CDS",
+    "segment": "CDS-FUT", "tick_size": 0.0025, "lot_size": 1, "instrument_type": "FUT",
 }
 
 
@@ -271,3 +279,80 @@ async def test_hydrate_skips_and_counts_malformed_rows(clock):
     assert store.index_count == 1                            # the symbol-less index row was skipped
     for bad in ("NOTOK", "ZEROTICK", "NULLTICK"):
         assert store.token_for_symbol(bad) is None
+
+
+# ================================================================== F1/F2 round-trip through the REAL store
+@pytest.fixture
+def market_store(tmp_path, clock):
+    """A hermetic tmp DuckDB store (never data/market.duckdb) — the real upsert/get_latest path the F2
+    cold-start hydrate uses, so the DECIMAL round-trip is exercised, not just the in-memory dict path."""
+    s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
+    s.open()
+    yield s
+    s.close()
+
+
+async def test_store_round_trip_is_lossless_including_subpaisa(market_store, clock, caplog):
+    """2026-07-21 lossless-hydrate: the FULL round-trip refresh → snapshot_rows → upsert → get_latest →
+    hydrate through a real DuckDB store must reconstruct EXACTLY what refresh loaded — indices (tick 0),
+    a normal equity, AND a sub-₹0.01 tradable — with zero spurious skips and index_count preserved.
+    Fails on the old DECIMAL(10,2) column (the sub-paisa tick truncates to 0.00 → hydrate rejects it)."""
+    src = InstrumentStore(clock)
+    await src.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW, CDS_FUT_ROW]))
+    market_store.upsert_instruments_daily(src.snapshot_rows(clock.today()))
+    latest = market_store.get_latest_instruments_daily()
+    assert latest is not None
+    _d, stored = latest
+
+    dst = InstrumentStore(clock)
+    with caplog.at_level(logging.WARNING, logger="engine.broker.instruments"):
+        loaded = dst.hydrate(stored)
+
+    # Zero spurious skips: both tradables refresh built (RELIANCE + the sub-paisa future) survived.
+    assert loaded == 2
+    assert dst.index_count == src.index_count == 2
+    assert not [r for r in caplog.records if r.getMessage() == "instrument.hydrate_row_skipped"]
+
+    # NIFTY 50 / India VIX resolve pre-login (the regime tokens), both directions.
+    assert dst.token_for_symbol("NIFTY 50") == 256265
+    assert dst.token_for_symbol("INDIA VIX") == 264969
+    assert dst.symbol_for_token(256265) == "NIFTY 50"
+
+    # Normal equity intact; the tradable seam still fail-closed for indices (A2).
+    assert dst.token_for_symbol("RELIANCE") == 408065
+    assert dst.by_symbol("RELIANCE").tick_size == Decimal("0.05")
+    with pytest.raises(UnknownInstrument):
+        dst.by_symbol("NIFTY 50")
+
+    # The sub-₹0.01 tradable survived with its EXACT tick (DECIMAL(18,6) column, not truncated to 0.00).
+    assert dst.token_for_symbol("USDINR26JANFUT") == 111111
+    assert dst.by_symbol("USDINR26JANFUT").tick_size == Decimal("0.0025")
+
+
+async def test_store_round_trip_still_rejects_corrupt_equity(market_store, clock, caplog):
+    """The A10 tick_size>0 invariant is NOT weakened: a persisted EQUITY row whose tick is genuinely 0
+    (corrupt data, not an index) is still skipped + warned on hydrate — even though a full round-trip
+    otherwise produces no skips."""
+    src = InstrumentStore(clock)
+    await src.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW]))
+    rows = src.snapshot_rows(clock.today())
+    # A corrupt tradable EQUITY row (equity segment/type, but tick 0) alongside the clean snapshot.
+    rows.append({
+        "d": clock.today(), "instrument_token": 999001, "tradingsymbol": "CORRUPTEQ", "name": None,
+        "exchange": "NSE", "segment": "NSE", "instrument_type": "EQ", "tick_size": Decimal("0"),
+        "lot_size": 1, "mis_leverage": None, "mis_eligible": None, "surveillance": None,
+        "fno": False, "extra": None,
+    })
+    market_store.upsert_instruments_daily(rows)
+    latest = market_store.get_latest_instruments_daily()
+    assert latest is not None
+    _d, stored = latest
+
+    dst = InstrumentStore(clock)
+    with caplog.at_level(logging.WARNING, logger="engine.broker.instruments"):
+        loaded = dst.hydrate(stored)
+
+    assert loaded == 1                                    # only RELIANCE; the corrupt EQ was rejected
+    assert dst.token_for_symbol("CORRUPTEQ") is None      # never entered the tradable map
+    assert dst.token_for_symbol("NIFTY 50") == 256265     # the index seam is unaffected
+    assert [r for r in caplog.records if r.getMessage() == "instrument.hydrate_row_skipped"]

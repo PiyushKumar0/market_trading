@@ -1,5 +1,30 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-21 (afternoon — stop-hang zombie + hydrate data-loss pair, diagnosed + FIXED)
+
+- **Incident 3 (13:34 IST): Ctrl-C logged `engine_interrupted` but the process never exited** —
+  a zombie holding `engine.lock` + heartbeat (had to taskkill 46332). Two causes: (a) signal
+  handlers were installed only AFTER `lifecycle.startup()` — the entire boot had no graceful stop,
+  so Ctrl-C mid-startup raised a raw KeyboardInterrupt with no teardown; (b) interpreter exit joins
+  wedged executor workers forever (`concurrent.futures` atexit). **Fix:** handlers install right
+  after the lock acquire — FIRST Ctrl-C = graceful stop (honoured even mid-boot), SECOND = forced
+  `os._exit(130)` (state stays RUNNING → next boot crash-recovers, by design); `main()` now ends in
+  a `_hard_exit` backstop that logs lingering non-daemon threads then `os._exit`s — a wedged worker
+  can never zombify the engine again (subprocess-proven in tests).
+- **Incident 4 (13:57 IST): 8,072 `hydrate_row_skipped` warnings + `indices=0` + regime backfill
+  `unknown_token`.** THREE stacked causes, the third found only by adversarial review + DB
+  forensics after the first implementation pass mis-attributed it: (1) `instruments_daily.tick_size
+  DECIMAL(10,2)` truncated sub-paisa CDS ticks (0.0025→0.00) → gt=0 rejection on hydrate — column
+  widened to DECIMAL(18,6) + one-shot idempotent migration; (2) **the 07-21 snapshot was TORN**: the
+  10:32 instance was taskkilled mid-upsert during the double-run window, and `snapshot_rows` appends
+  the 233 index rows LAST — exactly the regime tokens were lost (10:40 boot even hydrated a
+  half-written 52,854-row snapshot, on record); `_upsert_rows` is now wrapped in one explicit
+  transaction (all-or-nothing; a kill leaves the PRIOR complete day); (3) the F2 ladder blindly
+  trusted `MAX(d)` — it now detects a DEGRADED snapshot (`index_count==0`; a real dump always has
+  indices) and escalates to live refresh + persist when a session exists, healing the stored day in
+  place. **No manual data repair needed: the first post-fix boot self-heals the torn 07-21 day.**
+  544 tests green.
+
 ## 2026-07-21 (morning login lockout — fourth cold-start-family defect, diagnosed + FIXED)
 
 - **Incident (owner report ~10:45 IST): browser could not reach `localhost:8400` for the daily

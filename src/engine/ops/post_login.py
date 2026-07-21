@@ -102,6 +102,32 @@ async def hydrate_instruments_at_startup(
         d, rows = latest
         count = instruments.hydrate(rows)
         _log.info("instruments_hydrated", d=d.isoformat(), count=count, indices=instruments.index_count)
+        if instruments.index_count == 0:
+            # DEGRADED-snapshot escalation (2026-07-21): a snapshot with ZERO index rows cannot resolve
+            # the regime symbols (NIFTY 50 / INDIA VIX) — regime backfill then fails unknown_token and
+            # warm-up never clears. Observed cause: a taskkill mid-persist TORE the 07-21 day (the index
+            # rows are appended last, so exactly they were lost) and every boot then hydrated the broken
+            # MAX(d) day over the complete prior one. A real Kite dump ALWAYS carries indices, so
+            # index_count==0 is a reliable degradation signal. With a live session, escalate to a full
+            # refresh + persist — healing the stored day in place; without one, warn loudly (the
+            # PostLoginRecovery instruments step re-refreshes the moment the owner logs in).
+            if kite is not None and session_valid:
+                count = await instruments.refresh(kite)
+                today = clock.today()
+                persisted = await store.arun(
+                    store.upsert_instruments_daily, instruments.snapshot_rows(today)
+                )
+                _log.warning(
+                    "instruments_hydrate_degraded_refreshed",
+                    hydrated_d=d.isoformat(), count=count, persisted=persisted,
+                    indices=instruments.index_count,
+                )
+                return "hydrated_degraded_refreshed"
+            _log.warning(
+                "instruments_hydrate_degraded",
+                d=d.isoformat(),
+                reason="snapshot has no index rows — regime tokens unresolvable until the post-login refresh",
+            )
         return "hydrated"
     if kite is not None and session_valid:
         count = await instruments.refresh(kite)

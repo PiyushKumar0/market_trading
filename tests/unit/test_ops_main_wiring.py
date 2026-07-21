@@ -130,6 +130,52 @@ async def test_startup_unavailable_when_no_snapshot_and_no_session(market_store,
 
 
 @pytest.mark.asyncio
+async def test_degraded_snapshot_escalates_to_live_refresh(market_store, clock):
+    """2026-07-21 torn-persist incident: a snapshot with ZERO index rows (a taskkill mid-upsert lost
+    the index tail) cannot resolve the regime tokens. With a live session the ladder must ESCALATE:
+    live refresh + persist, healing the stored day in place."""
+    # Persist a DEGRADED snapshot: equities only, no index rows (what the torn 07-21 day looked like).
+    degraded = InstrumentStore(clock)
+    await degraded.refresh(FakeKite([RELIANCE_ROW]))
+    market_store.upsert_instruments_daily(degraded.snapshot_rows(clock.today()))
+
+    instruments = InstrumentStore(clock)
+    kite = FakeKite([RELIANCE_ROW, NIFTY50_ROW])
+    branch = await hydrate_instruments_at_startup(
+        instruments, market_store, kite=kite, session_valid=True, clock=clock,
+    )
+    assert branch == "hydrated_degraded_refreshed"
+    assert kite.calls == 1                                     # escalation actually refreshed live
+    assert instruments.hydrated is False                       # store now holds a live dump
+    assert instruments.token_for_symbol("NIFTY 50") == 256265  # regime token resolvable again
+    # And the stored day is HEALED: the persisted snapshot now carries the index row, so the NEXT
+    # cold boot hydrates it without escalating.
+    healed = InstrumentStore(clock)
+    branch2 = await hydrate_instruments_at_startup(
+        healed, market_store, kite=None, session_valid=False, clock=clock,
+    )
+    assert branch2 == "hydrated"
+    assert healed.token_for_symbol("NIFTY 50") == 256265
+
+
+@pytest.mark.asyncio
+async def test_degraded_snapshot_without_session_stays_hydrated_with_warning(market_store, clock):
+    """Same degraded snapshot pre-login: no session to escalate with — the ladder keeps the hydrated
+    (degraded) map and the post-login instruments step heals it on login."""
+    degraded = InstrumentStore(clock)
+    await degraded.refresh(FakeKite([RELIANCE_ROW]))
+    market_store.upsert_instruments_daily(degraded.snapshot_rows(clock.today()))
+
+    instruments = InstrumentStore(clock)
+    branch = await hydrate_instruments_at_startup(
+        instruments, market_store, kite=None, session_valid=False, clock=clock,
+    )
+    assert branch == "hydrated"
+    assert instruments.index_count == 0
+    assert instruments.token_for_symbol("NIFTY 50") is None    # degraded until login refresh
+
+
+@pytest.mark.asyncio
 async def test_startup_skips_when_store_already_populated(market_store, clock):
     """A store already populated this process (refresh already ran) short-circuits to already_loaded —
     no redundant hydrate, no clobbering a live dump with a stale snapshot."""

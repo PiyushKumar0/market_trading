@@ -23,12 +23,15 @@ login), which is exactly the §2.6 posture. The Tier-1 harness / OMS / live rout
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import signal
 import sqlite3
-import sys
+import threading
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, time, timedelta
 from decimal import Decimal
+from typing import NoReturn
 
 import httpx
 from apscheduler.triggers.cron import CronTrigger
@@ -209,6 +212,14 @@ async def run() -> int:
             hint="another engine instance owns the single-writer stores (§2.6 step 0); this one exits",
         )
         return 3
+
+    # --- graceful-stop wiring, installed EARLY (2026-07-21 13:34 IST zombie). Ctrl-C during a wedged
+    #     lifecycle.startup used to hit Python's default SIGINT handler (raw KeyboardInterrupt, no
+    #     shutdown, process lingered on data/engine.lock). Installing here — right after the lock, before
+    #     ANY shared resource is opened — covers the ENTIRE boot; a first Ctrl-C requests a graceful stop
+    #     (honoured at await stop_event.wait()), a second forces a hard exit even if the boot is wedged. ---
+    stop_event = asyncio.Event()
+    _install_signal_handlers(stop_event)
 
     # --- persistence + migrations ---
     conn = connect(settings.sqlite_path())
@@ -648,8 +659,8 @@ async def run() -> int:
     if telegram is not None and report.needs_login and not login_prompt_sent:
         await notify(login_prompt(session.login_url()))
 
-    stop_event = asyncio.Event()
-    _install_signal_handlers(stop_event)
+    # stop_event + signal handlers were installed EARLY (right after the instance lock) so a wedged boot
+    # is still interruptible; here we simply idle on it until the first signal requests a graceful stop.
     _log.info("engine_ready", host=settings.api.host, port=settings.api.port, mode=mode.mode().value)
     await stop_event.wait()
 
@@ -874,31 +885,124 @@ async def _stop_api(task) -> None:
         _log.exception("api_server_task_failed")
 
 
-def _install_signal_handlers(stop_event: asyncio.Event) -> None:
-    loop = asyncio.get_running_loop()
+def _make_stop_handler(
+    loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event, force_exit: Callable[[int], object],
+) -> Callable[..., None]:
+    """Build the COUNTED stop handler shared across every registered signal (extracted so the two-press
+    semantics are unit-testable WITHOUT raising real signals — the returned handler is called directly).
 
-    def _request_stop() -> None:
-        stop_event.set()
+    The same handler object is registered for SIGINT/SIGTERM/SIGBREAK, so its counter is shared across
+    them (a SIGINT then a SIGTERM is still "second signal"). It accepts ``*_args`` so it serves BOTH the
+    zero-arg :meth:`loop.add_signal_handler` callback and the ``(signum, frame)`` :func:`signal.signal`
+    fallback. It never raises — a signal handler that raised would surface at an arbitrary ``await``.
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _request_stop)
-        except (NotImplementedError, RuntimeError):
-            # Windows ProactorEventLoop does not support add_signal_handler for SIGTERM; fall back to
-            # the default SIGINT (KeyboardInterrupt) handling in main().
+    * FIRST signal: graceful — wake the idle ``await stop_event.wait()`` via
+      :meth:`loop.call_soon_threadsafe` (the ``signal.signal`` fallback runs in the main thread OUTSIDE
+      the loop callback context on Windows, so the threadsafe hand-off is the correct wake-up; the loop
+      is captured at install time). Honoured at the next safe point; a second Ctrl-C forces exit.
+    * SECOND (and later) signal: hard exit. State stays RUNNING (never committed STOPPED) so the next
+      boot runs crash recovery — that is BY DESIGN; R3 protection is broker-resident, not process-local.
+    """
+    state = {"count": 0}
+
+    def _handler(*_args: object) -> None:
+        state["count"] += 1
+        if state["count"] == 1:
+            _log.warning(
+                "stop_requested",
+                hint="graceful stop — honoured at the next safe point; a second Ctrl-C forces exit",
+            )
             try:
-                signal.signal(sig, lambda *_: stop_event.set())
+                loop.call_soon_threadsafe(stop_event.set)
+            except RuntimeError:
+                # Loop already closed (signal.signal fallback handlers are process-global and outlive
+                # asyncio.run on Windows): a stray signal in the post-run teardown window has nothing to
+                # wake — swallow so the "never raises" contract holds; _hard_exit is already imminent.
+                pass
+            return
+        _log.critical(
+            "stop_forced",
+            hint="second signal — engine exits hard; state stays RUNNING so the next boot runs crash "
+            "recovery (R3 protection is broker-resident)",
+        )
+        try:
+            logging.shutdown()
+        except Exception:  # noqa: BLE001 - a hard-exit path must never raise out of a signal handler
+            pass
+        force_exit(130)
+
+    return _handler
+
+
+def _install_signal_handlers(stop_event: asyncio.Event, *, force_exit: Callable[[int], object] = os._exit) -> None:
+    """Install the graceful-stop signal handlers EARLY — before ``connect()``, so the WHOLE boot is
+    covered (2026-07-21 13:34 IST: Ctrl-C during a wedged ``lifecycle.startup`` hit Python's default
+    SIGINT handler → a raw ``KeyboardInterrupt`` at an arbitrary ``await`` with no ``lifecycle.shutdown``;
+    the process then lingered holding ``data/engine.lock`` — a zombie that blocks every future start).
+
+    ``force_exit`` is injectable so the second-press hard exit is unit-testable without killing the
+    interpreter (default :func:`os._exit`). The counted handler is SHARED across all registered signals.
+    """
+    loop = asyncio.get_running_loop()
+    handler = _make_stop_handler(loop, stop_event, force_exit)
+
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):   # Windows console ctrl-break / NSSM stop → CTRL_BREAK_EVENT
+        signals.append(signal.SIGBREAK)
+    for sig in signals:
+        try:
+            loop.add_signal_handler(sig, handler)   # POSIX: runs inside the loop
+        except (NotImplementedError, RuntimeError):
+            # Windows ProactorEventLoop has no add_signal_handler; fall back to signal.signal (the
+            # handler accepts the (signum, frame) args and wakes the loop threadsafe from the main thread).
+            try:
+                signal.signal(sig, handler)
             except (ValueError, OSError):
                 pass
 
 
-def main() -> int:
+def _hard_exit(code: int) -> NoReturn:
+    """Force process exit that the interpreter's own shutdown CANNOT (2026-07-21 13:34 IST zombie).
+
+    After ``main()`` returns, interpreter shutdown joins non-daemon threads and ``concurrent.futures``'
+    atexit hook joins executor workers WITHOUT a timeout. A single wedged worker (blocked DuckDB op, a
+    long feature snapshot, a hung HTTP call) then hangs the process forever — still holding the §2.6
+    instance lock and heartbeat, a zombie that blocks every future start until it is killed by hand
+    (exactly what happened at 13:34). ``os._exit`` skips those joins entirely, so a wedged worker can
+    never zombify the process. Runs ONLY from ``main()`` (never at import), so tests import this module
+    freely without risk of exiting the test runner.
+    """
+    main_thread = threading.main_thread()
+    stragglers = [t.name for t in threading.enumerate() if not t.daemon and t is not main_thread]
+    if stragglers:
+        _log.warning(
+            "nondaemon_threads_at_exit", threads=stragglers,
+            hint="abandoned non-daemon threads would block interpreter shutdown; forcing os._exit",
+        )
+    else:
+        _log.info("exit_clean")
     try:
-        return asyncio.run(run())
+        logging.shutdown()
+    except Exception:  # noqa: BLE001 - flushing the log handlers must never block the forced exit
+        pass
+    os._exit(code)
+
+
+def main() -> NoReturn:
+    # The interpreter MUST NOT be trusted to exit on its own after run() returns (abandoned executor
+    # workers, above), so BOTH the normal-return and the KeyboardInterrupt path funnel through the
+    # os._exit backstop via `finally` — no path may fall through to a bare return. A raw KeyboardInterrupt
+    # escaping asyncio.run (2026-07-21: run() wedged before its own handlers could honour the stop) is
+    # still caught here and mapped to 130.
+    code = 1
+    try:
+        code = asyncio.run(run())
     except KeyboardInterrupt:
         _log.info("engine_interrupted")
-        return 0
+        code = 130
+    finally:
+        _hard_exit(code)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

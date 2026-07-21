@@ -148,6 +148,11 @@ _SCHEMA: tuple[str, ...] = (
     """,
     # instruments_daily — full Kite dump snapshot per day incl. tick_size (A10), MIS leverage,
     # surveillance flags (A8), F&O membership (C7). `extra` = JSON overflow of the raw dump row.
+    # tick_size is DECIMAL(18,6), NOT (10,2) (2026-07-21 lossless-hydrate incident): the daily Kite dump
+    # carries sub-₹0.01 ticks (currency/commodity derivatives at ₹0.0025) that a (10,2) column silently
+    # truncated to 0.00 on write; hydrate() then rebuilt an Instrument from 0.00 and the `tick_size > 0`
+    # model REJECTED it (8072 skips, any legacy tradable-lane index row among them). Scale 6 represents
+    # every published NSE tick. Existing (10,2) DBs are widened once by _migrate_instruments_tick_scale.
     """
     CREATE TABLE IF NOT EXISTS instruments_daily (
         d                DATE NOT NULL,
@@ -157,7 +162,7 @@ _SCHEMA: tuple[str, ...] = (
         exchange         TEXT,
         segment          TEXT,
         instrument_type  TEXT,
-        tick_size        DECIMAL(10,2),
+        tick_size        DECIMAL(18,6),
         lot_size         INTEGER,
         mis_leverage     DOUBLE,
         mis_eligible     BOOLEAN,
@@ -683,12 +688,37 @@ class MarketStore:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    #: Scale ``instruments_daily.tick_size`` must carry (2026-07-21 lossless-hydrate incident). The
+    #: ``DECIMAL(18,6)`` DDL applies to fresh DBs; a DB created under the old ``DECIMAL(10,2)`` is
+    #: widened once by :meth:`_migrate_instruments_tick_scale` on the next open.
+    _INSTRUMENTS_TICK_SCALE = 6
+
     def init_schema(self) -> None:
-        """Create every §4.3 table + index. Idempotent (IF NOT EXISTS) — safe on every startup."""
+        """Create every §4.3 table + index. Idempotent (IF NOT EXISTS) — safe on every startup.
+
+        Also runs the one-shot ``instruments_daily.tick_size`` widen (2026-07-21): ``CREATE TABLE IF
+        NOT EXISTS`` never alters an existing column, so a legacy DB would keep truncating sub-paisa
+        ticks to 0.00 and losing them on hydrate.
+        """
         with self._lock:
             con = self._require_con()
             for stmt in _SCHEMA:
                 con.execute(stmt)
+            self._migrate_instruments_tick_scale(con)
+
+    def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
+        (2026-07-21 lossless-hydrate incident). Guarded on the live column scale via ``information_schema``
+        so the ALTER runs EXACTLY ONCE (never a per-open column rewrite): a fresh DB already carries the
+        wide DDL, so ``numeric_scale`` is 6 and this no-ops."""
+        row = con.execute(
+            "SELECT numeric_scale FROM information_schema.columns "
+            "WHERE table_name = 'instruments_daily' AND column_name = 'tick_size'"
+        ).fetchone()
+        scale = row[0] if row and row[0] is not None else self._INSTRUMENTS_TICK_SCALE
+        if scale < self._INSTRUMENTS_TICK_SCALE:
+            con.execute("ALTER TABLE instruments_daily ALTER tick_size SET DATA TYPE DECIMAL(18,6)")
+            _log.info("instruments_tick_scale_migrated", frm=scale, to=self._INSTRUMENTS_TICK_SCALE)
 
     def table_names(self) -> set[str]:
         """Names of the persistent tables in the store (for self-tests / the schema lockstep test)."""
@@ -794,7 +824,19 @@ class MarketStore:
         sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) {conflict}"
         with self._lock:
             con = self._require_con()
-            con.executemany(sql, [[row.get(c) for c in cols] for row in rows])
+            # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
+            # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
+            # exactly the regime tokens were lost and every later boot hydrated a broken MAX(d) day).
+            # Autocommit applies per statement; one explicit transaction makes the batch all-or-nothing —
+            # a killed process leaves the PRIOR complete snapshot, never a torn one. BaseException so a
+            # KeyboardInterrupt/CancelledError mid-batch also rolls back and keeps the connection usable.
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.executemany(sql, [[row.get(c) for c in cols] for row in rows])
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT")
         return len(rows)
 
     # ================================================================== bars_1m (§3.2.3, A13/A14)
