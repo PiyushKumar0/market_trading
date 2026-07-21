@@ -14,6 +14,7 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
+from kiteconnect.exceptions import TokenException
 
 from engine.broker.kite_client import KiteClient
 from engine.core.clock import IST
@@ -169,6 +170,63 @@ async def test_unknown_token_is_reported_failed_without_a_request(store, clock, 
     assert kite.calls == []
     assert len(report.failed) == 1
     assert report.failed[0].error == "unknown_instrument_token"
+
+
+# ------------------------------------------------------------------ TokenException abort (2026-07-21)
+class _TokenKite:
+    """historical() always raises TokenException (a dead token fails every call identically)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def historical(self, token, frm, to, interval):
+        self.calls.append((token, frm, to, interval))
+        raise TokenException("Incorrect api_key or access_token")
+
+
+async def test_run_aborts_whole_run_on_token_rejection(store, clock, conn):
+    """A rejected token aborts the ENTIRE run after the first request: the attempted span carries the
+    real token error, every remaining symbol is reported 'aborted_token_rejected' with no extra
+    requests (no per-symbol hammering)."""
+    kite = _TokenKite()
+    job = _job(store, kite, clock, conn)
+    report = await job.run(
+        ["RELIANCE", "TCS", "INFY"], "minute", dt.date(2026, 1, 1), dt.date(2026, 1, 10)
+    )
+    assert len(kite.calls) == 1                            # aborted after the very first request
+    assert len(report.failed) == 3                         # attempted + 2 aborted-remainder
+    by_symbol = {s.symbol: s.error for s in report.failed}
+    assert "TokenException" in by_symbol["RELIANCE"]       # the attempted span keeps the real error
+    assert by_symbol["TCS"] == "aborted_token_rejected"
+    assert by_symbol["INFY"] == "aborted_token_rejected"
+    assert report.fetched == []
+
+
+async def test_run_non_token_error_only_fails_that_symbol_and_continues(store, clock, conn):
+    """A NON-token error is isolated to its symbol (existing behaviour): the next symbol still runs."""
+    kite = FakeKite(one_minute_candle, fail_on_call={0})   # RELIANCE (call 0) raises RuntimeError
+    job = _job(store, kite, clock, conn)
+    report = await job.run(["RELIANCE", "TCS"], "minute", dt.date(2026, 1, 1), dt.date(2026, 1, 10))
+    assert len(kite.calls) == 2                            # both symbols attempted — no abort
+    assert [f.symbol for f in report.failed] == ["RELIANCE"]
+    assert "RuntimeError" in report.failed[0].error
+    assert [f.symbol for f in report.fetched] == ["TCS"]   # TCS proceeded after RELIANCE failed
+
+
+async def test_warmup_gap_aborts_whole_run_on_token_rejection(store, clock, conn):
+    base = dt.datetime(2026, 6, 17, 10, 0, tzinfo=IST)
+    kite = _TokenKite()
+    job = _job(store, kite, clock, conn)
+    report = await job.warmup_gap(
+        ["RELIANCE", "TCS", "INFY"], base, base + dt.timedelta(minutes=5)
+    )
+    assert len(kite.calls) == 1                            # aborted after the first symbol's fetch
+    assert len(report.failed) == 3
+    by_symbol = {s.symbol: s.error for s in report.failed}
+    assert "TokenException" in by_symbol["RELIANCE"]
+    assert by_symbol["TCS"] == "aborted_token_rejected"
+    assert by_symbol["INFY"] == "aborted_token_rejected"
+    assert report.fetched == []
 
 
 # ------------------------------------------------------------------ throttle wiring (A2)

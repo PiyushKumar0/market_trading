@@ -272,3 +272,56 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
 
     armed = {j.id for j in sched._sched.get_jobs()}
     assert {"bar_advance", "health_check", "news_poll_et", "news_poll_mc", "news_poll_gdelt"} <= armed
+
+
+# --------------------------------------------------------------------------- login API bind confirmation
+@pytest.mark.asyncio
+async def test_serve_api_confirms_the_bind() -> None:
+    """2026-07-21 lockout: _serve_api must CONFIRM the login-callback socket actually bound (a silent
+    bind failure inside the fire-and-forget task is what locked the owner out). On a real ephemeral
+    port the server flips ``started`` True; _stop_api then tears it down cleanly."""
+    import socket
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    # Reserve a definitely-free port, then release it for uvicorn (avoids a settings-model port=0 fight).
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    stub = SimpleNamespace(api=SimpleNamespace(host="127.0.0.1", port=port))
+    task = await opsmain._serve_api(FastAPI(), stub)
+    try:
+        assert task is not None
+        assert task._mt_server.started is True
+    finally:
+        await opsmain._stop_api(task)
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_serve_api_survives_an_occupied_port() -> None:
+    """The 2026-07-21 incident case itself: the port is ALREADY HELD (stale/second engine). uvicorn's
+    own bind paths sys.exit(1) — which would escape the serve task and kill the whole engine loop
+    before any alert could fire. _serve_api binds the socket itself instead: it must return ``None``
+    (no SystemExit, no exception), and _stop_api(None) must no-op so shutdown teardown still runs."""
+    import socket
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # mirror the engine's own Windows bind posture
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        stub = SimpleNamespace(api=SimpleNamespace(host="127.0.0.1", port=port))
+        task = await opsmain._serve_api(FastAPI(), stub)   # must NOT raise SystemExit
+        assert task is None
+        await opsmain._stop_api(task)                      # None → no-op, never raises
+    finally:
+        holder.close()

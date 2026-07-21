@@ -35,6 +35,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
+from kiteconnect.exceptions import TokenException
 from pydantic import BaseModel, ConfigDict, Field
 
 from engine.broker.kite_client import KiteClient
@@ -149,9 +150,21 @@ class ReconcileJob:
         day_end = self._clock.combine(d + timedelta(days=1), time(0, 0))
         open_minute = self._clock.combine(d, self._session_open)
 
-        for symbol in sorted(set(symbols)):
+        ordered = sorted(set(symbols))
+        for i, symbol in enumerate(ordered):
             existing = await self._store.aget_bars_1m(symbol, day_start, day_end)
-            official = await self._fetch_official(symbol, d)
+            try:
+                official = await self._fetch_official(symbol, d)
+            except TokenException:
+                # 2026-07-21: a rejected token fails every official fetch identically — stop
+                # processing the remaining symbols instead of hammering the broker (the KiteClient
+                # circuit breaker has already frozen entries). Symbols processed so far persist
+                # intact; if none did, the day is left un-checkpointed and re-runs after re-login.
+                _log.warning(
+                    "reconcile_aborted_token_rejected", d=d.isoformat(),
+                    symbols_remaining=len(ordered) - i,
+                )
+                break
 
             by_minute: dict[datetime, Bar] = {b.ts_minute: b for b in existing}
             self_bars = {m: b for m, b in by_minute.items() if b.src == "self"}

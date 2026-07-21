@@ -292,7 +292,10 @@ async def run() -> int:
     if secrets.has(KITE_API_KEY):
         kc = session.kite_connect()
         if kc is not None:
-            kite = KiteClient(kc, RateLimiter(clock), clock)
+            # on_token_rejected wires the §2.6/R6 circuit breaker: the FIRST TokenException on any
+            # broker call fires SessionManager.on_token_rejected → the invalidation hook (freeze +
+            # alert), so a mid-day token death stops entries instead of failing silently (2026-07-21).
+            kite = KiteClient(kc, RateLimiter(clock), clock, on_token_rejected=session.on_token_rejected)
     else:
         _log.warning("kite_client_absent", hint="seed kite_api_key/secret; entries stay FROZEN until login")
 
@@ -472,6 +475,22 @@ async def run() -> int:
         if not kill.is_killed():
             await mode.set_risk_state(RiskState.FROZEN, reason, Actor.RISK_GATE)
 
+    # §2.6/R6 mid-day token-death circuit breaker: the KiteClient (built above with
+    # on_token_rejected=session.on_token_rejected) fires this hook on the FIRST TokenException of a
+    # burst (SessionManager.on_token_rejected is idempotent) so entries FREEZE and the owner is
+    # alerted to re-login — the invalidation seam that was never wired before 2026-07-21.
+    async def _on_session_invalidated() -> None:
+        await freeze_entries("kite_token_rejected")
+        await alert(
+            "critical",
+            "Kite token rejected by broker — entries FROZEN; re-login via the login link or /token (R6)",
+        )
+        # A tappable link, not just a notice: this path also covers the probe-'inconclusive'-then-dead
+        # boot (network flake at probe time), where NO login prompt was sent at startup. The hook only
+        # fires via the KiteClient (which exists ⇒ api_key exists), so login_url() cannot raise here.
+        await notify(login_prompt(session.login_url()))
+    session.set_invalidation_hook(_on_session_invalidated)
+
     warmup_gate = WarmupGate(
         store, clock, calendar,
         symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL,
@@ -492,7 +511,11 @@ async def run() -> int:
         # Step 4: warm-up the regime history (NIFTY50/VIX daily — checkpointed, cheap on re-runs) and
         # gap-fill today's intraday minute bars from official candles so warm-up never needs live ticks.
         # Shared with the post-login re-trigger so both issue the IDENTICAL calls (engine.ops.post_login).
-        if backfill is None:
+        # 2026-07-21: a token-less (or expired-token) boot must NOT issue doomed historical calls — the
+        # live probe makes token_valid() truthful, and PostLoginRecovery re-runs this SAME hook the
+        # moment a valid token arrives.
+        if backfill is None or not session.token_valid():
+            _log.info("backfill_hook_skipped", reason="no valid Kite token")
             return
         await regime_and_warmup_backfill(
             backfill, clock, calendar, settings, watchlist_symbols, INDEX_SYMBOL, VIX_SYMBOL
@@ -549,9 +572,40 @@ async def run() -> int:
     if telegram is not None:
         await telegram.start()
 
+    # --- BIND THE LOGIN CALLBACK API *BEFORE* startup recovery (2026-07-21 lockout). The owner's only
+    #     browser login route (GET /kite/callback, :8400) is hosted by THIS uvicorn server, and it used
+    #     to bind only AFTER lifecycle.startup(). A boot on an expired token then wedged inside the
+    #     warm-up backfill (every historical call TokenException) and the port never bound — login was
+    #     locked out both ways. The app is already fully wired (session_manager in app.state), so
+    #     /kite/callback works the instant the socket binds; a login mid-startup just fires the
+    #     idempotent PostLoginRecovery hook. _serve_api binds the socket ITSELF (uvicorn's own bind
+    #     paths sys.exit(1), which would kill the loop) and returns None on failure — the engine
+    #     CONTINUES either way (Telegram /token still permits the daily login). ---
+    server_task = await _serve_api(app, settings)
+    _bound = getattr(server_task, "_mt_server", None)
+    if _bound is None or not _bound.started:
+        await alert(
+            "critical",
+            f"dashboard/login API failed to bind {settings.api.host}:{settings.api.port} — "
+            "browser login unreachable; use Telegram /token",
+        )
+
+    # --- LIVE token probe (Fix-1, R6/A5): behavioural token_valid() answers True on a stale-but-not-yet-
+    #     rejected token, so a boot on yesterday's expired token passed the self-test and ground the
+    #     warm-up backfill on a dead token (2026-07-21). Probe it live ONCE here so token_valid() is
+    #     truthful for the hydrate + startup below, and send the login link the instant we KNOW the token
+    #     is rejected/absent (guarded on kite so login_url() never raises on a fresh, api-key-less install). ---
+    probe = await session.verify_token()
+    _log.info("token_probe", outcome=probe)
+    login_prompt_sent = False
+    if probe in ("rejected", "absent") and telegram is not None and kite is not None:
+        await notify(login_prompt(session.login_url()))
+        login_prompt_sent = True
+
     # --- F2 cold-start token-map recovery: rebuild the in-memory instruments index (from the persisted
     #     snapshot pre-login, or a live refresh) BEFORE the §2.6 step-4 backfill + step-6 warm-up run
-    #     inside lifecycle.startup — otherwise a restart after 08:15 finds an empty map (unknown_token). ---
+    #     inside lifecycle.startup — otherwise a restart after 08:15 finds an empty map (unknown_token).
+    #     session_valid here is now the LIVE-probed truth (above), not a stale behavioural guess. ---
     try:
         instruments_source = await hydrate_instruments_at_startup(
             instruments, store, kite, session_valid=session.token_valid(), clock=clock,
@@ -569,12 +623,12 @@ async def run() -> int:
               instruments=instruments_source)
     await health.check(check_skew=False)
 
-    # --- start remaining services + idle until a stop signal (§2.6: being up is an active period) ---
+    # --- start remaining services + idle until a stop signal (§2.6: being up is an active period). The
+    #     login API is already bound (above); only prompt again here if startup still needs a login AND we
+    #     did not already send the link off the token probe (no double link). ---
     scheduler.start()
-    if telegram is not None and report.needs_login:
+    if telegram is not None and report.needs_login and not login_prompt_sent:
         await notify(login_prompt(session.login_url()))
-
-    server_task = await _serve_api(app, settings)
 
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
@@ -724,17 +778,70 @@ def _create_app(session, mode, kill, secrets, clock, bus):
 
 
 async def _serve_api(app, settings):
+    """Bind + serve the dashboard/login API; return the serve task, or ``None`` if the bind failed.
+
+    2026-07-21 (both halves of the lockout): the login callback (:8400 ``GET /kite/callback``) must
+    come up EARLY and must fail LOUDLY. Two uvicorn traps make the naive version deadly:
+
+    * uvicorn's own bind paths call ``sys.exit(1)`` on a bind ``OSError`` (``Config.bind_socket`` and
+      the host/port branch of ``Server.startup``). Inside a task that ``SystemExit`` escapes the
+      coroutine and KILLS the whole engine loop — no alert, no Telegram ``/token`` fallback, and the
+      §2.6 single-instance guard never runs — precisely when a stale process already holds the port.
+      So we bind the socket OURSELVES (plain ``OSError`` on failure) and hand it to
+      ``server.serve(sockets=[...])``, whose pre-bound path has NO ``sys.exit`` (uvicorn closes the
+      socket again on its own shutdown).
+    * On Windows the default ``SO_REUSEADDR`` lets a second bind silently STEAL a live port;
+      ``SO_EXCLUSIVEADDRUSE`` makes the double-bind fail loudly here instead (O7/E4 posture).
+    """
+    import socket
+
     import uvicorn
 
-    config = uvicorn.Config(app, host=settings.api.host, port=settings.api.port, log_level="warning")
+    host, port = settings.api.host, settings.api.port
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # Windows: refuse to share a port a live engine holds
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:  # POSIX: match uvicorn's default rebind-after-restart behaviour
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+    except OSError as exc:
+        sock.close()
+        _log.critical(
+            "api_bind_failed", host=host, port=port, error=str(exc),
+            hint="port already in use? browser login unreachable — use the Telegram /token fallback",
+        )
+        return None
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve())
+
+    async def _guarded_serve() -> None:
+        try:
+            await server.serve(sockets=[sock])
+        except SystemExit as exc:  # any residual uvicorn sys.exit must never kill the engine loop
+            _log.critical("api_serve_exited", code=getattr(exc, "code", None))
+
+    task = asyncio.create_task(_guarded_serve())
     # Stash the server on the task so _stop_api can signal it.
     task._mt_server = server  # type: ignore[attr-defined]
+    # CONFIRM startup completed: ``started`` flips once the listeners are up (the socket is already
+    # bound above, so this is near-instant); the task dying first means startup failed some other way.
+    for _ in range(200):  # 200 × 0.05s ≈ 10s
+        if server.started or task.done():
+            break
+        await asyncio.sleep(0.05)
+    if task.done() or not server.started:
+        _log.critical(
+            "api_start_unconfirmed", host=host, port=port, task_done=task.done(),
+            hint="socket bound but uvicorn never reported started — browser login may be unreachable",
+        )
     return task
 
 
 async def _stop_api(task) -> None:
+    if task is None:  # bind failed at boot (_serve_api returned None) — nothing to stop
+        return
     server = getattr(task, "_mt_server", None)
     if server is not None:
         server.should_exit = True
@@ -742,6 +849,9 @@ async def _stop_api(task) -> None:
         await asyncio.wait_for(task, timeout=10)
     except TimeoutError:
         task.cancel()
+    except Exception:  # noqa: BLE001 - a server task that died earlier must never abort the
+        # shutdown teardown that follows (http.aclose / store.close / conn.close).
+        _log.exception("api_server_task_failed")
 
 
 def _install_signal_handlers(stop_event: asyncio.Event) -> None:

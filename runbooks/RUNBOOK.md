@@ -13,9 +13,15 @@ capital protection is broker-resident (R3), so an open position is protected wit
 The Kite access token expires ~06:00 IST daily (A5). Each trading day:
 
 1. Start the engine (manual/demand or the wake Scheduled Task — same code path, §2.6). The startup
-   self-test detects an invalid/absent token and FREEZES entries (open positions stay broker-protected).
-2. The engine sends the **Kite login link** to your Telegram (also shown in the dashboard). Open it via
-   whichever login method you registered (see below).
+   **live-probes the token against the broker** (2026-07-21 fix — a stale token can no longer
+   masquerade as valid) and FREEZES entries while invalid (open positions stay broker-protected).
+   The `/kite/callback` login port (:8400) is bound **before** the startup recovery, so the browser
+   redirect works even while recovery is still running; a port-bind failure raises a critical
+   Telegram alert (use the `/token` fallback then).
+2. The engine sends the **Kite login link** to your Telegram immediately after the probe finds the
+   token rejected/absent (also shown in the dashboard). Open it via whichever login method you
+   registered (see below). If the token dies **mid-day**, the first rejected broker call freezes
+   entries and re-sends the login link automatically (same recovery as the morning flow).
 3. After you clear Kite's TOTP screen, Kite redirects the browser to `…/kite/callback?request_token=...`
    (the only unauthenticated route; it can only complete a login). The engine exchanges the checksum and
    stores the access token in Windows Credential Manager (DPAPI). Entries un-FREEZE once the token is valid.

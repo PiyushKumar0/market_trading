@@ -5,6 +5,25 @@ run from the repo root in **PowerShell** (NOT cmd.exe — `$syms` expansion sile
 the backtest CLI now hard-errors on it). The market store (DuckDB) allows ONE writer: the engine,
 a backtest, or a backfill — never concurrently.
 
+## Stuck engine / login port dead (2026-07-21 incident pattern)
+
+```powershell
+# Who holds :8400 + which engine processes exist (two instances = the wedge pattern):
+netstat -ano | Select-String ":8400"
+Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" |
+    Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | Format-List
+# Kill a wedged engine TREE (venv shim + child; $pid is reserved in PowerShell — use another name):
+taskkill /F /T /PID <procId>
+# Startup triage from the structured log:
+Get-Content data\logs\engine.log -Tail 60
+Select-String -Path data\logs\engine.log -Pattern 'token_probe|api_bind_failed|engine_ready|needs_login|token_rejected' |
+    Select-Object -Last 15
+```
+
+Post-fix behaviour: boot probes the token live (`token_probe` outcome in the log), sends the login
+link immediately on `rejected`/`absent`, and binds `/kite/callback` BEFORE the startup recovery;
+`api_bind_failed` + a critical Telegram alert = port held by another process (use `/token`).
+
 ## Universe symbol list (the canonical 200-name set for historical runs)
 
 ```powershell

@@ -1,5 +1,31 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-21 (morning login lockout — fourth cold-start-family defect, diagnosed + FIXED)
+
+- **Incident (owner report ~10:45 IST): browser could not reach `localhost:8400` for the daily
+  login; engine "running" but not taking the key.** Diagnosis from engine.log + process/port scan:
+  (1) yesterday's expired token passed the self-test — `token_valid()` is behavioural (present ∧
+  not-yet-rejected), no live call had failed at check time — so `needs_login=false`, NO login link
+  sent, and startup marched into the warm-up backfill where **all 50 symbols failed TokenException**
+  (`token_rejected` count 0: KiteClient never notified the session). (2) The uvicorn server hosting
+  the ONLY browser login route (`/kite/callback`, :8400) binds AFTER `lifecycle.startup()` — startup
+  wedged, port never bound. (3) TWO engine instances were running concurrently (10:35 + 10:40
+  starts) contending on state.db/Telegram; killed both, port freed, owner restarted + logged in.
+- **Fix shipped (this commit), three parts + review hardening:** (a) `SessionManager.verify_token()`
+  — live `kc.profile()` probe at every boot; a rejected/absent token now sends the login link
+  IMMEDIATELY and the broker-touching recovery no-ops until login (PostLoginRecovery re-runs it).
+  (b) Login callback binds BEFORE startup recovery; `_serve_api` binds the socket itself
+  (uvicorn's own bind paths `sys.exit(1)` — adversarial review caught that escaping the serve task
+  and killing the loop; reproduced end-to-end), `SO_EXCLUSIVEADDRUSE` on Windows, returns None +
+  critical alert on failure, engine continues (Telegram `/token` fallback). (c) TokenException
+  circuit breaker: KiteClient → `session.on_token_rejected` (idempotent) → freeze + critical alert
+  + fresh login link (the invalidation seam existed but was NEVER wired); backfill/warmup/reconcile
+  loops abort remaining symbols on the first TokenException instead of grinding. 529 tests green
+  (43 new/extended incl. the occupied-port case).
+- **Follow-up candidate (NOT fixed, logged only): the §2.6 single-instance guard did not refuse the
+  10:40 second instance** — the 10:35 one likely wedged before its RUNNING commit, so the guard saw
+  a stale prior state. Needs its own investigation (chaos case: double-start during a wedged boot).
+
 ## 2026-07-20 (evening — owner stopped the engine ~21:28 IST; date corrected from a mislabeled 07-21 entry)
 
 - **Deferred G1 store checks ran** (engine-off window): `instruments_daily` EMPTY confirmed (0 rows

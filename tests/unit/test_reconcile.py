@@ -12,6 +12,7 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
+from kiteconnect.exceptions import TokenException
 
 from engine.core.clock import IST
 from engine.core.config import ReconcileCfg, Settings
@@ -214,3 +215,53 @@ async def test_unknown_token_yields_empty_official_row(store, clock):
     assert sym.bars_official == 0 and sym.bars_compared == 0
     assert sym.flagged is False
     assert kite.calls == []                     # no token → no request, never a guess
+
+
+# --------------------------------------------------------------------------- TokenException abort (2026-07-21)
+class _KiteTokenAfter:
+    """historical() returns ``ok`` candles for the first ``die_after`` calls, then a TokenException —
+    lets us assert the processed portion survives while the remaining symbols abort."""
+
+    def __init__(self, ok: list[dict], die_after: int = 1) -> None:
+        self.calls = 0
+        self._ok = ok
+        self._die_after = die_after
+
+    async def historical(self, token, frm, to, interval):
+        self.calls += 1
+        if self.calls > self._die_after:
+            raise TokenException("Incorrect api_key or access_token")
+        return self._ok
+
+
+async def test_token_rejection_aborts_remaining_symbols_processed_portion_intact(store, clock):
+    """Symbols A/B/C on D: A reconciles cleanly, then the token dies on B's official fetch — B and C
+    are skipped (one warning, not three), A's result persists, and the day carries A's log row."""
+    store.insert_bars_1m([
+        self_bar("A", at(9, 15), "10.00", 100),
+        self_bar("B", at(9, 15), "10.00", 100),
+        self_bar("C", at(9, 15), "10.00", 100),
+    ])
+    kite = _KiteTokenAfter([official_candle(at(9, 15), 10.00, 100)], die_after=1)
+    report = await _job(store, kite, clock).run(D, ["A", "B", "C"])
+
+    assert kite.calls == 2                            # A fetched, B raised, C never attempted
+    assert [s.symbol for s in report.symbols] == ["A"]   # only the processed portion is reported
+    assert store.has_reconcile_entry(D) is True      # A's row landed (day partially checkpointed)
+    (row,) = store.get_reconcile_log(D)
+    assert row["symbol"] == "A"
+
+
+async def test_token_rejection_on_first_symbol_leaves_day_uncheckpointed(store, clock):
+    """When the token is already dead, the very first fetch aborts: nothing processed, so the day is
+    left un-checkpointed and re-runs after re-login."""
+    store.insert_bars_1m([
+        self_bar("A", at(9, 15), "10.00", 100),
+        self_bar("B", at(9, 15), "10.00", 100),
+    ])
+    kite = _KiteTokenAfter([], die_after=0)          # dies on the first call
+    report = await _job(store, kite, clock).run(D, ["A", "B"])
+
+    assert kite.calls == 1
+    assert report.symbols == []
+    assert store.has_reconcile_entry(D) is False

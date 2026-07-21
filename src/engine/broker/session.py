@@ -23,6 +23,14 @@ live call comes back 403/TokenException). :meth:`token_valid` returns "token pre
 so a token the broker still honours past a nominal expiry stays usable, and one the broker rejects
 *before* the nominal expiry is treated as dead immediately (R6 — fail toward freezing entries).
 
+Validity is now behavioural AND probed live ONCE at startup (:meth:`verify_token`, added after the
+2026-07-21 cold-start lockout): a boot on yesterday's expired token had ``_rejected=False`` and a
+token present, so behavioural :meth:`token_valid` answered True and the engine ground the warm-up
+backfill on a dead token before any live call surfaced the rejection. The startup probe calls
+``kc.profile()`` and marks the token rejected (or confirms it live) so ``token_valid`` is truthful
+before hydrate/warm-up run — WITHOUT firing the mid-day invalidation hook (the boot self-test's
+needs_login/login-prompt path owns owner comms at that stage).
+
 Dependencies: ``core`` only (Secrets, Clock, log). pykiteconnect's ``KiteConnect`` is sync
 ``requests``-based, so the network exchange runs in a thread executor to avoid blocking the loop.
 """
@@ -34,6 +42,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import TokenException
 
 from engine.core.clock import Clock
 from engine.core.log import get_logger
@@ -165,6 +174,49 @@ class SessionManager:
             await hook()
         except Exception:  # noqa: BLE001 - a post-login hook must never affect the login result
             _log.exception("login_hook_failed")
+
+    # -- startup liveness probe -----------------------------------------------------------------
+
+    async def verify_token(self) -> str:
+        """Live-probe the persisted access token against the broker once at startup (R6/A5).
+
+        Behavioural :meth:`token_valid` cannot tell a still-honoured token from an expired one that
+        no live call has yet hit — the 2026-07-21 lockout (a boot on yesterday's token passed the
+        self-test and ground the warm-up backfill on a dead token). This probe closes that gap by
+        making one authenticated ``kc.profile()`` call. Returns a tag:
+
+        * ``"no_api_key"`` — no ``KITE_API_KEY`` seeded yet (fresh install); nothing to probe.
+        * ``"absent"`` — api_key present but no access token loaded (pre-login boot).
+        * ``"rejected"`` — the broker returned :class:`TokenException`: sets ``_rejected`` so
+          :meth:`token_valid` is now False. Deliberately does NOT fire the ``_on_invalidated`` hook
+          — at boot the self-test's needs_login / login-prompt path owns owner comms; that hook is
+          for MID-DAY invalidation (freeze + alert) only.
+        * ``"inconclusive"`` — any other error (network/DNS/5xx): cannot verify is NOT the same as
+          invalid, so ALL state is left untouched and the Fix-3 circuit breaker catches a truly dead
+          token on the first real call.
+        * ``"valid"`` — profile succeeded: :meth:`mark_success` stamps freshness.
+
+        ``kc.profile()`` is sync ``requests`` I/O (pykiteconnect), so it runs in the default executor
+        — the same pattern as :meth:`complete_login`.
+        """
+        if not self._secrets.has(KITE_API_KEY):
+            return "no_api_key"
+        if self._access_token is None:
+            return "absent"
+        kc = self._connect()
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, lambda: kc.profile())
+        except TokenException as exc:
+            self._rejected = True
+            _log.warning("token_probe_rejected", error=str(exc))
+            return "rejected"
+        except Exception as exc:  # noqa: BLE001 - cannot verify != invalid; leave all state untouched
+            _log.warning("token_probe_inconclusive", error=str(exc), error_type=type(exc).__name__)
+            return "inconclusive"
+        self.mark_success()
+        _log.info("token_probe_ok")
+        return "valid"
 
     # -- validity tracking ----------------------------------------------------------------------
 

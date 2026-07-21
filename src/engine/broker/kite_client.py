@@ -33,9 +33,12 @@ import asyncio
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from kiteconnect.exceptions import TokenException
+
 from engine.core.log import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
 
     from engine.broker.rate_limiter import RateLimiter
@@ -65,12 +68,36 @@ class KiteClient:
     clock:
         The single IST :class:`~engine.core.clock.Clock` (R6). Held for tz-aware timestamping of
         log/audit events; this client never reads ``datetime.now()`` directly.
+    on_token_rejected:
+        Optional async circuit-breaker fired the moment ANY broker call returns
+        :class:`~kiteconnect.exceptions.TokenException` (2026-07-21 fix): the wiring layer points it
+        at :meth:`~engine.broker.session.SessionManager.on_token_rejected` so a mid-day token death
+        freezes entries + alerts the owner on the FIRST rejection instead of every subsequent call
+        failing silently. The hook is awaited then the original error is ALWAYS re-raised (R5/R8 —
+        never swallow); a hook failure is logged and never masks the broker error.
     """
 
-    def __init__(self, kc: Any, rate_limiter: RateLimiter, clock: Clock) -> None:
+    def __init__(
+        self,
+        kc: Any,
+        rate_limiter: RateLimiter,
+        clock: Clock,
+        on_token_rejected: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._kc = kc
         self._rl = rate_limiter
         self._clock = clock
+        self._on_token_rejected = on_token_rejected
+
+    async def _fire_token_rejected(self, exc: BaseException) -> None:
+        """If ``exc`` is a :class:`TokenException` and the circuit breaker is wired, fire it once —
+        inside its own try/except so a hook failure NEVER masks the original broker error (R5/R8).
+        The caller re-raises ``exc`` unconditionally after this returns."""
+        if isinstance(exc, TokenException) and self._on_token_rejected is not None:
+            try:
+                await self._on_token_rejected()
+            except Exception:  # noqa: BLE001 - a hook failure must never mask the broker error
+                _log.exception("token_rejected_hook_failed")
 
     # -- internal call-through --------------------------------------------------------------------
 
@@ -95,6 +122,7 @@ class KiteClient:
                 error_type=type(exc).__name__,
                 **log_fields,
             )
+            await self._fire_token_rejected(exc)  # TokenException → freeze entries once (2026-07-21)
             raise
         _log.info("kite.ok", op=op, endpoint_class=endpoint_class, **log_fields)
         return result
@@ -121,6 +149,7 @@ class KiteClient:
                 error_type=type(exc).__name__,
                 **log_fields,
             )
+            await self._fire_token_rejected(exc)  # TokenException → freeze entries once (2026-07-21)
             raise
         _log.info("kite.ok", op=op, endpoint_class="orders", intent=intent, **log_fields)
         return result

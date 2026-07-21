@@ -30,6 +30,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
+from kiteconnect.exceptions import TokenException
 from pydantic import BaseModel, ConfigDict, Field
 
 from engine.broker.kite_client import KiteClient
@@ -145,7 +146,8 @@ class BackfillJob:
         """
         report = BackfillReport(interval=interval)
         chunk_days = self._chunk_days(interval)
-        for symbol in symbols:
+        symbols = list(symbols)
+        for i, symbol in enumerate(symbols):
             report.requested.append(
                 BackfillSpan(symbol=symbol, frm=start.isoformat(), to=end.isoformat())
             )
@@ -168,6 +170,7 @@ class BackfillJob:
                 _log.warning("backfill_unknown_token", symbol=symbol)
                 continue
             cur = eff_start
+            aborted = False
             while cur <= end:
                 chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
                 try:
@@ -187,6 +190,27 @@ class BackfillJob:
                             error=f"{type(exc).__name__}: {exc}",
                         )
                     )
+                    if isinstance(exc, TokenException):
+                        # 2026-07-21: a rejected token fails EVERY subsequent historical call
+                        # identically — abort the whole run instead of hammering the broker (and
+                        # spamming a per-symbol warning) once per remaining symbol. The KiteClient
+                        # on_token_rejected circuit breaker has already frozen entries; the
+                        # un-attempted symbols are reported failed so the caller sees the full
+                        # picture and the resume (via PostLoginRecovery) refills them.
+                        remaining = symbols[i + 1:]
+                        for rem in remaining:
+                            report.failed.append(
+                                BackfillSpan(
+                                    symbol=rem, frm=start.isoformat(), to=end.isoformat(),
+                                    error="aborted_token_rejected",
+                                )
+                            )
+                        _log.warning(
+                            "backfill_aborted_token_rejected", interval=interval,
+                            symbols_remaining=len(remaining),
+                        )
+                        aborted = True
+                        break
                     _log.warning(
                         "backfill_chunk_failed", symbol=symbol, interval=interval,
                         frm=cur.isoformat(), to=chunk_end.isoformat(), error=str(exc),
@@ -200,8 +224,10 @@ class BackfillJob:
                 report.bars_written += written
                 self._advance_checkpoint(symbol, interval, chunk_end)
                 cur = chunk_end + timedelta(days=1)
+            if aborted:
+                break
         _log.info(
-            "backfill_run_done", interval=interval, symbols=len(list(symbols)),
+            "backfill_run_done", interval=interval, symbols=len(symbols),
             bars_written=report.bars_written, failed=len(report.failed),
         )
         return report
@@ -223,7 +249,8 @@ class BackfillJob:
         to = to.astimezone(IST)
         report = BackfillReport(interval="minute")
         chunk_days = self._chunk_days("minute")
-        for symbol in symbols:
+        symbols = list(symbols)
+        for i, symbol in enumerate(symbols):
             report.requested.append(
                 BackfillSpan(symbol=symbol, frm=frm.isoformat(), to=to.isoformat())
             )
@@ -239,6 +266,7 @@ class BackfillJob:
                 continue
             written = 0
             failed = False
+            aborted = False
             cur = frm
             while cur < to:
                 chunk_to = min(cur + timedelta(days=chunk_days), to)
@@ -254,7 +282,25 @@ class BackfillJob:
                             error=f"{type(exc).__name__}: {exc}",
                         )
                     )
-                    _log.warning("warmup_gap_chunk_failed", symbol=symbol, error=str(exc))
+                    if isinstance(exc, TokenException):
+                        # 2026-07-21: a rejected token fails every gap call identically — abort the
+                        # whole warm-up fill (the circuit breaker already froze entries) rather than
+                        # retry per remaining symbol. Un-attempted symbols reported failed; the
+                        # post-login re-trigger recomputes and refills the gap once the token is good.
+                        for rem in symbols[i + 1:]:
+                            report.failed.append(
+                                BackfillSpan(
+                                    symbol=rem, frm=frm.isoformat(), to=to.isoformat(),
+                                    error="aborted_token_rejected",
+                                )
+                            )
+                        _log.warning(
+                            "warmup_gap_aborted_token_rejected",
+                            symbols_remaining=len(symbols) - i - 1,
+                        )
+                        aborted = True
+                    else:
+                        _log.warning("warmup_gap_chunk_failed", symbol=symbol, error=str(exc))
                     failed = True
                     break
                 cur = chunk_to
@@ -263,8 +309,10 @@ class BackfillJob:
                     BackfillSpan(symbol=symbol, frm=frm.isoformat(), to=to.isoformat(), bars=written)
                 )
                 report.bars_written += written
+            if aborted:
+                break
         _log.info(
-            "warmup_gap_done", symbols=len(list(symbols)), frm=frm.isoformat(), to=to.isoformat(),
+            "warmup_gap_done", symbols=len(symbols), frm=frm.isoformat(), to=to.isoformat(),
             bars_written=report.bars_written, failed=len(report.failed),
         )
         return report
