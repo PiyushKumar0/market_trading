@@ -47,6 +47,11 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
 
 - **Start:** `mt-engine` (NSSM) or `python -m engine.ops.main`. Runs the full §2.6 recovery + catch-up,
   then idles in the sticky mode (OFF on a fresh install — safe).
+- **Only ONE instance can run** (2026-07-21 fix): startup takes an exclusive kernel lock on
+  `data/engine.lock` before touching any store. A second start refuses with **exit code 3** and logs
+  `single_instance_refused_lock` (naming the holder pid) — it is NOT an error in the running engine.
+  If the holder is a wedged boot, the watchdog force-kills it and the lock frees itself on process
+  death (never delete `engine.lock` by hand; the lock lives in the kernel, not the file).
 - **Stop:** stop the NSSM service (or Ctrl-C). The shutdown guard (§2.6) will, from Phase 3, flatten an
   open MIS before window-end / verify CNC GTTs / cancel working entries — never leaving the PC dead with
   an unprotected position or a resting entry order.

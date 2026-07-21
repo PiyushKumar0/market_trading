@@ -22,9 +22,18 @@
   + fresh login link (the invalidation seam existed but was NEVER wired); backfill/warmup/reconcile
   loops abort remaining symbols on the first TokenException instead of grinding. 529 tests green
   (43 new/extended incl. the occupied-port case).
-- **Follow-up candidate (NOT fixed, logged only): the §2.6 single-instance guard did not refuse the
-  10:40 second instance** — the 10:35 one likely wedged before its RUNNING commit, so the guard saw
-  a stale prior state. Needs its own investigation (chaos case: double-start during a wedged boot).
+- **Follow-up CLOSED same day (second commit): OS-level single-instance lock.** Root cause of the
+  double-run: the §2.6 step-0 guard is a check-then-act on the `engine_lifecycle` DB row whose
+  RUNNING commit lands only deep into boot — a boot wedged before it (the 10:35 one) is invisible,
+  and two simultaneous boots can both pass the read (TOCTOU). Fix: `InstanceLock` — an exclusive
+  kernel file lock on `<data_dir>/engine.lock` acquired at the TOP of `run()`, before sqlite/DuckDB/
+  Telegram/:8400; a second instance refuses with **exit 3** + `single_instance_refused_lock` (holder
+  pid named). Kernel releases on ANY process death (crash/taskkill) — no stale-lock reaping; the DB
+  guard stays as secondary crash-detection. Windows subtlety (empirically verified): the locked
+  byte 0 is MANDATORY-unreadable to other handles, so the pid record lives at offset 1. Wedge
+  choreography: wedged holder → new starts cleanly refused (NSSM retries throttled ~15s, log-only)
+  → watchdog force-kills the wedge → kernel frees the lock → next start acquires. 534 tests green
+  (5 new incl. a subprocess kernel-release proof).
 
 ## 2026-07-20 (evening — owner stopped the engine ~21:28 IST; date corrected from a mislabeled 07-21 entry)
 

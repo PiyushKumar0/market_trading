@@ -200,8 +200,18 @@ class SessionLifecycle:
 
     # ------------------------------------------------------------------ startup (§2.6)
     async def startup(self, *, check_skew: bool = True) -> StartupReport:
-        # 0) Process-lifecycle boot (§2.6 step 0 / §2.2): single-instance guard → crash detection →
-        #    atomic RUNNING commit → heartbeat thread → ENGINE_STARTED, all BEFORE the recovery body.
+        # 0) Process-lifecycle boot (§2.6 step 0 / §2.2): crash detection → atomic RUNNING commit →
+        #    heartbeat thread → ENGINE_STARTED, all BEFORE the recovery body.
+        #
+        #    PRIMARY vs SECONDARY (2026-07-21 double-run): the real mutual exclusion is now the
+        #    OS-level ``engine.ops.single_instance.InstanceLock``, acquired in the composition root
+        #    (``engine.ops.main.run``) BEFORE any shared resource is touched (sqlite / DuckDB / :8400 /
+        #    Telegram) — a kernel file lock, released on ANY process death. This ``engine_lifecycle``
+        #    check STAYS as the SECONDARY, belt-and-suspenders guard: it drives crash-recovered
+        #    detection (``crash_recovered`` below) and carries the pid-alive semantics the file lock has
+        #    no need for. On its own it is only a TOCTOU read (two boots can both pass it, and an
+        #    instance that wedges before this commit is invisible to it) — which is precisely why the
+        #    file lock is now primary and this remains defence in depth. No behaviour change here.
         prior = self._read_prior()
         prior_state = prior["state"] if prior else None
         prior_pid = int(prior["pid"]) if prior and prior["pid"] else None

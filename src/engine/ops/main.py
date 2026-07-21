@@ -101,6 +101,7 @@ from engine.ops.post_login import (
 )
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
+from engine.ops.single_instance import InstanceLock
 from engine.ops.warmup import WarmupGate
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
@@ -191,6 +192,23 @@ async def run() -> int:
     settings = load_settings()
     configure_logging(level="INFO", logs_dir=settings.logs_dir())
     _log.info("engine_boot", env=settings.env, tz=settings.timezone)
+
+    # --- §2.6 step-0 PRIMARY single-instance guard (2026-07-21 double-run). An exclusive OS file lock,
+    #     acquired BEFORE any shared resource is touched (sqlite connect / MarketStore.open / Telegram
+    #     poll / :8400 bind). That day TWO instances ran: one wedged BEFORE lifecycle.startup ever
+    #     committed RUNNING, so the DB-row guard (§2.6 step 0) was blind to it, and two boots can both
+    #     pass its check-then-act read (TOCTOU). This kernel lock IS real mutual exclusion — released on
+    #     ANY process death (crash / taskkill /F), so no stale lock to reap. The DB check stays as the
+    #     secondary crash-detection / pid-alive guard. Exit code 3 is deliberate: non-zero (a refusal is
+    #     never mistaken for a clean run) and distinct from the watchdog's 2. ---
+    lock_path = settings.resolved_data_dir() / "engine.lock"
+    instance_lock = InstanceLock(lock_path)
+    if not instance_lock.acquire():
+        _log.critical(
+            "single_instance_refused_lock", lock=str(lock_path), holder_pid=instance_lock.holder_pid(),
+            hint="another engine instance owns the single-writer stores (§2.6 step 0); this one exits",
+        )
+        return 3
 
     # --- persistence + migrations ---
     conn = connect(settings.sqlite_path())
@@ -648,6 +666,8 @@ async def run() -> int:
     await http.aclose()
     store.close()
     conn.close()
+    instance_lock.release()   # cosmetic tidiness — every non-clean exit is covered by the kernel
+    # releasing the OS lock on process death; this just frees it promptly on a graceful stop.
     _log.info("engine_stopped")
     return 0
 

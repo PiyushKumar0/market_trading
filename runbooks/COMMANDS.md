@@ -23,6 +23,9 @@ Select-String -Path data\logs\engine.log -Pattern 'token_probe|api_bind_failed|e
 Post-fix behaviour: boot probes the token live (`token_probe` outcome in the log), sends the login
 link immediately on `rejected`/`absent`, and binds `/kite/callback` BEFORE the startup recovery;
 `api_bind_failed` + a critical Telegram alert = port held by another process (use `/token`).
+A second engine start now refuses outright — **exit 3** + `single_instance_refused_lock` naming the
+holder pid (kernel lock on `data\engine.lock`; frees itself when the holder dies — kill the wedged
+holder pid, never delete the file).
 
 ## Universe symbol list (the canonical 200-name set for historical runs)
 
