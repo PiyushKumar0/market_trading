@@ -1,5 +1,36 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-21 (evening boot ~20:03 — EOD catch-up verdict + one open diagnostic)
+
+- **Owner-reported 404/503s: benign, E5 held.** NSE-only: corp_actions 404 (recovered within the
+  run — present in caught_up), deals bulk/block 503 (NSE evening maintenance; date-keyed →
+  auto-retry next boot). BSE fully healthy: filings_pit_fresh wrote 18 fresh insider rows for
+  07-21 (cap-subdivision fired correctly), filings_shp 191 rows/47 syms, filings_results 686
+  events, bhavcopy 2,390 symbols 0 mismatches. Catch-up completed the 07-21 EOD set.
+- **OPEN DIAGNOSTIC — GROWW warm-up blocker (168/200, young_excluded empty):** NOT the young-rule
+  evening race first hypothesized (the window already excludes today). GROWW's 07-20 daily bar is
+  missing after both bhavcopy and the daily_bars catch-up ran — genuine no-trade day, suspension,
+  or a symbol-level fetch gap. Store forensics at next off-window (check bars_1d GROWW 07-18..21 +
+  whether GROWW traded on 07-20). Impact tonight: none (market closed). Impact tomorrow: NONE for
+  live capture — FROZEN blocks entries only; ticker/data capture run regardless (and mode is OFF).
+  If the gap is real+chronic, the design question is whether one symbol's daily gap should freeze
+  globally vs exclude-and-report (plan §7.1 wording is global-conservative) — decide with data.
+
+## 2026-07-21 (end-of-day validation — run SUCCESSFUL, one milestone deferred)
+
+- **Owner stopped the engine 16:02 IST; end-of-day validation against expectations:**
+  ✓ instruments_daily complete + healed (07-21: 112,997 rows / 233 indices; 07-20 also complete);
+  ✓ regime dailies current through 07-21 (NIFTY 50 + INDIA VIX, 997 rows each);
+  ✓ full session minute bars present (18,750 = 50×375, honestly src='kite_official'; reconcile
+  correctly excluded all as offline, 0 drift / 0 compared);
+  ✓ **post-login recovery hook PROVEN LIVE** (`ticker_resumed tokens=52` at 15:34:00, feed HEALTHY
+  in 3 s); ✓ graceful-stop fix proven (shutdown guards → backup → exit_clean, state STOPPED);
+  ✓ morning jobs success; EOD jobs (18:00+) hadn't fired by the 16:02 stop → catch-up next boot
+  (by design). ✗ LIVE tick capture still 0/5 G1 sessions — timing, not defect: the ticker was only
+  up 00:14–00:40 and 15:34–16:02, never during 09:15–15:30 (incident chain owned the session).
+- **Tomorrow needs nothing special**: engine up before 09:15 (any order vs login — the hook covers
+  both), leave it through 15:30+ → first genuine live-capture session.
+
 ## 2026-07-21 (late afternoon — torn-snapshot HEAL confirmed live + persist made ~1,300× faster)
 
 - **Heal verified in production (15:01:25 IST):** the degraded-snapshot escalation fired on the

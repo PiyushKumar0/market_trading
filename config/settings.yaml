@@ -89,7 +89,9 @@ news:
                                  # corroboration count, so owner-only (never in envelope.yaml)
   et_poll_s: 300                 # ET Markets RSS poll cadence (§3.2.4: 5 min)
   mc_poll_s: 900                 # Moneycontrol RSS poll cadence (15 min, polite)
-  gdelt_poll_s: 900              # GDELT DOC 2.0 poll cadence (15-min update granularity)
+  gdelt_poll_s: 1800             # GDELT DOC 2.0 poll cadence — raised 900→1800 (2026-07-22: intermittent
+                                 # 429s/throttle pages at 15-min; GDELT updates 15-min but O12 only needs
+                                 # the pre-open digest, so 30-min halves quota pressure at zero cost)
   backfill_lookback_h: 72        # off-period startup headline backfill window (§4.4 job 10)
   gdelt_backfill_max_days: 90    # GDELT DOC ~3-month window — no deeper backfill dependency (E6)
 
