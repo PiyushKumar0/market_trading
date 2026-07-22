@@ -95,6 +95,14 @@ class MessageKind(StrEnum):
     ``stale_data_guard``: tick age 5 s / heartbeat silence 10 s ⇒ FROZEN + ticker respawn, A4/R2).
     NOT raised during WARMING/intentionally-off (those are suppressed upstream, §2.6/§3.2.12)."""
 
+    FEED_DEGRADED = "feed_degraded"
+    """The live tick feed went silent DURING market hours while the child's 1 s heartbeats keep it
+    HEALTHY (2026-07-22 tickless-HEALTHY session, R2/§7.1). Heartbeats are KiteTicker-independent, so a
+    feed delivering ZERO ticks used to read HEALTHY all day and write zero self-built bars in silence.
+    Distinct from FEED_STALE (heartbeat silence ⇒ kill+respawn+FROZEN, critical): DEGRADED is
+    ``warning`` — the child is alive, the FEED is not delivering ticks. Recovers automatically the
+    moment ticks resume."""
+
     REC_FILL_SUSPECTED = "rec_fill_suspected"
     """The reconciler matched a broker position to an open RECOMMEND rec (R5/§3.6): exactly one
     one-tap confirm prompt, pre-filled with the observed qty/price, BEFORE any ``positions`` row or
@@ -269,6 +277,26 @@ def feed_stale(age_s: float) -> CatalogMessage:
         ),
         severity="critical",
         data={"age_s": age_s},
+    )
+
+
+def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
+    """Live feed silent for ``age_s`` s DURING market hours while heartbeats keep the child HEALTHY.
+
+    Warning (not critical): the ticker child is alive and heartbeating, but its KiteTicker is delivering
+    no ticks, so NO self-built 1-minute bars are being written. Fires once on the HEALTHY→DEGRADED
+    transition (§7.1 in-session tick-silence guard); the state recovers to HEALTHY when ticks resume.
+    """
+    return CatalogMessage(
+        kind=MessageKind.FEED_DEGRADED,
+        title="Feed degraded — no ticks in-session",
+        body=(
+            f"Heartbeats are healthy but NO live ticks for {age_s:.0f}s (>{budget_s:.0f}s budget) "
+            "during market hours — the feed is tickless and self-built bars are NOT being written. "
+            "Check the ticker child (see ticker_child_output logs)."
+        ),
+        severity="warning",
+        data={"age_s": age_s, "budget_s": budget_s},
     )
 
 

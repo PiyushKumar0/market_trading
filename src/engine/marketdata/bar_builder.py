@@ -132,6 +132,11 @@ class BarBuilder:
         self._auction_open: dict[str, Decimal] = {}         # last pre-open ltp per symbol (A14)
         self._finalized_through: dict[str, datetime] = {}   # last finalized minute per symbol
 
+        # --- feed_stats counters (R8 observability, §3.2.12): zero-cost increments on the hot path,
+        #     drained + reset by stats_snapshot() for the periodic in-session feed_stats line. ---
+        self._bars_finalized = 0
+        self._bars_written = 0
+
     # ------------------------------------------------------------------ tick path (§4.4 job 1)
 
     def on_tick(self, tick: Tick) -> None:
@@ -268,6 +273,7 @@ class BarBuilder:
         prev = self._finalized_through.get(ob.symbol)
         if prev is None or ob.minute > prev:
             self._finalized_through[ob.symbol] = ob.minute
+        self._bars_finalized += 1
         return Bar(
             symbol=ob.symbol, ts_minute=ob.minute,
             open=ob.open, high=ob.high, low=ob.low, close=ob.close,
@@ -278,9 +284,21 @@ class BarBuilder:
         if not bars:
             return
         self._store.insert_bars_1m(bars)          # persist BEFORE notifying (batch upsert)
+        self._bars_written += len(bars)
         if self._bus is not None:
             for bar in bars:
                 self._bus.publish(BAR_1M_TOPIC, bar)
+
+    def stats_snapshot(self) -> dict[str, int]:
+        """Return + reset the since-last-call bar counters for the periodic ``feed_stats`` line (R8).
+
+        ``bars_finalized`` counts minute bars closed (minute+grace or force-flush); ``bars_written`` is
+        the batch-upsert count. They differ only transiently within a write batch. Reset-on-read gives
+        the composition-root emitter clean per-interval deltas without a second clock."""
+        snap = {"bars_finalized": self._bars_finalized, "bars_written": self._bars_written}
+        self._bars_finalized = 0
+        self._bars_written = 0
+        return snap
 
     def _handle_late_tick(self, tick: Tick, minute: datetime) -> None:
         """A tick for an already-finalized minute (past minute+grace): corrections_log (§4.4 job 1).

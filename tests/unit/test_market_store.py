@@ -391,7 +391,8 @@ async def test_async_wrappers_offload_sync_core(store, clock):
 # --------------------------------------------------------------------------- settings (additive keys)
 def test_settings_load_with_new_phase1_keys():
     s = load_settings()
-    assert (s.news.et_poll_s, s.news.mc_poll_s, s.news.gdelt_poll_s) == (300, 900, 900)
+    # gdelt_poll_s raised 900→1800 on 2026-07-22 (intermittent 429s; O12 needs only the pre-open digest)
+    assert (s.news.et_poll_s, s.news.mc_poll_s, s.news.gdelt_poll_s) == (300, 900, 1800)
     assert s.news.backfill_lookback_h == 72 and s.news.gdelt_backfill_max_days == 90
     assert s.news.cluster_sim_threshold == 0.75 and s.news.feeds.et_markets_rss.startswith("https://")
     assert s.cat.fanout_weight == 0.5

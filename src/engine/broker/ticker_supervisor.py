@@ -53,7 +53,7 @@ import contextlib
 import secrets as _secrets
 import struct
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -62,11 +62,16 @@ from typing import Any
 import msgpack
 from pydantic import BaseModel, Field
 
+from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import Settings
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.types import Tick
+from engine.notify.catalog import CatalogMessage, feed_degraded
+
+#: Owner-notification sink type (§3.2.11): async, consumes a typed :class:`CatalogMessage`.
+NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
 
 _log = get_logger("engine.broker.ticker_supervisor")
 
@@ -179,8 +184,11 @@ class FeedHealth(BaseModel):
         Seconds since the last 1 s heartbeat frame, or ``None`` if none seen. Silence beyond
         ``heartbeat_silence_kill_s`` (10 s) while running ⇒ kill + respawn.
     state:
-        One of ``{"STOPPED", "WARMING", "HEALTHY", "STALE"}``. ``WARMING`` suppresses false feed-stale
-        alarms on startup (§2.6).
+        One of ``{"STOPPED", "WARMING", "HEALTHY", "DEGRADED", "STALE"}``. ``WARMING`` suppresses false
+        feed-stale alarms on startup (§2.6). ``DEGRADED`` is the in-session tick-silence state (2026-07-22
+        tickless-HEALTHY session): heartbeats are fine but NO ticks are arriving during market hours, so
+        no self-built bars are being written — a visible, alerting state distinct from HEALTHY, that
+        recovers to HEALTHY the moment ticks resume.
     """
 
     last_tick_age_s: float | None = None
@@ -210,6 +218,12 @@ class TickerSupervisor:
     api_key:
         Kite api_key handed to the child over stdin together with the access token (§2.4 — never
         env, never a routable frame).
+    calendar:
+        NSE calendar for the in-session tick-silence guard (§7.1): the guard only fires during market
+        hours. ``None`` disables the guard (bare harness) — the feed then keeps heartbeat-only health.
+    notify:
+        Async owner-notification sink (§3.2.11) for the one-shot HEALTHY→DEGRADED alert. Best-effort;
+        ``None`` skips the owner notify (the WARNING log + ``feed.health`` transition still fire).
     """
 
     def __init__(
@@ -220,12 +234,19 @@ class TickerSupervisor:
         *,
         symbol_for_token: Callable[[int], str | None] | None = None,
         api_key: str = "",
+        calendar: NSECalendar | None = None,
+        notify: NotifyFn | None = None,
     ) -> None:
         self._settings = settings
         self._clock = clock
         self._bus = bus
         self._symbol_for_token = symbol_for_token
         self._api_key = api_key
+        # Calendar + notify power the in-session tick-silence guard (§7.1): market-hours gating +
+        # the one-shot owner alert on HEALTHY→DEGRADED. ``None`` (bare harnesses/tests) disables the
+        # guard — a feed with no calendar cannot know it is in-session, so it keeps HEALTHY semantics.
+        self._calendar = calendar
+        self._notify = notify
 
         # --- child process state ---
         self._proc: asyncio.subprocess.Process | None = None
@@ -241,12 +262,21 @@ class TickerSupervisor:
         # --- supervision / read-loop tasks ---
         self._read_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
+        # Drain tasks for the child's stdout/stderr. Un-drained (the 2026-07-22 defect) the child's OWN
+        # diagnostics — including the reason a feed goes tickless — are discarded, and a full pipe buffer
+        # eventually WEDGES the child mid-write. Fail toward visibility: pump both into the engine log.
+        self._output_tasks: list[asyncio.Task[None]] = []
 
         # --- health signal (timestamps as tz-aware IST via clock.now(), R6) ---
         self._state: str = "STOPPED"
         self._last_tick_at = None  # type: ignore[var-annotated]
         self._last_heartbeat_at = None  # type: ignore[var-annotated]
         self._started_at = None  # type: ignore[var-annotated]
+        self._healthy_since = None  # type: ignore[var-annotated]  # entry into HEALTHY (tick-silence ref)
+
+        # --- feed_stats counters (R8 observability): zero-cost increments, drained by stats_snapshot() ---
+        self._ticks_received = 0
+        self._frames_dropped: dict[str, int] = {}
 
         self._lock = asyncio.Lock()  # serialize start/stop/respawn
 
@@ -366,6 +396,21 @@ class TickerSupervisor:
             env=full_env,
         )
 
+        # Drain stdout+stderr into the engine log IMMEDIATELY (before the handshake — the child logs to
+        # stderr while it reads its stdin credentials and connects KiteTicker). Un-drained, those pipes
+        # (a) hide the child's own explanation of a tickless/dead feed and (b) fill their OS buffer and
+        # wedge the child on its next stderr write. Both are the 2026-07-22 defect's blind spot.
+        self._output_tasks = [
+            asyncio.create_task(
+                self._drain_child_stream(self._proc.stderr, "stderr", "warning"),
+                name="ticker-stderr-drain",
+            ),
+            asyncio.create_task(
+                self._drain_child_stream(self._proc.stdout, "stdout", "info"),
+                name="ticker-stdout-drain",
+            ),
+        ]
+
         # The access token crosses the trust boundary on stdin (not env, not a frame) so it never lands
         # in the process table; Phase 1 hands the token + initial subscription set here.
         await self._send_startup_handshake()
@@ -373,6 +418,7 @@ class TickerSupervisor:
         self._started_at = self._clock.now()
         self._last_tick_at = None
         self._last_heartbeat_at = None
+        self._healthy_since = None
         self._set_state("WARMING")  # suppress false feed-stale alarms until first ticks (§2.6)
 
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="ticker-monitor-loop")
@@ -412,13 +458,54 @@ class TickerSupervisor:
             _log.warning("ticker_stdin_handshake_failed", error=str(exc))
         # Leave stdin OPEN (do NOT close) so the child stays adopted (§2.4 orphan protection).
 
+    async def _drain_child_stream(self, stream: Any, name: str, level: str) -> None:
+        """Pump one child pipe (stdout/stderr) line-by-line into the engine log until EOF (R8).
+
+        This is the 2026-07-22 fix: the supervisor captured the child's stderr into a PIPE nothing ever
+        read, so the child's own diagnostics (KiteTicker connect/close/reconnect/noreconnect, the reason
+        a feed went tickless) were discarded AND a full pipe buffer would eventually wedge the child on
+        its next write. Child stderr is its error channel ⇒ WARNING; stdout is unexpected ⇒ INFO. Never
+        raises out — a drain failure must never take down supervision.
+        """
+        if stream is None:
+            return
+        log_fn = getattr(_log, level, _log.warning)
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return  # EOF: the child closed the stream (exited)
+                text = line.decode("utf-8", "replace").rstrip()
+                if text:
+                    log_fn("ticker_child_output", stream=name, line=text)
+        except asyncio.CancelledError:  # pragma: no cover - normal on stop/respawn
+            raise
+        except Exception:  # noqa: BLE001 - a drain error must never kill supervision
+            _log.exception("ticker_child_stream_drain_error", stream=name)
+
+    async def _cancel_output_tasks(self) -> None:
+        """Cancel + await the stdout/stderr drain tasks (idempotent). The child is already dead by the
+        time this runs, so the pipes are at EOF; this is leak-cleanup for a killed/wedged child whose
+        streams never closed."""
+        tasks = self._output_tasks
+        self._output_tasks = []
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
     async def _terminate_child(self) -> None:
         """Close stdin (orphan protection) then terminate, escalating to kill if it does not exit."""
         proc = self._proc
         self._proc = None
         if proc is None:
+            await self._cancel_output_tasks()
             return
         if proc.returncode is not None:
+            await self._cancel_output_tasks()
             return
 
         # 1) Close stdin: a well-behaved child treats stdin EOF as "parent gone" and exits (§2.4).
@@ -432,6 +519,7 @@ class TickerSupervisor:
         try:
             proc.terminate()
         except ProcessLookupError:  # pragma: no cover - exited between checks
+            await self._cancel_output_tasks()
             return
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -445,6 +533,8 @@ class TickerSupervisor:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:  # pragma: no cover - OS-level wedge
                 _log.error("ticker_kill_timeout", pid=proc.pid)
+        # The child is dead ⇒ its stdout/stderr are at EOF; reap the drain tasks (leak-cleanup).
+        await self._cancel_output_tasks()
 
     # ------------------------------------------------------------------ read loop (the loopback server)
 
@@ -539,12 +629,11 @@ class TickerSupervisor:
             with contextlib.suppress(Exception):
                 writer.close()
 
-    @staticmethod
-    async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+    async def _read_frame(self, reader: asyncio.StreamReader) -> dict[str, Any] | None:
         """Read one length-prefixed msgpack frame; ``None`` on EOF/connection loss.
 
-        An undecodable body yields ``{}`` (logged) so one corrupt frame never tears the link down —
-        the heartbeat-silence guard is the backstop for a systematically broken stream.
+        An undecodable body yields ``{}`` (logged + counted) so one corrupt frame never tears the link
+        down — the heartbeat-silence guard is the backstop for a systematically broken stream.
         """
         try:
             header = await reader.readexactly(_LEN_PREFIX.size)
@@ -556,6 +645,7 @@ class TickerSupervisor:
             frame = msgpack.unpackb(body, raw=False)
         except Exception as exc:  # noqa: BLE001 - corrupt frame is dropped, not fatal
             _log.warning("ticker_frame_decode_error", error=str(exc))
+            self._drop("decode_error")
             return {}
         return frame if isinstance(frame, dict) else {}
 
@@ -570,7 +660,13 @@ class TickerSupervisor:
                 self._set_state("HEALTHY")
                 await self._publish_health()
         elif ftype == "tick":
+            self._ticks_received += 1
             self._last_tick_at = self._clock.now()
+            if self._state == "DEGRADED":
+                # Ticks resumed after an in-session silence: recover DEGRADED → HEALTHY (visible).
+                self._set_state("HEALTHY")
+                _log.info("feed_tick_recovered")
+                await self._publish_health()
             tick = self._parse_tick(frame)
             if tick is not None and self._bus is not None:
                 self._bus.publish(TICK_TOPIC, tick)
@@ -580,6 +676,7 @@ class TickerSupervisor:
                 self._bus.publish(ORDER_UPDATE_TOPIC, OrderUpdateFrame(data=frame.get("data") or {}))
         else:
             _log.warning("ticker_unknown_frame", frame_type=str(ftype))
+            self._drop("unknown_frame")
 
     def _parse_tick(self, frame: dict[str, Any]) -> Tick | None:
         """Wire tick frame → core ``Tick`` (symbol resolved via the injected resolver); None = drop."""
@@ -589,6 +686,7 @@ class TickerSupervisor:
             symbol = self._symbol_for_token(int(token))
         if symbol is None:
             tok = -1 if token is None else int(token)
+            self._drop("unresolved_symbol")
             if tok not in self._unresolved_tokens_logged:   # log once per token, not per tick
                 self._unresolved_tokens_logged.add(tok)
                 _log.warning("ticker_tick_symbol_unresolved", instrument_token=tok)
@@ -597,6 +695,7 @@ class TickerSupervisor:
             return parse_tick_frame(frame, symbol)
         except Exception:  # noqa: BLE001 - malformed frame is dropped, never crashes the read loop
             _log.exception("ticker_tick_parse_error", instrument_token=token)
+            self._drop("parse_error")
             return None
 
     async def _monitor_loop(self) -> None:
@@ -607,6 +706,7 @@ class TickerSupervisor:
         publishes the ``feed.health`` STALE transition. Also reaps an unexpectedly dead child.
         """
         kill_after = float(self._settings.ticker.heartbeat_silence_kill_s)
+        tick_silence_budget = float(self._settings.ticker.tick_silence_degrade_s)
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -635,8 +735,80 @@ class TickerSupervisor:
                     await self._publish_health()  # R2 — STALE transition for the stale-data guard
                     await self._respawn(reason="heartbeat_silence")
                     return
+
+                # Heartbeats fine, but is the FEED actually delivering ticks? A child heartbeats every
+                # 1 s regardless of ticks, so a tickless feed used to read HEALTHY all session (the
+                # 2026-07-22 defect). During market hours, tick silence past the budget ⇒ DEGRADED.
+                await self._check_tick_silence(tick_silence_budget)
         except asyncio.CancelledError:  # pragma: no cover - normal on stop
             raise
+
+    async def _check_tick_silence(self, budget_s: float) -> None:
+        """In-session tick-silence guard (§7.1) — called each monitor tick.
+
+        HEALTHY + inside market hours + effective tick age past ``budget_s`` ⇒ transition to the visible
+        DEGRADED state (a tickless feed must NEVER present HEALTHY through a session again), emit a
+        WARNING, publish the ``feed.health`` transition, and fire the one-shot owner notify. Off-hours or
+        any non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
+        HEALTHY happens on the next tick in :meth:`_handle_frame`.
+        """
+        if self._state != "HEALTHY" or not self._in_market_hours():
+            return
+        silence = self._effective_tick_silence_s()
+        if silence is None or silence <= budget_s:
+            return
+        self._set_state("DEGRADED")
+        _log.warning("feed_tick_silence_degraded", tick_silence_s=round(silence, 1), budget_s=budget_s)
+        await self._publish_health()
+        await self._notify_degraded(silence, budget_s)
+
+    def _in_market_hours(self, now: datetime | None = None) -> bool:
+        """True iff ``now`` is inside today's NSE continuous session (calendar+clock). Without a
+        calendar (bare harness) the feed cannot know it is in-session ⇒ False (guard disabled)."""
+        if self._calendar is None:
+            return False
+        now = now or self._clock.now()
+        session = self._calendar.session(now.date())
+        if session is None:  # holiday / weekend / unverified horizon (R6)
+            return False
+        return session.open <= now <= session.close
+
+    def _effective_tick_silence_s(self) -> float | None:
+        """Seconds since the last tick — or, if NO tick has EVER been seen, since we entered HEALTHY.
+
+        The 'never a single tick' case is exactly the 2026-07-22 outage, so it MUST count toward the
+        silence budget rather than being excused as 'no tick yet' (which is what left it HEALTHY)."""
+        ref = self._last_tick_at or self._healthy_since
+        if ref is None:
+            return None
+        return (self._clock.now() - ref).total_seconds()
+
+    async def _notify_degraded(self, age_s: float, budget_s: float) -> None:
+        """One-shot owner alert on HEALTHY→DEGRADED (best-effort; never breaks supervision, §3.2.11)."""
+        if self._notify is None:
+            return
+        try:
+            await self._notify(feed_degraded(age_s=age_s, budget_s=budget_s))
+        except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
+            _log.exception("feed_degraded_notify_failed")
+
+    def stats_snapshot(self) -> dict[str, Any]:
+        """Return + reset the since-last-call feed counters for the periodic ``feed_stats`` line (R8).
+
+        ``ticks_received`` counts tick frames off the wire; ``frames_dropped`` maps drop-reason →
+        count (unresolved_symbol / parse_error / unknown_frame / decode_error). Reset-on-read gives the
+        composition-root emitter clean per-interval deltas."""
+        snap: dict[str, Any] = {
+            "ticks_received": self._ticks_received,
+            "frames_dropped": dict(self._frames_dropped),
+        }
+        self._ticks_received = 0
+        self._frames_dropped = {}
+        return snap
+
+    def _drop(self, reason: str) -> None:
+        """Increment the drop counter for ``reason`` (feed_stats; zero-cost, no hot-path logging)."""
+        self._frames_dropped[reason] = self._frames_dropped.get(reason, 0) + 1
 
     async def _respawn(self, *, reason: str) -> None:
         """Kill the current child and launch a fresh one (A4 — reactor cannot restart in-process).
@@ -692,6 +864,10 @@ class TickerSupervisor:
     def _set_state(self, state: str) -> None:
         if state != self._state:
             _log.info("feed_health_transition", frm=self._state, to=state)
+        if state == "HEALTHY" and self._state != "HEALTHY":
+            # Reference instant for the tick-silence budget when NO tick has been seen yet (the
+            # 2026-07-22 'never a single tick' case must still count as silence, §7.1).
+            self._healthy_since = self._clock.now()
         self._state = state
 
     async def _publish_health(self) -> None:

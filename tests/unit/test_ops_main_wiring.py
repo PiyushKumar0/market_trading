@@ -314,10 +314,12 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
         return None
 
     _arm_live_jobs(sched, settings, bar_builder=None, health=None,
-                   news_ingest=None, resolve_news=_resolve_news)
+                   news_ingest=None, resolve_news=_resolve_news,
+                   ticker=object(), calendar=calendar, clock=clock)
 
     armed = {j.id for j in sched._sched.get_jobs()}
-    assert {"bar_advance", "health_check", "news_poll_et", "news_poll_mc", "news_poll_gdelt"} <= armed
+    assert {"bar_advance", "health_check", "feed_stats",
+            "news_poll_et", "news_poll_mc", "news_poll_gdelt"} <= armed
 
 
 # --------------------------------------------------------------------------- login API bind confirmation

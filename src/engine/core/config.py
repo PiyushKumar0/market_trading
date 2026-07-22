@@ -63,6 +63,13 @@ class TickerCfg(BaseModel):
     tcp_port: int = 8401
     heartbeat_silence_kill_s: int = 10
     max_instruments_per_conn: int = 3000
+    # In-session tick-silence guard (2026-07-22 tickless-HEALTHY session): the child heartbeats every
+    # 1 s REGARDLESS of ticks, so a feed that delivers NO ticks still reads HEALTHY all day. During
+    # market hours, tick silence beyond this budget (heartbeats still fine) ⇒ a visible DEGRADED state
+    # + owner alert. Off-hours keeps heartbeat-only semantics (no false night alarms).
+    tick_silence_degrade_s: int = 120
+    # Cadence of the periodic in-session ``feed_stats`` INFO line (ticks/drops/bars since last stat).
+    feed_stats_interval_s: int = 300
 
 
 class BrokerCfg(BaseModel):

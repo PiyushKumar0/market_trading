@@ -375,7 +375,12 @@ async def run() -> int:
     features = FeatureEngine(store, clock, calendar, index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL)
 
     # --- ticker subprocess supervisor (started into WARMING at step 7 when a token exists) ---
-    ticker = TickerSupervisor(settings, clock, bus, symbol_for_token=instruments.symbol_for_token)
+    # calendar+notify power the in-session tick-silence guard (§7.1): a tickless-but-heartbeating child
+    # used to read HEALTHY all session (2026-07-22) — now it degrades visibly + alerts during market hours.
+    ticker = TickerSupervisor(
+        settings, clock, bus,
+        symbol_for_token=instruments.symbol_for_token, calendar=calendar, notify=notify,
+    )
 
     # ------------------------------------------------------------------ watchlist helpers
     def watchlist_symbols() -> list[str]:
@@ -594,7 +599,8 @@ async def run() -> int:
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
-    _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news)
+    _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
+                   ticker=ticker, calendar=calendar, clock=clock)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -727,10 +733,11 @@ def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
 def _arm_live_jobs(
     scheduler: Scheduler, settings, bar_builder: BarBuilder, health: HealthMonitor,
     news_ingest: NewsIngest, resolve_news,
+    *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
-    bar-finalization timer, the state-aware health check, and the per-feed news poll cadences (§4.4
-    job 10 — ET 5 min / MC 15 min / GDELT 15 min from settings.news)."""
+    bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
+    and the periodic in-session ``feed_stats`` observability line (R8)."""
 
     async def _advance_bars() -> None:
         bar_builder.advance()
@@ -738,12 +745,31 @@ def _arm_live_jobs(
     async def _health() -> None:
         await health.check(check_skew=False)
 
+    async def _feed_stats() -> None:
+        # In-session only (no all-night noise; the 22:57 STALE in the 2026-07-22 log is expected). One
+        # INFO line so an operator can see AT A GLANCE whether ticks/bars are flowing: the tickless
+        # session would have shown ticks_received=0, bars_written=0 every 5 minutes.
+        now = clock.now()
+        session = calendar.session(now.date())
+        if session is None or not (session.open <= now <= session.close):
+            return
+        ts = ticker.stats_snapshot()
+        bs = bar_builder.stats_snapshot()
+        _log.info(
+            "feed_stats",
+            ticks_received=ts["ticks_received"], frames_dropped=ts["frames_dropped"],
+            bars_finalized=bs["bars_finalized"], bars_written=bs["bars_written"],
+            feed_state=ticker.health().state,
+        )
+
     def _news_poll(feed: str):
         async def _poll() -> None:
             await resolve_news(await news_ingest.poll(feeds=(feed,)))
         return _poll
 
     scheduler.add_job(_advance_bars, trigger=IntervalTrigger(seconds=5), job_id="bar_advance", guard=False)
+    scheduler.add_job(_feed_stats, trigger=IntervalTrigger(seconds=settings.ticker.feed_stats_interval_s),
+                      job_id="feed_stats", guard=False)
     scheduler.add_job(_health, trigger=IntervalTrigger(seconds=settings.lifecycle.watchdog_poll_s),
                       job_id="health_check", guard=False)
     scheduler.add_job(_news_poll("et"), trigger=IntervalTrigger(seconds=settings.news.et_poll_s),

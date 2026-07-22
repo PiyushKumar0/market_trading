@@ -221,6 +221,21 @@ def test_day_rollover_resets_state_and_flushes_open_bars(store, mclock, now):
     assert bar.auction_open is None           # no pre-open print seen on day 2
 
 
+# ------------------------------------------------------------------ feed_stats counters (R8)
+def test_stats_snapshot_counts_finalized_and_written_then_resets(store, mclock, now):
+    """The periodic feed_stats line reads bars_finalized/bars_written from here; reset-on-read."""
+    bb = BarBuilder(store, mclock)
+    feed(bb, now, tick("R", at(9, 15, 10), "100.00", 1000))
+    feed(bb, now, tick("R", at(9, 16, 10), "101.00", 1500))
+    now.set(at(9, 17, 5))
+    bb.advance()                                  # both 09:15 and 09:16 finalize + write
+
+    snap = bb.stats_snapshot()
+    assert snap["bars_finalized"] == 2
+    assert snap["bars_written"] == 2
+    assert bb.stats_snapshot() == {"bars_finalized": 0, "bars_written": 0}   # reset-on-read
+
+
 # ------------------------------------------------------------------ raw tick persistence (§4.3)
 def test_raw_ticks_buffered_including_preopen(store, mclock, now):
     bb = BarBuilder(store, mclock)
