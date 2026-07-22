@@ -27,6 +27,16 @@ A second engine start now refuses outright — **exit 3** + `single_instance_ref
 holder pid (kernel lock on `data\engine.lock`; frees itself when the holder dies — kill the wedged
 holder pid, never delete the file).
 
+## Service logs (NSSM mode)
+
+```powershell
+Get-Content data\logs\engine.log -Tail 50 -Wait        # structured log (all launch modes) — primary
+Get-Content data\logs\service.err.log -Tail 50 -Wait   # NSSM-captured stderr: + raw tracebacks/early-boot crashes
+Get-Content data\logs\service.out.log -Tail 50         # NSSM-captured stdout: stray prints
+Get-WinEvent -ProviderName nssm -MaxEvents 20 | Format-Table TimeCreated, Message -Wrap  # start/stop/crash-restart/throttle
+scripts\nssm_install.ps1 -Action status                # service config incl. ObjectName + log paths
+```
+
 ## Universe symbol list (the canonical 200-name set for historical runs)
 
 ```powershell
