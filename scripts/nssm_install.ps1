@@ -142,6 +142,16 @@ $Sentinel    = Join-Path $RunDir 'intend_to_run.flag'    # "I intend to run" fla
 $StdoutLog   = Join-Path $LogsDir 'service.out.log'
 $StderrLog   = Join-Path $LogsDir 'service.err.log'
 
+# Service control (install/remove/start/stop) needs an ELEVATED shell; without it nssm fails with
+# the cryptic "OpenService(): Access is denied" (2026-07-23 owner-hit). Fail fast + say how.
+$script:IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+                     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $script:IsElevated -and $Action -in @('install', 'remove', 'start', 'stop') -and $Confirm) {
+    throw ("This action needs an ELEVATED PowerShell (Run as administrator). From this shell: " +
+           "Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-Command'," +
+           "`"cd '$RepoRoot'; scripts\nssm_install.ps1 -Action $Action -Confirm ...`"")
+}
+
 # The engine is an installed package (pyproject: hatchling wheel of src/engine, [tool.uv] package),
 # so `python -m engine.ops.main` resolves from the venv without PYTHONPATH juggling. AppDirectory =
 # repo root so the engine's relative config/ and data/ paths resolve (config.Settings._abs).
