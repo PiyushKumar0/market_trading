@@ -205,6 +205,26 @@ async def test_filings_pit_run_persists_and_is_idempotent(store, clock):
     assert hl["ingested_at"] == FIXED_NOW              # Clock-stamped, tz-aware IST
 
 
+def test_insider_reupsert_is_do_nothing_and_never_faults(store):
+    # 2026-07-23 FATAL regression: re-upserting identical content-hash rows via ON CONFLICT DO
+    # UPDATE tripped DuckDB's ART index ("Failed to delete all rows from index") and invalidated
+    # the connection. insider_trades' id IS the content hash ⇒ conflict action must be DO NOTHING.
+    row = {"id": "bse:deadbeef", "symbol": "JSWENERGY", "person_name": "A",
+           "value": Decimal("12345678.00"), "broadcast_dt": datetime(2026, 6, 23, 21, 43, tzinfo=IST)}
+    assert store.upsert_insider_trades([row]) == 1
+    # Identical re-upsert (the catch-up re-run shape): no exception, count stable.
+    store.upsert_insider_trades([row])
+    # Intra-batch duplicate id (the two-BSE-surfaces overlap shape): no exception either.
+    store.upsert_insider_trades([row, dict(row)])
+    rows = [r for r in store.get_insider_trades() if r["id"] == "bse:deadbeef"]
+    assert len(rows) == 1 and rows[0]["person_name"] == "A"
+    # DO NOTHING semantics pinned: a (theoretically impossible) same-id-different-content row
+    # keeps the ORIGINAL — content-hash ids make the difference unreachable in practice.
+    store.upsert_insider_trades([{**row, "person_name": "B"}])
+    rows = [r for r in store.get_insider_trades() if r["id"] == "bse:deadbeef"]
+    assert rows[0]["person_name"] == "A"
+
+
 async def test_filings_pit_window_keys_off_watermark(store, clock):
     # Seed a stored broadcast on 2026-06-10; the run-day is D (2026-06-17): window = [10-06, 17-06].
     store.upsert_insider_trades(

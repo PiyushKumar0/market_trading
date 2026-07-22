@@ -551,6 +551,12 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
 }
 
+# Tables whose PK is a CONTENT HASH of the row (identical id ⇒ identical row). Conflict action for
+# these is DO NOTHING, never DO UPDATE: the update would rewrite equal values, and that no-op
+# rewrite tripped DuckDB's ART index fault on 2026-07-23 (insider_trades catch-up re-upsert →
+# "Failed to delete all rows from index" → connection-invalidating FATAL).
+_CONTENT_HASH_PK_TABLES: frozenset[str] = frozenset({"insider_trades"})
+
 # Values applied for keys OMITTED from a row dict (an explicit ``?`` NULL would otherwise override
 # the column DEFAULT). Mirrors the DDL defaults above — keep the two in lockstep.
 _TABLE_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -813,10 +819,15 @@ class MarketStore:
         if defaults:
             rows = [{**defaults, **row} for row in rows]
         non_pk = [c for c in cols if c not in pk]
-        if non_pk:
+        if non_pk and table not in _CONTENT_HASH_PK_TABLES:
             updates = ", ".join(f'"{c}" = excluded."{c}"' for c in non_pk)
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
         else:
+            # Content-hash-PK tables (id derives from the row's content): identical id ⇒ identical
+            # row, so a conflict UPDATE only rewrites equal values — and that no-op rewrite is what
+            # tripped DuckDB's ART fault on 2026-07-23 ("Failed to delete all rows from index",
+            # insider_trades re-upsert during catch-up; the FATAL invalidated the whole connection).
+            # DO NOTHING is semantically exact for these tables and never touches the delete path.
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO NOTHING"
         # 2026-07-21 (third finding of the incident day): instruments_daily is ~113k rows/day and
         # executemany binds row-at-a-time (~128 rows/s measured here) — the 08:15 persist and the

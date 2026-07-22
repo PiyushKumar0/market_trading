@@ -1,5 +1,18 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-23 (pre-market — tickless-HEALTHY defect fixed, `30ca64f`)
+
+- **07-22 session verdict**: whole fix chain proved live (token probe → login link → post-login
+  ticker resume 10:50, HEALTHY through close, clean respawn 11:37, clean stop) EXCEPT zero
+  self-built bars again (reconcile 0 compared / 18,750 offline). Root cause of the silence:
+  **child stderr piped but never drained** — every KiteTicker diagnostic discarded; heartbeats
+  (same socket/framing as ticks ⇒ downstream chain proven by an end-to-end test) kept HEALTHY
+  with no ticks. Fix: stderr/stdout drained into engine.log (`ticker_child_output`); in-session
+  tick-silence ⇒ DEGRADED + Telegram within ~120 s (calendar-aware, off-hours unchanged);
+  `feed_stats` every 5 min (ticks/drops/bars). The actual tick-outage trigger becomes visible
+  next session. Also fixed my own miss: settings test not updated for the gdelt 900→1800 change.
+  554 tests green. **Operator: restart onto `30ca64f` before 09:15.**
+
 ## 2026-07-21 (evening boot ~20:03 — EOD catch-up verdict + one open diagnostic)
 
 - **Owner-reported 404/503s: benign, E5 held.** NSE-only: corp_actions 404 (recovered within the
