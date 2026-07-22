@@ -289,6 +289,12 @@ class TickerSupervisor:
         Kite ``access_token`` are handed to the child; the access token + the per-spawn shared secret
         cross the §2.4 trust boundary out-of-band (env + stdin), never as a routable frame.
         """
+        if not self._api_key:
+            # Fail LOUD, never dial: an empty api_key in the WS URL is a guaranteed 400-BadRequest
+            # upgrade-reject loop (2026-07-23 root cause — the child reconnected forever while the
+            # heartbeat kept the feed looking HEALTHY; zero ticks were ever captured).
+            _log.error("ticker_start_refused_no_api_key")
+            return
         async with self._lock:
             if self._proc is not None and self._proc.returncode is None:
                 _log.info("ticker_start_noop_already_running", pid=self._proc.pid)

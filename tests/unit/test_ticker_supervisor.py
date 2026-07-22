@@ -116,6 +116,30 @@ def _tick_frame(token: int = 1, ltp: str = "101.00", cum: int = 500,
 
 
 @pytest.mark.asyncio
+async def test_start_refuses_without_api_key(clock, monkeypatch):
+    # 2026-07-23 root cause: api_key defaulted to "" and the child dialed the WS with it forever
+    # (400-BadRequest reject loop, HEALTHY-by-heartbeat, zero ticks ever). start() must fail LOUD.
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None)          # api_key omitted -> ""
+    spawned = []
+    monkeypatch.setattr(sup, "_spawn_child", lambda: spawned.append(1))
+    await sup.start([1, 2], "tok")
+    assert spawned == []                                              # refused, never spawned
+
+
+@pytest.mark.asyncio
+async def test_start_spawns_with_api_key(clock, monkeypatch):
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None, api_key="k123")
+    spawned = []
+
+    async def fake_spawn():
+        spawned.append(1)
+
+    monkeypatch.setattr(sup, "_spawn_child", fake_spawn)
+    await sup.start([1, 2], "tok")
+    assert spawned == [1]
+
+
+@pytest.mark.asyncio
 async def test_respawn_cancels_old_read_task(clock, monkeypatch):
     sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
     # Stand in for a live child + its parked read loop (as _spawn_child would have created).

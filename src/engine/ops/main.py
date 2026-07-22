@@ -380,6 +380,9 @@ async def run() -> int:
     ticker = TickerSupervisor(
         settings, clock, bus,
         symbol_for_token=instruments.symbol_for_token, calendar=calendar, notify=notify,
+        # The WS URL needs the api_key alongside the access token; omitting it left the default ""
+        # and every websocket upgrade 400-rejected forever (2026-07-23 root cause, zero ticks ever).
+        api_key=session.api_key() or "",
     )
 
     # ------------------------------------------------------------------ watchlist helpers

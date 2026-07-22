@@ -262,6 +262,13 @@ class SessionManager:
             return None
         return self._connect()
 
+    def api_key(self) -> str | None:
+        """The configured Kite api_key, or None when not seeded. The ticker child needs it for the
+        WEBSOCKET URL: an empty api_key produced a permanent 400-BadRequest upgrade-reject loop
+        (2026-07-23 — the root cause of zero live ticks ever captured; REST was unaffected because
+        the KiteClient carries its own KiteConnect-bound key)."""
+        return self._secrets.get(KITE_API_KEY) if self._secrets.has(KITE_API_KEY) else None
+
     # -- internals ------------------------------------------------------------------------------
 
     def _connect(self) -> KiteConnect:
