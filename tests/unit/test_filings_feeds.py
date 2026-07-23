@@ -205,6 +205,26 @@ async def test_filings_pit_run_persists_and_is_idempotent(store, clock):
     assert hl["ingested_at"] == FIXED_NOW              # Clock-stamped, tz-aware IST
 
 
+async def test_filings_shp_out_of_universe_skip_is_not_degraded(store, clock):
+    # 2026-07-23 owner report: a healthy run alerted "7 skipped (no scrip code)" — but those were
+    # MARKET-WIDE submissions for symbols outside the universe (not in symbol_isin). Routine skips
+    # must not degrade or alert; only failed fetches / unmapped IN-universe symbols do.
+    store.upsert_symbol_isin([
+        {"symbol": "RELIANCE", "isin": "INE002A01018", "bse_scrip_code": "500325", "as_of": D},
+    ])
+    msgs, sink = collect_alerts()
+    client = routed_client({
+        "corporate-share-holdings-master": httpx.Response(200, json=SHP_MASTER_JSON),
+        "SHPQNewFormat": httpx.Response(200, json=SHP_QUARTER_INDEX_JSON),
+        "CorporatesSHPSecuritybeta": httpx.Response(200, json=SHP_DETAIL_JSON),
+    })
+    # SHP_MASTER_JSON carries SHAH + RELIANCE; SHAH is now OUT of universe (no symbol_isin row).
+    result = await FilingsShpJob(store, clock, client, notify=sink).run()
+    assert result.ok is True and result.degraded is False     # out-of-universe skip ≠ degradation
+    assert result.skipped_no_scrip == 0
+    assert msgs == []                                          # and NO owner alert
+
+
 def test_insider_reupsert_is_do_nothing_and_never_faults(store):
     # 2026-07-23 FATAL regression: re-upserting identical content-hash rows via ON CONFLICT DO
     # UPDATE tripped DuckDB's ART index ("Failed to delete all rows from index") and invalidated
@@ -379,14 +399,20 @@ async def test_filings_shp_fetches_new_submissions(store, clock):
 
 
 async def test_filings_shp_skips_symbol_without_scrip_code(store, clock):
-    store.upsert_symbol_isin([{"symbol": "RELIANCE", "isin": "INE002A01018", "bse_scrip_code": "500325", "as_of": D}])
+    # SHAH is IN-universe (symbol_isin row exists) but its BSE scrip mapping is missing — the
+    # 2026-07-23 taxonomy: this IS a real degradation (its SHP data is silently unobtainable),
+    # unlike out-of-universe skips (see the not-degraded test above).
+    store.upsert_symbol_isin([
+        {"symbol": "RELIANCE", "isin": "INE002A01018", "bse_scrip_code": "500325", "as_of": D},
+        {"symbol": "SHAH", "isin": "INE482J01021", "bse_scrip_code": None, "as_of": D},
+    ])
     client = routed_client({
         "corporate-share-holdings-master": httpx.Response(200, json=SHP_MASTER_JSON),
         "SHPQNewFormat": httpx.Response(200, json=SHP_QUARTER_INDEX_JSON),
         "CorporatesSHPSecuritybeta": httpx.Response(200, json=SHP_DETAIL_JSON),
     })
     result = await FilingsShpJob(store, clock, client).run()
-    assert result.skipped_no_scrip == 1                      # SHAH has no mapping ⇒ skipped, not failed
+    assert result.skipped_no_scrip == 1                      # in-universe, mapping missing ⇒ degraded
     assert result.symbols_upserted == 1 and result.degraded is True
 
 

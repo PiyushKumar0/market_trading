@@ -362,11 +362,21 @@ class FilingsShpJob:
         isin_map = await self._store.asymbol_isin_map()
 
         skipped_no_scrip = failed = symbols_upserted = rows_written = 0
+        skipped_out_of_universe = 0
         bse_calls = 0
         for sub in new:
             mapping = isin_map.get(sub.symbol)
-            code = _clean(mapping.get("bse_scrip_code")) if mapping else ""
+            if mapping is None:
+                # The NSE SHP master is MARKET-WIDE; a submission for a symbol we never mapped is
+                # simply out-of-universe — routine on every run, NEVER a degradation (2026-07-23:
+                # counting these as degraded produced false owner alerts — alert fatigue is the
+                # real failure mode). Counted separately for the log line only.
+                skipped_out_of_universe += 1
+                continue
+            code = _clean(mapping.get("bse_scrip_code"))
             if not code:
+                # IN-universe symbol whose scrip mapping is missing: its SHP data is silently
+                # unobtainable — this IS a real degradation (isin_map should have resolved it).
                 skipped_no_scrip += 1
                 continue
             try:
@@ -406,10 +416,14 @@ class FilingsShpJob:
                 rows_written += written
                 symbols_upserted += 1
 
+        # Degraded ⇔ something we WANTED was not obtained: a failed BSE fetch, or an IN-universe
+        # symbol without a scrip mapping. Out-of-universe skips are routine and never alert
+        # (2026-07-23 owner report: a "7 skipped (no scrip code)" alert fired on a healthy run).
         degraded = bool(failed or skipped_no_scrip)
-        if degraded and (failed or skipped_no_scrip):
+        if degraded:
             await self._alert(
-                f"{failed} symbol(s) failed BSE detail fetch, {skipped_no_scrip} skipped (no scrip code)"
+                f"{failed} symbol(s) failed BSE detail fetch, {skipped_no_scrip} in-universe "
+                f"symbol(s) missing a scrip mapping"
             )
         result = FilingsShpResult(
             ok=True,
@@ -424,7 +438,8 @@ class FilingsShpJob:
         _log.info(
             "filings_shp_ingested",
             seen=len(submissions), new=len(new), symbols=symbols_upserted,
-            rows=rows_written, skipped_no_scrip=skipped_no_scrip, failed=failed,
+            rows=rows_written, skipped_no_scrip=skipped_no_scrip,
+            skipped_out_of_universe=skipped_out_of_universe, failed=failed,
         )
         return result
 
