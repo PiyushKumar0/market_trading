@@ -1,5 +1,18 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-23 (day — FIRST LIVE CAPTURE + sleep-wedge fix `1aa2744`)
+
+- **FIRST LIVE SESSION IN PLATFORM HISTORY**: WS connected on first attempt post-`9fc20dc`
+  (api_key fix); 09:15→12:18 flawless — ~15–16k ticks/5min, 260 bars/5min (52 syms × 5), zero
+  drops. G1 ticker session #1 (partial).
+- **13:41 incident: PC slept mid-session; feed wedged after resume.** First sleep: heartbeat-kill
+  respawned correctly. Second sleep landed mid-WARMING, where the stale-kill is suppressed and no
+  timeout existed → wedged forever (ticks=0, 12:44→13:41+). Fix `1aa2744`: bounded WARMING
+  (warming_timeout_s=60, capped backoff, one-shot FEED_WEDGED escalation, counters reset on
+  HEALTHY) = generic sleep/resume recovery; + KeepAwake (ES_SYSTEM_REQUIRED during NSE sessions,
+  health-loop-driven, opt-out knob). 566 tests green. Owner also advised: AC power plan should not
+  sleep during market hours (G0 power checklist).
+
 ## 2026-07-23 (overnight — TWO root causes closed: DuckDB FATAL + the zero-ticks-ever mystery)
 
 - **01:04 DuckDB FATAL** (`Failed to delete all rows from index` → connection invalidated for the

@@ -264,6 +264,14 @@ class BackfillJob:
                 )
                 _log.warning("warmup_gap_unknown_token", symbol=symbol)
                 continue
+            # Fill GAPS ONLY — never overwrite an existing bar of ANY src (2026-07-23: a mid-session
+            # restart passed frm=09:15 and the fill CLOBBERED the morning's live self-built bars with
+            # official candles, destroying the day's reconcile evidence — 1,311 of ~9,500 self bars
+            # survived). Coverage gaps also handle INTERIOR holes (a sleep window between two live
+            # stretches), which no single last-bar-seen ``frm`` can express.
+            gap_minutes = set(await self._store.acoverage_gaps(symbol, frm, to))
+            if not gap_minutes:
+                continue      # fully covered — nothing to fill, nothing to touch
             written = 0
             failed = False
             aborted = False
@@ -273,7 +281,8 @@ class BackfillJob:
                 try:
                     candles = await self._kite.historical(token, cur, chunk_to, "minute")
                     written += await self._write_candles(
-                        symbol, "minute", candles, src="gap_backfilled", frm=frm, to=to
+                        symbol, "minute", candles, src="gap_backfilled", frm=frm, to=to,
+                        only_minutes=gap_minutes,
                     )
                 except Exception as exc:  # noqa: BLE001 - a symbol's gap failure never blocks others
                     report.failed.append(
@@ -335,8 +344,12 @@ class BackfillJob:
         src: str,
         frm: datetime | None = None,
         to: datetime | None = None,
+        only_minutes: set | None = None,
     ) -> int:
-        """Write fetched candles (as-is, A11) to bars_1d / bars_1m; optional ``[frm, to)`` filter."""
+        """Write fetched candles (as-is, A11) to bars_1d / bars_1m; optional ``[frm, to)`` filter.
+
+        ``only_minutes`` (minute interval only): write ONLY candles whose ts is in the set — the
+        warmup-gap fill-gaps-never-overwrite contract (2026-07-23; see :meth:`warmup_gap`)."""
         if not candles:
             return 0
         if interval == "day":
@@ -358,6 +371,8 @@ class BackfillJob:
                 continue
             if to is not None and ts >= to:
                 continue
+            if only_minutes is not None and ts not in only_minutes:
+                continue      # existing bar (any src) — never overwritten by a gap fill
             bars.append(
                 Bar(
                     symbol=symbol, ts_minute=ts,
