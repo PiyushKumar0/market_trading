@@ -28,6 +28,11 @@ ticker:
   max_instruments_per_conn: 3000          # A3
   tick_silence_degrade_s: 120             # in-session tick silence (heartbeats OK) => DEGRADED + alert
   feed_stats_interval_s: 300              # periodic in-session feed_stats INFO line cadence
+  warming_timeout_s: 60                   # WARMING with no heartbeat > this => kill+respawn (2026-07-23
+                                          #   sleep/resume wedge; also the generic system-resume recovery)
+  warming_backoff_cap_s: 300             # consecutive WARMING-timeout respawns back off (60×2ⁿ), capped here
+  max_wedge_respawns: 5                   # after this many consecutive wedge respawns => escalate ONCE (warning)
+  keep_awake_in_session: true             # Windows: keep the OS awake while the NSE session is open (screen may sleep)
 
 # Process-lifecycle notifications + liveness watchdog (§2.2/§3.2.12). Distinct from the ticker heartbeat above:
 # this is the ENGINE's own liveness marker (SQLite engine_lifecycle.last_alive_at) read by the OUT-OF-BAND watchdog.

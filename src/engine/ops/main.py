@@ -95,6 +95,7 @@ from engine.ops.jobs import (
     JobRegistry,
     JobSpec,
 )
+from engine.ops.keep_awake import KeepAwake
 from engine.ops.lifecycle import SessionLifecycle
 from engine.ops.post_login import (
     PostLoginRecovery,
@@ -540,7 +541,13 @@ async def run() -> int:
         protected_store=protected_store, kill_switch=kill, mode_manager=mode, session_manager=session,
         catch_up=catch_up, warmup_gate=warmup_gate,
     )
-    health = HealthMonitor(clock, settings, ticker_supervisor=ticker, alert=alert)
+    # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
+    # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.
+    keep_awake = KeepAwake(enabled=settings.ticker.keep_awake_in_session)
+    health = HealthMonitor(
+        clock, settings, ticker_supervisor=ticker, alert=alert,
+        calendar=calendar, keep_awake=keep_awake,
+    )
     scheduler = Scheduler(clock, calendar)
 
     # --- §2.6 injected recovery hooks (steps 4 & 7) ---

@@ -1,5 +1,23 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-23 (overnight — TWO root causes closed: DuckDB FATAL + the zero-ticks-ever mystery)
+
+- **01:04 DuckDB FATAL** (`Failed to delete all rows from index` → connection invalidated for the
+  rest of the boot): triggered by the filings_pit_fresh catch-up re-upserting identical
+  content-hash rows via ON CONFLICT DO UPDATE. Fix `d00526c`: `_CONTENT_HASH_PK_TABLES` route to
+  DO NOTHING (identical id ⇒ identical row; never touches the index delete path). Store file
+  intact (FATAL protects on-disk state; verified open+counts after restart).
+- **ZERO-TICKS ROOT CAUSE FOUND AND FIXED (`9fc20dc`)** — the stderr drain surfaced it live:
+  every KiteTicker WS upgrade 400-BadRequests (`kws.reconnecting` forever). Cause:
+  `TickerSupervisor` constructed WITHOUT `api_key` → silent `""` default → child dialed
+  `wss://ws.kite.trade?api_key=` since the first boot. REST unaffected (KiteConnect binds its own
+  key) — why every other credential check passed. Fix: `SessionManager.api_key()` wired through;
+  `start()` now REFUSES loud on empty api_key. Whole causal chain of the live-capture failure is
+  now closed: empty api_key → WS 400 → no ticks → heartbeat-HEALTHY mask → zero self bars.
+- Also seen working in the owner's 01:31 log: post-login recovery clean, instruments persist
+  113,636 rows without fault (d00526c verified live). GROWW blocker persists (170/200, the 07-20
+  hole) — forensics still open. **Operator: restart onto `9fc20dc` BEFORE 09:15.**
+
 ## 2026-07-23 (pre-market — tickless-HEALTHY defect fixed, `30ca64f`)
 
 - **07-22 session verdict**: whole fix chain proved live (token probe → login link → post-login

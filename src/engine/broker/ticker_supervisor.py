@@ -24,9 +24,14 @@ Trust boundary (§2.4):
 Health / stale-data guard (R2, §2.6):
     ``health()`` reports a :class:`FeedHealth` whose ``state`` drives the §7.1 ``stale_data_guard``:
         * ``STOPPED``  — no child running.
-        * ``WARMING``  — child just spawned / reconnecting + warm-up backfilling; feed-stale alarm and
-          respawn are **suppressed** (§2.6/§3.2.12) to avoid false alarms on a fresh startup, distinct
-          from feed-lost-while-running.
+        * ``WARMING``  — child just spawned / reconnecting + warm-up backfilling; the HEALTHY-path
+          heartbeat-silence kill is **suppressed** (§2.6/§3.2.12) to avoid false alarms on a fresh
+          startup, distinct from feed-lost-while-running. The suppression is **bounded**: WARMING with
+          no heartbeat past ``settings.ticker.warming_timeout_s`` ⇒ kill + respawn with capped
+          exponential backoff (2026-07-23 13:41 sleep/resume wedge — an unbounded WARMING froze the
+          state machine forever). This is also the generic system-resume recovery: after a resume,
+          whatever state the machine froze in, either the HEALTHY-path stale kill or this WARMING
+          timeout fires and respawns.
         * ``HEALTHY``  — heartbeats arriving within the silence budget.
         * ``STALE``    — heartbeat silence exceeded ``settings.ticker.heartbeat_silence_kill_s`` (10 s)
           while *running* (not WARMING) ⇒ the supervisor kills + respawns the child and publishes a
@@ -68,7 +73,7 @@ from engine.core.config import Settings
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.types import Tick
-from engine.notify.catalog import CatalogMessage, feed_degraded
+from engine.notify.catalog import CatalogMessage, feed_degraded, feed_wedged
 
 #: Owner-notification sink type (§3.2.11): async, consumes a typed :class:`CatalogMessage`.
 NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
@@ -273,6 +278,12 @@ class TickerSupervisor:
         self._last_heartbeat_at = None  # type: ignore[var-annotated]
         self._started_at = None  # type: ignore[var-annotated]
         self._healthy_since = None  # type: ignore[var-annotated]  # entry into HEALTHY (tick-silence ref)
+
+        # --- WARMING-wedge backoff (2026-07-23 13:41 sleep/resume). Consecutive WARMING-timeout
+        #     respawns that never reach HEALTHY; drives the capped exponential backoff and the
+        #     one-shot owner escalation. Both reset on a successful WARMING->HEALTHY promotion. ---
+        self._wedge_respawns = 0
+        self._wedge_escalated = False
 
         # --- feed_stats counters (R8 observability): zero-cost increments, drained by stats_snapshot() ---
         self._ticks_received = 0
@@ -709,10 +720,15 @@ class TickerSupervisor:
 
         Runs while a child is alive. Each tick it re-derives the health state from ``clock.now()``; when
         the feed goes STALE while *running* (not WARMING — §2.6 suppression) it triggers a respawn and
-        publishes the ``feed.health`` STALE transition. Also reaps an unexpectedly dead child.
+        publishes the ``feed.health`` STALE transition. WARMING is no longer exempt from ALL timeouts:
+        an unbounded WARMING is itself a wedge (2026-07-23), so ``_check_warming_timeout`` bounds it.
+        Also reaps an unexpectedly dead child.
         """
         kill_after = float(self._settings.ticker.heartbeat_silence_kill_s)
         tick_silence_budget = float(self._settings.ticker.tick_silence_degrade_s)
+        warming_timeout = float(self._settings.ticker.warming_timeout_s)
+        warming_cap = float(self._settings.ticker.warming_backoff_cap_s)
+        max_wedge = int(self._settings.ticker.max_wedge_respawns)
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -728,8 +744,15 @@ class TickerSupervisor:
 
                 heartbeat_age = self._heartbeat_age_s()
                 if self._state == "WARMING":
-                    # Suppress feed-stale during warm-up; promotion to HEALTHY happens on first
-                    # heartbeat in the Phase-1 read loop. Nothing to enforce here yet.
+                    # The HEALTHY-path heartbeat-silence kill below is suppressed during warm-up (a
+                    # fresh spawn legitimately has no ticks/heartbeat yet, §2.6) — promotion to HEALTHY
+                    # happens on the first heartbeat in the read loop. But WARMING must NOT be
+                    # unbounded: a child that dies/hangs before its first heartbeat, or a system-resume
+                    # that froze the machine mid-WARMING (2026-07-23 13:41), would otherwise wedge here
+                    # forever (zero respawns, feed dead). Bound it with a timeout + capped backoff; a
+                    # respawn returns (``_spawn_child`` installs a fresh monitor task).
+                    if await self._check_warming_timeout(warming_timeout, warming_cap, max_wedge):
+                        return
                     continue
                 if heartbeat_age is not None and heartbeat_age > kill_after:
                     _log.error(
@@ -767,6 +790,52 @@ class TickerSupervisor:
         _log.warning("feed_tick_silence_degraded", tick_silence_s=round(silence, 1), budget_s=budget_s)
         await self._publish_health()
         await self._notify_degraded(silence, budget_s)
+
+    async def _check_warming_timeout(
+        self, timeout_s: float, cap_s: float, max_respawns: int
+    ) -> bool:
+        """WARMING-wedge guard (2026-07-23 13:41 sleep/resume) — called each monitor tick while WARMING.
+
+        If no heartbeat has arrived within the backoff-scaled timeout, the child is wedged (dead/hung
+        before its first heartbeat, or the machine froze mid-WARMING on OS sleep): kill + respawn.
+        Returns ``True`` when a respawn was triggered so the monitor loop returns (``_spawn_child``
+        installs a fresh monitor task); ``False`` (no-op) while still inside the budget.
+
+        Consecutive wedge-respawns that never reach HEALTHY back off exponentially
+        (``timeout_s × 2ⁿ``) capped at ``cap_s``, and past ``max_respawns`` escalate ONCE to the owner
+        (the feed is structurally down — dead child / no network / rejected token). A successful
+        WARMING→HEALTHY promotion resets the counter + escalation flag (see :meth:`_set_state`).
+        """
+        age = self._warming_age_s()
+        effective = min(timeout_s * (2 ** self._wedge_respawns), cap_s)
+        if age is None or age <= effective:
+            return False
+        self._wedge_respawns += 1
+        _log.error(
+            "ticker_warming_timeout",
+            warming_age_s=round(age, 1),
+            timeout_s=round(effective, 1),
+            wedge_respawns=self._wedge_respawns,
+        )
+        # One-shot owner escalation once the feed has failed to come up max_respawns times in a row.
+        if self._wedge_respawns >= max_respawns and not self._wedge_escalated:
+            self._wedge_escalated = True
+            await self._notify_wedged(self._wedge_respawns, age)
+        # A wedged feed is a real feed-lost incident: publish STALE (fail toward visibility — the §7.1
+        # stale-data guard can FREEZE entries) before the respawn re-enters WARMING.
+        self._set_state("STALE")
+        await self._publish_health()  # R2 — STALE transition for the stale-data guard
+        await self._respawn(reason="warming_timeout")
+        return True
+
+    async def _notify_wedged(self, respawns: int, age_s: float) -> None:
+        """One-shot owner escalation for a WEDGED feed (best-effort; never breaks supervision, §3.2.11)."""
+        if self._notify is None:
+            return
+        try:
+            await self._notify(feed_wedged(respawns=respawns, age_s=age_s))
+        except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
+            _log.exception("feed_wedged_notify_failed")
 
     def _in_market_hours(self, now: datetime | None = None) -> bool:
         """True iff ``now`` is inside today's NSE continuous session (calendar+clock). Without a
@@ -867,6 +936,17 @@ class TickerSupervisor:
             return None
         return (self._clock.now() - self._last_heartbeat_at).total_seconds()
 
+    def _warming_age_s(self) -> float | None:
+        """Seconds this spawn has been WARMING with no heartbeat yet — the WARMING-wedge clock.
+
+        Reference is the last heartbeat if one somehow arrived without promoting (defensive; in WARMING
+        the first heartbeat promotes to HEALTHY), else this spawn's ``_started_at``. ``None`` before the
+        first spawn. Each (re)spawn resets ``_started_at``, so every WARMING episode is timed afresh."""
+        ref = self._last_heartbeat_at or self._started_at
+        if ref is None:
+            return None
+        return (self._clock.now() - ref).total_seconds()
+
     def _set_state(self, state: str) -> None:
         if state != self._state:
             _log.info("feed_health_transition", frm=self._state, to=state)
@@ -874,6 +954,10 @@ class TickerSupervisor:
             # Reference instant for the tick-silence budget when NO tick has been seen yet (the
             # 2026-07-22 'never a single tick' case must still count as silence, §7.1).
             self._healthy_since = self._clock.now()
+            # A successful (re)connect clears the WARMING-wedge backoff + one-shot escalation: the next
+            # wedge episode starts fresh at the base timeout and can escalate again (2026-07-23).
+            self._wedge_respawns = 0
+            self._wedge_escalated = False
         self._state = state
 
     async def _publish_health(self) -> None:

@@ -70,6 +70,21 @@ class TickerCfg(BaseModel):
     tick_silence_degrade_s: int = 120
     # Cadence of the periodic in-session ``feed_stats`` INFO line (ticks/drops/bars since last stat).
     feed_stats_interval_s: int = 300
+    # WARMING-wedge guard (2026-07-23 13:41 sleep/resume incident): the HEALTHY-path heartbeat-silence
+    # kill deliberately skips WARMING (a fresh spawn legitimately has no ticks/heartbeat yet), and
+    # WARMING had NO timeout — so a child that dies/hangs before its first heartbeat (or a system-resume
+    # that froze the machine mid-WARMING) wedged the state machine forever (zero respawns, feed dead).
+    # If WARMING persists this long with no heartbeat ⇒ kill + respawn (also the generic system-resume
+    # recovery: whatever state froze, the timeout fires and respawns).
+    warming_timeout_s: int = 60
+    # Consecutive WARMING-timeout respawns back off exponentially (warming_timeout_s × 2ⁿ) capped here.
+    warming_backoff_cap_s: int = 300
+    # After this many consecutive WARMING-timeout respawns without reaching HEALTHY, keep retrying at
+    # the capped backoff but escalate ONCE to the owner (the feed is structurally wedged).
+    max_wedge_respawns: int = 5
+    # In-session OS keep-awake (Windows): while the NSE session is open, assert SetThreadExecutionState
+    # so the OS does not auto-sleep mid-session and freeze the feed. Opt-out here. Non-Windows: no-op.
+    keep_awake_in_session: bool = True
 
 
 class BrokerCfg(BaseModel):

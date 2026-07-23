@@ -30,6 +30,10 @@ class _FakeTickerCfg:
     max_instruments_per_conn = 3000
     tick_silence_degrade_s = 120
     feed_stats_interval_s = 300
+    warming_timeout_s = 60
+    warming_backoff_cap_s = 300
+    max_wedge_respawns = 5
+    keep_awake_in_session = True
 
 
 class _FakeSettings:
@@ -334,3 +338,105 @@ async def test_feed_stats_snapshot_counts_and_resets(clock):
     assert snap["frames_dropped"]["unknown_frame"] == 1
 
     assert sup.stats_snapshot() == {"ticks_received": 0, "frames_dropped": {}}  # reset-on-read
+
+
+# --------------------------------------------------------- sleep/resume WARMING-wedge (2026-07-23 13:41)
+def _warming_sup(clock, *, notify=None):
+    """A supervisor parked in WARMING with a fresh spawn instant — the wedge shape after resume."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), notify=notify)
+    sup._state = "WARMING"
+    sup._started_at = clock.now()
+    sup._last_heartbeat_at = None
+    return sup
+
+
+@pytest.mark.asyncio
+async def test_warming_timeout_respawns_after_budget(monkeypatch):
+    """WARMING with no heartbeat past warming_timeout_s ⇒ kill+respawn (the wedge is broken)."""
+    now = _Now(_at(9, 15, 0))
+    clock = Clock(time_source=now)
+    sup = _warming_sup(clock)
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    now.set(_at(9, 15, 30))                                   # 30 s < 60 s budget — no respawn
+    assert await sup._check_warming_timeout(60.0, 300.0, 5) is False
+    assert respawns == []
+
+    now.set(_at(9, 16, 5))                                    # 65 s > 60 s budget — respawn fires
+    assert await sup._check_warming_timeout(60.0, 300.0, 5) is True
+    assert respawns == ["warming_timeout"]
+    assert sup._wedge_respawns == 1
+    assert sup.health().state == "STALE"                     # published a visible feed-lost transition
+
+
+@pytest.mark.asyncio
+async def test_warming_heartbeat_within_budget_no_respawn(monkeypatch):
+    """A heartbeat within the budget promotes WARMING→HEALTHY — no wedge respawn, counters clean."""
+    now = _Now(_at(9, 15, 0))
+    clock = Clock(time_source=now)
+    sup = _warming_sup(clock)
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    now.set(_at(9, 15, 30))                                   # 30 s < 60 s — no fire
+    assert await sup._check_warming_timeout(60.0, 300.0, 5) is False
+
+    await sup._handle_frame({"type": "heartbeat"})           # first heartbeat ⇒ HEALTHY
+    assert sup.health().state == "HEALTHY"
+    assert respawns == []
+    assert sup._wedge_respawns == 0
+    assert sup._wedge_escalated is False
+
+
+@pytest.mark.asyncio
+async def test_warming_backoff_caps_and_escalates_once(monkeypatch):
+    """Consecutive wedge respawns back off exponentially, cap at cap_s, and escalate ONCE."""
+    now = _Now(_at(9, 15, 0))
+    clock = Clock(time_source=now)
+    notify = _NotifyRec()
+    sup = _warming_sup(clock, notify=notify)
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+        sup._state = "WARMING"                               # a fresh child re-enters WARMING
+        sup._started_at = clock.now()
+        sup._last_heartbeat_at = None
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def advance(sec):
+        now.set(now.value + dt.timedelta(seconds=sec))
+        return await sup._check_warming_timeout(60.0, 300.0, 3)  # max_respawns=3 for a short episode
+
+    assert await advance(61) is True                         # base budget 60 s
+    assert sup._wedge_respawns == 1
+    assert await advance(90) is False                        # backoff grew to 120 s: 90 s must NOT fire
+    assert await advance(40) is True                         # 130 s total > 120 s: fires
+    assert sup._wedge_respawns == 2
+    assert await advance(241) is True                        # budget 240 s; 3rd respawn hits max ⇒ escalate
+    assert sup._wedge_respawns == 3
+    assert len(notify.msgs) == 1
+    assert notify.msgs[0].kind == MessageKind.FEED_WEDGED
+    assert notify.msgs[0].severity == "warning"
+    # Cap proof: uncapped budget would be 60×2³=480 s, but cap_s=300 ⇒ a 350 s gap still fires ...
+    assert await advance(350) is True
+    assert sup._wedge_respawns == 4
+    assert len(notify.msgs) == 1                             # ... and escalation is one-shot
+
+    # Recovery resets the backoff + escalation so a later episode can escalate again (§2.6).
+    sup._set_state("HEALTHY")
+    assert sup._wedge_respawns == 0
+    assert sup._wedge_escalated is False

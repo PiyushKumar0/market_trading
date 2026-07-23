@@ -103,6 +103,14 @@ class MessageKind(StrEnum):
     ``warning`` — the child is alive, the FEED is not delivering ticks. Recovers automatically the
     moment ticks resume."""
 
+    FEED_WEDGED = "feed_wedged"
+    """The live tick feed is WEDGED: repeated WARMING-timeout respawns never reached HEALTHY
+    (2026-07-23 13:41 sleep/resume incident). The supervisor keeps retrying at capped backoff, but
+    after ``ticker.max_wedge_respawns`` consecutive attempts the feed has still failed to come up —
+    a structural fault (dead child / no network / rejected token) that needs owner attention. Escalated
+    ONCE per wedge episode (``warning``, not a per-respawn page); recovers automatically the moment a
+    respawn finally heartbeats."""
+
     REC_FILL_SUSPECTED = "rec_fill_suspected"
     """The reconciler matched a broker position to an open RECOMMEND rec (R5/§3.6): exactly one
     one-tap confirm prompt, pre-filled with the observed qty/price, BEFORE any ``positions`` row or
@@ -297,6 +305,28 @@ def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
         ),
         severity="warning",
         data={"age_s": age_s, "budget_s": budget_s},
+    )
+
+
+def feed_wedged(*, respawns: int, age_s: float) -> CatalogMessage:
+    """The ticker feed is WEDGED — repeated WARMING-timeout respawns never reached HEALTHY (§2.6/R2).
+
+    Escalated ONCE after ``ticker.max_wedge_respawns`` consecutive WARMING-timeout respawns (2026-07-23
+    sleep/resume wedge): the supervisor keeps retrying at capped backoff, but the child never delivers a
+    heartbeat, so the feed is structurally down. Warning (not critical): risk-reducing exits are
+    unaffected and the state recovers automatically once a respawn heartbeats.
+    """
+    return CatalogMessage(
+        kind=MessageKind.FEED_WEDGED,
+        title="Feed wedged — respawns not recovering",
+        body=(
+            f"The ticker feed has failed to come up after {respawns} consecutive WARMING-timeout "
+            f"respawns (no heartbeat for {age_s:.0f}s on the last attempt). Still retrying at capped "
+            "backoff, but the feed is delivering NO data — check the ticker child (ticker_child_output "
+            "logs), network, and Kite token. Recovers automatically once a respawn heartbeats."
+        ),
+        severity="warning",
+        data={"respawns": respawns, "age_s": age_s},
     )
 
 
