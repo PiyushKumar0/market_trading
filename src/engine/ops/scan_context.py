@@ -59,7 +59,7 @@ Known v1 gaps (deliberate, documented — not silent)
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -123,7 +123,10 @@ class LiveScanContextProvider:
     momentum_universe:
         Optional symbols to preload into the day cache on the day's FIRST call, so
         ``momentum_by_symbol`` is the complete cross-section from the first bar instead of filling in
-        as symbols tick. ``None`` (default) = purely lazy.
+        as symbols tick. Accepts a static sequence OR a zero-arg callable resolved at each day-cache
+        build (the universe is day-scoped — composition passes the ``universe_daily`` watchlist
+        closure so a fresh 08:30 build is picked up without reconstructing the provider).
+        ``None`` (default) = purely lazy.
     """
 
     def __init__(
@@ -137,7 +140,7 @@ class LiveScanContextProvider:
         momentum_weeks: int = 4,
         daily_lookback_days: int = 400,
         ex_horizon_days: int = DEFAULT_EX_HORIZON_DAYS,
-        momentum_universe: Sequence[str] | None = None,
+        momentum_universe: Sequence[str] | Callable[[], Sequence[str]] | None = None,
     ) -> None:
         if momentum_weeks < 1:
             raise ValueError("momentum_weeks must be >= 1")
@@ -153,7 +156,11 @@ class LiveScanContextProvider:
         self._momentum_weeks = int(momentum_weeks)
         self._lookback_days = int(daily_lookback_days)
         self._ex_horizon_days = int(ex_horizon_days)
-        self._momentum_universe = list(momentum_universe) if momentum_universe else []
+        if callable(momentum_universe):
+            self._momentum_universe_fn: Callable[[], Sequence[str]] | None = momentum_universe
+        else:
+            static = list(momentum_universe) if momentum_universe else []
+            self._momentum_universe_fn = (lambda: static) if static else None
         # Built lazily on the first __call__ — NO store read happens at construction (a provider is
         # wired at composition time, long before the worker thread exists).
         self._cache: _DayCache | None = None
@@ -217,12 +224,18 @@ class LiveScanContextProvider:
             index_closes=index_closes,
             ex_dates=ex_dates,
         )
-        for symbol in self._momentum_universe:
+        preload: Sequence[str] = ()
+        if self._momentum_universe_fn is not None:
+            try:
+                preload = self._momentum_universe_fn()
+            except Exception:  # noqa: BLE001 - a failed universe read degrades to lazy fill, never raises
+                _log.exception("scan_context_universe_preload_failed")
+        for symbol in preload:
             self._load_daily(cache, symbol)
         _log.info(
             "scan_context_day_built",
             d=d.isoformat(), index_closes=len(index_closes), flagged=len(flagged),
-            ex_date_symbols=len(ex_dates), preloaded=len(self._momentum_universe),
+            ex_date_symbols=len(ex_dates), preloaded=len(preload),
             trading_day=window is not None,
         )
         return cache
