@@ -13,15 +13,21 @@ Two load-bearing security properties ship here in Phase 0:
   :class:`OwnerConfirmation`-style challenge; a follow-up ``/confirm <phrase>`` completes it. Killing
   is single-step (fast, §7.2); only *reset* / mode-up are two-step.
 
-Phase 0 is a SKELETON: the command table is fully wired, but handlers whose data source is a later
-phase (positions, P&L, budget, approvals, RECOMMEND outcome capture) log + reply
-"not yet implemented in Phase 0". FULLY wired to their Tier-2 targets are: ``/kill`` and
-``/kill_reset`` (two-step) → :class:`KillSwitch`; ``/mode`` (two-step for AUTO) →
-:class:`ModeManager`; ``/trade_window`` (single-step, owner-ID + validation) →
-``ModeManager.set_trade_window``; ``/status``; ``/confirm`` (completes a two-step challenge); and
-``/help`` (renders the :data:`_COMMANDS` catalog).
+Phase 2 completes the §3.2.11 command surface: every row of :data:`_COMMANDS` now has a real handler.
+The Phase-2 data sources arrive as **optional keyword dependencies** — ``reco_book``, ``latch``,
+``governor``, ``limits_engine``, ``exposure``, ``session``, ``conn`` — each defaulting to ``None``, in
+which case its command replies "… not wired" instead of pretending to act. Composition (§3.2.12) wires
+them in a later wave; the bot itself never constructs a dependency and never originates an order.
+
+Two RECOMMEND-mode honesty rules are encoded here (B7/§3.6): the platform places **zero API orders**,
+so ``/close`` returns guidance rather than sending anything, and ``/approve`` writes only its
+``owner_approvals`` row (a tracked position's stop is updated only if the injected recommendation book
+exposes ``apply_approval`` — probed, never required).
+
 The command catalog is the single source of truth for handler registration, ``/help``, and the
 Telegram ``/`` autocomplete menu (``setMyCommands``, owner-chat-scoped), so the three never drift.
+:meth:`TelegramBot.attach_bus` subscribes the outbound owner alerts (mode / risk-state / kill /
+trade-window / budget-tier) to the §3.2.1 topics, rendering them through the §8 catalog (R8).
 
 All owner-confirmed state changes use :data:`Actor.OWNER`. All times come from :class:`Clock` — the
 challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()`` (§3.2 convention).
@@ -31,24 +37,46 @@ challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()`
 
 from __future__ import annotations
 
+import json
 import secrets as _secrets
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from functools import wraps
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from engine.core.clock import Clock
-from engine.core.enums import Actor, Mode
+from engine.core.db import transaction
+from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.types import OwnerConfirmation
+from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
+from engine.notify import catalog
+from engine.risk.causes import CAUSE_OWNER_PAUSE, CAUSE_REJECTION_STORM
+from engine.risk.events import (
+    TOPIC_KILL_STATE,
+    TOPIC_MODE_CHANGED,
+    TOPIC_RISK_STATE,
+    TOPIC_TRADE_WINDOW,
+    KillStateChanged,
+    ModeChanged,
+    RiskStateChanged,
+    TradeWindowChanged,
+)
 
 if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
+    from engine.broker.session import SessionManager
+    from engine.intelligence.governor import BudgetGovernor
+    from engine.risk.causes import RiskStateLatch
+    from engine.risk.exposure import ExposureTracker
     from engine.risk.kill import KillSwitch
+    from engine.risk.limits import LimitsEngine
     from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.notify.telegram")
@@ -57,8 +85,27 @@ _log = get_logger("engine.notify.telegram")
 # keeps a stale confirm phrase from authorising a destructive action long after the owner asked.
 _CHALLENGE_TTL = timedelta(minutes=2)
 
-# Commands whose downstream lands in Phase 2+ — wired as logged stubs that reply with this text.
+# Reply text for a command registered from the catalog but whose downstream is not yet wired.
 _PHASE0_STUB = "not yet implemented in Phase 0"
+
+
+class RecoBook(Protocol):
+    """The RECOMMEND outcome-capture seam (§3.6) — implemented by ``RecommendationBook``.
+
+    Duck-typed on purpose (mirrors the ``FloorLimits`` seam in ``engine.risk.exposure``): the bot
+    depends on these three coroutines and nothing else, so the book can land independently. Each
+    returns an owner-facing summary string and raises :class:`ValueError` — with a message meant for
+    the owner — on an unknown ``rec_id`` or an invalid state transition.
+
+    ``apply_approval`` is OPTIONAL and probed with ``hasattr``: in Phase 2 a stop-widen approval has
+    no order side effect (the human owns their orders, B7), so a book that cannot apply one is fine.
+    """
+
+    async def take(self, rec_id: str, qty: int, price: Decimal) -> str: ...
+
+    async def close(self, rec_id: str, price: Decimal) -> str: ...
+
+    async def veto(self, rec_id: str) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -66,20 +113,22 @@ class _CommandSpec:
     """One row of the §3.2.11 owner-command catalog.
 
     Single source of truth for handler registration, ``/help``, and the Telegram ``/`` autocomplete
-    menu (``setMyCommands``) — so all three can never drift. ``live`` is True for commands fully wired
-    in Phase 0 and False for the Phase-2+ stubs (which register but reply ``_PHASE0_STUB``).
+    menu (``setMyCommands``) — so all three can never drift. ``live`` is True for a command with a real
+    handler and False for one registered as a logged stub replying ``_PHASE0_STUB``. Every §3.2.11
+    command is live as of Phase 2: a live command whose OPTIONAL dependency is unwired replies
+    "… not wired", which is a handler's honest answer, not a stub.
     """
 
     name: str        # command word, no leading slash (Telegram requires ^[a-z0-9_]{1,32}$)
     usage: str       # owner-facing signature, e.g. "/mode <OFF|RECOMMEND|AUTO>"
     summary: str     # one-line description of what it does
-    live: bool       # True ⇒ wired now; False ⇒ Phase-2 stub
+    live: bool       # True ⇒ real handler; False ⇒ registered stub
 
 
-# Ordered so ``/help`` and the menu read top-to-bottom in a sensible sequence (live first). Editing
-# this tuple is the ONLY place to add/relabel a command — registration + help + menu follow from it.
+# Ordered so ``/help`` and the menu read top-to-bottom in a sensible sequence (control plane first).
+# Editing this tuple is the ONLY place to add/relabel a command — registration + help + menu follow.
 _COMMANDS: tuple[_CommandSpec, ...] = (
-    # --- fully wired in Phase 0 ---
+    # --- sticky control plane (mode / kill / window) ---
     _CommandSpec("status", "/status",
                  "Show sticky control-plane state — mode, order routing, risk_state, kill switch, "
                  "and trade window. Read-only.", True),
@@ -96,29 +145,44 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("confirm", "/confirm <phrase>",
                  "Complete a pending two-step challenge (kill reset or →AUTO) with its phrase.", True),
     _CommandSpec("help", "/help", "List every command and what it does.", True),
-    # --- Phase 2+ data sources — registered but reply that they are not yet implemented ---
-    _CommandSpec("positions", "/positions", "Show open positions (qty, average price, P&L).", False),
-    _CommandSpec("pnl", "/pnl", "Show today's realised and unrealised P&L.", False),
-    _CommandSpec("veto", "/veto", "Veto a pending recommendation before it acts.", False),
-    _CommandSpec("close", "/close", "Request a close of an open position.", False),
-    _CommandSpec("approve", "/approve", "Approve a pending action (e.g. a stop-widen).", False),
-    _CommandSpec("reject", "/reject", "Reject a pending recommendation or action.", False),
-    _CommandSpec("token", "/token", "Submit the daily Kite login request token.", False),
-    _CommandSpec("budget", "/budget", "Show LLM/API spend vs. cap and the active degrade rung.", False),
-    _CommandSpec("limits", "/limits", "Show the active (protected) risk limits.", False),
-    _CommandSpec("pause_entries", "/pause_entries", "Pause new entries; risk-reducing exits continue.",
-                 False),
-    _CommandSpec("resume_entries", "/resume_entries", "Resume new entries after a pause.", False),
-    _CommandSpec("taken", "/taken", "Confirm you took a recommended trade (origin=recommended).", False),
-    _CommandSpec("closed", "/closed", "Mark a recommended trade as closed.", False),
+    # --- entries pause / re-arm (§3.5.3 per-cause latch) ---
+    _CommandSpec("pause_entries", "/pause_entries",
+                 "Pause new entries (risk_state FROZEN); risk-reducing exits continue.", True),
+    _CommandSpec("resume_entries", "/resume_entries",
+                 "Resume entries: clears the owner pause AND a rejection-storm freeze.", True),
+    # --- RECOMMEND outcome capture (§3.6) ---
+    _CommandSpec("taken", "/taken <rec_id> <qty> <price>",
+                 "Confirm you took a recommendation at qty/price (origin=recommended).", True),
+    _CommandSpec("closed", "/closed <rec_id> <price>",
+                 "Mark a taken recommendation closed at price (records the outcome).", True),
+    _CommandSpec("veto", "/veto <rec_id>",
+                 "Decline an open recommendation; it is recorded as vetoed, never as taken.", True),
+    _CommandSpec("close", "/close <position_id>",
+                 "Guidance for exiting a position — in RECOMMEND the exit is yours to place (B7).",
+                 True),
+    # --- read-only reports ---
+    _CommandSpec("positions", "/positions",
+                 "Show open positions (qty, average entry, stop/target, origin).", True),
+    _CommandSpec("pnl", "/pnl", "Show realised P&L today, day MTM and platform equity.", True),
+    _CommandSpec("budget", "/budget",
+                 "Show month-to-date LLM spend per agent vs allocation and the degrade tier.", True),
+    _CommandSpec("limits", "/limits",
+                 "Show equity, day MTM, open counts, consecutive losses and the key caps.", True),
+    # --- approvals + broker session ---
+    _CommandSpec("approve", "/approve <approval_id>",
+                 "Approve a pending owner-approval request (e.g. a stop-widen).", True),
+    _CommandSpec("reject", "/reject <approval_id>", "Reject a pending owner-approval request.", True),
+    _CommandSpec("token", "/token <request_token>",
+                 "Complete the daily Kite login with the request token (§10.2 fallback).", True),
 )
 
 
 def _help_text() -> str:
     """Render the full §3.2.11 command catalog as one owner-facing plain-text message (no markdown).
 
-    Live commands list their usage signature + description; Phase-2 stubs are grouped under a clearly
-    labelled "not yet available" heading so the owner is never misled into thinking they act.
+    Live commands list their usage signature + description; any non-live spec is grouped under a
+    clearly labelled "not yet available" heading so the owner is never misled into thinking it acts
+    (as of Phase 2 every §3.2.11 command is live, so that section is normally empty).
     """
     live = [c for c in _COMMANDS if c.live]
     later = [c for c in _COMMANDS if not c.live]
@@ -172,6 +236,13 @@ class TelegramBot:
         mode_manager: ModeManager | None = None,
         kill_switch: KillSwitch | None = None,
         bus: EventBus | None = None,
+        reco_book: RecoBook | None = None,
+        latch: RiskStateLatch | None = None,
+        governor: BudgetGovernor | None = None,
+        limits_engine: LimitsEngine | None = None,
+        exposure: ExposureTracker | None = None,
+        session: SessionManager | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> None:
         self._token = token
         self._owner_chat_id = int(owner_chat_id)
@@ -179,7 +250,17 @@ class TelegramBot:
         self._mode = mode_manager
         self._kill = kill_switch
         self._bus = bus
+        # Phase-2 data sources. Every one is OPTIONAL: composition (§3.2.12) wires them in a later
+        # wave, and until then the owning command replies "not wired" rather than half-acting.
+        self._reco_book = reco_book
+        self._latch = latch
+        self._governor = governor
+        self._limits = limits_engine
+        self._exposure = exposure
+        self._session = session
+        self._conn = conn
         self._app: Application | None = None
+        self._bus_attached = False
         # At most one challenge is pending at a time — a new destructive command supersedes the old.
         self._pending: _PendingChallenge | None = None
 
@@ -266,7 +347,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ command table
     def _live_handlers(self) -> dict[str, Callable[..., Awaitable[None]]]:
-        """Name → bound handler for every command wired in Phase 0.
+        """Name → bound handler for every command with a real implementation.
 
         Must cover exactly the ``live`` rows of :data:`_COMMANDS`: a live spec with no handler here
         fails fast at registration (KeyError), and an orphan handler with no spec is never registered —
@@ -280,6 +361,19 @@ class TelegramBot:
             "trade_window": self._cmd_trade_window,
             "confirm": self._cmd_confirm,
             "help": self._cmd_help,
+            "pause_entries": self._cmd_pause_entries,
+            "resume_entries": self._cmd_resume_entries,
+            "taken": self._cmd_taken,
+            "closed": self._cmd_closed,
+            "veto": self._cmd_veto,
+            "close": self._cmd_close,
+            "positions": self._cmd_positions,
+            "pnl": self._cmd_pnl,
+            "budget": self._cmd_budget,
+            "limits": self._cmd_limits,
+            "approve": self._cmd_approve,
+            "reject": self._cmd_reject,
+            "token": self._cmd_token,
         }
 
     def _register_handlers(self, app: Application) -> None:
@@ -477,6 +571,342 @@ class TelegramBot:
         _log.info("telegram_challenge_issued", action=action)
         return phrase
 
+    # ------------------------------------------------------------------ /pause_entries /resume_entries
+    async def _cmd_pause_entries(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner pause: latch the ``owner_pause`` cause at FROZEN (§3.5.3). Exits keep running (R3)."""
+        if self._latch is None:
+            await _reply(update, "/pause_entries: risk-state latch not wired.")
+            return
+        state = await self._latch.set_cause(
+            CAUSE_OWNER_PAUSE, RiskState.FROZEN, "owner /pause_entries", Actor.OWNER
+        )
+        _log.warning("telegram_cmd_pause_entries", risk_state=state.value)
+        await _reply(
+            update,
+            f"entries PAUSED — risk_state {state.value}. Risk-reducing exits/protection continue (R3). "
+            "Send /resume_entries to re-arm.",
+        )
+
+    async def _cmd_resume_entries(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner re-arm. Clears BOTH the owner pause and a rejection-storm freeze — §3.5.3 makes a
+        rejection storm the one FROZEN cause that never auto-recovers; ``/resume_entries`` IS its
+        recovery path. Any other cause still latching keeps entries closed, and the reply says so."""
+        if self._latch is None:
+            await _reply(update, "/resume_entries: risk-state latch not wired.")
+            return
+        await self._latch.clear_cause(CAUSE_OWNER_PAUSE, Actor.OWNER)
+        state = await self._latch.clear_cause(CAUSE_REJECTION_STORM, Actor.OWNER)
+        remaining = [cause for cause, _state, _detail in self._latch.active_causes()]
+        _log.warning("telegram_cmd_resume_entries", risk_state=state.value, remaining=remaining)
+        text = f"owner pause + rejection-storm freeze cleared — risk_state {state.value}."
+        if remaining:
+            text += " Still latched by: " + ", ".join(remaining) + "."
+        await _reply(update, text)
+
+    # ------------------------------------------------------------------ RECOMMEND outcome capture (§3.6)
+    async def _cmd_taken(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner confirms they took a recommendation — creates the ``origin='recommended'`` position."""
+        if self._reco_book is None:
+            await _reply(update, "/taken: recommendation book not wired.")
+            return
+        args = _args(context)
+        if len(args) != 3:
+            await _reply(update, "usage: /taken <rec_id> <qty> <price>")
+            return
+        qty, price = _parse_int(args[1]), _parse_decimal(args[2])
+        if qty is None or qty <= 0 or price is None or price <= 0:
+            await _reply(update, "invalid qty/price; usage: /taken <rec_id> <qty> <price>")
+            return
+        _log.warning("telegram_cmd_taken", rec_id=args[0], qty=qty, price=str(price))
+        await _reply(update, await _book_result(self._reco_book.take(args[0], qty, price)))
+
+    async def _cmd_closed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner marks a taken recommendation closed at ``price`` (§3.6 outcome capture)."""
+        if self._reco_book is None:
+            await _reply(update, "/closed: recommendation book not wired.")
+            return
+        args = _args(context)
+        if len(args) != 2:
+            await _reply(update, "usage: /closed <rec_id> <price>")
+            return
+        price = _parse_decimal(args[1])
+        if price is None or price <= 0:
+            await _reply(update, "invalid price; usage: /closed <rec_id> <price>")
+            return
+        _log.warning("telegram_cmd_closed", rec_id=args[0], price=str(price))
+        await _reply(update, await _book_result(self._reco_book.close(args[0], price)))
+
+    async def _cmd_veto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner declines an open recommendation. Recorded as vetoed — never silently as a non-fill,
+        which is a different (unbiased) training label (§6.5)."""
+        if self._reco_book is None:
+            await _reply(update, "/veto: recommendation book not wired.")
+            return
+        args = _args(context)
+        if len(args) != 1:
+            await _reply(update, "usage: /veto <rec_id>")
+            return
+        _log.warning("telegram_cmd_veto", rec_id=args[0])
+        await _reply(update, await _book_result(self._reco_book.veto(args[0])))
+
+    async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Exit guidance — the v1 answer, and an honest one: in RECOMMEND the platform places ZERO API
+        orders (B7), so there is nothing for this command to send. It marks nothing and changes no
+        state; the owner exits in their terminal and reports it with ``/closed`` (§3.6)."""
+        args = _args(context)
+        target = args[0] if args else "<position_id>"
+        _log.info("telegram_cmd_close", position_id=args[0] if args else None)
+        await _reply(
+            update,
+            f"/close {target}: nothing was sent to the broker. In RECOMMEND the exit decision AND the "
+            "order are yours — the platform places zero API orders (B7). Square off in your terminal, "
+            "then send /closed <rec_id> <price> so the outcome is recorded (§3.6). Platform-placed "
+            "exits arrive with AUTO in Phase 3.",
+        )
+
+    # ------------------------------------------------------------------ read-only reports
+    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Open positions, straight off the state store (read-only, no broker call)."""
+        if self._conn is None:
+            await _reply(update, "/positions: state store not wired.")
+            return
+        rows = self._conn.execute(
+            "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, origin, "
+            "protection_state FROM positions WHERE state='OPEN' ORDER BY opened_at"
+        ).fetchall()
+        _log.info("telegram_cmd_positions", count=len(rows))
+        if not rows:
+            await _reply(update, "no open positions.")
+            return
+        lines = [f"open positions: {len(rows)}"]
+        for row in rows:
+            lines.append(
+                f"{row['symbol']} {row['side']} {row['qty']} @ {row['avg_entry']} · "
+                f"{row['product'] or '-'} · stop {row['stop'] or '-'} · target {row['target'] or '-'} · "
+                f"{row['origin']} · {row['protection_state'] or 'unprotected'} · id {row['position_id']}"
+            )
+        await _reply(update, "\n".join(lines))
+
+    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Today's P&L off :class:`~engine.risk.exposure.ExposureTracker` (rebuilt from the tables).
+
+        ``origin='external'`` is excluded upstream (O5) — this is platform P&L, not account P&L. With
+        no mark source wired the open-MTM term would silently read ₹0 (marks fall back to avg entry),
+        so it is reported as unavailable instead of as a number the owner might trust.
+        """
+        if self._exposure is None:
+            await _reply(update, "/pnl: exposure tracker not wired.")
+            return
+        exp = self._exposure
+        today = self._clock.today()
+        lines = [f"P&L {today.isoformat()} (platform only; external excluded, O5)"]
+        realized_today = _realized_today(exp, today)
+        if realized_today is not None:
+            lines.append(f"realised today: {_inr(realized_today)}")
+        lines.append(f"day MTM: {_inr(exp.day_mtm())}")
+        lines.append(f"realised all-time: {_inr(exp.realized_net())}")
+        # No mark source ⇒ open_mtm() degrades to zero-at-entry — say so instead of presenting a
+        # zero placeholder as a real mark-to-market.
+        if not exp.has_mark_source():
+            lines.append("open MTM: n/a offline (no mark source)")
+        else:
+            lines.append(f"open MTM: {_inr(exp.open_mtm())}")
+        lines.append(f"equity: {_inr(exp.equity())} · open: {exp.open_position_counts().total}")
+        _log.info("telegram_cmd_pnl")
+        await _reply(update, "\n".join(lines))
+
+    async def _cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Month-to-date LLM spend vs the per-agent allocations + the active §5.6 degrade tier."""
+        if self._governor is None:
+            await _reply(update, "/budget: budget governor not wired.")
+            return
+        gov = self._governor
+        credit = gov.credit()
+        allocations: dict[str, Any] = gov.allocations()
+        lines = [
+            f"month spend: {_usd(gov.month_spend())}" + (f" / {_usd(credit)} credit" if credit else ""),
+            f"pro-rata to date: {_usd(gov.pro_rata_to_date())} (trading days, R6)",
+            f"tier: {gov.degrade_tier().value}",
+        ]
+        if allocations:
+            lines.append("per agent (spend / allocation):")
+            lines += [
+                f"  {agent}: {_usd(gov.agent_spend(agent))} / {_usd(alloc)}"
+                for agent, alloc in sorted(allocations.items())
+            ]
+        _log.info("telegram_cmd_budget")
+        await _reply(update, "\n".join(lines))
+
+    async def _cmd_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Live headroom against the §7.1 caps: what is used vs what the protected store allows."""
+        if self._limits is None or self._exposure is None:
+            await _reply(update, "/limits: limits engine / exposure tracker not wired.")
+            return
+        try:
+            table = self._limits.table()
+        except Exception as exc:  # noqa: BLE001 - an integrity failure is the gate's call, not the bot's
+            _log.exception("telegram_limits_load_failed")
+            await _reply(update, f"/limits: limits unavailable ({exc}).")
+            return
+        lim, exp = table.limits, self._exposure
+        counts = exp.open_position_counts()
+        lines = [
+            f"equity: {_inr(exp.equity())} (base {_inr(table.capital_base_inr)})",
+            f"day MTM: {_inr(exp.day_mtm())} "
+            f"(soft {lim.daily_loss_soft.day_mtm_pct}% / hard {lim.daily_loss_hard.day_mtm_pct}%)",
+            f"open: {counts.total}/{lim.max_open_positions.total} "
+            f"(MIS {counts.mis}/{lim.max_open_positions.max_mis}, "
+            f"CNC {counts.cnc}/{lim.max_open_positions.max_cnc})",
+            f"consecutive losses: {exp.consecutive_losses()}/{lim.consecutive_losses.max_per_session}",
+            f"trades today: {exp.trades_opened_today()}/{lim.max_new_trades_day.count}",
+            f"deployed capital: {_inr(exp.deployed_capital())} / "
+            f"{_inr(lim.capital_cap.max_deployed_capital_inr)}",
+            f"per-trade risk: intraday {lim.per_trade_risk.intraday_pct}% · "
+            f"swing/position {lim.per_trade_risk.swing_position_pct}%",
+        ]
+        _log.info("telegram_cmd_limits")
+        await _reply(update, "\n".join(lines))
+
+    # ------------------------------------------------------------------ owner approvals (§3.4)
+    async def _cmd_approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Approve one ``owner_approvals`` row (e.g. a stop-widen, R1)."""
+        await self._resolve_approval(update, context, "approved")
+
+    async def _cmd_reject(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reject one ``owner_approvals`` row."""
+        await self._resolve_approval(update, context, "rejected")
+
+    async def _resolve_approval(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, status: str
+    ) -> None:
+        """Stamp the approval row and report it. NO side effect beyond the row in Phase 2 — the human
+        manages their own orders (B7). If the injected recommendation book knows how to push an
+        approved stop onto a tracked position it is offered the approval (probe, never a requirement:
+        the book lands in a parallel task and may not implement it yet)."""
+        verb = "approve" if status == "approved" else "reject"
+        if self._conn is None:
+            await _reply(update, f"/{verb}: state store not wired.")
+            return
+        args = _args(context)
+        if len(args) != 1:
+            await _reply(update, f"usage: /{verb} <approval_id>")
+            return
+        approval_id = args[0]
+        row = self._conn.execute(
+            "SELECT approval_id, kind, payload, status FROM owner_approvals WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()
+        if row is None:
+            await _reply(update, f"unknown approval {approval_id}.")
+            return
+        current = row["status"] or "pending"
+        if current != "pending":
+            await _reply(update, f"approval {approval_id} already {current}; unchanged.")
+            return
+        now = self._clock.now().isoformat()
+        with transaction(self._conn):
+            self._conn.execute(
+                "UPDATE owner_approvals SET status=?, resolved_at=? WHERE approval_id=?",
+                (status, now, approval_id),
+            )
+        _log.warning("telegram_cmd_approval", approval_id=approval_id, status=status, kind=row["kind"])
+        lines = [f"approval {approval_id} {status} ({row['kind'] or 'unknown kind'})"]
+        payload = _render_payload(row["payload"])
+        if payload:
+            lines.append(payload)
+        if status == "approved":
+            applied = await self._apply_approval(approval_id)
+            if applied:
+                lines.append(applied)
+        await _reply(update, "\n".join(lines))
+
+    async def _apply_approval(self, approval_id: str) -> str | None:
+        """Offer an approved approval to the recommendation book, if it implements ``apply_approval``."""
+        apply = getattr(self._reco_book, "apply_approval", None) if self._reco_book else None
+        if apply is None:
+            return None
+        try:
+            return str(await apply(approval_id))
+        except Exception as exc:  # noqa: BLE001 - the row is already stamped; report, never crash (R8)
+            _log.exception("telegram_apply_approval_failed", approval_id=approval_id)
+            return f"(applying the approval failed: {exc})"
+
+    # ------------------------------------------------------------------ /token (§10.2 fallback path)
+    async def _cmd_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Complete the daily Kite login with a pasted ``request_token`` — the §10.2 fallback for when
+        the ``/kite/callback`` redirect cannot reach the engine (off-LAN)."""
+        if self._session is None:
+            await _reply(update, "/token: session manager not wired.")
+            return
+        args = _args(context)
+        if len(args) != 1:
+            await _reply(update, "usage: /token <request_token>")
+            return
+        try:
+            await self._session.complete_login(args[0])
+        except Exception as exc:  # noqa: BLE001 - a bad/expired token must not kill the control plane
+            _log.exception("telegram_cmd_token_failed")
+            await _reply(update, f"login failed: {exc}")
+            return
+        _log.warning("telegram_cmd_token_ok")
+        await _reply(update, "Session live ✅ — daily Kite login complete.")
+
+    # ------------------------------------------------------------------ outbound bus alerts (R8)
+    def attach_bus(self, bus: EventBus | None = None) -> None:
+        """Subscribe the owner-alert handlers to the §3.2.1 control-plane topics (R8).
+
+        Every handler renders through the §8 catalog and calls :meth:`send`, which is best-effort — a
+        Telegram outage can never break a publisher (mode change, kill, risk-state latch). Attaching
+        twice would double-send, so the second call is a no-op.
+        """
+        target = bus if bus is not None else self._bus
+        if target is None:
+            _log.warning("telegram_attach_bus_noop", reason="no_bus")
+            return
+        if self._bus_attached:
+            _log.warning("telegram_attach_bus_noop", reason="already_attached")
+            return
+        self._bus = target
+        target.subscribe(TOPIC_MODE_CHANGED, self._on_mode_changed)
+        target.subscribe(TOPIC_RISK_STATE, self._on_risk_state)
+        target.subscribe(TOPIC_KILL_STATE, self._on_kill_state)
+        target.subscribe(TOPIC_TRADE_WINDOW, self._on_trade_window)
+        target.subscribe(TOPIC_BUDGET_STATE, self._on_budget_state)
+        self._bus_attached = True
+        _log.info("telegram_bus_attached")
+
+    async def _on_mode_changed(self, event: ModeChanged) -> None:
+        await self.send(
+            catalog.mode_change(
+                event.old_mode.value, event.new_mode.value, event.actor.value, event.reason
+            )
+        )
+
+    async def _on_risk_state(self, event: RiskStateChanged) -> None:
+        await self.send(
+            catalog.risk_state_change(event.old_state.value, event.new_state.value, event.reason)
+        )
+
+    async def _on_kill_state(self, event: KillStateChanged) -> None:
+        await self.send(
+            catalog.kill_state(killed=event.killed, reason=event.reason, actor=event.actor.value)
+        )
+
+    async def _on_trade_window(self, event: TradeWindowChanged) -> None:
+        await self.send(
+            catalog.trade_window_changed(
+                start=event.start_ist,
+                end=event.end_ist,
+                buffer_min=event.squareoff_buffer_min,
+                actor=event.actor.value,
+            )
+        )
+
+    async def _on_budget_state(self, event: BudgetStateChanged) -> None:
+        await self.send(
+            catalog.budget_tier(event.old_tier.value, event.new_tier.value, event.month_spend_usd)
+        )
+
 
 # ---------------------------------------------------------------------- module-level guards/helpers
 
@@ -516,6 +946,76 @@ async def _reply(update: Update, text: str) -> None:
 def _args(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
     """Command arguments, or an empty list."""
     return list(context.args) if context.args else []
+
+
+def _parse_int(raw: str) -> int | None:
+    """Parse a whole-number command argument; None on anything malformed."""
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_decimal(raw: str) -> Decimal | None:
+    """Parse a price argument as an exact :class:`Decimal` (money is never a float, §8.1). Thousands
+    separators are tolerated because owners type them; anything else is None."""
+    try:
+        return Decimal(raw.strip().replace(",", ""))
+    except (TypeError, ValueError, InvalidOperation):
+        return None
+
+
+def _inr(value: Any) -> str:
+    """Render a rupee amount for the owner. Display-only rounding — the stored value stays Decimal."""
+    return f"₹{Decimal(value):,.2f}"
+
+
+def _usd(value: Any) -> str:
+    """Render a USD budget amount. Four places: per-call LLM costs are fractions of a cent, and a
+    2-decimal render would report a real month's early spend as ``$0.00``."""
+    return f"${Decimal(value):,.4f}"
+
+
+async def _book_result(call: Awaitable[str]) -> str:
+    """Await a :class:`RecoBook` call and turn any failure into an owner-facing line.
+
+    ``ValueError`` is the book's contract for "unknown rec / invalid transition" and already carries a
+    message written for the owner, so it is surfaced verbatim; anything else is a bug, logged with a
+    traceback and reported — a bad book call must never take down the control plane (R8)."""
+    try:
+        return await call
+    except ValueError as exc:
+        _log.warning("telegram_reco_book_rejected", error=str(exc))
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 - report, never crash the bot (R8)
+        _log.exception("telegram_reco_book_failed")
+        return f"failed: {exc}"
+
+
+def _render_payload(raw: str | None) -> str:
+    """Render an ``owner_approvals`` payload as owner-facing lines.
+
+    Structured data belongs in the audit log, prose belongs in the message (§8/R8) — dumping the raw
+    JSON blob into the chat is exactly the leak ``CatalogMessage.render`` exists to prevent."""
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    if isinstance(data, dict):
+        return "\n".join(f"  {key}: {value}" for key, value in data.items())
+    return str(data)
+
+
+def _realized_today(exposure: Any, day: date) -> Decimal | None:
+    """Net realised P&L of platform/recommended positions CLOSED today, or None if unavailable —
+    a read-only report must never be the thing that breaks."""
+    try:
+        return exposure.realized_net_closed_on(day)
+    except Exception:  # noqa: BLE001 - a display line is never worth failing the command over
+        _log.exception("telegram_realized_today_failed")
+        return None
 
 
 def _parse_hhmm(raw: str):

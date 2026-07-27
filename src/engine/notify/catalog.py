@@ -25,6 +25,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from engine.core.contracts import Recommendation
+
 # Severity is a closed vocabulary shared by every kind; "critical" maps to the loud/alert path.
 Severity = Literal["info", "warning", "critical"]
 
@@ -144,6 +146,27 @@ class MessageKind(StrEnum):
     """A safety/deadline-critical daily job (instruments/tick-size A10, surveillance A8, earnings
     calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
     FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3)."""
+
+    MODE_CHANGE = "mode_change"
+    """The engine mode moved ``OFF ↔ RECOMMEND ↔ AUTO`` (§10.3 ``MODE_CHANGE``). Owner-initiated or a
+    risk-forced downgrade — the ``actor`` says which, and a risk-forced one never re-arms on a timer
+    (R3/R5). Warning: the owner must always know which mode their capital is running under."""
+
+    RISK_STATE_CHANGE = "risk_state_change"
+    """The Tier-2 risk state moved (§10.3 ``RISK_STATE(FROZEN/CLOSE_ONLY)``, §3.5.3). Carries the
+    per-cause reason that drove the edge — states are reached by direct per-cause edges composed
+    most-restrictive-wins, so the cause is the actionable half of the message (see
+    :class:`engine.risk.causes.RiskStateLatch`)."""
+
+    CATALYST_WATCHLIST = "catalyst_watchlist"
+    """The daily catalyst watchlist was built (§4.4 job 14 / §10.3 ``CATALYST_WATCHLIST``): how many
+    symbols are ORIGINATING candidates (news may start a trade) vs CONTEXT-only (news may veto/size
+    but never originate, O11/§2.7)."""
+
+    CATALYST_DISABLED = "catalyst_disabled"
+    """The news/catalyst layer disabled itself via the §2.7 fail-safe ladder (stale digest, too few
+    source domains, feed outage, …). Warning, not critical: the platform keeps trading its
+    deterministic strategies — it just stops originating on news (§10.3 ``CATALYST_DISABLED``)."""
 
     POST_LOGIN_RECOVERY = "post_login_recovery"
     """The §2.6 cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
@@ -352,7 +375,8 @@ def rec_fill_suspected(
         # One-tap confirm: the button command is the literal /taken the bot will execute (§3.6).
         reply_keyboard=[
             [{"text": f"✓ /taken {symbol} {qty}@{price_s}", "command": f"/taken {rec_id} {qty} {price_s}"}],
-            [{"text": "✗ No action", "command": f"/reject {rec_id}"}],
+            # /veto is the rec-dismiss command (§3.6); /reject resolves owner_approvals rows.
+            [{"text": "✗ No action", "command": f"/veto {rec_id}"}],
         ],
     )
 
@@ -511,6 +535,191 @@ def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
             "steps": [{"name": n, "status": s, "detail": d} for n, s, d in steps],
             "any_failed": any_failed,
         },
+    )
+
+
+def mode_change(old: str, new: str, actor: str, reason: str) -> CatalogMessage:
+    """Engine mode changed (§10.3 ``MODE_CHANGE``; §3.5.3 machine). Rendered from the ``mode.changed``
+    event, so the owner sees every transition — including a gate-forced downgrade they did not ask for
+    (which re-arms only on explicit owner action, never a timer; R3/R5)."""
+    return CatalogMessage(
+        kind=MessageKind.MODE_CHANGE,
+        title=f"Mode {old} → {new}",
+        body=f"Engine mode changed {old} → {new} by {actor} (reason: {reason}).",
+        severity="warning",
+        data={"old": old, "new": new, "actor": actor, "reason": reason},
+    )
+
+
+def risk_state_change(old: str, new: str, cause: str) -> CatalogMessage:
+    """Risk state changed (§10.3 ``RISK_STATE``; §3.5.3 per-cause edges, most-restrictive-wins).
+
+    ``cause`` is the latching cause (or the re-arm note) from
+    :class:`engine.risk.causes.RiskStateLatch` — the actionable half: it names what must clear before
+    entries reopen. Risk-reducing actions are never gated by any of these states (R3)."""
+    return CatalogMessage(
+        kind=MessageKind.RISK_STATE_CHANGE,
+        title=f"Risk state {old} → {new}",
+        body=(
+            f"Risk state changed {old} → {new} (cause: {cause}).\n"
+            "Risk-reducing exits/protection continue in every state (R3)."
+        ),
+        severity="warning",
+        data={"old": old, "new": new, "cause": cause},
+    )
+
+
+def kill_state(*, killed: bool, reason: str, actor: str) -> CatalogMessage:
+    """Kill switch engaged or reset (§10.3 ``KILL/KILL_RESET``, §7.2). Engaging is loud (``critical``)
+    and single-step; the reset is the owner's two-step ``/kill_reset`` + ``/confirm`` flow (R10)."""
+    return CatalogMessage(
+        kind=MessageKind.KILL,
+        title="KILL SWITCH ENGAGED" if killed else "Kill switch reset",
+        body=(
+            f"Trading halted — {reason} (by {actor}). Reset is owner two-step: /kill_reset then /confirm."
+            if killed
+            else f"Kill switch cleared by {actor} ({reason}); trading may resume subject to mode + risk state."
+        ),
+        severity="critical" if killed else "warning",
+        data={"killed": killed, "reason": reason, "actor": actor},
+    )
+
+
+def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -> CatalogMessage:
+    """The daily trade window was changed (§3.2.7/§10.3 ``TRADE_WINDOW_CHANGED``). Already-rendered
+    ``HH:MM`` strings in (no Clock access here); the setter validated + audited before publishing."""
+    return CatalogMessage(
+        kind=MessageKind.TRADE_WINDOW_CHANGED,
+        title=f"Trade window {start}-{end}",
+        body=(
+            f"Entries are now confined to {start}-{end} IST (MIS square-off buffer {buffer_min}m), "
+            f"set by {actor}. Exits/protection are never gated by the window (R3)."
+        ),
+        severity="info",
+        data={"start": start, "end": end, "buffer_min": buffer_min, "actor": actor},
+    )
+
+
+def budget_tier(old: str, new: str, month_spend: Decimal) -> CatalogMessage:
+    """The §5.6 degrade ladder moved a rung (§10.3 ``BUDGET_TIER(DGn)``).
+
+    Reuses :data:`MessageKind.BUDGET_WARNING` — the ladder IS the budget warning; a second kind for the
+    same event would fork the audit log (R8)."""
+    return CatalogMessage(
+        kind=MessageKind.BUDGET_WARNING,
+        title=f"Budget tier {old} → {new}",
+        body=(
+            f"LLM/API degrade ladder moved {old} → {new} (month spend ${month_spend}). "
+            "Capabilities change per the §5.6 ladder; /budget shows the per-agent split."
+        ),
+        severity="warning",
+        data={"old_tier": old, "new_tier": new, "month_spend_usd": str(month_spend)},
+    )
+
+
+def catalyst_watchlist(n_originating: int, n_context: int) -> CatalogMessage:
+    """Daily catalyst watchlist built (§4.4 job 14 / §10.3 ``CATALYST_WATCHLIST(n_originating,
+    n_context)``). ORIGINATING symbols may start a trade; CONTEXT-only symbols may only veto/size
+    one (O11/§2.7) — the split is the whole message."""
+    return CatalogMessage(
+        kind=MessageKind.CATALYST_WATCHLIST,
+        title="Catalyst watchlist built",
+        body=(
+            f"originating: {n_originating}\ncontext-only: {n_context}\n"
+            "Context-only symbols can veto or size a trade, never originate one (O11)."
+        ),
+        severity="info",
+        data={"n_originating": n_originating, "n_context": n_context},
+    )
+
+
+def catalyst_disabled(reason: str) -> CatalogMessage:
+    """The news/catalyst layer disabled itself (§2.7 fail-safe ladder / §10.3 ``CATALYST_DISABLED``).
+    Deterministic strategies keep running — only news-originated entries stop."""
+    return CatalogMessage(
+        kind=MessageKind.CATALYST_DISABLED,
+        title="Catalyst layer disabled",
+        body=(
+            f"News-originated entries are OFF: {reason}\n"
+            "Deterministic strategies are unaffected; the layer re-enables when the condition clears."
+        ),
+        severity="warning",
+        data={"reason": reason},
+    )
+
+
+#: §3.6 recommendation rendering budgets — a Telegram message must stay readable on a phone.
+THESIS_MAX_CHARS = 300
+MAX_HEADROOM_LINES = 5
+
+
+def recommendation_message(rec: Recommendation) -> CatalogMessage:
+    """Render a §3.6 :class:`~engine.core.contracts.Recommendation` for the owner (§10.3
+    ``RECOMMENDATION``).
+
+    Everything the human needs to act is in the prose — instrument/side/style/product, entry zone,
+    stop, targets, size, the gate verdict WITH per-rule headroom (R1: headroom ships in the payload),
+    this trade's breakeven math (C3), and the B7/R3 manual protective-order checklist. The platform
+    places ZERO API orders in RECOMMEND, so the checklist is the mechanism that transfers protection
+    responsibility to the human explicitly — it is never truncated away.
+
+    Failed gate checks sort first among the at-most :data:`MAX_HEADROOM_LINES` headroom lines: a
+    ``shrink``/``owner_approval_required`` verdict is only meaningful next to the rule that caused it.
+    The thesis is truncated at :data:`THESIS_MAX_CHARS`; the full object is on the dashboard.
+    """
+    low, high = rec.entry_zone
+    targets = " / ".join(str(t) for t in rec.targets) or "(none)"
+    thesis = rec.thesis[:THESIS_MAX_CHARS] + ("…" if len(rec.thesis) > THESIS_MAX_CHARS else "")
+    checks = sorted(rec.gate.checks, key=lambda c: c.passed)[:MAX_HEADROOM_LINES]
+    approved = rec.gate.approved_qty if rec.gate.approved_qty is not None else rec.qty
+
+    lines = [
+        f"{rec.side} {rec.instrument} · {rec.style}/{rec.product} · qty {rec.qty} "
+        f"(notional ₹{rec.notional})",
+        f"entry {low}-{high} · stop {rec.stop} · targets {targets}",
+        f"confidence {rec.confidence:.2f} · valid until {rec.valid_until.isoformat(timespec='minutes')}",
+    ]
+    if rec.short_flag_higher_tail_risk:
+        lines.append("SHORT — higher tail risk (C8 shorting policy).")
+    lines += [
+        f"thesis: {thesis}",
+        f"gate: {rec.gate.verdict} (approved qty {approved})",
+    ]
+    lines += [
+        f"  • {c.rule_id}: {c.value} vs {c.limit} — headroom {c.headroom}{'' if c.passed else ' (FAILED)'}"
+        for c in checks
+    ]
+    lines.append(
+        f"cost: breakeven {rec.cost.breakeven_pct}% · total ₹{rec.cost.total_cost} · "
+        f"edge {rec.cost.edge_multiple}x"
+    )
+    lines.append("checklist (yours to place — the platform places no orders in RECOMMEND, B7):")
+    lines += [f"  • {item}" for item in rec.manual_checklist]
+
+    return CatalogMessage(
+        kind=MessageKind.RECOMMENDATION,
+        title=f"Recommendation {rec.kind}: {rec.side} {rec.instrument}",
+        body="\n".join(lines),
+        severity="info",
+        data={
+            "rec_id": rec.rec_id,
+            "kind": rec.kind,
+            "instrument": rec.instrument,
+            "side": rec.side,
+            "style": rec.style,
+            "product": rec.product,
+            "qty": rec.qty,
+            "notional": str(rec.notional),
+            "entry_zone": [str(low), str(high)],
+            "stop": str(rec.stop),
+            "targets": [str(t) for t in rec.targets],
+            "confidence": rec.confidence,
+            "verdict": rec.gate.verdict,
+            "breakeven_pct": str(rec.cost.breakeven_pct),
+            "valid_until": rec.valid_until.isoformat(),
+        },
+        # One-tap outcome capture (§3.6): the owner confirms the fill with the observed qty/price.
+        reply_keyboard=[[{"text": f"✓ /taken {rec.rec_id}", "command": f"/taken {rec.rec_id} {rec.qty} "}]],
     )
 
 

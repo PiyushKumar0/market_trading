@@ -149,7 +149,8 @@ def test_help_text_lists_every_command() -> None:
             assert f"    {c.summary}" in lines                 # indented description line
         else:
             assert f"/{c.name} — {c.summary}" in lines         # exact stub line, no prefix collision
-    assert "Not yet available (Phase 2+):" in lines            # stubs clearly separated
+    if any(not c.live for c in _COMMANDS):                     # every command is live as of Phase 2
+        assert "Not yet available (Phase 2+):" in lines        # any stub stays clearly separated
     assert len(text) <= 4096                                   # fits a single Telegram message
 
 
