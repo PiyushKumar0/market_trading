@@ -31,14 +31,14 @@ import threading
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, time, timedelta
 from decimal import Decimal
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import httpx
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from engine.broker.instruments import InstrumentStore, UnknownInstrument
-from engine.broker.kite_client import KiteClient
+from engine.broker.kite_client import KiteClient, OrderSurfaceViolation
 from engine.broker.rate_limiter import RateLimiter
 from engine.broker.session import SessionManager
 from engine.broker.ticker_supervisor import TickerSupervisor
@@ -50,7 +50,7 @@ from engine.core.enums import Actor, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import configure_logging, get_logger
 from engine.core.migrations import apply_migrations
-from engine.core.protected_store import ProtectedStore
+from engine.core.protected_store import IntegrityError, ProtectedStore
 from engine.core.secrets import DASHBOARD_TOKEN, KITE_API_KEY, TELEGRAM_BOT_TOKEN, Secrets
 from engine.core.types import TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob
@@ -106,8 +106,12 @@ from engine.ops.post_login import (
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
 from engine.ops.single_instance import InstanceLock
+from engine.intelligence.governor import BudgetGovernor
 from engine.ops.warmup import WarmupGate
+from engine.risk.causes import RiskStateLatch
+from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
+from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
 from engine.universe.builder import UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
@@ -243,6 +247,38 @@ async def run() -> int:
     bus = EventBus()
     protected_store = ProtectedStore(config_dir(), conn, clock)
     mode = ModeManager(conn, clock, bus, calendar)
+    latch = RiskStateLatch(conn, clock, mode)
+    limits_engine = LimitsEngine(protected_store)
+    governor = BudgetGovernor.from_config(conn, clock, calendar, bus)
+
+    # --- live tick cache: last (ltp, exchange_ts) per symbol. Feeds the ExposureTracker mark
+    #     source and the gate's ltp/tick-age seams (§7.1 stale_data_guard) — a symbol never seen
+    #     this session reads None ⇒ every price-derived rule fails CLOSED. ---
+    last_ticks: dict[str, tuple[Decimal, Any]] = {}
+
+    async def _cache_tick(evt: Any) -> None:
+        last_ticks[evt.tradingsymbol] = (evt.ltp, evt.exchange_ts)
+
+    bus.subscribe("tick", _cache_tick)
+
+    def mark_price(symbol: str) -> Decimal | None:
+        cached = last_ticks.get(symbol)
+        return cached[0] if cached else None
+
+    def tick_age_s(symbol: str) -> float | None:
+        cached = last_ticks.get(symbol)
+        if cached is None:
+            return None
+        return max(0.0, (clock.now() - cached[1]).total_seconds())
+
+    # Capital base from the protected limit table; an unregistered/tampered store must not crash the
+    # boot (the self-test FAILs it to FROZEN separately) — fall back to the §7.1 starting value.
+    try:
+        _capital_base = limits_engine.load().capital_base_inr
+    except IntegrityError:
+        _log.warning("limits_unverified_at_boot", hint="scripts/seed_protected_config.py; using S7.1 default base")
+        _capital_base = Decimal("20000")
+    exposure = ExposureTracker(conn, clock, _capital_base, mark_price=mark_price)
 
     # --- owner I/O alert sink (Telegram if configured, else log-only) ---
     telegram_holder: dict[str, object] = {"bot": None}
@@ -280,8 +316,26 @@ async def run() -> int:
     kill = KillSwitch(conn, clock, bus, alert_callback=kill_alert)
     session = SessionManager(secrets, clock, redirect_path=settings.broker.kite_login_redirect_path)
 
-    # --- Telegram (optional in Phase 0/1) ---
-    telegram = _build_telegram(settings, secrets, clock, mode, kill)
+    # --- kill ⇄ cause-latch bridge (§3.5.3): the sticky kill_state is the KillSwitch's own store;
+    #     mirroring it into the risk_state_causes ledger keeps mode_state.risk_state showing KILLED
+    #     (and re-arming to the next-most-restrictive cause on owner reset, never straight to NORMAL).
+    from engine.risk.events import TOPIC_KILL_STATE
+
+    async def _kill_to_latch(evt: Any) -> None:
+        if evt.killed:
+            await latch.set_cause("kill", RiskState.KILLED, evt.reason or "kill", evt.actor)
+        else:
+            await latch.clear_cause("kill", evt.actor)
+
+    bus.subscribe(TOPIC_KILL_STATE, _kill_to_latch)
+
+    # --- Telegram (optional in Phase 0/1). reco_book is wired after the pipeline exists (Phase-2
+    #     second pass); every other owner-command dependency is live from boot. ---
+    telegram = _build_telegram(
+        settings, secrets, clock, mode, kill,
+        latch=latch, governor=governor, limits_engine=limits_engine, exposure=exposure,
+        session=session, conn=conn, bus=bus,
+    )
     telegram_holder["bot"] = telegram
 
     # =========================================================================================
@@ -318,6 +372,23 @@ async def run() -> int:
     )
 
     # Broker REST facade — only when credentials exist (fresh install stays runnable + FROZEN, §2.6).
+    def order_guard(intent: str) -> None:
+        """Order-surface predicate (a) (§3.5.3, A7/B7): a position-OPENING broker call requires
+        AUTO ∧ NORMAL ∧ inside the owner trade window; risk-reducing intent is NEVER gated (R3)."""
+        if intent == "risk_reducing":
+            return
+        kill.assert_orders_allowed()
+        try:
+            start, end = calendar.trade_window(clock.today())
+            in_window = start <= clock.now() <= end
+        except ValueError:                          # not a trading day ⇒ never in-window
+            in_window = False
+        if not mode.opening_orders_allowed(in_window):
+            raise OrderSurfaceViolation(
+                f"opening order blocked: mode={mode.mode().value} "
+                f"risk_state={mode.risk_state().value} in_window={in_window} (B7/§3.5.3)"
+            )
+
     kite: KiteClient | None = None
     if secrets.has(KITE_API_KEY):
         kc = session.kite_connect()
@@ -325,7 +396,8 @@ async def run() -> int:
             # on_token_rejected wires the §2.6/R6 circuit breaker: the FIRST TokenException on any
             # broker call fires SessionManager.on_token_rejected → the invalidation hook (freeze +
             # alert), so a mid-day token death stops entries instead of failing silently (2026-07-21).
-            kite = KiteClient(kc, RateLimiter(clock), clock, on_token_rejected=session.on_token_rejected)
+            kite = KiteClient(kc, RateLimiter(clock), clock,
+                              on_token_rejected=session.on_token_rejected, order_guard=order_guard)
     else:
         _log.warning("kite_client_absent", hint="seed kite_api_key/secret; entries stay FROZEN until login")
 
@@ -540,6 +612,7 @@ async def run() -> int:
         conn=conn, clock=clock, settings=settings, secrets=secrets,
         protected_store=protected_store, kill_switch=kill, mode_manager=mode, session_manager=session,
         catch_up=catch_up, warmup_gate=warmup_gate,
+        exposure=exposure, limits_engine=limits_engine, latch=latch,
     )
     # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
     # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.
@@ -603,14 +676,36 @@ async def run() -> int:
     session.add_login_hook(post_login_recovery.run)
 
     # --- dashboard API ---
-    app = _create_app(session, mode, kill, secrets, clock, bus)
+    app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
+                      protected_store=protected_store, exposure=exposure, governor=governor,
+                      limits_engine=limits_engine)
     if not secrets.has(DASHBOARD_TOKEN):
         _log.warning("dashboard_token_missing", hint="run scripts/dpapi_set.py --generate-dashboard-token")
+
+    # --- §7.1 platform-equity minute persist + continuous floor-ladder evaluation ("evaluated on
+    #     every minute-persist"): in-session only; a breached rung applies its FULL action through
+    #     the cause latch (state + downgrade + kill where specified). ---
+    async def equity_tick() -> None:
+        now = clock.now()
+        day_session = calendar.session(now.date())
+        if day_session is None or not (day_session.open <= now <= day_session.close):
+            return
+        exposure.persist_snapshot()
+        try:
+            table = limits_engine.load()
+        except IntegrityError:
+            return   # unverifiable limits are the self-test/kill path's problem, not this loop's
+        breaches = exposure.evaluate_floors(floor_limits_from(table))
+        if breaches:
+            await exposure.apply_floor_breaches(
+                breaches, mode, kill, latch=latch,
+                alert=lambda m: alert("critical", m),
+            )
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
     _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
-                   ticker=ticker, calendar=calendar, clock=clock)
+                   ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -743,7 +838,7 @@ def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
 def _arm_live_jobs(
     scheduler: Scheduler, settings, bar_builder: BarBuilder, health: HealthMonitor,
     news_ingest: NewsIngest, resolve_news,
-    *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock,
+    *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -788,6 +883,10 @@ def _arm_live_jobs(
                       job_id="news_poll_mc", guard=False)
     scheduler.add_job(_news_poll("gdelt"), trigger=IntervalTrigger(seconds=settings.news.gdelt_poll_s),
                       job_id="news_poll_gdelt", guard=False)
+    if equity_tick is not None:
+        # §7.1: platform equity persisted each minute + the halt ladder evaluated on every persist.
+        scheduler.add_job(equity_tick, trigger=IntervalTrigger(seconds=60),
+                          job_id="equity_tick", guard=False)
 
 
 # --------------------------------------------------------------------------- backup (§10.5)
@@ -826,7 +925,9 @@ def _build_version() -> str:
         return "0.0.0"
 
 
-def _build_telegram(settings, secrets, clock, mode, kill):
+def _build_telegram(settings, secrets, clock, mode, kill, *, latch=None, governor=None,
+                    limits_engine=None, exposure=None, session=None, conn=None, bus=None,
+                    reco_book=None):
     token = secrets.get_optional(TELEGRAM_BOT_TOKEN)
     owner_chat_id = settings.telegram.owner_chat_id
     if not token or not owner_chat_id:
@@ -834,14 +935,23 @@ def _build_telegram(settings, secrets, clock, mode, kill):
         return None
     from engine.notify.telegram import TelegramBot
 
-    return TelegramBot(token, owner_chat_id, clock, mode_manager=mode, kill_switch=kill)
+    bot = TelegramBot(
+        token, owner_chat_id, clock, mode_manager=mode, kill_switch=kill,
+        reco_book=reco_book, latch=latch, governor=governor, limits_engine=limits_engine,
+        exposure=exposure, session=session, conn=conn,
+    )
+    if bus is not None:
+        bot.attach_bus(bus)   # §10.3 alert catalog: mode/risk/kill/window/budget events → owner
+    return bot
 
 
-def _create_app(session, mode, kill, secrets, clock, bus):
+def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protected_store=None,
+                exposure=None, governor=None, limits_engine=None):
     from engine.api.app import create_app
 
     return create_app(session_manager=session, mode_manager=mode, kill_switch=kill,
-                      secrets=secrets, clock=clock, bus=bus)
+                      secrets=secrets, clock=clock, bus=bus, conn=conn, store=protected_store,
+                      exposure=exposure, governor=governor, limits_engine=limits_engine)
 
 
 async def _serve_api(app, settings):

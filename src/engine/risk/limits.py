@@ -288,3 +288,22 @@ class LimitsEngine:
     def _parse(self) -> LimitTable:
         raw = self._store.load_verified(LIMITS_FILE)
         return LimitTable.model_validate(raw)
+
+
+def floor_limits_from(table: LimitTable) -> "FloorLimits":
+    """Bridge the §7.1 yaml percentages (−10.0 == −10%, drawdown 8.0 == 8%) to the
+    :class:`~engine.risk.exposure.FloorLimits` fraction-of-1 convention (0.10, 0.08)."""
+    from engine.risk.exposure import FloorLimits  # local: keeps the module import graph acyclic
+
+    lim = table.limits
+
+    def frac(pct: float) -> Decimal:
+        # str() first: a yaml float like 8.0 must never smuggle a binary artifact into a Decimal.
+        return abs(Decimal(str(pct))) / 100
+
+    return FloorLimits(
+        weekly_drawdown_pct=frac(lim.weekly_drawdown.drawdown_pct),
+        equity_floor_rung_pct=frac(lim.equity_floor_rung.equity_pct_of_base),
+        cumulative_floor_pct=frac(lim.cumulative_floor.equity_pct_of_base),
+        capital_base=table.capital_base_inr,
+    )

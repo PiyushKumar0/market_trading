@@ -101,6 +101,9 @@ class SelfTest:
         session_manager=None,
         catch_up=None,
         warmup_gate=None,
+        exposure=None,
+        limits_engine=None,
+        latch=None,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -114,6 +117,11 @@ class SelfTest:
         # WarmupGate — both optional; unwired ⇒ the freshness checks surface as SKIP, never silently pass.
         self._catch_up = catch_up
         self._warmup_gate = warmup_gate
+        # §2.6 step-2 seams (Phase 2): ExposureTracker + LimitsEngine + RiskStateLatch drive the
+        # day-counter rebuild and the startup floor-ladder re-evaluation; unwired ⇒ SKIP.
+        self._exposure = exposure
+        self._limits = limits_engine
+        self._latch = latch
 
     async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
@@ -125,10 +133,8 @@ class SelfTest:
         report.checks.append(await self._check_clock_skew(check_skew))
         report.checks.append(self._check_trade_window())
         report.checks.append(self._check_token())
-        report.checks.append(self._stub(
-            "risk_counters_rebuild", "§2.6 day-scoped counters — TODO(Phase 2/3): ledger + reconcile"))
-        report.checks.append(self._stub(
-            "equity_halt_ladder", "§2.6 floor-ladder re-eval — TODO(Phase 2/3): ExposureTracker equity"))
+        report.checks.append(self._check_risk_counters_rebuild())
+        report.checks.append(await self._check_equity_halt_ladder())
         if include_freshness:
             report.checks.extend(await self.data_freshness_checks())
         report.checks.append(self._stub(
@@ -296,3 +302,51 @@ class SelfTest:
     @staticmethod
     def _stub(name: str, detail: str) -> SelfTestCheck:
         return SelfTestCheck(name=name, status=CheckStatus.SKIP, detail=detail)
+
+    def _check_risk_counters_rebuild(self) -> SelfTestCheck:
+        """§2.6 step 2: rebuild the day-scoped risk counters from the ledger/positions tables so a
+        same-day restart cannot reset exhausted entry capacity. The rebuild IS the read — the
+        tracker recomputes from tables on every call; this check performs and reports it."""
+        if self._exposure is None:
+            return self._stub("risk_counters_rebuild", "ExposureTracker not wired")
+        try:
+            d = self._clock.today()
+            losses = self._exposure.consecutive_losses(d)
+            opened = self._exposure.trades_opened_today(d)
+            baseline = self._exposure.day_baseline(d)
+            day_mtm = self._exposure.day_mtm(d)
+        except Exception as exc:  # noqa: BLE001 - a broken rebuild must freeze entries, not crash boot
+            return SelfTestCheck(name="risk_counters_rebuild", status=CheckStatus.FAIL,
+                                 detail=f"rebuild failed: {exc}", implies=Implies.FROZEN)
+        return SelfTestCheck(
+            name="risk_counters_rebuild", status=CheckStatus.PASS,
+            detail=(f"consecutive_losses={losses} opened_today={opened} "
+                    f"day_baseline={baseline} day_mtm={day_mtm}"),
+        )
+
+    async def _check_equity_halt_ladder(self) -> SelfTestCheck:
+        """§2.6 step 2: re-evaluate the continuous equity halt ladder against reconciled equity and
+        APPLY each breached rung's full §7.1 action before entries reopen — a startup trip must be
+        behaviorally identical to a live trip (state + downgrade + kill where specified)."""
+        if self._exposure is None or self._limits is None:
+            return self._stub("equity_halt_ladder", "ExposureTracker/LimitsEngine not wired")
+        from engine.risk.limits import floor_limits_from
+
+        try:
+            table = self._limits.load()
+            breaches = self._exposure.evaluate_floors(floor_limits_from(table))
+            if breaches:
+                await self._exposure.apply_floor_breaches(
+                    breaches, self._mode, self._kill, latch=self._latch,
+                )
+        except Exception as exc:  # noqa: BLE001 - an unevaluable ladder freezes entries, never crashes
+            return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.FAIL,
+                                 detail=f"ladder evaluation failed: {exc}", implies=Implies.FROZEN)
+        if breaches:
+            rungs = ", ".join(b.rung for b in breaches)
+            return SelfTestCheck(
+                name="equity_halt_ladder", status=CheckStatus.WARN,
+                detail=f"rung(s) tripped and APPLIED on startup: {rungs} (equity {breaches[0].equity})",
+            )
+        return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.PASS,
+                             detail=f"no rung breached (equity {self._exposure.equity()})")

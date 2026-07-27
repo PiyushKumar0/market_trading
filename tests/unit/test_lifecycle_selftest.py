@@ -88,6 +88,68 @@ def _build(conn, clock, temp_config, *, secrets_present=REQUIRED_AT_STARTUP, not
 
 
 @pytest.mark.asyncio
+async def test_selftest_risk_counters_and_ladder_skip_when_unwired(conn, clock, temp_config, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
+    report = await lifecycle.startup(check_skew=False)
+    del report
+    # Direct selftest run: the two §2.6 step-2 checks surface as SKIP, never silently pass.
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=ProtectedStore(temp_config, conn, clock),
+                  kill_switch=KillSwitch(conn, clock), mode_manager=ModeManager(conn, clock, None, calendar))
+    rep = await st.run(check_skew=False, include_freshness=False)
+    by_name = {c.name: c for c in rep.checks}
+    assert by_name["risk_counters_rebuild"].status.value == "SKIP"
+    assert by_name["equity_halt_ladder"].status.value == "SKIP"
+
+
+@pytest.mark.asyncio
+async def test_selftest_equity_ladder_applies_breached_rung_on_startup(conn, clock, temp_config, monkeypatch):
+    """§2.6 step 2: an offline-realized loss below the −10% rung trips CLOSE_ONLY on startup —
+    behaviorally identical to a live trip (state applied, not merely reported)."""
+    from decimal import Decimal
+
+    from engine.risk.causes import RiskStateLatch
+    from engine.risk.exposure import ExposureTracker
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
+    mode = ModeManager(conn, clock, None, calendar)
+    kill = KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mode)
+    # A closed platform position realizing −₹2,100 net ⇒ equity 17,900 ≤ 18,000 (−10% of 20k).
+    conn.execute(
+        "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, state, origin,"
+        " opened_at, closed_at, realized_pnl, costs) VALUES ('p1','AAA','BUY','MIS',10,'100','CLOSED',"
+        " 'platform', ?, ?, '-2100', '0')",
+        (f"{clock.today().isoformat()}T09:30:00+05:30", f"{clock.today().isoformat()}T10:00:00+05:30"),
+    )
+    exposure = ExposureTracker(conn, clock, Decimal("20000"))
+
+    class _RealLimits:
+        """LimitsEngine seam: parse the REAL repo limits.yaml (floor pcts) without the hash store."""
+
+        def load(self):
+            from engine.core.config import load_yaml
+            from engine.risk.limits import LimitTable
+            return LimitTable.model_validate(load_yaml(config_dir() / "limits.yaml"))
+
+    store = ProtectedStore(temp_config, conn, clock)
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=store, kill_switch=kill, mode_manager=mode,
+                  exposure=exposure, limits_engine=_RealLimits(), latch=latch)
+    rep = await st.run(check_skew=False, include_freshness=False)
+    by_name = {c.name: c for c in rep.checks}
+    assert by_name["risk_counters_rebuild"].status.value == "PASS"
+    assert "day_mtm=-2100" in by_name["risk_counters_rebuild"].detail
+    assert by_name["equity_halt_ladder"].status.value == "WARN"
+    assert "equity_floor_rung" in by_name["equity_halt_ladder"].detail
+    assert mode.risk_state() == RiskState.CLOSE_ONLY       # applied, not merely reported
+    assert any(c == "floor_equity_floor_rung" for c, _s, _d in latch.active_causes())
+
+
+@pytest.mark.asyncio
 async def test_startup_frozen_when_protected_store_unregistered(conn, clock, temp_config, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, kill, store, lifecycle = _build(conn, clock, temp_config)
