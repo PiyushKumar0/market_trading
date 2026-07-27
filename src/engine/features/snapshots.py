@@ -15,8 +15,9 @@ Serialization contract (load-bearing for the §9.6 determinism tests):
   (features are statistics and normally floats — Decimals appear only if a caller passes a price
   level through unconverted).
 
-``FEATURE_SET_VERSION`` is the v1 stamp (§6.2) written on every ``features_daily`` row and snapshot;
-it bumps to 2 when the §2.7 sentiment layer lands (§8.3 — trial windows reset per version).
+``FEATURE_SET_VERSION`` is the stamp (§6.2) written on every ``features_daily`` row and snapshot; it
+bumped 1 -> 2 when the §2.7 sentiment/catalyst block landed live (§8.3 — trial windows reset per
+version; the N-reset/neutral-fill bump *mechanics* are learning-side, Phase 5).
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ from ulid import ULID
 
 from engine.marketdata.store import MarketStore
 
-#: §6.2 feature-set version stamped on every features_daily row + snapshot. Bumps to 2 with §2.7.
-FEATURE_SET_VERSION = 1
+#: §6.2 feature-set version stamped on every features_daily row + snapshot. v2 (§2.7): live
+#: sentiment/catalyst block from sentiment_agg + catalyst_watchlist (engine.features.engine).
+FEATURE_SET_VERSION = 2
 
 #: The only value types a feature may hold once cleaned (JSON scalars; never NaN — §6.2).
 FeatureValue = bool | int | float | str | None

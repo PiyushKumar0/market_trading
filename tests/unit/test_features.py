@@ -113,13 +113,37 @@ def _rows_by_symbol(store) -> dict[str, dict]:
     return {r["symbol"]: json.loads(r["features"]) for r in store.get_features_daily(D)}
 
 
+def _seed_sentiment_layer(store, clock):
+    """§2.7 digest outputs (sentiment_agg + theme_map + catalyst_watchlist) for the ``seeded``
+    universe: AAA (sector IT) gets a symbol row AND is on today's watchlist (`originating`, graded);
+    BBB (also sector IT) gets no symbol row and no watchlist row — only the sector/market fan-out and
+    one matching theme, so the two symbols' §6.2 v2 blocks diverge on every axis."""
+    as_of = clock.now() - timedelta(hours=2)
+    store.upsert_sentiment_agg([
+        {"scope": "symbol", "scope_key": "AAA", "as_of": as_of, "value": 0.42},
+        {"scope": "sector", "scope_key": "IT", "as_of": as_of, "value": 0.15},
+        {"scope": "theme", "scope_key": "THEME1", "as_of": as_of, "value": 0.05},
+        {"scope": "theme", "scope_key": "THEME2", "as_of": as_of, "value": -0.30},
+        {"scope": "market", "scope_key": "market", "as_of": as_of, "value": 0.10},
+    ])
+    store.upsert_theme_map([
+        {"theme": "THEME1", "keywords": ["kw1"], "symbols": ["AAA", "BBB"]},   # both symbols
+        {"theme": "THEME2", "keywords": ["kw2"], "symbols": ["AAA"]},          # AAA only, |value| wins
+    ])
+    store.replace_catalyst_watchlist(D, [{
+        "symbol": "AAA", "grade": "originating", "direction": "long", "event_type": "results",
+        "materiality": 0.75, "source_domain_count": 3, "event_age_h": 5.5,
+    }])
+    return as_of
+
+
 # --------------------------------------------------------------------------- daily snapshot
 def test_daily_snapshot_versioned_universe_scoped_full_key_set(engine, store, seeded):
     engine.daily_snapshot(D)
     rows = store.get_features_daily(D)
     assert {r["symbol"] for r in rows} == {"AAA", "BBB"}          # excluded ZZZ gets no row
     for r in rows:
-        assert r["feature_set_version"] == FEATURE_SET_VERSION == 1
+        assert r["feature_set_version"] == FEATURE_SET_VERSION == 2
         feats = json.loads(r["features"])
         assert set(feats) == set(DAILY_FEATURE_KEYS)              # stable vocabulary, always
 
@@ -221,7 +245,8 @@ def test_daily_per_symbol_context_flags(engine, store, seeded):
 
 def test_absent_news_defaults_are_pinned_and_in_distribution(engine, store, seeded):
     """§6.2 pinned: sentiment* = 0, on_watchlist = false, materiality = 0, sentiment_available =
-    false — present on EVERY v1 row, never None/NaN (chaos case 20)."""
+    false — present on EVERY row when no digest has ever run, never None/NaN (chaos case 20). The
+    catalyst DESCRIPTIVE fields (not pinned scalars) fall back to None like any warm-up feature."""
     engine.daily_snapshot(D)
     for feats in _rows_by_symbol(store).values():
         for key, pinned in ABSENT_NEWS_DEFAULTS.items():
@@ -231,6 +256,10 @@ def test_absent_news_defaults_are_pinned_and_in_distribution(engine, store, seed
         assert feats["materiality"] == 0
         for scope in ("symbol", "sector", "theme", "market"):
             assert feats[f"sentiment_{scope}"] == 0
+        assert feats["watchlist_grade"] is None
+        assert feats["catalyst_event_type"] is None
+        assert feats["catalyst_event_age_h"] is None
+        assert feats["catalyst_source_domain_count"] is None
 
 
 def test_daily_snapshot_deterministic_and_idempotent(engine, store, seeded):
@@ -257,6 +286,41 @@ def test_daily_symbol_without_day_d_bar_gets_none_price_features(engine, store, 
     assert feats["ret_1d"] is None and feats["atr14_1d"] is None and feats["day_range_pos"] is None
     assert feats["sentiment_available"] is False and feats["sentiment_symbol"] == 0
     assert feats["nifty_ret_1d"] is not None                      # market context still present
+
+
+def test_daily_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):
+    """§6.2 v2: real decay-weighted sentiment_agg values + today's catalyst_watchlist row land on
+    the row — the pinned absent-news defaults are a per-field FALLBACK, not the only path. AAA and
+    BBB (same IT sector) diverge on every sentiment/catalyst axis, proving the lookups are keyed
+    correctly (not just echoing the pinned defaults)."""
+    _seed_sentiment_layer(store, clock)
+    engine.daily_snapshot(D)
+    by_symbol = _rows_by_symbol(store)
+    a, b = by_symbol["AAA"], by_symbol["BBB"]
+
+    assert a["sentiment_available"] is True and b["sentiment_available"] is True
+    assert a["sentiment_symbol"] == pytest.approx(0.42)           # ("symbol","AAA") row
+    assert a["sentiment_sector"] == pytest.approx(0.15)           # ("sector","IT") row
+    assert a["sentiment_theme"] == pytest.approx(-0.30)           # THEME2 wins: |-0.30| > |0.05|
+    assert a["sentiment_market"] == pytest.approx(0.10)
+    assert a["on_watchlist"] is True
+    assert a["watchlist_grade"] == "originating"
+    assert a["catalyst_event_type"] == "results"
+    assert a["materiality"] == pytest.approx(0.75)                # watchlist-sourced, not sentiment_agg
+    assert a["catalyst_source_domain_count"] == 3
+    assert a["catalyst_event_age_h"] == pytest.approx(5.5)
+
+    # BBB: no ("symbol","BBB") row, no watchlist row; shares the IT sector + market rows; only
+    # THEME1 contains BBB (THEME2 doesn't) so its theme value can't leak in.
+    assert b["sentiment_symbol"] == 0.0
+    assert b["sentiment_sector"] == pytest.approx(0.15)
+    assert b["sentiment_theme"] == pytest.approx(0.05)
+    assert b["sentiment_market"] == pytest.approx(0.10)
+    assert b["on_watchlist"] is False and b["watchlist_grade"] is None
+    assert b["materiality"] == 0.0
+    assert b["catalyst_event_type"] is None
+    assert b["catalyst_event_age_h"] is None
+    assert b["catalyst_source_domain_count"] is None
 
 
 # --------------------------------------------------------------------------- expiry-day flag
@@ -292,7 +356,7 @@ def _seed_intraday(store, clock, symbol: str, n: int = 50) -> list[Bar]:
 def test_intraday_snapshot_math_version_and_persistence(engine, store, clock, seeded):
     bars = _seed_intraday(store, clock, "AAA")                    # 09:15..10:04, now = 10:05
     vec = engine.intraday_snapshot("AAA")
-    assert vec.feature_set_version == FEATURE_SET_VERSION == 1
+    assert vec.feature_set_version == FEATURE_SET_VERSION == 2
     assert vec.symbol == "AAA" and vec.ts == FIXED_NOW
     f = vec.features
     assert set(f) == set(INTRADAY_FEATURE_KEYS)
@@ -319,7 +383,7 @@ def test_intraday_snapshot_math_version_and_persistence(engine, store, clock, se
     # Persisted under its ULID key (§4.3): round-trips exactly and is referenced later.
     loaded = load_snapshot(store, vec.features_snapshot_id)
     assert loaded is not None
-    assert loaded.features == f and loaded.feature_set_version == 1 and loaded.symbol == "AAA"
+    assert loaded.features == f and loaded.feature_set_version == 2 and loaded.symbol == "AAA"
 
 
 def test_intraday_snapshot_deterministic_features_fresh_ids(engine, store, clock, seeded):
@@ -337,6 +401,26 @@ def test_intraday_snapshot_no_bars_is_warmup_not_error(engine, store):
     assert f["vwap"] is None and f["atr14_1m"] is None
     assert f["or_complete"] is True                               # 10:05 is past the 09:45 OR end
     assert load_snapshot(store, vec.features_snapshot_id) is not None
+
+
+def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):
+    """§6.2 v2: the same sentiment_agg + catalyst_watchlist block lands on the intraday
+    microstructure snapshot as on the daily row (shared context helper)."""
+    _seed_intraday(store, clock, "AAA")
+    _seed_sentiment_layer(store, clock)
+    vec = engine.intraday_snapshot("AAA")
+    f = vec.features
+    assert f["sentiment_available"] is True
+    assert f["sentiment_symbol"] == pytest.approx(0.42)
+    assert f["sentiment_sector"] == pytest.approx(0.15)
+    assert f["sentiment_theme"] == pytest.approx(-0.30)
+    assert f["sentiment_market"] == pytest.approx(0.10)
+    assert f["on_watchlist"] is True
+    assert f["watchlist_grade"] == "originating"
+    assert f["catalyst_event_type"] == "results"
+    assert f["materiality"] == pytest.approx(0.75)
+    assert f["catalyst_source_domain_count"] == 3
+    assert f["catalyst_event_age_h"] == pytest.approx(5.5)
 
 
 # --------------------------------------------------------------------------- serialization contract

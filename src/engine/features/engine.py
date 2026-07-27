@@ -1,4 +1,4 @@
-"""§3.2.5 ``FeatureEngine`` — deterministic, versioned feature computation (§6.2 feature set v1).
+"""§3.2.5 ``FeatureEngine`` — deterministic, versioned feature computation (§6.2 feature set v2).
 
 Two pinned surfaces (§3.2.5)::
 
@@ -10,7 +10,7 @@ clock, no network, no randomness (the only minted value is the snapshot ULID, wh
 data). The same store contents always produce byte-identical ``features_daily`` rows (canonical
 ``features_json``); the §9.1 feature tests assert exactly that.
 
-Feature set v1 (§6.2, ``feature_set_version = 1`` stamped on every row):
+Feature set v2 (§6.2, ``feature_set_version = 2`` stamped on every row):
 
 * **Price/volatility (per symbol, from ``bars_1d``):** returns 1/5/20d, ATR(14) daily, realized vol
   20d (annualized stdev of log returns), gap stats (today's open gap + 20d mean |gap|), distance to
@@ -21,10 +21,17 @@ Feature set v1 (§6.2, ``feature_set_version = 1`` stamped on every row):
   (A12), surveillance status (A8), ``flagged_instrument_day`` (block deals). Sector "index" returns
   are the equal-weight mean return of the universe's same-sector constituents (``sector_map``) —
   a deterministic proxy; Phase 1 has no sectoral-index bar feed.
-* **Sentiment / catalyst:** at their PINNED absent-news defaults (:data:`ABSENT_NEWS_DEFAULTS`) —
-  sentiment* = 0, ``on_watchlist`` = False, ``materiality`` = 0, ``sentiment_available`` = False.
-  An in-distribution "no news" vector, never NaN/missing (§6.2, chaos case 20). The real values
-  arrive with the §2.7 layer as feature-set v2 (§8.3 bump mechanics).
+* **Sentiment / catalyst (v2, §6.2):** decay-weighted ``sentiment_{symbol,sector,theme,market}``
+  from the LATEST ``sentiment_agg`` rows (the digest's own decay-weighted sum, §2.7 step 5(i)) plus
+  per-symbol catalyst fields from TODAY's ``catalyst_watchlist`` (§2.7 step 5(ii)) —
+  ``on_watchlist``, ``watchlist_grade``, ``catalyst_event_type``, ``catalyst_event_age_h``,
+  ``materiality``, ``catalyst_source_domain_count`` — and ``sentiment_available``. Each half falls
+  back independently to its slice of the PINNED absent-news defaults
+  (:data:`ABSENT_NEWS_DEFAULTS`) when its source is empty: sentiment* = 0 / ``sentiment_available``
+  = False when no digest has ever run; ``on_watchlist`` = False / ``materiality`` = 0 (grade/event
+  fields = None) when today's watchlist has no row for the symbol. An in-distribution "no news"
+  vector, never NaN/missing (§6.2, chaos case 20). Only ``sentiment_agg`` + ``catalyst_watchlist``
+  are read here — never ``news``/``news_clusters`` directly (§2.4 single-seam discipline).
 * **Microstructure (intraday only):** opening-range stats, VWAP distance, relative volume,
   ATR(14) 1m, last-30-bar summary.
 
@@ -43,6 +50,7 @@ from __future__ import annotations
 import math
 import statistics
 from calendar import monthrange
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -61,9 +69,11 @@ from engine.strategy.indicators import vwap, wilder_atr
 
 _log = get_logger("engine.features.engine")
 
-#: §6.2 PINNED absent-news defaults (features v1 ships these verbatim; a news outage in v2 falls
-#: back to the SAME vector, so non-`cat` candidate ranking cannot shift — chaos case 20). Values are
-#: in-distribution scalars, never None/NaN. Changing any of these is a plan change, not a tweak.
+#: §6.2 PINNED absent-news defaults (a news outage falls back to this SAME vector, so non-`cat`
+#: candidate ranking cannot shift — chaos case 20). Values are in-distribution scalars, never
+#: None/NaN. Changing any of these is a plan change, not a tweak. (The catalyst DESCRIPTIVE fields —
+#: watchlist_grade / catalyst_event_type / catalyst_event_age_h / catalyst_source_domain_count —
+#: are not pinned scalars: they default to None like any other warm-up/unavailable feature.)
 ABSENT_NEWS_DEFAULTS: dict[str, float | bool] = {
     "sentiment_symbol": 0.0,
     "sentiment_sector": 0.0,
@@ -74,8 +84,14 @@ ABSENT_NEWS_DEFAULTS: dict[str, float | bool] = {
     "sentiment_available": False,
 }
 
-#: The complete, ordered v1 daily feature vocabulary — every features_daily row carries exactly
-#: these keys (None = warm-up/unavailable; sentiment keys always the pinned defaults in v1).
+#: Catalyst-watchlist DESCRIPTIVE fields (§6.2 v2) — present only when the symbol has a today's
+#: ``catalyst_watchlist`` row; None otherwise (not part of the pinned never-None scalar set above).
+_CATALYST_DESCRIPTIVE_KEYS: tuple[str, ...] = (
+    "watchlist_grade", "catalyst_event_type", "catalyst_event_age_h", "catalyst_source_domain_count",
+)
+
+#: The complete, ordered v2 daily feature vocabulary — every features_daily row carries exactly
+#: these keys (None = warm-up/unavailable; ABSENT_NEWS_DEFAULTS keys always in-distribution scalars).
 DAILY_FEATURE_KEYS: tuple[str, ...] = (
     # price / volatility (per symbol, bars_1d)
     "ret_1d", "ret_5d", "ret_20d",
@@ -93,11 +109,12 @@ DAILY_FEATURE_KEYS: tuple[str, ...] = (
     "sector", "sector_ret_1d", "sector_ret_5d",
     "results_day", "days_to_ex_date", "ex_date_within_5d",
     "surveillance", "surveillance_flagged", "flagged_instrument_day",
-    # sentiment / catalyst — §6.2 pinned absent-news defaults in v1
+    # sentiment / catalyst (§6.2 v2) — pinned absent-news defaults + catalyst descriptive fields
     *ABSENT_NEWS_DEFAULTS,
+    *_CATALYST_DESCRIPTIVE_KEYS,
 )
 
-#: The complete intraday (microstructure) vocabulary (§6.2) — FeatureVector.features keys.
+#: The complete intraday (microstructure) vocabulary (§6.2 v2) — FeatureVector.features keys.
 INTRADAY_FEATURE_KEYS: tuple[str, ...] = (
     "bar_count", "minutes_elapsed",
     "or_complete", "or_high", "or_low", "or_range_pct",
@@ -105,6 +122,9 @@ INTRADAY_FEATURE_KEYS: tuple[str, ...] = (
     "vwap", "vwap_dist",
     "atr14_1m", "rel_volume",
     "last30_ret", "last30_range_pct", "last30_up_frac", "last30_volume",
+    # sentiment / catalyst (§6.2 v2) — same block + fallback rules as DAILY_FEATURE_KEYS
+    *ABSENT_NEWS_DEFAULTS,
+    *_CATALYST_DESCRIPTIVE_KEYS,
 )
 
 _ANNUALIZATION = math.sqrt(252.0)   # NSE ~252 trading sessions/year (realized-vol convention)
@@ -218,10 +238,10 @@ class FeatureEngine:
 
     # ------------------------------------------------------------------ pinned surface (§3.2.5)
     def daily_snapshot(self, d: date) -> None:
-        """Compute + upsert the §6.2 v1 ``features_daily`` rows for day ``d``'s universe.
+        """Compute + upsert the §6.2 v2 ``features_daily`` rows for day ``d``'s universe.
 
         Nightly-job entry point (§4.4): one row per INCLUDED ``universe_daily`` symbol, stamped
-        ``feature_set_version = 1``, features serialized with the canonical ``features_json`` so a
+        ``feature_set_version = 2``, features serialized with the canonical ``features_json`` so a
         re-run writes byte-identical rows (idempotent upsert on (d, symbol, version)).
         """
         universe = [r["symbol"] for r in self._store.get_universe_daily(d, included_only=True)]
@@ -248,6 +268,9 @@ class FeatureEngine:
             r["tradingsymbol"]: r.get("surveillance") for r in self._store.get_instruments_daily(d)
         }
         flagged_today = {r["symbol"] for r in self._store.get_flagged_instrument_days(d)}
+        sentiment_by_key, theme_symbols, watchlist_by_symbol, sentiment_available = (
+            self._sentiment_catalyst_context(d)
+        )
 
         rows: list[dict[str, Any]] = []
         for sym in universe:
@@ -268,7 +291,9 @@ class FeatureEngine:
                 "surveillance_flagged": surv is not None,
                 "flagged_instrument_day": sym in flagged_today,
             })
-            feats.update(ABSENT_NEWS_DEFAULTS)          # §6.2 pinned — LAST, nothing may override
+            feats.update(_sentiment_catalyst_features(         # §6.2 v2 — LAST, nothing may override
+                sym, sector, sentiment_by_key, theme_symbols, watchlist_by_symbol, sentiment_available,
+            ))
             rows.append({
                 "d": d,
                 "symbol": sym,
@@ -293,6 +318,13 @@ class FeatureEngine:
         session_open = session.open if session is not None else self._clock.combine(d, time(9, 15))
         bars = self._store.get_bars_1m(symbol, session_open, now)
         feats = self._intraday_features(symbol, d, session_open, now, bars)
+        sentiment_by_key, theme_symbols, watchlist_by_symbol, sentiment_available = (
+            self._sentiment_catalyst_context(d)
+        )
+        sector = {r["symbol"]: r["sector"] for r in self._store.get_sector_map(as_of=d)}.get(symbol)
+        feats.update(_sentiment_catalyst_features(             # §6.2 v2
+            symbol, sector, sentiment_by_key, theme_symbols, watchlist_by_symbol, sentiment_available,
+        ))
         vector = new_feature_vector(symbol, now, feats)
         persist_snapshot(self._store, vector)
         _log.info(
@@ -386,6 +418,33 @@ class FeatureEngine:
             probe -= timedelta(days=1)
         return probe.month == d.month and d == probe
 
+    # ------------------------------------------------------------------ shared: sentiment/catalyst (§6.2 v2)
+    def _sentiment_catalyst_context(
+        self, d: date
+    ) -> tuple[dict[tuple[str, str], float], dict[str, set[str]], dict[str, dict[str, Any]], bool]:
+        """Day-level sentiment/catalyst context, shared by ``daily_snapshot`` and
+        ``intraday_snapshot`` so both compute from the SAME digest snapshot within one call:
+
+        * ``sentiment_by_key`` — the LATEST ``sentiment_agg`` rows (whichever digest run stamped
+          them last; the digest runs once daily, §2.7 step 5(i)), keyed by ``(scope, scope_key)``.
+        * ``theme_symbols`` — ``theme_map`` as ``theme -> {symbols}`` for the best-theme lookup.
+        * ``watchlist_by_symbol`` — TODAY's ``catalyst_watchlist`` rows keyed by symbol (§2.7 step
+          5(ii); at most one row per symbol per day — best cluster wins upstream).
+        * ``sentiment_available`` — True only when a digest has EVER run (chaos case 20 gate); the
+          per-symbol/-sector/-theme/-market sentiment values fall back to 0.0 otherwise, never None.
+
+        Only ``sentiment_agg`` / ``theme_map`` / ``catalyst_watchlist`` are read — never
+        ``news``/``news_clusters`` directly (§2.4 single-seam discipline).
+        """
+        latest_as_of = self._store.latest_sentiment_as_of()
+        sentiment_by_key = {
+            (r["scope"], r["scope_key"]): float(r["value"])
+            for r in (self._store.get_sentiment_agg(latest_as_of) if latest_as_of is not None else [])
+        }
+        theme_symbols = {r["theme"]: set(r["symbols"] or []) for r in self._store.get_theme_map()}
+        watchlist_by_symbol = {r["symbol"]: r for r in self._store.get_catalyst_watchlist(d)}
+        return sentiment_by_key, theme_symbols, watchlist_by_symbol, latest_as_of is not None
+
     # ------------------------------------------------------------------ intraday internals
     def _intraday_features(
         self, symbol: str, d: date, session_open: datetime, now: datetime, bars: list
@@ -449,3 +508,51 @@ def _sector_means(
         if sector and sector != "UNCLASSIFIED" and r is not None:
             by_sector.setdefault(sector, []).append(r)
     return {sector: sum(v) / len(v) for sector, v in by_sector.items()}
+
+
+def _sentiment_catalyst_features(
+    symbol: str,
+    sector: str | None,
+    sentiment_by_key: Mapping[tuple[str, str], float],
+    theme_symbols: Mapping[str, set[str]],
+    watchlist_by_symbol: Mapping[str, Mapping[str, Any]],
+    sentiment_available: bool,
+) -> dict[str, Any]:
+    """§6.2 v2 sentiment/catalyst block for ONE symbol, from the shared day-level context built by
+    :meth:`FeatureEngine._sentiment_catalyst_context`. Falls back field-by-field to the PINNED
+    :data:`ABSENT_NEWS_DEFAULTS` — the two halves are independent (a symbol with no watchlist row
+    still gets its real sentiment_* values on a day the digest ran, and vice versa is impossible but
+    not assumed): sentiment_* stay 0.0 / ``sentiment_available`` stays False unless a digest has
+    EVER run; ``on_watchlist``/``materiality`` stay False/0.0 (descriptive fields stay None) unless
+    TODAY's ``catalyst_watchlist`` has a row for ``symbol`` (chaos case 20, never NaN/None for the
+    pinned numeric fields).
+    """
+    out: dict[str, Any] = dict(ABSENT_NEWS_DEFAULTS)
+    out["watchlist_grade"] = None
+    out["catalyst_event_type"] = None
+    out["catalyst_event_age_h"] = None
+    out["catalyst_source_domain_count"] = None
+    out["sentiment_available"] = sentiment_available
+    if sentiment_available:
+        out["sentiment_symbol"] = sentiment_by_key.get(("symbol", symbol), 0.0)
+        if sector:
+            out["sentiment_sector"] = sentiment_by_key.get(("sector", sector), 0.0)
+        best_theme_value: float | None = None
+        for theme, symbols in theme_symbols.items():
+            if symbol not in symbols:
+                continue
+            value = sentiment_by_key.get(("theme", theme))
+            if value is not None and (best_theme_value is None or abs(value) > abs(best_theme_value)):
+                best_theme_value = value
+        out["sentiment_theme"] = best_theme_value if best_theme_value is not None else 0.0
+        out["sentiment_market"] = sentiment_by_key.get(("market", "market"), 0.0)
+    watch = watchlist_by_symbol.get(symbol)
+    if watch is not None:
+        out["on_watchlist"] = True
+        out["watchlist_grade"] = watch["grade"]
+        out["catalyst_event_type"] = watch.get("event_type")
+        out["catalyst_event_age_h"] = watch.get("event_age_h")
+        materiality = watch.get("materiality")
+        out["materiality"] = float(materiality) if materiality is not None else 0.0
+        out["catalyst_source_domain_count"] = watch.get("source_domain_count")
+    return out
