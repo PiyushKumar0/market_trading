@@ -52,6 +52,16 @@ _log = get_logger("engine.broker.kite_client")
 ReqLike = Any
 
 
+class OrderSurfaceViolation(RuntimeError):
+    """Raised by an injected ``order_guard`` to block a broker order call (§3.5.3 predicate (a), A7/B7).
+
+    ``KiteClient`` does not import ``engine.risk`` — the guard is a plain callback wired by ops (mode
+    manager + kill switch live above this layer). This exception type is the uniform signal a blocked
+    call surfaces up the stack; ``KiteClient`` itself never raises it directly, only re-raises what the
+    guard raises.
+    """
+
+
 class KiteClient:
     """Async, rate-limited, logged facade over a synchronous pykiteconnect ``KiteConnect``.
 
@@ -75,6 +85,16 @@ class KiteClient:
         freezes entries + alerts the owner on the FIRST rejection instead of every subsequent call
         failing silently. The hook is awaited then the original error is ALWAYS re-raised (R5/R8 —
         never swallow); a hook failure is logged and never masks the broker error.
+    order_guard:
+        Optional order-surface guard (A7, §3.5.3 predicate (a) / B7). Called synchronously with the
+        caller's ``intent`` (``"entry"`` or ``"risk_reducing"``) BEFORE the rate limiter is acquired,
+        on every order-placing/modifying/cancelling path (``place_order``, ``modify_order``,
+        ``cancel_order``, ``place_gtt``, ``modify_gtt``, ``delete_gtt``). It raises
+        :class:`OrderSurfaceViolation` to block the call or returns ``None`` to allow it — this client
+        does not interpret ``intent`` itself; that decision (mode == AUTO ∧ risk_state == NORMAL ∧
+        in-window, plus the kill switch) belongs to the guard the wiring layer injects, since
+        ``engine.broker`` may not import ``engine.risk``. Unwired (``None``) means no gating —
+        unchanged behaviour for unit tests / scripts that construct a bare ``KiteClient``.
     """
 
     def __init__(
@@ -83,11 +103,14 @@ class KiteClient:
         rate_limiter: RateLimiter,
         clock: Clock,
         on_token_rejected: Callable[[], Awaitable[None]] | None = None,
+        *,
+        order_guard: Callable[[str], None] | None = None,
     ) -> None:
         self._kc = kc
         self._rl = rate_limiter
         self._clock = clock
         self._on_token_rejected = on_token_rejected
+        self._order_guard = order_guard
 
     async def _fire_token_rejected(self, exc: BaseException) -> None:
         """If ``exc`` is a :class:`TokenException` and the circuit breaker is wired, fire it once —
@@ -133,7 +156,14 @@ class KiteClient:
         ``intent="entry"`` is the default and is hard-capped at 70/day; protective / exit / square-off
         callers pass ``intent="risk_reducing"`` for the uncapped-but-paced reserved pool (never
         budget-rejected). The split is enforced inside :meth:`RateLimiter.acquire`.
+
+        The order-surface guard (A7), if wired, runs FIRST — before the limiter is even touched — so a
+        blocked call never consumes rate-limiter budget. This is the single chokepoint every
+        order-placing/modifying/cancelling method routes through, so wiring the guard here covers all
+        six (place_order, modify_order, cancel_order, place_gtt, modify_gtt, delete_gtt).
         """
+        if self._order_guard is not None:
+            self._order_guard(intent)  # raises OrderSurfaceViolation to block; None return = allowed
         await self._rl.acquire(endpoint_class="orders", intent=intent)
         loop = asyncio.get_running_loop()
         _log.info("kite.call", op=op, endpoint_class="orders", intent=intent, **log_fields)
