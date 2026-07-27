@@ -1,14 +1,12 @@
 # CLAUDE.md
 
-## 2026-07-13: Fable retired — Opus is now the manager
-
-Fable access ended 2026-07-12. The manager role in the policy below passes to Opus unchanged: everything under "Fable does itself" is now Opus's own work, done inline. The delegation rungs below Opus are unchanged (Sonnet for spec-determined execution, Haiku for token-hungry low-judgement work); implementation formerly routed to `"opus"` is now done inline by the manager, or delegated to Sonnet when the spec is complete enough. **Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer written on Fable's last session. Where the text below still says "Fable", read "Opus"; where the two documents conflict, `FABLE_HANDOFF.md` wins.
+**Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer that supplements this file. Where the two conflict, `FABLE_HANDOFF.md` wins.
 
 ## Model policy — Fable is the manager, not the workhorse
 
-This session runs on Claude Fable 5. Fable is the most expensive model in the stack, so its time goes exclusively to work that requires judgement; everything else is delegated to cheaper models via the Agent tool.
+The manager role runs on Claude Fable 5. Fable is the most expensive model in the stack, so its time goes exclusively to work that requires judgement; everything else is delegated to cheaper models via the Agent tool.
 
-Cost ladder (per MTok in/out, as of 2026-07): Fable $10/$50 → Opus $5/$25 → Sonnet $3/$15 → Haiku $1/$5. If prices drift, only the ordering matters.
+Cost ladder (per MTok in/out, as of 2026-07): Fable 5 $10/$50 → Opus 5 $5/$25 → Sonnet 5 $3/$15 → Haiku 4.5 $1/$5. If prices drift, only the ordering matters.
 
 ### Fable does itself (judgement work — never delegate)
 
@@ -24,9 +22,9 @@ Subagents inherit the session model (Fable) by default — **always pass an expl
 
 | Work | Model |
 |---|---|
-| Implementation where the spec leaves real decisions open (design gaps, failure modes the spec can't enumerate), multi-file refactors, tests for complex logic | `"opus"` |
-| Implementation fully determined by the spec: boilerplate, mechanical edits, routine fixes with an already-named root cause, running test suites and reporting results | `"sonnet"` |
-| Token-hungry, low-judgement work: log digging, big-document reading, research sweeps, browser use, codebase scans, bulk extraction | `"haiku"` |
+| Implementation where the spec leaves real decisions open (design gaps, failure modes the spec can't enumerate), multi-file refactors, tests for complex logic | `"opus"` (Opus 5) |
+| Implementation fully determined by the spec: boilerplate, mechanical edits, routine fixes with an already-named root cause, running test suites and reporting results | `"sonnet"` (Sonnet 5) |
+| Token-hungry, low-judgement work: log digging, big-document reading, research sweeps, browser use, codebase scans, bulk extraction | `"haiku"` (Haiku 4.5) |
 
 Routing rules:
 

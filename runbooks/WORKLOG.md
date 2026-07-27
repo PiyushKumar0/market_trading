@@ -1,5 +1,24 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-27 (Monday — session #3 live; Q15 CLOSED; C2 CLOSED)
+
+- **C2 contract-note verification PASSED** (owner-supplied real Zerodha note, 4 BSE CNC trades,
+  ₹8,402 turnover, ₹8.38 charges): brokerage 0 ✓, SEBI exact ✓, GST exact ✓, stamp ✓ (rupee
+  rounding), STT ✓ after two real-world rules — per-scrip whole-rupee rounding and ETF buy-side
+  exemption (SILVERBEES; no ETFs in platform universe); txn charge delta = BSE vs the model's
+  pinned NSE rate (platform routes NSE). DP correctly absent (ledger-side at settlement).
+  Cost model verified against actual billing; no costs.yaml change needed. G1 item CLOSED.
+
+- **Q15 candle-latency measured live** (11:03–11:22 IST, 60 samples, 3 symbols): official 1m
+  candles available **p50 0.4s / p90 4.1s / p99 8.2s** after minute close →
+  `data/reports/q15_latency.json`. The §14 Q15 assumption (gap-backfill/warm-up can rely on
+  prompt official candles) holds with wide margin. G1 item CLOSED. (First attempt failed on a
+  momentary DNS blip — the live feed rode through it untouched; only fresh connections failed.)
+- Session #3 capturing since ~10:18 (13–14k ticks/window, zero drops, keep-awake engaged).
+  Remaining G1: ticker/news session counters (auto-accruing), owner contract-note check (C2),
+  owner phase-end push approval. Watch-items: TITAN 0/x intraday warmup line (new-to-watchlist?),
+  GROWW young-classifier quirk resurfaced — both entries-only, check at next store window.
+
 ## 2026-07-23 (day — FIRST LIVE CAPTURE + sleep-wedge fix `1aa2744`)
 
 - **FIRST LIVE SESSION IN PLATFORM HISTORY**: WS connected on first attempt post-`9fc20dc`
