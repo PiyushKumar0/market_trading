@@ -86,15 +86,20 @@ agents:
   # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps (D5) ---
   nightly_reviewer:
     model: sonnet-4.6
-    shape: agentic
-    tools_enabled: true
-    max_turns: 12
-    max_output_tokens: 6000    # per-call knob; the cumulative run budget below is a different lever (§5.5)
-    run_budget_tokens: { billed_in_max: 120000, billed_out_max: 10000 }   # governor-enforced billed cap/run (§5.5/§11.2)
+    # Phase-2 v1 DEVIATION (2026-07-28): single-shot with deterministically pre-assembled context —
+    # at Phase-2 volume (a handful of recommendations/day, no auto trades) the §5.5 agentic tool
+    # loop adds cost + an unverified SDK MCP surface for no analytical gain. The agentic shape +
+    # read-only MCP toolset return in Phase 3; run_budget_tokens is kept as that upgrade's envelope.
+    shape: single_shot
+    tools_enabled: false
+    max_output_tokens: 6000
+    timeout_s: 90              # bigger single-shot context than the intraday agents
+    run_budget_tokens: { billed_in_max: 120000, billed_out_max: 10000 }   # reserved for the Phase-3 agentic upgrade (§5.5/§11.2)
     triggers: [schedule]
     schedule_ist: "21:00"
 
   weekly_researcher:
+    enabled: false             # Phase 5 (§8.7); not loadable until its §5.5 read-only MCP allowlist is wired
     model: opus-4.8            # weekly deep review (D9); realistically ~$1/agentic run (D4)
     shape: agentic
     tools_enabled: true
