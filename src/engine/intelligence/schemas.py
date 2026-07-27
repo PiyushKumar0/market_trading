@@ -71,8 +71,11 @@ __all__ = [
     "IntradayOutputAdapter",
     "ModifyStopAction",
     "ModifyTargetAction",
+    "NightlyReview",
     "NoActionOutput",
+    "ParamSuggestion",
     "Recommendation",
+    "TradeAttribution",
     "action_proposal_json_schema",
     "intraday_output_json_schema",
     "parse_and_stamp",
@@ -328,3 +331,52 @@ def parse_cluster_scores(raw: dict[str, Any] | list[Any] | str) -> tuple[list[Cl
             cid = item.get("cluster_id") if isinstance(item, dict) else None
             dropped.append(cid if isinstance(cid, str) and cid else f"#{index}")
     return scores, dropped
+
+
+# =========================================================================== Nightly Reviewer (§5.5)
+class ParamSuggestion(BaseModel):
+    """ONE suggested envelope-parameter value (§5.5 output contract).
+
+    A SUGGESTION, never a setting: the §6.4 validation pipeline and the owner decide (R4). The job
+    that persists a review DROPS any suggestion whose ``parameter`` is not an ``envelope.yaml`` name
+    or whose ``proposed_value`` falls outside that parameter's bounds — the model's suggestible set
+    is the list it was shown in the context, and no downstream reader re-derives it.
+
+    ``proposed_value`` is a float because every envelope parameter is a plain numeric knob (§6.3):
+    no price, no money, so the decimal-as-string convention deliberately does not apply here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    parameter: str
+    proposed_value: float
+    evidence_refs: list[str] = Field(default_factory=list)   # entry_id / rec_id, never prose
+
+
+class TradeAttribution(BaseModel):
+    """Attribution of ONE closed learning-ledger row (§5.5).
+
+    ``thesis_wrong`` and ``process_error`` are different failures: the first is the market
+    disagreeing with a correctly-executed idea, the second is the platform or the owner mishandling
+    it. Collapsing them would make the lessons unactionable, which is why the verdict is a closed
+    enum rather than free text.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entry_id: str
+    verdict: Literal["thesis_right", "thesis_wrong", "process_error", "unclear"]
+    note: str = ""
+
+
+class NightlyReview(BaseModel):
+    """The Nightly Post-Trade Reviewer's output (§5.5) — one JSON row per trading day in
+    ``nightly_reviews``, read by ``GET /config/params`` and the daily owner summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lessons: list[str] = Field(default_factory=list)
+    param_suggestions: list[ParamSuggestion] = Field(default_factory=list)
+    process_errors: list[str] = Field(default_factory=list)
+    trade_attributions: list[TradeAttribution] = Field(default_factory=list)
+    summary: str
