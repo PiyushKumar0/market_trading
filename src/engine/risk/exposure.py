@@ -200,8 +200,10 @@ class ExposureTracker:
         """The day's opening equity, rebuilt on first use and cached in-memory for the day.
 
         Rebuild rule (§2.6): the last ``equity_snapshots`` row strictly BEFORE ``d`` (i.e. the prior
-        session's final persist), else current equity. The fallback means a first-ever run with
-        positions already closed today reads day_mtm 0 — there is no earlier equity to measure from.
+        session's final persist). With no prior snapshot (first-ever run), back the baseline out of
+        current equity MINUS today's already-realized net — a loss realized while the engine was off
+        must still count toward ``daily_loss_soft``/``daily_loss_hard`` on the first run of the day
+        (§2.6 step 2 folds offline closes into the day counters, and day-MTM is one of them).
         """
         d = d or self._clock.today()
         if self._day_baseline is not None and self._day_baseline[0] == d:
@@ -210,9 +212,22 @@ class ExposureTracker:
             "SELECT equity FROM equity_snapshots WHERE substr(at, 1, 10) < ? ORDER BY at DESC LIMIT 1",
             (d.isoformat(),),
         ).fetchone()
-        baseline = _dec(row["equity"]) if row is not None else self.equity()
+        baseline = _dec(row["equity"]) if row is not None else self.equity() - self._realized_net_closed_on(d)
         self._day_baseline = (d, baseline)
         return baseline
+
+    def _realized_net_closed_on(self, d: date) -> Decimal:
+        """Net realized P&L of platform/recommended positions CLOSED on ``d`` (gross − costs)."""
+        rows = self._conn.execute(
+            "SELECT realized_pnl, costs FROM positions "
+            "WHERE origin IN ('platform','recommended') AND state = 'CLOSED' "
+            "AND substr(closed_at, 1, 10) = ?",
+            (d.isoformat(),),
+        ).fetchall()
+        total = Decimal("0")
+        for row in rows:
+            total += _dec(row["realized_pnl"]) - _dec(row["costs"])
+        return total
 
     def day_mtm(self, d: date | None = None) -> Decimal:
         """Day P&L on an MTM basis: realized net of everything CLOSED today + the open-MTM move since

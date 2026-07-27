@@ -118,11 +118,24 @@ def test_day_baseline_rebuilds_from_last_prior_session_snapshot(conn, clock):
     assert tracker.day_mtm() == Decimal("-125")
 
 
-def test_day_baseline_without_prior_snapshot_is_current_equity(conn, clock):
+def test_day_baseline_without_prior_snapshot_backs_out_todays_closes(conn, clock):
+    """First-ever run with positions already closed today (§2.6 step 2): the baseline is current
+    equity MINUS today's realized net, so an offline-realized P&L still counts toward day-MTM —
+    a loss closed while the engine was down must be able to trip daily_loss_soft/hard."""
     _mixed_book(conn)
     tracker = ExposureTracker(conn, clock, CAPITAL, mark_price=MARKS.get)
-    assert tracker.day_baseline() == Decimal("20375")
-    assert tracker.day_mtm() == Decimal("0")
+    # today's realized net: (500-40) + (-200-35) = +225 (external excluded)
+    assert tracker.day_baseline() == Decimal("20150")
+    assert tracker.day_mtm() == Decimal("225")
+
+
+def test_day_mtm_counts_offline_loss_on_first_run(conn, clock):
+    """An MIS loss realized by the broker while the engine was off, discovered on the first run of
+    the day with no prior snapshots: day_mtm reports the loss, not zero."""
+    _position(conn, "off1", state="CLOSED", origin="platform", symbol="AAA",
+              closed_at=f"{TODAY.isoformat()}T09:20:00+05:30", realized_pnl="-900", costs="45")
+    tracker = ExposureTracker(conn, clock, CAPITAL)
+    assert tracker.day_mtm() == Decimal("-945")
 
 
 # ----------------------------------------------------------------- consecutive_losses rebuild (§7.1)
