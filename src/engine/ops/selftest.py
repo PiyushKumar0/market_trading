@@ -104,6 +104,8 @@ class SelfTest:
         exposure=None,
         limits_engine=None,
         latch=None,
+        sdk_smoke=None,
+        calendar=None,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -122,6 +124,11 @@ class SelfTest:
         self._exposure = exposure
         self._limits = limits_engine
         self._latch = latch
+        # D11 seam: an async callable performing ONE cheap SDK round-trip (composition wires it to
+        # the AgentHarness). The self-test owns the trading-day gate + per-day dedupe; a failed call
+        # is WARN, never FROZEN — LLM availability is not a safety input (D7/R1).
+        self._sdk_smoke = sdk_smoke
+        self._calendar = calendar
 
     async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
@@ -137,8 +144,7 @@ class SelfTest:
         report.checks.append(await self._check_equity_halt_ladder())
         if include_freshness:
             report.checks.extend(await self.data_freshness_checks())
-        report.checks.append(self._stub(
-            "sdk_smoke", "one cheap Haiku call — wired with the intelligence harness, Phase 1 (D11)"))
+        report.checks.append(await self._check_sdk_smoke())
 
         for c in report.checks:
             level = _log.info if c.status in (CheckStatus.PASS, CheckStatus.SKIP) else _log.warning
@@ -350,3 +356,33 @@ class SelfTest:
             )
         return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.PASS,
                              detail=f"no rung breached (equity {self._exposure.equity()})")
+
+    async def _check_sdk_smoke(self) -> SelfTestCheck:
+        """D11: one cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading
+        day via a ``job_runs`` watermark. WARN on failure — never FROZEN (LLM availability is not a
+        safety input, D7)."""
+        if self._sdk_smoke is None:
+            return self._stub("sdk_smoke", "harness smoke callable not wired")
+        d = self._clock.today()
+        if self._calendar is not None and not self._calendar.is_trading_day(d):
+            return self._stub("sdk_smoke", "non-trading day (D11: skipped)")
+        row = self._conn.execute(
+            "SELECT status FROM job_runs WHERE job_id='sdk_smoke' AND run_for_date=?", (d.isoformat(),)
+        ).fetchone()
+        if row is not None and row["status"] == "success":
+            return self._stub("sdk_smoke", "already verified this trading day (deduped)")
+        try:
+            detail = await self._sdk_smoke()
+        except Exception as exc:  # noqa: BLE001 - a dead SDK degrades to no-proposal, never blocks boot
+            return SelfTestCheck(name="sdk_smoke", status=CheckStatus.WARN,
+                                 detail=f"SDK call failed: {exc}")
+        now = self._clock.now().isoformat()
+        self._conn.execute(
+            "INSERT INTO job_runs (job_id, run_for_date, last_success_at, last_attempt_at, status) "
+            "VALUES ('sdk_smoke', ?, ?, ?, 'success') "
+            "ON CONFLICT(job_id, run_for_date) DO UPDATE SET last_success_at=excluded.last_success_at, "
+            "last_attempt_at=excluded.last_attempt_at, status='success'",
+            (d.isoformat(), now, now),
+        )
+        self._conn.commit()
+        return SelfTestCheck(name="sdk_smoke", status=CheckStatus.PASS, detail=detail)

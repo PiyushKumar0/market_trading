@@ -719,3 +719,25 @@ async def test_shape_guards(defs, gov, clock, conn) -> None:
         await harness.run_single_shot(defs["nightly_reviewer"], FakeContext(), json.loads)
     with pytest.raises(ValueError, match="run_agentic"):
         await harness.run_agentic(defs["intraday_analyst"], "task")
+
+
+# --------------------------------------------------------------------------- D11 sdk smoke
+async def test_run_sdk_smoke_happy_path(defs, gov, clock, conn) -> None:
+    from engine.intelligence.harness import run_sdk_smoke
+
+    fake = FakeQuery([FakeAssistantMessage('{"ok": true}'),
+                      FakeResultMessage({"input_tokens": 40, "output_tokens": 6})])
+    harness = make_harness(defs, gov, clock, conn, fake)
+    detail = await run_sdk_smoke(harness)
+    assert "SDK round-trip ok" in detail
+    row = conn.execute("SELECT agent_id, ok FROM agent_calls ORDER BY at DESC LIMIT 1").fetchone()
+    assert (row["agent_id"], row["ok"]) == ("sdk_smoke", 1)
+
+
+async def test_run_sdk_smoke_raises_on_wrong_payload(defs, gov, clock, conn) -> None:
+    from engine.intelligence.harness import run_sdk_smoke
+
+    fake = FakeQuery([FakeAssistantMessage('{"ok": false}')])
+    harness = make_harness(defs, gov, clock, conn, fake)
+    with pytest.raises(RuntimeError, match="schema_invalid"):
+        await run_sdk_smoke(harness)

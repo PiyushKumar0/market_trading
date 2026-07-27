@@ -44,7 +44,7 @@ from engine.broker.session import SessionManager
 from engine.broker.ticker_supervisor import TickerSupervisor
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
-from engine.core.config import config_dir, load_settings
+from engine.core.config import config_dir, load_settings, load_yaml
 from engine.core.db import connect
 from engine.core.enums import Actor, RiskState
 from engine.core.eventbus import EventBus
@@ -107,6 +107,7 @@ from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
 from engine.ops.single_instance import InstanceLock
 from engine.intelligence.governor import BudgetGovernor
+from engine.intelligence.harness import AgentHarness, load_agent_defs, run_sdk_smoke
 from engine.ops.warmup import WarmupGate
 from engine.risk.causes import RiskStateLatch
 from engine.risk.exposure import ExposureTracker
@@ -337,6 +338,17 @@ async def run() -> int:
         session=session, conn=conn, bus=bus,
     )
     telegram_holder["bot"] = telegram
+
+    # --- Tier-1 harness (§3.2.6): the ONLY SDK call site. Consumed by the D11 sdk-smoke check and
+    #     (second wiring pass) the recommendation pipeline / planner / news-scoring jobs. A roster
+    #     that fails to load disables the LLM tier for the run — deterministic tiers unaffected (D7).
+    agent_defs: dict[str, Any] = {}
+    harness: AgentHarness | None = None
+    try:
+        agent_defs = load_agent_defs(load_yaml(config_dir() / "agents.yaml"))
+        harness = AgentHarness(agent_defs, governor, clock, conn, alert=alert)
+    except Exception:  # noqa: BLE001 - a bad roster must not stop the deterministic engine (D7)
+        _log.exception("agent_roster_unloadable", hint="config/agents.yaml — LLM tier disabled this run")
 
     # =========================================================================================
     # DATA PLANE (§2.5 / §3.2.3 / §4.4). Single-writer store + tick→bar builder + daily jobs.
@@ -613,6 +625,8 @@ async def run() -> int:
         protected_store=protected_store, kill_switch=kill, mode_manager=mode, session_manager=session,
         catch_up=catch_up, warmup_gate=warmup_gate,
         exposure=exposure, limits_engine=limits_engine, latch=latch,
+        sdk_smoke=(None if harness is None else (lambda: run_sdk_smoke(harness))),
+        calendar=calendar,
     )
     # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
     # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.

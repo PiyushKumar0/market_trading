@@ -955,3 +955,45 @@ class AgentHarness:
             except Exception as exc:  # noqa: BLE001 - alerting is best-effort; never masks the failure
                 _log.warning("agent_alert_failed", agent=agent_def.agent_id, error=str(exc))
         return result
+
+
+# --------------------------------------------------------------------------- D11 smoke (S3.2.12)
+class _SmokeContext:
+    """Minimal AssembledContextLike for the self-test round-trip (no assembler dependency)."""
+
+    system_prompt = 'You are a connectivity check. Reply with ONLY the JSON object {"ok": true}.'
+    inputs_digest = "sdk-smoke"
+    call_class = "schedule"
+
+    def prompt(self) -> str:
+        return "ping"
+
+
+SMOKE_AGENT_DEF = AgentDef(
+    agent_id="sdk_smoke",
+    model="haiku-4.5",
+    shape="single_shot",
+    tools_enabled=False,
+    allowed_tools=[],
+    max_output_tokens=32,
+    timeout_s=30.0,
+)
+
+
+async def run_sdk_smoke(harness: AgentHarness) -> str:
+    """One cheap Haiku round-trip through the FULL harness path (options, allowlist, validation,
+    metering, audit row) — the D11 self-test call. Raises on any failure; the self-test maps that
+    to WARN (LLM availability is never a safety input, D7)."""
+
+    def _validate(raw: str) -> Any:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("ok") is not True:
+            raise ValueError(f"unexpected smoke payload: {raw[:80]}")
+        return data
+
+    result = await harness.run_single_shot(SMOKE_AGENT_DEF, _SmokeContext(), _validate)
+    if not result.ok:
+        raise RuntimeError(f"{result.reason}: {result.detail}")
+    usage = result.usage
+    tokens = f"{usage.in_tokens}in/{usage.out_tokens}out" if usage is not None else "usage n/a"
+    return f"SDK round-trip ok ({tokens}, call {result.call_id})"

@@ -1,0 +1,414 @@
+"""``LiveScanContextProvider`` (§3.2.5) — the live ``context_provider`` seam.
+
+Covers the :class:`ScanContext` contract it must fill (intraday series with the scanned bar last,
+daily/index/flagged/ex-date/momentum context, calendar window), the §3.2 hot-path read budget (ONE
+``get_bars_1d`` per symbol per day, one flagged/corp-action read per day, rebuilt on date change,
+nothing read at construction), and its degradation rules (out-of-order + redelivered bars, snapshot
+minting failure, non-trading date).
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+
+from engine.core.calendar import NSECalendar
+from engine.core.clock import IST
+from engine.core.config import config_dir
+from engine.core.types import Bar
+from engine.features.engine import FeatureEngine
+from engine.features.snapshots import load_snapshot
+from engine.marketdata.store import DailyBar, MarketStore
+from engine.ops.scan_context import LiveScanContextProvider
+from engine.strategy.prescreen import SignalPreScreen
+from engine.strategy.scanners.base import Scanner
+from tests.conftest import FIXED_NOW
+
+D = FIXED_NOW.date()                      # 2026-06-17 (Wed), a real trading day (conftest)
+NEXT_D = date(2026, 6, 18)                # Thu, also a trading day
+SUNDAY = date(2026, 6, 21)                # not a trading day (weekend, no muhurat) — R6
+SESSION_OPEN = datetime(2026, 6, 17, 9, 15, tzinfo=IST)
+
+
+# --------------------------------------------------------------------------- spies / stubs
+class SpyStore(MarketStore):
+    """MarketStore that records every read the provider makes (read-budget assertions)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.daily_reads: list[str] = []
+        self.minute_reads: list[str] = []
+        self.flagged_reads: list[date] = []
+        self.corp_action_reads: int = 0
+
+    def get_bars_1d(self, symbol, start, end):        # noqa: ANN001, ANN201 - spy passthrough
+        self.daily_reads.append(symbol)
+        return super().get_bars_1d(symbol, start, end)
+
+    def get_bars_1m(self, symbol, start, end):        # noqa: ANN001, ANN201
+        self.minute_reads.append(symbol)
+        return super().get_bars_1m(symbol, start, end)
+
+    def get_flagged_instrument_days(self, d):         # noqa: ANN001, ANN201
+        self.flagged_reads.append(d)
+        return super().get_flagged_instrument_days(d)
+
+    def get_corp_actions(self, **kwargs):             # noqa: ANN201
+        self.corp_action_reads += 1
+        return super().get_corp_actions(**kwargs)
+
+
+class StubFeatures:
+    """Minimal ``FeatureEngine`` stand-in: the provider only reads ``features_snapshot_id``."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def intraday_snapshot(self, symbol: str):         # noqa: ANN201 - duck-typed FeatureVector
+        self.calls.append(symbol)
+        if self.fail:
+            raise RuntimeError("duckdb read failed mid-session")
+
+        class _V:
+            features_snapshot_id = f"snap-{symbol}-{len(self.calls)}"
+
+        return _V()
+
+
+# --------------------------------------------------------------------------- fixtures
+@pytest.fixture
+def store(tmp_path, clock) -> SpyStore:
+    s = SpyStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
+    s.open()
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def calendar(clock) -> NSECalendar:
+    return NSECalendar(config_dir() / "calendar", clock)
+
+
+@pytest.fixture
+def features() -> StubFeatures:
+    return StubFeatures()
+
+
+@pytest.fixture
+def provider(store, clock, calendar, features) -> LiveScanContextProvider:
+    return LiveScanContextProvider(store, clock, calendar, features)
+
+
+# --------------------------------------------------------------------------- synthetic data
+def _weekdays_back(end: date, n: int) -> list[date]:
+    """The last ``n`` weekdays ending at ``end`` inclusive, ascending (bars_1d needs no calendar)."""
+    days: list[date] = []
+    probe = end
+    while len(days) < n:
+        if probe.weekday() < 5:
+            days.append(probe)
+        probe -= timedelta(days=1)
+    return list(reversed(days))
+
+
+def _seed_daily(store: MarketStore, symbol: str, days: list[date], base: float, drift: float):
+    bars = [
+        DailyBar(
+            symbol=symbol, d=dd,
+            open=Decimal(f"{base + drift * i:.2f}"),
+            high=Decimal(f"{base + drift * i + 1:.2f}"),
+            low=Decimal(f"{base + drift * i - 1:.2f}"),
+            close=Decimal(f"{base + drift * i:.2f}"),
+            volume=10_000 + i,
+        )
+        for i, dd in enumerate(days)
+    ]
+    store.upsert_bars_1d(bars)
+    store.daily_reads.clear()          # seeding is not a provider read
+    return bars
+
+
+def _bar(symbol: str = "AAA", *, d: date = D, hh: int = 9, mm: int = 20, close: str = "100.00") -> Bar:
+    return Bar(
+        symbol=symbol, ts_minute=datetime(d.year, d.month, d.day, hh, mm, tzinfo=IST),
+        open=Decimal("99.00"), high=Decimal("101.00"), low=Decimal("98.00"),
+        close=Decimal(close), volume=1_000,
+    )
+
+
+def _seed_intraday(store: MarketStore, symbol: str, minutes: range) -> list[Bar]:
+    bars = [_bar(symbol, hh=9, mm=m, close=f"{100 + m}.00") for m in minutes]
+    store.insert_bars_1m(bars)
+    store.minute_reads.clear()
+    return bars
+
+
+# --------------------------------------------------------------------------- construction
+def test_no_store_read_at_construction(store, clock, calendar, features):
+    LiveScanContextProvider(store, clock, calendar, features)
+    assert store.daily_reads == [] and store.minute_reads == [] and store.flagged_reads == []
+    assert store.corp_action_reads == 0
+
+
+def test_constructor_validation(store, clock, calendar, features):
+    with pytest.raises(ValueError):
+        LiveScanContextProvider(store, clock, calendar, features, momentum_weeks=0)
+    with pytest.raises(ValueError):
+        LiveScanContextProvider(store, clock, calendar, features, daily_lookback_days=0)
+    with pytest.raises(ValueError):
+        LiveScanContextProvider(store, clock, calendar, features, ex_horizon_days=-1)
+
+
+# --------------------------------------------------------------------------- intraday series
+def test_intraday_seeded_from_store_with_current_bar_last(store, provider):
+    _seed_intraday(store, "AAA", range(15, 20))          # 09:15..09:19 already persisted
+    incoming = _bar(mm=20, close="120.00")
+
+    ctx = provider(incoming)
+
+    ts = [b.ts_minute for b in ctx.intraday_bars]
+    assert ts == sorted(ts)                              # ascending (§3.2.5 contract)
+    assert len(ctx.intraday_bars) == 6                   # 5 seeded + the scanned bar
+    assert ctx.intraday_bars[-1].ts_minute == incoming.ts_minute
+    assert ctx.intraday_bars[-1].close == incoming.close
+    assert store.minute_reads == ["AAA"]                 # exactly one seed read for the symbol
+
+    # Subsequent bars append in memory — never another store read.
+    ctx2 = provider(_bar(mm=21, close="121.00"))
+    assert len(ctx2.intraday_bars) == 7
+    assert ctx2.intraday_bars[-1].ts_minute == datetime(2026, 6, 17, 9, 21, tzinfo=IST)
+    assert store.minute_reads == ["AAA"]
+
+
+def test_intraday_seed_skipped_at_session_open(store, provider):
+    ctx = provider(_bar(hh=9, mm=15))
+    assert [b.ts_minute for b in ctx.intraday_bars] == [SESSION_OPEN]
+    assert store.minute_reads == []                      # nothing to seed at the open
+
+
+def test_duplicate_bar_redelivery_replaces_last(store, provider):
+    provider(_bar(mm=20, close="100.00"))
+    ctx = provider(_bar(mm=20, close="103.50"))          # same minute re-delivered (late-tick amend)
+    assert len(ctx.intraday_bars) == 1
+    assert ctx.intraday_bars[-1].close == Decimal("103.50")
+
+
+def test_out_of_order_bar_ignored(store, provider):
+    provider(_bar(mm=20, close="100.00"))
+    provider(_bar(mm=21, close="101.00"))
+    ctx = provider(_bar(mm=20, close="999.00"))          # stale delivery
+    assert [b.close for b in ctx.intraday_bars] == [Decimal("100.00"), Decimal("101.00")]
+    # The scanned bar is NOT last ⇒ intraday scanners fail to zero, which is the intended degradation.
+    assert ctx.intraday_bars[-1].ts_minute == datetime(2026, 6, 17, 9, 21, tzinfo=IST)
+
+
+def test_intraday_series_is_per_symbol(store, provider):
+    provider(_bar("AAA", mm=20))
+    provider(_bar("AAA", mm=21))
+    ctx = provider(_bar("BBB", mm=21))
+    assert len(ctx.intraday_bars) == 1 and ctx.intraday_bars[0].symbol == "BBB"
+
+
+# --------------------------------------------------------------------------- daily cache / read budget
+def test_one_daily_read_per_symbol_per_day(store, provider):
+    _seed_daily(store, "AAA", _weekdays_back(D - timedelta(days=1), 30), 100.0, 0.5)
+    _seed_daily(store, "BBB", _weekdays_back(D - timedelta(days=1), 30), 200.0, -0.5)
+
+    for mm in range(20, 25):
+        provider(_bar("AAA", mm=mm))
+        provider(_bar("BBB", mm=mm))
+
+    # 10 bars, 2 symbols: one bars_1d read each + one for the index, ALL on the first bar of the day.
+    assert store.daily_reads.count("AAA") == 1
+    assert store.daily_reads.count("BBB") == 1
+    assert store.daily_reads.count("NIFTY 50") == 1
+    assert store.flagged_reads == [D]
+    assert store.corp_action_reads == 1
+
+
+def test_daily_bars_stop_at_the_prior_session(store, provider):
+    days = _weekdays_back(D - timedelta(days=1), 30)
+    _seed_daily(store, "AAA", days, 100.0, 0.5)
+    _seed_daily(store, "AAA", [D], 500.0, 0.0)           # today's row must never leak in
+
+    ctx = provider(_bar("AAA"))
+    assert [b.d for b in ctx.daily_bars] == days
+    assert ctx.daily_bars[-1].d == days[-1] < D
+
+
+def test_symbol_first_seen_mid_day_loads_lazily_once(store, provider):
+    _seed_daily(store, "AAA", _weekdays_back(D - timedelta(days=1), 30), 100.0, 0.5)
+    _seed_daily(store, "CCC", _weekdays_back(D - timedelta(days=1), 30), 300.0, 1.0)
+
+    provider(_bar("AAA", mm=20))
+    assert "CCC" not in store.daily_reads
+    provider(_bar("CCC", mm=21))
+    provider(_bar("CCC", mm=22))
+    assert store.daily_reads.count("CCC") == 1
+
+
+def test_day_cache_rebuilt_on_date_change(store, provider):
+    _seed_daily(store, "AAA", _weekdays_back(D - timedelta(days=1), 30), 100.0, 0.5)
+
+    provider(_bar("AAA", d=D, mm=20))
+    provider(_bar("AAA", d=D, mm=21))
+    assert store.daily_reads.count("AAA") == 1
+
+    ctx = provider(_bar("AAA", d=NEXT_D, mm=20))
+    assert store.daily_reads.count("AAA") == 2           # rebuilt for the new day
+    assert store.daily_reads.count("NIFTY 50") == 2
+    assert store.flagged_reads == [D, NEXT_D]
+    assert store.corp_action_reads == 2
+    assert ctx.session_open == datetime(2026, 6, 18, 9, 15, tzinfo=IST)
+    assert len(ctx.intraday_bars) == 1                   # yesterday's series does not survive rollover
+
+
+# --------------------------------------------------------------------------- momentum
+def test_momentum_present_for_cached_symbols(store, provider):
+    days = _weekdays_back(D - timedelta(days=1), 30)
+    aaa = _seed_daily(store, "AAA", days, 100.0, 0.5)
+    _seed_daily(store, "BBB", days, 200.0, -0.5)
+
+    ctx = provider(_bar("AAA"))
+    assert set(ctx.momentum_by_symbol) == {"AAA"}        # cross-section fills in as symbols tick
+    expected = float(aaa[-1].close) / float(aaa[-21].close) - 1.0
+    assert ctx.momentum_by_symbol["AAA"] == pytest.approx(expected)
+
+    ctx2 = provider(_bar("BBB"))
+    assert set(ctx2.momentum_by_symbol) == {"AAA", "BBB"}
+    assert ctx2.momentum_by_symbol["BBB"] < 0.0          # declining series
+
+
+def test_momentum_nan_when_history_is_short(store, provider):
+    _seed_daily(store, "AAA", _weekdays_back(D - timedelta(days=1), 5), 100.0, 0.5)
+    ctx = provider(_bar("AAA"))
+    assert math.isnan(ctx.momentum_by_symbol["AAA"])     # unrankable, never an error (§6.1 mom)
+
+
+def test_momentum_nan_when_symbol_has_no_daily_history(store, provider):
+    ctx = provider(_bar("ZZZ"))
+    assert ctx.daily_bars == []
+    assert math.isnan(ctx.momentum_by_symbol["ZZZ"])
+
+
+def test_momentum_universe_preloads_full_cross_section(store, clock, calendar, features):
+    days = _weekdays_back(D - timedelta(days=1), 30)
+    _seed_daily(store, "AAA", days, 100.0, 0.5)
+    _seed_daily(store, "BBB", days, 200.0, -0.5)
+
+    provider = LiveScanContextProvider(
+        store, clock, calendar, features, momentum_universe=["AAA", "BBB"]
+    )
+    ctx = provider(_bar("AAA"))                          # first bar of the day already sees both
+    assert set(ctx.momentum_by_symbol) == {"AAA", "BBB"}
+    provider(_bar("BBB"))
+    assert store.daily_reads.count("BBB") == 1           # preload counts as the one read
+
+
+# --------------------------------------------------------------------------- index / flagged / ex-dates
+def test_index_daily_closes_populated(store, provider):
+    days = _weekdays_back(D - timedelta(days=1), 30)
+    nifty = _seed_daily(store, "NIFTY 50", days, 20_000.0, 5.0)
+
+    ctx = provider(_bar("AAA"))
+    assert ctx.index_daily_closes == [b.close for b in nifty]
+    assert ctx.index_daily_closes[0] < ctx.index_daily_closes[-1]
+
+
+def test_flagged_symbol_of_the_day(store, provider):
+    store.upsert_flagged_instrument_days([{"symbol": "AAA", "d": D, "reason": "block_deal"}])
+    assert provider(_bar("AAA")).flagged is True         # §6.1 orb suppresses on this
+    assert provider(_bar("BBB")).flagged is False
+
+
+def test_upcoming_ex_dates_bucketed_per_symbol(store, provider):
+    store.upsert_corp_actions([
+        {"symbol": "AAA", "ex_date": D + timedelta(days=3), "kind": "dividend"},
+        {"symbol": "AAA", "ex_date": D + timedelta(days=90), "kind": "dividend"},   # beyond horizon
+        {"symbol": "AAA", "ex_date": D - timedelta(days=2), "kind": "dividend"},    # past
+        {"symbol": "BBB", "ex_date": D + timedelta(days=5), "kind": "bonus"},
+    ])
+    assert provider(_bar("AAA")).upcoming_ex_dates == [D + timedelta(days=3)]
+    assert provider(_bar("BBB")).upcoming_ex_dates == [D + timedelta(days=5)]
+    assert provider(_bar("CCC")).upcoming_ex_dates == []
+    assert store.corp_action_reads == 1                  # ONE range read for every symbol
+
+
+def test_ex_date_horizon_covers_the_mom_skip_window(store, provider):
+    # §6.1 mom skips on ex-dates within ceil(rebalance_days x 7/5) calendar days — 28 at the §6.3
+    # upper bound of 20. A shorter provider horizon would silently defeat the A12 skip.
+    store.upsert_corp_actions([{"symbol": "AAA", "ex_date": D + timedelta(days=27), "kind": "dividend"}])
+    assert provider(_bar("AAA")).upcoming_ex_dates == [D + timedelta(days=27)]
+
+
+# --------------------------------------------------------------------------- calendar context
+def test_trade_window_and_session_open_on_a_trading_day(provider):
+    ctx = provider(_bar("AAA"))
+    assert ctx.session_open == SESSION_OPEN
+    assert ctx.trade_window == (
+        datetime(2026, 6, 17, 10, 0, tzinfo=IST), datetime(2026, 6, 17, 10, 30, tzinfo=IST),
+    )
+
+
+def test_non_trading_date_yields_no_window_and_no_session_open(store, provider):
+    ctx = provider(_bar("AAA", d=SUNDAY))
+    assert ctx.trade_window is None                      # NSECalendar raises; provider degrades (R6)
+    assert ctx.session_open is None
+    assert store.minute_reads == []                      # no session ⇒ no intraday seed
+    assert len(ctx.intraday_bars) == 1                   # still the scanned bar, ascending contract
+
+
+def test_mom_sessions_since_rebalance_is_none_in_v1(provider):
+    assert provider(_bar("AAA")).mom_sessions_since_rebalance is None
+
+
+# --------------------------------------------------------------------------- feature snapshot
+def test_features_snapshot_id_minted_per_bar(provider, features):
+    assert provider(_bar("AAA", mm=20)).features_snapshot_id == "snap-AAA-1"
+    assert provider(_bar("AAA", mm=21)).features_snapshot_id == "snap-AAA-2"
+    assert features.calls == ["AAA", "AAA"]
+
+
+def test_snapshot_minting_failure_yields_none(store, clock, calendar):
+    provider = LiveScanContextProvider(store, clock, calendar, StubFeatures(fail=True))
+    ctx = provider(_bar("AAA"))                          # must not raise into the scan path
+    assert ctx.features_snapshot_id is None
+    assert ctx.session_open == SESSION_OPEN              # the rest of the context is still built
+
+
+def test_real_feature_engine_snapshot_is_persisted(store, clock, calendar):
+    engine = FeatureEngine(store, clock, calendar)
+    provider = LiveScanContextProvider(store, clock, calendar, engine)
+    _seed_intraday(store, "AAA", range(15, 20))
+
+    snapshot_id = provider(_bar("AAA", mm=20)).features_snapshot_id
+
+    assert snapshot_id is not None
+    vector = load_snapshot(store, snapshot_id)
+    assert vector is not None and vector.symbol == "AAA"
+
+
+# --------------------------------------------------------------------------- pre-screen wiring
+def test_provider_satisfies_the_prescreen_context_provider_seam(store, provider):
+    """The provider is the injected ``context_provider``: SignalPreScreen calls it per bar."""
+    seen = []
+
+    class _Recorder(Scanner):
+        strategy_id = "recorder"
+        style = "intraday"
+
+        def scan(self, bar, ctx):  # noqa: ANN001 - test stub
+            seen.append(ctx)
+            return []
+
+    ps = SignalPreScreen([_Recorder()], provider)
+    ps.on_bar(_bar("AAA", mm=20))
+    ps.on_bar(_bar("AAA", mm=21))
+
+    assert len(seen) == 2
+    assert seen[-1].session_open == SESSION_OPEN
+    assert [b.ts_minute.minute for b in seen[-1].intraday_bars] == [20, 21]
