@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict
 from engine.broker.instruments import InstrumentStore
 from engine.core.config import config_dir
 from engine.core.log import get_logger
-from engine.intelligence.schemas import CostBreakdown
+from engine.core.contracts import CostBreakdown
 
 _log = get_logger("engine.strategy.cost_model")
 
