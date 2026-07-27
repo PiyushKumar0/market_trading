@@ -58,6 +58,8 @@ class HealthMonitor:
         max_skew_s: float | None = None,
         wal_warn_mb: float = 256.0,
         disk_warn_gb: float = 2.0,
+        calendar: Any = None,              # duck-typed: must expose .session(date) -> session|None
+        keep_awake: Any = None,            # duck-typed: must expose .update(session_open: bool)
     ) -> None:
         self._clock = clock
         self._settings = settings
@@ -66,6 +68,10 @@ class HealthMonitor:
         self._max_skew_s = max_skew_s if max_skew_s is not None else settings.clock.max_skew_s
         self._wal_warn_mb = wal_warn_mb
         self._disk_warn_gb = disk_warn_gb
+        # In-session OS keep-awake (2026-07-23 sleep/resume wedge): the health loop is the always-on
+        # periodic tick, so it is where keep-awake is engaged (session open) / released (session close).
+        self._calendar = calendar
+        self._keep_awake = keep_awake
 
     async def check(self, *, check_skew: bool = True) -> HealthReport:
         report = HealthReport()
@@ -107,11 +113,28 @@ class HealthMonitor:
             if report.wal_size_mb > self._wal_warn_mb:
                 report.problems.append("large_wal")  # checkpoint at EOD (§4.1)
 
+        # --- in-session OS keep-awake (2026-07-23 sleep/resume wedge): while a trading session is open,
+        #     keep the OS awake so it does not auto-sleep mid-session and freeze the tick feed; release
+        #     at session close. No-op off-Windows / when disabled / without a calendar. ---
+        if self._keep_awake is not None:
+            self._keep_awake.update(self._session_open())
+
         if report.problems and self._alert is not None:
             await self._alert("warning", f"health problems: {report.problems}")
         _log.info("health_check", feed=report.feed_state, skew_ok=report.clock_skew_ok,
                   disk_free_gb=report.disk_free_gb, problems=report.problems)
         return report
+
+    def _session_open(self) -> bool:
+        """True iff ``clock.now()`` is inside today's NSE continuous session (same calendar/clock the
+        tick-silence guard uses). Without a calendar the loop cannot know it is in-session ⇒ False."""
+        if self._calendar is None:
+            return False
+        now = self._clock.now()
+        session = self._calendar.session(now.date())
+        if session is None:  # holiday / weekend / unverified horizon (R6)
+            return False
+        return session.open <= now <= session.close
 
     async def watchdog_missed_start(self, expected: str) -> None:
         """Alert that an expected scheduled active-period start did not occur (§2.6/§10.4)."""

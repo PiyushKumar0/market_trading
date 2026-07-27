@@ -73,7 +73,7 @@ class Clock:
             try:
                 client = ntplib.NTPClient()
                 response = await loop.run_in_executor(
-                    None, lambda s=server: client.request(s, version=3, timeout=3)
+                    None, lambda s=server, c=client: c.request(s, version=3, timeout=3)
                 )
                 return timedelta(seconds=abs(response.offset))
             except Exception as exc:  # noqa: BLE001 - try the next server

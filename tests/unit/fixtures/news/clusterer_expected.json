@@ -1,0 +1,125 @@
+{
+  "_comment": "Golden EXPECTED output for clusterer_headlines.json under the §3.2.4 pinned algorithm (sim_threshold 0.75, max_event_age_days 2). Verified against the fixture _comment's claims: c-h01 = story A (h01+h02+h03 same-day merge, h15 joins next day INSIDE the window; distinct domains = 3); c-h14 = the IDENTICAL title 3 days later (sim 1.0) but OUTSIDE the window from c-h01's last_seen -> its own cluster; c-h04 = story B (h05 repeats h04's domain so distinct domains stays 2); c-h08 = story C cross-day merge; c-h11 vs c-h12 = greedy-earliest (sim(h12,h11)=0.6852 < 0.75 -> own cluster; h13 scores 0.9143 vs h11 AND 0.7706 vs h12 -> joins c-h11, the earliest first_seen). Ordered by (first_seen, cluster_id); headline_ids in published_at order.",
+  "clusters": [
+    {
+      "cluster_id": "c-h01",
+      "representative": "RBI cuts repo rate by 25 basis points in surprise move",
+      "source_domains": ["economictimes.indiatimes.com", "livemint.com", "moneycontrol.com"],
+      "first_seen": "2026-06-17T09:00:00+05:30",
+      "last_seen": "2026-06-18T08:00:00+05:30",
+      "headline_ids": ["h01", "h02", "h03", "h15"]
+    },
+    {
+      "cluster_id": "c-h04",
+      "representative": "Infosys beats Q1 profit estimates raises FY27 revenue guidance",
+      "source_domains": ["economictimes.indiatimes.com", "moneycontrol.com"],
+      "first_seen": "2026-06-17T09:20:00+05:30",
+      "last_seen": "2026-06-17T09:40:00+05:30",
+      "headline_ids": ["h04", "h05", "h06"]
+    },
+    {
+      "cluster_id": "c-h07",
+      "representative": "Tata Motors wins record electric bus order from state transport",
+      "source_domains": ["economictimes.indiatimes.com"],
+      "first_seen": "2026-06-17T09:30:00+05:30",
+      "last_seen": "2026-06-17T09:30:00+05:30",
+      "headline_ids": ["h07"]
+    },
+    {
+      "cluster_id": "c-h08",
+      "representative": "Adani Ports acquires container terminal stake in Colombo",
+      "source_domains": ["livemint.com", "moneycontrol.com"],
+      "first_seen": "2026-06-17T09:45:00+05:30",
+      "last_seen": "2026-06-18T09:30:00+05:30",
+      "headline_ids": ["h08", "h22"]
+    },
+    {
+      "cluster_id": "c-h09",
+      "representative": "Sensex ends flat as IT stocks drag banks gain",
+      "source_domains": ["economictimes.indiatimes.com"],
+      "first_seen": "2026-06-17T10:00:00+05:30",
+      "last_seen": "2026-06-17T10:00:00+05:30",
+      "headline_ids": ["h09"]
+    },
+    {
+      "cluster_id": "c-h10",
+      "representative": "Government approves PLI scheme for semiconductor manufacturing",
+      "source_domains": ["business-standard.com"],
+      "first_seen": "2026-06-17T10:15:00+05:30",
+      "last_seen": "2026-06-17T10:15:00+05:30",
+      "headline_ids": ["h10"]
+    },
+    {
+      "cluster_id": "c-h11",
+      "representative": "Pharma exporters rally as US FDA clears three plants",
+      "source_domains": ["economictimes.indiatimes.com", "moneycontrol.com"],
+      "first_seen": "2026-06-17T11:00:00+05:30",
+      "last_seen": "2026-06-17T11:20:00+05:30",
+      "headline_ids": ["h11", "h13"]
+    },
+    {
+      "cluster_id": "c-h12",
+      "representative": "Pharma stocks rally after US FDA clears Aurobindo plants",
+      "source_domains": ["livemint.com"],
+      "first_seen": "2026-06-17T11:10:00+05:30",
+      "last_seen": "2026-06-17T11:10:00+05:30",
+      "headline_ids": ["h12"]
+    },
+    {
+      "cluster_id": "c-h16",
+      "representative": "HDFC Bank raises MCLR by 10 basis points across tenures",
+      "source_domains": ["economictimes.indiatimes.com"],
+      "first_seen": "2026-06-17T12:00:00+05:30",
+      "last_seen": "2026-06-17T12:00:00+05:30",
+      "headline_ids": ["h16"]
+    },
+    {
+      "cluster_id": "c-h17",
+      "representative": "Crude oil slips below 70 dollars as OPEC output rises",
+      "source_domains": ["moneycontrol.com"],
+      "first_seen": "2026-06-17T12:30:00+05:30",
+      "last_seen": "2026-06-17T12:30:00+05:30",
+      "headline_ids": ["h17"]
+    },
+    {
+      "cluster_id": "c-h18",
+      "representative": "Zomato shares jump 8 percent on strong quarterly delivery growth",
+      "source_domains": ["livemint.com"],
+      "first_seen": "2026-06-17T13:00:00+05:30",
+      "last_seen": "2026-06-17T13:00:00+05:30",
+      "headline_ids": ["h18"]
+    },
+    {
+      "cluster_id": "c-h19",
+      "representative": "SEBI proposes tighter disclosure norms for small cap funds",
+      "source_domains": ["business-standard.com"],
+      "first_seen": "2026-06-17T13:30:00+05:30",
+      "last_seen": "2026-06-17T13:30:00+05:30",
+      "headline_ids": ["h19"]
+    },
+    {
+      "cluster_id": "c-h20",
+      "representative": "Maruti Suzuki recalls 40000 cars over airbag defect",
+      "source_domains": ["economictimes.indiatimes.com"],
+      "first_seen": "2026-06-17T14:00:00+05:30",
+      "last_seen": "2026-06-17T14:00:00+05:30",
+      "headline_ids": ["h20"]
+    },
+    {
+      "cluster_id": "c-h21",
+      "representative": "Defence stocks rally on new DRDO missile order win",
+      "source_domains": ["moneycontrol.com"],
+      "first_seen": "2026-06-17T14:30:00+05:30",
+      "last_seen": "2026-06-17T14:30:00+05:30",
+      "headline_ids": ["h21"]
+    },
+    {
+      "cluster_id": "c-h14",
+      "representative": "RBI cuts repo rate by 25 basis points in surprise move",
+      "source_domains": ["economictimes.indiatimes.com"],
+      "first_seen": "2026-06-20T09:00:00+05:30",
+      "last_seen": "2026-06-20T09:00:00+05:30",
+      "headline_ids": ["h14"]
+    }
+  ]
+}

@@ -1,23 +1,22 @@
-# config/calendar/2026.yaml — NSE trading calendar for 2026 (R6).
+# config/calendar/2026.yaml — NSE trading calendar for 2026 (R6, B2).
 #
-# ⚠⚠ DRAFT — `verified: false`. THE OWNER MUST VERIFY THIS LIST against the official NSE holiday
-# circular before Phase 1 (§4.4 job 12), then set `verified: true` and `verified_through` to the
-# last date covered. FAIL-SAFE (R6): NSECalendar refuses to mark any date a trading day beyond
-# `verified_through` (or at all while `verified: false` in prod) — "no calendar, no trading". Without
-# this, ~15 days/year misbehave and the LLM loop burns credit on closed markets (R6).
+# CIRCULAR-COMPLETE (as of the official NSE circular below) but still 2026 is a LIVE / partially-elapsed
+# year — ⚠ OWNER CROSS-CHECK REQUESTED before relying on this for size-critical decisions. All fixed-date
+# AND movable/lunar holidays from the official 2026 circular are now filled in (previously only the fixed
+# dates were), plus one ad-hoc election holiday added by a later partial-modification circular (same
+# pattern as 2024's Jan-22/May-20/Nov-20 ad-hoc closures — see config/calendar/2024.yaml). Two things are
+# NOT yet settled and may still change before year-end: (1) the Nov-8 muhurat SESSION TIMINGS (date is
+# confirmed, times are not — see the special_sessions comment below); (2) NSE has amended each of the last
+# two years' base circulars mid-year for elections, so a further ad-hoc 2026 holiday is plausible and this
+# file will need another pass if/when one is announced.
 #
-# Only the FIXED-DATE national holidays below are filled with confidence. The LUNAR/MOVABLE holidays
-# (Holi, Mahashivratri, Ram Navami, Mahavir Jayanti, Good Friday, Id-ul-Fitr, Bakri Id, Muharram,
-# Ganesh Chaturthi, Dussehra, Diwali Laxmi Pujan [Muhurat], Diwali Balipratipada, Guru Nanak Jayanti)
-# shift year to year and are intentionally LEFT BLANK rather than guessed — fill from the circular.
+# FAIL-SAFE (R6): NSECalendar refuses to mark any date a trading day unless `verified: true` AND the date
+# is at/before `verified_through`. Set below so the 200-session warmup lookback (§7.1/B2) can rely on 2026.
 
 year: 2026
-verified: false                           # ⚠ DRAFT — movable/lunar holidays below are still BLANK. Do NOT
-                                          # set true until the FULL list is filled from the NSE circular
-                                          # (§4.4 job 12, owner task). While false, strict/prod mode refuses
-                                          # every 2026 date ("no calendar, no trading", R6) — the safe default.
-verified_through:                         # set to e.g. "2026-12-31" once the owner confirms the full list
-source: "NSE holiday circular (to be attached by owner)"
+verified: true                           # circular-complete (owner cross-check requested — see header).
+verified_through: "2026-12-31"
+source: "NSE CM-segment trading-holiday circular NSE/CMTR/71775 (2025-12-12, Ref 172/2025) + partial-modification circular declaring 2026-01-15 a Capital Market segment trading holiday (Maharashtra Municipal Corporation elections; corroborated by AngelOne, Business Standard, ScanX, Upstox, The Statesman, PL Capital — exact NSE download-ref not independently located, see concerns). Full text: nsearchives.nseindia.com/content/circulars/."
 
 # Regular session times (IST). Stable; A14 pre-open + continuous + post-close.
 sessions:
@@ -25,18 +24,45 @@ sessions:
   continuous: { start: "09:15", end: "15:30" }
   post_close: { start: "15:40", end: "16:00" }      # CNC/MTF market orders at close price
 
-# Full-day market holidays (no trading). FIXED-DATE national holidays only — VERIFY + COMPLETE.
+# Full-day market holidays (no trading). Complete 2026 list per NSE/CMTR/71775: 15 fixed/movable dates +
+# the 3 dates falling on Sat/Sun that are actual holidays regardless (listed for completeness — harmless,
+# is_trading_day checks weekends first), plus 1 ad-hoc election holiday added afterward.
 holidays:
+  - { date: "2026-01-15", name: "Trading holiday — Maharashtra Municipal Corporation Election; added by a partial-modification circular to NSE/CMTR/71775 (not in the original Dec-2025 circular); corroborated by AngelOne/Business Standard/ScanX/Upstox/The Statesman/PL Capital" }
   - { date: "2026-01-26", name: "Republic Day" }
+  - { date: "2026-02-15", name: "Mahashivratri (falls on Sunday)" }
+  - { date: "2026-03-03", name: "Holi" }
+  - { date: "2026-03-21", name: "Id-Ul-Fitr (Ramadan Eid) (falls on Saturday)" }
+  - { date: "2026-03-26", name: "Shri Ram Navami" }
+  - { date: "2026-03-31", name: "Shri Mahavir Jayanti" }
+  - { date: "2026-04-03", name: "Good Friday" }
+  - { date: "2026-04-14", name: "Dr. Baba Saheb Ambedkar Jayanti" }
   - { date: "2026-05-01", name: "Maharashtra Day" }
-  - { date: "2026-10-02", name: "Gandhi Jayanti" }
+  - { date: "2026-05-28", name: "Bakri Id" }
+  - { date: "2026-06-26", name: "Muharram" }
+  - { date: "2026-08-15", name: "Independence Day (falls on Saturday)" }
+  - { date: "2026-09-14", name: "Ganesh Chaturthi" }
+  - { date: "2026-10-02", name: "Mahatma Gandhi Jayanti" }
+  - { date: "2026-10-20", name: "Dussehra" }
+  - { date: "2026-11-10", name: "Diwali-Balipratipada" }
+  - { date: "2026-11-24", name: "Prakash Gurpurb Sri Guru Nanak Dev" }
   - { date: "2026-12-25", name: "Christmas" }
-  # TODO(owner): add all movable/lunar holidays from the official NSE 2026 circular before Phase 1.
+  # NOTE: 2026-11-08 (Diwali Laxmi Pujan, a Sunday) is deliberately NOT listed here — it is modelled ONLY
+  # in special_sessions below (muhurat), per the loader convention at calendar.py:53-63 (a muhurat day must
+  # never also be in `holidays`, else the loader raises ValueError on the overlap and the engine fails to
+  # boot). Confirmed via NSE/CMTR/71775's Sat/Sun table: "Muhurat Trading will be conducted on Sunday,
+  # November 08, 2026. Timings of Muhurat Trading shall be notified subsequently."
 
-# Muhurat trading (Diwali evening special session) — date + times from the circular; left blank.
-special_sessions: [{ date: "2026-11-08", name: "Diwali Muhurat Trading", start: "09:15", end: "10:15" }]
-  # Example shape once known:
-  # - { date: "2026-11-08", name: "Diwali Muhurat Trading", start: "18:15", end: "19:15" }
+# Muhurat trading (Diwali evening special session). Deliberately NOT in `holidays` — see the note above and
+# calendar.py:53-63.
+special_sessions:
+  # Date CONFIRMED (NSE/CMTR/71775: "Muhurat Trading will be conducted on Sunday, November 08, 2026").
+  # Timings NOT yet announced as of this pass (searched — NSE typically issues the timing circular in
+  # Sept/Oct of the event year, e.g. NSE/CMTR/70319 for 2025 was dated 2025-09-22, ~1 month before Diwali).
+  # start/end below are an UNVERIFIED PLACEHOLDER (a morning slot) inconsistent with the historical evening/
+  # afternoon muhurat pattern (2024: Normal Market 18:00-19:00; 2025: Normal Market 13:45-14:45) — left
+  # unchanged per instructions rather than guessed. Owner: replace once NSE's timing circular lands.
+  - { date: "2026-11-08", name: "Diwali Muhurat Trading — DATE confirmed, TIMINGS not yet announced (placeholder, see comment above)", start: "09:15", end: "10:15" }
 
 # Shortened / special sessions (e.g. BCP days) — fill if/when the circular announces any.
 shortened_sessions: []

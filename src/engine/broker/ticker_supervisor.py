@@ -24,9 +24,14 @@ Trust boundary (§2.4):
 Health / stale-data guard (R2, §2.6):
     ``health()`` reports a :class:`FeedHealth` whose ``state`` drives the §7.1 ``stale_data_guard``:
         * ``STOPPED``  — no child running.
-        * ``WARMING``  — child just spawned / reconnecting + warm-up backfilling; feed-stale alarm and
-          respawn are **suppressed** (§2.6/§3.2.12) to avoid false alarms on a fresh startup, distinct
-          from feed-lost-while-running.
+        * ``WARMING``  — child just spawned / reconnecting + warm-up backfilling; the HEALTHY-path
+          heartbeat-silence kill is **suppressed** (§2.6/§3.2.12) to avoid false alarms on a fresh
+          startup, distinct from feed-lost-while-running. The suppression is **bounded**: WARMING with
+          no heartbeat past ``settings.ticker.warming_timeout_s`` ⇒ kill + respawn with capped
+          exponential backoff (2026-07-23 13:41 sleep/resume wedge — an unbounded WARMING froze the
+          state machine forever). This is also the generic system-resume recovery: after a resume,
+          whatever state the machine froze in, either the HEALTHY-path stale kill or this WARMING
+          timeout fires and respawns.
         * ``HEALTHY``  — heartbeats arriving within the silence budget.
         * ``STALE``    — heartbeat silence exceeded ``settings.ticker.heartbeat_silence_kill_s`` (10 s)
           while *running* (not WARMING) ⇒ the supervisor kills + respawns the child and publishes a
@@ -38,30 +43,123 @@ Subscription set (§3.2.2):
     the universe ticks. Changes go over a **control frame** on the live TCP link via
     :meth:`update_subscriptions`, not a respawn.
 
-Phase 0 scope: real subprocess spawn/terminate (``asyncio.create_subprocess_exec``), real per-spawn
-secret + stdin orphan-protection, and a real :meth:`health` that computes ages from ``clock.now()``. The
-connection read loop + msgpack frame parsing + control-frame writing are documented **skeletons** —
-real framing is Phase 1.
+Phase 1 scope: real subprocess spawn/terminate (``asyncio.create_subprocess_exec``), per-spawn
+secret + stdin orphan-protection, a real :meth:`health` computed from ``clock.now()``, AND the real
+framing: the loopback ``asyncio`` server, the §2.4 handshake validation, length-prefixed msgpack
+frame parsing (tick → :class:`~engine.core.types.Tick` → ``bus.publish("tick", …)``; order →
+``order.update``; heartbeat → health), the ``subscribe`` control frame, and the stdin credentials
+frame.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets as _secrets
+import struct
 import sys
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel
+import msgpack
+from pydantic import BaseModel, Field
 
-from engine.core.clock import Clock
+from engine.core.calendar import NSECalendar
+from engine.core.clock import IST, Clock
 from engine.core.config import Settings
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
+from engine.core.types import Tick
+from engine.notify.catalog import CatalogMessage, feed_degraded, feed_wedged
+
+#: Owner-notification sink type (§3.2.11): async, consumes a typed :class:`CatalogMessage`.
+NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
 
 _log = get_logger("engine.broker.ticker_supervisor")
 
 #: Canonical event bus topic for feed-health transitions (§3.2.1).
 FEED_HEALTH_TOPIC = "feed.health"
+#: Canonical event bus topic for parsed live ticks (§3.2.1) — consumed by ``BarBuilder`` (§3.2.3).
+TICK_TOPIC = "tick"
+#: Canonical event bus topic for broker order postbacks (§3.2.1, A3) — drives the OMS (§3.5.1).
+ORDER_UPDATE_TOPIC = "order.update"
+
+#: Length prefix on every frame: 4-byte big-endian unsigned int (mirror of ticker/main.py).
+_LEN_PREFIX = struct.Struct(">I")
+#: Wire-protocol version we accept from the child's ``hello`` (ticker/main.py ``_PROTOCOL_VERSION``).
+PROTOCOL_VERSION = 1
+
+
+class OrderUpdateFrame(BaseModel):
+    """A verbatim Kite order postback (A3) as forwarded by the mt-ticker child.
+
+    ``data`` is the raw ``on_order_update`` payload, untouched — the OMS correlates it against
+    platform orders on the broker's own field names (§3.5.1). Published on ``order.update``.
+    """
+
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+def _wire_decimal(value: Any) -> Decimal | None:
+    """A wire decimal-string (or number) → ``Decimal``; None/empty passes through (§3.2 money)."""
+    if value is None or value == "":
+        return None
+    return Decimal(str(value))
+
+
+def _wire_timestamp(value: Any) -> datetime | None:
+    """A wire ISO-8601 NAIVE-IST timestamp → tz-aware IST ``datetime`` (§3.2 convention).
+
+    ticker/main.py forwards KiteTicker's naive IST wall time as an ISO string; we attach
+    ``Asia/Kolkata`` here. A tz-aware value (defensive) is converted, not re-stamped.
+    """
+    if value is None or value == "":
+        return None
+    ts = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if not isinstance(ts, datetime):
+        return None
+    return ts.replace(tzinfo=IST) if ts.tzinfo is None else ts.astimezone(IST)
+
+
+def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
+    """Parse one PINNED wire tick frame (ticker/main.py ``_frame_tick``) into a core ``Tick``.
+
+    The exact mirror of the child's serializer: prices arrive as decimal strings and re-wrap to
+    ``Decimal`` exactly; ``volume_traded`` is the broker's CUMULATIVE day volume, verbatim (A13);
+    ``exchange_timestamp`` is naive-IST ISO and becomes tz-aware IST. ``tradingsymbol`` is resolved
+    by the caller (the wire carries only the instrument token). Raises ``ValueError`` on a frame
+    missing its load-bearing fields — the caller logs and drops it (never crashes the read loop).
+    """
+    ltp = _wire_decimal(frame.get("last_price"))
+    if ltp is None:
+        raise ValueError("tick frame missing last_price")
+    exchange_ts = _wire_timestamp(frame.get("exchange_timestamp"))
+    if exchange_ts is None:
+        raise ValueError("tick frame missing exchange_timestamp")
+    token = frame.get("instrument_token")
+    if token is None:
+        raise ValueError("tick frame missing instrument_token")
+    ohlc = frame.get("ohlc") or {}
+    depth = frame.get("depth") or {}
+    buy = depth.get("buy") or []
+    sell = depth.get("sell") or []
+    return Tick(
+        instrument_token=int(token),
+        tradingsymbol=tradingsymbol,
+        ltp=ltp,
+        volume_traded=int(frame.get("volume_traded") or 0),
+        exchange_ts=exchange_ts,
+        ohlc_open=_wire_decimal(ohlc.get("open")),
+        ohlc_high=_wire_decimal(ohlc.get("high")),
+        ohlc_low=_wire_decimal(ohlc.get("low")),
+        ohlc_close=_wire_decimal(ohlc.get("close")),
+        avg_price=_wire_decimal(frame.get("average_traded_price")),
+        bid=_wire_decimal(buy[0].get("price")) if buy else None,
+        ask=_wire_decimal(sell[0].get("price")) if sell else None,
+    )
 
 # WIRE CONTRACT (single source of truth — ticker/main.py implements exactly this):
 #   * TOPOLOGY: the ENGINE is the TCP SERVER — it listens on 127.0.0.1:<tcp_port> (loopback-only, §2.4)
@@ -91,8 +189,11 @@ class FeedHealth(BaseModel):
         Seconds since the last 1 s heartbeat frame, or ``None`` if none seen. Silence beyond
         ``heartbeat_silence_kill_s`` (10 s) while running ⇒ kill + respawn.
     state:
-        One of ``{"STOPPED", "WARMING", "HEALTHY", "STALE"}``. ``WARMING`` suppresses false feed-stale
-        alarms on startup (§2.6).
+        One of ``{"STOPPED", "WARMING", "HEALTHY", "DEGRADED", "STALE"}``. ``WARMING`` suppresses false
+        feed-stale alarms on startup (§2.6). ``DEGRADED`` is the in-session tick-silence state (2026-07-22
+        tickless-HEALTHY session): heartbeats are fine but NO ticks are arriving during market hours, so
+        no self-built bars are being written — a visible, alerting state distinct from HEALTHY, that
+        recovers to HEALTHY the moment ticks resume.
     """
 
     last_tick_age_s: float | None = None
@@ -112,13 +213,45 @@ class TickerSupervisor:
         The single source of "now" — every age in :meth:`health` is derived from ``clock.now()``
         (never a bare ``datetime.now()``; §3.2 convention / R6).
     bus:
-        Event bus for publishing ``feed.health`` transitions.
+        Event bus for ``feed.health`` transitions and the parsed ``tick`` / ``order.update``
+        streams. May be ``None`` in bare harnesses/tests — publishing is then skipped.
+    symbol_for_token:
+        Resolver from instrument token → tradingsymbol (the wire carries only the token; the core
+        ``Tick`` requires the symbol). The composition root wires ``InstrumentStore``. A tick whose
+        token cannot be resolved is dropped (logged once per token) — downstream consumers are
+        keyed by symbol, so an unresolvable tick is unusable.
+    api_key:
+        Kite api_key handed to the child over stdin together with the access token (§2.4 — never
+        env, never a routable frame).
+    calendar:
+        NSE calendar for the in-session tick-silence guard (§7.1): the guard only fires during market
+        hours. ``None`` disables the guard (bare harness) — the feed then keeps heartbeat-only health.
+    notify:
+        Async owner-notification sink (§3.2.11) for the one-shot HEALTHY→DEGRADED alert. Best-effort;
+        ``None`` skips the owner notify (the WARNING log + ``feed.health`` transition still fire).
     """
 
-    def __init__(self, settings: Settings, clock: Clock, bus: EventBus) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Clock,
+        bus: EventBus | None,
+        *,
+        symbol_for_token: Callable[[int], str | None] | None = None,
+        api_key: str = "",
+        calendar: NSECalendar | None = None,
+        notify: NotifyFn | None = None,
+    ) -> None:
         self._settings = settings
         self._clock = clock
         self._bus = bus
+        self._symbol_for_token = symbol_for_token
+        self._api_key = api_key
+        # Calendar + notify power the in-session tick-silence guard (§7.1): market-hours gating +
+        # the one-shot owner alert on HEALTHY→DEGRADED. ``None`` (bare harnesses/tests) disables the
+        # guard — a feed with no calendar cannot know it is in-session, so it keeps HEALTHY semantics.
+        self._calendar = calendar
+        self._notify = notify
 
         # --- child process state ---
         self._proc: asyncio.subprocess.Process | None = None
@@ -126,15 +259,35 @@ class TickerSupervisor:
         self._access_token: str | None = None
         self._tokens: list[int] = []
 
-        # --- supervision / read-loop tasks (Phase-1 frame parsing lives behind these) ---
+        # --- the loopback server + the (single) authenticated child link ---
+        self._server: asyncio.AbstractServer | None = None
+        self._child_writer: asyncio.StreamWriter | None = None
+        self._unresolved_tokens_logged: set[int] = set()
+
+        # --- supervision / read-loop tasks ---
         self._read_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
+        # Drain tasks for the child's stdout/stderr. Un-drained (the 2026-07-22 defect) the child's OWN
+        # diagnostics — including the reason a feed goes tickless — are discarded, and a full pipe buffer
+        # eventually WEDGES the child mid-write. Fail toward visibility: pump both into the engine log.
+        self._output_tasks: list[asyncio.Task[None]] = []
 
         # --- health signal (timestamps as tz-aware IST via clock.now(), R6) ---
         self._state: str = "STOPPED"
         self._last_tick_at = None  # type: ignore[var-annotated]
         self._last_heartbeat_at = None  # type: ignore[var-annotated]
         self._started_at = None  # type: ignore[var-annotated]
+        self._healthy_since = None  # type: ignore[var-annotated]  # entry into HEALTHY (tick-silence ref)
+
+        # --- WARMING-wedge backoff (2026-07-23 13:41 sleep/resume). Consecutive WARMING-timeout
+        #     respawns that never reach HEALTHY; drives the capped exponential backoff and the
+        #     one-shot owner escalation. Both reset on a successful WARMING->HEALTHY promotion. ---
+        self._wedge_respawns = 0
+        self._wedge_escalated = False
+
+        # --- feed_stats counters (R8 observability): zero-cost increments, drained by stats_snapshot() ---
+        self._ticks_received = 0
+        self._frames_dropped: dict[str, int] = {}
 
         self._lock = asyncio.Lock()  # serialize start/stop/respawn
 
@@ -147,6 +300,12 @@ class TickerSupervisor:
         Kite ``access_token`` are handed to the child; the access token + the per-spawn shared secret
         cross the §2.4 trust boundary out-of-band (env + stdin), never as a routable frame.
         """
+        if not self._api_key:
+            # Fail LOUD, never dial: an empty api_key in the WS URL is a guaranteed 400-BadRequest
+            # upgrade-reject loop (2026-07-23 root cause — the child reconnected forever while the
+            # heartbeat kept the feed looking HEALTHY; zero ticks were ever captured).
+            _log.error("ticker_start_refused_no_api_key")
+            return
         async with self._lock:
             if self._proc is not None and self._proc.returncode is None:
                 _log.info("ticker_start_noop_already_running", pid=self._proc.pid)
@@ -158,9 +317,9 @@ class TickerSupervisor:
     async def update_subscriptions(self, tokens: list[int]) -> None:
         """Update the live subscription set via a control frame on the TCP link (no respawn).
 
-        Phase-0 skeleton: records the desired set and (Phase 1) writes a length-prefixed msgpack control
-        frame instructing the child to (un)subscribe. The set is capped at
-        ``settings.ticker.max_instruments_per_conn`` (A3, ≤3,000/conn).
+        Writes a length-prefixed msgpack ``{"type":"subscribe","tokens":[…]}`` frame; the child
+        diffs the set, (un)subscribes, and re-asserts FULL mode (ticker/main.py). The set is capped
+        at ``settings.ticker.max_instruments_per_conn`` (A3, ≤3,000/conn).
         """
         cap = self._settings.ticker.max_instruments_per_conn
         if len(tokens) > cap:
@@ -169,8 +328,21 @@ class TickerSupervisor:
         if self._proc is None or self._proc.returncode is not None:
             _log.info("ticker_update_subscriptions_deferred_not_running", count=len(self._tokens))
             return
-        # Phase 1: await self._write_control_frame({"type": "subscribe", "tokens": self._tokens})
+        await self._write_control_frame({"type": "subscribe", "tokens": self._tokens})
         _log.info("ticker_update_subscriptions", count=len(self._tokens))
+
+    async def _write_control_frame(self, obj: dict[str, Any]) -> None:
+        """Send one control frame to the connected child (deferred+logged if the link is down)."""
+        writer = self._child_writer
+        if writer is None:
+            _log.info("ticker_control_frame_deferred_no_link", frame_type=obj.get("type"))
+            return
+        try:
+            body = msgpack.packb(obj, use_bin_type=True)
+            writer.write(_LEN_PREFIX.pack(len(body)) + body)
+            await writer.drain()
+        except (ConnectionError, RuntimeError) as exc:
+            _log.warning("ticker_control_frame_write_failed", error=str(exc))
 
     async def stop(self) -> None:
         """Stop the child: close stdin (orphan protection, §2.4) then terminate (A4)."""
@@ -200,10 +372,13 @@ class TickerSupervisor:
     # ------------------------------------------------------------------ spawn / terminate (real)
 
     def _ticker_entrypoint(self) -> Path:
-        """Resolve ``ticker/main.py`` — the separate Twisted program (§3.2.2)."""
-        # src/engine/broker/ticker_supervisor.py -> parents[2] == src/
-        src_root = Path(__file__).resolve().parents[2]
-        return src_root / "ticker" / "main.py"
+        """Resolve ``ticker/main.py`` — the separate Twisted program at the REPO ROOT (§3.2.2).
+
+        ``ticker/`` deliberately lives outside ``src/engine`` (it must never import ``engine.*``,
+        §2.2): src/engine/broker/ticker_supervisor.py → parents[3] == the repo root.
+        """
+        repo_root = Path(__file__).resolve().parents[3]
+        return repo_root / "ticker" / "main.py"
 
     async def _spawn_child(self) -> None:
         """Launch a fresh child with a new per-spawn secret; arm the read + monitor loops.
@@ -213,6 +388,11 @@ class TickerSupervisor:
         """
         self._shared_secret = _secrets.token_hex(32)
         entrypoint = self._ticker_entrypoint()
+
+        # The ENGINE is the TCP server (WIRE CONTRACT at module top): bind the loopback listener
+        # BEFORE spawning the child, or the child's immediate connect would be refused.
+        self._read_task = asyncio.create_task(self._read_loop(), name="ticker-read-loop")
+        await self._wait_server_ready()
 
         env = {
             _ENV_SHARED_SECRET: self._shared_secret,
@@ -233,6 +413,21 @@ class TickerSupervisor:
             env=full_env,
         )
 
+        # Drain stdout+stderr into the engine log IMMEDIATELY (before the handshake — the child logs to
+        # stderr while it reads its stdin credentials and connects KiteTicker). Un-drained, those pipes
+        # (a) hide the child's own explanation of a tickless/dead feed and (b) fill their OS buffer and
+        # wedge the child on its next stderr write. Both are the 2026-07-22 defect's blind spot.
+        self._output_tasks = [
+            asyncio.create_task(
+                self._drain_child_stream(self._proc.stderr, "stderr", "warning"),
+                name="ticker-stderr-drain",
+            ),
+            asyncio.create_task(
+                self._drain_child_stream(self._proc.stdout, "stdout", "info"),
+                name="ticker-stdout-drain",
+            ),
+        ]
+
         # The access token crosses the trust boundary on stdin (not env, not a frame) so it never lands
         # in the process table; Phase 1 hands the token + initial subscription set here.
         await self._send_startup_handshake()
@@ -240,9 +435,9 @@ class TickerSupervisor:
         self._started_at = self._clock.now()
         self._last_tick_at = None
         self._last_heartbeat_at = None
+        self._healthy_since = None
         self._set_state("WARMING")  # suppress false feed-stale alarms until first ticks (§2.6)
 
-        self._read_task = asyncio.create_task(self._read_loop(), name="ticker-read-loop")
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="ticker-monitor-loop")
 
         _log.info(
@@ -254,28 +449,80 @@ class TickerSupervisor:
         )
 
     async def _send_startup_handshake(self) -> None:
-        """Phase-0 skeleton: deliver the access token + initial subscriptions to the child over stdin.
+        """Deliver the credentials + initial subscriptions to the child over stdin (§2.4).
 
-        Phase 1 writes the access token and the initial subscription set as the first framed message;
-        the child must present the shared secret back on the TCP link before any tick/order frame is
-        honoured (§2.4). Here we only document the channel and keep stdin open as the liveness signal.
+        One length-prefixed msgpack frame ``{"api_key", "access_token", "tokens"}`` — the SECRETS
+        CHANNEL of the wire contract: never env, never a routable frame, so credentials never land
+        in the process table. The child reads it before connecting KiteTicker
+        (ticker/main.py ``_read_stdin_credentials``). Stdin then stays OPEN as the liveness signal
+        (closing it is the orphan-protection kill, §2.4) — the child ignores further stdin bytes.
         """
         proc = self._proc
         if proc is None or proc.stdin is None:
             return
-        # Phase 1:
-        #   payload = msgpack.packb({"access_token": self._access_token, "tokens": self._tokens})
-        #   proc.stdin.write(_length_prefix(payload)); await proc.stdin.drain()
-        # Phase 0: leave stdin open (do NOT close) so the child stays adopted (§2.4 orphan protection).
-        return
+        payload = msgpack.packb(
+            {
+                "api_key": self._api_key,
+                "access_token": self._access_token or "",
+                "tokens": list(self._tokens),
+            },
+            use_bin_type=True,
+        )
+        try:
+            proc.stdin.write(_LEN_PREFIX.pack(len(payload)) + payload)
+            await proc.stdin.drain()
+        except (ConnectionError, RuntimeError) as exc:  # pragma: no cover - child died mid-spawn
+            _log.warning("ticker_stdin_handshake_failed", error=str(exc))
+        # Leave stdin OPEN (do NOT close) so the child stays adopted (§2.4 orphan protection).
+
+    async def _drain_child_stream(self, stream: Any, name: str, level: str) -> None:
+        """Pump one child pipe (stdout/stderr) line-by-line into the engine log until EOF (R8).
+
+        This is the 2026-07-22 fix: the supervisor captured the child's stderr into a PIPE nothing ever
+        read, so the child's own diagnostics (KiteTicker connect/close/reconnect/noreconnect, the reason
+        a feed went tickless) were discarded AND a full pipe buffer would eventually wedge the child on
+        its next write. Child stderr is its error channel ⇒ WARNING; stdout is unexpected ⇒ INFO. Never
+        raises out — a drain failure must never take down supervision.
+        """
+        if stream is None:
+            return
+        log_fn = getattr(_log, level, _log.warning)
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return  # EOF: the child closed the stream (exited)
+                text = line.decode("utf-8", "replace").rstrip()
+                if text:
+                    log_fn("ticker_child_output", stream=name, line=text)
+        except asyncio.CancelledError:  # pragma: no cover - normal on stop/respawn
+            raise
+        except Exception:  # noqa: BLE001 - a drain error must never kill supervision
+            _log.exception("ticker_child_stream_drain_error", stream=name)
+
+    async def _cancel_output_tasks(self) -> None:
+        """Cancel + await the stdout/stderr drain tasks (idempotent). The child is already dead by the
+        time this runs, so the pipes are at EOF; this is leak-cleanup for a killed/wedged child whose
+        streams never closed."""
+        tasks = self._output_tasks
+        self._output_tasks = []
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _terminate_child(self) -> None:
         """Close stdin (orphan protection) then terminate, escalating to kill if it does not exit."""
         proc = self._proc
         self._proc = None
         if proc is None:
+            await self._cancel_output_tasks()
             return
         if proc.returncode is not None:
+            await self._cancel_output_tasks()
             return
 
         # 1) Close stdin: a well-behaved child treats stdin EOF as "parent gone" and exits (§2.4).
@@ -289,10 +536,11 @@ class TickerSupervisor:
         try:
             proc.terminate()
         except ProcessLookupError:  # pragma: no cover - exited between checks
+            await self._cancel_output_tasks()
             return
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _log.warning("ticker_terminate_timeout_killing", pid=proc.pid)
             try:
                 proc.kill()
@@ -300,41 +548,187 @@ class TickerSupervisor:
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:  # pragma: no cover - OS-level wedge
+            except TimeoutError:  # pragma: no cover - OS-level wedge
                 _log.error("ticker_kill_timeout", pid=proc.pid)
+        # The child is dead ⇒ its stdout/stderr are at EOF; reap the drain tasks (leak-cleanup).
+        await self._cancel_output_tasks()
 
-    # ------------------------------------------------------------------ read + monitor loops (skeleton)
+    # ------------------------------------------------------------------ read loop (the loopback server)
+
+    async def _wait_server_ready(self, timeout_s: float = 5.0) -> None:
+        """Poll until :meth:`_read_loop` has bound its listener (or it died / timed out).
+
+        Uses real short sleeps (not Clock) — this is I/O readiness, not trading time.
+        """
+        for _ in range(int(timeout_s / 0.01)):
+            if self._server is not None:
+                return
+            task = self._read_task
+            if task is not None and task.done():
+                exc = task.exception() if not task.cancelled() else None
+                _log.error("ticker_server_bind_failed", error=str(exc))
+                return
+            await asyncio.sleep(0.01)
+        _log.error("ticker_server_bind_timeout", timeout_s=timeout_s)
 
     async def _read_loop(self) -> None:
-        """Connection read loop over 127.0.0.1:<tcp_port> (documented skeleton; Phase 1 parses frames).
+        """The loopback TCP server owning the child's data link (WIRE CONTRACT at module top).
 
-        Phase 1 responsibilities (the ENGINE is the server — see the WIRE CONTRACT at module top):
-            * run an ``asyncio`` server (``asyncio.start_server``) on the loopback endpoint and ACCEPT
-              the child's inbound connection (the child is the client, ``reactor.connectTCP``);
-            * validate the §2.4 shared-secret handshake on the child's first frame, else drop it;
-            * read **length-prefixed msgpack** frames and dispatch by type:
-                - ``tick``  → update ``_last_tick_at``; publish ``tick`` on the bus;
-                - ``order`` → publish ``order.update`` (drives the OMS, A3) — a fabricated frame is
-                  blocked by the handshake + loopback bind + reconciliation backstop (§2.4);
-                - ``heartbeat`` (1 s) → update ``_last_heartbeat_at``; first heartbeat + warm-up done
-                  promotes WARMING → HEALTHY (§2.6).
-
-        Phase 0: park until cancelled so the task structure (and its cancellation on stop/respawn) is
-        real and tested, without opening a real socket.
+        The ENGINE is the server: ``asyncio.start_server`` on ``127.0.0.1:<tcp_port>`` accepts the
+        child's inbound connection (the child is the client, ``reactor.connectTCP``). Frame parsing
+        and dispatch live in :meth:`_handle_child_connection`. Cancellation (stop/respawn) closes
+        the listener so a respawn can rebind the port.
         """
+        server = await asyncio.start_server(
+            self._handle_child_connection,
+            host=self._settings.ticker.tcp_host,
+            port=int(self._settings.ticker.tcp_port),
+        )
+        self._server = server
+        _log.info(
+            "ticker_server_listening",
+            tcp=f"{self._settings.ticker.tcp_host}:{self._settings.ticker.tcp_port}",
+        )
         try:
-            await asyncio.Event().wait()  # replaced by the real connect+read in Phase 1
+            await asyncio.Event().wait()  # serve until cancelled (stop/respawn)
+        finally:
+            self._server = None
+            self._child_writer = None
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+
+    async def _handle_child_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        """Authenticate one inbound child connection (§2.4) and pump its frames.
+
+        The FIRST frame must be a ``hello`` echoing this spawn's shared secret — else the
+        connection is dropped before any tick/order frame is honoured (a fabricated local frame
+        must not be able to inject a phantom fill; loopback bind + per-spawn secret + REST
+        reconciliation backstop, §2.4).
+        """
+        peer = writer.get_extra_info("peername")
+        try:
+            hello = await self._read_frame(reader)
+            if (
+                hello is None
+                or hello.get("type") != "hello"
+                or not self._shared_secret
+                or hello.get("secret") != self._shared_secret
+            ):
+                _log.warning(
+                    "ticker_handshake_rejected",
+                    peer=str(peer),
+                    frame_type=None if hello is None else hello.get("type"),
+                )
+                return
+            _log.info(
+                "ticker_handshake_ok",
+                child_pid=hello.get("pid"),
+                protocol_v=hello.get("v"),
+                tokens=hello.get("tokens"),
+            )
+            self._child_writer = writer
+            while True:
+                frame = await self._read_frame(reader)
+                if frame is None:
+                    _log.info("ticker_link_closed", peer=str(peer))
+                    return
+                await self._handle_frame(frame)
         except asyncio.CancelledError:  # pragma: no cover - normal on stop/respawn
             raise
+        except Exception:  # noqa: BLE001 - never let a link error kill the server silently
+            _log.exception("ticker_link_error", peer=str(peer))
+        finally:
+            if self._child_writer is writer:
+                self._child_writer = None
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    async def _read_frame(self, reader: asyncio.StreamReader) -> dict[str, Any] | None:
+        """Read one length-prefixed msgpack frame; ``None`` on EOF/connection loss.
+
+        An undecodable body yields ``{}`` (logged + counted) so one corrupt frame never tears the link
+        down — the heartbeat-silence guard is the backstop for a systematically broken stream.
+        """
+        try:
+            header = await reader.readexactly(_LEN_PREFIX.size)
+            (length,) = _LEN_PREFIX.unpack(header)
+            body = await reader.readexactly(length)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            return None
+        try:
+            frame = msgpack.unpackb(body, raw=False)
+        except Exception as exc:  # noqa: BLE001 - corrupt frame is dropped, not fatal
+            _log.warning("ticker_frame_decode_error", error=str(exc))
+            self._drop("decode_error")
+            return {}
+        return frame if isinstance(frame, dict) else {}
+
+    async def _handle_frame(self, frame: dict[str, Any]) -> None:
+        """Dispatch one authenticated frame by ``type`` (WIRE CONTRACT at module top)."""
+        ftype = frame.get("type")
+        if ftype == "heartbeat":
+            self._last_heartbeat_at = self._clock.now()
+            if self._state == "WARMING":
+                # First heartbeat proves the link + child are live: promote WARMING → HEALTHY (§2.6).
+                # The §7.1 warm-up ENTRY gate (ops.warmup) is separate — this is feed health only.
+                self._set_state("HEALTHY")
+                await self._publish_health()
+        elif ftype == "tick":
+            self._ticks_received += 1
+            self._last_tick_at = self._clock.now()
+            if self._state == "DEGRADED":
+                # Ticks resumed after an in-session silence: recover DEGRADED → HEALTHY (visible).
+                self._set_state("HEALTHY")
+                _log.info("feed_tick_recovered")
+                await self._publish_health()
+            tick = self._parse_tick(frame)
+            if tick is not None and self._bus is not None:
+                self._bus.publish(TICK_TOPIC, tick)
+        elif ftype == "order":
+            # Verbatim Kite postback (A3); the OMS correlates it (§3.5.1).
+            if self._bus is not None:
+                self._bus.publish(ORDER_UPDATE_TOPIC, OrderUpdateFrame(data=frame.get("data") or {}))
+        else:
+            _log.warning("ticker_unknown_frame", frame_type=str(ftype))
+            self._drop("unknown_frame")
+
+    def _parse_tick(self, frame: dict[str, Any]) -> Tick | None:
+        """Wire tick frame → core ``Tick`` (symbol resolved via the injected resolver); None = drop."""
+        token = frame.get("instrument_token")
+        symbol: str | None = None
+        if token is not None and self._symbol_for_token is not None:
+            symbol = self._symbol_for_token(int(token))
+        if symbol is None:
+            tok = -1 if token is None else int(token)
+            self._drop("unresolved_symbol")
+            if tok not in self._unresolved_tokens_logged:   # log once per token, not per tick
+                self._unresolved_tokens_logged.add(tok)
+                _log.warning("ticker_tick_symbol_unresolved", instrument_token=tok)
+            return None
+        try:
+            return parse_tick_frame(frame, symbol)
+        except Exception:  # noqa: BLE001 - malformed frame is dropped, never crashes the read loop
+            _log.exception("ticker_tick_parse_error", instrument_token=token)
+            self._drop("parse_error")
+            return None
 
     async def _monitor_loop(self) -> None:
         """Heartbeat-silence watchdog: kill + respawn on >``heartbeat_silence_kill_s`` (R2/A4).
 
         Runs while a child is alive. Each tick it re-derives the health state from ``clock.now()``; when
         the feed goes STALE while *running* (not WARMING — §2.6 suppression) it triggers a respawn and
-        publishes the ``feed.health`` STALE transition. Also reaps an unexpectedly dead child.
+        publishes the ``feed.health`` STALE transition. WARMING is no longer exempt from ALL timeouts:
+        an unbounded WARMING is itself a wedge (2026-07-23), so ``_check_warming_timeout`` bounds it.
+        Also reaps an unexpectedly dead child.
         """
         kill_after = float(self._settings.ticker.heartbeat_silence_kill_s)
+        tick_silence_budget = float(self._settings.ticker.tick_silence_degrade_s)
+        warming_timeout = float(self._settings.ticker.warming_timeout_s)
+        warming_cap = float(self._settings.ticker.warming_backoff_cap_s)
+        max_wedge = int(self._settings.ticker.max_wedge_respawns)
         try:
             while True:
                 await asyncio.sleep(1.0)
@@ -350,8 +744,15 @@ class TickerSupervisor:
 
                 heartbeat_age = self._heartbeat_age_s()
                 if self._state == "WARMING":
-                    # Suppress feed-stale during warm-up; promotion to HEALTHY happens on first
-                    # heartbeat in the Phase-1 read loop. Nothing to enforce here yet.
+                    # The HEALTHY-path heartbeat-silence kill below is suppressed during warm-up (a
+                    # fresh spawn legitimately has no ticks/heartbeat yet, §2.6) — promotion to HEALTHY
+                    # happens on the first heartbeat in the read loop. But WARMING must NOT be
+                    # unbounded: a child that dies/hangs before its first heartbeat, or a system-resume
+                    # that froze the machine mid-WARMING (2026-07-23 13:41), would otherwise wedge here
+                    # forever (zero respawns, feed dead). Bound it with a timeout + capped backoff; a
+                    # respawn returns (``_spawn_child`` installs a fresh monitor task).
+                    if await self._check_warming_timeout(warming_timeout, warming_cap, max_wedge):
+                        return
                     continue
                 if heartbeat_age is not None and heartbeat_age > kill_after:
                     _log.error(
@@ -363,8 +764,126 @@ class TickerSupervisor:
                     await self._publish_health()  # R2 — STALE transition for the stale-data guard
                     await self._respawn(reason="heartbeat_silence")
                     return
+
+                # Heartbeats fine, but is the FEED actually delivering ticks? A child heartbeats every
+                # 1 s regardless of ticks, so a tickless feed used to read HEALTHY all session (the
+                # 2026-07-22 defect). During market hours, tick silence past the budget ⇒ DEGRADED.
+                await self._check_tick_silence(tick_silence_budget)
         except asyncio.CancelledError:  # pragma: no cover - normal on stop
             raise
+
+    async def _check_tick_silence(self, budget_s: float) -> None:
+        """In-session tick-silence guard (§7.1) — called each monitor tick.
+
+        HEALTHY + inside market hours + effective tick age past ``budget_s`` ⇒ transition to the visible
+        DEGRADED state (a tickless feed must NEVER present HEALTHY through a session again), emit a
+        WARNING, publish the ``feed.health`` transition, and fire the one-shot owner notify. Off-hours or
+        any non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
+        HEALTHY happens on the next tick in :meth:`_handle_frame`.
+        """
+        if self._state != "HEALTHY" or not self._in_market_hours():
+            return
+        silence = self._effective_tick_silence_s()
+        if silence is None or silence <= budget_s:
+            return
+        self._set_state("DEGRADED")
+        _log.warning("feed_tick_silence_degraded", tick_silence_s=round(silence, 1), budget_s=budget_s)
+        await self._publish_health()
+        await self._notify_degraded(silence, budget_s)
+
+    async def _check_warming_timeout(
+        self, timeout_s: float, cap_s: float, max_respawns: int
+    ) -> bool:
+        """WARMING-wedge guard (2026-07-23 13:41 sleep/resume) — called each monitor tick while WARMING.
+
+        If no heartbeat has arrived within the backoff-scaled timeout, the child is wedged (dead/hung
+        before its first heartbeat, or the machine froze mid-WARMING on OS sleep): kill + respawn.
+        Returns ``True`` when a respawn was triggered so the monitor loop returns (``_spawn_child``
+        installs a fresh monitor task); ``False`` (no-op) while still inside the budget.
+
+        Consecutive wedge-respawns that never reach HEALTHY back off exponentially
+        (``timeout_s × 2ⁿ``) capped at ``cap_s``, and past ``max_respawns`` escalate ONCE to the owner
+        (the feed is structurally down — dead child / no network / rejected token). A successful
+        WARMING→HEALTHY promotion resets the counter + escalation flag (see :meth:`_set_state`).
+        """
+        age = self._warming_age_s()
+        effective = min(timeout_s * (2 ** self._wedge_respawns), cap_s)
+        if age is None or age <= effective:
+            return False
+        self._wedge_respawns += 1
+        _log.error(
+            "ticker_warming_timeout",
+            warming_age_s=round(age, 1),
+            timeout_s=round(effective, 1),
+            wedge_respawns=self._wedge_respawns,
+        )
+        # One-shot owner escalation once the feed has failed to come up max_respawns times in a row.
+        if self._wedge_respawns >= max_respawns and not self._wedge_escalated:
+            self._wedge_escalated = True
+            await self._notify_wedged(self._wedge_respawns, age)
+        # A wedged feed is a real feed-lost incident: publish STALE (fail toward visibility — the §7.1
+        # stale-data guard can FREEZE entries) before the respawn re-enters WARMING.
+        self._set_state("STALE")
+        await self._publish_health()  # R2 — STALE transition for the stale-data guard
+        await self._respawn(reason="warming_timeout")
+        return True
+
+    async def _notify_wedged(self, respawns: int, age_s: float) -> None:
+        """One-shot owner escalation for a WEDGED feed (best-effort; never breaks supervision, §3.2.11)."""
+        if self._notify is None:
+            return
+        try:
+            await self._notify(feed_wedged(respawns=respawns, age_s=age_s))
+        except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
+            _log.exception("feed_wedged_notify_failed")
+
+    def _in_market_hours(self, now: datetime | None = None) -> bool:
+        """True iff ``now`` is inside today's NSE continuous session (calendar+clock). Without a
+        calendar (bare harness) the feed cannot know it is in-session ⇒ False (guard disabled)."""
+        if self._calendar is None:
+            return False
+        now = now or self._clock.now()
+        session = self._calendar.session(now.date())
+        if session is None:  # holiday / weekend / unverified horizon (R6)
+            return False
+        return session.open <= now <= session.close
+
+    def _effective_tick_silence_s(self) -> float | None:
+        """Seconds since the last tick — or, if NO tick has EVER been seen, since we entered HEALTHY.
+
+        The 'never a single tick' case is exactly the 2026-07-22 outage, so it MUST count toward the
+        silence budget rather than being excused as 'no tick yet' (which is what left it HEALTHY)."""
+        ref = self._last_tick_at or self._healthy_since
+        if ref is None:
+            return None
+        return (self._clock.now() - ref).total_seconds()
+
+    async def _notify_degraded(self, age_s: float, budget_s: float) -> None:
+        """One-shot owner alert on HEALTHY→DEGRADED (best-effort; never breaks supervision, §3.2.11)."""
+        if self._notify is None:
+            return
+        try:
+            await self._notify(feed_degraded(age_s=age_s, budget_s=budget_s))
+        except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
+            _log.exception("feed_degraded_notify_failed")
+
+    def stats_snapshot(self) -> dict[str, Any]:
+        """Return + reset the since-last-call feed counters for the periodic ``feed_stats`` line (R8).
+
+        ``ticks_received`` counts tick frames off the wire; ``frames_dropped`` maps drop-reason →
+        count (unresolved_symbol / parse_error / unknown_frame / decode_error). Reset-on-read gives the
+        composition-root emitter clean per-interval deltas."""
+        snap: dict[str, Any] = {
+            "ticks_received": self._ticks_received,
+            "frames_dropped": dict(self._frames_dropped),
+        }
+        self._ticks_received = 0
+        self._frames_dropped = {}
+        return snap
+
+    def _drop(self, reason: str) -> None:
+        """Increment the drop counter for ``reason`` (feed_stats; zero-cost, no hot-path logging)."""
+        self._frames_dropped[reason] = self._frames_dropped.get(reason, 0) + 1
 
     async def _respawn(self, *, reason: str) -> None:
         """Kill the current child and launch a fresh one (A4 — reactor cannot restart in-process).
@@ -417,13 +936,34 @@ class TickerSupervisor:
             return None
         return (self._clock.now() - self._last_heartbeat_at).total_seconds()
 
+    def _warming_age_s(self) -> float | None:
+        """Seconds this spawn has been WARMING with no heartbeat yet — the WARMING-wedge clock.
+
+        Reference is the last heartbeat if one somehow arrived without promoting (defensive; in WARMING
+        the first heartbeat promotes to HEALTHY), else this spawn's ``_started_at``. ``None`` before the
+        first spawn. Each (re)spawn resets ``_started_at``, so every WARMING episode is timed afresh."""
+        ref = self._last_heartbeat_at or self._started_at
+        if ref is None:
+            return None
+        return (self._clock.now() - ref).total_seconds()
+
     def _set_state(self, state: str) -> None:
         if state != self._state:
             _log.info("feed_health_transition", frm=self._state, to=state)
+        if state == "HEALTHY" and self._state != "HEALTHY":
+            # Reference instant for the tick-silence budget when NO tick has been seen yet (the
+            # 2026-07-22 'never a single tick' case must still count as silence, §7.1).
+            self._healthy_since = self._clock.now()
+            # A successful (re)connect clears the WARMING-wedge backoff + one-shot escalation: the next
+            # wedge episode starts fresh at the base timeout and can escalate again (2026-07-23).
+            self._wedge_respawns = 0
+            self._wedge_escalated = False
         self._state = state
 
     async def _publish_health(self) -> None:
-        """Publish the current :class:`FeedHealth` on ``feed.health`` (R2)."""
+        """Publish the current :class:`FeedHealth` on ``feed.health`` (R2). No-op without a bus."""
+        if self._bus is None:
+            return
         await self._bus.apublish(FEED_HEALTH_TOPIC, self.health())
 
 

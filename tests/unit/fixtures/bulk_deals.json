@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "BD_DT_DATE": "17-Jun-2026",
+      "BD_SYMBOL": "LOWFLT",
+      "BD_SCRIP_NAME": "LowFloat Limited",
+      "BD_CLIENT_NAME": "BIG WHALE FUND",
+      "BD_BUY_SELL": "BUY",
+      "BD_QTY_TRD": "500000",
+      "BD_TP_WATP": "101.35",
+      "BD_REMARKS": "-"
+    },
+    {
+      "BD_DT_DATE": "17-Jun-2026",
+      "BD_SYMBOL": "LOWFLT",
+      "BD_SCRIP_NAME": "LowFloat Limited",
+      "BD_CLIENT_NAME": "BIG WHALE FUND",
+      "BD_BUY_SELL": "SELL",
+      "BD_QTY_TRD": "200000",
+      "BD_TP_WATP": "102.10",
+      "BD_REMARKS": "-"
+    },
+    {
+      "BD_DT_DATE": "16-Jun-2026",
+      "BD_SYMBOL": "OLDDEAL",
+      "BD_CLIENT_NAME": "STALE CLIENT",
+      "BD_QTY_TRD": "1",
+      "BD_TP_WATP": "1.00"
+    },
+    {
+      "BD_DT_DATE": "17-Jun-2026",
+      "BD_SYMBOL": "",
+      "BD_CLIENT_NAME": "NAMELESS"
+    }
+  ]
+}

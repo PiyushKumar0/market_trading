@@ -38,19 +38,42 @@ import ``engine.*`` — separate program, separate interpreter, no shared state 
 goes to **stderr** (the engine captures the child's stderr); ``print()`` is fine here because this is
 a standalone script, not an engine module.
 
-Phase-0 status: this is a documented skeleton. The KiteTicker wiring, the framing helpers, and the
-process lifecycle (TCP connect, heartbeat loop, stdin watcher, reactor) are real and load-bearing;
-the exact *frame payload schemas* are marked ``TODO(Phase 1)`` where the field set is still being
-nailed down against the engine reader and the §4 tick/bar schemas.
+Wire payload schemas (Phase 1, PINNED — the engine reader ``engine.broker.ticker_supervisor``
+implements the exact mirror):
+
+  * ``hello``      — ``{type, v, secret, ppid, pid, tokens}`` (§2.4 handshake; first frame on
+    connect). ``v`` is the protocol version (1); ``tokens`` is the subscribed token COUNT (an int,
+    for the engine's link-health log — never the token list itself).
+  * ``tick``       — ``{type:"tick", instrument_token, mode, tradable, last_price, volume_traded,
+    exchange_timestamp, last_trade_time, average_traded_price, ohlc:{open,high,low,close},
+    depth:{buy:[{price,quantity,orders}×≤5], sell:[…]}}``. Prices cross the wire as **decimal
+    strings** (msgpack has no Decimal; ``str(float)`` is the shortest round-trip repr, so a broker
+    price like 2338.55 arrives as ``"2338.55"`` and the engine re-wraps ``Decimal`` exactly).
+    ``volume_traded`` is the broker's **cumulative day volume**, forwarded verbatim (A13).
+    Timestamps are ISO-8601 strings of the NAIVE IST wall time KiteTicker parses out of the binary
+    packet; the engine attaches ``Asia/Kolkata`` (§3.2).
+  * ``order``      — ``{type:"order", data:<verbatim Kite postback dict>}`` (A3): the raw
+    ``on_order_update`` payload, untouched — the OMS correlates it (§3.5.1).
+  * ``heartbeat``  — ``{type:"heartbeat", seq, ws_connected, last_tick_age_s}`` every 1 s (§2.2);
+    ``ws_connected``/``last_tick_age_s`` let the engine distinguish "ticker alive but feed silent"
+    from "ticker alive, market quiet".
+  * control (inbound) — ``{type:"subscribe", tokens:[…]}`` (§3.2.2 ``update_subscriptions``): the
+    child diffs the token set, (un)subscribes, and re-asserts FULL mode on the new set.
+  * stdin (one-time, §2.4) — a single length-prefixed msgpack frame
+    ``{api_key, access_token, tokens?}`` written by the supervisor on spawn; secrets never touch
+    the process table.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
+import socket as _socket
 import struct
 import sys
-import socket as _socket
+import time as _time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import msgpack
 
@@ -61,14 +84,19 @@ from kiteconnect import KiteTicker
 # Twisted reactor + helpers. ``reactor`` is the Twisted global reactor; importing it installs the
 # default (select/epoll/iocp) reactor for this interpreter — fine, this process runs nothing else.
 from twisted.internet import reactor, stdio
-from twisted.internet.task import LoopingCall
 from twisted.internet.protocol import ClientFactory, Protocol
+from twisted.internet.task import LoopingCall
 from twisted.protocols.basic import LineReceiver
-
 
 # --------------------------------------------------------------------------- constants
 #: Length-prefix is a 4-byte big-endian unsigned int (max frame ~4 GiB; ticks are tiny).
 _LEN_PREFIX = struct.Struct(">I")
+
+#: Wire-protocol version stamped on the ``hello`` frame (bump on any breaking schema change).
+_PROTOCOL_VERSION = 1
+
+#: IST for log timestamps only (this process makes no trading time decisions — no ``core.Clock``).
+_IST = ZoneInfo("Asia/Kolkata")
 
 #: Heartbeat cadence (seconds). The engine's stale-data guard kills+respawns on >10 s silence
 #: (``settings.ticker.heartbeat_silence_kill_s``, §7.1) — a 1 s beat gives ~10 missed beats of slack.
@@ -100,9 +128,48 @@ def pack_frame(obj: dict[str, Any]) -> bytes:
 
     Wire layout: ``<4-byte big-endian uint length><msgpack bytes>``. ``use_bin_type=True`` keeps
     bytes/str distinct on the wire; the engine reader uses the symmetric ``raw=False``.
+    ``default=str`` is a defensive last resort so an unexpected non-msgpack type inside a verbatim
+    broker payload (e.g. a datetime in an order postback) degrades to its string form instead of
+    crashing the reactor mid-stream — the pinned tick schema converts explicitly before packing.
     """
-    body = msgpack.packb(obj, use_bin_type=True)
+    body = msgpack.packb(obj, use_bin_type=True, default=str)
     return _LEN_PREFIX.pack(len(body)) + body
+
+
+def _price_str(value: Any) -> str | None:
+    """A broker price → decimal string for the wire (msgpack has no Decimal; §"tick" schema above).
+
+    ``str(float)`` is the shortest round-trip repr, so 2338.55 crosses as ``"2338.55"`` and the
+    engine re-wraps ``Decimal("2338.55")`` exactly. ``None`` passes through (field absent/blank).
+    """
+    return None if value is None else str(value)
+
+
+def _iso_ts(value: Any) -> str | None:
+    """A KiteTicker timestamp → ISO-8601 string of the NAIVE IST wall time it parsed (schema above).
+
+    KiteTicker hands naive ``datetime`` objects (IST wall clock from the binary packet); the engine
+    reader attaches ``Asia/Kolkata`` (§3.2). Non-datetime values degrade to ``str`` defensively.
+    """
+    if value is None:
+        return None
+    if isinstance(value, _dt.datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _depth_side(levels: Any) -> list[dict[str, Any]]:
+    """Shape one depth side into the pinned ``[{price, quantity, orders}×≤5]`` wire form (§6.2)."""
+    shaped: list[dict[str, Any]] = []
+    for level in (levels or [])[:5]:
+        shaped.append(
+            {
+                "price": _price_str(level.get("price")),
+                "quantity": level.get("quantity"),
+                "orders": level.get("orders"),
+            }
+        )
+    return shaped
 
 
 # --------------------------------------------------------------------------- TCP publisher
@@ -114,7 +181,7 @@ class _PublisherProtocol(Protocol):
     ``update_subscriptions``, §3.2.2) arrive inbound from the engine and are dispatched here.
     """
 
-    def __init__(self, factory: "_PublisherFactory") -> None:
+    def __init__(self, factory: _PublisherFactory) -> None:
         self._factory = factory
         self._inbuf = bytearray()
 
@@ -125,12 +192,14 @@ class _PublisherProtocol(Protocol):
         self.send_frame(
             {
                 "type": "hello",
+                # Protocol version — the engine rejects a mismatched child (breaking-change guard).
+                "v": _PROTOCOL_VERSION,
                 # Per-spawn shared secret + parent PID so the engine authenticates the link (§2.4).
                 "secret": self._factory.shared_secret,
                 "ppid": os.getppid(),
                 "pid": os.getpid(),
-                # TODO(Phase 1): include protocol/version + the subscribed token count for the
-                # engine's link-health log.
+                # Subscribed token COUNT (an int, for the engine's link-health log) — never the list.
+                "tokens": self._factory.token_count(),
             }
         )
 
@@ -153,8 +222,9 @@ class _PublisherProtocol(Protocol):
     def dataReceived(self, data: bytes) -> None:  # noqa: N802 (Twisted naming)
         """Buffer + decode inbound length-prefixed control frames from the engine.
 
-        TODO(Phase 1): the only inbound message today is ``update_subscriptions`` (new token set on
-        watchlist churn / held-symbol changes, §3.2.2). Decode and apply to the live KiteTicker.
+        The only inbound message today is ``{"type":"subscribe","tokens":[…]}`` (the engine's
+        ``update_subscriptions`` on watchlist churn / held-symbol changes, §3.2.2); it is dispatched
+        to :meth:`TickerApp.on_control_frame`, which diffs + applies it on the live KiteTicker.
         """
         self._inbuf.extend(data)
         while True:
@@ -177,7 +247,7 @@ class _PublisherProtocol(Protocol):
 class _PublisherFactory(ClientFactory):
     """Builds the single publisher protocol and bridges it to the :class:`TickerApp`."""
 
-    def __init__(self, app: "TickerApp", shared_secret: str) -> None:
+    def __init__(self, app: TickerApp, shared_secret: str) -> None:
         self.app = app
         self.shared_secret = shared_secret
         self.protocol_instance: _PublisherProtocol | None = None
@@ -185,6 +255,10 @@ class _PublisherFactory(ClientFactory):
     def buildProtocol(self, addr: Any) -> _PublisherProtocol:  # noqa: N802 (Twisted naming)
         proto = _PublisherProtocol(self)
         return proto
+
+    def token_count(self) -> int:
+        """Subscribed-token count stamped on the ``hello`` frame (link-health log, never the list)."""
+        return self.app.token_count
 
     def clientConnectionFailed(self, connector: Any, reason: Any) -> None:  # noqa: N802
         """Could not even reach the parent socket — fatal; the engine will respawn us."""
@@ -251,6 +325,14 @@ class TickerApp:
         self._heartbeat_seq = 0
         #: Built lazily once the TCP link is up so we never stream into a dead socket.
         self._kws: KiteTicker | None = None
+        #: Websocket state + last-tick monotonic instant for the heartbeat's health fields (§2.2):
+        #: lets the engine distinguish "ticker alive but feed silent" from "ticker alive, market quiet".
+        self._ws_connected = False
+        self._last_tick_monotonic: float | None = None
+
+    @property
+    def token_count(self) -> int:
+        return len(self._tokens)
 
     # -- TCP link -------------------------------------------------------------
     def on_tcp_ready(self, publisher: _PublisherProtocol) -> None:
@@ -262,10 +344,44 @@ class TickerApp:
     def on_control_frame(self, msg: dict[str, Any]) -> None:
         """Apply an inbound control frame from the engine (§3.2.2).
 
-        TODO(Phase 1): dispatch on ``msg["type"]`` — ``update_subscriptions`` ⇒ diff the token set
-        and call ``self._kws.subscribe()/unsubscribe()`` + re-assert FULL mode on the new tokens.
+        The only control message today is ``{"type":"subscribe","tokens":[…]}`` (the engine's
+        ``update_subscriptions``): diff the token set, (un)subscribe on the live KiteTicker, and
+        re-assert FULL mode on the whole new set.
         """
-        _log("control.frame", msg=msg)
+        mtype = msg.get("type") if isinstance(msg, dict) else None
+        if mtype == "subscribe":
+            try:
+                tokens = [int(t) for t in msg.get("tokens", [])]
+            except (TypeError, ValueError):
+                _log("control.bad_tokens", msg=msg)
+                return
+            self._apply_subscriptions(tokens)
+        else:
+            _log("control.unknown_frame", msg=msg)
+
+    def _apply_subscriptions(self, tokens: list[int]) -> None:
+        """Diff the current token set against ``tokens`` and apply on the live websocket (§3.2.2)."""
+        new = list(dict.fromkeys(tokens))              # de-dup, order-preserving
+        old = set(self._tokens)
+        added = [t for t in new if t not in old]
+        removed = [t for t in self._tokens if t not in set(new)]
+        self._tokens = new
+        kws = self._kws
+        if kws is None:
+            # Not connected yet — _on_connect subscribes the (updated) full set when it fires.
+            _log("control.subscribe_deferred", tokens=len(new))
+            return
+        try:
+            if removed:
+                kws.unsubscribe(removed)
+            if added:
+                kws.subscribe(added)
+            if new:
+                # Re-assert FULL on the whole new set (mode is per-token; keeps A13 volume + depth).
+                kws.set_mode(_MODE_FULL, new)
+        except Exception as exc:  # pragma: no cover - defensive; never crash the reactor
+            _log("control.subscribe_error", error=str(exc))
+        _log("control.subscribed", total=len(new), added=len(added), removed=len(removed))
 
     # -- heartbeat ------------------------------------------------------------
     def _start_heartbeat(self) -> None:
@@ -274,16 +390,25 @@ class TickerApp:
         self._heartbeat.start(_HEARTBEAT_INTERVAL_S, now=False)
 
     def _send_heartbeat(self) -> None:
-        """Emit one in-band heartbeat frame (§2.2). Drives the engine stale-data guard (R2)."""
+        """Emit one in-band heartbeat frame (§2.2). Drives the engine stale-data guard (R2).
+
+        ``ws_connected`` + ``last_tick_age_s`` (monotonic; ``None`` until the first tick) let the
+        engine distinguish "ticker alive but feed silent" from "ticker alive, market quiet".
+        """
         if self._publisher is None:
             return
         self._heartbeat_seq += 1
+        last_tick_age = (
+            None
+            if self._last_tick_monotonic is None
+            else round(_time.monotonic() - self._last_tick_monotonic, 3)
+        )
         self._publisher.send_frame(
             {
                 "type": "heartbeat",
                 "seq": self._heartbeat_seq,
-                # TODO(Phase 1): include ws connection state + last-tick monotonic age so the engine
-                # distinguishes "ticker alive but feed silent" from "ticker alive, market quiet".
+                "ws_connected": self._ws_connected,
+                "last_tick_age_s": last_tick_age,
             }
         )
 
@@ -313,6 +438,7 @@ class TickerApp:
     def _on_connect(self, ws: Any, response: Any) -> None:
         """Subscribe to the token set and request FULL mode (cumulative volume + depth, A13/§6.2)."""
         _log("kws.connected", tokens=len(self._tokens))
+        self._ws_connected = True
         if self._tokens:
             ws.subscribe(self._tokens)
             ws.set_mode(_MODE_FULL, self._tokens)
@@ -327,29 +453,47 @@ class TickerApp:
         """
         if self._publisher is None:
             return
+        self._last_tick_monotonic = _time.monotonic()
         for tick in ticks:
             self._publisher.send_frame(self._frame_tick(tick))
 
     def _frame_tick(self, tick: dict[str, Any]) -> dict[str, Any]:
-        """Shape a KiteTicker tick dict into the wire frame.
+        """Shape a KiteTicker FULL-mode tick dict into the PINNED wire frame (module docstring).
 
-        TODO(Phase 1): pin the exact field set against the §4 ``Tick`` schema + the engine reader —
-        instrument_token, last_price, **cumulative** volume_traded (A13), OHLC, depth snapshot
-        (§6.2), and the broker ``exchange_timestamp``/``last_trade_time``. Decimals are sent as
-        strings to preserve precision (msgpack has no Decimal); the engine re-wraps to ``Decimal``.
-        For Phase 0 the raw tick is forwarded under ``data`` so nothing is lost.
+        Field set is pinned against the engine's ``core.types.Tick`` reader
+        (``engine.broker.ticker_supervisor.parse_tick_frame`` is the exact mirror):
+        ``instrument_token``, ``last_price``, **cumulative** ``volume_traded`` verbatim (A13),
+        ``exchange_timestamp``/``last_trade_time`` as ISO strings of the naive IST wall time,
+        ``average_traded_price`` (exchange day-VWAP), the day ``ohlc`` snapshot, and the ``depth``
+        top levels (§6.2 spread/liquidity features). Prices cross as decimal strings (msgpack has
+        no Decimal); the engine re-wraps ``Decimal`` exactly.
         """
-        return {"type": "tick", "data": tick}
+        ohlc = tick.get("ohlc") or {}
+        depth = tick.get("depth") or {}
+        return {
+            "type": "tick",
+            "instrument_token": tick.get("instrument_token"),
+            "mode": tick.get("mode"),
+            "tradable": tick.get("tradable"),
+            "last_price": _price_str(tick.get("last_price")),
+            "volume_traded": tick.get("volume_traded"),
+            "exchange_timestamp": _iso_ts(tick.get("exchange_timestamp")),
+            "last_trade_time": _iso_ts(tick.get("last_trade_time")),
+            "average_traded_price": _price_str(tick.get("average_traded_price")),
+            "ohlc": {k: _price_str(ohlc.get(k)) for k in ("open", "high", "low", "close")},
+            "depth": {
+                "buy": _depth_side(depth.get("buy")),
+                "sell": _depth_side(depth.get("sell")),
+            },
+        }
 
     def _on_order_update(self, ws: Any, data: dict[str, Any]) -> None:
-        """Forward a broker order postback as a ``type="order"`` frame (A3).
+        """Forward a broker order postback as a ``type="order"`` frame (A3) — payload VERBATIM.
 
-        This is the same socket as ticks (§2.2). The engine correlates it to a platform order; an
-        update that arrives *before* ``place_order()`` returns its id is buffered in pending-
-        correlation (A3/§3.5.1) — that buffering is the engine's job, not ours.
-
-        TODO(Phase 1): pin the order-frame schema against ``BrokerOrderUpdate`` (§3.5) — order_id,
-        status, filled/pending qty, average_price (string Decimal), and exchange timestamps.
+        PINNED (module docstring): ``{"type":"order","data":<verbatim Kite postback dict>}`` — the
+        raw ``on_order_update`` payload untouched, because the OMS correlates on the broker's own
+        field names (§3.5.1). An update that arrives *before* ``place_order()`` returns its id is
+        buffered in pending-correlation by the engine — that buffering is the engine's job, not ours.
         """
         if self._publisher is None:
             return
@@ -358,6 +502,7 @@ class TickerApp:
     def _on_close(self, ws: Any, code: Any, reason: Any) -> None:
         """Websocket closed. Log it and let KiteTicker's reconnect logic re-establish (A4)."""
         _log("kws.closed", code=code, reason=reason)
+        self._ws_connected = False
 
     def _on_error(self, ws: Any, code: Any, reason: Any) -> None:
         """Websocket error. Log; KiteTicker reconnects. Persistent silence ⇒ engine respawns us."""
@@ -392,20 +537,37 @@ def _parse_tokens(raw: str | None) -> list[int]:
     return [int(part) for part in raw.split(",") if part.strip()]
 
 
-def _read_stdin_credentials() -> dict[str, str]:
+def _read_stdin_credentials() -> dict[str, Any]:
     """Read the one-time Kite credentials the supervisor writes to our stdin on spawn (§2.4).
 
-    THE WIRE CONTRACT (mirrored in engine.broker.ticker_supervisor): ``api_key`` + ``access_token``
-    arrive on **stdin** as the first framed line — NEVER via env or a routable frame — so they never
-    land in the process table. Must run BEFORE the Twisted ``_StdinWatcher`` takes over stdin (main()
-    calls this first, then installs the watcher for EOF/orphan detection).
+    THE WIRE CONTRACT (mirrored in engine.broker.ticker_supervisor._send_startup_handshake): a
+    single length-prefixed msgpack frame ``{"api_key", "access_token", "tokens"?}`` arrives on
+    **stdin** — NEVER via env or a routable frame — so secrets never land in the process table.
+    Must run BEFORE the Twisted ``_StdinWatcher`` takes over stdin (main() calls this first, then
+    installs the watcher for EOF/orphan detection).
 
-    Phase-0 skeleton: the supervisor does not yet write the credentials frame, so return empty and let
-    main() warn (the link is unauthenticated — Phase-0 harness only).
+    Returns ``{}`` when stdin closes before/inside the frame or the frame is undecodable (a bare
+    Phase-0-style harness spawn) — main() then warns and proceeds unauthenticated-to-Kite.
     """
-    # TODO(Phase 1): read a single length-prefixed msgpack frame from sys.stdin.buffer:
-    #   {"api_key": ..., "access_token": ...}; then release stdin to the _StdinWatcher for EOF/orphan.
-    return {}
+    stdin = sys.stdin.buffer
+    header = stdin.read(_LEN_PREFIX.size)
+    if header is None or len(header) < _LEN_PREFIX.size:
+        _log("stdin.no_credentials_frame", got=0 if not header else len(header))
+        return {}
+    (length,) = _LEN_PREFIX.unpack(header)
+    body = stdin.read(length)
+    if body is None or len(body) < length:
+        _log("stdin.credentials_truncated", expected=length, got=0 if not body else len(body))
+        return {}
+    try:
+        creds = msgpack.unpackb(body, raw=False)
+    except Exception as exc:
+        _log("stdin.credentials_decode_error", error=str(exc))
+        return {}
+    if not isinstance(creds, dict):
+        _log("stdin.credentials_not_a_dict", got=type(creds).__name__)
+        return {}
+    return creds
 
 
 def _resolve_config(argv: list[str]) -> dict[str, Any]:
@@ -413,24 +575,28 @@ def _resolve_config(argv: list[str]) -> dict[str, Any]:
     ``TickerSupervisor``:
 
       * ``tcp_host`` / ``tcp_port`` (the ENGINE's loopback listener — we are the CLIENT that connects),
-        ``shared_secret``, ``parent_pid`` and the initial ``tokens`` travel via **env/argv**;
-      * ``api_key`` + ``access_token`` travel via **stdin** (:func:`_read_stdin_credentials`, §2.4) so
-        secrets never touch the process table.
+        ``shared_secret``, ``parent_pid`` and (fallback) ``tokens`` travel via **env/argv**;
+      * ``api_key`` + ``access_token`` + the authoritative initial ``tokens`` travel via **stdin**
+        (:func:`_read_stdin_credentials`, §2.4) so secrets never touch the process table.
     """
     env = os.environ
-    # Positional convention (Phase 0): main.py <tcp_host> <tcp_port> [tokens_csv]
+    # Positional convention: main.py <tcp_host> <tcp_port> [tokens_csv]
     pos = argv[1:]
     tcp_host = pos[0] if len(pos) >= 1 else env.get("MT_TICKER_TCP_HOST", "127.0.0.1")
     tcp_port = int(pos[1]) if len(pos) >= 2 else int(env.get("MT_TICKER_TCP_PORT", "8401"))
     tokens_raw = pos[2] if len(pos) >= 3 else env.get("MT_TICKER_TOKENS")
-    creds = _read_stdin_credentials()  # api_key/access_token via STDIN only (§2.4); empty in Phase 0
+    creds = _read_stdin_credentials()  # api_key/access_token (+tokens) via STDIN only (§2.4)
+    stdin_tokens = creds.get("tokens")
+    tokens = (
+        [int(t) for t in stdin_tokens] if stdin_tokens else _parse_tokens(tokens_raw)
+    )
     return {
         "tcp_host": tcp_host,
         "tcp_port": tcp_port,
-        "api_key": creds.get("api_key", ""),
-        "access_token": creds.get("access_token", ""),
+        "api_key": str(creds.get("api_key") or ""),
+        "access_token": str(creds.get("access_token") or ""),
         "shared_secret": env.get("MT_TICKER_SHARED_SECRET", ""),
-        "tokens": _parse_tokens(tokens_raw),
+        "tokens": tokens,
     }
 
 

@@ -332,7 +332,7 @@ def _decide(
 def _print_report(symbol: str, ex_date: date, token: int, v: Verdict) -> None:
     sep = "=" * 78
     print(sep)
-    print(f"A11 CHECK — are Kite MINUTE candles corp-action adjusted?  (§4.4 job 11, §14 Q10)")
+    print("A11 CHECK — are Kite MINUTE candles corp-action adjusted?  (§4.4 job 11, §14 Q10)")
     print(sep)
     print(f"symbol={symbol}  instrument_token={token}  ex_date={ex_date.isoformat()}")
     print("")
@@ -357,16 +357,16 @@ def _print_report(symbol: str, ex_date: date, token: int, v: Verdict) -> None:
         print("  Verdict inconclusive; do NOT record a value yet. Re-run with a cleaner ex-date.")
     else:
         val = str(v.minute_candles_adjusted).lower()
-        print(f"  1. Set in config/settings.yaml:")
-        print(f"         data:")
+        print("  1. Set in config/settings.yaml:")
+        print("         data:")
         print(f"           minute_candles_adjusted: {val}")
-        print(f"  2. Record the answer in IMPLEMENTATION_PLAN.md §14 Q10 (A11).")
-        print(f"  3. Configure the bar-stitching / backfill job accordingly (A11): if minute candles are")
+        print("  2. Record the answer in IMPLEMENTATION_PLAN.md §14 Q10 (A11).")
+        print("  3. Configure the bar-stitching / backfill job accordingly (A11): if minute candles are")
         if v.minute_candles_adjusted:
-            print(f"     ADJUSTED, no re-adjustment is needed when stitching minute history across ex-dates.")
+            print("     ADJUSTED, no re-adjustment is needed when stitching minute history across ex-dates.")
         else:
-            print(f"     UNADJUSTED, the backfill job must corp-action-adjust minute bars across ex-dates")
-            print(f"     (using CorpActionsJob ex-dates, A12) before they are comparable to daily/adjusted bars.")
+            print("     UNADJUSTED, the backfill job must corp-action-adjust minute bars across ex-dates")
+            print("     (using CorpActionsJob ex-dates, A12) before they are comparable to daily/adjusted bars.")
     print(sep)
 
 

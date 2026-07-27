@@ -95,11 +95,63 @@ class MessageKind(StrEnum):
     ``stale_data_guard``: tick age 5 s / heartbeat silence 10 s ⇒ FROZEN + ticker respawn, A4/R2).
     NOT raised during WARMING/intentionally-off (those are suppressed upstream, §2.6/§3.2.12)."""
 
+    FEED_DEGRADED = "feed_degraded"
+    """The live tick feed went silent DURING market hours while the child's 1 s heartbeats keep it
+    HEALTHY (2026-07-22 tickless-HEALTHY session, R2/§7.1). Heartbeats are KiteTicker-independent, so a
+    feed delivering ZERO ticks used to read HEALTHY all day and write zero self-built bars in silence.
+    Distinct from FEED_STALE (heartbeat silence ⇒ kill+respawn+FROZEN, critical): DEGRADED is
+    ``warning`` — the child is alive, the FEED is not delivering ticks. Recovers automatically the
+    moment ticks resume."""
+
+    FEED_WEDGED = "feed_wedged"
+    """The live tick feed is WEDGED: repeated WARMING-timeout respawns never reached HEALTHY
+    (2026-07-23 13:41 sleep/resume incident). The supervisor keeps retrying at capped backoff, but
+    after ``ticker.max_wedge_respawns`` consecutive attempts the feed has still failed to come up —
+    a structural fault (dead child / no network / rejected token) that needs owner attention. Escalated
+    ONCE per wedge episode (``warning``, not a per-respawn page); recovers automatically the moment a
+    respawn finally heartbeats."""
+
     REC_FILL_SUSPECTED = "rec_fill_suspected"
     """The reconciler matched a broker position to an open RECOMMEND rec (R5/§3.6): exactly one
     one-tap confirm prompt, pre-filled with the observed qty/price, BEFORE any ``positions`` row or
     order call. Owner confirms via ``/taken`` (one tap) ⇒ ``origin='recommended'``; dismiss/expiry ⇒
     ``no_action``. Never auto-adopted."""
+
+    RECONCILE_DRIFT = "reconcile_drift"
+    """Nightly self-built-vs-official bar reconciliation drifted beyond thresholds (A13/§3.2.3:
+    |Δvol|>``reconcile.vol_drift_pct`` or |Δclose|>``reconcile.close_drift_ticks`` on more than
+    ``reconcile.max_bad_bar_fraction`` of compared bars). Offline spans are excluded from the
+    denominator (§2.6) — this alert means genuine self-vs-official divergence, investigate the feed."""
+
+    BACKFILL_REPORT = "backfill_report"
+    """A ``BackfillJob`` run (historical or §2.6 warm-up gap-fill) finished — bars written, span,
+    failures (§3.2.3/§4.4 jobs 1+3). Warning when any symbol failed; info otherwise."""
+
+    WARMUP_FROZEN = "warmup_frozen"
+    """The §2.6 step-6 cold-start warm-up gate: entries stay FROZEN because contiguous bar coverage
+    is insufficient for a strategy's feature lookbacks (§7.1 ``warmup_ready``; §10.3
+    ``WARMUP_FROZEN(symbol/strategy)``). Never trade on thin data — distinct from feed-stale."""
+
+    CATCHUP_REPORT = "catchup_report"
+    """The §2.6 step-5 ``CatchUpRunner`` finished replaying missed jobs after an off period: which
+    jobs were caught up, in dependency order, and which failed (feeding the STARTUP_REPORT)."""
+
+    ENGINE_CRASHLOOP = "engine_crashloop"
+    """Repeated fast respawns inside ``lifecycle.crashloop_window_s`` coalesced into one loud alert
+    (§2.2/§10.7) instead of a page per restart. Always critical — something is structurally wrong."""
+
+    DATA_FRESHNESS_FROZEN = "data_freshness_frozen"
+    """A safety/deadline-critical daily job (instruments/tick-size A10, surveillance A8, earnings
+    calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
+    FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3)."""
+
+    POST_LOGIN_RECOVERY = "post_login_recovery"
+    """The §2.6 cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
+    ``/kite/callback`` route or the Telegram ``/token`` fallback both land in
+    ``SessionManager.complete_login``), the post-login recovery re-runs the startup steps a pre-login
+    boot could not — instruments load/persist, regime + warm-up-gap backfill, warm-up re-evaluation
+    (and freeze-lift once coverage is met), and ticker start — and reports the per-step outcome so a
+    BACKGROUND recovery is never silent. Info severity unless a step failed (then warning)."""
 
 
 class CatalogMessage(BaseModel):
@@ -236,6 +288,48 @@ def feed_stale(age_s: float) -> CatalogMessage:
     )
 
 
+def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
+    """Live feed silent for ``age_s`` s DURING market hours while heartbeats keep the child HEALTHY.
+
+    Warning (not critical): the ticker child is alive and heartbeating, but its KiteTicker is delivering
+    no ticks, so NO self-built 1-minute bars are being written. Fires once on the HEALTHY→DEGRADED
+    transition (§7.1 in-session tick-silence guard); the state recovers to HEALTHY when ticks resume.
+    """
+    return CatalogMessage(
+        kind=MessageKind.FEED_DEGRADED,
+        title="Feed degraded — no ticks in-session",
+        body=(
+            f"Heartbeats are healthy but NO live ticks for {age_s:.0f}s (>{budget_s:.0f}s budget) "
+            "during market hours — the feed is tickless and self-built bars are NOT being written. "
+            "Check the ticker child (see ticker_child_output logs)."
+        ),
+        severity="warning",
+        data={"age_s": age_s, "budget_s": budget_s},
+    )
+
+
+def feed_wedged(*, respawns: int, age_s: float) -> CatalogMessage:
+    """The ticker feed is WEDGED — repeated WARMING-timeout respawns never reached HEALTHY (§2.6/R2).
+
+    Escalated ONCE after ``ticker.max_wedge_respawns`` consecutive WARMING-timeout respawns (2026-07-23
+    sleep/resume wedge): the supervisor keeps retrying at capped backoff, but the child never delivers a
+    heartbeat, so the feed is structurally down. Warning (not critical): risk-reducing exits are
+    unaffected and the state recovers automatically once a respawn heartbeats.
+    """
+    return CatalogMessage(
+        kind=MessageKind.FEED_WEDGED,
+        title="Feed wedged — respawns not recovering",
+        body=(
+            f"The ticker feed has failed to come up after {respawns} consecutive WARMING-timeout "
+            f"respawns (no heartbeat for {age_s:.0f}s on the last attempt). Still retrying at capped "
+            "backoff, but the feed is delivering NO data — check the ticker child (ticker_child_output "
+            "logs), network, and Kite token. Recovers automatically once a respawn heartbeats."
+        ),
+        severity="warning",
+        data={"respawns": respawns, "age_s": age_s},
+    )
+
+
 def rec_fill_suspected(
     rec_id: str, symbol: str, qty: int, price: Decimal
 ) -> CatalogMessage:
@@ -260,4 +354,180 @@ def rec_fill_suspected(
             [{"text": f"✓ /taken {symbol} {qty}@{price_s}", "command": f"/taken {rec_id} {qty} {price_s}"}],
             [{"text": "✗ No action", "command": f"/reject {rec_id}"}],
         ],
+    )
+
+
+def reconcile_drift(
+    *,
+    d: str,
+    symbols_flagged: list[str],
+    bars_compared: int,
+    bad_bar_fraction: float,
+    max_bad_bar_fraction: float,
+) -> CatalogMessage:
+    """Self-built vs official 1m bars drifted beyond the §3.2.3 thresholds on day ``d`` (A13).
+
+    ``symbols_flagged`` lists the symbols whose bad-bar fraction exceeded
+    ``reconcile.max_bad_bar_fraction``; offline (gap-backfilled) spans were already excluded from the
+    denominator (§2.6), so this is genuine divergence. Official candles have replaced the drifted
+    self-built rows (``src='kite_official'`` canonical, §4.4 job 2) — the alert is for investigation.
+    """
+    shown = ", ".join(symbols_flagged[:10]) + ("…" if len(symbols_flagged) > 10 else "")
+    return CatalogMessage(
+        kind=MessageKind.RECONCILE_DRIFT,
+        title=f"Bar reconcile drift on {d}",
+        body=(
+            f"{len(symbols_flagged)} symbol(s) drifted beyond thresholds "
+            f"(bad-bar fraction {bad_bar_fraction:.4f} > {max_bad_bar_fraction:.4f} "
+            f"over {bars_compared} compared bars): {shown}\n"
+            "Official candles are now canonical for the drifted rows; investigate the tick feed."
+        ),
+        severity="warning",
+        data={
+            "d": d,
+            "symbols_flagged": symbols_flagged,
+            "bars_compared": bars_compared,
+            "bad_bar_fraction": bad_bar_fraction,
+            "max_bad_bar_fraction": max_bad_bar_fraction,
+        },
+    )
+
+
+def backfill_report(
+    *,
+    interval: str,
+    symbols: int,
+    bars_written: int,
+    frm: str,
+    to: str,
+    duration_s: float,
+    failures: list[str],
+) -> CatalogMessage:
+    """A ``BackfillJob`` run finished (§3.2.3; historical §4.4 job 3 or §2.6 warm-up gap-fill).
+
+    ``frm``/``to`` are already-rendered IST strings (callers pass Clock-derived values; no Clock
+    access here). Warning when any symbol failed — those symbols stay behind their checkpoint and the
+    next run resumes them (A2 resumable)."""
+    fail = f"\nFailed: {', '.join(failures)}" if failures else ""
+    return CatalogMessage(
+        kind=MessageKind.BACKFILL_REPORT,
+        title=f"Backfill {interval} complete" + (" (with failures)" if failures else ""),
+        body=(
+            f"{bars_written} bars across {symbols} symbol(s) for [{frm} .. {to}] "
+            f"in {duration_s:.1f}s (≤3 req/s, A2).{fail}"
+        ),
+        severity="warning" if failures else "info",
+        data={
+            "interval": interval,
+            "symbols": symbols,
+            "bars_written": bars_written,
+            "frm": frm,
+            "to": to,
+            "duration_s": duration_s,
+            "failures": failures,
+        },
+    )
+
+
+def warmup_frozen(*, blockers: list[str]) -> CatalogMessage:
+    """Entries FROZEN by the cold-start warm-up gate (§2.6 step 6 / §7.1 ``warmup_ready``).
+
+    Each blocker is a rendered "scope: have/need" line (e.g. ``"orb:RELIANCE bars 12/30"``) — the
+    strategies/symbols whose feature lookbacks lack contiguous bar coverage. Entries reopen
+    automatically once coverage is met; risk-reducing actions were never gated (R3)."""
+    return CatalogMessage(
+        kind=MessageKind.WARMUP_FROZEN,
+        title="Warm-up incomplete — entries frozen",
+        body=(
+            "Insufficient contiguous bar coverage for feature lookbacks (never trade on thin data):\n"
+            + "\n".join(f"• {b}" for b in blockers)
+        ),
+        severity="warning",
+        data={"blockers": blockers},
+    )
+
+
+def catchup_report(
+    *,
+    off_duration_s: float,
+    jobs_caught_up: list[str],
+    jobs_failed: list[str],
+) -> CatalogMessage:
+    """§2.6 step-5 ``CatchUpRunner`` summary: missed jobs replayed in dependency order after an off
+    period. Failures of safety/deadline-critical jobs additionally raise DATA_FRESHNESS_FROZEN."""
+    caught = ", ".join(jobs_caught_up) if jobs_caught_up else "none"
+    failed = ", ".join(jobs_failed) if jobs_failed else "none"
+    hours = off_duration_s / 3600.0
+    return CatalogMessage(
+        kind=MessageKind.CATCHUP_REPORT,
+        title="Missed-job catch-up complete" + (" (with failures)" if jobs_failed else ""),
+        body=(
+            f"Off for {hours:.1f}h. Jobs caught up: {caught}\nFailed: {failed}"
+        ),
+        severity="warning" if jobs_failed else "info",
+        data={
+            "off_duration_s": off_duration_s,
+            "jobs_caught_up": jobs_caught_up,
+            "jobs_failed": jobs_failed,
+        },
+    )
+
+
+def engine_crashloop(*, restarts: int, window_s: int) -> CatalogMessage:
+    """Coalesced crash-loop alarm (§2.2/§10.7): ``restarts`` fast respawns inside ``window_s``.
+
+    One loud page instead of one per restart. The engine should be held STOPPED for investigation —
+    open positions remain broker-protected throughout (R3)."""
+    return CatalogMessage(
+        kind=MessageKind.ENGINE_CRASHLOOP,
+        title="Engine crash-looping",
+        body=(
+            f"{restarts} restarts within {window_s}s — holding down for investigation. "
+            "Open positions remain broker-protected (R3); check logs before restarting."
+        ),
+        severity="critical",
+        data={"restarts": restarts, "window_s": window_s},
+    )
+
+
+def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
+    """Post-login recovery summary (§2.6 cold-start RE-TRIGGER).
+
+    ``steps`` is the ordered ``(name, status, detail)`` list, ``status`` in {ok, skipped, failed}.
+    Info severity unless any step failed (then warning). The owner SEES this on Telegram so a
+    background recovery (the login HTTP/Telegram path returned immediately) is never silent — it is
+    the visible proof the engine re-armed after a boot BEFORE the daily login."""
+    any_failed = any(status == "failed" for _name, status, _detail in steps)
+    lines = [
+        f"- {name}: {status}" + (f" ({detail})" if detail else "")
+        for name, status, detail in steps
+    ]
+    return CatalogMessage(
+        kind=MessageKind.POST_LOGIN_RECOVERY,
+        title="Post-login recovery" + (" (with failures)" if any_failed else ""),
+        body="Login complete - re-ran the startup recovery sequence:\n" + "\n".join(lines),
+        severity="warning" if any_failed else "info",
+        data={
+            "steps": [{"name": n, "status": s, "detail": d} for n, s, d in steps],
+            "any_failed": any_failed,
+        },
+    )
+
+
+def data_freshness_frozen(*, job_id: str, last_success: str | None, reason: str) -> CatalogMessage:
+    """A safety/deadline-critical daily job is not fresh ⇒ entries FROZEN (§2.6 step 5).
+
+    ``last_success`` is a rendered IST timestamp of the job's last good run (or None if never).
+    Entries stay frozen until the job runs/verifies; risk-reducing actions continue (R3)."""
+    last = last_success or "never"
+    return CatalogMessage(
+        kind=MessageKind.DATA_FRESHNESS_FROZEN,
+        title=f"Entries frozen — {job_id} not fresh",
+        body=(
+            f"Safety-critical job '{job_id}' could not run/verify before entries open "
+            f"(last success: {last}). Reason: {reason}\n"
+            "Entries FROZEN until fresh; exits/protection unaffected (R3)."
+        ),
+        severity="critical",
+        data={"job_id": job_id, "last_success": last_success, "reason": reason},
     )

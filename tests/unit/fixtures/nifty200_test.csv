@@ -1,0 +1,11 @@
+# test copy of the NSE index-constituents CSV shape (comment line exercises the parser's skip rule)
+Company Name,Industry,Symbol,Series,ISIN Code
+Reliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE,EQ,
+Tata Consultancy Services Ltd.,Information Technology,TCS,EQ,
+GSM Flagged Co,Misc,GSMSTK,EQ,
+ASM Flagged Co,Misc,ASMSTK,EQ,
+T2T Co,Misc,T2TSTK,EQ,
+ESM Co,Misc,ESMSTK,EQ,
+No MIS Co,Misc,NOMIS,EQ,
+Low Value Co,Misc,LOWVAL,EQ,
+No Data Co,Misc,NODATA,EQ,

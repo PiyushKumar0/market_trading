@@ -1,0 +1,90 @@
+# config/calendar/2024.yaml — NSE trading calendar for 2024 (R6, B2).
+#
+# SETTLED HISTORY — verified: true, verified_through: "2024-12-31". 2024 is fully elapsed; every date
+# below is a closed historical fact (not a projection), sourced from the official NSE capital-market-
+# segment trading-holiday circulars plus corroborating broker/news coverage (>=2 independent sources per
+# fact, cross-checked against each other; see per-entry notes below for anything sources disagreed on).
+# FAIL-SAFE (R6): NSECalendar only counts a date as a trading day in strict mode when verified: true AND
+# the date is at/before verified_through — both hold here, so the 200-session warmup lookback (§7.1/B2)
+# can walk back through all of 2024 instead of hitting "calendar horizon < 200 sessions".
+#
+# PRIMARY sources (NSE circular archive, nsearchives.nseindia.com/content/circulars/):
+#   - CMTR59722 (2023-12-12, Circular Ref 154/2023) — original 2024 trading-holidays circular: 14 fixed-
+#     date holidays + 5 dates falling on Sat/Sun (listed separately) + the Nov 1 muhurat notice.
+#   - CMTR61518 (2024-04-08, Ref 52/2024) — partial modification adding May 20, 2024 (Parliamentary/Lok
+#     Sabha Election holiday, Mumbai).
+#   - NCL/COM/60353 (2024-01-19, Ref 013/2024) — NSE Clearing circular that quotes verbatim: "Government
+#     of Maharashtra has declared January 22, 2024 as a public holiday under Section 25 of the Negotiable
+#     Instruments Act, 1881" referencing NSE/COM/60339 (2024-01-19), the underlying trading-holiday notice
+#     for the Ram Mandir Pran Pratishtha ceremony.
+#   - NCL/CMPT/64968 (2024-11-08, Ref 250/2024) — NSE Clearing circular quoting "circular download
+#     reference no. NSE/CMTR/64960 dated Nov 08, 2024, regarding trading holiday on Wednesday, Nov 20,
+#     2024, on account of Assembly Elections in Maharashtra".
+#   - NSE/MSD/61893 (2024-05-07, Ref 40/2024) — official DR-drill session timings for Sat, May 18, 2024
+#     (Capital Market segment: Session-1 Normal Market 09:15-10:00 Primary site; Session-2 Normal Market
+#     11:30-12:30 DR site).
+#   - NCL/CMPT/64632 (2024-10-19, Ref 128/2024) — Nov 1, 2024 muhurat SLBS transaction window 18:00-19:00
+#     hrs, corroborating the Capital Market normal-market muhurat window.
+# CORROBORATING secondary sources (broker/news, cross-checked against the primary circulars above, none
+# in conflict on the facts retained):
+#   - Zeebiz, Business Today, India TV News — Jan 22, 2024 Ram Mandir holiday.
+#   - Zerodha Market Intel bulletin 367702, Equitypandit — Jan 20, 2024 DR-drill timings (09:15-10:00
+#     Primary, 11:30-12:30 DR) — matches the officially-circular-confirmed May 18 pattern exactly.
+#   - Business Today, Republic World (via search synthesis of the NSE circular text) — Mar 2, 2024
+#     DR-drill timings (09:15-10:00 Primary, 11:30-12:30 DR) — same pattern again.
+#   - Zerodha bulletin 396259, Groww, 5paisa, Upstox, AngelOne — Nov 20, 2024 Maharashtra election holiday.
+#   - Goodreturns, Equitypandit, Business Standard, Upstox — Nov 1, 2024 muhurat Pre-Open 17:45-18:00 /
+#     Normal Market 18:00-19:00 (Normal Market window independently matches NCL/CMPT/64632's SLBS window).
+
+year: 2024
+verified: true                            # settled history (R6) — see verified_through and sources above.
+verified_through: "2024-12-31"
+source: "NSE/CMTR/59722 (2023-12-12) + NSE/CMTR/61518 (2024-04-08, May-20 election) + NSE/COM/60339 via NCL/COM/60353 (2024-01-19, Jan-22 Ram Mandir holiday) + NSE/CMTR/64960 via NCL/CMPT/64968 (2024-11-08, Nov-20 Maharashtra election) + NSE/MSD/61893 (2024-05-07, May-18 DR-drill timings) + NCL/CMPT/64632 (2024-10-19, muhurat SLBS window). Full text: nsearchives.nseindia.com/content/circulars/."
+
+# Regular session times (IST) — unchanged from 2026.yaml; historical days used the same schedule.
+sessions:
+  pre_open:   { start: "09:00", end: "09:15" }
+  continuous: { start: "09:15", end: "15:30" }
+  post_close: { start: "15:40", end: "16:00" }
+
+# Full-day market holidays (no trading). Complete 2024 list: the original circular's 14 fixed/movable
+# dates, its 5 Sat/Sun-falling dates (included for completeness — harmless, is_trading_day checks weekends
+# first), and 2 ad-hoc election/ceremony holidays added by later partial-modification circulars.
+holidays:
+  - { date: "2024-01-22", name: "Special holiday (Ram Mandir Pran Pratishtha ceremony) — Maharashtra public holiday under NI Act s.25; added by NSE/COM/60339, not in the original Dec-2023 circular" }
+  - { date: "2024-01-26", name: "Republic Day" }
+  - { date: "2024-03-08", name: "Mahashivratri" }
+  - { date: "2024-03-25", name: "Holi" }
+  - { date: "2024-03-29", name: "Good Friday" }
+  - { date: "2024-04-11", name: "Id-Ul-Fitr (Ramadan Eid)" }
+  - { date: "2024-04-14", name: "Dr. Baba Saheb Ambedkar Jayanti (falls on Sunday)" }
+  - { date: "2024-04-17", name: "Shri Ram Navmi" }
+  - { date: "2024-04-21", name: "Shri Mahavir Jayanti (falls on Sunday)" }
+  - { date: "2024-05-01", name: "Maharashtra Day" }
+  - { date: "2024-05-20", name: "Trading holiday — Parliamentary (Lok Sabha) Election, Mumbai; added by NSE/CMTR/61518, not in the original Dec-2023 circular" }
+  - { date: "2024-06-17", name: "Bakri Id" }
+  - { date: "2024-07-17", name: "Moharram" }
+  - { date: "2024-08-15", name: "Independence Day / Parsi New Year" }
+  - { date: "2024-09-07", name: "Ganesh Chaturthi (falls on Saturday)" }
+  - { date: "2024-10-02", name: "Mahatma Gandhi Jayanti" }
+  - { date: "2024-10-12", name: "Dussehra (falls on Saturday)" }
+  - { date: "2024-11-02", name: "Diwali-Balipratipada (falls on Saturday)" }
+  - { date: "2024-11-15", name: "Gurunanak Jayanti" }
+  - { date: "2024-11-20", name: "Trading holiday — Maharashtra Assembly Election (NSE/CMTR/64960)" }
+  - { date: "2024-12-25", name: "Christmas" }
+  # NOTE: 2024-11-01 (Diwali Laxmi Pujan) is deliberately NOT listed here even though NSE's circular calls
+  # it a "trading holiday" — the day IS a normal trading holiday for the regular 09:15-15:30 session, but
+  # it also carries the evening muhurat session, so it is modelled ONLY in special_sessions below, per the
+  # loader convention at calendar.py:53-63 (a muhurat/special day must never also be in `holidays`, else
+  # the loader raises ValueError on the overlap and the engine fails to boot).
+
+# Muhurat trading (Diwali evening special session) + verified DR-drill Saturday live-trading sessions.
+# Deliberately NOT in `holidays` — see the note above and calendar.py:53-63.
+special_sessions:
+  - { date: "2024-11-01", name: "Diwali Muhurat Trading — Normal Market 18:00-19:00 hrs IST (verified: NCL/CMPT/64632 2024-10-19 SLBS window, corroborated by Goodreturns/Equitypandit/Business Standard/Upstox). Pre-open 17:45-18:00 per broker sources is not separately modelled — schema has one continuous window, same simplification used for every muhurat entry in this repo.", start: "18:00", end: "19:00" }
+  - { date: "2024-01-20", name: "DR-drill (NOT muhurat) — SEBI-mandated live trading session, intra-day switchover Primary->DR site, Equity & F&O. Two sub-windows with a switchover halt in between: 09:15-10:00 Primary, then 11:30-12:30 DR (NOT continuous — no trading 10:00-11:30). Modelled as the encompassing 09:15-12:30 span since the schema has one continuous start/end. Verified via 2 independent sources (Zerodha Market Intel bulletin 367702; Equitypandit) and matches the officially-circular-confirmed May-18 drill pattern exactly.", start: "09:15", end: "12:30" }
+  - { date: "2024-03-02", name: "DR-drill (NOT muhurat) — same SEBI-mandated switchover drill, Equity & F&O. 09:15-10:00 Primary, then 11:30-12:30 DR, gap in between (NOT continuous). Verified via 2 independent sources (Business Today, Republic World) and matches the May-18 drill pattern exactly.", start: "09:15", end: "12:30" }
+  - { date: "2024-05-18", name: "DR-drill (NOT muhurat) — same SEBI-mandated switchover drill, Equity (CM) & F&O. Officially verified via NSE/MSD/61893 (2024-05-07): CM Session-1 Normal Market 09:15-10:00 Primary site, Session-2 Normal Market 11:30-12:30 DR site. Modelled as the 09:15-12:30 span (gap 10:00-11:30, NOT continuous); pre-open/block-deal/closing-session sub-windows outside 09:15-12:30 are not separately modelled (schema has one continuous window).", start: "09:15", end: "12:30" }
+
+# Shortened / special sessions (BCP days already covered above as DR-drills). None else known for 2024.
+shortened_sessions: []

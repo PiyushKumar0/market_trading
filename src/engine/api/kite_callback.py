@@ -32,7 +32,6 @@ This route is deliberately the *only* member of ``engine.api`` exempt from beare
 from __future__ import annotations
 
 import html
-from typing import Optional
 
 from fastapi import APIRouter, Query
 from fastapi.responses import HTMLResponse
@@ -92,15 +91,15 @@ def build_kite_callback_router(session_manager, clock) -> APIRouter:
 
     @router.get("/kite/callback", response_class=HTMLResponse)
     async def kite_callback(
-        request_token: Optional[str] = Query(
+        request_token: str | None = Query(
             default=None,
             description="Single-use Kite login token appended by the provider redirect (R6).",
         ),
-        status: Optional[str] = Query(
+        status: str | None = Query(
             default=None,
             description="Provider-supplied login status (informational; e.g. 'success').",
         ),
-        action: Optional[str] = Query(
+        action: str | None = Query(
             default=None,
             description="Provider-supplied action hint (informational).",
         ),

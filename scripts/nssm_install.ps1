@@ -115,6 +115,10 @@ param(
 
     [string]$RepoRoot,
 
+    # Windows account the service logs on as (e.g. '.\piyush.kumar_atari'). REQUIRED in practice:
+    # DPAPI secrets decrypt only under the owner's profile (D11); LocalSystem cannot read them.
+    [string]$ServiceUser,
+
     [switch]$Confirm
 )
 
@@ -137,6 +141,16 @@ $RunDir      = Join-Path $RepoRoot 'data\run'            # sentinel lives here (
 $Sentinel    = Join-Path $RunDir 'intend_to_run.flag'    # "I intend to run" flag (engine-managed)
 $StdoutLog   = Join-Path $LogsDir 'service.out.log'
 $StderrLog   = Join-Path $LogsDir 'service.err.log'
+
+# Service control (install/remove/start/stop) needs an ELEVATED shell; without it nssm fails with
+# the cryptic "OpenService(): Access is denied" (2026-07-23 owner-hit). Fail fast + say how.
+$script:IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+                     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $script:IsElevated -and $Action -in @('install', 'remove', 'start', 'stop') -and $Confirm) {
+    throw ("This action needs an ELEVATED PowerShell (Run as administrator). From this shell: " +
+           "Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-Command'," +
+           "`"cd '$RepoRoot'; scripts\nssm_install.ps1 -Action $Action -Confirm ...`"")
+}
 
 # The engine is an installed package (pyproject: hatchling wheel of src/engine, [tool.uv] package),
 # so `python -m engine.ops.main` resolves from the venv without PYTHONPATH juggling. AppDirectory =
@@ -256,6 +270,22 @@ function Install-Service {
     # (4) Restart sentinel path is exported so the engine knows where to write/delete its flag.
     #     This is the ONLY env var we set -- it is a path, NOT a secret. Secrets stay in DPAPI.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppEnvironmentExtra', "MT_RESTART_SENTINEL=$Sentinel")
+
+    # (6) Service account (D11 -- REQUIRED, not optional): the DPAPI secrets (Kite keys, Telegram
+    #     bot token, Claude OAuth) were sealed under the OWNER's Windows profile. A service left on
+    #     the LocalSystem default CANNOT decrypt them -- the engine boots secret-less and freezes.
+    #     NSSM grants the 'Log on as a service' right automatically when ObjectName is set.
+    if ($ServiceUser) {
+        $secure = Read-Host -Prompt "Windows password for $ServiceUser (used once for 'nssm set ObjectName'; not stored)" -AsSecureString
+        $plain  = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                      [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+        Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'ObjectName', $ServiceUser, $plain)
+        $plain = $null
+    } else {
+        Write-Warning ("-ServiceUser not given: service stays on LocalSystem, which CANNOT decrypt " +
+                       "the owner's DPAPI secrets (D11). Pass -ServiceUser '.\<owner-account>' or run: " +
+                       "nssm set $ServiceName ObjectName '.\<owner-account>' <password>")
+    }
 
     # ----------------------------------------------------------------------------------------------
     # DOCUMENTED FALLBACK ONLY -- DO NOT UNCOMMENT BY DEFAULT (D11/§2.2/§2.4, R10/D2).

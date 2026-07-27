@@ -1,0 +1,37 @@
+{
+  "_note": "LIVE-VERIFIED field names 2026-07-16: BSE CorporatesSHPSecuritybeta/w?scripcode=500325&qtrid=130. The per-category SEBI table is Table1 (Table/Table4 are single meta rows). Category values below are illustrative; field NAMES are the real ones.",
+  "Table": [
+    {"Fld_TransactionId": 381121, "Fld_AuthoriseDate": "2026-07-16T19:24:53.207", "Qtr_Id": 130.0, "Fld_qtrname": "Jun-26", "slongname": "Reliance Industries Ltd"}
+  ],
+  "Table1": [
+    {
+      "Fld_Code": "STA1A2",
+      "Fld_ShortName": "(A) Promoter & Promoter Group",
+      "FLD_LEVEL": "A=A1+A2",
+      "Fld_ShortCatg": "Promoter and Promoter Group",
+      "Fld_NoOfShareHolders": 47,
+      "Fld_TotalNoOfShares": 6715496096,
+      "Fld_TotalPercentageOf_A_B_C2": 50.48,
+      "Fld_NoOfLockedInShares": 0,
+      "Fld_LockedInSharesPercent": 0.0,
+      "Fld_PledgeEncumberedNoOfShares": 84720861,
+      "Fld_PledgeEncumberedPercentage": 1.26
+    },
+    {
+      "Fld_Code": "STB",
+      "Fld_ShortName": "(B) Public",
+      "FLD_LEVEL": "B",
+      "Fld_ShortCatg": "Public",
+      "Fld_NoOfShareHolders": 3512044,
+      "Fld_TotalNoOfShares": 6588000000,
+      "Fld_TotalPercentageOf_A_B_C2": 49.52,
+      "Fld_NoOfLockedInShares": 0,
+      "Fld_LockedInSharesPercent": 0.0,
+      "Fld_PledgeEncumberedNoOfShares": 0,
+      "Fld_PledgeEncumberedPercentage": 0.0
+    }
+  ],
+  "Table3": [
+    {"nscripcode": 500325, "fld_quarterid": 130.0, "fld_quartername": "June 2026", "fld_startdate": "01 Apr 2026", "fld_enddate": "30 Jun 2026"}
+  ]
+}

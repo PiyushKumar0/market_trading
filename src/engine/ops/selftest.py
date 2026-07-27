@@ -3,10 +3,22 @@
 Asserts the platform's preconditions before entries can open and surfaces what must FROZEN/kill/prompt:
 secrets present, ``ANTHROPIC_API_KEY`` absent (D2 trap), protected-store hashes verified (R4), kill-state
 honored (R10), clock skew < 2 s (R6), trade window present + valid (§7.1), and (when a session manager is
-wired) the daily token's validity (R6). The deeper Phase-1/2 checks — day-scoped risk-counter rebuild and
-the continuous equity halt-ladder re-evaluation (§2.6), data-freshness, and the one cheap Haiku SDK call
-(D11 — deduped per trading day, skipped on non-trading-day starts; lands with the Phase-1 intelligence
-harness) — are stubbed with explicit TODOs and surfaced as SKIP so the gate sequence is visible from day one.
+wired) the daily token's validity (R6).
+
+Phase-1 addition — the §3.2.12 **data-freshness gate before entries**: today-dated
+instruments/surveillance/earnings (the safety/deadline-critical §2.6 step-5 jobs) must be recorded
+fresh in ``job_runs``; if stale, the catch-up job is triggered (idempotent watermarks); if still
+unsatisfiable ⇒ refuse to open entries (FROZEN-for-entries, applied by the lifecycle) + alert. The
+warm-up sufficiency check (§7.1 ``warmup_ready``) rides the same surface via the injected
+:class:`~engine.ops.warmup.WarmupGate`. ``SessionLifecycle.startup`` runs this self-test with
+``include_freshness=False`` because at §2.6 step 1c the backfill/catch-up have not run yet — the
+lifecycle enforces freshness after step 5 and warm-up at step 6; a standalone/pre-entries re-run
+(``run()`` default) includes them.
+
+Still stubbed with explicit markers (surfaced as SKIP so the gate sequence is honest): the day-scoped
+risk-counter rebuild + continuous equity halt-ladder re-evaluation (§2.6 — TODO(Phase 2/3): needs the
+ledger + ExposureTracker + broker reconcile) and the one cheap Haiku SDK call (D11 — deduped per
+trading day, skipped on non-trading-day starts; TODO(Phase 1 intelligence harness)).
 
 This module REPORTS; the lifecycle applies the consequences (the §2.4 integrity rule: FROZEN-with-flat-book
 vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions (§2.6).
@@ -87,6 +99,8 @@ class SelfTest:
         kill_switch: KillSwitch,
         mode_manager: ModeManager,
         session_manager=None,
+        catch_up=None,
+        warmup_gate=None,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -96,8 +110,12 @@ class SelfTest:
         self._kill = kill_switch
         self._mode = mode_manager
         self._session = session_manager
+        # §3.2.12 data-freshness seams (Phase 1): the CatchUpRunner (job_runs watermarks) and the
+        # WarmupGate — both optional; unwired ⇒ the freshness checks surface as SKIP, never silently pass.
+        self._catch_up = catch_up
+        self._warmup_gate = warmup_gate
 
-    async def run(self, *, check_skew: bool = True) -> SelfTestReport:
+    async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
         report.checks.append(self._check_native_preload())
         report.checks.append(self._check_secrets())
@@ -107,9 +125,12 @@ class SelfTest:
         report.checks.append(await self._check_clock_skew(check_skew))
         report.checks.append(self._check_trade_window())
         report.checks.append(self._check_token())
-        report.checks.append(self._stub("risk_counters_rebuild", "§2.6 day-scoped counters — Phase 2"))
-        report.checks.append(self._stub("equity_halt_ladder", "§2.6 floor-ladder re-eval — Phase 2"))
-        report.checks.append(self._stub("data_freshness", "instruments/surveillance/earnings — Phase 1"))
+        report.checks.append(self._stub(
+            "risk_counters_rebuild", "§2.6 day-scoped counters — TODO(Phase 2/3): ledger + reconcile"))
+        report.checks.append(self._stub(
+            "equity_halt_ladder", "§2.6 floor-ladder re-eval — TODO(Phase 2/3): ExposureTracker equity"))
+        if include_freshness:
+            report.checks.extend(await self.data_freshness_checks())
         report.checks.append(self._stub(
             "sdk_smoke", "one cheap Haiku call — wired with the intelligence harness, Phase 1 (D11)"))
 
@@ -211,6 +232,66 @@ class SelfTest:
         # Non-fatal: owner may start before the daily login; entries stay FROZEN until re-login (R6).
         return SelfTestCheck(name="token_valid", status=CheckStatus.WARN,
                              detail="daily token not valid — login required (R6)", implies=Implies.LOGIN_PROMPT)
+
+    # ----------------------------------------------------------------- data freshness (§3.2.12/§2.6)
+    async def data_freshness_checks(self) -> list[SelfTestCheck]:
+        """The §3.2.12 DATA-FRESHNESS gate before entries: today-dated instruments + surveillance +
+        earnings (+ ex-date GTT adjust) recorded fresh in ``job_runs``, and warm-up sufficient.
+
+        Stale safety-critical jobs first TRIGGER the catch-up (idempotent ``job_runs`` watermarks —
+        re-running a fresh job is a no-op, §2.6 step 5); only what is STILL stale after that fails the
+        check (⇒ FROZEN-for-entries, applied by the lifecycle) + alert. Unwired seams surface as SKIP —
+        never a silent pass. The held-CNC ex-date GTT scan itself is the ``corp_actions_gtt_adjust``
+        job (TODO(Phase 3) wiring: needs the OMS GTT manager); its freshness rides the same watermark.
+        """
+        return [await self._check_safety_jobs_fresh(), await self._check_warmup_ready()]
+
+    async def _check_safety_jobs_fresh(self) -> SelfTestCheck:
+        if self._catch_up is None or not getattr(self._catch_up, "has_registry", False):
+            return self._stub(
+                "data_freshness",
+                "no CatchUpRunner/job registry wired — Phase-1 jobs registered by the integrator (§2.6)",
+            )
+        stale = self._catch_up.stale_safety_jobs()
+        if stale:
+            # Trigger the catch-up job (idempotent watermarks) — §3.2.12 "else run the catch-up job".
+            _log.warning("data_freshness_stale_triggering_catchup", stale=stale)
+            try:
+                await self._catch_up.catch_up()
+            except Exception:  # noqa: BLE001 - unsatisfiable catch-up must surface as FAIL, not crash
+                _log.exception("data_freshness_catchup_failed")
+            stale = self._catch_up.stale_safety_jobs()
+        if stale:
+            return SelfTestCheck(
+                name="data_freshness",
+                status=CheckStatus.FAIL,
+                detail=f"safety-critical jobs not fresh today after catch-up: {stale} (§2.6 step 5)",
+                implies=Implies.FROZEN,
+            )
+        return SelfTestCheck(name="data_freshness", status=CheckStatus.PASS,
+                             detail="today-dated safety-critical jobs fresh (instruments/surveillance/earnings)")
+
+    async def _check_warmup_ready(self) -> SelfTestCheck:
+        if self._warmup_gate is None:
+            return self._stub(
+                "warmup_ready", "no WarmupGate wired — integrator passes engine.ops.warmup.WarmupGate (§2.6)"
+            )
+        try:
+            status = await self._warmup_gate.status()
+        except Exception:  # noqa: BLE001 - coverage that cannot be VERIFIED is treated as missing
+            _log.exception("warmup_gate_check_failed")
+            return SelfTestCheck(name="warmup_ready", status=CheckStatus.FAIL,
+                                 detail="warm-up coverage check failed — treated as missing (never trade thin data)",
+                                 implies=Implies.FROZEN)
+        if status.ready:
+            return SelfTestCheck(name="warmup_ready", status=CheckStatus.PASS,
+                                 detail="contiguous coverage satisfies every strategy lookback (§7.1)")
+        return SelfTestCheck(
+            name="warmup_ready",
+            status=CheckStatus.FAIL,
+            detail="insufficient contiguous coverage: " + "; ".join(status.blockers[:6]),
+            implies=Implies.FROZEN,
+        )
 
     @staticmethod
     def _stub(name: str, detail: str) -> SelfTestCheck:

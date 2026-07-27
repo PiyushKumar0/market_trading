@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "mTIMESTAMP": "17-Jun-2026",
+      "BP_SYMBOL": "BLOCKED",
+      "BP_SCRIP_NAME": "Blocked Limited",
+      "BP_CLIENT_NAME": "INSTITUTION A",
+      "BP_QTY": "1000000",
+      "BP_WAP": "55.20"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Moneycontrol RSS fixture. One new item + one URL duplicated in the ET fixture (dedupe target). -->
+<rss version="2.0">
+  <channel>
+    <title>Moneycontrol Business</title>
+    <link>https://www.moneycontrol.com</link>
+    <description>Moneycontrol fixture feed</description>
+    <item>
+      <title>RBI cuts repo rate by 25 basis points, surprise move say analysts</title>
+      <link>https://www.moneycontrol.com/news/business/markets/rbi-rate-cut-analysts.html</link>
+      <pubDate>Wed, 17 Jun 2026 03:34:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Shared story headline syndicated across feeds</title>
+      <link>https://www.moneycontrol.com/news/business/markets/shared-story.html</link>
+      <pubDate>Wed, 17 Jun 2026 04:20:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

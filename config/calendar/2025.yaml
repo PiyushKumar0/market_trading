@@ -1,0 +1,67 @@
+# config/calendar/2025.yaml — NSE trading calendar for 2025 (R6, B2).
+#
+# SETTLED HISTORY — verified: true, verified_through: "2025-12-31". 2025 is fully elapsed (today is
+# 2026-07-10); every date below is a closed historical fact, sourced from the official NSE capital-market-
+# segment trading-holiday circular plus the muhurat-timing circular issued closer to Diwali. FAIL-SAFE
+# (R6): NSECalendar only counts a date as a trading day in strict mode when verified: true AND the date is
+# at/before verified_through — both hold here, extending the 200-session warmup lookback (§7.1/B2) through
+# 2025.
+#
+# PRIMARY sources (NSE circular archive, nsearchives.nseindia.com/content/circulars/):
+#   - CMTR65587 (2024-12-13, Circular Ref 170/2024) — original 2025 trading-holidays circular: 14 fixed/
+#     movable dates + 4 dates falling on Sat/Sun (listed separately) + the Oct 21 muhurat notice.
+#   - CMTR70319 (2025-09-22, Ref 124/2025) — official Diwali muhurat session schedule for Tue, Oct 21,
+#     2025: Block deal 13:15-13:30, Pre-Open 13:30-13:45, Normal Market 13:45-14:45, Special pre-open (IPO/
+#     relisted) 13:30-14:15, Call Auction Illiquid 13:50-14:35, Closing Session 14:55-15:05, trade
+#     modification cut-off 15:15.
+# Corroborating secondary sources (broker/news, consistent with the above, no conflicts):
+#   - Upstox, Business Today — Oct 21, 2025 muhurat date + "1:45 PM to 2:45 PM" Normal Market window
+#     (matches CMTR70319's 13:45-14:45 exactly).
+# RESEARCH NOTE: unlike 2024, no ad-hoc election/ceremony trading holidays and no DR-drill weekend live-
+# trading sessions were found for 2025 in this research pass (multiple targeted searches came up empty).
+# Flagged for owner cross-check — absence of search hits is not proof of absence, though the official
+# circular is the authoritative source for the fixed/movable list either way.
+
+year: 2025
+verified: true                            # settled history (R6) — see verified_through and sources above.
+verified_through: "2025-12-31"
+source: "NSE/CMTR/65587 (2024-12-13, trading holidays for 2025) + NSE/CMTR/70319 (2025-09-22, Diwali muhurat schedule). Full text: nsearchives.nseindia.com/content/circulars/. No ad-hoc holidays or DR-drill sessions found for 2025 (see RESEARCH NOTE above) — owner cross-check recommended."
+
+# Regular session times (IST) — unchanged from 2026.yaml; 2025 used the same schedule.
+sessions:
+  pre_open:   { start: "09:00", end: "09:15" }
+  continuous: { start: "09:15", end: "15:30" }
+  post_close: { start: "15:40", end: "16:00" }
+
+# Full-day market holidays (no trading). Complete 2025 list: the circular's 14 fixed/movable dates plus
+# its 4 Sat/Sun-falling dates (included for completeness — harmless, is_trading_day checks weekends first).
+holidays:
+  - { date: "2025-01-26", name: "Republic Day (falls on Sunday)" }
+  - { date: "2025-02-26", name: "Mahashivratri" }
+  - { date: "2025-03-14", name: "Holi" }
+  - { date: "2025-03-31", name: "Id-Ul-Fitr (Ramadan Eid)" }
+  - { date: "2025-04-06", name: "Shri Ram Navami (falls on Sunday)" }
+  - { date: "2025-04-10", name: "Shri Mahavir Jayanti" }
+  - { date: "2025-04-14", name: "Dr. Baba Saheb Ambedkar Jayanti" }
+  - { date: "2025-04-18", name: "Good Friday" }
+  - { date: "2025-05-01", name: "Maharashtra Day" }
+  - { date: "2025-06-07", name: "Bakri Id (falls on Saturday)" }
+  - { date: "2025-07-06", name: "Muharram (falls on Sunday)" }
+  - { date: "2025-08-15", name: "Independence Day" }
+  - { date: "2025-08-27", name: "Ganesh Chaturthi" }
+  - { date: "2025-10-02", name: "Mahatma Gandhi Jayanti / Dussehra" }
+  - { date: "2025-10-22", name: "Diwali-Balipratipada" }
+  - { date: "2025-11-05", name: "Prakash Gurpurb Sri Guru Nanak Dev" }
+  - { date: "2025-12-25", name: "Christmas" }
+  # NOTE: 2025-10-21 (Diwali Laxmi Pujan) is deliberately NOT listed here even though NSE's circular calls
+  # it a "trading holiday" — it is modelled ONLY in special_sessions below (muhurat afternoon session), per
+  # the loader convention at calendar.py:53-63 (a muhurat day must never also be in `holidays`, else the
+  # loader raises ValueError on the overlap and the engine fails to boot).
+
+# Muhurat trading (Diwali special session). Deliberately NOT in `holidays` — see the note above and
+# calendar.py:53-63.
+special_sessions:
+  - { date: "2025-10-21", name: "Diwali Muhurat Trading — Normal Market 13:45-14:45 hrs IST (officially verified: NSE/CMTR/70319 2025-09-22; corroborated by Upstox/Business Today). Block-deal (13:15-13:30) and pre-open (13:30-13:45) sub-windows not separately modelled — schema has one continuous window, same simplification used for every muhurat entry in this repo.", start: "13:45", end: "14:45" }
+
+# Shortened / special sessions — none known for 2025 (see RESEARCH NOTE above).
+shortened_sessions: []

@@ -14,7 +14,7 @@ EXPECTED_TABLES = {
     "mode_state", "kill_state", "engine_lifecycle", "trade_window_state", "job_runs",
     "budget_ledger", "protected_config", "config_audit", "owner_approvals",
     "learning_ledger", "param_sets", "model_registry", "envelope_state", "shadow_trades",
-    "recommendations", "backfill_checkpoints", "schema_migrations",
+    "recommendations", "backfill_checkpoints", "filings_backfill_checkpoints", "schema_migrations",
 }
 
 
