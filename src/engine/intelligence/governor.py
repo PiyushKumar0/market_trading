@@ -217,6 +217,14 @@ class BudgetGovernor:
         await self._publish_if_changed(prior, tier, month, self._clock.now())
         return tier
 
+    def credit(self) -> Decimal:
+        """The monthly credit ceiling (USD) — public for the owner surfaces (/budget, dashboard)."""
+        return self._credit
+
+    def allocations(self) -> dict[str, Decimal]:
+        """Per-agent monthly allocations (USD), a copy — public for the owner surfaces."""
+        return dict(self._allocations)
+
     def month_spend(self, month: str | None = None) -> Decimal:
         return self._sum("SELECT cost_usd FROM budget_ledger WHERE month=?", (month or self._month(),))
 

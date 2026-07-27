@@ -293,6 +293,28 @@ async def _auto(mm: ModeManager) -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_floor_breach_routes_through_latch_when_wired(conn, clock):
+    """With a RiskStateLatch wired, a floor rung latches as a per-rung CAUSE (§3.5.3) — so clearing
+    an unrelated cause (owner /resume_entries) can never relax the floor-set CLOSE_ONLY."""
+    from engine.risk.causes import CAUSE_OWNER_PAUSE, RiskStateLatch
+
+    _equity_at(conn, Decimal("18000"))                 # −10% rung
+    tracker = ExposureTracker(conn, clock, CAPITAL)
+    mm, ks = ModeManager(conn, clock), KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mm)
+    await _auto(mm)
+    await latch.set_cause(CAUSE_OWNER_PAUSE, RiskState.FROZEN, "owner pause", Actor.OWNER)
+
+    await tracker.apply_floor_breaches(tracker.evaluate_floors(FloorLimits()), mm, ks, latch=latch)
+    assert mm.risk_state() == RiskState.CLOSE_ONLY
+    assert any(c == "floor_equity_floor_rung" for c, _s, _d in latch.active_causes())
+
+    # Clearing the unrelated owner_pause must NOT relax the floor's CLOSE_ONLY.
+    await latch.clear_cause(CAUSE_OWNER_PAUSE, Actor.OWNER)
+    assert mm.risk_state() == RiskState.CLOSE_ONLY
+
+
+@pytest.mark.asyncio
 async def test_apply_weekly_drawdown_forces_close_only_and_recommend(conn, clock):
     for d, eq in [("2026-06-10", "22000"), ("2026-06-16", "20400")]:
         _snapshot(conn, f"{d}T15:25:00+05:30", eq)

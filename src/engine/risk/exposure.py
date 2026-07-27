@@ -212,11 +212,15 @@ class ExposureTracker:
             "SELECT equity FROM equity_snapshots WHERE substr(at, 1, 10) < ? ORDER BY at DESC LIMIT 1",
             (d.isoformat(),),
         ).fetchone()
-        baseline = _dec(row["equity"]) if row is not None else self.equity() - self._realized_net_closed_on(d)
+        baseline = _dec(row["equity"]) if row is not None else self.equity() - self.realized_net_closed_on(d)
         self._day_baseline = (d, baseline)
         return baseline
 
-    def _realized_net_closed_on(self, d: date) -> Decimal:
+    def has_mark_source(self) -> bool:
+        """Whether a live mark-price source is wired (else open MTM degrades to zero-at-entry)."""
+        return self._mark_price is not None
+
+    def realized_net_closed_on(self, d: date) -> Decimal:
         """Net realized P&L of platform/recommended positions CLOSED on ``d`` (gross − costs)."""
         rows = self._conn.execute(
             "SELECT realized_pnl, costs FROM positions "
@@ -412,20 +416,31 @@ class ExposureTracker:
         kill_switch: KillSwitch,
         flatten: FlattenCallback | None = None,
         alert: AlertCallback | None = None,
+        latch: Any | None = None,
     ) -> None:
         """Apply each breached rung's FULL §7.1 action, most-restrictive first.
 
         Idempotent by construction: ``force_downgrade`` only ever lowers the mode, the risk state is
         only ever escalated (:meth:`_escalate`), and re-triggering the kill switch is a no-op on state.
         Re-running on startup against the same equity therefore reaches the same place (§2.6 step 2).
+
+        When a ``RiskStateLatch`` is wired, state changes route through it as per-rung causes
+        (``floor_<rung>``) so the §3.5.3 cause ledger stays the single source of latch truth — an
+        owner ``clear_cause`` on an unrelated cause can then never relax a floor-set CLOSE_ONLY.
+        Floor causes clear only via explicit owner re-arm (they never auto-clear here).
         """
         for breach in sorted(breaches, key=lambda b: _ACTION_RANK[b.action], reverse=True):
             reason = f"{breach.rung}: equity {breach.equity} vs {breach.threshold}"
             if breach.action == "kill_forced_off":
                 await kill_switch.trigger(reason, actor=Actor.RISK_GATE, flatten=True)
+                if latch is not None:
+                    await latch.set_cause(f"floor_{breach.rung}", RiskState.KILLED, reason, Actor.RISK_GATE)
                 await mode_manager.force_downgrade(Mode.OFF, breach.rung)
             else:
-                await self._escalate(mode_manager, RiskState.CLOSE_ONLY, reason)
+                if latch is not None:
+                    await latch.set_cause(f"floor_{breach.rung}", RiskState.CLOSE_ONLY, reason, Actor.RISK_GATE)
+                else:
+                    await self._escalate(mode_manager, RiskState.CLOSE_ONLY, reason)
                 await mode_manager.force_downgrade(Mode.RECOMMEND, breach.rung)
                 # Phase 3 wires the real exit-all here; Phase 2 runs alert-only when unwired.
                 if breach.action == "forced_exit_close_only" and flatten is not None:
