@@ -1,6 +1,7 @@
-"""Deterministic news pipeline, §2.7 steps 2–3: ``HeadlineClusterer`` + ``EntityResolver`` (§3.2.4).
+"""Deterministic news pipeline, §2.7 steps 2–3 + 5: ``HeadlineClusterer`` + ``EntityResolver``
+(§3.2.4) and the ``CatalystDigestJob`` (§3.2.4 / §4.4 job 14).
 
-Both algorithms are PINNED by the plan — cluster membership drives the §7.1
+Every algorithm here is PINNED by the plan — cluster membership drives the §7.1
 ``catalyst_guard.min_source_domains`` corroboration count and the resolver's symbols feed the
 catalyst watchlist, so there is zero implementation latitude and NO LLM anywhere in this module:
 
@@ -19,6 +20,12 @@ catalyst watchlist, so there is zero implementation latitude and NO LLM anywhere
   a guess — logged to ``unresolved_entities`` (weekly suggestion loop, §5.5). Out-of-universe
   entities are recorded, never traded. Sector/theme tags via ``sector_map`` + ``theme_map`` keyword
   match (same whole-word rule).
+- **CatalystDigestJob** (§2.7 step 5): the two pinned digest outputs — ``sentiment_agg`` (a clipped
+  decay-weighted SUM, never a mean) and the day's ``catalyst_watchlist`` (grades + deterministic
+  §6.1 levels). It consumes the step-4 scores through the persisted ``news_clusters`` columns only,
+  so replay never re-invokes the LLM (R8/§9.6), and loads the ``catalyst_guard`` block
+  hash-verified at run time (§2.4 item 1) — the enforcement site, never a constructor argument.
+  Its own resolved ambiguities are listed on the class, not here.
 
 Spec ambiguities resolved here (documented for the integrator):
 
@@ -34,10 +41,9 @@ Spec ambiguities resolved here (documented for the integrator):
   clusterer's sorted-set normalization.
 
 Phase-2 pointer (deliberately NOT stubbed here, per plan): §2.7 step 4 — News Analyst scoring
-(§5.4, Tier-1 LLM, scores persisted per CLUSTER) — and step 5 — ``CatalystDigestJob`` (§4.4 job 14)
-— belong to ``engine.intelligence``. The News Analyst's verbatim entity strings for unmatched
-clusters re-enter :meth:`EntityResolver.resolve` via ``extra_texts`` — the LLM never assigns a
-symbol directly (§3.2.4).
+(§5.4, Tier-1 LLM, scores persisted per CLUSTER) — belongs to ``engine.intelligence``. The News
+Analyst's verbatim entity strings for unmatched clusters re-enter :meth:`EntityResolver.resolve`
+via ``extra_texts`` — the LLM never assigns a symbol directly (§3.2.4).
 
 Failure model: this module is deterministic CPU-bound work over already-ingested rows; the async
 ``run`` wrappers offload DuckDB access through ``MarketStore`` (convention 12) and are scheduled by
@@ -47,18 +53,26 @@ the §4.4 job-10 pipeline, which is never load-bearing (E5).
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from difflib import SequenceMatcher
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
+from ulid import ULID
 
+from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
+from engine.core.config import CatCfg, config_dir, load_yaml
 from engine.core.log import get_logger
+from engine.core.protected_store import ProtectedStore
 from engine.datafeeds.news import Headline
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import DailyBar, MarketStore
+from engine.strategy.indicators import wilder_atr
 
 _log = get_logger("engine.datafeeds.news_pipeline")
 
@@ -576,3 +590,535 @@ class EntityResolver:
             if self._contains_phrase(tokens, phrase.split(" ")):
                 tags.update(tagset)
         return sorted(tags)
+
+
+# =========================================================================== §2.7 step 5 (digest)
+#: The §5.4 event types that carry the O13 T+1 PEAD sign-agreement requirement (§6.1 `cat`).
+EARNINGS_EVENT_TYPES: frozenset[str] = frozenset({"earnings_result", "earnings_guidance"})
+
+#: ``cat.*`` behaviour knobs the digest needs. All but ``fanout_weight`` are §6.3 envelope rows;
+#: ``fanout_weight`` is settings.yaml-resident (owner-only, deliberately NOT learnable).
+CAT_PARAM_KEYS: tuple[str, ...] = (
+    "materiality_min", "novelty_min", "max_event_age_days", "decay_halflife_h",
+    "confirm_move_pct", "stop_atr_mult", "rr_target", "fanout_weight",
+)
+
+#: §7.1 `catalyst_guard` fallbacks, used ONLY for a key absent from the hash-verified block. Each
+#: fails to LESS activity (empty event-type list ⇒ nothing can originate), so a truncated guard
+#: block can never widen the origination surface (§2.7 fail-safe ladder).
+_GUARD_FALLBACKS: dict[str, Any] = {
+    "min_source_domains": 2,
+    "sentiment_min_long": 0.30,
+    "digest_stale_max_h": 20,
+    "originating_event_types": (),
+}
+
+#: §2.7 step 5(ii) inclusion floor: below this WEIGHTED materiality a cluster feeds `sentiment_agg`
+#: only — no watchlist row at all (the §5.4 rubric noise line).
+INCLUSION_FLOOR = 0.2
+
+#: ``earnings_calendar.kind`` marking a results day T (R2 no-entry day + the O13 reaction bar).
+#: ``EarningsCalendarJob.classify_event`` already folds results-considering board meetings into it.
+_RESULTS_KIND = "results"
+
+_ATR_PERIOD = 14
+#: ``bars_1d`` rows needed strictly before ``d`` for levels: the Wilder ATR seed lands at index
+#: ``period − 1``, so 15 rows give a seeded value plus one recursion step. Fewer ⇒ levels NULL.
+_MIN_LEVEL_BARS = 15
+#: Calendar span pulled for the per-symbol daily history (≈60 sessions ≫ _MIN_LEVEL_BARS, and wide
+#: enough to contain the O13 results-day-T bar, which lies inside the cluster lookback window).
+_HISTORY_LOOKBACK_DAYS = 90
+#: Bound on the day-at-a-time calendar walks (a missing calendar year must not spin, R6).
+_MAX_CALENDAR_SCAN_DAYS = 60
+
+_PAISE = Decimal("0.01")
+_HUNDRED = Decimal("100")
+
+
+def load_cat_params(envelope: Mapping[str, Any] | None = None) -> dict[str, float]:
+    """``cat.*`` digest params: ``config/envelope.yaml`` defaults + settings.yaml ``cat``, overridden
+    by ``envelope`` (namespaced ``cat.rr_target`` and bare ``rr_target`` both resolve; every other
+    strategy's keys are ignored, so the live §6.5 ``envelope_state`` mapping can be passed whole).
+
+    The bounds file is read UNVERIFIED here because only its DEFAULTS are used — every value that
+    can license a trade comes from the caller's ``envelope_state`` row or from the hash-verified
+    ``catalyst_guard`` block (§2.4 item 1), never from this read.
+    """
+    cfg = config_dir()
+    params: dict[str, float] = {
+        name[len("cat."):]: float(spec["default"])
+        for name, spec in (load_yaml(cfg / "envelope.yaml").get("parameters") or {}).items()
+        if name.startswith("cat.") and isinstance(spec, Mapping)
+    }
+    settings_cat = load_yaml(cfg / "settings.yaml").get("cat") or {}
+    params["fanout_weight"] = float(settings_cat.get("fanout_weight", CatCfg().fanout_weight))
+    for key, value in (envelope or {}).items():
+        bare = key[len("cat."):] if key.startswith("cat.") else key
+        if bare in CAT_PARAM_KEYS:
+            params[bare] = float(value)
+    missing = [k for k in CAT_PARAM_KEYS if k not in params]
+    if missing:
+        raise KeyError(f"cat params missing from envelope.yaml/settings.yaml and overrides: {missing}")
+    return params
+
+
+def guard_value(guard: Mapping[str, Any], key: str) -> Any:
+    """One ``catalyst_guard`` value, falling back to the pinned §7.1 default (:data:`_GUARD_FALLBACKS`)."""
+    value = guard.get(key)
+    return _GUARD_FALLBACKS[key] if value is None else value
+
+
+def originating_conditions(
+    *,
+    weighted_materiality: float,
+    weighted_sentiment: float,
+    event_type: str | None,
+    source_domain_count: int,
+    novelty: float | None,
+    in_universe: bool,
+    flagged: bool,
+    results_day_t: bool,
+    earnings_reaction_agrees: bool,
+    materiality_min: float,
+    novelty_min: float,
+    guard: Mapping[str, Any],
+) -> dict[str, bool]:
+    """The §2.7 step-5(ii) AND-list, one boolean per condition — ``originating`` iff ALL are True.
+
+    Pure: every argument is already-gathered evidence, so each condition is unit-testable in
+    isolation and the store reads stay out of the rule. ``guard`` is the hash-verified §7.1
+    ``catalyst_guard`` block. Materiality/sentiment arrive ALREADY weighted by
+    ``cat.fanout_weight`` for a fanned-out sector/theme cluster (§2.7: the weight multiplies both
+    BEFORE the comparison). Short-direction candidates fail ``sentiment_long`` by construction —
+    the §1.4.9 shorts gate, not a separate rule.
+    """
+    allowed = tuple(guard_value(guard, "originating_event_types") or ())
+    return {
+        "materiality": weighted_materiality >= materiality_min,
+        "sentiment_long": weighted_sentiment >= float(guard_value(guard, "sentiment_min_long")),
+        "event_type": event_type is not None and event_type in allowed,
+        "source_domains": source_domain_count >= int(guard_value(guard, "min_source_domains")),
+        "novelty": novelty is not None and novelty >= novelty_min,
+        "in_universe": in_universe,
+        "not_flagged": not flagged,
+        "not_results_day": not results_day_t,
+        "earnings_reaction": earnings_reaction_agrees,
+    }
+
+
+def _clip(value: float) -> float:
+    return max(-1.0, min(1.0, value))
+
+
+def _paise(value: Decimal) -> Decimal:
+    """Quantize to the DECIMAL(12,2) column scale. NO tick snapping here: the watchlist stores raw
+    deterministic levels; the live scanner is what publishes tick-legal order prices (§3.2.5)."""
+    return value.quantize(_PAISE, rounding=ROUND_HALF_UP)
+
+
+def _reaction_agrees(bars: Sequence[DailyBar], t_day: date, sentiment: float) -> bool:
+    """O13 PEAD agreement: ``sign(cluster sentiment) == sign(close_T − open_T)`` from ``bars_1d``.
+
+    ``close_T == open_T`` ⇒ reaction sign 0 ⇒ never agrees (conservative, §6.1). A MISSING T bar is
+    treated identically: an unverifiable reaction can never license origination.
+    """
+    bar = next((b for b in bars if b.d == t_day), None)
+    if bar is None or sentiment == 0:
+        return False
+    reaction = bar.close - bar.open
+    if reaction == 0:
+        return False
+    return (reaction > 0) == (sentiment > 0)
+
+
+class CatalystDigestResult(BaseModel):
+    """One digest run's outcome (§2.7 step 5). ``(0, 0)`` is a SUCCESS — an empty-but-FRESH digest
+    means `cat` simply originates nothing; only STALE/MISSING disables it (§2.7 fail-safe ladder)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    d: date
+    n_originating: int
+    n_context: int
+    sentiment_rows: int
+    ran_at: datetime
+
+
+class CatalystDigestJob:
+    """§2.7 step 5 / §4.4 job 14 (~08:35, before the 08:50 planner; idempotent run-latest catch-up).
+
+    Two outputs, both deterministic and both re-derivable from persisted scores (no LLM, R8):
+
+    (i) ``sentiment_agg`` — ``clip(Σᵢ sentimentᵢ·materialityᵢ·wᵢ·0.5^(age_hᵢ/half-life), −1, +1)`` per
+    ``(scope, scope_key)`` over scored clusters with ``age_h ≤ 6×`` half-life, age measured from
+    cluster ``first_seen`` to the run time. A decayed SUM, never a mean.
+
+    (ii) ``catalyst_watchlist`` — every scored cluster whose TRADING-SESSION event age ≤
+    ``cat.max_event_age_days``, best cluster per symbol, graded by :func:`originating_conditions`
+    with §6.1 levels on ``originating`` rows only.
+
+    Parameters
+    ----------
+    store / clock / calendar:
+        DuckDB access (all reads/writes offloaded via ``arun``, convention 12), the single "now",
+        and the weekend/holiday-aware session arithmetic (R6).
+    protected_store:
+        Loads ``limits.yaml`` HASH-VERIFIED at run time — the ``catalyst_guard`` block is never
+        accepted as a constructor argument (§2.4 item 1: the enforcement site verifies it). A
+        verification failure propagates: an unverifiable anti-manipulation surface must yield NO
+        digest (which disables `cat` for the day), never a permissive one.
+    envelope:
+        Live §6.5 ``envelope_state`` values; see :func:`load_cat_params` for defaults + key forms.
+
+    Spec ambiguities resolved here (documented for the integrator):
+
+    - ``market``-scope clusters contribute to the ``market`` row ONLY — never a symbol row and
+      never a watchlist row (§2.7: market news feeds regime context, "**never** origination").
+    - Sector/theme fan-out consumes the RESOLVER's tags (``sectors``/``themes``) and is intersected
+      with today's included universe when one exists; with no universe row yet the raw constituents
+      are used and the ``in_universe`` condition still blocks origination.
+    - The ``market``/``market`` row is written on EVERY run (0.0 when no market cluster scored), so
+      "the digest ran" is observable even for an empty corpus — otherwise an empty-but-fresh digest
+      would be indistinguishable from a missing one (§2.7 fail-safe ladder needs that distinction).
+    - The row's ``materiality`` is the WEIGHTED value (what the grade decision used); ``event_age_h``
+      is informational, ``event_age_sessions`` is the eligibility clock.
+    - ``expires_at`` is the first trading day the event EXCEEDS the age horizon (session age
+      ``max_event_age_days + 1``) — i.e. the first digest day it no longer qualifies.
+    """
+
+    def __init__(
+        self,
+        store: MarketStore,
+        clock: Clock,
+        calendar: NSECalendar,
+        protected_store: ProtectedStore,
+        envelope: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._store = store
+        self._clock = clock
+        self._calendar = calendar
+        self._protected = protected_store
+        self._params = load_cat_params(envelope)
+
+    # ------------------------------------------------------------------ session arithmetic (R6)
+    def event_age_sessions(self, first_seen: datetime, d: date) -> int:
+        """§2.7 step-5(ii) event age: TRADING DAYS in ``(first_seen date, d]``.
+
+        The digest runs pre-open, so ``d`` is the first session the event can be traded into and
+        counts as age 1 — a Friday-evening or weekend event is therefore age 1 at Monday's digest
+        (which keeps Friday reporters T+1-PEAD-eligible, O13), and a same-day event is age 0.
+        """
+        start = first_seen.astimezone(IST).date()
+        probe, age = start + timedelta(days=1), 0
+        while probe <= d:
+            if self._calendar.is_trading_day(probe):
+                age += 1
+            probe += timedelta(days=1)
+        return age
+
+    def _oldest_eligible_date(self, d: date, max_days: int) -> date:
+        """Earliest ``first_seen`` DATE whose session age at ``d`` can still be ≤ ``max_days``."""
+        probe, remaining = d, max_days
+        for _ in range(_MAX_CALENDAR_SCAN_DAYS):
+            if remaining <= 0:
+                break
+            probe -= timedelta(days=1)
+            if self._calendar.is_trading_day(probe):
+                remaining -= 1
+        return probe
+
+    def _expires_at(self, first_seen: datetime, max_days: int) -> date:
+        """The trading day the event EXCEEDS ``cat.max_event_age_days`` (session age max+1)."""
+        probe = first_seen.astimezone(IST).date()
+        for _ in range(max_days + 1):
+            probe = self._calendar.next_trading_day(probe)
+        return probe
+
+    # ------------------------------------------------------------------ guard (§2.4 item 1)
+    def _guard(self) -> dict[str, Any]:
+        """The ``catalyst_guard`` block from the HASH-VERIFIED ``limits.yaml`` — loaded per run, at
+        the enforcement site, exactly like the gate loads its limits (§2.4 item 1 / §7.1)."""
+        limits = self._protected.load_verified("limits.yaml")
+        guard = (limits.get("limits") or {}).get("catalyst_guard")
+        if not isinstance(guard, Mapping):
+            raise ValueError("limits.yaml has no `limits.catalyst_guard` block (§7.1 owner-only surface)")
+        return dict(guard)
+
+    # ------------------------------------------------------------------ run (§2.7 step 5)
+    async def run(self, d: date) -> CatalystDigestResult:
+        ran_at = self._clock.now()
+        guard = self._guard()
+        max_days = int(self._params["max_event_age_days"])
+        halflife = float(self._params["decay_halflife_h"])
+
+        # One lookback covering BOTH computations: the sentiment decay horizon (6× half-life) and
+        # the session-age horizon expanded to calendar days (weekends/holidays included).
+        window_start = min(
+            ran_at - timedelta(hours=6.0 * halflife),
+            self._clock.combine(self._oldest_eligible_date(d, max_days), time(0, 0)),
+        )
+        rows = await self._store.arun(
+            self._store.get_news_clusters, scored=True, last_seen_after=window_start
+        )
+        clusters = [
+            NewsCluster.from_row(r)
+            for r in rows
+            if r.get("sentiment") is not None and r.get("materiality") is not None
+        ]
+        sector_symbols = _reverse_sector_map(await self._store.arun(self._store.get_sector_map, as_of=d))
+        theme_symbols = {
+            r["theme"]: set(r["symbols"] or [])
+            for r in await self._store.arun(self._store.get_theme_map)
+        }
+        universe = {
+            r["symbol"]
+            for r in await self._store.arun(self._store.get_universe_daily, d, included_only=True)
+        }
+
+        sentiment_rows = self._sentiment_rows(clusters, ran_at, sector_symbols, theme_symbols, universe)
+        await self._store.arun(self._store.upsert_sentiment_agg, sentiment_rows)
+
+        watch_rows = await self._watchlist_rows(
+            d, clusters, ran_at, guard, sector_symbols, theme_symbols, universe,
+            earnings_from=window_start.date(),
+        )
+        await self._store.arun(self._store.replace_catalyst_watchlist, d, watch_rows)
+
+        n_originating = sum(1 for r in watch_rows if r["grade"] == "originating")
+        result = CatalystDigestResult(
+            d=d,
+            n_originating=n_originating,
+            n_context=len(watch_rows) - n_originating,
+            sentiment_rows=len(sentiment_rows),
+            ran_at=ran_at,
+        )
+        _log.info(
+            "catalyst_digest",
+            d=str(d),
+            clusters=len(clusters),
+            sentiment_rows=result.sentiment_rows,
+            n_originating=result.n_originating,
+            n_context=result.n_context,
+        )
+        return result
+
+    def digest_status(self, d: date) -> Literal["fresh", "stale", "missing"]:
+        """§2.7 fail-safe input for features-v2 + the ``CATALYST_DISABLED`` alert (scanner: Phase 3).
+
+        ``missing`` = no digest artifact at all (no ``sentiment_agg`` stamp, no ``d`` watchlist);
+        ``stale`` = the latest stamp is older than ``catalyst_guard.digest_stale_max_h`` (or day
+        ``d`` has rows with no stamp at all — an age that cannot be established is never "fresh").
+        An EMPTY digest is ``fresh``: only stale/missing disables `cat`.
+        """
+        as_of = self._store.latest_sentiment_as_of()
+        if as_of is None:
+            return "missing" if not self._store.get_catalyst_watchlist(d) else "stale"
+        age_h = (self._clock.now() - as_of).total_seconds() / 3600.0
+        return "stale" if age_h > float(guard_value(self._guard(), "digest_stale_max_h")) else "fresh"
+
+    # ------------------------------------------------------------------ step 5(i): sentiment_agg
+    def _sentiment_rows(
+        self,
+        clusters: Sequence[NewsCluster],
+        ran_at: datetime,
+        sector_symbols: Mapping[str, set[str]],
+        theme_symbols: Mapping[str, set[str]],
+        universe: set[str],
+    ) -> list[dict[str, Any]]:
+        halflife = float(self._params["decay_halflife_h"])
+        fanout = float(self._params["fanout_weight"])
+        totals: dict[tuple[str, str], float] = defaultdict(float)
+        for c in clusters:
+            # Clamp a future first_seen (clock skew / bad feed timestamp) to age 0: decay may fade a
+            # contribution, never AMPLIFY it beyond its unaged weight.
+            age_h = max(0.0, (ran_at - c.first_seen).total_seconds() / 3600.0)
+            if age_h > 6.0 * halflife:
+                continue
+            base = float(c.sentiment) * float(c.materiality) * 0.5 ** (age_h / halflife)
+            w = fanout if c.scope in ("sector", "theme") else 1.0
+            for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
+                totals[("symbol", symbol)] += base * w
+            for sector in c.sectors or []:
+                totals[("sector", sector)] += base
+            for theme in c.themes or []:
+                totals[("theme", theme)] += base
+            if c.scope == "market":
+                totals[("market", "market")] += base
+        totals.setdefault(("market", "market"), 0.0)   # digest-ran marker (see class docstring)
+        return [
+            {"scope": scope, "scope_key": key, "as_of": ran_at, "value": _clip(value)}
+            for (scope, key), value in sorted(totals.items())
+        ]
+
+    def _symbol_targets(
+        self,
+        c: NewsCluster,
+        sector_symbols: Mapping[str, set[str]],
+        theme_symbols: Mapping[str, set[str]],
+        universe: set[str],
+    ) -> set[str]:
+        """Symbols a cluster contributes to: its resolved ``symbols`` plus, for a sector/theme
+        cluster, the fan-out constituents of the RESOLVER's tags (the LLM never assigns a symbol)."""
+        if c.scope == "market":
+            return set()
+        symbols = set(c.symbols or [])
+        if c.scope in ("sector", "theme"):
+            tags = (c.sectors or []) if c.scope == "sector" else (c.themes or [])
+            source = sector_symbols if c.scope == "sector" else theme_symbols
+            fan: set[str] = set()
+            for tag in tags:
+                fan |= source.get(tag, set())
+            symbols |= (fan & universe) if universe else fan
+        return symbols
+
+    # ------------------------------------------------------------------ step 5(ii): watchlist
+    async def _watchlist_rows(
+        self,
+        d: date,
+        clusters: Sequence[NewsCluster],
+        ran_at: datetime,
+        guard: Mapping[str, Any],
+        sector_symbols: Mapping[str, set[str]],
+        theme_symbols: Mapping[str, set[str]],
+        universe: set[str],
+        *,
+        earnings_from: date,
+    ) -> list[dict[str, Any]]:
+        p = self._params
+        max_days = int(p["max_event_age_days"])
+        fanout = float(p["fanout_weight"])
+        sentiment_min = float(guard_value(guard, "sentiment_min_long"))
+
+        flagged = {
+            r["symbol"] for r in await self._store.arun(self._store.get_flagged_instrument_days, d)
+        }
+        results_days: dict[str, set[date]] = defaultdict(set)
+        for r in await self._store.arun(self._store.get_earnings_calendar, earnings_from, d):
+            if r.get("kind") == _RESULTS_KIND:
+                results_days[r["symbol"]].add(r["event_date"])
+
+        # Best cluster per symbol = highest WEIGHTED materiality; ties break on cluster_id (§9.1
+        # determinism: the same corpus must yield the same watchlist).
+        best: dict[str, tuple[NewsCluster, float, float, int]] = {}
+        for c in clusters:
+            age_sessions = self.event_age_sessions(c.first_seen, d)
+            if age_sessions > max_days:
+                continue
+            w = fanout if c.scope in ("sector", "theme") else 1.0
+            weighted_materiality = float(c.materiality) * w
+            for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
+                current = best.get(symbol)
+                if current is None or (-weighted_materiality, c.cluster_id) < (
+                    -current[1], current[0].cluster_id
+                ):
+                    best[symbol] = (c, weighted_materiality, float(c.sentiment) * w, age_sessions)
+
+        rows: list[dict[str, Any]] = []
+        for symbol in sorted(best):
+            c, weighted_materiality, weighted_sentiment, age_sessions = best[symbol]
+            if weighted_materiality < INCLUSION_FLOOR:
+                continue                       # below the noise line: sentiment_agg only, no row
+            symbol_results = results_days.get(symbol, set())
+            t_day = max((t for t in symbol_results if t < d), default=None)
+            history: list[DailyBar] | None = None
+            reaction_agrees = True             # vacuous unless this IS an earnings event with a T
+            if c.event_type in EARNINGS_EVENT_TYPES and t_day is not None:
+                history = await self._history(symbol, d)
+                reaction_agrees = _reaction_agrees(history, t_day, weighted_sentiment)
+            conditions = originating_conditions(
+                weighted_materiality=weighted_materiality,
+                weighted_sentiment=weighted_sentiment,
+                event_type=c.event_type,
+                source_domain_count=len(c.source_domains),
+                novelty=c.novelty,
+                in_universe=symbol in universe,
+                flagged=symbol in flagged,
+                results_day_t=d in symbol_results,
+                earnings_reaction_agrees=reaction_agrees,
+                materiality_min=float(p["materiality_min"]),
+                novelty_min=float(p["novelty_min"]),
+                guard=guard,
+            )
+            originating = all(conditions.values())
+            levels: dict[str, Decimal] = {}
+            if originating:
+                if history is None:
+                    history = await self._history(symbol, d)
+                levels = self._levels(history)
+                if not levels:
+                    # Never blocks the grade: the scanner's live confirmation still needs its own
+                    # levels, and a thin-history symbol is caught by warmup_ready anyway (§7.1).
+                    _log.warning(
+                        "catalyst_levels_unavailable", symbol=symbol, d=str(d), bars=len(history)
+                    )
+            direction = (
+                "long" if weighted_sentiment >= sentiment_min
+                else "short" if weighted_sentiment <= -sentiment_min
+                else None
+            )
+            rows.append({
+                "entry_id": str(ULID()),
+                "symbol": symbol,
+                "grade": "originating" if originating else "context",
+                "direction": direction,
+                "event_type": c.event_type,
+                "cluster_refs": [c.cluster_id],
+                "materiality": weighted_materiality,
+                "source_domain_count": len(c.source_domains),
+                "event_age_h": (ran_at - c.first_seen).total_seconds() / 3600.0,
+                "event_age_sessions": age_sessions,
+                "expires_at": self._expires_at(c.first_seen, max_days),
+                **levels,
+            })
+        return rows
+
+    async def _history(self, symbol: str, d: date) -> list[DailyBar]:
+        """``bars_1d`` strictly BEFORE ``d`` — the digest is pre-open, day ``d`` has no bar yet."""
+        return await self._store.arun(
+            self._store.get_bars_1d,
+            symbol,
+            d - timedelta(days=_HISTORY_LOOKBACK_DAYS),
+            d - timedelta(days=1),
+        )
+
+    def _levels(self, bars: Sequence[DailyBar]) -> dict[str, Decimal]:
+        """Deterministic §6.1 `cat` levels from bars strictly before ``d``; ``{}`` on thin history.
+
+        Only the PRICE leg of the §6.1 confirmation is computable at 08:35: ``confirm_trigger =
+        prior_close × (1 + cat.confirm_move_pct/100)``. The ``max()`` against the day's first-30-min
+        high and the relative-volume leg are LIVE scanner conditions — the trigger here is the floor
+        the scanner raises, never the whole rule. ``invalidation = prior_close``: a confirmation move
+        fully retraced voids the setup (documented decision — §2.7 pins the level set, not this
+        choice). Stop/target BANDS collapse to a point because ``entry == confirm_trigger`` is the
+        only entry price knowable pre-open; the live scanner recomputes both at the true entry.
+        """
+        if len(bars) < _MIN_LEVEL_BARS:
+            return {}
+        atr = wilder_atr(
+            [b.high for b in bars], [b.low for b in bars], [b.close for b in bars], _ATR_PERIOD
+        )
+        latest = float(atr.iloc[-1])
+        if not math.isfinite(latest) or latest <= 0:
+            return {}
+        prior_close = bars[-1].close
+        # Quantize the trigger FIRST: stop/target are anchored to the PUBLISHED trigger, so the
+        # persisted levels satisfy the §6.1 arithmetic exactly as stored (no residual drift).
+        trigger = _paise(prior_close * (Decimal(1) + Decimal(str(self._params["confirm_move_pct"])) / _HUNDRED))
+        stop = _paise(trigger - Decimal(str(self._params["stop_atr_mult"])) * Decimal(str(latest)))
+        target = _paise(trigger + Decimal(str(self._params["rr_target"])) * (trigger - stop))
+        return {
+            "confirm_trigger": trigger,
+            "invalidation": _paise(prior_close),
+            "stop_band_low": stop,
+            "stop_band_high": stop,
+            "target_band_low": target,
+            "target_band_high": target,
+        }
+
+
+def _reverse_sector_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, set[str]]:
+    """``sector_map`` rows → ``sector -> {symbols}`` (the §2.7 sector fan-out constituents)."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        out[row["sector"]].add(row["symbol"])
+    return dict(out)
