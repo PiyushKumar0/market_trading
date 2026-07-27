@@ -15,6 +15,7 @@ EXPECTED_TABLES = {
     "budget_ledger", "protected_config", "config_audit", "owner_approvals",
     "learning_ledger", "param_sets", "model_registry", "envelope_state", "shadow_trades",
     "recommendations", "backfill_checkpoints", "filings_backfill_checkpoints", "schema_migrations",
+    "day_plans", "agent_calls", "equity_snapshots", "risk_state_causes", "nightly_reviews",
 }
 
 
