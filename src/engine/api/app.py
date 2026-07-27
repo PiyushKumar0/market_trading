@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from engine.api.kite_callback import build_kite_callback_router
-from engine.core.config import Settings, load_settings
+from engine.core.config import Settings, load_settings, repo_root
 from engine.core.db import transaction
 from engine.core.enums import Actor, Mode
 from engine.core.log import get_logger
@@ -49,6 +49,12 @@ _DASHBOARD_DIST_DIRNAME = "dist"
 #: The protected-store name for the learnable-parameter envelope (§6.3), matching ``limits.py``'s
 #: module-level ``LIMITS_FILE`` convention.
 ENVELOPE_FILE = "envelope.yaml"
+
+#: §7.1 ``catalyst_guard.digest_stale_max_h`` fallback for the READ-ONLY freshness label on
+#: ``GET /news/watchlist``, used only when ``limits_engine`` is unwired. Mirrors the pinned fallback in
+#: ``engine.datafeeds.news_pipeline`` (duplicated rather than imported: this API module must not drag
+#: the whole news pipeline into its import graph for one number, and nothing here can license a trade).
+_DIGEST_STALE_MAX_H_FALLBACK = 20
 
 #: Bus topics relayed onto every connected ``/ws/live`` socket (R8). Tick fan-out is Phase 3.
 _WS_RELAY_TOPICS = (TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_KILL_STATE, TOPIC_TRADE_WINDOW, TOPIC_BUDGET_STATE)
@@ -136,6 +142,7 @@ def create_app(
     exposure: Any = None,
     governor: Any = None,
     limits_engine: Any = None,
+    market_store: Any = None,
 ) -> FastAPI:
     """Construct the dashboard ``FastAPI`` app (§3.2.11).
 
@@ -164,6 +171,7 @@ def create_app(
     app.state.exposure = exposure
     app.state.governor = governor
     app.state.limits_engine = limits_engine
+    app.state.market_store = market_store   # MarketStore (news watchlist); `store` is the ProtectedStore
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
@@ -240,6 +248,34 @@ def create_app(
             )
         return {"decisions": out}
 
+    @app.get("/recommendations")
+    async def recommendations(_: Owner) -> dict[str, Any]:
+        """Latest 100 RECOMMEND-mode recommendations, most recently delivered first (§3.6/R8).
+
+        ``/decisions`` is the proposal→verdict PROVENANCE view and carries no ``Recommendation``
+        payload; the dashboard's recommendation panel needs the delivered artifact itself (thesis,
+        entry zone, stop/targets, gate verdict, ``manual_checklist``) plus the owner's ``human_action``
+        (taken | expired | dismissed | closed), which only this table holds."""
+        conn = app.state.conn
+        if conn is None:
+            return {"recommendations": []}
+        rows = conn.execute(
+            "SELECT rec_id, payload, delivered_at, human_action, human_fill_price, outcome "
+            "FROM recommendations ORDER BY COALESCE(delivered_at, '') DESC LIMIT 100"
+        ).fetchall()
+        out = [
+            {
+                "rec_id": r["rec_id"],
+                "recommendation": json.loads(r["payload"]) if r["payload"] else None,
+                "delivered_at": r["delivered_at"],
+                "human_action": r["human_action"],
+                "human_fill_price": r["human_fill_price"],
+                "outcome": json.loads(r["outcome"]) if r["outcome"] else None,
+            }
+            for r in rows
+        ]
+        return {"recommendations": out}
+
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:
         """Latest 100 gate-verdict payloads, most recently evaluated first (R8)."""
@@ -304,6 +340,34 @@ def create_app(
             },
             "degrade_tier": governor.degrade_tier().value,
         }
+
+    @app.get("/news/watchlist")
+    async def news_watchlist(_: Owner) -> dict[str, Any]:
+        """Today's §2.7 catalyst watchlist — ``originating`` vs ``context`` rows with their event type,
+        materiality and DETERMINISTIC §6.1 levels — plus the digest freshness the `cat` fail-safe ladder
+        keys off (§2.7). READ-ONLY: this route mirrors the freshness label, it never gates anything.
+
+        Duck-typed like every other read route: rows come off ``store`` when it exposes the news-layer
+        readers, and ``digest_stale_max_h`` off ``limits_engine``'s hash-verified ``catalyst_guard``
+        block (§7.1). An unwired store / clock degrades to the empty shape with ``status: null`` — an
+        UNKNOWN freshness is never reported as one of the three real ``digest_status`` values."""
+        store = app.state.market_store if app.state.market_store is not None else app.state.store
+        clock = app.state.clock
+        get_watchlist = getattr(store, "get_catalyst_watchlist", None)
+        if get_watchlist is None or clock is None:
+            return {"d": None, "watchlist": [], "digest": _digest_block(None, None, None)}
+        d = clock.today()
+        rows = [{k: _jsonable(v) for k, v in row.items()} for row in get_watchlist(d)]
+        latest_as_of = getattr(store, "latest_sentiment_as_of", None)
+        as_of = latest_as_of() if latest_as_of is not None else None
+        limits_engine = app.state.limits_engine
+        stale_max_h = (
+            int(limits_engine.catalyst_guard().digest_stale_max_h)
+            if limits_engine is not None
+            else _DIGEST_STALE_MAX_H_FALLBACK
+        )
+        age_h = (clock.now() - as_of).total_seconds() / 3600.0 if as_of is not None else None
+        return {"d": d.isoformat(), "watchlist": rows, "digest": _digest_block(as_of, age_h, stale_max_h, rows)}
 
     @app.get("/learning/status")
     async def learning_status(_: Owner) -> dict[str, Any]:
@@ -657,6 +721,43 @@ async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
 
 
 # --------------------------------------------------------------------------- helpers
+def _jsonable(value: Any) -> Any:
+    """Render one market-store row value for the wire. Store rows are DuckDB-native, so prices arrive
+    as ``Decimal`` and days/timestamps as ``date``/``datetime``: Decimals cross as STRINGS (§8.1
+    decimal-as-string — FastAPI's default encoder would coerce them to float and corrupt a level)."""
+    from datetime import date as _date
+    from decimal import Decimal as _Decimal
+
+    if isinstance(value, _Decimal):
+        return str(value)
+    if isinstance(value, _date):  # covers datetime (a date subclass) — both go out ISO-8601
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def _digest_block(
+    as_of: Any, age_h: float | None, stale_max_h: int | None, rows: list[Any] | None = None
+) -> dict[str, Any]:
+    """The ``/news/watchlist`` freshness sub-object, mirroring ``CatalystDigestJob.digest_status``:
+    no ``sentiment_agg`` stamp at all ⇒ ``missing`` (or ``stale`` when day ``d`` HAS watchlist rows —
+    an age that cannot be established is never "fresh"); otherwise ``stale`` past
+    ``catalyst_guard.digest_stale_max_h``. ``status`` is ``None`` only when the store is unwired."""
+    if stale_max_h is None:
+        return {"as_of": None, "age_h": None, "stale_max_h": None, "status": None}
+    if as_of is None:
+        status = "stale" if rows else "missing"
+    else:
+        status = "stale" if (age_h or 0.0) > float(stale_max_h) else "fresh"
+    return {
+        "as_of": as_of.isoformat() if as_of is not None else None,
+        "age_h": round(age_h, 3) if age_h is not None else None,
+        "stale_max_h": stale_max_h,
+        "status": status,
+    }
+
+
 def _parse_hhmm(value: str):
     """Parse an 'HH:MM' IST clock string into a ``datetime.time`` (owner input; not a trading 'now')."""
     from datetime import time as _time
@@ -666,15 +767,24 @@ def _parse_hhmm(value: str):
 
 
 def _mount_dashboard_if_present(app: FastAPI, settings: Settings) -> None:
-    """Serve the built React dashboard at ``/`` if a ``web/dist`` build exists (R8). No-op otherwise so
-    the API runs headless in dev / before the front-end is built."""
+    """Serve the built React dashboard at ``/`` if a build exists (R8). No-op otherwise so the API runs
+    headless in dev / before the front-end is built.
+
+    ``<repo>/dashboard/dist`` is the FIRST candidate and the real one (D3): the front-end source lives
+    in ``dashboard/`` and ``npm run build`` writes there. It is resolved from ``repo_root()`` — NOT from
+    ``Path.cwd()`` — because the engine is normally launched as a service whose working directory is
+    not the repo. The legacy ``web/dist`` locations stay as fallbacks."""
     from pathlib import Path
 
     data_dir = settings.logs_dir().parent if hasattr(settings, "logs_dir") else Path.cwd()
-    candidates = [Path.cwd() / "web" / _DASHBOARD_DIST_DIRNAME, data_dir / "web" / _DASHBOARD_DIST_DIRNAME]
+    candidates = [
+        repo_root() / "dashboard" / _DASHBOARD_DIST_DIRNAME,
+        Path.cwd() / "web" / _DASHBOARD_DIST_DIRNAME,
+        data_dir / "web" / _DASHBOARD_DIST_DIRNAME,
+    ]
     for dist in candidates:
         if dist.is_dir():
             app.mount("/", StaticFiles(directory=str(dist), html=True), name="dashboard")
             _log.info("dashboard_mounted", path=str(dist))
             return
-    _log.info("dashboard_not_built", note="no web/dist found; serving API only")
+    _log.info("dashboard_not_built", note="no dashboard/dist or web/dist found; serving API only")

@@ -8,6 +8,7 @@ don't exist yet."""
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -430,3 +431,142 @@ def test_ws_live_broadcasts_bus_event(conn, clock, bus) -> None:
         assert frame["payload"]["old_mode"] == "OFF"
         assert frame["payload"]["reason"] == "test"
         assert frame["at"] is not None
+
+
+# --------------------------------------------------------------------------- /news/watchlist (D3)
+# The dashboard's news panel (§3.2.11 O8/R8) reads today's §2.7 catalyst watchlist + the digest
+# freshness label. The route is duck-typed on ``store``: a MarketStore answers it, a ProtectedStore (or
+# no store) degrades to the empty shape with ``status: null``.
+@pytest.fixture
+def market_store(tmp_path, clock):
+    from engine.marketdata.store import MarketStore
+
+    s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
+    s.open()
+    yield s
+    s.close()
+
+
+def _seed_watchlist(market_store, d) -> None:
+    market_store.replace_catalyst_watchlist(
+        d,
+        [
+            {
+                "entry_id": "wl-orig", "symbol": "AAA", "grade": "originating", "direction": "long",
+                "event_type": "order_win", "materiality": 0.72, "source_domain_count": 3,
+                "event_age_h": 4.0, "event_age_sessions": 0,
+                "confirm_trigger": Decimal("1410.50"), "invalidation": Decimal("1385.00"),
+                "stop_band_low": Decimal("1380.00"), "stop_band_high": Decimal("1390.00"),
+                "target_band_low": Decimal("1440.00"), "target_band_high": Decimal("1460.00"),
+            },
+            {
+                "entry_id": "wl-ctx", "symbol": "BBB", "grade": "context", "direction": None,
+                "event_type": "guidance", "materiality": 0.31, "source_domain_count": 1,
+            },
+        ],
+    )
+
+
+def test_news_watchlist_unwired_and_non_market_store_return_empty_shape(conn, clock, store) -> None:
+    empty = {"d": None, "watchlist": [], "digest": {"as_of": None, "age_h": None, "stale_max_h": None, "status": None}}
+
+    # (a) nothing wired at all
+    assert _client().get("/news/watchlist", headers=AUTH).json() == empty
+    # (b) a ProtectedStore is wired (today's real composition): it has no news-layer readers, so the
+    #     route must degrade exactly like an unwired one rather than 500 the dashboard poll.
+    assert _client(conn=conn, clock=clock, store=store).get("/news/watchlist", headers=AUTH).json() == empty
+
+
+def test_news_watchlist_wired_rows_levels_and_digest_freshness(clock, market_store, limits_engine) -> None:
+    d = clock.today()
+    _seed_watchlist(market_store, d)
+    market_store.upsert_sentiment_agg(
+        [{"scope": "market", "scope_key": "market", "as_of": clock.now(), "value": 0.0}]
+    )
+    client = _client(clock=clock, store=market_store, limits_engine=limits_engine)
+
+    r = client.get("/news/watchlist", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["d"] == d.isoformat()
+
+    rows = {row["symbol"]: row for row in body["watchlist"]}
+    assert {row["grade"] for row in body["watchlist"]} == {"originating", "context"}
+    orig = rows["AAA"]
+    assert orig["event_type"] == "order_win"
+    assert orig["materiality"] == 0.72
+    # Levels are Decimal in the store and must cross the wire as STRINGS (§8.1), never floats.
+    assert orig["confirm_trigger"] == "1410.50"
+    assert orig["stop_band_low"] == "1380.00"
+    assert orig["target_band_high"] == "1460.00"
+    assert rows["BBB"]["confirm_trigger"] is None
+
+    digest = body["digest"]
+    assert digest["status"] == "fresh"          # stamp == frozen now => age 0
+    assert digest["age_h"] == 0.0
+    assert digest["as_of"] == clock.now().isoformat()
+    assert digest["stale_max_h"] == 20          # config/limits.yaml catalyst_guard (§7.1)
+
+
+def test_news_watchlist_digest_stale_and_missing(clock, market_store, limits_engine) -> None:
+    client = _client(clock=clock, store=market_store, limits_engine=limits_engine)
+
+    # No sentiment_agg stamp and no watchlist rows => the digest never ran for today.
+    assert client.get("/news/watchlist", headers=AUTH).json()["digest"]["status"] == "missing"
+
+    # Rows but no stamp => an age that cannot be established is never "fresh" (mirrors digest_status).
+    _seed_watchlist(market_store, clock.today())
+    assert client.get("/news/watchlist", headers=AUTH).json()["digest"]["status"] == "stale"
+
+    # Stamp older than catalyst_guard.digest_stale_max_h (20h) => stale.
+    market_store.upsert_sentiment_agg(
+        [{"scope": "market", "scope_key": "market", "as_of": clock.now() - timedelta(hours=30),
+          "value": 0.0}]
+    )
+    stale = client.get("/news/watchlist", headers=AUTH).json()["digest"]
+    assert stale["status"] == "stale"
+    assert stale["age_h"] == 30.0
+
+
+# --------------------------------------------------------------------------- /recommendations (D3)
+# /decisions is the proposal→verdict provenance view and carries no Recommendation payload; the
+# dashboard's recommendation panel reads the delivered artifact + the owner's human_action from here.
+def test_recommendations_unwired_returns_stub_shape() -> None:
+    assert _client().get("/recommendations", headers=AUTH).json() == {"recommendations": []}
+
+
+def test_recommendations_latest_delivered_first_with_payload_and_human_action(conn, clock) -> None:
+    payload = {
+        "rec_id": "rec-1", "kind": "entry", "instrument": "AAA", "side": "BUY", "style": "intraday",
+        "product": "MIS", "entry_zone": ["1400.00", "1402.50"], "stop": "1390.00",
+        "targets": ["1430.00"], "qty": 10, "notional": "14000.00", "thesis": "ORB with volume",
+        "confidence": 0.62, "manual_checklist": ["place the stop-loss order first"],
+        "gate": {"verdict": "approve", "reasons": ["edge_multiple_ok"]},
+    }
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at, human_action, human_fill_price, "
+        "outcome) VALUES (?, ?, ?, ?, ?, ?)",
+        ("rec-1", json.dumps(payload), "2026-06-17T09:20:00+05:30", "taken", "1401.00",
+         json.dumps({"pnl": "120.00"})),
+    )
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at, human_action) VALUES (?, ?, ?, ?)",
+        ("rec-2", json.dumps({**payload, "rec_id": "rec-2"}), "2026-06-17T10:00:00+05:30", None),
+    )
+    client = _client(conn=conn, clock=clock)
+
+    r = client.get("/recommendations", headers=AUTH)
+    assert r.status_code == 200
+    recs = r.json()["recommendations"]
+    assert [rec["rec_id"] for rec in recs] == ["rec-2", "rec-1"]
+
+    taken = next(rec for rec in recs if rec["rec_id"] == "rec-1")
+    assert taken["human_action"] == "taken"
+    assert taken["human_fill_price"] == "1401.00"
+    assert taken["outcome"] == {"pnl": "120.00"}
+    assert taken["recommendation"]["thesis"] == "ORB with volume"
+    assert taken["recommendation"]["entry_zone"] == ["1400.00", "1402.50"]
+    assert taken["recommendation"]["manual_checklist"] == ["place the stop-loss order first"]
+    assert taken["recommendation"]["gate"]["verdict"] == "approve"
+
+    assert next(rec for rec in recs if rec["rec_id"] == "rec-2")["human_action"] is None

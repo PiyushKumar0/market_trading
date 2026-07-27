@@ -1,0 +1,331 @@
+/* Hand-rolled, self-contained: no CSS framework, no webfont, no CDN link of any kind — the LAN page
+   must render with zero external requests (R10). Dark + compact: this is an operations console. */
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1c2230;
+  --line: #2b3341;
+  --fg: #d7dee8;
+  --fg-dim: #8b97a8;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --muted: #6e7681;
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', monospace;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+a {
+  color: var(--accent);
+}
+
+/* --------------------------------------------------------------------- layout */
+.app {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 10px;
+  align-items: start;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.panel > h2 {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-body {
+  padding: 8px 10px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+/* --------------------------------------------------------------------- header */
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.header .title {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-right: 4px;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.kill-banner {
+  background: var(--bad);
+  color: #0d1117;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+/* --------------------------------------------------------------------- chips */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  white-space: nowrap;
+}
+
+.chip .k {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.chip.ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chip.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.chip.bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+.chip.info {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --------------------------------------------------------------------- tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+.empty {
+  color: var(--muted);
+  padding: 6px 2px;
+}
+
+/* --------------------------------------------------------------------- controls */
+button,
+input {
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.danger {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+input[type='time'],
+input[type='number'] {
+  width: 92px;
+}
+
+form.inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+label {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------- bits */
+.bar {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  min-width: 120px;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.bar > span.warn {
+  background: var(--warn);
+}
+
+.bar > span.bad {
+  background: var(--bad);
+}
+
+.rec {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: var(--panel-2);
+}
+
+.rec:last-child {
+  margin-bottom: 0;
+}
+
+.rec .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.thesis {
+  color: var(--fg);
+  white-space: pre-wrap;
+  margin: 4px 0;
+}
+
+ul.checklist {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--fg-dim);
+}
+
+.events {
+  font-size: 12px;
+}
+
+.events .ev {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding: 2px 0;
+}
+
+.events .ev .at {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.events .ev .body {
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+
+.err {
+  color: var(--bad);
+}
+
+.dim {
+  color: var(--muted);
+}
+
+/* --------------------------------------------------------------------- token gate */
+.gate {
+  max-width: 420px;
+  margin: 12vh auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gate input {
+  width: 100%;
+}
