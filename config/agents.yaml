@@ -50,6 +50,11 @@ degrade_ladder:
   DG3: { global_alloc_pct: 95 }
   # DG4 = credit exhausted / SDK billing errors => zero SDK calls (== LLM-unavailable safe state, D7)
 
+# Timeouts recalibrated 2026-07-28 against MEASURED single-shot durations through the CLI subprocess
+# (~1.5s spawn + full response before anything streams usage): the real 30-cluster news call took 32s
+# with thinking off and 48-80s+ before the harness pinned thinking to zero; the old 45/60s budgets
+# timed out every production call on 2026-07-28 while the tiny smoke call passed. Budgets are ~3x the
+# measured duration — a slow call that completes is billed anyway, so cutting it off wastes the spend.
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
   intraday_analyst:
@@ -57,7 +62,7 @@ agents:
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1200
-    timeout_s: 45
+    timeout_s: 120
     triggers: [signal_candidate, position_event, heartbeat]   # (a)+(c) window-gated; (b) whenever up (§5.2)
     heartbeat_min: 20          # [tunable]; window-bounded (§5.6)
     prescreen_cap_per_day: 6   # [tunable]
@@ -67,7 +72,7 @@ agents:
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 2000
-    timeout_s: 60
+    timeout_s: 180
     triggers: [schedule]
     schedule_ist: "08:50"
 
@@ -77,7 +82,7 @@ agents:
     tools_enabled: false
     max_output_tokens: 1500    # richer per-CLUSTER schema: scope/entities/sectors/themes/sentiment/
                                # materiality/event_type(closed enum)/novelty (§5.4); batched ≤30 clusters/call
-    timeout_s: 45
+    timeout_s: 120             # measured 32s (thinking off) for a full 30-cluster batch
     triggers: [schedule, batch]
     # market hours + 19:00–22:00 sweep + pre-open batch that MUST complete before the ~08:35
     # catalyst digest (§4.4 job 14); NOT window-gated (§5.6). Scores are UNTRUSTED (§2.4);
@@ -93,7 +98,7 @@ agents:
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 6000
-    timeout_s: 90              # bigger single-shot context than the intraday agents
+    timeout_s: 300             # bigger single-shot context AND up to 6000 output tokens on sonnet
     run_budget_tokens: { billed_in_max: 120000, billed_out_max: 10000 }   # reserved for the Phase-3 agentic upgrade (§5.5/§11.2)
     triggers: [schedule]
     schedule_ist: "21:00"

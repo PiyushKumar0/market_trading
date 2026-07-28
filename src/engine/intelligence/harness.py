@@ -22,6 +22,12 @@ are auditable in code rather than prose:
   validation error appended; timeout / 429 / credit / SDK death do not retry. Everything resolves to
   ``AgentResult.Failed`` + an owner alert. Model prose is NEVER salvaged by regex or fence-stripping —
   a non-JSON response is a schema violation, full stop.
+- **Structured output (2026-07-28).** When a ``json_schema`` is sent, the CLI fulfils it by forcing a
+  ``StructuredOutput`` TOOL call whose *input* is the validated payload; that round-trip counts as a
+  second turn, so the turn cap gets +1 exactly when the schema knob went out. The tool input is the
+  authoritative answer (it can never be fenced or wrapped in prose), and client-side validation
+  remains authoritative on top of it (§8.1). Extended thinking is pinned off (``max_thinking_tokens=0``)
+  wherever the knob exists — it bills at output rates and measured +15-50s latency per call.
 - **No LLM-originated time (§5.1).** The harness stamps nothing from model output. Temporal stamping
   belongs to the ``validate`` callback the caller supplies (e.g. ``schemas.parse_and_stamp``), which
   overwrites ``valid_until``/ids from ``Clock``.
@@ -352,6 +358,25 @@ def _message_text(message: Any) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _structured_output(message: Any) -> str | None:
+    """JSON of a ``StructuredOutput`` tool call carried by this message, if any.
+
+    The CLI fulfils an output schema by forcing a ``StructuredOutput`` TOOL call whose *input* is the
+    schema-validated payload — that input is the authoritative answer, and any assistant text around
+    it is commentary. ``_consume`` therefore always prefers this over trailing text.
+    """
+    content = _attr(message, "content")
+    if not isinstance(content, (list, tuple)):
+        return None
+    payload: str | None = None
+    for block in content:
+        if _attr(block, "name") == "StructuredOutput":
+            data = _attr(block, "input")
+            if isinstance(data, dict):
+                payload = json.dumps(data)
+    return payload
 
 
 def _is_result_message(message: Any) -> bool:
@@ -775,17 +800,24 @@ class AgentHarness:
         """Drive the SDK stream to completion; return ``(final assistant text, aborted_on_budget)``."""
         query = self._query()
         texts: list[str] = []
+        structured: list[str] = []
         aborted = False
         async with _closing(query(prompt=prompt, options=options)) as stream:
             async for message in stream:
                 text = _message_text(message)
                 if text:
                     texts.append(text)
+                payload = _structured_output(message)
+                if payload is not None:
+                    structured.append(payload)
                 accumulator.add(message)
                 if budget is not None and budget.exceeded(accumulator.total()):
                     aborted = True
                     break
-        return (texts[-1] if texts else ""), aborted
+        # A StructuredOutput payload outranks trailing text: after the tool ack the model may emit
+        # closing prose, and texts[-1] would hand that prose to the validator.
+        final = structured[-1] if structured else (texts[-1] if texts else "")
+        return final, aborted
 
     # ------------------------------------------------------------------ SDK plumbing
     def _query(self) -> QueryFn:
@@ -845,8 +877,13 @@ class AgentHarness:
             name = _first_field(cls, ("max_output_tokens", "max_tokens"))
             if name:
                 kwargs[name] = agent_def.max_output_tokens
-        if max_turns is not None and "max_turns" in fields:
-            kwargs["max_turns"] = max_turns
+
+        # The CLI defaults to extended thinking, billed at output rates; measured 2026-07-28 it added
+        # 15-50s to single-shot scoring calls for no schema benefit. Pinned off wherever the knob
+        # exists. (If a Phase-3 agentic agent wants thinking, that becomes an agents.yaml knob.)
+        name = _first_field(cls, ("max_thinking_tokens",))
+        if name:
+            kwargs[name] = 0
 
         # Explicit allowlist on EVERY call (D5/D10) — empty for single-shot. An options surface with
         # NO tool knob is refused for EVERY shape (2026-07-28 review): an SDK release that renames
@@ -863,13 +900,25 @@ class AgentHarness:
         if "disallowed_tools" in fields:
             kwargs["disallowed_tools"] = [t for t in BUILTIN_TOOLS if t not in agent_def.allowed_tools]
 
+        schema_sent = False
         if json_schema is not None:
             if "output_schema" in fields:
                 kwargs["output_schema"] = json_schema
+                schema_sent = True
             elif "output_format" in fields:
                 kwargs["output_format"] = {"type": "json_schema", "schema": json_schema}
+                schema_sent = True
             # Absent either knob the schema simply is not sent — client-side validation is authoritative
             # in every case anyway (§8.1 locked convention).
+
+        if max_turns is not None and "max_turns" in fields:
+            # The CLI fulfils a sent schema via a StructuredOutput TOOL choreography that consumes
+            # turns of its own: the tool round-trip, a CLI-side schema-validation retry when the
+            # payload misses, and a closing text turn after the ack (observed 2026-07-28: a clean run
+            # is 2 turns, one schema retry makes 3 — a 1-turn cap killed every compliant call with
+            # error_max_turns). +3 covers ~two schema retries; with no other tools allowed the extra
+            # turns cannot be spent on anything else, and exhausting them still fails loudly.
+            kwargs["max_turns"] = max_turns + 3 if schema_sent else max_turns
 
         try:
             return cls(**kwargs), prefix
@@ -993,11 +1042,21 @@ SMOKE_AGENT_DEF = AgentDef(
     timeout_s=30.0,
 )
 
+# Every production agent sends a json_schema, so the smoke call sends one too — D11 must exercise
+# the structured-output path the real calls take, not a text-only path nothing else uses
+# (2026-07-28: a schema-less smoke passed while every schema call failed on the untested path).
+SMOKE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+
 
 async def run_sdk_smoke(harness: AgentHarness) -> str:
-    """One cheap Haiku round-trip through the FULL harness path (options, allowlist, validation,
-    metering, audit row) — the D11 self-test call. Raises on any failure; the self-test maps that
-    to WARN (LLM availability is never a safety input, D7)."""
+    """One cheap Haiku round-trip through the FULL harness path (options, allowlist, structured
+    output, validation, metering, audit row) — the D11 self-test call. Raises on any failure; the
+    self-test maps that to WARN (LLM availability is never a safety input, D7)."""
 
     def _validate(raw: str) -> Any:
         data = json.loads(raw)
@@ -1005,7 +1064,9 @@ async def run_sdk_smoke(harness: AgentHarness) -> str:
             raise ValueError(f"unexpected smoke payload: {raw[:80]}")
         return data
 
-    result = await harness.run_single_shot(SMOKE_AGENT_DEF, _SmokeContext(), _validate)
+    result = await harness.run_single_shot(
+        SMOKE_AGENT_DEF, _SmokeContext(), _validate, json_schema=SMOKE_SCHEMA
+    )
     if not result.ok:
         raise RuntimeError(f"{result.reason}: {result.detail}")
     usage = result.usage

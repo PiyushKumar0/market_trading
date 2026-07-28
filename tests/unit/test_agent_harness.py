@@ -67,6 +67,18 @@ class FakeAssistantMessage:
         self.usage = usage
 
 
+class FakeStructuredToolMessage:
+    """Assistant message whose content is a StructuredOutput TOOL call (the CLI's json_schema path):
+    the validated payload is the tool call's ``input``, not assistant text."""
+
+    def __init__(self, payload: dict[str, Any], usage: dict[str, int] | None = None) -> None:
+        block = type("ToolUseBlock", (), {})()
+        block.name = "StructuredOutput"
+        block.input = payload
+        self.content = [block]
+        self.usage = usage
+
+
 class FakeResultMessage:
     """Shaped like the SDK's ResultMessage: cumulative usage + its own cost estimate."""
 
@@ -380,7 +392,9 @@ async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov
     assert opts.allowed_tools == []                # D5: single-shot agents get no tools
     assert "WebSearch" in opts.disallowed_tools and "Bash" in opts.disallowed_tools
     assert opts.max_output_tokens == 1200
-    assert opts.max_turns == 1                     # single-shot cannot loop
+    # The schema knob was sent, so the StructuredOutput tool round-trip gets its extra turn
+    # (observed live 2026-07-28: max_turns=1 + json_schema => error_max_turns on every call).
+    assert opts.max_turns == 4
     assert opts.system_prompt == "SYSTEM PROMPT (byte-stable)"
     assert opts.output_schema == {"type": "object"}
     # System prompt went in the options, so the prompt is exactly the assembled context block (D8).
@@ -486,6 +500,111 @@ async def test_prose_response_is_never_salvaged(defs, gov, clock, conn) -> None:
 
     assert not result.ok and result.reason == "schema_invalid"
     assert "not valid JSON" in result.detail
+
+
+# --------------------------------------------------------------------------- structured output (CLI json_schema path)
+async def test_structured_tool_payload_wins_over_trailing_text(defs, gov, clock, conn) -> None:
+    # The CLI fulfils json_schema via a StructuredOutput TOOL call; the payload is the tool input.
+    # Any assistant text after the tool ack is commentary and must never shadow the payload.
+    fake = FakeQuery(
+        [
+            FakeStructuredToolMessage(ENTER_PAYLOAD, USAGE_SDK),
+            FakeAssistantMessage("I have provided the structured output."),
+            FakeResultMessage(USAGE_SDK, 0.02),
+        ]
+    )
+    harness = make_harness(defs, gov, clock, conn, fake)
+
+    result = await harness.run_single_shot(
+        defs["intraday_analyst"], FakeContext(), enter_validator(clock), json_schema={"type": "object"}
+    )
+
+    assert result.ok
+    assert result.payload.tradingsymbol == "RELIANCE"
+    (row,) = rows(conn)
+    assert json.loads(row["output_json"])["tradingsymbol"] == "RELIANCE"
+
+
+async def test_no_schema_means_no_turn_bump(defs, gov, clock, conn) -> None:
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake)
+
+    await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert fake.calls[0].options.max_turns == 1        # no schema knob sent => single turn as ever
+    assert fake.calls[0].options.output_schema is None
+
+
+async def test_schema_without_knob_keeps_single_turn(defs, gov, clock, conn) -> None:
+    # An options surface with max_turns but NO schema knob: the schema is not sent, so the turn
+    # cap must stay 1 — a bump would let a no-tools agent idle through a second turn for nothing.
+    @dataclass
+    class NoSchemaKnob:
+        model: str | None = None
+        system_prompt: str | None = None
+        setting_sources: list[str] | None = None
+        max_turns: int | None = None
+        allowed_tools: list[str] | None = None
+        disallowed_tools: list[str] | None = None
+
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoSchemaKnob)
+
+    result = await harness.run_single_shot(
+        defs["intraday_analyst"], FakeContext(), enter_validator(clock), json_schema={"type": "object"}
+    )
+
+    assert result.ok
+    assert fake.calls[0].options.max_turns == 1
+
+
+async def test_output_format_fallback_mapping_and_turn_bump(defs, gov, clock, conn) -> None:
+    # The shipped SDK (0.2.x) exposes `output_format`, not `output_schema` — the schema is wrapped
+    # and the tool round-trip still needs its extra turn.
+    @dataclass
+    class OutputFormatOptions:
+        model: str | None = None
+        system_prompt: str | None = None
+        setting_sources: list[str] | None = None
+        max_turns: int | None = None
+        allowed_tools: list[str] | None = None
+        disallowed_tools: list[str] | None = None
+        output_format: dict[str, Any] | None = None
+
+    fake = FakeQuery(
+        [FakeStructuredToolMessage(ENTER_PAYLOAD, USAGE_SDK), FakeResultMessage(USAGE_SDK)]
+    )
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=OutputFormatOptions)
+
+    result = await harness.run_single_shot(
+        defs["intraday_analyst"], FakeContext(), enter_validator(clock), json_schema={"type": "object"}
+    )
+
+    assert result.ok
+    opts = fake.calls[0].options
+    assert opts.output_format == {"type": "json_schema", "schema": {"type": "object"}}
+    assert opts.max_turns == 4
+
+
+async def test_thinking_capped_to_zero_when_knob_exists(defs, gov, clock, conn) -> None:
+    # The CLI defaults to extended thinking — billed at output rates and measured to add 15-50s to
+    # single-shot scoring calls (2026-07-28). The harness pins it off wherever the knob exists.
+    @dataclass
+    class ThinkingOptions:
+        model: str | None = None
+        system_prompt: str | None = None
+        setting_sources: list[str] | None = None
+        max_turns: int | None = None
+        allowed_tools: list[str] | None = None
+        disallowed_tools: list[str] | None = None
+        max_thinking_tokens: int | None = None
+
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=ThinkingOptions)
+
+    await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert fake.calls[0].options.max_thinking_tokens == 0
 
 
 # --------------------------------------------------------------------------- timeout / SDK failures
@@ -737,6 +856,22 @@ async def test_run_sdk_smoke_happy_path(defs, gov, clock, conn) -> None:
     assert "SDK round-trip ok" in detail
     row = conn.execute("SELECT agent_id, ok FROM agent_calls ORDER BY at DESC LIMIT 1").fetchone()
     assert (row["agent_id"], row["ok"]) == ("sdk_smoke", 1)
+
+
+async def test_run_sdk_smoke_exercises_the_structured_output_path(defs, gov, clock, conn) -> None:
+    # D11 must smoke-test the path production agents actually use: every production call sends a
+    # json_schema, so the smoke call sends one too (2026-07-28: a schema-less smoke passed WARN-only
+    # while every real call failed on the untested structured-output path).
+    from engine.intelligence.harness import run_sdk_smoke
+
+    fake = FakeQuery([FakeStructuredToolMessage({"ok": True}),
+                      FakeResultMessage({"input_tokens": 40, "output_tokens": 6})])
+    harness = make_harness(defs, gov, clock, conn, fake)
+    detail = await run_sdk_smoke(harness)
+    assert "SDK round-trip ok" in detail
+    opts = fake.calls[0].options
+    assert opts.output_schema is not None              # the schema went out with the smoke call
+    assert opts.max_turns == 4                         # tool choreography headroom included
 
 
 async def test_run_sdk_smoke_raises_on_wrong_payload(defs, gov, clock, conn) -> None:
