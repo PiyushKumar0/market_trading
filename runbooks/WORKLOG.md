@@ -1,6 +1,42 @@
 # WORKLOG — autonomous operations log
 
-## 2026-07-27 (Monday — session #3 live; Q15 CLOSED; C2 CLOSED)
+## 2026-07-28 (overnight — PHASE 2 IMPLEMENTED on branch `phase2`, ~30 commits, 567→1149 tests)
+
+- **Owner directed "move ahead with the next phase" (2026-07-27 14:24). Phase 2 (RECOMMEND live,
+  §8.3) is now code-complete on `phase2`**: contracts moved to `engine/core/contracts.py` (R1
+  import-graph), BudgetGovernor (D6 ladder + D4 pricing), LimitsEngine (hash-verified §7.1 reader),
+  ExposureTracker (equity/day counters/floor ladder), CatalystDigestJob (§2.7 step 5),
+  order-surface guard on KiteClient (B7), RiskGate + GateContextBuilder (full §7.1 table,
+  monotone actions, shrink loop, news-free ctx), AgentHarness (single SDK call site, allowlist
+  enforcement, D7 ladder, agent_calls audit), ContextAssembler + intraday/preopen/news agent defs,
+  features v2, Telegram command surface + RiskStateLatch cause ledger, API routes + WS hub +
+  React dashboard v1 (dashboard/dist, `npm run build`), RecommendationPipeline + Book
+  (deliver//taken//closed/veto/expiry→no_action, stop-proximity + max_holding events),
+  NewsScoringJob (fan-out purity), PreopenPlannerJob (day_plans), nightly reviewer v1,
+  LiveScanContextProvider + live SignalPreScreen wiring, full composition-root wiring incl.
+  equity minute-tick + floor-ladder application through the latch, sdk_smoke selftest (D11,
+  deduped/day), migrations 0003+0004. Engine NOT restarted — live capture session #3 ran
+  untouched; deploying `phase2` is an owner decision.
+- **Incident during validation: full-suite pytest wedged twice (idle-await, 0% CPU).** Root cause:
+  `test_order_surface.py` built `RateLimiter(clock)` on the FROZEN conftest clock — the token
+  bucket refills off `clock.now()`, so the third order call in one test waited forever on a refill
+  that never came (also why that subagent never returned its report). Fix: `burst=100` per the
+  established `test_rate_limiter.py` frozen-clock idiom; the wedged runs also explain the two
+  lost wakeups (machine suspend gaps 15:18→22:59).
+- **Deviations/decisions logged**: nightly reviewer v1 single-shot (plan §5.5 note); digest
+  `invalidation=prior_close` + collapsed bands (plan §3.2.4 note); contracts location (plan §3.3
+  note); `positions.realized_pnl` is GROSS with costs separate (ExposureTracker convention — must
+  hold for the Phase-3 OMS writer); Phase-2 `max_new_trades_day` counts entry RECOMMENDATIONS.
+- **Known Phase-2 gaps (deliberate, tracked)**: `nifty50_fn`/`expiry_day_fn` unwired ⇒ the
+  expiry-day NIFTY50-MIS `no_trade_windows` leg is inert until Phase 3 (harmless for a 10:00–10:30
+  window); clock-skew gate verdict is boot-scoped; `mom` treats every day as rebalance-due until
+  ledger-driven state lands (bounded by dedupe + forward caps + analyst veto); B4 flagged a
+  potential look-ahead if `daily_snapshot` is re-run for PAST days once sentiment history
+  accumulates (Phase-5 replay must add a day-scoped sentiment read); catalog lacks dedicated
+  AGENT_FAILED/OWNER_APPROVAL kinds (LIMIT_BREACH reused); REC_FILL_SUSPECTED auto-match needs the
+  Phase-3 reconciler (manual /taken until then). G2 operational evidence (4 weeks of recs, ≥5
+  owner-executed, weekly watchlist reviews) starts accruing once the owner deploys + enables
+  RECOMMEND. **Push to origin awaits owner approval (phase-end rule).**
 
 - **C2 contract-note verification PASSED** (owner-supplied real Zerodha note, 4 BSE CNC trades,
   ₹8,402 turnover, ₹8.38 charges): brokerage 0 ✓, SEBI exact ✓, GST exact ✓, stamp ✓ (rupee

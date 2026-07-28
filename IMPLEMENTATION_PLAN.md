@@ -519,9 +519,9 @@ class CatalystDigestJob:                              # §2.7 step 5; §4.4 job 
     # fail-safe ladder — one convention, also asserted by chaos case 20). Never load-bearing (E5).
 ```
 
-`datafeeds` jobs (all EOD/pre-open, all best-effort with Kite as load-bearing source, E5): `BhavcopyJob` (UDiFF format, new URLs), `CorpActionsJob` (ex-dates → GTT adjustment triggers, A12; feeds A11 verification), `EarningsCalendarJob` (results days → no-trade windows, R2; **also feeds the §6.1 `cat` T+1 PEAD eligibility, O13**), `DealsJob` (bulk/block deals → `flagged_instrument_days`, fake-volume-breakout suppression), `CatalystDigestJob` (§2.7 step 5, job 14).
+`datafeeds` jobs (all EOD/pre-open, all best-effort with Kite as load-bearing source, E5): `BhavcopyJob` (UDiFF format, new URLs), `CorpActionsJob` (ex-dates → GTT adjustment triggers, A12; feeds A11 verification), `EarningsCalendarJob` (results days → no-trade windows, R2; **also feeds the §6.1 `cat` T+1 PEAD eligibility, O13**), `DealsJob` (bulk/block deals → `flagged_instrument_days`, fake-volume-breakout suppression), `CatalystDigestJob` (§2.7 step 5, job 14). *Digest implementation notes (Phase 2, 2026-07-28): the watchlist row's `invalidation` is pinned to `prior_close` (the confirmation move fully retraced voids the setup — §2.7 names the field without a formula), and the stop/target bands collapse to the `entry == confirm_trigger` anchor at digest time (the day's 30-min-high leg is a live scanner input, not computable at 08:35 — the scanner recomputes at true entry).*
 
-**Dependencies:** `core`, `broker`.
+**Dependencies:** `core`, `broker`, plus the pure-function `engine.strategy.indicators` helpers (ATR for the §6.1 digest levels — numpy/pandas only, no engine imports, so the tier graph stays acyclic; first noted 2026-07-28).
 
 #### 3.2.5 `engine.features` + `engine.strategy`
 
@@ -832,6 +832,8 @@ class SelfTest:         # runs on EVERY startup (process boot, scheduled or manu
 ```
 
 ### 3.3 Action-object schemas (R1)
+
+*Implementation note (Phase 2, 2026-07-28): these models (plus §3.4 `GateVerdict` and §3.6 `Recommendation`) live in `engine/core/contracts.py` and are re-exported unchanged by `engine.intelligence.schemas` — `engine.risk` must construct `GateVerdict`s while the §9.1 import-graph guard forbids it importing `engine.intelligence`; a neutral `core` home satisfies both. The §8.1 locked conventions are unaffected.*
 
 All Tier-1 trade actions are exactly one of these five Pydantic models (discriminated union on `action`). The SDK call uses this as its structured-output schema (D5/D7); anything that fails validation after 2 retries is dropped with an alert — **never parsed from prose** (D7). **Temporal and identity fields (`valid_until`, `proposal_id`, `inputs_digest`, `agent_id`) are platform-stamped — the LLM emits only decision content (side, prices, qty, stop/target, thesis, confidence) and never a date/time/timestamp; any temporal value the model emits is ignored and overwritten by `Clock` (§3.2.1/§5.1).** Prices/quantities are values (Decimal/int), not times — the only datetime in the union is the platform-stamped `valid_until`.
 
@@ -1175,6 +1177,8 @@ Nightly backup (§10.5): SQLite `VACUUM INTO` + DuckDB checkpoint copy + `config
 | Failure | Scores absent ⇒ clusters stay unscored ⇒ excluded from the watchlist (`cat` originates nothing — §2.7 fail-safe ladder); analyst context marks "sentiment unavailable" (D7) — never blocks anything else |
 
 ### 5.5 Nightly Post-Trade Reviewer & Weekly Strategy Researcher
+
+*Phase-2 v1 deviation (2026-07-28): the nightly reviewer ships SINGLE-SHOT over a deterministically pre-assembled context (day's ledger/recommendation/verdict/agent-failure/budget summary) — at Phase-2 volume the agentic tool loop adds cost and an unverified SDK MCP surface for no analytical gain. The output contract below is unchanged, so the agentic shape + read-only MCP toolset return in Phase 3 as a drop-in; `run_budget_tokens` in `agents.yaml` is retained as that upgrade's envelope. The weekly researcher is parked (`enabled: false`) until Phase 5.*
 
 | | Nightly Reviewer | Weekly Researcher |
 |---|---|---|

@@ -97,3 +97,17 @@ Coverage checks: see scratch patterns in WORKLOG entries (bars/filings min/max/c
   `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -match 'engine.ops.main' }`
 - A backtest/backfill blocks engine startup for its duration — schedule long runs outside
   trading/EOD-job hours.
+
+## Phase-2 surfaces (2026-07-28)
+
+```powershell
+# Dashboard build (served by the engine at / from dashboard/dist):
+cd dashboard; npm install; npm run build; cd ..
+# Phase-2 test slices:
+uv run pytest tests/unit/test_risk_gate.py tests/unit/test_reco_pipeline.py -q     # gate + pipeline
+uv run pytest tests/unit/test_budget_governor.py tests/unit/test_agent_harness.py -q  # LLM plumbing
+uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py -q   # news layer
+```
+- RECOMMEND flow needs: mode RECOMMEND (`/mode RECOMMEND`), valid trade window, warm-up ready,
+  and the Claude OAuth token present (else the LLM tier is disabled and only scanners run).
+- Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
