@@ -1,5 +1,28 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-28 (night — fixes DEPLOYED at 21:09; boot verified clean)
+
+- **Repair executed with owner approval** (service ACL denies unelevated stop; owner accepted the
+  UAC `Restart-Service mt-engine`): rewound the 52 poisoned day-interval `backfill_checkpoints`
+  rows (`through_date 2026-07-28 → 2026-07-20`; the monotonic checkpoint records REQUESTED-through,
+  not observed-through, so days requested intraday/pre-bar advance past bars that were never
+  written — that is how the 27th went missing under a "complete through 28th" checkpoint) and
+  cleared the `daily_bars` job_runs rows for 27th+28th.
+- **21:09:26 boot on the fixed code — every fix verified in production:** selftest ALL-PASS with
+  `sdk_smoke` OK attempt 1 through the real structured-output path (9in/57out, 5.3 s);
+  `catchup_sweep` armed; regime day backfill wrote exactly the 12 missing index bars
+  (NIFTY 50 + VIX × 6 sessions) and the daily_bars catch-up 50 more across the watchlist;
+  `warmup_not_ready` (which logged every 60 s for 2 h) went SILENT after the bars landed —
+  warm-up READY. The `warmup_ready` FROZEN cause stays latched by design until the post-login
+  reapply — tomorrow's daily login lifts it before open (mode is OFF anyway, owner's call to raise).
+- **21:00 nightly_review fired on the OLD code** (before the restart): the reviewer generated
+  1,593 tokens ($0.125) and died on `error_max_turns` — the exact fixed bug; job recorded success
+  so tonight's review is skipped. First fixed-code review runs tomorrow 21:00.
+- Morning checklist for 2026-07-29: owner login → post-login reapply lifts `warmup_ready`;
+  pre-open news batch must complete before the 08:35 digest (backlog ~1,050 clusters draining
+  from tonight's 19–22 h sweep); preopen_planner 08:50 on fixed code should persist the first
+  real DayPlan; enable RECOMMEND is an owner decision (G2).
+
 ## 2026-07-28 (evening — PHASE-2 FIRST DEPLOY validated; agent-harness structured-output fix)
 
 - **Owner deployed `phase2` at 19:04 (first boot on the new code; migrations 0003+0004 applied).**
