@@ -18,10 +18,22 @@
 - **21:00 nightly_review fired on the OLD code** (before the restart): the reviewer generated
   1,593 tokens ($0.125) and died on `error_max_turns` — the exact fixed bug; job recorded success
   so tonight's review is skipped. First fixed-code review runs tomorrow 21:00.
+- **News backlog draining live**: 11 `news_analyst` OK calls in the first 12 min (forced batch
+  loops chunks back-to-back, ~40 s/call, every one attempt-1, ~$0.037/call) — the whole 1,050
+  backlog clears tonight.
+- **FOLLOW-ON ROOT CAUSE FIXED: checkpoint advance recorded REQUESTED-through, not
+  observed-through** (`backfill.py` advanced to `chunk_end` even on a zero-candle span). This is
+  the poisoning mechanism itself — and it would RECUR tomorrow: the pre-open regime backfill
+  requests through "today" before today's bar exists, checkpoints it complete, and the 18:05
+  daily_bars then skips it forever. Fix: advance to `min(chunk_end, max observed candle date)`;
+  empty chunk leaves the checkpoint alone (`backfill_chunk_empty`) and the next pass re-requests
+  it. 2 regression tests; suite 1,116 green. **Deployed pending one more service restart** —
+  the 21:09 process predates this fix; it must be restarted before tomorrow's owner login
+  (else the 29th gets poisoned at the first post-login fetch and Thursday freezes again).
 - Morning checklist for 2026-07-29: owner login → post-login reapply lifts `warmup_ready`;
-  pre-open news batch must complete before the 08:35 digest (backlog ~1,050 clusters draining
-  from tonight's 19–22 h sweep); preopen_planner 08:50 on fixed code should persist the first
-  real DayPlan; enable RECOMMEND is an owner decision (G2).
+  pre-open news batch must complete before the 08:35 digest (remainder of the backlog, if any);
+  preopen_planner 08:50 on fixed code should persist the first real DayPlan; enable RECOMMEND is
+  an owner decision (G2).
 
 ## 2026-07-28 (evening — PHASE-2 FIRST DEPLOY validated; agent-harness structured-output fix)
 
