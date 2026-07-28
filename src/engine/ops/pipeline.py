@@ -245,6 +245,13 @@ class RecommendationBook:
                 "an open recommendation"
             )
         data = self._rec_payload(row)
+        if (data.get("kind") or "entry") != "entry":
+            # 2026-07-28 review: /taken on an exit/adjust rec would OPEN a new position on the
+            # closing side — a phantom short after exiting a long. Exits are reported via /closed.
+            raise ValueError(
+                f"recommendation {rec_id} is kind='{data.get('kind')}' — /taken records ENTRY fills "
+                "only; report an executed exit with /closed <entry_rec_id> <price>"
+            )
         now = self._clock.now()
         position_id = str(ULID())
         targets = data.get("targets") or []
@@ -281,8 +288,11 @@ class RecommendationBook:
         price = _dec(price)
         if price <= 0:
             raise ValueError(f"price must be positive, got {price}")
+        # Prefer the ENTRY row (has entry_px) — /closed may legitimately arrive with an EXIT rec's id
+        # when the owner replies to a delivered exit recommendation (2026-07-28 review).
         ledger = self._conn.execute(
-            "SELECT * FROM learning_ledger WHERE rec_id=? ORDER BY created_at LIMIT 1", (rec_id,)
+            "SELECT * FROM learning_ledger WHERE rec_id=? "
+            "ORDER BY (entry_px IS NULL), created_at LIMIT 1", (rec_id,)
         ).fetchone()
         if ledger is None:
             raise ValueError(f"no learning-ledger row for recommendation {rec_id}")
@@ -320,13 +330,15 @@ class RecommendationBook:
                 "realized_pnl=?, costs=? WHERE position_id=?",
                 (now.isoformat(), str(gross), str(costs), position["position_id"]),
             )
+            # Label EVERY still-open ledger row tied to this position (entry row + any exit/adjust
+            # rec rows), so a close reported against an exit-rec id never orphans the entry row.
             self._conn.execute(
                 "UPDATE learning_ledger SET exit_px=?, costs=?, gross_pnl=?, net_pnl=?, "
                 "holding_minutes=?, close_reason='manual_owner', outcome_label=?, closed_at=? "
-                "WHERE entry_id=?",
+                "WHERE (entry_id=? OR position_id=?) AND outcome_label IS NULL",
                 (
                     str(price), str(costs), str(gross), str(net), holding_minutes,
-                    outcome_label, now.isoformat(), ledger["entry_id"],
+                    outcome_label, now.isoformat(), ledger["entry_id"], position["position_id"],
                 ),
             )
             self._conn.execute(
@@ -480,6 +492,9 @@ class RecommendationPipeline:
         self._store = store
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
         self._last_position_event: dict[str, datetime] = {}
+        #: §5.2(a) analyst forward cap — per-day count of candidates that reached the harness (§5.6).
+        self._forwarded_day: date | None = None
+        self._forwarded_count = 0
 
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
@@ -506,6 +521,19 @@ class RecommendationPipeline:
             _log.warning("signal_candidate_governor_blocked", signal_id=candidate.signal_id,
                          reason=getattr(decision, "reason", None))
             return
+        # §5.2(a) forward cap (≤6 candidates/day to the analyst at DG0, 4 at DG1+ — §5.6): the
+        # governor owns the number, this counter the enforcement (2026-07-28 review: it had no
+        # consumer, so a volatile day could burn 20 analyst calls). Counts only calls that reach
+        # the harness; the coarse prescreen settings cap still bounds candidate PUBLICATION.
+        if self._forwarded_day != d:
+            self._forwarded_day, self._forwarded_count = d, 0
+        cap_fn = getattr(self._governor, "prescreen_forward_cap", None)
+        cap = cap_fn() if cap_fn is not None else None
+        if cap is not None and self._forwarded_count >= int(cap):
+            _log.info("signal_candidate_forward_cap", signal_id=candidate.signal_id,
+                      forwarded=self._forwarded_count, cap=int(cap))
+            return
+        self._forwarded_count += 1
 
         entry_ref = _dec(candidate.raw_levels.entry)
         product = _product_of(candidate.style)
@@ -540,6 +568,44 @@ class RecommendationPipeline:
             _log.info("signal_candidate_no_action", signal_id=candidate.signal_id,
                       reason=payload.reason)
             return
+
+        # STRUCTURAL COHERENCE (R1 — the structural half of "the analyst disposes of THIS candidate"):
+        # every symbol-scoped GateContext fact is resolved for candidate.symbol, and the TTL/product
+        # derive from candidate.style, so an LLM that substitutes any identity field would be judged
+        # on another instrument's facts (2026-07-28 review: gate approved a hijacked out-of-universe
+        # symbol). A mismatch is a hallucination — dropped like schema-invalid output (D7), no
+        # proposal row, owner alerted.
+        if payload.action == "enter":
+            mismatches = {
+                name: (got, want)
+                for name, got, want in (
+                    ("tradingsymbol", payload.tradingsymbol, candidate.symbol),
+                    ("side", payload.side, candidate.side),
+                    ("style", payload.style, candidate.style),
+                    ("signal_id", payload.signal_id, candidate.signal_id),
+                    ("strategy_id", payload.strategy_id, candidate.strategy_id),
+                    ("features_snapshot_id", payload.features_snapshot_id,
+                     candidate.features_snapshot_id or payload.features_snapshot_id),
+                )
+                if got != want
+            }
+            if mismatches:
+                _log.warning("agent_output_incoherent", signal_id=candidate.signal_id,
+                             mismatches={k: [str(g), str(w)] for k, (g, w) in mismatches.items()})
+                await self._send(CatalogMessage(
+                    kind=MessageKind.LIMIT_BREACH,
+                    title="Analyst output dropped (identity mismatch)",
+                    body=(
+                        f"The intraday analyst answered candidate {candidate.signal_id} "
+                        f"({candidate.symbol}) with different identity fields "
+                        f"({', '.join(sorted(mismatches))}) — dropped like schema-invalid output "
+                        "(D7); nothing was recommended."
+                    ),
+                    severity="warning",
+                    data={"signal_id": candidate.signal_id,
+                          "mismatches": {k: [str(g), str(w)] for k, (g, w) in mismatches.items()}},
+                ))
+                return
 
         verdict, gate_ctx = await self._gate_and_persist(
             payload, candidate.symbol, str(getattr(payload, "side", candidate.side)),

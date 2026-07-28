@@ -198,6 +198,12 @@ CASES: tuple[Case, ...] = (
     Case("proposal_stale", "expired", "fail", False,
          act={"valid_until": NOW - timedelta(seconds=1)}),
     Case("proposal_stale", "valid_until == now", "boundary", False, act={"valid_until": NOW}),
+    # 2026-07-28 review F4: direction from action.side, never inferred from the stop.
+    Case("levels_coherent", "BUY stop below entry, target above", "pass", True),
+    Case("levels_coherent", "BUY stop ABOVE entry (inverted short shape)", "fail", False,
+         act={"stop_price": Decimal("105"), "target_price": Decimal("95")}),
+    Case("levels_coherent", "BUY target below entry", "fail", False,
+         act={"target_price": Decimal("99.50")}),
     Case("analyst_confidence_min", "0.70", "pass", True, act={"confidence": 0.70}),
     Case("analyst_confidence_min", "0.50", "fail", False, act={"confidence": 0.50}),
     Case("analyst_confidence_min", "exactly the floor", "boundary", True,
@@ -359,7 +365,7 @@ CASES: tuple[Case, ...] = (
 #: the pass/fail pair IS the boundary. Documented rather than faked with a bogus "boundary" case.
 BOOLEAN_ONLY_RULES: frozenset[str] = frozenset({
     "mode_risk_state", "kill_state", "instrument_eligible", "surveillance",
-    "warmup_ready", "regime_data_ready", "clock_skew",
+    "warmup_ready", "regime_data_ready", "clock_skew", "levels_coherent",
 })
 
 #: Rules that CANNOT fail in Phase 2 because their data source lands later. They must never claim a
@@ -439,7 +445,8 @@ def test_phase2_na_rules_are_marked_na(gate: RiskGate) -> None:
 
 # --------------------------------------------------------------------------- registry completeness
 EXPECTED_ENTER_RULES: tuple[str, ...] = (
-    "mode_risk_state", "kill_state", "proposal_stale", "analyst_confidence_min", "trade_window",
+    "mode_risk_state", "kill_state", "proposal_stale", "levels_coherent",
+    "analyst_confidence_min", "trade_window",
     "no_trade_windows", "min_residual_window", "instrument_eligible", "surveillance", "capital_cap",
     "per_trade_risk", "daily_loss_soft", "consecutive_losses", "max_new_trades_day",
     "max_open_positions", "per_stock_exposure", "per_sector_exposure", "co_movement_cap",
@@ -491,10 +498,12 @@ def test_shrinkable_registry_covers_yaml_on_breach() -> None:
 
 # --------------------------------------------------------------------------- shrink loop (R1/C3)
 def test_shrink_bound_by_capital_cap(gate: RiskGate) -> None:
-    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("19900")))
+    # MIS charged at FULL notional on BOTH sides (2026-07-28 review: the old notional/3x new-leg
+    # basis mixed units against the tracker's notional-based deployed figure).
+    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("19700")))
     assert verdict.verdict == "shrink"
     assert verdict.original_qty == 10
-    assert verdict.approved_qty == 3          # Rs100 headroom / (Rs100 / 3x) = 3
+    assert verdict.approved_qty == 3          # Rs300 headroom / Rs100 full notional = 3
     assert check_of(verdict, "capital_cap").passed is False
     # min_viable_size is re-run at the SHRUNK size and still clears 2x breakeven.
     assert check_of(verdict, "min_viable_size").passed is True
@@ -785,7 +794,7 @@ def test_gate_verdict_json_round_trips(gate: RiskGate) -> None:
 
 
 def test_shrink_verdict_json_round_trips(gate: RiskGate) -> None:
-    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("19900")))
+    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("19700")))
     restored = GateVerdict.model_validate_json(verdict.model_dump_json())
     assert restored.verdict == "shrink"
     assert restored.original_qty == 10 and restored.approved_qty == 3

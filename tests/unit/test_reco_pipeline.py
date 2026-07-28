@@ -274,8 +274,10 @@ def passing_ctx(**overrides: Any) -> GateContext:
 
 
 def candidate(**overrides: Any) -> SignalCandidate:
+    # signal_id matches ENTER_JSON: the pipeline's structural-coherence guard (R1) drops an analyst
+    # payload whose identity fields differ from the candidate's — deliberate, tested below.
     base: dict[str, Any] = {
-        "signal_id": str(ULID()),
+        "signal_id": "01SIGNAL",
         "strategy_id": "orb",
         "symbol": SYMBOL,
         "side": "BUY",
@@ -829,3 +831,42 @@ async def test_heartbeat_is_window_gated(conn, ticker, pclock, calendar, book, l
     )
     await pipeline.heartbeat()
     assert harness.calls == [] and parts["assembler"].heartbeats == 0
+
+
+# --------------------------------------------------------------------------- structural coherence (R1)
+async def test_identity_mismatch_drops_payload_before_the_gate(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """An analyst payload naming a different symbol than the candidate is a hallucination: dropped
+    like schema-invalid output (D7) — no proposal row, no verdict, nothing delivered."""
+    hijacked = dict(ENTER_JSON, tradingsymbol="SUZLON")
+    harness = FakeHarness(hijacked)
+    gate = StubGate(verdict_of("approve", cost_model))
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness, gate=gate,
+        ctx=passing_ctx(), limits=StubLimits(limit_table),
+    )
+    await pipeline.on_signal_candidate(candidate())
+    assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
+    assert any("identity mismatch" in str(getattr(m, "title", "")) for m in parts["notify"].messages)
+
+
+async def test_forward_cap_stops_analyst_calls_for_the_day(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """S5.2(a)/S5.6: at most governor.prescreen_forward_cap() candidates reach the analyst per day."""
+
+    class CappedGovernor(FakeGovernor):
+        def prescreen_forward_cap(self) -> int:
+            return 2
+
+    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
+    gate = StubGate(verdict_of("approve", cost_model))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness, gate=gate,
+        ctx=passing_ctx(), limits=StubLimits(limit_table), governor=CappedGovernor(),
+    )
+    for _i in range(4):
+        await pipeline.on_signal_candidate(candidate())
+    assert len(harness.calls) == 2

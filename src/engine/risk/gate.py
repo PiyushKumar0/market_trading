@@ -77,6 +77,7 @@ DOCUMENTED_ENTER_RULES: tuple[str, ...] = (
     "mode_risk_state",
     "kill_state",
     "proposal_stale",
+    "levels_coherent",
     "analyst_confidence_min",
     "trade_window",
     "no_trade_windows",
@@ -324,6 +325,7 @@ class RiskGate:
         self._rule_mode_risk_state(led, ctx)
         self._rule_kill_state(led, ctx)
         self._rule_proposal_stale(led, action, ctx)
+        self._rule_levels_coherent(led, action, entry_ref)
         self._rule_analyst_confidence(led, action, table)
         self._rule_trade_window(led, ctx, now_t, intraday)
         self._rule_no_trade_windows(led, ctx, lim, now_t, intraday)
@@ -408,6 +410,31 @@ class RiskGate:
             f"valid_until={vu.isoformat() if vu else 'unstamped'} now={ctx.now.isoformat()}",
             "valid_until > now",
             "fresh" if ok else "expired/unstamped proposal — fail closed",
+        )
+
+    def _rule_levels_coherent(
+        self, led: _Ledger, action: EnterAction, entry_ref: Decimal | None
+    ) -> None:
+        """Stop/target must agree with ``action.side`` (2026-07-28 review: the edge/risk math infers
+        direction from ``stop < entry``, so a BUY with the stop ABOVE entry was silently scored as a
+        healthy short — and its 'protective' SL-M would sit above the market). BUY: stop < entry <
+        target; SELL mirrored. With no usable entry reference, orientation of stop vs target alone."""
+        long_side = action.side == "BUY"
+        stop, target = action.stop_price, action.target_price
+        problems: list[str] = []
+        if entry_ref is not None:
+            if (stop >= entry_ref) if long_side else (stop <= entry_ref):
+                problems.append(f"stop {stop} on the wrong side of entry {_q(entry_ref)}")
+            if target is not None and ((target <= entry_ref) if long_side else (target >= entry_ref)):
+                problems.append(f"target {target} on the wrong side of entry {_q(entry_ref)}")
+        elif target is not None and ((stop >= target) if long_side else (stop <= target)):
+            problems.append(f"stop {stop} vs target {target} inverted for {action.side}")
+        ok = not problems
+        led.add(
+            "levels_coherent", ok,
+            "; ".join(problems) if problems else f"{action.side}: stop {stop}, target {target}",
+            "BUY: stop < entry < target; SELL mirrored (direction from side, never inferred)",
+            "coherent" if ok else "inverted levels — the stop cannot protect this side",
         )
 
     def _rule_analyst_confidence(self, led: _Ledger, action: EnterAction, table: LimitTable) -> None:
@@ -511,23 +538,23 @@ class RiskGate:
         qty: int, product: str,
     ) -> None:
         cap = _dec(lim.capital_cap.max_deployed_capital_inr)
-        lev = _dec(lim.max_leverage.platform_cap_x)
         headroom = cap - ctx.deployed_capital
         if entry_ref is None:
             led.cap("capital_cap", 0)
             led.add("capital_cap", False, "unpriceable (MARKET with no LTP)",
                     f"deployed <= {_q(cap)}", "fail closed", shrinkable=True)
             return
-        # Deployed capital for MIS is MARGIN, not notional. Phase 2 carries no per-stock leverage in
-        # the context, so the platform leverage cap is used as an OPTIMISTIC margin floor: the real
-        # per-stock margin is never lower, so this can under-charge deployment. Stated in `value`.
-        per_unit = entry_ref if product == "CNC" else (entry_ref / lev if lev > 0 else entry_ref)
+        # Phase 2 charges MIS at FULL notional on BOTH sides of the inequality — matching
+        # ExposureTracker.deployed_capital(), which has no per-stock leverage until Phase 3
+        # (2026-07-28 review: charging the NEW leg at notional/3 against open legs at 1x notional
+        # made one MIS fill consume the whole cap). Conservative: never under-charges deployment.
+        per_unit = entry_ref
         qty_max = _floor_div(headroom, per_unit)
         led.cap("capital_cap", qty_max)
         new_deployed = Decimal(qty) * per_unit
         ok = ctx.deployed_capital + new_deployed <= cap
         basis = "notional (CNC cash)" if product == "CNC" else (
-            f"notional/{lev}x platform cap — OPTIMISTIC margin floor, no per-stock leverage in Phase 2"
+            "FULL notional — per-stock MIS margin accounting lands with the Phase-3 OMS"
         )
         led.add(
             "capital_cap", ok,
@@ -783,6 +810,9 @@ class RiskGate:
             led.add("margin_buffer", False, "unpriceable / nothing approvable",
                     f"available >= {ratio} x requirement", "fail closed")
             return
+        # MIS margin ~ notional/leverage IS the right basis HERE (the broker blocks margin, not
+        # notional) — unlike capital_cap this compares against the broker-reported available margin,
+        # not against the tracker's notional-based deployed figure, so the units already agree.
         lev = _dec(lim.max_leverage.platform_cap_x)
         per_unit = entry_ref if product == "CNC" else (entry_ref / lev if lev > 0 else entry_ref)
         required = Decimal(approved) * per_unit
@@ -1056,6 +1086,17 @@ class GateContextBuilder:
         pending = self._pending_entry_rec_symbols(now)
         orders = self._orders()
 
+        # Un-actioned recommendations occupy concentration room too (2026-07-28 review: in RECOMMEND
+        # no position exists until /taken, so sector/correlation caps never bound while the sibling
+        # position-count rules already charged pending recs). Sector: each pending symbol counts in
+        # its sector. Correlation: the candidate is compared against pending symbols as well.
+        sector_counts: dict[str, int] = dict(self._exposure.per_sector_open(sector_of))
+        for pending_symbol in pending:
+            if pending_symbol == symbol:
+                continue
+            sector = sector_of.get(pending_symbol, _UNCLASSIFIED)
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
         return GateContext(
             now=now,
             mode=self._mode.mode(),
@@ -1076,8 +1117,8 @@ class GateContextBuilder:
             pending_rec_symbols=pending,
             per_symbol_cnc_notional={symbol: self._exposure.cnc_notional(symbol)},
             sector_of=sector_of,
-            open_sector_counts=self._exposure.per_sector_open(sector_of),
-            max_corr_with_open=await self._max_corr(symbol, open_symbols, d),
+            open_sector_counts=sector_counts,
+            max_corr_with_open=await self._max_corr(symbol, open_symbols | pending, d),
             deployed_capital=self._exposure.deployed_capital(),
             ltp=self._ltp_fn(symbol) if self._ltp_fn else None,
             tick_age_s=self._tick_age_fn(symbol) if self._tick_age_fn else None,
