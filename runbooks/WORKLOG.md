@@ -1,5 +1,48 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-28 (evening — PHASE-2 FIRST DEPLOY validated; agent-harness structured-output fix)
+
+- **Owner deployed `phase2` at 19:04 (first boot on the new code; migrations 0003+0004 applied).**
+  Boot otherwise clean: selftest ok (one WARN, below), token probe valid, WS connected first try
+  (52 tokens), feed HEALTHY, all missed evening jobs caught up (daily_bars 27+28, bhavcopy,
+  corp_actions/deals for the 27th, backup). Engine sticky state `mode=OFF, risk=FROZEN(warmup_ready)`
+  — mode stays OFF until the owner enables RECOMMEND (G2).
+- **CRITICAL FOUND+FIXED: every production agent call failed on first live contact.** Two distinct
+  mechanisms, diagnosed by replaying the exact stored `agent_calls.context_gz` payloads through the
+  SDK: (1) `sdk_smoke` (the only schema-less call) got fenced ```json — WARN only; (2) every REAL
+  call sends a json_schema, which the CLI fulfils via a **StructuredOutput TOOL round-trip** — the
+  harness pinned `max_turns=1`, so compliant calls died (`error_max_turns`), and on top the CLI's
+  default **extended thinking** pushed real durations (measured: 32s thinking-off, 48-80s+ with) past
+  the 45/60s timeouts → the observed zero-token "timeouts" (news_analyst 0/1050 scored,
+  preopen_planner no day-plan). Fix `harness.py`: +3 turn headroom exactly when the schema knob is
+  sent (observed anatomy: tool turn + CLI-side schema-retry + closing text), payload extracted from
+  the StructuredOutput tool input (outranks trailing prose; D7 "no fence-stripping" stands
+  untouched), `max_thinking_tokens=0` pinned, smoke call now sends a schema so D11 exercises the
+  REAL path. `agents.yaml` timeouts recalibrated to ~3× measured (intraday/news 120s, planner 180s,
+  nightly 300s). Verified end-to-end against the live SDK with the actual failed news batch:
+  success, 3 turns, 69s, all 30 clusters extracted. New pinned tests in `test_agent_harness.py`.
+- **Warm-up frozen all session — root cause: 2026-07-27 18:05 `daily_bars` never ran** (machine
+  slept 17:56→evening; boot-time catch-up is the ONLY catch-up, and there was no boot until 19:04).
+  The whole universe lacked the 27th bar → `NIFTY 50 199/200`, `INDIA VIX 19/20`, and GROWW failed
+  the young-listing exemption. Two fixes: (1) `catchup_sweep` interval job (30 min, watermark-
+  deduped ⇒ idempotent) so sleep/resume gaps self-heal without a restart; (2) young-listing check
+  now judges coverage INSIDE the session window only — the old `total == since_listing` compared
+  against a span that includes TODAY'S evening bar, flipping every young listing back to a blocker
+  each evening (the "GROWW quirk" watch-item, now closed). Regression tests pinned for both...
+  NIFTY 50/VIX still 199/200 post-catch-up at 19:35 — bars_1d hole to verify+repair at restart
+  (store is single-writer; can't inspect while the engine holds it).
+- **Surveillance `sms` source RETIRED**: NSE removed `/api/unsolicited-sms` (hard 404; sibling
+  reportGSM/ASM still serve → removal, not anti-bot; probed variants all 404). A permanently-dead
+  source would re-fire the critical "degraded" alert every refresh for a list §3.2.4 never consumed.
+  Field kept as the seam for a replacement.
+- **Today's market session (old instance) had a broken feed ALL DAY**: ticker child WS upgrade
+  403-Forbidden loop (stale daily token in the long-running process), HEALTHY→DEGRADED cycles
+  every ~2 min, ~zero live ticks 09:15–15:30; all 18,750 bars came from official-candle backfill
+  (reconcile compared 0). The 19:04 restart on a fresh token connected first try. Gap to consider
+  for Phase 3: a WS 4xx-loop should escalate to the token-rejected freeze + login prompt instead of
+  respawning for hours. Also chronic (pre-existing): Telegram polling/send failures throughout the
+  day on the old instance (httpx connect errors — network blips), gdelt ReadTimeouts (34/day).
+
 ## 2026-07-28 (day — ADVERSARIAL REVIEW of `phase2`: 26 findings, 20 fixed, 6 accepted-with-notes)
 
 - **6-dimension adversarial review (order-safety/gate-math/R1/wiring/money/concurrency) + 2-skeptic
