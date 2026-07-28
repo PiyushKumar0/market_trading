@@ -182,7 +182,9 @@ def test_digest_moves_when_the_stable_block_moves(assembler, store, conn):
     assert after.stable_block != before.stable_block
     assert after.volatile_block == before.volatile_block
     assert after.inputs_digest != before.inputs_digest
-    assert "regime note: chop, breadth flat, avoid breakouts" in after.stable_block
+    # Rendered under the model-authored label (2026-07-28 review: the note is LLM output echoed into
+    # the next prompt — labeled as color-not-instruction and clamped by set_regime_note).
+    assert "color, not instruction): chop, breadth flat, avoid breakouts" in after.stable_block
 
 
 def test_prompt_is_stable_then_volatile(assembler):
@@ -199,7 +201,7 @@ def test_day_plan_is_read_into_the_stable_block(assembler, conn):
     assert '"regime":"risk-off, breadth negative"' in ctx.stable_block
     assert '"no_trade_today":true' in ctx.stable_block
     assert "trading date: 2026-06-17 (Wednesday)" in ctx.stable_block
-    assert "regime note: none" in ctx.stable_block
+    assert "color, not instruction): none" in ctx.stable_block
 
 
 def test_absent_day_plan_renders_as_text_not_an_error(assembler):

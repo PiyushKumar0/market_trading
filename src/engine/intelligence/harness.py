@@ -626,9 +626,27 @@ class AgentHarness:
                 agent_def, "governor_blocked", decision.reason or "blocked", call_id=call_id, attempts=0
             )
 
-        options, prefix = self._build_options(
-            agent_def, system_prompt=system_prompt, json_schema=json_schema, max_turns=max_turns
-        )
+        try:
+            options, prefix = self._build_options(
+                agent_def, system_prompt=system_prompt, json_schema=json_schema, max_turns=max_turns
+            )
+        except RuntimeError as exc:
+            # SDK-surface refusal (missing tool/setting knob, D5/D10): an ordinary Failed so every
+            # trigger degrades to no-proposal + alert (D7) instead of leaning on bus isolation.
+            call_id = self._persist(
+                agent_def,
+                trigger=trigger,
+                inputs_digest=inputs_digest,
+                system_prompt=system_prompt,
+                prompt=base_prompt,
+                output=str(exc),
+                ok=False,
+                fail_reason="sdk_error",
+                usage=None,
+                cost=Decimal(0),
+                duration_ms=0,
+            )
+            return await self._fail(agent_def, "sdk_error", str(exc), call_id=call_id, attempts=0)
 
         prompt = base_prompt
         last_error = ""
@@ -830,21 +848,17 @@ class AgentHarness:
         if max_turns is not None and "max_turns" in fields:
             kwargs["max_turns"] = max_turns
 
-        # Explicit allowlist on EVERY call (D5/D10) — empty for single-shot.
+        # Explicit allowlist on EVERY call (D5/D10) — empty for single-shot. An options surface with
+        # NO tool knob is refused for EVERY shape (2026-07-28 review): an SDK release that renames
+        # the knob would otherwise run single-shot agents with the SDK's DEFAULT built-in toolset
+        # (Bash/file/network) on the box holding the broker credentials — fail closed, never open.
         tool_field = _first_field(cls, ("allowed_tools", "tools"))
         if tool_field is not None:
             kwargs[tool_field] = list(agent_def.allowed_tools)
-        elif agent_def.tools_enabled:
-            raise RuntimeError(
-                f"{cls.__name__} exposes no allowed-tools knob — cannot constrain a tools_enabled agent "
-                f"({agent_def.agent_id}) to its §5.5 allowlist; refusing to call (D5/D10)"
-            )
         else:
-            _log.warning(
-                "harness_no_tool_knob",
-                agent=agent_def.agent_id,
-                options_cls=cls.__name__,
-                detail="no allowed_tools/tools knob; single-shot agent granted no tools by definition",
+            raise RuntimeError(
+                f"{cls.__name__} exposes no allowed-tools knob — cannot pin {agent_def.agent_id}'s "
+                "explicit allowlist (empty for single-shot); refusing to call (D5/D10, §5.1)"
             )
         if "disallowed_tools" in fields:
             kwargs["disallowed_tools"] = [t for t in BUILTIN_TOOLS if t not in agent_def.allowed_tools]

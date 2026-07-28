@@ -581,24 +581,29 @@ async def test_call_class_drives_admission(defs, gov, clock, conn, real_cfg, cal
 
 # --------------------------------------------------------------------------- tool-knob guarantees
 async def test_missing_tool_knob_refuses_tools_enabled_agent(defs, gov, clock, conn) -> None:
+    # Uniform D7 shape: the SDK-surface refusal is an ordinary Failed (callers degrade to
+    # no-proposal + alert), never an exception leaning on bus isolation.
     fake = FakeQuery([FakeAssistantMessage("{}"), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoToolOptions)
 
-    with pytest.raises(RuntimeError, match="allowed-tools"):
-        await harness.run_agentic(defs["nightly_reviewer"], "review the day")
+    result = await harness.run_agentic(defs["nightly_reviewer"], "review the day")
+
+    assert not result.ok and result.reason == "sdk_error"
+    assert "allowed-tools" in (result.detail or "")
     assert fake.calls == []
 
 
-async def test_missing_tool_knob_still_runs_single_shot(defs, gov, clock, conn) -> None:
-    # Nothing was ever granted to a single-shot agent, so the missing knob is a warning, not a stop.
+async def test_missing_tool_knob_refuses_single_shot_too(defs, gov, clock, conn) -> None:
+    """2026-07-28 review F10: an options surface with NO tool knob means the SDK's DEFAULT builtin
+    toolset would run — refused for EVERY shape (fail closed), not warned past for single-shot."""
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoToolOptions)
 
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
-    assert result.ok
-    assert not hasattr(fake.calls[0].options, "allowed_tools")
-    assert fake.calls[0].options.setting_sources == []
+    assert not result.ok
+    assert result.reason == "sdk_error"
+    assert fake.calls == []          # refused BEFORE any SDK call went out
 
 
 async def test_system_prompt_falls_back_into_the_prompt_when_unsupported(defs, gov, clock, conn) -> None:

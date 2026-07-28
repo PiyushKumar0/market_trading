@@ -101,6 +101,12 @@ class WarmupGate:
         self._vix_n = int(vix_lookback_sessions)
 
     # ------------------------------------------------------------------ public surface
+    def set_symbols(self, symbols: Sequence[str], daily_symbols: Sequence[str] | None = None) -> None:
+        """Refresh the coverage set (2026-07-28 review: it was frozen at boot, so an 08:30 universe
+        change left the gate verifying YESTERDAY's watchlist for the rest of the day)."""
+        self._symbols = list(symbols)
+        self._daily_symbols = list(daily_symbols) if daily_symbols is not None else list(symbols)
+
     async def ready(self) -> bool:
         return not await self.missing()
 

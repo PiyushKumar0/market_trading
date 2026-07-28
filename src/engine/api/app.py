@@ -700,13 +700,25 @@ def _ws_authorized(websocket: WebSocket, secrets: Secrets) -> bool:
 
 def _make_ws_relay_handler(hub: WSHub, topic: str) -> Any:
     """Bind ``topic`` by value (default-arg trick) so every subscribed handler broadcasts under its
-    OWN topic name, not whichever topic the enclosing loop last iterated to (R8)."""
+    OWN topic name, not whichever topic the enclosing loop last iterated to (R8).
+
+    The broadcast is FIRE-AND-FORGET (2026-07-28 review): ``KillSwitch.trigger`` and the mode/risk
+    setters ``apublish`` their events — i.e. they AWAIT every subscribed handler — so an awaited
+    broadcast would let one stalled dashboard socket wedge the KILL sequence. A dropped frame costs
+    a dashboard refresh; a wedged kill path costs capital (R10)."""
 
     async def _handler(event: Any) -> None:
         payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
-        await hub.broadcast(topic, payload)
+        task = asyncio.ensure_future(hub.broadcast(topic, payload))
+        task.add_done_callback(_log_ws_relay_result)
 
     return _handler
+
+
+def _log_ws_relay_result(task: "asyncio.Task[Any]") -> None:
+    exc = task.exception() if not task.cancelled() else None
+    if exc is not None:
+        _log.warning("ws_relay_broadcast_failed", error=str(exc))
 
 
 async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
