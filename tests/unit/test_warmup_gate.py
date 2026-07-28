@@ -189,6 +189,25 @@ async def test_young_excluded_but_gaps_and_old_shortfalls_still_block(clock):
     assert not any(b.startswith("rsi2/trend/mom:GROWW") for b in status.blockers)
 
 
+@pytest.mark.asyncio
+async def test_young_listing_survives_todays_bar_landing(clock):
+    """Regression (observed GROWW 2026-07-28): the evening daily_bars job writes TODAY'S bar, which
+    the session window excludes — the span total then reads sessions-since-listing + 1 and the old
+    ``total == since_listing`` young test failed, flipping the listing back to a blocker every
+    evening. Young-ness is judged on in-window coverage only."""
+    store = FakeStore()
+    _fill_ready(store)
+    # Full coverage for the 3 sessions since listing; the span carries one EXTRA bar (today's,
+    # 2026-06-17, outside the strictly-before-today window).
+    store.daily["GROWW"] = [date(2026, 6, 16), date(2026, 6, 15), date(2026, 6, 12)]
+    store.spans["GROWW"] = (date(2026, 6, 12), 4)
+    gate = _gate(store, clock, symbols=("RELIANCE", "GROWW"))
+    status = await gate.status()
+    assert status.ready is True
+    assert status.young_excluded == ["GROWW(3/5)"]
+    assert not any(b.startswith("rsi2/trend/mom:GROWW") for b in status.blockers)
+
+
 # --------------------------------------------------------------------- lifecycle consequence (§2.6)
 class _FakeGate:
     def __init__(self, ready: bool, blockers: list[str] | None = None):

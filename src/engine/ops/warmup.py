@@ -186,13 +186,16 @@ class WarmupGate:
             return None, None
         # Short of the lookback. Distinguish a YOUNG LISTING from a real gap: a young listing has its
         # FIRST-EVER bar inside the lookback window (so it cannot supply n sessions) AND a bar for every
-        # session since that first bar (total available == sessions-since-listing, full coverage). A
-        # shortfall that fails EITHER test is a genuine gap and still blocks (never weakened).
-        first_bar, total = await self._store.adaily_bar_span(symbol)
+        # session since that first bar (full coverage). A shortfall that fails EITHER test is a genuine
+        # gap and still blocks (never weakened). Coverage is judged INSIDE the session window only —
+        # the span's total counts every row including today's still-live bar (written by the 18:05
+        # daily_bars job), which the window excludes; comparing against it flipped every young listing
+        # back to a blocker each evening (observed GROWW 2026-07-28).
+        first_bar, _total = await self._store.adaily_bar_span(symbol)
         if first_bar is not None and first_bar > sessions[-1]:
-            since_listing = sum(1 for d in sessions if d >= first_bar)
-            if total == since_listing:
-                return None, f"{symbol}({total}/{n})"
+            since_listing = [d for d in sessions if d >= first_bar]
+            if all(d in present for d in since_listing):
+                return None, f"{symbol}({len(since_listing)}/{n})"
         return f"{scope}:{symbol} daily bars {have}/{n}", None
 
     def _recent_sessions(self, n: int) -> list[date] | None:

@@ -978,12 +978,22 @@ async def run() -> int:
         except Exception:  # noqa: BLE001 - an unevaluable warm-up stays NOT-READY (fail closed)
             _log.exception("warmup_status_refresh_failed")
 
+    # --- periodic missed-job sweep (2026-07-28): boot-time catch-up cannot help a machine that SLEEPS
+    #     through a fire slot and resumes without a restart — 2026-07-27 slept 17:56→evening, missed
+    #     18:05 daily_bars, and warm-up then blocked the whole next session on the absent bar. The
+    #     runner's watermarks make a repeat pass a no-op, so sweeping on a cadence is safe. ---
+    async def catchup_sweep() -> None:
+        try:
+            await catch_up.catch_up()
+        except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
+            _log.exception("catchup_sweep_failed")
+
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
     _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
                    ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
                    scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
-                   warmup_refresh=warmup_refresh)
+                   warmup_refresh=warmup_refresh, catchup_sweep=catchup_sweep)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -1121,7 +1131,7 @@ def _arm_live_jobs(
     scheduler: Scheduler, settings, bar_builder: BarBuilder, health: HealthMonitor,
     news_ingest: NewsIngest, resolve_news,
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
-    scoring_tick=None, heartbeat_tick=None, warmup_refresh=None,
+    scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -1182,6 +1192,10 @@ def _arm_live_jobs(
         # Gate readiness snapshot (§7.1 warmup_ready/regime_data_ready) — fail-closed until first run.
         scheduler.add_job(warmup_refresh, trigger=IntervalTrigger(seconds=60),
                           job_id="warmup_status_refresh", guard=False)
+    if catchup_sweep is not None:
+        # Missed-job sweep for sleep/resume gaps (watermark-deduped ⇒ idempotent; see wiring note).
+        scheduler.add_job(catchup_sweep, trigger=IntervalTrigger(seconds=1800),
+                          job_id="catchup_sweep", guard=False)
 
 
 # --------------------------------------------------------------------------- backup (§10.5)
