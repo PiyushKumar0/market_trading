@@ -34,6 +34,11 @@
   pre-open news batch must complete before the 08:35 digest (remainder of the backlog, if any);
   preopen_planner 08:50 on fixed code should persist the first real DayPlan; enable RECOMMEND is
   an owner decision (G2).
+- **21:50 second restart DONE (owner-accepted UAC)** — the observed-through checkpoint fix is
+  live before tomorrow's login; no contingency needed. Boot clean: selftest ok (`sdk_smoke` SKIP,
+  correctly deduped per trading day), `catchup_sweep` armed, regime day backfill truthfully
+  no-op. Remaining news backlog resumes on the scoring cadence (19–22 h sweep tonight, pre-open
+  batch tomorrow). Engine state: `mode=OFF`, `FROZEN(warmup_ready)` until the post-login lift.
 
 ## 2026-07-28 (evening — PHASE-2 FIRST DEPLOY validated; agent-harness structured-output fix)
 
