@@ -222,7 +222,19 @@ class BackfillJob:
                     )
                 )
                 report.bars_written += written
-                self._advance_checkpoint(symbol, interval, chunk_end)
+                if candles:
+                    # OBSERVED-through, never requested-through: a span can legitimately end on
+                    # days whose candles don't exist yet (a "today" requested pre-close, a weekend
+                    # tail). Checkpointing the requested end is how the 2026-07-28 poisoning
+                    # happened — the un-published day was recorded complete and never fetched
+                    # again ("already_complete" forever; warm-up froze on the hole).
+                    observed = max(_candle_ts(c).date() for c in candles)
+                    self._advance_checkpoint(symbol, interval, min(chunk_end, observed))
+                else:
+                    _log.info(
+                        "backfill_chunk_empty", symbol=symbol, interval=interval,
+                        frm=cur.isoformat(), to=chunk_end.isoformat(),
+                    )
                 cur = chunk_end + timedelta(days=1)
             if aborted:
                 break

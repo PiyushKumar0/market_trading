@@ -54,8 +54,9 @@ class FakeKite:
 
 
 def one_minute_candle(token, frm, to, interval):
-    """One 09:15 candle on the chunk's first day — enough to count written bars per request."""
-    ts = frm.replace(hour=9, minute=15, second=0, microsecond=0)
+    """One 09:15 candle on the chunk's LAST day — data present through the requested end, so the
+    observed-through checkpoint lands on the chunk end (one bar per request keeps counting easy)."""
+    ts = to.replace(hour=9, minute=15, second=0, microsecond=0)
     return [{"date": ts, "open": 100.0, "high": 101.0, "low": 99.5, "close": 100.55, "volume": 1234}]
 
 
@@ -108,7 +109,7 @@ async def test_minute_backfill_chunks_at_60_days(store, clock, conn):
 
 async def test_day_backfill_single_chunk_writes_bars_1d(store, clock, conn):
     def day_candle(token, frm, to, interval):
-        return [{"date": frm.replace(hour=0, minute=0, second=0, microsecond=0),
+        return [{"date": to.replace(hour=0, minute=0, second=0, microsecond=0),
                  "open": 10.0, "high": 12.0, "low": 9.0, "close": 11.5, "volume": 999}]
 
     kite = FakeKite(day_candle)
@@ -123,6 +124,38 @@ async def test_day_backfill_single_chunk_writes_bars_1d(store, clock, conn):
     assert len(rows) == 1
     assert rows[0].close == Decimal("11.5") and rows[0].src == "kite_official"
     assert _checkpoint(conn, "TCS", "day") == end.isoformat()
+
+
+# ---------------------------------------------------- observed-through checkpoints (2026-07-28)
+async def test_empty_chunk_never_advances_the_checkpoint(store, clock, conn):
+    """The 2026-07-28 poisoning: a day requested before its bar exists (pre-close "today") must
+    stay un-checkpointed — recording the REQUESTED end as complete made the hole permanent
+    ("already_complete" on every later pass; warm-up froze on the missing session)."""
+    kite = FakeKite()                                           # returns [] for every request
+    d = dt.date(2026, 7, 28)
+    report = await _job(store, kite, clock, conn).run(["TCS"], "day", d, d)
+    assert len(kite.calls) == 1
+    assert report.bars_written == 0 and not report.failed
+    assert _checkpoint(conn, "TCS", "day") is None              # NOT '2026-07-28'
+
+    # Self-healing: the next run re-requests the same day and checkpoints once the bar exists.
+    def now_published(token, frm, to, interval):
+        return [{"date": frm, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1}]
+    kite2 = FakeKite(now_published)
+    await _job(store, kite2, clock, conn).run(["TCS"], "day", d, d)
+    assert len(kite2.calls) == 1
+    assert _checkpoint(conn, "TCS", "day") == d.isoformat()
+
+
+async def test_checkpoint_advances_only_to_the_last_observed_candle(store, clock, conn):
+    """Candles short of the requested end (unpublished tail): checkpoint = observed-through, so
+    the missing tail is re-fetched by the next run instead of being skipped forever."""
+    def first_day_only(token, frm, to, interval):
+        return [{"date": frm, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1}]
+
+    start, end = dt.date(2026, 7, 24), dt.date(2026, 7, 28)
+    await _job(store, FakeKite(first_day_only), clock, conn).run(["TCS"], "day", start, end)
+    assert _checkpoint(conn, "TCS", "day") == start.isoformat()
 
 
 # ------------------------------------------------------------------ checkpoint resume (A2)
