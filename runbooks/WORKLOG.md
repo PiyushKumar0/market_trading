@@ -1,5 +1,42 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-28 (day — ADVERSARIAL REVIEW of `phase2`: 26 findings, 20 fixed, 6 accepted-with-notes)
+
+- **6-dimension adversarial review (order-safety/gate-math/R1/wiring/money/concurrency) + 2-skeptic
+  verification over the whole phase2 diff.** 26 unique findings; the verifier fleet was cut short by
+  the session usage limit, so unverified ones were triaged by hand. ALL FIXED (each with a pinned
+  regression test):
+  **criticals** — (1) post-login warm-up lift wrote `risk_state=NORMAL` directly, erasing standing
+  causes (defeated `/pause_entries` and a floor rung the selftest itself applied): every freeze now
+  routes through the `risk_state_causes` ledger and the lift clears only its own causes; (2)
+  `clear_cause` re-armed NORMAL over out-of-ledger freezes (e.g. token-rejected): now preserves any
+  more-restrictive out-of-ledger state, and the token freeze is itself a cause auto-cleared on
+  re-login; (3) LLM could substitute `tradingsymbol`/`side`/`style` in an EnterAction and be judged
+  on the CANDIDATE's facts (gate approved a hijacked out-of-universe symbol): structural coherence
+  guard drops mismatched payloads pre-gate (D7); (4) ticker subscription omitted held-position
+  symbols (a dropped-from-universe holding marked at `avg_entry`, blinding the floor ladder): held
+  symbols now always subscribed; (5) a stalled dashboard socket could wedge the KILL sequence
+  (`apublish` awaited the WS relay): broadcasts are now fire-and-forget.
+  **majors** — `daily_loss_soft/hard` had NO enforcement locus → `evaluate_day_loss`/`apply_day_loss`
+  wired into the equity minute-tick + startup selftest, with day-scoped causes auto-cleared next
+  session; gate approved an inverted BUY (stop above entry scored as a healthy short) → new
+  `levels_coherent` rule; `capital_cap` mixed units (new MIS leg at notional/3 vs open legs at 1×) →
+  full notional both sides until Phase-3 margin accounting; `edge_multiple_min` was hard-coded 2.0 →
+  read from envelope_state/limits.yaml at boot; sector/correlation caps ignored pending recs (never
+  bound in RECOMMEND) → pending recs charged; the ≤6/day analyst forward cap + DG1 4/day rung had no
+  consumer → enforced in the pipeline; 08:30 universe rebuild never re-subscribed the feed nor the
+  warm-up gate → both refreshed; news polls/scorer raced on shared cluster rows → serialized behind
+  one lock; `/taken` on an exit rec would OPEN a phantom position → kind guard; `/closed` via an
+  exit-rec id orphaned the entry ledger row → labels every open row for the position; model-authored
+  regime note re-entered prompts unbounded → clamped + labeled; harness ran single-shot with SDK
+  DEFAULT tools if the options class lost its tool knob → refuses for every shape (uniform Failed).
+- **Accepted with notes (conservative direction or Phase-2 volume)**: day-baseline uses the newest
+  prior snapshot (multi-day drift lands in today's MTM — over-freezes, never under); can_invoke is
+  TOCTOU across concurrent bars (bounded by the forward cap); per-bar snapshot minting is
+  store-lock-heavy at scale (watch-item ≥100 symbols); `on_bar` does small sync reads on the loop
+  (0–3 tracked positions); `regime_data_ready` freezes all entries, not only regime strategies
+  (stricter than plan wording).
+
 ## 2026-07-28 (overnight — PHASE 2 IMPLEMENTED on branch `phase2`, ~30 commits, 567→1149 tests)
 
 - **Owner directed "move ahead with the next phase" (2026-07-27 14:24). Phase 2 (RECOMMEND live,
