@@ -46,8 +46,11 @@ NSE_ASM_URL = "https://www.nseindia.com/api/reportASM"                # [VERIFY 
 NSE_ESM_URL = "https://www.nseindia.com/api/reportESM"                # [VERIFY Phase-1]
 #: T2T from the listed-securities master (archives host, less bot-gated): SERIES BE/BZ = trade-to-trade.
 NSE_T2T_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"   # [VERIFY Phase-1]
-#: Unsolicited-SMS watch list (pump-promo suspects). [VERIFY Phase-1] — page/API moves; anti-bot [likely].
-NSE_SMS_URL = "https://www.nseindia.com/api/unsolicited-sms"          # [VERIFY Phase-1]
+#: Unsolicited-SMS watch list — RETIRED 2026-07-28: NSE removed /api/unsolicited-sms (hard 404 while
+#: the sibling report endpoints above still serve, so removal, not anti-bot; probed variants all 404).
+#: A permanently-dead fetch would re-flag "degraded" + critical-alert every refresh for a list the
+#: §3.2.4 universe rules never consumed. The ``sms`` field stays on the snapshot as the seam for a
+#: replacement source, pinned empty until one exists.
 
 #: T2T series codes in the securities master (BE = rolling T2T, BZ = T2T + other restrictions).
 _T2T_SERIES = frozenset({"BE", "BZ"})
@@ -188,7 +191,6 @@ class SurveillanceIngest:
             ("asm", self._fetch_json_symbols(NSE_ASM_URL)),
             ("t2t", self._fetch_t2t()),
             ("esm", self._fetch_json_symbols(NSE_ESM_URL)),
-            ("sms", self._fetch_json_symbols(NSE_SMS_URL)),
         ):
             try:
                 symbols = await coro
@@ -213,7 +215,7 @@ class SurveillanceIngest:
             asm=results["asm"],
             t2t=results["t2t"],
             esm=results["esm"],
-            sms=results["sms"],
+            # sms retired (source removed by NSE 2026-07-28) — pinned empty, see the note at the top.
             degraded_sources=tuple(degraded),
             unconfirmed_symbols=frozenset(unconfirmed),
         )

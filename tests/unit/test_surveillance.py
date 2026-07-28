@@ -48,7 +48,6 @@ PAYLOADS: dict[str, httpx.Response] = {
         },
     ),
     sv.NSE_ESM_URL: httpx.Response(200, json=[{"symbol": "ESMSTK"}]),
-    sv.NSE_SMS_URL: httpx.Response(200, json={"data": [{"symbol": "PUMPED", "reason": "sms tips"}]}),
     sv.NSE_T2T_URL: httpx.Response(200, text=T2T_CSV),
 }
 
@@ -89,19 +88,18 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
     assert lists.asm == {"ASMLONG", "ASMSHORT"}         # nested long/short shapes both walked
     assert lists.t2t == {"T2TSTK", "T2TBZ"}             # BE + BZ series; EQ row not T2T
     assert lists.esm == {"ESMSTK"}
-    assert lists.sms == {"PUMPED"}
+    assert lists.sms == frozenset()                     # retired source (NSE 404, 2026-07-28) — pinned empty
     assert lists.degraded_sources == () and lists.unconfirmed_symbols == frozenset()
     assert lists.as_of == D
 
     # flagged() is the §3.2.4 exclusion set: the four lists, NOT the SMS list.
     assert lists.flagged() == {"GSMSTK", "ASMLONG", "ASMSHORT", "T2TSTK", "T2TBZ", "ESMSTK"}
-    assert "PUMPED" not in lists.flagged()
     assert lists.reasons_for("gsmstk") == ["surveillance_gsm"]      # case-insensitive
     assert lists.reasons_for("NORMALEQ") == []
 
     # Last-good cache written per source (the reuse-yesterday fallback, E5).
     cache = json.loads((tmp_path / "surveillance.json").read_text(encoding="utf-8"))
-    assert set(cache) == {"gsm", "asm", "t2t", "esm", "sms"}
+    assert set(cache) == {"gsm", "asm", "t2t", "esm"}
     assert cache["gsm"]["symbols"] == ["GSMSTK"]
 
 
@@ -142,7 +140,7 @@ async def test_all_sources_down_never_raises(tmp_path, clock):
     msgs, sink = collect_alerts()
     ingest = make_ingest(tmp_path, clock, fail_urls=set(PAYLOADS), notify=sink)
     lists = await ingest.refresh()                      # must not raise into the scheduler (E5)
-    assert set(lists.degraded_sources) == {"gsm", "asm", "t2t", "esm", "sms"}
+    assert set(lists.degraded_sources) == {"gsm", "asm", "t2t", "esm"}
     assert lists.flagged() == frozenset()
     assert msgs
 
