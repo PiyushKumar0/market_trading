@@ -276,3 +276,41 @@ def test_catch_up_watermarks(conn, clock):
     assert runner.was_run("bhavcopy", d) is False
     runner.record_run("bhavcopy", d, status="success")
     assert runner.was_run("bhavcopy", d) is True
+
+
+@pytest.mark.asyncio
+async def test_warmup_lift_preserves_standing_owner_pause(conn, clock, temp_config, monkeypatch):
+    """2026-07-28 review F0: the post-login warm-up lift must clear ONLY its own causes — a standing
+    /pause_entries (owner_pause, FROZEN) survives the lift instead of being erased to NORMAL."""
+    from engine.risk.causes import CAUSE_OWNER_PAUSE, RiskStateLatch
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
+    mode = ModeManager(conn, clock, None, calendar)
+    kill = KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mode)
+    store = ProtectedStore(temp_config, conn, clock)
+    store.register_initial("limits.yaml", OWNER_OK)
+    store.register_initial("envelope.yaml", OWNER_OK)
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=store, kill_switch=kill, mode_manager=mode)
+
+    class ReadyGate:
+        async def status(self):
+            from engine.ops.warmup import WarmupStatus
+            return WarmupStatus(ready=True, blockers=[])
+
+    lifecycle = SessionLifecycle(
+        conn=conn, clock=clock, calendar=calendar, settings=FakeSettings(),
+        mode_manager=mode, kill_switch=kill, self_test=st,
+        catch_up=CatchUpRunner(conn, clock, calendar), warmup_gate=ReadyGate(), latch=latch,
+        build_version="test-0",
+    )
+    await lifecycle.startup(check_skew=False)
+    await latch.set_cause(CAUSE_OWNER_PAUSE, RiskState.FROZEN, "owner /pause_entries", Actor.OWNER)
+
+    reapply = await lifecycle.reapply_warmup_gate()
+
+    assert reapply.lifted is False
+    assert mode.risk_state() == RiskState.FROZEN            # the pause survives the lift
+    assert any(c == CAUSE_OWNER_PAUSE for c, _s, _d in latch.active_causes())

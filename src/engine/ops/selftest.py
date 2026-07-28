@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from engine import _preload
 from engine.core.clock import Clock, ClockSkewUnavailable
 from engine.core.config import Settings, config_dir, load_yaml
+from engine.core.enums import Actor
 from engine.core.log import get_logger
 from engine.core.protected_store import PROTECTED_NAMES, ProtectedStore
 from engine.core.secrets import Secrets
@@ -140,7 +141,7 @@ class SelfTest:
         report.checks.append(await self._check_clock_skew(check_skew))
         report.checks.append(self._check_trade_window())
         report.checks.append(self._check_token())
-        report.checks.append(self._check_risk_counters_rebuild())
+        report.checks.append(await self._check_risk_counters_rebuild())
         report.checks.append(await self._check_equity_halt_ladder())
         if include_freshness:
             report.checks.extend(await self.data_freshness_checks())
@@ -309,7 +310,7 @@ class SelfTest:
     def _stub(name: str, detail: str) -> SelfTestCheck:
         return SelfTestCheck(name=name, status=CheckStatus.SKIP, detail=detail)
 
-    def _check_risk_counters_rebuild(self) -> SelfTestCheck:
+    async def _check_risk_counters_rebuild(self) -> SelfTestCheck:
         """§2.6 step 2: rebuild the day-scoped risk counters from the ledger/positions tables so a
         same-day restart cannot reset exhausted entry capacity. The rebuild IS the read — the
         tracker recomputes from tables on every call; this check performs and reports it."""
@@ -317,6 +318,9 @@ class SelfTest:
             return self._stub("risk_counters_rebuild", "ExposureTracker not wired")
         try:
             d = self._clock.today()
+            if self._latch is not None:
+                # §3.5.3 behavioural auto-clear: yesterday's day-scoped causes re-arm this session.
+                await self._latch.clear_stale_daily(d.isoformat(), Actor.RISK_GATE)
             losses = self._exposure.consecutive_losses(d)
             opened = self._exposure.trades_opened_today(d)
             baseline = self._exposure.day_baseline(d)
@@ -339,20 +343,31 @@ class SelfTest:
         from engine.risk.limits import floor_limits_from
 
         try:
+            from decimal import Decimal
+
             table = self._limits.load()
             breaches = self._exposure.evaluate_floors(floor_limits_from(table))
             if breaches:
                 await self._exposure.apply_floor_breaches(
                     breaches, self._mode, self._kill, latch=self._latch,
                 )
+            # §7.1 daily-loss rungs re-checked on startup too — an offline-realized loss past −5/−7%
+            # must trip exactly as a live one would (§2.6 step 2).
+            day_rungs = self._exposure.evaluate_day_loss(
+                Decimal(str(table.limits.daily_loss_soft.day_mtm_pct)),
+                Decimal(str(table.limits.daily_loss_hard.day_mtm_pct)),
+            )
+            if day_rungs and self._latch is not None:
+                await self._exposure.apply_day_loss(day_rungs, self._mode, self._latch)
         except Exception as exc:  # noqa: BLE001 - an unevaluable ladder freezes entries, never crashes
             return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.FAIL,
                                  detail=f"ladder evaluation failed: {exc}", implies=Implies.FROZEN)
-        if breaches:
-            rungs = ", ".join(b.rung for b in breaches)
+        tripped = [b.rung for b in breaches] + day_rungs
+        if tripped:
             return SelfTestCheck(
                 name="equity_halt_ladder", status=CheckStatus.WARN,
-                detail=f"rung(s) tripped and APPLIED on startup: {rungs} (equity {breaches[0].equity})",
+                detail=f"rung(s) tripped and APPLIED on startup: {', '.join(tripped)} "
+                       f"(equity {self._exposure.equity()})",
             )
         return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.PASS,
                              detail=f"no rung breached (equity {self._exposure.equity()})")

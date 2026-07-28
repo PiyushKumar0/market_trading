@@ -181,3 +181,23 @@ async def test_state_changes_are_published_and_audited(conn, clock, bus):
     assert "daily_loss_soft" in seen[0].reason and "re-armed" in seen[1].reason
     audits = conn.execute("SELECT diff FROM config_audit WHERE name='risk_state'").fetchall()
     assert len(audits) == 2
+
+
+async def test_clear_inactive_cause_never_relaxes_an_out_of_ledger_state(conn, clock):
+    """2026-07-28 review F1: /resume_entries (clear of causes that are NOT active) must not re-arm
+    NORMAL over a freeze some latch-less path wrote directly (e.g. token-rejected)."""
+    from engine.core.calendar import NSECalendar
+    from engine.core.config import config_dir
+    from engine.core.enums import Actor, RiskState
+    from engine.risk.causes import CAUSE_OWNER_PAUSE, RiskStateLatch
+    from engine.risk.mode import ModeManager
+
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
+    mode = ModeManager(conn, clock, None, calendar)
+    latch = RiskStateLatch(conn, clock, mode)
+    await mode.set_risk_state(RiskState.FROZEN, "kite_token_rejected", Actor.RISK_GATE)  # out-of-ledger
+
+    resolved = await latch.clear_cause(CAUSE_OWNER_PAUSE, Actor.OWNER)
+
+    assert resolved == RiskState.FROZEN
+    assert mode.risk_state() == RiskState.FROZEN

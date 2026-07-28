@@ -505,7 +505,22 @@ async def run() -> int:
     # Everything below is inert without the Tier-1 harness (LLM tier disabled ⇒ scanners still
     # run, the gate still exists, but no proposals are minted — fails to no-recommendation, D7).
     # =========================================================================================
-    cost_model = CostModel.from_config(instruments=instruments)
+    # `edge_multiple_min` is the ONE learner-movable gate knob (§6.3/§7.1): operating value from
+    # envelope_state when a promotion has written one, else the owner's limits.yaml default —
+    # never the CostModel's Python default (2026-07-28 review: an owner limit change was invisible).
+    # Re-read at boot; intra-run envelope promotions land Phase 5 (§6.4).
+    def _edge_multiple_min() -> Decimal:
+        row = conn.execute(
+            "SELECT value FROM envelope_state WHERE parameter='edge_multiple_min'"
+        ).fetchone()
+        if row is not None and row["value"]:
+            return Decimal(str(row["value"]))
+        try:
+            return Decimal(str(limits_engine.load().limits.min_viable_size.edge_multiple_min_default))
+        except IntegrityError:
+            return Decimal("2.0")   # §6.3 default; the store failure is already FROZEN elsewhere
+
+    cost_model = CostModel.from_config(instruments=instruments, edge_multiple_min=_edge_multiple_min())
     gate = RiskGate(limits_engine, cost_model, clock)
 
     # Warm-up status cache for the gate context: WarmupGate.status() is async + store-heavy, so the
@@ -605,10 +620,24 @@ async def run() -> int:
             d = d - timedelta(days=1)
         return []
 
+    def held_symbols() -> list[str]:
+        """Open platform/recommended position symbols — MUST stay in the feed even after the universe
+        drops them (2026-07-28 review: an unsubscribed holding marks at avg_entry, so its loss is
+        invisible to the §7.1 floor ladder and day-MTM rungs)."""
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM positions WHERE state='OPEN' "
+            "AND origin IN ('platform','recommended')"
+        ).fetchall()
+        return [str(r["symbol"]) for r in rows]
+
     def ticker_tokens() -> list[int]:
-        """Ticker subscription set: watchlist + NIFTY 50 + India VIX → instrument tokens (A3)."""
+        """Ticker subscription set: watchlist + HELD symbols + NIFTY 50 + India VIX → tokens (A3)."""
         out: list[int] = []
-        for sym in [*watchlist_symbols(), INDEX_SYMBOL, VIX_SYMBOL]:
+        seen: set[str] = set()
+        for sym in [*watchlist_symbols(), *held_symbols(), INDEX_SYMBOL, VIX_SYMBOL]:
+            if sym in seen:
+                continue
+            seen.add(sym)
             tok = instruments.token_for_symbol(sym)
             if tok is not None:
                 out.append(tok)
@@ -642,24 +671,44 @@ async def run() -> int:
         await leverage.refresh()          # 08:15/08:20 inputs re-read on catch-up (self-refresh, §3.2.4)
         await surveillance.current()
         await universe_builder.build(clock.today())
+        # Re-point the feed AND the warm-up coverage set at today's universe (2026-07-28 review: both
+        # were frozen at boot, so a pre-08:30 start ran the whole day on YESTERDAY's watchlist).
+        warmup_gate.set_symbols(watchlist_symbols())
+        try:
+            if ticker.health().state != "STOPPED":
+                await ticker.update_subscriptions(ticker_tokens())
+        except Exception:  # noqa: BLE001 - a resubscribe failure degrades to the old set, never fails the job
+            _log.exception("ticker_resubscribe_failed")
+
+    # ONE writer through the news chain at a time (2026-07-28 review): the three per-feed polls fire
+    # on independent intervals and the scorer writes whole cluster rows back — un-serialized, a poll
+    # updating a cluster between the scorer's read and its write-back gets clobbered by the stale
+    # snapshot (cluster assignment is also read-modify-write). Volumes are tiny; a lock is free.
+    news_chain_lock = asyncio.Lock()
 
     async def resolve_news(headlines: list) -> None:
         if not headlines:
             return
-        touched = await clusterer.run(headlines)
-        await resolver.aload(clock.today())
-        await resolver.run(touched)
+        async with news_chain_lock:
+            touched = await clusterer.run(headlines)
+            await resolver.aload(clock.today())
+            await resolver.run(touched)
+
+    async def score_news(*, force: bool = False) -> None:
+        if scoring_job is None:
+            return
+        async with news_chain_lock:
+            await scoring_job.run_batch(force=force)
 
     async def job_news_chain() -> None:
         # §4.4 job 10 startup/catch-up: backfill → cluster → resolve (never entry-blocking, §2.7),
         # then the §5.4 pre-open scoring batch (force=True: score ALL unscored regardless of the ≥8
         # minimum) so the ~08:35 digest sees today's scores. Scoring failure never blocks the chain.
         await resolve_news(await news_ingest.backfill())
-        if scoring_job is not None:
-            try:
-                await scoring_job.run_batch(force=True)
-            except Exception:  # noqa: BLE001 - unscored clusters just stay off the watchlist (§2.7)
-                _log.exception("preopen_scoring_batch_failed")
+        try:
+            await score_news(force=True)
+        except Exception:  # noqa: BLE001 - unscored clusters just stay off the watchlist (§2.7)
+            _log.exception("preopen_scoring_batch_failed")
 
     async def job_catalyst_digest() -> None:
         # §4.4 job 14 (~08:35): emits CATALYST_WATCHLIST on every SUCCESSFUL run — including an
@@ -761,8 +810,10 @@ async def run() -> int:
     # OPS: freeze seam, warm-up gate, heartbeat, catch-up (registry), self-test, lifecycle.
     # =========================================================================================
     async def freeze_entries(reason: str) -> None:
+        # Through the cause ledger (§3.5.3 single-writer discipline, 2026-07-28 review): a direct
+        # risk_state write is invisible to clear_cause re-arms and the warm-up lift.
         if not kill.is_killed():
-            await mode.set_risk_state(RiskState.FROZEN, reason, Actor.RISK_GATE)
+            await latch.set_cause(reason, RiskState.FROZEN, reason, Actor.RISK_GATE)
 
     # §2.6/R6 mid-day token-death circuit breaker: the KiteClient (built above with
     # on_token_rejected=session.on_token_rejected) fires this hook on the FIRST TokenException of a
@@ -779,6 +830,13 @@ async def run() -> int:
         # fires via the KiteClient (which exists ⇒ api_key exists), so login_url() cannot raise here.
         await notify(login_prompt(session.login_url()))
     session.set_invalidation_hook(_on_session_invalidated)
+
+    async def _clear_token_freeze() -> None:
+        # §3.5.3 auto-recovery class: a token-invalid freeze clears on successful re-login. The ledger
+        # resolves — any OTHER active cause (owner_pause, floor rung, warm-up) keeps the state.
+        await latch.clear_cause("kite_token_rejected", Actor.RISK_GATE)
+
+    session.add_login_hook(_clear_token_freeze)
 
     warmup_gate = WarmupGate(
         store, clock, calendar,
@@ -837,7 +895,7 @@ async def run() -> int:
         conn=conn, clock=clock, calendar=calendar, settings=settings,
         mode_manager=mode, kill_switch=kill, self_test=self_test, catch_up=catch_up,
         alert=alert, notify=notify, build_version=_build_version(),
-        heartbeat=heartbeat, warmup_gate=warmup_gate,
+        heartbeat=heartbeat, warmup_gate=warmup_gate, latch=latch,
         boot_history_path=data_dir / "lifecycle_boots.json",
         backfill_hook=backfill_hook, ticker_resume_hook=ticker_resume_hook, backup_hook=backup_hook,
     )
@@ -882,12 +940,19 @@ async def run() -> int:
                 breaches, mode, kill, latch=latch,
                 alert=lambda m: alert("critical", m),
             )
+        # §7.1 daily-loss rungs (2026-07-28 review: −7% hard halt had no enforcement locus).
+        rungs = exposure.evaluate_day_loss(
+            Decimal(str(table.limits.daily_loss_soft.day_mtm_pct)),
+            Decimal(str(table.limits.daily_loss_hard.day_mtm_pct)),
+        )
+        if rungs:
+            await exposure.apply_day_loss(rungs, mode, latch,
+                                          alert=lambda m: alert("critical", m))
 
     # --- §5.4 in-session/evening scoring cadence: run_batch() self-gates on the scoring windows,
     #     the ≥8/30-min batch trigger and the governor — this loop only provides the pulse. ---
     async def scoring_tick() -> None:
-        if scoring_job is not None:
-            await scoring_job.run_batch()
+        await score_news()
 
     # --- §5.2(c) heartbeat pulse: cadence owned by the governor (20 min at DG0, 45 at DG1, off at
     #     DG2+); pipeline.heartbeat() itself enforces in-window + admission, this loop the spacing. ---

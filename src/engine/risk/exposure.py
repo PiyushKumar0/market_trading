@@ -409,6 +409,46 @@ class ExposureTracker:
                 )
         return breaches
 
+    def evaluate_day_loss(self, soft_pct: Decimal, hard_pct: Decimal, d: date | None = None) -> list[str]:
+        """§7.1 daily-loss rungs on the CAPITAL BASE (thresholds are negative percents, e.g. −5.0):
+        returns the tripped rung names, hard first. 2026-07-28 review: `daily_loss_hard` had no
+        enforcement locus at all — the equity floor ladder only covers the equity/weekly rungs."""
+        d = d or self._clock.today()
+        pct = self.day_mtm(d) / self._capital_base * Decimal(100)
+        rungs: list[str] = []
+        if pct <= _dec(hard_pct):
+            rungs.append("daily_loss_hard")
+        if pct <= _dec(soft_pct):
+            rungs.append("daily_loss_soft")
+        return rungs
+
+    async def apply_day_loss(
+        self,
+        rungs: list[str],
+        mode_manager: ModeManager,
+        latch: Any,
+        *,
+        flatten: FlattenCallback | None = None,
+        alert: AlertCallback | None = None,
+    ) -> None:
+        """Apply the §7.1 daily-loss actions through the cause ledger: soft ⇒ FROZEN (no new entries
+        rest of day); hard ⇒ CLOSE_ONLY + AUTO→RECOMMEND + flatten-MIS (Phase-3 OMS; alert-only until
+        then). Day-scoped: :meth:`RiskStateLatch.clear_stale_daily` re-arms them next session."""
+        if "daily_loss_hard" in rungs:
+            reason = "daily_loss_hard: day MTM at/below the -7% hard line (§7.1)"
+            await latch.set_cause("daily_loss_hard", RiskState.CLOSE_ONLY, reason, Actor.RISK_GATE)
+            await mode_manager.force_downgrade(Mode.RECOMMEND, "daily_loss_hard")
+            if flatten is not None:
+                await flatten()
+            if alert is not None:
+                await alert(f"DAILY LOSS HARD: {reason} — flatten MIS "
+                            f"{'triggered' if flatten else 'is MANUAL until the Phase-3 OMS'}")
+        elif "daily_loss_soft" in rungs:
+            reason = "daily_loss_soft: day MTM at/below the -5% soft line (§7.1)"
+            await latch.set_cause("daily_loss_soft", RiskState.FROZEN, reason, Actor.RISK_GATE)
+            if alert is not None:
+                await alert(f"DAILY LOSS SOFT: {reason} — entries FROZEN for the rest of the day")
+
     async def apply_floor_breaches(
         self,
         breaches: list[FloorBreach],

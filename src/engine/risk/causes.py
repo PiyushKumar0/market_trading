@@ -153,5 +153,29 @@ class RiskStateLatch:
             resolved=resolved.value,
             actor=who.value,
         )
+        # Defense-in-depth (2026-07-28 review): clearing a cause that was NOT active must never RELAX
+        # a state some out-of-ledger writer set (e.g. a freeze from a latch-less code path) — the
+        # historical failure was /resume_entries re-arming NORMAL over a token-rejected freeze. When
+        # the cause WAS active, the ledger owned the state and the resolve-write is authoritative.
+        current = self._mode.risk_state()
+        if not was_active and _RISK_RANK[current] > _RISK_RANK[resolved]:
+            _log.warning("risk_cause_clear_preserved_state", cause=cause, state=current.value,
+                         resolved=resolved.value)
+            return current
         await self._mode.set_risk_state(resolved, reason, who)
         return resolved
+
+    async def clear_stale_daily(self, today: str, who: Actor) -> list[str]:
+        """§3.5.3 behavioural auto-clear: day-scoped causes (``daily_loss_*``, ``consecutive_losses``)
+        latch only for THEIR session — clear any still active from a prior day (called at startup /
+        first tick of a new session). Returns the causes cleared."""
+        rows = self._conn.execute(
+            "SELECT cause FROM risk_state_causes WHERE cleared_at IS NULL "
+            "AND (cause LIKE 'daily_loss_%' OR cause = 'consecutive_losses') "
+            "AND substr(set_at, 1, 10) < ?",
+            (today,),
+        ).fetchall()
+        cleared = [str(r["cause"]) for r in rows]
+        for cause in cleared:
+            await self.clear_cause(cause, who)
+        return cleared

@@ -162,6 +162,7 @@ class SessionLifecycle:
         build_version: str = "0.0.0",
         heartbeat: HeartbeatWriter | None = None,
         warmup_gate=None,
+        latch=None,
         boot_history_path: Path | None = None,
         reconcile_hook: Hook | None = None,
         overdue_squareoff_hook: Hook | None = None,
@@ -186,6 +187,7 @@ class SessionLifecycle:
         self._build_version = build_version
         self._heartbeat = heartbeat
         self._warmup_gate = warmup_gate
+        self._latch = latch
         self._boot_history_path = boot_history_path
         self._reconcile = reconcile_hook
         self._overdue_squareoff = overdue_squareoff_hook
@@ -197,6 +199,15 @@ class SessionLifecycle:
         self._verify_cnc = verify_cnc_protected_hook
         self._backup = backup_hook
         self._suppress_report_notify = False   # crash-loop coalescing (§2.2): silent boots stay silent
+
+    async def _freeze(self, cause: str, detail: str) -> None:
+        """FROZEN-for-entries through the §3.5.3 cause ledger when wired (single-writer discipline —
+        2026-07-28 review: a direct write is invisible to ``clear_cause`` re-arms and to the lift
+        path); the direct setter remains only for latch-less construction (older tests)."""
+        if self._latch is not None:
+            await self._latch.set_cause(cause, RiskState.FROZEN, detail, Actor.RISK_GATE)
+        else:
+            await self._mode.set_risk_state(RiskState.FROZEN, detail, Actor.RISK_GATE)
 
     # ------------------------------------------------------------------ startup (§2.6)
     async def startup(self, *, check_skew: bool = True) -> StartupReport:
@@ -274,7 +285,7 @@ class SessionLifecycle:
         report.integrity_ok = not integrity_failed
         if integrity_failed:
             if self._open_positions_count() == 0:
-                await self._mode.set_risk_state(RiskState.FROZEN, "protected_store_integrity", Actor.RISK_GATE)
+                await self._freeze("protected_store_integrity", "protected_store_integrity")
                 report.notes.append("integrity_failed_flat_book_frozen")
             else:
                 await self._kill.trigger("protected_store_integrity_live_book", actor=Actor.RISK_GATE, flatten=True)
@@ -282,7 +293,7 @@ class SessionLifecycle:
 
         # Other FROZEN-implying causes (secrets/clock/window/token) ⇒ FROZEN entries until cleared.
         if report.frozen_reasons and not self._kill.is_killed():
-            await self._mode.set_risk_state(RiskState.FROZEN, ",".join(report.frozen_reasons), Actor.RISK_GATE)
+            await self._freeze("startup_selftest", ",".join(report.frozen_reasons))
 
         # 2c) Day-scoped risk-counter rebuild + continuous equity halt-ladder re-eval (§2.6) —
         #     ledger/reconcile-dependent. TODO(Phase 2/3): wired with ExposureTracker + the ledger.
@@ -304,9 +315,7 @@ class SessionLifecycle:
             # guarantees a safety-critical catch-up failure never leaves entries open (§2.6).
             report.frozen_reasons.extend(r for r in result.frozen_reasons if r not in report.frozen_reasons)
             if not self._kill.is_killed():
-                await self._mode.set_risk_state(
-                    RiskState.FROZEN, ",".join(result.frozen_reasons), Actor.RISK_GATE
-                )
+                await self._freeze("catchup_safety_jobs", ",".join(result.frozen_reasons))
 
         # 6) Cold-start warm-up gate (§2.6 step 6 / §7.1 warmup_ready + regime_data_ready).
         await self._apply_warmup_gate(report)
@@ -533,8 +542,8 @@ class SessionLifecycle:
         froze = False
         if not self._kill.is_killed():
             before = self._mode.risk_state()
-            await self._mode.set_risk_state(RiskState.FROZEN, "warmup_ready", Actor.RISK_GATE)
-            froze = before != RiskState.FROZEN
+            await self._freeze("warmup_ready", "warmup_ready")
+            froze = before != RiskState.FROZEN and self._mode.risk_state() == RiskState.FROZEN
         await self._notify_safe(catalog.warmup_frozen(blockers=blockers), "warmup_frozen")
         return froze
 
@@ -579,6 +588,18 @@ class SessionLifecycle:
         if st.needs_login or st.frozen_reasons:
             _log.info("warmup_lift_held", needs_login=st.needs_login, other_frozen=st.frozen_reasons)
             return False, "other_freeze"
+        if self._latch is not None:
+            # Clear ONLY the causes this lifecycle owns and has just re-verified; the ledger resolves
+            # the rest — an owner_pause, rejection-storm, floor rung or daily-loss cause that is still
+            # active keeps the state (2026-07-28 review: the previous direct NORMAL write erased any
+            # standing cause, defeating /pause_entries and a floor rung the selftest itself applied).
+            await self._latch.clear_cause("warmup_ready", Actor.RISK_GATE)
+            await self._latch.clear_cause("startup_selftest", Actor.RISK_GATE)
+            after = self._mode.risk_state()
+            lifted = after == RiskState.NORMAL
+            _log.warning("warmup_freeze_lifted" if lifted else "warmup_lift_partial",
+                         state=after.value)
+            return lifted, "lifted" if lifted else "other_causes_hold"
         await self._mode.set_risk_state(RiskState.NORMAL, "warmup_ready_lifted", Actor.RISK_GATE)
         _log.warning("warmup_freeze_lifted")
         return True, "lifted"
