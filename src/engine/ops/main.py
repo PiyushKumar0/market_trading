@@ -62,7 +62,7 @@ from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob
 from engine.datafeeds.filings_results import FilingsResultsJob
 from engine.datafeeds.filings_shp import FilingsShpJob
 from engine.datafeeds.news import NewsIngest
-from engine.datafeeds.news_pipeline import EntityResolver, HeadlineClusterer
+from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
 from engine.datafeeds.sector_map import SectorMapJob
 from engine.features.engine import FeatureEngine
 from engine.marketdata.backfill import BackfillJob
@@ -75,11 +75,15 @@ from engine.ops.heartbeat import HeartbeatWriter
 from engine.ops.jobs import (
     JOB_BACKUP,
     JOB_BHAVCOPY,
+    JOB_CATALYST_DIGEST,
     JOB_CORP_ACTIONS,
     JOB_DAILY_BARS,
     JOB_DEALS,
     JOB_EARNINGS,
     JOB_FEATURES,
+    JOB_NIGHTLY_REVIEW,
+    JOB_PREOPEN_PLANNER,
+    JOB_RECO_EXPIRE,
     JOB_FILINGS_PIT,
     JOB_FILINGS_PIT_FRESH,
     JOB_FILINGS_RESULTS,
@@ -106,9 +110,19 @@ from engine.ops.post_login import (
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
 from engine.ops.single_instance import InstanceLock
+from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentHarness, load_agent_defs, run_sdk_smoke
-from engine.ops.warmup import WarmupGate
+from engine.ops.news_scoring import NewsScoringJob
+from engine.ops.nightly_review import NightlyReviewJob
+from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
+from engine.ops.preopen_planner import PreopenPlannerJob
+from engine.ops.scan_context import LiveScanContextProvider
+from engine.ops.warmup import WarmupGate, WarmupStatus
+from engine.risk.gate import GateContextBuilder, RiskGate
+from engine.strategy.cost_model import CostModel
+from engine.strategy.prescreen import SignalPreScreen
+from engine.strategy.scanners import build_enabled_scanners
 from engine.risk.causes import RiskStateLatch
 from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
@@ -152,6 +166,17 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
 )
 
+#: Phase-2 additions (§8.3): digest → planner run pre-open in dependency order after the news chain;
+#: rec-expiry labels stale unconfirmed recommendations post-window; the nightly reviewer is date-keyed
+#: (one review per missed trading day, §2.6). Registered only when the owning object was built.
+PHASE2_JOB_IDS: tuple[str, ...] = (
+    JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RECO_EXPIRE,   # run-latest
+    JOB_NIGHTLY_REVIEW,                                          # date-keyed
+)
+
+#: Fire-time for the §3.6 expiry labeling sweep — after the 15:30 close, before EOD reconcile.
+_RECO_EXPIRE_IST = time(15, 45)
+
 
 def _is_sunday(d: date) -> bool:
     return d.weekday() == 6   # §4.4 job 13 weekly cadence — fires Sunday, not a trading day
@@ -194,6 +219,22 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
         JobSpec(JOB_FILINGS_RESULTS, JobClass.DATE_KEYED, settings.jobs.filings_results_ist, fns[JOB_FILINGS_RESULTS], order=70),
     ):
         registry.register(spec)
+    # Phase-2 jobs (§8.3) register only when composition built their owning object (LLM tier may be
+    # disabled, D7). Catch-up dependency order within RUN_LATEST: universe(10) → news_chain(20) →
+    # digest(25) → planner(28) — the digest needs scored clusters + today's universe; the planner
+    # needs the digest (§2.7 steps 4-6).
+    for spec in (
+        JobSpec(JOB_CATALYST_DIGEST, JobClass.RUN_LATEST, settings.jobs.catalyst_digest_ist,
+                fns.get(JOB_CATALYST_DIGEST), order=25),
+        JobSpec(JOB_PREOPEN_PLANNER, JobClass.RUN_LATEST, settings.jobs.preopen_planner_ist,
+                fns.get(JOB_PREOPEN_PLANNER), order=28),
+        JobSpec(JOB_RECO_EXPIRE, JobClass.RUN_LATEST, _RECO_EXPIRE_IST,
+                fns.get(JOB_RECO_EXPIRE), order=60),
+        JobSpec(JOB_NIGHTLY_REVIEW, JobClass.DATE_KEYED, settings.jobs.nightly_review_ist,
+                fns.get(JOB_NIGHTLY_REVIEW), order=80),
+    ):
+        if spec.run is not None:
+            registry.register(spec)
     return registry
 
 
@@ -456,8 +497,91 @@ async def run() -> int:
     )
     resolver = EntityResolver(store, clock)
 
-    # --- feature engine v1 (§3.2.5/§6.2) ---
+    # --- feature engine v2 (§3.2.5/§6.2) ---
     features = FeatureEngine(store, clock, calendar, index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL)
+
+    # =========================================================================================
+    # PHASE-2 DECISION PLANE (§3.2.6/§3.2.7/§3.6): cost model → gate → pipeline → agent jobs.
+    # Everything below is inert without the Tier-1 harness (LLM tier disabled ⇒ scanners still
+    # run, the gate still exists, but no proposals are minted — fails to no-recommendation, D7).
+    # =========================================================================================
+    cost_model = CostModel.from_config(instruments=instruments)
+    gate = RiskGate(limits_engine, cost_model, clock)
+
+    # Warm-up status cache for the gate context: WarmupGate.status() is async + store-heavy, so the
+    # gate reads a snapshot refreshed by the equity/health cadence. Unset ⇒ a NOT-READY status with a
+    # regime blocker — both §7.1 readiness rules fail CLOSED until the first refresh lands.
+    warmup_holder: dict[str, Any] = {"status": None}
+    _WARMUP_UNREFRESHED = WarmupStatus(
+        ready=False, blockers=["warmup:unrefreshed 0/0", "regime:unrefreshed 0/0"]
+    )
+
+    def warmup_status_snapshot() -> WarmupStatus:
+        return warmup_holder["status"] or _WARMUP_UNREFRESHED
+
+    # Clock-skew verdict is boot-scoped (§3.2.12 self-test measures it; the health loop deliberately
+    # skips per-minute NTP). A mid-day drift is caught at the next startup — accepted for Phase 2.
+    skew_holder: dict[str, bool] = {"ok": False}
+
+    ctx_builder = GateContextBuilder(
+        limits_engine, exposure, instruments, store, calendar, clock, mode, kill,
+        ltp_fn=mark_price, tick_age_fn=tick_age_s,
+        warmup_status_fn=warmup_status_snapshot,
+        clock_skew_ok_fn=lambda: skew_holder["ok"],
+        degrade_tier_fn=lambda: governor.degrade_tier().value,
+        conn=conn, index_symbol=INDEX_SYMBOL,
+        # nifty50_fn/expiry_day_fn unwired in Phase 2: the expiry-day NIFTY50-MIS leg of
+        # `no_trade_windows` is inert until Phase 3 wires index membership (WORKLOG'd).
+    )
+
+    assembler = ContextAssembler(store, conn, clock, calendar)
+    book = RecommendationBook(conn, clock, cost_model)
+    pipeline = (
+        RecommendationPipeline(
+            assembler, harness, agent_defs, gate, ctx_builder, book, mode, kill,
+            governor, exposure, limits_engine, notify, clock, calendar, conn, store,
+        )
+        if harness is not None else None
+    )
+    if pipeline is not None:
+        bus.subscribe("signal.candidate", pipeline.on_signal_candidate)
+        bus.subscribe("bar.1m", pipeline.on_bar)
+    if telegram is not None:
+        telegram.set_reco_book(book)
+
+    # --- live pre-screen (§3.2.5): scanners → signal.candidate. Runs whenever the engine is up;
+    #     candidate-forwarding to the analyst is window-gated inside the pipeline, not here. ---
+    scan_provider = LiveScanContextProvider(
+        store, clock, calendar, features, index_symbol=INDEX_SYMBOL,
+        # Late-bound: watchlist_symbols is defined further down this function; the lambda resolves it
+        # at day-cache build time (first bar of the day), long after the whole graph is wired.
+        momentum_universe=lambda: watchlist_symbols(),
+    )
+    prescreen = SignalPreScreen(
+        scanners=build_enabled_scanners(("orb", "rsi2", "trend", "mom")),   # `cat` lands Phase 3
+        context_provider=scan_provider,
+        bus=bus,
+        max_candidates_per_day=settings.strategy.prescreen.max_candidates_per_day,
+        max_per_strategy_day=settings.strategy.prescreen.max_per_strategy_day,
+    )
+    bus.subscribe("bar.1m", prescreen.handle_bar)
+
+    # --- Tier-1 jobs (all fail to no-output, never blocking — D7/E5) ---
+    digest_job = CatalystDigestJob(store, clock, calendar, protected_store)
+    scoring_job = (
+        NewsScoringJob(store, resolver, assembler, harness, agent_defs, governor, clock, calendar)
+        if harness is not None and "news_analyst" in agent_defs else None
+    )
+    planner_job = (
+        PreopenPlannerJob(store, conn, assembler, harness, agent_defs, governor, clock, calendar,
+                          notify=alert)
+        if harness is not None and "preopen_planner" in agent_defs else None
+    )
+    nightly_job = (
+        NightlyReviewJob(protected_store, conn, assembler, harness, agent_defs, governor, clock,
+                         calendar, notify=notify)
+        if harness is not None and "nightly_reviewer" in agent_defs else None
+    )
 
     # --- ticker subprocess supervisor (started into WARMING at step 7 when a token exists) ---
     # calendar+notify power the in-session tick-silence guard (§7.1): a tickless-but-heartbeating child
@@ -527,8 +651,45 @@ async def run() -> int:
         await resolver.run(touched)
 
     async def job_news_chain() -> None:
-        # §4.4 job 10 startup/catch-up: backfill → cluster → resolve (never entry-blocking, §2.7).
+        # §4.4 job 10 startup/catch-up: backfill → cluster → resolve (never entry-blocking, §2.7),
+        # then the §5.4 pre-open scoring batch (force=True: score ALL unscored regardless of the ≥8
+        # minimum) so the ~08:35 digest sees today's scores. Scoring failure never blocks the chain.
         await resolve_news(await news_ingest.backfill())
+        if scoring_job is not None:
+            try:
+                await scoring_job.run_batch(force=True)
+            except Exception:  # noqa: BLE001 - unscored clusters just stay off the watchlist (§2.7)
+                _log.exception("preopen_scoring_batch_failed")
+
+    async def job_catalyst_digest() -> None:
+        # §4.4 job 14 (~08:35): emits CATALYST_WATCHLIST on every SUCCESSFUL run — including an
+        # empty-but-fresh (0, 0); a failed run alerts CATALYST_DISABLED and re-raises so the
+        # watermark records the failure (§2.7 fail-safe ladder, chaos case 20 convention).
+        from engine.notify.catalog import catalyst_disabled, catalyst_watchlist
+
+        try:
+            result = await digest_job.run(clock.today())
+        except Exception as exc:
+            await notify(catalyst_disabled(f"digest failed: {exc}"))
+            raise
+        await notify(catalyst_watchlist(result.n_originating, result.n_context))
+
+    async def job_preopen_planner() -> None:
+        if planner_job is not None:
+            await planner_job.run(clock.today())
+
+    async def job_reco_expire() -> None:
+        # §3.6: expired-unconfirmed recommendations become labelled no_action rows (unbiased non-fill
+        # signal); aged tracked positions get their §7.1 max_holding exit recommendations.
+        expired = book.expire_stale(clock.now())
+        if expired:
+            _log.info("recommendations_expired", count=expired)
+        if pipeline is not None:
+            await pipeline.check_aged_positions(clock.today())
+
+    async def job_nightly_review(d) -> None:
+        if nightly_job is not None:
+            await nightly_job.run(d)
 
     async def job_sector_map() -> None:
         await sector_map.run(clock.today(), universe_symbols=watchlist_symbols())
@@ -588,6 +749,12 @@ async def run() -> int:
         JOB_FILINGS_PIT_FRESH: job_filings_pit_fresh,
         JOB_FILINGS_RESULTS: job_filings_results,
         JOB_FILINGS_SHP: job_filings_shp,
+        # Phase-2 (§8.3): digest always (deterministic, $0); planner/nightly/expire register even
+        # when the LLM tier is down — their fns no-op internally so the watermark records the skip.
+        JOB_CATALYST_DIGEST: job_catalyst_digest,
+        JOB_PREOPEN_PLANNER: job_preopen_planner,
+        JOB_RECO_EXPIRE: job_reco_expire,
+        JOB_NIGHTLY_REVIEW: job_nightly_review,
     })
 
     # =========================================================================================
@@ -692,7 +859,7 @@ async def run() -> int:
     # --- dashboard API ---
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
                       protected_store=protected_store, exposure=exposure, governor=governor,
-                      limits_engine=limits_engine)
+                      limits_engine=limits_engine, market_store=store)
     if not secrets.has(DASHBOARD_TOKEN):
         _log.warning("dashboard_token_missing", hint="run scripts/dpapi_set.py --generate-dashboard-token")
 
@@ -716,10 +883,42 @@ async def run() -> int:
                 alert=lambda m: alert("critical", m),
             )
 
+    # --- §5.4 in-session/evening scoring cadence: run_batch() self-gates on the scoring windows,
+    #     the ≥8/30-min batch trigger and the governor — this loop only provides the pulse. ---
+    async def scoring_tick() -> None:
+        if scoring_job is not None:
+            await scoring_job.run_batch()
+
+    # --- §5.2(c) heartbeat pulse: cadence owned by the governor (20 min at DG0, 45 at DG1, off at
+    #     DG2+); pipeline.heartbeat() itself enforces in-window + admission, this loop the spacing. ---
+    hb_holder: dict[str, Any] = {"last": None}
+
+    async def heartbeat_tick() -> None:
+        if pipeline is None:
+            return
+        interval_min = governor.heartbeat_interval_min()
+        if interval_min is None:
+            return
+        now = clock.now()
+        last = hb_holder["last"]
+        if last is not None and (now - last).total_seconds() < interval_min * 60:
+            return
+        hb_holder["last"] = now
+        await pipeline.heartbeat()
+
+    # --- refresh the gate's warm-up snapshot alongside the equity cadence (fail-closed until set) ---
+    async def warmup_refresh() -> None:
+        try:
+            warmup_holder["status"] = await warmup_gate.status()
+        except Exception:  # noqa: BLE001 - an unevaluable warm-up stays NOT-READY (fail closed)
+            _log.exception("warmup_status_refresh_failed")
+
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
     _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
-                   ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick)
+                   ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
+                   scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
+                   warmup_refresh=warmup_refresh)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -775,6 +974,10 @@ async def run() -> int:
               needs_login=report.needs_login, integrity_ok=report.integrity_ok,
               jobs_caught_up=len(report.jobs_caught_up), frozen=report.frozen_reasons,
               instruments=instruments_source)
+    # Boot-scoped skew verdict for the gate's §7.1 clock_skew rule (self-test measured it above);
+    # seed the warm-up snapshot immediately so the gate isn't blind until the first 60s refresh.
+    skew_holder["ok"] = "clock_skew" not in report.frozen_reasons
+    await warmup_refresh()
     await health.check(check_skew=False)
 
     # --- start remaining services + idle until a stop signal (§2.6: being up is an active period). The
@@ -853,6 +1056,7 @@ def _arm_live_jobs(
     scheduler: Scheduler, settings, bar_builder: BarBuilder, health: HealthMonitor,
     news_ingest: NewsIngest, resolve_news,
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
+    scoring_tick=None, heartbeat_tick=None, warmup_refresh=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -901,6 +1105,18 @@ def _arm_live_jobs(
         # §7.1: platform equity persisted each minute + the halt ladder evaluated on every persist.
         scheduler.add_job(equity_tick, trigger=IntervalTrigger(seconds=60),
                           job_id="equity_tick", guard=False)
+    if scoring_tick is not None:
+        # §5.4 cadence pulse — run_batch() self-gates (windows, batch trigger, governor).
+        scheduler.add_job(scoring_tick, trigger=IntervalTrigger(seconds=300),
+                          job_id="news_scoring_tick", guard=False)
+    if heartbeat_tick is not None:
+        # §5.2(c) — one-minute pulse; the governor-owned interval gates the actual call.
+        scheduler.add_job(heartbeat_tick, trigger=IntervalTrigger(seconds=60),
+                          job_id="analyst_heartbeat_tick", guard=False)
+    if warmup_refresh is not None:
+        # Gate readiness snapshot (§7.1 warmup_ready/regime_data_ready) — fail-closed until first run.
+        scheduler.add_job(warmup_refresh, trigger=IntervalTrigger(seconds=60),
+                          job_id="warmup_status_refresh", guard=False)
 
 
 # --------------------------------------------------------------------------- backup (§10.5)
@@ -960,12 +1176,13 @@ def _build_telegram(settings, secrets, clock, mode, kill, *, latch=None, governo
 
 
 def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protected_store=None,
-                exposure=None, governor=None, limits_engine=None):
+                exposure=None, governor=None, limits_engine=None, market_store=None):
     from engine.api.app import create_app
 
     return create_app(session_manager=session, mode_manager=mode, kill_switch=kill,
                       secrets=secrets, clock=clock, bus=bus, conn=conn, store=protected_store,
-                      exposure=exposure, governor=governor, limits_engine=limits_engine)
+                      exposure=exposure, governor=governor, limits_engine=limits_engine,
+                      market_store=market_store)
 
 
 async def _serve_api(app, settings):

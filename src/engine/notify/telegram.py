@@ -264,6 +264,10 @@ class TelegramBot:
         # At most one challenge is pending at a time — a new destructive command supersedes the old.
         self._pending: _PendingChallenge | None = None
 
+    def set_reco_book(self, book: RecoBook) -> None:
+        """Late-wire the recommendation book (built after the bot in the composition root)."""
+        self._reco_book = book
+
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         """Build the application, register the command table, and begin polling (R10).

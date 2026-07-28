@@ -71,6 +71,8 @@ JOB_RECONCILE = "bar_reconcile"                  # §4.4 job 2 (A13) — date-ke
 JOB_DAILY_BARS = "daily_bars"                    # §4.4 job 3 — date-keyed
 JOB_FEATURES = "features_daily"                  # §3.2.5/§6.2 nightly feature snapshot — date-keyed
 JOB_NIGHTLY_REVIEW = "nightly_review"            # §5.5 — date-keyed
+JOB_CATALYST_DIGEST = "catalyst_digest"          # §2.7 step 5 / §4.4 job 14 — run-latest (~08:35)
+JOB_RECO_EXPIRE = "reco_expire"                  # §3.6 expired-unconfirmed → no_action — run-latest
 
 
 class JobClass(StrEnum):

@@ -192,9 +192,34 @@ async def test_startup_skips_when_store_already_populated(market_store, clock):
 
 
 def test_registry_covers_every_phase1_job() -> None:
+    # Phase-1 fns only ⇒ the Phase-2 specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
     assert len(reg) == len(PHASE1_JOB_IDS) == 17   # +4 §2.8 filings jobs (incl. stage-3 fresh insider)
+
+
+def test_registry_phase2_jobs_register_when_their_fns_exist() -> None:
+    """§8.3 wiring: digest 08:35 → planner 08:50 (run-latest, after the news chain in catch-up
+    order), reco-expiry 15:45 run-latest, nightly review 21:00 date-keyed (§2.6 per missed day)."""
+    fns = _all_noop_fns()
+    fns[opsmain.JOB_CATALYST_DIGEST] = _noop
+    fns[opsmain.JOB_PREOPEN_PLANNER] = _noop
+    fns[opsmain.JOB_RECO_EXPIRE] = _noop
+    fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
+    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns).specs()}
+    assert set(by_id) == set(PHASE1_JOB_IDS) | set(opsmain.PHASE2_JOB_IDS)
+
+    expected = {
+        opsmain.JOB_CATALYST_DIGEST: (JobClass.RUN_LATEST, time(8, 35), 25),
+        opsmain.JOB_PREOPEN_PLANNER: (JobClass.RUN_LATEST, time(8, 50), 28),
+        opsmain.JOB_RECO_EXPIRE:     (JobClass.RUN_LATEST, time(15, 45), 60),
+        opsmain.JOB_NIGHTLY_REVIEW:  (JobClass.DATE_KEYED, time(21, 0), 80),
+    }
+    for jid, (cls, at, order) in expected.items():
+        assert (by_id[jid].job_class, by_id[jid].at, by_id[jid].order) == (cls, at, order), jid
+    # Catch-up dependency order (§2.7 steps 4-6): news chain before digest before planner.
+    news = by_id[opsmain.JOB_NEWS_CHAIN].order
+    assert news < by_id[opsmain.JOB_CATALYST_DIGEST].order < by_id[opsmain.JOB_PREOPEN_PLANNER].order
 
 
 def test_registry_classes_and_fire_times_match_the_schedule() -> None:
