@@ -78,6 +78,27 @@ class SignalCandidate(BaseModel):
     catalyst_ref: str | None = None           # catalyst_watchlist.entry_id (§2.7); price baselines: None
 
 
+class PendingSetup(BaseModel):
+    """A strategy condition that is NOT currently true, with the deterministic price at which it
+    would arm (§3.2.5 sweep addendum, owner-directed 2026-07-29).
+
+    Purely informational — it never enters the pipeline and no LLM sees it at origination. The owner
+    uses it to decide whether shifting/extending the trade window is worth it ("RELIANCE rsi2 arms
+    below ₹1,385"). ``trigger_price`` is None where the condition is not price-invertible
+    (cross-sectional / rule-based) and ``condition`` then carries the plain-text rule alone.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    strategy_id: str
+    symbol: str
+    side: Side
+    style: Style
+    trigger_price: Decimal | None = None       # tick-rounded arm level; None = not price-invertible
+    last_price: Decimal | None = None          # the scanned bar's close, for at-a-glance distance
+    condition: str = ""                        # human-readable arming rule (volume gate, window, …)
+
+
 class ScanContext(BaseModel):
     """Everything a scanner may read for one bar, assembled by the pre-screen's context provider.
 

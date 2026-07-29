@@ -473,6 +473,7 @@ class RecommendationPipeline:
         calendar: NSECalendar,
         conn: sqlite3.Connection,
         store: Any,
+        rearm: Callable[[str, str], bool] | None = None,
     ) -> None:
         self._assembler = assembler
         self._harness = harness
@@ -490,6 +491,9 @@ class RecommendationPipeline:
         self._calendar = calendar
         self._conn = conn
         self._store = store
+        #: (symbol, strategy_id) -> re-arm the prescreen's day dedupe after an analyst
+        #: INFRASTRUCTURE failure (owner-directed 2026-07-29); wired to SignalPreScreen.rearm.
+        self._rearm = rearm
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
         self._last_position_event: dict[str, datetime] = {}
         #: §5.2(a) analyst forward cap — per-day count of candidates that reached the harness (§5.6).
@@ -559,6 +563,12 @@ class RecommendationPipeline:
             json_schema=intraday_guidance_json_schema(),
         )
         if not result.ok:
+            # Analyst INFRASTRUCTURE failure: the candidate was never evaluated, so hand its
+            # once-per-day publication back (owner-directed 2026-07-29 — six candidates burned by a
+            # broken analyst could not re-publish in the repaired window). governor_blocked is a
+            # deliberate budget policy, not an outage — re-arming would hammer the admission gate.
+            if self._rearm is not None and result.reason != "governor_blocked":
+                self._rearm(candidate.symbol, candidate.strategy_id)
             await self._alert_agent_failed("signal_candidate", result)
             return
         payload = result.payload

@@ -36,7 +36,7 @@ from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.types import Bar
 from engine.strategy.scanners.base import Scanner
-from engine.strategy.types import ScanContext, SignalCandidate
+from engine.strategy.types import PendingSetup, ScanContext, SignalCandidate
 
 _log = get_logger("engine.strategy.prescreen")
 
@@ -101,6 +101,57 @@ class SignalPreScreen:
             for cand in accepted:
                 self._bus.publish(SIGNAL_CANDIDATE_TOPIC, cand)
         return accepted
+
+    # ------------------------------------------------------------------ sweep addendum (2026-07-29)
+    def seen_today(self) -> int:
+        """Number of (symbol, strategy) day slots spent so far today — the sweep verdict's
+        "already evaluated" count."""
+        with self._lock:
+            return len(self._seen)
+
+    def rearm(self, symbol: str, strategy_id: str) -> bool:
+        """Give ``(symbol, strategy)`` its once-per-day publication back (owner-directed 2026-07-29).
+
+        For the pipeline's analyst INFRASTRUCTURE failures only (timeout/SDK death/schema battles):
+        the condition was never actually evaluated, so consuming the day slot would silence a
+        still-true setup for the rest of the day (observed 2026-07-29: six candidates burned by a
+        broken analyst could not re-publish in the repaired window). An analyst that RAN and said
+        no_action, or a gate rejection, is a real evaluation — those must NOT re-arm. Daily caps are
+        deliberately not refunded (the spam bound counts attempts, not outcomes)."""
+        with self._lock:
+            key = (symbol, strategy_id)
+            if key in self._seen:
+                self._seen.discard(key)
+                _log.info("prescreen_rearmed", symbol=symbol, strategy_id=strategy_id)
+                return True
+            return False
+
+    def sweep(self, bars: Sequence[Bar]) -> tuple[list[SignalCandidate], list[PendingSetup]]:
+        """Re-scan the LATEST bar of each symbol on demand (§3.2.5 sweep addendum, 2026-07-29).
+
+        Each bar runs through the normal :meth:`_scan` path — dedupe and caps apply exactly as if
+        the bar had just arrived, so a sweep can never double-publish or bypass a bound.
+        PUBLICATION is the caller's job on the event loop (``await bus.apublish`` per candidate —
+        the same split :meth:`handle_bar` uses), which keeps ``sweep`` loop-agnostic and safe to
+        run in a worker thread. Additionally collects every scanner's :meth:`Scanner.pending` arm
+        levels, skipping (symbol, strategy) pairs that already published today (their day slot is
+        spent). The caller turns the pair into the owner verdict message."""
+        accepted: list[SignalCandidate] = []
+        pending: list[PendingSetup] = []
+        for bar in bars:
+            accepted.extend(self._scan(bar))
+            ctx = self._context_provider(bar)
+            with self._lock:
+                seen = set(self._seen)
+            for scanner in self._scanners:
+                if (bar.symbol, scanner.strategy_id) in seen:
+                    continue
+                try:
+                    pending.extend(scanner.pending(bar, ctx))
+                except Exception:  # noqa: BLE001 - one scanner's pending math never kills the sweep
+                    _log.exception("pending_setup_failed", symbol=bar.symbol,
+                                   strategy_id=scanner.strategy_id)
+        return accepted, pending
 
     # ------------------------------------------------------------------ bus adapter
     async def handle_bar(self, event: BaseModel) -> None:

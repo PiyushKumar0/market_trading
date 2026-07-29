@@ -168,6 +168,13 @@ class MessageKind(StrEnum):
     source domains, feed outage, …). Warning, not critical: the platform keeps trading its
     deterministic strategies — it just stops originating on news (§10.3 ``CATALYST_DISABLED``)."""
 
+    SCAN_SWEEP = "scan_sweep"
+    """An on-demand scanner sweep completed (§3.2.5 sweep addendum, 2026-07-29): fired when the
+    trade window becomes active or the owner asks via ``/scan_now``. Carries the explicit verdict —
+    candidates published now, plus the deterministic PENDING arm levels ("X arms below ₹N") so the
+    owner can decide whether shifting the window is worth it. Never silent: "nothing to trade right
+    now" is a first-class answer."""
+
     POST_LOGIN_RECOVERY = "post_login_recovery"
     """The §2.6 cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
     ``/kite/callback`` route or the Telegram ``/token`` fallback both land in
@@ -614,6 +621,46 @@ def budget_tier(old: str, new: str, month_spend: Decimal) -> CatalogMessage:
         ),
         severity="warning",
         data={"old_tier": old, "new_tier": new, "month_spend_usd": str(month_spend)},
+    )
+
+
+def scan_sweep(
+    *,
+    trigger: str,
+    published: list[str],
+    pending_lines: list[str],
+    suppressed_today: int,
+) -> CatalogMessage:
+    """§3.2.5 sweep verdict (2026-07-29): the owner always hears SOMETHING when a sweep runs.
+
+    ``published`` — "SYMBOL strategy SIDE @ entry" lines for candidates entering the pipeline now;
+    ``pending_lines`` — pre-rendered "SYMBOL strategy arms below/above ₹N (now ₹M)" lines;
+    ``suppressed_today`` — (symbol, strategy) pairs whose day slot is already spent.
+    """
+    if published:
+        headline = f"{len(published)} candidate(s) qualify — evaluating now"
+    elif pending_lines:
+        headline = "Nothing to trade right now — nearest setups below"
+    else:
+        headline = "Nothing to trade right now — no live or pending setups"
+    lines = [f"trigger: {trigger}", headline]
+    if published:
+        lines += ["", "live:"] + [f"  {p}" for p in published]
+    if pending_lines:
+        lines += ["", "pending (arm levels):"] + [f"  {p}" for p in pending_lines]
+    if suppressed_today:
+        lines += ["", f"{suppressed_today} setup(s) already evaluated today (once-per-day rule)"]
+    return CatalogMessage(
+        kind=MessageKind.SCAN_SWEEP,
+        title="Scan sweep: " + ("candidates found" if published else "nothing to trade right now"),
+        body="\n".join(lines),
+        severity="info",
+        data={
+            "trigger": trigger,
+            "published": published,
+            "pending": pending_lines,
+            "suppressed_today": suppressed_today,
+        },
     )
 
 

@@ -30,7 +30,7 @@ from decimal import Decimal
 from engine.core.types import Bar
 from engine.strategy.indicators import sma, wilder_rsi
 from engine.strategy.scanners.base import Scanner, register
-from engine.strategy.types import ScanContext, SignalCandidate, round_to_tick
+from engine.strategy.types import PendingSetup, ScanContext, SignalCandidate, round_to_tick
 
 _RSI_PERIOD = 2        # §6.1: RSI(2)
 _STOCK_DMA = 200       # §6.1: stock above 200-DMA
@@ -84,5 +84,66 @@ class Rsi2Scanner(Scanner):
                 stop=stop,
                 target=None,     # exit is RSI(2) > rsi_exit or max_hold_days — informational (§6.1)
                 score=(p["rsi_entry"] - rsi) / p["rsi_entry"],
+            )
+        ]
+
+    def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
+        """The dip price at which RSI(2) would cross under ``rsi_entry`` today (§3.2.5 sweep).
+
+        RSI(2) over ``completed closes + [P]`` is strictly increasing in ``P``, so the arm level is
+        found by bisection on today's provisional close. The level is only reported while it stays
+        ABOVE the 200-DMA it would produce — a dip deep enough to break the DMA filter cannot arm
+        this strategy today. Regime filter and warm-up gates match :meth:`scan` exactly.
+        """
+        p = self.params
+
+        idx = ctx.index_daily_closes
+        if len(idx) < _INDEX_DMA + _RISING_LOOKBACK:
+            return []
+        sma50 = sma(idx, _INDEX_DMA)
+        now50, then50 = float(sma50.iloc[-1]), float(sma50.iloc[-1 - _RISING_LOOKBACK])
+        if math.isnan(now50) or math.isnan(then50):
+            return []
+        if not (float(idx[-1]) > now50 and now50 > then50):
+            return []
+
+        completed = [float(d.close) for d in ctx.daily_bars]
+        if len(completed) + 1 < _STOCK_DMA:
+            return []
+        close_now = float(bar.close)
+
+        def rsi_at(price: float) -> float:
+            return float(wilder_rsi([*completed, price], _RSI_PERIOD).iloc[-1])
+
+        current = rsi_at(close_now)
+        if math.isnan(current) or current < p["rsi_entry"]:
+            return []  # already armed — scan()'s live-signal territory (or NaN: fail to zero)
+
+        # Bisect the largest P with RSI(2) < rsi_entry in (0, close_now).
+        lo, hi = close_now * 0.01, close_now
+        if not rsi_at(lo) < p["rsi_entry"]:
+            return []  # even a 99% collapse would not tip it (degenerate history) — nothing to arm
+        for _ in range(50):
+            mid = (lo + hi) / 2.0
+            if rsi_at(mid) < p["rsi_entry"]:
+                lo = mid
+            else:
+                hi = mid
+        trigger = lo
+
+        # The dip must still clear the 200-DMA computed WITH the dip value, or the DMA filter breaks
+        # before the RSI condition can arm.
+        sma200_at = float(sma([*completed, trigger], _STOCK_DMA).iloc[-1])
+        if math.isnan(sma200_at) or not trigger > sma200_at:
+            return []
+
+        return [
+            PendingSetup(
+                strategy_id=self.strategy_id, symbol=bar.symbol, side="BUY", style=self.style,
+                trigger_price=round_to_tick(trigger), last_price=bar.close,
+                condition=(
+                    f"daily close at/below the level tips RSI(2) under {p['rsi_entry']:g} "
+                    "while holding the 200-DMA; index uptrend filter currently PASSING"
+                ),
             )
         ]

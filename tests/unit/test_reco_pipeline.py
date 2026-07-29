@@ -326,7 +326,7 @@ def agent_defs() -> dict[str, AgentDef]:
 
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
-    mode=None, kill=None, notify=None, assembler=None,
+    mode=None, kill=None, notify=None, assembler=None, rearm=None,
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
         "assembler": assembler or FakeAssembler(),
@@ -343,7 +343,7 @@ def make_pipeline(
     pipeline = RecommendationPipeline(
         parts["assembler"], harness, agent_defs(), gate, parts["ctx_builder"], book,
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
-        parts["notify"], clock, calendar, conn, parts["store"],
+        parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
     )
     return pipeline, parts
 
@@ -504,6 +504,36 @@ async def test_agent_failure_alerts_and_writes_no_proposal(
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
     assert len(parts["notify"].messages) == 1
     assert parts["notify"].messages[0].data["value"] == "timeout"
+
+
+async def test_agent_infra_failure_rearms_the_prescreen_slot(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """Owner-directed 2026-07-29: an analyst INFRASTRUCTURE failure hands the (symbol, strategy)
+    day slot back so a still-true condition can re-publish; a governor block (budget policy,
+    the call never went out) must NOT re-arm."""
+    rearmed: list[tuple[str, str]] = []
+
+    harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    cand = candidate()
+    await pipeline.on_signal_candidate(cand)
+    assert rearmed == [(cand.symbol, cand.strategy_id)]
+
+    rearmed.clear()
+    pipeline2, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=FakeGovernor(allowed=False),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    await pipeline2.on_signal_candidate(candidate())
+    assert rearmed == []                                   # governor block: no re-arm
 
 
 async def test_no_action_records_the_regime_note_and_no_proposal(

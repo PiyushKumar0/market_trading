@@ -174,6 +174,9 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("reject", "/reject <approval_id>", "Reject a pending owner-approval request.", True),
     _CommandSpec("token", "/token <request_token>",
                  "Complete the daily Kite login with the request token (§10.2 fallback).", True),
+    _CommandSpec("scan_now", "/scan_now",
+                 "Sweep the scanners on demand: live candidates enter the pipeline; otherwise "
+                 "the reply lists the price levels at which today's setups would arm.", True),
 )
 
 
@@ -243,6 +246,7 @@ class TelegramBot:
         exposure: ExposureTracker | None = None,
         session: SessionManager | None = None,
         conn: sqlite3.Connection | None = None,
+        scan_sweep_fn: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self._token = token
         self._owner_chat_id = int(owner_chat_id)
@@ -259,6 +263,8 @@ class TelegramBot:
         self._exposure = exposure
         self._session = session
         self._conn = conn
+        #: async (trigger) -> owner-facing sweep verdict text (§3.2.5 sweep addendum, 2026-07-29).
+        self._scan_sweep_fn = scan_sweep_fn
         self._app: Application | None = None
         self._bus_attached = False
         # At most one challenge is pending at a time — a new destructive command supersedes the old.
@@ -267,6 +273,11 @@ class TelegramBot:
     def set_reco_book(self, book: RecoBook) -> None:
         """Late-wire the recommendation book (built after the bot in the composition root)."""
         self._reco_book = book
+
+    def set_scan_sweep_fn(self, fn: Callable[[str], Awaitable[str]]) -> None:
+        """Late-wire the ``/scan_now`` sweep (§3.2.5 addendum; the closure needs the pre-screen,
+        which is built after the bot in the composition root)."""
+        self._scan_sweep_fn = fn
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -378,6 +389,7 @@ class TelegramBot:
             "approve": self._cmd_approve,
             "reject": self._cmd_reject,
             "token": self._cmd_token,
+            "scan_now": self._cmd_scan_now,
         }
 
     def _register_handlers(self, app: Application) -> None:
@@ -429,6 +441,23 @@ class TelegramBot:
             lines.append(f"pending_confirm: {self._pending.action} (reply /confirm <phrase>)")
         _log.info("telegram_cmd_status")
         await _reply(update, "\n".join(lines))
+
+    # ------------------------------------------------------------------ /scan_now (§3.2.5 sweep)
+    async def _cmd_scan_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """On-demand scanner sweep (owner-directed 2026-07-29): live candidates enter the normal
+        pipeline; the reply is ALWAYS an explicit verdict — candidates, pending arm levels, or an
+        honest "nothing to trade right now". Never silence."""
+        if self._scan_sweep_fn is None:
+            await _reply(update, "/scan_now: sweep not wired.")
+            return
+        _log.info("telegram_cmd_scan_now")
+        try:
+            text = await self._scan_sweep_fn("scan_now")
+        except Exception as exc:  # noqa: BLE001 - a sweep failure is a reply, never a dead command
+            _log.exception("telegram_scan_now_failed")
+            await _reply(update, f"sweep failed: {type(exc).__name__}: {exc}")
+            return
+        await _reply(update, text)
 
     # ------------------------------------------------------------------ /kill (single-step, wired)
     async def _cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

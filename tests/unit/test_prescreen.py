@@ -25,7 +25,7 @@ from engine.strategy.scanners import (
     params_from_envelope,
     register,
 )
-from engine.strategy.types import ScanContext
+from engine.strategy.types import PendingSetup, ScanContext
 
 
 def _bar(symbol: str = "TCS", day: int = 17, hh: int = 10, mm: int = 0) -> Bar:
@@ -95,6 +95,89 @@ def test_cap_constructor_validation():
         _prescreen(max_candidates_per_day=0)
     with pytest.raises(ValueError):
         _prescreen(max_per_strategy_day=0)
+
+
+# ------------------------------------------------------------------ sweep addendum (2026-07-29)
+def test_rearm_gives_back_the_day_slot():
+    """An analyst INFRASTRUCTURE failure re-arms the (symbol, strategy) day slot so a still-true
+    condition can re-publish (2026-07-29: six candidates burned by a broken analyst were dedupe-
+    blocked for the rest of the day)."""
+    ps = _prescreen()
+    assert len(ps.on_bar(_bar(mm=0))) == 1
+    assert ps.on_bar(_bar(mm=1)) == []                    # slot spent
+    assert ps.rearm("TCS", "stub") is True
+    assert len(ps.on_bar(_bar(mm=2))) == 1                # re-published after re-arm
+    assert ps.rearm("TCS", "nosuch") is False             # nothing to give back
+
+
+def _pending_stub(sid: str = "pend") -> Scanner:
+    """Never fires; always reports one pending arm level (never registered)."""
+
+    class _Pending(Scanner):
+        strategy_id = sid
+        style = "swing"
+        DEFAULT_PARAMS = {}
+
+        def scan(self, bar, ctx):  # noqa: ANN001 - test stub
+            return []
+
+        def pending(self, bar, ctx):  # noqa: ANN001 - test stub
+            return [PendingSetup(strategy_id=sid, symbol=bar.symbol, side="BUY", style="swing",
+                                 trigger_price=Decimal("95"), last_price=bar.close,
+                                 condition="dip to the level")]
+
+    return _Pending()
+
+
+def test_sweep_scans_with_normal_dedupe_and_reports_pending():
+    ps = SignalPreScreen([_stub(), _pending_stub()], lambda bar: ScanContext())
+    accepted, pending = ps.sweep([_bar(symbol="AAA"), _bar(symbol="BBB", mm=1)])
+    assert [c.symbol for c in accepted] == ["AAA", "BBB"]
+    assert [p.symbol for p in pending] == ["AAA", "BBB"]
+    assert ps.seen_today() == 2
+    # Second sweep: the stub's day slots are spent — no re-publication, no double-counting; the
+    # never-published pending strategy keeps reporting its level.
+    accepted2, pending2 = ps.sweep([_bar(symbol="AAA", mm=2)])
+    assert accepted2 == []
+    assert [(p.symbol, p.strategy_id) for p in pending2] == [("AAA", "pend")]
+
+
+def test_sweep_suppresses_pending_for_pairs_that_already_published():
+    """Once (symbol, strategy) published today, its pending arm level is noise — the day slot is
+    spent and a re-break cannot re-enter the pipeline (once-per-day rule)."""
+
+    class _Both(Scanner):
+        strategy_id = "both"
+        style = "intraday"
+        DEFAULT_PARAMS = {}
+
+        def scan(self, bar, ctx):  # noqa: ANN001 - test stub
+            return [self._candidate(bar=bar, ctx=ctx, side="BUY", entry=bar.close, score=1.0)]
+
+        def pending(self, bar, ctx):  # noqa: ANN001 - test stub
+            return [PendingSetup(strategy_id="both", symbol=bar.symbol, side="SELL",
+                                 style="intraday", trigger_price=Decimal("90"))]
+
+    ps = SignalPreScreen([_Both()], lambda bar: ScanContext())
+    accepted, pending = ps.sweep([_bar(symbol="AAA")])
+    assert len(accepted) == 1
+    assert pending == []                                  # published this very sweep — pending muted
+
+
+def test_sweep_never_publishes_itself():
+    """sweep() is worker-thread-safe BECAUSE publication is the caller's job (handle_bar's split):
+    accepted candidates come back unpublished."""
+    bus = EventBus()
+    received = []
+
+    async def handler(event):  # noqa: ANN001
+        received.append(event)
+
+    bus.subscribe(SIGNAL_CANDIDATE_TOPIC, handler)
+    ps = _prescreen(bus=bus)
+    accepted, _pending = ps.sweep([_bar()])
+    assert len(accepted) == 1
+    assert received == []                                 # nothing hit the bus from inside sweep()
 
 
 # ---------------------------------------------------------------------------- publication

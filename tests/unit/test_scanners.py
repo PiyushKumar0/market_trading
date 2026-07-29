@@ -433,3 +433,58 @@ def test_mom_ex_date_skip_horizon():
     assert scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 7, 8)])) == []   # day+21 — inside, skip
     assert len(scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 7, 9)]))) == 1   # day+22 — outside
     assert len(scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 6, 16)]))) == 1  # past ex-date ignored
+
+
+# ------------------------------------------------------------------ pending arm levels (2026-07-29)
+def test_orb_pending_reports_both_range_edges_inside_the_range():
+    """Price INSIDE the auction-seeded range [99.50, 102.00] => both edges reported as arm levels
+    (the sweep's "shift your window to catch it" input)."""
+    inside = Bar(symbol="TCS", ts_minute=_dt(9, 40), open=Decimal("100"), high=Decimal("100.60"),
+                 low=Decimal("99.80"), close=Decimal("100.60"), volume=900)
+    pend = _orb().pending(inside, _orb_ctx(_orb_session(inside)))
+    assert [(p.side, p.trigger_price) for p in pend] == [
+        ("BUY", Decimal("102.00")), ("SELL", Decimal("99.50")),
+    ]
+    assert all(p.strategy_id == "orb" and p.symbol == "TCS" for p in pend)
+    assert all(p.last_price == Decimal("100.60") for p in pend)
+    assert "volume" in pend[0].condition       # the arming volume gate rides along in prose
+
+
+def test_orb_pending_silent_beyond_range_while_forming_and_flagged():
+    trigger = _buy_trigger(_dt(9, 35))                       # beyond the range: scan()'s territory
+    assert _orb().pending(trigger, _orb_ctx(_orb_session(trigger))) == []
+    forming = _uniform_bar(_dt(9, 20))                       # opening range still forming
+    assert _orb().pending(forming, _orb_ctx(_orb_session(forming))) == []
+    inside = Bar(symbol="TCS", ts_minute=_dt(9, 40), open=Decimal("100"), high=Decimal("100.60"),
+                 low=Decimal("99.80"), close=Decimal("100.60"), volume=900)
+    assert _orb().pending(inside, _orb_ctx(_orb_session(inside), flagged=True)) == []
+
+
+def test_rsi2_pending_inverts_the_arm_price():
+    """The bisection contract: the reported dip level brackets the RSI(2) < rsi_entry boundary
+    within one tick, and the level respects the 200-DMA floor."""
+    from engine.strategy.indicators import wilder_rsi
+
+    series = [*RSI2_RISING, 196.5]                           # 199 completed dailies (as scan tests)
+    ctx = ScanContext(daily_bars=_dailies(series), index_daily_closes=UPTREND_INDEX)
+    bar = _swing_bar("199.00")                               # not oversold: no live signal
+    assert Rsi2Scanner().scan(bar, ctx) == []
+    pend = Rsi2Scanner().pending(bar, ctx)
+    assert len(pend) == 1
+    p = pend[0]
+    assert (p.side, p.strategy_id, p.style) == ("BUY", "rsi2", "swing")
+    trigger = float(p.trigger_price)
+    assert trigger < 199.0
+    # One tick below the level: condition holds; one tick above: it does not (bracketing).
+    assert float(wilder_rsi([*series, trigger - 0.05], 2).iloc[-1]) < 10
+    assert float(wilder_rsi([*series, trigger + 0.05], 2).iloc[-1]) >= 10
+    # And the level still clears the 200-DMA computed with the dip in the series.
+    from engine.strategy.indicators import sma
+    assert trigger > float(sma([*series, trigger], 200).iloc[-1])
+
+
+def test_rsi2_pending_silent_when_live_or_regime_off():
+    live_ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX)
+    assert Rsi2Scanner().pending(_swing_bar("194.50"), live_ctx) == []     # already oversold: live
+    flat = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=FLAT_INDEX)
+    assert Rsi2Scanner().pending(_swing_bar("199.00"), flat) == []         # index regime filter off

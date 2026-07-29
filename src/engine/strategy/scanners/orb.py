@@ -42,13 +42,30 @@ from datetime import datetime, time, timedelta
 from engine.core.types import Bar
 from engine.strategy.indicators import rolling_median_volume
 from engine.strategy.scanners.base import Scanner, register
-from engine.strategy.types import ScanContext, Side, SignalCandidate, round_to_tick
+from engine.strategy.types import PendingSetup, ScanContext, Side, SignalCandidate, round_to_tick
 
 #: Plan-pinned base entry window (§6.1: "entries 09:30–14:30"), intersected with the owner window.
 BASE_ENTRY_START = time(9, 30)
 BASE_ENTRY_END = time(14, 30)
 
 _MEDIAN_WINDOW = 20   # §6.1: "20-bar median"
+
+
+def _opening_range(bars: list[Bar], session_open: datetime, range_end: datetime) -> tuple[float, float] | None:
+    """The A14 auction-open-seeded opening range ``(high, low)``, or None if no range bars exist."""
+    range_bars = [b for b in bars if session_open <= b.ts_minute < range_end]
+    if not range_bars:
+        return None
+    range_high = -math.inf
+    range_low = math.inf
+    for b in range_bars:
+        hi, lo = float(b.high), float(b.low)
+        if b.ts_minute == session_open and b.auction_open is not None:
+            hi = max(hi, float(b.auction_open))
+            lo = min(lo, float(b.auction_open))
+        range_high = max(range_high, hi)
+        range_low = min(range_low, lo)
+    return range_high, range_low
 
 
 @register
@@ -86,18 +103,10 @@ class OrbScanner(Scanner):
             return []
 
         # ---- opening range, auction-open-seeded (A14).
-        range_bars = [b for b in bars if ctx.session_open <= b.ts_minute < range_end]
-        if not range_bars:
+        orange = _opening_range(bars, ctx.session_open, range_end)
+        if orange is None:
             return []
-        range_high = -math.inf
-        range_low = math.inf
-        for b in range_bars:
-            hi, lo = float(b.high), float(b.low)
-            if b.ts_minute == ctx.session_open and b.auction_open is not None:
-                hi = max(hi, float(b.auction_open))
-                lo = min(lo, float(b.auction_open))
-            range_high = max(range_high, hi)
-            range_low = min(range_low, lo)
+        range_high, range_low = orange
 
         close_f = float(bar.close)
         side: Side
@@ -141,4 +150,42 @@ class OrbScanner(Scanner):
                 target=target,
                 score=vol_ratio / (2.0 * p["vol_mult"]),
             )
+        ]
+
+    def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
+        """Both range edges as arm levels while price sits INSIDE the opening range (§3.2.5 sweep).
+
+        Reported without the volume/entry-window gates applied — those are conditions of the moment
+        the break happens, which is exactly what the owner is deciding whether to be present for.
+        The base 09:30–14:30 bound rides along in ``condition`` so the owner knows the legal span.
+        """
+        if ctx.flagged or ctx.session_open is None:
+            return []
+        bars = ctx.intraday_bars
+        if not bars:
+            return []
+        p = self.params
+        range_end = ctx.session_open + timedelta(minutes=int(p["orb_minutes"]))
+        if bar.ts_minute < range_end:
+            return []  # range still forming — no level to arm against yet
+        orange = _opening_range(bars, ctx.session_open, range_end)
+        if orange is None:
+            return []
+        range_high, range_low = orange
+        close_f = float(bar.close)
+        if close_f > range_high or close_f < range_low:
+            return []  # already beyond the range — that is scan()'s live-signal territory
+        condition = (
+            f"1m close beyond the level on volume ≥ {p['vol_mult']:g}× 20-bar median; "
+            f"entries legal {BASE_ENTRY_START:%H:%M}–{BASE_ENTRY_END:%H:%M} ∩ trade window"
+        )
+        return [
+            PendingSetup(
+                strategy_id=self.strategy_id, symbol=bar.symbol, side="BUY", style=self.style,
+                trigger_price=round_to_tick(range_high), last_price=bar.close, condition=condition,
+            ),
+            PendingSetup(
+                strategy_id=self.strategy_id, symbol=bar.symbol, side="SELL", style=self.style,
+                trigger_price=round_to_tick(range_low), last_price=bar.close, condition=condition,
+            ),
         ]

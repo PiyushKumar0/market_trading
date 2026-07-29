@@ -46,7 +46,7 @@ from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings, load_yaml
 from engine.core.db import connect
-from engine.core.enums import Actor, RiskState
+from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import configure_logging, get_logger
 from engine.core.migrations import apply_migrations
@@ -69,6 +69,7 @@ from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.bar_builder import BarBuilder
 from engine.marketdata.reconcile import ReconcileJob
 from engine.marketdata.store import MarketStore
+from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, login_prompt
 from engine.ops.health import HealthMonitor
 from engine.ops.heartbeat import HeartbeatWriter
@@ -555,6 +556,9 @@ async def run() -> int:
         RecommendationPipeline(
             assembler, harness, agent_defs, gate, ctx_builder, book, mode, kill,
             governor, exposure, limits_engine, notify, clock, calendar, conn, store,
+            # Late-bound like momentum_universe below: `prescreen` is constructed a few lines further
+            # down; the lambda resolves it at call time (an analyst failure long after wiring).
+            rearm=lambda sym, sid: prescreen.rearm(sym, sid),
         )
         if harness is not None else None
     )
@@ -1001,12 +1005,84 @@ async def run() -> int:
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
 
+    # --- on-demand scanner sweep (§3.2.5 addendum, owner-directed 2026-07-29): the answer to "what
+    #     could I trade right now, and at what price would today's setups arm?" Runs when the trade
+    #     window becomes ACTIVE and on /scan_now. Live candidates re-enter the NORMAL pipeline path
+    #     (dedupe/caps intact); the verdict is never silence. ---
+    async def run_scan_sweep(trigger: str) -> str:
+        now = clock.now()
+        session_day = calendar.session(now.date())
+        if session_day is None or not (session_day.open <= now <= session_day.close):
+            return "no session in progress — the sweep reads live bars; try during market hours"
+
+        def _collect_and_scan():
+            latest = []
+            for sym in watchlist_symbols():
+                tail = store.get_bars_1m(sym, session_day.open, now)
+                if tail:
+                    latest.append(tail[-1])
+            return prescreen.sweep(latest)
+
+        accepted, pendings = await asyncio.to_thread(_collect_and_scan)
+        for cand in accepted:
+            await bus.apublish("signal.candidate", cand)
+
+        def _distance(p) -> float:
+            if p.trigger_price is None or p.last_price is None or p.last_price == 0:
+                return float("inf")
+            return abs(float(p.trigger_price) - float(p.last_price)) / float(p.last_price)
+
+        pend_lines = []
+        for p in sorted((p for p in pendings if p.trigger_price is not None), key=_distance)[:10]:
+            direction = "above" if p.last_price is not None and p.trigger_price > p.last_price else "below"
+            pend_lines.append(
+                f"{p.symbol} {p.strategy_id} {p.side} arms {direction} ₹{p.trigger_price}"
+                + (f" (now ₹{p.last_price}, {_distance(p) * 100:.1f}% away)" if p.last_price else "")
+            )
+        published = [
+            f"{c.symbol} {c.strategy_id} {c.side} @ ₹{c.raw_levels.entry}" for c in accepted
+        ]
+        msg = catalog.scan_sweep(
+            trigger=trigger, published=published, pending_lines=pend_lines,
+            suppressed_today=prescreen.seen_today(),
+        )
+        _log.info("scan_sweep_done", trigger=trigger, published=len(published),
+                  pending=len(pend_lines), suppressed=prescreen.seen_today())
+        if trigger != "scan_now":       # /scan_now gets the body as its direct reply — no double send
+            await notify(msg)
+        return msg.body
+
+    # Fire the sweep on the window-INACTIVE→ACTIVE edge (covers both the daily window-open moment
+    # and an owner moving/extending the window onto "now").
+    _window_active = {"was": False}
+
+    async def window_sweep_tick() -> None:
+        now = clock.now()
+        session_day = calendar.session(now.date())
+        window = mode.get_trade_window()
+        active = bool(
+            session_day is not None and window is not None
+            and session_day.open <= now <= session_day.close
+            and window.start <= now.time() <= window.end
+            and mode.mode() in (Mode.RECOMMEND, Mode.AUTO)
+        )
+        was, _window_active["was"] = _window_active["was"], active
+        if active and not was:
+            try:
+                await run_scan_sweep("window_open")
+            except Exception:  # noqa: BLE001 - a sweep failure must never take down the scheduler
+                _log.exception("window_open_sweep_failed")
+
+    if telegram is not None:
+        telegram.set_scan_sweep_fn(run_scan_sweep)
+
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
     _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
                    ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
                    scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
-                   warmup_refresh=warmup_refresh, catchup_sweep=catchup_sweep)
+                   warmup_refresh=warmup_refresh, catchup_sweep=catchup_sweep,
+                   window_sweep_tick=window_sweep_tick)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -1145,6 +1221,7 @@ def _arm_live_jobs(
     news_ingest: NewsIngest, resolve_news,
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
     scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
+    window_sweep_tick=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -1209,6 +1286,11 @@ def _arm_live_jobs(
         # Missed-job sweep for sleep/resume gaps (watermark-deduped ⇒ idempotent; see wiring note).
         scheduler.add_job(catchup_sweep, trigger=IntervalTrigger(seconds=1800),
                           job_id="catchup_sweep", guard=False)
+    if window_sweep_tick is not None:
+        # §3.2.5 sweep addendum (2026-07-29): fire the scanner sweep on the trade-window
+        # INACTIVE→ACTIVE edge — the "what could I trade right now?" verdict is never silent.
+        scheduler.add_job(window_sweep_tick, trigger=IntervalTrigger(seconds=60),
+                          job_id="window_sweep_tick", guard=False)
 
 
 # --------------------------------------------------------------------------- backup (§10.5)
