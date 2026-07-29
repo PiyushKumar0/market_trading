@@ -90,6 +90,10 @@ class SignalPreScreen:
         self._lock = threading.Lock()
         self._day: date | None = None
         self._seen: set[tuple[str, str]] = set()      # (symbol, strategy_id) already emitted today
+        #: Pairs that have been CHARGED against the daily caps (2026-07-29 owner decision:
+        #: a re-armed pair re-publishes within its already-paid quota — caps count unique pairs,
+        #: not publications, or re-arm cycles would exhaust the day cap without one evaluation).
+        self._charged: set[tuple[str, str]] = set()
         self._count_day = 0
         self._count_by_strategy: dict[str, int] = {}
 
@@ -170,6 +174,7 @@ class SignalPreScreen:
             if day != self._day:
                 self._day = day
                 self._seen.clear()
+                self._charged.clear()
                 self._count_day = 0
                 self._count_by_strategy.clear()
 
@@ -182,14 +187,18 @@ class SignalPreScreen:
                         # Same (symbol, strategy) already fired today — a breakout re-closing beyond
                         # the range every minute must not re-trigger Tier-1 (D5 dedupe).
                         continue
-                    if self._count_day >= self._max_day:
+                    # Caps bind on UNIQUE pairs (2026-07-29): a re-armed pair re-publishes within
+                    # its already-paid quota; only a NEW pair can be suppressed by a full cap.
+                    charged = key in self._charged
+                    if not charged and self._count_day >= self._max_day:
                         _log.info(
                             "prescreen_cap_suppressed", cap="day", symbol=cand.symbol,
                             strategy_id=cand.strategy_id, max_candidates_per_day=self._max_day,
                         )
                         continue
                     per_strategy = self._count_by_strategy.get(cand.strategy_id, 0)
-                    if self._max_strategy_day is not None and per_strategy >= self._max_strategy_day:
+                    if (not charged and self._max_strategy_day is not None
+                            and per_strategy >= self._max_strategy_day):
                         _log.info(
                             "prescreen_cap_suppressed", cap="strategy_day", symbol=cand.symbol,
                             strategy_id=cand.strategy_id, max_per_strategy_day=self._max_strategy_day,
@@ -199,8 +208,10 @@ class SignalPreScreen:
                     # catalyst_guard.max_catalyst_entries_day here (§3.2.5/§7.1), loaded via
                     # ProtectedStore.load_verified — never evaluated in RiskGate (§2.4 item 4).
                     self._seen.add(key)
-                    self._count_day += 1
-                    self._count_by_strategy[cand.strategy_id] = per_strategy + 1
+                    if not charged:
+                        self._charged.add(key)
+                        self._count_day += 1
+                        self._count_by_strategy[cand.strategy_id] = per_strategy + 1
                     accepted.append(cand)
                     _log.info(
                         "signal_candidate", signal_id=cand.signal_id, strategy_id=cand.strategy_id,

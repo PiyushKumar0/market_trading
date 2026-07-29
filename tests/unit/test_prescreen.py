@@ -99,15 +99,28 @@ def test_cap_constructor_validation():
 
 # ------------------------------------------------------------------ sweep addendum (2026-07-29)
 def test_rearm_gives_back_the_day_slot():
-    """An analyst INFRASTRUCTURE failure re-arms the (symbol, strategy) day slot so a still-true
-    condition can re-publish (2026-07-29: six candidates burned by a broken analyst were dedupe-
-    blocked for the rest of the day)."""
+    """A never-evaluated drop re-arms the (symbol, strategy) day slot so a still-true condition
+    can re-publish (2026-07-29: six candidates burned by a broken analyst were dedupe-blocked for
+    the rest of the day)."""
     ps = _prescreen()
     assert len(ps.on_bar(_bar(mm=0))) == 1
     assert ps.on_bar(_bar(mm=1)) == []                    # slot spent
     assert ps.rearm("TCS", "stub") is True
     assert len(ps.on_bar(_bar(mm=2))) == 1                # re-published after re-arm
     assert ps.rearm("TCS", "nosuch") is False             # nothing to give back
+
+
+def test_caps_charge_once_per_pair_across_rearm_cycles():
+    """2026-07-29 owner decision: caps bind on UNIQUE pairs. A re-armed pair re-publishes within
+    its already-paid quota even with the cap full; a NEW pair is still suppressed. Without this,
+    an out-of-window re-arm/re-publish cycle would exhaust the day cap with zero evaluations."""
+    ps = _prescreen(max_candidates_per_day=1)
+    assert len(ps.on_bar(_bar(symbol="AAA", mm=0))) == 1  # cap now full (1/1 unique pair)
+    for cycle in range(3):                                # re-arm/re-publish churns freely
+        assert ps.rearm("AAA", "stub") is True
+        assert len(ps.on_bar(_bar(symbol="AAA", mm=1 + cycle))) == 1, f"cycle {cycle}"
+    assert ps.on_bar(_bar(symbol="BBB", mm=9)) == []      # a NEW pair still hits the full cap
+    assert ps.seen_today() == 1
 
 
 def _pending_stub(sid: str = "pend") -> Scanner:

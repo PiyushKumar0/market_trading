@@ -500,6 +500,11 @@ class RecommendationPipeline:
         self._forwarded_day: date | None = None
         self._forwarded_count = 0
 
+    def _rearm_slot(self, candidate: SignalCandidate) -> None:
+        """Hand the (symbol, strategy) day slot back after a never-evaluated drop (2026-07-29)."""
+        if self._rearm is not None:
+            self._rearm(candidate.symbol, candidate.strategy_id)
+
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
         """§5.2 trigger (a). Also usable directly as a ``signal.candidate`` bus handler.
@@ -508,17 +513,35 @@ class RecommendationPipeline:
         ``trade_window``); every earlier check is cheaper still. A governor block fails to
         no-proposal (D7) — silently, because "we did not call" is already an ``agent_calls`` row.
         """
+        # Drops where the candidate was NEVER EVALUATED hand the prescreen day slot back
+        # (2026-07-29 owner decision) so a still-true condition is waiting when conditions change
+        # (window opens, freeze lifts, mode returns). The prescreen charges its caps once per pair,
+        # so the re-arm/re-publish cycle can never exhaust a day cap. Deliberate NON-re-arms:
+        # a governor block (budget policy), the forward cap (the analyst quota was spent on real
+        # evaluations), and an unsizeable candidate (no stop ⇒ nothing to wait for today).
         if self._mode.mode() not in (Mode.RECOMMEND, Mode.AUTO):
+            self._rearm_slot(candidate)
             return
         if self._mode.risk_state() != RiskState.NORMAL:
+            self._rearm_slot(candidate)
             return
         if self._kill.is_killed():
+            self._rearm_slot(candidate)
             return
         d = self._clock.today()
         window = self._window(d)
         if window is None or not (window[0] <= self._clock.now() <= window[1]):
             _log.info("signal_candidate_out_of_window", signal_id=candidate.signal_id,
                       symbol=candidate.symbol)
+            self._rearm_slot(candidate)
+            return
+        if candidate.raw_levels.stop is None:
+            # No stop level ⇒ max_qty_by_risk is 0 ⇒ a guaranteed no_action — never spend an
+            # analyst call on it (2026-07-29 owner decision; today: `mom` until ledger-driven
+            # rebalance state lands). The day slot stays consumed: no stop will appear today.
+            _log.info("signal_candidate_unsizeable", signal_id=candidate.signal_id,
+                      symbol=candidate.symbol, strategy_id=candidate.strategy_id,
+                      reason="no stop level — cannot size, analyst call would be wasted")
             return
         decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
         if not decision.allowed:

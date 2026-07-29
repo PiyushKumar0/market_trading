@@ -536,6 +536,57 @@ async def test_agent_infra_failure_rearms_the_prescreen_slot(
     assert rearmed == []                                   # governor block: no re-arm
 
 
+async def test_never_evaluated_drops_rearm_the_slot(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-07-29 owner decision: out-of-window / mode / freeze drops re-arm the day slot (the
+    candidate was never evaluated) — so a still-true condition is waiting when the window opens."""
+    rearmed: list[tuple[str, str]] = []
+
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)      # outside the seeded 10:00–10:30 window
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    cand = candidate()
+    await pipeline.on_signal_candidate(cand)
+    assert rearmed == [(cand.symbol, cand.strategy_id)]       # out-of-window → slot back
+
+    rearmed.clear()
+    ticker.at = datetime(2026, 6, 17, 10, 15, tzinfo=IST)     # back inside the window
+    pipeline_off, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), mode=FakeMode(mode=Mode.OFF),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    await pipeline_off.on_signal_candidate(candidate())
+    assert len(rearmed) == 1                                  # mode OFF → slot back
+
+
+async def test_stopless_candidate_never_reaches_the_analyst(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-07-29 owner decision: no stop level ⇒ max_qty_by_risk is 0 ⇒ a guaranteed no_action —
+    the analyst call is never spent (today: `mom` until rebalance state lands). The slot stays
+    consumed (no stop will appear today) and the forward cap is not charged."""
+    rearmed: list[tuple[str, str]] = []
+    harness = FakeHarness()                 # any call would raise "more times than results"
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    stopless = candidate(raw_levels=RawLevels(entry=Decimal("100.00")))
+    await pipeline.on_signal_candidate(stopless)
+    assert harness.calls == []                                # no analyst spend
+    assert rearmed == []                                      # slot deliberately NOT re-armed
+    assert pipeline._forwarded_count == 0                     # forward cap untouched
+
+
 async def test_no_action_records_the_regime_note_and_no_proposal(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
