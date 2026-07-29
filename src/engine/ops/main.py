@@ -670,6 +670,7 @@ async def run() -> int:
     async def job_universe() -> None:
         await leverage.refresh()          # 08:15/08:20 inputs re-read on catch-up (self-refresh, §3.2.4)
         await surveillance.current()
+        before = set(watchlist_symbols())
         await universe_builder.build(clock.today())
         # Re-point the feed AND the warm-up coverage set at today's universe (2026-07-28 review: both
         # were frozen at boot, so a pre-08:30 start ran the whole day on YESTERDAY's watchlist).
@@ -679,6 +680,18 @@ async def run() -> int:
                 await ticker.update_subscriptions(ticker_tokens())
         except Exception:  # noqa: BLE001 - a resubscribe failure degrades to the old set, never fails the job
             _log.exception("ticker_resubscribe_failed")
+        # Symbols ENTERING the watchlist mid-session have no session bars yet, and the boot/post-login
+        # gap fill ran against the PREVIOUS set (2026-07-29: SWIGGY/TITAN entered 15 s after the fill
+        # and their 09:15→09:53 hole kept warm-up FROZEN all day). Fill the newcomers' minutes now —
+        # the gate is already watching them. Pre-open builds skip this (nothing missed yet).
+        added = [s for s in watchlist_symbols() if s not in before]
+        session = calendar.session(clock.today())
+        if added and backfill is not None and session is not None and clock.now() > session.open:
+            try:
+                gap = await backfill.warmup_gap(added, session.open, clock.now())
+                _log.info("universe_added_gap_filled", symbols=added, bars=gap.bars_written)
+            except Exception:  # noqa: BLE001 - a failed fill leaves the gate blocking (fail closed), never fails the job
+                _log.exception("universe_added_gap_fill_failed", symbols=added)
 
     # ONE writer through the news chain at a time (2026-07-28 review): the three per-feed polls fire
     # on independent intervals and the scorer writes whole cluster rows back — un-serialized, a poll

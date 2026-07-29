@@ -186,12 +186,20 @@ async def regime_and_warmup_backfill(
     warm-up never needs live ticks. Extracted so startup and the post-login re-trigger issue the
     IDENTICAL calls. Returns bars written per leg (``{"regime_daily_bars", "warmup_gap_bars"}``)."""
     today = clock.today()
+    session = calendar.session(today)
+    # The day-interval end is clamped to YESTERDAY until today's session has closed: an intraday
+    # fetch returns today's RUNNING candle, and writing it advances the observed-through checkpoint
+    # so the 18:05 daily_bars job skips the day — freezing a partial snapshot as today's daily bar
+    # forever (2026-07-29: NIFTY 50/VIX closes stuck at the 09:53 boot's LTP until repaired).
+    # Today's FINAL bar is the evening job's business, never an intraday fetch's.
+    day_end = today
+    if session is not None and clock.now() <= session.close:
+        day_end = today - timedelta(days=1)
     day_report = await backfill.run(
         [index_symbol, vix_symbol], "day",
-        today - timedelta(days=365 * settings.data.backfill_daily_years), today,
+        today - timedelta(days=365 * settings.data.backfill_daily_years), day_end,
     )
     written = {"regime_daily_bars": day_report.bars_written, "warmup_gap_bars": 0}
-    session = calendar.session(today)
     watch = watchlist_symbols()
     if session is not None and watch:
         gap_report = await backfill.warmup_gap(watch, session.open, clock.now())

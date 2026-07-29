@@ -94,7 +94,7 @@ class FakeBackfill:
     async def run(self, symbols, interval, start, end):
         if self.boom:
             raise RuntimeError("backfill exploded")
-        self.run_calls.append((list(symbols), interval))
+        self.run_calls.append((list(symbols), interval, start, end))
         return SimpleNamespace(bars_written=len(list(symbols)) * 10)
 
     async def warmup_gap(self, symbols, frm, to):
@@ -317,6 +317,37 @@ async def test_resume_ticker_skips_without_valid_token(clock):
     status = await resume_ticker(FakeSession(valid=False), FakeKite([]), ticker, lambda: [1, 2, 3])
     assert status == "skipped_no_token"
     assert ticker.started is None
+
+
+# --------------------------------------------------------------------------- day-leg end clamp (2026-07-29)
+@pytest.mark.asyncio
+async def test_day_backfill_end_clamps_to_yesterday_until_session_close(clock, calendar_fixture=None):
+    """2026-07-29: a day-interval fetch through 'today' DURING the session returns today's RUNNING
+    candle; writing it advances the observed-through checkpoint, so the evening daily_bars job then
+    skips the day and a partial snapshot freezes as today's bar. The day leg must stop at yesterday
+    until the session has closed — today's final bar is the evening job's business."""
+    import datetime as _dt
+
+    from engine.core.clock import IST, Clock
+    from engine.ops.post_login import regime_and_warmup_backfill
+
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
+    bf = FakeBackfill()
+    # conftest clock is 2026-06-17 10:05 IST — mid-session on a trading day → clamp to yesterday.
+    await regime_and_warmup_backfill(bf, clock, calendar, load_settings(),
+                                     lambda: [], "NIFTY 50", "INDIA VIX")
+    _syms, interval, _start, end = bf.run_calls[0]
+    assert interval == "day"
+    assert end == _dt.date(2026, 6, 16)
+
+    # Post-close the same day: today's candle is final and fetchable → end is today.
+    evening = Clock(time_source=lambda: _dt.datetime(2026, 6, 17, 19, 0, tzinfo=IST))
+    cal2 = NSECalendar(config_dir() / "calendar", evening, strict=False)
+    bf2 = FakeBackfill()
+    await regime_and_warmup_backfill(bf2, evening, cal2, load_settings(),
+                                     lambda: [], "NIFTY 50", "INDIA VIX")
+    *_rest, end2 = bf2.run_calls[0]
+    assert end2 == _dt.date(2026, 6, 17)
 
 
 # --------------------------------------------------------------------------- warm-up gate reapply / lift
