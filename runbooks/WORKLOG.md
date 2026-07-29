@@ -1,5 +1,37 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-29 (day — FIRST LIVE RECOMMEND WINDOW; union-schema disengage found+fixed)
+
+- **Owner enabled RECOMMEND 10:48, set trade window 11:00–11:30, re-login lifted the freeze**
+  (the 10:49 restart + re-login healed SWIGGY/TITAN: gap-fill wrote exactly their 78 missing
+  minutes; risk NORMAL 10:51).
+- **11:00:05 — first candidates in platform history**: six intraday signals (ADANIGREEN, BSE,
+  GVT&D, INFY, M&M, TATASTEEL); forward cap 6/6 enforced; analyst calls fired… **and every one
+  died `schema_invalid`** (~$0.50 across D7 retries; window produced zero recommendations).
+- **ROOT CAUSE (pinned by SDK matrix)**: the runtime's `output_format` **silently falls back to
+  TEXT mode for any schema containing a oneOf/anyOf union** — root-level, wrapped in an object,
+  or de-discriminated, all disengage; a flat object engages. The intraday agent is the only one
+  whose schema is a union (`IntradayOutput` discriminated on `action`) — news/planner/nightly are
+  flat objects, which is why yesterday's fix validated on them. With the knob dead, sonnet answered
+  in PURE fenced blocks and D7's no-fence rule rejected them ×3 per candidate. Model output also
+  drifted fields without coaching ("entry"/"qty" vs "enter"/"quantity") — the CLI's schema
+  validation would have caught both.
+- **Fixes** (suite green, verified STRUCTURED against the live SDK on sonnet):
+  1. `intraday_guidance_json_schema()` — FLAT merge of the §5.2 union for the knob (action enum +
+     every model-emitted field, only `action` required); the discriminated union in
+     `parse_intraday` stays the authoritative client-side contract (§8.1). Coverage pinned by test
+     (fails if a union keyword returns or a variant grows an unguided field).
+  2. Harness `_validate` narrow unwrap: a response that is EXACTLY one fenced block and nothing
+     else is the JSON in CLI framing — unwrapped deterministically. Prose+fence still rejected
+     (D7 pin unchanged, test kept).
+  3. (morning) `job_universe` gap-fills symbols ENTERING the watchlist mid-session (SWIGGY/TITAN
+     class); `regime_and_warmup_backfill` clamps its day-interval end to YESTERDAY until session
+     close (the partial-candle checkpoint poisoning: NIFTY 50/VIX got checkpointed "complete
+     through today" off the 09:53 boot's running candle).
+- **PENDING TONIGHT (before 18:05)**: one-off SQLite rewind of NIFTY 50 + INDIA VIX day
+  checkpoints 2026-07-29 → 2026-07-28 (monotonic MAX means the clamp fix cannot retreat them);
+  the 18:05 daily_bars then overwrites today's partial index bars with finals.
+
 ## 2026-07-28 (night — fixes DEPLOYED at 21:09; boot verified clean)
 
 - **Repair executed with owner approval** (service ACL denies unelevated stop; owner accepted the
