@@ -1,5 +1,20 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-29 (late afternoon — owner ruled on follow-ups #1 and #2; implemented + deployed)
+
+- **#1 Out-of-window slot burn FIXED**: every never-evaluated drop (out-of-window, mode OFF,
+  freeze, kill — plus the existing analyst infra-failure path) now re-arms the (symbol, strategy)
+  day slot via `pipeline._rearm_slot`; the prescreen charges its daily caps ONCE per unique pair
+  (`_charged` set), so re-arm/re-publish cycles can never exhaust a cap while a full cap still
+  suppresses new pairs. Deliberate non-re-arms: governor blocks, forward cap, real evaluations.
+- **#2 Stopless candidates held from the analyst**: `raw_levels.stop is None` (today: every `mom`
+  candidate until rebalance state lands) short-circuits before the governor/forward cap with
+  `signal_candidate_unsizeable` — no more guaranteed-no_action analyst spends (2× today ≈ ₹6 each).
+  Slot deliberately stays consumed (no stop can appear intraday). `trend` ships an ATR trail stop,
+  so only `mom` is affected.
+- Still open for the owner: #3 analyst catalyst-weighting (§5.2 prompt), tomorrow's real trade
+  window (sticky value is still the 15:12–15:25 validation stub), phase-end push approval.
+
 ## 2026-07-29 (afternoon — sweep addendum: "what could I trade right now?" is never silent)
 
 - **12:15 self-service deploy** (owner granted service-control ACL — no more UAC): all four morning
