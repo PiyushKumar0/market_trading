@@ -20,6 +20,20 @@
   orb = auction-seeded range edges; rsi2 = bisection-inverted dip close that tips RSI(2) under
   the threshold while holding its 200-DMA. Informational only; §2.4 origination boundary intact.
 - Tests: prescreen sweep/rearm ×4, scanner pending ×4, pipeline rearm ×1 — all green.
+- **13:50 FIRST FULL PRODUCTION CHAIN** (13:49–14:30 owner window, sweep-deployed at 13:49):
+  `scan_sweep_done trigger=window_open published=1 pending=10 suppressed=7`; forward cap 6/6;
+  analyst evaluated all six — REASONED no_actions: CGPOWER(rsi2 0.97) vetoed BY THE DAY PLAN
+  ("avoid: −3.8% overnight gap, unknown origin" — planner→analyst coherence working),
+  mom candidates zeroed by `max_qty_by_risk=0` (no stop level ⇒ no permissible size),
+  GVT&D/KOTAKBANK declined on absent catalyst support, one stale ORB breakdown called "late".
+  Zero recommendations is the CORRECT output of this input set. All auditable in `agent_calls`.
+- **Follow-ups observed (not defects, design questions for the owner)**: (1) out-of-window
+  publications consume the day slot without evaluation (the 12:16/13:46 batches) — candidate
+  re-arm-on-out-of-window needs cap-charge-once semantics before it's safe; sweep+restart covered
+  it today. (2) `mom` candidates ship stop=None ⇒ guaranteed no_action at max_qty_by_risk=0 —
+  either derive a default stop or stop forwarding them until ledger-driven rebalance state lands.
+  (3) Analyst leans hard on catalyst absence for price-baseline strategies — §5.2 prompt-weighting
+  question (rsi2's backtested edge does not require catalyst support).
 
 ## 2026-07-29 (day — FIRST LIVE RECOMMEND WINDOW; union-schema disengage found+fixed)
 
