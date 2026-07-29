@@ -14,6 +14,13 @@
   so only `mom` is affected.
 - Still open for the owner: #3 analyst catalyst-weighting (§5.2 prompt), tomorrow's real trade
   window (sticky value is still the 15:12–15:25 validation stub), phase-end push approval.
+- **20:07 — catchup_sweep's first real firing PASSED**: machine slept ~17:5x→20:05 through the
+  whole evening-job window (Monday's session-killer scenario); on resume the 30-min sweep caught up
+  the entire batch inside two minutes (bhavcopy, daily_bars 50 final bars, features_daily, filings
+  ×3, earnings_calendar) + catch-up report to Telegram. Index finals had already replaced today's
+  partial bars at the 16:37 post-close boot (observed-through + session-clamp verified end-to-end);
+  checkpoints honest at 2026-07-29. Every data-integrity fix of the last 48h has now fired against
+  its real failure scenario and held.
 
 ## 2026-07-29 (afternoon — sweep addendum: "what could I trade right now?" is never silent)
 
