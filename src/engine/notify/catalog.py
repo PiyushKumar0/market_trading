@@ -624,41 +624,96 @@ def budget_tier(old: str, new: str, month_spend: Decimal) -> CatalogMessage:
     )
 
 
+#: Owner-facing strategy names (2026-07-29 feedback: "orb/rsi2 are not easy to understand").
+STRATEGY_LABELS: dict[str, str] = {
+    "orb": "intraday breakout",
+    "rsi2": "swing dip-buy",
+    "trend": "swing trend-follow",
+    "mom": "swing momentum",
+    "cat": "news catalyst",
+}
+
+_STYLE_HEADERS: dict[str, str] = {
+    "intraday": "INTRADAY (square off the same day)",
+    "swing": "SWING (hold for days)",
+    "position": "POSITION (longer hold)",
+}
+
+
+def _sweep_trade_line(row: dict[str, Any], *, live: bool) -> list[str]:
+    """Two lines per setup: the WHAT (symbol/side/label/level) and the PLAN (stop/target/exit).
+
+    ``row`` keys: symbol, side, strategy_id, entry|trigger, arms_when, last, stop, target,
+    exit_rule, held (all optional except symbol/side/strategy_id).
+    """
+    label = STRATEGY_LABELS.get(row.get("strategy_id", ""), row.get("strategy_id", "?"))
+    held = "  ← you HOLD this" if row.get("held") else ""
+    if live:
+        head = f"• {row['symbol']} {row['side']} ({label}){held}"
+        detail = f"  entry ₹{row.get('entry', '?')}"
+    else:
+        verb = "breaks above" if row.get("arms_when") == "above" else "dips below"
+        now = f" (now ₹{row['last']})" if row.get("last") is not None else ""
+        head = f"• {row['symbol']} {row['side']} if price {verb} ₹{row.get('trigger', '?')}{now}{held}"
+        detail = f"  entry ₹{row.get('trigger', '?')}"
+    if row.get("stop") is not None:
+        detail += f" · stop ₹{row['stop']}"
+    if row.get("target") is not None:
+        detail += f" · target ₹{row['target']}"
+    elif row.get("exit_rule"):
+        detail += f" · {row['exit_rule']}"
+    return [head, detail]
+
+
+def _sweep_section(rows: list[dict[str, Any]], *, live: bool) -> list[str]:
+    """Group rows under their style header, intraday first (2026-07-29: separate the trade types)."""
+    out: list[str] = []
+    for style in ("intraday", "swing", "position"):
+        block = [r for r in rows if r.get("style") == style]
+        if not block:
+            continue
+        out.append(_STYLE_HEADERS[style] + ":")
+        for row in block:
+            out += _sweep_trade_line(row, live=live)
+    return out
+
+
 def scan_sweep(
     *,
     trigger: str,
-    published: list[str],
-    pending_lines: list[str],
+    live: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
     suppressed_today: int,
 ) -> CatalogMessage:
     """§3.2.5 sweep verdict (2026-07-29): the owner always hears SOMETHING when a sweep runs.
 
-    ``published`` — "SYMBOL strategy SIDE @ entry" lines for candidates entering the pipeline now;
-    ``pending_lines`` — pre-rendered "SYMBOL strategy arms below/above ₹N (now ₹M)" lines;
-    ``suppressed_today`` — (symbol, strategy) pairs whose day slot is already spent.
+    Rendering per owner feedback (2026-07-29): trade types grouped intraday/swing, every setup
+    shows its full plan (entry + stop + target or exit rule), friendly strategy names, held
+    positions flagged. ``live`` rows are candidates entering the pipeline now; ``pending`` rows are
+    would-arm levels; ``suppressed_today`` counts day slots already spent.
     """
-    if published:
-        headline = f"{len(published)} candidate(s) qualify — evaluating now"
-    elif pending_lines:
+    if live:
+        headline = f"{len(live)} candidate(s) qualify — evaluating now"
+    elif pending:
         headline = "Nothing to trade right now — nearest setups below"
     else:
         headline = "Nothing to trade right now — no live or pending setups"
-    lines = [f"trigger: {trigger}", headline]
-    if published:
-        lines += ["", "live:"] + [f"  {p}" for p in published]
-    if pending_lines:
-        lines += ["", "pending (arm levels):"] + [f"  {p}" for p in pending_lines]
+    lines = [headline]
+    if live:
+        lines += ["", "▶ LIVE — sent to the analyst:"] + _sweep_section(live, live=True)
+    if pending:
+        lines += ["", "⏳ NOT YET TRIGGERED — would arm at:"] + _sweep_section(pending, live=False)
     if suppressed_today:
-        lines += ["", f"{suppressed_today} setup(s) already evaluated today (once-per-day rule)"]
+        lines += ["", f"({suppressed_today} setup(s) already evaluated today — once-per-day rule)"]
     return CatalogMessage(
         kind=MessageKind.SCAN_SWEEP,
-        title="Scan sweep: " + ("candidates found" if published else "nothing to trade right now"),
+        title="Scan sweep: " + ("candidates found" if live else "nothing to trade right now"),
         body="\n".join(lines),
         severity="info",
         data={
             "trigger": trigger,
-            "published": published,
-            "pending": pending_lines,
+            "live": live,
+            "pending": pending,
             "suppressed_today": suppressed_today,
         },
     )

@@ -1032,22 +1032,34 @@ async def run() -> int:
                 return float("inf")
             return abs(float(p.trigger_price) - float(p.last_price)) / float(p.last_price)
 
-        pend_lines = []
-        for p in sorted((p for p in pendings if p.trigger_price is not None), key=_distance)[:10]:
-            direction = "above" if p.last_price is not None and p.trigger_price > p.last_price else "below"
-            pend_lines.append(
-                f"{p.symbol} {p.strategy_id} {p.side} arms {direction} ₹{p.trigger_price}"
-                + (f" (now ₹{p.last_price}, {_distance(p) * 100:.1f}% away)" if p.last_price else "")
-            )
-        published = [
-            f"{c.symbol} {c.strategy_id} {c.side} @ ₹{c.raw_levels.entry}" for c in accepted
+        held = set(held_symbols())
+        live_rows = [
+            {
+                "symbol": c.symbol, "side": c.side, "strategy_id": c.strategy_id, "style": c.style,
+                "entry": str(c.raw_levels.entry),
+                "stop": None if c.raw_levels.stop is None else str(c.raw_levels.stop),
+                "target": None if c.raw_levels.target is None else str(c.raw_levels.target),
+                "held": c.symbol in held,
+            }
+            for c in accepted
+        ]
+        pending_rows = [
+            {
+                "symbol": p.symbol, "side": p.side, "strategy_id": p.strategy_id, "style": p.style,
+                "trigger": str(p.trigger_price), "arms_when": p.arms_when,
+                "last": None if p.last_price is None else str(p.last_price),
+                "stop": None if p.stop_price is None else str(p.stop_price),
+                "target": None if p.target_price is None else str(p.target_price),
+                "exit_rule": p.exit_rule, "held": p.symbol in held,
+            }
+            for p in sorted((p for p in pendings if p.trigger_price is not None), key=_distance)[:10]
         ]
         msg = catalog.scan_sweep(
-            trigger=trigger, published=published, pending_lines=pend_lines,
+            trigger=trigger, live=live_rows, pending=pending_rows,
             suppressed_today=prescreen.seen_today(),
         )
-        _log.info("scan_sweep_done", trigger=trigger, published=len(published),
-                  pending=len(pend_lines), suppressed=prescreen.seen_today())
+        _log.info("scan_sweep_done", trigger=trigger, published=len(live_rows),
+                  pending=len(pending_rows), suppressed=prescreen.seen_today())
         if trigger != "scan_now":       # /scan_now gets the body as its direct reply — no double send
             await notify(msg)
         return msg.body

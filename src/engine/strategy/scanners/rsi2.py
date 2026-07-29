@@ -140,7 +140,10 @@ class Rsi2Scanner(Scanner):
         return [
             PendingSetup(
                 strategy_id=self.strategy_id, symbol=bar.symbol, side="BUY", style=self.style,
-                trigger_price=round_to_tick(trigger), last_price=bar.close,
+                trigger_price=round_to_tick(trigger), arms_when="below", last_price=bar.close,
+                stop_price=round_to_tick(trigger * (1.0 - p["stop_pct"] / 100.0)),
+                target_price=None,
+                exit_rule=f"exit on RSI(2) > {p['rsi_exit']:g} or after {p['max_hold_days']:g} sessions",
                 condition=(
                     f"daily close at/below the level tips RSI(2) under {p['rsi_entry']:g} "
                     "while holding the 200-DMA; index uptrend filter currently PASSING"

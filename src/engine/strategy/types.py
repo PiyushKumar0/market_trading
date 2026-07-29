@@ -83,9 +83,13 @@ class PendingSetup(BaseModel):
     would arm (§3.2.5 sweep addendum, owner-directed 2026-07-29).
 
     Purely informational — it never enters the pipeline and no LLM sees it at origination. The owner
-    uses it to decide whether shifting/extending the trade window is worth it ("RELIANCE rsi2 arms
-    below ₹1,385"). ``trigger_price`` is None where the condition is not price-invertible
-    (cross-sectional / rule-based) and ``condition`` then carries the plain-text rule alone.
+    uses it to decide whether shifting/extending the trade window is worth it ("RELIANCE arms above
+    ₹1,280"). ``trigger_price`` is None where the condition is not price-invertible (cross-sectional
+    / rule-based) and ``condition`` then carries the plain-text rule alone. ``arms_when`` is the
+    SCANNER's own statement of the crossing direction (2026-07-29 owner feedback: inferring it from
+    price comparison mislabeled a BUY breakout "below" when trigger == last). ``stop_price`` /
+    ``target_price`` / ``exit_rule`` carry the full would-be trade plan so the owner message never
+    shows a naked buy/sell point.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -95,7 +99,11 @@ class PendingSetup(BaseModel):
     side: Side
     style: Style
     trigger_price: Decimal | None = None       # tick-rounded arm level; None = not price-invertible
+    arms_when: Literal["above", "below"] = "above"   # crossing direction, declared by the scanner
     last_price: Decimal | None = None          # the scanned bar's close, for at-a-glance distance
+    stop_price: Decimal | None = None          # the stop the strategy would use at the trigger
+    target_price: Decimal | None = None        # fixed target where the rule defines one
+    exit_rule: str = ""                        # words, where exit is rule-based instead of a target
     condition: str = ""                        # human-readable arming rule (volume gate, window, …)
 
 

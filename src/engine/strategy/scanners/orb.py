@@ -179,13 +179,22 @@ class OrbScanner(Scanner):
             f"1m close beyond the level on volume ≥ {p['vol_mult']:g}× 20-bar median; "
             f"entries legal {BASE_ENTRY_START:%H:%M}–{BASE_ENTRY_END:%H:%M} ∩ trade window"
         )
+        # The full would-be plan AT the trigger (§6.1 v2): risk spans the whole range, stop at the
+        # opposite edge, fixed target at rr_target × risk — the owner never sees a naked level.
+        risk = p["stop_range_frac"] * (range_high - range_low)
         return [
             PendingSetup(
                 strategy_id=self.strategy_id, symbol=bar.symbol, side="BUY", style=self.style,
-                trigger_price=round_to_tick(range_high), last_price=bar.close, condition=condition,
+                trigger_price=round_to_tick(range_high), arms_when="above", last_price=bar.close,
+                stop_price=round_to_tick(range_high - risk),
+                target_price=round_to_tick(range_high + p["rr_target"] * risk),
+                condition=condition,
             ),
             PendingSetup(
                 strategy_id=self.strategy_id, symbol=bar.symbol, side="SELL", style=self.style,
-                trigger_price=round_to_tick(range_low), last_price=bar.close, condition=condition,
+                trigger_price=round_to_tick(range_low), arms_when="below", last_price=bar.close,
+                stop_price=round_to_tick(range_low + risk),
+                target_price=round_to_tick(range_low - p["rr_target"] * risk),
+                condition=condition,
             ),
         ]
