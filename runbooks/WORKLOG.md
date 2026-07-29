@@ -1,5 +1,26 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-29 (afternoon — sweep addendum: "what could I trade right now?" is never silent)
+
+- **12:15 self-service deploy** (owner granted service-control ACL — no more UAC): all four morning
+  fixes live. Boot clean: RECOMMEND/NORMAL, zero freezes. Index checkpoints rewound 29→28 (18:05
+  overwrites today's partials). **12:38 heartbeat = intraday analyst VERIFIED in production**:
+  attempt-1 structured `no_action` + a coherent regime note. 12:25–13:15 validation window closed
+  with no market signals (mid-day; the analyst's own regime note called the chop correctly).
+- **Owner design directive implemented (4 features, plan §3.2.5 sweep addendum)**:
+  (1) `prescreen.rearm` — analyst infra-failures hand back the once-per-day slot (the morning's
+  six burned candidates would have re-published in the repaired window); wired into the pipeline's
+  failure branch (never on governor blocks / real evaluations).
+  (2) `prescreen.sweep` + window-open trigger — on the trade-window INACTIVE→ACTIVE edge the
+  scanners re-run on each symbol's latest bar (normal dedupe/caps; loop-safe publication split)
+  and the owner ALWAYS gets a `SCAN_SWEEP` verdict: live candidates / pending arm levels /
+  "nothing to trade right now".
+  (3) `/scan_now` Telegram command — same sweep on demand, direct reply.
+  (4) `Scanner.pending()` arm levels — deterministic "X arms below ₹N (now ₹M, d% away)":
+  orb = auction-seeded range edges; rsi2 = bisection-inverted dip close that tips RSI(2) under
+  the threshold while holding its 200-DMA. Informational only; §2.4 origination boundary intact.
+- Tests: prescreen sweep/rearm ×4, scanner pending ×4, pipeline rearm ×1 — all green.
+
 ## 2026-07-29 (day — FIRST LIVE RECOMMEND WINDOW; union-schema disengage found+fixed)
 
 - **Owner enabled RECOMMEND 10:48, set trade window 11:00–11:30, re-login lifted the freeze**
