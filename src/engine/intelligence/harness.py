@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import re
 import sqlite3
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -358,6 +359,19 @@ def _message_text(message: Any) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n(.*)\n?```$", re.DOTALL)
+
+
+def _unwrap_lone_fence(text: str) -> str:
+    """The whole-string fence unwrap ``_validate`` documents: ```` ```json\\n{...}\\n``` ```` → ``{...}``.
+
+    Anything around the fence — prose before, commentary after, a second block — fails the match
+    and the text passes through untouched (and then fails JSON parsing as it should, D7).
+    """
+    match = _FENCE_RE.match(text)
+    return match.group(1).strip() if match else text
 
 
 def _structured_output(message: Any) -> str | None:
@@ -771,12 +785,17 @@ class AgentHarness:
     ) -> tuple[bool, Any, str]:
         """Parse the final assistant text as JSON and hand it to the caller's validator.
 
-        No fence-stripping, no regex salvage: a response wrapped in prose or ``` fences is a schema
-        violation and earns a retry, not a rescue (D7).
+        No prose salvage (D7): a response that MIXES prose with JSON is a schema violation and
+        earns a retry, not a rescue. ONE deterministic unwrap is permitted (2026-07-29): a response
+        that is EXACTLY a single ```-fenced block and nothing else is that JSON in the CLI's
+        habitual framing, not prose — observed live when the structured-output knob silently
+        disengages (union schemas) and the model answers in a bare fenced block. The unwrap is a
+        whole-string match; any surrounding text still fails.
         """
         stripped = text.strip()
         if not stripped:
             return False, None, "empty response (no assistant text)"
+        stripped = _unwrap_lone_fence(stripped)
         try:
             json.loads(stripped)
         except ValueError as exc:

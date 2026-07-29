@@ -491,7 +491,7 @@ async def test_schema_invalid_three_times_fails(defs, gov, clock, conn, alert, a
 
 
 async def test_prose_response_is_never_salvaged(defs, gov, clock, conn) -> None:
-    # D7: a fenced/prose answer is a schema violation, not something to regex out.
+    # D7: an answer that MIXES prose with a fence is a schema violation, not something to regex out.
     fenced = f"Here is my answer:\n```json\n{ENTER_JSON}\n```"
     fake = FakeQuery([FakeAssistantMessage(fenced), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake)
@@ -500,6 +500,19 @@ async def test_prose_response_is_never_salvaged(defs, gov, clock, conn) -> None:
 
     assert not result.ok and result.reason == "schema_invalid"
     assert "not valid JSON" in result.detail
+
+
+async def test_lone_fenced_block_is_unwrapped(defs, gov, clock, conn) -> None:
+    """2026-07-29: when the structured-output knob silently disengages (union schema), the model
+    answers in a BARE fenced block — that is the JSON in the CLI's habitual framing, not prose.
+    A whole-string fence unwraps; anything around it still fails (previous test)."""
+    fake = FakeQuery([FakeAssistantMessage(f"```json\n{ENTER_JSON}\n```"), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake)
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert result.ok
+    assert result.payload.tradingsymbol == "RELIANCE"
 
 
 # --------------------------------------------------------------------------- structured output (CLI json_schema path)
