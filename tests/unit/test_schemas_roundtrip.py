@@ -194,3 +194,34 @@ def test_naive_platform_valid_until_rejected_by_parse_and_stamp() -> None:
     naive_stamp = {**STAMP, "valid_until": datetime(2026, 6, 17, 10, 5)}  # no tzinfo
     with pytest.raises(ValidationError):
         parse_and_stamp(RAW_BY_ACTION["enter"], **naive_stamp)
+
+
+# --------------------------------------------------------------- guidance schema (2026-07-29)
+def test_intraday_guidance_schema_is_flat_and_covers_the_union() -> None:
+    """The runtime's output_format silently falls back to TEXT mode on any oneOf/anyOf union
+    (pinned live 2026-07-29: every intraday call answered in fenced prose and died), so the knob
+    gets a FLAT merge of the union. This pin fails when (a) a union keyword sneaks back in, or
+    (b) a variant grows a model-emitted field the guidance does not cover."""
+    from engine.intelligence.schemas import NoActionOutput, intraday_guidance_json_schema
+
+    g = intraday_guidance_json_schema()
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for bad in ("oneOf", "anyOf", "allOf", "$ref", "discriminator"):
+                assert bad not in node, f"union keyword {bad!r} disengages structured output"
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(g)
+    assert set(g["properties"]["action"]["enum"]) == set(ACTION_MODELS) | {"no_action"}
+
+    stamped = {"schema_version", "proposal_id", "agent_id", "valid_until", "inputs_digest"}
+    for model in [*ACTION_MODELS.values(), NoActionOutput]:
+        for field in model.model_fields:
+            if field in stamped:
+                continue
+            assert field in g["properties"], f"{model.__name__}.{field} missing from guidance schema"

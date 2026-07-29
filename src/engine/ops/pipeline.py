@@ -1,4 +1,4 @@
-"""The RECOMMEND pipeline (§3.6, §5.2, §7.1 ``max_holding``) — signal ⇒ analyst ⇒ gate ⇒ owner.
+﻿"""The RECOMMEND pipeline (§3.6, §5.2, §7.1 ``max_holding``) — signal ⇒ analyst ⇒ gate ⇒ owner.
 
 Lives in ``engine.ops`` because it is the only package allowed to import everything (§3.2.12): it
 wires Tier-1 (``intelligence``), Tier-2 (``risk``), the store, the notifier and the state DB into one
@@ -57,7 +57,7 @@ from engine.core.types import Bar
 from engine.features.snapshots import FEATURE_SET_VERSION
 from engine.intelligence.schemas import (
     NoActionOutput,
-    intraday_output_json_schema,
+    intraday_guidance_json_schema,
     parse_intraday,
 )
 from engine.notify import catalog
@@ -556,7 +556,7 @@ class RecommendationPipeline:
                 raw, proposal_id=proposal_id, agent_id=INTRADAY_AGENT_ID,
                 valid_until=valid_until, inputs_digest=actx.inputs_digest,
             ),
-            json_schema=intraday_output_json_schema(),
+            json_schema=intraday_guidance_json_schema(),
         )
         if not result.ok:
             await self._alert_agent_failed("signal_candidate", result)
@@ -771,7 +771,7 @@ class RecommendationPipeline:
                 raw, proposal_id=proposal_id, agent_id=INTRADAY_AGENT_ID,
                 valid_until=valid_until, inputs_digest=actx.inputs_digest,
             ),
-            json_schema=intraday_output_json_schema(),
+            json_schema=intraday_guidance_json_schema(),
         )
         if not result.ok:
             await self._alert_agent_failed("position_event", result)
@@ -874,7 +874,7 @@ class RecommendationPipeline:
                 raw, proposal_id=proposal_id, agent_id=INTRADAY_AGENT_ID,
                 valid_until=valid_until, inputs_digest=actx.inputs_digest,
             ),
-            json_schema=intraday_output_json_schema(),
+            json_schema=intraday_guidance_json_schema(),
         )
         if not result.ok:
             await self._alert_agent_failed("heartbeat", result)

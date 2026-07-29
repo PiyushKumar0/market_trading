@@ -77,6 +77,7 @@ __all__ = [
     "Recommendation",
     "TradeAttribution",
     "action_proposal_json_schema",
+    "intraday_guidance_json_schema",
     "intraday_output_json_schema",
     "parse_and_stamp",
     "parse_cluster_scores",
@@ -161,6 +162,58 @@ IntradayOutputAdapter: TypeAdapter[Any] = TypeAdapter(IntradayOutput)
 def intraday_output_json_schema() -> dict[str, Any]:
     """JSON Schema for the §5.2 output union — the Intraday Analyst's structured-output schema."""
     return IntradayOutputAdapter.json_schema()
+
+
+def intraday_guidance_json_schema() -> dict[str, Any]:
+    """FLAT single-object schema for the runtime's structured-output knob (§8.1).
+
+    The CLI's ``output_format`` silently falls back to plain TEXT mode for any schema containing a
+    ``oneOf``/``anyOf`` union — root-level, wrapped, or de-discriminated (pinned live 2026-07-29:
+    every intraday call answered in fenced prose and died schema_invalid while the flat news/plan
+    schemas engaged the StructuredOutput tool). So the knob gets this flattened merge of the §5.2
+    union — every variant's model-emitted field, ``action`` as the closed enum, only ``action``
+    required — and the DISCRIMINATED union in :func:`parse_intraday` remains the authoritative
+    contract exactly as §8.1 locks it. A payload this schema admits but the union rejects still
+    fails client-side and retries under D7. Platform-stamped fields (proposal_id, valid_until,
+    agent_id, inputs_digest) are deliberately absent: the model has no business emitting them, and
+    the runtime's own schema coaching steers it off any it invents (additionalProperties: false).
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [*ACTION_MODELS.keys(), "no_action"],
+            },
+            # ActionBase / NoActionOutput
+            "thesis": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reason": {"type": "string"},        # no_action free text; exit uses its closed reasons
+            "regime_note": {"type": "string"},
+            # EnterAction
+            "tradingsymbol": {"type": "string"},
+            "exchange": {"type": "string", "enum": ["NSE"]},
+            "side": {"type": "string", "enum": ["BUY", "SELL"]},
+            "style": {"type": "string", "enum": ["intraday", "swing", "position"]},
+            "entry_type": {"type": "string", "enum": ["LIMIT", "MARKET"]},
+            "entry_price": {"type": "string"},
+            "stop_price": {"type": "string"},
+            "target_price": {"type": "string"},
+            "quantity": {"type": "integer", "minimum": 1},
+            "signal_id": {"type": "string"},
+            "strategy_id": {"type": "string"},
+            "features_snapshot_id": {"type": "string"},
+            # ExitAction / ModifyStop / ModifyTarget / Cancel
+            "position_id": {"type": "string"},
+            "exit_type": {"type": "string", "enum": ["MARKET", "LIMIT"]},
+            "limit_price": {"type": "string"},
+            "new_stop": {"type": "string"},
+            "new_target": {"type": "string"},
+            "order_id": {"type": "string"},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    }
 
 
 def parse_intraday(

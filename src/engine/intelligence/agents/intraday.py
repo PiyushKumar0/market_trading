@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import AwareDatetime
 
-from engine.intelligence.schemas import intraday_output_json_schema, parse_intraday
+from engine.intelligence.schemas import intraday_guidance_json_schema, parse_intraday
 
 #: config/agents.yaml key (model, timeouts, triggers, budget allocation).
 AGENT_ID = "intraday_analyst"
@@ -62,8 +62,10 @@ the catalyst evidence and the price structure disagree with each other, say so a
 
 
 def output_json_schema() -> dict[str, Any]:
-    """The structured-output schema for this agent: action union plus no_action (§5.2)."""
-    return intraday_output_json_schema()
+    """The structured-output schema sent to the runtime: the FLAT guidance form of the §5.2 union
+    (the runtime's output_format falls back to text mode on oneOf/anyOf — see the guidance schema's
+    docstring). Client-side validation still runs the discriminated union via parse_output."""
+    return intraday_guidance_json_schema()
 
 
 def parse_output(

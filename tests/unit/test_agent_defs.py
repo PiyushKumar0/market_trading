@@ -29,6 +29,7 @@ from engine.intelligence.schemas import (
     DayPlan,
     EnterAction,
     NoActionOutput,
+    intraday_guidance_json_schema,
     intraday_output_json_schema,
     parse_cluster_scores,
     parse_intraday,
@@ -171,7 +172,9 @@ def test_intraday_output_schema_is_a_discriminated_union():
     assert "discriminator" in body
     for action in ("enter", "exit", "modify-stop", "modify-target", "cancel", "no_action"):
         assert action in body
-    assert intraday.output_json_schema() == schema
+    # The agent's KNOB schema is the FLAT guidance form (2026-07-29: the runtime's output_format
+    # silently disengages on oneOf/anyOf unions) — the union above stays the client-side contract.
+    assert intraday.output_json_schema() == intraday_guidance_json_schema()
 
 
 def test_agent_output_schemas_are_exported():
