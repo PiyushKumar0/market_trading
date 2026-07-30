@@ -1,5 +1,24 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-30 (mid-day — plan-poisoning incident found in the 09:30 window; provenance fixes live)
+
+- **09:30–10:30 window: all machinery worked, zero recs — the DayPlan had declared
+  `no_trade_today`.** Root cause: context provenance. The 08:50 planner escalated the nightly
+  review's post-mortem of the ALREADY-FIXED 2026-07-29 incident into "PLATFORM CRITICAL: pipeline
+  operationally non-functional" (its own successful call disproving it), and separately read our
+  own `watchlist_cap` rows (~150/day, by design) as a "mass exchange surveillance action". Every
+  analyst verdict then correctly deferred to the poisoned plan. (Also validated same window:
+  out-of-window re-arm, stopless-mom hold, evidence-weighted verdicts, all attempt-1 calls.)
+- **Fixes (deployed 10:26, suite 1,134 green)**: (1) deterministic `platform_health` line leads the
+  planner context (latest sdk_smoke outcome + today's ok/failed counts) + prompt rule 9 —
+  operational status ONLY from that line, no_trade_today is for MARKET conditions, the platform
+  manages its own health (D7); (2) review summary labeled `[review of the <d> session] … HISTORY`;
+  (3) `_surveillance_lines` passes only `surveillance_*` reasons + prompt rule 10.
+- **10:56 regenerated plan (deleted row + watermark → catch-up re-ran it): `no_trade_today=false`,
+  8 focus symbols**, warnings all genuine market content — incl. KALYANKJIL's real ASM move
+  correctly surviving the filter — and the operational note now reads "HISTORY … platform health
+  shows self-test PASS today, 27/27 calls succeeding". Textbook provenance-aware output.
+
 ## 2026-07-30 (pre-open — owner ruling #3: catalyst weighting in the §5.2 prompt)
 
 - **SYSTEM_PROMPT gains a WEIGHING THE EVIDENCE section (rules 12–14)**: the scanner setup is the
