@@ -1,5 +1,23 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-31 (00:30–01:00 — midnight triage: DNS-wedged process + rollover alert spam)
+
+- **Owner reported errors/warnings.** Thursday's operational day was CLEAN (all evening jobs
+  succeeded; the ~18:35→20:28 sleep healed by the sweep at 20:28; nightly review + backup on time
+  at 21:00). The real problems were all post-midnight:
+  1. **Process-local DNS breakage after resume** (`getaddrinfo failed`): DNS resolved fine from a
+     fresh process, but the long-running engine's network calls (Telegram sends ×9, news feeds)
+     kept failing — stale resolver/socket state after sleep. Cascade: sends stuck in long DNS
+     timeouts exhausted the shared thread pool → `_health` and `warmup_refresh` wedged
+     ("maximum number of running instances reached" every minute from 00:28). Cleared by restart;
+     environmental class (machine DNS after resume), watch for recurrence.
+  2. **Midnight-rollover alert spam FIXED**: `HealthMonitor.check` flagged `feed_stale`
+     unconditionally; out-of-session STALE is definitional (no ticks at night) and it alerted
+     per-minute from 00:32 after the date rolled. `feed_stale` is now appended only while
+     `_session_open()` (R2 = feed lost WHILE RUNNING). New `test_health_monitor.py` (the module
+     had zero tests) pins in-session incident / out-of-session quiet / calendar-less quiet.
+     Suite 1,138 green.
+
 ## 2026-07-30 (mid-day — plan-poisoning incident found in the 09:30 window; provenance fixes live)
 
 - **09:30–10:30 window: all machinery worked, zero recs — the DayPlan had declared

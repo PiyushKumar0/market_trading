@@ -81,8 +81,12 @@ class HealthMonitor:
             fh = self._ticker.health()
             report.feed_state = getattr(fh, "state", "UNKNOWN")
             report.last_tick_age_s = getattr(fh, "last_tick_age_s", None)
-            if report.feed_state == "STALE":
-                report.problems.append("feed_stale")  # feed-lost-while-running (R2) — a real incident
+            if report.feed_state == "STALE" and self._session_open():
+                # feed-lost-WHILE-RUNNING (R2) — a real incident. Out-of-session STALE is
+                # definitional (no ticks exist at night) and spammed an alert per minute from
+                # midnight 2026-07-31 after the date rollover — never an incident. Calendar-less
+                # wiring returns False here, keeping a misconfigured deploy quiet, not noisy.
+                report.problems.append("feed_stale")
             # WARMING / STOPPED raise no problem (§2.6: warming is expected, stopped is intentional-off).
 
         # --- clock skew (R6) ---
