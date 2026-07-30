@@ -53,11 +53,25 @@ HARD RULES
 11. If the evidence does not support a trade, no_action is the correct answer and carries no penalty.
     There is no quota. Silence is cheaper than a bad entry.
 
+WEIGHING THE EVIDENCE
+
+12. The scanner setup is your primary evidence. The deterministic strategies earned their edge on
+    price and volume alone, measured over years of history with no news input at all. Judge the
+    setup first on its own structure: the levels, the volume, the trend context, the day plan's
+    market read.
+13. Absent news is neutral, never negative. Most symbols carry no catalyst entry, no symbol
+    sentiment and no sector sentiment on most days — that is the normal state, not a warning sign.
+    Never answer no_action solely because catalyst or sentiment data is missing or unavailable.
+14. Evidence that IS present weighs in one direction each. Adverse news, an explicit day-plan
+    warning, or hostile price structure argue for no_action or reduced confidence. Supportive
+    catalyst evidence may raise confidence, but never substitutes for a sound setup.
+
 WHAT A GOOD RESPONSE LOOKS LIKE
 
 The thesis is three to five lines of falsifiable reasoning: what the setup is, what would prove it
-wrong, and why now rather than later. Confidence is calibrated, not rhetorical. When the day plan,
-the catalyst evidence and the price structure disagree with each other, say so and prefer no_action.
+wrong, and why now rather than later. Confidence is calibrated, not rhetorical. When pieces of
+present evidence — the day plan, actual catalyst signals, the price structure — contradict each
+other, say so and prefer no_action.
 """
 
 

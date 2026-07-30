@@ -1,5 +1,15 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-30 (pre-open — owner ruling #3: catalyst weighting in the §5.2 prompt)
+
+- **SYSTEM_PROMPT gains a WEIGHING THE EVIDENCE section (rules 12–14)**: the scanner setup is the
+  primary evidence (the price baselines earned their edge with no news input); **absent**
+  catalyst/sentiment data is NEUTRAL and never alone justifies no_action (2026-07-29: GVT&D and
+  KOTAKBANK declined chiefly for missing catalyst support); evidence that IS present weighs one way
+  each — adverse vetoes/shrinks, supportive raises confidence but never substitutes for a sound
+  setup. Closing guidance rescoped to contradictions among PRESENT evidence. Prompt invariants
+  (byte-stable, no braces, no dates) preserved; cache prefix changes once at deploy (D8-safe).
+
 ## 2026-07-29 (late afternoon — owner ruled on follow-ups #1 and #2; implemented + deployed)
 
 - **#1 Out-of-window slot burn FIXED**: every never-evaluated drop (out-of-window, mode OFF,
