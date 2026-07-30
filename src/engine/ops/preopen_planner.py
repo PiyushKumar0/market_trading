@@ -152,6 +152,7 @@ class PreopenPlannerJob:
             surveillance_changes=self._surveillance_lines(d),
             open_positions_summary=self._positions_summary(),
             yesterday_review_summary=self._yesterday_review_summary(),
+            platform_health=self._platform_health_line(d),
         )
         result = await self._harness.run_single_shot(
             self._def,
@@ -257,17 +258,23 @@ class PreopenPlannerJob:
 
     # ------------------------------------------------------------------ surveillance changes (A8)
     def _surveillance_lines(self, d: date) -> list[str]:
-        """Today's ``universe_daily`` exclusion summary. ``unavailable`` only when the universe build
-        never ran for ``d`` (zero rows); an empty exclusion set with rows present is a real zero."""
+        """Today's EXCHANGE surveillance exclusions from ``universe_daily``. ``unavailable`` only
+        when the universe build never ran for ``d`` (zero rows); no flagged symbols is "none".
+
+        Only ``surveillance_*`` reasons pass this filter (2026-07-30): platform bookkeeping reasons
+        — ``watchlist_cap`` is our OWN top-N liquidity cap and applies to ~150 symbols every single
+        day — read to the model like a mass exchange action ("mass surveillance sweep covering most
+        Nifty 100/200") and poisoned the plan's warnings.
+        """
         rows = self._store.get_universe_daily(d)
         if not rows:
             return [_UNAVAILABLE]
         lines: list[str] = []
         for row in rows:
-            reasons = row.get("exclusion_reasons") or []
+            reasons = [r for r in (row.get("exclusion_reasons") or []) if str(r).startswith("surveillance_")]
             if reasons:
                 lines.append(f"{row['symbol']}: {', '.join(reasons)}")
-        return lines
+        return lines or ["none"]
 
     # ------------------------------------------------------------------ open positions + overnight risk
     def _positions_summary(self) -> str:
@@ -286,9 +293,12 @@ class PreopenPlannerJob:
 
     # ------------------------------------------------------------------ yesterday's review (§5.5)
     def _yesterday_review_summary(self) -> str:
-        """Latest ``nightly_reviews.payload["summary"]``; "none" when absent (task-pinned — the
-        nightly reviewer is a later Phase-2 wave, so an empty table is the normal state today)."""
-        row = self._conn.execute("SELECT payload FROM nightly_reviews ORDER BY d DESC LIMIT 1").fetchone()
+        """Latest ``nightly_reviews.payload["summary"]`` prefixed with ITS session date; "none" when
+        absent. The date label matters (2026-07-30): an unlabeled post-mortem of an already-fixed
+        incident was escalated by the planner into a present-tense platform outage."""
+        row = self._conn.execute(
+            "SELECT d, payload FROM nightly_reviews ORDER BY d DESC LIMIT 1"
+        ).fetchone()
         if row is None:
             return "none"
         try:
@@ -296,7 +306,29 @@ class PreopenPlannerJob:
         except (TypeError, json.JSONDecodeError):
             return "none"
         summary = payload.get("summary") if isinstance(payload, dict) else None
-        return summary if isinstance(summary, str) and summary.strip() else "none"
+        if not (isinstance(summary, str) and summary.strip()):
+            return "none"
+        return f"[review of the {row['d']} session] {summary}"
+
+    def _platform_health_line(self, d: date) -> str:
+        """Deterministic CURRENT harness health — the only operational-status source the planner
+        prompt permits (2026-07-30: without it, history became a present-tense outage claim)."""
+        row = self._conn.execute(
+            "SELECT ok, at FROM agent_calls WHERE agent_id='sdk_smoke' ORDER BY at DESC LIMIT 1"
+        ).fetchone()
+        smoke = "never-run"
+        if row is not None:
+            smoke = f"{'PASS' if row['ok'] else 'FAIL'} at {row['at']}"
+        counts = self._conn.execute(
+            "SELECT COALESCE(SUM(ok), 0), COUNT(*) FROM agent_calls WHERE at >= ?",
+            (d.isoformat(),),
+        ).fetchone()
+        ok_n, total = int(counts[0]), int(counts[1])
+        return (
+            f"LLM self-test {smoke}; agent calls today: {ok_n} ok / {total - ok_n} failed. "
+            "If the self-test passes, the signal pipeline is operational regardless of what any "
+            "historical review text says."
+        )
 
     # ------------------------------------------------------------------ persistence (§2.6 run-latest)
     def _persist(self, d: date, plan: DayPlan) -> None:

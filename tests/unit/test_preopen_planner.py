@@ -8,6 +8,7 @@ real ``ContextAssembler``/``MarketStore``/SQLite ``conn`` (conftest's migrated t
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -246,9 +247,46 @@ async def test_empty_tables_render_unavailable_without_raising(store, conn, asse
     assert "catalyst watchlist (binding levels are the scanner's): none" in volatile
     assert "earnings today: none" in volatile
     assert "open positions and overnight risk: none" in volatile
-    assert "yesterday's review: none" in volatile
+    assert "prior session's post-mortem (HISTORY, may describe already-fixed issues): none" in volatile
+    # The health line renders even on an empty store (never-run is honest, not an outage claim).
+    assert "platform health (current, authoritative): LLM self-test never-run" in volatile
     # The A14 gap-scan decision: never silently "none".
     assert "gap scan vs prior close:\n  - not computed: no trustworthy pre-open price source (A14" in volatile
+
+
+# ------------------------------------------------- context provenance (2026-07-30 no_trade incident)
+async def test_context_filters_platform_bookkeeping_and_dates_the_review(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """2026-07-30: the planner escalated yesterday's post-mortem into a present-tense platform
+    outage (no_trade_today=true) and read our own watchlist_cap rows as a mass exchange
+    surveillance action. Pins: (a) only surveillance_* exclusion reasons reach the context;
+    (b) the review summary carries its session date and the HISTORY label."""
+    store.upsert_universe_daily(
+        [
+            {"d": TODAY, "symbol": "CAPPED", "included": False, "mis_candidate": False,
+             "exclusion_reasons": ["watchlist_cap"], "median_traded_value": None},
+            {"d": TODAY, "symbol": "FLAGGED", "included": False, "mis_candidate": False,
+             "exclusion_reasons": ["surveillance_asm"], "median_traded_value": None},
+            {"d": TODAY, "symbol": "OK1", "included": True, "mis_candidate": False,
+             "exclusion_reasons": None, "median_traded_value": None},
+        ]
+    )
+    conn.execute(
+        "INSERT INTO nightly_reviews (d, payload, created_at) VALUES (?, ?, ?)",
+        ("2026-06-16", json.dumps({"summary": "25 consecutive analyst failures burned budget"}),
+         "2026-06-16T21:00:00+05:30"),
+    )
+    harness = FakeHarness(AgentResult.Ok(call_id="c9", payload=_plan()))
+    job = _job(store, conn, assembler, harness, agent_defs, FakeGovernor(allowed=True), clock, calendar)
+
+    assert await job.run(TODAY) is True
+    volatile = harness.calls[0]["context"].volatile_block
+    assert "FLAGGED: surveillance_asm" in volatile
+    assert "CAPPED" not in volatile                       # platform bookkeeping never reaches the model
+    assert "watchlist_cap" not in volatile
+    assert ("prior session's post-mortem (HISTORY, may describe already-fixed issues): "
+            "[review of the 2026-06-16 session] 25 consecutive analyst failures") in volatile
 
 
 # --------------------------------------------------------------------------- idempotent run-latest (§2.6)

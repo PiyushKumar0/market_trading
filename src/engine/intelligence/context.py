@@ -237,22 +237,28 @@ class ContextAssembler:
         surveillance_changes: Sequence[str],
         open_positions_summary: str,
         yesterday_review_summary: str,
+        platform_health: str = "",
     ) -> AssembledContext:
         """Context for the 08:50 day-plan call (§5.3). Every input is caller-precomputed text.
 
         The planner's STABLE block is the trading-date line alone: the day plan it is about to write
-        does not exist yet, and the regime note is an intraday artifact.
+        does not exist yet, and the regime note is an intraday artifact. ``platform_health`` is the
+        deterministic CURRENT harness state (2026-07-30: without it the planner escalated
+        yesterday's post-mortem into a present-tense outage and declared no_trade_today).
         """
         stable = "\n".join(["== DAY CONTEXT (stable) ==", self._date_line(d)])
         parts: list[str] = ["== PRE-OPEN STATE (volatile) =="]
+        if platform_health:
+            parts.append(f"platform health (current, authoritative): {platform_health}")
         parts.append(self._section("overnight movers (bhavcopy)", movers_lines))
         parts.append(self._section("gap scan vs prior close", gap_lines))
         parts.append(self._section("catalyst digest", digest_lines))
         parts.append(self._section("catalyst watchlist (binding levels are the scanner's)", watchlist_lines))
         parts.append(self._section("earnings today", earnings_today))
-        parts.append(self._section("surveillance changes", surveillance_changes))
+        parts.append(self._section("exchange surveillance changes", surveillance_changes))
         parts.append(f"open positions and overnight risk: {open_positions_summary}")
-        parts.append(f"yesterday's review: {yesterday_review_summary}")
+        parts.append(f"prior session's post-mortem (HISTORY, may describe already-fixed issues): "
+                     f"{yesterday_review_summary}")
         return AssembledContext.build(
             system_prompt=preopen.SYSTEM_PROMPT,
             stable_block=stable,
