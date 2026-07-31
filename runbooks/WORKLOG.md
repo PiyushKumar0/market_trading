@@ -1,5 +1,26 @@
 # WORKLOG — autonomous operations log
 
+## 2026-07-31 (mid-day — FIRST ENTER PROPOSALS reached the gate; C7 join fixed)
+
+- **10:00–11:00 window: the analyst PROPOSED for the first time** — BAJFINANCE BUY and HINDALCO BUY
+  (ORB breakouts, 2× volume, full plans). Both first attempts tripped client validation
+  (`enter.regime_note` extra-forbidden — the flat guidance schema can't express "regime_note only
+  with no_action"), **D7 retries recovered both** (corrected payloads, proposals persisted), and
+  **the deterministic gate REJECTED both**: BAJFINANCE confidence 0.54 < the owner's 0.55 floor
+  (correct), and both on `instrument_eligible` — `mis_candidate=False`.
+- **ROOT CAUSE, structural: `mis_candidates` has been 0 EVERY day** — `InstrumentStore.is_fno`
+  derived F&O membership per-row (exchange NFO / type FUT|CE|PE), which flags the DERIVATIVE rows
+  but never the NSE equity the platform looks up. The NFO→underlying join was a documented Phase-1
+  TODO that never landed; Phase 2's gate made it load-bearing: every MIS (intraday) proposal was
+  structurally un-approvable. Fix: refresh() collects derivative rows' `name` values (the
+  underlying's tradingsymbol) and flags matching equities; round-trips via snapshot/hydrate.
+  3 new tests; suite 1,141 green.
+- Verdict-quality note (evidence-weighting fix working): morning declines cited price structure
+  ("stop ~4% wide", "pierced OR low by 0.03% — marginal"), zero catalyst-absence refrains.
+- Follow-up (minor): analyst attaches `regime_note` to enter proposals ~sometimes; costs one D7
+  retry each. Options: allow `regime_note` on ActionBase (platform applies it via the same clamp
+  path) or drop it from the guidance schema. Owner call; retries currently bridge it.
+
 ## 2026-07-31 (00:30–01:00 — midnight triage: DNS-wedged process + rollover alert spam)
 
 - **Owner reported errors/warnings.** Thursday's operational day was CLEAN (all evening jobs

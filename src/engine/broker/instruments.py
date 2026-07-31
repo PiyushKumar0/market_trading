@@ -121,6 +121,20 @@ class InstrumentStore:
         raw = kite_client.instruments()
         if hasattr(raw, "__await__"):
             raw = await raw
+        raw = list(raw)
+
+        # C7 NFO→underlying join (2026-07-31: the per-row heuristic marked only the DERIVATIVE rows
+        # is_fno, never the NSE equity the platform actually looks up — mis_candidates was 0 every
+        # day and the gate structurally rejected every MIS proposal). A derivative row's ``name`` is
+        # its underlying's tradingsymbol; collect them first, then flag matching equities.
+        fno_underlyings: set[str] = set()
+        for row in raw:
+            exchange = str(self._row_get(row, "exchange", "") or "")
+            itype = str(self._row_get(row, "instrument_type", "") or "")
+            if exchange in _FNO_EXCHANGES and itype in _FNO_INSTRUMENT_TYPES:
+                name = str(self._row_get(row, "name", "") or "").strip()
+                if name:
+                    fno_underlyings.add(name)
 
         indexed: dict[str, Instrument] = {}
         index_tokens: dict[str, int] = {}
@@ -146,7 +160,7 @@ class InstrumentStore:
                 index_by_token[token] = symbol
                 continue
             try:
-                instrument = self._row_to_instrument(row)
+                instrument = self._row_to_instrument(row, fno_underlyings)
             except (KeyError, ValueError, TypeError) as exc:
                 skipped += 1
                 _log.warning("instrument.row_skipped", error=str(exc))
@@ -425,19 +439,29 @@ class InstrumentStore:
         return getattr(row, key, default)
 
     @staticmethod
-    def _row_to_instrument(row: Any) -> Instrument:
+    def _row_to_instrument(row: Any, fno_underlyings: frozenset[str] | set[str] = frozenset()) -> Instrument:
         """Map one Kite dump row (dict or object) to an :class:`Instrument`.
 
         Tolerant of dict-shaped (pykiteconnect ``instruments()``) and attribute-shaped rows.
+        ``fno_underlyings`` is the C7 join input from :meth:`refresh`: an NSE equity whose
+        tradingsymbol appears among the derivative rows' ``name`` values is F&O-listed.
         """
         get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
 
         exchange = str(get("exchange", "") or "")
         instrument_type = str(get("instrument_type", "") or "")
-        is_fno = exchange in _FNO_EXCHANGES or instrument_type in _FNO_INSTRUMENT_TYPES
+        tradingsymbol = str(get("tradingsymbol"))
+        # A derivative row is F&O by its own shape; an EQUITY is F&O-listed when its tradingsymbol
+        # is among the derivative rows' underlying names (the C7 join — 2026-07-31; the shape-only
+        # heuristic left every NSE equity is_fno=False and mis_candidates empty forever).
+        is_fno = (
+            exchange in _FNO_EXCHANGES
+            or instrument_type in _FNO_INSTRUMENT_TYPES
+            or tradingsymbol in fno_underlyings
+        )
 
         return Instrument(
-            tradingsymbol=str(get("tradingsymbol")),
+            tradingsymbol=tradingsymbol,
             instrument_token=int(get("instrument_token")),
             exchange=exchange,
             segment=str(get("segment", "") or ""),

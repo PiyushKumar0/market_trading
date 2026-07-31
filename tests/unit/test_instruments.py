@@ -47,6 +47,14 @@ MALFORMED_ROW = {  # tradable segment, no instrument_token → int(None) raises 
     "tradingsymbol": "BROKEN", "exchange": "NSE", "segment": "NSE",
     "tick_size": 0.05, "lot_size": 1, "instrument_type": "EQ",
 }
+# A RELIANCE stock future: its ``name`` is the underlying's tradingsymbol — the C7 join input that
+# must flag the NSE EQUITY row is_fno=True (2026-07-31: shape-only derivation left every equity
+# False and mis_candidates empty, structurally rejecting all MIS proposals at the gate).
+RELIANCE_FUT_ROW = {
+    "tradingsymbol": "RELIANCE26JANFUT", "instrument_token": 22223333, "exchange": "NFO",
+    "segment": "NFO-FUT", "tick_size": 0.05, "lot_size": 250, "instrument_type": "FUT",
+    "name": "RELIANCE",
+}
 # A legitimately tradable currency-derivative future with a sub-₹0.01 tick (₹0.0025): refresh accepts it
 # (0.0025 > 0), but a DECIMAL(10,2) store column truncated it to 0.00 so hydrate rejected it — the
 # 2026-07-21 8072-skip mechanism the widened DECIMAL(18,6) column fixes.
@@ -356,3 +364,31 @@ async def test_store_round_trip_still_rejects_corrupt_equity(market_store, clock
     assert dst.token_for_symbol("CORRUPTEQ") is None      # never entered the tradable map
     assert dst.token_for_symbol("NIFTY 50") == 256265     # the index seam is unaffected
     assert [r for r in caplog.records if r.getMessage() == "instrument.hydrate_row_skipped"]
+
+
+# ------------------------------------------------------------- C7 NFO->underlying join (2026-07-31)
+async def test_equity_with_a_derivative_is_flagged_fno(clock):
+    """The C7 join: an NSE equity whose tradingsymbol appears as a derivative row's ``name`` is
+    F&O-listed. Before 2026-07-31 only the DERIVATIVE rows were flagged, the equity lookup the
+    platform actually performs always returned False, and mis_candidates was empty every day."""
+    store = InstrumentStore(clock)
+    await store.refresh(FakeKite([RELIANCE_ROW, RELIANCE_FUT_ROW, NIFTY50_ROW]))
+
+    assert store.is_fno("RELIANCE") is True               # equity flagged via the join
+    assert store.is_fno("RELIANCE26JANFUT") is True       # the derivative row keeps its own flag
+    assert store.is_fno("NIFTY 50") is False              # indices stay fail-closed
+
+
+async def test_equity_without_derivatives_stays_non_fno(clock):
+    store = InstrumentStore(clock)
+    await store.refresh(FakeKite([RELIANCE_ROW, NIFTY_FUT_ROW]))   # NIFTY fut has no name field
+    assert store.is_fno("RELIANCE") is False
+
+
+async def test_fno_join_round_trips_through_snapshot_and_hydrate(clock):
+    """The joined flag must survive snapshot_rows -> hydrate verbatim (stored column, F2)."""
+    src = InstrumentStore(clock)
+    await src.refresh(FakeKite([RELIANCE_ROW, RELIANCE_FUT_ROW]))
+    dst = InstrumentStore(clock)
+    dst.hydrate(src.snapshot_rows(SNAPSHOT_DAY))
+    assert dst.is_fno("RELIANCE") is True
