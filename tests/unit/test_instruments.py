@@ -34,6 +34,7 @@ SNAPSHOT_DAY = date(2026, 6, 17)
 RELIANCE_ROW = {
     "tradingsymbol": "RELIANCE", "instrument_token": 408065, "exchange": "NSE",
     "segment": "NSE", "tick_size": 0.05, "lot_size": 1, "instrument_type": "EQ",
+    "name": "RELIANCE INDUSTRIES LTD",
 }
 NIFTY50_ROW = {
     "tradingsymbol": "NIFTY 50", "instrument_token": 256265, "exchange": "NSE",
@@ -235,6 +236,9 @@ async def test_snapshot_hydrate_round_trip_is_identical(clock):
     assert dst.is_empty is False
     assert dst.hydrated is True                               # provenance flag flipped
     assert dst.index_count == 2
+    # §3.2.4 alias-seed source: the company name survives the round-trip (2026-08-03 G1 finding —
+    # a name-less snapshot left entity_aliases empty and every live headline unresolved).
+    assert dst.by_symbol("RELIANCE").name == "RELIANCE INDUSTRIES LTD"
 
     # Tradable seam identical, both directions + the load-bearing metadata.
     for sym, tok in [("RELIANCE", 408065), ("NIFTY26JANFUT", 12345678)]:

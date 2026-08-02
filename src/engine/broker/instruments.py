@@ -76,6 +76,8 @@ class Instrument(BaseModel):
     lot_size: int = Field(gt=0)
     instrument_type: str                        # "EQ" | "FUT" | "CE" | "PE" | ...
     is_fno: bool = False                        # C7 — F&O-listed underlying (dynamic band membership)
+    name: str | None = None                     # company name from the dump — the §3.2.4 alias-seed
+                                                # source (dropped until 2026-08-03: empty-alias G1 finding)
 
 
 class InstrumentStore:
@@ -219,8 +221,10 @@ class InstrumentStore:
         One dict per tradable :class:`Instrument` PLUS one per index token (the non-tradable
         ``INDICES`` seam), each carrying exactly the :attr:`_SNAPSHOT_COLUMNS` keys so the store's
         pinned-column upsert accepts them. The A8 surveillance/MIS-leverage join is surveillance's own
-        job, so ``name``/``mis_leverage``/``mis_eligible``/``surveillance``/``extra`` are left at the
-        table's ``NULL`` default here — this writer persists only what the dump itself carries.
+        job, so ``mis_leverage``/``mis_eligible``/``surveillance``/``extra`` are left at the table's
+        ``NULL`` default here — this writer persists only what the dump itself carries. ``name`` IS
+        dump-carried and persists verbatim: it is the §3.2.4 alias-seed source (2026-08-03 G1 finding —
+        a NULL name column left ``entity_aliases`` empty and every headline unresolved).
 
         Each tradable ``tick_size`` is emitted verbatim (a ``Decimal``); the store column is
         ``DECIMAL(18,6)`` so a sub-₹0.01 tick (₹0.0025 currency/commodity derivatives) survives the
@@ -237,7 +241,7 @@ class InstrumentStore:
                 "d": d,
                 "instrument_token": ins.instrument_token,
                 "tradingsymbol": ins.tradingsymbol,
-                "name": None,
+                "name": ins.name,
                 "exchange": ins.exchange,
                 "segment": ins.segment,
                 "instrument_type": ins.instrument_type,
@@ -469,6 +473,7 @@ class InstrumentStore:
             lot_size=int(get("lot_size") or 1),
             instrument_type=instrument_type,
             is_fno=is_fno,
+            name=(str(get("name")).strip() or None) if get("name") else None,
         )
 
     @staticmethod
@@ -491,4 +496,5 @@ class InstrumentStore:
             lot_size=int(get("lot_size")),
             instrument_type=str(get("instrument_type", "") or ""),
             is_fno=bool(get("fno")),
+            name=(str(get("name")).strip() or None) if get("name") else None,
         )

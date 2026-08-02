@@ -662,8 +662,14 @@ async def run() -> int:
         # hydrate the token map pre-login instead of an unknown_token storm (§4.3, F1). Surveillance/MIS
         # columns are left NULL here — the 08:20 surveillance job owns that join.
         today = clock.today()
-        persisted = await store.arun(store.upsert_instruments_daily, instruments.snapshot_rows(today))
-        _log.info("instruments_persisted", d=today.isoformat(), rows=persisted)
+        rows = instruments.snapshot_rows(today)
+        persisted = await store.arun(store.upsert_instruments_daily, rows)
+        # §3.2.4 alias SEED from this dump's company names (idempotent upsert; curated rows live under
+        # their own keys). Production ran with an EMPTY entity_aliases table until 2026-08-03 — every
+        # headline no-matched — because nothing called this; the daily job now owns it, which also
+        # tracks renames/new listings.
+        seeded = await store.arun(resolver.seed_aliases, rows)
+        _log.info("instruments_persisted", d=today.isoformat(), rows=persisted, aliases_seeded=seeded)
 
     async def job_surveillance() -> None:
         await surveillance.refresh()
