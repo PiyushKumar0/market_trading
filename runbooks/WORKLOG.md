@@ -1,5 +1,56 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-03 (pre-market — G1 spot-check caught TWO live news-layer defects; fixed + remediated)
+
+- **The §8.2 G1 entity-resolution check did its job before a human even scored it.** First draw
+  returned ZERO resolved clusters → `entity_aliases` was EMPTY in production: the §3.2.4 seed was
+  never wired into composition, AND the root cause under that — `Instrument` never captured the
+  dump's company `name`, so `instruments_daily.name` was NULL for all 100k rows and no store-side
+  seed was possible. Fixes: `name` through model/refresh/snapshot/hydrate (round-trip pinned);
+  `job_instruments` now seeds aliases daily (idempotent; log field `aliases_seeded`); tonight
+  seeded 195/200 from the NIFTY200 cache (5 correctly stoplisted).
+- **Second defect, exposed by the re-resolved redraw:** ET/MC auto-generated live-blog/ticker page
+  titles ("<Company> Share Price Live Updates: …") glued up to 27 companies into ONE cluster —
+  template tokens dominated the pinned SequenceMatcher similarity (Dr Reddys→INDUSINDBK-class
+  misattribution; 42 contaminated clusters live). Fix (plan-amended §3.2.4/§4.4-10): these are
+  PAGE titles, not headlines — dropped at ingest via owner-config `news.drop_title_patterns`;
+  plus a curated boilerplate-phrase strip in the clusterer normalization as defense-in-depth.
+- **Owner-approved data remediation (engine off):** pre-image to
+  `data/backups/news_preimage_20260803T022317/`; purged 350 live-blog rows; rebuilt last-7d
+  clusters via the fixed pipeline (news 1796→1446; 554 rebuilt clusters, 108 with symbols; the
+  only multi-symbol clusters left are genuine multi-company roundups). NOTE: the first DELETE
+  attempt hit the DuckDB ART index-delete FATAL (the 2026-07-23 pathology — transaction rolled
+  back clean); the executed remediation used the table-rebuild pattern instead. Scores lost on
+  rebuilt clusters are re-earned by the 08:15 pre-open batch by design.
+- **Follow-ups logged:** §10.5 backup job covers state.db ONLY — the DuckDB checkpoint-copy leg is
+  NOT implemented (3.9GB store had no backup until tonight's targeted pre-image); alias recall
+  gaps spotted in the fresh sample (Kotak Mahindra Bank / SBI Card / Groww no-match — §5.5 weekly
+  alias-curation loop material); Moneycontrol QUOTE-page titles ("X Share Price , X Stock Price , …")
+  are a drop-pattern candidate. G1 sample awaiting owner verdict:
+  `data/reports/g1_entity_sample_20260803T022728.md`.
+
+## 2026-07-31 (night — hindsight replay: would the advertised setups have paid?)
+
+- **Owner asked whether the sweep-message setups from every trade window would have been
+  profitable.** Replayed all of them against OFFICIAL Kite 1m candles (fetched read-only,
+  independent of our own bar builder; engine left running). Sources: transcript-mined Telegram
+  sweeps (6 messages, 07-29→07-31), engine `signal_candidate` events (both days' logs), the two
+  analyst proposals from `state.db`. Entries only inside each message's real owner window;
+  touch-fill at trigger; stop-before-target in-bar (conservative); platform sizing (₹200/₹400
+  risk, caps) + C3 cost model. Artifacts: `scratchpad/hindsight/` (results_v2.json, 126 candle
+  files, simulate_v2.py); first sim pass had wrong windows (paste-time→15:25) — caught in audit,
+  re-run corrected.
+- **Verdict: the platform's zero-recommendation week was RIGHT.** Telegram pendings taken
+  mechanically: −₹790 net over 3 days (28 triggered, 5 stops, 2 targets, rest square-off scratches;
+  losers cluster at full −₹200-ish risk, winners are square-off dribbles). Engine-evaluated
+  crossings (mostly analyst-declined): −₹797 net — the declines dodged 8 stops; only SBIN (+260)
+  and DLF (+272) got away. The two real proposals: BAJFINANCE +₹51 (killed by 0.54<0.55 — cost
+  ₹51), HINDALCO **−₹218** (killed by the C7 bug — the bug saved money). Swing dip-buys: 9/10
+  never filled (price rallied away); fills' open MTM +₹533 (provisional, mostly engine-side
+  candidates). **Live hindsight now agrees with the CPCV backtests: ORB-style touch entries are
+  net-negative at retail costs; the volume-confirmation + analyst + gate stack is earning its keep
+  by saying no.**
+
 ## 2026-07-31 (mid-day — FIRST ENTER PROPOSALS reached the gate; C7 join fixed)
 
 - **10:00–11:00 window: the analyst PROPOSED for the first time** — BAJFINANCE BUY and HINDALCO BUY
