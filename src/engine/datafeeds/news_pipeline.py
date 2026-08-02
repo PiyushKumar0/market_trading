@@ -120,9 +120,49 @@ def title_tokens(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+#: §3.2.4 boilerplate strip (2026-08-03, plan-amended): recurring TEMPLATE phrases in Indian
+#: financial-press headlines. ET emits dozens of near-identical "<Company> Share Price Live
+#: Updates: ..." titles a day; with the template tokens included, the boilerplate dominated the
+#: token-set similarity and glued DIFFERENT companies into one cluster (worst observed live: 27
+#: companies in a single cluster — G1 sample finding). Phrases are removed as whole-word token
+#: SUBSEQUENCES before the sorted-set normalization, longest first. Curated in code like
+#: :data:`ALIAS_STOPLIST` (owner-reviewed; not learnable).
+CLUSTERER_BOILERPLATE_PHRASES: tuple[str, ...] = (
+    "share price live updates",
+    "stock price live updates",
+    "results live updates",
+    "share price highlights",
+    "live updates",
+    "share price today",
+    "stock market live updates",
+)
+_BOILERPLATE_TOKENSEQS: tuple[tuple[str, ...], ...] = tuple(
+    sorted((tuple(p.split()) for p in CLUSTERER_BOILERPLATE_PHRASES), key=len, reverse=True)
+)
+
+
+def _strip_boilerplate(tokens: list[str]) -> list[str]:
+    """Remove every whole-word occurrence of each boilerplate phrase from the token sequence."""
+    for seq in _BOILERPLATE_TOKENSEQS:
+        n = len(seq)
+        out: list[str] = []
+        i = 0
+        while i < len(tokens):
+            if tuple(tokens[i:i + n]) == seq:
+                i += n
+            else:
+                out.append(tokens[i])
+                i += 1
+        tokens = out
+    return tokens
+
+
 def clusterer_normalize(title: str) -> str:
-    """§3.2.4 pinned clusterer normalization: sorted set of UNIQUE lowercase alphanumeric tokens."""
-    return " ".join(sorted(set(title_tokens(title))))
+    """§3.2.4 pinned clusterer normalization: boilerplate-phrase strip (see
+    :data:`CLUSTERER_BOILERPLATE_PHRASES`), then the sorted set of UNIQUE lowercase alphanumeric
+    tokens. The strip runs on the ORDERED token sequence (phrases are positional); the set/sort
+    happens after, so the §9.1 golden-file determinism is unchanged in kind."""
+    return " ".join(sorted(set(_strip_boilerplate(title_tokens(title)))))
 
 
 def similarity(norm_a: str, norm_b: str) -> float:

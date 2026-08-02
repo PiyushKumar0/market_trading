@@ -156,6 +156,16 @@ class NewsCfg(BaseModel):
 
     feeds: NewsFeedsCfg = Field(default_factory=NewsFeedsCfg)
     cluster_sim_threshold: float = 0.75   # §3.2.4 pinned clustering similarity [tunable, owner]
+    #: Case-insensitive substrings that mark a feed item as an auto-generated live-blog/ticker PAGE
+    #: title, not a news headline — dropped at ingest (2026-08-03 G1 finding: ET's "<Company> Share
+    #: Price Live Updates: ..." template glued up to 27 companies into one cluster and burned scorer
+    #: budget on zero-content titles). Owner-editable like the feed set (config_audit).
+    drop_title_patterns: list[str] = Field(default_factory=lambda: [
+        "share price live updates",
+        "stock market live updates",
+        "results live updates",
+        "share price highlights",
+    ])
     et_poll_s: int = 300                  # ET Markets RSS poll cadence (§3.2.4: 5 min)
     mc_poll_s: int = 900                  # Moneycontrol RSS poll cadence (15 min, polite)
     gdelt_poll_s: int = 900               # GDELT DOC 2.0 poll cadence (15-min update granularity)

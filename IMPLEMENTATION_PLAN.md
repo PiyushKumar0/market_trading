@@ -480,10 +480,18 @@ class NewsIngest:                                     # E6 — best-effort enric
     # Feed set is CONFIG (`settings.yaml news.feeds`): seed = ET Markets RSS + Moneycontrol markets/business RSS +
     # one pinned GDELT DOC query (sourcecountry:IN + business/markets keywords, domain-filtered to major Indian
     # financial press). Changing the feed set is an owner config change (config_audit).
+    # DROP LIST (2026-08-03, G1 finding): items whose title matches `news.drop_title_patterns` (owner config,
+    # case-insensitive substring; seed = "share price live updates" et al.) are dropped AT INGEST — they are
+    # auto-generated live-blog/ticker PAGE titles, not news headlines: zero event content, scorer-budget burn,
+    # and their template tokens glued up to 27 different companies into one live cluster (corroboration +
+    # symbol-attribution poison). Dropping at the source keeps the pinned clusterer untouched for real headlines.
 
 class HeadlineClusterer:                              # §2.7 step 2 — deterministic dedup, NO LLM
     def cluster(self, hs: list[Headline]) -> list[NewsCluster]
-    # ALGORITHM (pinned — cluster membership drives the corroboration count, so zero implementation latitude):
+    # ALGORITHM (pinned — cluster membership drives the corroboration count, so zero implementation latitude;
+    # amended 2026-08-03: normalization first strips the curated CLUSTERER_BOILERPLATE_PHRASES token
+    # subsequences — defense-in-depth under the §4.4 job-10 ingest drop list, so residual template fragments
+    # can never dominate the similarity):
     # normalize a title to its sorted set of unique lowercase alphanumeric tokens; similarity(a, b) =
     # difflib.SequenceMatcher(None, " ".join(tokens_a), " ".join(tokens_b)).ratio(); process headlines in
     # published_at order, assigning each greedily to the earliest-first_seen existing cluster whose REPRESENTATIVE

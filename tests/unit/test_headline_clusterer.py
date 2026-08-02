@@ -212,3 +212,17 @@ async def test_run_requires_store_and_handles_empty_batch(store):
         await pure.run([])
     wired = HeadlineClusterer(store)
     assert await wired.run([]) == []
+
+
+# --------------------------------------------------------------------------- boilerplate strip (2026-08-03)
+def test_boilerplate_phrases_do_not_contribute_to_similarity():
+    """The G1-sample production finding (defense-in-depth leg): template phrases are stripped from the
+    similarity input so shared boilerplate cannot glue unrelated titles together on its own. The
+    PRIMARY guard is upstream — NewsIngest drops live-blog page titles entirely (news.drop_title_patterns);
+    this strip covers residual template fragments that slip a pattern list."""
+    a = clusterer_normalize("Dr Reddys Share Price Live Updates")
+    b = clusterer_normalize("IndusInd Bank Share Price Live Updates")
+    assert "share" not in a and "updates" not in b     # template tokens gone from the similarity input
+    assert similarity(a, b) < 0.5                      # only company tokens remain ⇒ clearly dissimilar
+    # A title that IS pure boilerplate still normalizes to a stable (empty) string, never raises.
+    assert clusterer_normalize("Live updates") == ""

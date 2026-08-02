@@ -164,6 +164,24 @@ class NewsIngest:
         if "gdelt" in selected:
             batch += await self._fetch_guarded("gdelt_doc", self._fetch_gdelt(lookback_h))
 
+        # §3.2.4/§4.4 job 10 drop list (2026-08-03): auto-generated live-blog/ticker PAGE titles are
+        # not news headlines — they carry zero event content, burn scorer budget, and their template
+        # tokens glued different companies into one cluster (the G1 contamination finding). Owner-
+        # editable in settings (news.drop_title_patterns), case-insensitive substring match.
+        patterns = [p.lower() for p in (self._cfg.drop_title_patterns or [])]
+        if patterns:
+            kept: list[Headline] = []
+            dropped = 0
+            for h in batch:
+                title = h.title.lower()
+                if any(p in title for p in patterns):
+                    dropped += 1
+                else:
+                    kept.append(h)
+            if dropped:
+                _log.info("news_boilerplate_dropped", dropped=dropped, kept=len(kept))
+            batch = kept
+
         deduped = self._dedupe(batch)
         inserted = await self._store.arun(self._insert_batch, deduped)
         _log.info(
