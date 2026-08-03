@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-03 (evening close-out — day validated; LLM-tier outage found+fixed; news layer converging)
+
+- **Day verdict: operationally excellent, analytically half-dark.** 19/19 scheduled jobs green
+  (full EOD set incl. first reco_expire), 316 equity snapshots, feed clean all session, $1.44 LLM
+  spend, 8/8 intraday analyst calls schema-valid (StructuredOutput rework proven in production),
+  DayPlan produced. Zero proposals (8× model no_action — watch item, not a defect).
+- **INCIDENT: the LLM tier was dark 12:33→20:41+.** Owner migrated agents.yaml to the Claude-5
+  roster (sonnet-5 etc.); the harness model map predated the 5-family → `load_agent_defs` raised →
+  the WHOLE tier disabled for two boots, and the 21:00 nightly review "succeeded" in 29 ms as a
+  None-guard no-op behind a success watermark. Fixes: 5-family model ids mapped;
+  `load_agent_roster` quarantines a bad def ALONE (rest of roster stays live, D7); self-test gains
+  an `agent_roster` check (WARN on quarantine/empty — the old failure surfaced only as a benign-
+  looking sdk_smoke SKIP); planner/nightly job fns now RAISE when unwired so the watermark records
+  failure and catch-up retries; tonight's nightly watermark flipped to failed for next-boot
+  catch-up.
+- **Engine stopped CLEAN 21:15 (owner-sanctioned)**; off-window work: dump-name alias seed — which
+  exposed one more defect: seeding the FULL dump poisoned resolution (derivative rows' name = the
+  underlying ⇒ one name → hundreds of contract symbols ⇒ ambiguity un-matched good aliases,
+  108→39 clusters). `seed_aliases` now filters dict rows to NSE+EQ; alias table rebuilt (8,215
+  equity aliases + 5 curated). Second G1 iteration then showed multi-company ROUNDUP titles
+  ("Stocks in news", "Market wrap") acting as cluster BRIDGES (merging Adani-family clusters
+  etc.) — added to `news.drop_title_patterns`; recent clusters rebuilt again: **0 clusters with
+  >2 symbols**. Sample redrawn (seed 5): 3 residual suspects (Adani-family attribution, the
+  "Stocks to buy in 2026" series template, a results-live-roundup variant) — owner to score;
+  next curation candidates identified if it lands under 95%.
+- Follow-ups still open: §10.5 DuckDB backup leg unimplemented; TCS-class recall (dump legal names
+  vs press short forms — §5.5 curation); `mom` daily-rebalance-due gap; push approval pending.
+
 ## 2026-08-03 (owner G1 verdict: 44/50 = 88% — BELOW the ≥95% bar; remedied, redraw pending)
 
 - **Owner scored the sample: rows 17, 21, 43, 44, 48, 50 wrong.** Two precision failures (both the
