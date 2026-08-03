@@ -34,6 +34,8 @@ aliases:
   # chars, so TCS seeds as "tata consultancy serv lt" and ADANIENSOL as the singular "adani
   # energy solution" — press acronyms/short forms must be curated; the dump can never yield them.
   - { alias: "TCS",              tradingsymbol: TCS }
+  - { alias: "RIL",              tradingsymbol: RELIANCE }
+  - { alias: "M&M",              tradingsymbol: "M&M" }
   - { alias: "HUL",              tradingsymbol: HINDUNILVR }
   - { alias: "L&T",              tradingsymbol: LT }
   - { alias: "Cholamandalam",    tradingsymbol: CHOLAFIN }
