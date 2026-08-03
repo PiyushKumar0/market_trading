@@ -40,3 +40,16 @@ aliases:
   - { alias: "L&T",              tradingsymbol: LT }
   - { alias: "Cholamandalam",    tradingsymbol: CHOLAFIN }
   - { alias: "Adani Energy Solutions", tradingsymbol: ADANIENSOL }
+  # 2026-08-03 seed-6 follow-up. "Reliance" pins RELIANCE over the seed's conglomerate-prefix
+  # ambiguity union (curated rows override seed rows at load); bare "Adani"/"Godrej" stay
+  # deliberately ambiguous — no curated pin. The SBI fund-house family maps to SBIFUNDS (listed
+  # NSE EQ, outside NIFTY200): headlines about the AMC record out_of_universe instead of wrongly
+  # attaching SBIN via the bare "SBI" alias.
+  - { alias: "Reliance",         tradingsymbol: RELIANCE }
+  - { alias: "Adani Green",      tradingsymbol: ADANIGREEN }
+  - { alias: "Adani Ports",      tradingsymbol: ADANIPORTS }
+  - { alias: "SBI Fund",         tradingsymbol: SBIFUNDS }
+  - { alias: "SBI Funds",        tradingsymbol: SBIFUNDS }
+  - { alias: "SBI Funds Management", tradingsymbol: SBIFUNDS }
+  - { alias: "SBI MF",           tradingsymbol: SBIFUNDS }
+  - { alias: "SBI Mutual Fund",  tradingsymbol: SBIFUNDS }

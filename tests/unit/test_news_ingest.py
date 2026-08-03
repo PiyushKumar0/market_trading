@@ -146,6 +146,26 @@ async def test_published_at_is_tz_aware_ist(store, clock):
     assert by_url["https://www.business-standard.com/markets/bad-seendate.html"].published_at == FIXED_NOW
 
 
+async def test_titles_are_html_unescaped_and_fo_talk_series_dropped(store, clock):
+    """ET double-escapes entities ('F&amp;amp;O' survives XML parsing as 'F&amp;O') — stored titles
+    must hold the human form or drop-pattern/alias matching silently miss (G1 seed-6 row 23)."""
+    cfg = NewsCfg()
+    xml = b"""<?xml version="1.0"?><rss><channel>
+      <item><title>M&amp;amp;M Q1 profit beats  estimates on tractor demand</title>
+        <link>https://economictimes.indiatimes.com/markets/mm-q1.cms</link>
+        <pubDate>Wed, 17 Jun 2026 03:30:00 GMT</pubDate></item>
+      <item><title>F&amp;amp;O Talk: Nifty setups for the week, says analyst</title>
+        <link>https://economictimes.indiatimes.com/markets/fo-talk.cms</link>
+        <pubDate>Wed, 17 Jun 2026 03:31:00 GMT</pubDate></item>
+    </channel></rss>"""
+    overrides = {cfg.feeds.et_markets_rss: httpx.Response(200, content=xml)}
+    ingest, client = _make_ingest(store, clock, overrides=overrides)
+    async with client:
+        got = await ingest.poll(feeds=("et",))
+    # The unescaped 'F&O Talk' series title is caught by news.drop_title_patterns.
+    assert [h.title for h in got] == ["M&M Q1 profit beats estimates on tractor demand"]
+
+
 def test_headline_rejects_naive_published_at():
     with pytest.raises(ValidationError):
         Headline(

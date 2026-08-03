@@ -349,6 +349,46 @@ def test_real_aliases_yaml_parses_and_applies(store, clock):
     assert r.seed_curated_aliases(cfg) >= 4               # the shipped curated set
 
 
+def test_conglomerate_surname_prefix_is_ambiguous_by_construction(store, clock):
+    """G1 seed-6 rows 6/19/25: 'ADANI ENTERPRISES' strips to bare 'adani', which used to grab
+    EVERY Adani-subsidiary headline for ADANIENT. A stripped-stage alias that token-prefixes
+    another company's alias now unions those symbols in — bare 'Adani' refuses with candidates,
+    while span subsumption still resolves the specific subsidiary phrase."""
+    resolver = EntityResolver(store, clock)
+    resolver.seed_aliases([
+        ("ADANI ENTERPRISES", "ADANIENT"),
+        ("ADANI POWER", "ADANIPOWER"),
+        ("ADANI GREEN ENERGY", "ADANIGREEN"),
+    ])
+    rc = resolver.resolve(_cluster("Adani stocks rally after clarification"))
+    assert rc.symbols == []
+    (u,) = [u for u in rc.unresolved if u.entity_text == "adani"]
+    assert u.reason == "ambiguous"
+    assert {"ADANIENT", "ADANIPOWER", "ADANIGREEN"} <= set(u.candidate_symbols)
+    # The specific subsidiary phrase still wins via subsumption…
+    assert resolver.resolve(_cluster("Adani Power Q1 results today")).symbols == ["ADANIPOWER"]
+    # …and the full flagship phrase still resolves the flagship.
+    assert resolver.resolve(_cluster("Adani Enterprises posts Q1 loss")).symbols == ["ADANIENT"]
+
+
+def test_curated_rows_override_seed_rows_at_load(store, clock):
+    """§6.3 owner-sets: an alias with any curated row loads ONLY the curated symbol(s) —
+    'Reliance' pins RELIANCE even though the seed's prefix union made it multi-symbol."""
+    resolver = EntityResolver(store, clock)
+    resolver.seed_aliases([
+        ("RELIANCE INDUSTRIES LTD", "RELIANCE"),
+        ("RELIANCE POWER", "RPOWER"),
+    ])
+    rc = resolver.resolve(_cluster("Reliance shares surge on refining margins"))
+    assert rc.symbols == []  # seed alone: prefix union makes bare 'reliance' ambiguous
+    resolver.seed_curated_aliases({"aliases": [{"alias": "Reliance", "tradingsymbol": "RELIANCE"}]})
+    resolver.load()
+    rc = resolver.resolve(_cluster("Reliance shares surge on refining margins"))
+    assert rc.symbols == ["RELIANCE"]
+    # The longer seed phrases are untouched by the curated pin.
+    assert resolver.resolve(_cluster("Reliance Power restructures debt")).symbols == ["RPOWER"]
+
+
 def test_dump_seed_takes_nse_equities_only(store, clock):
     """2026-08-03: seeding the FULL dump mapped every derivative row's name (= its underlying) to
     hundreds of contract symbols -> ambiguity un-matched good aliases (live resolution fell

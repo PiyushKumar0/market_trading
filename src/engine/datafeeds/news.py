@@ -29,6 +29,7 @@ anything.
 
 from __future__ import annotations
 
+import html
 import json
 import math
 import xml.etree.ElementTree as ET
@@ -71,6 +72,13 @@ GDELT_DOMAIN_ALLOWLIST: frozenset[str] = frozenset({
 #: Feed keys accepted by :meth:`NewsIngest.poll` — one per §3.2.4 source (distinct poll cadences:
 #: ``news.et_poll_s`` / ``news.mc_poll_s`` / ``news.gdelt_poll_s``; the scheduler may poll each alone).
 FEED_KEYS: tuple[str, ...] = ("et", "mc", "gdelt")
+
+
+def _clean_title(title: str) -> str:
+    """Whitespace-collapse + HTML-unescape. ET double-escapes entities in RSS ("F&amp;amp;O"
+    survives XML parsing as "F&amp;O") — stored titles must hold the human form ("F&O", "M&M")
+    or drop-pattern and alias matching silently miss (G1 seed-6 row 23)."""
+    return html.unescape(" ".join(title.split()))
 
 
 class Headline(BaseModel):
@@ -222,7 +230,7 @@ class NewsIngest:
         malformed = 0
         for item in root.iter("item"):
             try:
-                title = (item.findtext("title") or "").strip()
+                title = _clean_title(item.findtext("title") or "")
                 link = (item.findtext("link") or "").strip()
                 domain = _domain(link)
                 if not title or not link or not domain:
@@ -271,7 +279,7 @@ class NewsIngest:
         skipped = 0
         for art in payload.get("articles", []):
             try:
-                title = str(art.get("title") or "").strip()
+                title = _clean_title(str(art.get("title") or ""))
                 url = str(art.get("url") or "").strip()
                 domain = _domain(url) or str(art.get("domain") or "").lower()
                 if not title or not url or not domain:

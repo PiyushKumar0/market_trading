@@ -224,5 +224,37 @@ def test_boilerplate_phrases_do_not_contribute_to_similarity():
     b = clusterer_normalize("IndusInd Bank Share Price Live Updates")
     assert "share" not in a and "updates" not in b     # template tokens gone from the similarity input
     assert similarity(a, b) < 0.5                      # only company tokens remain ⇒ clearly dissimilar
-    # A title that IS pure boilerplate still normalizes to a stable (empty) string, never raises.
-    assert clusterer_normalize("Live updates") == ""
+    # A title that IS pure boilerplate falls back to its unstripped tokens — an EMPTY norm would
+    # make every template-only title cluster with every other one at similarity 1.0.
+    assert clusterer_normalize("Live updates") == "live updates"
+
+
+def test_earnings_template_does_not_bridge_different_companies():
+    """G1 seed-6 golden pairs — the three REAL cross-company merges observed live (2026-08-03):
+    same-day "Q1 Results" template headlines cleared the 0.75 bar on shared template tokens alone.
+    With the earnings-template vocabulary stripped, similarity runs on distinctive tokens only."""
+    contaminated = [
+        ("Maruti Suzuki Q1 Results: Profit falls 11% YoY to Rs 3,352 crore; revenue rises 36%",
+         "CDSL Q1 Results: Net profit rises 15% YoY to Rs 118 crore, revenue up 13%"),
+        ("Tata Steel Q1 Results: Profit rises 15% to Rs 2,318 crore, revenue climbs 14%",
+         "Sun Pharma Q1 Results: Profit rises 27% YoY to Rs 2,895 crore; revenue climbs 10.5%"),
+        ("Infosys Q1 Results: Profit rises 12% YoY to Rs 7,769 crore; co trims upper-end revenue forecast",
+         "Tata Consumer Q1 Results: Net profit rises 28% YoY to Rs 427 crore, revenue up 12%"),
+    ]
+    for a, b in contaminated:
+        assert similarity(clusterer_normalize(a), clusterer_normalize(b)) < 0.75, (a, b)
+
+
+def test_same_story_rereports_still_cluster_after_template_strip():
+    """Counterpart golden pairs: near-duplicate re-reports of the SAME story (live clean clusters)
+    must stay at/above the 0.75 bar after the template strip."""
+    clean = [
+        ("HUL Q1 Results: Revenue rises 10% YoY to Rs 17,149 crore, but profit falls 3% on one-off tax credit",
+         "HUL Q1 Results: Revenue rises 10% YoY to Rs 17,341 crore, but profit falls 3% on one-off tax credit"),
+        ("Maruti Suzuki Q1 profit drops 11% YoY to Rs 3,352 crore on higher input costs",
+         "Maruti Suzuki Q1 profit drops 11% to Rs 3,352 crore amid rising input costs"),
+        ("HUL shares slide 5% after weaker-than-expected Q1; PAT dips 3% to Rs 2,673 crore on one-time credit",
+         "HUL shares slide over 6% after weaker-than-expected Q1; PAT dips 3% to Rs 2,673 crore on one-time credit"),
+    ]
+    for a, b in clean:
+        assert similarity(clusterer_normalize(a), clusterer_normalize(b)) >= 0.75, (a, b)

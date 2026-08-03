@@ -181,6 +181,9 @@ class NewsCfg(BaseModel):
         "trade spotlight",
         "stocks to buy in 2026",
         " live :",
+        # Seed-6 row 23: ET/MC F&O-desk multi-name series ("F&O Talk: ... says <analyst>").
+        # Matches post-unescape titles (ingest html.unescapes; "F&amp;O Talk" never reaches here).
+        "f&o talk",
     ])
     et_poll_s: int = 300                  # ET Markets RSS poll cadence (§3.2.4: 5 min)
     mc_poll_s: int = 900                  # Moneycontrol RSS poll cadence (15 min, polite)

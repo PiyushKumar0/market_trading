@@ -138,6 +138,16 @@ CLUSTERER_BOILERPLATE_PHRASES: tuple[str, ...] = (
     "live updates",
     "share price today",
     "stock market live updates",
+    # Earnings-template vocabulary (2026-08-03, G1 seed-6): same-day "<Company> Q1 Results:
+    # Profit rises N% YoY to Rs M crore" headlines from DIFFERENT companies shared enough
+    # template tokens to clear the 0.75 similarity bar (3 live cross-company merges: Maruti+CDSL,
+    # TataSteel+SunPharma, Infosys+TataConsumer). Similarity must run on the DISTINCTIVE tokens
+    # (company name + figures), so the template predicates are stripped — clusterer-only; the
+    # resolver never sees this list.
+    "q1 results", "q2 results", "q3 results", "q4 results",
+    "net profit", "profit rises", "profit falls", "profit jumps", "profit drops",
+    "profit surges", "profit dips", "revenue rises", "revenue climbs", "revenue up",
+    "q1", "q2", "q3", "q4", "yoy", "qoq", "rs", "crore", "cr", "results",
 )
 _BOILERPLATE_TOKENSEQS: tuple[tuple[str, ...], ...] = tuple(
     sorted((tuple(p.split()) for p in CLUSTERER_BOILERPLATE_PHRASES), key=len, reverse=True)
@@ -164,8 +174,14 @@ def clusterer_normalize(title: str) -> str:
     """§3.2.4 pinned clusterer normalization: boilerplate-phrase strip (see
     :data:`CLUSTERER_BOILERPLATE_PHRASES`), then the sorted set of UNIQUE lowercase alphanumeric
     tokens. The strip runs on the ORDERED token sequence (phrases are positional); the set/sort
-    happens after, so the §9.1 golden-file determinism is unchanged in kind."""
-    return " ".join(sorted(set(_strip_boilerplate(title_tokens(title)))))
+    happens after, so the §9.1 golden-file determinism is unchanged in kind.
+
+    A title made ENTIRELY of boilerplate falls back to its unstripped token set — two empty
+    norms would be similarity 1.0 and everything template-only would collapse into one cluster.
+    """
+    tokens = title_tokens(title)
+    stripped = _strip_boilerplate(tokens)
+    return " ".join(sorted(set(stripped or tokens)))
 
 
 def similarity(norm_a: str, norm_b: str) -> float:
@@ -461,11 +477,23 @@ class EntityResolver:
         self._theme_keywords = {k: frozenset(v) for k, v in kw.items()}
 
     def load(self, d: Any = None) -> None:
-        """(Re)load alias/sector/theme/universe state from the store (sync; see :meth:`aload`)."""
+        """(Re)load alias/sector/theme/universe state from the store (sync; see :meth:`aload`).
+
+        CURATED rows take priority: for an alias with any ``source='curated'`` row, only the
+        curated symbol(s) load — the owner's explicit mapping overrides the machine seed (§6.3
+        platform-suggests-owner-sets; e.g. "Reliance" pins RELIANCE over the conglomerate-prefix
+        ambiguity union the seed produces).
+        """
         if self._store is None:
             raise RuntimeError("EntityResolver.load requires a MarketStore")
+        curated_syms: dict[str, set[str]] = {}
+        all_syms: dict[str, set[str]] = {}
+        for row in self._store.get_entity_aliases():
+            all_syms.setdefault(row["alias"], set()).add(row["tradingsymbol"])
+            if row.get("source") == "curated":
+                curated_syms.setdefault(row["alias"], set()).add(row["tradingsymbol"])
         self._set_aliases(
-            (row["alias"], (row["tradingsymbol"],)) for row in self._store.get_entity_aliases()
+            (a, tuple(sorted(curated_syms.get(a) or syms))) for a, syms in all_syms.items()
         )
         self.set_sector_map({r["symbol"]: r["sector"] for r in self._store.get_sector_map()})
         self.set_theme_map({r["theme"]: list(r["keywords"] or []) for r in self._store.get_theme_map()})
@@ -494,6 +522,7 @@ class EntityResolver:
         live resolution fell 108→39 clusters). Tuple rows are trusted as (company_name, symbol).
         """
         pairs: list[tuple[str, str]] = []
+        stripped_stage: set[str] = set()
         stoplisted = 0
         for item in instruments:
             if isinstance(item, tuple):
@@ -504,11 +533,33 @@ class EntityResolver:
                 name, symbol = item.get("name"), item.get("tradingsymbol")
             if not name or not symbol:
                 continue
-            for alias in alias_variants(str(name)):
+            for stage, alias in enumerate(alias_variants(str(name))):
                 if alias in ALIAS_STOPLIST:
                     stoplisted += 1
                     continue
                 pairs.append((alias, str(symbol)))
+                if stage > 0:
+                    stripped_stage.add(alias)
+
+        # Conglomerate-surname guard (G1 seed-6 rows 6/19/25): a STRIPPED-stage alias ("ADANI
+        # ENTERPRISES" → "adani") that token-PREFIXES another company's alias is ambiguous by
+        # construction — a bare "Adani"/"Godrej" headline must refuse with candidates, not default
+        # to whichever family member's name happened to strip shortest. Union the prefixed symbols
+        # in; the §3.2.4 multi-symbol rule then refuses, while span subsumption still resolves
+        # "Adani Power" to ADANIPOWER. Curated rows override at load() ("Reliance" → RELIANCE).
+        alias_syms: dict[str, set[str]] = {}
+        for a, s in pairs:
+            alias_syms.setdefault(a, set()).add(s)
+        by_first: dict[str, list[str]] = {}
+        for a in alias_syms:
+            by_first.setdefault(a.split(" ", 1)[0], []).append(a)
+        for a in stripped_stage:
+            if a not in alias_syms:
+                continue
+            toks = a.split(" ")
+            for b in by_first.get(toks[0], ()):
+                if b != a and b.split(" ")[: len(toks)] == toks:
+                    pairs.extend((a, s) for s in alias_syms[b] - alias_syms[a])
 
         self._set_aliases(
             list((a, syms) for a, syms in self._aliases.items())
