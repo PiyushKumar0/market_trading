@@ -144,6 +144,46 @@ def test_overlapping_spans_of_different_companies_resolve_to_nothing():
     assert all(set(u.candidate_symbols) == {"TATAMOTORS", "TMFL"} for u in rc.unresolved)
 
 
+def test_contained_span_is_subsumed_by_the_longer_match():
+    """§3.2.4 subsumption (G1 seed-6 row 47): the most specific phrase wins over a strictly
+    contained sub-phrase of a DIFFERENT company — 'Inox' inside 'PVR Inox' must not poison it."""
+    resolver = EntityResolver(aliases={"pvr inox": "PVRINOX", "inox": "INOXINDIA"})
+    rc = resolver.resolve(_cluster("PVR Inox Q1 Results: Co swings to black"))
+    assert rc.symbols == ["PVRINOX"]
+    assert rc.unresolved == []
+    # …while the sub-phrase alone still resolves normally.
+    rc = resolver.resolve(_cluster("Inox wins cryogenic tank order"))
+    assert rc.symbols == ["INOXINDIA"]
+
+
+def test_curated_sbi_does_not_kill_sbi_card_headlines():
+    """Regression: curating 'sbi' (SBIN) must not make 'SBI Card' headlines refuse — the longer
+    curated phrase subsumes it. A bare 'SBI' headline still resolves SBIN."""
+    resolver = EntityResolver(aliases={"sbi": "SBIN", "sbi card": "SBICARD"})
+    rc = resolver.resolve(_cluster("SBI Card posts 12 percent profit growth"))
+    assert rc.symbols == ["SBICARD"]
+    assert rc.unresolved == []
+    rc = resolver.resolve(_cluster("SBI raises Rs 4,691 crore via Tier 1 bonds"))
+    assert rc.symbols == ["SBIN"]
+
+
+def test_identical_spans_of_different_companies_still_refuse():
+    """Subsumption needs a STRICTLY longer container — two aliases on the same span stay ambiguous."""
+    resolver = EntityResolver(aliases={"jindal steel": ("JINDALSTEL", "JSL")})
+    rc = resolver.resolve(_cluster("Jindal Steel announces expansion"))
+    assert rc.symbols == []
+    assert all(u.reason == "ambiguous" for u in rc.unresolved)
+
+
+def test_chained_containment_longest_phrase_wins():
+    resolver = EntityResolver(
+        aliases={"sbi": "SBIN", "sbi funds": "SBIFUNDS", "sbi funds management": "SBIFUNDS"}
+    )
+    rc = resolver.resolve(_cluster("SBI Funds Management IPO subscription strong"))
+    assert rc.symbols == ["SBIFUNDS"]
+    assert rc.unresolved == []
+
+
 def test_non_overlapping_matches_both_resolve():
     resolver = EntityResolver(aliases={"infosys": "INFY", "wipro": "WIPRO"})
     rc = resolver.resolve(_cluster("Infosys and Wipro rally on strong IT spending"))

@@ -508,8 +508,11 @@ class EntityResolver:                                 # §2.7 step 3 — determi
     # MINUS a curated stoplist of aliases that are common English words (TRENT/IDEA/… — owner-reviewed once in
     # Phase 1); `entity_aliases` (DuckDB) starts as exactly this seed. AMBIGUOUS = a matched alias mapping to >1
     # distinct tradingsymbol, OR two different companies' aliases matching overlapping title spans ⇒ NO match,
-    # never a guess — logged to the unresolved-entity table (weekly suggestion loop, §5.5). Out-of-universe
-    # entities recorded, never traded. sector/theme tags via sector_map + theme_map keyword match (same whole-word
+    # never a guess — logged to the unresolved-entity table (weekly suggestion loop, §5.5). SUBSUMPTION
+    # refinement (2026-08-03, G1 seed-6): a match STRICTLY contained in a longer match's span is subsumed —
+    # the most specific phrase wins ("Inox" inside "PVR Inox" doesn't poison it; curated "SBI" doesn't kill
+    # "SBI Card"). Staggered overlaps (neither contains the other) and same-span collisions still refuse.
+    # Out-of-universe entities recorded, never traded. sector/theme tags via sector_map + theme_map keyword match (same whole-word
     # rule), fanned out to universe constituents at `cat.fanout_weight` (§2.7 step 5). Entity STRINGS emitted by
     # the News Analyst for unmatched clusters re-enter this resolver — the LLM never assigns a symbol; fan-out
     # consumes ONLY this resolver's deterministic sector/theme tags — LLM-emitted scope/sectors/themes are advisory

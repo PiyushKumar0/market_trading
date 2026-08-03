@@ -636,6 +636,12 @@ class EntityResolver:
         components; a component whose symbol union is >1 (a multi-symbol alias, or different
         companies' aliases overlapping) resolves to NOTHING and every alias in it is logged
         ``ambiguous`` with the union as candidates.
+
+        SUBSUMPTION refinement (2026-08-03, G1 seed-6 row 47): a match whose span is STRICTLY
+        contained in a longer match's span is subsumed — the most specific phrase wins. Without
+        it, curating "SBI" (SBIN) silently killed every "SBI Card" headline, and "PVR Inox"
+        refused because the contained "Inox" (a different company) poisoned the component.
+        Staggered partial overlaps (neither contains the other) still refuse — never a guess.
         """
         tokens = title_tokens(text)
         matches: list[tuple[int, int, str, frozenset[str]]] = []
@@ -645,6 +651,13 @@ class EntityResolver:
             for i in range(len(tokens) - n + 1):
                 if tokens[i:i + n] == alias_toks:
                     matches.append((i, i + n, alias, syms))
+        matches = [
+            m for m in matches
+            if not any(
+                o[0] <= m[0] and m[1] <= o[1] and (o[1] - o[0]) > (m[1] - m[0])
+                for o in matches
+            )
+        ]
         matches.sort(key=lambda m: (m[0], m[1], m[2]))
 
         components: list[list[tuple[int, int, str, frozenset[str]]]] = []
