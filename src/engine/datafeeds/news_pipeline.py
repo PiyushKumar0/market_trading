@@ -471,6 +471,11 @@ class EntityResolver:
         legal suffixes stripped (:func:`strip_legal_suffixes`); aliases in :data:`ALIAS_STOPLIST`
         are dropped (common English words — owner-reviewed in Phase 1). ``entity_aliases`` starts as
         exactly this seed; returns the number of (alias, symbol) pairs seeded.
+
+        DICT rows are filtered to NSE EQUITIES (2026-08-03: seeding the FULL dump poisoned
+        resolution — every derivative row's ``name`` is its underlying, so one company name mapped
+        to hundreds of contract symbols and the ambiguity rule un-matched previously-good aliases;
+        live resolution fell 108→39 clusters). Tuple rows are trusted as (company_name, symbol).
         """
         pairs: list[tuple[str, str]] = []
         stoplisted = 0
@@ -478,6 +483,8 @@ class EntityResolver:
             if isinstance(item, tuple):
                 name, symbol = item
             else:
+                if str(item.get("exchange") or "") != "NSE" or str(item.get("instrument_type") or "") != "EQ":
+                    continue
                 name, symbol = item.get("name"), item.get("tradingsymbol")
             if not name or not symbol:
                 continue

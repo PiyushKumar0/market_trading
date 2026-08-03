@@ -65,11 +65,12 @@ def test_strip_legal_suffixes():
 def test_seed_from_instruments_dump_applies_suffixes_and_stoplist(store, clock):
     resolver = EntityResolver(store, clock)
     seeded = resolver.seed_aliases([
-        {"name": "INFOSYS LIMITED", "tradingsymbol": "INFY"},
-        {"name": "HINDUSTAN UNILEVER LIMITED", "tradingsymbol": "HINDUNILVR"},
+        # Dict rows carry the instruments_daily equity markers (2026-08-03: non-EQ rows are filtered).
+        {"name": "INFOSYS LIMITED", "tradingsymbol": "INFY", "exchange": "NSE", "instrument_type": "EQ"},
+        {"name": "HINDUSTAN UNILEVER LIMITED", "tradingsymbol": "HINDUNILVR", "exchange": "NSE", "instrument_type": "EQ"},
         ("TRENT LTD", "TRENT"),          # stoplisted: common English word
         ("COAL INDIA LTD", "COALINDIA"), # strips to 'coal' ⇒ stoplisted
-        {"name": "", "tradingsymbol": "NONAME"},  # malformed row skipped
+        {"name": "", "tradingsymbol": "NONAME", "exchange": "NSE", "instrument_type": "EQ"},  # malformed row skipped
     ])
     assert seeded == 2
 
@@ -289,3 +290,20 @@ def test_real_aliases_yaml_parses_and_applies(store, clock):
     cfg = load_yaml(config_dir() / "aliases.yaml")
     r = EntityResolver(store, clock)
     assert r.seed_curated_aliases(cfg) >= 4               # the shipped curated set
+
+
+def test_dump_seed_takes_nse_equities_only(store, clock):
+    """2026-08-03: seeding the FULL dump mapped every derivative row's name (= its underlying) to
+    hundreds of contract symbols -> ambiguity un-matched good aliases (live resolution fell
+    108->39 clusters). Dict rows now filter to exchange NSE + instrument_type EQ."""
+    r = EntityResolver(store, clock)
+    n = r.seed_aliases([
+        {"name": "RELIANCE INDUSTRIES LTD", "tradingsymbol": "RELIANCE", "exchange": "NSE", "instrument_type": "EQ"},
+        {"name": "RELIANCE", "tradingsymbol": "RELIANCE25AUGFUT", "exchange": "NFO", "instrument_type": "FUT"},
+        {"name": "RELIANCE", "tradingsymbol": "RELIANCE25AUG1400CE", "exchange": "NFO", "instrument_type": "CE"},
+        {"name": "SOME BSE CO", "tradingsymbol": "SOMEBSE", "exchange": "BSE", "instrument_type": "EQ"},
+    ])
+    assert n == 1
+    rows = store.get_entity_aliases()
+    # "INDUSTRIES LTD" both strip as legal-suffix tokens — the seed alias is the bare company head.
+    assert {(x["alias"], x["tradingsymbol"]) for x in rows} == {("reliance", "RELIANCE")}

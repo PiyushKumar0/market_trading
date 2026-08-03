@@ -168,6 +168,15 @@ class NewsCfg(BaseModel):
         # Moneycontrol QUOTE-page titles ("X Share Price , X Stock Price , ..." — G1 verdict row 17):
         # the comma-spaced template never appears in written prose.
         "stock price ,",
+        # Multi-company ROUNDUP titles (2026-08-03 second G1 iteration): breadth commentary, not
+        # company events — and worse, they BRIDGE different companies' clusters (a roundup naming
+        # Adani Ports + Adani Enterprises merges both families' clusters, cross-attributing every
+        # member). No catalyst signal is lost: §2.7 wants per-company events, not market wraps.
+        "stocks in news",
+        "market wrap",
+        "buzzing stocks",
+        "top gainers",
+        "gainers and losers",
     ])
     et_poll_s: int = 300                  # ET Markets RSS poll cadence (§3.2.4: 5 min)
     mc_poll_s: int = 900                  # Moneycontrol RSS poll cadence (15 min, polite)
