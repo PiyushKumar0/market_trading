@@ -200,8 +200,12 @@ def real_cfg() -> dict:
 
 
 @pytest.fixture
-def gov(conn, clock, calendar, real_cfg) -> BudgetGovernor:
-    return BudgetGovernor(conn, clock, calendar, real_cfg)
+def gov(conn, clock, calendar) -> BudgetGovernor:
+    # PINNED governor numbers (credit/allocations/ladder), NOT the live owner-tunable agents.yaml —
+    # admission-boundary tests here must not move when the owner rebalances the budget (2026-08-03).
+    from tests.unit.test_budget_governor import PINNED_CFG
+
+    return BudgetGovernor(conn, clock, calendar, PINNED_CFG)
 
 
 @pytest.fixture

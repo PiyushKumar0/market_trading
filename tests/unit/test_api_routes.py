@@ -320,7 +320,9 @@ async def test_budget_wired_per_agent_and_degrade_tier(conn, clock, governor) ->
     # this route's contract to pin down.
     assert Decimal(body["budget"]["month_spend_usd"]) == Decimal("1")
     assert Decimal(body["budget"]["per_agent_spend_usd"]["weekly_researcher"]) == Decimal("1")
-    assert Decimal(body["budget"]["allocations_usd"]["weekly_researcher"]) == Decimal("12")
+    # Amount-AGNOSTIC vs the owner-tunable agents.yaml (2026-08-03 rebalance lesson): the route's
+    # contract is that it serves the GOVERNOR's allocation, not any particular dollar figure.
+    assert Decimal(body["budget"]["allocations_usd"]["weekly_researcher"]) == governor.allocations()["weekly_researcher"]
 
 
 # --------------------------------------------------------------------------- config/params (GET + POST)

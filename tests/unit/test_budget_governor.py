@@ -33,14 +33,47 @@ def calendar(clock) -> NSECalendar:
     return NSECalendar(config_dir() / "calendar", clock, strict=False)
 
 
+#: PINNED worked-example config (the §5.6/§11.2 numbers as designed). The exact-boundary tests pin
+#: their arithmetic against THIS, deliberately NOT against config/agents.yaml — the live file is
+#: owner-tunable at will (credit was raised 100→120 on 2026-08-03 and broke the old file-coupled
+#: suite), and a worked example that moves with owner edits proves nothing.
+PINNED_CFG: dict = {
+    "llm": {"monthly_credit_usd": 100},
+    "model_pricing_usd_per_mtok": {
+        "haiku-4.5": {"input": 1, "output": 5},
+        "sonnet-4.6": {"input": 3, "output": 15},
+        "opus-4.8": {"input": 5, "output": 25},
+    },
+    "budget_allocations_usd": {
+        "intraday_analyst": 42, "nightly_reviewer": 20, "weekly_researcher": 12,
+        "news_analyst": 14, "preopen_planner": 5, "reserve": 7,
+    },
+    "degrade_ladder": {
+        "DG1": {"pro_rata_pct": 110, "agent_alloc_pct": 85},
+        "DG2": {"pro_rata_pct": 125, "global_alloc_pct": 85},
+        "DG3": {"global_alloc_pct": 95},
+    },
+    "agents": {"intraday_analyst": {"heartbeat_min": 20, "prescreen_cap_per_day": 6}},
+}
+
+
 @pytest.fixture
 def real_cfg() -> dict:
     return load_yaml(config_dir() / "agents.yaml")
 
 
 @pytest.fixture
-def gov(conn, clock, calendar, real_cfg, bus) -> BudgetGovernor:
-    return BudgetGovernor(conn, clock, calendar, real_cfg, bus=bus)
+def gov(conn, clock, calendar, bus) -> BudgetGovernor:
+    return BudgetGovernor(conn, clock, calendar, PINNED_CFG, bus=bus)
+
+
+def test_real_agents_yaml_loads_and_prices(conn, clock, calendar, real_cfg) -> None:
+    """Schema smoke against the LIVE owner-tunable file: it must construct and price — no amount
+    assertions (owner edits must never fail the suite; the math is pinned above)."""
+    g = BudgetGovernor(conn, clock, calendar, real_cfg)
+    assert g.credit() > 0
+    assert g.allocations()
+    assert g.price("haiku-4.5", TokenUsage(in_tokens=1_000_000, out_tokens=0)) > 0
 
 
 def isolated_cfg(real_cfg: dict, credit: str = "105") -> dict:
@@ -162,12 +195,12 @@ async def test_dg1_agent_allocation_boundary_is_strict(gov):
     assert gov.degrade_tier() == DegradeTier.DG1
 
 
-async def test_dg2_global_boundary_is_strict(conn, calendar, real_cfg):
+async def test_dg2_global_boundary_is_strict(conn, calendar):
     # Fixed clock moved to Tue 2026-06-23 (17 of 21 trading days elapsed) so 125% of pace is $101.19
     # and the global-85% rule, not the pace rule, is the binding one at $85.
     clock = Clock(time_source=lambda: datetime(2026, 6, 23, 10, 5, tzinfo=IST))
     cal = NSECalendar(config_dir() / "calendar", clock, strict=False)
-    gov = BudgetGovernor(conn, clock, cal, real_cfg)
+    gov = BudgetGovernor(conn, clock, cal, PINNED_CFG)
     assert gov.trading_days() == (17, 21)
 
     # 85% of EVERY allocation sums to exactly 85% of the credit, so no agent trips the DG1 rule either.
@@ -242,10 +275,10 @@ async def test_allocation_exhaustion_blocks_only_that_agent(gov):
     assert gov.can_invoke("intraday_analyst").allowed is True
 
 
-async def test_allocation_exhaustion_blocks_even_at_dg0(conn, clock, calendar, real_cfg):
+async def test_allocation_exhaustion_blocks_even_at_dg0(conn, clock, calendar):
     # Same rule with the DG1 agent trip lifted to 100%: the tier is DG0 and the agent is still blocked.
-    cfg = dict(real_cfg)
-    cfg["degrade_ladder"] = {**real_cfg["degrade_ladder"], "DG1": {"pro_rata_pct": 110, "agent_alloc_pct": 100}}
+    cfg = dict(PINNED_CFG)
+    cfg["degrade_ladder"] = {**PINNED_CFG["degrade_ladder"], "DG1": {"pro_rata_pct": 110, "agent_alloc_pct": 100}}
     gov = BudgetGovernor(conn, clock, calendar, cfg)
     await spend(gov, "5.00", agent="preopen_planner")
     assert gov.degrade_tier() == DegradeTier.DG0
@@ -286,11 +319,13 @@ async def test_full_grade_knobs_come_from_agents_yaml(conn, clock, calendar, rea
 
 
 async def test_from_config_loads_agents_yaml(conn, clock, calendar):
+    # Amount-AGNOSTIC against the live owner-tunable file (credit is the owner's knob, D3/O6):
+    # whatever the shipped credit is, spending exactly that much must reach DG4.
     gov = BudgetGovernor.from_config(conn, clock, calendar)
     assert gov.price("sonnet-4.6", TokenUsage(in_tokens=1_000_000, out_tokens=0)) == Decimal("3")
     assert gov.degrade_tier() == DegradeTier.DG0
-    await spend(gov, "100.00")
-    assert gov.degrade_tier() == DegradeTier.DG4                 # the shipped $100 credit (D3)
+    await spend(gov, str(gov.credit()))
+    assert gov.degrade_tier() == DegradeTier.DG4
 
 
 # --------------------------------------------------------------------------- bus (§3.2.1, R8)
@@ -328,13 +363,13 @@ async def test_raise_billing_error_publishes(conn, clock, calendar, real_cfg, bu
 
 
 # --------------------------------------------------------------------------- month rollover
-async def test_month_rollover_resets_the_tier(conn, calendar, real_cfg, bus):
+async def test_month_rollover_resets_the_tier(conn, calendar, bus):
     now = [datetime(2026, 6, 17, 10, 5, tzinfo=IST)]
     clock = Clock(time_source=lambda: now[0])
     cal = NSECalendar(config_dir() / "calendar", clock, strict=False)
     seen: list[BudgetStateChanged] = []
     bus.subscribe(TOPIC_BUDGET_STATE, lambda e: _collect(seen, e))
-    gov = BudgetGovernor(conn, clock, cal, real_cfg, bus=bus)
+    gov = BudgetGovernor(conn, clock, cal, PINNED_CFG, bus=bus)
 
     await spend(gov, "100.00")
     gov.note_billing_error("credit_exhausted")
