@@ -177,6 +177,10 @@ class NewsCfg(BaseModel):
         "buzzing stocks",
         "top gainers",
         "gainers and losers",
+        # Seed-5 verdict residuals (2026-08-03): more roundup/series templates that bridge clusters.
+        "trade spotlight",
+        "stocks to buy in 2026",
+        " live :",
     ])
     et_poll_s: int = 300                  # ET Markets RSS poll cadence (§3.2.4: 5 min)
     mc_poll_s: int = 900                  # Moneycontrol RSS poll cadence (15 min, polite)

@@ -59,12 +59,17 @@ def main() -> int:
             WHERE len(c.symbols) = 0 AND len(c.entities) = 0
             """
         ).fetchall()
+        # FRESH rows only: unresolved_entities is APPEND-ONLY, so without this filter the sample
+        # resurrects verdicts from superseded alias tables (2026-08-03 seed-5 row 48: option-chain
+        # "ambiguous" candidates recorded during the 20-minute full-dump-seed window, long fixed).
+        # Freshness = within 1h of the newest logged_at (one resolve pass logs in a tight burst).
         unresolved = conn.execute(
             """
             SELECT u.entity_text, u.reason, u.candidate_symbols, n.title, n.source_domain
             FROM unresolved_entities u
             LEFT JOIN news n ON n.cluster_id = u.cluster_id
             WHERE n.title IS NOT NULL
+              AND u.logged_at >= (SELECT MAX(logged_at) FROM unresolved_entities) - INTERVAL 1 HOUR
             """
         ).fetchall()
     finally:

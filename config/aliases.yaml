@@ -20,3 +20,13 @@ aliases:
   - { alias: "SBI Cards",   tradingsymbol: SBICARD }
   - { alias: "Kotak Bank",  tradingsymbol: KOTAKBANK }
   - { alias: "Lloyds Metals", tradingsymbol: LLOYDSME }
+  # 2026-08-03 seed-5 verdict (rows 29/33/39/40/45): press short forms of legal names. "SBI" is
+  # safe by construction — an "SBI Card"/"SBI Life" headline matches two aliases on overlapping
+  # spans and the §3.2.4 rule refuses rather than guesses.
+  - { alias: "HCL Tech",         tradingsymbol: HCLTECH }
+  - { alias: "Kalyan Jewellers", tradingsymbol: KALYANKJIL }
+  - { alias: "SBI",              tradingsymbol: SBIN }
+  - { alias: "SBI Life",         tradingsymbol: SBILIFE }
+  - { alias: "BEL",              tradingsymbol: BEL }
+  - { alias: "Adani Power",      tradingsymbol: ADANIPOWER }
+  - { alias: "Adani Energy",     tradingsymbol: ADANIENSOL }
