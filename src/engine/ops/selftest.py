@@ -107,6 +107,8 @@ class SelfTest:
         latch=None,
         sdk_smoke=None,
         calendar=None,
+        roster_quarantined: dict[str, str] | None = None,
+        roster_loaded: int | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -130,6 +132,10 @@ class SelfTest:
         # is WARN, never FROZEN — LLM availability is not a safety input (D7/R1).
         self._sdk_smoke = sdk_smoke
         self._calendar = calendar
+        # Roster health (2026-08-03: a quarantined/unloadable roster used to surface only as an
+        # innocuous-looking sdk_smoke SKIP while every LLM job silently no-op'd).
+        self._roster_quarantined = dict(roster_quarantined or {})
+        self._roster_loaded = roster_loaded
 
     async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
@@ -145,6 +151,7 @@ class SelfTest:
         report.checks.append(await self._check_equity_halt_ladder())
         if include_freshness:
             report.checks.extend(await self.data_freshness_checks())
+        report.checks.append(self._check_agent_roster())
         report.checks.append(await self._check_sdk_smoke())
 
         for c in report.checks:
@@ -371,6 +378,22 @@ class SelfTest:
             )
         return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.PASS,
                              detail=f"no rung breached (equity {self._exposure.equity()})")
+
+    def _check_agent_roster(self) -> SelfTestCheck:
+        """Tier-1 roster health (D7): WARN — never FROZEN, the LLM is not load-bearing — when any
+        agent definition was quarantined or the roster is empty, so a config typo shows up as a
+        named check instead of a day of silent no-op LLM jobs (2026-08-03 sonnet-5 incident)."""
+        if self._roster_loaded is None and not self._roster_quarantined:
+            return self._stub("agent_roster", "roster not wired")
+        if self._roster_quarantined:
+            names = ", ".join(f"{a} ({r[:80]})" for a, r in sorted(self._roster_quarantined.items()))
+            return SelfTestCheck(name="agent_roster", status=CheckStatus.WARN,
+                                 detail=f"{self._roster_loaded or 0} loaded; QUARANTINED: {names}")
+        if not self._roster_loaded:
+            return SelfTestCheck(name="agent_roster", status=CheckStatus.WARN,
+                                 detail="EMPTY roster — LLM tier disabled this run")
+        return SelfTestCheck(name="agent_roster", status=CheckStatus.PASS,
+                             detail=f"{self._roster_loaded} agent defs loaded")
 
     async def _check_sdk_smoke(self) -> SelfTestCheck:
         """D11: one cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading

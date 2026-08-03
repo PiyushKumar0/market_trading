@@ -322,7 +322,10 @@ async def test_from_config_loads_agents_yaml(conn, clock, calendar):
     # Amount-AGNOSTIC against the live owner-tunable file (credit is the owner's knob, D3/O6):
     # whatever the shipped credit is, spending exactly that much must reach DG4.
     gov = BudgetGovernor.from_config(conn, clock, calendar)
-    assert gov.price("sonnet-4.6", TokenUsage(in_tokens=1_000_000, out_tokens=0)) == Decimal("3")
+    # Fully config-agnostic (owner tunes models AND rates): every priced model must price > 0.
+    priced = load_yaml(config_dir() / "agents.yaml")["model_pricing_usd_per_mtok"]
+    for name in priced:
+        assert gov.price(name, TokenUsage(in_tokens=1_000_000, out_tokens=0)) > 0
     assert gov.degrade_tier() == DegradeTier.DG0
     await spend(gov, str(gov.credit()))
     assert gov.degrade_tier() == DegradeTier.DG4

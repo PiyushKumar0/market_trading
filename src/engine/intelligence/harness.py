@@ -70,6 +70,12 @@ MODEL_API_IDS: dict[str, str] = {
     "haiku-4.5": "claude-haiku-4-5",
     "sonnet-4.6": "claude-sonnet-4-6",
     "opus-4.8": "claude-opus-4-8",
+    # Claude 5 family (owner roster migration 2026-08-03 — the unmapped 'sonnet-5' darkened the
+    # whole LLM tier from the 12:33 boot until this entry landed; see load_agent_roster for the
+    # one-bad-def quarantine that keeps a repeat from taking every agent down).
+    "sonnet-5": "claude-sonnet-5",
+    "opus-5": "claude-opus-5",
+    "fable-5": "claude-fable-5",
 }
 
 # The SDK's built-in tools, explicitly disabled on every call (§5.1) — "no filesystem, no network, no
@@ -226,6 +232,45 @@ def load_agent_defs(cfg: dict[str, Any]) -> dict[str, AgentDef]:
             run_budget_tokens=RunCaps(**budget) if budget else None,
         )
     return out
+
+
+class RosterLoad(BaseModel):
+    """Outcome of :func:`load_agent_roster`: the runnable defs plus every QUARANTINED def with its
+    refusal reason. A quarantined agent cannot run (same guarantee as the strict loader) — but it no
+    longer takes the other agents down with it."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    defs: dict[str, AgentDef]
+    quarantined: dict[str, str]
+
+
+def load_agent_roster(cfg: dict[str, Any]) -> RosterLoad:
+    """Per-def tolerant roster load for the COMPOSITION ROOT (2026-08-03 incident: one unmapped
+    model name — ``sonnet-5`` before the 5-family entries existed — made :func:`load_agent_defs`
+    raise and DISABLED the entire LLM tier for two boots, with every LLM job then no-op'ing behind
+    success watermarks).
+
+    Each definition validates independently: an invalid one is EXCLUDED and logged loud (the
+    §9.1/D5 guarantee is preserved — a def that fails validation is not runnable), while the valid
+    rest of the roster stays live (D7: failures degrade to less capability, never more). The strict
+    :func:`load_agent_defs` remains for tests/tooling that want refusal semantics.
+    """
+    defs: dict[str, AgentDef] = {}
+    quarantined: dict[str, str] = {}
+    for agent_id, raw in (cfg.get("agents") or {}).items():
+        try:
+            loaded = load_agent_defs({"agents": {agent_id: raw}})
+        except Exception as exc:  # noqa: BLE001 - each def is judged alone; the reason is preserved
+            quarantined[agent_id] = str(exc)
+            _log.error("agent_def_quarantined", agent=agent_id, error=str(exc)[:300])
+            continue
+        defs.update(loaded)
+    if quarantined:
+        _log.error(
+            "agent_roster_partial", loaded=sorted(defs), quarantined=sorted(quarantined),
+        )
+    return RosterLoad(defs=defs, quarantined=quarantined)
 
 
 # --------------------------------------------------------------------------- results

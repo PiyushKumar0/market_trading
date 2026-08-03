@@ -113,7 +113,7 @@ from engine.ops.selftest import SelfTest
 from engine.ops.single_instance import InstanceLock
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
-from engine.intelligence.harness import AgentHarness, load_agent_defs, run_sdk_smoke
+from engine.intelligence.harness import AgentHarness, load_agent_roster, run_sdk_smoke
 from engine.ops.news_scoring import NewsScoringJob
 from engine.ops.nightly_review import NightlyReviewJob
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
@@ -382,13 +382,20 @@ async def run() -> int:
     telegram_holder["bot"] = telegram
 
     # --- Tier-1 harness (§3.2.6): the ONLY SDK call site. Consumed by the D11 sdk-smoke check and
-    #     (second wiring pass) the recommendation pipeline / planner / news-scoring jobs. A roster
-    #     that fails to load disables the LLM tier for the run — deterministic tiers unaffected (D7).
+    #     (second wiring pass) the recommendation pipeline / planner / news-scoring jobs. Defs load
+    #     PER-AGENT (2026-08-03: one unmapped model name used to raise and dark the WHOLE tier for
+    #     the run); an invalid def is quarantined + surfaced by the self-test, the rest stay live.
     agent_defs: dict[str, Any] = {}
+    roster_quarantined: dict[str, str] = {}
     harness: AgentHarness | None = None
     try:
-        agent_defs = load_agent_defs(load_yaml(config_dir() / "agents.yaml"))
-        harness = AgentHarness(agent_defs, governor, clock, conn, alert=alert)
+        roster = load_agent_roster(load_yaml(config_dir() / "agents.yaml"))
+        agent_defs = roster.defs
+        roster_quarantined = roster.quarantined
+        if agent_defs:
+            harness = AgentHarness(agent_defs, governor, clock, conn, alert=alert)
+        else:
+            _log.error("agent_roster_empty", hint="config/agents.yaml — LLM tier disabled this run")
     except Exception:  # noqa: BLE001 - a bad roster must not stop the deterministic engine (D7)
         _log.exception("agent_roster_unloadable", hint="config/agents.yaml — LLM tier disabled this run")
 
@@ -751,8 +758,11 @@ async def run() -> int:
         await notify(catalyst_watchlist(result.n_originating, result.n_context))
 
     async def job_preopen_planner() -> None:
-        if planner_job is not None:
-            await planner_job.run(clock.today())
+        if planner_job is None:
+            # A FAILED watermark, not a silent success: catch-up retries once the roster is fixed
+            # (2026-08-03: the sonnet-5 roster failure made this a 29 ms "success" no-op all day).
+            raise RuntimeError("preopen planner unavailable — LLM roster quarantined/unloaded")
+        await planner_job.run(clock.today())
 
     async def job_reco_expire() -> None:
         # §3.6: expired-unconfirmed recommendations become labelled no_action rows (unbiased non-fill
@@ -764,8 +774,9 @@ async def run() -> int:
             await pipeline.check_aged_positions(clock.today())
 
     async def job_nightly_review(d) -> None:
-        if nightly_job is not None:
-            await nightly_job.run(d)
+        if nightly_job is None:
+            raise RuntimeError("nightly reviewer unavailable — LLM roster quarantined/unloaded")
+        await nightly_job.run(d)
 
     async def job_sector_map() -> None:
         await sector_map.run(clock.today(), universe_symbols=watchlist_symbols())
@@ -879,6 +890,7 @@ async def run() -> int:
         exposure=exposure, limits_engine=limits_engine, latch=latch,
         sdk_smoke=(None if harness is None else (lambda: run_sdk_smoke(harness))),
         calendar=calendar,
+        roster_quarantined=roster_quarantined, roster_loaded=len(agent_defs),
     )
     # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
     # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.

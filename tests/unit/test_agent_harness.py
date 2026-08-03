@@ -898,3 +898,39 @@ async def test_run_sdk_smoke_raises_on_wrong_payload(defs, gov, clock, conn) -> 
     harness = make_harness(defs, gov, clock, conn, fake)
     with pytest.raises(RuntimeError, match="schema_invalid"):
         await run_sdk_smoke(harness)
+
+
+# --------------------------------------------------------------------------- roster quarantine (2026-08-03)
+def test_claude5_family_models_are_mapped() -> None:
+    # The 2026-08-03 incident: the owner moved the roster to sonnet-5 before this map knew the
+    # 5-family, and the strict loader darkened the whole LLM tier for two boots.
+    assert MODEL_API_IDS["sonnet-5"] == "claude-sonnet-5"
+    assert MODEL_API_IDS["opus-5"] == "claude-opus-5"
+    assert MODEL_API_IDS["fable-5"] == "claude-fable-5"
+
+
+def test_one_bad_def_quarantines_alone_not_the_roster() -> None:
+    from engine.intelligence.harness import load_agent_roster
+
+    cfg = {"agents": {
+        "good": {"model": "haiku-4.5", "shape": "single_shot", "tools_enabled": False},
+        "bad_model": {"model": "sonnet-99", "shape": "single_shot", "tools_enabled": False},
+        "bad_allowlist": {"model": "haiku-4.5", "shape": "agentic", "tools_enabled": True,
+                          "max_turns": 3, "run_budget_tokens": {"billed_in_max": 1, "billed_out_max": 1}},
+    }}
+    roster = load_agent_roster(cfg)
+    assert set(roster.defs) == {"good"}                       # the valid def stays live (D7)
+    assert set(roster.quarantined) == {"bad_model", "bad_allowlist"}
+    assert "unknown model" in roster.quarantined["bad_model"]
+    assert "allowed_tools" in roster.quarantined["bad_allowlist"]
+    # The strict loader keeps refusal semantics for tests/tooling.
+    with pytest.raises(Exception, match="unknown model"):
+        load_agent_defs(cfg)
+
+
+def test_real_roster_loads_whole_after_claude5_migration(real_cfg) -> None:
+    from engine.intelligence.harness import load_agent_roster
+
+    roster = load_agent_roster(real_cfg)
+    assert roster.quarantined == {}
+    assert "intraday_analyst" in roster.defs and "nightly_reviewer" in roster.defs
