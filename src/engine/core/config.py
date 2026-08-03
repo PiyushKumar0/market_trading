@@ -165,6 +165,9 @@ class NewsCfg(BaseModel):
         "stock market live updates",
         "results live updates",
         "share price highlights",
+        # Moneycontrol QUOTE-page titles ("X Share Price , X Stock Price , ..." — G1 verdict row 17):
+        # the comma-spaced template never appears in written prose.
+        "stock price ,",
     ])
     et_poll_s: int = 300                  # ET Markets RSS poll cadence (§3.2.4: 5 min)
     mc_poll_s: int = 900                  # Moneycontrol RSS poll cadence (15 min, polite)

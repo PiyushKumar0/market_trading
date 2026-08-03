@@ -1,0 +1,22 @@
+# config/aliases.yaml — CURATED entity-alias additions (§3.2.4/§4.3: "seed + curated additions").
+#
+# The daily seed derives aliases from the instruments dump's LEGAL names; colloquial press names
+# that the legal name does not contain live here. Owner-editable (the §5.5 weekly loop SUGGESTS
+# additions from the unresolved-entity log; only the owner adds them — platform suggests, owner
+# sets, §6.3). Merged into entity_aliases by the daily instruments job with source='curated'.
+#
+# Seeded 2026-08-03 from the owner's G1 sample verdict (rows 43/44/48/50):
+#   - Groww's legal name is "Billionbrains Garage Ventures Ltd." — no headline ever says that.
+#   - "SBI Card(s)" is how the press writes SBI Cards and Payment Services.
+#   - Lloyds Metals & Energy is OUT of the NIFTY200 universe: the alias exists so the resolver
+#     records it as out_of_universe (the §3.2.4 disposition) instead of a bare no_match.
+#   - "Kotak Bank" is the common short form (the full "Kotak Mahindra Bank" seeds from the dump).
+
+schema_version: 1
+
+aliases:
+  - { alias: "Groww",       tradingsymbol: GROWW }
+  - { alias: "SBI Card",    tradingsymbol: SBICARD }
+  - { alias: "SBI Cards",   tradingsymbol: SBICARD }
+  - { alias: "Kotak Bank",  tradingsymbol: KOTAKBANK }
+  - { alias: "Lloyds Metals", tradingsymbol: LLOYDSME }

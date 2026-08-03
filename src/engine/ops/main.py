@@ -669,7 +669,11 @@ async def run() -> int:
         # headline no-matched — because nothing called this; the daily job now owns it, which also
         # tracks renames/new listings.
         seeded = await store.arun(resolver.seed_aliases, rows)
-        _log.info("instruments_persisted", d=today.isoformat(), rows=persisted, aliases_seeded=seeded)
+        curated = await store.arun(
+            resolver.seed_curated_aliases, load_yaml(config_dir() / "aliases.yaml")
+        )
+        _log.info("instruments_persisted", d=today.isoformat(), rows=persisted,
+                  aliases_seeded=seeded, aliases_curated=curated)
 
     async def job_surveillance() -> None:
         await surveillance.refresh()

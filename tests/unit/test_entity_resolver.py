@@ -247,3 +247,45 @@ async def test_pure_resolver_requires_store_for_run_and_load(clock):
         resolver.load()
     with pytest.raises(RuntimeError, match="requires a MarketStore"):
         await resolver.run([])
+
+
+# --------------------------------------------------------------------------- G1 verdict fixes (2026-08-03)
+def test_stoplisted_alias_is_filtered_on_load_not_only_at_seed(store, clock):
+    """A persisted alias later added to ALIAS_STOPLIST ("bse": venue mentions, G1 rows 17/21) must
+    stop matching on the next load — no store surgery required while the engine holds the lock."""
+    store.upsert_entity_aliases([
+        {"alias": "bse", "tradingsymbol": "BSE", "source": "seed", "added_at": clock.now()},
+        {"alias": "swiggy", "tradingsymbol": "SWIGGY", "source": "seed", "added_at": clock.now()},
+    ])
+    r = EntityResolver(store, clock)
+    r.load(clock.today())
+    venue = _cluster("Silverstorm Parks & Resorts IPO set for BSE SME debut", "t-venue")
+    assert r.resolve(venue).symbols == []                 # stoplisted ⇒ never a venue false-positive
+    real = _cluster("Swiggy contra view: brokerage downgrades the stock", "t-real")
+    assert "SWIGGY" in {s for u in [r.resolve(real)] for s in u.symbols} or r.resolve(real).symbols
+
+
+def test_curated_aliases_seed_and_resolve(store, clock):
+    """config/aliases.yaml curated additions (owner-set, §6.3): colloquial names the legal-name seed
+    can never produce — Groww's legal name is Billionbrains Garage Ventures (G1 verdict row 50)."""
+    r = EntityResolver(store, clock)
+    applied = r.seed_curated_aliases({"aliases": [
+        {"alias": "Groww", "tradingsymbol": "GROWW"},
+        {"alias": "SBI Card", "tradingsymbol": "SBICARD"},
+        {"alias": "BSE", "tradingsymbol": "BSE"},          # stoplisted ⇒ must be refused even curated
+    ]})
+    assert applied == 2
+    rows = store.get_entity_aliases()
+    assert {(x["alias"], x["tradingsymbol"], x["source"]) for x in rows} == {
+        ("groww", "GROWW", "curated"), ("sbi card", "SBICARD", "curated"),
+    }
+    got = r.resolve(_cluster("Groww faces technical glitch, client withdrawals hit", "t-groww"))
+    assert got.entities == ["groww"]
+
+
+def test_real_aliases_yaml_parses_and_applies(store, clock):
+    from engine.core.config import config_dir, load_yaml
+
+    cfg = load_yaml(config_dir() / "aliases.yaml")
+    r = EntityResolver(store, clock)
+    assert r.seed_curated_aliases(cfg) >= 4               # the shipped curated set

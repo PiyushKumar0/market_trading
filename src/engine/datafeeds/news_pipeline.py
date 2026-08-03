@@ -101,6 +101,9 @@ ALIAS_STOPLIST: frozenset[str] = frozenset({
     "century",    # Century Textiles / Century Plyboards
     "campus",     # Campus Activewear Ltd
     "united",     # United Spirits / United Breweries partial forms
+    "bse",        # BSE Ltd — fires on VENUE mentions ("IPO set for BSE SME debut", quote-page
+                  # boilerplate); G1 owner verdict 2026-08-03 rows 17/21. Genuine BSE-the-company
+                  # coverage is the accepted recall cost (venue noise dominates).
 })
 
 #: Sector label that must never become a keyword tag (§4.4 job 13 fallback bucket).
@@ -413,7 +416,10 @@ class EntityResolver:
         merged: dict[str, set[str]] = {}
         for alias, syms in pairs:
             norm = " ".join(title_tokens(alias))
-            if not norm:
+            if not norm or norm in ALIAS_STOPLIST:
+                # Stoplist enforced at LOAD too, not only at seed time — a previously-persisted row
+                # for a later-stoplisted alias (BSE, 2026-08-03) must stop matching immediately on
+                # the next load, without requiring store surgery while the engine holds the lock.
                 continue
             merged.setdefault(norm, set()).update(syms)
         self._aliases = {a: frozenset(s) for a, s in merged.items()}
@@ -494,6 +500,33 @@ class EntityResolver:
                  for a, s in sorted(set(pairs))]
             )
         _log.info("entity_aliases_seeded", seeded=len(pairs), stoplisted=stoplisted)
+        return len(pairs)
+
+    def seed_curated_aliases(self, cfg: Mapping[str, Any]) -> int:
+        """Merge + persist the ``config/aliases.yaml`` CURATED additions (§3.2.4 "curated additions";
+        §6.3 platform-suggests-owner-sets — this file is the owner's surface). Same normalization and
+        stoplist as the dump seed; persisted with ``source='curated'`` so the daily re-seed never
+        confuses provenance. Returns the number of pairs applied."""
+        pairs: list[tuple[str, str]] = []
+        for item in cfg.get("aliases") or []:
+            alias, symbol = item.get("alias"), item.get("tradingsymbol")
+            if not alias or not symbol:
+                continue
+            norm = " ".join(title_tokens(str(alias)))
+            if not norm or norm in ALIAS_STOPLIST:
+                continue
+            pairs.append((norm, str(symbol)))
+        self._set_aliases(
+            list((a, syms) for a, syms in self._aliases.items())
+            + [(a, (s,)) for a, s in pairs]
+        )
+        if self._store is not None and pairs:
+            added_at = self._clock.now() if self._clock is not None else None
+            self._store.upsert_entity_aliases(
+                [{"alias": a, "tradingsymbol": s, "source": "curated", "added_at": added_at}
+                 for a, s in sorted(set(pairs))]
+            )
+        _log.info("entity_aliases_curated", applied=len(pairs))
         return len(pairs)
 
     # ------------------------------------------------------------------ resolution (pinned rule)
