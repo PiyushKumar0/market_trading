@@ -1,5 +1,25 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-03 (owner G1 verdict: 44/50 = 88% — BELOW the ≥95% bar; remedied, redraw pending)
+
+- **Owner scored the sample: rows 17, 21, 43, 44, 48, 50 wrong.** Two precision failures (both the
+  "BSE" alias firing on venue mentions / MC quote-page boilerplate) and four recall gaps (colloquial
+  names the legal-name seed can't produce). Per the §8.2 remedy loop, fixes applied:
+  (1) "bse" added to ALIAS_STOPLIST **and** the stoplist is now enforced at resolver LOAD (a
+  stale persisted row stops matching without store surgery); (2) `news.drop_title_patterns` gains
+  the MC quote-page template ("stock price ,"); (3) NEW owner surface `config/aliases.yaml` —
+  curated colloquial aliases (Groww→GROWW: legal name is Billionbrains Garage Ventures; SBI
+  Card(s)→SBICARD; Kotak Bank→KOTAKBANK; Lloyds Metals→LLOYDSME, deliberately out-of-universe so
+  the resolver records the correct disposition) — merged daily by `job_instruments` with
+  source='curated', giving the §5.5 suggest-then-owner-set loop its editable file early.
+- Rows 43/48/50 were partly STALE evidence: section C samples the append-only unresolved log, and
+  those rows predate the alias seeding. The redraw (next engine-off window; engine was restarted
+  by the owner mid-session, so the store is locked) re-scores against live behavior.
+- **Test-design lesson (12 failures fixed):** the governor/harness suites loaded the LIVE
+  `config/agents.yaml` and hard-coded its numbers; the owner's budget rebalance (credit 100→120)
+  broke them. Worked-example math is now pinned to an in-test `PINNED_CFG`; the live file gets
+  amount-agnostic schema smokes only. Owner config edits must never fail the suite.
+
 ## 2026-08-03 (pre-market — G1 spot-check caught TWO live news-layer defects; fixed + remediated)
 
 - **The §8.2 G1 entity-resolution check did its job before a human even scored it.** First draw
