@@ -998,12 +998,10 @@ async def run() -> int:
         hb_holder["last"] = now
         await pipeline.heartbeat()
 
-    # --- refresh the gate's warm-up snapshot alongside the equity cadence (fail-closed until set) ---
+    # --- refresh the gate's warm-up snapshot alongside the equity cadence (fail-closed until set),
+    #     and LIFT a standing warm-up freeze once coverage completes (see refresh_and_lift_warmup). ---
     async def warmup_refresh() -> None:
-        try:
-            warmup_holder["status"] = await warmup_gate.status()
-        except Exception:  # noqa: BLE001 - an unevaluable warm-up stays NOT-READY (fail closed)
-            _log.exception("warmup_status_refresh_failed")
+        await refresh_and_lift_warmup(warmup_gate, warmup_holder, mode, lifecycle)
 
     # --- periodic missed-job sweep (2026-07-28): boot-time catch-up cannot help a machine that SLEEPS
     #     through a fire slot and resumes without a restart — 2026-07-27 slept 17:56→evening, missed
@@ -1313,6 +1311,30 @@ def _arm_live_jobs(
         # INACTIVE→ACTIVE edge — the "what could I trade right now?" verdict is never silent.
         scheduler.add_job(window_sweep_tick, trigger=IntervalTrigger(seconds=60),
                           job_id="window_sweep_tick", guard=False)
+
+
+# --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)
+async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecycle) -> None:
+    """Refresh the gate's warm-up snapshot AND lift a standing warm-up freeze once coverage completes.
+
+    The lift used to hang off the post-login hook only — a VALID-TOKEN mid-session restart (first
+    seen 2026-08-03: boot 12:22 IST, ORB lookbacks ~17 min short) froze entries and nothing ever
+    lifted them, because no login event fires on such a boot. Runs on the 60 s
+    ``warmup_status_refresh`` cadence; ``reapply_warmup_gate`` resolves through the cause latch
+    (never a blanket NORMAL write) and is a no-op unless the state is FROZEN with coverage ready.
+    A refresh failure keeps the PREVIOUS snapshot semantics (holder untouched ⇒ stays fail-closed).
+    """
+    try:
+        status = await warmup_gate.status()
+        warmup_holder["status"] = status
+    except Exception:  # noqa: BLE001 - an unevaluable warm-up stays NOT-READY (fail closed)
+        _log.exception("warmup_status_refresh_failed")
+        return
+    if status.ready and mode.risk_state() == RiskState.FROZEN:
+        try:
+            await lifecycle.reapply_warmup_gate()
+        except Exception:  # noqa: BLE001 - a failed lift retries on the next 60s tick
+            _log.exception("warmup_freeze_lift_failed")
 
 
 # --------------------------------------------------------------------------- backup (§10.5)

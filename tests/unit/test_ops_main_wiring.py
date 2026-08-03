@@ -399,3 +399,68 @@ async def test_serve_api_survives_an_occupied_port() -> None:
         await opsmain._stop_api(task)                      # None → no-op, never raises
     finally:
         holder.close()
+
+
+# --------------------------------------------------------------------------- warm-up lift cadence (2026-08-03)
+@pytest.mark.asyncio
+async def test_warmup_refresh_lifts_freeze_without_a_login_event(conn, clock, calendar, tmp_path):
+    """2026-08-03 gap: the warm-up lift hung off the post-login hook only, so a VALID-TOKEN
+    mid-session restart (boot 12:22, ORB lookbacks short) froze entries with NOTHING to lift them —
+    no login event ever fires on such a boot. The 60s refresh cadence must lift it by itself."""
+    from engine.core.enums import RiskState
+    from engine.core.protected_store import ProtectedStore
+    from engine.core.types import OwnerConfirmation
+    from engine.ops.lifecycle import SessionLifecycle
+    from engine.ops.main import refresh_and_lift_warmup
+    from engine.ops.selftest import SelfTest
+    from engine.ops.warmup import WarmupStatus
+    from engine.risk.causes import RiskStateLatch
+    from engine.core.enums import Actor
+    from engine.core.types import TradeWindow
+    from engine.risk.kill import KillSwitch
+    from engine.risk.mode import ModeManager
+    from tests.unit.test_lifecycle_selftest import OWNER_OK, FakeSecrets, FakeSettings, REQUIRED_AT_STARTUP
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "limits.yaml").write_text("schema_version: 1\nlimits: {}\n", encoding="utf-8")
+    (cfg / "envelope.yaml").write_text("schema_version: 1\nparameters: {}\n", encoding="utf-8")
+    pstore = ProtectedStore(cfg, conn, clock)
+    pstore.register_initial("limits.yaml", OWNER_OK)
+    pstore.register_initial("envelope.yaml", OWNER_OK)
+
+    mode = ModeManager(conn, clock, None, calendar)
+    kill = KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mode)
+    mode.seed_trade_window_if_absent(TradeWindow(
+        start=FakeSettings._TW.start_ist, end=FakeSettings._TW.end_ist, squareoff_buffer_min=5,
+    ))
+
+    class TogglingGate:
+        def __init__(self):
+            self.ready = False
+        async def status(self):
+            return WarmupStatus(ready=self.ready, blockers=[] if self.ready else ["orb:AAA bars 165/182"])
+
+    gate = TogglingGate()
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=pstore, kill_switch=kill, mode_manager=mode)
+    lifecycle = SessionLifecycle(
+        conn=conn, clock=clock, calendar=calendar, settings=FakeSettings(),
+        mode_manager=mode, kill_switch=kill, self_test=st, catch_up=None,
+        warmup_gate=gate, latch=latch, build_version="test-0",
+    )
+
+    # The mid-session cold boot: warm-up short => FROZEN via the cause the lifecycle owns.
+    await latch.set_cause("warmup_ready", RiskState.FROZEN, "orb lookback short", Actor.RISK_GATE)
+    assert mode.risk_state() == RiskState.FROZEN
+
+    holder: dict = {"status": None}
+    await refresh_and_lift_warmup(gate, holder, mode, lifecycle)      # still short => stays frozen
+    assert holder["status"].ready is False
+    assert mode.risk_state() == RiskState.FROZEN
+
+    gate.ready = True                                                  # coverage completes ~12:40
+    await refresh_and_lift_warmup(gate, holder, mode, lifecycle)
+    assert holder["status"].ready is True
+    assert mode.risk_state() == RiskState.NORMAL                       # lifted with NO login event
