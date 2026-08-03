@@ -15,6 +15,7 @@ from engine.datafeeds.news_pipeline import (
     LEGAL_SUFFIX_TOKENS,
     EntityResolver,
     NewsCluster,
+    alias_variants,
     strip_legal_suffixes,
 )
 from engine.marketdata.store import MarketStore
@@ -62,27 +63,43 @@ def test_strip_legal_suffixes():
     assert strip_legal_suffixes("LIMITED") == "limited"              # never strips below one token
 
 
+def test_alias_variants_returns_every_strip_stage_longest_first():
+    assert alias_variants("COAL INDIA LIMITED") == ["coal india limited", "coal india", "coal"]
+    assert alias_variants("INFOSYS LIMITED") == ["infosys limited", "infosys"]
+    assert alias_variants("HDFC BANK") == ["hdfc bank"]  # no suffix ⇒ single stage
+    assert alias_variants("") == []
+
+
 def test_seed_from_instruments_dump_applies_suffixes_and_stoplist(store, clock):
     resolver = EntityResolver(store, clock)
     seeded = resolver.seed_aliases([
         # Dict rows carry the instruments_daily equity markers (2026-08-03: non-EQ rows are filtered).
         {"name": "INFOSYS LIMITED", "tradingsymbol": "INFY", "exchange": "NSE", "instrument_type": "EQ"},
         {"name": "HINDUSTAN UNILEVER LIMITED", "tradingsymbol": "HINDUNILVR", "exchange": "NSE", "instrument_type": "EQ"},
-        ("TRENT LTD", "TRENT"),          # stoplisted: common English word
-        ("COAL INDIA LTD", "COALINDIA"), # strips to 'coal' ⇒ stoplisted
+        ("TRENT LTD", "TRENT"),          # bare 'trent' stage stoplisted; 'trent ltd' stage kept
+        ("COAL INDIA LTD", "COALINDIA"), # final 'coal' stage stoplisted; 'coal india' stage kept
         {"name": "", "tradingsymbol": "NONAME", "exchange": "NSE", "instrument_type": "EQ"},  # malformed row skipped
     ])
-    assert seeded == 2
+    assert seeded == 7  # every non-stoplisted strip stage seeds (G1 seed-5 row 20)
 
     rows = store.get_entity_aliases()
     assert {(r["alias"], r["tradingsymbol"]) for r in rows} == {
-        ("infosys", "INFY"), ("hindustan unilever", "HINDUNILVR"),
+        ("infosys limited", "INFY"), ("infosys", "INFY"),
+        ("hindustan unilever limited", "HINDUNILVR"), ("hindustan unilever", "HINDUNILVR"),
+        ("trent ltd", "TRENT"),
+        ("coal india ltd", "COALINDIA"), ("coal india", "COALINDIA"),
     }
     assert all(r["source"] == "seed" for r in rows)
 
     rc = resolver.resolve(_cluster("Infosys wins large European banking deal"))
     assert rc.symbols == ["INFY"]
-    # Stoplisted aliases never match — TRENT the company is invisible to the resolver seed.
+    # The G1 seed-5 row-20 regression: "Coal India" resolves even though bare "coal" is stoplisted…
+    rc = resolver.resolve(_cluster("Q1 Results today: Coal India among 68 companies to report"))
+    assert rc.symbols == ["COALINDIA"]
+    # …while a commodity headline still never false-positives on the stoplisted word.
+    rc = resolver.resolve(_cluster("Coal prices ease as monsoon demand drops"))
+    assert rc.symbols == [] and rc.entities == []
+    # Stoplisted bare alias never matches — only the full "Trent Ltd" phrasing could.
     rc = resolver.resolve(_cluster("Trent shares surge on strong festive sales"))
     assert rc.symbols == [] and rc.entities == []
 
@@ -303,7 +320,10 @@ def test_dump_seed_takes_nse_equities_only(store, clock):
         {"name": "RELIANCE", "tradingsymbol": "RELIANCE25AUG1400CE", "exchange": "NFO", "instrument_type": "CE"},
         {"name": "SOME BSE CO", "tradingsymbol": "SOMEBSE", "exchange": "BSE", "instrument_type": "EQ"},
     ])
-    assert n == 1
+    assert n == 3  # every strip stage of the ONE equity row; derivative/BSE rows contribute nothing
     rows = store.get_entity_aliases()
-    # "INDUSTRIES LTD" both strip as legal-suffix tokens — the seed alias is the bare company head.
-    assert {(x["alias"], x["tradingsymbol"]) for x in rows} == {("reliance", "RELIANCE")}
+    assert {(x["alias"], x["tradingsymbol"]) for x in rows} == {
+        ("reliance industries ltd", "RELIANCE"),
+        ("reliance industries", "RELIANCE"),
+        ("reliance", "RELIANCE"),
+    }

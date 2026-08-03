@@ -30,3 +30,11 @@ aliases:
   - { alias: "BEL",              tradingsymbol: BEL }
   - { alias: "Adani Power",      tradingsymbol: ADANIPOWER }
   - { alias: "Adani Energy",     tradingsymbol: ADANIENSOL }
+  # 2026-08-03 multi-ticker follow-up (rows 4/11/18/20): Zerodha truncates dump names at ~20
+  # chars, so TCS seeds as "tata consultancy serv lt" and ADANIENSOL as the singular "adani
+  # energy solution" — press acronyms/short forms must be curated; the dump can never yield them.
+  - { alias: "TCS",              tradingsymbol: TCS }
+  - { alias: "HUL",              tradingsymbol: HINDUNILVR }
+  - { alias: "L&T",              tradingsymbol: LT }
+  - { alias: "Cholamandalam",    tradingsymbol: CHOLAFIN }
+  - { alias: "Adani Energy Solutions", tradingsymbol: ADANIENSOL }

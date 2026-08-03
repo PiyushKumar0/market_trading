@@ -179,10 +179,26 @@ def strip_legal_suffixes(company_name: str) -> str:
     Stripping is iterative (``"COAL INDIA LIMITED" → "coal india" → "coal"``) — the resulting
     common-word aliases are handled by :data:`ALIAS_STOPLIST`, not by refusing the strip.
     """
+    return alias_variants(company_name)[-1] if title_tokens(company_name) else ""
+
+
+def alias_variants(company_name: str) -> list[str]:
+    """EVERY stage of the iterative suffix strip, longest first (never below one token).
+
+    The seed takes all stages, not just the final strip (G1 seed-5 row 20, 2026-08-03): "COAL
+    INDIA" fully strips to "coal", which the stoplist rightly kills — but the unstripped
+    "coal india" stage is exactly what headlines print, and dropping ONLY the dangerous stage
+    keeps the company resolvable instead of erasing it. All stages map to the same symbol, so
+    overlapping-span matches stay unambiguous (union of 1).
+    """
     tokens = title_tokens(company_name)
+    if not tokens:
+        return []
+    out = [" ".join(tokens)]
     while len(tokens) > 1 and tokens[-1] in LEGAL_SUFFIX_TOKENS:
         tokens.pop()
-    return " ".join(tokens)
+        out.append(" ".join(tokens))
+    return out
 
 
 class NewsCluster(BaseModel):
@@ -467,10 +483,10 @@ class EntityResolver:
         """Build the §3.2.4 alias SEED from instruments-dump rows and merge + persist it.
 
         ``instruments`` yields dicts with ``name``/``tradingsymbol`` (the ``instruments_daily`` row
-        shape, §4.3) or plain ``(company_name, tradingsymbol)`` tuples. Each company name gets its
-        legal suffixes stripped (:func:`strip_legal_suffixes`); aliases in :data:`ALIAS_STOPLIST`
-        are dropped (common English words — owner-reviewed in Phase 1). ``entity_aliases`` starts as
-        exactly this seed; returns the number of (alias, symbol) pairs seeded.
+        shape, §4.3) or plain ``(company_name, tradingsymbol)`` tuples. Each company name seeds
+        EVERY suffix-strip stage (:func:`alias_variants`); aliases in :data:`ALIAS_STOPLIST` are
+        dropped per stage (common English words — owner-reviewed in Phase 1). ``entity_aliases``
+        starts as exactly this seed; returns the number of (alias, symbol) pairs seeded.
 
         DICT rows are filtered to NSE EQUITIES (2026-08-03: seeding the FULL dump poisoned
         resolution — every derivative row's ``name`` is its underlying, so one company name mapped
@@ -488,13 +504,11 @@ class EntityResolver:
                 name, symbol = item.get("name"), item.get("tradingsymbol")
             if not name or not symbol:
                 continue
-            alias = strip_legal_suffixes(str(name))
-            if not alias:
-                continue
-            if alias in ALIAS_STOPLIST:
-                stoplisted += 1
-                continue
-            pairs.append((alias, str(symbol)))
+            for alias in alias_variants(str(name)):
+                if alias in ALIAS_STOPLIST:
+                    stoplisted += 1
+                    continue
+                pairs.append((alias, str(symbol)))
 
         self._set_aliases(
             list((a, syms) for a, syms in self._aliases.items())
