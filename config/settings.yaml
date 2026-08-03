@@ -79,7 +79,11 @@ data:
   # ex-date open Rs 2358 (no raw jump); daily agrees (2332). So the backfill / bar-stitching job needs
   # NO re-adjustment of Kite minute history across ex-dates (A11). Recorded also in plan section 14 Q10.
   minute_candles_adjusted: true
-  universe_max_watchlist: 50              # active intraday watchlist cap [tunable] (A3 not the binding constraint)
+  universe_max_watchlist: 100             # active intraday watchlist cap [tunable] (A3 not the binding constraint)
+                                          # 50 -> 100 owner-directed 2026-08-04 (BPCL, liquidity rank 96,
+                                          # was structurally invisible); first boot after this change
+                                          # backfills 1m history for the ~50 newly watched symbols (A2
+                                          # throttled - expect a longer warm-up that morning)
   min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
   backfill_daily_years: 2
   backfill_minute_years: 1

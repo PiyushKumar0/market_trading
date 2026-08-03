@@ -123,13 +123,13 @@ from engine.ops.warmup import WarmupGate, WarmupStatus
 from engine.risk.gate import GateContextBuilder, RiskGate
 from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
-from engine.strategy.scanners import build_enabled_scanners
+from engine.strategy.scanners import brk20, build_enabled_scanners
 from engine.risk.causes import RiskStateLatch
 from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
-from engine.universe.builder import UniverseBuilder
+from engine.universe.builder import EXCL_CAP, UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
 from engine.universe.surveillance import SurveillanceIngest
 
@@ -1041,7 +1041,40 @@ async def run() -> int:
                 tail = store.get_bars_1m(sym, session_day.open, now)
                 if tail:
                     latest.append(tail[-1])
-            return prescreen.sweep(latest)
+            accepted, pendings = prescreen.sweep(latest)
+
+            # --- brk20 daily leg (2026-08-04, owner-directed after the BPCL miss): completed-
+            #     daily-bar breakouts over the FULL ELIGIBLE universe — watchlist_cap symbols have
+            #     no 1m bars, so the bar-driven scanners can never see them. Admission goes through
+            #     prescreen.admit so the §3.2.5 dedupe/caps bind identically; a second sweep the
+            #     same day re-admits nothing.
+            today = now.date()
+            uni = store.get_universe_daily(today)
+            eligible = [
+                r["symbol"] for r in uni
+                if r["included"] or list(r["exclusion_reasons"] or []) == [EXCL_CAP]
+            ]
+            histories: dict[str, list[brk20.DailyRow]] = {}
+            hist_start = today - timedelta(days=70)   # comfortably ≥ lookback+2 sessions
+            yesterday = today - timedelta(days=1)     # completed sessions only, never today's forming bar
+            for sym in eligible:
+                frame = store.get_bars_1d_frame(sym, hist_start, yesterday)
+                if len(frame):
+                    histories[sym] = [
+                        brk20.DailyRow(high=float(h), close=float(c), volume=float(v))
+                        for h, c, v in zip(frame["high"], frame["close"], frame["volume"])
+                    ]
+            ex_map: dict[str, list[date]] = {}
+            for row in store.get_corp_actions(
+                ex_from=today,
+                ex_to=today + timedelta(days=int(brk20.DEFAULT_PARAMS["ex_skip_days"])),
+            ):
+                if row.get("ex_date") is not None:
+                    ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
+            daily = prescreen.admit(
+                brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map), today
+            )
+            return accepted + daily, pendings
 
         accepted, pendings = await asyncio.to_thread(_collect_and_scan)
         for cand in accepted:

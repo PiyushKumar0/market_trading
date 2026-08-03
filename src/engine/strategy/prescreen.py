@@ -167,57 +167,77 @@ class SignalPreScreen:
             for cand in accepted:
                 await self._bus.apublish(SIGNAL_CANDIDATE_TOPIC, cand)
 
+    def admit(self, cands: Sequence[SignalCandidate], day: date) -> list[SignalCandidate]:
+        """Admit EXTERNALLY-scanned candidates through the same dedupe/caps/telemetry spine.
+
+        The brk20 daily sweep (2026-08-04, owner-directed after the BPCL miss) scans completed
+        ``bars_1d`` for the full eligible universe — no 1m bar exists to drive :meth:`on_bar`, but
+        its candidates must face the identical §3.2.5 bounds (same-day (symbol, strategy) dedupe,
+        the daily and per-strategy caps) or the sweep would be a cap bypass. ``day`` is the
+        session date (the caller's clock); publication stays the caller's job, as in :meth:`sweep`.
+        """
+        with self._lock:
+            self._roll_day_locked(day)
+            return [c for c in cands if self._admit_one_locked(c)]
+
     # ------------------------------------------------------------------ core
+    def _roll_day_locked(self, day: date) -> None:
+        if day != self._day:
+            self._day = day
+            self._seen.clear()
+            self._charged.clear()
+            self._count_day = 0
+            self._count_by_strategy.clear()
+
+    def _admit_one_locked(self, cand: SignalCandidate) -> bool:
+        """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): dedupe, caps,
+        telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
+        key = (cand.symbol, cand.strategy_id)
+        if key in self._seen:
+            # Same (symbol, strategy) already fired today — a breakout re-closing beyond
+            # the range every minute must not re-trigger Tier-1 (D5 dedupe).
+            return False
+        # Caps bind on UNIQUE pairs (2026-07-29): a re-armed pair re-publishes within
+        # its already-paid quota; only a NEW pair can be suppressed by a full cap.
+        charged = key in self._charged
+        if not charged and self._count_day >= self._max_day:
+            _log.info(
+                "prescreen_cap_suppressed", cap="day", symbol=cand.symbol,
+                strategy_id=cand.strategy_id, max_candidates_per_day=self._max_day,
+            )
+            return False
+        per_strategy = self._count_by_strategy.get(cand.strategy_id, 0)
+        if (not charged and self._max_strategy_day is not None
+                and per_strategy >= self._max_strategy_day):
+            _log.info(
+                "prescreen_cap_suppressed", cap="strategy_day", symbol=cand.symbol,
+                strategy_id=cand.strategy_id, max_per_strategy_day=self._max_strategy_day,
+            )
+            return False
+        # TODO(Phase 3): `cat` candidates (catalyst_ref set) are additionally capped by
+        # catalyst_guard.max_catalyst_entries_day here (§3.2.5/§7.1), loaded via
+        # ProtectedStore.load_verified — never evaluated in RiskGate (§2.4 item 4).
+        self._seen.add(key)
+        if not charged:
+            self._charged.add(key)
+            self._count_day += 1
+            self._count_by_strategy[cand.strategy_id] = per_strategy + 1
+        _log.info(
+            "signal_candidate", signal_id=cand.signal_id, strategy_id=cand.strategy_id,
+            symbol=cand.symbol, side=cand.side, style=cand.style, score=cand.score,
+            entry=str(cand.raw_levels.entry),
+            stop=None if cand.raw_levels.stop is None else str(cand.raw_levels.stop),
+            target=None if cand.raw_levels.target is None else str(cand.raw_levels.target),
+        )
+        return True
+
     def _scan(self, bar: Bar) -> list[SignalCandidate]:
         with self._lock:
-            day = bar.ts_minute.date()
-            if day != self._day:
-                self._day = day
-                self._seen.clear()
-                self._charged.clear()
-                self._count_day = 0
-                self._count_by_strategy.clear()
-
+            self._roll_day_locked(bar.ts_minute.date())
             ctx = self._context_provider(bar)
             accepted: list[SignalCandidate] = []
             for scanner in self._scanners:
                 for cand in scanner.scan(bar, ctx):
-                    key = (cand.symbol, cand.strategy_id)
-                    if key in self._seen:
-                        # Same (symbol, strategy) already fired today — a breakout re-closing beyond
-                        # the range every minute must not re-trigger Tier-1 (D5 dedupe).
-                        continue
-                    # Caps bind on UNIQUE pairs (2026-07-29): a re-armed pair re-publishes within
-                    # its already-paid quota; only a NEW pair can be suppressed by a full cap.
-                    charged = key in self._charged
-                    if not charged and self._count_day >= self._max_day:
-                        _log.info(
-                            "prescreen_cap_suppressed", cap="day", symbol=cand.symbol,
-                            strategy_id=cand.strategy_id, max_candidates_per_day=self._max_day,
-                        )
-                        continue
-                    per_strategy = self._count_by_strategy.get(cand.strategy_id, 0)
-                    if (not charged and self._max_strategy_day is not None
-                            and per_strategy >= self._max_strategy_day):
-                        _log.info(
-                            "prescreen_cap_suppressed", cap="strategy_day", symbol=cand.symbol,
-                            strategy_id=cand.strategy_id, max_per_strategy_day=self._max_strategy_day,
-                        )
-                        continue
-                    # TODO(Phase 3): `cat` candidates (catalyst_ref set) are additionally capped by
-                    # catalyst_guard.max_catalyst_entries_day here (§3.2.5/§7.1), loaded via
-                    # ProtectedStore.load_verified — never evaluated in RiskGate (§2.4 item 4).
-                    self._seen.add(key)
-                    if not charged:
-                        self._charged.add(key)
-                        self._count_day += 1
-                        self._count_by_strategy[cand.strategy_id] = per_strategy + 1
-                    accepted.append(cand)
-                    _log.info(
-                        "signal_candidate", signal_id=cand.signal_id, strategy_id=cand.strategy_id,
-                        symbol=cand.symbol, side=cand.side, style=cand.style, score=cand.score,
-                        entry=str(cand.raw_levels.entry),
-                        stop=None if cand.raw_levels.stop is None else str(cand.raw_levels.stop),
-                        target=None if cand.raw_levels.target is None else str(cand.raw_levels.target),
-                    )
+                    if self._admit_one_locked(cand):
+                        accepted.append(cand)
             return accepted

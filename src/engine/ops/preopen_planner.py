@@ -60,6 +60,8 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
 from engine.marketdata.store import MarketStore
+from engine.strategy.scanners import brk20
+from engine.universe.builder import EXCL_CAP
 
 _log = get_logger("engine.ops.preopen_planner")
 
@@ -145,6 +147,7 @@ class PreopenPlannerJob:
         actx = self._assembler.for_planner(
             d,
             movers_lines=self._movers_lines(d),
+            breakout_lines=self._breakout_lines(d),
             gap_lines=[_GAP_SCAN_LINE],
             digest_lines=self._digest_lines(),
             watchlist_lines=self._watchlist_lines(d),
@@ -210,6 +213,45 @@ class PreopenPlannerJob:
                 return probe
             probe -= timedelta(days=1)
         return None
+
+    # ------------------------------------------------------------------ brk20 (§6.1 addendum, 2026-08-04)
+    def _breakout_lines(self, d: date) -> list[str]:
+        """Yesterday's 20d-high daily-close breakouts over the FULL ELIGIBLE universe (brk20).
+
+        Advisory context only (§5.3: the planner never originates) — the ACTIONABLE candidates are
+        admitted by the window-open sweep through the prescreen caps. Full-universe by design:
+        watchlist_cap symbols are invisible to the per-bar scanners (the BPCL 2026-08-03 miss),
+        and this section is exactly where the planner learns about them.
+        """
+        rows = self._store.get_universe_daily(d)
+        included = {r["symbol"] for r in rows if r["included"]}
+        eligible = [
+            r["symbol"] for r in rows
+            if r["included"] or list(r["exclusion_reasons"] or []) == [EXCL_CAP]
+        ]
+        if not eligible:
+            return [_UNAVAILABLE]
+        yesterday = d - timedelta(days=1)
+        histories: dict[str, list[brk20.DailyRow]] = {}
+        for sym in eligible:
+            frame = self._store.get_bars_1d_frame(sym, d - timedelta(days=70), yesterday)
+            if len(frame):
+                histories[sym] = [
+                    brk20.DailyRow(high=float(h), close=float(c), volume=float(v))
+                    for h, c, v in zip(frame["high"], frame["close"], frame["volume"])
+                ]
+        ex_map: dict[str, list[date]] = {}
+        for row in self._store.get_corp_actions(
+            ex_from=d, ex_to=d + timedelta(days=int(brk20.DEFAULT_PARAMS["ex_skip_days"]))
+        ):
+            if row.get("ex_date") is not None:
+                ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
+        cands = brk20.sweep_daily(histories, today=d, ex_dates_by_symbol=ex_map)
+        return [
+            f"{c.symbol} closed {c.raw_levels.entry} above its 20d high {c.raw_levels.stop} "
+            f"(score {c.score:.2f}; watchlisted: {'yes' if c.symbol in included else 'no'})"
+            for c in cands
+        ] or ["none"]
 
     # ------------------------------------------------------------------ catalyst digest (§2.7 step 5)
     def _digest_lines(self) -> list[str]:

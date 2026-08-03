@@ -238,6 +238,7 @@ class ContextAssembler:
         open_positions_summary: str,
         yesterday_review_summary: str,
         platform_health: str = "",
+        breakout_lines: Sequence[str] = (),
     ) -> AssembledContext:
         """Context for the 08:50 day-plan call (§5.3). Every input is caller-precomputed text.
 
@@ -251,6 +252,10 @@ class ContextAssembler:
         if platform_health:
             parts.append(f"platform health (current, authoritative): {platform_health}")
         parts.append(self._section("overnight movers (bhavcopy)", movers_lines))
+        parts.append(self._section(
+            "20d-high daily breakouts (brk20, yesterday's close; full eligible universe)",
+            breakout_lines,
+        ))
         parts.append(self._section("gap scan vs prior close", gap_lines))
         parts.append(self._section("catalyst digest", digest_lines))
         parts.append(self._section("catalyst watchlist (binding levels are the scanner's)", watchlist_lines))

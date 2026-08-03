@@ -75,6 +75,34 @@ def test_two_strategies_same_symbol_both_pass_dedupe():
     assert [c.strategy_id for c in out] == ["s1", "s2"]   # scanner order preserved
 
 
+# ---------------------------------------------------------------------------- admit (brk20 sweep leg)
+def _ext_cand(symbol: str, strategy_id: str = "brk20"):
+    from engine.strategy.types import RawLevels, SignalCandidate
+    return SignalCandidate(
+        signal_id=f"sig-{symbol}-{strategy_id}", strategy_id=strategy_id, symbol=symbol,
+        side="BUY", style="swing",
+        raw_levels=RawLevels(entry=Decimal("103.00"), stop=Decimal("100.00")), score=0.65,
+    )
+
+
+def test_admit_applies_the_same_dedupe_and_caps_as_the_bar_path():
+    """§3.2.5 (2026-08-04 brk20 addendum): externally-scanned candidates face the identical spine —
+    same-day (symbol, strategy) dedupe and the shared daily cap — or the sweep is a cap bypass."""
+    from datetime import date as _date
+    ps = _prescreen(max_candidates_per_day=3)
+    day = _date(2026, 6, 17)
+    admitted = ps.admit([_ext_cand("BPCL"), _ext_cand("COALINDIA")], day)
+    assert [c.symbol for c in admitted] == ["BPCL", "COALINDIA"]
+    # Re-admitting the same pair the same day is a dedupe no-op.
+    assert ps.admit([_ext_cand("BPCL")], day) == []
+    # The daily cap is SHARED with the bar-driven path: one slot left, then suppression.
+    assert len(ps.on_bar(_bar(symbol="TCS"))) == 1
+    assert ps.on_bar(_bar(symbol="INFY", mm=1)) == []          # day cap (3) exhausted
+    assert ps.admit([_ext_cand("RELIANCE")], day) == []        # and admit is equally bound
+    # New day: everything resets.
+    assert [c.symbol for c in ps.admit([_ext_cand("BPCL")], _date(2026, 6, 18))] == ["BPCL"]
+
+
 # ---------------------------------------------------------------------------- per-day caps
 def test_daily_cap_suppresses_after_limit():
     ps = _prescreen(max_candidates_per_day=2)

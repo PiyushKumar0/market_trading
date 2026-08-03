@@ -1,5 +1,26 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-04 (later) — BPCL post-mortem → brk20 daily-breakout leg + watchlist 50→100 (owner-directed)
+
+- **Owner asked why BPCL's 2026-08-03 breakout wasn't recommended.** Diagnosis (logs + store,
+  2-agent evidence sweep): BPCL is liquidity rank 96/200 and the intraday watchlist caps at the
+  top 50 by 20d median traded value — BPCL has NEVER been included; no tick subscription → no 1m
+  bars since 07-16 → the per-bar scanners structurally could not see it (zero BPCL log lines all
+  session). Breakout verified real on daily bars (close 329.95 > 20d-high 321.90, closed at the
+  high) but at 0.80× average volume — even a watched BPCL would have failed ORB's 1.5× volume
+  gate. Also for the record: 817 candidates fired that day across 34 symbols; all 8 analyst calls
+  said no_action.
+- **Owner directed two changes, both live:** (1) `universe_max_watchlist` 50→100 (BPCL-class
+  ranks now watched; first boot backfills 1m history for ~50 new symbols — expect a longer
+  warm-up). (2) **brk20**: 20d-high daily-close breakout over the FULL eligible universe —
+  pure batch rule (not a per-bar Scanner), runs in the window-open//scan_now sweep +
+  a new pre-open planner context section; candidates admitted via new `SignalPreScreen.admit`
+  (same dedupe/caps spine — no cap bypass). Long-only, fresh-cross only, vol_mult 1.2 default
+  (a BPCL-shaped 0.8×-volume breakout is still REFUSED by default — owner can lower the §6.3
+  envelope if they disagree), A12 ex-date skip, stop = broken level, rr_target 2.0. Plan §6.1
+  amended with the addendum + evidence caveat. 1,170 unit tests green (8 new: pinned brk20
+  worked example incl. the BPCL volume-refusal shape, admit-spine cap sharing).
+
 ## 2026-08-04 — **G1 ENTITY-RESOLUTION GATE PASSED: 96%** (owner verdict #3 on seed-7: rows 46/47 = 48/50)
 
 - Verdict history: #1 seed-3 88% → #2 seed-5 80% → #3 seed-7 **96% ≥ 95%**. Plan §8.2 annotated.
