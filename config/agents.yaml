@@ -9,8 +9,7 @@
 schema_version: 1
 
 llm:
-  # O6: Max 5x => $100 Agent SDK credit/month (D3). 20x => 200. Confirm tier at implementation time.
-  monthly_credit_usd: 100
+  monthly_credit_usd: 120
   # Pay-as-you-go overflow default OFF (D6). If owner enables, this hard monthly cap applies.
   overflow_enabled: false
   overflow_cap_usd: 25
@@ -37,10 +36,10 @@ model_pricing_usd_per_mtok:
 # weekly 15→12, sentiment/news 8→14. The catalyst digest is deterministic — $0.
 budget_allocations_usd:
   intraday_analyst: 42
-  nightly_reviewer: 20
-  weekly_researcher: 12
-  news_analyst: 14
-  preopen_planner: 5
+  nightly_reviewer: 26
+  weekly_researcher: 15
+  news_analyst: 20
+  preopen_planner: 10
   reserve: 7
 
 # Degrade ladder trip points (§5.6) — cache-aware; shrink context before switching models (D8).
