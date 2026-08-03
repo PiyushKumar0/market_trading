@@ -27,8 +27,8 @@ llm:
 # Standard per-MTok rates (USD), D4 — the governor prices ledger usage from these (no balance API, D6).
 model_pricing_usd_per_mtok:
   haiku-4.5:  { input: 1,  output: 5 }
-  sonnet-4.6: { input: 3,  output: 15 }
-  opus-4.8:   { input: 5,  output: 25 }
+  sonnet-5: { input: 3,  output: 15 }
+  opus-5:   { input: 5,  output: 25 }
   fable-5:    { input: 10, output: 50 }
 
 # Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $93 + $7 reserve = $100.
@@ -57,7 +57,7 @@ degrade_ladder:
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
   intraday_analyst:
-    model: sonnet-4.6           # D9/§5.2: thesis quality materially better for entry decisions; owner-confirmed
+    model: sonnet-5           # D9/§5.2: thesis quality materially better for entry decisions; owner-confirmed
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1200
@@ -67,7 +67,7 @@ agents:
     prescreen_cap_per_day: 6   # [tunable]
 
   preopen_planner:
-    model: sonnet-4.6
+    model: sonnet-5
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 2000
@@ -89,7 +89,7 @@ agents:
 
   # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps (D5) ---
   nightly_reviewer:
-    model: sonnet-4.6
+    model: sonnet-5
     # Phase-2 v1 DEVIATION (2026-07-28): single-shot with deterministically pre-assembled context —
     # at Phase-2 volume (a handful of recommendations/day, no auto trades) the §5.5 agentic tool
     # loop adds cost + an unverified SDK MCP surface for no analytical gain. The agentic shape +
@@ -104,7 +104,7 @@ agents:
 
   weekly_researcher:
     enabled: false             # Phase 5 (§8.7); not loadable until its §5.5 read-only MCP allowlist is wired
-    model: opus-4.8            # weekly deep review (D9); realistically ~$1/agentic run (D4)
+    model: opus-5           # weekly deep review (D9); realistically ~$1/agentic run (D4)
     shape: agentic
     tools_enabled: true
     max_turns: 20
