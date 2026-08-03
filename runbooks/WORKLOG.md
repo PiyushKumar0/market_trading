@@ -1,5 +1,21 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-04 — **G1 ENTITY-RESOLUTION GATE PASSED: 96%** (owner verdict #3 on seed-7: rows 46/47 = 48/50)
+
+- Verdict history: #1 seed-3 88% → #2 seed-5 80% → #3 seed-7 **96% ≥ 95%**. Plan §8.2 annotated.
+- The two marks, both fixed forward same-day: (46) "among 4 stocks closing above/below VWAP"
+  screener series is cross-company template output → "vwap" added to news.drop_title_patterns
+  (screener output is not news); (47) 'dollar' (Dollar Industries) matched a currency context →
+  ALIAS_STOPLIST — enforced at LOAD, so the stale store row goes dead on next engine boot, no
+  store surgery needed. Existing VWAP clusters in the corpus are inert (out_of_universe refusals,
+  no symbols attached); ingest drops the series going forward — optional corpus purge can ride the
+  next natural off-window.
+- Gate context for the record: VEDL/LAURUSLABS/DLF out_of_universe rows in the sample are CORRECT
+  platform behavior (watchlist_cap universe exclusions), confirmed to owner pre-verdict.
+- Remaining before G2 window closes: prune the two 4 GB pre-remediation backups (after this pass —
+  now safe), §10.5 DuckDB backup leg, `mom` daily-rebalance-due gap, 0-proposals watch, push
+  approval (phase2, 73 commits).
+
 ## 2026-08-03/04 (late night — G1 verdict #2 processed; five root causes fixed; seed-7 draw awaiting owner verdict)
 
 - **Owner G1 verdict #2 (seed 5): 10/50 wrong (80%).** Classified: 3 template/roundup rows, 5

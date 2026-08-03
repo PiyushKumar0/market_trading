@@ -94,6 +94,7 @@ ALIAS_STOPLIST: frozenset[str] = frozenset({
     "idea",       # (curated) Vodafone Idea aliases
     "coal",       # Coal India Ltd -> "coal" after suffix strip
     "oil",        # Oil India Ltd -> "oil" after suffix strip
+    "dollar",     # Dollar Industries — matched currency contexts (G1 seed-7 row 47, owner-marked)
     "page",       # Page Industries Ltd -> "page"
     "escorts",    # Escorts Kubota / Escorts Ltd
     "lupin",      # Lupin Ltd (common noun)

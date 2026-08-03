@@ -50,7 +50,8 @@ def test_pinned_legal_suffix_list():
 
 
 def test_stoplist_contains_the_plan_named_common_words():
-    assert {"trent", "idea"} <= set(ALIAS_STOPLIST)  # §3.2.4: TRENT/IDEA/… owner-reviewed in Phase 1
+    # §3.2.4: TRENT/IDEA/… owner-reviewed in Phase 1; "dollar" owner-marked at the G1 gate (seed-7).
+    assert {"trent", "idea", "dollar"} <= set(ALIAS_STOPLIST)
 
 
 def test_strip_legal_suffixes():
