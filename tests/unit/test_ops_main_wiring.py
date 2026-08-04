@@ -349,6 +349,58 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
     assert {f"news_poll_{name}" for name in settings.news.feeds.rss} <= armed
 
 
+# --------------------------------------------------------------------------- brk20 feature-snapshot mint
+def _brk20_cand(symbol: str):
+    from decimal import Decimal
+
+    from engine.strategy.types import RawLevels, SignalCandidate
+
+    return SignalCandidate(
+        signal_id=f"sig-{symbol}", strategy_id="brk20", symbol=symbol, side="BUY", style="swing",
+        raw_levels=RawLevels(entry=Decimal("100.00"), stop=Decimal("95.00"), target=Decimal("110.00")),
+        score=0.6,
+    )
+
+
+def test_attach_feature_snapshots_mints_one_id_per_candidate() -> None:
+    """2026-08-04 defect: batch-rule (brk20) candidates reached the analyst with
+    features_snapshot_id: null, and intraday.py Rule 6 mandates no_action on a missing id — every
+    brk20 candidate was structurally un-recommendable. The composition root must mint the same
+    §4.3 feature link the per-bar ScanContext path mints."""
+    from types import SimpleNamespace
+
+    minted: list[str] = []
+
+    class FakeFeatures:
+        def intraday_snapshot(self, symbol):
+            minted.append(symbol)
+            return SimpleNamespace(features_snapshot_id=f"snap-{symbol}")
+
+    cands = [_brk20_cand("BPCL"), _brk20_cand("COALINDIA")]
+    out = opsmain._attach_feature_snapshots(FakeFeatures(), cands)
+
+    assert [c.features_snapshot_id for c in out] == ["snap-BPCL", "snap-COALINDIA"]
+    assert minted == ["BPCL", "COALINDIA"]          # one mint per admitted candidate
+    assert [c.signal_id for c in out] == [c.signal_id for c in cands]  # everything else unchanged
+    assert all(c.features_snapshot_id is None for c in cands)          # frozen inputs not mutated
+
+
+def test_attach_feature_snapshots_degrades_to_none_never_raises() -> None:
+    """Scan-path posture (§3.2.5): a FeatureEngine failure costs that candidate its feature link,
+    never the sweep. Mixed batch: the healthy symbol still gets its id."""
+
+    class FlakyFeatures:
+        def intraday_snapshot(self, symbol):
+            from types import SimpleNamespace
+
+            if symbol == "BPCL":
+                raise RuntimeError("boom")
+            return SimpleNamespace(features_snapshot_id=f"snap-{symbol}")
+
+    out = opsmain._attach_feature_snapshots(FlakyFeatures(), [_brk20_cand("BPCL"), _brk20_cand("COALINDIA")])
+    assert [c.features_snapshot_id for c in out] == [None, "snap-COALINDIA"]
+
+
 # --------------------------------------------------------------------------- login API bind confirmation
 @pytest.mark.asyncio
 async def test_serve_api_confirms_the_bind() -> None:

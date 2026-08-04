@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-04 (later #3, ~14:00) — brk20 null-snapshot defect: every batch candidate was analyst-unrecommendable (owner-directed fix)
+
+- **Owner asked whether the 09:23 "Scan sweep: candidates found" Telegram (15 brk20) was a valid
+  recommendation. It wasn't a recommendation at all (candidate stage, pre-analyst) — but the logs
+  behind it exposed a day-one defect in yesterday's brk20 leg:** every evaluated brk20 candidate
+  (4 of 15 before the analyst budget cut off) was refused with `features_snapshot_id: null` as the
+  mandatory ground — intraday.py Rule 6 requires the id, and the batch path never minted one
+  (types.py even said "None until wired"). brk20 candidates were STRUCTURALLY un-recommendable;
+  each sweep burned analyst calls on doomed candidates. Per-bar scanners unaffected (ScanContext
+  mints per bar).
+- **Fix:** `_attach_feature_snapshots` in ops/main.py — post-`prescreen.admit` (suppressed/capped
+  candidates never spend a snapshot write), mints via the same `FeatureEngine.intraday_snapshot`
+  the ScanContext path uses (unwatched symbols degrade to None-valued microstructure + real §6.2 v2
+  catalyst/sentiment features — never errors), per-candidate degrade-to-None on failure. Failing
+  test first (2 new in test_ops_main_wiring), then 1,172 green.
+- **Live validation, honest scope:** engine restarted ~13:20; window sweep 13:49:24 ran the new
+  wiring clean (no batch_snapshot_failed, no exceptions) but admit's once-per-day ledger suppressed
+  all 15 brk20 re-fires (by design) → the mint loop executed on an empty list. Bar-path candidates
+  at 13:49 were evaluated ON MERIT (incl. a BPCL orb short declined for rel_volume 0.229 — the
+  watchlist-100 change working). **Full live proof of the brk20 mint = tomorrow's window-open
+  sweep**; the null-id refusal pattern must not reappear.
+- The 09:23 duplicate sweep itself was benign: the 09:20 feeds-restart killed the first batch's
+  analyst queue in-flight; re-publish of never-evaluated setups is the designed resilience.
+- **Two open observations for the owner (not fixed, flagged 09:30):** (1) hairline stops on
+  marginal fresh-crosses (TMPV/NATIONALUM ₹0.50 ≈ 0.14% risk) — mechanically per-spec but inside
+  daily noise; a min-stop-distance floor (ATR-fraction) is a spec decision; (2) candidate-cap
+  arithmetic across restarts (30+ publications today vs max_candidates_per_day 20; second sweep's
+  pending=10 suggests the cap bound, but the counter may be restart-reset) — needs a look.
+
 ## 2026-08-04 (later #2, ~09:40) — zero-origination root cause → news-feed remediation (owner-directed)
 
 - **Owner reported the dashboard "digest stale" banner; the stale part was a pre-08:35 transient

@@ -1077,8 +1077,13 @@ async def run() -> int:
             ):
                 if row.get("ex_date") is not None:
                     ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
-            daily = prescreen.admit(
-                brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map), today
+            # Snapshot mint AFTER admit (dedupe/caps first — a suppressed candidate never spends a
+            # snapshot write); without it the analyst's Rule 6 refuses every batch candidate unseen.
+            daily = _attach_feature_snapshots(
+                features,
+                prescreen.admit(
+                    brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map), today
+                ),
             )
             return accepted + daily, pendings
 
@@ -1387,6 +1392,26 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
             await lifecycle.reapply_warmup_gate()
         except Exception:  # noqa: BLE001 - a failed lift retries on the next 60s tick
             _log.exception("warmup_freeze_lift_failed")
+
+
+# --------------------------------------------------------------------------- brk20 feature link (§4.3)
+def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list:
+    """Mint the §4.3 ``features_snapshot_id`` for batch-rule candidates (brk20) post-admit.
+
+    The per-bar path gets its id from ScanContext at signal time; batch rules bypass ScanContext, and
+    a candidate with a null id is structurally un-recommendable (intraday.py Rule 6 mandates
+    no_action on a missing identifier — the 2026-08-04 all-15-refused sweep). Runs AFTER
+    ``prescreen.admit`` so suppressed/capped candidates never spend a snapshot write. A minting
+    failure costs that one candidate its feature link, never the sweep (scan-path posture, §3.2.5)."""
+    out = []
+    for c in candidates:
+        try:
+            sid = features.intraday_snapshot(c.symbol).features_snapshot_id
+        except Exception as exc:  # noqa: BLE001 - fail to None, never propagate into the sweep
+            _log.warning("batch_snapshot_failed", symbol=c.symbol, error=str(exc))
+            sid = None
+        out.append(c.model_copy(update={"features_snapshot_id": sid}))
+    return out
 
 
 # --------------------------------------------------------------------------- backup (§10.5)
