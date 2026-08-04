@@ -25,6 +25,17 @@
   publication onward). Side effect worth having: the post-warmup window sweep (~15:15) runs with
   a fresh in-memory ledger + live journal, and may re-fire brk20 — which would live-exercise the
   #3 snapshot-mint fix same-day.
+- **14:55 sweep: BOTH fixes live-proven same-day.** All 15 brk20 candidates re-fired at 14:52:49
+  (fresh ledger) and journalled with zero `day_slot_journal_failed`. Analyst verdicts flipped from
+  the morning's mandatory Rule-6 refusals to MERIT evaluations: ASHOKLEY (OR round-trip, VWAP,
+  volume), LTM (2.6% fade below trigger), TMCV (OR low, rel_volume 0.72×) — all reasoned from real
+  features. Residual gap now visible in its true form: UNWATCHED symbols (JUBLFOOD, ABCAPITAL —
+  outside the tick watchlist) carry a snapshot whose microstructure values are null ⇒ the analyst
+  refuses on "cannot confirm live price" — judgement, not a missing identifier. brk20's sub-cap
+  value-add needs DAILY-bar context in the assembler for swing candidates (bars_1d exists for the
+  full universe) — proposal for the owner, not done. Footnote, same in-memory-day-counter class:
+  the pipeline's analyst forward cap (`_forwarded_count`) also resets on restart — low severity
+  (the persistent budget governor backstops actual spend), noted for a future pass.
 
 ## 2026-08-04 (later #3, ~14:00) — brk20 null-snapshot defect: every batch candidate was analyst-unrecommendable (owner-directed fix)
 
