@@ -502,8 +502,36 @@ class RecommendationPipeline:
 
     def _rearm_slot(self, candidate: SignalCandidate) -> None:
         """Hand the (symbol, strategy) day slot back after a never-evaluated drop (2026-07-29)."""
+        try:
+            self._conn.execute(
+                "UPDATE prescreen_day_slots SET evaluated=0 WHERE d=? AND symbol=? AND strategy_id=?",
+                (self._clock.today().isoformat(), candidate.symbol, candidate.strategy_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("day_slot_journal_failed", op="rearm", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
         if self._rearm is not None:
             self._rearm(candidate.symbol, candidate.strategy_id)
+
+    def _journal_slot(self, candidate: SignalCandidate, d: date) -> None:
+        """§3.2.5 day-slot journal (2026-08-04): a received publication spends the (symbol, strategy)
+        slot for day ``d`` — the conservative default for EVERY handler path; :meth:`_rearm_slot`
+        flips it back for the never-evaluated drops. Boot rehydration (``engine.ops.main``) rebuilds
+        the prescreen's in-memory dedupe/caps from these rows, so a restart no longer resets the
+        20/day bound. A journal failure degrades to the old in-memory-only behavior, never blocks
+        the candidate."""
+        try:
+            self._conn.execute(
+                "INSERT INTO prescreen_day_slots (d, symbol, strategy_id, published_at, evaluated) "
+                "VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT(d, symbol, strategy_id) "
+                "DO UPDATE SET evaluated=1, published_at=excluded.published_at",
+                (d.isoformat(), candidate.symbol, candidate.strategy_id,
+                 self._clock.now().isoformat()),
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("day_slot_journal_failed", op="publish", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
 
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
@@ -519,6 +547,7 @@ class RecommendationPipeline:
         # so the re-arm/re-publish cycle can never exhaust a day cap. Deliberate NON-re-arms:
         # a governor block (budget policy), the forward cap (the analyst quota was spent on real
         # evaluations), and an unsizeable candidate (no stop ⇒ nothing to wait for today).
+        self._journal_slot(candidate, self._clock.today())
         if self._mode.mode() not in (Mode.RECOMMEND, Mode.AUTO):
             self._rearm_slot(candidate)
             return
@@ -590,8 +619,8 @@ class RecommendationPipeline:
             # once-per-day publication back (owner-directed 2026-07-29 — six candidates burned by a
             # broken analyst could not re-publish in the repaired window). governor_blocked is a
             # deliberate budget policy, not an outage — re-arming would hammer the admission gate.
-            if self._rearm is not None and result.reason != "governor_blocked":
-                self._rearm(candidate.symbol, candidate.strategy_id)
+            if result.reason != "governor_blocked":
+                self._rearm_slot(candidate)
             await self._alert_agent_failed("signal_candidate", result)
             return
         payload = result.payload

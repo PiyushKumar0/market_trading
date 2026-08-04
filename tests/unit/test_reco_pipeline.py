@@ -566,6 +566,67 @@ async def test_never_evaluated_drops_rearm_the_slot(
     assert len(rearmed) == 1                                  # mode OFF → slot back
 
 
+async def test_day_slot_journal_and_rehydration_round_trip(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-08-04 (owner-directed): the prescreen's dedupe/caps day state was process memory, so a
+    restart reset the 20/day bound (~54 publications observed across two restarts). Publications now
+    journal to ``prescreen_day_slots`` — evaluated=1 on receipt (the conservative default for every
+    handler path), flipped to 0 by the never-evaluated rearm paths — and ``_hydrate_prescreen``
+    rebuilds a fresh prescreen from those rows exactly per the 2026-07-29 rearm semantics."""
+    from datetime import date as _date
+
+    from engine.ops.main import _hydrate_prescreen
+    from engine.strategy.prescreen import SignalPreScreen
+    from engine.strategy.types import RawLevels as _RL
+    from engine.strategy.types import ScanContext as _SC
+    from engine.strategy.types import SignalCandidate as _Cand
+
+    # (a) An EVALUATED candidate (analyst ran, said no_action): journal row stays evaluated=1.
+    ticker.at = datetime(2026, 6, 17, 10, 15, tzinfo=IST)
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book,
+        harness=FakeHarness(dict(NO_ACTION_JSON)),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+    )
+    await pipeline.on_signal_candidate(candidate())
+    rows = conn.execute(
+        "SELECT strategy_id, evaluated FROM prescreen_day_slots WHERE d='2026-06-17'"
+    ).fetchall()
+    assert {(r["strategy_id"], r["evaluated"]) for r in rows} == {("orb", 1)}
+
+    # (b) A NEVER-EVALUATED drop (out of window): journalled on receipt, flipped to evaluated=0.
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline2, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), rearm=lambda sym, sid: True,
+    )
+    await pipeline2.on_signal_candidate(candidate(strategy_id="rsi2", signal_id="01SIGNAL2"))
+    by_sid = {
+        r["strategy_id"]: r["evaluated"] for r in conn.execute(
+            "SELECT strategy_id, evaluated FROM prescreen_day_slots WHERE d='2026-06-17'"
+        ).fetchall()
+    }
+    assert by_sid == {"orb": 1, "rsi2": 0}
+
+    # (c) "Restart": a FRESH prescreen hydrated from the journal — the evaluated pair is deduped,
+    # the in-flight-lost pair re-publishes within its already-paid cap slot.
+    def _ext(strategy_id: str) -> _Cand:
+        return _Cand(
+            signal_id=f"sig-{strategy_id}", strategy_id=strategy_id, symbol=SYMBOL, side="BUY",
+            style="intraday", raw_levels=_RL(entry=Decimal("100"), stop=Decimal("99")), score=0.5,
+        )
+
+    ps = SignalPreScreen([], lambda bar: _SC(), None, max_candidates_per_day=2)
+    _hydrate_prescreen(conn, ps, _date(2026, 6, 17))
+    day = _date(2026, 6, 17)
+    assert ps.admit([_ext("orb")], day) == []                       # evaluated → still deduped
+    assert ps.admit([_ext("trend")], day) == []                     # cap full (2 charged pairs)
+    assert [c.strategy_id for c in ps.admit([_ext("rsi2")], day)] == ["rsi2"]   # paid quota re-publish
+
+
 async def test_stopless_candidate_never_reaches_the_analyst(
     conn, pclock, calendar, book, limit_table, cost_model
 ):

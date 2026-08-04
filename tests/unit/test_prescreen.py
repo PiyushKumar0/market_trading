@@ -103,6 +103,49 @@ def test_admit_applies_the_same_dedupe_and_caps_as_the_bar_path():
     assert [c.symbol for c in ps.admit([_ext_cand("BPCL")], _date(2026, 6, 18))] == ["BPCL"]
 
 
+# ---------------------------------------------------------------------------- hydrate (restart-proof day state)
+def test_hydrate_restores_dedupe_and_caps_across_a_restart():
+    """2026-08-04: the day state was process memory only, so a restart reset both bounds (observed:
+    ~54 publications vs the 20/day cap across two mid-session restarts). A hydrated `seen` pair may
+    not re-publish; hydrated `charged` pairs count against the caps."""
+    from datetime import date as _date
+    day = _date(2026, 6, 17)
+    ps = _prescreen(max_candidates_per_day=3)
+    ps.hydrate(day, seen=[("BPCL", "brk20"), ("TCS", "stub")],
+               charged=[("BPCL", "brk20"), ("TCS", "stub")])
+    # Evaluated pairs stay deduped after the "restart".
+    assert ps.admit([_ext_cand("BPCL")], day) == []
+    assert ps.on_bar(_bar(symbol="TCS")) == []
+    # The cap counter survived too: 2 of 3 slots spent, one NEW pair fits, the next is suppressed.
+    assert [c.symbol for c in ps.admit([_ext_cand("COALINDIA")], day)] == ["COALINDIA"]
+    assert ps.admit([_ext_cand("RELIANCE")], day) == []
+    assert ps.seen_today() == 3
+
+
+def test_hydrate_charged_but_unseen_republishes_within_paid_quota():
+    """A pair published but LOST IN FLIGHT (evaluated=0 — the crash/restart shape) re-publishes,
+    and within its already-paid cap slot: the 2026-07-29 rearm semantics, now restart-proof."""
+    from datetime import date as _date
+    day = _date(2026, 6, 17)
+    ps = _prescreen(max_candidates_per_day=2)
+    ps.hydrate(day, seen=[("TCS", "stub")],
+               charged=[("TCS", "stub"), ("BPCL", "brk20")])   # BPCL: published, never evaluated
+    # Cap is already FULL (2 charged pairs) — a brand-new pair is suppressed...
+    assert ps.admit([_ext_cand("RELIANCE")], day) == []
+    # ...but the in-flight-lost pair re-publishes inside its paid quota.
+    assert [c.symbol for c in ps.admit([_ext_cand("BPCL")], day)] == ["BPCL"]
+    # And only once — the re-publish spends the slot again.
+    assert ps.admit([_ext_cand("BPCL")], day) == []
+
+
+def test_hydrate_day_rolls_forward_normally():
+    """Hydrated state belongs to ITS day: the next session's first bar resets everything (§9.6)."""
+    from datetime import date as _date
+    ps = _prescreen(max_candidates_per_day=1)
+    ps.hydrate(_date(2026, 6, 17), seen=[("TCS", "stub")], charged=[("TCS", "stub")])
+    assert len(ps.on_bar(_bar(day=18, symbol="TCS"))) == 1
+
+
 # ---------------------------------------------------------------------------- per-day caps
 def test_daily_cap_suppresses_after_limit():
     ps = _prescreen(max_candidates_per_day=2)

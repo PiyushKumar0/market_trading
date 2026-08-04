@@ -590,6 +590,10 @@ async def run() -> int:
         max_candidates_per_day=settings.strategy.prescreen.max_candidates_per_day,
         max_per_strategy_day=settings.strategy.prescreen.max_per_strategy_day,
     )
+    # 2026-08-04: dedupe/caps day-state is process memory — rehydrate it from the day-slot journal
+    # so a restart no longer resets the 20/day bound (observed: ~54 publications across two
+    # mid-session restarts) or re-sends already-evaluated candidates.
+    _hydrate_prescreen(conn, prescreen, clock.today())
     bus.subscribe("bar.1m", prescreen.handle_bar)
 
     # --- Tier-1 jobs (all fail to no-output, never blocking — D7/E5) ---
@@ -1392,6 +1396,24 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
             await lifecycle.reapply_warmup_gate()
         except Exception:  # noqa: BLE001 - a failed lift retries on the next 60s tick
             _log.exception("warmup_freeze_lift_failed")
+
+
+# --------------------------------------------------------------------------- prescreen day-state (§3.2.5)
+def _hydrate_prescreen(conn: sqlite3.Connection, prescreen, today: date) -> None:
+    """Rebuild the prescreen's in-memory day state from ``prescreen_day_slots`` at boot (2026-08-04).
+
+    ``charged`` = every pair published today (the caps bound — counts attempts, never refunded);
+    ``seen`` = pairs whose slot is spent (``evaluated=1``). A charged-but-unseen pair was lost
+    in flight (or re-armed) and may re-publish within its already-paid quota — the 2026-07-29
+    rearm semantics, now restart-proof."""
+    rows = conn.execute(
+        "SELECT symbol, strategy_id, evaluated FROM prescreen_day_slots WHERE d = ?",
+        (today.isoformat(),),
+    ).fetchall()
+    charged = {(r["symbol"], r["strategy_id"]) for r in rows}
+    seen = {(r["symbol"], r["strategy_id"]) for r in rows if r["evaluated"]}
+    prescreen.hydrate(today, seen=sorted(seen), charged=sorted(charged))
+    _log.info("prescreen_hydrated", d=today.isoformat(), charged=len(charged), seen=len(seen))
 
 
 # --------------------------------------------------------------------------- brk20 feature link (§4.3)

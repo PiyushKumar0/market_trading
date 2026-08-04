@@ -130,6 +130,33 @@ class SignalPreScreen:
                 return True
             return False
 
+    def hydrate(
+        self,
+        day: date,
+        *,
+        seen: Sequence[tuple[str, str]],
+        charged: Sequence[tuple[str, str]],
+    ) -> None:
+        """Restore ``day``'s dedupe/cap state from the persisted journal at boot (2026-08-04).
+
+        The per-day state is process memory, so before this existed every restart reset BOTH bounds —
+        observed 2026-08-04: ~54 publications against the 20/day cap across two mid-session restarts.
+        ``charged`` = every (symbol, strategy) pair published today — caps count attempts, never
+        refunded (2026-07-29). ``seen`` = pairs whose day slot is SPENT (evaluated, or deliberately
+        refused: governor/forward-cap/unsizeable); a charged-but-unseen pair was lost in flight and
+        may re-publish within its already-paid quota — exactly the :meth:`rearm` semantics. Boot-only
+        (composition root, from ``prescreen_day_slots``): replay/backtest paths never call this, so
+        §9.6 bar-stream determinism is untouched."""
+        with self._lock:
+            self._roll_day_locked(day)
+            self._seen = set(seen)
+            self._charged = set(charged) | self._seen
+            self._count_day = len(self._charged)
+            counts: dict[str, int] = {}
+            for _, strategy_id in self._charged:
+                counts[strategy_id] = counts.get(strategy_id, 0) + 1
+            self._count_by_strategy = counts
+
     def sweep(self, bars: Sequence[Bar]) -> tuple[list[SignalCandidate], list[PendingSetup]]:
         """Re-scan the LATEST bar of each symbol on demand (§3.2.5 sweep addendum, 2026-07-29).
 
