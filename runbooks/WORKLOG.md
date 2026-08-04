@@ -1,6 +1,6 @@
 # WORKLOG — autonomous operations log
 
-## 2026-08-04 (later #4, ~15:45) — prescreen day-state journal: dedupe/caps now survive restarts (owner-directed "Fix Point B")
+## 2026-08-04 (later #4, ~14:50) — prescreen day-state journal: dedupe/caps now survive restarts (owner-directed "Fix Point B")
 
 - **Confirmed mechanics before fixing:** all §3.2.5 day state (`_seen`/`_charged`/counters) was
   process memory (prescreen.py) — every restart reset the once-per-day dedupe AND the 20/day cap.
@@ -19,9 +19,12 @@
   (journal lives in the pipeline, not the prescreen scan path).
 - Plan §3.2.5 day-slot-journal addendum written. 1,176 unit tests green (4 new: hydrate
   dedupe/caps/paid-quota semantics + a full pipeline journal→rehydrate round trip).
-- **Deployed via restart ~15:45 (post-close).** Journal table is empty until tomorrow's first
-  publications, so today's `prescreen_hydrated` logs 0/0 — the line proves the wiring; the bound
-  becomes load-bearing with tomorrow's first candidates.
+- **Deployed via mid-session restart ~14:50 (owner-authorized).** Boot log: `migration_applied
+  0004`, `prescreen_hydrated charged=0 seen=0` (table born this boot — today's earlier
+  publications predate it; the wiring is proven, the bound becomes load-bearing from the next
+  publication onward). Side effect worth having: the post-warmup window sweep (~15:15) runs with
+  a fresh in-memory ledger + live journal, and may re-fire brk20 — which would live-exercise the
+  #3 snapshot-mint fix same-day.
 
 ## 2026-08-04 (later #3, ~14:00) — brk20 null-snapshot defect: every batch candidate was analyst-unrecommendable (owner-directed fix)
 
