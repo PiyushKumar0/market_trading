@@ -6,8 +6,11 @@ only (§2.4): every ``news`` row is written ``untrusted=true`` (forced by ``Mark
 
 Feed set (CONFIG — ``settings.yaml news.feeds``; changing it is an owner config change, config_audit):
 
-- **ET Markets RSS** (5-min cadence) + **Moneycontrol RSS** (15-min, polite): parsed with stdlib
-  ``xml.etree.ElementTree`` over an injected ``httpx.AsyncClient`` (convention 11 — E5 best-effort).
+- **RSS**, a config-driven name → ``{url, poll_s}`` map (``news.feeds.rss``; seeds: ET Markets at
+  5 min + Livemint markets/companies at 15 min). Parsed with stdlib ``xml.etree.ElementTree`` over an
+  injected ``httpx.AsyncClient`` (convention 11 — E5 best-effort). Moneycontrol RSS was removed
+  2026-08-04: the feed has been frozen since ~2024-04 (391 polls, zero inserts) and its silence left
+  the corpus single-source, which no §2.7 corroboration gate can pass.
   Malformed items are tolerated: an item without a title or an absolute link is skipped; an item with
   a missing/unparsable ``pubDate`` keeps the headline with ``published_at`` = ingest time (Clock) —
   conservative-recent, never a naive datetime.
@@ -69,9 +72,10 @@ GDELT_DOMAIN_ALLOWLIST: frozenset[str] = frozenset({
     "zeebiz.com",
 })
 
-#: Feed keys accepted by :meth:`NewsIngest.poll` — one per §3.2.4 source (distinct poll cadences:
-#: ``news.et_poll_s`` / ``news.mc_poll_s`` / ``news.gdelt_poll_s``; the scheduler may poll each alone).
-FEED_KEYS: tuple[str, ...] = ("et", "mc", "gdelt")
+#: The one NON-RSS feed key accepted by :meth:`NewsIngest.poll`. The RSS keys are config-driven
+#: (``news.feeds.rss``), so the accepted set is built per-instance in ``poll``; each source has its
+#: own cadence (per-feed ``poll_s`` / ``news.gdelt_poll_s``) and the scheduler may poll each alone.
+GDELT_KEY = "gdelt"
 
 
 def _clean_title(title: str) -> str:
@@ -133,13 +137,15 @@ class NewsIngest:
         clock: Clock,
         http: httpx.AsyncClient,
         *,
-        request_timeout_s: float = 10.0,
+        request_timeout_s: float | None = None,
     ) -> None:
         self._cfg = cfg
         self._store = store
         self._clock = clock
         self._http = http
-        self._timeout = float(request_timeout_s)
+        # None ⇒ the settings value (news.request_timeout_s); an explicit argument still wins so
+        # tests/probes can tighten it.
+        self._timeout = float(request_timeout_s if request_timeout_s is not None else cfg.request_timeout_s)
 
     # ------------------------------------------------------------------ public surface
     async def poll(
@@ -150,8 +156,9 @@ class NewsIngest:
     ) -> list[Headline]:
         """Poll the configured feeds, dedupe by URL, persist new ``news`` rows; return the NEW headlines.
 
-        ``feeds`` selects a subset of :data:`FEED_KEYS` (None = all three) so the scheduler can honor
-        the distinct §3.2.4 cadences. ``lookback_h`` widens the GDELT ``timespan`` window — the
+        ``feeds`` selects a subset of the valid keys — every ``news.feeds.rss`` name plus
+        :data:`GDELT_KEY` (None = all of them) — so the scheduler can honor the distinct §3.2.4
+        per-feed cadences. ``lookback_h`` widens the GDELT ``timespan`` window — the
         off-period backfill knob (§4.4 job 10); None = the routine window (2× ``gdelt_poll_s``, so
         consecutive polls overlap and boundary items are never missed — URL dedupe absorbs the overlap).
 
@@ -159,17 +166,17 @@ class NewsIngest:
         feed just contributes nothing. Returns only the headlines actually INSERTED (post-dedupe),
         each carrying its minted ``headline_id`` — the §2.7 step-2 clusterer input.
         """
-        selected = tuple(feeds) if feeds is not None else FEED_KEYS
-        unknown = set(selected) - set(FEED_KEYS)
+        valid = tuple(self._cfg.feeds.rss) + (GDELT_KEY,)
+        selected = tuple(feeds) if feeds is not None else valid
+        unknown = set(selected) - set(valid)
         if unknown:
-            raise ValueError(f"unknown feed key(s) {sorted(unknown)}; allowed: {FEED_KEYS}")
+            raise ValueError(f"unknown feed key(s) {sorted(unknown)}; allowed: {valid}")
 
         batch: list[Headline] = []
-        if "et" in selected:
-            batch += await self._fetch_guarded("et_markets_rss", self._fetch_rss(self._cfg.feeds.et_markets_rss))
-        if "mc" in selected:
-            batch += await self._fetch_guarded("moneycontrol_rss", self._fetch_rss(self._cfg.feeds.moneycontrol_rss))
-        if "gdelt" in selected:
+        for name, feed in self._cfg.feeds.rss.items():
+            if name in selected:
+                batch += await self._fetch_guarded(name, self._fetch_rss(feed.url))
+        if GDELT_KEY in selected:
             batch += await self._fetch_guarded("gdelt_doc", self._fetch_gdelt(lookback_h))
 
         # §3.2.4/§4.4 job 10 drop list (2026-08-03): auto-generated live-blog/ticker PAGE titles are

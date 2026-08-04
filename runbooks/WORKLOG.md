@@ -1,6 +1,36 @@
 # WORKLOG — autonomous operations log
 
-## 2026-08-04 (later) — BPCL post-mortem → brk20 daily-breakout leg + watchlist 50→100 (owner-directed)
+## 2026-08-04 (later #2, ~09:40) — zero-origination root cause → news-feed remediation (owner-directed)
+
+- **Owner reported the dashboard "digest stale" banner; the stale part was a pre-08:35 transient
+  (digest ran on schedule), but the replay it prompted found the real defect.** Full
+  `originating_conditions` replay of the 08-03 watchlist (27 rows, against the pre-remediation3
+  backup; reproduced the digest 27/27): `source_domains` kills EVERY row — 546/547 scored clusters
+  since 07-28 have exactly 1 domain (522 ET), so `catalyst_guard.min_source_domains: 2` was
+  structurally unpassable → `n_originating` = 0 every day. BPCL 08-03: **zero raw headlines** —
+  corpus starvation upstream of every filter, not a grading failure.
+- **Feed-level causes (all were `[VERIFY Phase-1]`, never live-verified):** Moneycontrol
+  `rss/business.xml` — the ENTIRE MC RSS ecosystem frozen since ~2024-04 (probe: newest pubDate
+  ~832 days old on all 5 MC feeds; 391 engine polls, 0 inserts ever). GDELT — ~99% standalone-poll
+  failure: 121 ConnectTimeouts (10 s timeout) + 57 429s; even a single fresh probe 429'd.
+  Business Standard RSS probed as an alternative: WAF 403, rejected.
+- **Remediation (owner: "work on all suggested points"):** `news.feeds` generalized to an open
+  `rss: name → {url, poll_s}` map (feed swaps are now a settings edit); MC retired; Livemint
+  markets+companies added (live-verified: newest items 11/31 min old); `request_timeout_s` 10→30;
+  `gdelt_poll_s` 1800→3600 (GDELT = corroboration bonus, never load-bearing); `CatalystDigestJob`
+  now receives the §6.5 `envelope_state` mapping at boot (was silently pinned to defaults; table
+  is empty today so no behavior change — contract honored for Phase-5 promotions). Plan §2.7/§3.2.4/
+  §4.4-job-10 + RUNBOOK amended. 1,170 unit tests green. NOT touched, deliberately:
+  `min_source_domains` — the guard was correct, the corpus was starved.
+- **Live verification (engine restarted ~09:20, mid-session, owner-authorized):** first Livemint
+  polls 09:35:45 inserted 29+28 headlines, ET unaffected — dual-domain corpus restored. SCM restart
+  registers as `crash_recovered: true` in startup_report (integrity_ok, harmless — known shape).
+- **Acceptance pending tomorrow 08:35 digest:** expect multi-domain clusters (ET×Livemint merges)
+  and `source_domain_count ≥ 2` on shared stories. `n_originating` may legitimately still be 0
+  (the other 8 AND-conditions), but if ~ALL clusters are still single-domain after a full dual-feed
+  day, the next suspect is the CLUSTERER's cross-source merging, not the feeds. Secondary watch:
+  GDELT first new-cadence poll (~10:20) for whether the 30 s timeout rescues it; materiality-floor
+  near-misses (BAJFINANCE-shaped 0.60 vs 0.70) are an owner-policy question, not a defect.
 
 - **Owner asked why BPCL's 2026-08-03 breakout wasn't recommended.** Diagnosis (logs + store,
   2-agent evidence sweep): BPCL is liquidity rank 96/200 and the intraday watchlist caps at the

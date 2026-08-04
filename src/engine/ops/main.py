@@ -593,7 +593,13 @@ async def run() -> int:
     bus.subscribe("bar.1m", prescreen.handle_bar)
 
     # --- Tier-1 jobs (all fail to no-output, never blocking — D7/E5) ---
-    digest_job = CatalystDigestJob(store, clock, calendar, protected_store)
+    # §6.5 envelope_state read at boot, same policy as `edge_multiple_min` above (re-read at boot;
+    # intra-run promotions land Phase 5). load_cat_params ignores every non-`cat` key, so the whole
+    # mapping goes in as-is; empty ⇒ None ⇒ the envelope.yaml/settings.yaml defaults.
+    _envelope_state = {
+        r["parameter"]: r["value"] for r in conn.execute("SELECT parameter, value FROM envelope_state").fetchall()
+    }
+    digest_job = CatalystDigestJob(store, clock, calendar, protected_store, envelope=_envelope_state or None)
     scoring_job = (
         NewsScoringJob(store, resolver, assembler, harness, agent_defs, governor, clock, calendar)
         if harness is not None and "news_analyst" in agent_defs else None
@@ -1325,10 +1331,11 @@ def _arm_live_jobs(
                       job_id="feed_stats", guard=False)
     scheduler.add_job(_health, trigger=IntervalTrigger(seconds=settings.lifecycle.watchdog_poll_s),
                       job_id="health_check", guard=False)
-    scheduler.add_job(_news_poll("et"), trigger=IntervalTrigger(seconds=settings.news.et_poll_s),
-                      job_id="news_poll_et", guard=False)
-    scheduler.add_job(_news_poll("mc"), trigger=IntervalTrigger(seconds=settings.news.mc_poll_s),
-                      job_id="news_poll_mc", guard=False)
+    # One job per configured RSS feed (§3.2.4): the feed set is settings, not code, so adding a
+    # source is a config_audit'd settings.yaml edit and the scheduler picks it up at the next boot.
+    for name, feed in settings.news.feeds.rss.items():
+        scheduler.add_job(_news_poll(name), trigger=IntervalTrigger(seconds=feed.poll_s),
+                          job_id=f"news_poll_{name}", guard=False)
     scheduler.add_job(_news_poll("gdelt"), trigger=IntervalTrigger(seconds=settings.news.gdelt_poll_s),
                       job_id="news_poll_gdelt", guard=False)
     if equity_tick is not None:

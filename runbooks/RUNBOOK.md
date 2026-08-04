@@ -147,8 +147,9 @@ uses). Times are the `jobs:` block in `config/settings.yaml`.
 | 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` (§10.5) |
 
 Live (interval, not calendar-gated, run whenever the engine is up): `bar_advance` (5 s bar
-finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the per-feed news polls `news_poll_et`
-(`news.et_poll_s`=300 s) / `news_poll_mc` (900 s) / `news_poll_gdelt` (900 s).
+finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the news polls — one `news_poll_<name>`
+job per `news.feeds.rss` entry at its own `poll_s` (2026-08-04 seed: `et` 300 s, `livemint_markets` /
+`livemint_companies` 900 s) plus `news_poll_gdelt` (`news.gdelt_poll_s`=3600 s).
 
 ## Historical backfill procedure (A2, checkpointed & resumable)
 
@@ -209,8 +210,10 @@ The G1 gate exercises these live for ≥5 sessions. Confirm each returns parseab
 browser-shaped headers; a per-source failure degrades gracefully (reuse-yesterday / skip) but should be
 re-pointed, not left broken. Feed set is `config_audit`-tracked (owner-only changes).
 
-- [ ] **ET Markets RSS** — `news.feeds.et_markets_rss` (5-min poll).
-- [ ] **Moneycontrol RSS** — `news.feeds.moneycontrol_rss` (15-min poll).
+- [x] **ET Markets RSS** — `news.feeds.rss.et` (300 s poll). Verified live 2026-08-04.
+- [x] **Livemint markets/companies RSS** — `news.feeds.rss.livemint_*` (900 s). Verified live 2026-08-04.
+      (Moneycontrol RSS RETIRED 2026-08-04: whole MC feed ecosystem frozen since ~2024-04 — newest
+      pubDate ~832 days old, 391 polls with zero inserts. Do not re-add without a fresh probe.)
 - [ ] **GDELT DOC 2.0** — `GDELT_DOC_URL` + `news.feeds.gdelt_doc_query`, client-side filtered to
       `GDELT_DOMAIN_ALLOWLIST` (module-pinned in `datafeeds/news.py`; widening it is a code change).
 - [ ] **MIS leverage** — `KITE_MIS_MARGINS_URL` = `https://api.kite.trade/margins/equity` (fail-closed:

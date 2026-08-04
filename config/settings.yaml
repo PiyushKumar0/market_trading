@@ -90,19 +90,30 @@ data:
 
 # --- News-intelligence layer (§2.7) — owner-only operational config; changes audited (config_audit) ---
 news:
-  # Feed set (§3.2.4 NewsIngest). URLs are SEEDS to be VERIFIED at Phase-1 implementation (feeds move;
-  # the G1 gate exercises them live for ≥5 sessions). Headline-level only; bodies never fetched.
+  # Feed set (§3.2.4 NewsIngest). `rss` is an open name -> {url, poll_s} map: one scheduler job per
+  # entry, so adding/removing a source is a settings edit, not a code change. Headline-level only;
+  # bodies never fetched. Moneycontrol RSS REMOVED 2026-08-04 — its whole feed ecosystem has been
+  # frozen since ~2024-04 (probe 2026-08-04: newest pubDate ~832 days old; 391 engine polls inserted
+  # 0 headlines ever), which left the corpus ET-only and made cat's min_source_domains:2 unpassable.
   feeds:
-    et_markets_rss:   "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"  # 5-min poll [VERIFY Phase-1]
-    moneycontrol_rss: "https://www.moneycontrol.com/rss/business.xml"                         # 15-min, polite [VERIFY Phase-1]
-    gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query, 15-min [VERIFY Phase-1]
+    rss:
+      et:                                                                                    # verified live 2026-08-04
+        url:    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
+        poll_s: 300                                                                          # 5-min cadence (§3.2.4)
+      livemint_markets:                                                                      # verified live 2026-08-04 (HTTP 200, 35 items, newest 11 min old)
+        url:    "https://www.livemint.com/rss/markets"
+        poll_s: 900                                                                          # 15-min, polite
+      livemint_companies:                                                                    # verified live 2026-08-04 (HTTP 200, 35 items, newest 31 min old)
+        url:    "https://www.livemint.com/rss/companies"
+        poll_s: 900                                                                          # 15-min, polite
+    gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query [VERIFY Phase-1]
   cluster_sim_threshold: 0.75    # §3.2.4 pinned clustering similarity [tunable, owner] — drives the
                                  # corroboration count, so owner-only (never in envelope.yaml)
-  et_poll_s: 300                 # ET Markets RSS poll cadence (§3.2.4: 5 min)
-  mc_poll_s: 900                 # Moneycontrol RSS poll cadence (15 min, polite)
-  gdelt_poll_s: 1800             # GDELT DOC 2.0 poll cadence — raised 900→1800 (2026-07-22: intermittent
-                                 # 429s/throttle pages at 15-min; GDELT updates 15-min but O12 only needs
-                                 # the pre-open digest, so 30-min halves quota pressure at zero cost)
+  gdelt_poll_s: 3600             # GDELT DOC 2.0 poll cadence — 1800→3600 (2026-08-04: the 429s persisted
+                                 # at 30-min, and a probe of a SINGLE fresh request still 429'd, so the
+                                 # limit is not cadence-shaped; O12 only needs the pre-open digest)
+  request_timeout_s: 30          # per-fetch HTTP timeout — 10→30 (2026-08-04: 121 ConnectTimeouts against
+                                 # GDELT at the old 10 s; ~99% of polls returned nothing)
   backfill_lookback_h: 72        # off-period startup headline backfill window (§4.4 job 10)
   gdelt_backfill_max_days: 90    # GDELT DOC ~3-month window — no deeper backfill dependency (E6)
 

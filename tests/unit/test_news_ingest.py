@@ -1,5 +1,5 @@
-"""NewsIngest (§3.2.4 / §2.7 step 1 / §4.4 job 10): offline fixture parses of ET/Moneycontrol RSS +
-GDELT DOC 2.0 artlist, URL dedupe (within a batch, across feeds, across polls), tz-correctness
+"""NewsIngest (§3.2.4 / §2.7 step 1 / §4.4 job 10): offline fixture parses of the config-driven RSS
+feed set + GDELT DOC 2.0 artlist, URL dedupe (within a batch, across feeds, across polls), tz-correctness
 (RFC-2822 / GDELT seendate → tz-aware IST; unparsable ⇒ Clock ingest time), the GDELT domain
 allowlist + timespan windows (routine vs §4.4 job-10 backfill), and E5 degradation (a dead feed
 contributes zero headlines and never raises)."""
@@ -29,7 +29,10 @@ ET_URLS = {
     "https://economictimes.indiatimes.com/markets/bad-date.cms",
     "https://www.moneycontrol.com/news/business/markets/shared-story.html",
 }
-MC_URLS = {
+# Served as the SECOND RSS feed (`livemint_markets`). The item links inside the fixture stay
+# moneycontrol.com deliberately: source_domain derives from the item link, not the feed URL, and the
+# shared-story dup with ET is exactly what the cross-feed dedupe assertions ride on.
+RSS2_URLS = {
     "https://www.moneycontrol.com/news/business/markets/rbi-rate-cut-analysts.html",
     "https://www.moneycontrol.com/news/business/markets/shared-story.html",  # dup of an ET item
 }
@@ -38,7 +41,11 @@ GDELT_URLS = {
     "https://economictimes.indiatimes.com/markets/rbi-rate-cut.cms",  # dup of an ET item
     "https://www.business-standard.com/markets/bad-seendate.html",
 }
-ALL_UNIQUE_URLS = ET_URLS | MC_URLS | GDELT_URLS  # 7 distinct
+ALL_UNIQUE_URLS = ET_URLS | RSS2_URLS | GDELT_URLS  # 7 distinct
+
+#: Third configured RSS feed (`livemint_companies`) — well-formed but empty, so the default handler
+#: has no dead feed and per-test overrides stay about the failure being exercised.
+EMPTY_RSS = b'<?xml version="1.0"?><rss><channel></channel></rss>'
 
 
 @pytest.fixture
@@ -68,10 +75,12 @@ def _make_ingest(
                 if isinstance(outcome, Exception):
                     raise outcome
                 return outcome
-        if url.startswith(cfg.feeds.et_markets_rss):
+        if url.startswith(cfg.feeds.rss["et"].url):
             return httpx.Response(200, content=(FIXTURES / "et_markets_rss.xml").read_bytes())
-        if url.startswith(cfg.feeds.moneycontrol_rss):
+        if url.startswith(cfg.feeds.rss["livemint_markets"].url):
             return httpx.Response(200, content=(FIXTURES / "moneycontrol_rss.xml").read_bytes())
+        if url.startswith(cfg.feeds.rss["livemint_companies"].url):
+            return httpx.Response(200, content=EMPTY_RSS)
         if url.startswith(GDELT_DOC_URL):
             return httpx.Response(200, content=(FIXTURES / "gdelt_artlist.json").read_bytes())
         return httpx.Response(404)
@@ -158,7 +167,7 @@ async def test_titles_are_html_unescaped_and_fo_talk_series_dropped(store, clock
         <link>https://economictimes.indiatimes.com/markets/fo-talk.cms</link>
         <pubDate>Wed, 17 Jun 2026 03:31:00 GMT</pubDate></item>
     </channel></rss>"""
-    overrides = {cfg.feeds.et_markets_rss: httpx.Response(200, content=xml)}
+    overrides = {cfg.feeds.rss["et"].url: httpx.Response(200, content=xml)}
     ingest, client = _make_ingest(store, clock, overrides=overrides)
     async with client:
         got = await ingest.poll(feeds=("et",))
@@ -196,35 +205,36 @@ async def test_gdelt_timespan_routine_vs_backfill_windows(store, clock):
     record: list[httpx.Request] = []
     ingest, client = _make_ingest(store, clock, record=record)
     async with client:
-        await ingest.poll(feeds=("gdelt",))                       # routine: 2× 900 s cadence = 30 min
+        await ingest.poll(feeds=("gdelt",))                       # routine: 2× 3600 s cadence = 2 h
         await ingest.poll(feeds=("gdelt",), lookback_h=48)        # widened poll window
         await ingest.backfill()                                   # §4.4 job 10 default = 72 h
         await ingest.backfill(lookback_h=30 * 24)                 # sized to a long off period
         await ingest.backfill(lookback_h=365 * 24)                # capped at the ~3-month DOC window
 
     spans = [r.url.params["timespan"] for r in record if str(r.url).startswith(GDELT_DOC_URL)]
-    assert spans == ["30min", "48h", "72h", "30d", "90d"]
+    assert spans == ["2h", "48h", "72h", "30d", "90d"]
 
 
 # --------------------------------------------------------------------------- E5 degradation + selection
 async def test_dead_feeds_degrade_to_zero_headlines_never_raise(store, clock):
     cfg = NewsCfg()
     overrides: dict[str, httpx.Response | Exception] = {
-        cfg.feeds.et_markets_rss: httpx.Response(500),                       # HTTP failure
-        cfg.feeds.moneycontrol_rss: httpx.Response(200, content=b"<not xml"),  # unparsable body
+        cfg.feeds.rss["et"].url: httpx.Response(500),                                 # HTTP failure
+        cfg.feeds.rss["livemint_markets"].url: httpx.Response(200, content=b"<not xml"),  # unparsable body
     }
     ingest, client = _make_ingest(store, clock, overrides=overrides)
     async with client:
         got = await ingest.poll()
-    # ET + MC contribute nothing; GDELT still lands (feeds fail independently, E5).
+    # Both RSS feeds contribute nothing; GDELT still lands (feeds fail independently, E5).
     assert {h.url for h in got} == GDELT_URLS
 
 
 async def test_all_feeds_down_yields_empty_poll(store, clock):
     cfg = NewsCfg()
     overrides: dict[str, httpx.Response | Exception] = {
-        cfg.feeds.et_markets_rss: httpx.ConnectError("boom"),
-        cfg.feeds.moneycontrol_rss: httpx.Response(503),
+        cfg.feeds.rss["et"].url: httpx.ConnectError("boom"),
+        cfg.feeds.rss["livemint_markets"].url: httpx.Response(503),
+        cfg.feeds.rss["livemint_companies"].url: httpx.TimeoutException("slow"),
         GDELT_DOC_URL: httpx.Response(200, content=b"{ not json"),
     }
     ingest, client = _make_ingest(store, clock, overrides=overrides)
@@ -240,7 +250,7 @@ async def test_feed_subset_polls_only_selected_sources(store, clock):
     async with client:
         got = await ingest.poll(feeds=("et",))
     assert len(record) == 1
-    assert str(record[0].url).startswith(NewsCfg().feeds.et_markets_rss)
+    assert str(record[0].url).startswith(NewsCfg().feeds.rss["et"].url)
     assert {h.url for h in got} == ET_URLS
 
 

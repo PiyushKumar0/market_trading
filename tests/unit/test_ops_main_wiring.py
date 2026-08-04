@@ -344,8 +344,9 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
                    ticker=object(), calendar=calendar, clock=clock)
 
     armed = {j.id for j in sched._sched.get_jobs()}
-    assert {"bar_advance", "health_check", "feed_stats",
-            "news_poll_et", "news_poll_mc", "news_poll_gdelt"} <= armed
+    # One news_poll_<name> job per configured RSS feed, plus the GDELT job.
+    assert {"bar_advance", "health_check", "feed_stats", "news_poll_gdelt"} <= armed
+    assert {f"news_poll_{name}" for name in settings.news.feeds.rss} <= armed
 
 
 # --------------------------------------------------------------------------- login API bind confirmation

@@ -111,3 +111,24 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
 - RECOMMEND flow needs: mode RECOMMEND (`/mode RECOMMEND`), valid trade window, warm-up ready,
   and the Claude OAuth token present (else the LLM tier is disabled and only scanners run).
 - Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
+
+## News-feed health (2026-08-04, after the MC-retirement remediation)
+
+```powershell
+# Engine service restart (NSSM; SCM stop registers as crash_recovered=true in startup_report — harmless):
+Restart-Service mt-engine
+
+# Per-feed poll health from logs (fetched/unique/inserted; a feed whose standalone polls NEVER
+# insert is dead or frozen upstream — the MC failure shape):
+Select-String -Path data\logs\engine.log -Pattern '"news_polled"' | ForEach-Object { $_.Line | ConvertFrom-Json } |
+  Group-Object { $_.feeds -join ',' } | ForEach-Object { "{0}: polls={1} inserted={2}" -f $_.Name, $_.Count, (($_.Group | Measure-Object inserted -Sum).Sum) }
+
+# Corpus corroboration health (needs engine OFF, or run against a data\backups\*.duckdb copy):
+# distribution of distinct source domains per scored cluster — if ~all are 1, min_source_domains:2
+# can never pass and n_originating is structurally 0 (see memory: news-feed-starvation-zero-origination):
+uv run python -c "import duckdb, collections; con = duckdb.connect(r'data\market.duckdb', read_only=True); rows = con.execute(\"select source_domains from news_clusters where sentiment is not null\").fetchall(); print(collections.Counter(len(r[0] or []) for r in rows))"
+
+# RSS liveness probe (a feed whose newest pubDate is days old is frozen upstream — retire it):
+# session scratchpad probe_feeds.py pattern; quick single-feed check:
+uv run python -c "import httpx, xml.etree.ElementTree as ET; r = httpx.get('https://www.livemint.com/rss/markets', headers={'User-Agent': 'Mozilla/5.0'}, follow_redirects=True, timeout=30); print(r.status_code, [i.findtext('pubDate') for i in ET.fromstring(r.content).findall('.//item')][:3])"
+```

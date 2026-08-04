@@ -142,12 +142,31 @@ class DataCfg(BaseModel):
     backfill_minute_years: int = 1
 
 
-class NewsFeedsCfg(BaseModel):
-    """§3.2.4 ``NewsIngest`` feed set (§2.7 step 1). Seed URLs are [VERIFY Phase-1] — feeds move;
-    the G1 gate exercises them live. Headline-level only; bodies are never fetched (A3r)."""
+class RssFeedCfg(BaseModel):
+    """One §3.2.4 RSS source: where to fetch it and how often. Cadence is per-feed (publishers
+    differ in update rate and in how much politeness they want), so the scheduler arms one job
+    per entry of :attr:`NewsFeedsCfg.rss` rather than a fixed set of named jobs."""
 
-    et_markets_rss: str = "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
-    moneycontrol_rss: str = "https://www.moneycontrol.com/rss/business.xml"
+    url: str
+    poll_s: int = 900
+
+
+class NewsFeedsCfg(BaseModel):
+    """§3.2.4 ``NewsIngest`` feed set (§2.7 step 1). Headline-level only; bodies are never fetched (A3r).
+
+    ``rss`` is an open name → feed map: adding/removing a source is a settings.yaml edit (config_audit),
+    not a code change — the 2026-08-04 lesson, when the corpus silently collapsed to ET-only.
+    Moneycontrol RSS was RETIRED 2026-08-04: its whole feed ecosystem has been frozen since ~2024-04
+    (newest pubDate ~832 days old; 391 engine polls inserted zero headlines), which starved the §2.7
+    ``min_source_domains`` corroboration gate. The Livemint markets/companies feeds that replace it
+    were live-verified 2026-08-04 (HTTP 200, 35 items each, newest items minutes old)."""
+
+    rss: dict[str, RssFeedCfg] = Field(default_factory=lambda: {
+        "et": RssFeedCfg(
+            url="https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms", poll_s=300),
+        "livemint_markets": RssFeedCfg(url="https://www.livemint.com/rss/markets", poll_s=900),
+        "livemint_companies": RssFeedCfg(url="https://www.livemint.com/rss/companies", poll_s=900),
+    })
     gdelt_doc_query: str = "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"
 
 
@@ -189,9 +208,12 @@ class NewsCfg(BaseModel):
         # together on the shared template.
         "vwap",
     ])
-    et_poll_s: int = 300                  # ET Markets RSS poll cadence (§3.2.4: 5 min)
-    mc_poll_s: int = 900                  # Moneycontrol RSS poll cadence (15 min, polite)
-    gdelt_poll_s: int = 900               # GDELT DOC 2.0 poll cadence (15-min update granularity)
+    # RSS cadences are per-feed (``feeds.rss[name].poll_s``); only GDELT keeps a top-level knob.
+    gdelt_poll_s: int = 3600              # GDELT DOC 2.0 poll cadence — 900→3600 (2026-08-04: 429s
+                                          # persisted at 1800 s and a single fresh probe still 429'd;
+                                          # O12 only needs the pre-open digest, so hourly costs nothing)
+    request_timeout_s: float = 30.0       # per-fetch HTTP timeout — 10→30 (2026-08-04: 121 GDELT
+                                          # ConnectTimeouts at the old 10 s, ~99% of polls dead)
     backfill_lookback_h: int = 72         # off-period startup backfill window over RSS lookbacks (§4.4 job 10)
     gdelt_backfill_max_days: int = 90     # GDELT DOC ~3-month window — no deeper backfill exists (E6)
 
