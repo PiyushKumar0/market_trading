@@ -394,8 +394,10 @@ def test_settings_load_with_new_phase1_keys():
     # Per-feed RSS cadences (§3.2.4); gdelt_poll_s 1800→3600 and request_timeout_s 10→30 on
     # 2026-08-04 (persistent 429s at 30-min; 121 ConnectTimeouts at the old 10 s timeout).
     rss = s.news.feeds.rss
+    # 2026-08-05 pool widening: 3 new DOMAINS (hbl/cnbctv18/ndtvprofit) — corroboration pool 2 → 5.
     assert {n: f.poll_s for n, f in rss.items()} == {
         "et": 300, "livemint_markets": 900, "livemint_companies": 900,
+        "hbl_markets": 900, "hbl_companies": 900, "cnbctv18_market": 900, "ndtvprofit": 900,
     }
     assert (s.news.gdelt_poll_s, s.news.request_timeout_s) == (3600, 30.0)
     assert s.news.backfill_lookback_h == 72 and s.news.gdelt_backfill_max_days == 90

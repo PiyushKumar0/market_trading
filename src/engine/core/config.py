@@ -166,6 +166,16 @@ class NewsFeedsCfg(BaseModel):
             url="https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms", poll_s=300),
         "livemint_markets": RssFeedCfg(url="https://www.livemint.com/rss/markets", poll_s=900),
         "livemint_companies": RssFeedCfg(url="https://www.livemint.com/rss/companies", poll_s=900),
+        # 2026-08-05 pool widening: both livemint feeds are ONE registrable domain, so the
+        # corroboration pool was effectively two — three new DOMAINS make "any 2 of 5" clearable
+        # for genuine stories (§2.7 story-level counting). All three live-verified 2026-08-05.
+        "hbl_markets": RssFeedCfg(
+            url="https://www.thehindubusinessline.com/markets/feeder/default.rss", poll_s=900),
+        "hbl_companies": RssFeedCfg(
+            url="https://www.thehindubusinessline.com/companies/feeder/default.rss", poll_s=900),
+        "cnbctv18_market": RssFeedCfg(
+            url="https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml", poll_s=900),
+        "ndtvprofit": RssFeedCfg(url="https://feeds.feedburner.com/ndtvprofit-latest", poll_s=900),
     })
     gdelt_doc_query: str = "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"
 
@@ -207,6 +217,11 @@ class NewsCfg(BaseModel):
         # series — automated screener output, not news; different companies' editions cluster
         # together on the shared template.
         "vwap",
+        # 2026-08-05 new-source templates (probed at feed adoption): HBL's liveblog series titles
+        # itself "Stock Market Live:" (no "updates" — the existing pattern misses it), and
+        # CNBC-TV18's "11:11" branded multi-topic digest bridges unrelated companies per item.
+        "stock market live",
+        "11:11",
     ])
     # RSS cadences are per-feed (``feeds.rss[name].poll_s``); only GDELT keeps a top-level knob.
     gdelt_poll_s: int = 3600              # GDELT DOC 2.0 poll cadence — 900→3600 (2026-08-04: 429s

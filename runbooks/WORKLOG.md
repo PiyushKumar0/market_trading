@@ -1,5 +1,26 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-05 (later #2, ~12:30) — corroboration pool widened 2→5 domains (owner observation)
+
+- **Owner's point, confirmed:** both Livemint feeds resolve to ONE registrable domain, so the
+  effective corroboration pool was two domains (ET, LM) — `min_source_domains: 2` required the
+  single ET∩LM intersection for every origination; one LM gap day ⇒ zero origination capability.
+  Correct fix is more DOMAINS, not weakening the never-learnable guard.
+- **Probed 7 candidates live (production headers); adopted 4 feeds / 3 new domains:** HBL
+  markets+companies (60 items, ~35 min fresh), CNBC-TV18 market (200 items, 10 min), NDTV Profit
+  (20 items, ~1 h). All three already in the GDELT allowlist. Rejected with evidence:
+  financialexpress (malformed XML at source), zeebiz + business-standard (WAF 403), businesstoday
+  (no parseable pubDates). Settings-only feed addition (Monday's rss-map refactor paying off) +
+  two new drop patterns for the incoming templates ("stock market live" — HBL's liveblog series
+  lacks the word "updates"; "11:11" — CNBC-TV18's branded multi-topic digest, a cluster-bridging
+  shape). Plan §2.7/§3.2.4/§4.4 + RUNBOOK updated; test_market_store feed assertion extended;
+  1,180 unit tests green.
+- **Deploys with the already-scheduled 15:35 restart** (same boot as story-level corroboration).
+  Tomorrow's 08:35 digest is the compound acceptance point: 5-domain corpus × story-level union —
+  expect `source_domain_count ≥ 2` to become common on genuinely covered stories. Watch after the
+  first full corpus day: scorer budget uptick (~+200-300 headlines/day, governor-bounded) and any
+  new-outlet template contamination in clusters (G1-class check).
+
 ## 2026-08-05 (later, ~12:00) — story-level corroboration decided, built, deploy scheduled (owner-directed "research and decide")
 
 - **Research → decision: option A (digest-time story-level corroboration) over cross-outlet

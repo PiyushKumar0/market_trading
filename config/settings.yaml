@@ -106,6 +106,23 @@ news:
       livemint_companies:                                                                    # verified live 2026-08-04 (HTTP 200, 35 items, newest 31 min old)
         url:    "https://www.livemint.com/rss/companies"
         poll_s: 900                                                                          # 15-min, polite
+      # 2026-08-05 pool widening (owner-directed): the corroboration pool was effectively TWO domains
+      # (both livemint feeds are ONE domain), so min_source_domains:2 required the exact ET∩LM
+      # intersection. Three new DOMAINS below take the pool to five — "any 2 of 5" is realistic for
+      # genuine stories, unchanged bar for a manipulator. Probed live 2026-08-05; rejected same day:
+      # financialexpress (malformed XML), zeebiz + business-standard (WAF 403), businesstoday (no dates).
+      hbl_markets:                                                                           # verified live 2026-08-05 (60 items, newest 34 min)
+        url:    "https://www.thehindubusinessline.com/markets/feeder/default.rss"
+        poll_s: 900
+      hbl_companies:                                                                         # verified live 2026-08-05 (60 items, newest 40 min)
+        url:    "https://www.thehindubusinessline.com/companies/feeder/default.rss"
+        poll_s: 900
+      cnbctv18_market:                                                                       # verified live 2026-08-05 (200 items, newest 10 min)
+        url:    "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml"
+        poll_s: 900
+      ndtvprofit:                                                                            # verified live 2026-08-05 (20 items, newest 63 min)
+        url:    "https://feeds.feedburner.com/ndtvprofit-latest"
+        poll_s: 900
     gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query [VERIFY Phase-1]
   cluster_sim_threshold: 0.75    # §3.2.4 pinned clustering similarity [tunable, owner] — drives the
                                  # corroboration count, so owner-only (never in envelope.yaml)

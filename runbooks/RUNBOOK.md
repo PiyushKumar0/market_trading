@@ -214,6 +214,11 @@ re-pointed, not left broken. Feed set is `config_audit`-tracked (owner-only chan
 - [x] **Livemint markets/companies RSS** — `news.feeds.rss.livemint_*` (900 s). Verified live 2026-08-04.
       (Moneycontrol RSS RETIRED 2026-08-04: whole MC feed ecosystem frozen since ~2024-04 — newest
       pubDate ~832 days old, 391 polls with zero inserts. Do not re-add without a fresh probe.)
+- [x] **Hindu BusinessLine markets/companies, CNBC-TV18 market, NDTV Profit** —
+      `news.feeds.rss.hbl_* / cnbctv18_market / ndtvprofit` (900 s). Verified live 2026-08-05
+      (corroboration-pool widening 2→5 domains; both Livemint feeds are ONE domain). Rejected
+      2026-08-05: financialexpress (malformed XML), zeebiz + business-standard (WAF 403),
+      businesstoday (no parseable pubDates).
 - [ ] **GDELT DOC 2.0** — `GDELT_DOC_URL` + `news.feeds.gdelt_doc_query`, client-side filtered to
       `GDELT_DOMAIN_ALLOWLIST` (module-pinned in `datafeeds/news.py`; widening it is a code change).
 - [ ] **MIS leverage** — `KITE_MIS_MARGINS_URL` = `https://api.kite.trade/margins/equity` (fail-closed:
