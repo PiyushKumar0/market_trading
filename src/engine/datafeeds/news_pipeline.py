@@ -849,7 +849,9 @@ def originating_conditions(
     ``catalyst_guard`` block. Materiality/sentiment arrive ALREADY weighted by
     ``cat.fanout_weight`` for a fanned-out sector/theme cluster (§2.7: the weight multiplies both
     BEFORE the comparison). Short-direction candidates fail ``sentiment_long`` by construction —
-    the §1.4.9 shorts gate, not a separate rule.
+    the §1.4.9 shorts gate, not a separate rule. ``source_domain_count`` is the §2.7 STORY-level
+    union (2026-08-05): distinct domains across all age-eligible clusters for the same
+    ``(symbol, event_type)``, gathered by the digest — not one cluster's own set.
     """
     allowed = tuple(guard_value(guard, "originating_event_types") or ())
     return {
@@ -941,6 +943,10 @@ class CatalystDigestJob:
       would be indistinguishable from a missing one (§2.7 fail-safe ladder needs that distinction).
     - The row's ``materiality`` is the WEIGHTED value (what the grade decision used); ``event_age_h``
       is informational, ``event_age_sessions`` is the eligibility clock.
+    - ``source_domain_count`` is the STORY-level union (2026-08-05): distinct domains across ALL
+      age-eligible clusters targeting the same ``(symbol, event_type)`` — cross-outlet paraphrase
+      never merges under the pinned §3.2.4 similarity, so cluster-level counting was structurally
+      unpassable. ``cluster_refs`` = best cluster first + every corroborating cluster id (§6.5).
     - ``expires_at`` is the first trading day the event EXCEEDS the age horizon (session age
       ``max_event_age_days + 1``) — i.e. the first digest day it no longer qualifies.
     """
@@ -1157,8 +1163,16 @@ class CatalystDigestJob:
                 results_days[r["symbol"]].add(r["event_date"])
 
         # Best cluster per symbol = highest WEIGHTED materiality; ties break on cluster_id (§9.1
-        # determinism: the same corpus must yield the same watchlist).
+        # determinism: the same corpus must yield the same watchlist). The same pass builds the
+        # STORY-level corroboration maps (§2.7 step 5(ii), 2026-08-05 owner-directed): cross-outlet
+        # paraphrase never merges under the pinned §3.2.4 similarity (measured: 0/1,400 live
+        # cross-feed pairs ≥ 0.75, best TRUE pair below a FALSE pair), so the min_source_domains
+        # count is the union of domains across ALL age-eligible clusters targeting the same
+        # (symbol, event_type) — an event_type disagreement between outlets loses the corroboration
+        # (fails to LESS activity, never false-corroboration).
         best: dict[str, tuple[NewsCluster, float, float, int]] = {}
+        story_domains: dict[tuple[str, str | None], set[str]] = defaultdict(set)
+        story_refs: dict[tuple[str, str | None], set[str]] = defaultdict(set)
         for c in clusters:
             age_sessions = self.event_age_sessions(c.first_seen, d)
             if age_sessions > max_days:
@@ -1166,6 +1180,8 @@ class CatalystDigestJob:
             w = fanout if c.scope in ("sector", "theme") else 1.0
             weighted_materiality = float(c.materiality) * w
             for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
+                story_domains[(symbol, c.event_type)].update(c.source_domains or [])
+                story_refs[(symbol, c.event_type)].add(c.cluster_id)
                 current = best.get(symbol)
                 if current is None or (-weighted_materiality, c.cluster_id) < (
                     -current[1], current[0].cluster_id
@@ -1184,11 +1200,14 @@ class CatalystDigestJob:
             if c.event_type in EARNINGS_EVENT_TYPES and t_day is not None:
                 history = await self._history(symbol, d)
                 reaction_agrees = _reaction_agrees(history, t_day, weighted_sentiment)
+            # §2.7 step 5(ii) story-level corroboration: the guard input is the (symbol, event_type)
+            # domain union, not this cluster's own set (which is single-outlet in the normal case).
+            corroboration = story_domains.get((symbol, c.event_type), set()) | set(c.source_domains or [])
             conditions = originating_conditions(
                 weighted_materiality=weighted_materiality,
                 weighted_sentiment=weighted_sentiment,
                 event_type=c.event_type,
-                source_domain_count=len(c.source_domains),
+                source_domain_count=len(corroboration),
                 novelty=c.novelty,
                 in_universe=symbol in universe,
                 flagged=symbol in flagged,
@@ -1221,9 +1240,12 @@ class CatalystDigestJob:
                 "grade": "originating" if originating else "context",
                 "direction": direction,
                 "event_type": c.event_type,
-                "cluster_refs": [c.cluster_id],
+                # Best cluster FIRST, then every corroborating cluster id (§6.5 audit trail).
+                "cluster_refs": [c.cluster_id] + sorted(
+                    story_refs.get((symbol, c.event_type), set()) - {c.cluster_id}
+                ),
                 "materiality": weighted_materiality,
-                "source_domain_count": len(c.source_domains),
+                "source_domain_count": len(corroboration),
                 "event_age_h": (ran_at - c.first_seen).total_seconds() / 3600.0,
                 "event_age_sessions": age_sessions,
                 "expires_at": self._expires_at(c.first_seen, max_days),

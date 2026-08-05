@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-05 (later, ~12:00) — story-level corroboration decided, built, deploy scheduled (owner-directed "research and decide")
+
+- **Research → decision: option A (digest-time story-level corroboration) over cross-outlet
+  cluster merging or re-anchored clustering.** Architecture: A is read-time-only, deterministic,
+  replayable, reversible, zero stored-cluster surgery, zero G1-golden disturbance, and
+  `originating_conditions` keeps its signature. Empirical (pre-remediation backup, 1,380 scored
+  clusters): the (symbol, event_type, day) domain-union reaches ≥2 domains for **5 real events —
+  ITC and MARUTI results (08-03, both in that day's watchlist failing source_domains) + BEL
+  (07-28) among them; 4 of 5 are pure union gains no merge threshold could find** (the true/false
+  pair inversion at 0.548/0.550 refuted threshold tuning outright). Known cost, measured: 2 of 6
+  cross-domain symbol-days had outlet event_type disagreement → corroboration lost → fails to
+  LESS activity. Merging (B) additionally requires re-scoring merged clusters and rewriting
+  headline links — all risk, no added recommendation quality.
+- **Implemented:** `_watchlist_rows` builds `(symbol, event_type) → domain-union / cluster-id`
+  maps in the existing candidacy pass (same `_symbol_targets` semantics, fan-out included;
+  below-inclusion-floor clusters still corroborate — a tiny follow-up mention is a corroborating
+  publication); `originating_conditions` receives the union count; rows store the union as
+  `source_domain_count` and `cluster_refs` = best cluster first + corroborators (§6.5 audit).
+  Plan §2.7 step 5(ii) + §3.2.4 + anti-manipulation paragraph amended with rationale + evidence.
+  4 new pinned tests (cross-cluster flip to originating, event_type-disagreement fail-safe,
+  below-floor corroborator, sector-fan-out corroborator); **1,180 unit tests green.**
+- **Deploy: one-shot Scheduled Task `mt-engine-deploy-restart-20260805` restarts the service at
+  15:35 IST** (post-close — the change only affects the pre-open digest, so a third mid-session
+  restart bought nothing today). Measurement point: tomorrow's 08:35 digest — expect
+  `source_domain_count ≥ 2` rows wherever ET and Livemint both carried a story, and the first
+  legitimate `n_originating > 0` day when one clears the other seven conditions. Task should be
+  deleted after firing (`schtasks /delete /tn mt-engine-deploy-restart-20260805 /f`).
+
 ## 2026-08-05 (~11:20) — status check: morning Kite-WS outage (self-healed); feeds FIXED but clusterer confirmed as the second zero-origination blocker
 
 - **Morning outage, network-shaped:** boot 07:59 clean (7-second transient clock_skew freeze —

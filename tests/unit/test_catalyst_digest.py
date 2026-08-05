@@ -288,6 +288,83 @@ async def test_single_source_cluster_can_never_originate(store, make_job, n_doma
     assert rows[0]["source_domain_count"] == n_domains
 
 
+async def test_story_level_union_corroborates_across_single_domain_clusters(store, make_job):
+    """§2.7 step 5(ii) 2026-08-05 amendment: cross-outlet paraphrase never merges under the pinned
+    §3.2.4 similarity (0/1,400 live pairs ≥ 0.75), so corroboration counts the domain UNION across
+    age-eligible clusters for the same (symbol, event_type). Two single-domain clusters, different
+    outlets ⇒ originating; the ITC/MARUTI/BEL results shape from the 2026-08-05 research."""
+    seed_qualifying(store, domains=("economictimes.indiatimes.com",))
+    seed_cluster(
+        store, "c-2", first_seen=at(TUE, 19, 0), symbols=("ACME",),
+        materiality=0.75, domains=("livemint.com",),
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["grade"] for r in rows] == ["originating"]
+    assert rows[0]["source_domain_count"] == 2
+    # §6.5 audit: best cluster (higher weighted materiality) FIRST, then the corroborator.
+    assert list(rows[0]["cluster_refs"]) == ["c-1", "c-2"]
+
+
+async def test_event_type_disagreement_loses_the_corroboration(store, make_job):
+    """The union is keyed on (symbol, event_type): outlets typing the story differently fail to
+    LESS activity — single-domain count, context grade, no corroborator in cluster_refs."""
+    seed_qualifying(store, domains=("economictimes.indiatimes.com",))
+    seed_cluster(
+        store, "c-2", first_seen=at(TUE, 19, 0), symbols=("ACME",),
+        materiality=0.75, event_type="earnings_result", domains=("livemint.com",),
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["grade"] for r in rows] == ["context"]          # source_domains blocks
+    assert rows[0]["source_domain_count"] == 1
+    assert list(rows[0]["cluster_refs"]) == ["c-1"]
+
+
+async def test_below_inclusion_floor_cluster_still_corroborates(store, make_job):
+    """A tiny follow-up mention (weighted materiality < the 0.2 inclusion floor) makes no row of
+    its own but IS a corroborating publication — its domain counts toward the story union."""
+    seed_qualifying(store, domains=("economictimes.indiatimes.com",))
+    seed_cluster(
+        store, "c-2", first_seen=at(TUE, 19, 0), symbols=("ACME",),
+        materiality=0.10, domains=("livemint.com",),
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["symbol"] for r in rows] == ["ACME"]            # one row: the floor still binds c-2
+    assert rows[0]["grade"] == "originating"
+    assert rows[0]["source_domain_count"] == 2
+    assert list(rows[0]["cluster_refs"]) == ["c-1", "c-2"]
+
+
+async def test_fanout_cluster_corroborates_constituent_story(store, make_job):
+    """A sector cluster from a second outlet corroborates a constituent's stock story of the same
+    event_type — `_symbol_targets` semantics, consistent with candidacy."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    store.upsert_sector_map(WED, [{"symbol": "ACME", "sector": "METALS"}])
+    seed_cluster(store, "c-1", first_seen=at(TUE, 18, 0), symbols=("ACME",),
+                 domains=("economictimes.indiatimes.com",))
+    seed_cluster(
+        store, "c-2", first_seen=at(TUE, 19, 0), scope="sector", sectors=("METALS",),
+        materiality=0.60, domains=("livemint.com",),
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["symbol"] for r in rows] == ["ACME"]
+    assert rows[0]["source_domain_count"] == 2
+    assert rows[0]["grade"] == "originating"
+    assert list(rows[0]["cluster_refs"]) == ["c-1", "c-2"]
+
+
 # --------------------------------------------------------------------------- fan-out weighting
 @pytest.mark.parametrize(
     ("scope", "materiality", "sentiment", "grade", "stored_materiality"),
