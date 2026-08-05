@@ -222,6 +222,11 @@ class NewsCfg(BaseModel):
         # CNBC-TV18's "11:11" branded multi-topic digest bridges unrelated companies per item.
         "stock market live",
         "11:11",
+        # HBL's "Q1 Results Highlights: ONGC, BSE, Bharti Airtel, ..." multi-company roundup —
+        # the G1 bridging shape, seen live 2026-08-05 before first ingest. Also drops
+        # single-company "<X> Results Highlights" liveblog wrappers; the plain result article
+        # on the same domain carries the event, so no catalyst signal is lost.
+        "results highlights",
     ])
     # RSS cadences are per-feed (``feeds.rss[name].poll_s``); only GDELT keeps a top-level knob.
     gdelt_poll_s: int = 3600              # GDELT DOC 2.0 poll cadence — 900→3600 (2026-08-04: 429s
