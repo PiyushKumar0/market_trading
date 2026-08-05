@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-05 (~11:20) — status check: morning Kite-WS outage (self-healed); feeds FIXED but clusterer confirmed as the second zero-origination blocker
+
+- **Morning outage, network-shaped:** boot 07:59 clean (7-second transient clock_skew freeze —
+  NTP unreachable — cleared by the disabled-skew re-check). 08:05–08:51 Telegram poll exceptions +
+  `instruments` job failure 08:17. 08:51:16 `ticker_heartbeat_silence` → respawn; the new child
+  stayed alive (heartbeats) but could not reach Kite upstream until ~11:02 → **no ticks 08:51–11:02
+  (through the 09:15 open)**. Recovery was by-design: reconnect at 11:02 → catch-up 11:06 ran
+  surveillance/universe/news-chain/digest/planner; tick backlog flushed (469/burst). A graceful
+  stop at 11:15:10 (watchdog-shaped, feed stale >2h) → clean restart 11:16:29, instruments
+  hydrated. RECOMMEND mode throughout, no positions — missed coverage, not risk.
+- **Acceptance check #1 (feeds): PASS.** Livemint contributing (boot backfill 55 inserts; ET 21
+  intraday; digest fresh at 11:06, age 0.12 h, 687 clusters, 49 context rows).
+- **Acceptance check #2 (multi-domain corroboration): FAIL — and root-caused same morning.**
+  /news/watchlist: all 49 rows still `source_domain_count: 1`. Discriminating experiment (live
+  ET+LM RSS heads, prod `clusterer_normalize`+`similarity`): **0 of 1,400 cross-feed pairs ≥ the
+  0.75 threshold**, and threshold tuning CANNOT fix it — the best TRUE same-story pair (BSE Q1 on
+  both outlets) scores 0.548 while a FALSE pair (different stories) scores 0.550. SequenceMatcher
+  over sorted-token strings separates near-duplicates/syndication, not cross-outlet paraphrase.
+  ⇒ `min_source_domains: 2` remains structurally unpassable; `n_originating` stays 0 until the
+  corroboration mechanism changes. OWNER DECISION needed (plan-pinned §3.2.4 algorithm + §2.7
+  anti-manipulation surface): recommended shape = keep clusters as-is, count corroboration
+  domains ACROSS same-(symbol, event_type, session) clusters at digest time — story-level
+  corroboration without loosening headline clustering. Alternatives: a second-stage cross-outlet
+  merge rule; or entity+event-anchored clustering. Threshold tuning alone is refuted.
+- brk20: 0 candidates today (0 published / 0 suppressed) — plausible-by-design (yesterday's 15
+  crossers now ride above the band; fresh-cross excludes them); no null-id regression observable
+  (nothing fired). Prescreen journal/hydration wiring ran clean at both boots (0/0 — no
+  publications yet today).
+
 ## 2026-08-04 (later #4, ~14:50) — prescreen day-state journal: dedupe/caps now survive restarts (owner-directed "Fix Point B")
 
 - **Confirmed mechanics before fixing:** all §3.2.5 day state (`_seen`/`_charged`/counters) was
