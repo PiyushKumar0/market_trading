@@ -863,6 +863,13 @@ async def run() -> int:
         if not kill.is_killed():
             await latch.set_cause(reason, RiskState.FROZEN, reason, Actor.RISK_GATE)
 
+    async def clear_entries_cause(reason: str) -> None:
+        # Mirror of freeze_entries (2026-08-06): a safety-critical job verified fresh clears its
+        # own latched data_freshness cause through the same ledger (clear_cause recomputes and is
+        # idempotent on inactive causes) — without this a pre-login catch-up failure held FROZEN
+        # for the whole session after the post-login re-run had already succeeded.
+        await latch.clear_cause(reason, Actor.RISK_GATE)
+
     # §2.6/R6 mid-day token-death circuit breaker: the KiteClient (built above with
     # on_token_rejected=session.on_token_rejected) fires this hook on the FIRST TokenException of a
     # burst (SessionManager.on_token_rejected is idempotent) so entries FREEZE and the owner is
@@ -891,7 +898,8 @@ async def run() -> int:
         symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL,
     )
     heartbeat = HeartbeatWriter(settings.sqlite_path(), clock, interval_s=settings.lifecycle.heartbeat_write_s)
-    catch_up = CatchUpRunner(conn, clock, calendar, registry, freeze=freeze_entries, notify=notify)
+    catch_up = CatchUpRunner(conn, clock, calendar, registry, freeze=freeze_entries, notify=notify,
+                             clear=clear_entries_cause)
 
     self_test = SelfTest(
         conn=conn, clock=clock, settings=settings, secrets=secrets,

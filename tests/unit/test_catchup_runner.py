@@ -43,8 +43,8 @@ def _spec_recorder(calls: list, job_id: str, job_class: JobClass, at: time, *, o
     return JobSpec(job_id=job_id, job_class=job_class, at=at, run=run, order=order, fire_day=fire_day)
 
 
-def _build_runner(conn, clock, calendar, registry, *, freeze=None, notify=None):
-    return CatchUpRunner(conn, clock, calendar, registry, freeze=freeze, notify=notify)
+def _build_runner(conn, clock, calendar, registry, *, freeze=None, notify=None, clear=None):
+    return CatchUpRunner(conn, clock, calendar, registry, freeze=freeze, notify=notify, clear=clear)
 
 
 @pytest.mark.asyncio
@@ -116,6 +116,55 @@ async def test_safety_critical_failure_freezes_and_alerts(conn, clock, calendar)
     # The failed attempt is recorded (status != success) so the self-test still sees it stale.
     assert runner.was_run("instruments", WED) is False
     assert runner.stale_safety_jobs() == ["instruments"]
+
+
+@pytest.mark.asyncio
+async def test_safety_critical_success_clears_the_latched_freshness_cause(conn, clock, calendar):
+    """2026-08-06 live bug: a pre-login catch-up failure latched ``data_freshness:instruments``;
+    the post-login catch-up re-ran instruments SUCCESSFULLY but nothing cleared the cause — the
+    platform stayed FROZEN all day on stale evidence. A success — or an already-verified-fresh
+    watermark on the next boot — must clear the job's own cause (idempotent; a latch clear on an
+    inactive cause is a no-op recompute)."""
+    calls: list = []
+    frozen: list[str] = []
+    cleared: list[str] = []
+
+    async def freeze(reason: str) -> None:
+        frozen.append(reason)
+
+    async def clear(reason: str) -> None:
+        cleared.append(reason)
+
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "instruments", JobClass.SAFETY_CRITICAL, time(8, 15)))
+    runner = _build_runner(conn, clock, calendar, reg, freeze=freeze, clear=clear)
+
+    # Catch-up runs the job successfully ⇒ its (possibly latched) cause clears.
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert cleared == ["data_freshness:instruments"]
+    assert frozen == []
+
+    # Restart shape: watermarked fresh today ⇒ cleared again — the boot self-heals a stale latch.
+    cleared.clear()
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert cleared == ["data_freshness:instruments"]
+    assert frozen == []
+
+
+@pytest.mark.asyncio
+async def test_safety_critical_failure_never_clears(conn, clock, calendar):
+    """The clear fires ONLY on verified freshness — a failing job keeps its cause latched."""
+    cleared: list[str] = []
+
+    async def clear(reason: str) -> None:
+        cleared.append(reason)
+
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15), fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg, clear=clear)
+
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert cleared == []
 
 
 @pytest.mark.asyncio

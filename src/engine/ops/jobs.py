@@ -160,6 +160,7 @@ class CatchUpRunner:
         *,
         freeze: FreezeFn | None = None,
         notify: NotifyFn | None = None,
+        clear: FreezeFn | None = None,
         max_lookback_days: int = 30,
     ) -> None:
         self._conn = conn
@@ -168,6 +169,10 @@ class CatchUpRunner:
         self._registry = registry
         self._freeze = freeze
         self._notify = notify
+        #: Mirror of ``freeze`` (2026-08-06): clears a job's ``data_freshness:<job>`` cause once the
+        #: job is verified fresh — without it a pre-login failure latched FROZEN for the whole day
+        #: even after the post-login catch-up succeeded (observed live: instruments, 2026-08-06).
+        self._clear = clear
         self._max_lookback_days = int(max_lookback_days)
 
     # ------------------------------------------------------------------ watermarks (§4.2 job_runs)
@@ -264,6 +269,17 @@ class CatchUpRunner:
                 _log.exception("catchup_report_notify_failed")
         return result
 
+    async def _clear_freshness(self, job_id: str) -> None:
+        """Clear ``data_freshness:<job_id>`` after the job is verified fresh (success or a today's
+        success watermark). Idempotent — the latch's clear_cause is a no-op recompute on an inactive
+        cause. A clear failure degrades to the old always-latched behavior, never fails the pass."""
+        if self._clear is None:
+            return
+        try:
+            await self._clear(f"data_freshness:{job_id}")
+        except Exception:  # noqa: BLE001 - healing is best-effort; the freeze side must stay intact
+            _log.exception("data_freshness_clear_failed", job_id=job_id)
+
     # ------------------------------------------------------------------ per-class executors
     async def _run_safety_critical(self, spec: JobSpec, now: datetime, result: CatchUpResult) -> None:
         """Deadline job: only TODAY's freshness matters (§2.6 — 'run or verify before entries open').
@@ -273,11 +289,16 @@ class CatchUpRunner:
         if not self._fires_on(spec, today) or self._clock.combine(today, spec.at) > now:
             return
         if self.was_run(spec.job_id, today):
+            # Verified fresh — a PRIOR failure's latched cause is stale evidence; clear it so a
+            # restart self-heals (2026-08-06: instruments failed pre-login, succeeded post-login,
+            # and the latch held FROZEN all day because no path cleared on later success).
+            await self._clear_freshness(spec.job_id)
             return
         try:
             await spec.run()  # type: ignore[call-arg]
             self.record_run(spec.job_id, today)
             result.jobs_caught_up.append(f"{spec.job_id}:{today.isoformat()}")
+            await self._clear_freshness(spec.job_id)
         except Exception:  # noqa: BLE001 - a safety-critical failure freezes entries, never crashes boot
             _log.exception("safety_critical_catchup_failed", job_id=spec.job_id)
             self.record_run(spec.job_id, today, status="failed")

@@ -1,5 +1,29 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-06 (~12:10) — owner-reported all-day FROZEN → two defects found+fixed; first live multi-domain corroboration
+
+- **Defect 1 — warm-up seam hole (operational, healed by restart):** late start (11:21, login
+  ~3 min) ⇒ the boot gap-backfill covered 09:15→11:24:23 while live ticks began 11:25:03 — the
+  11:24 bar missing in ALL 100 symbols ⇒ `orb bars 146/147` with gaps=1 forever ⇒ warm-up could
+  never lift. Restart at 11:45 re-ran the full-window backfill (frm 09:15) — warm-up cleared.
+  Durable-fix candidate (not built): warmup_refresh re-triggers the gap backfill on persistent
+  gaps (cooldown-bounded). Seam risk is login-lag-shaped; with a valid token the window is tight.
+- **Defect 2 — `data_freshness:*` one-way latch (code, fixed):** jobs.py froze on safety-critical
+  catch-up FAILURE but NO path cleared the cause on later success — the 11:21 pre-login
+  instruments failure latched FROZEN even after instruments succeeded 11:24 (post-login) and
+  11:30 (catch-up). Fix: `CatchUpRunner(clear=...)` mirror of `freeze` — clears
+  `data_freshness:<job>` on success AND on the already-verified-fresh watermark branch (restart
+  self-heal); failure never clears; clear failure degrades to the old latched behavior. Wired via
+  the same cause ledger (`latch.clear_cause`, Actor.RISK_GATE). Failing tests first; 1,182 green.
+  **Live: FROZEN→NORMAL at 12:05:47, cause cleared with `was_active: true`, remaining=[].**
+- **Milestone: first live multi-domain watchlist row.** Today's 11:27 digest (5-domain corpus ×
+  story-level union): BHARTIARTL earnings_result `source_domain_count=2` — grade context solely on
+  materiality 0.65 < 0.70. The corroboration stack works end-to-end; the materiality floor is now
+  the visible binding constraint (owner decision standing). Context rows 30 (roundup drop patterns
+  trimming noise vs yesterday's 49). n_originating=0 legitimate today.
+- Prescreen journal rehydrated `charged=20 seen=0` at the 11:45 boot — restart-proof caps working
+  live with real data.
+
 ## 2026-08-05 (later #2, ~12:30) — corroboration pool widened 2→5 domains (owner observation)
 
 - **Owner's point, confirmed:** both Livemint feeds resolve to ONE registrable domain, so the
