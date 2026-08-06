@@ -1,5 +1,35 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-06 (EOD, ~19:00) — warm-up gap self-repair: built, twice-reviewed, deployed
+
+- **The durable fix for the morning's seam-hole class** (owner: "apply the fix as required with
+  proper checks and review"): `maybe_repair_warmup_gaps` — the 60 s warmup refresh re-triggers the
+  §2.6 gap backfill itself when blockers show the intraday-gap shape. No manual restart needed on
+  the next login-lagged morning.
+- **Two adversarial review rounds (Opus), both material.** Round 1 killed my v1 outright: the
+  repair budget would have burned PRE-LOGIN on a dead token — the original incident would NOT have
+  been fixed. Applied: token-validity gate (uncharged skip, one-shot log/day); repair window
+  trimmed to now−2 min (never touches builder-owned minutes — the 2026-07-23 provenance-clobber
+  class — and makes transient just-closed-minute deficits scan-only); budget charged on activity.
+  Round 2 caught the v2 predicate mis-scoring the UNFILLABLE hole (fetch completes, zero bars
+  land) as free ⇒ uncapped broker resweeps all session. Final predicate: charge on BROKER SPEND —
+  `report.fetched` or real failure spans; `unknown_instrument_token` spans excluded (pre-network;
+  the instruments map is post-login's repair) — one step stronger than the reviewer's one-liner,
+  closing their LOW finding properly. Reviewer confirmed rounds' findings closed against code.
+- **Bonus property (reviewer-verified):** the trim makes it STRUCTURALLY impossible for the repair
+  alone to lift the freeze — the gate needs the last minute, which only the LIVE builder supplies.
+  A dead feed can never be papered over with official candles.
+- Bounds: in-session only, ≥300 s cooldown, ≤3 broker-touching attempts/session-day, repair never
+  lifts anything itself (next refresh tick lifts through the normal path). 3 pinned tests
+  (trimmed window, spend-only budgeting incl. unfillable/unknown-token/error paths, all guards
+  leave the budget untouched); **1,185 unit tests green.**
+- **Deployed 18:58 post-close:** clean boot, `prescreen_hydrated charged=20 seen=15` (the day's
+  full evaluation state restart-proof). The repair path first exercises live on the next gappy
+  morning; tests carry the proof until then.
+- EOD status for the record: risk NORMAL 12:05→close; 6 no_actions, 0 recommendations (thin
+  unfrozen window today); Telegram flakiness all afternoon (26 poll exceptions, 11 send failures —
+  owner may have missed notifications; box-level network suspected, second day running).
+
 ## 2026-08-06 (~12:10) — owner-reported all-day FROZEN → two defects found+fixed; first live multi-domain corroboration
 
 - **Defect 1 — warm-up seam hole (operational, healed by restart):** late start (11:21, login
