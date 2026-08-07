@@ -680,6 +680,104 @@ async def test_attach_bus_without_a_bus_is_a_noop(bot):
 
 
 @pytest.mark.asyncio
+async def test_a_hanging_send_is_bounded_and_dropped(clock, monkeypatch):
+    """2026-08-07 boot wedge: a send that neither returns nor raises held the whole boot between
+    catch_up_complete and scheduler start. The send seam is now hard-bounded — a hang costs the
+    caller at most the timeout, logged as telegram_send_timeout, never an unbounded wait."""
+    import asyncio
+
+    from engine.notify import telegram as tg_mod
+
+    class _HangingBot:
+        async def send_message(self, chat_id, text):
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr(tg_mod, "_SEND_TIMEOUT_S", 0.05)
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)
+    bot._app = _SendApp(_HangingBot())
+
+    await asyncio.wait_for(bot.send("hello"), timeout=5)       # returns promptly; no exception
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_start_degrades_to_disabled_bot(clock, monkeypatch):
+    """2026-08-07: `start()` has four network awaits and used to run UNGUARDED in the boot path —
+    a hang or error now degrades to a DISABLED bot (sends drop 'not_started') instead of holding
+    or crashing the boot."""
+    import asyncio
+
+    from engine.notify import telegram as tg_mod
+
+    async def _hang(self, app):
+        await asyncio.sleep(3600)
+
+    async def _no_teardown(app):
+        return None
+
+    monkeypatch.setattr(tg_mod, "_START_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(TelegramBot, "_start_network", _hang)
+    monkeypatch.setattr(TelegramBot, "_teardown_app", staticmethod(_no_teardown))
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)
+
+    await asyncio.wait_for(bot.start(), timeout=5)             # returns; never raises
+    assert bot._app is None                                    # disabled, half-started app not kept
+    assert bot._failed_app is not None                         # ...but RETAINED for teardown (a live
+    await bot.send("dropped")                                  # poller may have survived the timeout)
+
+
+@pytest.mark.asyncio
+async def test_a_partially_started_poller_is_torn_down_by_stop(clock, monkeypatch):
+    """Review round: a start() timeout can land AFTER start_polling succeeded — the orphaned live
+    poller must remain reachable, and stop() must tear it down (owner commands must not keep
+    executing on a bot the engine reports as disabled)."""
+    import asyncio
+
+    from engine.notify import telegram as tg_mod
+
+    torn_down: list = []
+
+    async def _partial_start(self, app):
+        await asyncio.sleep(3600)                              # timeout lands mid-sequence
+
+    async def _record_teardown(app):
+        torn_down.append(app)
+
+    monkeypatch.setattr(tg_mod, "_START_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(TelegramBot, "_start_network", _partial_start)
+    monkeypatch.setattr(TelegramBot, "_teardown_app", staticmethod(_record_teardown))
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)
+
+    await asyncio.wait_for(bot.start(), timeout=5)
+    assert len(torn_down) == 1                                 # best-effort teardown at degrade time
+    assert bot._failed_app is torn_down[0]                     # retained regardless
+
+    await bot.stop()                                           # stop() reaches the orphan again
+    assert len(torn_down) == 2 and torn_down[1] is torn_down[0]
+    assert bot._failed_app is None
+
+
+@pytest.mark.asyncio
+async def test_teardown_app_runs_every_step_despite_failures():
+    """Review round: the teardown loop must attempt shutdown even when stop() raises — each step is
+    individually guarded, so a broken step never strands the later ones."""
+    class _App:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.updater = None
+
+        async def stop(self):
+            self.calls.append("stop")
+            raise RuntimeError("stop broke")
+
+        async def shutdown(self):
+            self.calls.append("shutdown")
+
+    app = _App()
+    await TelegramBot._teardown_app(app)
+    assert app.calls == ["stop", "shutdown"]                   # shutdown ran despite stop raising
+
+
+@pytest.mark.asyncio
 async def test_a_send_failure_never_breaks_the_publisher(clock, bus):
     """R8: alerting must never take down the risk publisher that raised the event."""
 

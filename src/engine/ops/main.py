@@ -1232,8 +1232,25 @@ async def run() -> int:
         _log.exception("instruments_hydrate_failed")
         instruments_source = "failed"
 
-    # --- every-startup recovery (§2.6). check_skew honours NTP; degrades to FROZEN if unreachable (R6). ---
-    report = await lifecycle.startup(check_skew=True)
+    # --- every-startup recovery (§2.6). check_skew honours NTP; degrades to FROZEN if unreachable (R6).
+    #     Boot-phase safety ticks run alongside it (2026-08-07): OBSERVATION-ONLY — the warm-up
+    #     SNAPSHOT (never the lift/repair; see boot_phase_ticks) + the health/keep-awake pulse must
+    #     not wait out a news-backlog-sized catch-up; cancelled AND awaited before startup handling
+    #     continues, so no tick body overlaps the post-boot warmup_refresh. ---
+    _boot_ticks = asyncio.create_task(
+        boot_phase_ticks(
+            lambda: refresh_warmup_snapshot(warmup_gate, warmup_holder),
+            lambda: health.check(check_skew=False),
+        )
+    )
+    try:
+        report = await lifecycle.startup(check_skew=True)
+    finally:
+        _boot_ticks.cancel()
+        try:
+            await _boot_ticks
+        except asyncio.CancelledError:
+            pass
     _log.info("startup_complete", mode=report.sticky_mode, killed=report.killed,
               needs_login=report.needs_login, integrity_ok=report.integrity_ok,
               jobs_caught_up=len(report.jobs_caught_up), frozen=report.frozen_reasons,
@@ -1395,6 +1412,24 @@ def _arm_live_jobs(
 
 
 # --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)
+async def refresh_warmup_snapshot(warmup_gate, warmup_holder: dict):
+    """Refresh the gate's warm-up snapshot ONLY — no latch mutation, no lift, no repair.
+
+    This is the piece safe to run at ANY time, including mid-``lifecycle.startup()`` (the boot
+    ticks, 2026-08-07 review round: a mid-boot LIFT races the catch-up's safety-critical freeze —
+    ``_maybe_lift_warmup_freeze`` clears causes the still-running recovery believes are set — and
+    a mid-boot REPAIR chases a tail hole the not-yet-started ticker regrows forever, burning the
+    day's budget; both belong on the post-boot scheduler cadence). A refresh failure keeps the
+    PREVIOUS snapshot (holder untouched ⇒ stays fail-closed). Returns the status, or None."""
+    try:
+        status = await warmup_gate.status()
+        warmup_holder["status"] = status
+        return status
+    except Exception:  # noqa: BLE001 - an unevaluable warm-up stays NOT-READY (fail closed)
+        _log.exception("warmup_status_refresh_failed")
+        return None
+
+
 async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecycle) -> None:
     """Refresh the gate's warm-up snapshot AND lift a standing warm-up freeze once coverage completes.
 
@@ -1403,19 +1438,41 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
     lifted them, because no login event fires on such a boot. Runs on the 60 s
     ``warmup_status_refresh`` cadence; ``reapply_warmup_gate`` resolves through the cause latch
     (never a blanket NORMAL write) and is a no-op unless the state is FROZEN with coverage ready.
-    A refresh failure keeps the PREVIOUS snapshot semantics (holder untouched ⇒ stays fail-closed).
     """
-    try:
-        status = await warmup_gate.status()
-        warmup_holder["status"] = status
-    except Exception:  # noqa: BLE001 - an unevaluable warm-up stays NOT-READY (fail closed)
-        _log.exception("warmup_status_refresh_failed")
+    status = await refresh_warmup_snapshot(warmup_gate, warmup_holder)
+    if status is None:
         return
     if status.ready and mode.risk_state() == RiskState.FROZEN:
         try:
             await lifecycle.reapply_warmup_gate()
         except Exception:  # noqa: BLE001 - a failed lift retries on the next 60s tick
             _log.exception("warmup_freeze_lift_failed")
+
+
+# --------------------------------------------------------------------------- boot-phase safety ticks
+async def boot_phase_ticks(refresh, health_check, *, interval_s: float = 60.0) -> None:
+    """Run the two OBSERVATION-ONLY refreshes on a cadence DURING boot recovery (2026-08-07).
+
+    The scheduler — owner of ``warmup_status_refresh`` and ``health_check`` — starts only after
+    ``lifecycle.startup()`` returns, and the catch-up inside it scales with the news backlog (a
+    122-cluster scoring batch held the 10:52 boot ~17 min): until this existed the box had no
+    health/keep-awake pulse and a stale warm-up snapshot for that whole window. DELIBERATELY
+    observation-only (2026-08-07 review round): the callables must be :func:`refresh_warmup_snapshot`
+    (never the lifting/repairing ``warmup_refresh`` — a mid-boot lift races the still-running
+    recovery's cause state, and a mid-boot repair chases the tail hole the not-yet-started ticker
+    regrows, burning the day's repair budget) and the health check (whose ``keep_awake.update()``
+    is the real prize on a sleep-prone box). The lift itself costs nothing by waiting: the
+    composition root calls the full ``warmup_refresh()`` immediately after startup returns. The
+    task is spawned right before recovery and cancelled (and awaited) when the scheduler takes
+    over. Sleep-first: a normal boot finishes in well under a tick and never fires. One tick's
+    failure never ends the loop (fail-open on observation, fail-closed on state)."""
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await refresh()
+            await health_check()
+        except Exception:  # noqa: BLE001 - observation must keep ticking; CancelledError still propagates
+            _log.exception("boot_tick_failed")
 
 
 # --------------------------------------------------------------------------- warm-up gap self-repair

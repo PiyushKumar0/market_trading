@@ -1,5 +1,32 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-07 (later, ~12:15) — boot-liveness hardening: bounded Telegram seam + observation-only boot ticks (owner-directed, three review rounds)
+
+- **The two suggested changes, applied with review and validation.** (i) Telegram hard bounds:
+  `send()` capped 15 s (drop + `telegram_send_timeout`); the four-network-await `start()` leg
+  bounded 45 s as one unit, degrading on timeout/ERROR to a DISABLED bot (was UNGUARDED in the
+  boot path — could crash boot outright); a start-timeout that lands after start_polling retains
+  the partial app (`_failed_app`) so `stop()` can always kill the orphaned poller. (ii) Boot-phase
+  ticks during `lifecycle.startup()`: warm-up SNAPSHOT + health/keep-awake pulse every 60 s,
+  cancelled-and-awaited at scheduler takeover.
+- **The review earned it again (rounds 4–5 on this codebase, both material).** Round 1 on this
+  diff: my boot ticks passed the full lifting/repairing `warmup_refresh` — during boot the ticker
+  isn't running, the tail hole GROWS, the repair would have burned the 3/day budget chasing it and
+  the residual hole would have frozen the session: the machinery would have recreated the
+  2026-08-06 wedge. Also proved the mid-boot lift races `_maybe_lift_warmup_freeze`'s clearing of
+  `startup_selftest` mid-recovery AND buys nothing (entries gate-blocked on boot-scoped
+  `clock_skew`; the post-startup `warmup_refresh()` lifts within ~0 s anyway). Fix: ticks are
+  OBSERVATION-ONLY via new `refresh_warmup_snapshot` (no latch/lift/repair handle — structural,
+  not tested-in). Round 2 verdict: "sound — ship it"; the clock_skew interlock is now documented
+  in the §2.6 addendum rather than incidental.
+- 5 new tests (bounded hang, degraded start, orphan teardown via stop(), teardown-step isolation,
+  sleep-first zero-fire); **1,190 green.** Plan §2.6 boot-liveness addendum (written, then
+  NARROWED to match the reviewed design). Deployed 12:08; boot ~90 s, telegram_started,
+  engine_ready 12:09:31, feed HEALTHY, risk NORMAL (12:05 lift stands).
+- Filed, not fixed: the finally-cancellation trap on `await _boot_ticks` (unreachable while run()
+  is signal-driven); per-send bound is per-call (~10 boot sends on a dead network ≈ 150 s total,
+  acceptable); boot-window entry safety interlock = boot-scoped `clock_skew` context (documented).
+
 ## 2026-08-07 (~11:25) — FIRST ORIGINATING CATALYST (HAL); slow-boot freeze diagnosed; one boot wedge cleared by restart
 
 - **Milestone: the news layer's first live origination.** 11:07:37 digest (1,555 clusters, 122

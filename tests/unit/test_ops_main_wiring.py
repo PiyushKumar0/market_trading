@@ -401,6 +401,55 @@ def test_attach_feature_snapshots_degrades_to_none_never_raises() -> None:
     assert [c.features_snapshot_id for c in out] == [None, "snap-COALINDIA"]
 
 
+# --------------------------------------------------------------------------- boot-phase safety ticks
+@pytest.mark.asyncio
+async def test_boot_phase_ticks_run_survive_errors_and_cancel_cleanly() -> None:
+    """2026-08-07: warm-up lift + health visibility must not wait out a news-backlog catch-up. The
+    boot tick loop fires both callables each interval, survives a raising tick (fail-open on
+    observation), and dies instantly on cancel (the scheduler taking over)."""
+    import asyncio
+
+    from engine.ops.main import boot_phase_ticks
+
+    refreshes: list[int] = []
+    healths: list[int] = []
+
+    async def refresh():
+        refreshes.append(1)
+        if len(refreshes) == 2:
+            raise RuntimeError("one bad tick")
+
+    async def health_check():
+        healths.append(1)
+
+    task = asyncio.create_task(boot_phase_ticks(refresh, health_check, interval_s=0.01))
+    while len(refreshes) < 4:                                   # the raising tick #2 didn't end the loop
+        await asyncio.sleep(0.005)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert len(refreshes) >= 4
+    assert len(healths) >= 3                                    # tick #2's health skipped by the raise
+    assert len(healths) < len(refreshes)                        # the raise short-circuited that tick only
+
+    # Sleep-first pin: a fast boot cancels before the first interval elapses ⇒ ZERO fires.
+    fast_refreshes: list[int] = []
+
+    async def fast_refresh():
+        fast_refreshes.append(1)
+
+    fast = asyncio.create_task(boot_phase_ticks(fast_refresh, health_check, interval_s=60.0))
+    await asyncio.sleep(0.01)
+    fast.cancel()
+    try:
+        await fast
+    except asyncio.CancelledError:
+        pass
+    assert fast_refreshes == []                                 # a normal boot never sees a tick
+
+
 # --------------------------------------------------------------------------- warm-up gap self-repair
 def _repair_setup(now, *, fetched=1, bars_written=120, failed=()):
     """Stub clock (mutable now), the REAL calendar, a not-ready orb-gap status, and a recorder

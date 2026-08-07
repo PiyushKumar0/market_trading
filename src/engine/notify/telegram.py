@@ -37,6 +37,7 @@ challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()`
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets as _secrets
 import sqlite3
@@ -80,6 +81,16 @@ if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
     from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.notify.telegram")
+
+#: Hard bounds on Telegram network awaits (2026-08-07): the library's own retry/connect behavior is
+#: not trusted to terminate under the LAN box's flaky network — a hanging send after
+#: ``catch_up_complete`` held the whole boot (no scheduler, no warm-up lift) until a manual restart,
+#: the second such wedge in three days. A send is best-effort (R8): late delivery is worthless,
+#: so a bounded drop is strictly better than an unbounded wait. Start gets a longer budget (four
+#: network round-trips) and degrades to a DISABLED bot — the engine must boot without Telegram
+#: rather than never.
+_SEND_TIMEOUT_S = 15.0
+_START_TIMEOUT_S = 45.0
 
 # How long a pending two-step challenge stays valid before it must be re-issued (R10). A short TTL
 # keeps a stale confirm phrase from authorising a destructive action long after the owner asked.
@@ -266,6 +277,10 @@ class TelegramBot:
         #: async (trigger) -> owner-facing sweep verdict text (§3.2.5 sweep addendum, 2026-07-29).
         self._scan_sweep_fn = scan_sweep_fn
         self._app: Application | None = None
+        #: A start() that timed out AFTER start_polling succeeded leaves a LIVE poller behind
+        #: (2026-08-07 review round): retained here so stop() can always reach it for teardown —
+        #: otherwise owner commands keep executing on a bot the engine reports as disabled.
+        self._failed_app: Application | None = None
         self._bus_attached = False
         # At most one challenge is pending at a time — a new destructive command supersedes the old.
         self._pending: _PendingChallenge | None = None
@@ -291,16 +306,53 @@ class TelegramBot:
             return
         app = ApplicationBuilder().token(self._token).build()
         self._register_handlers(app)
+        # BOUNDED start (2026-08-07): the four network awaits below must never hold the boot —
+        # timeout or error degrades to a DISABLED bot (sends drop "not_started"; the owner still
+        # has the dashboard) instead of an engine that never reaches the scheduler. ``self._app``
+        # is assigned only on SUCCESS so a half-started app can never serve sends.
+        try:
+            await asyncio.wait_for(self._start_network(app), timeout=_START_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 - a broken Telegram must never hold or crash the boot (R8)
+            _log.exception("telegram_start_failed_disabled", timeout_s=_START_TIMEOUT_S)
+            # The timeout may have landed AFTER start_polling succeeded — a live poller would then
+            # keep dispatching owner commands on a "disabled" bot. Retain the app so stop() can
+            # always reach it, and best-effort tear it down now.
+            self._failed_app = app
+            await self._teardown_app(app)
+            return
         self._app = app
+        _log.info("telegram_started", owner_chat_id=self._owner_chat_id)
+
+    async def _start_network(self, app: Application) -> None:
+        """The network leg of :meth:`start`, isolated so the caller can bound it as one unit."""
         await app.initialize()
         await app.start()
         if app.updater is not None:
             await app.updater.start_polling(drop_pending_updates=True)
         await self._publish_command_menu(app)
-        _log.info("telegram_started", owner_chat_id=self._owner_chat_id)
+
+    @staticmethod
+    async def _teardown_app(app: Application) -> None:
+        """Best-effort teardown of a partially-started application; every step individually guarded
+        (a timeout may have cancelled the start mid-initialize — any step may legitimately fail)."""
+        for step in ("updater", "stop", "shutdown"):
+            try:
+                if step == "updater":
+                    if app.updater is not None:
+                        await asyncio.wait_for(app.updater.stop(), timeout=5)
+                elif step == "stop":
+                    await asyncio.wait_for(app.stop(), timeout=5)
+                else:
+                    await asyncio.wait_for(app.shutdown(), timeout=5)
+            except Exception:  # noqa: BLE001 - teardown of a broken app is best-effort by definition
+                pass
 
     async def stop(self) -> None:
-        """Stop polling and shut the application down cleanly."""
+        """Stop polling and shut the application down cleanly — including a partially-started app
+        left behind by a degraded start() (its poller may still be live; 2026-08-07)."""
+        failed, self._failed_app = self._failed_app, None
+        if failed is not None:
+            await self._teardown_app(failed)
         app = self._app
         if app is None:
             return
@@ -344,7 +396,14 @@ class TelegramBot:
             return
         text = self._render(msg)
         try:
-            await app.bot.send_message(chat_id=self._owner_chat_id, text=text)
+            # BOUNDED (2026-08-07): a hanging send wedged the boot between catch_up_complete and
+            # scheduler start. Alerts are best-effort — a bounded drop beats an unbounded wait.
+            await asyncio.wait_for(
+                app.bot.send_message(chat_id=self._owner_chat_id, text=text),
+                timeout=_SEND_TIMEOUT_S,
+            )
+        except TimeoutError:
+            _log.error("telegram_send_timeout", timeout_s=_SEND_TIMEOUT_S)
         except Exception:  # noqa: BLE001 - alerting must never crash the caller (R8)
             _log.exception("telegram_send_failed")
 
