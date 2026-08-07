@@ -1,5 +1,30 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-07 (~11:25) — FIRST ORIGINATING CATALYST (HAL); slow-boot freeze diagnosed; one boot wedge cleared by restart
+
+- **Milestone: the news layer's first live origination.** 11:07:37 digest (1,555 clusters, 122
+  scored in the boot batch): **HAL — rating_change, 2 domains, weighted materiality 0.75, long,
+  both corroborating cluster ids in `cluster_refs`** — every §2.7 condition passed legitimately.
+  Corroboration is now COMMON: 8 of 29 rows multi-domain (SWIGGY earnings_guidance at FIVE
+  domains, POWERGRID 3) vs one row yesterday, zero before the 08-04/08-05 remediations. Planner
+  picked 7 focus items. (`cat` still originates to watchlist/features only — Phase-3 scanner +
+  §8.6 gate unbuilt/ungated; today starts the §6.4 shadow-evidence clock with real originations.)
+- **Owner-reported FROZEN #1 (10:52→11:09): not a defect.** The ~10:50 restart's catch-up had to
+  score a 122-cluster overnight backlog (7-feed corpus; clustering alone ~6 min) and the scheduler
+  — which owns the warm-up lift — starts only after catch-up. Wednesday's fixes visibly worked:
+  data_freshness cleared via the verified-fresh path; blockers were just the 3 new watchlist
+  joiners (gap-filled at 10:52:15). Structural observation for a future §2.6 decision: the boot
+  serializes the LLM scoring batch BEFORE scheduler start, so the frozen window scales with the
+  news backlog.
+- **FROZEN #2 (11:09→11:17): a real wedge.** After `catch_up_complete` 11:09:23 the boot hung in
+  the final startup steps — last event a `telegram_send_failed` at 11:09:28; ticks/API/bar-path
+  all alive, scheduler never started, no startup_report. Suspect: an unbounded/hanging Telegram
+  send inside the startup notify path (send failures ×3 days running; box-level network). Cleared
+  by restart 11:17 — watermarked catch-up made it a 2-minute boot: **NORMAL 11:19:20,
+  engine_ready 11:19:21**, inside the owner's 11:15–15:30 window. FOLLOW-UP (not built): timeout-
+  harden the startup notify path so Telegram can never hold the boot hostage; second sighting
+  confirms the diagnosis.
+
 ## 2026-08-06 (EOD, ~19:00) — warm-up gap self-repair: built, twice-reviewed, deployed
 
 - **The durable fix for the morning's seam-hole class** (owner: "apply the fix as required with
