@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-10 (EOD, ~21:15) — the boot wedge has a THIRD face: catch-up clusterer on weekend backlog; day recovered post-close
+
+- **Today's 12:35 boot never completed** — wedged at 12:38 INSIDE catch-up, between the news
+  backfill (weekend backlog inserted) and `news_clustered` (which never came): 8+ hours. The
+  Friday Telegram bounds were sound but this wedge is a different member of the class — an
+  UNBOUNDED, UNOBSERVABLE catch-up step; leading hypothesis the O(n²) clusterer over a 7-feed
+  weekend corpus (CPU evidence inconclusive from the service shell; no exception anywhere;
+  loop alive throughout).
+- **The wedge was INVISIBLE by our own recent design:** boot-phase ticks kept health logging,
+  the bus-driven bar path traded normally (35 candidates, 14 analyst calls), risk showed NORMAL
+  (Wednesday's freshness clears fired during catch-up) — while no scheduler, no news polls, NO
+  DIGEST for 2026-08-10 at all, no 18:00 EOD jobs, and every possible entry silently gate-blocked
+  on the boot-scoped `clock_skew` context (the documented interlock working — but burning analyst
+  calls on structurally unactionable evaluations all afternoon). ZERO recommendations today =
+  mostly this, not market quiet.
+- **Recovery (post-close restart ~21:03): completed in 5 min by construction** — the backlog
+  headlines were already inserted, so the re-run's backfill returned ~nothing, the chain
+  completed, and catch-up ran ALL 14 missed daily/EOD jobs (reconcile 16,002 bars compared with
+  offline-span drift flags — expected; bhavcopy 2,428; daily_bars; features; filings ×4; deals;
+  earnings; corp_actions; reco_expire; nightly_review; backup). engine_ready 21:08:14; overnight
+  state correct (warmup_ready frozen post-close). ACCEPTED COST: the 12:38 weekend batch remains
+  unclustered/unscored — orphaned headlines, absent from tomorrow's digest corpus (E5).
+- **FILED, needs owner go (the real fix for the class):** bounded + observable catch-up steps —
+  per-step progress/deadline logging, a step budget that degrades the never-load-bearing news
+  chain to skip+alert instead of wedging the boot, and a chunked/offloaded clusterer whose cost
+  now scales with 7-feed × weekend volume. Also worth deciding: an unclustered-headline sweep so
+  an abandoned batch is retried instead of orphaned. Evidence trail this entry + engine.log
+  2026-08-10 12:35–21:03.
+
 ## 2026-08-07 (later, ~12:15) — boot-liveness hardening: bounded Telegram seam + observation-only boot ticks (owner-directed, three review rounds)
 
 - **The two suggested changes, applied with review and validation.** (i) Telegram hard bounds:
