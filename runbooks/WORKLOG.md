@@ -1,5 +1,36 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-10 (late, ~22:15) — news-chain wedge class FIXED (researched, measured, reviewed, deployed)
+
+- **Research/validation first (owner-directed):** benchmarked the real clusterer on backup data —
+  429 headlines × 1,500 window clusters = **90.6 s**, matching the observed 12:38:06→12:39:16
+  tick-gap (~95 s) exactly. Model confirmed: the difflib pass ran ON the event loop (convention-12
+  violation, proven and bounded), FINISHED, and the terminal 8-hour wedge was a post-clustering
+  await (store to_thread hop / resolver) that never returned — not identifiable from logs, which
+  is itself the defect the fix targets.
+- **Four-part fix, each with a named reason (owner constraints: no bloat/no over-optimization):**
+  (1) `cluster()` off-loop via to_thread + a test pin so a refactor can't re-inline it;
+  (2) progress logging (start line gated ≥100 headlines; per-100 progress) — a legit 90 s pass is
+  now distinguishable from a wedge in one log read; (3) `resolve_news_bounded` — 600 s deadline
+  (6× measured worst case) over lock-acquisition + chain, degrading to skip + one owner alert
+  (chain path only — the per-feed polls log-only, review round: no pager noise loop); cancellation
+  releases the lock, partial upserts are idempotent; (4) orphan re-sweep folded into the EXISTING
+  chain job via the EXISTING `get_news(unclustered_only=True)` — capped [:500] oldest-first
+  (review round: an uncapped re-sweep after repeated timeouts outgrows its own deadline forever).
+  DECLINED as over-optimization: clusterer algorithm acceleration (quick_ratio prefilter would
+  also change golden-file output — reviewer concurred).
+- **Review verdict: "ship it tonight."** Cancellation safety CONFIRMED with better evidence than
+  claimed: `cluster()` is provably pure (deep-copies, zero store access) so an orphaned thread
+  writes nothing; the store hops are idempotent + lock-serialized; `headline_ids` is not persisted
+  so re-sweeps converge to the same clusters. All 3 review findings folded in same-session.
+- 3 new tests (bounded-resolve complete/timeout/lock-freed/wedged-holder; orphan-row→Headline tz
+  roundtrip; off-loop pin); **1,193 green**. Deployed 22:10, boot clean 22:11:27.
+- **Live validation = tomorrow 08:35:** the chain run re-sweeps today's 429 orphaned weekend
+  headlines (capped batch, progress lines, bounded) into the digest corpus. Watch for
+  `news_orphans_reswept`, `news_clustering_started/progress`, and a digest whose corpus includes
+  the weekend. Unpinned-but-filed: partial-persist→re-sweep convergence test; the 4-day abandon
+  cutoff pin; the scheduler-before-scoring §2.6 structural question stands.
+
 ## 2026-08-10 (EOD, ~21:15) — the boot wedge has a THIRD face: catch-up clusterer on weekend backlog; day recovered post-close
 
 - **Today's 12:35 boot never completed** — wedged at 12:38 INSIDE catch-up, between the news

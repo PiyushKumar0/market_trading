@@ -52,9 +52,11 @@ the §4.4 job-10 pipeline, which is never load-bearing (E5).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
+import time as _time_mod
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
@@ -334,7 +336,17 @@ class HeadlineClusterer:
         norms: dict[str, str] = {c.cluster_id: clusterer_normalize(c.representative) for c in clusters}
         touched: dict[str, NewsCluster] = {}
 
-        for h in sorted(hs, key=lambda h: (h.published_at, h.url)):
+        # Progress visibility (2026-08-10): a weekend-backlog pass is legitimately ~90 s of pure
+        # difflib CPU (measured: 429 headlines × 1,500 window clusters = 90.6 s) — without these
+        # lines a long pass is indistinguishable from a wedge in the log.
+        started = _time_mod.perf_counter()
+        if len(hs) >= 100:   # backlog-sized passes only — per-poll trickles would log ~1,000×/day
+            _log.info("news_clustering_started", headlines=len(hs), window_clusters=len(clusters))
+
+        for i, h in enumerate(sorted(hs, key=lambda h: (h.published_at, h.url))):
+            if i and i % 100 == 0:
+                _log.info("news_clustering_progress", done=i, total=len(hs),
+                          elapsed_s=round(_time_mod.perf_counter() - started, 1))
             norm = clusterer_normalize(h.title)
             target: NewsCluster | None = None
             # Greedy: the EARLIEST-first_seen cluster (not the best-scoring one) at/above threshold.
@@ -379,7 +391,10 @@ class HeadlineClusterer:
         window_start = min(h.published_at for h in hs) - self._window
         rows = await self._store.arun(self._store.get_news_clusters, last_seen_after=window_start)
         existing = [NewsCluster.from_row(r) for r in rows]
-        touched = self.cluster(hs, existing=existing)
+        # OFF the event loop (2026-08-10, §3.2 convention 12 / §2.2 heartbeat invariant): the pure
+        # difflib pass is CPU-bound and blocked the loop ~95 s on the weekend backlog — every loop
+        # consumer (bus handlers, API, scheduler) stalls for its duration when run inline.
+        touched = await asyncio.to_thread(self.cluster, hs, existing)
         await self._store.aupsert_news_clusters([c.to_row() for c in touched])
         for c in touched:
             if c.headline_ids:

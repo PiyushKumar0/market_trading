@@ -175,6 +175,25 @@ async def test_titles_are_html_unescaped_and_fo_talk_series_dropped(store, clock
     assert [h.title for h in got] == ["M&M Q1 profit beats estimates on tractor demand"]
 
 
+async def test_unclustered_store_rows_roundtrip_into_headlines(store, clock):
+    """2026-08-10 orphan re-sweep: `job_news_chain` rebuilds Headline objects from
+    `get_news(unclustered_only=True)` rows — the roundtrip must survive the model's tz-aware
+    validator (a naive store timestamp would crash the whole chain job)."""
+    ingest, client = _make_ingest(store, clock)
+    async with client:
+        inserted = await ingest.poll(feeds=("et",))
+    assert inserted
+
+    rows = store.get_news(unclustered_only=True)
+    assert {r["url"] for r in rows} == {h.url for h in inserted}
+    rebuilt = [
+        Headline(**{k: r[k] for k in ("headline_id", "title", "source_domain", "url", "published_at")})
+        for r in rows
+    ]
+    assert all(h.published_at.tzinfo is not None for h in rebuilt)
+    assert {h.headline_id for h in rebuilt} == {h.headline_id for h in inserted}
+
+
 def test_headline_rejects_naive_published_at():
     with pytest.raises(ValidationError):
         Headline(

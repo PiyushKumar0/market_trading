@@ -57,6 +57,30 @@ def store(tmp_path, clock):
     s.close()
 
 
+@pytest.mark.asyncio
+async def test_run_executes_the_cluster_pass_off_the_event_loop(store):
+    """2026-08-10: the pure-difflib pass blocked the event loop ~95 s on a weekend backlog (measured
+    90.6 s at 429×1,500). ``run()`` must execute :meth:`cluster` in a worker thread (§3.2 convention
+    12) — pinned so a refactor cannot silently re-inline it."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    fx, headlines = _load_fixture()
+    clusterer = HeadlineClusterer(store, sim_threshold=fx["sim_threshold"],
+                                  max_event_age_days=fx["max_event_age_days"])
+    seen_threads: list[int] = []
+    original = clusterer.cluster
+
+    def spy(hs, existing=None):
+        seen_threads.append(threading.get_ident())
+        return original(hs, existing=existing)
+
+    clusterer.cluster = spy                                    # instance attribute shadows the method
+    touched = await clusterer.run(headlines)
+    assert touched                                             # the pass genuinely ran
+    assert seen_threads and all(t != loop_thread for t in seen_threads)
+
+
 # --------------------------------------------------------------------------- golden file (§9.1)
 def test_golden_file_byte_identity():
     """Same headlines in ⇒ byte-identical clusters out (committed golden pair)."""

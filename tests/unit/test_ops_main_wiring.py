@@ -401,6 +401,45 @@ def test_attach_feature_snapshots_degrades_to_none_never_raises() -> None:
     assert [c.features_snapshot_id for c in out] == [None, "snap-COALINDIA"]
 
 
+# --------------------------------------------------------------------------- bounded news resolve
+@pytest.mark.asyncio
+async def test_resolve_news_bounded_completes_times_out_and_frees_the_lock() -> None:
+    """2026-08-10 boot wedge: a post-clustering await hung 8+ h holding the news chain. The bound
+    covers the chain AND lock acquisition; expiry cancels, alerts, frees the lock for the next
+    caller, and returns False — the boot moves on (E5: the chain is never load-bearing)."""
+    import asyncio
+
+    from engine.ops.main import resolve_news_bounded
+
+    lock = asyncio.Lock()
+    alerts: list[int] = []
+
+    async def on_timeout():
+        alerts.append(1)
+
+    async def quick():
+        return None
+
+    assert await resolve_news_bounded(lock, quick, timeout_s=5) is True
+    assert not lock.locked()
+
+    async def hangs():
+        await asyncio.sleep(3600)
+
+    assert await resolve_news_bounded(lock, hangs, timeout_s=0.05, on_timeout=on_timeout) is False
+    assert alerts == [1]
+    assert not lock.locked()                                   # cancellation released it
+    assert await resolve_news_bounded(lock, quick, timeout_s=5) is True   # next caller unblocked
+
+    # A wedged HOLDER must not wedge later callers past their own bound.
+    await lock.acquire()
+    try:
+        assert await resolve_news_bounded(lock, quick, timeout_s=0.05, on_timeout=on_timeout) is False
+        assert alerts == [1, 1]
+    finally:
+        lock.release()
+
+
 # --------------------------------------------------------------------------- boot-phase safety ticks
 @pytest.mark.asyncio
 async def test_boot_phase_ticks_run_survive_errors_and_cancel_cleanly() -> None:

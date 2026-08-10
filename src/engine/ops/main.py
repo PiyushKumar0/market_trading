@@ -61,7 +61,7 @@ from engine.datafeeds.filings_pit import FilingsPitJob
 from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob
 from engine.datafeeds.filings_results import FilingsResultsJob
 from engine.datafeeds.filings_shp import FilingsShpJob
-from engine.datafeeds.news import NewsIngest
+from engine.datafeeds.news import Headline, NewsIngest
 from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
 from engine.datafeeds.sector_map import SectorMapJob
 from engine.features.engine import FeatureEngine
@@ -730,13 +730,27 @@ async def run() -> int:
     # snapshot (cluster assignment is also read-modify-write). Volumes are tiny; a lock is free.
     news_chain_lock = asyncio.Lock()
 
-    async def resolve_news(headlines: list) -> None:
+    async def resolve_news(headlines: list, *, alert_on_timeout: bool = False) -> None:
         if not headlines:
             return
-        async with news_chain_lock:
+
+        async def _chain() -> None:
             touched = await clusterer.run(headlines)
             await resolver.aload(clock.today())
             await resolver.run(touched)
+
+        # Bounded (2026-08-10): the 12:38 boot's resolve hung 8+ h and wedged the whole startup.
+        # The owner alert fires only from the chain/catch-up path (review round: every per-feed
+        # poll shares this closure — a persistent hang would page once per poll per 600 s forever;
+        # the poll path degrades to the helper's own error log).
+        await resolve_news_bounded(
+            news_chain_lock, _chain,
+            on_timeout=(lambda: alert(
+                "warning",
+                f"news resolve timed out after {_NEWS_RESOLVE_TIMEOUT_S:.0f}s — chain skipped; "
+                "unclustered headlines re-sweep on the next run (E5, never entry-blocking)",
+            )) if alert_on_timeout else None,
+        )
 
     async def score_news(*, force: bool = False) -> None:
         if scoring_job is None:
@@ -748,7 +762,24 @@ async def run() -> int:
         # §4.4 job 10 startup/catch-up: backfill → cluster → resolve (never entry-blocking, §2.7),
         # then the §5.4 pre-open scoring batch (force=True: score ALL unscored regardless of the ≥8
         # minimum) so the ~08:35 digest sees today's scores. Scoring failure never blocks the chain.
-        await resolve_news(await news_ingest.backfill())
+        # Unclustered re-sweep (2026-08-10): a bounded/cancelled resolve leaves inserted-but-unlinked
+        # rows — fold them into this run's batch so an abandoned backlog is retried, never orphaned.
+        inserted = await news_ingest.backfill()
+        seen = {h.headline_id for h in inserted}
+        # Capped slice (review round): clustering is O(headlines × window clusters), so an uncapped
+        # re-sweep after repeated timeouts grows the next attempt past its own deadline forever.
+        # get_news orders by published_at ⇒ oldest-first: every run makes bounded forward progress.
+        orphans = [
+            Headline(**{k: r[k] for k in ("headline_id", "title", "source_domain", "url", "published_at")})
+            for r in await store.arun(
+                store.get_news,
+                published_after=clock.now() - timedelta(days=4), unclustered_only=True,
+            )
+            if r["headline_id"] not in seen
+        ][:500]
+        if orphans:
+            _log.info("news_orphans_reswept", orphans=len(orphans))
+        await resolve_news(inserted + orphans, alert_on_timeout=True)
         try:
             await score_news(force=True)
         except Exception:  # noqa: BLE001 - unscored clusters just stay off the watchlist (§2.7)
@@ -1447,6 +1478,39 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
             await lifecycle.reapply_warmup_gate()
         except Exception:  # noqa: BLE001 - a failed lift retries on the next 60s tick
             _log.exception("warmup_freeze_lift_failed")
+
+
+# --------------------------------------------------------------------------- bounded news resolve (§2.7/E5)
+#: 2026-08-10 boot wedge: a post-clustering await inside the resolve chain hung 8+ hours during
+#: catch-up — the boot never completed and NOTHING flagged it. The chain is never-load-bearing
+#: (E5), so a bounded skip + alert strictly beats a wedged boot. Budget = ~6× the measured
+#: worst case (429 weekend headlines × 1,500 window clusters = 90.6 s clustering) plus store hops.
+_NEWS_RESOLVE_TIMEOUT_S = 600.0
+
+
+async def resolve_news_bounded(lock: asyncio.Lock, chain, *, timeout_s: float = _NEWS_RESOLVE_TIMEOUT_S,
+                               on_timeout=None) -> bool:
+    """Run one news resolve pass under the chain lock with a hard deadline (2026-08-10).
+
+    The deadline covers LOCK ACQUISITION too (a wedged holder must not wedge every later caller).
+    On expiry: cancellation releases the lock at the ``async with`` exit, partially-persisted
+    clusters stand (idempotent upserts), and inserted-but-unlinked headlines are re-swept by the
+    next ``job_news_chain`` run — nothing is lost, the boot/chain just moves on. Returns True on
+    completion, False on timeout."""
+    try:
+        async def _locked() -> None:
+            async with lock:
+                await chain()
+        await asyncio.wait_for(_locked(), timeout=timeout_s)
+        return True
+    except TimeoutError:
+        _log.error("news_resolve_timeout", timeout_s=timeout_s)
+        if on_timeout is not None:
+            try:
+                await on_timeout()
+            except Exception:  # noqa: BLE001 - the alert is best-effort; the skip already happened
+                _log.exception("news_resolve_timeout_alert_failed")
+        return False
 
 
 # --------------------------------------------------------------------------- boot-phase safety ticks
