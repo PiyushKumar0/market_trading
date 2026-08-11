@@ -577,10 +577,11 @@ class RecommendationPipeline:
             _log.warning("signal_candidate_governor_blocked", signal_id=candidate.signal_id,
                          reason=getattr(decision, "reason", None))
             return
-        # §5.2(a) forward cap (≤6 candidates/day to the analyst at DG0, 4 at DG1+ — §5.6): the
-        # governor owns the number, this counter the enforcement (2026-07-28 review: it had no
-        # consumer, so a volatile day could burn 20 analyst calls). Counts only calls that reach
-        # the harness; the coarse prescreen settings cap still bounds candidate PUBLICATION.
+        # §5.2(a) forward cap (agents.yaml prescreen_cap_per_day at DG0 — 12 since 2026-08-11,
+        # was 6; 4 at DG1+ — §5.6): the governor owns the number, this counter the enforcement
+        # (2026-07-28 review: it had no consumer, so a volatile day could burn 20 analyst calls).
+        # Counts only calls that reach the harness; the coarse prescreen settings cap still bounds
+        # candidate PUBLICATION.
         if self._forwarded_day != d:
             self._forwarded_day, self._forwarded_count = d, 0
         cap_fn = getattr(self._governor, "prescreen_forward_cap", None)

@@ -31,13 +31,16 @@ model_pricing_usd_per_mtok:
   opus-5:   { input: 5,  output: 25 }
   fable-5:    { input: 10, output: 50 }
 
-# Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $93 + $7 reserve = $100.
+# Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $103 + $7 reserve = $110.
 # Rebalanced 2026-07-06 for the news layer (§2.7 owner decision, §14 Q16): intraday 45→42,
 # weekly 15→12, sentiment/news 8→14. The catalyst digest is deterministic — $0.
+# Rebalanced 2026-08-11 (owner: raise the forward cap): intraday 42→52 funds prescreen_cap_per_day
+# 6→12 (~$0.115/measured signal call ⇒ +6/day ≈ +$14.5/month), taken from weekly_researcher 15→5 —
+# that agent is enabled:false until Phase 5 (§8.7); re-fund it at enablement.
 budget_allocations_usd:
-  intraday_analyst: 42
+  intraday_analyst: 52
   nightly_reviewer: 26
-  weekly_researcher: 15
+  weekly_researcher: 5
   news_analyst: 20
   preopen_planner: 10
   reserve: 7
@@ -64,7 +67,8 @@ agents:
     timeout_s: 120
     triggers: [signal_candidate, position_event, heartbeat]   # (a)+(c) window-gated; (b) whenever up (§5.2)
     heartbeat_min: 20          # [tunable]; window-bounded (§5.6)
-    prescreen_cap_per_day: 6   # [tunable]
+    prescreen_cap_per_day: 12  # [tunable] 6→12 (owner 2026-08-11: the cap, not signal quality, was
+                               # binding — 66 candidates by 10:13 vs 6 evaluations; funded above)
 
   preopen_planner:
     model: sonnet-5

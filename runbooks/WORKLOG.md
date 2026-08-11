@@ -1,5 +1,27 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-11 (~10:30) — analyst forward cap 6→12 (owner-directed), funded from the disabled weekly slot
+
+- **Owner call after this morning's zero-recommendation read:** the cap, not signal quality, was
+  binding — 66 candidates published by 10:13 (≈20 unique setups under the §3.2.5 publication cap)
+  vs 6 analyst evaluations, all declined on merit (weak-volume morning; verdict quality high).
+- **The pair change (a cap raise alone would self-defeat):** `prescreen_cap_per_day` 6→12 AND
+  `intraday_analyst` allocation $42→$52 — at the MEASURED $0.115/signal call, +6/day ≈ +$14.5/mo
+  would have tripped DG1 (which clamps the cap to 4) under the old envelope. Funded from
+  `weekly_researcher` $15→$5 (enabled:false until Phase 5 — re-fund at enablement). Allocations
+  $103 + $7 reserve = $110 ≤ $120 credit. DG1+ degraded cap stays 4 (§5.6 ladder unchanged).
+- Plan §5.2(a) trigger row annotated; pipeline comment updated; tests untouched (fixtures are
+  synthetic — passthrough semantics, not the real value); **1,193 green.** Deployed 10:25 (the
+  restart also refreshed the in-memory forward counter — up to 12 evaluations available for the
+  rest of today's session). Boot clean: engine_ready 10:25:07.
+- Morning status for the record: first live morning of the bounded news chain was textbook —
+  boot 09:50→09:58 incl. a fully-observable 105×416 clustering pass (20.7 s, off-loop) + 126
+  scored + fresh digest (1,663 clusters, 0 originating / 36 context, HAL aged out) + planner.
+  Orphan re-sweep found zero orphans: yesterday's wedge had completed cluster-linking before
+  hanging — weekend corpus intact all along. 3 Telegram sends dropped fast on real network
+  errors (DNS getaddrinfo + 2 TimedOut) — the bounded seam behaving; owner missed the startup
+  report, engine unaffected.
+
 ## 2026-08-10 (late, ~22:15) — news-chain wedge class FIXED (researched, measured, reviewed, deployed)
 
 - **Research/validation first (owner-directed):** benchmarked the real clusterer on backup data —
