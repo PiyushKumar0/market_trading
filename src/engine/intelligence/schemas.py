@@ -148,6 +148,13 @@ class NoActionOutput(BaseModel):
     action: Literal["no_action"]
     reason: str = Field(min_length=5)
     regime_note: str = ""       # optional regime read; feeds the NEXT context's stable block (§5.2)
+    # Guidance-schema compatibility (2026-08-12): the FLAT structured-output schema (§8.1 — the CLI
+    # degrades to text on unions, pinned 2026-07-29) advertises ``thesis``/``confidence`` for EVERY
+    # action, so the model legitimately attaches them when declining — 9 schema_invalid failures on
+    # 2026-08-12 (retries hit the same shape; one terminal). Accepted here, unused downstream;
+    # ``extra="forbid"`` still rejects genuinely foreign fields (R1 structural coherence intact).
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    thesis: str | None = None
 
 
 #: §5.2 output schema: the §3.3 action union PLUS ``no_action``, discriminated on ``action``.

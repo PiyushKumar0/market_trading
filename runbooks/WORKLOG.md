@@ -1,5 +1,24 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-12 (~09:50) — no_action schema_invalid fixed: a self-inflicted contract mismatch
+
+- **Owner reported terminal `schema_invalid` alerts at the morning start (9 failures 09:27–09:35,
+  retries hitting the identical shape, ≥1 terminal — up from retried-noise on 08-07).** Root
+  cause is OURS, not model drift: the FLAT guidance schema handed to the runtime (§8.1 — the CLI
+  silently degrades to text on union schemas, pinned 2026-07-29) advertises `thesis`/`confidence`
+  as properties for EVERY action, while `NoActionOutput` (extra="forbid") rejects them — the
+  model dutifully attaches its confidence when declining and our validator refuses our own
+  invitation. Each doomed candidate burned 2–3 retries (~$0.35) plus its day slot.
+- **Fix (minimal):** `NoActionOutput` gains optional accepted-and-unused `confidence` (0..1) and
+  `thesis` — the validation side now accepts exactly what the guidance side advertises;
+  `extra="forbid"` retained, so genuinely foreign fields (e.g. quantity on a no_action) still
+  reject (R1 teeth intact). Regression test pins the previously-untested direction
+  (schema-advertised ⇒ model-accepted) plus both rejection cases. **1,194 green.** Deployed
+  09:46:47, before the trade window.
+- Note for the pattern library: the model→schema consistency test existed and passed throughout —
+  the REVERSE direction (guidance-advertised ⇒ validation-accepted) was the untested seam. When a
+  contract has two independently-maintained halves, test both directions.
+
 ## 2026-08-11 (~10:30) — analyst forward cap 6→12 (owner-directed), funded from the disabled weekly slot
 
 - **Owner call after this morning's zero-recommendation read:** the cap, not signal quality, was

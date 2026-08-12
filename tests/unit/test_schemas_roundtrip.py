@@ -225,3 +225,30 @@ def test_intraday_guidance_schema_is_flat_and_covers_the_union() -> None:
             if field in stamped:
                 continue
             assert field in g["properties"], f"{model.__name__}.{field} missing from guidance schema"
+
+
+def test_no_action_accepts_the_fields_the_guidance_schema_advertises():
+    """2026-08-12 live bug (9 schema_invalid failures, one terminal): the FLAT guidance schema
+    (§8.1 — the CLI degrades on unions) advertises ``thesis``/``confidence`` for EVERY action, so
+    the model legitimately attaches them when declining — the validation side must accept what the
+    guidance side invites. Foreign fields (never advertised for no_action semantics, e.g. a
+    quantity) stay rejected: ``extra="forbid"`` keeps its R1 teeth."""
+    from engine.intelligence.schemas import NoActionOutput
+
+    out = NoActionOutput.model_validate({
+        "action": "no_action",
+        "reason": "chop — the range has not resolved",
+        "confidence": 0.35,
+        "thesis": "no edge at this volume",
+    })
+    assert out.reason.startswith("chop")
+    assert out.confidence == 0.35
+
+    with pytest.raises(ValidationError):
+        NoActionOutput.model_validate({
+            "action": "no_action", "reason": "chop — no resolution", "quantity": 10,
+        })
+    with pytest.raises(ValidationError):
+        NoActionOutput.model_validate({
+            "action": "no_action", "reason": "chop — no resolution", "confidence": 1.7,
+        })
