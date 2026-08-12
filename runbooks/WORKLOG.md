@@ -1,5 +1,20 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-12 (EOD, ~23:15) — first fully-clean run; bhavcopy straggling on NSE-side errors
+
+- **Zero infrastructure interference today — first time since the funnel matured.** Schema fix
+  (morning, dd592f5) held: 0 schema_invalid post-deploy; 3 candidates armed, 3 evaluated cleanly,
+  3 declined on merit; 9 of 12 quota unspent; 0 recommendations — disciplined silence, verified as
+  judgement rather than defect. Quiet tape, second day running.
+- **bhavcopy: failed 18:03 (NSE transient), retried by the sweeps all evening (6 more transients
+  through 20:42), still not landed by 23:11.** NSE-side unavailability ≥5 h. Non-blocking (E5:
+  cross-check + universe input; features 18:50 ✓, nightly_review + backup 22:23 ✓, reconcile ✓).
+  Retries continue via sweep + tomorrow's boot. MORNING CHECK if still failing: probe the UDiFF
+  URL manually — the plan flags NSE URL-scheme drift as the watched failure mode here (§4.4 job 6).
+- Engine left RUNNING in correct overnight posture. Week's ledger: five boot wedges (three root
+  causes), the schema contract mismatch, two frozen-latch classes, and the starved corpus — all
+  measured, fixed under review, live-verified. The platform's silence is now trustworthy.
+
 ## 2026-08-12 (~09:50) — no_action schema_invalid fixed: a self-inflicted contract mismatch
 
 - **Owner reported terminal `schema_invalid` alerts at the morning start (9 failures 09:27–09:35,
