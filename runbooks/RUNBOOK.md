@@ -300,11 +300,14 @@ bars are judged against owner-set state (the trade window) that moved during the
       `recommendations.human_action='taken'` (and `'closed'`); `[owner-manual]` — the executions
       themselves, reported back through Telegram `/taken <rec_id> <qty> <price>` and
       `/closed <rec_id> <price>` so the `learning_ledger` row closes with a real outcome (§6.5).
-- [ ] **Budget within 10% of console (D6):** "budget governor tracking within **10%** of
-      console-reconciled spend". Evidence: `scripts/g2_evidence.py` criterion 7 prints the single
-      month-to-date total plus its ±10% band; `[owner-manual]` — open the Anthropic console for
-      the same month and diff. Per-agent spend vs `config/agents.yaml` allocations is in the same
-      table.
+- [ ] **Budget discipline (D6, re-scoped 2026-08-13):** the plan's original bar ("within **10%**
+      of console-reconciled spend") assumed a monthly-credit billing model that doesn't exist —
+      owner clarification 2026-08-13: SDK usage bills against the Claude subscription's **weekly
+      usage limits** (Anthropic's June-15 notice paused the credit change), so there is no console
+      dollar figure to reconcile. The check is now: `scripts/g2_evidence.py` criterion 7 —
+      ledger arithmetic sane and month-to-date spend within the **self-imposed** allocations in
+      `config/agents.yaml` (the DG-ladder input); `[owner-manual]` — subscription usage-limit
+      headroom not under pressure during the soak.
 - [ ] **Zero API orders:** "zero API orders placed (**broker order book empty of platform orders** —
       audited)". Evidence: `scripts/g2_evidence.py` criterion 6 proves the platform side
       (`orders` / `order_events` empty); `[owner-manual]` — the broker-side audit in Kite Console

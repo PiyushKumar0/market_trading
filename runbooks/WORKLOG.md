@@ -55,6 +55,19 @@
   30 min absent on late-start days, WO-12); date=1970-01-01 orphan tick partition; 223
   negative-spread closing-auction rows (filter rule for any bid/ask consumer); parquet
   small-file pathology measured (752,150 files / 1.37 GB per day, WO-7).
+- **~16:33 DEPLOYED + LIVE-VERIFIED (owner stopped the engine; granted standing autonomous
+  service-control authorization — memorized):** watermark flip ran (08-12 success→failed), boot
+  clean (engine_ready 16:33:48, RECOMMEND/NORMAL, integrity ok), and the catch-up **re-fetched
+  bhavcopy:2026-08-12 under the fixed code** — parsed 2,459 / written 2,359 / cross-checked 100.
+  WATCH ITEM: `bhavcopy_cross_check_mismatch` on 98/100 cross-checked symbols — no successful-
+  ingest baseline exists in logs to compare; if tomorrow's normal 18:00 run shows ~98% again the
+  cross-check tolerance is the suspect (NSE weighted official close vs Kite LTP close differ
+  structurally), not the data.
+- **D6 RE-SCOPED (owner clarification):** SDK usage bills against the Claude subscription's
+  WEEKLY usage limits, not a monthly credit (Anthropic June-15 notice paused the credit change) —
+  no console dollar figure exists to reconcile. Plan §8.3 annotated, RUNBOOK G2 item rewritten,
+  g2_evidence.py criterion 7 re-scoped to ledger-arithmetic + self-imposed-allocation adherence
+  (now MET: $31.40 vs $120). agents.yaml dollar figures remain the self-imposed DG-ladder budget.
 
 ## 2026-08-12 (EOD, ~23:15) — first fully-clean run; bhavcopy straggling on NSE-side errors
 

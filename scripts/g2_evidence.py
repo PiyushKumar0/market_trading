@@ -419,9 +419,10 @@ def render(res: dict[str, Any]) -> str:
          f"events={orders['order_events']}",
          "0 rows; broker book owner-audited",
          MET if orders["live_order_rows"] == 0 else NOT_MET],
-        ["7", f"Budget MTD {bud['month']} (D6 console diff)",
+        ["7", f"Budget MTD {bud['month']} (D6, re-scoped 2026-08-13)",
          f"total ${bud['total_usd']:.2f} vs alloc ${bud['alloc_sum_usd'] or 0:.0f}",
-         "within +/-10% of console", NA],
+         "ledger arithmetic + within self-imposed alloc",
+         MET if bud["alloc_sum_usd"] and bud["total_usd"] <= bud["alloc_sum_usd"] else NA],
         ["8", "Watchlist-precision reviews (2 weekly)", "[owner-manual]",
          "2 weekly samples reviewed", NA],
         ["9", "Payload completeness (gate/cost/checklist)",
@@ -456,16 +457,18 @@ def render(res: dict[str, Any]) -> str:
         brows.append([agent, str(r["calls"]), f"{r['spend_usd']:.4f}",
                       "-" if r["alloc_usd"] is None else f"{r['alloc_usd']:.0f}",
                       fmt_pct(r["pct_of_alloc"])])
-    brows.append(["TOTAL (diff vs console)", "", f"{bud['total_usd']:.4f}",
+    brows.append(["TOTAL (self-imposed budget)", "", f"{bud['total_usd']:.4f}",
                   f"{bud['alloc_sum_usd'] or 0:.0f}",
                   fmt_pct(pct(int(round(bud["total_usd"] * 1e6)),
                               int(round((bud["alloc_sum_usd"] or 0) * 1e6))))])
     L.append(table(["AGENT", "BILLED CALLS", "SPEND USD", "ALLOC USD", "% OF ALLOC"], brows))
     L.append("")
-    L.append(f"  >> D6 CHECK: open the Anthropic console for {bud['month']} and diff its total "
-             f"against  ${bud['total_usd']:.2f}  (+/-10% band = "
-             f"${bud['total_usd'] * 0.9:.2f} .. ${bud['total_usd'] * 1.1:.2f}).")
-    L.append(f"  Monthly credit configured: ${bud['monthly_credit_usd']}. "
+    L.append("  >> D6 RE-SCOPED (owner clarification 2026-08-13): SDK usage bills against the Claude")
+    L.append("     subscription's WEEKLY usage limits, not a monthly credit (Anthropic's June-15 notice")
+    L.append("     paused the credit change) - there is NO console dollar figure to reconcile against.")
+    L.append("     The dollar ledger above is the platform's SELF-IMPOSED budget (DG ladder input);")
+    L.append("     the check is ledger arithmetic + staying within the self-imposed allocations.")
+    L.append(f"  Self-imposed monthly budget configured: ${bud['monthly_credit_usd']}. "
              f"Ledger months present: {', '.join(bud['ledger_months'])}.")
     L.append("")
 
@@ -516,8 +519,9 @@ def render(res: dict[str, Any]) -> str:
     L.append("                  Console audit - the engine cannot evidence its own absence there.")
     L.append("C5/C7 budget    : budget_ledger(month) vs config/agents.yaml budget_allocations_usd.")
     L.append("                  Allocations include a 'reserve' line that no agent spends against.")
-    L.append("                  D6's 10% bar is against the CONSOLE number, which this tool cannot")
-    L.append("                  read - hence N-A until the owner does the diff above.")
+    L.append("                  D6 re-scoped 2026-08-13: SDK usage bills against subscription weekly")
+    L.append("                  usage limits, not a monthly credit - no console dollar reconciliation")
+    L.append("                  exists; the bar is ledger arithmetic + self-imposed allocation adherence.")
     L.append("Sessions        : " + " | ".join(meta["calendar_notes"]))
     L.append("")
     return "\n".join(L)
