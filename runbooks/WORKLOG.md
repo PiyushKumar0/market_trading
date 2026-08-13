@@ -1,5 +1,37 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-14 (night 2, ~02:45) — owner's three directives answered: reversion closed morning-included; the dodged-winner effect is real but costs still win; insider_net_buy SURVIVES
+
+- All three pre-registered (IMPROVEMENT_SPEC WO-10b/16/17), built + mutation-checked by three
+  agents, 1,428 green, then run in one finally-guarded engine-down window (02:16–02:33; engine
+  back RUNNING 02:34:42, hours before the 09:05 pre-open mark).
+- **WO-10b (morning window): ABORTED AT STAGE 1 AGAIN** — overall −0.12552%/trade over 440,384
+  trades; morning split 10:00–11:35 gross +0.00154% vs midday +0.00006% (marginally more morning
+  reversion, ~40× below the floor). Reversion is closed across the entire tradeable window.
+- **WO-17 (owner's stop-width hypothesis): the effect is REAL, the rescue is not.** At the tight
+  1× stop, 25.8% of stop-outs (12,477/48,308) would have ended net-positive left alone; wider
+  stops are measurably better (gross peaks at 2.5×ATR_10m — genuine post-dip recovery drift, the
+  optional-stopping null violated) — but the best geometry still loses −0.087%/trade because even
+  NO-STOP buy-to-close carries only +0.036% gross vs the 12.6bp round trip. Stop width was never
+  the binding constraint; costs are. Filed policy note: if an intraday edge ever exists, default
+  stops nearer 2.5× ATR_10m than 1–1.5×.
+- **WO-16 (insider re-check): SURVIVES.** Audit: date anchoring PASSES (broadcast_dt everywhere;
+  the feared PIT transaction-date lookahead is absent — verified into captured payloads); found+
+  fixed a midnight-fallback one-session lookahead; fills corrected to next-open; the report writer
+  would have overwritten the 2026-07-17 artifact (now timestamped). Corrected numbers: T+10
+  **+0.7297%** / T+20 **+1.5797%** net (recorded +0.75/+1.61 − ~0.02pp); CPCV +0.0359%/day,
+  median passing split +0.0655 = 4× the WO-3 floor → PROMOTABLE. Standing caveats: the fold
+  fraction is STILL boundary-exact (60.0% vs 60 bar — one fold from failure), survivorship/index-
+  membership remains an uncorrectable optimistic bound, and live reachability differs from the
+  backtest (PIT ~70-day embargo; live origination rides the BSE fresh feed, live only since
+  07-19). Commits 0fa8ac1, 6a8a978, a34dbeb. All three reports STOP FOR OWNER REVIEW.
+- **The platform's strategic map after 48 hours of honest measurement:** intraday (breakout,
+  catalyst-conditioned, touch-entry momentum, VWAP reversion morning-and-midday, all stop
+  geometries) = closed at this cost structure. Swing price baselines (rsi2/trend/mom) = economically
+  zero. **The one surviving edge is the filings insider leg — slow, T+10/T+20, CNC** — pointing the
+  platform's alpha budget at the filings/event space and at G2's original purpose: proving the
+  process on whatever the funnel now surfaces.
+
 ## 2026-08-14 (overnight, ~01:15) — THE CORRECTED NUMBERS: no strategy survives honest mechanics; VWAP-reversion aborts AT the cost floor; deploy live-verified
 
 - **Corrected sweeps (next-open fills + spread + ₹20k sizing + margin floor), all four NOT PROMOTABLE:**
