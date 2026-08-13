@@ -32,8 +32,26 @@ headlines:
 Every leg reports BOTH **gross** and **net** (net = gross − one round-trip CNC cost, ``CostModel``
 breakeven at the reference notional) with honest stats — hit rate, mean/median drift. Negative/flat
 results are surfaced, not massaged (C9); every filings leg degrades to an honest ``n=0`` section when
-its table is empty. Output: ``data/reports/event_study.md`` + ``.json``. Standalone/blocking (offline
-research tool). Exit codes: 0 = ran; 2 = no symbols/bars resolved.
+its table is empty. Output: ``data/reports/event_study_<ts>.md`` + ``.json`` (timestamped since
+WO-16 — the pre-WO-16 fixed name overwrote the previous run's evidence). Standalone/blocking
+(offline research tool). Exit codes: 0 = ran; 2 = no symbols/bars resolved.
+
+**Entry-fill mechanics (WO-16, 2026-08-14).** Every leg's signal is knowable at the CLOSE of its
+event session T (the filings legs by construction — :func:`entry_session_index` maps a broadcast to
+the first close at which it was public; the PEAD legs because the reaction sign is read off T's own
+open/close). ``--entry-fill`` decides where that signal is FILLED:
+
+* ``next_open`` (**default**) — fill at ``open_(T+1)``, the first price actually reachable by an
+  order placed after observing close_T. Horizon T+k then measures ``close_(T+k) / open_(T+1)``.
+* ``close_t`` — the pre-WO-16 convention: fill at ``close_T`` itself. For the filings legs this is
+  defensible (the broadcast timestamp precedes the close, so the information was genuinely in hand
+  before the auction) but it still books the T→T+1 overnight gap that no post-close order can
+  capture; for the reaction-sign PEAD/confirmation legs it is the WO-2 same-bar class outright (the
+  signal is DERIVED from close_T and filled AT close_T). Kept only for old-vs-new comparison.
+
+The cost subtracted from every NET column is the full round-trip friction — statutory fees **plus**
+the measured bid-ask spread (WO-2) — via ``CostModel.breakeven_pct``; the report header prints the
+two components separately so the spread is never invisible.
 """
 
 from __future__ import annotations
@@ -72,6 +90,12 @@ REFERENCE_NOTIONAL = Decimal("20000")
 
 INSIDER_TRAILING_SESSIONS = 10          # §2.8.2 trailing-session window for the insider BUY value sum
 MARKET_CLOSE_IST = time(15, 30)         # a filing broadcast after this is NOT knowable at that close
+
+#: WO-16 entry-fill conventions (see the module docstring). ``next_open`` is the corrected default.
+ENTRY_FILL_NEXT_OPEN = "next_open"
+ENTRY_FILL_CLOSE_T = "close_t"
+ENTRY_FILLS = (ENTRY_FILL_NEXT_OPEN, ENTRY_FILL_CLOSE_T)
+DEFAULT_ENTRY_FILL = ENTRY_FILL_NEXT_OPEN
 
 # §2.8.2 taxonomy — acq_mode values that are NOT open-market purchases and are excluded from the
 # insider_net_buy aggregation. Case-insensitive SUBSTRING match (defensive: NSE varies the exact
@@ -135,8 +159,21 @@ def gap_volume_event_days(bars: list[DailyBar]) -> list[date]:
 
 # ------------------------------------------------------------------ §2.8.4 point-in-time entry mapping
 def after_hours(broadcast_dt: datetime) -> bool:
-    """A broadcast strictly after 15:30 IST was NOT knowable at that session's close (§2.8.4 PIT)."""
-    return _to_ist(broadcast_dt).time() > MARKET_CLOSE_IST
+    """A broadcast strictly after 15:30 IST was NOT knowable at that session's close (§2.8.4 PIT).
+
+    **Midnight guard (WO-16).** Exchanges do not broadcast at 00:00:00, so an exact-midnight stamp
+    means the TIME IS UNKNOWN, not that the filing was public before dawn: it is what the feeds'
+    date-only parse fallbacks produce (``filings_pit._parse_dt``'s ``'%d-%b-%Y'`` branch,
+    ``filings_pit_fresh._parse_dt``'s ``'%Y-%m-%d'`` branch) and what this module synthesises for
+    date-only ``earnings_calendar`` fallback rows. Treating it as intraday would let a filing that
+    was actually disseminated at 20:39 (the shape of every real PIT row — see
+    ``tests/unit/fixtures/filings_pit.json``) enter at that same session's close: a one-session
+    lookahead. So an unknown time is treated as AFTER hours — the conservative direction.
+    """
+    t = _to_ist(broadcast_dt).time()
+    if t == time(0, 0):
+        return True
+    return t > MARKET_CLOSE_IST
 
 
 def entry_session_index(sessions: list[date], broadcast_dt: datetime) -> int | None:
@@ -317,13 +354,35 @@ class DirectionalObservation:
     net: dict[int, float] = field(default_factory=dict)
 
 
+def entry_price(rows: list[_Row], signal_idx: int, entry_fill: str = DEFAULT_ENTRY_FILL) -> float | None:
+    """Fill price for a signal that became knowable at the CLOSE of ``signal_idx`` (WO-16).
+
+    ``next_open`` ⇒ ``rows[signal_idx + 1].open`` (the first reachable price after that close);
+    ``close_t`` ⇒ ``rows[signal_idx].close`` (the pre-WO-16 convention). ``None`` when the fill bar
+    does not exist or the price is non-positive — the event is then unmeasurable and dropped.
+    """
+    if entry_fill not in ENTRY_FILLS:
+        raise ValueError(f"entry_fill must be one of {ENTRY_FILLS}, got {entry_fill!r}")
+    if entry_fill == ENTRY_FILL_CLOSE_T:
+        px = rows[signal_idx].close
+    else:
+        j = signal_idx + 1
+        if j >= len(rows):
+            return None
+        px = rows[j].open
+    return px if px > 0 else None
+
+
 def measure_event(
-    rows: list[_Row], idx: int, *, symbol: str, kind: str, cost_pct: float
+    rows: list[_Row], idx: int, *, symbol: str, kind: str, cost_pct: float,
+    entry_fill: str = DEFAULT_ENTRY_FILL,
 ) -> Observation | None:
     """Measure one reaction-sign event at series position ``idx`` (day T). ``None`` if unmeasurable.
 
     ``cost_pct`` is one round-trip CNC breakeven (%), subtracted once from every signed drift to give
     the net. The gross (pre-cost) drift is retained alongside (§2.8.4: net-only hid the diagnosis).
+    ``entry_fill`` (WO-16) picks the fill price the drift is measured FROM — ``open_(T+1)`` by
+    default, ``close_T`` under the superseded ``close_t`` convention (see the module docstring).
     """
     T = rows[idx]
     if T.close == T.open:
@@ -331,9 +390,12 @@ def measure_event(
     sign = 1 if T.close > T.open else -1
     if idx + max(HORIZONS) >= len(rows):
         return None                    # not enough forward bars for T+5
+    base = entry_price(rows, idx, entry_fill)
+    if base is None:
+        return None                    # no reachable fill bar / non-positive fill price
     obs = Observation(symbol=symbol, event_date=T.d, kind=kind, reaction_sign=sign)
     for k in HORIZONS:
-        raw = rows[idx + k].close / T.close - 1.0
+        raw = rows[idx + k].close / base - 1.0
         gross = sign * raw * 100.0
         obs.pead_gross[k] = gross
         obs.pead_net[k] = gross - cost_pct
@@ -349,10 +411,13 @@ def measure_event(
     vol_ok = med > 0 and t1.volume >= CAT_CONFIRM_VOL_MULT * med
     obs.confirmed = bool(move_ok and vol_ok)
     if obs.confirmed:
+        # The confirmation signal is read off close_(T+1), so it fills on the SAME convention one
+        # session later (open_(T+2) by default; close_(T+1) under close_t — which is same-bar, WO-2).
+        c_base = entry_price(rows, idx + 1, entry_fill)
         for k in HORIZONS:
-            if k < 2:
+            if k < 2 or c_base is None:
                 continue
-            raw = rows[idx + k].close / t1.close - 1.0     # entry at the confirmation bar close
+            raw = rows[idx + k].close / c_base - 1.0
             gross = sign * raw * 100.0
             obs.confirm_gross[k] = gross
             obs.confirm_net[k] = gross - cost_pct
@@ -360,16 +425,22 @@ def measure_event(
 
 
 def measure_directional(
-    rows: list[_Row], idx: int, *, symbol: str, kind: str, horizons: tuple[int, ...], cost_pct: float
+    rows: list[_Row], idx: int, *, symbol: str, kind: str, horizons: tuple[int, ...], cost_pct: float,
+    entry_fill: str = DEFAULT_ENTRY_FILL,
 ) -> DirectionalObservation | None:
-    """Long forward drift at series position ``idx`` (entry at close_T). Raw (unsigned) return — the
-    cohort direction is the event type, never a T-day reaction sign. ``None`` if there are not enough
-    forward bars for the longest horizon. ``cost_pct`` (one CNC round trip) is subtracted once per
-    horizon to give net."""
+    """Long forward drift for an event knowable at close_T (series position ``idx``). Raw (unsigned)
+    return — the cohort direction is the event type, never a T-day reaction sign. ``None`` if there
+    are not enough forward bars for the longest horizon. ``cost_pct`` (one CNC round trip) is
+    subtracted once per horizon to give net.
+
+    ``entry_fill`` (WO-16): ``next_open`` measures ``close_(T+k) / open_(T+1)`` — the T+1 horizon is
+    then a single intraday session — while ``close_t`` measures ``close_(T+k) / close_T``, booking
+    the T→T+1 overnight gap that a post-close order cannot reach.
+    """
     if idx + max(horizons) >= len(rows):
         return None
-    base = rows[idx].close
-    if base <= 0:
+    base = entry_price(rows, idx, entry_fill)
+    if base is None:
         return None
     obs = DirectionalObservation(symbol=symbol, event_date=rows[idx].d, kind=kind)
     for k in horizons:
@@ -489,9 +560,34 @@ def render_markdown(agg: dict, meta: dict) -> str:
         f"- Symbols: {meta['n_symbols']}  ·  window: {meta['start']} → {meta['end']}  ·  "
         f"events: {agg['n_events']}"
     )
+    fees_pct, spread_pct = meta.get("cost_fees_pct"), meta.get("cost_spread_pct")
+    split = (
+        f" = {fees_pct:.4f}% statutory fees + {spread_pct:.4f}% measured bid-ask SPREAD (WO-2)"
+        if fees_pct is not None and spread_pct is not None
+        else ""
+    )
     lines.append(
-        f"- Round-trip CNC cost subtracted from every NET drift: {meta['cost_pct']:.4f}% "
-        f"(breakeven at ₹{meta['reference_notional']}); GROSS columns are pre-cost."
+        f"- Round-trip CNC cost subtracted from every NET drift: {meta['cost_pct']:.4f}%{split} "
+        f"(breakeven at ₹{meta['reference_notional']}); GROSS columns are pre-cost. The spread is "
+        "charged on BOTH legs (half each) and the CNC DP charge is included once — one round trip "
+        "per event, regardless of horizon."
+    )
+    entry_fill = meta.get("entry_fill", ENTRY_FILL_CLOSE_T)
+    lines.append(
+        "- Entry fill (WO-16): **"
+        + (
+            "next session's OPEN** — every drift is measured from `open_(T+1)`, the first price "
+            "reachable by an order placed after the signal was knowable at `close_T`."
+            if entry_fill == ENTRY_FILL_NEXT_OPEN
+            else "`close_T`** (SUPERSEDED pre-WO-16 convention) — books the T→T+1 overnight gap no "
+            "post-close order can capture; for the reaction-sign legs it is same-bar (WO-2 class)."
+        )
+    )
+    lines.append(
+        "- Survivorship caveat: the symbol set is the universe as of the RUN date applied over the "
+        "whole window, not as-of each event date — names that left the index (or delisted) are "
+        "absent, which biases every leg optimistically. Not corrected here (no historical index "
+        "membership is stored); stated so it is weighed."
     )
     lines.append(
         f"- Gap/volume event rule: |open-gap vs prior close| ≥ {GAP_MIN:.0%} AND volume ≥ "
@@ -505,8 +601,10 @@ def render_markdown(agg: dict, meta: dict) -> str:
         lines.append(
             f"- §2.8.4 insider-buy leg: trailing-{INSIDER_TRAILING_SESSIONS}-session open-market "
             f"insider BUY value ≥ ₹{meta['insider_min_value_inr']} (re-arm below); directional long "
-            "drift, entry at close_T = first close at which the filing was knowable (point-in-time; "
-            "broadcast after 15:30 IST ⇒ next session)."
+            "drift. Event session T = the first close at which the DISCLOSURE was public — keyed on "
+            "the exchange broadcast timestamp (`insider_trades.broadcast_dt`), NEVER the "
+            "`txn_from`/`txn_to` transaction dates; broadcast after 15:30 IST (or with an unknown "
+            "time) ⇒ next session."
         )
         lines.append(
             f"- §2.8.4 pledge-delta leg: promoter pledged-% QoQ change ≥ "
@@ -581,8 +679,13 @@ def run_study(
     store: MarketStore, cost_model: CostModel, symbols: list[str], start: date, end: date, *,
     insider_min_value_inr: int = 10_000_000, pledge_delta_min_pct: float = 5.0,
     skip_filings: bool = False, today: date | None = None,
+    entry_fill: str = DEFAULT_ENTRY_FILL,
 ) -> tuple[list[Observation], list[Observation], list[DirectionalObservation], dict]:
+    if entry_fill not in ENTRY_FILLS:
+        raise ValueError(f"entry_fill must be one of {ENTRY_FILLS}, got {entry_fill!r}")
     cost_pct = float(cost_model.breakeven_pct(REFERENCE_NOTIONAL, "CNC"))
+    fees_pct = float(cost_model.fee_breakeven_pct(REFERENCE_NOTIONAL, "CNC"))
+    spread_pct = float(cost_model.spread_pct)
     today = today or Clock().today()
     pead_obs: list[Observation] = []
     results_obs: list[Observation] = []
@@ -606,7 +709,7 @@ def run_study(
             if idx is None:
                 continue
             kind = "earnings" if d in earnings_dates else "gap_volume"
-            obs = measure_event(rows, idx, symbol=sym, kind=kind, cost_pct=cost_pct)
+            obs = measure_event(rows, idx, symbol=sym, kind=kind, cost_pct=cost_pct, entry_fill=entry_fill)
             if obs is not None:
                 pead_obs.append(obs)
 
@@ -625,7 +728,9 @@ def run_study(
                 if (ed := r.get("event_date")) is not None and ed < today
             ]
         for idx in event_session_indices(sessions, result_bdts):
-            obs = measure_event(rows, idx, symbol=sym, kind="results_filing", cost_pct=cost_pct)
+            obs = measure_event(
+                rows, idx, symbol=sym, kind="results_filing", cost_pct=cost_pct, entry_fill=entry_fill
+            )
             if obs is not None:
                 results_obs.append(obs)
 
@@ -633,7 +738,8 @@ def run_study(
         insider_rows = store.get_insider_trades(symbol=sym)
         for idx in insider_buy_events(sessions, insider_rows, insider_min_value_inr):
             obs = measure_directional(
-                rows, idx, symbol=sym, kind="insider_buy", horizons=INSIDER_HORIZONS, cost_pct=cost_pct
+                rows, idx, symbol=sym, kind="insider_buy", horizons=INSIDER_HORIZONS,
+                cost_pct=cost_pct, entry_fill=entry_fill,
             )
             if obs is not None:
                 directional_obs.append(obs)
@@ -647,7 +753,8 @@ def run_study(
                 continue
             kind = "pledge_increase" if ev["direction"] == "increase" else "pledge_decrease"
             obs = measure_directional(
-                rows, si, symbol=sym, kind=kind, horizons=PLEDGE_HORIZONS, cost_pct=cost_pct
+                rows, si, symbol=sym, kind=kind, horizons=PLEDGE_HORIZONS, cost_pct=cost_pct,
+                entry_fill=entry_fill,
             )
             if obs is not None:
                 directional_obs.append(obs)
@@ -658,6 +765,9 @@ def run_study(
         "start": str(start),
         "end": str(end),
         "cost_pct": cost_pct,
+        "cost_fees_pct": fees_pct,
+        "cost_spread_pct": spread_pct,
+        "entry_fill": entry_fill,
         "reference_notional": str(REFERENCE_NOTIONAL),
         "skip_filings": skip_filings,
         "insider_min_value_inr": insider_min_value_inr,
@@ -667,11 +777,22 @@ def run_study(
 
 
 def _write(agg: dict, meta: dict, reports_dir: Path) -> Path:
+    """Write ``event_study_<ts>.{md,json}`` (WO-16: TIMESTAMPED, like every other report artifact).
+
+    Until WO-16 this wrote a FIXED ``event_study.md``/``.json``, so each run destroyed the previous
+    one — including the 2026-07-17 stage-2 artifact the ``insider_net_buy`` verdict (T+10 +0.75%,
+    T+20 +1.61%, n=110) is recorded against, which is exactly the history a re-run must be compared
+    with. The old files are left untouched as the pre-WO-16 record.
+    """
     import json
 
     reports_dir.mkdir(parents=True, exist_ok=True)
-    md_path = reports_dir / "event_study.md"
-    json_path = reports_dir / "event_study.json"
+    try:
+        stamp = datetime.fromisoformat(str(meta["generated_at"])).strftime("%Y%m%dT%H%M%S")
+    except (KeyError, TypeError, ValueError):  # pragma: no cover - defensive: never lose a report
+        stamp = Clock().now().strftime("%Y%m%dT%H%M%S")
+    md_path = reports_dir / f"event_study_{stamp}.md"
+    json_path = reports_dir / f"event_study_{stamp}.json"
     md_path.write_text(render_markdown(agg, meta), encoding="utf-8")
     json_path.write_text(json.dumps({"meta": meta, "aggregate": agg}, indent=2), encoding="utf-8")
     return md_path
@@ -687,6 +808,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-filings-legs", dest="skip_filings", action="store_true",
         help="run only the original PEAD + confirmation legs (no §2.8.4 filings legs)",
+    )
+    parser.add_argument(
+        "--entry-fill", dest="entry_fill", default=DEFAULT_ENTRY_FILL, choices=list(ENTRY_FILLS),
+        help=(
+            "WO-16 fill convention: 'next_open' (default) fills at open_(T+1); 'close_t' is the "
+            "superseded pre-WO-16 close_T fill, kept for old-vs-new comparison"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -711,10 +839,16 @@ def main(argv: list[str] | None = None) -> int:
             insider_min_value_inr=settings.filings.insider_min_value_inr,
             pledge_delta_min_pct=settings.filings.pledge_delta_min_pct,
             skip_filings=args.skip_filings, today=clock.today(),
+            entry_fill=args.entry_fill,
         )
         agg = aggregate(pead_obs, results_obs, directional_obs)
         md_path = _write(agg, meta, reports_dir)
-        print(f"event study: {agg['n_events']} events over {len(symbols)} symbols -> {md_path}")
+        # ASCII only (Windows console may be cp1252).
+        print(
+            f"event study: {agg['n_events']} events over {len(symbols)} symbols "
+            f"[entry_fill={args.entry_fill}, round-trip cost {meta['cost_pct']:.4f}% "
+            f"= {meta['cost_fees_pct']:.4f}% fees + {meta['cost_spread_pct']:.4f}% spread] -> {md_path}"
+        )
     finally:
         store.close()
     return 0
