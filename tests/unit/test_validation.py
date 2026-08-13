@@ -4,6 +4,17 @@ Pure tier (no vectorbt): fold_pass_min exact boundaries, non-promotable without 
 the CPCV fold-pass fraction ≥ fold_pass_min(N), anchored walk-forward split determinism, honest
 negative-result rendering. The one skfolio-backed test (real CPCV purge/embargo no-overlap) is marked
 ``needs_heavy_deps``.
+
+WO-3 (2026-08-13) adds two things pinned here:
+
+* the **margin floor** — median PASSING-split expectancy ≥ ``cost_floor / MARGIN_FLOOR_DAYS`` per
+  day, fail-closed when no cost floor is supplied — tested at the exact 12/15 = 80.0% boundary that
+  four rsi2 runs sat on, with the recorded sub-floor margins (⇒ not promotable) and with margins that
+  genuinely clear costs (⇒ promotable);
+* the **winner-stability flag** — recorded on the report, never part of the verdict.
+
+Every ``promotion_decision`` call therefore now passes a cost floor + a median: the rule fails closed
+without them, which is itself asserted below.
 """
 
 from __future__ import annotations
@@ -18,6 +29,7 @@ import pytest
 from engine.core.clock import IST, Clock
 from engine.learning import reports
 from engine.learning.validate import (
+    MARGIN_FLOOR_DAYS,
     CPCVFold,
     ParamSet,
     ValidationPipeline,
@@ -25,11 +37,27 @@ from engine.learning.validate import (
     WalkForwardFold,
     cpcv_splits,
     fold_pass_min,
+    margin_floor_pct_per_day,
     promotion_decision,
     walk_forward_splits,
+    winner_stability,
 )
 
 FIXED_NOW = datetime(2026, 6, 17, 18, 0, tzinfo=IST)
+
+#: The CNC ₹20k round-trip friction after WO-2 = 0.2992% statutory fees + 0.0200% measured spread.
+#: The WO-3 margin floor is this / MARGIN_FLOOR_DAYS = 0.01596 %/day.
+CNC_COST_FLOOR_PCT = 0.3192
+#: A margin that clears the floor comfortably (used wherever the test is about a DIFFERENT rule).
+CLEARS = 0.05
+
+
+def _decide(n, fraction, **kw):
+    """promotion_decision with the WO-3 margin inputs defaulted to a clearly-clearing edge, so a
+    test about (say) the drawdown gate is not silently answered by the margin floor."""
+    kw.setdefault("median_passing_expectancy_pct", CLEARS)
+    kw.setdefault("cost_floor_pct", CNC_COST_FLOOR_PCT)
+    return promotion_decision(n, fraction, **kw)
 
 
 @pytest.fixture
@@ -65,38 +93,145 @@ def test_fold_pass_min_rejects_negative():
 
 # --------------------------------------------------------------------------- promotion_decision rule
 def test_promotion_absent_n_not_promotable():
-    ok, reasons = promotion_decision(None, 1.0)
+    ok, reasons = _decide(None, 1.0)
     assert ok is False
     assert any("no cited N" in r or "N is ABSENT" in r for r in reasons)
 
 
 def test_promotion_absent_folds_not_promotable():
-    ok, reasons = promotion_decision(10, None)
+    ok, reasons = _decide(10, None)
     assert ok is False
     assert any("no folds" in r.lower() or "CPCV produced no folds" in r for r in reasons)
 
 
 def test_promotion_boundary_at_n10_and_n11():
     # N=10 requires 60%; N=11 requires 70%. A 60% fraction clears N=10, fails N=11.
-    ok10, _ = promotion_decision(10, 0.60)
+    ok10, _ = _decide(10, 0.60)
     assert ok10 is True
-    assert promotion_decision(10, 0.59)[0] is False
-    ok11, reasons11 = promotion_decision(11, 0.60)
+    assert _decide(10, 0.59)[0] is False
+    ok11, reasons11 = _decide(11, 0.60)
     assert ok11 is False
     assert any("fold_pass_min" in r for r in reasons11)
 
 
 def test_promotion_boundary_at_n31():
-    assert promotion_decision(31, 0.80)[0] is True
-    assert promotion_decision(31, 0.79)[0] is False
+    assert _decide(31, 0.80)[0] is True
+    assert _decide(31, 0.79)[0] is False
 
 
 def test_promotion_drawdown_gate():
     # Even a passing fold fraction is rejected when max DD exceeds 1.25× champion's (§6.4 step 2).
-    ok, reasons = promotion_decision(5, 1.0, max_dd_pct=20.0, champion_max_dd_pct=10.0)
+    ok, reasons = _decide(5, 1.0, max_dd_pct=20.0, champion_max_dd_pct=10.0)
     assert ok is False
     assert any("drawdown" in r.lower() for r in reasons)
-    assert promotion_decision(5, 1.0, max_dd_pct=12.0, champion_max_dd_pct=10.0)[0] is True
+    assert _decide(5, 1.0, max_dd_pct=12.0, champion_max_dd_pct=10.0)[0] is True
+
+
+# --------------------------------------------------------------------------- WO-3 margin floor
+def test_margin_floor_constant_and_derivation():
+    """floor = cost_floor / 20 sessions — the one round trip a position must earn over the §7.1
+    swing holding cap. On the post-WO-2 CNC surface that is 0.3192% / 20 = 0.01596 %/day."""
+    assert MARGIN_FLOOR_DAYS == 20
+    assert margin_floor_pct_per_day(CNC_COST_FLOOR_PCT) == pytest.approx(0.01596)
+    assert margin_floor_pct_per_day(None) is None
+    assert margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=10) == pytest.approx(0.03192)
+    with pytest.raises(ValueError):
+        margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=0)
+
+
+def test_promotion_rejects_the_recorded_rsi2_boundary_pass():
+    """THE case WO-3 exists for: 12/15 = exactly 80.0% (a strict-< pass at N>30) with the recorded
+    rsi2 median passing split ~0.0006 %/day — positive, and ~27x below the cost floor."""
+    n, fraction = 40, 12 / 15
+    assert fraction == fold_pass_min(n)                       # sits EXACTLY on the bar
+    ok, reasons = promotion_decision(
+        n, fraction, median_passing_expectancy_pct=0.0006, cost_floor_pct=CNC_COST_FLOOR_PCT
+    )
+    assert ok is False
+    assert not any("fold_pass_min" in r for r in reasons)      # the fold rule still passes it
+    assert any("margin floor" in r for r in reasons)
+    assert any("0.01596" in r for r in reasons)                # the floor is stated, not implied
+
+
+def test_promotion_accepts_the_same_boundary_with_a_cost_clearing_margin():
+    """Same 12/15 boundary, same N — but margins that genuinely clear costs ⇒ promotable."""
+    n, fraction = 40, 12 / 15
+    ok, reasons = promotion_decision(
+        n, fraction, median_passing_expectancy_pct=0.02, cost_floor_pct=CNC_COST_FLOOR_PCT
+    )
+    assert ok is True and reasons == []
+
+
+def test_margin_floor_boundary_is_exact_and_inclusive():
+    """>= the floor passes; a hair below fails (the floor itself is a PASS, unlike fold_pass_min's
+    strict-< comparison, which WO-3 deliberately left alone)."""
+    floor = margin_floor_pct_per_day(CNC_COST_FLOOR_PCT)
+    assert promotion_decision(
+        40, 12 / 15, median_passing_expectancy_pct=floor, cost_floor_pct=CNC_COST_FLOOR_PCT
+    )[0] is True
+    assert promotion_decision(
+        40, 12 / 15, median_passing_expectancy_pct=floor * 0.999, cost_floor_pct=CNC_COST_FLOOR_PCT
+    )[0] is False
+
+
+def test_promotion_fails_closed_without_a_cost_floor():
+    """A margin floor that silently skips is no floor at all (same posture as a missing N)."""
+    ok, reasons = promotion_decision(10, 1.0, median_passing_expectancy_pct=1.0)
+    assert ok is False
+    assert any("margin floor NOT EVALUATED" in r for r in reasons)
+
+
+def test_promotion_fails_closed_without_any_passing_split():
+    ok, reasons = promotion_decision(
+        10, 1.0, median_passing_expectancy_pct=None, cost_floor_pct=CNC_COST_FLOOR_PCT
+    )
+    assert ok is False
+    assert any("no passing CPCV splits" in r for r in reasons)
+
+
+def test_fold_pass_fraction_comparison_stays_strict_less_than():
+    """WO-3 explicitly did NOT move this boundary: fraction == fold_pass_min(N) still PASSES."""
+    for n in (10, 11, 31, 40):
+        assert _decide(n, fold_pass_min(n))[0] is True
+
+
+# --------------------------------------------------------------------------- WO-3 winner stability
+def test_winner_stability_flag_states():
+    same = winner_stability({"a": 1.0, "b": 2.0}, {"a": 1.0, "b": 2.0},
+                            grid_density="coarse", adjacent_density="medium")
+    assert same.stable is True and same.differing_params == []
+    assert "STABLE" in same.note()
+
+    diff = winner_stability({"rsi_entry": 3.0, "rsi_exit": 10.0}, {"rsi_entry": 15.0, "rsi_exit": 2.0},
+                            grid_density="medium", adjacent_density="fine")
+    assert diff.stable is False
+    assert diff.differing_params == ["rsi_entry", "rsi_exit"]
+    assert "UNSTABLE" in diff.note()
+
+    unknown = winner_stability({"a": 1.0}, None)
+    assert unknown.stable is None
+    assert "NOT ASSESSED" in unknown.note()
+
+    # a density that adds an axis genuinely changed the winner
+    added = winner_stability({"a": 1.0}, {"a": 1.0, "b": 3.0})
+    assert added.stable is False and added.differing_params == ["b"]
+
+
+def test_winner_instability_is_a_flag_not_an_auto_fail(clock):
+    """The report records the instability; the verdict is unaffected (WO-3 (b))."""
+    pipe = _pipeline(clock)
+    ps = ParamSet(
+        strategy_id="rsi2", params={"rsi_entry": 3.0}, trial_count_n=10,
+        cost_floor_pct=CNC_COST_FLOOR_PCT, grid_density="coarse", adjacent_density="medium",
+        adjacent_winner={"rsi_entry": 15.0},
+    )
+    report = pipe.validate_sync("rsi2", ps)
+    assert report.winner_stability is not None
+    assert report.winner_stability.stable is False
+    assert report.winner_stability.differing_params == ["rsi_entry"]
+    assert any("UNSTABLE" in note for note in report.notes)
+    assert report.promotable is True                       # flag only — the verdict is unchanged
+    assert not any("stab" in r.lower() for r in report.reasons)
 
 
 # --------------------------------------------------------------------------- walk-forward determinism
@@ -182,6 +317,44 @@ def test_pipeline_promotable_iff_fraction_meets_bar(clock):
     assert r11.promotable is False
 
 
+def _tiny_margin_series() -> pd.Series:
+    """Same 3/5 fold-pass shape, but the winning folds earn ~0.0006%/day — the recorded rsi2
+    magnitude: positive after costs, ~27x below the WO-3 margin floor."""
+    idx = [date(2024, 1, 1) + timedelta(days=i) for i in range(40)]
+    return pd.Series([0.000006] * 20 + [-0.01] * 20, index=idx, dtype="float64")
+
+
+def test_pipeline_margin_floor_blocks_a_near_zero_margin_pass(clock):
+    """End-to-end: the fold-pass rule says yes, the margin floor says no (WO-3 (a))."""
+    pipe = ValidationPipeline(
+        returns_provider=lambda sid, params: _tiny_margin_series(),
+        clock=clock,
+        splitter=_FixedSplitter(),
+        cost_floor_provider=lambda _sid: CNC_COST_FLOOR_PCT,
+    )
+    report = pipe.validate_sync("rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10))
+    assert report.cpcv_fold_pass_fraction == pytest.approx(0.6)     # clears fold_pass_min(10)=60%
+    assert report.cpcv_median_passing_expectancy_pct == pytest.approx(0.0006)
+    assert report.cost_floor_pct == pytest.approx(CNC_COST_FLOOR_PCT)
+    assert report.margin_floor_pct_per_day == pytest.approx(0.01596)
+    assert report.promotable is False
+    assert any("margin floor" in r for r in report.reasons)
+    assert not any("fold_pass_min" in r for r in report.reasons)
+    assert any("Margin floor (WO-3)" in note for note in report.notes)
+
+
+def test_pipeline_derives_the_cost_floor_when_the_caller_supplies_none(clock):
+    """No cost_floor_pct on the ParamSet and no provider ⇒ the pipeline derives one from the same
+    CostModel the sweeps/gate use, so the floor is enforced rather than skipped."""
+    pipe = _pipeline(clock)
+    report = pipe.validate_sync("rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10))
+    assert report.cost_floor_pct is not None and report.cost_floor_pct > 0.3   # CNC fees + spread
+    assert report.margin_floor_pct_per_day == pytest.approx(
+        report.cost_floor_pct / MARGIN_FLOOR_DAYS
+    )
+    assert report.promotable is True            # +1%/day passing folds clear the floor easily
+
+
 def test_pipeline_persists_param_set_and_artifacts(clock, conn, tmp_path):
     pipe = _pipeline(clock, conn=conn, reports_dir=tmp_path)
     ps = ParamSet(strategy_id="rsi2", params={"rsi_entry": 8.0}, trial_count_n=10)
@@ -198,6 +371,27 @@ def test_pipeline_persists_param_set_and_artifacts(clock, conn, tmp_path):
     md = tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.md"
     js = tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.json"
     assert md.exists() and js.exists()
+
+
+def test_report_artifacts_carry_the_wo3_flag_and_margin_floor(clock, tmp_path):
+    """WO-3 acceptance: the re-issued reports SHOW the winner-stability flag and the margin floor —
+    as prose in the md (via notes) and as structured fields in the json."""
+    pipe = _pipeline(clock, reports_dir=tmp_path)
+    ps = ParamSet(
+        strategy_id="rsi2", params={"rsi_entry": 3.0}, trial_count_n=10,
+        cost_floor_pct=CNC_COST_FLOOR_PCT, grid_density="coarse", adjacent_density="medium",
+        adjacent_winner={"rsi_entry": 15.0},
+    )
+    report = pipe.validate_sync("rsi2", ps)
+    md_text = (tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.md").read_text(encoding="utf-8")
+    assert "Winner stability (WO-3): UNSTABLE" in md_text
+    assert "Margin floor (WO-3)" in md_text and "0.01596%/day" in md_text
+
+    data = json.loads((tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.json").read_text(encoding="utf-8"))
+    assert data["winner_stability"]["stable"] is False
+    assert data["winner_stability"]["differing_params"] == ["rsi_entry"]
+    assert data["margin_floor_pct_per_day"] == pytest.approx(0.01596)
+    assert data["cpcv_median_passing_expectancy_pct"] == pytest.approx(1.0)
 
 
 def test_pipeline_rejects_strategy_id_mismatch(clock):

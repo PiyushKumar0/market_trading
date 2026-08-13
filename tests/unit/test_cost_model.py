@@ -1,7 +1,14 @@
 """CostModel (§3.2.5, C1-C4): the C3 worked examples asserted TO THE PAISA, parameterized from
 ``config/costs.yaml``; the DP multi-scrip case (C4); min_viable_qty shrink/reject boundaries; banded
-tick rounding via ``InstrumentStore.round_to_tick`` (A10); and the zero-hardcoded-rates guarantee
-(rates flow from the yaml, §9.1)."""
+tick rounding via ``InstrumentStore.round_to_tick`` (A10); the measured bid-ask spread component
+(WO-2); and the zero-hardcoded-rates guarantee (rates flow from the yaml, §9.1).
+
+Spread convention under test (WO-2, 2026-08-13): the C3 worked examples remain **fees only** and
+paisa-exact — they are the contract-note anchor, and the broker never bills a spread. ``round_trip``
+adds ONE extra component, ``spread`` = ``spread_pct`` x notional (half the quoted spread on each of
+the two legs), so ``total_cost`` = fees + spread and ``breakeven_pct`` is the full friction the §7.1
+viability check must clear. ``fee_breakeven_pct`` is the fees-only view.
+"""
 
 from __future__ import annotations
 
@@ -52,6 +59,10 @@ def sizing_model(rates, instruments) -> CostModel:
 # Hand-derived from the 2026-06-11 config/costs.yaml rates (contract-note rounding: each component
 # exact-then-paisa-quantized, GST on the RAW brokerage+txn+SEBI bases, total = sum of quantized
 # components). If a re-scrape changes costs.yaml these literals MUST be re-derived alongside it.
+#
+# These are the STATUTORY FEE components ONLY and are UNCHANGED by WO-2 — the spread is asserted
+# separately below (SPREAD_COMPONENT / WORKED_TOTALS_WITH_SPREAD), because the contract note the
+# ~Rs21/Rs60/Rs83 anchors were verified against contains fees and no spread.
 WORKED_EXAMPLES = {
     # (product, notional, n_scrips): {component: paisa-exact Decimal}
     ("MIS", Decimal("20000"), 1): {           # intraday Rs 20k round trip ~= Rs 21 (C3)
@@ -82,38 +93,126 @@ WORKED_EXAMPLES = {
         "dp": Decimal("0.00"),
     },
 }
+#: FEES-only totals (spread excluded) — the contract-note anchor, unchanged by WO-2.
 WORKED_TOTALS = {
     ("MIS", Decimal("20000"), 1): (Decimal("21.26"), Decimal("0.106300")),
     ("CNC", Decimal("20000"), 1): (Decimal("59.84"), Decimal("0.299200")),
     ("MIS", Decimal("100000"), 1): (Decimal("82.68"), Decimal("0.082680")),
 }
+#: spread component = spread_pct (0.02%) x notional — proportional, product-independent (WO-2).
+SPREAD_COMPONENT = {
+    ("MIS", Decimal("20000"), 1): Decimal("4.00"),
+    ("CNC", Decimal("20000"), 1): Decimal("4.00"),
+    ("MIS", Decimal("100000"), 1): Decimal("20.00"),
+}
+#: full friction (fees + spread) = what round_trip/breakeven_pct report and the gate must clear.
+WORKED_TOTALS_WITH_SPREAD = {
+    ("MIS", Decimal("20000"), 1): (Decimal("25.26"), Decimal("0.126300")),
+    ("CNC", Decimal("20000"), 1): (Decimal("63.84"), Decimal("0.319200")),
+    ("MIS", Decimal("100000"), 1): (Decimal("102.68"), Decimal("0.102680")),
+}
+FEE_KEYS = ("brokerage", "stt", "txn", "sebi", "stamp", "gst", "dp")
 
 
 @pytest.mark.parametrize("key", sorted(WORKED_EXAMPLES, key=str))
 def test_c3_worked_examples_to_the_paisa(model, key):
+    """The FEE components stay paisa-exact (contract-note anchor) with spread carried separately."""
     product, notional, n = key
     bd = model.round_trip(notional, product, n_scrips_sell_day=n)
-    assert bd.components == WORKED_EXAMPLES[key]
-    total, breakeven = WORKED_TOTALS[key]
-    assert bd.total_cost == total
-    assert bd.breakeven_pct == breakeven
-    # Contract-note invariant: the breakdown always adds up.
+    fee_components = {k: v for k, v in bd.components.items() if k != "spread"}
+    assert fee_components == WORKED_EXAMPLES[key]
+    fee_total, fee_breakeven = WORKED_TOTALS[key]
+    assert sum(fee_components.values(), Decimal("0")) == fee_total
+    assert model.fee_breakeven_pct(notional, product, n_scrips_sell_day=n) == fee_breakeven
+    # Contract-note invariant: the breakdown always adds up (now including the spread component).
     assert sum(bd.components.values(), Decimal("0")) == bd.total_cost
 
 
+@pytest.mark.parametrize("key", sorted(WORKED_EXAMPLES, key=str))
+def test_spread_component_and_full_friction_totals(model, key):
+    """WO-2: round_trip/breakeven_pct = fees + the measured spread (half per leg, both legs)."""
+    product, notional, n = key
+    bd = model.round_trip(notional, product, n_scrips_sell_day=n)
+    assert bd.components["spread"] == SPREAD_COMPONENT[key]
+    total, breakeven = WORKED_TOTALS_WITH_SPREAD[key]
+    assert bd.total_cost == total
+    assert bd.breakeven_pct == breakeven
+    # full friction - fees = spread, exactly; and spread == spread_pct of notional
+    assert bd.total_cost - WORKED_TOTALS[key][0] == SPREAD_COMPONENT[key]
+    assert bd.components["spread"] == (notional * model.spread_pct / Decimal("100")).quantize(
+        Decimal("0.01")
+    )
+
+
+def test_spread_is_half_per_leg(model):
+    """The yaml value is the FULL quoted spread; each leg crosses half of it, so a round trip pays
+    exactly 2 x half_spread_pct = spread_pct of notional."""
+    assert model.half_spread_pct * 2 == model.spread_pct
+    notional = Decimal("50000")
+    per_leg = notional * model.half_spread_pct / Decimal("100")
+    assert model.round_trip(notional, "MIS").components["spread"] == (2 * per_leg).quantize(
+        Decimal("0.01")
+    )
+
+
+def test_spread_flows_from_yaml_not_code(raw_yaml):
+    """Doubling spread_pct doubles the spread component and nothing else (C2: zero hardcoded rates)."""
+    base = CostModel(CostRates.from_dict(raw_yaml)).round_trip(Decimal("20000"), "CNC")
+    mutated = copy.deepcopy(raw_yaml)
+    mutated["spread_pct"] = 2 * float(raw_yaml["spread_pct"])
+    bumped = CostModel(CostRates.from_dict(mutated)).round_trip(Decimal("20000"), "CNC")
+    assert bumped.components["spread"] == 2 * base.components["spread"]
+    assert bumped.total_cost - base.total_cost == base.components["spread"]
+    for k in FEE_KEYS:                       # spread is not a GST base and touches no fee
+        assert bumped.components[k] == base.components[k]
+
+
+def test_missing_spread_pct_is_a_hard_error(raw_yaml):
+    """A costs.yaml without the measurement must NOT silently fall back to a zero-spread surface."""
+    mutated = copy.deepcopy(raw_yaml)
+    del mutated["spread_pct"]
+    with pytest.raises(ValueError, match="spread_pct"):
+        CostRates.from_dict(mutated)
+
+
+def test_zero_spread_reproduces_the_pre_wo2_surface(raw_yaml):
+    """spread_pct: 0 collapses round_trip back onto the fees-only numbers — proof the spread leg is
+    the ONLY thing WO-2 added to the cost surface."""
+    mutated = copy.deepcopy(raw_yaml)
+    mutated["spread_pct"] = 0.0
+    m0 = CostModel(CostRates.from_dict(mutated))
+    for (product, notional, n), (fee_total, fee_breakeven) in WORKED_TOTALS.items():
+        bd = m0.round_trip(notional, product, n_scrips_sell_day=n)
+        assert bd.components["spread"] == Decimal("0.00")
+        assert bd.total_cost == fee_total
+        assert bd.breakeven_pct == fee_breakeven
+
+
 def test_c3_reference_roundtrips_parameterized_from_yaml(model, raw_yaml):
-    """The yaml's own reference_roundtrips block (C3: ~21 / ~60 / ~83) reproduces from the model."""
+    """The yaml's own reference_roundtrips block (C3: ~21 / ~60 / ~83) reproduces from the model.
+
+    The block is FEES-ONLY by construction (see its costs.yaml comment) — it is asserted against
+    ``fee_breakeven_pct`` / total minus the spread component, so a spread re-measurement can never
+    silently invalidate the contract-note anchors.
+    """
     refs = raw_yaml["reference_roundtrips"]
     assert len(refs) == 3
     for ref in refs:
-        bd = model.round_trip(Decimal(ref["notional_inr"]), ref["product"])
-        assert bd.total_cost.quantize(Decimal("1")) == Decimal(ref["expected_total_inr"]), ref["label"]
-        assert abs(bd.breakeven_pct - Decimal(str(ref["breakeven_pct"]))) <= Decimal("0.001"), ref["label"]
+        notional = Decimal(ref["notional_inr"])
+        bd = model.round_trip(notional, ref["product"])
+        fees = bd.total_cost - bd.components["spread"]
+        assert fees.quantize(Decimal("1")) == Decimal(ref["expected_total_inr"]), ref["label"]
+        fee_breakeven = model.fee_breakeven_pct(notional, ref["product"])
+        assert abs(fee_breakeven - Decimal(str(ref["breakeven_pct"]))) <= Decimal("0.001"), ref["label"]
+        # and the full-friction breakeven is strictly higher, by exactly the spread
+        assert bd.breakeven_pct - fee_breakeven == model.spread_pct
 
 
 def test_breakeven_pct_matches_round_trip(model):
     for product, notional in (("MIS", Decimal("20000")), ("CNC", Decimal("50000"))):
         assert model.breakeven_pct(notional, product) == model.round_trip(notional, product).breakeven_pct
+        # fees-only is strictly cheaper — never let a caller confuse the two (WO-2)
+        assert model.fee_breakeven_pct(notional, product) < model.breakeven_pct(notional, product)
 
 
 def test_breakeven_non_increasing_in_notional(model):
@@ -131,9 +230,10 @@ def test_dp_charged_per_scrip_per_sell_day(model):
     assert one.components["dp"] == Decimal("15.34")
     assert two.components["dp"] == Decimal("30.68")
     # Proportional charges are unaffected by the split; only DP moves for zero-brokerage CNC.
-    for k in ("brokerage", "stt", "txn", "sebi", "stamp", "gst"):
+    # (spread is proportional too — WO-2 — so splitting scrips must not change it.)
+    for k in ("brokerage", "stt", "txn", "sebi", "stamp", "gst", "spread"):
         assert one.components[k] == two.components[k]
-    assert two.total_cost == Decimal("75.18")
+    assert two.total_cost == Decimal("79.18")            # 75.18 fees + 4.00 spread
     assert two.total_cost - one.total_cost == Decimal("15.34")
 
 
@@ -155,8 +255,11 @@ def test_min_viable_qty_small_edge_needs_size_and_boundary_is_exact(sizing_model
     required = sizing_model.edge_multiple_min
     assert edge >= required * model.breakeven_pct(Decimal(qty) * Decimal("100.00"), "CNC")
     assert edge < required * model.breakeven_pct(Decimal(qty - 1) * Decimal("100.00"), "CNC")
-    # Sanity band: DP 15.34 must shrink below ~0.0275% of notional -> around Rs 51-62k.
-    assert 45_000 < qty * 100 < 70_000
+    # Sanity band: the 0.5% edge must cover 2x (proportional CNC costs + spread) = 2 x 0.2425%,
+    # leaving only ~0.0075% of notional for the flat DP 15.34 -> around Rs 2.0-2.2 lakh.
+    # PRE-WO-2 this band was Rs 51-62k: the 0.02% spread does NOT amortize with size, so it eats
+    # most of the headroom the flat DP charge used to be shrunk into. Intended (gate tightens).
+    assert 195_000 < qty * 100 < 215_000
 
 
 def test_min_viable_qty_generous_edge_is_qty_one(sizing_model):

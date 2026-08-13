@@ -17,6 +17,18 @@ Semantics pinned by the plan:
   A report with **no cited N is not promotable** (E2). Promotable iff the CPCV fold-pass fraction
   ≥ ``fold_pass_min(N)`` (§9.1) — plus, when a champion max-DD is supplied (Phase 2 seam), max DD
   ≤ 1.25× champion's (§6.4 step 2).
+* **Margin floor** (WO-3, 2026-08-13) — a fold-pass FRACTION says how often the edge was positive,
+  never by how much. Four rsi2 runs passed at exactly 12/15 = 80.0% with every passing split under
+  0.02%/day (median ≈ 0.0006%/day): statistically "positive", economically indistinguishable from
+  zero. So promotion now ALSO requires the **median passing-split expectancy ≥ cost_floor /
+  MARGIN_FLOOR_DAYS per day** — see :data:`MARGIN_FLOOR_DAYS` for the constant's derivation. The
+  ``fold_pass_fraction`` comparison deliberately stays strict-``<`` (silently flipping it to ``<=``
+  would move a documented boundary invisibly; the margin floor is the real fix).
+* **Winner stability** (WO-3) — the sweep's winning config changed three times across near-identical
+  grid densities. The report records whether the adjacent density picked the same winner as a
+  **flag** (:class:`WinnerStability`), NOT an auto-fail: instability is evidence about the ranking
+  surface's flatness, and turning it into a hard gate would silently discard genuinely robust
+  strategies whose neighbouring configs are near-ties.
 * **Persistence** — every validated candidate is logged to SQLite ``param_sets``
   (``status='candidate'``, ``validation_report`` JSON citing N, ``evaluated_at``) for audit, and a
   report artifact (md + json) is written via :mod:`engine.learning.reports`.
@@ -33,8 +45,9 @@ import asyncio
 import calendar as _calendar
 import json
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -56,6 +69,32 @@ CPCV_N_TEST_FOLDS = 2
 WF_TRAIN_MONTHS = 6
 WF_TEST_MONTHS = 1
 CHAMPION_MAX_DD_MULT = 1.25            # §6.4 step 2: max DD ≤ 1.25× champion's
+
+#: WO-3 margin floor: the median PASSING CPCV split must earn at least ``cost_floor / 20`` per day,
+#: where ``cost_floor`` is the strategy's full round-trip friction (fees + spread, WO-2) at the
+#: sweep's sizing — ``CostModel.breakeven_pct(reference_notional, product)``.
+#:
+#: DERIVATION OF THE 20. It is the §7.1 swing holding cap / the §6.3 ``rebalance_days`` upper bound —
+#: 20 trading sessions ≈ one month. Read it as: **a position must, over the horizon it is actually
+#: held, earn at least the one round trip it costs to hold it.** Spread the round trip evenly across
+#: those 20 sessions and the per-day bar is ``cost_floor/20``. An edge that merely covers its own
+#: costs once per holding period sits exactly ON the floor; anything below it is paying the broker
+#: and the spread to take risk.
+#:
+#: CALIBRATION AGAINST THE RECORDED NUMBERS (IMPROVEMENT_SPEC Part III / F3):
+#:   * CNC ₹20k cost floor = 0.2992% fees + 0.0200% spread = 0.3192% ⇒ floor 0.01596 %/day.
+#:   * rsi2's four "promotable" runs: median passing split ≈ 0.0006 %/day ⇒ ~27× BELOW the floor.
+#:     Even the best recorded baseline (mom, max passing split 0.0058 %/day) is ~3× below it.
+#:     Every recorded pre-WO-2 promotion therefore fails, which is the intent.
+#:   * A genuinely cost-clearing edge passes: a swing rule that nets one round trip (0.3192%) per
+#:     20-session holding period lands exactly on 0.01596 %/day; anything better clears it.
+#: Intraday strategies (``orb``) round-trip far more often than once per 20 sessions, so for them
+#: this floor is a LOWER bound rather than the true bar — honest, and the sweep's own C3 cost gate
+#: plus the fold-pass rule carry that case. Overridable per call, never silently.
+MARGIN_FLOOR_DAYS = 20
+
+#: The sweep sizing the cost floor is quoted at when the caller supplies none (WO-2 (iii)).
+_DEFAULT_REFERENCE_NOTIONAL = Decimal("20000")
 
 
 # --------------------------------------------------------------------------- fold_pass_min (§6.4/§9.1)
@@ -91,6 +130,13 @@ class ParamSet(BaseModel):
     params: dict[str, float]
     trial_count_n: int | None = None
     sweep_stats: dict[str, float | None] | None = None
+    #: WO-3 margin floor: full round-trip friction (fees + spread) at the sweep's sizing, in percent
+    #: (``SweepReport.cost_floor_pct``). ``None`` ⇒ the pipeline derives it from the CostModel.
+    cost_floor_pct: float | None = None
+    #: WO-3 winner-stability flag inputs (all optional; absent ⇒ "not assessed", never a fail).
+    grid_density: str | None = None
+    adjacent_density: str | None = None
+    adjacent_winner: dict[str, float] | None = None
 
 
 class WalkForwardFold(BaseModel):
@@ -120,6 +166,70 @@ class CPCVFold(BaseModel):
     passed: bool
 
 
+class WinnerStability(BaseModel):
+    """WO-3 (b): did the ADJACENT grid density select the same winning config? A FLAG, never a fail.
+
+    ``stable is None`` means "not assessed" — no adjacent-density winner was supplied. An unstable
+    winner is reported (report note + this structured field) so a reader can weigh it; the promotion
+    rule deliberately ignores it, because near-ties on a flat ranking surface are not by themselves
+    evidence of a bad strategy — they are evidence about the SURFACE.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    grid_density: str | None
+    adjacent_density: str | None
+    winner: dict[str, float]
+    adjacent_winner: dict[str, float] | None
+    stable: bool | None
+    differing_params: list[str] = Field(default_factory=list)
+
+    def note(self) -> str:
+        """One-line rendering for ``ValidationReport.notes`` (so it lands in the md artifact)."""
+        if self.stable is None:
+            return (
+                "Winner stability (WO-3): NOT ASSESSED — no adjacent-grid-density winner was "
+                "supplied for comparison. Flag only; it never affects the promotion verdict."
+            )
+        if self.stable:
+            return (
+                f"Winner stability (WO-3): STABLE — the {self.adjacent_density!r} grid density "
+                f"selected the same winning config as {self.grid_density!r}."
+            )
+        return (
+            f"Winner stability (WO-3): UNSTABLE — the {self.adjacent_density!r} grid density "
+            f"selected a DIFFERENT winner (differs on: {', '.join(self.differing_params)}). "
+            "Flag only, not an auto-fail: it says the ranking surface is flat around the optimum, "
+            "so treat the specific parameter values as weakly identified."
+        )
+
+
+def winner_stability(
+    winner: Mapping[str, float],
+    adjacent_winner: Mapping[str, float] | None,
+    *,
+    grid_density: str | None = None,
+    adjacent_density: str | None = None,
+) -> WinnerStability:
+    """Compare a sweep winner with the adjacent grid density's winner (pure, §9.6).
+
+    ``adjacent_winner is None`` ⇒ ``stable=None`` ("not assessed"). Parameters present in only one of
+    the two dicts count as differing (a density that adds an axis genuinely changed the winner).
+    """
+    win = {k: float(v) for k, v in winner.items()}
+    if adjacent_winner is None:
+        return WinnerStability(
+            grid_density=grid_density, adjacent_density=adjacent_density,
+            winner=win, adjacent_winner=None, stable=None, differing_params=[],
+        )
+    adj = {k: float(v) for k, v in adjacent_winner.items()}
+    differing = sorted(k for k in set(win) | set(adj) if win.get(k) != adj.get(k))
+    return WinnerStability(
+        grid_density=grid_density, adjacent_density=adjacent_density,
+        winner=win, adjacent_winner=adj, stable=not differing, differing_params=differing,
+    )
+
+
 class ValidationReport(BaseModel):
     """§6.4 step 2 output. MUST cite the trial count N — a report with no cited N is not promotable.
 
@@ -144,6 +254,13 @@ class ValidationReport(BaseModel):
     walk_forward: list[WalkForwardFold]
     cpcv: list[CPCVFold]
     cpcv_fold_pass_fraction: float | None
+    #: WO-3 margin floor inputs/outputs — median expectancy of the PASSING splits, the cost floor it
+    #: is measured against, and the resulting per-day bar (all %; None ⇒ not evaluable).
+    cpcv_median_passing_expectancy_pct: float | None = None
+    cost_floor_pct: float | None = None
+    margin_floor_pct_per_day: float | None = None
+    #: WO-3 winner-stability FLAG (never part of the promotion rule).
+    winner_stability: WinnerStability | None = None
     promotable: bool
     reasons: list[str]                              # every reason the report is NOT promotable
     sweep_stats: dict[str, float | None] | None = None
@@ -227,19 +344,42 @@ def cpcv_splits(
 
 
 # --------------------------------------------------------------------------- promotion rule (§6.4/§9.1)
+def margin_floor_pct_per_day(
+    cost_floor_pct: float | None, *, margin_floor_days: int = MARGIN_FLOOR_DAYS
+) -> float | None:
+    """The WO-3 per-day expectancy floor = ``cost_floor_pct / margin_floor_days`` (see
+    :data:`MARGIN_FLOOR_DAYS` for the derivation). ``None`` in ⇒ ``None`` out."""
+    if cost_floor_pct is None:
+        return None
+    if margin_floor_days < 1:
+        raise ValueError(f"margin_floor_days must be >= 1, got {margin_floor_days}")
+    return float(cost_floor_pct) / float(margin_floor_days)
+
+
 def promotion_decision(
     n: int | None,
     fold_pass_fraction: float | None,
     *,
     max_dd_pct: float | None = None,
     champion_max_dd_pct: float | None = None,
+    median_passing_expectancy_pct: float | None = None,
+    cost_floor_pct: float | None = None,
+    margin_floor_days: int = MARGIN_FLOOR_DAYS,
 ) -> tuple[bool, list[str]]:
     """The deterministic §6.4 step-2 pass rule. Returns ``(promotable, reasons_not_promotable)``.
 
     * no cited N ⇒ not promotable (E2);
     * no CPCV folds ⇒ not promotable (nothing was validated out-of-sample);
-    * promotable iff fold-pass fraction ≥ ``fold_pass_min(N)`` (§9.1) — and, when a champion max-DD
-      is provided (Phase-2 ``ChampionChallenger`` seam), max DD ≤ 1.25× champion's.
+    * fold-pass fraction ≥ ``fold_pass_min(N)`` (§9.1) — comparison stays **strict-<**, deliberately
+      unchanged by WO-3 (moving a documented boundary silently is a semantics trap);
+    * **margin floor (WO-3)**: median PASSING-split expectancy ≥ ``cost_floor_pct /
+      margin_floor_days`` per day. FAIL-CLOSED — no cost floor supplied ⇒ not promotable, exactly
+      like a missing N: a floor that silently no-ops when the caller forgets to pass it would
+      re-open the near-zero-margin hole it exists to close;
+    * and, when a champion max-DD is provided (Phase-2 ``ChampionChallenger`` seam),
+      max DD ≤ 1.25× champion's.
+
+    Winner stability is NOT here on purpose — WO-3 makes it a report-level flag, not a gate.
     """
     reasons: list[str] = []
     if n is None:
@@ -254,6 +394,25 @@ def promotion_decision(
             reasons.append(
                 f"CPCV fold-pass fraction {fold_pass_fraction:.1%} < fold_pass_min(N={n}) = {need:.0%}"
             )
+    # ---- WO-3 margin floor: "how often positive" is not "positive enough to be worth trading" ----
+    floor = margin_floor_pct_per_day(cost_floor_pct, margin_floor_days=margin_floor_days)
+    if floor is None:
+        reasons.append(
+            "margin floor NOT EVALUATED — no per-trade cost floor supplied (WO-3). A margin floor "
+            "that silently skips is no floor; fail closed."
+        )
+    elif median_passing_expectancy_pct is None:
+        reasons.append(
+            f"margin floor NOT EVALUATED — no passing CPCV splits to take a median of; the floor is "
+            f"{floor:.5f}%/day (= cost floor {cost_floor_pct:.4f}% / {margin_floor_days} sessions)"
+        )
+    elif median_passing_expectancy_pct < floor:
+        reasons.append(
+            f"median passing-split expectancy {median_passing_expectancy_pct:.5f}%/day < margin "
+            f"floor {floor:.5f}%/day (= round-trip cost floor {cost_floor_pct:.4f}% / "
+            f"{margin_floor_days} sessions, WO-3): the edge is positive but not economically "
+            "distinguishable from zero at these costs"
+        )
     if champion_max_dd_pct is not None and max_dd_pct is not None:
         cap = CHAMPION_MAX_DD_MULT * champion_max_dd_pct
         if max_dd_pct > cap:
@@ -262,6 +421,38 @@ def promotion_decision(
                 f"({champion_max_dd_pct:.2f}%) = {cap:.2f}% (§6.4 step 2)"
             )
     return (not reasons, reasons)
+
+
+_COST_FLOOR_MEMO: dict[str, float | None] = {}
+
+
+def default_cost_floor_pct(strategy_id: str) -> float | None:
+    """Round-trip friction (fees + spread, WO-2) at the ₹20,000 sweep sizing, in percent.
+
+    The WO-3 margin floor is a multiple of this. Derived from the SAME ``CostModel`` the sweeps and
+    the live gate use, so the floor can never drift from the costs the returns were charged. Unknown
+    strategies fall back to **CNC** (delivery — the dearer surface, and the product every non-``orb``
+    baseline and the filings rules trade), so an unmapped strategy gets the STRICTER floor.
+
+    Returns ``None`` if the cost model cannot be built at all (missing/broken ``config/costs.yaml``);
+    :func:`promotion_decision` then fails closed with an explicit reason rather than skipping the
+    floor. Memoized per strategy — imports are function-level (``engine._preload`` discipline).
+    """
+    if strategy_id in _COST_FLOOR_MEMO:
+        return _COST_FLOOR_MEMO[strategy_id]
+    try:
+        from engine.learning.sweep import PRODUCT_BY_STRATEGY
+        from engine.strategy.cost_model import CostModel
+
+        product = PRODUCT_BY_STRATEGY.get(strategy_id, "CNC")
+        floor = float(
+            CostModel.from_config().breakeven_pct(_DEFAULT_REFERENCE_NOTIONAL, product)
+        )
+    except Exception as exc:                                    # noqa: BLE001 — reported, not raised
+        _log.warning("cost_floor_unavailable", strategy=strategy_id, error=str(exc))
+        floor = None
+    _COST_FLOOR_MEMO[strategy_id] = floor
+    return floor
 
 
 #: (strategy_id, params) -> cost-adjusted daily net return series (ascending date index).
@@ -291,6 +482,13 @@ class ValidationPipeline:
     champion_max_dd_provider:
         ``strategy_id -> champion max-DD %`` (Phase-2 ``ChampionChallenger`` seam); ``None`` values
         skip the 1.25× DD comparison (no champion exists in Phase 1).
+    cost_floor_provider:
+        ``strategy_id -> round-trip friction %`` for the WO-3 margin floor. Defaults to
+        :func:`default_cost_floor_pct` (the CostModel at the ₹20,000 sweep sizing), so the floor is
+        enforced even when the caller passes nothing; a ``ParamSet.cost_floor_pct`` (the sweep's own
+        measured floor) overrides it per candidate.
+    margin_floor_days:
+        The WO-3 constant (default :data:`MARGIN_FLOOR_DAYS` = 20) — see its derivation.
     """
 
     def __init__(
@@ -302,6 +500,8 @@ class ValidationPipeline:
         reports_dir: str | Path | None = None,
         splitter: Splitter | None = None,
         champion_max_dd_provider: Callable[[str], float | None] | None = None,
+        cost_floor_provider: Callable[[str], float | None] | None = None,
+        margin_floor_days: int = MARGIN_FLOOR_DAYS,
         cpcv_n_folds: int = CPCV_N_FOLDS,
         cpcv_n_test_folds: int = CPCV_N_TEST_FOLDS,
         purge_days: int = CPCV_PURGE_DAYS,
@@ -314,6 +514,8 @@ class ValidationPipeline:
         self._conn = conn
         self._reports_dir = Path(reports_dir) if reports_dir is not None else None
         self._champion_max_dd = champion_max_dd_provider or (lambda _sid: None)
+        self._cost_floor = cost_floor_provider or default_cost_floor_pct
+        self._margin_floor_days = margin_floor_days
         self._wf_train_months = wf_train_months
         self._wf_test_months = wf_test_months
         if splitter is None:
@@ -369,13 +571,41 @@ class ValidationPipeline:
             max_dd = float(-np.min(equity / np.maximum.accumulate(equity) - 1.0) * 100.0)
 
         wf_folds = self._walk_forward(dates, values)
-        cpcv_folds, pass_fraction = self._cpcv(values)
+        cpcv_folds, pass_fraction, median_passing = self._cpcv(values)
 
         n = params.trial_count_n
         champion_dd = self._champion_max_dd(strategy_id)
-        promotable, reasons = promotion_decision(
-            n, pass_fraction, max_dd_pct=max_dd, champion_max_dd_pct=champion_dd
+        cost_floor = (
+            params.cost_floor_pct
+            if params.cost_floor_pct is not None
+            else self._cost_floor(strategy_id)
         )
+        floor = margin_floor_pct_per_day(cost_floor, margin_floor_days=self._margin_floor_days)
+        stability = winner_stability(
+            params.params,
+            params.adjacent_winner,
+            grid_density=params.grid_density,
+            adjacent_density=params.adjacent_density,
+        )
+        promotable, reasons = promotion_decision(
+            n,
+            pass_fraction,
+            max_dd_pct=max_dd,
+            champion_max_dd_pct=champion_dd,
+            median_passing_expectancy_pct=median_passing,
+            cost_floor_pct=cost_floor,
+            margin_floor_days=self._margin_floor_days,
+        )
+        notes = [stability.note()]
+        if floor is not None:
+            notes.append(
+                f"Margin floor (WO-3): median passing-split expectancy must be >= {floor:.5f}%/day "
+                f"(= round-trip friction {cost_floor:.4f}% at the ₹{_DEFAULT_REFERENCE_NOTIONAL} "
+                f"sweep sizing, incl. the measured spread, spread over {self._margin_floor_days} "
+                f"sessions). Observed: "
+                + ("no passing splits" if median_passing is None else f"{median_passing:.5f}%/day")
+                + "."
+            )
         return ValidationReport(
             strategy_id=strategy_id,
             param_set_id=params.param_set_id,
@@ -391,9 +621,14 @@ class ValidationPipeline:
             walk_forward=wf_folds,
             cpcv=cpcv_folds,
             cpcv_fold_pass_fraction=pass_fraction,
+            cpcv_median_passing_expectancy_pct=median_passing,
+            cost_floor_pct=cost_floor,
+            margin_floor_pct_per_day=floor,
+            winner_stability=stability,
             promotable=promotable,
             reasons=reasons,
             sweep_stats=params.sweep_stats,
+            notes=notes,
             generated_at=self._clock.now(),
         )
 
@@ -420,7 +655,13 @@ class ValidationPipeline:
             )
         return folds
 
-    def _cpcv(self, values: np.ndarray) -> tuple[list[CPCVFold], float | None]:
+    def _cpcv(self, values: np.ndarray) -> tuple[list[CPCVFold], float | None, float | None]:
+        """Returns ``(folds, pass_fraction, median_passing_expectancy_pct)``.
+
+        The median is over the PASSING splits only (WO-3): it answers "when this edge worked, by how
+        much?" — the question a pass FRACTION cannot answer, and the one four boundary-exact rsi2
+        promotions turned out to answer with ~0.0006%/day.
+        """
         splits = self._splitter(len(values))
         folds: list[CPCVFold] = []
         for i, (train_idx, test_idx) in enumerate(splits):
@@ -437,8 +678,10 @@ class ValidationPipeline:
                 )
             )
         if not folds:
-            return [], None
-        return folds, sum(f.passed for f in folds) / len(folds)
+            return [], None, None
+        passing = [f.expectancy_pct for f in folds if f.passed and f.expectancy_pct is not None]
+        median_passing = float(np.median(passing)) if passing else None
+        return folds, sum(f.passed for f in folds) / len(folds), median_passing
 
     def _persist(self, report: ValidationReport) -> None:
         """Audit row per §6.4 step 1: every surfaced candidate is a ``param_sets`` row

@@ -9,7 +9,11 @@ signal builders are testable without the heavy backtest stack. This file pins:
 * the §6.1 v2 (2026-07-12) **range-anchored stop/target** — risk = ``stop_range_frac × (entry −
   range_low)`` stamped as per-signal ``sl_stop``/``tp_stop`` fractions — and the **C3 cost floor**
   that skips breakouts whose risk cannot pay a round trip twice (risk/price < 4 × per-side fee);
-* the ``rsi2`` **max_hold_days scheduled time-exit** (modelled 2026-07-12) OR-ed onto the RSI-exit.
+* the ``rsi2`` **max_hold_days scheduled time-exit** (modelled 2026-07-12) OR-ed onto the RSI-exit;
+* the WO-2 (2026-08-13) **next-bar-open shift** — the pure transform ``_shift_to_next_bar`` /
+  ``_shift_stop_frame`` that turns "signal on bar t" into "order on bar t+1, filled at its open",
+  including the session-aware drop that stops an intraday signal leaking into the next session;
+* WO-2 (iv): the ``mom`` ranking window **excludes the traded session** once fills are next-open.
 """
 
 from __future__ import annotations
@@ -19,7 +23,15 @@ import pandas as pd
 import pytest
 
 from engine.core.clock import IST
-from engine.learning.sweep import _Frames, _signals_orb, _signals_rsi2
+from engine.learning.sweep import (
+    _Frames,
+    _session_codes,
+    _shift_stop_frame,
+    _shift_to_next_bar,
+    _signals_mom,
+    _signals_orb,
+    _signals_rsi2,
+)
 
 _SYM = "ZZ"
 _DAY = "2024-06-03"                     # a Monday; a full 09:15–15:29 IST session
@@ -150,3 +162,95 @@ def test_rsi2_max_hold_days_schedules_time_exit():
     sig0 = _signals_rsi2(frames, {**base, "max_hold_days": 0.0})
     assert int(sig0.exits[_SYM].sum()) == 0
     assert int(sig0.entries[_SYM].sum()) == entry_positions.size   # entries unchanged (cache reused)
+
+
+# --------------------------------------------------------------------------- WO-2 next-bar-open shift
+def test_shift_to_next_bar_moves_signals_forward_and_drops_the_last_one():
+    """A signal computed on bar t must act on bar t+1; a signal on the LAST bar has no bar to fill
+    into and is dropped (never silently filled at its own bar, the pre-WO-2 defect)."""
+    idx = pd.bdate_range("2024-01-01", periods=5)
+    sig = pd.DataFrame({_SYM: [False, True, False, False, True]}, index=idx)
+
+    out = _shift_to_next_bar(sig, session_codes=None)
+
+    assert list(out[_SYM]) == [False, False, True, False, False]
+    assert out.dtypes.iloc[0] is np.dtype(bool)      # still boolean — vectorbt needs a bool mask
+    assert int(sig[_SYM].sum()) == 2 and int(out[_SYM].sum()) == 1   # the last-bar signal is dropped
+
+
+def test_shift_to_next_bar_never_crosses_an_intraday_session_boundary():
+    """Intraday (orb): a signal on a session's LAST bar must not fill on the next session's first
+    bar — the session gap is not a fillable next bar."""
+    idx = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2024-06-03 15:28", tz=IST), pd.Timestamp("2024-06-03 15:29", tz=IST),
+            pd.Timestamp("2024-06-04 09:15", tz=IST), pd.Timestamp("2024-06-04 09:16", tz=IST),
+        ]
+    )
+    sig = pd.DataFrame({_SYM: [True, True, False, False]}, index=idx)
+    codes = _session_codes(idx)
+    assert list(codes) == [0, 0, 1, 1]
+
+    out = _shift_to_next_bar(sig, session_codes=codes)
+
+    assert list(out[_SYM]) == [False, True, False, False]   # 15:28 -> 15:29; 15:29 -> dropped
+
+
+def test_shift_stop_frame_travels_with_its_entry_and_passes_scalars_through():
+    """Per-signal sl/tp FRACTIONS are stamped on the signal bar, so they must move with it."""
+    idx = pd.bdate_range("2024-01-01", periods=4)
+    stops = pd.DataFrame({_SYM: [np.nan, 0.025, np.nan, np.nan]}, index=idx)
+
+    out = _shift_stop_frame(stops, session_codes=None)
+
+    assert np.isnan(out[_SYM].iloc[1])
+    assert float(out[_SYM].iloc[2]) == pytest.approx(0.025)     # same row as the shifted entry
+    assert _shift_stop_frame(0.04, session_codes=None) == 0.04  # rsi2's constant stop_pct
+    assert _shift_stop_frame(None, session_codes=None) is None
+
+
+def _mom_frames() -> _Frames:
+    """Two symbols over 24 daily bars. AAA leads on 4-week momentum through session t=22, then a
+    single −20% close on t=23 flips the ranking. With top_n=1 the winner therefore differs
+    depending on whether the ranking window includes session 23 or stops at 22."""
+    n = 24
+    idx = pd.bdate_range("2024-01-01", periods=n)
+    aaa = np.array([100.0 + 2.0 * i for i in range(n)])      # steady strong uptrend
+    bbb = np.array([100.0 + 0.5 * i for i in range(n)])      # weaker uptrend
+    aaa[-1] = aaa[-2] * 0.80                                 # AAA collapses on the LAST session
+    close = pd.DataFrame({"AAA": aaa, "BBB": bbb}, index=idx)
+    return _Frames(
+        close=close,
+        high=close * 1.01,
+        low=close * 0.99,
+        open=close.copy(),
+        volume=pd.DataFrame(1000.0, index=idx, columns=close.columns),
+        intraday=False,
+        auction_open=None,
+    )
+
+
+def test_mom_ranking_window_excludes_the_traded_session():
+    """WO-2 (iv): the rank that FILLS on session t+1 is computed from closes through session t.
+
+    The builder stamps the rebalance on row t and ``SweepRunner._portfolio`` shifts it to t+1, so in
+    fill-row space the ranking input is ``momentum.shift(1)`` — the live 'through d−1' window
+    (ScanContext builds momentum from bars through d−1; the scanner trades on d). Here AAA's crash
+    lands on row 23: it must NOT influence the order that fills on row 23, and it MUST flip the
+    order that would fill on row 24 (which does not exist ⇒ dropped)."""
+    frames = _mom_frames()
+    close = frames.close
+    sig = _signals_mom(frames, {"top_n": 1.0, "rebalance_days": 1.0})
+
+    mom = close / close.shift(20) - 1.0
+    # signal rows are pre-shift; the row that FILLS at t+1 open is the signal row t.
+    signal_row_for_last_fill = len(close) - 2               # fills on the final row
+    assert bool(sig.entries["AAA"].iloc[signal_row_for_last_fill]) is True   # ranked on closes <= t
+    assert bool(sig.entries["BBB"].iloc[signal_row_for_last_fill]) is False
+    # the crash session itself (row 23) does rank BBB first — but that decision can only fill on a
+    # row 24 that does not exist, so it is dropped, exactly as a live pre-open rank for d+1 would be.
+    assert float(mom["AAA"].iloc[-1]) < float(mom["BBB"].iloc[-1])
+    assert bool(sig.entries["BBB"].iloc[-1]) is True
+    shifted = _shift_to_next_bar(sig.entries, session_codes=None)
+    assert bool(shifted["BBB"].iloc[-1]) is False           # nothing from the crash bar ever fills
+    assert bool(shifted["AAA"].iloc[-1]) is True            # the pre-crash rank is what trades

@@ -16,6 +16,27 @@ guard, ``engine._preload`` — ``import engine`` establishes sklearn's OpenMP ru
 load); the module top level is pandas/numpy + stdlib only, so ``import engine.learning.sweep`` stays
 cheap for the pure-Python test tier.
 
+FILL MECHANICS — **next-bar OPEN** (WO-2, 2026-08-13; this is the one that invalidated every prior
+report). Signals are computed from bar *t*'s COMPLETED values, so no order derived from them can fill
+before bar *t+1*. Implementation, of the two the WO offered: **the signal frames are shifted forward
+one bar and an explicit price frame (``price=frames.open``) is passed to ``from_signals``** — so a
+signal computed on *t* becomes an order on row *t+1* and fills at *t+1*'s OPEN. (The alternative —
+leaving signals on *t* and passing ``open.shift(-1)`` as the price — fills at the same price but
+books the trade on row *t*, which back-dates the position into a session it was not held in, marks
+row *t*'s return with it, and evaluates row *t*'s high/low against a stop that did not exist yet.
+Shifting the signals keeps the trade, its return and its stop all in the session the fill happened.)
+Previously ``price`` was left ``None`` ⇒ ``np.inf`` ⇒ the SAME row's close (verified in the installed
+``vectorbt/portfolio/nb.py``: "upper bound is close"), i.e. a fill at the very close that generated
+the signal. Consequences pinned by ``tests/unit/test_sweep_smoke.py``:
+
+* signals on the LAST row of the frame are dropped — there is no bar left to fill them in;
+* for ``orb`` (intraday) the shift is **session-aware**: a signal on a session's last bar is dropped,
+  never carried into the next session's first bar. The forced MIS session-end square-off is the ONE
+  signal deliberately NOT shifted (shifting it would push the exit into the next session and the
+  position would ride overnight); it fills at the session's last bar's open;
+* stops/targets anchor at the FILL price (``stop_entry_price='fillprice'``), not at some other bar's
+  close — with next-open fills the entry bar's close is no longer the price paid.
+
 Documented modelling choices (Phase-1 backtests are **vectorbt-vectorized only**, §8.2; the
 event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in Phase 3):
 
@@ -27,12 +48,24 @@ event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in 
   day a name is flat) — the return of an equal-weight allocation running the rule across the frame.
   §7.1 portfolio limits / concurrent-position caps / sizing are the gate + paper layer's job (Phase
   2/3), deliberately NOT modelled in the raw-edge sweep.
-* **Costs.** A constant proportional per-side fee = ½ × ``CostModel`` round-trip breakeven at a
-  reference notional (``reference_notional``, default ₹20,000), charged by vectorbt on BOTH legs so a
-  round trip pays ≈ the full breakeven. This is an **approximation**: the fixed cost components (DP
-  flat, delivery brokerage flat, MIS per-order cap) do not scale linearly with notional, so the fee
-  is exact only near the reference book size — documented in every report's notes. ``orb`` is priced
-  MIS; ``rsi2``/``trend``/``mom`` are priced CNC (delivery).
+* **Costs — fees.** A constant proportional per-side fee = ½ × ``CostModel.fee_breakeven_pct`` (the
+  STATUTORY-fee breakeven, spread excluded — spread is charged separately as slippage, see below) at
+  a reference notional (``reference_notional``, default ₹20,000), charged by vectorbt on BOTH legs so
+  a round trip pays ≈ the full fee breakeven. This is an **approximation**: the fixed cost components
+  (DP flat, delivery brokerage flat, MIS per-order cap) do not scale linearly with notional, so the
+  fee is exact only near the reference book size — documented in every report's notes. ``orb`` is
+  priced MIS; ``rsi2``/``trend``/``mom`` are priced CNC (delivery).
+* **Costs — spread** (WO-2). ``CostModel.half_spread_pct`` (½ of the measured ``costs.yaml``
+  ``spread_pct``) is passed to vectorbt as ``slippage``, so EVERY order fills half a spread against
+  itself and a round trip pays the full measured spread — on top of the fees. Before WO-2 the sweep
+  charged zero spread and zero slippage anywhere (F4).
+* **Sizing** (WO-2). ``init_cash`` defaults to ``reference_notional`` (₹20,000 — the live per-trade
+  notional), not the old fixed ₹100,000. Each per-symbol backtest opens one all-in position, so
+  trades are sized at the same notional the constant fee was calibrated at. (Fees/slippage here are
+  proportional, so the RETURN series is scale-invariant; what the old 100k-vs-20k mismatch broke was
+  the claim that the modelled constant fee was the right constant for the traded size.) Equity
+  compounds within a symbol, so later positions drift from the reference — the constant-fee
+  approximation is exact only near it.
 * **Stops/exits.** ``orb`` uses vectorbt ``sl_stop``/``tp_stop`` per-signal fractions (intrabar via
   high/low) with risk anchored at the OPPOSITE opening-range edge (§6.1 v2 2026-07-12:
   ``stop_range_frac × (entry − range_low)``; sub-cost-floor breakouts — risk < 2× round-trip
@@ -81,8 +114,14 @@ _log = get_logger("engine.learning.sweep")
 
 PRICE_BASELINES: tuple[str, ...] = ("orb", "rsi2", "trend", "mom")
 
-#: product each baseline is costed under (§6.1: orb intraday MIS; the rest delivery CNC).
-_PRODUCT: dict[str, str] = {"orb": "MIS", "rsi2": "CNC", "trend": "CNC", "mom": "CNC"}
+#: product each baseline is costed under (§6.1: orb intraday MIS; the rest delivery CNC). Public —
+#: ``engine.learning.validate`` reads it to derive the §6.4 margin-floor cost floor per strategy.
+PRODUCT_BY_STRATEGY: dict[str, str] = {"orb": "MIS", "rsi2": "CNC", "trend": "CNC", "mom": "CNC"}
+_PRODUCT = PRODUCT_BY_STRATEGY          # internal alias (kept for readability at call sites)
+
+#: The live per-trade notional the cost model is calibrated at (§6.3/§7.1) — also the sweep's default
+#: per-symbol ``init_cash`` (WO-2 (iii): calibrate the constant fee at the size actually traded).
+REFERENCE_NOTIONAL_DEFAULT: Decimal = Decimal("20000")
 
 #: grid density → target points per parameter (before the default is unioned in). Configurable via
 #: the CLI ``--grid-density``; the grid cardinality is the trial count N (§6.4 step 1).
@@ -96,6 +135,9 @@ _RSI_PERIOD = 2
 _STOCK_DMA = 200
 _MOM_LOOKBACK = 20                  # 4 weeks × 5 sessions (indicators.momentum)
 _TRADING_DAYS_Y = 252
+
+#: WO-2 (i): what every report's ``fill_mechanics`` field and modelling note declare.
+FILL_MECHANICS = "next_bar_open"
 
 
 # --------------------------------------------------------------------------- report models
@@ -127,7 +169,12 @@ class SweepReport(BaseModel):
     data_start: date | None
     data_end: date | None
     reference_notional: str                # Decimal as string (money convention)
-    per_side_fee_pct: float                # the modelled constant per-side fee, %
+    per_side_fee_pct: float                # the modelled constant per-side STATUTORY fee, %
+    init_cash: str = "0"                   # per-symbol backtest cash (= reference_notional, WO-2)
+    spread_pct: float = 0.0                # measured full quoted spread, % (costs.yaml, WO-2)
+    slippage_per_leg_pct: float = 0.0      # = spread_pct/2, charged by vectorbt on EVERY order
+    cost_floor_pct: float = 0.0            # round-trip friction at the reference notional (fees+spread)
+    fill_mechanics: str = "next_bar_open"  # WO-2; "same_bar_close" was the pre-2026-08-13 defect
     stats: list[ParamSetStat]
     best_params: dict[str, float] | None   # ranked by expectancy_pct then total_return_pct
     notes: list[str] = Field(default_factory=list)
@@ -247,6 +294,9 @@ class SweepRunner:
         Single "now" (§3.2) — stamps ``generated_at``.
     reference_notional / init_cash:
         The book size the constant per-side fee is calibrated at, and per-symbol backtest cash.
+        ``init_cash=None`` (the default) means "the same number" — WO-2 (iii): the pre-2026-08-13
+        default charged a fee calibrated at ₹20,000 to a ₹100,000 book. Pass an explicit
+        ``init_cash`` only to deliberately re-introduce that mismatch.
     index_symbol:
         Optional reference-index symbol whose daily closes drive the ``rsi2`` regime filter. ``None``
         ⇒ the regime filter is DISABLED for the sweep (noted in the report); the live scanner always
@@ -259,15 +309,16 @@ class SweepRunner:
         cost_model: CostModel,
         clock: Clock,
         *,
-        reference_notional: Decimal = Decimal("20000"),
-        init_cash: float = 100_000.0,
+        reference_notional: Decimal = REFERENCE_NOTIONAL_DEFAULT,
+        init_cash: float | None = None,
         index_symbol: str | None = None,
     ) -> None:
         self._store = store
         self._cost_model = cost_model
         self._clock = clock
         self._reference_notional = Decimal(reference_notional)
-        self._init_cash = float(init_cash)
+        # WO-2 (iii): trade at the notional the fee constant was calibrated at.
+        self._init_cash = float(self._reference_notional) if init_cash is None else float(init_cash)
         self._index_symbol = index_symbol
         # frames cached per strategy so returns_for() recomputes without re-reading the store.
         self._frames: dict[str, _Frames] = {}
@@ -278,10 +329,25 @@ class SweepRunner:
 
     # ------------------------------------------------------------------ costs
     def _per_side_fee(self, strategy_id: str) -> float:
-        """½ × round-trip breakeven at the reference notional, as a fraction (charged both legs)."""
+        """½ × round-trip STATUTORY-fee breakeven at the reference notional, as a fraction.
+
+        Fees only (``fee_breakeven_pct``) — the spread half of the friction is charged separately as
+        vectorbt ``slippage`` (:meth:`_slippage_per_leg`), so using the spread-inclusive
+        ``breakeven_pct`` here would double-count it (WO-2).
+        """
         product = _PRODUCT[strategy_id]
-        be_pct = float(self._cost_model.breakeven_pct(self._reference_notional, product))
+        be_pct = float(self._cost_model.fee_breakeven_pct(self._reference_notional, product))
         return be_pct / 100.0 / 2.0
+
+    def _slippage_per_leg(self) -> float:
+        """Half the measured quoted spread, as a fraction — vectorbt charges it on EVERY order, so a
+        round trip pays the full ``costs.yaml`` ``spread_pct`` (WO-2)."""
+        return float(self._cost_model.half_spread_pct) / 100.0
+
+    def _cost_floor_pct(self, strategy_id: str) -> float:
+        """Full round-trip friction (fees + spread) at the reference notional, in percent — the
+        number WO-3's promotion margin floor is expressed as a fraction of."""
+        return float(self._cost_model.breakeven_pct(self._reference_notional, _PRODUCT[strategy_id]))
 
     # ------------------------------------------------------------------ public surface
     def run(
@@ -338,6 +404,11 @@ class SweepRunner:
             data_end=d_end,
             reference_notional=str(self._reference_notional),
             per_side_fee_pct=round(fee * 100.0, 6),
+            init_cash=f"{Decimal(str(self._init_cash)):.2f}",   # money convention: Decimal as string
+            spread_pct=float(self._cost_model.spread_pct),
+            slippage_per_leg_pct=round(self._slippage_per_leg() * 100.0, 6),
+            cost_floor_pct=round(self._cost_floor_pct(strategy_id), 6),
+            fill_mechanics=FILL_MECHANICS,
             stats=stats,
             best_params=best,
             notes=notes,
@@ -453,16 +524,46 @@ class SweepRunner:
         return pd.Timestamp(idx[0]).date(), pd.Timestamp(idx[-1]).date()
 
     def _modelling_notes(self, strategy_id: str, frames: _Frames) -> list[str]:
+        bar = "1m bar" if frames.intraday else "session"
         notes = [
-            f"Costs: constant per-side fee {self._fee.get(strategy_id, 0.0) * 100:.4f}% "
-            f"(= ½ × round-trip breakeven at ₹{self._reference_notional} {_PRODUCT[strategy_id]}), "
-            "charged on both legs — an approximation (fixed DP/brokerage components do not scale "
-            "linearly; exact only near the reference notional).",
+            f"FILLS: NEXT-{bar.upper()} OPEN (WO-2, 2026-08-13). Signals are computed on {bar} t's "
+            f"completed values; entries AND exits are shifted one {bar} forward and filled at "
+            f"{bar} t+1's OPEN (vectorbt price=open frame, signals shifted +1). The prior mechanics "
+            "left price=None, which vectorbt resolves to the SAME bar's close — a fill at the very "
+            "close that generated the signal (lookahead). Signals on the last bar of the frame are "
+            "dropped (nothing left to fill into). Stops/targets anchor at the FILL price "
+            "(stop_entry_price='fillprice'). EVERY number in this report is on the new mechanics; "
+            "reports generated before 2026-08-13 are superseded.",
+            f"Costs — fees: constant per-side fee {self._fee.get(strategy_id, 0.0) * 100:.4f}% "
+            f"(= ½ × round-trip STATUTORY-fee breakeven at ₹{self._reference_notional} "
+            f"{_PRODUCT[strategy_id]}), charged on both legs — an approximation (fixed DP/brokerage "
+            "components do not scale linearly; exact only near the reference notional).",
+            f"Costs — spread (WO-2): vectorbt slippage {self._slippage_per_leg() * 100:.4f}% per leg "
+            f"= half the measured quoted spread {float(self._cost_model.spread_pct):.3f}% "
+            "(config/costs.yaml spread_pct), so a round trip pays the full spread ON TOP of the "
+            "fees. Provenance: NIFTY200 median quoted spread 0.0180% over 48 symbol-days (24 symbols "
+            "× sessions 2026-08-11/12), per-tier 0.0135/0.0180/0.0219%, p75 0.0303% — "
+            "IMPROVEMENT_SPEC.md Part III. The prior sweeps charged ZERO spread and zero slippage. "
+            f"Full round-trip friction at the reference notional: "
+            f"{self._cost_floor_pct(strategy_id):.4f}%.",
+            f"Sizing (WO-2): per-symbol init_cash = ₹{self._init_cash:,.0f} = the "
+            f"reference_notional ₹{self._reference_notional:,.0f} the fee constant is calibrated at (the "
+            "live per-trade notional) — previously ₹100,000 against a fee calibrated at ₹20,000. "
+            "Each symbol runs one all-in position; equity compounds within a symbol, so later "
+            "positions drift from the reference size.",
             "Long-only (Phase-1 §1.4.9 shorts gate); per-symbol equal-weight, no §7.1 portfolio "
             "limits (gate/paper layer, Phase 2/3).",
             "Vectorbt-vectorized only (§8.2); the event-driven ReplayHarness re-validates in Phase 3.",
         ]
         if strategy_id == "orb":
+            notes.append(
+                "orb fills (WO-2): the same next-bar-open rule, session-aware — a breakout signalled "
+                "on the 1m bar that closed above the range fills at the NEXT 1m bar's open, and a "
+                "signal on a session's last bar is dropped rather than carried into the next "
+                "session. EXCEPTION: the forced MIS session-end square-off is deliberately NOT "
+                "shifted (it would land in the next session and the position would ride overnight); "
+                "it fills at the session's last bar's open."
+            )
             notes.append(
                 "orb v2 (2026-07-12): stop anchored at the OPPOSITE opening-range edge — risk = "
                 "stop_range_frac × (entry − range low) — replacing the sub-cost-floor ATR(14,1m) "
@@ -493,32 +594,60 @@ class SweepRunner:
                 "mom: cross-sectional top_n by 4-week momentum, rebalanced every rebalance_days "
                 "sessions; A12 ex-date skip is live-only (bars are corp-action-adjusted, A11)."
             )
+            notes.append(
+                "mom ranking EXCLUDES the traded session (WO-2 (iv)): under next-session-open fills "
+                "a rebalance decided from closes through session t executes at session t+1's open, "
+                "so in fill-row terms the ranking input is momentum.shift(1) — closes through t−1 "
+                "relative to the session traded. That is exactly the live window: ScanContext builds "
+                "momentum_by_symbol from daily bars through d−1 and the MomentumScanner trades on d. "
+                "The pre-WO-2 defect was the same-bar-CLOSE fill, which ranked on close(t) and then "
+                "traded at close(t) — the ranking included the traded bar itself."
+            )
         return notes
 
     # ------------------------------------------------------------------ backtest core
     def _backtest(self, strategy_id: str, frames: _Frames, params: dict[str, float], fee: float):
-        import vectorbt as vbt  # function-level: engine._preload native import-order guard
-
         builder = {
             "orb": _signals_orb,
             "rsi2": _signals_rsi2,
             "trend": _signals_trend,
             "mom": _signals_mom,
         }[strategy_id]
-        sig = builder(frames, params, fee)
+        return self._portfolio(frames, builder(frames, params, fee), fee)
+
+    def _portfolio(self, frames: _Frames, sig: _Signals, fee: float):
+        """Run one vectorbt backtest of already-built signals under the WO-2 fill mechanics.
+
+        This is where the NEXT-BAR-OPEN rule lives (module docstring): every signal frame is moved
+        one bar forward and ``price=frames.open`` makes the order fill at that bar's OPEN. Split out
+        of :meth:`_backtest` so the regression test can pin the fill price on hand-built signals
+        without going through a strategy's indicator math.
+        """
+        import vectorbt as vbt  # function-level: engine._preload native import-order guard
+
+        session = _session_codes(frames.close.index) if frames.intraday else None
+        entries = _shift_to_next_bar(sig.entries, session_codes=session)
+        # orb's forced MIS square-off must NOT move (it would land in the next session and the
+        # position would ride overnight); it fills at the session's last bar's open instead.
+        exits = _shift_to_next_bar(sig.exits, session_codes=session) if sig.shift_exits else sig.exits
         kwargs: dict[str, Any] = dict(
             close=frames.close,
-            entries=sig.entries,
-            exits=sig.exits,
+            entries=entries,
+            exits=exits,
+            price=frames.open,                 # WO-2: fill at THIS row's open (signals already +1)
             fees=fee,
+            slippage=self._slippage_per_leg(),  # WO-2: half the measured spread, every order
             init_cash=self._init_cash,
             direction="longonly",
+            # stops are fractions OF THE PRICE PAID; with next-open fills the signal bar's close is
+            # no longer that price, so anchor them at the fill (vectorbt's default is "close").
+            stop_entry_price="fillprice",
             freq="1min" if frames.intraday else "1D",
         )
         if sig.sl_stop is not None:
-            kwargs["sl_stop"] = sig.sl_stop
+            kwargs["sl_stop"] = _shift_stop_frame(sig.sl_stop, session_codes=session)
         if sig.tp_stop is not None:
-            kwargs["tp_stop"] = sig.tp_stop
+            kwargs["tp_stop"] = _shift_stop_frame(sig.tp_stop, session_codes=session)
         if sig.sl_trail:
             kwargs["sl_trail"] = True
         if frames.intraday:
@@ -551,11 +680,68 @@ class _Signals:
     sl_stop: pd.DataFrame | float | None = None
     tp_stop: pd.DataFrame | float | None = None
     sl_trail: bool = False
+    #: WO-2: exits normally shift to the next bar like entries. ``orb`` sets this False because its
+    #: only signal-driven exit is the forced MIS session-end square-off, which must stay on the
+    #: session's own last bar (a shift would carry it into the next session ⇒ overnight MIS ride).
+    shift_exits: bool = True
 
 
 def _params_key(params: Mapping[str, float]) -> tuple[tuple[str, float], ...]:
     """Deterministic memo key for one grid config (§9.6)."""
     return tuple(sorted((k, float(v)) for k, v in params.items()))
+
+
+# --------------------------------------------------------------------------- next-bar-open fills (WO-2)
+def _session_codes(index: pd.Index) -> np.ndarray:
+    """Per-row session id for an intraday index (equal codes ⇒ same trading day)."""
+    codes, _ = pd.factorize(pd.Index([pd.Timestamp(ts).date() for ts in index]))
+    return np.asarray(codes)
+
+
+def _first_rows_mask(n: int, session_codes: np.ndarray | None) -> np.ndarray:
+    """Rows that have NO usable predecessor: row 0, plus (intraday) each session's first row.
+
+    A signal shifted onto one of these came from the previous SESSION's last bar — it must be dropped,
+    not filled, because there is no next bar inside the session it was generated in.
+    """
+    mask = np.zeros(n, dtype=bool)
+    if n == 0:
+        return mask
+    mask[0] = True
+    if session_codes is not None and n > 1:
+        mask[1:] |= session_codes[1:] != session_codes[:-1]
+    return mask
+
+
+def _shift_to_next_bar(frame: pd.DataFrame, *, session_codes: np.ndarray | None) -> pd.DataFrame:
+    """Move every boolean signal ONE bar forward: a signal computed on bar t acts on bar t+1 (WO-2).
+
+    Signals on the frame's last bar (and, intraday, on a session's last bar) are DROPPED — there is
+    no bar left to fill them in. Deterministic and pure (§9.6).
+    """
+    shifted = frame.shift(1, fill_value=False)
+    drop = _first_rows_mask(len(frame), session_codes)
+    if drop.any():
+        shifted.iloc[drop] = False
+    return shifted.astype(bool)
+
+
+def _shift_stop_frame(
+    stop: pd.DataFrame | float | None, *, session_codes: np.ndarray | None
+) -> pd.DataFrame | float | None:
+    """Shift a per-signal stop/target FRACTION frame in lockstep with its entries (WO-2).
+
+    The fractions are stamped on the signal bar, so they must travel with the signal or they would
+    arrive on a bar the entry no longer occupies. Scalars (``rsi2``'s constant ``stop_pct``) and
+    ``None`` pass through untouched.
+    """
+    if not isinstance(stop, pd.DataFrame):
+        return stop
+    shifted = stop.shift(1)
+    drop = _first_rows_mask(len(stop), session_codes)
+    if drop.any():
+        shifted.iloc[drop] = np.nan
+    return shifted
 
 
 def _bool_like(frame: pd.DataFrame) -> pd.DataFrame:
@@ -677,6 +863,13 @@ def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
     entries = _bool_like(close)
     exits = _bool_like(close)
 
+    # WO-2 (iv) — the ranking window must exclude the session actually TRADED. It does, by
+    # construction, once fills are next-session-open: the signal stamped on row t is shifted to row
+    # t+1 by ``_portfolio``, so the rank that fills on t+1 was computed from closes through t. In
+    # fill-row space that is ``momentum.shift(1)`` — the same "through d−1" window the live
+    # MomentumScanner ranks on (ScanContext loads daily bars through d−1). Do NOT additionally shift
+    # ``mom`` here: that would rank through t−1 and trade at t+1's open, a session staler than live.
+    # Pinned by tests/unit/test_sweep_signals.py::test_mom_ranking_window_excludes_the_traded_session.
     mom = close / close.shift(_MOM_LOOKBACK) - 1.0
     first_valid = mom.dropna(how="all")
     if first_valid.empty:
@@ -811,7 +1004,12 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
                 # Non-empty by construction: the entry bar's close was a real (non-NaN) price.
                 sym_valid = day_pos[~np.isnan(c_np[day_pos])]
                 exits.iloc[sym_valid[-1], ex_col] = True
-    return _Signals(entries=entries, exits=exits, sl_stop=sl, tp_stop=tp)
+    # shift_exits=False (WO-2): the entry above IS subject to the same-bar-close defect the daily
+    # baselines had — it is stamped on the bar whose CLOSE cleared the range — so ``_portfolio``
+    # shifts it (and its sl/tp fractions) one 1m bar forward, session-aware. The square-off exit is
+    # the one signal that must stay put: it is a clock-driven MIS obligation on THIS session's last
+    # bar, and shifting it would push the exit into the next session (overnight ride, stale stop).
+    return _Signals(entries=entries, exits=exits, sl_stop=sl, tp_stop=tp, shift_exits=False)
 
 
 # --------------------------------------------------------------------------- stats helpers
@@ -835,8 +1033,11 @@ def _sharpe(daily: pd.Series) -> float | None:
 
 
 __all__ = [
-    "PRICE_BASELINES",
     "DENSITY_POINTS",
+    "FILL_MECHANICS",
+    "PRICE_BASELINES",
+    "PRODUCT_BY_STRATEGY",
+    "REFERENCE_NOTIONAL_DEFAULT",
     "ParamSetStat",
     "SweepReport",
     "SweepRunner",
