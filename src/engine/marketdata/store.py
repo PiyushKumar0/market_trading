@@ -102,6 +102,10 @@ _SCHEMA: tuple[str, ...] = (
     """,
     # corrections_log — late ticks past minute+5s grace (§4.4 job 1): symbol, minute, tick_ts, value,
     # plus whether the late tick amended its bar before the nightly reconcile. 90-day retention.
+    # ``reason`` (nullable) records WHY an unamended late tick was refused — notably
+    # 'official_bar_untouchable' when the target row is no longer src='self' (§3.2.3 amendment rules).
+    # It is the LAST column so a fresh DB and a DB widened by _migrate_corrections_reason (which can
+    # only append) carry identical column order.
     """
     CREATE TABLE IF NOT EXISTS corrections_log (
         symbol            TEXT NOT NULL,
@@ -110,7 +114,8 @@ _SCHEMA: tuple[str, ...] = (
         value             DECIMAL(12,2),
         cumulative_volume BIGINT,
         amended           BOOLEAN NOT NULL DEFAULT FALSE,
-        logged_at         TIMESTAMPTZ NOT NULL
+        logged_at         TIMESTAMPTZ NOT NULL,
+        reason            TEXT
     )
     """,
     # bars_1d — Kite historical (adjusted, A11) + bhavcopy cross-check.
@@ -569,6 +574,15 @@ _TABLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "shp_quarterly": {"revised": False},          # mirrors the DDL default (§2.8.1)
 }
 
+# ---------------------------------------------------------------------- late-tick amendment outcomes
+# Returned by :meth:`MarketStore.amend_bar_1m_extremes` (the §3.2.3 read-decide-write seam). The STORE
+# owns atomicity and the src precondition; the CALLER owns what each outcome means in corrections_log.
+AMEND_APPLIED = "amended"          # high/low widened to include the late print
+AMEND_IN_RANGE = "in_range"        # print already inside [low, high] — nothing to do
+AMEND_NO_BAR = "no_bar"            # no stored row for (symbol, minute)
+AMEND_FOREIGN_SRC = "foreign_src"  # row is no longer src=<require_src> (official/backfilled): untouchable
+AMEND_RACE_LOST = "race_lost"      # CAS predicate missed: the row changed under us; nothing written
+
 _TICK_STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _tick_stage (
         instrument_token BIGINT,
@@ -704,13 +718,14 @@ class MarketStore:
 
         Also runs the one-shot ``instruments_daily.tick_size`` widen (2026-07-21): ``CREATE TABLE IF
         NOT EXISTS`` never alters an existing column, so a legacy DB would keep truncating sub-paisa
-        ticks to 0.00 and losing them on hydrate.
+        ticks to 0.00 and losing them on hydrate. Same reason for the ``corrections_log.reason`` add.
         """
         with self._lock:
             con = self._require_con()
             for stmt in _SCHEMA:
                 con.execute(stmt)
             self._migrate_instruments_tick_scale(con)
+            self._migrate_corrections_reason(con)
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
@@ -725,6 +740,20 @@ class MarketStore:
         if scale < self._INSTRUMENTS_TICK_SCALE:
             con.execute("ALTER TABLE instruments_daily ALTER tick_size SET DATA TYPE DECIMAL(18,6)")
             _log.info("instruments_tick_scale_migrated", frm=scale, to=self._INSTRUMENTS_TICK_SCALE)
+
+    def _migrate_corrections_reason(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``corrections_log.reason`` column to a legacy DB (WO-5):
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB created before the
+        column existed would reject every ``append_correction`` carrying a reason. Guarded on
+        ``information_schema`` so the ALTER runs EXACTLY ONCE; a fresh DB already has it and no-ops.
+        Nullable + appended-last ⇒ existing rows keep their values and read back unchanged."""
+        row = con.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'corrections_log' AND column_name = 'reason'"
+        ).fetchone()
+        if row is None:
+            con.execute("ALTER TABLE corrections_log ADD COLUMN reason TEXT")
+            _log.info("corrections_log_reason_column_added")
 
     def table_names(self) -> set[str]:
         """Names of the persistent tables in the store (for self-tests / the schema lockstep test)."""
@@ -906,6 +935,79 @@ class MarketStore:
             for r in rows
         ]
 
+    def amend_bar_1m_extremes(
+        self, symbol: str, minute: datetime, value: Decimal, *, require_src: str = "self"
+    ) -> str:
+        """Atomically widen ONE stored 1m bar's high/low to include ``value`` (§3.2.3 late-tick
+        amendment). Returns one of the module-level ``AMEND_*`` outcomes; writes nothing except on
+        ``AMEND_APPLIED``, and never touches open/close/volume/src/auction_open.
+
+        This is the read-decide-write seam the late-tick path needs (WO-5): ``BarBuilder`` used to
+        ``get_bars_1m`` then ``insert_bars_1m`` as two independent lock acquisitions, so the 15:50
+        ReconcileJob could upsert the canonical official candle in between and have the amendment —
+        computed against the pre-reconcile row and issued as a whole-row upsert — silently overwrite
+        it. Here the SELECT, the decision and the UPDATE happen inside ONE ``_lock`` acquisition and
+        ONE transaction, and the UPDATE re-states the row it read as its own predicate
+        (``src``/``high``/``low`` compare-and-swap) so even a lock-free future caller can only write
+        against the row it decided on — otherwise ``AMEND_RACE_LOST``, write skipped.
+
+        ``require_src`` is a hard precondition, not a filter: a row whose ``src`` has become
+        ``kite_official``/``gap_backfilled`` is CANONICAL (§4.4 job 2) and a stray live tick may never
+        rewrite it — it reports ``AMEND_FOREIGN_SRC`` and leaves the row byte-intact.
+
+        Lock note: this holds ``_lock`` across 2-3 statements (µs-scale point reads/writes on the PK),
+        marginally longer than the one-statement discipline of the flush path — the cost of atomicity.
+        """
+        with self._lock:
+            con = self._require_con()
+            con.execute("BEGIN TRANSACTION")
+            try:
+                outcome = self._amend_bar_1m_locked(con, symbol, minute, value, require_src)
+            except BaseException:
+                # Mirrors _upsert_rows: a KeyboardInterrupt/CancelledError mid-amendment must leave
+                # no open transaction behind (the connection stays usable for every other caller).
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT")
+        return outcome
+
+    def _amend_bar_1m_locked(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        symbol: str,
+        minute: datetime,
+        value: Decimal,
+        require_src: str,
+    ) -> str:
+        """The read-decide-write body of :meth:`amend_bar_1m_extremes` — callers hold ``_lock`` and an
+        open transaction."""
+        row = self._read_bar_extremes(con, symbol, minute)
+        if row is None:
+            return AMEND_NO_BAR
+        src, high, low = row
+        if src != require_src:
+            return AMEND_FOREIGN_SRC
+        if low <= value <= high:
+            return AMEND_IN_RANGE
+        changed = con.execute(
+            "UPDATE bars_1m SET high = ?, low = ? "
+            "WHERE symbol = ? AND ts_minute = ? AND src = ? AND high = ? AND low = ?",
+            [max(high, value), min(low, value), symbol, minute, src, high, low],
+        ).fetchone()[0]
+        return AMEND_APPLIED if changed else AMEND_RACE_LOST
+
+    @staticmethod
+    def _read_bar_extremes(
+        con: duckdb.DuckDBPyConnection, symbol: str, minute: datetime
+    ) -> tuple[str, Decimal, Decimal] | None:
+        """``(src, high, low)`` of one stored bar, or ``None``. Its own method so the CAS predicate in
+        :meth:`_amend_bar_1m_locked` is testable: a test double returning a STALE snapshot must lose
+        the compare-and-swap (``AMEND_RACE_LOST``) and write nothing."""
+        row = con.execute(
+            "SELECT src, high, low FROM bars_1m WHERE symbol = ? AND ts_minute = ?", [symbol, minute]
+        ).fetchone()
+        return (row[0], row[1], row[2]) if row is not None else None
+
     def get_bars_1m_frame(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
         """Bulk float OHLCV frame of 1m bars (``start <= ts_minute < end``), ascending.
 
@@ -1054,12 +1156,18 @@ class MarketStore:
         *,
         cumulative_volume: int | None = None,
         amended: bool = False,
+        reason: str | None = None,
     ) -> None:
-        """Log a late tick that arrived past the minute+5s finalize grace (§4.3 corrections_log)."""
+        """Log a late tick that arrived past the minute+5s finalize grace (§4.3 corrections_log).
+
+        ``reason`` (optional) records why an ``amended=False`` row was NOT applied — notably
+        ``'official_bar_untouchable'`` for a late tick aimed at a reconciled/backfilled row (§3.2.3).
+        """
         self._execute(
-            "INSERT INTO corrections_log (symbol, minute, tick_ts, value, cumulative_volume, amended, logged_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            [symbol, minute, tick_ts, value, cumulative_volume, amended, self._clock.now()],
+            "INSERT INTO corrections_log "
+            "(symbol, minute, tick_ts, value, cumulative_volume, amended, logged_at, reason) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [symbol, minute, tick_ts, value, cumulative_volume, amended, self._clock.now(), reason],
         )
 
     def get_corrections(self, d: date) -> list[dict[str, Any]]:

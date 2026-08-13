@@ -16,7 +16,15 @@ from pydantic import ValidationError
 from engine.core.clock import Clock
 from engine.core.config import load_settings
 from engine.core.types import Bar, Tick
-from engine.marketdata.store import EXPECTED_TABLES, MarketStore
+from engine.marketdata.store import (
+    AMEND_APPLIED,
+    AMEND_FOREIGN_SRC,
+    AMEND_IN_RANGE,
+    AMEND_NO_BAR,
+    AMEND_RACE_LOST,
+    EXPECTED_TABLES,
+    MarketStore,
+)
 from engine.notify.catalog import (
     MessageKind,
     backfill_report,
@@ -111,6 +119,72 @@ def test_bars_1m_upsert_official_replaces_self(store, clock):
     got = store.get_bars_1m("RELIANCE", minute, minute + timedelta(minutes=1))
     assert len(got) == 1                               # upsert, not duplicate (Â§4.4 job 2 canonical)
     assert got[0].src == "kite_official" and got[0].close == Decimal("2341.15")
+
+
+def test_amend_bar_1m_extremes_is_a_guarded_compare_and_swap(store, clock, monkeypatch):
+    """The §3.2.3 late-tick amendment seam (WO-5): only ``src='self'`` rows are amendable, only
+    high/low ever move, and a decision taken against a STALE row loses the CAS instead of writing."""
+    minute = clock.combine(clock.today(), time(11, 0))
+    window = (minute, minute + timedelta(minutes=1))
+    store.insert_bars_1m([_bar(minute)])                       # self: high 2340.00 / low 2337.05
+
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("2339.00")) == AMEND_IN_RANGE
+    assert store.amend_bar_1m_extremes("NOSUCH", minute, Decimal("1.00")) == AMEND_NO_BAR
+
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("2345.00")) == AMEND_APPLIED
+    got = store.get_bars_1m("RELIANCE", *window)[0]
+    assert got.high == Decimal("2345.00")                       # widened
+    assert (got.open, got.low, got.close, got.volume, got.src) == (                 # nothing else moved
+        Decimal("2338.55"), Decimal("2337.05"), Decimal("2339.90"), 12500, "self")
+
+    # Official/backfilled rows are canonical (§4.4 job 2) — refused, byte-intact.
+    store.insert_bars_1m([_bar(minute, src="kite_official")])
+    before = store.get_bars_1m("RELIANCE", *window)[0]
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("9999.00")) == AMEND_FOREIGN_SRC
+    assert store.get_bars_1m("RELIANCE", *window)[0] == before
+    assert store.amend_bar_1m_extremes(
+        "RELIANCE", minute, Decimal("9999.00"), require_src="kite_official") == AMEND_APPLIED
+
+    # CAS: the row moved under the decision ⇒ the UPDATE predicate misses ⇒ nothing is written.
+    store.insert_bars_1m([_bar(minute, src="self")])
+    fresh = store.get_bars_1m("RELIANCE", *window)[0]
+    monkeypatch.setattr(
+        MarketStore, "_read_bar_extremes",
+        staticmethod(lambda con, symbol, m: ("self", Decimal("1.00"), Decimal("0.50"))),
+    )
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("5.00")) == AMEND_RACE_LOST
+    assert store.get_bars_1m("RELIANCE", *window)[0] == fresh
+
+
+def test_correction_reason_persists_and_legacy_db_is_migrated(tmp_path, clock):
+    """``corrections_log.reason`` round-trips, and a DB created before the column existed gets it
+    added exactly once on open (CREATE TABLE IF NOT EXISTS never alters an existing table)."""
+    db = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("SET TimeZone='Asia/Kolkata'")
+    con.execute(                                               # the pre-WO-5 shape, verbatim
+        "CREATE TABLE corrections_log (symbol TEXT NOT NULL, minute TIMESTAMPTZ NOT NULL, "
+        "tick_ts TIMESTAMPTZ NOT NULL, value DECIMAL(12,2), cumulative_volume BIGINT, "
+        "amended BOOLEAN NOT NULL DEFAULT FALSE, logged_at TIMESTAMPTZ NOT NULL)"
+    )
+    con.execute("INSERT INTO corrections_log VALUES ('RELIANCE', ?, ?, 12.50, 7, FALSE, ?)",
+                [clock.now(), clock.now(), clock.now()])
+    con.close()
+
+    s = MarketStore(db, tmp_path / "parquet", clock)
+    s.open()                                                   # migrates
+    try:
+        s.init_schema()                                        # idempotent: the ALTER runs once
+        s.append_correction("RELIANCE", clock.now(), clock.now(), Decimal("150.00"),
+                            cumulative_volume=720, amended=False,
+                            reason="official_bar_untouchable")
+        rows = s.get_corrections(clock.today())
+        assert len(rows) == 2                                  # the legacy row survived the ALTER
+        assert {r["reason"] for r in rows} == {None, "official_bar_untouchable"}
+        legacy = next(r for r in rows if r["reason"] is None)
+        assert legacy["value"] == Decimal("12.50") and legacy["cumulative_volume"] == 7
+    finally:
+        s.close()
 
 
 def test_bar_src_is_constrained(store, clock):
