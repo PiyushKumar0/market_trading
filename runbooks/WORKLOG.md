@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-13 (evening, ~19:20) — IMPROVEMENT_SPEC implemented: 14 work orders, two phases, 1,345 green
+
+- **Owner directive: "implement as deemed necessary by you." Scope chosen: everything except
+  WO-12's optional scheduled task (owner call per §14 Q14) and any live wiring of C-category work.**
+  Eight delegated implementation agents across two file-cluster phases; every diff audited against
+  its WO; two two-way judgement calls escalated to me and ruled (WO-4's two-basis sizing reference —
+  the WO's literal min-when-short would have LOOSENED rupee caps on shorts; WO-2(iv) subsumed by
+  next-open fills — a literal extra shift would double-lag mom vs live).
+- **Landed (commits 4c08584…f653c89):** WO-5 official-candle amendment guard + post-close exclusion
+  + CAS TOCTOU close; WO-6 analyst session aggregates + as-of stamps (stable block byte-identical);
+  WO-4 brk20 level-anchored entry + gate sizing reference (monotone-proven both directions);
+  WO-1+9 score-ranked funnel + per-strategy caps + journalled forward counter + funnel telemetry;
+  WO-2+3 next-open fills (11.07pp delta on the synthetic pin!) + spread_pct 0.02 in the cost
+  surface (gate inherits: CNC ₹20k breakeven 0.2992→0.3192%) + ₹20k sweep sizing + margin floor
+  cost_floor/20 + winner-stability flag; WO-15 news chain fires POST-scheduler-arming +
+  single-flight catch-up (the standing §2.6 question, resolved); WO-14(c) advisory tri-state
+  watermarks; WO-7 nightly tick compaction + flush 5s→60s; WO-8 bit-for-bit incremental ATR +
+  per-day sector cache; WO-11 trend floor 150; WO-13 mom rebalance state (migration 0006);
+  WO-12 RUNBOOK pre-open note; adjacency wiring for tonight's winner-stability.
+- **ALL SWEEP REPORTS PREDATING e72283a ARE SUPERSEDED** (same-close fills, zero spread, 5× sizing
+  mismatch). Tonight, engine off after the 22:23 backup: re-run all four sweeps + daily-strategy
+  adjacency under the corrected mechanics, then the WO-10 pre-registered VWAP-reversion experiment
+  (report STOPS for owner review), then restart = the deploy (migrations 0005/0006 + corrections_log
+  column + everything above goes live; boot must show post-arm chain firing + engine_ready before it).
+- NOT deployed yet: the running engine still has this morning's code (watermark fix era). Tomorrow's
+  first live session is the funnel's real test — the telemetry line shows whether ranked admission
+  changes what reaches the analyst.
+
 ## 2026-08-13 (afternoon, ~16:10) — yesterday's "bhavcopy retrying" was FALSE: watermark green-stamps degraded jobs (class fixed, 9 jobs); full-system audit executed → IMPROVEMENT_SPEC.md; G2 gate items closed
 
 - **CORRECTION to the 08-12 EOD entry:** "sweeps retrying, non-blocking" was wrong. The morning
