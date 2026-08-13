@@ -453,6 +453,45 @@ async def test_filings_shp_master_failure_degrades(store, clock):
     assert fshp.NSE_SHP_MASTER_URL.startswith("https://www.nseindia.com/")
 
 
+async def test_filings_shp_master_repeated_failure_alerts_once(store, clock):
+    """2026-08-13 (structural deviation representative — filings_shp is RUN_LATEST with NO ``d``
+    parameter on ``run()`` or ``_alert()``, unlike every other job here): dedup falls back to a single
+    process-lifetime bool flag instead of bhavcopy's ``set[date]``. Two consecutive failing runs must
+    still produce exactly one notify."""
+    msgs, sink = collect_alerts()
+    job = FilingsShpJob(store, clock, failing_client(), notify=sink)
+    result1 = await job.run()
+    result2 = await job.run()
+    assert result1.ok is False and result2.ok is False
+    assert len(msgs) == 1
+
+
+async def test_filings_shp_master_alert_rearms_after_success(store, clock):
+    """The bool flag resets on a fully clean run — a LATER failure (a fresh failing streak) alerts
+    again, mirroring bhavcopy's per-date discard/re-arm despite the different key type. Toggled by an
+    externally-mutated flag (not a raw handler call count — ``nse_get`` primes the www host + retries
+    transient failures internally, so the number of underlying HTTP requests per ``run()`` varies)."""
+    should_fail = {"v": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if should_fail["v"]:
+            raise httpx.ConnectError("unreachable", request=request)
+        return httpx.Response(200, json=SHP_MASTER_JSON)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    msgs, sink = collect_alerts()
+    job = FilingsShpJob(store, clock, client, notify=sink)
+
+    assert (await job.run()).ok is False       # fails, alerts (1st)
+
+    should_fail["v"] = False
+    assert (await job.run()).ok is True        # succeeds, no alert, re-arms the flag
+
+    should_fail["v"] = True
+    assert (await job.run()).ok is False       # fails again, alerts (2nd — re-armed)
+    assert len(msgs) == 2
+
+
 # =========================================================================== ISIN map
 def test_parse_constituents_isin_keeps_isin_column():
     mapping = parse_constituents_isin(CONSTITUENTS_CSV)

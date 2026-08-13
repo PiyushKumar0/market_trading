@@ -154,6 +154,10 @@ class EarningsCalendarJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): with the watermark fix forwarding this
+        #: job's ``ok`` through the composition root, the 30-min sweeps genuinely re-run a still-failing
+        #: day — alert once per failing streak, not on every attempt.
+        self._alerted: set[date] = set()
 
     async def run(self, d: date) -> EarningsCalendarResult:
         """Fetch + upsert results/board-meeting dates (idempotent on (symbol, event_date, kind)).
@@ -164,12 +168,15 @@ class EarningsCalendarJob:
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("earnings_calendar_fetch_failed", d=d.isoformat(), error=reason)
-            await self._alert(d, reason)
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(d, reason)
+                self._alerted.add(d)
             return EarningsCalendarResult(ok=False, degraded=True, reason=reason)
 
         now = self._clock.now()
         stamped = [{**row, "recorded_at": now} for row in rows]
         written = await self._store.arun(self._store.upsert_earnings_calendar, stamped)
+        self._alerted.discard(d)  # a success for d re-arms the alert (dedup is per failing streak)
         _log.info("earnings_calendar_ingested", d=d.isoformat(), parsed=len(rows), written=written)
         return EarningsCalendarResult(ok=True, rows_parsed=len(rows), rows_written=written)
 

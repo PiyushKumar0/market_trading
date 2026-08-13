@@ -156,6 +156,11 @@ class DealsJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): keyed on ``d`` regardless of whether the
+        #: alert coincided with ``ok=False`` (both sources down) or ``ok=True`` (one source down) — the
+        #: alert fires on ANY failed source either way, so the dedup guards that call, not the ``ok``
+        #: field. Discarded whenever a run for ``d`` has zero failed sources (re-arms for a later streak).
+        self._alerted: set[date] = set()
 
     async def run(self, d: date) -> DealsResult:
         """Fetch bulk + block deals for day ``d`` under per-source guards and upsert the flags
@@ -181,7 +186,11 @@ class DealsJob:
         if all_rows:
             written = await self._store.arun(self._store.upsert_flagged_instrument_days, all_rows)
         if failed:
-            await self._alert(d, failed, "; ".join(reasons))
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(d, failed, "; ".join(reasons))
+                self._alerted.add(d)
+        else:
+            self._alerted.discard(d)  # a clean run for d re-arms the alert for a later streak
         result = DealsResult(
             d=d,
             ok=len(failed) < 2,

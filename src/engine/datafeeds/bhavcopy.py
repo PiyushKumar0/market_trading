@@ -166,6 +166,10 @@ class BhavcopyJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Per-date alert dedup (2026-08-13): with the watermark fix, the 30-min sweeps genuinely
+        #: re-run a still-failing day, so alerting on EVERY attempt would storm during a long NSE
+        #: outage. Process-lifetime only — a fresh process re-alerts once, which is fine (E5).
+        self._alerted: set[date] = set()
 
     async def run(self, d: date) -> BhavcopyResult:
         """Fetch + parse + persist day ``d``'s bhavcopy. Never raises into the scheduler (E5)."""
@@ -179,7 +183,9 @@ class BhavcopyJob:
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("bhavcopy_fetch_failed", d=d.isoformat(), url=url, error=reason)
-            await self._alert(d, reason)
+            if d not in self._alerted:  # dedup: the fixed watermark means 30-min sweeps genuinely
+                await self._alert(d, reason)  # retry a still-failing day — don't storm on every attempt
+                self._alerted.add(d)
             return BhavcopyResult(d=d, ok=False, degraded=True, reason=reason)
 
         written, checked, mismatches = await self._store.arun(self._persist, d, bars)
@@ -188,6 +194,7 @@ class BhavcopyJob:
                 "bhavcopy_cross_check_mismatch", d=d.isoformat(),
                 symbols=mismatches[:20], count=len(mismatches),
             )
+        self._alerted.discard(d)  # a success for d re-arms the alert (dedup is per failing streak)
         result = BhavcopyResult(
             d=d, ok=True, rows_parsed=len(bars), rows_written=written,
             rows_cross_checked=checked, mismatched_symbols=tuple(mismatches),

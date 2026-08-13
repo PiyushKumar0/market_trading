@@ -189,6 +189,51 @@ async def test_date_keyed_failure_stops_replay_and_resumes(conn, clock, calendar
     assert [(j, d) for j, d in calls] == [("bhavcopy", TUE)]
 
 
+class _NotOkResult:
+    """A minimal stand-in for a job's ``ok``-bearing return (e.g. ``BhavcopyResult``)."""
+
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
+
+
+def _spec_recorder_notok(calls: list, job_id: str, at: time, *, notok_on: date, order: int = 100):
+    """A DATE_KEYED JobSpec whose run() appends (job_id, d) then returns ``ok=False`` for
+    ``notok_on`` — the degrade-without-raise E5 shape (e.g. ``BhavcopyResult(ok=False)``)."""
+
+    async def run(d: date) -> _NotOkResult:
+        calls.append((job_id, d))
+        return _NotOkResult(ok=(d != notok_on))
+
+    return JobSpec(job_id=job_id, job_class=JobClass.DATE_KEYED, at=at, run=run, order=order)
+
+
+@pytest.mark.asyncio
+async def test_date_keyed_notok_return_stops_replay_and_resumes(conn, clock, calendar):
+    """2026-08-12 live bug: a job that returns ``ok=False`` WITHOUT raising (bhavcopy's E5 shape —
+    it degrades + alerts + returns, never raises) must be treated exactly like an exception: recorded
+    failed, listed in jobs_failed, replay stopped. Before the fix this hit ``record_run`` with its
+    default ``status='success'`` and the day was silently skipped by every future sweep."""
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder_notok(calls, "bhavcopy", time(18, 30), notok_on=TUE))
+    runner = _build_runner(conn, clock, calendar, reg)
+    runner.record_run("bhavcopy", FRI)
+
+    result = await runner.catch_up(off_since=OFF_SINCE)
+    assert [(j, d) for j, d in calls] == [("bhavcopy", MON), ("bhavcopy", TUE)]  # both attempted
+    assert result.jobs_failed == [f"bhavcopy:{TUE.isoformat()}"]
+    assert runner.last_success_date("bhavcopy") == MON                 # watermark preserved at MON
+    assert runner.was_run("bhavcopy", TUE) is False
+
+    # Next startup resumes EXACTLY at the not-ok day — was_run() is False so it is NOT skipped.
+    calls.clear()
+    reg2 = JobRegistry()
+    reg2.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30)))
+    runner2 = _build_runner(conn, clock, calendar, reg2)
+    await runner2.catch_up(off_since=OFF_SINCE)
+    assert [(j, d) for j, d in calls] == [("bhavcopy", TUE)]
+
+
 @pytest.mark.asyncio
 async def test_safety_critical_not_yet_due_today_is_skipped(conn, clock, calendar):
     """A safety job whose fire-time is later today is NOT force-run — the re-armed scheduler fires

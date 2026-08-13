@@ -14,13 +14,16 @@ integrator owns that ARE pure enough to assert without booting the whole engine:
 
 from __future__ import annotations
 
-from datetime import date, time
+import inspect
+from datetime import date, time, timedelta
 
+import httpx
 import pytest
 
 from engine.broker.instruments import InstrumentStore
 from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_settings
+from engine.datafeeds.bhavcopy import BhavcopyJob
 from engine.marketdata.store import MarketStore
 from engine.ops import main as opsmain
 from engine.ops.jobs import (
@@ -278,6 +281,87 @@ def test_missing_job_fn_is_a_loud_wiring_error() -> None:
         build_job_registry(load_settings(), fns)
 
 
+# --------------------------------------------------------------------------- composition-root closure seam
+
+
+@pytest.mark.asyncio
+async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
+    market_store, clock, calendar, conn, monkeypatch
+) -> None:
+    """Composition-root regression (2026-08-13): ``engine.ops.main``'s ``job_bhavcopy`` closure
+    (main.py:832-834) MUST forward ``BhavcopyJob.run()``'s return value to ``spec.run`` — the
+    2026-08-12 live bug was exactly this closure discarding it (``await bhavcopy.run(d)`` with no
+    ``return``), which meant the ``_job_result_ok`` watermark fix never saw the degraded result
+    because ``spec.run`` was always ``None`` regardless of what the underlying job returned.
+
+    Unlike the machinery tests in ``test_catchup_runner.py``/this file's ``_scheduled_runner`` tests
+    (which hand-construct ``JobSpec.run`` to already return a meaningful object), this test goes
+    through the REAL pieces: a real ``BhavcopyJob`` degraded by a failing HTTP client, a closure that
+    mirrors ``engine.ops.main:job_bhavcopy`` verbatim, registered via the real ``build_job_registry``,
+    driven through the real ``_scheduled_runner`` — pinning the exact seam that let the closure
+    silently swallow the result."""
+    async def _instant(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("engine.core.nse_http._sleep", _instant)  # no retry backoff wait
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nse unreachable", request=request)
+
+    bhavcopy = BhavcopyJob(market_store, clock, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    async def job_bhavcopy(d):
+        # Mirrors engine.ops.main:job_bhavcopy (main.py:832-834) verbatim — MUST stay in sync.
+        return await bhavcopy.run(d)
+
+    fns = _all_noop_fns()
+    fns[opsmain.JOB_BHAVCOPY] = job_bhavcopy
+    registry = build_job_registry(load_settings(), fns)
+    spec = next(s for s in registry.specs() if s.job_id == opsmain.JOB_BHAVCOPY)
+
+    catch_up = CatchUpRunner(conn, clock, calendar)
+    await _scheduled_runner(spec, catch_up, clock)()
+
+    today = clock.today()
+    row = conn.execute(
+        "SELECT status FROM job_runs WHERE job_id=? AND run_for_date=?",
+        (opsmain.JOB_BHAVCOPY, today.isoformat()),
+    ).fetchone()
+    assert row["status"] == "failed"                                    # not the pre-fix "success"
+    assert catch_up.was_run(opsmain.JOB_BHAVCOPY, today) is False
+
+
+#: The 9 composition-root closures forwarded (2026-08-13) so an ok-bearing job result reaches
+#: JobSpec.run instead of being discarded to None (the bhavcopy seam above, closed for 8 more jobs).
+_FORWARDING_WRAPPERS: tuple[str, ...] = (
+    "job_bhavcopy", "job_earnings", "job_corp_actions", "job_sector_map", "job_filings_shp",
+    "job_deals", "job_filings_pit", "job_filings_pit_fresh", "job_filings_results",
+)
+
+
+def _wrapper_body(src: str, wrapper_name: str) -> str:
+    """Isolate one composition-root closure's own source (blank-line + 4-space-indent separated
+    ``async def job_...`` closures inside ``engine.ops.main:run``) — same ``inspect.getsource``
+    technique this file already uses (see the news-chain re-sweep pin above)."""
+    start = src.index(f"async def {wrapper_name}(")
+    next_def = src.find("\n\n    async def ", start)
+    end = next_def if next_def != -1 else src.index("\n\n    registry = build_job_registry", start)
+    return src[start:end]
+
+
+@pytest.mark.parametrize("wrapper_name", _FORWARDING_WRAPPERS)
+def test_ok_bearing_wrapper_forwards_return_value(wrapper_name: str) -> None:
+    """Composition-root regression (2026-08-13), swept over all 9 ok-bearing closures: each MUST
+    ``return await <job>.run(...)``, not a bare ``await`` that discards the result and always returns
+    None to ``JobSpec.run`` — the exact seam ``test_bhavcopy_composition_root_closure_forwards_degraded_result``
+    pins end-to-end for bhavcopy alone. A lightweight source-level sweep (rather than constructing all
+    9 real job objects) for the remaining 8: fails loudly if a future edit reintroduces a bare
+    ``await job.run(...)`` on any of them."""
+    src = inspect.getsource(opsmain.run)
+    body = _wrapper_body(src, wrapper_name)
+    assert "return await" in body, f"{wrapper_name} does not forward its job's return value"
+
+
 # --------------------------------------------------------------------------- scheduled_runner watermark
 
 
@@ -308,6 +392,50 @@ async def test_scheduled_runner_marks_failure_without_crashing(conn, clock, cale
 
     # A failed run is NOT a success watermark, so the CatchUpRunner will retry it on next startup.
     assert catch_up.was_run(JOB_UNIVERSE, clock.today()) is False
+
+
+class _OkResult:
+    """A minimal stand-in for a job's ``ok``-bearing return (e.g. ``BhavcopyResult``)."""
+
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
+
+
+@pytest.mark.asyncio
+async def test_scheduled_runner_records_failed_status_on_notok_result(conn, clock, calendar) -> None:
+    """2026-08-12 live bug: a job that degrades-without-raising (returns ``ok=False``) must sink the
+    watermark exactly like an exception — this is the bhavcopy shape (BhavcopyJob.run never raises,
+    E5). Before the fix this hit ``record_run`` with its default ``status='success'``."""
+    catch_up = CatchUpRunner(conn, clock, calendar)
+
+    async def run_it(d: date) -> _OkResult:
+        return _OkResult(ok=False)
+
+    spec = JobSpec(JOB_BHAVCOPY, JobClass.DATE_KEYED, time(18, 0), run_it, order=1)
+    await _scheduled_runner(spec, catch_up, clock)()
+
+    today = clock.today()
+    row = conn.execute(
+        "SELECT status, last_success_at FROM job_runs WHERE job_id=? AND run_for_date=?",
+        (JOB_BHAVCOPY, today.isoformat()),
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["last_success_at"] is None
+    assert catch_up.was_run(JOB_BHAVCOPY, today) is False
+
+
+@pytest.mark.asyncio
+async def test_scheduled_runner_records_success_for_ok_true_result(conn, clock, calendar) -> None:
+    """A job returning an explicit ``ok=True`` result (not just ``None``) still records success."""
+    catch_up = CatchUpRunner(conn, clock, calendar)
+
+    async def run_it(d: date) -> _OkResult:
+        return _OkResult(ok=True)
+
+    spec = JobSpec(JOB_BHAVCOPY, JobClass.DATE_KEYED, time(18, 0), run_it, order=1)
+    await _scheduled_runner(spec, catch_up, clock)()
+
+    assert catch_up.was_run(JOB_BHAVCOPY, clock.today()) is True
 
 
 # --------------------------------------------------------------------------- scheduler arming (same registry)
@@ -438,6 +566,51 @@ async def test_resolve_news_bounded_completes_times_out_and_frees_the_lock() -> 
         assert alerts == [1, 1]
     finally:
         lock.release()
+
+
+# --------------------------------------------------------------------------- orphan re-sweep cutoff
+#: ``job_news_chain``'s ABANDON horizon (2026-08-10): the re-sweep only reaches back this far, so a
+#: permanently-unclusterable orphan ages out of the retry set instead of being carried forever.
+_RESWEEP_ABANDON_DAYS = 4
+
+
+@pytest.mark.asyncio
+async def test_orphan_resweep_abandons_headlines_older_than_four_days(market_store, clock) -> None:
+    """2026-08-10 filed follow-up: pin the 4-day abandon cutoff. Behaviour first — the exact query
+    ``job_news_chain`` issues, with a headline one minute PAST the cutoff excluded and one minute
+    inside it swept (boundary itself inclusive, ``published_at >= published_after``), oldest-first,
+    already-clustered rows never re-swept. The constant lives inside ``run()``'s closure and cannot
+    be imported, so it is pinned over the source the way ``test_stop_path`` pins wiring order —
+    changing ``days=4`` (or dropping the 500 cap that keeps re-sweeps bounded) fails here."""
+    cutoff = clock.now() - timedelta(days=_RESWEEP_ABANDON_DAYS)
+    market_store.insert_news([
+        {"headline_id": "past-cutoff", "title": "Stale orphan a minute past the abandon horizon",
+         "source_domain": "economictimes.indiatimes.com",
+         "url": "https://economictimes.indiatimes.com/markets/past-cutoff.cms",
+         "published_at": cutoff - timedelta(minutes=1)},
+        {"headline_id": "at-cutoff", "title": "Orphan exactly on the abandon horizon",
+         "source_domain": "moneycontrol.com",
+         "url": "https://www.moneycontrol.com/news/at-cutoff.html",
+         "published_at": cutoff},
+        {"headline_id": "inside-cutoff", "title": "Orphan a minute inside the abandon horizon",
+         "source_domain": "livemint.com",
+         "url": "https://www.livemint.com/market/inside-cutoff.html",
+         "published_at": cutoff + timedelta(minutes=1)},
+        {"headline_id": "already-clustered", "title": "Fresh headline that already has a cluster",
+         "source_domain": "business-standard.com",
+         "url": "https://www.business-standard.com/markets/already-clustered.html",
+         "published_at": clock.now(), "cluster_id": "c-already"},
+    ])
+
+    swept = await market_store.arun(
+        market_store.get_news,
+        published_after=clock.now() - timedelta(days=4), unclustered_only=True,
+    )
+    assert [r["headline_id"] for r in swept] == ["at-cutoff", "inside-cutoff"]
+
+    src = inspect.getsource(opsmain.run)
+    assert "published_after=clock.now() - timedelta(days=4), unclustered_only=True" in src
+    assert "][:500]" in src          # the oldest-first cap: repeated timeouts stay bounded
 
 
 # --------------------------------------------------------------------------- boot-phase safety ticks

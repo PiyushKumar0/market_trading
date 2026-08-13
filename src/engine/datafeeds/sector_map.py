@@ -179,6 +179,12 @@ class SectorMapJob:
         self._themes_path = Path(themes_path) if themes_path is not None else config_dir() / "themes.yaml"
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Per-``d`` (as_of) alert dedup (2026-08-13, mirrors bhavcopy): guards all THREE alert sites
+        #: below (job-failed, no-data, degraded-frozen-copies) — the last of which can fire on an
+        #: otherwise ``ok=True`` run, so the dedup is keyed at each ``_alert`` call site, not on ``ok``.
+        #: The theme-seed alert in ``_refresh_themes`` has no ``d`` to key on and is NOT deduped here
+        #: (see that method — it also never drives ``ok``/the watermark, only ``themes_ok``).
+        self._alerted: set[date] = set()
 
     async def run(self, d: date, *, universe_symbols: Iterable[str] | None = None) -> SectorMapResult:
         """Build + persist the ``as_of=d`` sector snapshot and refresh ``theme_map``.
@@ -192,13 +198,15 @@ class SectorMapJob:
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise into the scheduler
             reason = f"{type(exc).__name__}: {exc}"
             _log.exception("sector_map_job_failed", d=d.isoformat())
-            await self._alert(
-                title="Sector-map job failed",
-                body=f"Weekly sector_map/theme_map refresh failed: {reason}. Previous snapshot "
-                "remains the latest (per_sector_exposure keeps last week's map, R1/E5).",
-                severity="critical",
-                data={"job_id": "sector_map", "d": d.isoformat(), "reason": reason},
-            )
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(
+                    title="Sector-map job failed",
+                    body=f"Weekly sector_map/theme_map refresh failed: {reason}. Previous snapshot "
+                    "remains the latest (per_sector_exposure keeps last week's map, R1/E5).",
+                    severity="critical",
+                    data={"job_id": "sector_map", "d": d.isoformat(), "reason": reason},
+                )
+                self._alerted.add(d)
             return SectorMapResult(as_of=d, ok=False, reason=reason)
 
     # ------------------------------------------------------------------ core
@@ -232,13 +240,15 @@ class SectorMapJob:
         if not mapping:
             # Nothing classifies at all (every source down AND no frozen copy): writing a snapshot
             # of only-UNCLASSIFIED rows would clobber the previous good map — keep it instead.
-            await self._alert(
-                title="Sector map has NO data — snapshot skipped",
-                body="Every sectoral-index source failed and no frozen fallback exists. The previous "
-                "sector_map snapshot remains the latest (R1/E5).",
-                severity="critical",
-                data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
-            )
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(
+                    title="Sector map has NO data — snapshot skipped",
+                    body="Every sectoral-index source failed and no frozen fallback exists. The "
+                    "previous sector_map snapshot remains the latest (R1/E5).",
+                    severity="critical",
+                    data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
+                )
+                self._alerted.add(d)
             return SectorMapResult(
                 as_of=d, ok=False, themes_ok=themes_ok, degraded_sources=tuple(degraded),
                 themes_written=themes_written, reason="no sector data (all sources failed, no cache)",
@@ -252,13 +262,17 @@ class SectorMapJob:
         written = await self._store.arun(self._store.upsert_sector_map, d, rows)
 
         if degraded:
-            await self._alert(
-                title="Sector map degraded — frozen copies reused",
-                body=f"Sectoral-index source(s) failed: {', '.join(degraded)}. Cached constituent "
-                "lists reused where available; membership may be stale (E5).",
-                severity="warning",
-                data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
-            )
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-degraded day
+                await self._alert(
+                    title="Sector map degraded — frozen copies reused",
+                    body=f"Sectoral-index source(s) failed: {', '.join(degraded)}. Cached constituent "
+                    "lists reused where available; membership may be stale (E5).",
+                    severity="warning",
+                    data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
+                )
+                self._alerted.add(d)
+        else:
+            self._alerted.discard(d)  # a fully clean run for d re-arms the alert for a later streak
         _log.info(
             "sector_map_written",
             as_of=d.isoformat(),

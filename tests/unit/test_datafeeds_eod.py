@@ -129,6 +129,45 @@ async def test_bhavcopy_failure_degrades_and_alerts(store, clock):
     assert store.get_bars_1d("RELIANCE", D, D) == []     # keeps whatever it had (here: nothing)
 
 
+async def test_bhavcopy_repeated_failure_alerts_once(store, clock):
+    """2026-08-13 fix: with the watermark bug fixed, the 30-min catch-up sweeps genuinely re-run a
+    still-failing day — alerting on EVERY attempt would storm during a long NSE outage. Two
+    consecutive failing runs for the same date must produce exactly one notify."""
+    msgs, sink = collect_alerts()
+    job = BhavcopyJob(store, clock, failing_client(), notify=sink)
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is False and result2.ok is False
+    assert len(msgs) == 1
+    assert msgs[0].data["d"] == D.isoformat()
+
+
+async def test_bhavcopy_alert_rearms_after_success(store, clock):
+    """A success for ``d`` discards its dedup entry — a LATER failure for the same date (a fresh
+    failing streak, not a repeat of the old one) can alert again."""
+    msgs, sink = collect_alerts()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("BhavCopy_NSE_CM_0_0_0_20260617_F_0000.csv", BHAVCOPY_CSV)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, content=buf.getvalue())
+        raise httpx.ConnectError("nse unreachable", request=request)   # every attempt after the first
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    job = BhavcopyJob(store, clock, client, notify=sink)
+
+    ok_result = await job.run(D)
+    assert ok_result.ok is True
+    fail_result = await job.run(D)                        # same date, now failing
+    assert fail_result.ok is False
+    assert len(msgs) == 1                                 # the success discarded the dedup entry
+    assert msgs[0].data["d"] == D.isoformat()
+
+
 # =========================================================================== corp actions (job 7)
 def test_classify_purpose_deterministic():
     assert classify_purpose("Dividend - Rs 9 Per Share") == ("dividend", None, Decimal("9"))
@@ -214,6 +253,21 @@ async def test_earnings_failure_alerts_critical(store, clock):
     assert ec.NSE_EVENT_CALENDAR_URL.startswith("https://www.nseindia.com/")
 
 
+async def test_earnings_repeated_failure_alerts_once(store, clock):
+    """2026-08-13 (critical-severity representative, binary ok/fail shape — mirrors bhavcopy exactly):
+    with the watermark fix now forwarding this SAFETY_CRITICAL job's ok through the composition root,
+    same-day catch-up sweeps genuinely re-run a still-failing day — two consecutive failing runs for
+    the same date must produce exactly one notify."""
+    msgs, sink = collect_alerts()
+    job = EarningsCalendarJob(store, clock, failing_client(), notify=sink)
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is False and result2.ok is False
+    assert len(msgs) == 1
+    assert msgs[0].severity == "critical"
+    assert msgs[0].data["d"] == D.isoformat()
+
+
 # =========================================================================== deals (job 9)
 def test_parse_deals_fixture():
     rows = parse_deals(BULK_DEALS_JSON, D, REASON_BULK)
@@ -253,6 +307,27 @@ async def test_deals_partial_failure_keeps_other_source(store, clock):
     assert result.failed_sources == ("block",)
     assert {r["symbol"] for r in store.get_flagged_instrument_days(D)} == {"LOWFLT"}
     assert msgs and msgs[0].data["failed_sources"] == ["block"]
+
+
+async def test_deals_repeated_partial_failure_alerts_once(store, clock):
+    """2026-08-13 (warning-severity representative, single-alert-call-site shape that DIFFERS from
+    bhavcopy's binary ok/fail): deals' alert fires even when ``ok`` stays True (one of two sources
+    down) — the dedup guards the ``_alert`` call site itself, keyed on ``d``, not on ``ok``. Two
+    consecutive partial-failure runs for the same date must still produce exactly one notify."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "block-deals" in str(request.url):
+            raise httpx.ConnectError("blocked", request=request)
+        return httpx.Response(200, json=BULK_DEALS_JSON)
+
+    msgs, sink = collect_alerts()
+    job = DealsJob(store, clock, httpx.AsyncClient(transport=httpx.MockTransport(handler)), notify=sink)
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is True and result2.ok is True              # ok stays True both times
+    assert result1.degraded is True and result2.degraded is True
+    assert len(msgs) == 1
+    assert msgs[0].severity == "warning"
+    assert msgs[0].data["failed_sources"] == ["block"]
 
 
 async def test_deals_total_failure_never_raises(store, clock):

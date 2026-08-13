@@ -53,17 +53,17 @@ from engine.core.migrations import apply_migrations
 from engine.core.protected_store import IntegrityError, ProtectedStore
 from engine.core.secrets import DASHBOARD_TOKEN, KITE_API_KEY, TELEGRAM_BOT_TOKEN, Secrets
 from engine.core.types import TradeWindow
-from engine.datafeeds.bhavcopy import BhavcopyJob
-from engine.datafeeds.corp_actions import CorpActionsJob
-from engine.datafeeds.deals import DealsJob
-from engine.datafeeds.earnings_calendar import EarningsCalendarJob
-from engine.datafeeds.filings_pit import FilingsPitJob
-from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob
-from engine.datafeeds.filings_results import FilingsResultsJob
-from engine.datafeeds.filings_shp import FilingsShpJob
+from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
+from engine.datafeeds.corp_actions import CorpActionsJob, CorpActionsResult
+from engine.datafeeds.deals import DealsJob, DealsResult
+from engine.datafeeds.earnings_calendar import EarningsCalendarJob, EarningsCalendarResult
+from engine.datafeeds.filings_pit import FilingsPitJob, FilingsPitResult
+from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob, FilingsPitFreshResult
+from engine.datafeeds.filings_results import FilingsResultsJob, FilingsResultsResult
+from engine.datafeeds.filings_shp import FilingsShpJob, FilingsShpResult
 from engine.datafeeds.news import Headline, NewsIngest
 from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
-from engine.datafeeds.sector_map import SectorMapJob
+from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
 from engine.features.engine import FeatureEngine
 from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.bar_builder import BarBuilder
@@ -99,6 +99,7 @@ from engine.ops.jobs import (
     JobClass,
     JobRegistry,
     JobSpec,
+    _job_result_ok,
 )
 from engine.ops.keep_awake import KeepAwake
 from engine.ops.lifecycle import SessionLifecycle
@@ -695,8 +696,10 @@ async def run() -> int:
     async def job_surveillance() -> None:
         await surveillance.refresh()
 
-    async def job_earnings() -> None:
-        await earnings.run(clock.today())
+    async def job_earnings() -> EarningsCalendarResult:
+        # Forwarded (2026-08-13): earnings_calendar degrades-without-raising (E5) — the watermark
+        # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await earnings.run(clock.today())
 
     async def job_universe() -> None:
         await leverage.refresh()          # 08:15/08:20 inputs re-read on catch-up (self-refresh, §3.2.4)
@@ -819,32 +822,48 @@ async def run() -> int:
             raise RuntimeError("nightly reviewer unavailable — LLM roster quarantined/unloaded")
         await nightly_job.run(d)
 
-    async def job_sector_map() -> None:
-        await sector_map.run(clock.today(), universe_symbols=watchlist_symbols())
+    async def job_sector_map() -> SectorMapResult:
+        # Forwarded (2026-08-13): sector_map degrades-without-raising (E5) — the watermark verdict
+        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await sector_map.run(clock.today(), universe_symbols=watchlist_symbols())
 
-    async def job_corp_actions() -> None:
-        await corp_actions.run(clock.today())
+    async def job_corp_actions() -> CorpActionsResult:
+        # Forwarded (2026-08-13): corp_actions degrades-without-raising (E5) — the watermark verdict
+        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await corp_actions.run(clock.today())
 
     async def job_backup() -> None:
         await _snapshot_backup(conn, settings, clock)
 
-    async def job_bhavcopy(d) -> None:
-        await bhavcopy.run(d)
+    async def job_bhavcopy(d) -> BhavcopyResult:
+        # Forwarded (2026-08-13): bhavcopy degrades-without-raising (E5) — the watermark verdict
+        # needs the real ok/degraded outcome, not a swallowed None (§ composition-root closure gap).
+        return await bhavcopy.run(d)
 
-    async def job_deals(d) -> None:
-        await deals.run(d)
+    async def job_deals(d) -> DealsResult:
+        # Forwarded (2026-08-13): deals degrades-without-raising (E5) — the watermark verdict needs
+        # the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await deals.run(d)
 
-    async def job_filings_pit(d) -> None:
-        await filings_pit.run(d)
+    async def job_filings_pit(d) -> FilingsPitResult:
+        # Forwarded (2026-08-13): filings_pit degrades-without-raising (E5) — the watermark verdict
+        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await filings_pit.run(d)
 
-    async def job_filings_pit_fresh(d) -> None:
-        await filings_pit_fresh.run(d)
+    async def job_filings_pit_fresh(d) -> FilingsPitFreshResult:
+        # Forwarded (2026-08-13): filings_pit_fresh degrades-without-raising (E5) — the watermark
+        # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await filings_pit_fresh.run(d)
 
-    async def job_filings_results(d) -> None:
-        await filings_results.run(d)
+    async def job_filings_results(d) -> FilingsResultsResult:
+        # Forwarded (2026-08-13): filings_results degrades-without-raising (E5) — the watermark
+        # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await filings_results.run(d)
 
-    async def job_filings_shp() -> None:
-        await filings_shp.run()
+    async def job_filings_shp() -> FilingsShpResult:
+        # Forwarded (2026-08-13): filings_shp degrades-without-raising (E5) — the watermark verdict
+        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        return await filings_shp.run()
 
     async def job_reconcile(d) -> None:
         if reconcile is not None:
@@ -1353,9 +1372,15 @@ def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
         today = clock.today()
         try:
             if spec.job_class == JobClass.DATE_KEYED:
-                await spec.run(today)  # type: ignore[call-arg]
+                outcome = await spec.run(today)  # type: ignore[call-arg]
             else:
-                await spec.run()       # type: ignore[call-arg]
+                outcome = await spec.run()       # type: ignore[call-arg]
+            if not _job_result_ok(outcome):
+                # degraded return = failure for the watermark; the job already alerted its own
+                # failure (E5) — no new alert from the runner.
+                _log.warning("scheduled_job_degraded", job_id=spec.job_id)
+                catch_up.record_run(spec.job_id, today, status="failed")
+                return
             catch_up.record_run(spec.job_id, today)
         except Exception:  # noqa: BLE001 - a scheduled job failure records + alerts, never crashes the loop
             _log.exception("scheduled_job_failed", job_id=spec.job_id)

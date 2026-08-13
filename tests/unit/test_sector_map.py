@@ -154,6 +154,42 @@ async def test_failed_source_reuses_frozen_copy_and_alerts(tmp_path, store, cloc
     assert msgs[-1].data["job_id"] == "sector_map"
 
 
+async def test_degraded_source_alert_dedups_and_rearms(tmp_path, store, clock):
+    """2026-08-13 (structural deviation representative — sector_map's 'degraded — frozen copies
+    reused' alert fires on an otherwise ``ok=True`` run, unlike bhavcopy's binary shape): dedup
+    guards each ``_alert`` call site, keyed on ``d``, not on ``ok``. Two consecutive runs with the
+    SAME failing source produce exactly one notify; a fully clean run re-arms it for a later streak."""
+    await make_job(tmp_path, store, clock, make_client()).run(D)     # seeds the frozen copies
+
+    msgs, sink = collect_alerts()
+    fail_urls = {_URLS["PSU_BANK"]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url in fail_urls:
+            raise httpx.ConnectError("blocked by anti-bot", request=request)
+        return httpx.Response(200, text=SECTOR_PAYLOADS[url])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    job = make_job(tmp_path, store, clock, client, notify=sink)
+
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is True and result2.ok is True                 # ok stays True both times
+    assert result1.degraded_sources == ("PSU_BANK",) and result2.degraded_sources == ("PSU_BANK",)
+    assert len(msgs) == 1                                            # deduped across the same streak
+
+    fail_urls.clear()                                                # next run for D is fully clean
+    result3 = await job.run(D)
+    assert result3.ok is True and result3.degraded_sources == ()
+    assert len(msgs) == 1                                            # no alert on a clean run
+
+    fail_urls.add(_URLS["PSU_BANK"])                                 # a NEW failing streak, same D
+    result4 = await job.run(D)
+    assert result4.degraded_sources == ("PSU_BANK",)
+    assert len(msgs) == 2                                            # re-armed: alerts again
+
+
 async def test_all_sources_down_no_cache_keeps_previous_snapshot(tmp_path, store, clock):
     """Nothing classifies at all ⇒ NO new snapshot (an all-UNCLASSIFIED snapshot would clobber
     the previous good map); previous snapshot stays the latest; critical alert; never raises."""

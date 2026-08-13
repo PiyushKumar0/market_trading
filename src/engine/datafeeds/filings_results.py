@@ -185,6 +185,11 @@ class FilingsResultsJob:
         self._earnings = earnings
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): keyed on ``d``; ``_alert`` can fire on a
+        #: run where only the event_calendar leg failed (``ok`` stays True — ``ok="results" not in
+        #: failed``), so the dedup guards the call site, not the ``ok`` field. Discarded whenever a run
+        #: for ``d`` has zero failed legs (re-arms for a later streak).
+        self._alerted: set[date] = set()
 
     async def run(self, d: date) -> FilingsResultsResult:
         """Ingest results filings over ``[watermark → d]`` and (if wired) the event calendar over the
@@ -218,7 +223,11 @@ class FilingsResultsJob:
                 reasons.append(f"event_calendar: {ec.reason}")
 
         if failed:
-            await self._alert(d, failed, "; ".join(reasons))
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(d, failed, "; ".join(reasons))
+                self._alerted.add(d)
+        else:
+            self._alerted.discard(d)  # a clean run for d re-arms the alert for a later streak
         result = FilingsResultsResult(
             ok="results" not in failed,
             degraded=bool(failed),

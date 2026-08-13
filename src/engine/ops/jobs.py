@@ -40,6 +40,13 @@ from engine.notify.catalog import CatalogMessage
 
 _log = get_logger("engine.ops.jobs")
 
+
+def _job_result_ok(result: object) -> bool:
+    """A job's return value participates in the watermark verdict (2026-08-13 fix): most jobs return
+    ``None`` (unaffected, defaults True); an E5 job that degrades-without-raising (e.g. bhavcopy) can
+    return a result object whose ``ok=False`` must now sink the watermark too."""
+    return bool(getattr(result, "ok", True))
+
 #: Freeze seam — the lifecycle wires this to ``ModeManager.set_risk_state(FROZEN, reason, RISK_GATE)``.
 FreezeFn = Callable[[str], Awaitable[None]]
 NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
@@ -295,24 +302,34 @@ class CatchUpRunner:
             await self._clear_freshness(spec.job_id)
             return
         try:
-            await spec.run()  # type: ignore[call-arg]
+            outcome = await spec.run()  # type: ignore[call-arg]
+            if not _job_result_ok(outcome):
+                # degraded return = failure for the watermark; the job already alerted (E5)
+                _log.warning("safety_critical_catchup_degraded", job_id=spec.job_id)
+                await self._fail_safety_critical(spec, today, result)
+                return
             self.record_run(spec.job_id, today)
             result.jobs_caught_up.append(f"{spec.job_id}:{today.isoformat()}")
             await self._clear_freshness(spec.job_id)
         except Exception:  # noqa: BLE001 - a safety-critical failure freezes entries, never crashes boot
             _log.exception("safety_critical_catchup_failed", job_id=spec.job_id)
-            self.record_run(spec.job_id, today, status="failed")
-            result.jobs_failed.append(f"{spec.job_id}:{today.isoformat()}")
-            reason = f"data_freshness:{spec.job_id}"
-            result.frozen_reasons.append(reason)
-            if self._freeze is not None:
-                await self._freeze(reason)
-            if self._notify is not None:
-                await self._notify(catalog.data_freshness_frozen(
-                    job_id=spec.job_id,
-                    last_success=self.last_success_at(spec.job_id),
-                    reason="safety-critical catch-up run failed (§2.6 step 5)",
-                ))
+            await self._fail_safety_critical(spec, today, result)
+
+    async def _fail_safety_critical(self, spec: JobSpec, today: date, result: CatchUpResult) -> None:
+        """Shared failure handling for the safety-critical path — an exception and a not-ok return
+        are treated identically (record failed, freeze, notify)."""
+        self.record_run(spec.job_id, today, status="failed")
+        result.jobs_failed.append(f"{spec.job_id}:{today.isoformat()}")
+        reason = f"data_freshness:{spec.job_id}"
+        result.frozen_reasons.append(reason)
+        if self._freeze is not None:
+            await self._freeze(reason)
+        if self._notify is not None:
+            await self._notify(catalog.data_freshness_frozen(
+                job_id=spec.job_id,
+                last_success=self.last_success_at(spec.job_id),
+                reason="safety-critical catch-up run failed (§2.6 step 5)",
+            ))
 
     async def _run_latest(
         self, spec: JobSpec, now: datetime, off_since: datetime | None, result: CatchUpResult
@@ -322,7 +339,13 @@ class CatchUpRunner:
             return
         target = missed[-1]  # single run-latest covering the whole gap; recorded under the latest day
         try:
-            await spec.run()  # type: ignore[call-arg]
+            outcome = await spec.run()  # type: ignore[call-arg]
+            if not _job_result_ok(outcome):
+                # degraded return = failure for the watermark; the job already alerted (E5)
+                _log.warning("run_latest_catchup_degraded", job_id=spec.job_id)
+                self.record_run(spec.job_id, target, status="failed")
+                result.jobs_failed.append(f"{spec.job_id}:{target.isoformat()}")
+                return
             self.record_run(spec.job_id, target)
             result.jobs_caught_up.append(f"{spec.job_id}:{target.isoformat()}")
         except Exception:  # noqa: BLE001 - run-latest jobs are never entry-blocking (§2.6/§2.7)
@@ -335,7 +358,13 @@ class CatchUpRunner:
     ) -> None:
         for d in self._missed_days(spec, now, off_since):
             try:
-                await spec.run(d)  # type: ignore[call-arg]
+                outcome = await spec.run(d)  # type: ignore[call-arg]
+                if not _job_result_ok(outcome):
+                    # degraded return = failure for the watermark; the job already alerted (E5)
+                    _log.warning("date_keyed_catchup_degraded", job_id=spec.job_id, run_for=d.isoformat())
+                    self.record_run(spec.job_id, d, status="failed")
+                    result.jobs_failed.append(f"{spec.job_id}:{d.isoformat()}")
+                    break
                 self.record_run(spec.job_id, d)
                 result.jobs_caught_up.append(f"{spec.job_id}:{d.isoformat()}")
             except Exception:  # noqa: BLE001 - stop this job's replay; watermark resumes it next startup
