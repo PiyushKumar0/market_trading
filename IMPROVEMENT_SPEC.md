@@ -471,6 +471,74 @@ Risk: boot path (three recent wedges = well-tested territory now); the digest fi
   it ran inside boot anyway); rollback = firing-point flag.
 ```
 
+```
+WO-10b: Morning-window VWAP-reversion variant (owner-directed 2026-08-14, after WO-10's abort)
+Category: C-alpha-experiment   Priority: P1
+Evidence: WO-10 aborted at stage 1 (unconditioned base rate −0.12742%/trade ≈ the cost floor;
+  gross ≈ 0) but its 10m-ATR warm-up meant ONLY 11:36–14:00 was measured — the 10:00–11:35
+  morning window, where reversion dynamics are typically strongest, was never observed.
+Hypothesis: identical to WO-10, measured on the morning window the original could not reach.
+Change (pre-registered): the stop unit's ATR seeds from the PRIOR session — the Wilder ATR(14)
+  recursion continues from the previous session's final 10m-ATR value, with the current
+  session's FIRST bucket's true range computed high−low only (no prev-close term: the overnight
+  gap must never enter the stop unit); a symbol with no prior-session ATR produces no trades
+  until its own warm-up completes (fail-closed, same rule as WO-10). Entry window 10:00–14:00 as
+  originally registered — now effective from 10:00; results additionally reported split
+  10:00–11:35 vs 11:36–14:00 so the morning increment is visible against WO-10's answer. Same
+  two-stage structure, same abort criterion on the SAME windows it measures, same grid, same
+  costs/fills/exits. No other change to the WO-10 pre-registration.
+Acceptance: report generated; stage-1 base rate reported overall AND for the morning split;
+  STOPS FOR OWNER REVIEW; no live wiring, no param_sets row.
+Effort: S (variant of the shipped harness)   Depends-on: WO-10 (shipped)
+Risk: research-only; the seeding rule is itself pre-registered above, not tuned.
+
+WO-16: Re-check insider_net_buy under corrected mechanics (owner-directed 2026-08-14)
+Category: B-validation-methodology   Priority: P0 (it is the last recorded positive)
+Evidence: insider_net_buy +0.75%/+1.61% net T+10/T+20 (n=110 position-days, 2026-07-17) and the
+  2026-07-19 CPCV stage-2 (+0.0361%/day, 60% folds) were produced BEFORE the WO-2 corrections;
+  the filings PIT source carries a ~70-day content embargo (memory: PIT ~2.5 months stale).
+Change: (i) AUDIT the event-study/validated mechanics first, before any re-run: entry timing vs
+  the event timestamp (same-bar/next-open?), the cost surface used, and — critically — WHICH
+  date anchors the event: the insider's TRANSACTION date or the public DISCLOSURE/broadcast
+  date. A backtest entering on transaction dates that were not knowable until weeks later is
+  lookahead of the worst kind and invalidates the result regardless of costs. (ii) Re-run with:
+  disclosure-date anchoring (if not already), next-session-open entries, the corrected CNC cost
+  surface including spread (0.3192% round trip at ₹20k), and the WO-3 margin floor applied to
+  the CPCV stage. (iii) Report old vs new side by side; state plainly which recorded claims
+  survive.
+Acceptance: the audit findings with file:line pointers; the re-run report; a one-line verdict:
+  insider_net_buy SURVIVES / DOES NOT SURVIVE corrected mechanics.
+Effort: S-M   Depends-on: —
+Risk: research-only.
+
+WO-17: Stop-geometry / adverse-excursion recovery study on intraday longs (owner-directed 2026-08-14)
+Category: C-alpha-experiment (diagnostic — promotion NOT sought)   Priority: P1
+Evidence: owner hypothesis — allowing a deeper adverse dip on an intraday buy may let noise-hit
+  positions recover to a positive sell, vs the current tight stop realizing the dip as a loss.
+  The hindsight replay (07-29..31) recorded "the declines dodged 8 stops"; each stop-out
+  realizes the full round-trip cost floor.
+Null hypothesis (stated up front): on a driftless path, ALL stop geometries have equal pre-cost
+  expected value (optional stopping) — any measured difference between stop widths is evidence
+  of post-dip CONDITIONAL drift (genuine recovery tendency after adverse excursion), which is
+  exactly what the owner's hypothesis asserts and what this study measures.
+Pre-registration: population = the orb entry-signal stream (the highest-volume recorded
+  intraday long family) over the full 1m window, entries next-1m-bar-open per WO-2; per entry,
+  simulate a FIXED axis of stop widths {1.0, 1.5, 2.5, 4.0} × ATR_10m (WO-10's stop unit,
+  prior-session-seeded per WO-10b so morning entries are stoppable) plus NO-STOP
+  (session-end square-off only); TWO exit ladders per width, both fixed: (a) orb's own
+  1.5R target + stop, (b) no target — exit at session end or stop. 10 configs total; per
+  config report net expectancy at ₹20k MIS incl. spread, win rate, and the two diagnostic
+  quantities the hypothesis lives on: DODGED-WINNER FRACTION (of trades stopped at width w,
+  the share that would have ended positive by session end) and the MAE distribution of
+  eventual winners (what dip depth winners actually survive). Promotion is NOT sought — the
+  deliverable is the stop-policy evidence table; any live stop-guidance change that follows is
+  a separate owner-approved change (analyst prompt / plan §6.1), never automatic.
+Acceptance: report with the 10-config table + the two diagnostics + a plain-language answer to
+  the owner's question; STOPS FOR OWNER REVIEW.
+Effort: M   Depends-on: WO-10b's seeded ATR (shared unit)
+Risk: research-only; multiplicity contained by the fixed axes and the no-promotion rule.
+```
+
 ---
 
 # Part III — Appendix
