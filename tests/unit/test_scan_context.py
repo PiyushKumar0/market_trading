@@ -24,6 +24,7 @@ from engine.features.snapshots import load_snapshot
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.ops.scan_context import LiveScanContextProvider
 from engine.strategy.prescreen import SignalPreScreen
+from engine.strategy.scanners import MomentumScanner
 from engine.strategy.scanners.base import Scanner
 from tests.conftest import FIXED_NOW
 
@@ -362,8 +363,91 @@ def test_non_trading_date_yields_no_window_and_no_session_open(store, provider):
     assert len(ctx.intraday_bars) == 1                   # still the scanned bar, ascending contract
 
 
-def test_mom_sessions_since_rebalance_is_none_in_v1(provider):
-    assert provider(_bar("AAA")).mom_sessions_since_rebalance is None
+def test_mom_sessions_since_rebalance_no_conn_degrades_to_legacy_none(provider):
+    # WO-13: the `provider` fixture wires no `conn` — this is the backward-compat degradation path
+    # (pre-WO-13 behaviour), not the resolved feature. Every day still reads "due" with no state
+    # persisted; see the ``mom rebalance state`` block below for the real (conn-wired) behaviour.
+    assert provider(_bar("AAA", d=D)).mom_sessions_since_rebalance is None
+    assert provider(_bar("AAA", d=NEXT_D)).mom_sessions_since_rebalance is None
+
+
+# --------------------------------------------------------------------------- mom rebalance state (WO-13)
+#
+# Trading-day sequence from D=2026-06-17 (conftest FIXED_NOW, a Wednesday): 06-17(D), 06-18(NEXT_D,
+# Thu), 06-19(Fri) — 06-20/21 are a weekend, 06-26 (Fri) is a holiday (Muharram, config/calendar/
+# 2026.yaml) — then 06-22(Mon), the next trading day after 06-19. Tests use a small
+# ``mom_rebalance_days=2`` override so the cadence exercises in three real trading days instead of
+# the §6.3 default 15.
+THIRD_D = date(2026, 6, 19)     # Fri — 2 trading sessions after D
+FOURTH_D = date(2026, 6, 22)    # Mon — 1 trading session after THIRD_D
+
+
+def test_mom_rebalance_bootstrap_is_none_and_persists_today(conn, store, clock, calendar, features):
+    provider = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    ctx = provider(_bar("AAA", d=D))
+    assert ctx.mom_sessions_since_rebalance is None          # never rebalanced ⇒ due now (unchanged)
+    row = conn.execute("SELECT last_rebalance_d FROM mom_rebalance_state WHERE id=1").fetchone()
+    assert row["last_rebalance_d"] == D.isoformat()           # today stamped as the new reference point
+
+
+def test_mom_rebalance_not_due_reports_sessions_elapsed_and_does_not_advance(conn, store, clock, calendar, features):
+    provider = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    provider(_bar("AAA", d=D))                                # bootstrap: marker := D
+    ctx = provider(_bar("AAA", d=NEXT_D))                     # 1 session later; cadence=2 ⇒ not due
+    assert ctx.mom_sessions_since_rebalance == 1
+    row = conn.execute("SELECT last_rebalance_d FROM mom_rebalance_state WHERE id=1").fetchone()
+    assert row["last_rebalance_d"] == D.isoformat()           # unchanged — not due yet
+
+
+def test_mom_rebalance_due_day_fires_and_advances_marker(conn, store, clock, calendar, features):
+    provider = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    provider(_bar("AAA", d=D))
+    provider(_bar("AAA", d=NEXT_D))
+    ctx = provider(_bar("AAA", d=THIRD_D))                    # 2 sessions later; cadence=2 ⇒ due
+    assert ctx.mom_sessions_since_rebalance == 2
+    row = conn.execute("SELECT last_rebalance_d FROM mom_rebalance_state WHERE id=1").fetchone()
+    assert row["last_rebalance_d"] == THIRD_D.isoformat()      # today becomes the new reference point
+
+
+def test_mom_rebalance_restart_preserves_state(conn, store, clock, calendar, features):
+    p1 = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    p1(_bar("AAA", d=D))
+    p1(_bar("AAA", d=NEXT_D))
+    p1(_bar("AAA", d=THIRD_D))                                # due here — marker advances to THIRD_D
+
+    # "Restart": a brand-new provider instance over the SAME conn/db — no in-memory cache survives.
+    p2 = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    ctx = p2(_bar("AAA", d=FOURTH_D))                          # 1 session after the PERSISTED marker
+    # Had the marker not survived the restart, this would read back as the None bootstrap (due now)
+    # instead of the correct "1 session since THIRD_D, not yet due at cadence 2".
+    assert ctx.mom_sessions_since_rebalance == 1
+
+
+def test_mom_rebalance_non_trading_day_never_advances_marker(conn, store, clock, calendar, features):
+    provider = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    provider(_bar("AAA", d=D))                                 # bootstrap: marker := D
+    ctx = provider(_bar("AAA", d=SUNDAY))                      # not a trading day — no session to count
+    assert ctx.mom_sessions_since_rebalance is None
+    row = conn.execute("SELECT last_rebalance_d FROM mom_rebalance_state WHERE id=1").fetchone()
+    assert row["last_rebalance_d"] == D.isoformat()            # untouched
+
+
+def test_mom_scanner_fires_only_when_due_end_to_end(conn, store, clock, calendar, features):
+    """The full WO-13 path: MomentumScanner + LiveScanContextProvider wired together, no hand-built
+    ``ScanContext``. Not-due emits nothing; due emits; the marker persists across the sequence."""
+    days = _weekdays_back(D - timedelta(days=1), 30)
+    _seed_daily(store, "AAA", days, 100.0, 0.5)                # rising momentum ⇒ ranks top_n=1
+    provider = LiveScanContextProvider(store, clock, calendar, features, conn=conn, mom_rebalance_days=2)
+    scanner = MomentumScanner({"top_n": 1, "rebalance_days": 2})
+
+    bar_d = _bar("AAA", d=D)
+    assert scanner.scan(bar_d, provider(bar_d)) != []          # bootstrap ⇒ due
+
+    bar_next = _bar("AAA", d=NEXT_D)
+    assert scanner.scan(bar_next, provider(bar_next)) == []    # 1 session in, cadence 2 ⇒ not due
+
+    bar_third = _bar("AAA", d=THIRD_D)
+    assert scanner.scan(bar_third, provider(bar_third)) != []  # 2 sessions in ⇒ due again
 
 
 # --------------------------------------------------------------------------- feature snapshot

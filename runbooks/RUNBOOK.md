@@ -185,6 +185,39 @@ python scripts/q15_candle_latency.py [--minutes 15] [--symbols … ] [--poll-s 2
 Records per-minute availability + percentile latencies to `data/reports/q15_latency.json`. Confirm the
 `warmup_ready` FROZEN fallback holds if candles are late (a start too close to the window stays FROZEN).
 
+## Pre-open start (tick coverage) (§14 Q14, IMPROVEMENT_SPEC.md F8)
+
+**Start the engine by 09:05 IST on trading days.** Raw tick capture — and therefore everything
+`data/parquet/ticks` carries (bid/ask, depth, cumulative volume) — begins only once the ticker
+subprocess is up; a late start loses the opening session **permanently**. Unlike `bars_1m`, which
+the §2.6 warm-up gap-fill can reconstruct OHLCV-only from Kite's historical MINUTE-CANDLE API
+(`src='gap_backfilled'`), raw ticks have **no backfill path** — Kite exposes no historical tick/quote
+API, so a tick the engine was not up to receive is gone for good, independent of any code fix.
+
+**Measured evidence (F8):** first captured bar was **09:19 IST on 2026-08-12** and **09:52 IST on
+2026-08-11** — both late-start days. On each, the opening ~30 minutes (09:15 auction-to-open onward,
+the most information-dense stretch of the session) are absent from tick storage. Consequence: any
+opening-range strategy (§6.1 `orb`-class) and any open-session spread measurement are blind exactly
+there — this also **understated** the audit's own opening-range estimate (only 24/48 measured
+symbol-days had a usable capture start; see `IMPROVEMENT_SPEC.md` Part III, "Measurement provenance
+(spread/range, W2b)").
+
+This is a start-**time** requirement, not a missing capability — every start already runs the
+identical §2.6 recovery/catch-up path regardless of clock time; starting earlier only means the
+ticker subscribes and writes before 09:15 instead of after.
+
+**Mitigation — pick one:**
+1. **Manual (default):** start the engine (service or `python -m engine.ops.main`) by 09:05 IST
+   yourself, same discipline as the morning login flow above.
+2. **Scheduled (owner option, plan §14 Q14):** Q14 recorded manual-start-primary **deliberately** —
+   this note documents the already-built option, it does not change that default. Register the
+   wake-capable engine-start Scheduled Task (§10.7 below): `\.scripts\schedule_tasks.ps1
+   -WithEngineStarts`, with a `lifecycle.active_period_starts` time at or before 09:05 IST. The
+   watchdog (`scripts/watchdog.py`) already alerts (`SCHEDULED_START_MISSED`) if a scheduled start
+   fails to fire, so a missed pre-open wake is caught the same day.
+
+Neither option is registered by default — this note changes no config and creates no Scheduled Task.
+
 ## Out-of-band watchdog + Scheduled Tasks (§2.2/§10.7)
 
 The engine's `HealthMonitor` dies with the process and cannot detect its own death, so a **separate

@@ -50,6 +50,16 @@ _log = get_logger("scripts.backtest")
 #: ``--index-symbol ""`` (empty) to deliberately disable the filter (all-regime; disclosed in notes).
 _DEFAULT_INDEX_SYMBOL = "NIFTY 50"
 
+#: WO-3 winner-stability adjacency (manager-decided wiring, 2026-08-13): DAILY strategies only —
+#: ``orb`` is the intraday/1m-scale baseline and stays single-density (its ``ParamSet`` never gets
+#: an ``adjacent_density``, so the validate report's ``WinnerStability`` reads "not assessed", by
+#: design). ``PRICE_BASELINES`` minus ``orb``.
+DAILY_BASELINES: frozenset[str] = frozenset(PRICE_BASELINES) - {"orb"}
+
+#: The coarse<->medium pair the manager specified. ``fine`` has no adjacency wiring (out of scope
+#: for this change) — a ``--grid-density fine`` run still validates, just without the extra sweep.
+_ADJACENT_DENSITY: dict[str, str] = {"coarse": "medium", "medium": "coarse"}
+
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
@@ -71,6 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--reports-dir", default=None, help="default: <data_dir>/reports")
+    parser.add_argument(
+        "--no-adjacent", action="store_true",
+        help=(
+            "skip the WO-3 adjacent-grid-density winner-stability sweep for daily strategies "
+            "(rsi2/trend/mom); orb never runs one regardless of this flag"
+        ),
+    )
     return parser
 
 
@@ -104,6 +121,35 @@ def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None
     return {}
 
 
+def _adjacent_winner(
+    strategy_id: str,
+    runner: SweepRunner,
+    *,
+    start: date,
+    end: date,
+    symbols: list[str],
+    grid_density: str,
+    run_adjacent: bool,
+) -> tuple[str | None, dict[str, float] | None]:
+    """WO-3 winner-stability input (manager-decided wiring): for a DAILY strategy, ALSO run the
+    adjacent grid density (coarse<->medium) and return ``(adjacent_density, adjacent_winner)``.
+
+    ``orb`` and any density outside the coarse/medium pair (e.g. ``fine``) return ``(None, None)`` —
+    exactly the "not assessed" input :func:`engine.learning.validate.winner_stability` expects, so
+    the validate report's ``WinnerStability`` flag reads "not assessed" rather than a fabricated
+    comparison. This is a SECOND full sweep (real cost) — ``--no-adjacent`` skips it.
+    """
+    if not run_adjacent or strategy_id not in DAILY_BASELINES:
+        return None, None
+    adjacent_density = _ADJACENT_DENSITY.get(grid_density)
+    if adjacent_density is None:
+        return None, None
+    adjacent_sweep = runner.run(
+        strategy_id, start, end, symbols=symbols, grid_density=adjacent_density
+    )
+    return adjacent_density, adjacent_sweep.best_params
+
+
 def _run_one(
     strategy_id: str,
     runner: SweepRunner,
@@ -114,6 +160,7 @@ def _run_one(
     end: date,
     symbols: list[str],
     grid_density: str,
+    run_adjacent: bool = True,
 ) -> None:
     sweep = runner.run(strategy_id, start, end, symbols=symbols, grid_density=grid_density)
     sweep_art = reports.write_sweep_report(sweep, reports_dir)
@@ -147,11 +194,19 @@ def _run_one(
         )
 
     best = sweep.best_params or _default_params(strategy_id)
+    adjacent_density, adjacent_winner = _adjacent_winner(
+        strategy_id, runner, start=start, end=end, symbols=symbols,
+        grid_density=grid_density, run_adjacent=run_adjacent,
+    )
     params = ParamSet(
         strategy_id=strategy_id,
         params=best,
         trial_count_n=sweep.trial_count_n,           # §6.4: the cited N = every config evaluated
         sweep_stats=_sweep_stats_dict(sweep, best),
+        cost_floor_pct=sweep.cost_floor_pct,          # WO-3 margin floor: the sweep's OWN measured floor
+        grid_density=sweep.grid_density,              # WO-3 winner-stability: this run's density
+        adjacent_density=adjacent_density,            # None for orb / a non-adjacent density (WO-3)
+        adjacent_winner=adjacent_winner,
     )
     report = pipeline.validate_sync(strategy_id, params)
     val_art = reports.write_report(report, reports_dir)
@@ -230,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
             _run_one(
                 strat, runner, pipeline, reports_dir,
                 start=args.start, end=args.end, symbols=symbols, grid_density=args.grid_density,
+                run_adjacent=not args.no_adjacent,
             )
         conn.commit()
     finally:

@@ -311,19 +311,22 @@ def test_rsi2_insufficient_history_fails_to_zero():
 
 # ============================================================================ trend (§6.1 row 3)
 #
-# 60 dailies with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-first-value EMAs of a
-# constant series), so an up provisional close makes the golden cross fire TODAY by construction.
-# Highs/lows creep +0.01/day (+DM=0.01, −DM=0, TR=1.0 uniform) ⇒ +DI=1, −DI=0 ⇒ DX=100 ⇒ ADX=100
-# exactly, and ATR(14,1d)=1.0 exactly — every level is closed-form.
+# 150 dailies (WO-11 floor, F10) with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-
+# first-value EMAs of a constant series), so an up provisional close makes the golden cross fire
+# TODAY by construction. Highs/lows creep +0.001/day (+DM=0.001, −DM=0) — small enough that the
+# cumulative offset never reaches 1.0 across the full 150-bar fixture, keeping TR=1.0 uniform (so
+# ATR(14,1d)=1.0 exactly) for any n used below; DX depends only on the SIGN pattern (−DI=0 exactly
+# since lows never fall ⇒ DX=100·(+DI)/(+DI) = 100 regardless of the +DM magnitude), so ADX=100
+# exactly too — every level stays closed-form at n=60, 149 or 150 alike.
 
 
-def _trend_dailies(n: int = 60, *, directional: bool = True) -> list[DailyBar]:
+def _trend_dailies(n: int = 150, *, directional: bool = True) -> list[DailyBar]:
     d0 = date(2026, 3, 1)
     out = []
     for i in range(n):
         if directional:
-            hi = Decimal("100") + Decimal("0.01") * i
-            lo = Decimal("99") + Decimal("0.01") * i
+            hi = Decimal("100") + Decimal("0.001") * i
+            lo = Decimal("99") + Decimal("0.001") * i
         else:
             hi, lo = Decimal("101"), Decimal("99")   # static H/L: ±DM = 0 ⇒ ADX = 0
         out.append(DailyBar(symbol="TCS", d=d0 + timedelta(days=i), open=Decimal("100"),
@@ -366,7 +369,7 @@ def test_trend_no_fresh_cross_rejected():
         DailyBar(symbol="TCS", d=d0 + timedelta(days=i), open=Decimal(str(100 + 0.5 * i)),
                  high=Decimal(str(101 + 0.5 * i)), low=Decimal(str(99 + 0.5 * i)),
                  close=Decimal(str(100 + 0.5 * i)), volume=1000)
-        for i in range(60)
+        for i in range(150)
     ]
     assert TrendScanner().scan(_swing_bar("135"), ScanContext(daily_bars=dailies)) == []
 
@@ -376,8 +379,22 @@ def test_trend_death_cross_not_emitted():
     assert TrendScanner().scan(_swing_bar("99"), ScanContext(daily_bars=_trend_dailies())) == []
 
 
-def test_trend_insufficient_dailies_fails_to_zero():
-    assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(59))) == []
+def test_trend_warmup_floor_149_150_boundary():
+    # WO-11 (F10): the floor is 150 completed dailies (raised from 60) — the boundary is the test.
+    # 149 fails to zero (warm-up, §7.1 warmup_ready); 150 is a live golden cross, hand-computed
+    # identically to test_trend_golden_cross_hand_computed above.
+    assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(149))) == []
+    out = TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(150)))
+    assert len(out) == 1
+    assert out[0].raw_levels.stop == Decimal("98.50")
+    assert out[0].score == pytest.approx(1.0)
+
+
+def test_trend_young_listing_emits_nothing_at_60_bars():
+    # WO-11 acceptance: a young-listing fixture at the OLD 60-bar floor must now emit nothing — the
+    # exact gap WarmupGate's young-listing exemption previously let through with material EMA-seed
+    # noise (F10).
+    assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(60))) == []
 
 
 # ============================================================================ mom (§6.1 row 4)

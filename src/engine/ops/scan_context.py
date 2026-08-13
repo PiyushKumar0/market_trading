@@ -44,11 +44,18 @@ and a bar older than the last one is IGNORED (a stale/out-of-order delivery must
 ascending series). An ignored bar leaves ``intraday_bars[-1] != bar``, which every intraday scanner
 already treats as fail-to-zero.
 
+``mom`` rebalance-day state (WO-13, F11, resolved 2026-08-13)
+---------------------------------------------------------------
+``mom_sessions_since_rebalance`` used to be hard-coded ``None`` ("never rebalanced ⇒ due now" on
+EVERY day), a live/backtest cadence mismatch against the sweep's fixed ``rebalance_days``-session
+turnover. The provider now persists the last-rebalanced trading day in ``mom_rebalance_state``
+(migration 0006, one row, singleton pattern) and reports the real trading-session count — see
+:meth:`LiveScanContextProvider._resolve_mom_rebalance`. ``None`` is still the correct value for the
+genuine "never rebalanced" bootstrap case (fresh install / no ``conn`` wired); the scanner already
+treats ``None`` and "due" identically (``engine.strategy.scanners.momentum``).
+
 Known v1 gaps (deliberate, documented — not silent)
 ---------------------------------------------------
-* ``mom_sessions_since_rebalance`` is always ``None`` ("never rebalanced ⇒ due now"). The real count
-  is ledger-driven and lands with live ``mom`` state tracking; until then the ``mom`` scanner treats
-  every day as a rebalance day (its own dedupe still limits it to one candidate per symbol per day).
 * ``momentum_by_symbol`` spans the symbols CACHED SO FAR today, not the whole universe — the
   cross-section fills in as symbols tick. Combined with the gap above, the first bars of a day can
   rank a symbol against a partial cross-section. Pass ``momentum_universe`` (typically today's
@@ -59,6 +66,7 @@ Known v1 gaps (deliberate, documented — not silent)
 from __future__ import annotations
 
 import math
+import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -81,6 +89,14 @@ _log = get_logger("engine.ops.scan_context")
 #: would silently defeat the A12 skip; supplying more is free (the scanner discards the surplus).
 DEFAULT_EX_HORIZON_DAYS = 28
 
+#: §6.1 ``mom.rebalance_days`` default (envelope.yaml: min 10 / max 20 / default 15; matches
+#: ``MomentumScanner.DEFAULT_PARAMS``) — the cadence this provider uses to decide when a rebalance-
+#: due day advances the persisted marker (WO-13, F11). MUST match the live ``MomentumScanner``'s
+#: configured ``rebalance_days``: today both default to 15 and ``engine.ops.main`` wires no envelope
+#: override into ``build_enabled_scanners`` yet, so they cannot drift in production; a future
+#: per-strategy envelope override would need to pass the same value here.
+DEFAULT_MOM_REBALANCE_DAYS = 15
+
 
 @dataclass
 class _DayCache:
@@ -97,6 +113,7 @@ class _DayCache:
     daily_bars: dict[str, list[DailyBar]] = field(default_factory=dict)
     momentum: dict[str, float] = field(default_factory=dict)
     intraday: dict[str, list[Bar]] = field(default_factory=dict)
+    mom_sessions_since_rebalance: int | None = None
 
 
 class LiveScanContextProvider:
@@ -127,6 +144,15 @@ class LiveScanContextProvider:
         build (the universe is day-scoped — composition passes the ``universe_daily`` watchlist
         closure so a fresh 08:30 build is picked up without reconstructing the provider).
         ``None`` (default) = purely lazy.
+    conn:
+        Optional state-DB connection for the WO-13 ``mom`` rebalance-day marker
+        (``mom_rebalance_state``, migration 0006). ``None`` (default) degrades to the pre-WO-13
+        behaviour — ``mom_sessions_since_rebalance`` is always ``None`` ("due now") and nothing is
+        persisted — so a caller that has not wired a connection yet is unaffected, never broken.
+    mom_rebalance_days:
+        The cadence (trading sessions) this provider uses to decide a rebalance is due and advance
+        the persisted marker (see :data:`DEFAULT_MOM_REBALANCE_DAYS`). MUST match the live
+        ``MomentumScanner``'s configured ``rebalance_days``.
     """
 
     def __init__(
@@ -141,6 +167,8 @@ class LiveScanContextProvider:
         daily_lookback_days: int = 400,
         ex_horizon_days: int = DEFAULT_EX_HORIZON_DAYS,
         momentum_universe: Sequence[str] | Callable[[], Sequence[str]] | None = None,
+        conn: sqlite3.Connection | None = None,
+        mom_rebalance_days: int = DEFAULT_MOM_REBALANCE_DAYS,
     ) -> None:
         if momentum_weeks < 1:
             raise ValueError("momentum_weeks must be >= 1")
@@ -148,6 +176,8 @@ class LiveScanContextProvider:
             raise ValueError("daily_lookback_days must be >= 1")
         if ex_horizon_days < 0:
             raise ValueError("ex_horizon_days must be >= 0")
+        if mom_rebalance_days < 1:
+            raise ValueError("mom_rebalance_days must be >= 1")
         self._store = store
         self._clock = clock
         self._calendar = calendar
@@ -156,6 +186,8 @@ class LiveScanContextProvider:
         self._momentum_weeks = int(momentum_weeks)
         self._lookback_days = int(daily_lookback_days)
         self._ex_horizon_days = int(ex_horizon_days)
+        self._conn = conn
+        self._mom_rebalance_days = int(mom_rebalance_days)
         if callable(momentum_universe):
             self._momentum_universe_fn: Callable[[], Sequence[str]] | None = momentum_universe
         else:
@@ -182,8 +214,9 @@ class LiveScanContextProvider:
             session_open=day.session_open,
             momentum_by_symbol=day.momentum,
             upcoming_ex_dates=day.ex_dates.get(symbol, []),
-            # v1: no live `mom` state yet ⇒ "never rebalanced ⇒ due now" (module docstring).
-            mom_sessions_since_rebalance=None,
+            # WO-13: real trading-session count (or None = never rebalanced ⇒ due now), day-cached —
+            # see _resolve_mom_rebalance / module docstring "mom rebalance-day state".
+            mom_sessions_since_rebalance=day.mom_sessions_since_rebalance,
             features_snapshot_id=self._snapshot_id(symbol),
         )
 
@@ -214,6 +247,9 @@ class LiveScanContextProvider:
             ex_from=d, ex_to=d + timedelta(days=self._ex_horizon_days)
         ):
             ex_dates.setdefault(row["symbol"], []).append(row["ex_date"])
+        # WO-13: only a real trading day is a candidate rebalance day — a weekend/holiday date (no
+        # session) must never advance the persisted marker.
+        mom_since = self._resolve_mom_rebalance(d) if session is not None else None
         cache = _DayCache(
             d=d,
             daily_start=daily_start,
@@ -223,6 +259,7 @@ class LiveScanContextProvider:
             flagged=flagged,
             index_closes=index_closes,
             ex_dates=ex_dates,
+            mom_sessions_since_rebalance=mom_since,
         )
         preload: Sequence[str] = ()
         if self._momentum_universe_fn is not None:
@@ -253,6 +290,68 @@ class LiveScanContextProvider:
         if not bars:
             return math.nan
         return float(momentum([b.close for b in bars], weeks=self._momentum_weeks).iloc[-1])
+
+    # ------------------------------------------------------------------ §6.1 mom rebalance state (WO-13)
+    def _resolve_mom_rebalance(self, d: date) -> int | None:
+        """Trading sessions since the last ``mom`` rebalance, or ``None`` if never rebalanced — both
+        read as "due now" by :class:`~engine.strategy.scanners.momentum.MomentumScanner` (module
+        docstring). Persists the day's cadence decision to ``mom_rebalance_state`` (migration 0006):
+        a DUE day (``since >= mom_rebalance_days``), or the never-rebalanced bootstrap, stamps ``d``
+        as the new reference point — matching the sweep's fixed-cadence indexing
+        (``valid_positions[::rebalance_days]``, ``engine.learning.sweep``), where a rebalance is a
+        calendar/session event and not conditioned on whether a candidate actually cleared ``top_n``
+        that day. No ``conn`` wired ⇒ degrades to the pre-WO-13 ``None`` (always due), never raises:
+        persistence is additive, not a hard dependency of the scan path.
+        """
+        if self._conn is None:
+            return None
+        last_d = self._read_last_rebalance_d()
+        if last_d is None:
+            self._write_last_rebalance_d(d)
+            return None                              # never rebalanced ⇒ due now (pre-existing semantics)
+        since = self._sessions_between(last_d, d)
+        if since >= self._mom_rebalance_days:
+            self._write_last_rebalance_d(d)           # today becomes the new reference point
+        return since
+
+    def _read_last_rebalance_d(self) -> date | None:
+        try:
+            row = self._conn.execute(
+                "SELECT last_rebalance_d FROM mom_rebalance_state WHERE id=1"
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001 - a journal read must never block the scan path
+            _log.warning("mom_rebalance_read_failed", error=str(exc))
+            return None
+        raw = row["last_rebalance_d"] if row is not None else None
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(str(raw))
+        except ValueError:
+            _log.warning("mom_rebalance_unparseable", raw=str(raw))
+            return None
+
+    def _write_last_rebalance_d(self, d: date) -> None:
+        try:
+            self._conn.execute(
+                "UPDATE mom_rebalance_state SET last_rebalance_d=? WHERE id=1", (d.isoformat(),)
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("mom_rebalance_write_failed", d=d.isoformat(), error=str(exc))
+
+    def _sessions_between(self, start: date, end: date) -> int:
+        """Trading sessions in (``start``, ``end``], via ``NSECalendar.is_trading_day`` (never a
+        second calendar) — the WO-13 cadence counter. ``end <= start`` (a stale/backdated marker)
+        returns 0 rather than a negative count."""
+        if end <= start:
+            return 0
+        count = 0
+        probe = start + timedelta(days=1)
+        while probe <= end:
+            if self._calendar.is_trading_day(probe):
+                count += 1
+            probe += timedelta(days=1)
+        return count
 
     # ------------------------------------------------------------------ intraday series
     def _intraday(self, day: _DayCache, bar: Bar) -> list[Bar]:
