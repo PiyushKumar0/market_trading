@@ -267,7 +267,13 @@ class PrescreenCfg(BaseModel):
     the gate/envelope layer owns per-parameter bounds — these are coarse per-day throttles."""
 
     max_candidates_per_day: int = 20               # signal.candidate publications per trading day
-    max_per_strategy_day: int | None = None        # optional per-strategy sub-cap (None = only the total)
+    #: Per-strategy publication sub-cap. int = the same cap for every strategy; MAPPING
+    #: {strategy_id: cap} = per-strategy values with the reserved key `default` binding any strategy
+    #: without a line of its own (WO-1 (iii), 2026-08-13 — owner knob, never learner-movable, §6.3).
+    max_per_strategy_day: int | dict[str, int] | None = None
+    #: Publication/forward admission ORDER: "ranked" = by score (prescreen) and per-strategy score
+    #: quantile (analyst forwarding); "arrival" = the pre-WO-1 order — the rollback flag, nothing else.
+    admission_mode: str = "ranked"
 
 
 class StrategyCfg(BaseModel):

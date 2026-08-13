@@ -28,6 +28,11 @@ Conventions that are load-bearing here:
 * **Exits never depend on an LLM (R1).** :meth:`check_aged_positions` builds its ``ExitAction``
   deterministically in Python and never calls the harness.
 * **Money is ``Decimal``, timestamps are tz-aware IST strings** in every row written here.
+* **The analyst slot goes to the best pending candidate, not the earliest** (§5.2(a), WO-1
+  2026-08-13). Published candidates queue; each slot the §5.6 forward cap grants is spent on the
+  highest per-strategy score QUANTILE waiting (``_forward_key``), and the counter that bounds those
+  slots lives in the day-slot journal so a mid-day restart resumes the day's quota instead of
+  refilling it. Rollback: ``admission_mode="arrival"``.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Any
@@ -99,6 +105,32 @@ TIME_STOP_THESIS = (
     "Deterministic time stop: this position has exceeded the §7.1 max_holding age for its style. "
     "No model was consulted — exits and stops never depend on an LLM response (R1)."
 )
+
+#: §5.2(a) forward-selection modes (WO-1, 2026-08-13). ``ranked`` = the priority queue below;
+#: ``arrival`` = the pre-WO-1 first-come-first-served order, kept ONLY as the config rollback.
+FORWARD_MODES = ("ranked", "arrival")
+
+#: How many quantile BANDS the per-strategy score distribution is cut into for forward selection.
+#: Quintiles: coarse enough that two candidates of comparable standing inside their own strategies
+#: are treated as equals (and ordered by fired_at), fine enough to separate a strategy's best from
+#: its middling ones. A finer grid would spuriously rank a 0.71 above a 0.69 across strategies.
+QUANTILE_BANDS = 5
+
+#: Hard ceiling on the pending-forward queue. The §3.2.5 publication cap (20/day) already bounds it
+#: an order of magnitude below this; the ceiling exists so a misconfigured publication cap cannot
+#: turn a refused-candidate pointer list into unbounded process memory.
+MAX_PENDING_FORWARDS = 100
+
+
+@dataclass(frozen=True)
+class _PendingForward:
+    """One published-but-not-yet-evaluated candidate waiting for an analyst slot (WO-1 (ii))."""
+
+    candidate: SignalCandidate
+    fired_at: datetime          # when the PIPELINE received it (platform clock, §3.2 — never LLM)
+    seq: int                    # arrival sequence: the last, always-unique deterministic tie-break
+    expires_at: datetime        # the candidate's own §5.2 TTL horizon; past it the levels are stale
+
 
 #: ``owner_approvals.kind`` per action type (§3.4 ``owner_approval_required``).
 _APPROVAL_KIND: Mapping[str, str] = {
@@ -474,7 +506,10 @@ class RecommendationPipeline:
         conn: sqlite3.Connection,
         store: Any,
         rearm: Callable[[str, str], bool] | None = None,
+        admission_mode: str = "ranked",
     ) -> None:
+        if admission_mode not in FORWARD_MODES:
+            raise ValueError(f"admission_mode must be one of {FORWARD_MODES}, got {admission_mode!r}")
         self._assembler = assembler
         self._harness = harness
         self._agent_defs = agent_defs
@@ -497,8 +532,16 @@ class RecommendationPipeline:
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
         self._last_position_event: dict[str, datetime] = {}
         #: §5.2(a) analyst forward cap — per-day count of candidates that reached the harness (§5.6).
+        #: Hydrated from the day-slot journal on every day roll (WO-1 (iv)), so a mid-day restart
+        #: RESUMES the day's analyst quota instead of refilling it.
         self._forwarded_day: date | None = None
         self._forwarded_count = 0
+        self._forward_mode = admission_mode
+        #: The §5.2(a) priority queue: published candidates that have not been evaluated yet.
+        self._pending_forwards: list[_PendingForward] = []
+        self._forward_seq = 0
+        #: strategy_id -> today's observed scores, the population the forward quantile ranks in.
+        self._day_scores: dict[str, list[float]] = {}
 
     def _rearm_slot(self, candidate: SignalCandidate) -> None:
         """Hand the (symbol, strategy) day slot back after a never-evaluated drop (2026-07-29)."""
@@ -522,16 +565,161 @@ class RecommendationPipeline:
         the candidate."""
         try:
             self._conn.execute(
-                "INSERT INTO prescreen_day_slots (d, symbol, strategy_id, published_at, evaluated) "
-                "VALUES (?, ?, ?, ?, 1) "
+                "INSERT INTO prescreen_day_slots "
+                "(d, symbol, strategy_id, published_at, evaluated, score) "
+                "VALUES (?, ?, ?, ?, 1, ?) "
                 "ON CONFLICT(d, symbol, strategy_id) "
-                "DO UPDATE SET evaluated=1, published_at=excluded.published_at",
+                "DO UPDATE SET evaluated=1, published_at=excluded.published_at, "
+                "score=excluded.score",
                 (d.isoformat(), candidate.symbol, candidate.strategy_id,
-                 self._clock.now().isoformat()),
+                 self._clock.now().isoformat(), float(candidate.score)),
             )
         except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
             _log.warning("day_slot_journal_failed", op="publish", symbol=candidate.symbol,
                          strategy_id=candidate.strategy_id, error=str(exc))
+
+    def _journal_forward(self, candidate: SignalCandidate, d: date) -> None:
+        """Charge one analyst forward to ``candidate``'s day slot (WO-1 (iv)).
+
+        A COUNTER, not a flag: a pair re-armed after an analyst INFRASTRUCTURE failure (2026-07-29)
+        can legitimately be forwarded again, and every attempt is real spend against the §5.2(a)
+        cap. Upserts rather than updates so a lost publish-journal row cannot silently swallow the
+        forward record. Journal failure degrades to in-memory-only counting, never blocks the call.
+        """
+        try:
+            self._conn.execute(
+                "INSERT INTO prescreen_day_slots "
+                "(d, symbol, strategy_id, published_at, evaluated, score, forwarded) "
+                "VALUES (?, ?, ?, ?, 1, ?, 1) "
+                "ON CONFLICT(d, symbol, strategy_id) "
+                "DO UPDATE SET forwarded = prescreen_day_slots.forwarded + 1",
+                (d.isoformat(), candidate.symbol, candidate.strategy_id,
+                 self._clock.now().isoformat(), float(candidate.score)),
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("day_slot_journal_failed", op="forward", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
+
+    # ------------------------------------------------------------------ §5.2(a) forward queue (WO-1)
+    def _roll_forward_day(self, d: date) -> None:
+        """Roll the forward-cap day, hydrating the counter and the score population from the
+        journal. Called on every candidate; the DB read happens once per day change (and therefore
+        exactly once after a restart)."""
+        if self._forwarded_day == d:
+            return
+        self._forwarded_day = d
+        self._pending_forwards.clear()
+        self._forward_seq = 0
+        self._forwarded_count, self._day_scores = self._hydrate_forward_state(d)
+
+    def _hydrate_forward_state(self, d: date) -> tuple[int, dict[str, list[float]]]:
+        """(forwarded-so-far, per-strategy score population) for ``d``, read from the journal."""
+        count = 0
+        scores: dict[str, list[float]] = {}
+        try:
+            rows = self._conn.execute(
+                "SELECT strategy_id, score, forwarded FROM prescreen_day_slots WHERE d=?",
+                (d.isoformat(),),
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - a journal read never blocks the trigger path
+            _log.warning("day_slot_journal_failed", op="hydrate_forward", d=d.isoformat(),
+                         error=str(exc))
+            return 0, {}
+        for row in rows:
+            count += int(row["forwarded"] or 0)
+            if row["score"] is not None:
+                scores.setdefault(str(row["strategy_id"]), []).append(float(row["score"]))
+        if count:
+            _log.info("forward_count_hydrated", d=d.isoformat(), forwarded=count,
+                      strategies=sorted(scores))
+        return count, scores
+
+    def _quantile_band(self, candidate: SignalCandidate) -> int:
+        """``candidate``'s standing WITHIN ITS OWN STRATEGY's day, as a quintile band (0..4).
+
+        ``score`` semantics are per-scanner: orb's 0.9 and rsi2's 0.9 are not the same statement,
+        so raw scores must never be compared across strategies. The empirical CDF of that
+        strategy's own day is comparable — it says "top of what this strategy produced today",
+        which means the same thing for every strategy.
+        """
+        population = self._day_scores.get(candidate.strategy_id) or []
+        if not population:
+            return QUANTILE_BANDS - 1        # first of its strategy today ⇒ top of its own day
+        score = float(candidate.score)
+        quantile = sum(1 for s in population if s <= score) / len(population)
+        return min(QUANTILE_BANDS - 1, int(quantile * QUANTILE_BANDS))
+
+    def _forward_key(self, entry: _PendingForward) -> tuple[int, datetime, int]:
+        """THE FORWARD SELECTION RULE (§5.2(a), WO-1 (ii)).
+
+        At each analyst slot, forward the highest-priority published-but-unevaluated candidate:
+
+          1. per-strategy score QUANTILE BAND, descending — rank within that strategy's own day,
+             never the raw score (scores are comparable inside a strategy, not across them);
+          2. inside one band, ``fired_at`` ASCENDING — comparable standing means the older setup
+             goes first, because it is the one closest to going stale;
+          3. arrival sequence, ascending — the final tie-break, so the order is total and the same
+             on every replay (two candidates can share a timestamp; they cannot share a seq).
+
+        ``min()`` over this key is the queue pop; the negated band makes "higher band" sort first.
+        """
+        return (-self._quantile_band(entry.candidate), entry.fired_at, entry.seq)
+
+    def _enqueue_forward(self, candidate: SignalCandidate) -> None:
+        """Put a candidate into the pending-forward queue, replacing any earlier entry for the same
+        (symbol, strategy): a re-published pair is ONE waiting candidate at its latest levels, not
+        two competing copies of itself."""
+        now = self._clock.now()
+        self._forward_seq += 1
+        key = (candidate.symbol, candidate.strategy_id)
+        self._pending_forwards = [
+            p for p in self._pending_forwards
+            if (p.candidate.symbol, p.candidate.strategy_id) != key
+        ]
+        self._pending_forwards.append(_PendingForward(
+            candidate=candidate, fired_at=now, seq=self._forward_seq,
+            expires_at=self._ttl(candidate.style),
+        ))
+        if len(self._pending_forwards) > MAX_PENDING_FORWARDS:
+            worst = max(self._pending_forwards, key=self._forward_key)
+            self._pending_forwards.remove(worst)
+            _log.warning("forward_queue_overflow", dropped=worst.candidate.signal_id,
+                         symbol=worst.candidate.symbol, limit=MAX_PENDING_FORWARDS)
+
+    def _expire_forwards(self, now: datetime) -> None:
+        """Drop queued candidates past their own §5.2 TTL horizon. A queued candidate is a REFUSED
+        one we kept a pointer to, so expiry does NOT re-arm its day slot — the forward cap has never
+        re-armed (2026-07-29: the analyst quota is spent on real evaluations)."""
+        live = [p for p in self._pending_forwards if p.expires_at > now]
+        for stale in self._pending_forwards:
+            if stale.expires_at <= now:
+                _log.info("forward_queue_expired", signal_id=stale.candidate.signal_id,
+                          symbol=stale.candidate.symbol, strategy_id=stale.candidate.strategy_id,
+                          score=stale.candidate.score, queued_at=stale.fired_at.isoformat())
+        self._pending_forwards = live
+
+    def _best_pending_score(self) -> float | None:
+        """Highest score sitting unforwarded in the queue — the live starvation reading (WO-9)."""
+        if not self._pending_forwards:
+            return None
+        return max(float(p.candidate.score) for p in self._pending_forwards)
+
+    def _take_forward_slot(self, cap: int | None) -> SignalCandidate | None:
+        """Spend one analyst slot on the best pending candidate, or return None if none is due."""
+        self._expire_forwards(self._clock.now())
+        if cap is not None and self._forwarded_count >= int(cap):
+            return None
+        if not self._pending_forwards:
+            return None
+        if self._forward_mode == "arrival":
+            entry = min(self._pending_forwards, key=lambda p: (p.fired_at, p.seq))
+        else:
+            entry = min(self._pending_forwards, key=self._forward_key)
+        self._pending_forwards.remove(entry)
+        self._forwarded_count += 1
+        if self._forwarded_day is not None:
+            self._journal_forward(entry.candidate, self._forwarded_day)
+        return entry.candidate
 
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
@@ -572,8 +760,12 @@ class RecommendationPipeline:
                       symbol=candidate.symbol, strategy_id=candidate.strategy_id,
                       reason="no stop level — cannot size, analyst call would be wasted")
             return
+        self._roll_forward_day(d)
         decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
         if not decision.allowed:
+            # A budget block is deliberate policy, not a missed slot: the candidate is neither
+            # re-armed nor queued (queueing it would let a blocked window build a backlog that
+            # hammers the admission gate the moment the block lifts).
             _log.warning("signal_candidate_governor_blocked", signal_id=candidate.signal_id,
                          reason=getattr(decision, "reason", None))
             return
@@ -581,16 +773,31 @@ class RecommendationPipeline:
         # was 6; 4 at DG1+ — §5.6): the governor owns the number, this counter the enforcement
         # (2026-07-28 review: it had no consumer, so a volatile day could burn 20 analyst calls).
         # Counts only calls that reach the harness; the coarse prescreen settings cap still bounds
-        # candidate PUBLICATION.
-        if self._forwarded_day != d:
-            self._forwarded_day, self._forwarded_count = d, 0
+        # candidate PUBLICATION. Since WO-1 the slot goes to the best PENDING candidate rather than
+        # to whoever arrived while budget remained (see _forward_key): the arriving candidate joins
+        # the queue, then the queue is drained by one — so a candidate refused at a full cap stays
+        # available for a slot that opens later (a degrade-tier recovery raises the cap mid-day)
+        # instead of being dropped on the floor.
+        self._day_scores.setdefault(candidate.strategy_id, []).append(float(candidate.score))
+        self._enqueue_forward(candidate)
         cap_fn = getattr(self._governor, "prescreen_forward_cap", None)
         cap = cap_fn() if cap_fn is not None else None
-        if cap is not None and self._forwarded_count >= int(cap):
+        chosen = self._take_forward_slot(cap)
+        if chosen is None:
             _log.info("signal_candidate_forward_cap", signal_id=candidate.signal_id,
-                      forwarded=self._forwarded_count, cap=int(cap))
+                      forwarded=self._forwarded_count, cap=None if cap is None else int(cap),
+                      queued=len(self._pending_forwards),
+                      best_unforwarded_score=self._best_pending_score())
             return
-        self._forwarded_count += 1
+        if chosen.signal_id != candidate.signal_id:
+            # The whole point of the queue: the slot went to a better-standing candidate that was
+            # refused earlier. Logged because "which candidate did the analyst actually see" must
+            # be answerable without a forensic DB read (WO-9).
+            _log.info("forward_queue_preempted", arrived=candidate.signal_id,
+                      forwarded=chosen.signal_id, symbol=chosen.symbol,
+                      strategy_id=chosen.strategy_id, score=chosen.score,
+                      queued=len(self._pending_forwards))
+        candidate = chosen
 
         entry_ref = _dec(candidate.raw_levels.entry)
         product = _product_of(candidate.style)
@@ -701,7 +908,11 @@ class RecommendationPipeline:
                 "catalyst_ref": candidate.catalyst_ref,
             },
         )
-        await self._send(catalog.recommendation_message(rec))
+        # WO-4 (iii): the payload states the live print next to a (possibly level-anchored) entry.
+        live_ltp = getattr(gate_ctx, "ltp", None)
+        await self._send(catalog.recommendation_message(
+            rec, ltp=_dec(live_ltp) if live_ltp is not None else None,
+        ))
 
     # ================================================================== recommendation assembly
     def build_recommendation(
@@ -860,7 +1071,7 @@ class RecommendationPipeline:
             return
         rec = self._manage_recommendation(action, verdict, position, ltp)
         self._book.deliver(rec, ledger_fields=self._manage_ledger_fields(action, verdict, position))
-        await self._send(catalog.recommendation_message(rec))
+        await self._send(catalog.recommendation_message(rec, ltp=ltp))
 
     # ================================================================== §7.1 max_holding
     async def check_aged_positions(self, d: date) -> int:
@@ -1268,7 +1479,10 @@ class RecommendationPipeline:
 __all__ = [
     "ATR_BAR_TAIL",
     "ATR_PERIOD",
+    "FORWARD_MODES",
     "INTRADAY_AGENT_ID",
+    "MAX_PENDING_FORWARDS",
+    "QUANTILE_BANDS",
     "PLATFORM_AGENT_ID",
     "POSITION_EVENT_DEBOUNCE_MIN",
     "STOP_PROXIMITY_ATR_MULT",

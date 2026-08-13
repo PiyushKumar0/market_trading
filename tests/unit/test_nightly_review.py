@@ -24,7 +24,9 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentResult, load_agent_defs
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.ops.nightly_review import (
+    FUNNEL_TITLE,
     NightlyReviewJob,
+    build_funnel_summary,
     build_review_context,
     load_envelope_bounds,
 )
@@ -451,3 +453,110 @@ async def test_missing_agent_def_is_a_logged_no_review(conn, gov, clock, calenda
     assert await job.run(D) is False
     assert harness.calls == []
     assert reviews(conn) == []
+
+
+# =========================================================================== WO-9 funnel telemetry
+def seed_funnel(conn, d: date = D) -> None:
+    """A day-slot journal shaped like a real starved session: orb published three and got two
+    analyst slots, rsi2 published two and got one, and the day's best UNFORWARDED score (0.85)
+    outranks one of the candidates that was actually evaluated."""
+    rows = [
+        # symbol,   strategy, score, forwarded
+        ("TCS", "orb", 0.90, 1),
+        ("INFY", "orb", 0.70, 1),
+        ("WIPRO", "orb", 0.85, 0),
+        ("SBIN", "rsi2", 0.40, 1),
+        ("ITC", "rsi2", 0.20, 0),
+    ]
+    for symbol, strategy_id, score, forwarded in rows:
+        conn.execute(
+            "INSERT INTO prescreen_day_slots "
+            "(d, symbol, strategy_id, published_at, evaluated, score, forwarded) "
+            "VALUES (?, ?, ?, ?, 1, ?, ?)",
+            (d.isoformat(), symbol, strategy_id, f"{d.isoformat()}T10:00:00+05:30",
+             score, forwarded),
+        )
+    for call_id in ("OK-1", "OK-2"):
+        conn.execute(
+            "INSERT INTO agent_calls (call_id, agent_id, trigger, model, ok, at) "
+            "VALUES (?, 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', 1, ?)",
+            (call_id, f"{d.isoformat()}T10:05:00+05:30"),
+        )
+    conn.execute(
+        "INSERT INTO agent_calls (call_id, agent_id, trigger, model, ok, at) "
+        "VALUES ('HB-1', 'intraday_analyst', 'heartbeat', 'sonnet-4.6', 1, ?)",
+        (f"{d.isoformat()}T10:40:00+05:30",),
+    )
+
+
+def test_funnel_summary_aggregates_the_whole_day(conn) -> None:
+    """WO-9: the funnel is raw -> published -> forwarded -> evaluated -> proposals -> verdicts, and
+    the number that says "a good candidate never reached the analyst" is best_unforwarded_score."""
+    seed_day(conn)
+    seed_funnel(conn)
+    summary = build_funnel_summary(conn, D, raw_by_strategy={"orb": 40, "rsi2": 6})
+
+    assert summary.raw == 46
+    assert summary.published == 5
+    assert summary.forwarded == 3
+    assert summary.evaluated == 2                    # ok signal_candidate calls; heartbeat excluded
+    assert summary.proposals == 2                    # from seed_day
+    assert summary.verdicts == {"approve": 1, "reject": 1}
+    assert summary.best_unforwarded_score == 0.85
+
+    orb = {s.strategy_id: s for s in summary.by_strategy}["orb"]
+    assert (orb.raw, orb.published, orb.forwarded) == (40, 3, 2)
+    assert orb.published_scores == (0.70, 0.85, 0.90)
+    assert orb.forwarded_scores == (0.70, 0.90)
+    assert orb.best_unforwarded_score == 0.85
+    # p25 / median / p75 of [0.70, 0.85, 0.90], linearly interpolated.
+    assert orb.quantiles == (0.77, 0.85, 0.88)
+
+
+def test_funnel_summary_of_an_empty_day_is_explicitly_empty(conn) -> None:
+    """A quiet day and a broken query must stay distinguishable (the module's D7 convention)."""
+    summary = build_funnel_summary(conn, EMPTY_DAY)
+    assert (summary.published, summary.forwarded, summary.evaluated) == (0, 0, 0)
+    assert summary.raw is None                       # never measured is not the same as zero
+    assert summary.best_unforwarded_score is None
+    assert summary.by_strategy == ()
+    assert summary.lines() == ["  nothing published today"]
+
+
+def test_funnel_section_is_in_the_review_context(conn) -> None:
+    seed_day(conn)
+    seed_funnel(conn)
+    text = build_review_context(conn, None, D, BOUNDS)
+    assert f"{FUNNEL_TITLE}:" in text
+    assert "published 5 -> forwarded 3 -> evaluated 2 -> proposals 2" in text
+    assert "best unforwarded score: 0.85" in text
+    assert "- orb: raw unmeasured published 3 forwarded 2" in text
+
+
+def test_funnel_log_fields_are_flat_scalars(conn) -> None:
+    """The EOD line is a STRUCTURED log record — its fields have to survive JSON rendering."""
+    seed_funnel(conn)
+    fields = build_funnel_summary(conn, D, raw_by_strategy={"orb": 40}).log_fields()
+    assert fields["d"] == D.isoformat()
+    assert fields["published"] == 5
+    assert fields["best_unforwarded_score"] == 0.85
+    assert fields["published_by_strategy"] == {"orb": 3, "rsi2": 2}
+    assert json.dumps(fields)                        # no Decimal/date/Row leaks into the log line
+
+
+@pytest.mark.asyncio
+async def test_run_emits_the_eod_funnel_line_even_when_it_produces_no_review(
+    conn, gov, clock, calendar
+) -> None:
+    """WO-9 acceptance: the funnel line is emitted BEFORE any early return, so a governor-blocked
+    or agent-def-less night still leaves the day's funnel numbers in the log — the measurement must
+    not depend on the LLM call it is measuring."""
+    seed_funnel(conn)
+    job = make_job(conn, gov, clock, calendar, {}, FakeHarness(raw=json.dumps(REVIEW)))
+    captured: list[Any] = []
+    real = job._log_funnel
+    job._log_funnel = lambda d: captured.append(real(d))
+
+    assert await job.run(D) is False                 # no agent def -> earliest possible return
+    assert captured and captured[0].forwarded == 3
+    assert captured[0].best_unforwarded_score == 0.85

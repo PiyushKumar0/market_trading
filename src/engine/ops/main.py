@@ -567,6 +567,7 @@ async def run() -> int:
             # Late-bound like momentum_universe below: `prescreen` is constructed a few lines further
             # down; the lambda resolves it at call time (an analyst failure long after wiring).
             rearm=lambda sym, sid: prescreen.rearm(sym, sid),
+            admission_mode=settings.strategy.prescreen.admission_mode,   # WO-1 rollback flag
         )
         if harness is not None else None
     )
@@ -590,6 +591,7 @@ async def run() -> int:
         bus=bus,
         max_candidates_per_day=settings.strategy.prescreen.max_candidates_per_day,
         max_per_strategy_day=settings.strategy.prescreen.max_per_strategy_day,
+        admission_mode=settings.strategy.prescreen.admission_mode,       # WO-1 rollback flag
     )
     # 2026-08-04: dedupe/caps day-state is process memory — rehydrate it from the day-slot journal
     # so a restart no longer resets the 20/day bound (observed: ~54 publications across two
@@ -616,7 +618,10 @@ async def run() -> int:
     )
     nightly_job = (
         NightlyReviewJob(protected_store, conn, assembler, harness, agent_defs, governor, clock,
-                         calendar, notify=notify)
+                         calendar, notify=notify,
+                         # WO-9: raw scanner output is the one funnel number that is not journaled
+                         # (it is not a decision) — read it from the live pre-screen counters.
+                         funnel_raw=lambda d: prescreen.raw_counts(d))
         if harness is not None and "nightly_reviewer" in agent_defs else None
     )
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -63,6 +64,15 @@ _HEADER = "== TRADING DAY REVIEW (volatile) =="
 _TRADES_TITLE = "closed trades (learning ledger)"
 _RECS_TITLE = "recommendations delivered"
 _ENVELOPE_TITLE = "suggestible parameters (envelope.yaml - the ONLY names you may propose)"
+
+#: WO-9 funnel section heading (also the log event's human anchor).
+FUNNEL_TITLE = "signal funnel utilization (3.2.5 admission -> 5.2(a) analyst slots)"
+
+#: The §5.2(a) analyst id and its candidate-trigger call class, as written to ``agent_calls``.
+_SIGNAL_AGENT_ID = "intraday_analyst"
+_SIGNAL_TRIGGER = "signal_candidate"
+
+_UNMEASURED = "unmeasured"
 
 
 # --------------------------------------------------------------------------- small render helpers
@@ -242,6 +252,218 @@ def _envelope_lines(bounds: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+# --------------------------------------------------------------------------- funnel telemetry (WO-9)
+def _round(value: float) -> float:
+    """Scores are 0..1 informational strengths; two decimals is all the precision they carry."""
+    return round(float(value), 2)
+
+
+def _quantile(sorted_values: Sequence[float], q: float) -> float:
+    """Linear-interpolated quantile over an ASCENDING list (no numpy on the reporting path)."""
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return _round(sorted_values[0])
+    pos = q * (len(sorted_values) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = pos - lo
+    return _round(sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac)
+
+
+@dataclass(frozen=True)
+class StrategyFunnel:
+    """One strategy's slice of the day's funnel (WO-9)."""
+
+    strategy_id: str
+    raw: int | None                              # None = the prescreen counters were not wired
+    published: int
+    forwarded: int
+    published_scores: tuple[float, ...]          # ascending
+    forwarded_scores: tuple[float, ...]          # ascending
+    best_unforwarded_score: float | None
+
+    @property
+    def quantiles(self) -> tuple[float, float, float]:
+        """(p25, median, p75) of this strategy's PUBLISHED scores — the distribution the forwarded
+        set has to beat for WO-1's live acceptance ("forwarded ≥ published median")."""
+        return (
+            _quantile(self.published_scores, 0.25),
+            _quantile(self.published_scores, 0.50),
+            _quantile(self.published_scores, 0.75),
+        )
+
+    def line(self) -> str:
+        p25, med, p75 = self.quantiles
+        raw = _UNMEASURED if self.raw is None else str(self.raw)
+        best = _NONE if self.best_unforwarded_score is None else f"{self.best_unforwarded_score}"
+        forwarded_scores = (
+            _NONE if not self.forwarded_scores
+            else ",".join(str(s) for s in self.forwarded_scores)
+        )
+        return (
+            f"  - {self.strategy_id}: raw {raw} published {self.published} "
+            f"forwarded {self.forwarded} | published scores p25/med/p75 {p25}/{med}/{p75} "
+            f"| forwarded scores {forwarded_scores} | best unforwarded {best}"
+        )
+
+
+@dataclass(frozen=True)
+class FunnelSummary:
+    """The whole day's origination funnel, assembled from the day-slot journal + the audit tables.
+
+    Every number here was previously reconstructable only by forensic DB reads (WO-9's evidence).
+    ``best_unforwarded_score`` is the point of the exercise: it is the direct, single-number answer
+    to "did a good candidate never reach the analyst?" — starvation, measured rather than argued.
+    """
+
+    d: date
+    raw: int | None
+    published: int
+    forwarded: int
+    evaluated: int
+    proposals: int
+    verdicts: Mapping[str, int]
+    best_unforwarded_score: float | None
+    by_strategy: tuple[StrategyFunnel, ...] = field(default=())
+
+    def lines(self) -> list[str]:
+        if not self.published:
+            return ["  nothing published today"]
+        verdicts = " ".join(f"{k}={v}" for k, v in sorted(self.verdicts.items())) or _NONE
+        raw = _UNMEASURED if self.raw is None else str(self.raw)
+        best = _NONE if self.best_unforwarded_score is None else f"{self.best_unforwarded_score}"
+        return [
+            f"  raw {raw} -> published {self.published} -> forwarded {self.forwarded} -> "
+            f"evaluated {self.evaluated} -> proposals {self.proposals}",
+            f"  gate verdicts: {verdicts}",
+            f"  best unforwarded score: {best}",
+            *(s.line() for s in self.by_strategy),
+        ]
+
+    def log_fields(self) -> dict[str, Any]:
+        """Flat, JSON-renderable fields for the one structured EOD log line."""
+        return {
+            "d": self.d.isoformat(),
+            "raw": self.raw,
+            "published": self.published,
+            "forwarded": self.forwarded,
+            "evaluated": self.evaluated,
+            "proposals": self.proposals,
+            "verdicts": dict(sorted(self.verdicts.items())),
+            "best_unforwarded_score": self.best_unforwarded_score,
+            "raw_by_strategy": {s.strategy_id: s.raw for s in self.by_strategy},
+            "published_by_strategy": {s.strategy_id: s.published for s in self.by_strategy},
+            "forwarded_by_strategy": {s.strategy_id: s.forwarded for s in self.by_strategy},
+            "published_score_quantiles": {
+                s.strategy_id: list(s.quantiles) for s in self.by_strategy
+            },
+            "forwarded_scores": {
+                s.strategy_id: list(s.forwarded_scores) for s in self.by_strategy
+            },
+            "best_unforwarded_by_strategy": {
+                s.strategy_id: s.best_unforwarded_score for s in self.by_strategy
+            },
+        }
+
+
+def build_funnel_summary(
+    conn: sqlite3.Connection,
+    d: date,
+    raw_by_strategy: Mapping[str, int] | None = None,
+) -> FunnelSummary:
+    """Assemble ``d``'s funnel from ``prescreen_day_slots`` + the proposal/verdict/agent-call audit.
+
+    A pure read, like the rest of this module. ``raw_by_strategy`` is the pre-admission scanner
+    count, which lives in the pre-screen's process memory rather than the DB (it is not a decision,
+    so it is not journaled) — unwired, the raw row renders "unmeasured" rather than "0": a number we
+    did not measure and a number that was zero are different facts (D7).
+    """
+    day = _day_prefix(d)
+    try:
+        rows = conn.execute(
+            "SELECT symbol, strategy_id, score, forwarded FROM prescreen_day_slots WHERE d = ? "
+            "ORDER BY strategy_id, symbol",
+            (day,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        # An unreadable journal costs the funnel section, never the review (D7).
+        _log.warning("funnel_journal_unreadable", d=day, error=f"{type(exc).__name__}: {exc}")
+        rows = []
+
+    published: dict[str, list[float]] = {}
+    forwarded_scores: dict[str, list[float]] = {}
+    forwarded_calls: dict[str, int] = {}
+    unforwarded: dict[str, list[float]] = {}
+    strategies: list[str] = []
+    for row in rows:
+        sid = str(row["strategy_id"])
+        if sid not in published:
+            published[sid] = []
+            strategies.append(sid)
+        n_forwarded = int(row["forwarded"] or 0)
+        forwarded_calls[sid] = forwarded_calls.get(sid, 0) + n_forwarded
+        if row["score"] is None:                  # pre-WO-1 rows carry no score — counted, not faked
+            continue
+        score = _round(row["score"])
+        published[sid].append(score)
+        (forwarded_scores if n_forwarded else unforwarded).setdefault(sid, []).append(score)
+
+    raw_map = dict(raw_by_strategy or {})
+    slices = tuple(
+        StrategyFunnel(
+            strategy_id=sid,
+            raw=raw_map.get(sid),
+            published=len(
+                [r for r in rows if str(r["strategy_id"]) == sid]
+            ),
+            forwarded=forwarded_calls.get(sid, 0),
+            published_scores=tuple(sorted(published.get(sid, ()))),
+            forwarded_scores=tuple(sorted(forwarded_scores.get(sid, ()))),
+            best_unforwarded_score=max(unforwarded[sid]) if unforwarded.get(sid) else None,
+        )
+        for sid in strategies
+    )
+    every_unforwarded = [s for scores in unforwarded.values() for s in scores]
+    proposals, verdicts = _proposal_verdict_counts(conn, day)
+    return FunnelSummary(
+        d=d,
+        raw=sum(raw_map.values()) if raw_map else None,
+        published=len(rows),
+        forwarded=sum(forwarded_calls.values()),
+        evaluated=_analyst_evaluations(conn, day),
+        proposals=proposals,
+        verdicts=verdicts,
+        best_unforwarded_score=max(every_unforwarded) if every_unforwarded else None,
+        by_strategy=slices,
+    )
+
+
+def _analyst_evaluations(conn: sqlite3.Connection, day: str) -> int:
+    """Forwarded candidates the analyst actually ANSWERED — the step between "we spent a slot" and
+    "a proposal exists". Heartbeat/position-event calls are a different trigger and excluded."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM agent_calls "
+        "WHERE agent_id = ? AND trigger = ? AND ok = 1 AND substr(at, 1, 10) = ?",
+        (_SIGNAL_AGENT_ID, _SIGNAL_TRIGGER, day),
+    ).fetchone()
+    return int(row["n"] if row is not None else 0)
+
+
+def _proposal_verdict_counts(conn: sqlite3.Connection, day: str) -> tuple[int, dict[str, int]]:
+    proposals = conn.execute(
+        "SELECT COUNT(*) AS n FROM proposals WHERE substr(created_at, 1, 10) = ?", (day,)
+    ).fetchone()["n"]
+    counts: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT verdict, COUNT(*) AS n FROM verdicts WHERE substr(evaluated_at, 1, 10) = ? "
+        "GROUP BY verdict",
+        (day,),
+    ).fetchall():
+        counts[str(row["verdict"] or _UNKNOWN)] = int(row["n"])
+    return int(proposals), counts
+
+
 # --------------------------------------------------------------------------- envelope bounds (R4)
 def load_envelope_bounds(store: Any | None) -> dict[str, Any]:
     """The ``envelope.yaml`` ``parameters`` table: name -> ``{min, max, default, used_by}`` (§6.3).
@@ -276,6 +498,7 @@ def build_review_context(
     store: Any | None,
     d: date,
     envelope_names: Mapping[str, Any] | None = None,
+    funnel: FunnelSummary | None = None,
 ) -> str:
     """The VOLATILE review block for ``d`` — a pure, deterministic read of the state DB.
 
@@ -299,6 +522,12 @@ def build_review_context(
     )
     parts.append(_section(_RECS_TITLE, _rec_lines(recs)))
     parts.append(_section("proposals and gate verdicts", _verdict_lines(conn, d)))
+    # WO-9: the reviewer cannot reason about "was the day's best idea even looked at?" from
+    # delivered recommendations alone — the funnel above them is where candidates are lost.
+    parts.append(_section(
+        FUNNEL_TITLE,
+        (funnel if funnel is not None else build_funnel_summary(conn, d)).lines(),
+    ))
     parts.append(_section("agent call failures", _agent_failure_lines(conn, d)))
     parts.append(f"llm spend today: ${_day_spend(conn, d)}")
     parts.append(_section(_ENVELOPE_TITLE, _envelope_lines(bounds)))
@@ -357,6 +586,10 @@ class NightlyReviewJob:
         The only sources of "now" and of trading-day facts (§3.2 no-naive-datetime).
     notify:
         Owner sink for the ``DAILY_SUMMARY`` message. Unwired ⇒ the review still persists.
+    funnel_raw:
+        Optional ``day -> {strategy_id: raw candidate count}`` reader (WO-9), normally
+        ``SignalPreScreen.raw_counts``. Raw scanner output is the one funnel number that is not in
+        the DB — it is not a decision, so it is not journaled. Unwired ⇒ the row reads "unmeasured".
     """
 
     def __init__(
@@ -370,6 +603,7 @@ class NightlyReviewJob:
         clock: Clock,
         calendar: NSECalendar,
         notify: NotifySink | None = None,
+        funnel_raw: Callable[[date], Mapping[str, int]] | None = None,
     ) -> None:
         self._store = store
         self._conn = conn
@@ -380,6 +614,7 @@ class NightlyReviewJob:
         self._clock = clock
         self._calendar = calendar
         self._notify = notify
+        self._funnel_raw = funnel_raw
 
     # ------------------------------------------------------------------ run (§5.5)
     async def run(self, d: date) -> bool:
@@ -389,6 +624,11 @@ class NightlyReviewJob:
         each resolve to a logged False, and a False leaves ``nightly_reviews`` untouched for ``d`` —
         so a retry (the §2.6 date-keyed catch-up) sees an un-reviewed day, not a half-reviewed one.
         """
+        # WO-9: the one structured EOD funnel line, emitted BEFORE every early return. The
+        # measurement must not depend on the LLM call it measures — a governor-blocked night is
+        # exactly the night you want the funnel numbers for.
+        funnel = self._log_funnel(d)
+
         agent_def = self._defs.get(nightly.AGENT_ID)
         if agent_def is None:
             _log.error("nightly_review_no_agent_def", agent=nightly.AGENT_ID, d=d.isoformat())
@@ -412,7 +652,7 @@ class NightlyReviewJob:
             stable_block="\n".join(
                 ["== DAY CONTEXT (stable) ==", f"trading date: {d.isoformat()} ({d.strftime('%A')})"]
             ),
-            volatile_block=build_review_context(self._conn, self._store, d, bounds),
+            volatile_block=build_review_context(self._conn, self._store, d, bounds, funnel=funnel),
             call_class=CALL_CLASS,
         )
         result = await self._harness.run_single_shot(
@@ -464,6 +704,21 @@ class NightlyReviewJob:
         )
         await self._send(self._summary_message(d, stored, trades, recs, len(dropped)))
         return True
+
+    # ------------------------------------------------------------------ funnel telemetry (WO-9)
+    def _log_funnel(self, d: date) -> FunnelSummary:
+        """Build ``d``'s funnel summary and emit it as ONE structured log line. Never raises: a
+        reporting read must not be able to cost the owner their nightly review (D7)."""
+        raw: Mapping[str, int] | None = None
+        if self._funnel_raw is not None:
+            try:
+                raw = self._funnel_raw(d)
+            except Exception as exc:  # noqa: BLE001 - an unwired/broken counter costs one row
+                _log.warning("funnel_raw_unavailable", d=d.isoformat(),
+                             error=f"{type(exc).__name__}: {exc}")
+        summary = build_funnel_summary(self._conn, d, raw)
+        _log.info("funnel_utilization", **summary.log_fields())
+        return summary
 
     # ------------------------------------------------------------------ persistence
     def _persist(self, d: date, review: NightlyReview) -> None:

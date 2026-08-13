@@ -153,7 +153,23 @@ filings:
 strategy:
   prescreen:
     max_candidates_per_day: 20   # signal.candidate publications per trading day (SignalPreScreen)
-    max_per_strategy_day:        # optional per-strategy sub-cap (blank = only the daily total applies)
+    # Admission ORDER (WO-1, 2026-08-13). `ranked` = the pre-screen admits a batch score-descending
+    # and the analyst forward queue picks by per-strategy score quantile; `arrival` = the pre-WO-1
+    # first-come-first-served order. `arrival` is the documented ROLLBACK setting and nothing else.
+    admission_mode: ranked
+    # Per-strategy publication sub-caps [owner knob — NOT in the learnable envelope (§6.3); the
+    # learner may never move a cap that decides which strategies get evaluated at all].
+    # `default` binds any strategy without its own line, and at 8 = 40% of max_candidates_per_day
+    # it STRUCTURALLY prevents any single strategy — including one added after this file was
+    # written — from taking more than 40% of the day's slots. orb is capped explicitly: on
+    # 2026-08-11 it took 55% of the day's publications purely by firing first.
+    max_per_strategy_day:
+      default: 8
+      orb: 6
+      rsi2: 8
+      trend: 6
+      mom: 4
+      brk20: 6
 
 # §3.2.3 ReconcileJob drift thresholds (A13) [tunable]: alert when >max_bad_bar_fraction of compared
 # bars drift by >vol_drift_pct volume or >close_drift_ticks ticks on close. Offline spans are

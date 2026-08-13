@@ -326,7 +326,7 @@ def agent_defs() -> dict[str, AgentDef]:
 
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
-    mode=None, kill=None, notify=None, assembler=None, rearm=None,
+    mode=None, kill=None, notify=None, assembler=None, rearm=None, admission_mode="ranked",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
         "assembler": assembler or FakeAssembler(),
@@ -344,6 +344,7 @@ def make_pipeline(
         parts["assembler"], harness, agent_defs(), gate, parts["ctx_builder"], book,
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
+        admission_mode=admission_mode,
     )
     return pipeline, parts
 
@@ -1012,3 +1013,161 @@ async def test_forward_cap_stops_analyst_calls_for_the_day(
     for _i in range(4):
         await pipeline.on_signal_candidate(candidate())
     assert len(harness.calls) == 2
+
+
+# ======================================================= WO-1: forward queue + journalled counter
+class TunableGovernor(FakeGovernor):
+    """A governor whose §5.2(a) forward cap the test can move — the live cap really does move
+    (agents.yaml ``prescreen_cap_per_day`` is 12 at DG0 and 4 at DG1+, §5.6)."""
+
+    def __init__(self, cap: int) -> None:
+        super().__init__()
+        self.cap = cap
+
+    def prescreen_forward_cap(self) -> int:
+        return self.cap
+
+
+def forward_journal(conn) -> dict[tuple[str, str], int]:
+    return {
+        (r["symbol"], r["strategy_id"]): int(r["forwarded"])
+        for r in conn.execute(
+            "SELECT symbol, strategy_id, forwarded FROM prescreen_day_slots"
+        ).fetchall()
+    }
+
+
+async def test_forward_queue_selects_by_per_strategy_quantile_not_raw_score(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """WO-1 (ii): at an analyst slot the queue picks the highest per-strategy score QUANTILE, not
+    the highest raw score - scores are comparable within a strategy and meaningless across them.
+    Here rsi2's only candidate (0.30) is the top of rsi2's day and orb's 0.95 is the top of orb's;
+    the tie inside the top quantile band falls back to fired_at, so the earlier one goes first."""
+    gov = TunableGovernor(0)               # no slots yet: everything queues, nothing is lost
+    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    await pipeline.on_signal_candidate(
+        candidate(symbol="INFY", strategy_id="rsi2", signal_id="R1", score=0.30))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="O1", score=0.95))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="WIPRO", strategy_id="orb", signal_id="O2", score=0.50))
+    assert harness.calls == []                                  # cap 0 - nothing forwarded
+    assert set(forward_journal(conn).values()) == {0}
+
+    gov.cap = 1                                                 # one slot opens (DG1 -> DG0)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="ITC", strategy_id="orb", signal_id="O3", score=0.01))
+    assert parts["assembler"].contexts[-1].stable_block == "stable R1"    # rsi2's top, not orb's
+    assert forward_journal(conn)[("INFY", "rsi2")] == 1
+
+    gov.cap = 2                                                 # a second slot
+    await pipeline.on_signal_candidate(
+        candidate(symbol="SBIN", strategy_id="orb", signal_id="O4", score=0.02))
+    assert parts["assembler"].contexts[-1].stable_block == "stable O1"    # now orb's own best
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+    assert forward_journal(conn)[("WIPRO", "orb")] == 0         # still queued, still unforwarded
+
+
+async def test_forward_count_survives_a_mid_day_restart(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """WO-1 (iv): the forward counter is journalled, so a restart RESUMES the day's analyst quota.
+    Before this it was process memory - the same defect the 2026-08-04 journal fixed for the
+    publication caps, still open on the more expensive of the two bounds."""
+    gov = TunableGovernor(3)
+    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    await pipeline.on_signal_candidate(candidate(symbol="TCS", strategy_id="orb", score=0.9))
+    await pipeline.on_signal_candidate(candidate(symbol="INFY", strategy_id="orb", score=0.8))
+    assert len(harness.calls) == 2
+    assert sum(forward_journal(conn).values()) == 2
+
+    # --- the restart: a brand-new pipeline object on the same state DB ---
+    harness2 = FakeHarness(dict(NO_ACTION_JSON))
+    restarted, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness2,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    await restarted.on_signal_candidate(candidate(symbol="SBIN", strategy_id="orb", score=0.7))
+    await restarted.on_signal_candidate(candidate(symbol="ITC", strategy_id="orb", score=0.6))
+    assert restarted._forwarded_count == 3                      # 2 hydrated + 1, not 1
+    assert len(harness2.calls) == 1                             # the 3-call day cap held across it
+    assert sum(forward_journal(conn).values()) == 3
+
+
+async def test_heartbeat_never_consumes_a_forward_slot(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """5.2(c) is regime context only and is metered by the governor, never by the 5.2(a) forward
+    cap - a chatty heartbeat must not eat the day's candidate evaluations."""
+    gov = TunableGovernor(1)
+    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    await pipeline.heartbeat()
+    await pipeline.heartbeat()
+    assert len(harness.calls) == 2
+    assert pipeline._forwarded_count == 0
+    assert forward_journal(conn) == {}                          # no day slot touched either
+    await pipeline.on_signal_candidate(candidate(symbol="TCS", strategy_id="orb", score=0.9))
+    assert len(harness.calls) == 3                              # the one slot was still there
+    assert pipeline._forwarded_count == 1
+
+
+async def test_forward_mode_arrival_is_the_rollback_to_fifo(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """WO-1 risk note: admission_mode='arrival' restores pre-WO-1 first-come-first-served
+    forwarding, so a rollback is a settings edit rather than a revert."""
+    gov = TunableGovernor(0)
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov, admission_mode="arrival",
+    )
+    await pipeline.on_signal_candidate(
+        candidate(symbol="ITC", strategy_id="orb", signal_id="LOW", score=0.01))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="TOP", score=0.99))
+    gov.cap = 1
+    await pipeline.on_signal_candidate(
+        candidate(symbol="SBIN", strategy_id="orb", signal_id="MID", score=0.50))
+    assert parts["assembler"].contexts[-1].stable_block == "stable LOW"   # earliest, not best
+
+
+async def test_queued_candidate_expires_instead_of_going_stale(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """A queued candidate is a REFUSED one we kept a pointer to; it must never be forwarded past
+    its own 5.2 TTL horizon - a 90-minute-old breakout level is not the setup the scanner saw.
+    Expiry does not re-arm the day slot (the forward cap deliberately never re-arms, 2026-07-29)."""
+    gov = TunableGovernor(0)
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="STALE", score=0.99))
+    ticker.at = NOW + timedelta(minutes=TTL_INTRADAY_MIN + 1)
+    gov.cap = 1
+    await pipeline.on_signal_candidate(
+        candidate(symbol="ITC", strategy_id="orb", signal_id="FRESH", score=0.10))
+    assert parts["assembler"].contexts[-1].stable_block == "stable FRESH"
+    assert forward_journal(conn)[("TCS", "orb")] == 0

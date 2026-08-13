@@ -350,3 +350,161 @@ def test_register_rejects_duplicate_strategy_id():
         register(Impostor)
     assert SCANNER_REGISTRY["orb"] is OrbScanner          # registry untouched by the failed attempt
     assert register(OrbScanner) is OrbScanner             # re-registering the same class is idempotent
+
+
+# ======================================================================== WO-1: ranked admission
+def _scored_stub(sid: str, scores: dict[str, float]):
+    """A scanner emitting one candidate per bar with a per-SYMBOL score (never registered)."""
+
+    class _Scored(Scanner):
+        strategy_id = sid
+        style = "intraday"
+        DEFAULT_PARAMS = {}
+
+        def scan(self, bar, ctx):  # noqa: ANN001 - test stub
+            if bar.symbol not in scores:
+                return []
+            return [self._candidate(bar=bar, ctx=ctx, side="BUY", entry=bar.close,
+                                    score=scores[bar.symbol])]
+
+    return _Scored()
+
+
+def _multi_stub(sid: str, scored_symbols: dict[str, float]):
+    """A scanner that emits one candidate per entry in ``scored_symbols`` on EVERY bar — the
+    batch-burst shape (``admit``/one bar producing many candidates at once)."""
+
+    class _Multi(Scanner):
+        strategy_id = sid
+        style = "intraday"
+        DEFAULT_PARAMS = {}
+
+        def scan(self, bar, ctx):  # noqa: ANN001 - test stub
+            from engine.strategy.types import RawLevels, SignalCandidate
+            return [
+                SignalCandidate(
+                    signal_id=f"sig-{sid}-{sym}", strategy_id=sid, symbol=sym, side="BUY",
+                    style="intraday",
+                    raw_levels=RawLevels(entry=Decimal("100"), stop=Decimal("99")), score=score,
+                )
+                for sym, score in scored_symbols.items()
+            ]
+
+    return _Multi()
+
+
+def test_burst_admits_the_top_scored_not_the_earliest():
+    """WO-1 (i): under a binding cap the batch is admitted SCORE-DESCENDING, so the best candidate
+    of a burst takes the last free slot instead of whichever scanner happened to emit first.
+    Pre-WO-1 this admitted LOW/MID (arrival order) and dropped the two best."""
+    burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95, "HIGH": 0.80}
+    ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2)
+    out = ps.on_bar(_bar(symbol="DRIVER"))
+    assert [c.symbol for c in out] == ["TOP", "HIGH"]
+
+
+def test_burst_ties_keep_arrival_order_and_admission_stays_deterministic():
+    """Ties in score fall back to emission order (``sorted`` is stable), so §9.6 replay of the same
+    bar stream still reproduces the same decisions byte-for-byte."""
+    burst = {"A": 0.50, "B": 0.50, "C": 0.90}
+    ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2)
+    assert [c.symbol for c in ps.on_bar(_bar(symbol="DRIVER"))] == ["C", "A"]
+
+
+def test_admission_mode_arrival_is_the_rollback_to_pre_wo1_order():
+    """WO-1 risk note: the rollback is a config flag, not a revert. ``arrival`` restores the exact
+    pre-WO-1 behaviour — first emitted, first admitted, score ignored."""
+    burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95}
+    ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2,
+                    admission_mode="arrival")
+    assert [c.symbol for c in ps.on_bar(_bar(symbol="DRIVER"))] == ["LOW", "MID"]
+    with pytest.raises(ValueError, match="admission_mode"):
+        _prescreen(admission_mode="whatever")
+
+
+def test_admit_batch_is_ranked_too():
+    """The brk20 daily sweep is the biggest real burst (dozens of candidates in ONE admit call) —
+    it must face the same score-descending selection as the bar path."""
+    from datetime import date as _date
+
+    from engine.strategy.types import RawLevels, SignalCandidate
+
+    def _c(symbol: str, score: float) -> SignalCandidate:
+        return SignalCandidate(
+            signal_id=f"sig-{symbol}", strategy_id="brk20", symbol=symbol, side="BUY",
+            style="swing", raw_levels=RawLevels(entry=Decimal("103"), stop=Decimal("100")),
+            score=score,
+        )
+
+    ps = _prescreen([], max_candidates_per_day=2)
+    out = ps.admit([_c("AAA", 0.2), _c("BBB", 0.9), _c("CCC", 0.55)], _date(2026, 6, 17))
+    assert [c.symbol for c in out] == ["BBB", "CCC"]
+
+
+# ======================================================================== WO-1: per-strategy caps
+def test_per_strategy_cap_mapping_binds_per_strategy():
+    """WO-1 (iii): the sub-cap becomes a per-strategy MAP; ``default`` binds any strategy without
+    its own line (the structural ≤40%-of-the-day guarantee for strategies added later)."""
+    ps = _prescreen(
+        [_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7}),
+         _multi_stub("rsi2", {"D": 0.6, "E": 0.5, "F": 0.4}),
+         _multi_stub("mom", {"G": 0.3, "H": 0.2})],
+        max_candidates_per_day=20,
+        max_per_strategy_day={"default": 2, "orb": 1},
+    )
+    out = ps.on_bar(_bar(symbol="DRIVER"))
+    by_strategy: dict[str, list[str]] = {}
+    for c in out:
+        by_strategy.setdefault(c.strategy_id, []).append(c.symbol)
+    assert by_strategy["orb"] == ["A"]                    # explicit cap 1, top-scored takes it
+    assert by_strategy["rsi2"] == ["D", "E"]              # `default` 2
+    assert by_strategy["mom"] == ["G", "H"]               # `default` 2
+
+
+def test_an_orb_flood_cannot_starve_rsi2():
+    """WO-1 acceptance: an orb flood must not consume slots rsi2 could have used. On 2026-08-11 orb
+    took 55% of the day's publications purely by arriving first; with orb capped at 6/20 the flood
+    stops at its cap and rsi2's later, lower-scored candidates still publish."""
+    orb_flood = {f"ORB{i}": 0.99 - i / 100 for i in range(30)}
+    ps = _prescreen(
+        [_multi_stub("orb", orb_flood), _multi_stub("rsi2", {"RSI_A": 0.30, "RSI_B": 0.25})],
+        max_candidates_per_day=20,
+        max_per_strategy_day={"default": 8, "orb": 6},
+    )
+    out = ps.on_bar(_bar(symbol="DRIVER"))
+    ids = [c.strategy_id for c in out]
+    assert ids.count("orb") == 6                          # capped, despite 30 higher-scored floods
+    assert sorted(c.symbol for c in out if c.strategy_id == "rsi2") == ["RSI_A", "RSI_B"]
+    # And orb took its cap with its BEST six, not its first six.
+    assert sorted(c.symbol for c in out if c.strategy_id == "orb") == [
+        "ORB0", "ORB1", "ORB2", "ORB3", "ORB4", "ORB5"
+    ]
+
+
+def test_per_strategy_cap_mapping_validation():
+    with pytest.raises(ValueError):
+        _prescreen(max_per_strategy_day={"orb": 0})
+
+
+def test_scalar_per_strategy_cap_still_works():
+    """The scalar form is the ``default``-only mapping — the shipped config used it before WO-1."""
+    ps = _prescreen([_stub("s1"), _stub("s2")], max_candidates_per_day=20, max_per_strategy_day=1)
+    assert len(ps.on_bar(_bar(symbol="AAA"))) == 2
+    assert ps.on_bar(_bar(symbol="BBB", mm=1)) == []
+
+
+# ======================================================================== WO-9: funnel counters
+def test_funnel_counters_track_raw_published_and_suppressed():
+    """WO-9: raw (what the scanners produced) vs published (what cleared dedupe/caps) is the top of
+    the funnel; without it "the analyst never saw it" and "nothing fired" are indistinguishable."""
+    from datetime import date as _date
+    ps = _prescreen([_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7})],
+                    max_candidates_per_day=20, max_per_strategy_day={"orb": 2})
+    ps.on_bar(_bar(symbol="DRIVER"))
+    counters = ps.funnel_counters()
+    assert counters["d"] == _date(2026, 6, 17)
+    assert counters["raw"]["orb"] == 3
+    assert counters["published"]["orb"] == 2
+    assert counters["suppressed_cap"]["orb"] == 1
+    assert ps.raw_counts(_date(2026, 6, 17)) == {"orb": 3}
+    assert ps.raw_counts(_date(2026, 6, 18)) == {}        # another day's counters are not this day's
