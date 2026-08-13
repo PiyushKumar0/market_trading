@@ -247,8 +247,11 @@ class PreopenPlannerJob:
             if row.get("ex_date") is not None:
                 ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
         cands = brk20.sweep_daily(histories, today=d, ex_dates_by_symbol=ex_map)
+        # WO-4 semantics: entry = the broken 20d-high LEVEL, stop = 2*level - close(y), so
+        # close(y) is recovered as 2*entry - stop; the summary names the close and the level.
         return [
-            f"{c.symbol} closed {c.raw_levels.entry} above its 20d high {c.raw_levels.stop} "
+            f"{c.symbol} closed {c.raw_levels.entry * 2 - c.raw_levels.stop} above its 20d high "
+            f"{c.raw_levels.entry} "
             f"(score {c.score:.2f}; watchlisted: {'yes' if c.symbol in included else 'no'})"
             for c in cands
         ] or ["none"]

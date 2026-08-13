@@ -156,7 +156,7 @@ class CostBreakdown(BaseModel):     # from CostModel (C2/C3)
     breakeven_pct: DecimalStr
     expected_edge_pct: DecimalStr
     edge_multiple: DecimalStr       # must be ≥ edge_multiple_min [tunable]
-    components: dict[str, DecimalStr]   # brokerage, stt, txn, sebi, stamp, gst, dp
+    components: dict[str, DecimalStr]   # brokerage, stt, txn, sebi, stamp, gst, dp, spread (2026-08-13)
 
 
 class GateVerdict(BaseModel):
