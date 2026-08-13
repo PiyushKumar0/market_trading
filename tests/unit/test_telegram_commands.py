@@ -584,6 +584,63 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     assert message.data["rec_id"] == "rec-1" and message.data["verdict"] == "shrink"
     for leak in ("CheckResult(", "rule_id=", "MessageKind.", "data={", "reply_keyboard="):
         assert leak not in text, leak
+    # A genuine ZONE (low != high) is not a level, and an unsupplied quote is stated as unknown
+    # rather than invented — the pre-WO-4 prose is byte-identical in that case.
+    assert message.data["level"] is None and message.data["ltp"] is None
+    assert "current price" not in text
+
+
+# ------------------------------------------------------- WO-4: level + current price (§3.6/F5)
+def _limit_recommendation(clock, level: str = "2450.00") -> Recommendation:
+    """A LIMIT proposal: the entry zone is the single instructed price (``low == high``), which is
+    the shape ``brk20`` now produces — the broken 20-day-high LEVEL."""
+    rec = _recommendation(clock)
+    return rec.model_copy(update={"entry_zone": (Decimal(level), Decimal(level))})
+
+
+def test_recommendation_states_both_the_level_and_the_current_price(clock):
+    """WO-4/F5: the payload rendered a stale price verbatim and said nothing about where the market
+    actually was. It must now state BOTH, in prose and in the structured data."""
+    text = catalog.recommendation_message(
+        _limit_recommendation(clock), ltp=Decimal("2500.00")
+    ).render()
+    assert "level 2450.00 (limit-at-level)" in text
+    assert "current price 2500.00" in text
+    # …and the gap, signed from the owner's point of view: the level is BELOW the live price.
+    assert "level 2450.00 is -2.00% away" in text
+
+
+def test_recommendation_level_and_ltp_are_machine_readable(clock):
+    """R8: the owner reads prose, the audit log reads ``data`` — both prices must survive there."""
+    message = catalog.recommendation_message(
+        _limit_recommendation(clock), ltp=Decimal("2500.00")
+    )
+    assert message.data["level"] == "2450.00"
+    assert message.data["ltp"] == "2500.00"
+    assert message.data["entry_zone"] == ["2450.00", "2450.00"]
+
+
+@pytest.mark.parametrize(
+    ("ltp", "expected"),
+    [
+        (Decimal("2450.00"), "level 2450.00 is +0.00% away"),   # boundary: quote ON the level
+        (Decimal("2400.00"), "level 2450.00 is +2.08% away"),   # level above the market
+        (Decimal("2500.00"), "level 2450.00 is -2.00% away"),   # market has run past the level
+    ],
+)
+def test_recommendation_gap_direction(clock, ltp, expected):
+    text = catalog.recommendation_message(_limit_recommendation(clock), ltp=ltp).render()
+    assert expected in text
+
+
+def test_recommendation_without_a_quote_never_invents_one(clock):
+    """No live quote ⇒ no current-price prose at all. Fabricating one (or silently reusing the
+    level) is exactly the F5 failure in a new costume."""
+    message = catalog.recommendation_message(_limit_recommendation(clock))
+    text = message.render()
+    assert "level 2450.00 (limit-at-level)" in text
+    assert "current price" not in text
+    assert message.data["ltp"] is None and message.data["level"] == "2450.00"
 
 
 @pytest.mark.parametrize(

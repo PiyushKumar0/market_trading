@@ -26,15 +26,43 @@ def _series_with_breakout(breakout_volume: float = 2000.0) -> list[DailyRow]:
 
 
 def test_pinned_breakout_math():
+    """WO-4 LIMIT-AT-LEVEL geometry: the plan is anchored on the BROKEN LEVEL (100), not on
+    yesterday's unobtainable close (103), with the rule's own risk unit R = close(y) - H20 = 3
+    translated down onto it."""
     cand = scan_daily("BPCL", _series_with_breakout(), today=TODAY, params=P)
     assert cand is not None
     assert cand.strategy_id == "brk20"
     assert cand.side == "BUY" and cand.style == "swing"
-    assert cand.raw_levels.entry == Decimal("103.00")
-    assert cand.raw_levels.stop == Decimal("100.00")                       # the broken 20d high
-    assert cand.raw_levels.target == Decimal("109.00")                     # 103 + 2 x (103-100)
-    # score = min(1, 0.5 + 5 x (103/100 - 1)) = 0.65
+    assert cand.raw_levels.entry == Decimal("100.00")                      # the broken 20d high
+    assert cand.raw_levels.stop == Decimal("97.00")                        # 100 - R, R = 103-100
+    assert cand.raw_levels.target == Decimal("106.00")                     # 100 + 2 x (100-97)
+    # score = min(1, 0.5 + 5 x (103/100 - 1)) = 0.65 — scored off the breakout MARGIN, so the
+    # re-anchoring leaves it untouched.
     assert abs(cand.score - 0.65) < 1e-9
+
+
+def test_entry_is_the_level_never_yesterdays_close():
+    """WO-4/F5, the defect this rule existed to carry: ``entry`` must never be ``close(y)``.
+
+    Swept over breakout margins so the assertion cannot pass by coincidence on one series, and the
+    §7.1 ``levels_coherent`` shape (stop < entry < target) is asserted at every point."""
+    for close in (100.5, 101.0, 103.0, 107.5, 110.0):
+        rows = _flat(21) + [DailyRow(high=close + 0.5, close=close, volume=2000.0)]
+        cand = scan_daily("X", rows, today=TODAY, params=P)
+        assert cand is not None, close
+        lv = cand.raw_levels
+        assert lv.entry == Decimal("100.00"), close          # H20, for every breakout margin
+        assert lv.entry != Decimal(str(close))
+        # R preserved: entry - stop == close(y) - H20, and R:R == rr_target.
+        assert lv.entry - lv.stop == Decimal(str(close)) - Decimal("100.00")
+        assert lv.target - lv.entry == 2 * (lv.entry - lv.stop)
+        assert lv.stop < lv.entry < lv.target                 # §7.1 levels_coherent shape
+
+
+def test_breakout_margin_lost_to_tick_rounding_emits_nothing():
+    """Degenerate guard: a margin smaller than one tick leaves entry == stop (no risk distance)."""
+    rows = _flat(21) + [DailyRow(high=100.1, close=100.01, volume=2000.0)]
+    assert scan_daily("X", rows, today=TODAY, params=P) is None
 
 
 def test_volume_unconfirmed_breakout_refused():

@@ -24,6 +24,14 @@ part that touches I/O:
 Verdict precedence (§3.2.7 monotone table): ``reject`` > ``owner_approval_required`` > ``shrink`` >
 ``approve``. The gate may only ever SHRINK an entry — :meth:`RiskGate.evaluate` asserts
 ``approved_qty <= original_qty`` as a code invariant, and §9.1 asserts it as a property.
+
+SIZING REFERENCE (WO-4, 2026-08-13): a LIMIT proposal's ``entry_price`` is a STATED price, and by
+the time the gate runs the market may have moved past it — sizing off it computes risk and notional
+from a price better than obtainable. :meth:`RiskGate._sizing_reference` is the ONE point where the
+price the §7.1 sizing rules consume is chosen; see its docstring for the rule and for why the
+selection can only ever TIGHTEN a cap. The ``entry_sanity_band`` hard-reject is deliberately NOT
+routed through it — it band-checks the STATED entry against the live LTP, which is the whole point
+of that rule.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from ulid import ULID
@@ -172,6 +180,25 @@ def _q(value: Decimal, places: str = "0.01") -> str:
         return str(value.quantize(Decimal(places)))
     except (InvalidOperation, ValueError):
         return str(value)
+
+
+class SizingReference(NamedTuple):
+    """The prices the §7.1 sizing rules size off, chosen at ONE point (:meth:`RiskGate._sizing_reference`).
+
+    Two fields rather than one because the two families of priced rules bind in OPPOSITE price
+    directions, and a single scalar cannot be conservative for both on a SHORT:
+
+    ``risk``
+        Basis for the stop-distance and edge rules (``per_trade_risk``, ``min_viable_size``). A cap
+        derived from it shrinks as the basis moves AWAY from the stop.
+    ``notional``
+        Basis for the capital/exposure/leverage/margin rules (``capital_cap``,
+        ``per_stock_exposure``, ``max_leverage``, ``margin_buffer``). A cap derived from it shrinks
+        as the basis moves UP.
+    """
+
+    risk: Decimal
+    notional: Decimal
 
 
 # --------------------------------------------------------------------------- GateContext
@@ -316,11 +343,17 @@ class RiskGate:
         qty = int(action.quantity)
         led = _Ledger()
 
-        # entry reference price: the LIMIT price when given, else the live LTP. A MARKET proposal with
-        # no LTP is UNPRICEABLE — every price-derived rule then fails closed rather than guessing.
+        # STATED entry reference: the LIMIT price when given, else the live LTP. A MARKET proposal
+        # with no LTP is UNPRICEABLE — every price-derived rule then fails closed rather than
+        # guessing. This is the price the PROPOSAL asserts; `levels_coherent` judges that shape and
+        # `entry_sanity_band` band-checks it against the live LTP.
         entry_ref: Decimal | None = action.entry_price if action.entry_type == "LIMIT" else ctx.ltp
         if entry_ref is not None and entry_ref <= 0:
             entry_ref = None
+        # ...and the ONE point where the price the SIZING rules consume is chosen (WO-4).
+        sizing = self._sizing_reference(action, ctx, entry_ref)
+        risk_ref = sizing.risk if sizing is not None else None
+        notional_ref = sizing.notional if sizing is not None else None
 
         self._rule_mode_risk_state(led, ctx)
         self._rule_kill_state(led, ctx)
@@ -332,16 +365,16 @@ class RiskGate:
         self._rule_min_residual_window(led, ctx, lim, now_t, intraday)
         self._rule_instrument_eligible(led, ctx, intraday)
         self._rule_surveillance(led, ctx)
-        self._rule_capital_cap(led, ctx, lim, entry_ref, qty, product)
-        self._rule_per_trade_risk(led, action, ctx, lim, entry_ref, qty, intraday)
+        self._rule_capital_cap(led, ctx, lim, notional_ref, qty, product)
+        self._rule_per_trade_risk(led, action, ctx, lim, risk_ref, qty, intraday)
         self._rule_daily_loss_soft(led, ctx, lim)
         self._rule_consecutive_losses(led, ctx, lim)
         self._rule_max_new_trades(led, ctx, lim)
         self._rule_max_open_positions(led, ctx, lim, intraday)
-        self._rule_per_stock_exposure(led, action, ctx, lim, entry_ref, qty, product)
+        self._rule_per_stock_exposure(led, action, ctx, lim, notional_ref, qty, product)
         self._rule_per_sector_exposure(led, action, ctx, lim)
         self._rule_co_movement(led, ctx, lim)
-        self._rule_max_leverage(led, ctx, lim, entry_ref, qty, intraday)
+        self._rule_max_leverage(led, ctx, lim, notional_ref, qty, intraday)
         self._rule_stale_data(led, ctx, lim)
         self._rule_readiness(led, ctx)
         self._rule_entry_sanity_band(led, action, ctx, lim, intraday)
@@ -356,8 +389,8 @@ class RiskGate:
 
         # margin + min-viable-size are evaluated on the FINAL size: they are statements about the
         # order that would actually be placed, not about the proposal's opening ask.
-        self._rule_margin_buffer(led, ctx, lim, entry_ref, approved, product)
-        cost = self._rule_min_viable_size(led, action, ctx, entry_ref, approved, product)
+        self._rule_margin_buffer(led, ctx, lim, notional_ref, approved, product)
+        cost = self._rule_min_viable_size(led, action, ctx, risk_ref, approved, product)
 
         checks = [led.checks[rule_id] for rule_id in DOCUMENTED_ENTER_RULES]
         assert len(checks) == len(led.checks), (          # noqa: S101 - developer invariant (§9.1)
@@ -383,6 +416,50 @@ class RiskGate:
         return self._verdict(
             action, ctx, verdict, checks, reasons, original_qty=qty, approved_qty=approved, cost=cost
         )
+
+    # -- sizing-reference selection (WO-4) ----------------------------------------------------
+    @staticmethod
+    def _sizing_reference(
+        action: EnterAction, ctx: GateContext, entry_ref: Decimal | None
+    ) -> SizingReference | None:
+        """THE single point at which the price the §7.1 sizing rules size off is chosen (WO-4).
+
+        A LIMIT proposal states a price; the market does not owe it to us. When the live LTP has run
+        PAST the stated entry, sizing off ``entry_price`` computes both the risk-at-stop and the
+        deployed notional from a price better than obtainable — a size the owner could not actually
+        put on at the risk the gate thinks it approved. So::
+
+            risk basis     = max(entry_price, LTP) when BUY, min(entry_price, LTP) when SELL
+            notional basis = max(entry_price, LTP) on BOTH sides
+
+        Both are the ADVERSE choice for the rule family that consumes them, which is why the
+        selection is MONOTONE-SAFE — it can shrink an approved size, never enlarge one:
+
+        * ``risk``: with coherent levels (``levels_coherent``: BUY ``stop < entry``, SELL
+          ``stop > entry``) the adverse fill always lies on the far side of the stated entry FROM
+          the stop, so ``|risk − stop| >= |entry_price − stop|``: ``per_trade_risk``'s implied cap
+          can only fall and ``min_viable_size``'s edge can only narrow. With INcoherent levels the
+          inequality need not hold — but ``levels_coherent`` is a hard reject, so ``approved_qty``
+          is 0 there regardless and the composite property survives.
+        * ``notional``: ``max`` on both sides, i.e. ``>= entry_price`` unconditionally, so every
+          per-unit divisor in ``capital_cap`` / ``per_stock_exposure`` / ``max_leverage`` /
+          ``margin_buffer`` can only rise and their caps can only fall. Taking ``min`` on the SHORT
+          side here would be arithmetically defensible (a fill at 90 really does deploy 90/unit) but
+          would LOOSEN those caps, and a gate change that can enlarge a size is not one this file
+          accepts — the conservative choice is the only one compatible with R1.
+
+        Unchanged paths: MARKET proposals (``entry_ref`` is already the live LTP, so both bases are
+        it), a LIMIT with no usable LTP (nothing better than the stated price is known — and
+        ``entry_sanity_band`` fails that proposal closed anyway), and the unpriceable case
+        (``None`` in, ``None`` out, every priced rule fails closed as before).
+        """
+        if entry_ref is None:
+            return None
+        ltp = ctx.ltp if (ctx.ltp is not None and ctx.ltp > 0) else None
+        if action.entry_type != "LIMIT" or ltp is None:
+            return SizingReference(risk=entry_ref, notional=entry_ref)
+        adverse = max(entry_ref, ltp) if action.side == "BUY" else min(entry_ref, ltp)
+        return SizingReference(risk=adverse, notional=max(entry_ref, ltp))
 
     # -- individual enter rules ---------------------------------------------------------------
     def _rule_mode_risk_state(self, led: _Ledger, ctx: GateContext) -> None:
@@ -534,12 +611,12 @@ class RiskGate:
         )
 
     def _rule_capital_cap(
-        self, led: _Ledger, ctx: GateContext, lim: Any, entry_ref: Decimal | None,
+        self, led: _Ledger, ctx: GateContext, lim: Any, notional_ref: Decimal | None,
         qty: int, product: str,
     ) -> None:
         cap = _dec(lim.capital_cap.max_deployed_capital_inr)
         headroom = cap - ctx.deployed_capital
-        if entry_ref is None:
+        if notional_ref is None:
             led.cap("capital_cap", 0)
             led.add("capital_cap", False, "unpriceable (MARKET with no LTP)",
                     f"deployed <= {_q(cap)}", "fail closed", shrinkable=True)
@@ -548,13 +625,15 @@ class RiskGate:
         # ExposureTracker.deployed_capital(), which has no per-stock leverage until Phase 3
         # (2026-07-28 review: charging the NEW leg at notional/3 against open legs at 1x notional
         # made one MIS fill consume the whole cap). Conservative: never under-charges deployment.
-        per_unit = entry_ref
+        per_unit = notional_ref                      # WO-4 notional basis (see _sizing_reference)
         qty_max = _floor_div(headroom, per_unit)
         led.cap("capital_cap", qty_max)
         new_deployed = Decimal(qty) * per_unit
         ok = ctx.deployed_capital + new_deployed <= cap
-        basis = "notional (CNC cash)" if product == "CNC" else (
-            "FULL notional — per-stock MIS margin accounting lands with the Phase-3 OMS"
+        basis = (
+            f"@ {_q(per_unit)} " + ("notional (CNC cash)" if product == "CNC" else (
+                "FULL notional — per-stock MIS margin accounting lands with the Phase-3 OMS"
+            ))
         )
         led.add(
             "capital_cap", ok,
@@ -566,24 +645,26 @@ class RiskGate:
 
     def _rule_per_trade_risk(
         self, led: _Ledger, action: EnterAction, ctx: GateContext, lim: Any,
-        entry_ref: Decimal | None, qty: int, intraday: bool,
+        risk_ref: Decimal | None, qty: int, intraday: bool,
     ) -> None:
         ptr = lim.per_trade_risk
         pct = _dec(ptr.intraday_pct if intraday else ptr.swing_position_pct)
         budget = pct / _HUNDRED * ctx.equity
-        if entry_ref is None:
+        if risk_ref is None:
             led.cap("per_trade_risk", 0)
             led.add("per_trade_risk", False, "unpriceable (MARKET with no LTP)",
                     f"qty x unit risk <= {_q(budget)}", "fail closed — unpriceable risk",
                     shrinkable=True)
             return
-        unit_risk = abs(entry_ref - action.stop_price)
+        # WO-4: distance measured from the ADVERSE fill reference, not from the stated entry.
+        unit_risk = abs(risk_ref - action.stop_price)
         if intraday:
-            unit, basis = unit_risk, "stop distance"
+            unit, basis = unit_risk, f"stop distance from {_q(risk_ref)}"
         else:
             gap = _dec(ptr.overnight_gap_mult)
             unit = gap * unit_risk
-            basis = f"{gap}x stop distance (daily-band leg unavailable in Phase 2 — gap mult only)"
+            basis = (f"{gap}x stop distance from {_q(risk_ref)} "
+                     "(daily-band leg unavailable in Phase 2 — gap mult only)")
         qty_max = _floor_div(budget, unit)
         led.cap("per_trade_risk", qty_max)
         at_risk = Decimal(qty) * unit
@@ -647,7 +728,7 @@ class RiskGate:
 
     def _rule_per_stock_exposure(
         self, led: _Ledger, action: EnterAction, ctx: GateContext, lim: Any,
-        entry_ref: Decimal | None, qty: int, product: str,
+        notional_ref: Decimal | None, qty: int, product: str,
     ) -> None:
         pse = lim.per_stock_exposure
         sym = action.tradingsymbol
@@ -657,16 +738,18 @@ class RiskGate:
         notes = [f"held={held}"]
         ok_notional = True
         if product == "CNC":
-            if entry_ref is None:
+            if notional_ref is None:
                 led.cap("per_stock_exposure", 0)
                 ok_notional = False
                 notes.append("unpriceable CNC notional")
             else:
-                qty_max = _floor_div(cap - existing, entry_ref)
+                qty_max = _floor_div(cap - existing, notional_ref)
                 led.cap("per_stock_exposure", qty_max)
-                new_notional = Decimal(qty) * entry_ref
+                new_notional = Decimal(qty) * notional_ref
                 ok_notional = existing + new_notional <= cap
-                notes.append(f"CNC notional {_q(existing)} + {_q(new_notional)}")
+                notes.append(
+                    f"CNC notional {_q(existing)} + {_q(new_notional)} @ {_q(notional_ref)}"
+                )
         ok = (not held) and ok_notional
         if held:
             # The one-position-per-symbol leg can NOT be cured by shrinking — hard reject.
@@ -709,19 +792,19 @@ class RiskGate:
         )
 
     def _rule_max_leverage(
-        self, led: _Ledger, ctx: GateContext, lim: Any, entry_ref: Decimal | None,
+        self, led: _Ledger, ctx: GateContext, lim: Any, notional_ref: Decimal | None,
         qty: int, intraday: bool,
     ) -> None:
         capx = _dec(lim.max_leverage.platform_cap_x) if intraday else Decimal(1)
         max_exposure = capx * ctx.equity
-        if entry_ref is None:
+        if notional_ref is None:
             led.cap("max_leverage", 0)
             led.add("max_leverage", False, "unpriceable (MARKET with no LTP)",
                     f"exposure <= {capx}x equity", "fail closed", shrinkable=True)
             return
-        qty_max = _floor_div(max_exposure, entry_ref)
+        qty_max = _floor_div(max_exposure, notional_ref)
         led.cap("max_leverage", qty_max)
-        exposure = Decimal(qty) * entry_ref
+        exposure = Decimal(qty) * notional_ref
         ok = exposure <= max_exposure
         led.add(
             "max_leverage", ok, f"exposure {_q(exposure)}",
@@ -798,7 +881,7 @@ class RiskGate:
                 "not applicable in this phase")
 
     def _rule_margin_buffer(
-        self, led: _Ledger, ctx: GateContext, lim: Any, entry_ref: Decimal | None,
+        self, led: _Ledger, ctx: GateContext, lim: Any, notional_ref: Decimal | None,
         approved: int, product: str,
     ) -> None:
         ratio = _dec(lim.margin_buffer.min_ratio)
@@ -806,7 +889,7 @@ class RiskGate:
             led.add("margin_buffer", True, "n/a (RECOMMEND: no API order)",
                     f"available >= {ratio} x requirement (C6)", "not applicable in this phase")
             return
-        if entry_ref is None or approved <= 0:
+        if notional_ref is None or approved <= 0:
             led.add("margin_buffer", False, "unpriceable / nothing approvable",
                     f"available >= {ratio} x requirement", "fail closed")
             return
@@ -814,7 +897,10 @@ class RiskGate:
         # notional) — unlike capital_cap this compares against the broker-reported available margin,
         # not against the tracker's notional-based deployed figure, so the units already agree.
         lev = _dec(lim.max_leverage.platform_cap_x)
-        per_unit = entry_ref if product == "CNC" else (entry_ref / lev if lev > 0 else entry_ref)
+        per_unit = (
+            notional_ref if product == "CNC"
+            else (notional_ref / lev if lev > 0 else notional_ref)
+        )
         required = Decimal(approved) * per_unit
         need = ratio * required
         ok = ctx.available_margin >= need
@@ -826,24 +912,27 @@ class RiskGate:
         )
 
     def _rule_min_viable_size(
-        self, led: _Ledger, action: EnterAction, ctx: GateContext, entry_ref: Decimal | None,
+        self, led: _Ledger, action: EnterAction, ctx: GateContext, risk_ref: Decimal | None,
         approved: int, product: Literal["MIS", "CNC"],
     ) -> CostBreakdown | None:
         """Post-shrink edge check (§7.1 ``min_viable_size``, C2/C3). Returns the CostBreakdown to
-        attach to the verdict when it could be computed at all."""
+        attach to the verdict when it could be computed at all.
+
+        Priced on the WO-4 risk basis — the edge that survives at the price the order can actually
+        be filled at, not the one the stated entry advertises."""
         need = self._costs.edge_multiple_min
         limit = f"expected edge >= {need} x breakeven (C2/C3)"
         if action.target_price is None:
             led.add("min_viable_size", False, _NO_TARGET, limit,
                     "an entry without a target can never be shown to clear costs")
             return None
-        if entry_ref is None or approved <= 0:
+        if risk_ref is None or approved <= 0:
             led.add("min_viable_size", False, "unpriceable / nothing approvable", limit,
                     "fail closed")
             return None
         try:
-            edge_pct = self._costs.expected_edge_pct(entry_ref, action.stop_price, action.target_price)
-            breakdown = self._costs.round_trip(Decimal(approved) * entry_ref, product)
+            edge_pct = self._costs.expected_edge_pct(risk_ref, action.stop_price, action.target_price)
+            breakdown = self._costs.round_trip(Decimal(approved) * risk_ref, product)
         except (ValueError, TypeError) as exc:
             led.add("min_viable_size", False, f"incoherent levels: {exc}", limit, "fail closed")
             return None

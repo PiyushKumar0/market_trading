@@ -22,10 +22,26 @@ produce an actionable swing recommendation):
   costs. (BPCL 2026-08-03 broke out at 0.80× average volume — this rule would REFUSE it; that is
   a deliberate default, owner-tunable via the §6.3 envelope.)
 * A12 ex-date skip: any known ex-date within ``ex_skip_days`` CALENDAR days of ``today``.
-* Levels: entry = ``close(y)``; stop = ``H20`` (the broken level is the structural invalidation);
-  target = entry + ``rr_target`` × (entry − stop). Sub-cost-floor risk is the §7.1 cost gate's
-  job (C3), not this rule's.
+* Levels — LIMIT-AT-LEVEL (WO-4, 2026-08-13). ``raw_levels.entry`` is the BROKEN LEVEL ``H20``
+  itself, never ``close(y)``: the level is the only price still actionable when the candidate is
+  read (``close(y)`` is a yesterday-print that nobody can transact at, and sizing off it computes
+  risk from a price better than obtainable). The trade plan keeps the rule's OWN risk unit —
+  ``R = close(y) − H20``, the breakout extension, exactly the distance the previous scheme used as
+  ``entry − stop`` — and is TRANSLATED down onto the level, so the geometry (risk unit, R:R,
+  score) is unchanged and only the anchor moves::
+
+      entry  = H20                                  (the retest of the broken level)
+      stop   = H20 − R = 2·H20 − close(y)           (the breakout failed by as much as it succeeded)
+      target = entry + rr_target × (entry − stop)   (unchanged formula, now off the level)
+
+  Rounding order is pinned: ``entry``/``stop`` are tick-rounded FIRST and ``target`` is derived
+  from the rounded pair, so the shipped levels are internally coherent (``stop < entry < target``,
+  the §7.1 ``levels_coherent`` shape) rather than coherent-before-rounding only. A breakout margin
+  that vanishes under tick rounding leaves ``entry <= stop`` ⇒ no candidate. Sub-cost-floor risk is
+  still the §7.1 cost gate's job (C3), not this rule's.
 * Score = ``min(1.0, 0.5 + 5 × (close(y)/H20 − 1))`` — +2% breakout margin ⇒ 0.6, ≥+10% ⇒ 1.0.
+  Deliberately still scored off ``close(y)/H20``: the breakout MARGIN is the strength signal, and
+  it is unaffected by where the trade plan is anchored.
 
 Evidence caveat rides along (§6.1): this rule ORIGINATES candidates for Tier-1 judgement and the
 owner's decision; it carries no presumption of positive expectancy.
@@ -101,8 +117,10 @@ def scan_daily(
     if any(today <= xd <= horizon for xd in upcoming_ex_dates):
         return None
 
-    entry = round_to_tick(y.close)
-    stop = round_to_tick(h20)
+    # ---- LIMIT-AT-LEVEL plan (WO-4): anchor on the broken level, keep the rule's own risk unit.
+    entry = round_to_tick(h20)                       # the actionable trigger, never close(y)
+    risk = round_to_tick(y.close) - entry            # R = breakout extension (tick-exact)
+    stop = round_to_tick(entry - risk)
     if entry <= stop:
         return None  # tick-rounding degenerate — no structural risk distance
     target = round_to_tick(entry + int(p["rr_target"]) * (entry - stop))

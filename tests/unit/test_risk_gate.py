@@ -173,6 +173,31 @@ def check_of(verdict: GateVerdict, rule_id: str):
     return matches[0]
 
 
+#: The shipped cost surface at module scope, so the CASES table can DERIVE its ``min_viable_size``
+#: boundary instead of hardcoding one. Same discipline as the rest of the file (assert against the
+#: shipped table, never against numbers duplicated here) — and load-bearing now that costs.yaml is a
+#: moving surface: the 2026-08-13 ``spread_pct`` addition shifted the MIS breakeven 0.106% -> 0.126%
+#: and silently stale-dated the literal that used to sit here.
+_COSTS = CostModel(load_cost_rates(COSTS_YAML), edge_multiple_min=Decimal("2.0"))
+
+
+def target_at_edge_multiple(entry: Decimal, qty: int, product: str, multiple: Decimal) -> Decimal:
+    """A LONG target whose expected edge is EXACTLY ``multiple`` x the shipped breakeven at
+    ``qty x entry`` notional — an exact boundary that tracks config/costs.yaml instead of drifting
+    from it."""
+    breakeven = _COSTS.round_trip(Decimal(qty) * entry, product).breakeven_pct
+    return entry * (Decimal(1) + multiple * breakeven / Decimal(100))
+
+
+#: The exact-2x-breakeven target for the BASE_ACTION shape (entry 100, qty 10, MIS).
+BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 10, "MIS", Decimal("2"))
+
+#: …and for a proposal SHRUNK to 3 units. Separate because ``min_viable_size`` is re-run at the
+#: shrunk notional, where paise-rounding of the fee components moves the breakeven (₹300 ⇒ 0.130%
+#: vs ₹1,000 ⇒ 0.126%) — a target calibrated at the opening ask would not sit on the boundary there.
+SHRUNK_BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 3, "MIS", Decimal("2"))
+
+
 # --------------------------------------------------------------------------- the rule table
 class Case(NamedTuple):
     rule_id: str
@@ -256,6 +281,10 @@ CASES: tuple[Case, ...] = (
          ctx={"deployed_capital": Decimal("19000")}),
     Case("capital_cap", "CNC one rupee over the cap", "fail", False, act=CNC,
          ctx={"deployed_capital": Decimal("19001")}),
+    # WO-4 notional basis: the SAME deployment that lands exactly on the cap at the stated entry
+    # breaches it once the live price the order would actually fill at is used.
+    Case("capital_cap", "LTP past the limit tips the exact-cap case over", "fail", False, act=CNC,
+         ctx={"deployed_capital": Decimal("19000"), "ltp": Decimal("100.50")}),
     Case("per_trade_risk", "10 x Rs1 stop distance", "pass", True),
     Case("per_trade_risk", "300 units breaches the 1% budget", "fail", False,
          act={"quantity": 300}),
@@ -264,6 +293,17 @@ CASES: tuple[Case, ...] = (
          act={"entry_type": "MARKET", "entry_price": None}, ctx={"ltp": None}),
     Case("per_trade_risk", "swing gap-multiplied budget", "pass", True,
          act={**CNC, "quantity": 160}),
+    # ---- WO-4 sizing reference: risk measured from max(entry, LTP) on a long -------------
+    Case("per_trade_risk", "LTP past the limit, still inside the budget", "pass", True,
+         ctx={"ltp": Decimal("100.50")}),
+    Case("per_trade_risk", "LTP past the limit breaches a budget the stale entry cleared",
+         "fail", False, act={"quantity": 200}, ctx={"ltp": Decimal("100.50")}),
+    Case("per_trade_risk", "LTP exactly at the limit price (max() tie)", "boundary", True,
+         act={"quantity": 200}, ctx={"ltp": Decimal("100")}),
+    Case("per_trade_risk", "LTP one paisa past the limit", "fail", False,
+         act={"quantity": 200}, ctx={"ltp": Decimal("100.01")}),
+    Case("per_trade_risk", "LTP below the limit never RELAXES a long", "pass", True,
+         act={"quantity": 200}, ctx={"ltp": Decimal("99.50")}),
     # ---- day-scoped counters -----------------------------------------------------------
     Case("daily_loss_soft", "flat day", "pass", True),
     Case("daily_loss_soft", "-5.5%", "fail", False, ctx={"day_mtm_pct": Decimal("-5.5")}),
@@ -358,7 +398,11 @@ CASES: tuple[Case, ...] = (
     Case("min_viable_size", "0.1% edge is sub-viable", "fail", False,
          act={"target_price": Decimal("100.10")}),
     Case("min_viable_size", "edge exactly 2x breakeven", "boundary", True,
-         act={"target_price": Decimal("100.212")}),
+         act={"target_price": BOUNDARY_TARGET}),
+    # WO-4: the edge is priced at the obtainable price. A trade that clears exactly 2x from the
+    # stated entry does not clear it from the price the market has actually moved to.
+    Case("min_viable_size", "edge measured from the live reference, not the stated entry",
+         "fail", False, act={"target_price": BOUNDARY_TARGET}, ctx={"ltp": Decimal("100.50")}),
 )
 
 #: Rules whose threshold is a plain boolean flag — there is no interior value to sit exactly on, so
@@ -619,6 +663,142 @@ def test_gate_never_enlarges_over_a_grid(gate: RiskGate) -> None:
             seen_reject = True
             assert verdict.approved_qty == 0
     assert seen_shrink and seen_approve and seen_reject, "grid must exercise all three verdicts"
+
+
+# ------------------------------------------------------- WO-4 sizing reference (§7.1 / F5)
+#: A coherent SHORT built off the same baseline: stop ABOVE entry, target BELOW (levels_coherent).
+SHORT: dict[str, Any] = {
+    "side": "SELL", "stop_price": Decimal("101"), "target_price": Decimal("97"),
+}
+
+
+def sizing_refs_of(verdict: GateVerdict) -> tuple[Decimal, Decimal]:
+    """The two WO-4 bases the gate ACTUALLY sized on, read back off the audit trail.
+
+    Deliberately parsed from the shipped CheckResults rather than recomputed here: the reference is
+    only auditable (and only renderable into the §3.6 payload) if the verdict states it, so these
+    strings are part of the contract, not incidental prose.
+    """
+    risk = re.search(r"stop distance from ([\d.]+)", check_of(verdict, "per_trade_risk").value)
+    notional = re.search(r"@ ([\d.]+)", check_of(verdict, "capital_cap").value)
+    assert risk and notional, "the gate must state the price each sizing rule sized off"
+    return Decimal(risk.group(1)), Decimal(notional.group(1))
+
+
+class RefCase(NamedTuple):
+    label: str
+    kind: str                     # "pass" | "fail" | "boundary" | "shrink"
+    act: dict[str, Any]
+    ltp: Decimal | None
+    risk_ref: str                 # expected risk basis  (per_trade_risk / min_viable_size)
+    notional_ref: str             # expected notional basis (capital_cap / leverage / margin)
+
+
+REF_CASES: tuple[RefCase, ...] = (
+    # -- long: risk and notional both take the HIGHER price -------------------------------
+    RefCase("BUY, LTP ran past the limit", "pass", {}, Decimal("100.50"), "100.50", "100.50"),
+    RefCase("BUY, LTP below the limit — the stated entry is already the worse price",
+            "pass", {}, Decimal("99.50"), "100.00", "100.00"),
+    RefCase("BUY, LTP exactly at the limit (max() tie)", "boundary", {}, Decimal("100"),
+            "100.00", "100.00"),
+    # -- short: risk takes the LOWER price, notional still takes the higher ----------------
+    RefCase("SELL, LTP fell below the limit", "pass", SHORT, Decimal("99.50"), "99.50", "100.00"),
+    RefCase("SELL, LTP rose above the limit", "pass", SHORT, Decimal("100.50"), "100.00", "100.50"),
+    RefCase("SELL, LTP exactly at the limit (min() tie)", "boundary", SHORT, Decimal("100"),
+            "100.00", "100.00"),
+    # -- unchanged paths -------------------------------------------------------------------
+    RefCase("MARKET already sizes off the live LTP", "pass",
+            {"entry_type": "MARKET", "entry_price": None}, Decimal("100.50"), "100.50", "100.50"),
+    RefCase("LIMIT with no LTP falls back to the stated entry", "fail", {}, None,
+            "100.00", "100.00"),
+)
+
+
+@pytest.mark.parametrize("case", REF_CASES, ids=lambda c: c.label)
+def test_sizing_reference_selection(gate: RiskGate, case: RefCase) -> None:
+    """WO-4: ONE selection point, stated as ``max(entry, LTP)`` long / ``min`` short for the risk
+    basis and ``max`` on both sides for the notional basis."""
+    verdict = gate.evaluate(make_action(**case.act), make_ctx(ltp=case.ltp))
+    risk, notional = sizing_refs_of(verdict)
+    assert (str(risk), str(notional)) == (case.risk_ref, case.notional_ref)
+
+
+def test_entry_sanity_band_still_judges_the_STATED_entry(gate: RiskGate) -> None:
+    """WO-4 explicitly leaves the hard-reject alone: it compares ``action.entry_price`` with the
+    live LTP. Routing it through the sizing reference would make it compare the LTP with itself and
+    the band could never fail — the exact rule that catches a nonsense limit price."""
+    action = make_action(entry_price=Decimal("102"))          # 2% off a 100 LTP; MIS band is 1%
+    verdict = gate.evaluate(action, make_ctx())
+    band = check_of(verdict, "entry_sanity_band")
+    assert band.passed is False
+    assert "102" in band.value and "100" in band.value
+    assert verdict.verdict == "reject"
+    # ...and the sizing reference did move, so the band is failing on its own terms, not by accident.
+    assert sizing_refs_of(verdict) == (Decimal("102.00"), Decimal("102.00"))
+
+
+def test_sizing_reference_shrink_then_recheck_rejects(gate: RiskGate) -> None:
+    """R1/C3 shrink-then-recheck through the WO-4 reference: the live price shrinks the capital-cap
+    headroom, and ``min_viable_size`` — re-run at the SHRUNK size and the SAME live price — no
+    longer clears costs, so the shrink ends in reject rather than a thinner recommendation."""
+    action = make_action(target_price=SHRUNK_BOUNDARY_TARGET)  # exactly 2x breakeven at qty 3
+    stale = gate.evaluate(action, make_ctx(deployed_capital=Decimal("19700")))
+    assert stale.verdict == "shrink" and stale.approved_qty == 3     # Rs300 headroom / Rs100
+    assert check_of(stale, "min_viable_size").passed is True
+
+    moved = gate.evaluate(action, make_ctx(deployed_capital=Decimal("19700"),
+                                           ltp=Decimal("100.50")))
+    assert "max qty 2" in check_of(moved, "capital_cap").headroom   # Rs300 / Rs100.50 = 2, not 3
+    assert check_of(moved, "min_viable_size").passed is False
+    assert moved.verdict == "reject" and moved.approved_qty == 0
+    assert any("min_viable_size" in reason for reason in moved.reasons)
+
+
+#: LTP moves that stay INSIDE both entry_sanity_band widths (MIS 1% / CNC 2%) around entry 100, so
+#: the grid isolates the sizing reference instead of measuring the band's hard reject.
+IN_BAND_LTPS = (Decimal("99.20"), Decimal("99.60"), Decimal("100"), Decimal("100.40"),
+                Decimal("100.80"))
+
+
+def test_sizing_reference_can_only_shrink_long_and_short(gate: RiskGate) -> None:
+    """THE monotone-safety property (WO-4 risk note): switching from the stale stated-entry basis to
+    the live reference can only DECREASE the approved size — never increase it — in BOTH directions.
+
+    The stale basis is reproduced exactly by evaluating with ``LTP == entry_price``, where the
+    selection is provably a no-op (``max(x, x) == min(x, x) == x``); every other point is compared
+    against it.
+    """
+    strict_decreases = 0
+    for side, qty, dep, style, ltp in product(
+        ("BUY", "SELL"), (1, 10, 133, 200), (Decimal("0"), Decimal("19000")),
+        ("intraday", "swing"), IN_BAND_LTPS,
+    ):
+        act = {"quantity": qty, "style": style, **({} if side == "BUY" else SHORT)}
+        action = make_action(**act)
+        stale = gate.evaluate(action, make_ctx(deployed_capital=dep, ltp=Decimal("100")))
+        moved = gate.evaluate(action, make_ctx(deployed_capital=dep, ltp=ltp))
+        assert stale.approved_qty is not None and moved.approved_qty is not None
+        assert moved.approved_qty <= stale.approved_qty, (
+            f"sizing reference ENLARGED the size: {stale.approved_qty} -> {moved.approved_qty} "
+            f"(side={side} qty={qty} deployed={dep} style={style} ltp={ltp})"
+        )
+        assert moved.approved_qty <= moved.original_qty     # the R1 invariant, restated per point
+        if moved.approved_qty < stale.approved_qty:
+            strict_decreases += 1
+    # Non-vacuous: the property is not holding merely because nothing ever changes.
+    assert strict_decreases > 0, "grid never exercised an adverse reference"
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_adverse_reference_widens_the_risk_distance(gate: RiskGate, side: str) -> None:
+    """Why the shrink direction is guaranteed: with coherent levels the adverse fill always sits on
+    the far side of the stated entry FROM the stop, so |ref - stop| can only grow."""
+    act = {} if side == "BUY" else SHORT
+    stop = Decimal("99") if side == "BUY" else Decimal("101")
+    adverse = Decimal("100.80") if side == "BUY" else Decimal("99.20")
+    stale_risk, _ = sizing_refs_of(gate.evaluate(make_action(**act), make_ctx(ltp=Decimal("100"))))
+    moved_risk, _ = sizing_refs_of(gate.evaluate(make_action(**act), make_ctx(ltp=adverse)))
+    assert abs(moved_risk - stop) > abs(stale_risk - stop)
 
 
 def test_evaluate_is_pure(gate: RiskGate) -> None:

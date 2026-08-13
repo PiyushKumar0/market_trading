@@ -755,7 +755,7 @@ THESIS_MAX_CHARS = 300
 MAX_HEADROOM_LINES = 5
 
 
-def recommendation_message(rec: Recommendation) -> CatalogMessage:
+def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -> CatalogMessage:
     """Render a §3.6 :class:`~engine.core.contracts.Recommendation` for the owner (§10.3
     ``RECOMMENDATION``).
 
@@ -765,22 +765,41 @@ def recommendation_message(rec: Recommendation) -> CatalogMessage:
     places ZERO API orders in RECOMMEND, so the checklist is the mechanism that transfers protection
     responsibility to the human explicitly — it is never truncated away.
 
+    LEVEL vs CURRENT PRICE (WO-4, 2026-08-13). A degenerate entry zone (``low == high``) is a LIMIT
+    proposal: the price is an instruction, and for a ``brk20`` candidate it is specifically the broken
+    20-day-high LEVEL, so it is labelled as one rather than shown as a range of itself. ``ltp`` is the
+    live price the engine sized against; when supplied, the message states BOTH it and the level plus
+    the gap between them, because "buy at 100" is only actionable next to "it is trading at 100.50" —
+    the F5 defect was a payload that rendered a price the market had already left. It is optional so a
+    caller with no live quote renders exactly the pre-WO-4 message rather than a fabricated one; the
+    structured ``data`` carries ``ltp`` either way (``None`` when unknown), so the audit log can always
+    tell "no quote" from "quote equal to the level".
+
     Failed gate checks sort first among the at-most :data:`MAX_HEADROOM_LINES` headroom lines: a
     ``shrink``/``owner_approval_required`` verdict is only meaningful next to the rule that caused it.
     The thesis is truncated at :data:`THESIS_MAX_CHARS`; the full object is on the dashboard.
     """
     low, high = rec.entry_zone
+    at_level = low == high
     targets = " / ".join(str(t) for t in rec.targets) or "(none)"
     thesis = rec.thesis[:THESIS_MAX_CHARS] + ("…" if len(rec.thesis) > THESIS_MAX_CHARS else "")
     checks = sorted(rec.gate.checks, key=lambda c: c.passed)[:MAX_HEADROOM_LINES]
     approved = rec.gate.approved_qty if rec.gate.approved_qty is not None else rec.qty
+    entry_text = f"level {low} (limit-at-level)" if at_level else f"entry {low}-{high}"
 
     lines = [
         f"{rec.side} {rec.instrument} · {rec.style}/{rec.product} · qty {rec.qty} "
         f"(notional ₹{rec.notional})",
-        f"entry {low}-{high} · stop {rec.stop} · targets {targets}",
-        f"confidence {rec.confidence:.2f} · valid until {rec.valid_until.isoformat(timespec='minutes')}",
+        f"{entry_text} · stop {rec.stop} · targets {targets}",
     ]
+    if ltp is not None and ltp > 0:
+        gap = (low - ltp) / ltp * Decimal(100)
+        lines.append(
+            f"current price {ltp} · {'level' if at_level else 'entry'} {low} is {gap:+.2f}% away"
+        )
+    lines.append(
+        f"confidence {rec.confidence:.2f} · valid until {rec.valid_until.isoformat(timespec='minutes')}"
+    )
     if rec.short_flag_higher_tail_risk:
         lines.append("SHORT — higher tail risk (C8 shorting policy).")
     lines += [
@@ -813,6 +832,10 @@ def recommendation_message(rec: Recommendation) -> CatalogMessage:
             "qty": rec.qty,
             "notional": str(rec.notional),
             "entry_zone": [str(low), str(high)],
+            # WO-4: the actionable trigger and the price it must be judged against, as separate
+            # machine-readable fields — never only the level, never only the quote.
+            "level": str(low) if at_level else None,
+            "ltp": None if ltp is None else str(ltp),
             "stop": str(rec.stop),
             "targets": [str(t) for t in rec.targets],
             "confidence": rec.confidence,
