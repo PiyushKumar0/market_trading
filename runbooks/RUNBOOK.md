@@ -254,3 +254,62 @@ ambiguous names correctly UNmatched (`unresolved_entities` log, §9.1).
       `scripts/rescrape_costs.py` before release and diff `config/costs.yaml`.
 - [ ] **News pipeline** ingesting + clustering + resolving on live feeds for **≥5 sessions**, with the
       50-headline entity-resolution precision spot-check above (≥95%).
+
+---
+
+# Phase 2 — RECOMMEND live operations (§8.3, gate G2)
+
+## Gate G2 evidence checklist (§8.3)
+
+Run the collector first — it computes every machine-checkable bar below in one pass and prints a
+MET / NOT-MET / N-A column plus the per-session digest detail and the budget table:
+
+```
+.venv\Scripts\python.exe scripts\g2_evidence.py [--from 2026-07-29] [--to YYYY-MM-DD]
+                                                [--month YYYY-MM] [--json data\reports\g2_evidence.json]
+```
+
+It opens `data/state.db` **read-only** (`file:…?mode=ro`) and never touches `data/market.duckdb`, so
+it is safe to run against the live engine. It reads DB rows only — no engine log parsing, no engine
+import. Read the **SOURCES + COVERAGE CAVEATS** block it prints before quoting any number: several
+bars are judged against owner-set state (the trade window) that moved during the day.
+
+- [ ] **Digest before window-open:** "catalyst digest + watchlist produced before window-open on
+      **≥90% of sessions**". Evidence: `scripts/g2_evidence.py` criterion 1 (source:
+      `job_runs(job_id='catalyst_digest').last_success_at` vs the `config_audit`
+      `trade_window_state` value in force at the digest instant). ⚠ Judge the per-session detail
+      table by hand where the **WINDOW RESET LATER SAME DAY** flag is set — on those days the owner
+      moved the window after the digest landed, so the pass/fail depends on which value you count.
+- [ ] **News Analyst schema validity:** "News Analyst batches schema-valid on **≥95% of calls**".
+      Evidence: `scripts/g2_evidence.py` criterion 2a (source: `agent_calls`, **one row per SDK
+      call, retries included** — the conservative denominator). Criterion 2b reports the Intraday
+      Analyst for context; §8.3 sets no bar on it, but a low reading is a live defect to fix.
+- [ ] **Recommendation delivery timeliness:** "**≥90%** of recommendations delivered before their
+      validity window opens". Evidence: `scripts/g2_evidence.py` criterion 3 (source:
+      `recommendations.delivered_at` vs the payload's `valid_until`; the payload carries no
+      `valid_from`, so the window opens at `created_at ≤ delivered_at` by construction).
+- [ ] **Payload completeness:** "daily recommendations with **gate verdicts + cost math + manual
+      checklist in every payload**". `[owner-manual]` — sample delivered `recommendations.payload`
+      rows and confirm `gate`, `cost`, and `manual_checklist` are populated on each.
+- [ ] **Duration:** "**4 weeks** of daily recommendations". Evidence: `scripts/g2_evidence.py`
+      criterion 5 counts sessions with ≥1 delivered recommendation against a 20-session bar;
+      `[owner-manual]` sign-off that the 4 weeks were *continuous operating* weeks, not a padded
+      count across outages.
+- [ ] **Owner manual executions:** "owner has executed **≥5 recommendations manually** and outcomes
+      captured in the ledger". Evidence: `scripts/g2_evidence.py` criterion 4 counts
+      `recommendations.human_action='taken'` (and `'closed'`); `[owner-manual]` — the executions
+      themselves, reported back through Telegram `/taken <rec_id> <qty> <price>` and
+      `/closed <rec_id> <price>` so the `learning_ledger` row closes with a real outcome (§6.5).
+- [ ] **Budget within 10% of console (D6):** "budget governor tracking within **10%** of
+      console-reconciled spend". Evidence: `scripts/g2_evidence.py` criterion 7 prints the single
+      month-to-date total plus its ±10% band; `[owner-manual]` — open the Anthropic console for
+      the same month and diff. Per-agent spend vs `config/agents.yaml` allocations is in the same
+      table.
+- [ ] **Zero API orders:** "zero API orders placed (**broker order book empty of platform orders** —
+      audited)". Evidence: `scripts/g2_evidence.py` criterion 6 proves the platform side
+      (`orders` / `order_events` empty); `[owner-manual]` — the broker-side audit in Kite Console
+      (Orders → all/GTT tabs for the period). The engine cannot evidence its own absence there.
+- [ ] **Watchlist precision:** "owner has reviewed watchlist precision on **at least two weekly
+      samples** (are `originating` entries genuinely material catalysts?)". `[owner-manual]` — sample
+      the dashboard news/watchlist panel or `catalyst_watchlist` grade=`originating` rows for two
+      separate weeks and record the verdict (same shape as the G1 50-headline sample above).
