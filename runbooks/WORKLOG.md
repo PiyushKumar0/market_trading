@@ -1,5 +1,51 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-14 (overnight, ~01:15) — THE CORRECTED NUMBERS: no strategy survives honest mechanics; VWAP-reversion aborts AT the cost floor; deploy live-verified
+
+- **Corrected sweeps (next-open fills + spread + ₹20k sizing + margin floor), all four NOT PROMOTABLE:**
+  orb −0.0316%/day CPCV 0/15 (the honest negative, unchanged); **rsi2 +0.0006%/day, CPCV 60% < 80%
+  — the recorded +0.58%/trade edge is GONE under honest fills** (it no longer even reaches the old
+  boundary); trend +0.0100%/day passes folds (93.3%) but fails the WO-3 margin floor (median passing
+  split 0.0103 < 0.0160%/day); mom +0.0033%/day, 15/15 folds, same floor failure. The audit's F2/F3
+  verdict lands in full: the swing "edges" were substantially same-bar-fill artifact plus margins
+  economically indistinguishable from zero. Reports: {orb,rsi2,trend,mom}_20260814T00*.{json,md};
+  everything before e72283a stays superseded.
+- **WO-10 VWAP-reversion: ABORTED AT STAGE 1 by its own pre-registration** — unconditioned 15–60-min
+  reversion base rate after costs = **−0.12742%/trade** (239,126 trades, 50,977 symbol-sessions,
+  win 18.2%) ≈ the 0.1263% cost floor itself ⇒ **gross reversion ≈ 0: the 15–60-min price process is
+  a martingale here and costs are the entire loss.** The stretch grid was never evaluated ("do not
+  tune until something clears zero"). Report: vwap_reversion_20260814T010518.{json,md} — C-CATEGORY,
+  STOPS FOR OWNER REVIEW, nothing wired. Pre-registration rulings recorded in-file (10m-ATR stop
+  scale — the 1m reading would have set stops below the cost floor, the ORB death geometry; warm-up
+  domination of the 10:00–11:35 window accepted rather than post-hoc tuned; morning-window variant
+  with prior-session-seeded ATR = the follow-up IF anything ever clears zero).
+- **Deploy live-verified TWICE:** engine restarted ~00:51 (attribution uncertain — the stale 08-05
+  deploy-restart task is ruled out, LastRun 08-05, no next run; most likely a manual owner start; it
+  even survived booting 6 s before the sweep released the duckdb) and again 01:06 after the WO-10
+  window. Both boots show the WO-15 shape: load_bearing catch-up → scheduler_started →
+  post_arm_jobs_fired [news_chain, catalyst_digest, preopen_planner, tick_compact] → engine_ready →
+  deferred scope complete. Migrations 0005/0006 + corrections_log.reason applied. Overnight posture
+  correct, RECOMMEND/NORMAL.
+- **The watermark fix earned its keep on night one:** corp_actions + deals failed tonight (NSE-side)
+  and are recorded FAILED — retried by boot catch-up (failed again, honestly) and by the 30-min
+  sweeps until NSE recovers. Under Tuesday's code these were green-stamped silent holes.
+- **Bhavcopy cross-check watch item CLOSED:** tonight's normal 18:00 run cross-checked 0 bars
+  (bhavcopy runs before daily_bars — same-day there is nothing to compare); the 98/100 was purely
+  the T+1 recovery ordering comparing NSE weighted official close vs Kite LTP close, which differ
+  structurally. Filed (small): the cross-check close comparison needs a weighted-close-aware
+  tolerance for T+1 runs; volume comparison unaffected.
+- **The strategic picture for the owner's morning read:** every strategy family the platform has
+  ever tested is now honest-negative or economically-zero at ₹20k retail cost structure — breakout
+  (orb, 5 runs), catalyst-conditioned breakout (E1), touch-entry momentum (hindsight replay), swing
+  mean-reversion/trend/momentum (tonight, corrected), and now intraday VWAP reversion (pre-registered,
+  aborted at the floor). The filings insider_net_buy leg (+0.75/+1.61% net, CPCV-passed pre-fix
+  mechanics) is the one recorded positive left — it deserves a corrected-mechanics re-check before
+  being trusted. Plan §1.2's stance (process quality over profit, capital preservation, learning per
+  rupee) is no longer a posture; it is the measured result. Where the edge is NOT excluded by
+  arithmetic: longer horizons (floor = 8% of day range), larger capital, and the untested filings/
+  event space. Today's funnel telemetry line still matters — it validates the pipeline plumbing
+  even in a no-edge regime.
+
 ## 2026-08-13 (evening, ~19:20) — IMPROVEMENT_SPEC implemented: 14 work orders, two phases, 1,345 green
 
 - **Owner directive: "implement as deemed necessary by you." Scope chosen: everything except
