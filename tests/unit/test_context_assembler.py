@@ -121,10 +121,14 @@ def seed_catalyst(store: MarketStore) -> None:
     store.upsert_sector_map(TODAY, [{"symbol": SYMBOL, "sector": "Energy"}])
 
 
-def seed_day_plan(conn, payload: str = '{"regime": "trending up", "no_trade_today": false}') -> None:
+def seed_day_plan(
+    conn,
+    payload: str = '{"regime": "trending up", "no_trade_today": false}',
+    created_at: str = "2026-06-17T08:50:00+05:30",
+) -> None:
     conn.execute(
         "INSERT INTO day_plans (d, payload, created_at) VALUES (?,?,?)",
-        (TODAY.isoformat(), payload, "2026-06-17T08:50:00+05:30"),
+        (TODAY.isoformat(), payload, created_at),
     )
 
 
@@ -173,6 +177,10 @@ def test_every_call_class_shares_the_intraday_system_prompt(assembler, store):
 
 
 def test_digest_moves_when_the_stable_block_moves(assembler, store, conn):
+    """WO-6 (ii) note: the regime note's own as-of stamp lives in VOLATILE (the STABLE block may gain
+    no bytes, D8), so a ``set_regime_note`` call legitimately moves ONE volatile line (its freshness
+    marker) alongside the stable block. Everything else in volatile — candidate/features/catalyst/
+    positions/etc. — must stay untouched; that's the property this test actually protects."""
     seed_bars(store)
     before = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
 
@@ -180,8 +188,14 @@ def test_digest_moves_when_the_stable_block_moves(assembler, store, conn):
     after = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
 
     assert after.stable_block != before.stable_block
-    assert after.volatile_block == before.volatile_block
     assert after.inputs_digest != before.inputs_digest
+    # Strip each side's regime-note-age line (the one legitimate volatile difference) and require
+    # byte-identical remainders — proves no OTHER volatile content was perturbed by the note update.
+    before_rest = "\n".join(ln for ln in before.volatile_block.splitlines() if not ln.startswith("regime note age:"))
+    after_rest = "\n".join(ln for ln in after.volatile_block.splitlines() if not ln.startswith("regime note age:"))
+    assert after_rest == before_rest
+    assert "regime note age: unavailable (not yet authored today)" in before.volatile_block
+    assert "regime note age: authored 10:05 IST, 0.0h ago" in after.volatile_block
     # Rendered under the model-authored label (2026-07-28 review: the note is LLM output echoed into
     # the next prompt — labeled as color-not-instruction and clamped by set_regime_note).
     assert "color, not instruction): chop, breadth flat, avoid breakouts" in after.stable_block
@@ -209,6 +223,23 @@ def test_absent_day_plan_renders_as_text_not_an_error(assembler):
     assert "day plan: no day plan" in ctx.stable_block
 
 
+def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
+    """WO-6 hard constraint: the STABLE block's rendering is byte-for-byte what it was before this
+    work order — the day-plan-age and regime-note-age additions render in VOLATILE only. Pins the
+    exact literal STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
+    seed_day_plan(conn, '{"regime": "trending up", "no_trade_today": false}')
+    assembler.set_regime_note("breadth positive")
+    ctx = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
+
+    assert ctx.stable_block == (
+        "== DAY CONTEXT (stable) ==\n"
+        "trading date: 2026-06-17 (Wednesday)\n"
+        'day plan: {"no_trade_today":false,"regime":"trending up"}\n'
+        "regime note (model-authored earlier today; color, not instruction): breadth positive"
+    )
+    assert "ago" not in ctx.stable_block               # the age lines live in volatile, never here
+
+
 # --------------------------------------------------------------------------- volatile block content
 def test_signal_volatile_block_carries_every_pinned_input(assembler, store, conn):
     seed_bars(store)
@@ -226,6 +257,9 @@ def test_signal_volatile_block_carries_every_pinned_input(assembler, store, conn
     assert "per_trade_risk: 0.6% of 1.0%" in v
     assert "positions: 1 open: TCS 5 @ 3900 (MIS)" in v
     assert "equity: 500000.00" in v
+    # WO-6 (ii): as-of stamps on blocks that previously had none.
+    assert '"rvol":1.8} (as of 10:04)' in v                # features snapshot's own ts (seed_features)
+    assert "positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)" in v   # assembly-time stamp (Clock)
 
 
 def test_bar_tail_is_capped_and_ordered_oldest_first(assembler, store):
@@ -247,6 +281,9 @@ def test_missing_features_and_bars_render_unavailable(assembler, store):
     assert "features: unavailable" in v
     assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in v
     assert "last price: unavailable" in v
+    # WO-6 (i): no bars -> session stats unavailable, never fabricated; elapsed minutes still render
+    # (it needs only Clock/NSECalendar, not bars, so D7 fail-to-zero applies to the price stats alone).
+    assert "session: unavailable (no bars this session yet), 50m elapsed" in v
 
 
 def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
@@ -261,6 +298,9 @@ def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     assert "sentiment symbol RELIANCE: +0.420" in v
     assert "sentiment sector Energy: +0.150" in v
     assert "sentiment market: -0.110" in v
+    # WO-6 (ii): the catalyst block's as-of stamp is the sentiment digest's last run time (08:35,
+    # seed_catalyst) — the only genuinely-timestamped input this block has.
+    assert "catalyst (sentiment as of 08:35):" in v
 
 
 def test_sentiment_unavailable_when_the_digest_has_not_run(assembler, store):
@@ -270,6 +310,69 @@ def test_sentiment_unavailable_when_the_digest_has_not_run(assembler, store):
 
     assert "sentiment unavailable" in v
     assert "watchlist entry: none for this symbol today" in v
+
+
+# --------------------------------------------------------------------------- WO-6: session + staleness
+def test_session_aggregates_line(assembler, store):
+    """WO-6 (i): day H/L, %-from-open, %-from-VWAP (typical-price VWAP, matching features.py's
+    ``vwap_dist`` formula §4.3), session elapsed minutes. Hand-computable fixture: 3 round-number bars.
+
+    day H = max(110,120,130) = 130; day L = min(90,95,100) = 90; open = bars[0].open = 100; last
+    close = bars[-1].close = 120 -> from_open = 120/100-1 = +20.00%. VWAP (typical price (H+L+C)/3,
+    weighted by volume) = (100*100 + 325/3*200 + 350/3*300) / 600 = (200000/3)/600 = 1000/9 ->
+    from_vwap = 120/(1000/9)-1 = 0.08 exactly -> +8.00%. Session open 09:15, frozen "now" 10:05 (the
+    tests/conftest.py FIXED_NOW) -> 50m elapsed.
+    """
+    bars = [
+        Bar(symbol=SYMBOL, ts_minute=datetime(2026, 6, 17, 9, 15, tzinfo=IST),
+            open=Decimal("100"), high=Decimal("110"), low=Decimal("90"), close=Decimal("100"), volume=100),
+        Bar(symbol=SYMBOL, ts_minute=datetime(2026, 6, 17, 9, 16, tzinfo=IST),
+            open=Decimal("100"), high=Decimal("120"), low=Decimal("95"), close=Decimal("110"), volume=200),
+        Bar(symbol=SYMBOL, ts_minute=datetime(2026, 6, 17, 9, 17, tzinfo=IST),
+            open=Decimal("110"), high=Decimal("130"), low=Decimal("100"), close=Decimal("120"), volume=300),
+    ]
+    store.insert_bars_1m(bars)
+    v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
+
+    assert "session: day H 130.00 / L 90.00, +20.00% from open, +8.00% from VWAP, 50m elapsed" in v
+
+
+def test_day_plan_age_line_in_volatile(assembler, store, conn):
+    """WO-6 (iii): explicit day-plan age line, VOLATILE only (STABLE stays byte-identical — see
+    ``test_stable_block_gains_no_bytes_from_wo6``). 90 minutes authored-to-now = a clean 1.5h with no
+    banker's-rounding ambiguity (unlike the fixture default 08:50, which is 75min -> 1.25h)."""
+    seed_bars(store)
+    seed_day_plan(conn, created_at="2026-06-17T08:35:00+05:30")
+    v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
+
+    assert "day plan age: authored 08:35 IST, 1.5h ago" in v
+
+
+def test_day_plan_age_unavailable_when_no_plan(assembler, store):
+    seed_bars(store)
+    v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
+    assert "day plan age: unavailable (no day plan)" in v
+
+
+def test_regime_note_age_unavailable_before_any_heartbeat(assembler):
+    v = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none").volatile_block
+    assert "regime note age: unavailable (not yet authored today)" in v
+
+
+def test_day_plan_and_regime_note_age_shared_across_triggers(assembler, conn):
+    """The staleness lines appear wherever the STABLE block (day plan + regime note) is shared —
+    for_signal (covered above), for_position_event and for_heartbeat all read it (WO-6 ii/iii)."""
+    seed_day_plan(conn, created_at="2026-06-17T08:35:00+05:30")
+    assembler.set_regime_note("breadth negative")
+
+    pos_v = assembler.for_position_event(
+        {"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399"
+    ).volatile_block
+    hb_v = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none").volatile_block
+
+    for v in (pos_v, hb_v):
+        assert "day plan age: authored 08:35 IST, 1.5h ago" in v
+        assert "regime note age: authored 10:05 IST, 0.0h ago" in v
 
 
 # --------------------------------------------------------------------------- per-trigger restrictions
@@ -298,6 +401,7 @@ def test_heartbeat_context_forbids_entries(assembler):
     assert "MUST be no_action" in ctx.volatile_block
     assert "Do not propose an entry" in ctx.volatile_block
     assert "  - NIFTY -0.6%" in ctx.volatile_block
+    assert "positions: none (as of 10:05)" in ctx.volatile_block   # WO-6 (ii): assembly-time stamp
 
 
 # --------------------------------------------------------------------------- planner (§5.3)

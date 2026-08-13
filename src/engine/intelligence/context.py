@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta
@@ -45,6 +46,7 @@ from engine.core.log import get_logger
 from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
 from engine.marketdata.store import MarketStore
+from engine.strategy.indicators import vwap
 from engine.strategy.types import SignalCandidate
 
 _log = get_logger("engine.intelligence.context")
@@ -119,6 +121,7 @@ class ContextAssembler:
         self._clock = clock
         self._calendar = calendar
         self._regime_note = "none"
+        self._regime_note_as_of: datetime | None = None   # WO-6 (ii): set alongside the note itself
 
     # ------------------------------------------------------------------ regime-note slot (§5.2 (c))
     #: Hard clamp on the model-authored regime note (2026-07-28 review): it is LLM OUTPUT echoed into
@@ -134,6 +137,7 @@ class ContextAssembler:
         """
         cleaned = " ".join(note.split())     # collapse newlines: one line can't fake block structure
         self._regime_note = cleaned[: self.REGIME_NOTE_MAX_CHARS] or "none"
+        self._regime_note_as_of = self._clock.now()   # WO-6 (ii): rendered in VOLATILE, never here
 
     # ------------------------------------------------------------------ trigger (a): signal candidate
     def for_signal(
@@ -154,8 +158,9 @@ class ContextAssembler:
         parts.append(f"candidate: {_json(candidate.model_dump(mode='json'))}")
         parts.append(f"features: {self._features_text(candidate.features_snapshot_id)}")
         parts.append(self._bars_text(bars))
+        parts.append(self._session_aggregates_text(d, bars))
         parts.append(self._catalyst_text(candidate.symbol, d))
-        parts.append(f"positions: {open_positions_summary}")
+        parts.append(f"positions: {open_positions_summary} (as of {self._now_hhmm()})")
         parts.append(f"sector exposure: {sector_exposure_line}")
         parts.append(f"cost and breakeven: {cost_line}")
         parts.append(f"equity: {equity}")
@@ -163,6 +168,8 @@ class ContextAssembler:
         parts.append("risk headroom (informational - the gate re-checks everything):")
         parts.extend(f"  - {line}" for line in headroom_lines)
         parts.append(self._ltp_line(bars))
+        parts.append(self._day_plan_age_text(d))
+        parts.append(self._regime_note_age_text())
         return AssembledContext.build(
             system_prompt=intraday.SYSTEM_PROMPT,
             stable_block=self._stable_block(d),
@@ -195,6 +202,8 @@ class ContextAssembler:
             f"event: {event_kind}",
             f"detail: {detail}",
             ltp_line,
+            self._day_plan_age_text(d),
+            self._regime_note_age_text(),
         ]
         return AssembledContext.build(
             system_prompt=intraday.SYSTEM_PROMPT,
@@ -216,7 +225,9 @@ class ContextAssembler:
             "regime observations:",
         ]
         parts.extend(f"  - {line}" for line in regime_lines)
-        parts.append(f"positions: {open_positions_summary}")
+        parts.append(f"positions: {open_positions_summary} (as of {self._now_hhmm()})")
+        parts.append(self._day_plan_age_text(d))
+        parts.append(self._regime_note_age_text())
         return AssembledContext.build(
             system_prompt=intraday.SYSTEM_PROMPT,
             stable_block=self._stable_block(d),
@@ -337,7 +348,8 @@ class ContextAssembler:
             return "no day plan"
 
     def _features_text(self, snapshot_id: str | None) -> str:
-        """The candidate's frozen feature vector (§4.3), or ``unavailable``."""
+        """The candidate's frozen feature vector (§4.3) with its as-of stamp (WO-6 ii), or
+        ``unavailable`` — never a fabricated timestamp on absent data (D7)."""
         if not snapshot_id:
             return _UNAVAILABLE
         row = self._store.get_feature_snapshot(snapshot_id)
@@ -347,7 +359,9 @@ class ContextAssembler:
             features = json.loads(row["features"])
         except (KeyError, TypeError, json.JSONDecodeError):
             return _UNAVAILABLE
-        return _json(features)
+        as_of = row.get("ts")
+        suffix = f" (as of {as_of.strftime('%H:%M')})" if isinstance(as_of, datetime) else ""
+        return f"{_json(features)}{suffix}"
 
     def _bars(self, symbol: str, d: date) -> list[Bar]:
         """Today's completed 1m bars up to "now" (the end bound is exclusive in the store)."""
@@ -372,9 +386,12 @@ class ContextAssembler:
 
         Present for every `cat` candidate and for any candidate whose symbol has an entry today. An
         un-run or empty digest is marked ``sentiment unavailable`` (D7) — never an error, never a
-        zero standing in for "no signal".
+        zero standing in for "no signal". The header carries the block's as-of stamp (WO-6 ii): the
+        sentiment digest's last run time, the only genuinely-timestamped input this block has.
         """
-        lines = ["catalyst:"]
+        as_of = self._store.latest_sentiment_as_of()
+        header = "catalyst:" if as_of is None else f"catalyst (sentiment as of {as_of.strftime('%H:%M')}):"
+        lines = [header]
         entries = [e for e in self._store.get_catalyst_watchlist(d) if e.get("symbol") == symbol]
         if entries:
             for entry in entries:
@@ -383,7 +400,6 @@ class ContextAssembler:
         else:
             lines.append("  watchlist entry: none for this symbol today")
 
-        as_of = self._store.latest_sentiment_as_of()
         if as_of is None:
             lines.append(f"  sentiment {_UNAVAILABLE}")
             return "\n".join(lines)
@@ -411,6 +427,74 @@ class ContextAssembler:
             f"last price: {last.close} at {last.ts_minute.strftime('%H:%M')} (last completed 1m bar; "
             f"context assembled at {self._clock.now().isoformat()})"
         )
+
+    # ------------------------------------------------------------------ WO-6: session-scale + staleness
+    def _session_aggregates_text(self, d: date, bars: Sequence[Bar]) -> str:
+        """Day H/L, %-from-open, %-from-VWAP, session elapsed minutes (WO-6 i) — VOLATILE only.
+
+        Computed over EVERY bar of the session fetched so far (``bars``, not the display-capped
+        ``BAR_TAIL``), fixing the "session-blind by mid-day" gap (F7): the 30-bar tail alone cannot
+        show a day's high/low once the day has more than 30 minutes on the clock. VWAP reuses
+        :func:`engine.strategy.indicators.vwap` (typical price ``(H+L+C)/3`` weighted by volume) — the
+        same formula ``features.py`` uses for ``vwap_dist`` (§4.3), so this line and the features
+        block cannot silently disagree; price*volume IS computable from the ``Bar`` model (OHLC +
+        volume), so this is a real computation, not a fabrication of unavailable data. Elapsed minutes
+        needs no bars at all and is always rendered (D7 fail-to-zero applies only to the price stats).
+        """
+        elapsed_min = max(int((self._clock.now() - self._session_start(d)).total_seconds() // 60), 0)
+        if not bars:
+            return f"session: {_UNAVAILABLE} (no bars this session yet), {elapsed_min}m elapsed"
+        highs = [float(b.high) for b in bars]
+        lows = [float(b.low) for b in bars]
+        closes = [float(b.close) for b in bars]
+        volumes = [b.volume for b in bars]
+        day_high, day_low = max(highs), min(lows)
+        last_close = closes[-1]
+        open_px = float(bars[0].open)
+        from_open = f"{(last_close / open_px - 1.0) * 100:+.2f}%" if open_px > 0.0 else _UNAVAILABLE
+        vwap_last = float(vwap(highs, lows, closes, volumes).iloc[-1])
+        from_vwap = (
+            f"{(last_close / vwap_last - 1.0) * 100:+.2f}%"
+            if math.isfinite(vwap_last) and vwap_last > 0.0
+            else _UNAVAILABLE
+        )
+        return (
+            f"session: day H {day_high:.2f} / L {day_low:.2f}, {from_open} from open, "
+            f"{from_vwap} from VWAP, {elapsed_min}m elapsed"
+        )
+
+    def _day_plan_age_text(self, d: date) -> str:
+        """Day-plan staleness (WO-6 iii). Rendered in VOLATILE only: the day-plan TEXT itself is read
+        by :meth:`_day_plan_text` into the STABLE block, which must gain no bytes (D8) — so the age
+        line lives here instead, computed fresh on every call from the same ``created_at`` row."""
+        try:
+            row = self._conn.execute(
+                "SELECT created_at FROM day_plans WHERE d = ?", (d.isoformat(),)
+            ).fetchone()
+        except sqlite3.OperationalError:          # table absent (pre-migration) - never blocks a call
+            return "day plan age: unavailable (no day plan)"
+        if row is None or not row[0]:
+            return "day plan age: unavailable (no day plan)"
+        try:
+            authored = datetime.fromisoformat(row[0])
+        except ValueError:
+            return "day plan age: unavailable (no day plan)"
+        age_h = (self._clock.now() - authored).total_seconds() / 3600.0
+        return f"day plan age: authored {authored.strftime('%H:%M')} IST, {age_h:.1f}h ago"
+
+    def _regime_note_age_text(self) -> str:
+        """Regime-note staleness (WO-6 ii). Rendered in VOLATILE only, for the same D8 reason as
+        :meth:`_day_plan_age_text`: the note TEXT lives in the STABLE block (``_stable_block``), which
+        must gain no bytes, so its as-of stamp is rendered alongside it here instead."""
+        if self._regime_note_as_of is None:
+            return "regime note age: unavailable (not yet authored today)"
+        age_h = (self._clock.now() - self._regime_note_as_of).total_seconds() / 3600.0
+        return f"regime note age: authored {self._regime_note_as_of.strftime('%H:%M')} IST, {age_h:.1f}h ago"
+
+    def _now_hhmm(self) -> str:
+        """Compact ``HH:MM`` for "as of context-assembly time" stamps (positions has no data-side
+        timestamp of its own, so this — precomputed from Clock, never the model — is the honest one)."""
+        return self._clock.now().strftime("%H:%M")
 
     # ================================================================== small helpers
     def _section(self, title: str, lines: Sequence[str]) -> str:
