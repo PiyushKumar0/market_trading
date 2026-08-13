@@ -1,5 +1,61 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-13 (afternoon, ~16:10) — yesterday's "bhavcopy retrying" was FALSE: watermark green-stamps degraded jobs (class fixed, 9 jobs); full-system audit executed → IMPROVEMENT_SPEC.md; G2 gate items closed
+
+- **CORRECTION to the 08-12 EOD entry:** "sweeps retrying, non-blocking" was wrong. The morning
+  check found `job_runs` showing bhavcopy 2026-08-12 SUCCESS at 18:03:36.310 — one millisecond
+  after its own "ingest degraded" alert (18:03:36.309). Root cause: the scheduled runner marks
+  failure only on RAISE (main.py `_scheduled_runner`), while E5 jobs degrade-without-raising and
+  return ok=False — which the composition-root closures (typed `-> None`) DISCARDED, so
+  `record_run` defaulted to success, `was_run()==True`, and no sweep ever retried. The "6 more
+  transients through 20:42" belonged to other NSE fetches. **08-12 bhavcopy data is missing behind
+  a green watermark** (NSE file confirmed available again: HTTP 200, 194,961 bytes).
+- **Fix (three rounds, delegated + reviewed; the agent's stop-and-report caught my own diagnosis
+  gap — the closure discard):** `_job_result_ok` sinks ok=False at all four run sites; all NINE
+  ok-bearing wrappers now FORWARD returns (bhavcopy + earnings/corp_actions/sector_map/
+  filings_shp/deals/filings_pit×3 — per-job ok=False semantics verified transient-shaped before
+  forwarding; PIT content-lag never touches ok=False); per-date alert dedup added to all 8
+  newly-forwarded jobs (correct retries would otherwise storm every 30-min sweep; success
+  re-arms). Composition-root pinned end-to-end (MockTransport bhavcopy → real registry → real
+  runner → status='failed') + parametrized forwards sweep. Filed, not fixed: planner/nightly bool
+  returns (LLM-budget retry semantics = WO-14), safety-critical freeze-notify dedup.
+  **+33 tests today; 1,219 green. Commits f203b48, b6d6b8d, e39cb75, 32424f2, 3cee8f3.**
+- **DEPLOY PENDING — needs owner (permission classifier blocks service control this session):**
+  before 18:00 ideally: `Stop-Service mt-engine` → run the flip script (scratchpad
+  `flip_bhavcopy_watermark.py`, flips 08-12 to failed) → `Start-Service mt-engine` → verify
+  catch-up re-fetches bhavcopy:2026-08-12 in engine.log. If deployed after an 18:00 failure,
+  check 08-13's row too (old code green-stamps it).
+- **G2 gate items closed:** the three missing §9.1 control-plane tests (restart-survival,
+  TRADE_WINDOW_CHANGED emission, on_shrink_squareoff contract); both filed news-chain pins
+  (partial-persist→re-sweep convergence — residual interleaving corner documented as owner
+  decision item; 4-day abandon cutoff + [:500] cap); `scripts/g2_evidence.py` + RUNBOOK G2
+  checklist. First collector run: digest-before-window-open 8/12=66.7% (bar 90% — wedge days
+  dominate misses), news analyst 346/346 schema-valid, intraday 83.2% attempt-level (24/25
+  today post-fix), recommendations 0 rows ever, MTD $31.29/$120 (console band $28.16–34.42 —
+  owner D6 diff pending). Plan §14 Q15 annotated with the recorded 07-28 measurement.
+- **AUDIT_PROMPT.md executed** (17 read-only agents, 3 waves + breadth; engine live throughout,
+  duckdb never opened) → **IMPROVEMENT_SPEC.md** at repo root. Verdict: symptom (a) zero-recs =
+  H1 defects (FIFO funnel ignores its own scores, orb took 55% of slots, is_fno bug — already
+  fixed 7fdf7fe — killed the only 2 enters ever); symptom (b) = H2 confirmed by measured
+  arithmetic at 1m scale (fees+spread floor 0.1243% = 2.05× median 1m range; 48 symbol-days of
+  stored tick bid/ask — first use of that data ever) but OPEN at 30-min+ horizons (floor = 0.18×
+  opening range). All recorded swing positives (rsi2 +0.58% etc.) methodologically unsafe:
+  same-bar-close fills verified into vectorbt source, all 12 passing rsi2 CPCV splits
+  < 0.02%/day, promotions boundary-exact at 80.0%, winner unstable across densities. 15 work
+  orders, P0 = score-ranked funnel + corrected sweep mechanics/spread + re-validation. Breadth:
+  indicator math independently verified sound (0.0 diff); bar-builder healthy except src-blind
+  late-tick amendment of official candles (WO-5); analyst context session-blind by mid-day (WO-6).
+- **§2.6 scheduler-before-scoring question ANSWERED (WO-15, needs owner go):** move the
+  never-load-bearing news chain + digest + planner to fire immediately AFTER `scheduler.start()`
+  (boot recovery keeps load-bearing data steps only) + single-flight lock on CatchUpRunner.
+  Scheduler guard is calendar-only (verified), so naive early arming was rejected; this ordering
+  makes boot latency independent of news volume by construction and keeps the catchup_sweep
+  self-heal alive during any future wedge.
+- Incidental finds filed: tick capture starts at engine start (08-11 first bar 09:52 — opening
+  30 min absent on late-start days, WO-12); date=1970-01-01 orphan tick partition; 223
+  negative-spread closing-auction rows (filter rule for any bid/ask consumer); parquet
+  small-file pathology measured (752,150 files / 1.37 GB per day, WO-7).
+
 ## 2026-08-12 (EOD, ~23:15) — first fully-clean run; bhavcopy straggling on NSE-side errors
 
 - **Zero infrastructure interference today — first time since the funnel matured.** Schema fix
