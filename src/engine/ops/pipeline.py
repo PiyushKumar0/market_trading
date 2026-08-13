@@ -33,6 +33,12 @@ Conventions that are load-bearing here:
   highest per-strategy score QUANTILE waiting (``_forward_key``), and the counter that bounds those
   slots lives in the day-slot journal so a mid-day restart resumes the day's quota instead of
   refilling it. Rollback: ``admission_mode="arrival"``.
+* **The trigger paths carry state instead of re-reading it** (§3.2 hot-path invariant 7, WO-8
+  2026-08-13). ATR(14,1m) is seeded from the store once per symbol per day and advanced one Wilder
+  step per bar (:meth:`RecommendationPipeline._atr_1m`), reseeding only when a bar's minute is not
+  contiguous with the last one seen; the weekly sector map is read once per trading date
+  (:meth:`RecommendationPipeline._sector_of`). ``hot_path_read_hygiene`` logs the resulting
+  reads-avoided/performed ledger once per session.
 """
 
 from __future__ import annotations
@@ -43,8 +49,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from time import perf_counter
 from typing import Any
 
+import numpy as np
 from ulid import ULID
 
 from engine.core.calendar import NSECalendar
@@ -69,7 +77,7 @@ from engine.intelligence.schemas import (
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.strategy.cost_model import CostModel
-from engine.strategy.indicators import wilder_atr
+from engine.strategy.indicators import _true_range, wilder_atr
 from engine.strategy.types import SignalCandidate
 
 _log = get_logger("engine.ops.pipeline")
@@ -99,6 +107,20 @@ POSITION_EVENT_DEBOUNCE_MIN = 60
 ATR_PERIOD = 14
 ATR_BAR_TAIL = 60
 
+#: The 1m bar cadence. A bar exactly this far past the last one CONTINUES the Wilder recursion;
+#: anything further ahead is a gap and reseeds from the store (WO-8 (i), §3.2 hot-path invariant 7).
+_BAR_STEP = timedelta(minutes=1)
+
+#: The per-session hot-path counters behind the ``hot_path_read_hygiene`` log line (WO-8 (iii)).
+_HOT_PATH_COUNTERS = (
+    "atr_store_reads",      # _atr_1m calls that had to read bars_1m (seed or gap reseed)
+    "atr_incremental",      # _atr_1m calls served from carried state — the reads AVOIDED
+    "atr_gap_reseeds",      # of the store reads, how many were non-contiguity reseeds
+    "sector_store_reads",   # sector-map reads performed
+    "sector_cache_hits",    # sector-map reads avoided
+)
+_HOT_PATH_TIMERS = ("atr_store_read_ms", "atr_incremental_ms", "sector_store_read_ms")
+
 #: The deterministic time-stop thesis (§7.1 ``max_holding``). A constant, not model text: R1 says an
 #: exit must survive with the LLM dead, so nothing on this path may be generated.
 TIME_STOP_THESIS = (
@@ -120,6 +142,25 @@ QUANTILE_BANDS = 5
 #: an order of magnitude below this; the ceiling exists so a misconfigured publication cap cannot
 #: turn a refused-candidate pointer list into unbounded process memory.
 MAX_PENDING_FORWARDS = 100
+
+
+@dataclass(frozen=True)
+class _AtrState:
+    """Carried ATR(14,1m) for one symbol — the state that replaces a per-bar store read (WO-8 (i)).
+
+    ``atr`` is a plain float on purpose: it is the exact ``float64`` :func:`wilder_atr` would have
+    produced at ``last_ts`` over the same anchored window, and the recursion that advances it uses
+    the identical expression, so the incremental and store-read values agree BIT FOR BIT (pinned by
+    ``test_incremental_atr_equals_the_store_read_at_every_bar``). The previous bar's H/L/C are kept
+    because the next bar's true range is defined against them.
+    """
+
+    day: date                   # the bar day this state belongs to — a new day always reseeds
+    last_ts: datetime           # minute of the newest bar folded in
+    last_high: float
+    last_low: float
+    last_close: float
+    atr: float
 
 
 @dataclass(frozen=True)
@@ -542,6 +583,15 @@ class RecommendationPipeline:
         self._forward_seq = 0
         #: strategy_id -> today's observed scores, the population the forward quantile ranks in.
         self._day_scores: dict[str, list[float]] = {}
+        #: WO-8 hot-path caches, all rolled together by :meth:`_roll_hot_path_day`.
+        #: symbol -> carried ATR(14,1m); bounded by the open-recommended-position count, since
+        #: :meth:`on_bar` returns before the ATR for any symbol without one.
+        self._atr_state: dict[str, _AtrState] = {}
+        self._sector_cache: dict[str, str] | None = None
+        self._sector_cache_day: date | None = None
+        self._hot_path_day: date | None = None
+        self._hot_counts: dict[str, int] = dict.fromkeys(_HOT_PATH_COUNTERS, 0)
+        self._hot_ms: dict[str, float] = dict.fromkeys(_HOT_PATH_TIMERS, 0.0)
 
     def _rearm_slot(self, candidate: SignalCandidate) -> None:
         """Hand the (symbol, strategy) day slot back after a never-evaluated drop (2026-07-29)."""
@@ -999,7 +1049,7 @@ class RecommendationPipeline:
         ).fetchall()
         if not positions:
             return
-        atr = self._atr_1m(bar.symbol)
+        atr = self._atr_1m(bar)
         if atr is None or atr <= 0:
             return
         now = self._clock.now()
@@ -1123,6 +1173,9 @@ class RecommendationPipeline:
             issued += 1
             _log.warning("max_holding_exit_recommended", position_id=position["position_id"],
                          style=style, age_sessions=age, cap=cap, rec_id=rec.rec_id)
+        # The §7.1 sweep is this class's own end-of-session hook, so it is where the WO-8 read
+        # ledger gets emitted — one line per session, no new wiring in the composition root.
+        self.log_hot_path_stats("eod")
         return issued
 
     # ================================================================== trigger (c): heartbeat
@@ -1354,15 +1407,76 @@ class RecommendationPipeline:
                 sessions += 1
         return sessions
 
-    def _atr_1m(self, symbol: str) -> Decimal | None:
-        """ATR(14,1m) over the trailing ``ATR_BAR_TAIL`` bars, or None when there is not enough."""
-        now = self._clock.now()
+    # ------------------------------------------------------------------ WO-8 hot-path read hygiene
+    def _atr_1m(self, bar: Bar) -> Decimal | None:
+        """ATR(14,1m) for ``bar``'s symbol, CARRIED FORWARD instead of re-read per bar (WO-8 (i)).
+
+        Until 2026-08-13 this issued one ``get_bars_1m`` per bar per symbol carrying an open
+        recommended position — a store read on the tick-driven bar path for a number that changes
+        by one Wilder step. The state machine, in the order the branches are tested:
+
+        * **no state / new bar day / the bar's minute is more than one minute past the last one
+          seen ⇒ SEED (or RESEED) from the store.** The gap branch is the load-bearing one: a
+          missed bar means the carried ATR is missing a true range, and silently continuing the
+          recursion would bake that hole in for the rest of the session. Reseeding re-reads the
+          real bars — including the ones this process never saw — so a gap costs one store read
+          and nothing else. A bar day change reseeds for the same reason (§3.2: 09:15 is not the
+          minute after 15:29).
+        * **exactly one minute past ⇒ advance the recursion** (:meth:`_advance_atr`).
+        * **the same minute, or older ⇒ return the carried value untouched.** A re-published or
+          replayed bar is already folded in and the state is at least as fresh as the bar; folding
+          it again would double-count its true range.
+        * **still behind after a seed** (the store lags the bus by more than a minute) ⇒ the
+          store's own value is returned, exactly as the pre-WO-8 code did, and the next bar
+          reseeds. Degrading to "one read per bar" is the floor here, never a stale carry.
+
+        Returns None when the store cannot supply ``ATR_PERIOD`` bars — unchanged behaviour, and
+        :meth:`on_bar` treats it as "no reading, no event".
+        """
+        started = perf_counter()
+        self._roll_hot_path_day(self._clock.today())
+        state = self._atr_state.get(bar.symbol)
+        if (
+            state is None
+            or state.day != bar.ts_minute.date()
+            or bar.ts_minute - state.last_ts > _BAR_STEP
+        ):
+            seeded = True
+            state = self._seed_atr(bar, gap=state is not None)
+            if state is None:
+                return None
+        else:
+            seeded = False
+        if bar.ts_minute - state.last_ts == _BAR_STEP:
+            state = self._advance_atr(state, bar)
+        self._atr_state[bar.symbol] = state
+        if not seeded:
+            self._hot_counts["atr_incremental"] += 1
+            self._hot_ms["atr_incremental_ms"] += (perf_counter() - started) * 1000.0
+        else:
+            self._hot_ms["atr_store_read_ms"] += (perf_counter() - started) * 1000.0
+        return _dec(state.atr)
+
+    def _seed_atr(self, bar: Bar, *, gap: bool) -> _AtrState | None:
+        """Anchor the recursion on a store read: ATR(14,1m) over the ``ATR_BAR_TAIL`` bars ending
+        at ``bar``'s minute, plus the H/L/C the next true range is measured against.
+
+        The window is anchored on ``bar.ts_minute`` rather than on ``Clock.now()`` so the seed
+        describes the bar's own neighbourhood and a replay produces the same number as the live
+        session did — the pre-WO-8 code read a now-anchored window, which differs whenever the bar
+        path runs behind the clock.
+        """
+        self._hot_counts["atr_store_reads"] += 1
+        if gap:
+            self._hot_counts["atr_gap_reseeds"] += 1
         try:
             bars = self._store.get_bars_1m(
-                symbol, now - timedelta(minutes=ATR_BAR_TAIL), now + timedelta(minutes=1)
+                bar.symbol,
+                bar.ts_minute - timedelta(minutes=ATR_BAR_TAIL),
+                bar.ts_minute + _BAR_STEP,
             )
         except Exception:                # noqa: BLE001 - a missing store read never breaks a bar tick
-            _log.exception("atr_read_failed", symbol=symbol)
+            _log.exception("atr_read_failed", symbol=bar.symbol)
             return None
         tail = list(bars)[-ATR_BAR_TAIL:]
         if len(tail) < ATR_PERIOD:
@@ -1371,9 +1485,99 @@ class RecommendationPipeline:
             [b.high for b in tail], [b.low for b in tail], [b.close for b in tail], ATR_PERIOD
         )
         last = series.iloc[-1] if len(series) else None
-        if last is None or last != last:      # NaN check without importing numpy here
+        if last is None or last != last:      # NaN check
             return None
-        return _dec(float(last))
+        anchor = tail[-1]
+        if gap:
+            _log.info("atr_reseeded_on_gap", symbol=bar.symbol, bar_ts=bar.ts_minute.isoformat(),
+                      anchor_ts=anchor.ts_minute.isoformat(), bars=len(tail))
+        return _AtrState(
+            day=bar.ts_minute.date(), last_ts=anchor.ts_minute, last_high=float(anchor.high),
+            last_low=float(anchor.low), last_close=float(anchor.close), atr=float(last),
+        )
+
+    @staticmethod
+    def _advance_atr(state: _AtrState, bar: Bar) -> _AtrState:
+        """One Wilder step: ``atr = (atr*(n−1) + TR) / n`` — the same expression, on the same
+        ``float64`` values, that :func:`wilder_atr` runs internally, so carrying the state forward
+        and re-reading the whole window from the anchor produce the identical number.
+
+        ``indicators._true_range`` is module-private by convention, not by contract, and it is
+        called here ON PURPOSE: the live incremental step and the vectorized backtest path must
+        share ONE definition of true range. Re-deriving ``max(H−L, |H−C₋₁|, |L−C₋₁|)`` locally
+        would be a second copy of §6.1 math that nothing forces to stay in step.
+        """
+        tr = float(_true_range(
+            np.array([state.last_high, float(bar.high)]),
+            np.array([state.last_low, float(bar.low)]),
+            np.array([state.last_close, float(bar.close)]),
+        )[1])
+        return _AtrState(
+            day=state.day, last_ts=bar.ts_minute, last_high=float(bar.high),
+            last_low=float(bar.low), last_close=float(bar.close),
+            atr=(state.atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD,
+        )
+
+    def _sector_of(self, d: date) -> dict[str, str] | None:
+        """``symbol -> sector`` for ``d``, read from the store ONCE per trading date (WO-8 (ii)).
+
+        The §2.4 sector map is a WEEKLY snapshot; reading it once per candidate was a per-analyst-
+        call store read of a value that cannot move inside a session. Two things are deliberately
+        NOT cached, because caching them would freeze a transient into the rest of the day: a read
+        that raised (returns None ⇒ "unavailable", and the next candidate retries), and an EMPTY
+        snapshot (the weekly job may still land today).
+        """
+        self._roll_hot_path_day(self._clock.today())
+        if self._sector_cache is not None and self._sector_cache_day == d:
+            self._hot_counts["sector_cache_hits"] += 1
+            return self._sector_cache
+        self._hot_counts["sector_store_reads"] += 1
+        started = perf_counter()
+        try:
+            rows = self._store.get_sector_map(as_of=d)
+        except Exception:                # noqa: BLE001 - a thinner context, never a failed call (D7)
+            _log.warning("sector_map_unavailable", d=d.isoformat())
+            return None
+        finally:
+            self._hot_ms["sector_store_read_ms"] += (perf_counter() - started) * 1000.0
+        mapping = {
+            str(r.get("symbol")): str(r.get("sector")) for r in rows if r.get("symbol")
+        }
+        if mapping:
+            self._sector_cache, self._sector_cache_day = mapping, d
+        return mapping
+
+    def _roll_hot_path_day(self, d: date) -> None:
+        """Flush the day's hot-path counters and drop every per-day cache on a date change.
+
+        Clearing :attr:`_atr_state` here is what bounds it: a symbol that stops carrying a position
+        never lingers past the session, and every symbol reseeds exactly once on the new day.
+        """
+        if self._hot_path_day == d:
+            return
+        if self._hot_path_day is not None:
+            self.log_hot_path_stats("day_roll")
+        self._hot_path_day = d
+        self._atr_state.clear()
+        self._sector_cache = None
+        self._sector_cache_day = None
+        self._hot_counts = dict.fromkeys(_HOT_PATH_COUNTERS, 0)
+        self._hot_ms = dict.fromkeys(_HOT_PATH_TIMERS, 0.0)
+
+    def hot_path_stats(self) -> dict[str, Any]:
+        """The current session's hot-path read ledger — reads avoided vs reads performed (WO-8)."""
+        counts = dict(self._hot_counts)
+        return {
+            "d": self._hot_path_day.isoformat() if self._hot_path_day else None,
+            **counts,
+            **{k: round(v, 3) for k, v in self._hot_ms.items()},
+            "store_reads_avoided": counts["atr_incremental"] + counts["sector_cache_hits"],
+            "store_reads_performed": counts["atr_store_reads"] + counts["sector_store_reads"],
+        }
+
+    def log_hot_path_stats(self, reason: str = "session") -> None:
+        """The one structured line that makes WO-8's before/after quantifiable in the live log."""
+        _log.info("hot_path_read_hygiene", reason=reason, **self.hot_path_stats())
 
     # ------------------------------------------------------------------ context lines (D7: never raise)
     def _headroom_lines(self, d: date) -> list[str]:
@@ -1399,14 +1603,8 @@ class RecommendationPipeline:
         return f"{counts.total} open (MIS {counts.mis}, CNC {counts.cnc})"
 
     def _sector_exposure_line(self, d: date) -> str:
-        try:
-            sector_of = {
-                str(r.get("symbol")): str(r.get("sector"))
-                for r in self._store.get_sector_map(as_of=d)
-                if r.get("symbol")
-            }
-        except Exception:                # noqa: BLE001 - a thinner context, never a failed call (D7)
-            _log.warning("sector_map_unavailable", d=d.isoformat())
+        sector_of = self._sector_of(d)
+        if sector_of is None:            # read failed ⇒ a thinner context, never a failed call (D7)
             return "unavailable"
         counts = self._exposure.per_sector_open(sector_of)
         if not counts:

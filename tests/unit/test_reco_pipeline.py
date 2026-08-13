@@ -17,6 +17,7 @@ governor) and REAL everywhere the behaviour under test depends on real policy:
 from __future__ import annotations
 
 import json
+import random
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -35,6 +36,7 @@ from engine.intelligence.context import AssembledContext
 from engine.intelligence.harness import AgentDef, AgentResult
 from engine.notify.catalog import MessageKind
 from engine.ops.pipeline import (
+    ATR_PERIOD,
     POSITION_EVENT_DEBOUNCE_MIN,
     TTL_INTRADAY_MIN,
     RecommendationBook,
@@ -44,6 +46,7 @@ from engine.risk.exposure import ExposureTracker
 from engine.risk.gate import GateContext, RiskGate
 from engine.risk.limits import LimitTable
 from engine.strategy.cost_model import CostModel
+from engine.strategy.indicators import wilder_atr
 from engine.strategy.types import RawLevels, SignalCandidate
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1171,3 +1174,199 @@ async def test_queued_candidate_expires_instead_of_going_stale(
         candidate(symbol="ITC", strategy_id="orb", signal_id="FRESH", score=0.10))
     assert parts["assembler"].contexts[-1].stable_block == "stable FRESH"
     assert forward_journal(conn)[("TCS", "orb")] == 0
+
+
+# ======================================================= WO-8: hot-path read hygiene (§3.2 inv. 7)
+class CountingStore(FakeStore):
+    """A store double that HONORS the ``[start, end)`` bar window and COUNTS every read.
+
+    ``FakeStore`` returns every bar it holds regardless of the window, which is fine for the
+    behavioural tests above but useless here: WO-8 is entirely about *how many* store reads the
+    trigger path performs and about the exact bar set a seed read returns.
+    """
+
+    def __init__(self, bars: list[Bar] | None = None, sectors: list[dict[str, str]] | None = None):
+        super().__init__(bars, sectors)
+        self.bar_reads = 0
+        self.sector_reads = 0
+
+    def get_bars_1m(self, symbol, start, end) -> list[Bar]:
+        self.bar_reads += 1
+        return [b for b in self.bars if b.symbol == symbol and start <= b.ts_minute < end]
+
+    def get_sector_map(self, as_of=None) -> list[dict[str, str]]:
+        self.sector_reads += 1
+        return self.sectors
+
+
+def _walk_bars(n: int, *, first_ts: datetime, symbol: str = SYMBOL, seed: int = 7) -> list[Bar]:
+    """``n`` contiguous 1m bars on a deterministic random walk.
+
+    NOT flat bars: a constant range makes every ATR recursion return the same number, so an
+    equivalence test over flat bars passes even against a broken recursion. Every bar here has a
+    different true range, and gaps/closes wander, so the Wilder state genuinely has to be carried.
+    """
+    rng = random.Random(seed)
+    bars: list[Bar] = []
+    px = Decimal("100")
+    for i in range(n):
+        close = px + Decimal(str(round(rng.uniform(-0.8, 0.8), 2)))
+        bars.append(Bar(
+            symbol=symbol, ts_minute=first_ts + timedelta(minutes=i), open=px,
+            high=max(px, close) + Decimal(str(round(rng.uniform(0.0, 0.5), 2))),
+            low=min(px, close) - Decimal(str(round(rng.uniform(0.0, 0.5), 2))),
+            close=close, volume=1000 + i,
+        ))
+        px = close
+    return bars
+
+
+def _store_atr(bars: list[Bar]) -> Decimal:
+    """ATR(14,1m) THE STORE-READ WAY: the shared §6.1 primitive over a bar sequence, converted
+    exactly as ``_atr_1m`` converts it. This is the reference the incremental path must equal."""
+    series = wilder_atr(
+        [b.high for b in bars], [b.low for b in bars], [b.close for b in bars], ATR_PERIOD
+    )
+    return Decimal(str(float(series.iloc[-1])))
+
+
+async def test_incremental_atr_equals_the_store_read_at_every_bar(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """WO-8 (i) acceptance: EXACT equivalence across all three phases of the ATR seam.
+
+    * **seed** — the first bar for a symbol reads the store once and lands on the store value;
+    * **steady state** — every subsequent contiguous bar is served by the Wilder recursion alone,
+      and equals the store-derived ATR over the same anchored window to the last bit;
+    * **gap** — a bar whose minute is not contiguous with the last seen minute RESEEDS from the
+      store rather than carrying a stale ATR forward, and the reseeded value differs from what
+      carrying forward would have produced (otherwise the reseed would be untested decoration).
+    """
+    history = _walk_bars(30, first_ts=NOW - timedelta(minutes=30))       # 09:35..10:04
+    store = CountingStore(bars=list(history))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), store=store,
+    )
+    live = _walk_bars(12, first_ts=NOW, seed=11)                          # 10:05..10:16
+
+    # --- seed + steady state: ten contiguous bars, ONE store read -------------------------------
+    anchored = list(history)
+    for bar in live[:10]:
+        ticker.at = bar.ts_minute + timedelta(seconds=1)
+        anchored.append(bar)
+        assert pipeline._atr_1m(bar) == _store_atr(anchored)              # exact, not approximate
+        store.bars.append(bar)                       # the bar writer persists it after the bus
+    assert store.bar_reads == 1                      # ten bars, one read: the WO-8 claim
+
+    # --- the gap: live[10] reaches the store but never reaches this pipeline --------------------
+    store.bars.append(live[10])
+    carried = pipeline._atr_1m(live[9])              # replay of a seen minute: no read, no change
+    assert store.bar_reads == 1
+
+    gap_bar = live[11]
+    ticker.at = gap_bar.ts_minute + timedelta(seconds=1)
+    reseeded = pipeline._atr_1m(gap_bar)
+    assert store.bar_reads == 2                                          # the reseed happened
+    assert reseeded == _store_atr([*store.bars, gap_bar])                 # ... and it is the store's
+    stale = (float(carried) * (ATR_PERIOD - 1) + float(
+        max(gap_bar.high - gap_bar.low, abs(gap_bar.high - live[9].close),
+            abs(gap_bar.low - live[9].close))
+    )) / ATR_PERIOD
+    assert reseeded != Decimal(str(stale))           # carrying forward would have been WRONG
+
+    # --- a duplicate bar is already folded in: no read, no double count -------------------------
+    assert pipeline._atr_1m(gap_bar) == reseeded
+    assert store.bar_reads == 2
+
+
+async def test_seed_does_not_double_count_a_bar_the_store_already_holds(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The PRODUCTION ordering: ``BarBuilder._write_and_publish`` persists the batch BEFORE it
+    publishes on ``bar.1m``, so the very first bar a symbol is seeded on is already in the store.
+    Its true range must be folded in exactly once - the seed already contains it, so the recursion
+    must NOT advance on top of the seed."""
+    history = _walk_bars(21, first_ts=NOW - timedelta(minutes=20))    # ..NOW: includes the live bar
+    store = CountingStore(bars=list(history))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), store=store,
+    )
+    assert pipeline._atr_1m(history[-1]) == _store_atr(history)       # once, not twice
+    assert pipeline._atr_1m(history[-1]) == _store_atr(history)       # replay: still once
+    assert store.bar_reads == 1
+
+
+async def test_on_bar_stops_reading_the_store_per_bar(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The F9 defect through the PUBLIC path: ``on_bar`` used to issue one ``get_bars_1m`` per bar
+    for every symbol carrying an open recommended position. Twelve bars must now cost one read."""
+    _open_position(conn, pclock, stop="90")                              # far from stop: no analyst
+    history = _walk_bars(20, first_ts=NOW - timedelta(minutes=20))
+    store = CountingStore(bars=list(history))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), store=store,
+    )
+    for bar in _walk_bars(12, first_ts=NOW, seed=3):
+        ticker.at = bar.ts_minute + timedelta(seconds=1)
+        await pipeline.on_bar(bar)
+        store.bars.append(bar)
+    assert store.bar_reads == 1
+    stats = pipeline.hot_path_stats()
+    assert stats["atr_store_reads"] == 1 and stats["atr_incremental"] == 11
+
+
+async def test_sector_map_is_read_once_per_trading_date(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """WO-8 (ii) acceptance: the sector map is a WEEKLY snapshot read per candidate. Four
+    candidates in one session == one read; the next trading date invalidates the cache == two."""
+    harness = FakeHarness(*[dict(NO_ACTION_JSON) for _ in range(5)])
+    store = CountingStore()
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), store=store,
+    )
+    for i, symbol in enumerate(("TCS", "INFY", "WIPRO", "SBIN")):
+        await pipeline.on_signal_candidate(candidate(symbol=symbol, signal_id=f"S{i}"))
+    assert len(harness.calls) == 4
+    assert store.sector_reads == 1
+
+    ticker.at = NOW + timedelta(days=1)                  # Thu 2026-06-18, a trading day
+    await pipeline.on_signal_candidate(candidate(symbol="ITC", signal_id="S9"))
+    assert len(harness.calls) == 5
+    assert store.sector_reads == 2                       # the date change invalidated it
+
+
+async def test_hot_path_stats_count_reads_avoided_against_reads_performed(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """WO-8 (iii): the one-line session log is what makes the before/after quantifiable, so the
+    counters behind it are asserted rather than trusted."""
+    _open_position(conn, pclock, stop="90")
+    store = CountingStore(bars=_walk_bars(20, first_ts=NOW - timedelta(minutes=20)))
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), store=store,
+    )
+    await pipeline.on_signal_candidate(candidate(symbol="TCS", signal_id="SX"))
+    for bar in _walk_bars(4, first_ts=NOW, seed=5):
+        ticker.at = bar.ts_minute + timedelta(seconds=1)
+        await pipeline.on_bar(bar)
+        store.bars.append(bar)
+
+    stats = pipeline.hot_path_stats()
+    assert stats["d"] == TODAY.isoformat()
+    assert (stats["atr_store_reads"], stats["atr_incremental"], stats["atr_gap_reseeds"]) == (1, 3, 0)
+    assert (stats["sector_store_reads"], stats["sector_cache_hits"]) == (1, 0)
+    assert stats["store_reads_avoided"] == 3 and stats["store_reads_performed"] == 2
+    assert stats["atr_store_read_ms"] >= 0.0 and stats["atr_incremental_ms"] >= 0.0
