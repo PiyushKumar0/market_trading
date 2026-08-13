@@ -6,10 +6,12 @@ agent, and persists the result. The plan is advisory only — it never originate
 or a trade; deterministic scanners and the risk gate keep doing that (§5.3 catalyst_focus note).
 
 **Planner death never blocks anything (§2.7).** The scanner path is planner-independent: a blocked
-governor, a harness failure, or thin/empty upstream tables all resolve to ``run() -> False`` and no
-``day_plans`` row — never an exception. The intraday context assembler already renders an absent
-plan as ``"no day plan"`` (``ContextAssembler._day_plan_text``), so a missing plan degrades the
-day's intraday prompts, not the engine.
+governor, a harness failure, or thin/empty upstream tables all resolve to a non-``RAN``
+:class:`~engine.ops.jobs.AdvisoryOutcome` and no ``day_plans`` row — never an exception. The
+intraday context assembler already renders an absent plan as ``"no day plan"``
+(``ContextAssembler._day_plan_text``), so a missing plan degrades the day's intraday prompts, not
+the engine. WO-14 (c) is why the return is a tri-state rather than the original ``bool``: the
+watermark must retry a harness failure and must NOT retry a governor block.
 
 Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-zero):
 
@@ -60,6 +62,7 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
 from engine.marketdata.store import MarketStore
+from engine.ops.jobs import AdvisoryOutcome
 from engine.strategy.scanners import brk20
 from engine.universe.builder import EXCL_CAP
 
@@ -131,18 +134,22 @@ class PreopenPlannerJob:
         self._notify = notify
 
     # ------------------------------------------------------------------ run (§5.3)
-    async def run(self, d: date) -> bool:
-        """Produce and persist the day plan for ``d``. ``True`` iff a ``day_plans`` row was written.
+    async def run(self, d: date) -> AdvisoryOutcome:
+        """Produce and persist the day plan for ``d``. ``RAN`` iff a ``day_plans`` row was written.
 
-        Every failure path (governor-blocked, harness failure) returns ``False`` — never raises —
-        because the planner is advisory-only and its death must never block the scanner path (§2.7).
+        Never raises — the planner is advisory-only and its death must never block the scanner path
+        (§2.7). WO-14 (c) splits the two non-``RAN`` cases the old ``bool`` conflated, because they
+        want opposite watermark treatment: ``BLOCKED`` (the §5.6 governor declined) is a CORRECT
+        outcome that must NOT be retried — retrying spends LLM budget re-asking a governor that is
+        deliberately saying no — while ``FAILED`` (harness failure) is retryable, and its retry is
+        governor-gated by the very check above. The composition-root wrapper translates.
         """
         decision = self._governor.can_invoke(preopen.AGENT_ID, CALL_CLASS)
         if not decision.allowed:
             _log.warning(
                 "preopen_planner_blocked", d=d.isoformat(), tier=decision.tier.value, reason=decision.reason
             )
-            return False
+            return AdvisoryOutcome.BLOCKED
 
         actx = self._assembler.for_planner(
             d,
@@ -174,12 +181,12 @@ class PreopenPlannerJob:
                     f"pre-open planner failed for {d.isoformat()}: {result.reason} "
                     f"({(result.detail or '')[:200]}) call_id={result.call_id}",
                 )
-            return False
+            return AdvisoryOutcome.FAILED
 
         plan: DayPlan = result.payload
         self._persist(d, plan)
         _log.info("preopen_planner_ran", d=d.isoformat(), call_id=result.call_id, focus=len(plan.focus))
-        return True
+        return AdvisoryOutcome.RAN
 
     # ------------------------------------------------------------------ movers (§5.3 "overnight movers")
     def _movers_lines(self, d: date) -> list[str]:

@@ -24,6 +24,7 @@ from engine.intelligence.governor import InvokeDecision
 from engine.intelligence.harness import AgentResult, load_agent_defs
 from engine.intelligence.schemas import DayPlan, DayPlanFocus
 from engine.marketdata.store import DailyBar, MarketStore
+from engine.ops.jobs import AdvisoryOutcome
 from engine.ops.preopen_planner import CALL_CLASS, PreopenPlannerJob
 
 # conftest's frozen clock: Wed 2026-06-17 10:05 IST — a real trading day.
@@ -145,7 +146,7 @@ async def test_persisted_row_round_trips_to_dayplan(store, conn, assembler, agen
 
     ok = await job.run(TODAY)
 
-    assert ok is True
+    assert ok is AdvisoryOutcome.RAN
     row = conn.execute("SELECT payload, created_at FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchone()
     assert row is not None
     assert row["created_at"]
@@ -160,7 +161,7 @@ async def test_governor_blocked_skips_harness_and_persists_nothing(store, conn, 
 
     ok = await job.run(TODAY)
 
-    assert ok is False
+    assert ok is AdvisoryOutcome.BLOCKED          # WO-14 (c): a correct outcome, not a failure
     assert harness.calls == []                                        # planner death never calls the SDK
     assert governor.calls == [(preopen.AGENT_ID, CALL_CLASS)]
     row = conn.execute("SELECT 1 FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchone()
@@ -168,7 +169,7 @@ async def test_governor_blocked_skips_harness_and_persists_nothing(store, conn, 
 
 
 # --------------------------------------------------------------------------- harness failure
-async def test_harness_failure_returns_false_and_persists_nothing(store, conn, assembler, agent_defs, clock, calendar):
+async def test_harness_failure_returns_failed_and_persists_nothing(store, conn, assembler, agent_defs, clock, calendar):
     harness = FakeHarness(AgentResult.Failed("schema_invalid", "not valid JSON", call_id="c2"))
     governor = FakeGovernor(allowed=True)
     alerts: list[tuple[str, str]] = []
@@ -180,7 +181,7 @@ async def test_harness_failure_returns_false_and_persists_nothing(store, conn, a
 
     ok = await job.run(TODAY)
 
-    assert ok is False
+    assert ok is AdvisoryOutcome.FAILED           # WO-14 (c): retryable, unlike a governor block
     assert len(harness.calls) == 1                                     # the call WAS attempted
     row = conn.execute("SELECT 1 FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchone()
     assert row is None
@@ -189,13 +190,13 @@ async def test_harness_failure_returns_false_and_persists_nothing(store, conn, a
     assert "schema_invalid" in alerts[0][1]
 
 
-async def test_harness_failure_with_no_notify_still_returns_false(store, conn, assembler, agent_defs, clock, calendar):
+async def test_harness_failure_with_no_notify_still_returns_failed(store, conn, assembler, agent_defs, clock, calendar):
     """``notify`` is optional (§5.3 step 3) — its absence must not raise."""
     harness = FakeHarness(AgentResult.Failed("timeout", "no complete response within 60s", call_id="c3"))
     governor = FakeGovernor(allowed=True)
     job = _job(store, conn, assembler, harness, agent_defs, governor, clock, calendar)
 
-    assert await job.run(TODAY) is False
+    assert await job.run(TODAY) is AdvisoryOutcome.FAILED
 
 
 # --------------------------------------------------------------------------- movers ordering
@@ -210,7 +211,7 @@ async def test_movers_ranked_by_absolute_return_descending(store, conn, assemble
 
     ok = await job.run(TODAY)
 
-    assert ok is True
+    assert ok is AdvisoryOutcome.RAN
     volatile = harness.calls[0]["context"].volatile_block
     start = volatile.index("overnight movers (bhavcopy):")
     end = volatile.index("gap scan vs prior close:")
@@ -237,7 +238,7 @@ async def test_empty_tables_render_unavailable_without_raising(store, conn, asse
 
     ok = await job.run(TODAY)
 
-    assert ok is True
+    assert ok is AdvisoryOutcome.RAN
     volatile = harness.calls[0]["context"].volatile_block
     # Foundational-data gaps (never even ran) => explicit "unavailable".
     assert "overnight movers (bhavcopy):\n  - unavailable" in volatile
@@ -280,7 +281,7 @@ async def test_context_filters_platform_bookkeeping_and_dates_the_review(
     harness = FakeHarness(AgentResult.Ok(call_id="c9", payload=_plan()))
     job = _job(store, conn, assembler, harness, agent_defs, FakeGovernor(allowed=True), clock, calendar)
 
-    assert await job.run(TODAY) is True
+    assert await job.run(TODAY) is AdvisoryOutcome.RAN
     volatile = harness.calls[0]["context"].volatile_block
     assert "FLAGGED: surveillance_asm" in volatile
     assert "CAPPED" not in volatile                       # platform bookkeeping never reaches the model
@@ -294,11 +295,11 @@ async def test_rerun_same_day_replaces_the_row(store, conn, assembler, agent_def
     governor = FakeGovernor(allowed=True)
     harness1 = FakeHarness(AgentResult.Ok(call_id="c6", payload=_plan(regime="first run")))
     job1 = _job(store, conn, assembler, harness1, agent_defs, governor, clock, calendar)
-    assert await job1.run(TODAY) is True
+    assert await job1.run(TODAY) is AdvisoryOutcome.RAN
 
     harness2 = FakeHarness(AgentResult.Ok(call_id="c7", payload=_plan(regime="second run replaces the first")))
     job2 = _job(store, conn, assembler, harness2, agent_defs, governor, clock, calendar)
-    assert await job2.run(TODAY) is True
+    assert await job2.run(TODAY) is AdvisoryOutcome.RAN
 
     rows = conn.execute("SELECT payload FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchall()
     assert len(rows) == 1

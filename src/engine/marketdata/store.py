@@ -22,7 +22,7 @@ wrappers that offload via ``asyncio.to_thread`` so the asyncio loop is never blo
 invariant); anything without a dedicated wrapper can be offloaded with :meth:`MarketStore.arun`.
 
 Tick Parquet dataset (§4.3 ``ticks``): raw FULL-mode frames (cumulative volume + depth top, A13) are
-buffered in memory and flushed every ``flush_interval_s`` (~5 s) or ``max_buffered_ticks``, whichever
+buffered in memory and flushed every ``flush_interval_s`` (60 s default) or ``max_buffered_ticks``, whichever
 first, into ``<parquet_root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<ulid>.parquet``. Each flush writes
 one file per (date, symbol) present in the batch; :meth:`compact_tick_partitions` coalesces a day's
 small batch files into one file per symbol (EOD job) so the 30-day retention window stays a sane file
@@ -638,7 +638,12 @@ class MarketStore:
         The single source of "now" (§3.2) — stamps ``ingested_at``/``logged_at`` and drives the tick
         flush timer and retention cutoffs.
     flush_interval_s / max_buffered_ticks:
-        Tick batching knobs (§4.3: ~5 s batches). Whichever trips first flushes the buffer.
+        Tick batching knobs (§4.3). Whichever trips first flushes the buffer. 60 s default
+        (WO-7, 2026-08-13; was 5 s): 5 s batches produced ~752K parquet fragments/day at
+        ~1.9 KB each; 60 s cuts the fragment count ~10× and the nightly compaction merges the
+        remainder to one file per symbol-day. Cost: the raw-TICK loss window on a hard crash
+        widens 5→60 s — bars_1m is built and persisted independently, so the exposure is R9
+        fill-model raw ticks only, never bar/decision data.
     """
 
     def __init__(
@@ -647,7 +652,7 @@ class MarketStore:
         parquet_root: str | Path,
         clock: Clock,
         *,
-        flush_interval_s: float = 5.0,
+        flush_interval_s: float = 60.0,
         max_buffered_ticks: int = 2000,
     ) -> None:
         self._db_path = Path(db_path)

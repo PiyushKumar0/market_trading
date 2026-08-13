@@ -14,6 +14,7 @@ integrator owns that ARE pure enough to assert without booting the whole engine:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import date, time, timedelta
 
@@ -30,19 +31,28 @@ from engine.ops.jobs import (
     JOB_BHAVCOPY,
     JOB_EARNINGS,
     JOB_INSTRUMENTS,
+    JOB_NIGHTLY_REVIEW,
+    JOB_PREOPEN_PLANNER,
     JOB_SECTOR_MAP,
     JOB_UNIVERSE,
+    AdvisoryOutcome,
+    AdvisoryRun,
     CatchUpRunner,
+    CatchUpScope,
     JobClass,
+    JobRegistry,
     JobSpec,
 )
 from engine.ops.main import (
     PHASE1_JOB_IDS,
+    POST_ARM_JOB_IDS,
     _arm_live_jobs,
     _arm_registry_jobs,
     _scheduled_runner,
     build_job_registry,
+    cancel_post_arm,
     hydrate_instruments_at_startup,
+    start_scheduler_and_fire_post_arm,
 )
 from engine.ops.scheduler import Scheduler
 from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
@@ -62,6 +72,7 @@ def _all_noop_fns() -> dict:
         opsmain.JOB_RECONCILE, opsmain.JOB_BHAVCOPY, opsmain.JOB_DAILY_BARS,
         opsmain.JOB_DEALS, opsmain.JOB_FEATURES,
         opsmain.JOB_FILINGS_PIT, opsmain.JOB_FILINGS_RESULTS,   # §2.8 date-keyed
+        opsmain.JOB_TICK_COMPACT,                               # §4.3/WO-7 date-keyed
     }
     return {jid: (_noop_dated if jid in date_keyed else _noop) for jid in PHASE1_JOB_IDS}
 
@@ -198,7 +209,7 @@ def test_registry_covers_every_phase1_job() -> None:
     # Phase-1 fns only ⇒ the Phase-2 specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 17   # +4 §2.8 filings jobs (incl. stage-3 fresh insider)
+    assert len(reg) == len(PHASE1_JOB_IDS) == 18   # +4 §2.8 filings, +1 WO-7 tick compaction
 
 
 def test_registry_phase2_jobs_register_when_their_fns_exist() -> None:
@@ -250,6 +261,8 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_FILINGS_PIT_FRESH: (JobClass.DATE_KEYED, time(19, 0)),
         opsmain.JOB_FILINGS_RESULTS:   (JobClass.DATE_KEYED, time(18, 45)),
         opsmain.JOB_FILINGS_SHP:     (JobClass.RUN_LATEST,   time(18, 50)),
+        # WO-7 storage housekeeping: post-EOD, after the nightly review's 21:00 slot.
+        opsmain.JOB_TICK_COMPACT:      (JobClass.DATE_KEYED, time(22, 30)),
     }
     for jid, (cls, at) in expected.items():
         assert by_id[jid].job_class == cls, jid
@@ -935,3 +948,222 @@ async def test_warmup_refresh_lifts_freeze_without_a_login_event(conn, clock, ca
     await refresh_and_lift_warmup(gate, holder, mode, lifecycle)
     assert holder["status"].ready is True
     assert mode.risk_state() == RiskState.NORMAL                       # lifted with NO login event
+
+
+# =========================================================================== WO-15 boot ordering
+# (i) boot catch-up runs load-bearing data steps only; the news chain + digest + planner (+ WO-7
+# compaction) fire as one-shots AFTER scheduler.start(); (iii) engine_ready never waits on the chain.
+# The machinery is pinned in test_catchup_runner.py; here it is the composition root's boot TAIL.
+
+
+class _FakeScheduler:
+    """Records arming order against the same list the jobs append to."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+        self._events.append("scheduler_armed")
+
+
+def _post_arm_registry(events: list[str], *, gate: asyncio.Event | None = None,
+                       boom: bool = False) -> JobRegistry:
+    """universe_build (load-bearing) + news_chain (deferred, optionally wedged/failing)."""
+    async def universe() -> None:
+        events.append("universe_build")
+
+    async def chain() -> None:
+        events.append("chain_started")
+        if gate is not None:
+            await gate.wait()
+        if boom:
+            raise RuntimeError("news chain blew up")
+        events.append("chain_finished")
+
+    reg = JobRegistry()
+    reg.register(JobSpec(JOB_UNIVERSE, JobClass.RUN_LATEST, time(8, 30), universe, order=10))
+    reg.register(JobSpec(opsmain.JOB_NEWS_CHAIN, JobClass.RUN_LATEST, time(8, 25), chain, order=20))
+    return reg
+
+
+def test_every_post_arm_job_is_a_registered_never_safety_critical_job() -> None:
+    """WO-15's deferred set must name real registry ids — a typo would silently defer nothing (and
+    silently never fire it, since the post-arm pass selects BY id)."""
+    fns = _all_noop_fns()
+    fns[opsmain.JOB_CATALYST_DIGEST] = _noop
+    fns[opsmain.JOB_PREOPEN_PLANNER] = _noop
+    fns[opsmain.JOB_RECO_EXPIRE] = _noop
+    fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
+    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns).specs()}
+    assert set(POST_ARM_JOB_IDS) <= set(by_id)
+    # None of them is safety-critical: the deferred set may never contain an entry-gating job.
+    assert all(by_id[j].job_class is not JobClass.SAFETY_CRITICAL for j in POST_ARM_JOB_IDS)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_is_armed_before_the_deferred_chain_fires(conn, clock, calendar) -> None:
+    events: list[str] = []
+    catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events),
+                             deferred=POST_ARM_JOB_IDS)
+
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up)
+
+    assert events == ["scheduler_armed"]           # the chain has not even started yet
+    await task
+    assert events == ["scheduler_armed", "chain_started", "chain_finished"]
+    assert catch_up.was_run(opsmain.JOB_NEWS_CHAIN, clock.today()) is True
+
+
+@pytest.mark.asyncio
+async def test_news_backlog_boot_reaches_engine_ready_in_load_bearing_time(conn, clock, calendar) -> None:
+    """WO-15 acceptance: a boot whose news chain never returns (the 2026-08-10 wedge: 8 h inside
+    lifecycle.startup, ahead of arming) must still reach engine_ready. The whole boot tail runs under
+    a timeout — if the chain were replayed inside the boot pass again, this test would hang."""
+    events: list[str] = []
+    wedged = asyncio.Event()                       # never set: the chain hangs forever
+    catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events, gate=wedged),
+                             deferred=POST_ARM_JOB_IDS)
+    scheduler = _FakeScheduler(events)
+
+    async def boot_tail() -> asyncio.Task | None:
+        await catch_up.catch_up()                  # what SessionLifecycle.startup awaits (2.6 step 5)
+        task = start_scheduler_and_fire_post_arm(scheduler, catch_up)
+        events.append("engine_ready")
+        return task
+
+    task = await asyncio.wait_for(boot_tail(), timeout=5)
+
+    assert events == ["universe_build", "scheduler_armed", "engine_ready"]
+    assert scheduler.started is True
+    await asyncio.sleep(0)                         # let the one-shot start and block
+    assert events[-1] == "chain_started" and task is not None and not task.done()
+    assert catch_up.was_run(opsmain.JOB_NEWS_CHAIN, clock.today()) is False
+
+    await cancel_post_arm(task)                    # shutdown never waits the chain out
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_post_arm_chain_records_a_failed_watermark_and_never_raises(
+    conn, clock, calendar
+) -> None:
+    events: list[str] = []
+    catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events, boom=True),
+                             deferred=POST_ARM_JOB_IDS)
+
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up)
+    await task                                     # a chain failure never escapes into the boot path
+
+    assert task.exception() is None
+    assert catch_up.was_run(opsmain.JOB_NEWS_CHAIN, clock.today()) is False   # failed watermark
+    row = conn.execute(
+        "SELECT status FROM job_runs WHERE job_id=? AND run_for_date=?",
+        (opsmain.JOB_NEWS_CHAIN, clock.today().isoformat()),
+    ).fetchone()
+    assert row["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, calendar, monkeypatch) -> None:
+    """WO-15 risk note: flipping ``DEFER_POST_ARM_JOBS`` off restores the old boot exactly — the
+    deferred set empties (so the boot pass runs the chain again) and no one-shot is fired."""
+    monkeypatch.setattr(opsmain, "DEFER_POST_ARM_JOBS", False)
+    events: list[str] = []
+    catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events), deferred=())
+
+    await catch_up.catch_up()                      # the boot pass, with the flag off
+    assert events == ["universe_build", "chain_started", "chain_finished"]
+
+    scheduler = _FakeScheduler(events)
+    assert start_scheduler_and_fire_post_arm(scheduler, catch_up) is None
+    assert scheduler.started is True               # arming still happens, unconditionally
+
+
+# =========================================================================== WO-14 (c) translation
+# preopen_planner/nightly_review return a tri-state; the composition-root wrappers translate it into
+# the ok-bearing watermark verdict. A governor block is a CORRECT outcome (success watermark, no
+# retry - a blind retry loop spends LLM budget); only a harness failure is retryable.
+
+
+class _FakeAdvisoryJob:
+    """Mirrors PreopenPlannerJob/NightlyReviewJob's contract: check the governor first, and return
+    BLOCKED without calling the harness when it says no (the tri-state itself is pinned against the
+    real jobs in test_preopen_planner.py / test_nightly_review.py)."""
+
+    def __init__(self, *, allowed: bool = True, harness_ok: bool = True) -> None:
+        self.allowed = allowed
+        self.harness_ok = harness_ok
+        self.governor_calls = 0
+        self.harness_calls = 0
+
+    async def run(self, _d: date | None = None) -> AdvisoryOutcome:
+        self.governor_calls += 1
+        if not self.allowed:
+            return AdvisoryOutcome.BLOCKED
+        self.harness_calls += 1
+        return AdvisoryOutcome.RAN if self.harness_ok else AdvisoryOutcome.FAILED
+
+
+@pytest.mark.parametrize("wrapper_name", ("job_preopen_planner", "job_nightly_review"))
+def test_advisory_wrapper_translates_the_tristate(wrapper_name: str) -> None:
+    """Source-level sweep (same technique as the ok-bearing forwarding sweep above): the wrapper -
+    not ``_job_result_ok`` - is where the tri-state becomes a watermark verdict. A future edit that
+    reverts to a bare ``await job.run(...)`` (discarding the outcome) fails here."""
+    body = _wrapper_body(inspect.getsource(opsmain.run), wrapper_name)
+    assert "return AdvisoryRun(await" in body, f"{wrapper_name} does not translate its outcome"
+
+
+@pytest.mark.asyncio
+async def test_governor_block_green_stamps_the_watermark_and_is_never_retried(
+    conn, clock, calendar
+) -> None:
+    planner = _FakeAdvisoryJob(allowed=False)
+
+    async def job_preopen_planner() -> AdvisoryRun:
+        return AdvisoryRun(await planner.run(clock.today()))    # mirrors engine.ops.main
+
+    spec = JobSpec(JOB_PREOPEN_PLANNER, JobClass.RUN_LATEST, time(8, 50), job_preopen_planner, order=28)
+    reg = JobRegistry()
+    reg.register(spec)
+    catch_up = CatchUpRunner(conn, clock, calendar, reg)
+
+    await _scheduled_runner(spec, catch_up, clock)()
+
+    assert planner.harness_calls == 0                          # blocked before the SDK boundary
+    assert catch_up.was_run(JOB_PREOPEN_PLANNER, clock.today()) is True    # SUCCESS watermark
+    await catch_up.catch_up(scope=CatchUpScope.ALL)            # the sweep must not re-run it
+    assert planner.governor_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_harness_failure_sinks_the_watermark_and_the_sweep_retry_is_governor_gated(
+    conn, clock, calendar
+) -> None:
+    """The retry is bounded by the governor, not by a counter: the re-run re-enters ``can_invoke``,
+    so a governor that has since closed the tap ends the retry chain with a success watermark and
+    zero spend (WO-14: 'a retried run is still governor-gated at execution')."""
+    nightly = _FakeAdvisoryJob(harness_ok=False)
+
+    async def job_nightly_review(d) -> AdvisoryRun:
+        return AdvisoryRun(await nightly.run(d))               # mirrors engine.ops.main
+
+    # Fire-time brought forward of the real 21:00 slot so the frozen 10:05 clock is PAST it — the
+    # sweep only replays days whose fire-time has come (§2.6 _missed_days).
+    spec = JobSpec(JOB_NIGHTLY_REVIEW, JobClass.DATE_KEYED, time(9, 0), job_nightly_review, order=80)
+    reg = JobRegistry()
+    reg.register(spec)
+    catch_up = CatchUpRunner(conn, clock, calendar, reg)
+    today = clock.today()
+
+    await _scheduled_runner(spec, catch_up, clock)()
+    assert catch_up.was_run(JOB_NIGHTLY_REVIEW, today) is False            # FAILED watermark
+    assert nightly.harness_calls == 1
+
+    nightly.allowed = False                                    # the governor closes the tap
+    result = await catch_up.catch_up(scope=CatchUpScope.ALL)   # the sweep retries the failed day
+
+    assert nightly.governor_calls == 2 and nightly.harness_calls == 1      # retried, spent nothing
+    assert catch_up.was_run(JOB_NIGHTLY_REVIEW, today) is True             # blocked => correct outcome
+    assert result.jobs_failed == []

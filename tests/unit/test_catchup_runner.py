@@ -9,6 +9,8 @@ trading day ascending, watermarks respected on re-run, and the freeze/notify sea
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import date, datetime, time
 
 import pytest
@@ -16,7 +18,7 @@ import pytest
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST
 from engine.core.config import config_dir
-from engine.ops.jobs import CatchUpRunner, JobClass, JobRegistry, JobSpec
+from engine.ops.jobs import CatchUpRunner, CatchUpScope, JobClass, JobRegistry, JobSpec
 
 OFF_SINCE = datetime(2026, 6, 12, 18, 30, tzinfo=IST)  # Fri evening — 3-trading-day gap to Wed 17th
 FRI, MON, TUE, WED = date(2026, 6, 12), date(2026, 6, 15), date(2026, 6, 16), date(2026, 6, 17)
@@ -266,3 +268,123 @@ def test_no_registry_is_pure_watermark_store(conn, clock, calendar):
     assert runner.stale_safety_jobs() == []
     runner.record_run("bhavcopy", MON)
     assert runner.was_run("bhavcopy", MON) is True
+
+
+# =========================================================================== WO-15: boot ordering
+# The 2026-08-10 wedge: the news chain ran INSIDE lifecycle.startup, ahead of scheduler.start(), and
+# an 8 h hang starved every scheduled job — including the 30-min sweep that exists to self-heal. The
+# machinery half of the fix is here (the firing point itself lives in engine.ops.main): a pass is
+# SCOPED, so boot replays load-bearing steps only, the deferred ids fire as a post-arm one-shot
+# through this same code, and the sweep (ALL) is their retry path. Passes are single-flight.
+DEFERRED = ("news_chain",)
+
+
+def _wo15_registry(calls: list) -> JobRegistry:
+    """universe_build (load-bearing) + news_chain (deferred) + bhavcopy (load-bearing, date-keyed)."""
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "universe_build", JobClass.RUN_LATEST, time(8, 45), order=10))
+    reg.register(_spec_recorder(calls, "news_chain", JobClass.RUN_LATEST, time(8, 25), order=20))
+    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30)))
+    return reg
+
+
+@pytest.mark.asyncio
+async def test_boot_pass_runs_load_bearing_only_and_the_post_arm_pass_runs_the_deferred(conn, clock, calendar):
+    calls: list = []
+    runner = CatchUpRunner(conn, clock, calendar, _wo15_registry(calls), deferred=DEFERRED)
+
+    boot = await runner.catch_up(off_since=OFF_SINCE)          # the lifecycle's call — default scope
+
+    # Fri/Mon/Tue bhavcopy replays (Wed's 18:30 is not due at 10:05) — and no news_chain anywhere.
+    assert [j for j, _ in calls] == ["universe_build", "bhavcopy", "bhavcopy", "bhavcopy"]
+    assert runner.was_run("news_chain", WED) is False          # nothing green-stamped it either
+    assert not any(e.startswith("news_chain") for e in boot.jobs_caught_up)
+
+    calls.clear()
+    post_arm = await runner.catch_up(scope=CatchUpScope.DEFERRED)
+
+    assert [j for j, _ in calls] == ["news_chain"]              # ONLY the deferred set
+    assert runner.was_run("news_chain", WED) is True            # same machinery, same watermark
+    assert post_arm.jobs_caught_up == [f"news_chain:{WED.isoformat()}"]
+
+
+@pytest.mark.asyncio
+async def test_failed_post_arm_run_is_swept_by_the_all_scope_sweep(conn, clock, calendar):
+    """A post-arm one-shot that fails must still be swept — which is exactly why the periodic sweep
+    asks for ALL rather than the default scope (WO-15 (i): 'the catch-up machinery should still track
+    their watermarks so a failed post-arm run is swept')."""
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "news_chain", JobClass.RUN_LATEST, time(8, 25), fail_on="always"))
+    runner = CatchUpRunner(conn, clock, calendar, reg, deferred=DEFERRED)
+
+    failed = await runner.catch_up(scope=CatchUpScope.DEFERRED)
+    assert failed.jobs_failed == [f"news_chain:{WED.isoformat()}"]
+    assert runner.was_run("news_chain", WED) is False
+
+    # A default-scope pass would NOT retry it (that is the point of the deferred set)...
+    calls.clear()
+    reg2 = JobRegistry()
+    reg2.register(_spec_recorder(calls, "news_chain", JobClass.RUN_LATEST, time(8, 25)))
+    runner2 = CatchUpRunner(conn, clock, calendar, reg2, deferred=DEFERRED)
+    await runner2.catch_up()
+    assert calls == []
+    # ...the sweep does.
+    swept = await runner2.catch_up(scope=CatchUpScope.ALL)
+    assert [j for j, _ in calls] == ["news_chain"]
+    assert swept.jobs_caught_up == [f"news_chain:{WED.isoformat()}"]
+    assert runner2.was_run("news_chain", WED) is True
+
+
+@pytest.mark.asyncio
+async def test_sweep_during_an_in_flight_pass_is_a_logged_no_op(conn, clock, calendar, caplog):
+    """WO-15 (ii) single-flight: the reordering makes sweep-vs-post-arm concurrency reachable
+    (APScheduler's max_instances=1 only serializes sweep-vs-sweep), and watermarks cannot save a
+    CONCURRENT pass — both would see the same un-watermarked job and run it twice."""
+    calls: list = []
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_chain() -> None:
+        started.set()
+        await release.wait()
+        calls.append(("news_chain", None))
+
+    reg = JobRegistry()
+    reg.register(JobSpec("news_chain", JobClass.RUN_LATEST, time(8, 25), slow_chain, order=20))
+    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30)))
+    runner = CatchUpRunner(conn, clock, calendar, reg, deferred=DEFERRED)
+
+    in_flight = asyncio.create_task(runner.catch_up(scope=CatchUpScope.DEFERRED))
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.jobs"):
+        sweep = await runner.catch_up(scope=CatchUpScope.ALL)
+
+    assert sweep.skipped_in_flight is True
+    assert sweep.jobs_caught_up == [] and sweep.jobs_failed == []
+    assert calls == []                       # not even the load-bearing half ran a second time
+    assert [r for r in caplog.records if r.getMessage() == "catch_up_skipped_in_flight"]
+
+    release.set()
+    done = await asyncio.wait_for(in_flight, timeout=5)
+    assert done.skipped_in_flight is False
+    assert done.jobs_caught_up == [f"news_chain:{WED.isoformat()}"]
+
+    # The lock is released, so the next sweep is a normal pass again.
+    after = await runner.catch_up(scope=CatchUpScope.ALL)
+    assert after.skipped_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_no_deferred_set_is_the_pre_wo15_behavior(conn, clock, calendar):
+    """The rollback path (``DEFER_POST_ARM_JOBS = False`` ⇒ ``deferred=()``): every scope is the whole
+    registry again, and the post-arm one-shot has nothing to do."""
+    calls: list = []
+    runner = CatchUpRunner(conn, clock, calendar, _wo15_registry(calls))     # deferred defaults to ()
+
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert "news_chain" in [j for j, _ in calls]           # ran INSIDE the boot pass, as before
+
+    calls.clear()
+    post_arm = await runner.catch_up(scope=CatchUpScope.DEFERRED)
+    assert calls == [] and post_arm.jobs_caught_up == []

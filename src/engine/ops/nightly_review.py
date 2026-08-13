@@ -45,6 +45,7 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import NightlyReview, ParamSuggestion
 from engine.notify.catalog import CatalogMessage, MessageKind
+from engine.ops.jobs import AdvisoryOutcome
 
 _log = get_logger("engine.ops.nightly_review")
 
@@ -617,12 +618,15 @@ class NightlyReviewJob:
         self._funnel_raw = funnel_raw
 
     # ------------------------------------------------------------------ run (§5.5)
-    async def run(self, d: date) -> bool:
-        """Review day ``d``. Returns True only when a review was validated AND persisted.
+    async def run(self, d: date) -> AdvisoryOutcome:
+        """Review day ``d``. ``RAN`` only when a review was validated AND persisted.
 
         Never raises into the scheduler: a missing definition, a governor block and a harness failure
-        each resolve to a logged False, and a False leaves ``nightly_reviews`` untouched for ``d`` —
-        so a retry (the §2.6 date-keyed catch-up) sees an un-reviewed day, not a half-reviewed one.
+        each resolve to a logged non-``RAN`` outcome that leaves ``nightly_reviews`` untouched for
+        ``d`` — so a retry (the §2.6 date-keyed catch-up) sees an un-reviewed day, not a half-reviewed
+        one. WO-14 (c): the outcome distinguishes ``BLOCKED`` (the governor declined — a correct,
+        non-retryable outcome; a blind retry loop here spends LLM budget) from ``FAILED`` (roster or
+        harness failure — retryable, and the retry re-enters the governor check below).
         """
         # WO-9: the one structured EOD funnel line, emitted BEFORE every early return. The
         # measurement must not depend on the LLM call it measures — a governor-blocked night is
@@ -632,7 +636,7 @@ class NightlyReviewJob:
         agent_def = self._defs.get(nightly.AGENT_ID)
         if agent_def is None:
             _log.error("nightly_review_no_agent_def", agent=nightly.AGENT_ID, d=d.isoformat())
-            return False
+            return AdvisoryOutcome.FAILED   # roster gap = harness failure: retryable (WO-14 c)
 
         decision = self._governor.can_invoke(nightly.AGENT_ID, CALL_CLASS)
         if not decision.allowed:
@@ -644,7 +648,7 @@ class NightlyReviewJob:
                 tier=decision.tier.value,
                 reason=decision.reason,
             )
-            return False
+            return AdvisoryOutcome.BLOCKED
 
         bounds = load_envelope_bounds(self._store)
         context = AssembledContext.build(
@@ -671,7 +675,7 @@ class NightlyReviewJob:
                 call_id=result.call_id,
             )
             await self._send(self._failure_message(d, result.reason, result.detail))
-            return False
+            return AdvisoryOutcome.FAILED
 
         review: NightlyReview = result.payload
         kept, dropped = _filter_suggestions(review.param_suggestions, bounds)
@@ -703,7 +707,7 @@ class NightlyReviewJob:
             suggestions_dropped=len(dropped),
         )
         await self._send(self._summary_message(d, stored, trades, recs, len(dropped)))
-        return True
+        return AdvisoryOutcome.RAN
 
     # ------------------------------------------------------------------ funnel telemetry (WO-9)
     def _log_funnel(self, d: date) -> FunnelSummary:

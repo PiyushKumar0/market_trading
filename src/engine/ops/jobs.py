@@ -19,12 +19,21 @@ off-window and is still meaningful, in dependency order, classified per §2.6 st
 Phase-1 jobs are registered by the integrator (``engine.ops.main``) against :class:`JobRegistry`;
 this module owns only the machinery. Job ids are the ``job_runs.job_id`` keys and must stay stable
 across releases (they ARE the watermark identity).
+
+**Boot ordering (WO-15, 2026-08-13).** A pass is scoped (:class:`CatchUpScope`): the boot pass runs
+LOAD-BEARING data steps only, while the ids the integrator declares ``deferred`` (the news chain →
+digest → planner, plus tick compaction) fire as one-shots AFTER ``scheduler.start()`` through the
+same machinery under ``DEFERRED`` — same code, same watermarks, new firing point. The 08-10 wedge
+(an unbounded news chain inside boot) starved every scheduled job for 8 h *including* the sweep that
+exists to self-heal; behind the armed scheduler the identical wedge costs only the digest. Passes
+are single-flight so the post-arm one-shot and the 30-min sweep can never replay a job twice.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
@@ -44,8 +53,48 @@ _log = get_logger("engine.ops.jobs")
 def _job_result_ok(result: object) -> bool:
     """A job's return value participates in the watermark verdict (2026-08-13 fix): most jobs return
     ``None`` (unaffected, defaults True); an E5 job that degrades-without-raising (e.g. bhavcopy) can
-    return a result object whose ``ok=False`` must now sink the watermark too."""
+    return a result object whose ``ok=False`` must now sink the watermark too.
+
+    Deliberately NOT widened to bare ``bool`` returns (WO-14): the advisory LLM jobs return a
+    tri-state (:class:`AdvisoryOutcome`) whose "governor blocked me" case is a CORRECT outcome, and
+    a blanket ``bool``-is-the-verdict rule would turn every blocked run into a retry that spends.
+    The composition-root wrappers translate that tri-state into :class:`AdvisoryRun` (``.ok``)."""
     return bool(getattr(result, "ok", True))
+
+
+class AdvisoryOutcome(StrEnum):
+    """How an advisory LLM job (§5.3 pre-open planner, §5.5 nightly reviewer) ended — WO-14 (c).
+
+    These jobs are advisory-only and NEVER raise into the scheduler (§2.7: planner death blocks
+    nothing), so before WO-14 their ``bool`` return was discarded and every run — blocked, failed or
+    real — green-stamped its watermark. The tri-state distinguishes the two false cases:
+
+    - ``RAN``     — the work was done and persisted ⇒ success watermark.
+    - ``BLOCKED`` — the §5.6 budget governor declined the call. A CORRECT outcome, not a failure:
+      success watermark, no retry (a retry loop here would burn LLM budget re-asking a governor that
+      is saying no on purpose).
+    - ``FAILED``  — harness/roster failure (the call was admitted and did not produce a usable
+      result) ⇒ failed watermark, swept by the next §2.6 catch-up pass. The retry is itself governor
+      -gated at execution (``can_invoke`` runs again), so the governor bounds the spend.
+    """
+
+    RAN = "ran"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class AdvisoryRun:
+    """WO-14 (c) translation seam: an :class:`AdvisoryOutcome` in the ok-bearing shape the watermark
+    machinery already understands (``_job_result_ok`` reads ``.ok``). Built by the composition-root
+    wrappers — the jobs themselves stay pure tri-state, and ``_job_result_ok`` stays unwidened."""
+
+    outcome: AdvisoryOutcome
+
+    @property
+    def ok(self) -> bool:
+        """Only a harness failure sinks the watermark; a governor block is a correct outcome."""
+        return self.outcome is not AdvisoryOutcome.FAILED
 
 #: Freeze seam — the lifecycle wires this to ``ModeManager.set_risk_state(FROZEN, reason, RISK_GATE)``.
 FreezeFn = Callable[[str], Awaitable[None]]
@@ -80,6 +129,7 @@ JOB_FEATURES = "features_daily"                  # §3.2.5/§6.2 nightly feature
 JOB_NIGHTLY_REVIEW = "nightly_review"            # §5.5 — date-keyed
 JOB_CATALYST_DIGEST = "catalyst_digest"          # §2.7 step 5 / §4.4 job 14 — run-latest (~08:35)
 JOB_RECO_EXPIRE = "reco_expire"                  # §3.6 expired-unconfirmed → no_action — run-latest
+JOB_TICK_COMPACT = "tick_compact"                # §4.3 tick-partition compaction (WO-7) — date-keyed
 
 
 class JobClass(StrEnum):
@@ -88,6 +138,21 @@ class JobClass(StrEnum):
     SAFETY_CRITICAL = "safety_critical"   # run/verify before entries open, else FROZEN-for-entries
     RUN_LATEST = "run_latest"             # single catch-up run covering the gap (run-latest-once)
     DATE_KEYED = "date_keyed"             # one run per missed trading day
+
+
+class CatchUpScope(StrEnum):
+    """Which slice of the registry a catch-up pass replays (WO-15 boot reordering).
+
+    ``LOAD_BEARING`` is the DEFAULT so the boot path (``SessionLifecycle.startup`` → ``catch_up()``)
+    gets the reordering without the lifecycle knowing about it: the never-load-bearing jobs the
+    integrator declared ``deferred`` (news chain → digest → planner) are skipped at boot and fired as
+    one-shots right after ``scheduler.start()`` under ``DEFERRED``. The periodic sweep asks for
+    ``ALL`` — that is what re-runs a deferred job whose post-arm one-shot failed.
+    """
+
+    LOAD_BEARING = "load_bearing"   # everything EXCEPT the deferred set (boot + self-test remediation)
+    DEFERRED = "deferred"           # ONLY the deferred set (the post-scheduler-arm one-shot)
+    ALL = "all"                     # the whole registry (the 30-min sweep; also the rollback path)
 
 
 @dataclass(frozen=True)
@@ -136,6 +201,8 @@ class CatchUpResult(BaseModel):
     jobs_failed: list[str] = Field(default_factory=list)
     frozen_reasons: list[str] = Field(default_factory=list)   # safety-critical failures (§2.6)
     off_duration_s: float = 0.0
+    #: WO-15 (ii): this pass did nothing because another pass was already in flight (single-flight).
+    skipped_in_flight: bool = False
 
 
 class CatchUpRunner:
@@ -156,6 +223,12 @@ class CatchUpRunner:
         Hard horizon (calendar days) for missed-fire-day scans — bounds a fresh install / ancient
         watermark so catch-up never enumerates years (the initial history backfill is its own §4.4
         job, not a catch-up). Spec-silent bound, resolved here; 30 days covers any plausible off-span.
+    deferred:
+        WO-15: job ids that are NEVER load-bearing for entries and therefore must not run inside the
+        boot pass (they fire as one-shots after ``scheduler.start()`` instead). A ``LOAD_BEARING``
+        pass skips them, a ``DEFERRED`` pass runs only them, and an ``ALL`` pass (the periodic sweep)
+        runs everything — so a deferred job whose post-arm one-shot failed is still swept. Empty ⇒
+        the pre-WO-15 behavior exactly (every scope is the whole registry).
     """
 
     def __init__(
@@ -169,6 +242,7 @@ class CatchUpRunner:
         notify: NotifyFn | None = None,
         clear: FreezeFn | None = None,
         max_lookback_days: int = 30,
+        deferred: Collection[str] = (),
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -176,6 +250,12 @@ class CatchUpRunner:
         self._registry = registry
         self._freeze = freeze
         self._notify = notify
+        self._deferred = frozenset(deferred)
+        #: WO-15 (ii) single-flight: the 30-min sweep must never race a still-running pass. Required
+        #: by the reordering — the post-arm one-shot can now still be in flight when the first sweep
+        #: fires (APScheduler's max_instances=1 only serializes sweep-vs-sweep). Constructed outside
+        #: a running loop is safe on 3.10+ (asyncio.Lock no longer binds a loop at construction).
+        self._pass_lock = asyncio.Lock()
         #: Mirror of ``freeze`` (2026-08-06): clears a job's ``data_freshness:<job>`` cause once the
         #: job is verified fresh — without it a pre-login failure latched FROZEN for the whole day
         #: even after the post-login catch-up succeeded (observed live: instruments, 2026-08-06).
@@ -243,8 +323,28 @@ class CatchUpRunner:
         return stale
 
     # ------------------------------------------------------------------ the catch-up pass (§2.6 step 5)
-    async def catch_up(self, *, off_since: datetime | None = None) -> CatchUpResult:
-        """Replay every missed job over the off-window, by class then dependency order (§2.6)."""
+    async def catch_up(
+        self, *, off_since: datetime | None = None, scope: CatchUpScope = CatchUpScope.LOAD_BEARING
+    ) -> CatchUpResult:
+        """Replay every missed job in ``scope`` over the off-window, by class then dependency order.
+
+        SINGLE-FLIGHT (WO-15 (ii)): a pass firing while another is still running is a logged no-op,
+        never a second concurrent replay. Watermarks make a *later* pass a cheap no-op anyway, but
+        they cannot make a CONCURRENT one safe — two passes would both see the same un-watermarked
+        job and run it twice (the post-arm news chain vs. the 30-min sweep is exactly that race).
+        The ``locked()`` check and the acquire below are not separated by an await point (an
+        uncontended ``asyncio.Lock.acquire`` returns without yielding), so no pass can slip between.
+        """
+        if self._pass_lock.locked():
+            _log.info(
+                "catch_up_skipped_in_flight", scope=str(scope),
+                note="single-flight (§2.6/WO-15): a catch-up pass is already running",
+            )
+            return CatchUpResult(skipped_in_flight=True)
+        async with self._pass_lock:
+            return await self._pass(off_since=off_since, scope=scope)
+
+    async def _pass(self, *, off_since: datetime | None, scope: CatchUpScope) -> CatchUpResult:
         now = self._clock.now()
         result = CatchUpResult(
             off_duration_s=max(0.0, (now - off_since).total_seconds()) if off_since else 0.0
@@ -253,15 +353,15 @@ class CatchUpRunner:
             _log.info("catch_up_no_registry", note="Phase-1 jobs registered by the integrator (§2.6)")
             return result
 
-        for spec in self._registry.specs(JobClass.SAFETY_CRITICAL):  # type: ignore[union-attr]
+        for spec in self._in_scope(JobClass.SAFETY_CRITICAL, scope):
             await self._run_safety_critical(spec, now, result)
-        for spec in self._registry.specs(JobClass.RUN_LATEST):  # type: ignore[union-attr]
+        for spec in self._in_scope(JobClass.RUN_LATEST, scope):
             await self._run_latest(spec, now, off_since, result)
-        for spec in self._registry.specs(JobClass.DATE_KEYED):  # type: ignore[union-attr]
+        for spec in self._in_scope(JobClass.DATE_KEYED, scope):
             await self._run_date_keyed(spec, now, off_since, result)
 
         _log.info(
-            "catch_up_complete",
+            "catch_up_complete", scope=str(scope),
             caught_up=result.jobs_caught_up, failed=result.jobs_failed,
             frozen=result.frozen_reasons, off_duration_s=result.off_duration_s,
         )
@@ -275,6 +375,15 @@ class CatchUpRunner:
             except Exception:  # noqa: BLE001 - reporting must never fail the recovery
                 _log.exception("catchup_report_notify_failed")
         return result
+
+    def _in_scope(self, job_class: JobClass, scope: CatchUpScope) -> list[JobSpec]:
+        """The class's specs in dependency order, filtered by the WO-15 deferred set."""
+        specs = self._registry.specs(job_class)  # type: ignore[union-attr]
+        if scope is CatchUpScope.ALL or not self._deferred:
+            return specs
+        if scope is CatchUpScope.DEFERRED:
+            return [s for s in specs if s.job_id in self._deferred]
+        return [s for s in specs if s.job_id not in self._deferred]
 
     async def _clear_freshness(self, job_id: str) -> None:
         """Clear ``data_freshness:<job_id>`` after the job is verified fresh (success or a today's

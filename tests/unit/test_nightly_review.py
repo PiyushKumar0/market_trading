@@ -23,6 +23,7 @@ from engine.intelligence.agents import nightly
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentResult, load_agent_defs
 from engine.notify.catalog import CatalogMessage, MessageKind
+from engine.ops.jobs import AdvisoryOutcome
 from engine.ops.nightly_review import (
     FUNNEL_TITLE,
     NightlyReviewJob,
@@ -308,7 +309,7 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
 
-    assert await job.run(D) is True
+    assert await job.run(D) is AdvisoryOutcome.RAN
 
     rows = reviews(conn)
     assert len(rows) == 1
@@ -362,7 +363,7 @@ async def test_out_of_envelope_and_out_of_bounds_suggestions_are_dropped(
     harness = FakeHarness(raw=json.dumps(review))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
 
-    assert await job.run(D) is True
+    assert await job.run(D) is AdvisoryOutcome.RAN
 
     kept = json.loads(reviews(conn)[0]["payload"])["param_suggestions"]
     assert [(s["parameter"], s["proposed_value"]) for s in kept] == [
@@ -384,7 +385,7 @@ async def test_no_envelope_means_every_suggestion_is_dropped(
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify, store=store)
 
-    assert await job.run(D) is True
+    assert await job.run(D) is AdvisoryOutcome.RAN
     assert json.loads(reviews(conn)[0]["payload"])["param_suggestions"] == []
 
 
@@ -398,7 +399,7 @@ async def test_governor_block_makes_no_call_and_writes_no_row(
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
 
-    assert await job.run(D) is False
+    assert await job.run(D) is AdvisoryOutcome.BLOCKED   # WO-14 (c): correct outcome, no retry
     assert harness.calls == []
     assert reviews(conn) == []
 
@@ -414,7 +415,7 @@ async def test_harness_failure_persists_nothing_and_still_tells_the_owner(
     )
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
 
-    assert await job.run(D) is False
+    assert await job.run(D) is AdvisoryOutcome.FAILED    # WO-14 (c): retryable (harness failure)
     assert reviews(conn) == []
     assert len(sent) == 1
     assert sent[0].kind == MessageKind.DAILY_SUMMARY
@@ -427,11 +428,11 @@ async def test_rerun_replaces_the_row_for_that_day(conn, gov, clock, calendar, a
     # The §2.6 date-keyed catch-up may replay a missed day, and the owner may redo one. One row per
     # trading day; every call that produced either review stays in agent_calls (R8).
     first = FakeHarness(raw=json.dumps(REVIEW))
-    assert await make_job(conn, gov, clock, calendar, agent_defs, first).run(D) is True
+    assert await make_job(conn, gov, clock, calendar, agent_defs, first).run(D) is AdvisoryOutcome.RAN
 
     second_review = dict(REVIEW, summary="Re-run: the stop was correct, the entry timing was not.")
     second = FakeHarness(raw=json.dumps(second_review))
-    assert await make_job(conn, gov, clock, calendar, agent_defs, second).run(D) is True
+    assert await make_job(conn, gov, clock, calendar, agent_defs, second).run(D) is AdvisoryOutcome.RAN
 
     rows = reviews(conn)
     assert len(rows) == 1
@@ -442,7 +443,7 @@ async def test_rerun_replaces_the_row_for_that_day(conn, gov, clock, calendar, a
 async def test_review_persists_without_a_notify_sink(conn, gov, clock, calendar, agent_defs) -> None:
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=None)
-    assert await job.run(D) is True
+    assert await job.run(D) is AdvisoryOutcome.RAN
     assert len(reviews(conn)) == 1
 
 
@@ -450,7 +451,7 @@ async def test_review_persists_without_a_notify_sink(conn, gov, clock, calendar,
 async def test_missing_agent_def_is_a_logged_no_review(conn, gov, clock, calendar) -> None:
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, {}, harness)
-    assert await job.run(D) is False
+    assert await job.run(D) is AdvisoryOutcome.FAILED    # roster gap = harness failure (WO-14 c)
     assert harness.calls == []
     assert reviews(conn) == []
 
@@ -557,6 +558,6 @@ async def test_run_emits_the_eod_funnel_line_even_when_it_produces_no_review(
     real = job._log_funnel
     job._log_funnel = lambda d: captured.append(real(d))
 
-    assert await job.run(D) is False                 # no agent def -> earliest possible return
+    assert await job.run(D) is AdvisoryOutcome.FAILED  # no agent def -> earliest possible return
     assert captured and captured[0].forwarded == 3
     assert captured[0].best_unforwarded_score == 0.85

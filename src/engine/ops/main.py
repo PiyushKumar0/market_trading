@@ -69,6 +69,7 @@ from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.bar_builder import BarBuilder
 from engine.marketdata.reconcile import ReconcileJob
 from engine.marketdata.store import MarketStore
+from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, login_prompt
 from engine.ops.health import HealthMonitor
@@ -94,8 +95,12 @@ from engine.ops.jobs import (
     JOB_RECONCILE,
     JOB_SECTOR_MAP,
     JOB_SURVEILLANCE,
+    JOB_TICK_COMPACT,
     JOB_UNIVERSE,
+    AdvisoryRun,
+    CatchUpResult,
     CatchUpRunner,
+    CatchUpScope,
     JobClass,
     JobRegistry,
     JobSpec,
@@ -155,6 +160,11 @@ _NEWS_CHAIN_IST = time(8, 25)
 _DAILY_BARS_IST = time(18, 5)
 _FEATURES_IST = time(18, 50)
 
+#: §4.3 tick-partition compaction (WO-7) — late evening, after every EOD data job and the nightly
+#: review, so a multi-minute filesystem pass never competes with them. Date-keyed: the run for day D
+#: compacts the closed date partitions up to D (never D itself — the writer still owns it).
+_TICK_COMPACT_IST = time(22, 30)
+
 #: Async job-runner type: DATE_KEYED runners take the run-for ``date``; all others take no args.
 JobRunFn = Callable[..., Awaitable[None]]
 
@@ -166,6 +176,7 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_FILINGS_SHP,                                                             # run-latest (§2.8)
     JOB_RECONCILE, JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_DEALS, JOB_FEATURES,        # date-keyed
     JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
+    JOB_TICK_COMPACT,                                                            # date-keyed (§4.3/WO-7)
 )
 
 #: Phase-2 additions (§8.3): digest → planner run pre-open in dependency order after the news chain;
@@ -178,6 +189,25 @@ PHASE2_JOB_IDS: tuple[str, ...] = (
 
 #: Fire-time for the §3.6 expiry labeling sweep — after the 15:30 close, before EOD reconcile.
 _RECO_EXPIRE_IST = time(15, 45)
+
+#: WO-15 (i): the §2.6 catch-up jobs that are NEVER load-bearing for entries and therefore must not
+#: run INSIDE boot. The 2026-08-10 wedge was an unbounded news chain in ``lifecycle.startup``, ahead
+#: of ``scheduler.start()``: it starved every scheduled job for 8 h — including the 30-min catchup
+#: sweep that exists to self-heal — while the scheduler guard (calendar-only, no recovery awareness)
+#: made naive early arming unsafe. These now fire as one-shots through the SAME catch-up machinery
+#: (same watermarks, same dependency order) immediately AFTER the scheduler is armed, so an identical
+#: wedge costs the digest alone. Digest staleness already degrades ``cat`` safely (digest_stale_max_h).
+#: Members, in catch-up dependency order: news chain (20) → digest (25) → planner (28), plus the WO-7
+#: tick compaction — pure EOD housekeeping (readers see fragments and compacted files identically),
+#: and the single heaviest catch-up step by wall-clock, so boot is precisely where it must not be.
+POST_ARM_JOB_IDS: tuple[str, ...] = (
+    JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_TICK_COMPACT,
+)
+
+#: ROLLBACK FLAG (WO-15 risk note). ``False`` restores the pre-WO-15 firing point exactly: the boot
+#: catch-up pass runs the whole registry (``deferred`` empty ⇒ every scope is the full registry) and
+#: the post-arm one-shot becomes a no-op. Flip + restart; no other code path changes.
+DEFER_POST_ARM_JOBS = True
 
 
 def _is_sunday(d: date) -> bool:
@@ -219,6 +249,9 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
         JobSpec(JOB_FILINGS_PIT, JobClass.DATE_KEYED, settings.jobs.filings_pit_ist, fns[JOB_FILINGS_PIT], order=60),
         JobSpec(JOB_FILINGS_PIT_FRESH, JobClass.DATE_KEYED, settings.jobs.filings_pit_fresh_ist, fns[JOB_FILINGS_PIT_FRESH], order=65),
         JobSpec(JOB_FILINGS_RESULTS, JobClass.DATE_KEYED, settings.jobs.filings_results_ist, fns[JOB_FILINGS_RESULTS], order=70),
+        # §4.3 storage housekeeping (WO-7): collapse each closed symbol-day's ~7.5 K tick fragments
+        # into one file. LAST in the date-keyed order — it reads no engine state and blocks nothing.
+        JobSpec(JOB_TICK_COMPACT, JobClass.DATE_KEYED, _TICK_COMPACT_IST, fns[JOB_TICK_COMPACT], order=90),
     ):
         registry.register(spec)
     # Phase-2 jobs (§8.3) register only when composition built their owning object (LLM tier may be
@@ -584,6 +617,9 @@ async def run() -> int:
         # Late-bound: watchlist_symbols is defined further down this function; the lambda resolves it
         # at day-cache build time (first bar of the day), long after the whole graph is wired.
         momentum_universe=lambda: watchlist_symbols(),
+        # WO-13 (2026-08-13, F11): persists the mom rebalance-day marker (mom_rebalance_state,
+        # migration 0006) so live mom fires only every rebalance_days sessions instead of every day.
+        conn=conn,
     )
     prescreen = SignalPreScreen(
         scanners=build_enabled_scanners(("orb", "rsi2", "trend", "mom")),   # `cat` lands Phase 3
@@ -806,12 +842,15 @@ async def run() -> int:
             raise
         await notify(catalyst_watchlist(result.n_originating, result.n_context))
 
-    async def job_preopen_planner() -> None:
+    async def job_preopen_planner() -> AdvisoryRun:
         if planner_job is None:
             # A FAILED watermark, not a silent success: catch-up retries once the roster is fixed
             # (2026-08-03: the sonnet-5 roster failure made this a 29 ms "success" no-op all day).
             raise RuntimeError("preopen planner unavailable — LLM roster quarantined/unloaded")
-        await planner_job.run(clock.today())
+        # WO-14 (c): translate the advisory tri-state into the ok-bearing watermark verdict here, in
+        # the wrapper — governor-blocked is a CORRECT outcome (success watermark, no retry), only a
+        # harness failure is retryable. ``_job_result_ok`` stays unwidened for bare bools.
+        return AdvisoryRun(await planner_job.run(clock.today()))
 
     async def job_reco_expire() -> None:
         # §3.6: expired-unconfirmed recommendations become labelled no_action rows (unbiased non-fill
@@ -822,10 +861,13 @@ async def run() -> int:
         if pipeline is not None:
             await pipeline.check_aged_positions(clock.today())
 
-    async def job_nightly_review(d) -> None:
+    async def job_nightly_review(d) -> AdvisoryRun:
         if nightly_job is None:
             raise RuntimeError("nightly reviewer unavailable — LLM roster quarantined/unloaded")
-        await nightly_job.run(d)
+        # WO-14 (c), as job_preopen_planner: blocked ⇒ success watermark (the governor said no on
+        # purpose), harness-failed ⇒ failed watermark ⇒ the next sweep retries — and that retry is
+        # itself governor-gated inside NightlyReviewJob.run, so the governor bounds the spend.
+        return AdvisoryRun(await nightly_job.run(d))
 
     async def job_sector_map() -> SectorMapResult:
         # Forwarded (2026-08-13): sector_map degrades-without-raising (E5) — the watermark verdict
@@ -883,6 +925,16 @@ async def run() -> int:
     async def job_features(d) -> None:
         await asyncio.to_thread(features.daily_snapshot, d)
 
+    async def job_tick_compact(d) -> TickCompactionResult:
+        # §4.3/WO-7: collapse the closed tick partitions up to ``d`` into one file per symbol-day.
+        # Off the event loop (DuckDB + a large filesystem walk, §2.2) and on its OWN connection —
+        # never the live MarketStore's, which is the bar/tick write path. Today's partition is
+        # skipped inside compact_ticks (the writer still owns it). Ok-bearing: a failed symbol-day
+        # sinks the watermark and the next sweep retries only what did not compact.
+        return await asyncio.to_thread(
+            compact_ticks, settings.parquet_dir(), upto=d, today=clock.today()
+        )
+
     registry = build_job_registry(settings, {
         JOB_INSTRUMENTS: job_instruments,
         JOB_SURVEILLANCE: job_surveillance,
@@ -901,6 +953,7 @@ async def run() -> int:
         JOB_FILINGS_PIT_FRESH: job_filings_pit_fresh,
         JOB_FILINGS_RESULTS: job_filings_results,
         JOB_FILINGS_SHP: job_filings_shp,
+        JOB_TICK_COMPACT: job_tick_compact,
         # Phase-2 (§8.3): digest always (deterministic, $0); planner/nightly/expire register even
         # when the LLM tier is down — their fns no-op internally so the watermark records the skip.
         JOB_CATALYST_DIGEST: job_catalyst_digest,
@@ -954,7 +1007,10 @@ async def run() -> int:
     )
     heartbeat = HeartbeatWriter(settings.sqlite_path(), clock, interval_s=settings.lifecycle.heartbeat_write_s)
     catch_up = CatchUpRunner(conn, clock, calendar, registry, freeze=freeze_entries, notify=notify,
-                             clear=clear_entries_cause)
+                             clear=clear_entries_cause,
+                             # WO-15 (i): boot replays load-bearing data steps only; POST_ARM_JOB_IDS
+                             # fire after scheduler.start() (rollback: DEFER_POST_ARM_JOBS = False).
+                             deferred=POST_ARM_JOB_IDS if DEFER_POST_ARM_JOBS else ())
 
     self_test = SelfTest(
         conn=conn, clock=clock, settings=settings, secrets=secrets,
@@ -1106,7 +1162,11 @@ async def run() -> int:
     #     runner's watermarks make a repeat pass a no-op, so sweeping on a cadence is safe. ---
     async def catchup_sweep() -> None:
         try:
-            await catch_up.catch_up()
+            # ALL scope (WO-15): the sweep is the retry path for the post-arm one-shots too — a
+            # news chain / digest / planner / compaction run that failed after arming is swept here
+            # exactly like any other missed job. Single-flight makes a sweep landing on top of a
+            # still-running pass a logged no-op rather than a double replay.
+            await catch_up.catch_up(scope=CatchUpScope.ALL)
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
 
@@ -1319,7 +1379,10 @@ async def run() -> int:
     # --- start remaining services + idle until a stop signal (§2.6: being up is an active period). The
     #     login API is already bound (above); only prompt again here if startup still needs a login AND we
     #     did not already send the link off the token probe (no double link). ---
-    scheduler.start()
+    # WO-15 (i)+(iii): arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it
+    # as a background task. engine_ready (below) must not wait on the news chain — a wedged chain now
+    # costs the digest, not the whole scheduled day (2026-08-10). Its own 600 s resolve cap bounds it.
+    post_arm_task = start_scheduler_and_fire_post_arm(scheduler, catch_up)
     if telegram is not None and report.needs_login and not login_prompt_sent:
         await notify(login_prompt(session.login_url()))
 
@@ -1332,6 +1395,7 @@ async def run() -> int:
     #     the lifecycle guard (backup + STOPPED commit + heartbeat join), then tear down the rest. ---
     _log.info("engine_stopping")
     scheduler.shutdown()                      # no new job fires can race the teardown
+    await cancel_post_arm(post_arm_task)      # a still-running post-arm one-shot never blocks a stop
     bar_builder.flush_all()                   # finalize any open minute bars (EOD/shutdown, §4.4 job 1)
     await ticker.stop()
     await lifecycle.shutdown()                # runs backup hook, commits STOPPED, joins the heartbeat
@@ -1351,6 +1415,55 @@ async def run() -> int:
 # ``engine.ops.post_login`` so the composition root AND the post-login re-trigger share the exact same
 # ladder; it is imported above and re-exported here (existing callers/tests keep importing it from
 # ``engine.ops.main``).
+
+
+# --------------------------------------------------------------------------- boot tail (WO-15)
+def start_scheduler_and_fire_post_arm(
+    scheduler: Scheduler, catch_up: CatchUpRunner
+) -> asyncio.Task | None:
+    """Arm the scheduler, THEN fire the deferred one-shots behind it — never the other way round.
+
+    The §2.6 boot order before WO-15 was: catch-up (news chain inside it) → scheduler.start(). The
+    2026-08-10 wedge proved the cost: a chain that never returns starves every scheduled job for 8 h,
+    including the 30-min catchup sweep that exists to self-heal. Reversing the two makes the chain's
+    worst case local to itself.
+
+    The one-shot IS a catch-up pass (``DEFERRED`` scope): identical code, identical ``job_runs``
+    watermarks, identical dependency order — only the firing point moved. A run that fails records a
+    FAILED watermark and the next sweep (``ALL``) retries it. It is deliberately NOT awaited: the
+    caller logs ``engine_ready`` immediately after, and that is the invariant WO-15 (iii) demands.
+    Returns the task (``None`` when the rollback flag is off / nothing is deferred) so shutdown can
+    cancel it; a crash inside is logged, never raised into the boot path.
+    """
+    scheduler.start()
+    if not (DEFER_POST_ARM_JOBS and POST_ARM_JOB_IDS):
+        return None
+
+    async def _fire() -> None:
+        try:
+            result: CatchUpResult = await catch_up.catch_up(scope=CatchUpScope.DEFERRED)
+            _log.info("post_arm_jobs_complete", jobs=list(POST_ARM_JOB_IDS),
+                      caught_up=result.jobs_caught_up, failed=result.jobs_failed,
+                      skipped_in_flight=result.skipped_in_flight)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - these jobs are never entry-blocking (§2.6/§2.7)
+            _log.exception("post_arm_jobs_failed")
+
+    _log.info("post_arm_jobs_fired", jobs=list(POST_ARM_JOB_IDS))
+    return asyncio.create_task(_fire(), name="post_arm_catchup")
+
+
+async def cancel_post_arm(task: asyncio.Task | None) -> None:
+    """Cancel + join the post-arm one-shot on shutdown (nothing it does is worth waiting out; its
+    watermarks make the next boot resume exactly where it stopped)."""
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown never raises
+        pass
 
 
 # --------------------------------------------------------------------------- scheduler arming
