@@ -1,5 +1,35 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-14 (EOD, ~22:15) — ranked funnel's first live day: the drain was vacuous; fixed same-day (paced) + review gains analyst-declines sight; corp-actions deployed
+
+- **Day 1 under ranked admission, the honest reading (via the new funnel_utilization line):** raw
+  2,523 → published 20 (per-strategy caps binding: rsi2 8, brk20 6, orb 4, mom 2 — vs orb's 55%
+  slot-grab on 08-11) → forwarded 12 → evaluated 12 → proposals 0. BUT forwarded_scores exposed
+  the defect: rsi2 [0.14…0.66] forwarded while rsi2 0.83 / orb 1.0 / mom 1.0 sat unforwarded —
+  all 12 slots burned ~09:20 (5 min into the session) because the WO-1 queue drained INSTANTLY
+  while under cap; ranking engaged only at exhaustion = never. The analyst then declined the lot
+  as structurally premature ("opening range still incomplete") — correct declines of wrong
+  forwards. My own midday status read this as ranking-at-work; the telemetry proved otherwise.
+- **Nightly reviewer adjudicated:** (1) "12→0 with no reasons" — the reasons EXIST verbatim in
+  agent_calls (quoted in the day's analysis); the reviewer just couldn't see that table → fixed:
+  the review context now carries an ANALYST DECLINES block (counts + per-strategy + 5 most recent
+  theses, identity recovered from the archived prompt). (2) "scoring-blind allocation" — right
+  effect, wrong mechanism; it was under-cap instant drain, not per-strategy caps → fixed: PACED
+  drain, one best-pending candidate per 3-min tick via a 60s scheduler pulse; rollback
+  forward_drain_mode: immediate. Both watched-failing-first; 1,443 green; plan §5.2(a) amended.
+  (3) schema failures 1+1 and $4.64 spend — watch items; the spend question is the standing
+  strategic call. Filed: stopless mom candidates journal slot rows and render as "unforwarded
+  1.0" while structurally unforwardable (funnel labeling); OFSS decline cited max_qty_by_risk=0
+  at 09:20 with zero positions — check headroom arithmetic tomorrow.
+- **Deployed 22:06 restart (engine_ready 22:07:48):** paced drain + declines block + the
+  corp-actions URL fix (camelCase route + [d−7, d+35] windowing — the bare endpoint's
+  same-day-only default would have silently starved the 28-day forward consumers behind a 200).
+  Live validation tomorrow: corp_actions job succeeds; the drain spends slots across the window.
+- Ops notes: midday restart ~12:16 observed (owner, presumably — window also widened to
+  09:20–15:30); deals endpoints still 503 (NSE-side) riding honest retries — drift treatment if
+  it survives tomorrow; tick_compact's first 30-day backlog drain fires 22:30 tonight under
+  watch; owner strategic review (three night-2 reports + insider direction) still open.
+
 ## 2026-08-14 (night 2, ~02:45) — owner's three directives answered: reversion closed morning-included; the dodged-winner effect is real but costs still win; insider_net_buy SURVIVES
 
 - All three pre-registered (IMPROVEMENT_SPEC WO-10b/16/17), built + mutation-checked by three
