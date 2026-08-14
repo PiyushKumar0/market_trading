@@ -25,11 +25,22 @@ failure (one bad symbol) resumable — the successful symbols simply do not come
 The job runs on its own in-memory DuckDB connection in a worker thread: the live ``MarketStore``
 connection is the bar/tick write path (§2.2 heartbeat invariant), and a full day's compaction must
 never queue behind — or in front of — it.
+
+SINGLE-FLIGHT (2026-08-14): WO-15's ``CatchUpRunner`` guards catch-up-vs-catch-up replay, but the
+post-arm one-shot and the scheduler's ``_scheduled_runner`` both reach this job directly — neither
+knows about the other. Two concurrent runs racing the same partitions is not a correctness bug (the
+loser always fails at READ time, before writing anything — the winner's output is unaffected) but it
+is 78-errors-a-night noise, so :func:`compact_ticks` itself is single-flight via a module-level
+``threading.Lock`` (both invocations land in the same engine process, off the event loop via
+``asyncio.to_thread``, so a thread lock is sufficient — no cross-process coordination exists or is
+needed here). The loser returns immediately with ``skipped_in_flight=True`` and ``ok=True``: the
+in-flight run owns the day's outcome, so a skip must never sink the watermark.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -52,6 +63,17 @@ COMPACT_NAME = f"{COMPACT_PREFIX}ticks.parquet"
 #: readers' ``*.parquet`` glob and this module's own fragment enumeration.
 _TMP_NAME = f".{COMPACT_NAME}.tmp"
 
+#: Single-flight guard (2026-08-14): non-blocking so a losing caller returns immediately instead of
+#: queueing behind a run that may still be draining a 30-day backlog. Module-level because both
+#: callers reach :func:`compact_ticks` as a bare function, not through a shared object.
+_COMPACT_LOCK = threading.Lock()
+
+#: Substring DuckDB's ``read_parquet`` raises when a path in its file list no longer exists — the
+#: signature of a fragment a CONCURRENT compaction run already unlinked out from under this one's
+#: glob (2026-08-14). Narrower than "any ``duckdb.IOException``" on purpose: a permission error or a
+#: truly corrupt file is a real problem and must stay at ERROR, not be swallowed by this benign case.
+_MISSING_FILE_MARKER = "No files found"
+
 
 @dataclass
 class TickCompactionResult:
@@ -69,6 +91,7 @@ class TickCompactionResult:
     skipped_current_date: str | None = None                 # the date left alone (writer still live)
     failures: list[str] = field(default_factory=list)       # "YYYY-MM-DD/SYMBOL: reason"
     budget_exhausted: bool = False                          # stopped on max_symbol_days, more remains
+    skipped_in_flight: bool = False                         # 2026-08-14: another run already held the lock
 
 
 def compact_ticks(
@@ -89,8 +112,31 @@ def compact_ticks(
     successive nightly runs instead of one unbounded pass. ``max_dates`` bounds the partition scan
     itself (ticks retain 30 days, §4.5 — a bigger backlog means retention is broken, not this).
 
+    SINGLE-FLIGHT (2026-08-14, module docstring): a non-blocking ``threading.Lock`` acquire. The
+    loser never touches the store or filesystem — it returns immediately with
+    ``skipped_in_flight=True`` on an otherwise-default (``ok=True``) result, which is deliberately
+    watermark-neutral: the in-flight run owns whatever this day's real outcome turns out to be.
+
     Synchronous and blocking (DuckDB + filesystem): call it via ``asyncio.to_thread``.
     """
+    if not _COMPACT_LOCK.acquire(blocking=False):
+        _log.info(
+            "tick_compaction_skipped_in_flight", upto=upto.isoformat(), today=today.isoformat(),
+            thread=threading.current_thread().name,
+        )
+        return TickCompactionResult(skipped_in_flight=True)
+    try:
+        return _compact_ticks_locked(
+            parquet_root, upto=upto, today=today, max_dates=max_dates, max_symbol_days=max_symbol_days,
+        )
+    finally:
+        _COMPACT_LOCK.release()
+
+
+def _compact_ticks_locked(
+    parquet_root: Path | str, *, upto: date, today: date, max_dates: int, max_symbol_days: int,
+) -> TickCompactionResult:
+    """The actual scan-and-compact body, run under :data:`_COMPACT_LOCK` by :func:`compact_ticks`."""
     result = TickCompactionResult()
     ticks_root = Path(parquet_root) / "ticks"
     if not ticks_root.is_dir():
@@ -180,6 +226,20 @@ def _compact_symbol_day(
         result.symbol_days_compacted += 1
         result.fragments_removed += len(fragments)
         result.rows_written += rows
+    except duckdb.IOException as exc:
+        if _MISSING_FILE_MARKER in str(exc):
+            # A concurrent compaction run can unlink these EXACT fragments between this run's glob
+            # (above) and DuckDB's read of them (2026-08-14 live: the post-arm one-shot and the
+            # 22:30 scheduled slot both reached this job before :data:`_COMPACT_LOCK` existed). This
+            # loser always fails HERE, at read time, before writing anything — the winner's
+            # partition is already correct, and this symbol-day resolves to a no-op on the very next
+            # run (idempotent, module docstring). Known and benign: WARNING with no traceback, no
+            # failure recorded, the run moves on to the next symbol-day.
+            _log.warning("tick_compaction_fragments_vanished", partition=label, error=str(exc))
+            return
+        result.ok = False
+        result.failures.append(f"{label}: {type(exc).__name__}: {exc}")
+        _log.exception("tick_compaction_symbol_day_failed", partition=label)
     except Exception as exc:  # noqa: BLE001 - one bad symbol-day degrades the run, never kills it
         result.ok = False
         result.failures.append(f"{label}: {type(exc).__name__}: {exc}")

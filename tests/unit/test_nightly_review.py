@@ -524,6 +524,33 @@ def test_funnel_summary_aggregates_the_whole_day(conn) -> None:
     assert orb.quantiles == (0.77, 0.85, 0.88)
 
 
+def test_funnel_summary_splits_unsizeable_from_unforwarded(conn) -> None:
+    """2026-08-14: a stopless candidate is journalled BEFORE the pipeline's stopless short-circuit
+    (``prescreen_day_slots.unsizeable``), so it must never be counted as a starved/unforwarded
+    candidate even though it, too, was never forwarded. WIPRO here scores higher (0.95) than the
+    genuinely-starved TCS (0.85) but must not win ``best_unforwarded_score`` â€” it was never eligible
+    for a slot in the first place."""
+    conn.execute(
+        "INSERT INTO prescreen_day_slots "
+        "(d, symbol, strategy_id, published_at, evaluated, score, forwarded, unsizeable) VALUES "
+        "(?, 'TCS', 'orb', ?, 1, 0.85, 0, 0), "
+        "(?, 'WIPRO', 'mom', ?, 1, 0.95, 0, 1)",
+        (D.isoformat(), f"{D.isoformat()}T10:00:00+05:30",
+         D.isoformat(), f"{D.isoformat()}T10:01:00+05:30"),
+    )
+    summary = build_funnel_summary(conn, D)
+
+    assert summary.published == 2
+    assert summary.unsizeable == 1
+    assert summary.best_unforwarded_score == 0.85            # TCS, never WIPRO's higher 0.95
+
+    by_sid = {s.strategy_id: s for s in summary.by_strategy}
+    assert by_sid["orb"].best_unforwarded_score == 0.85
+    assert by_sid["orb"].unsizeable == 0
+    assert by_sid["mom"].best_unforwarded_score is None
+    assert by_sid["mom"].unsizeable == 1
+
+
 def test_funnel_summary_of_an_empty_day_is_explicitly_empty(conn) -> None:
     """A quiet day and a broken query must stay distinguishable (the module's D7 convention)."""
     summary = build_funnel_summary(conn, EMPTY_DAY)

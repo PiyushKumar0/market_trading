@@ -643,17 +643,27 @@ class RecommendationPipeline:
         flips it back for the never-evaluated drops. Boot rehydration (``engine.ops.main``) rebuilds
         the prescreen's in-memory dedupe/caps from these rows, so a restart no longer resets the
         20/day bound. A journal failure degrades to the old in-memory-only behavior, never blocks
-        the candidate."""
+        the candidate.
+
+        Stamps ``unsizeable`` from ``candidate.raw_levels.stop`` (2026-08-14 fix): this write happens
+        BEFORE :meth:`on_signal_candidate`'s stopless short-circuit even runs, so without the marker a
+        structurally-unforwardable candidate (no stop ⇒ max_qty_by_risk is always 0, §7.1) journals
+        indistinguishably from one that was genuinely refused a forward slot — the funnel's
+        ``best_unforwarded_score`` (WO-9's starvation reading) then reads a `mom` 1.0 that never had a
+        stop as the day's best starved idea. The marker is a fact about the candidate, not about which
+        branch of the caller it happened to fall through, so it is set unconditionally here.
+        """
+        unsizeable = candidate.raw_levels.stop is None
         try:
             self._conn.execute(
                 "INSERT INTO prescreen_day_slots "
-                "(d, symbol, strategy_id, published_at, evaluated, score) "
-                "VALUES (?, ?, ?, ?, 1, ?) "
+                "(d, symbol, strategy_id, published_at, evaluated, score, unsizeable) "
+                "VALUES (?, ?, ?, ?, 1, ?, ?) "
                 "ON CONFLICT(d, symbol, strategy_id) "
                 "DO UPDATE SET evaluated=1, published_at=excluded.published_at, "
-                "score=excluded.score",
+                "score=excluded.score, unsizeable=excluded.unsizeable",
                 (d.isoformat(), candidate.symbol, candidate.strategy_id,
-                 self._clock.now().isoformat(), float(candidate.score)),
+                 self._clock.now().isoformat(), float(candidate.score), int(unsizeable)),
             )
         except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
             _log.warning("day_slot_journal_failed", op="publish", symbol=candidate.symbol,
@@ -679,6 +689,31 @@ class RecommendationPipeline:
             )
         except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
             _log.warning("day_slot_journal_failed", op="forward", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
+
+    def _journal_unsizeable_qty_zero(self, candidate: SignalCandidate, d: date) -> None:
+        """Flip the day slot's ``unsizeable`` marker after :meth:`_max_qty_by_risk` computes 0 for a
+        candidate that DOES carry a stop (2026-08-14 extension of the stopless case below).
+
+        :meth:`_journal_slot` already ran earlier in :meth:`on_signal_candidate` and stamped
+        ``unsizeable`` from ``stop is None`` alone — that misses the sibling case a real stop can
+        still land in: the §7.1 per-trade-risk budget cannot afford even one share at this stop's
+        absolute distance (live 2026-08-14: OFSS entry 11366.0/stop 10911.35 and SOLARINDS entry
+        19187.00/stop 18050.00, both real stops, both max_qty_by_risk 0 on a ₹20,000 account). Same
+        funnel category as the stopless case — reuses the same column and the same value
+        (``unsizeable=1``), not a distinct reason code: the funnel only needs to answer "was this
+        candidate ever eligible for a slot", and the answer is identically no for both. A plain UPDATE
+        rather than the upsert :meth:`_journal_slot` uses, because the row is already there. Degrades
+        to in-memory-only (never blocks the candidate) on a journal failure, same as every other write
+        here.
+        """
+        try:
+            self._conn.execute(
+                "UPDATE prescreen_day_slots SET unsizeable=1 WHERE d=? AND symbol=? AND strategy_id=?",
+                (d.isoformat(), candidate.symbol, candidate.strategy_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("day_slot_journal_failed", op="unsizeable_qty_zero", symbol=candidate.symbol,
                          strategy_id=candidate.strategy_id, error=str(exc))
 
     # ------------------------------------------------------------------ §5.2(a) forward queue (WO-1)
@@ -929,6 +964,20 @@ class RecommendationPipeline:
             _log.info("signal_candidate_unsizeable", signal_id=candidate.signal_id,
                       symbol=candidate.symbol, strategy_id=candidate.strategy_id,
                       reason="no stop level — cannot size, analyst call would be wasted")
+            return
+        max_qty = self._max_qty_by_risk(candidate)
+        if max_qty <= 0:
+            # A real stop, but the §7.1 per-trade-risk budget cannot afford even ONE share at this
+            # stop's absolute distance (2026-08-14 extension, live: OFSS/SOLARINDS both had genuine
+            # stops and still priced to 0 shares against a ₹20,000 account) — the gate could never
+            # approve any quantity, so this is the same wasted-analyst-call case the stopless check
+            # above already avoids. Same funnel category (unsizeable, never queued); the day slot
+            # stays consumed exactly as the stopless drop leaves it.
+            self._journal_unsizeable_qty_zero(candidate, d)
+            _log.info("candidate_unsizeable_qty_zero", signal_id=candidate.signal_id,
+                      symbol=candidate.symbol, strategy_id=candidate.strategy_id,
+                      entry=str(candidate.raw_levels.entry), stop=str(candidate.raw_levels.stop),
+                      budget=str(self._risk_budget_inr(candidate)))
             return
         self._roll_forward_day(d)
         decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
@@ -1483,6 +1532,16 @@ class RecommendationPipeline:
         }
 
     # ------------------------------------------------------------------ deterministic pre-computes
+    def _risk_budget_inr(self, candidate: SignalCandidate) -> Decimal:
+        """₹ risk budget for one entry of ``candidate`` under §7.1 ``per_trade_risk`` — the numerator
+        :meth:`_max_qty_by_risk` divides by the stop distance. Split out (2026-08-14, the
+        qty-zero-at-admission extension below) so ``candidate_unsizeable_qty_zero`` can log WHY a
+        candidate was unsizeable, not just the fact — same formula, no new arithmetic."""
+        table = self._limits.load()
+        ptr = table.limits.per_trade_risk
+        pct = _dec(ptr.intraday_pct if candidate.style == "intraday" else ptr.swing_position_pct)
+        return pct / _HUNDRED * self._exposure.equity()
+
     def _max_qty_by_risk(self, candidate: SignalCandidate) -> int:
         """``equity × per_trade_risk% / |entry − stop|``, floored at an int ≥ 0 (§7.1).
 
@@ -1494,10 +1553,7 @@ class RecommendationPipeline:
         stop = candidate.raw_levels.stop
         if stop is None:
             return 0
-        table = self._limits.load()
-        ptr = table.limits.per_trade_risk
-        pct = _dec(ptr.intraday_pct if candidate.style == "intraday" else ptr.swing_position_pct)
-        budget = pct / _HUNDRED * self._exposure.equity()
+        budget = self._risk_budget_inr(candidate)
         return _floor_div(budget, abs(_dec(candidate.raw_levels.entry) - _dec(stop)))
 
     def _entry_band_pct(self, product: str) -> float:

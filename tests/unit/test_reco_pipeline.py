@@ -668,6 +668,105 @@ async def test_stopless_candidate_never_reaches_the_analyst(
     assert rearmed == []                                      # slot deliberately NOT re-armed
     assert pipeline._forwarded_count == 0                     # forward cap untouched
 
+    row = conn.execute(
+        "SELECT unsizeable FROM prescreen_day_slots WHERE d=? AND symbol=? AND strategy_id=?",
+        (TODAY.isoformat(), stopless.symbol, stopless.strategy_id),
+    ).fetchone()
+    assert row["unsizeable"] == 1                             # distinguishable from real starvation
+
+
+async def test_stopless_candidate_never_appears_in_best_unforwarded(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-08-14 nightly-review confusion: a `mom` candidate scored 1.0 with no stop was journalled
+    like any other refused candidate, so the funnel's ``best_unforwarded_score`` (the direct
+    starvation reading, WO-9) reported 1.0 sitting unforwarded â€” indistinguishable from a good
+    candidate that never got an analyst slot. A structurally-unsizeable candidate was never eligible
+    for a slot in the first place and must never surface there."""
+    from engine.ops.nightly_review import build_funnel_summary
+
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), rearm=lambda sym, sid: True,
+    )
+    stopless = candidate(
+        strategy_id="mom", raw_levels=RawLevels(entry=Decimal("100.00")), score=1.0,
+    )
+    await publish_candidate(pipeline, stopless)
+
+    summary = build_funnel_summary(conn, TODAY)
+    assert summary.best_unforwarded_score is None
+    mom = {s.strategy_id: s for s in summary.by_strategy}["mom"]
+    assert mom.best_unforwarded_score is None
+    assert mom.unsizeable == 1
+
+
+async def test_qty_zero_candidate_never_reaches_the_analyst(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-08-14 extension: a candidate WITH a real stop can still be structurally unsizeable when
+    the §7.1 per-trade-risk budget cannot afford even one share at that stop's absolute distance â€”
+    OFSS-shaped, live 2026-08-14: entry 11366.0 / stop 10911.35 (â‚¹454.65/share) against a â‚¹400 (2%
+    swing) budget on the â‚¹20,000 test account. Same funnel category as the stopless case: journalled
+    unsizeable, never enqueued, never forwarded, no analyst spend â€” and never surfaces as the day's
+    best unforwarded score even though nothing else was published."""
+    from engine.ops.nightly_review import build_funnel_summary
+
+    rearmed: list[tuple[str, str]] = []
+    harness = FakeHarness()                 # any call would raise "more times than results"
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    ofss = candidate(
+        symbol="OFSS", strategy_id="rsi2", style="swing",
+        raw_levels=RawLevels(entry=Decimal("11366.0"), stop=Decimal("10911.35")),
+        score=0.48,
+    )
+    await publish_candidate(pipeline, ofss)
+
+    assert harness.calls == []                                # no analyst spend
+    assert rearmed == []                                      # slot deliberately NOT re-armed
+    assert pipeline._forwarded_count == 0                     # forward cap untouched
+    assert pipeline._pending_forwards == []                   # never enqueued
+
+    row = conn.execute(
+        "SELECT unsizeable FROM prescreen_day_slots WHERE d=? AND symbol=? AND strategy_id=?",
+        (TODAY.isoformat(), "OFSS", "rsi2"),
+    ).fetchone()
+    assert row["unsizeable"] == 1
+
+    summary = build_funnel_summary(conn, TODAY)
+    assert summary.unsizeable == 1
+    assert summary.best_unforwarded_score is None
+    rsi2 = {s.strategy_id: s for s in summary.by_strategy}["rsi2"]
+    assert rsi2.unsizeable == 1
+    assert rsi2.best_unforwarded_score is None
+
+
+async def test_sizeable_candidate_is_unaffected_by_the_qty_zero_check(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """The qty-zero check must not become a second, over-eager stopless gate: a candidate whose stop
+    distance the risk budget CAN afford still enqueues and reaches the analyst exactly as before."""
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+    )
+    await publish_candidate(pipeline, candidate())   # default: intraday, entry 100 / stop 99
+
+    assert len(harness.calls) == 1                            # analyst WAS called
+    row = conn.execute(
+        "SELECT unsizeable FROM prescreen_day_slots WHERE d=? AND symbol=? AND strategy_id=?",
+        (TODAY.isoformat(), SYMBOL, "orb"),
+    ).fetchone()
+    assert row["unsizeable"] == 0
+
 
 async def test_no_action_records_the_regime_note_and_no_proposal(
     conn, pclock, calendar, book, limit_table, cost_model

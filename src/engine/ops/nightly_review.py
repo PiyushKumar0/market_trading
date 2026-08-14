@@ -298,6 +298,7 @@ class StrategyFunnel:
     raw: int | None                              # None = the prescreen counters were not wired
     published: int
     forwarded: int
+    unsizeable: int                               # no stop level — never eligible for a slot (2026-08-14)
     published_scores: tuple[float, ...]          # ascending
     forwarded_scores: tuple[float, ...]          # ascending
     best_unforwarded_score: float | None
@@ -322,7 +323,8 @@ class StrategyFunnel:
         )
         return (
             f"  - {self.strategy_id}: raw {raw} published {self.published} "
-            f"forwarded {self.forwarded} | published scores p25/med/p75 {p25}/{med}/{p75} "
+            f"forwarded {self.forwarded} unsizeable {self.unsizeable} | "
+            f"published scores p25/med/p75 {p25}/{med}/{p75} "
             f"| forwarded scores {forwarded_scores} | best unforwarded {best}"
         )
 
@@ -340,6 +342,7 @@ class FunnelSummary:
     raw: int | None
     published: int
     forwarded: int
+    unsizeable: int                               # no stop level — never eligible for a slot (2026-08-14)
     evaluated: int
     proposals: int
     verdicts: Mapping[str, int]
@@ -355,6 +358,10 @@ class FunnelSummary:
         return [
             f"  raw {raw} -> published {self.published} -> forwarded {self.forwarded} -> "
             f"evaluated {self.evaluated} -> proposals {self.proposals}",
+            # 2026-08-14: a structurally-unsizeable candidate (no stop) was never eligible for a
+            # forward slot — reporting it separately keeps "best unforwarded score" a pure starvation
+            # reading instead of conflating it with candidates that could never have been forwarded.
+            f"  unsizeable (no stop level, never queued): {self.unsizeable}",
             f"  gate verdicts: {verdicts}",
             f"  best unforwarded score: {best}",
             *(s.line() for s in self.by_strategy),
@@ -367,6 +374,7 @@ class FunnelSummary:
             "raw": self.raw,
             "published": self.published,
             "forwarded": self.forwarded,
+            "unsizeable": self.unsizeable,
             "evaluated": self.evaluated,
             "proposals": self.proposals,
             "verdicts": dict(sorted(self.verdicts.items())),
@@ -374,6 +382,7 @@ class FunnelSummary:
             "raw_by_strategy": {s.strategy_id: s.raw for s in self.by_strategy},
             "published_by_strategy": {s.strategy_id: s.published for s in self.by_strategy},
             "forwarded_by_strategy": {s.strategy_id: s.forwarded for s in self.by_strategy},
+            "unsizeable_by_strategy": {s.strategy_id: s.unsizeable for s in self.by_strategy},
             "published_score_quantiles": {
                 s.strategy_id: list(s.quantiles) for s in self.by_strategy
             },
@@ -401,8 +410,8 @@ def build_funnel_summary(
     day = _day_prefix(d)
     try:
         rows = conn.execute(
-            "SELECT symbol, strategy_id, score, forwarded FROM prescreen_day_slots WHERE d = ? "
-            "ORDER BY strategy_id, symbol",
+            "SELECT symbol, strategy_id, score, forwarded, unsizeable FROM prescreen_day_slots "
+            "WHERE d = ? ORDER BY strategy_id, symbol",
             (day,),
         ).fetchall()
     except sqlite3.Error as exc:
@@ -414,18 +423,26 @@ def build_funnel_summary(
     forwarded_scores: dict[str, list[float]] = {}
     forwarded_calls: dict[str, int] = {}
     unforwarded: dict[str, list[float]] = {}
+    unsizeable_counts: dict[str, int] = {}
     strategies: list[str] = []
     for row in rows:
         sid = str(row["strategy_id"])
         if sid not in published:
             published[sid] = []
             strategies.append(sid)
+        is_unsizeable = bool(row["unsizeable"])
+        if is_unsizeable:
+            unsizeable_counts[sid] = unsizeable_counts.get(sid, 0) + 1
         n_forwarded = int(row["forwarded"] or 0)
         forwarded_calls[sid] = forwarded_calls.get(sid, 0) + n_forwarded
         if row["score"] is None:                  # pre-WO-1 rows carry no score — counted, not faked
             continue
         score = _round(row["score"])
         published[sid].append(score)
+        if is_unsizeable:
+            # 2026-08-14: journalled before the pipeline's stopless short-circuit even runs — never
+            # eligible for a forward slot, so it must not pollute the starvation reading below.
+            continue
         (forwarded_scores if n_forwarded else unforwarded).setdefault(sid, []).append(score)
 
     raw_map = dict(raw_by_strategy or {})
@@ -437,6 +454,7 @@ def build_funnel_summary(
                 [r for r in rows if str(r["strategy_id"]) == sid]
             ),
             forwarded=forwarded_calls.get(sid, 0),
+            unsizeable=unsizeable_counts.get(sid, 0),
             published_scores=tuple(sorted(published.get(sid, ()))),
             forwarded_scores=tuple(sorted(forwarded_scores.get(sid, ()))),
             best_unforwarded_score=max(unforwarded[sid]) if unforwarded.get(sid) else None,
@@ -450,6 +468,7 @@ def build_funnel_summary(
         raw=sum(raw_map.values()) if raw_map else None,
         published=len(rows),
         forwarded=sum(forwarded_calls.values()),
+        unsizeable=sum(unsizeable_counts.values()),
         evaluated=_analyst_evaluations(conn, day),
         proposals=proposals,
         verdicts=verdicts,
