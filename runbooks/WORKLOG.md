@@ -29,6 +29,19 @@
   09:20–15:30); deals endpoints still 503 (NSE-side) riding honest retries — drift treatment if
   it survives tomorrow; tick_compact's first 30-day backlog drain fires 22:30 tonight under
   watch; owner strategic review (three night-2 reports + insider direction) still open.
+- **~23:55 addendum (commits ab2bf6c…957849c):** OFSS max_qty_by_risk=0 = working-as-designed
+  (₹400 swing budget < 1 share of an ₹11k stock; 2/13 candidates, both expensive names) BUT it
+  exposed wasted analyst spend on structurally unsizeable candidates → both unsizeable classes
+  (stopless + qty-zero) now journal `unsizeable=1` (migration 0007), never enqueue, never
+  evaluate; funnel/review split "unsizeable" from "unforwarded" (the mom-1.0 confusion). ALSO:
+  tick_compact ran twice concurrently tonight (post-arm one-shot from the 22:07 restart + the
+  22:30 slot — WO-15's lock doesn't cover this pairing): verified harmless (loser fails at read
+  time pre-write; winner partitions clean), 78 noise errors → compact_ticks now single-flight
+  (non-blocking thread lock, skip = watermark-neutral) + vanished-fragments downgraded to one
+  WARNING. Final deploy restart: engine_ready 23:51:39, ticker HEALTHY; the resumed post-arm
+  drain runs the weekend solo under the guard. Market closed 08-15 (Independence Day, Sat) +
+  Sun — next session MON 08-17: weekend-backlog boot = WO-15's first real load test; corp_actions
+  live validation; paced drain's first full day.
 
 ## 2026-08-14 (night 2, ~02:45) — owner's three directives answered: reversion closed morning-included; the dodged-winner effect is real but costs still win; insider_net_buy SURVIVES
 
