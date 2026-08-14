@@ -274,6 +274,10 @@ class PrescreenCfg(BaseModel):
     #: Publication/forward admission ORDER: "ranked" = by score (prescreen) and per-strategy score
     #: quantile (analyst forwarding); "arrival" = the pre-WO-1 order — the rollback flag, nothing else.
     admission_mode: str = "ranked"
+    #: WHEN the analyst forward queue is drained (2026-08-14): "paced" = one slot per
+    #: ``FORWARD_PACING_MIN`` minutes on a scheduler pulse, so candidates accumulate and the ranking
+    #: above has a population to rank; "immediate" = the pre-2026-08-14 inline drain — rollback only.
+    forward_drain_mode: str = "paced"
 
 
 class StrategyCfg(BaseModel):

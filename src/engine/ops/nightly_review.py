@@ -26,6 +26,7 @@ Three properties this module is responsible for:
 
 from __future__ import annotations
 
+import gzip
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -69,9 +70,26 @@ _ENVELOPE_TITLE = "suggestible parameters (envelope.yaml - the ONLY names you ma
 #: WO-9 funnel section heading (also the log event's human anchor).
 FUNNEL_TITLE = "signal funnel utilization (3.2.5 admission -> 5.2(a) analyst slots)"
 
+#: Analyst-stage section heading (2026-08-14). The funnel above stops at "evaluated"; on the first
+#: live day under the ranked funnel that number was 12 and proposals were 0, and NOTHING in the
+#: review said why — the reviewer flagged exactly that blind spot. This section is the why.
+DECLINES_TITLE = "analyst decisions on forwarded candidates (5.2(a) evaluated -> declined)"
+
 #: The §5.2(a) analyst id and its candidate-trigger call class, as written to ``agent_calls``.
 _SIGNAL_AGENT_ID = "intraday_analyst"
 _SIGNAL_TRIGGER = "signal_candidate"
+
+#: How many of the day's declines are quoted, newest first, and how far each reason is truncated.
+#: Five is the reviewer's working set — enough to see whether the declines RHYME ("premature",
+#: "no volume") without turning the funnel section into a transcript; the full text of every call
+#: is in ``agent_calls`` for anyone who needs it (R8).
+DECLINE_REASONS_SHOWN = 5
+DECLINE_REASON_CHARS = 200
+
+#: How :meth:`~engine.intelligence.context.ContextAssembler.for_signal` renders the candidate — one
+#: compact key-sorted JSON object on its own line. It is the ONLY place a decline's subject survives
+#: (see :func:`_call_identity`), so this prefix is a real coupling and not a convenience.
+_CANDIDATE_LINE_PREFIX = "candidate: "
 
 _UNMEASURED = "unmeasured"
 
@@ -451,6 +469,145 @@ def _analyst_evaluations(conn: sqlite3.Connection, day: str) -> int:
     return int(row["n"] if row is not None else 0)
 
 
+# --------------------------------------------------------------------------- analyst stage (2026-08-14)
+def _loads_object(raw: Any) -> dict[str, Any] | None:
+    """JSON text -> dict, or ``None`` for anything that is not a JSON object (D7: a malformed row is
+    COUNTED, never raised — one unreadable analyst output must not cost the owner their review)."""
+    try:
+        loaded = json.loads(raw or "")
+    except (TypeError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _candidate_from_context(blob: Any) -> dict[str, Any]:
+    """The ``SignalCandidate`` dict out of an archived prompt (``agent_calls.context_gz``).
+
+    Needed because ``agent_calls`` has no identity columns and a DECLINE's payload has none either:
+    ``NoActionOutput`` is ``{action, reason, regime_note, confidence?, thesis?}`` with
+    ``extra="forbid"``, so an ``ok=1`` no_action row cannot legally carry a tradingsymbol. The
+    prompt is where the subject lives — ``for_signal`` writes the whole candidate as one
+    ``candidate: {...}`` line — and the prompt is archived verbatim for replay (R8). Unreadable or
+    absent ⇒ ``{}``.
+    """
+    if not blob:
+        return {}
+    try:
+        text = gzip.decompress(bytes(blob)).decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001 - a corrupt blob costs one identity, never the review
+        _log.warning("nightly_context_unreadable", error=f"{type(exc).__name__}: {exc}")
+        return {}
+    for line in text.splitlines():
+        if line.startswith(_CANDIDATE_LINE_PREFIX):
+            return _loads_object(line[len(_CANDIDATE_LINE_PREFIX):]) or {}
+    return {}
+
+
+def _call_identity(row: sqlite3.Row, payload: Mapping[str, Any] | None) -> tuple[str, str]:
+    """``(symbol, strategy_id)`` for one analyst call — from the output when it carries identity (an
+    ``enter`` proposal does), else from the archived prompt, else ``unknown`` on both."""
+    symbol = (payload or {}).get("tradingsymbol")
+    strategy = (payload or {}).get("strategy_id")
+    if symbol and strategy:
+        return str(symbol), str(strategy)
+    candidate = _candidate_from_context(row["context_gz"])
+    return (
+        str(symbol or candidate.get("symbol") or _UNKNOWN),
+        str(strategy or candidate.get("strategy_id") or _UNKNOWN),
+    )
+
+
+def _hhmm(at: Any) -> str:
+    """``HH:MM`` from an ISO-8601 IST timestamp column — the same no-tz-arithmetic rule as
+    :func:`_day_prefix`: the string IS IST, so slicing it is exact."""
+    text = str(at or "")
+    return text[11:16] if len(text) >= 16 else _UNKNOWN
+
+
+@dataclass(frozen=True)
+class AnalystDeclines:
+    """What the analyst DID with the candidates the funnel spent slots on (2026-08-14).
+
+    The funnel ends at ``evaluated``; on 2026-08-14 that was 12 against 0 proposals and the review
+    could not say whether the analyst was being disciplined or the candidates were structurally
+    wrong. ``by_strategy`` answers "is one scanner producing setups the analyst always refuses?" and
+    the quoted reasons answer "and does it always refuse them for the same reason?".
+    """
+
+    d: date
+    evaluated: int
+    declined: int
+    proposed: int
+    unparseable: int
+    by_strategy: Mapping[str, int]
+    recent: tuple[str, ...]
+
+    def lines(self) -> list[str]:
+        if not self.evaluated:
+            return []                       # -> the section renders "none" (a day with no calls)
+        by_strategy = " ".join(
+            f"{sid}={n}" for sid, n in sorted(self.by_strategy.items(), key=lambda kv: (-kv[1], kv[0]))
+        ) or _NONE
+        lines = [
+            f"  evaluated {self.evaluated} -> declined {self.declined} / proposed {self.proposed}"
+            + (f" (unreadable output: {self.unparseable})" if self.unparseable else ""),
+            f"  declines by strategy: {by_strategy}",
+        ]
+        if self.recent:
+            lines.append(f"  most recent declines (newest first, {DECLINE_REASON_CHARS} chars):")
+            lines.extend(f"    - {entry}" for entry in self.recent)
+        else:
+            lines.append(f"  most recent declines: {_NONE}")
+        return lines
+
+
+def build_analyst_declines(conn: sqlite3.Connection, d: date) -> AnalystDeclines:
+    """Assemble ``d``'s analyst-stage picture from ``agent_calls``. A pure read, like the rest of
+    this module, and total over the day's SUCCESSFUL signal-candidate calls — the failed ones are
+    already their own section (:func:`_agent_failure_lines`), and conflating "the analyst said no"
+    with "the analyst never answered" is precisely the confusion this block exists to end."""
+    day = _day_prefix(d)
+    try:
+        rows = conn.execute(
+            "SELECT at, output_json, context_gz FROM agent_calls "
+            "WHERE agent_id = ? AND trigger = ? AND ok = 1 AND substr(at, 1, 10) = ? "
+            "ORDER BY at, rowid",
+            (_SIGNAL_AGENT_ID, _SIGNAL_TRIGGER, day),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        # An unreadable audit costs this section, never the review (the module's D7 convention).
+        _log.warning("declines_audit_unreadable", d=day, error=f"{type(exc).__name__}: {exc}")
+        rows = []
+
+    declined = proposed = unparseable = 0
+    by_strategy: dict[str, int] = {}
+    quoted: list[str] = []
+    for row in rows:
+        payload = _loads_object(row["output_json"])
+        if payload is None:
+            unparseable += 1
+            continue
+        if str(payload.get("action") or "") != "no_action":
+            proposed += 1
+            continue
+        declined += 1
+        symbol, strategy_id = _call_identity(row, payload)
+        by_strategy[strategy_id] = by_strategy.get(strategy_id, 0) + 1
+        reason = " ".join(str(payload.get("reason") or _UNKNOWN).split())
+        quoted.append(f"{_hhmm(row['at'])} {symbol} ({strategy_id}): {reason[:DECLINE_REASON_CHARS]}")
+
+    return AnalystDeclines(
+        d=d,
+        evaluated=len(rows),
+        declined=declined,
+        proposed=proposed,
+        unparseable=unparseable,
+        by_strategy=by_strategy,
+        # Newest first: the last thing the analyst refused is the one the owner still remembers.
+        recent=tuple(reversed(quoted[-DECLINE_REASONS_SHOWN:])),
+    )
+
+
 def _proposal_verdict_counts(conn: sqlite3.Connection, day: str) -> tuple[int, dict[str, int]]:
     proposals = conn.execute(
         "SELECT COUNT(*) AS n FROM proposals WHERE substr(created_at, 1, 10) = ?", (day,)
@@ -529,6 +686,9 @@ def build_review_context(
         FUNNEL_TITLE,
         (funnel if funnel is not None else build_funnel_summary(conn, d)).lines(),
     ))
+    # 2026-08-14: the funnel's last number is "evaluated", and 12 evaluated -> 0 proposals is a
+    # DECISION the review has to be able to see, not a gap it has to infer from silence.
+    parts.append(_section(DECLINES_TITLE, build_analyst_declines(conn, d).lines()))
     parts.append(_section("agent call failures", _agent_failure_lines(conn, d)))
     parts.append(f"llm spend today: ${_day_spend(conn, d)}")
     parts.append(_section(_ENVELOPE_TITLE, _envelope_lines(bounds)))

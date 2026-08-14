@@ -601,6 +601,8 @@ async def run() -> int:
             # down; the lambda resolves it at call time (an analyst failure long after wiring).
             rearm=lambda sym, sid: prescreen.rearm(sym, sid),
             admission_mode=settings.strategy.prescreen.admission_mode,   # WO-1 rollback flag
+            # 2026-08-14 rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
+            forward_drain_mode=settings.strategy.prescreen.forward_drain_mode,
         )
         if harness is not None else None
     )
@@ -1139,6 +1141,18 @@ async def run() -> int:
         hb_holder["last"] = now
         await pipeline.heartbeat()
 
+    # --- §5.2(a) paced forward drain (2026-08-14): one-minute pulse; pipeline.drain_forward_queue()
+    #     owns BOTH the FORWARD_PACING_MIN cadence and the in-window/mode/kill/governor/cap
+    #     admission, exactly as heartbeat() owns its own. This loop only provides the pulse, so the
+    #     `immediate` rollback needs no scheduler change — the drain self-disables in that mode. ---
+    async def forward_drain_tick() -> None:
+        if pipeline is None:
+            return
+        try:
+            await pipeline.drain_forward_queue()
+        except Exception:  # noqa: BLE001 - a drain failure must never take down the scheduler loop
+            _log.exception("forward_drain_tick_failed")
+
     # --- refresh the gate's warm-up snapshot alongside the equity cadence (fail-closed until set),
     #     LIFT a standing warm-up freeze once coverage completes (see refresh_and_lift_warmup), and
     #     SELF-HEAL persistent intraday coverage holes (2026-08-06 seam hole: a login-lagged boot's
@@ -1297,7 +1311,7 @@ async def run() -> int:
                    ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
                    scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
                    warmup_refresh=warmup_refresh, catchup_sweep=catchup_sweep,
-                   window_sweep_tick=window_sweep_tick)
+                   window_sweep_tick=window_sweep_tick, forward_drain_tick=forward_drain_tick)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -1512,7 +1526,7 @@ def _arm_live_jobs(
     news_ingest: NewsIngest, resolve_news,
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
     scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
-    window_sweep_tick=None,
+    window_sweep_tick=None, forward_drain_tick=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -1583,6 +1597,10 @@ def _arm_live_jobs(
         # INACTIVE→ACTIVE edge — the "what could I trade right now?" verdict is never silent.
         scheduler.add_job(window_sweep_tick, trigger=IntervalTrigger(seconds=60),
                           job_id="window_sweep_tick", guard=False)
+    if forward_drain_tick is not None:
+        # §5.2(a) — one-minute pulse; the pipeline's FORWARD_PACING_MIN cadence gates the drain.
+        scheduler.add_job(forward_drain_tick, trigger=IntervalTrigger(seconds=60),
+                          job_id="forward_drain_tick", guard=False)
 
 
 # --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)

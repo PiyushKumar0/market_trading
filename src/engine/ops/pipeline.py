@@ -33,6 +33,13 @@ Conventions that are load-bearing here:
   highest per-strategy score QUANTILE waiting (``_forward_key``), and the counter that bounds those
   slots lives in the day-slot journal so a mid-day restart resumes the day's quota instead of
   refilling it. Rollback: ``admission_mode="arrival"``.
+* **The queue is drained on a CADENCE, not on arrival** (§5.2(a), 2026-08-14). An arriving candidate
+  only ever enqueues; :meth:`RecommendationPipeline.drain_forward_queue` — pulsed from the scheduler
+  — spends at most one slot every ``FORWARD_PACING_MIN`` minutes on the best pending candidate.
+  Ranking can only rank what has accumulated: on the first live day under WO-1 the inline drain left
+  exactly one candidate in the queue at every slot, so "forward the best pending" was satisfied
+  vacuously and all 12 slots were gone by 09:20 on scores 0.14–0.66 while 0.83/1.00/1.00 arrived
+  later and never got one. Rollback: ``forward_drain_mode="immediate"``.
 * **The trigger paths carry state instead of re-reading it** (§3.2 hot-path invariant 7, WO-8
   2026-08-13). ATR(14,1m) is seeded from the store once per symbol per day and advanced one Wilder
   step per bar (:meth:`RecommendationPipeline._atr_1m`), reseeding only when a bar's minute is not
@@ -142,6 +149,20 @@ QUANTILE_BANDS = 5
 #: an order of magnitude below this; the ceiling exists so a misconfigured publication cap cannot
 #: turn a refused-candidate pointer list into unbounded process memory.
 MAX_PENDING_FORWARDS = 100
+
+#: §5.2(a) forward-DRAIN trigger modes (2026-08-14). ``paced`` = the queue is drained on a fixed
+#: cadence by :meth:`RecommendationPipeline.drain_forward_queue`; ``immediate`` = the pre-2026-08-14
+#: behaviour in which an arriving candidate drained its own slot inline, kept ONLY as the rollback.
+FORWARD_DRAIN_MODES = ("paced", "immediate")
+
+#: Minutes between paced drains — the window over which candidates ACCUMULATE before one of them is
+#: chosen. Constrained from three sides: strictly above the 60 s scheduler pulse that drives it (or
+#: the cadence would just be the pulse); small against ``TTL_INTRADAY_MIN`` (20) so a queued
+#: candidate gets several chances before its own levels go stale; and cap × pacing must fit the
+#: trade window (12 slots at DG0 ⇒ 36 min of drains, 4 at DG1+ ⇒ 12 min). A LONGER interval buys a
+#: better-populated queue at the cost of latency to the analyst — 3 min was chosen against the
+#: 2026-08-14 arrival rate (66 candidates by 10:13 ⇒ ~2 per pacing interval at the open).
+FORWARD_PACING_MIN = 3
 
 
 @dataclass(frozen=True)
@@ -548,9 +569,14 @@ class RecommendationPipeline:
         store: Any,
         rearm: Callable[[str, str], bool] | None = None,
         admission_mode: str = "ranked",
+        forward_drain_mode: str = "paced",
     ) -> None:
         if admission_mode not in FORWARD_MODES:
             raise ValueError(f"admission_mode must be one of {FORWARD_MODES}, got {admission_mode!r}")
+        if forward_drain_mode not in FORWARD_DRAIN_MODES:
+            raise ValueError(
+                f"forward_drain_mode must be one of {FORWARD_DRAIN_MODES}, got {forward_drain_mode!r}"
+            )
         self._assembler = assembler
         self._harness = harness
         self._agent_defs = agent_defs
@@ -581,6 +607,11 @@ class RecommendationPipeline:
         #: The §5.2(a) priority queue: published candidates that have not been evaluated yet.
         self._pending_forwards: list[_PendingForward] = []
         self._forward_seq = 0
+        #: When the queue was last drained (2026-08-14). ``None`` ⇒ the first tick drains; from then
+        #: on the anchor advances every tick that passes the guard, dispatched or not — the interval
+        #: IS the accumulation window, so an empty one still spends its place in the cadence.
+        self._drain_mode = forward_drain_mode
+        self._last_forward_drain: datetime | None = None
         #: strategy_id -> today's observed scores, the population the forward quantile ranks in.
         self._day_scores: dict[str, list[float]] = {}
         #: WO-8 hot-path caches, all rolled together by :meth:`_roll_hot_path_day`.
@@ -771,6 +802,89 @@ class RecommendationPipeline:
             self._journal_forward(entry.candidate, self._forwarded_day)
         return entry.candidate
 
+    def _forward_cap(self) -> int | None:
+        """Today's §5.6 analyst forward cap, or ``None`` when the governor does not publish one."""
+        cap_fn = getattr(self._governor, "prescreen_forward_cap", None)
+        return cap_fn() if cap_fn is not None else None
+
+    # ------------------------------------------------------------ §5.2(a) paced drain (2026-08-14)
+    async def drain_forward_queue(self) -> bool:
+        """Spend at most one analyst slot, at most once per ``FORWARD_PACING_MIN`` minutes.
+
+        Pulsed every 60 s from the composition root (``forward_drain_tick``); THIS method owns the
+        cadence, exactly as :meth:`heartbeat` owns its own admission while ``heartbeat_tick`` owns
+        only the pulse. Returns True when a candidate reached the analyst.
+
+        Why the drain had to leave the arrival path (live 2026-08-14, the first day under WO-1): an
+        arriving candidate was enqueued and then immediately drained, so the queue held exactly one
+        entry at every slot and "take the best pending" decided nothing. All 12 slots were spent
+        five minutes into the session on rsi2 scores [0.14, 0.17, 0.27, 0.46, 0.48, 0.66] while the
+        day's best unforwarded candidates (rsi2 0.83, orb 1.00, mom 1.00) arrived later and never
+        got one. Pacing is what gives the ranking rule a population to rank.
+        """
+        if self._drain_mode != "paced":
+            return False
+        now = self._clock.now()
+        last = self._last_forward_drain
+        if last is not None and now - last < timedelta(minutes=FORWARD_PACING_MIN):
+            return False
+        self._last_forward_drain = now
+        return await self._drain_one_forward()
+
+    async def _drain_one_forward(self) -> bool:
+        """Dispatch the single best pending candidate; False when none is due.
+
+        ONE per call, never a burst: draining the whole remaining budget the moment it is available
+        is the inline drain again, just batched — the day's later candidates would still be facing
+        an exhausted cap.
+
+        Every gate :meth:`on_signal_candidate` applies at arrival is re-applied HERE because time
+        has passed since the candidate was queued: the window can have closed, the owner can have
+        killed or frozen, the budget can have run out. A closed gate leaves the queue untouched and
+        re-arms nothing — a queued candidate is a REFUSED one we kept a pointer to, and its only
+        exit is its own TTL (2026-07-29: the forward cap never re-arms).
+        """
+        if not self._pending_forwards:
+            return False
+        if self._mode.mode() not in (Mode.RECOMMEND, Mode.AUTO):
+            return False
+        if self._mode.risk_state() != RiskState.NORMAL:
+            return False
+        if self._kill.is_killed():
+            return False
+        d = self._clock.today()
+        window = self._window(d)
+        if window is None or not (window[0] <= self._clock.now() <= window[1]):
+            return False
+        self._roll_forward_day(d)
+        decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
+        if not decision.allowed:
+            # Unlike the arrival path (where a block DROPS the candidate to keep a blocked window
+            # from building a backlog), a block here simply skips this tick: the queue is already
+            # bounded and drained at most once per pacing interval, so retrying is one call every
+            # FORWARD_PACING_MIN minutes, not a stampede when the block lifts.
+            _log.warning("forward_drain_governor_blocked", queued=len(self._pending_forwards),
+                         reason=getattr(decision, "reason", None))
+            return False
+        cap = self._forward_cap()
+        chosen = self._take_forward_slot(cap)
+        if chosen is None:
+            _log.info("forward_drain_no_slot", forwarded=self._forwarded_count,
+                      cap=None if cap is None else int(cap),
+                      queued=len(self._pending_forwards),
+                      best_unforwarded_score=self._best_pending_score())
+            return False
+        # "Which candidate did the analyst actually see, and what was still waiting behind it" must
+        # be answerable without a forensic DB read (WO-9) — and under pacing the answer is the whole
+        # point of the change.
+        _log.info("forward_drained", signal_id=chosen.signal_id, symbol=chosen.symbol,
+                  strategy_id=chosen.strategy_id, score=chosen.score,
+                  forwarded=self._forwarded_count, cap=None if cap is None else int(cap),
+                  queued=len(self._pending_forwards),
+                  best_unforwarded_score=self._best_pending_score())
+        await self._evaluate_forward(chosen, d)
+        return True
+
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
         """§5.2 trigger (a). Also usable directly as a ``signal.candidate`` bus handler.
@@ -778,6 +892,12 @@ class RecommendationPipeline:
         Entry-seeking calls fire ONLY inside the owner-set trade window (§1.4 item 11 / §7.1
         ``trade_window``); every earlier check is cheaper still. A governor block fails to
         no-proposal (D7) — silently, because "we did not call" is already an ``agent_calls`` row.
+
+        Under the default ``paced`` drain mode this method ADMITS a candidate to the queue and stops
+        there; the analyst call happens on the next :meth:`drain_forward_queue` tick, which re-checks
+        every gate below. The gates still run here so a candidate that cannot be evaluated at all is
+        never queued, and so the never-evaluated day-slot re-arms (2026-07-29) keep firing at the
+        moment the drop happens rather than a pacing interval later.
         """
         # Drops where the candidate was NEVER EVALUATED hand the prescreen day slot back
         # (2026-07-29 owner decision) so a still-true condition is waiting when conditions change
@@ -825,13 +945,21 @@ class RecommendationPipeline:
         # Counts only calls that reach the harness; the coarse prescreen settings cap still bounds
         # candidate PUBLICATION. Since WO-1 the slot goes to the best PENDING candidate rather than
         # to whoever arrived while budget remained (see _forward_key): the arriving candidate joins
-        # the queue, then the queue is drained by one — so a candidate refused at a full cap stays
+        # the queue, then the queue is drained — so a candidate refused at a full cap stays
         # available for a slot that opens later (a degrade-tier recovery raises the cap mid-day)
         # instead of being dropped on the floor.
         self._day_scores.setdefault(candidate.strategy_id, []).append(float(candidate.score))
         self._enqueue_forward(candidate)
-        cap_fn = getattr(self._governor, "prescreen_forward_cap", None)
-        cap = cap_fn() if cap_fn is not None else None
+        if self._drain_mode == "paced":
+            # 2026-08-14: the arriving candidate NEVER drains its own slot. It waits for the next
+            # drain tick and competes there with everything else that arrived inside the interval —
+            # the accumulation without which the ranking rule ranks a set of one.
+            _log.info("signal_candidate_queued", signal_id=candidate.signal_id,
+                      symbol=candidate.symbol, strategy_id=candidate.strategy_id,
+                      score=candidate.score, queued=len(self._pending_forwards),
+                      forwarded=self._forwarded_count)
+            return
+        cap = self._forward_cap()
         chosen = self._take_forward_slot(cap)
         if chosen is None:
             _log.info("signal_candidate_forward_cap", signal_id=candidate.signal_id,
@@ -847,8 +975,14 @@ class RecommendationPipeline:
                       forwarded=chosen.signal_id, symbol=chosen.symbol,
                       strategy_id=chosen.strategy_id, score=chosen.score,
                       queued=len(self._pending_forwards))
-        candidate = chosen
+        await self._evaluate_forward(chosen, d)
 
+    async def _evaluate_forward(self, candidate: SignalCandidate, d: date) -> None:
+        """Spend the analyst call on ``candidate``: assemble, call, coherence-check, gate, deliver.
+
+        Everything from here down is identical for both drain modes — the mode decides only WHEN a
+        queued candidate arrives at this method, never what happens to it once it does.
+        """
         entry_ref = _dec(candidate.raw_levels.entry)
         product = _product_of(candidate.style)
         max_qty_by_risk = self._max_qty_by_risk(candidate)
@@ -1677,7 +1811,9 @@ class RecommendationPipeline:
 __all__ = [
     "ATR_BAR_TAIL",
     "ATR_PERIOD",
+    "FORWARD_DRAIN_MODES",
     "FORWARD_MODES",
+    "FORWARD_PACING_MIN",
     "INTRADAY_AGENT_ID",
     "MAX_PENDING_FORWARDS",
     "QUANTILE_BANDS",

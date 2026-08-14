@@ -1,11 +1,11 @@
-"""RECOMMEND pipeline (§3.6 / §5.2 / §7.1 ``max_holding``) — book + trigger handlers.
+﻿"""RECOMMEND pipeline (Â§3.6 / Â§5.2 / Â§7.1 ``max_holding``) â€” book + trigger handlers.
 
 The seams are faked exactly where a fake is the point (the Claude harness, the context assembler, the
 governor) and REAL everywhere the behaviour under test depends on real policy:
 
 * the end-to-end approve path runs the **real** :class:`~engine.risk.gate.RiskGate` over the shipped
   ``config/limits.yaml`` and the **real** :class:`~engine.strategy.cost_model.CostModel` from
-  ``config/costs.yaml`` — a recommendation that the shipped limit table would not approve must not
+  ``config/costs.yaml`` â€” a recommendation that the shipped limit table would not approve must not
   pass here either;
 * a stub gate is used only to reach the verdict branches (shrink / owner_approval_required) that a
   passing baseline cannot produce;
@@ -37,6 +37,7 @@ from engine.intelligence.harness import AgentDef, AgentResult
 from engine.notify.catalog import MessageKind
 from engine.ops.pipeline import (
     ATR_PERIOD,
+    FORWARD_PACING_MIN,
     POSITION_EVENT_DEBOUNCE_MIN,
     TTL_INTRADAY_MIN,
     RecommendationBook,
@@ -53,7 +54,7 @@ REPO = Path(__file__).resolve().parents[2]
 LIMITS_YAML = REPO / "config" / "limits.yaml"
 CALENDAR_DIR = REPO / "config" / "calendar"
 
-#: Wed 2026-06-17 10:05 IST — a real trading day inside the seeded 10:00–10:30 trade window.
+#: Wed 2026-06-17 10:05 IST â€” a real trading day inside the seeded 10:00â€“10:30 trade window.
 NOW = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
 TODAY = NOW.date()
 SYMBOL = "RELIANCE"
@@ -62,7 +63,7 @@ CAPITAL_BASE = Decimal("20000")
 
 # =========================================================================== doubles
 class Ticker:
-    """A movable time source — ``ticker.at = ...`` advances every Clock built on it."""
+    """A movable time source â€” ``ticker.at = ...`` advances every Clock built on it."""
 
     def __init__(self, at: datetime) -> None:
         self.at = at
@@ -82,7 +83,7 @@ class StubLimits:
 
 
 class FakeHarness:
-    """Canned single-shot results. ``dict`` ⇒ Ok(validate(json)); ``AgentResult`` ⇒ returned as-is."""
+    """Canned single-shot results. ``dict`` â‡’ Ok(validate(json)); ``AgentResult`` â‡’ returned as-is."""
 
     def __init__(self, *results: Any) -> None:
         self.queued = list(results)
@@ -200,7 +201,7 @@ class Notifier:
 
 
 class StubGate:
-    """Returns a canned verdict — the only way to reach shrink / owner_approval_required."""
+    """Returns a canned verdict â€” the only way to reach shrink / owner_approval_required."""
 
     def __init__(self, verdict: GateVerdict) -> None:
         self.verdict = verdict
@@ -210,7 +211,7 @@ class StubGate:
 
 
 class ZeroCostModel:
-    """Duck-typed cost model with a zero round trip — the only way to land an exact ``scratch``."""
+    """Duck-typed cost model with a zero round trip â€” the only way to land an exact ``scratch``."""
 
     def round_trip(self, notional: Decimal, product: str, n_scrips_sell_day: int = 1) -> CostBreakdown:
         return CostBreakdown(
@@ -252,7 +253,7 @@ def book(conn, pclock: Clock, cost_model: CostModel) -> RecommendationBook:
 
 # --------------------------------------------------------------------------- gate context baseline
 def passing_ctx(**overrides: Any) -> GateContext:
-    """A context in which every §7.1 enter rule passes (mirrors the gate suite's baseline)."""
+    """A context in which every Â§7.1 enter rule passes (mirrors the gate suite's baseline)."""
     base: dict[str, Any] = {
         "now": NOW,
         "mode": Mode.RECOMMEND,
@@ -278,7 +279,7 @@ def passing_ctx(**overrides: Any) -> GateContext:
 
 def candidate(**overrides: Any) -> SignalCandidate:
     # signal_id matches ENTER_JSON: the pipeline's structural-coherence guard (R1) drops an analyst
-    # payload whose identity fields differ from the candidate's — deliberate, tested below.
+    # payload whose identity fields differ from the candidate's â€” deliberate, tested below.
     base: dict[str, Any] = {
         "signal_id": "01SIGNAL",
         "strategy_id": "orb",
@@ -313,7 +314,7 @@ ENTER_JSON: dict[str, Any] = {
 
 NO_ACTION_JSON: dict[str, Any] = {
     "action": "no_action",
-    "reason": "chop — the range has not resolved",
+    "reason": "chop â€” the range has not resolved",
     "regime_note": "NIFTY balancing inside the opening range; breakouts failing.",
 }
 
@@ -327,9 +328,25 @@ def agent_defs() -> dict[str, AgentDef]:
     }
 
 
+async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandidate) -> None:
+    """Publish a candidate AND let the Â§5.2(a) drain spend a slot on the queue.
+
+    Since 2026-08-14 an arriving candidate only ENQUEUES â€” the analyst call is made by the paced
+    drain tick, so a test that wants a candidate evaluated has to run the drain too.
+    ``_drain_one_forward`` is that tick with its cadence guard removed: the cadence itself is pinned
+    by the pacing block at the bottom of this file (through the PUBLIC ``drain_forward_queue``), and
+    every other test here is about what happens to a candidate AFTER it is dispatched rather than
+    about when. A drain on an empty queue is a no-op, so the "nothing was forwarded" tests keep
+    asserting exactly what they did before.
+    """
+    await pipeline.on_signal_candidate(cand)
+    await pipeline._drain_one_forward()
+
+
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
     mode=None, kill=None, notify=None, assembler=None, rearm=None, admission_mode="ranked",
+    forward_drain_mode="paced",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
         "assembler": assembler or FakeAssembler(),
@@ -347,7 +364,7 @@ def make_pipeline(
         parts["assembler"], harness, agent_defs(), gate, parts["ctx_builder"], book,
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
-        admission_mode=admission_mode,
+        admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
     )
     return pipeline, parts
 
@@ -411,18 +428,18 @@ LEDGER_FIELDS: dict[str, Any] = {
 }
 
 
-# =========================================================================== trigger (a) — entries
+# =========================================================================== trigger (a) â€” entries
 async def test_happy_path_writes_the_full_provenance_chain(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """proposals → verdicts → recommendations → learning_ledger, plus a rendered owner message."""
+    """proposals â†’ verdicts â†’ recommendations â†’ learning_ledger, plus a rendered owner message."""
     harness = FakeHarness(dict(ENTER_JSON))
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
 
     proposal = conn.execute("SELECT * FROM proposals").fetchone()
     verdict = conn.execute("SELECT * FROM verdicts").fetchone()
@@ -430,14 +447,14 @@ async def test_happy_path_writes_the_full_provenance_chain(
     ledger = conn.execute("SELECT * FROM learning_ledger").fetchone()
 
     assert proposal["action"] == "enter" and proposal["agent_id"] == "intraday_analyst"
-    # inputs_digest is PLATFORM-stamped from the assembled context — the replay key (R8).
+    # inputs_digest is PLATFORM-stamped from the assembled context â€” the replay key (R8).
     assert proposal["inputs_digest"] == parts["assembler"].contexts[0].inputs_digest
     assert verdict["verdict"] == "approve" and verdict["proposal_id"] == proposal["proposal_id"]
 
     payload = json.loads(rec_row["payload"])
     assert payload["kind"] == "entry" and payload["instrument"] == SYMBOL and payload["qty"] == 10
     assert rec_row["human_action"] is None and rec_row["delivered_at"]
-    # valid_until is PLATFORM-stamped from Clock, never model-emitted (§3.2).
+    # valid_until is PLATFORM-stamped from Clock, never model-emitted (Â§3.2).
     assert payload["valid_until"] == (NOW + timedelta(minutes=TTL_INTRADAY_MIN)).isoformat()
 
     assert ledger["rec_id"] == rec_row["rec_id"] and ledger["is_paper"] == 0
@@ -471,7 +488,7 @@ async def test_gatekeepers_fail_to_no_proposal(
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table), **kwargs,
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
     assert harness.calls == [], label
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
 
@@ -479,15 +496,15 @@ async def test_gatekeepers_fail_to_no_proposal(
 async def test_out_of_window_never_calls_the_analyst(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """Entry-seeking calls fire ONLY inside the owner-set window (§7.1 trade_window / §1.4 item 11)."""
-    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)      # seeded window is 10:00–10:30
+    """Entry-seeking calls fire ONLY inside the owner-set window (Â§7.1 trade_window / Â§1.4 item 11)."""
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)      # seeded window is 10:00â€“10:30
     harness = FakeHarness()
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
     assert harness.calls == []
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
 
@@ -495,14 +512,14 @@ async def test_out_of_window_never_calls_the_analyst(
 async def test_agent_failure_alerts_and_writes_no_proposal(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """D7: schema-invalid/timeout/SDK death ⇒ no proposal + owner alert, never a salvaged action."""
+    """D7: schema-invalid/timeout/SDK death â‡’ no proposal + owner alert, never a salvaged action."""
     harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"))
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
 
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
@@ -526,7 +543,7 @@ async def test_agent_infra_failure_rearms_the_prescreen_slot(
         rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
     )
     cand = candidate()
-    await pipeline.on_signal_candidate(cand)
+    await publish_candidate(pipeline, cand)
     assert rearmed == [(cand.symbol, cand.strategy_id)]
 
     rearmed.clear()
@@ -536,7 +553,7 @@ async def test_agent_infra_failure_rearms_the_prescreen_slot(
         limits=StubLimits(limit_table), governor=FakeGovernor(allowed=False),
         rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
     )
-    await pipeline2.on_signal_candidate(candidate())
+    await publish_candidate(pipeline2, candidate())
     assert rearmed == []                                   # governor block: no re-arm
 
 
@@ -544,10 +561,10 @@ async def test_never_evaluated_drops_rearm_the_slot(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
     """2026-07-29 owner decision: out-of-window / mode / freeze drops re-arm the day slot (the
-    candidate was never evaluated) — so a still-true condition is waiting when the window opens."""
+    candidate was never evaluated) â€” so a still-true condition is waiting when the window opens."""
     rearmed: list[tuple[str, str]] = []
 
-    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)      # outside the seeded 10:00–10:30 window
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)      # outside the seeded 10:00â€“10:30 window
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
@@ -555,8 +572,8 @@ async def test_never_evaluated_drops_rearm_the_slot(
         rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
     )
     cand = candidate()
-    await pipeline.on_signal_candidate(cand)
-    assert rearmed == [(cand.symbol, cand.strategy_id)]       # out-of-window → slot back
+    await publish_candidate(pipeline, cand)
+    assert rearmed == [(cand.symbol, cand.strategy_id)]       # out-of-window â†’ slot back
 
     rearmed.clear()
     ticker.at = datetime(2026, 6, 17, 10, 15, tzinfo=IST)     # back inside the window
@@ -566,8 +583,8 @@ async def test_never_evaluated_drops_rearm_the_slot(
         limits=StubLimits(limit_table), mode=FakeMode(mode=Mode.OFF),
         rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
     )
-    await pipeline_off.on_signal_candidate(candidate())
-    assert len(rearmed) == 1                                  # mode OFF → slot back
+    await publish_candidate(pipeline_off, candidate())
+    assert len(rearmed) == 1                                  # mode OFF â†’ slot back
 
 
 async def test_day_slot_journal_and_rehydration_round_trip(
@@ -575,8 +592,8 @@ async def test_day_slot_journal_and_rehydration_round_trip(
 ):
     """2026-08-04 (owner-directed): the prescreen's dedupe/caps day state was process memory, so a
     restart reset the 20/day bound (~54 publications observed across two restarts). Publications now
-    journal to ``prescreen_day_slots`` — evaluated=1 on receipt (the conservative default for every
-    handler path), flipped to 0 by the never-evaluated rearm paths — and ``_hydrate_prescreen``
+    journal to ``prescreen_day_slots`` â€” evaluated=1 on receipt (the conservative default for every
+    handler path), flipped to 0 by the never-evaluated rearm paths â€” and ``_hydrate_prescreen``
     rebuilds a fresh prescreen from those rows exactly per the 2026-07-29 rearm semantics."""
     from datetime import date as _date
 
@@ -594,7 +611,7 @@ async def test_day_slot_journal_and_rehydration_round_trip(
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
     rows = conn.execute(
         "SELECT strategy_id, evaluated FROM prescreen_day_slots WHERE d='2026-06-17'"
     ).fetchall()
@@ -607,7 +624,7 @@ async def test_day_slot_journal_and_rehydration_round_trip(
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table), rearm=lambda sym, sid: True,
     )
-    await pipeline2.on_signal_candidate(candidate(strategy_id="rsi2", signal_id="01SIGNAL2"))
+    await publish_candidate(pipeline2, candidate(strategy_id="rsi2", signal_id="01SIGNAL2"))
     by_sid = {
         r["strategy_id"]: r["evaluated"] for r in conn.execute(
             "SELECT strategy_id, evaluated FROM prescreen_day_slots WHERE d='2026-06-17'"
@@ -615,7 +632,7 @@ async def test_day_slot_journal_and_rehydration_round_trip(
     }
     assert by_sid == {"orb": 1, "rsi2": 0}
 
-    # (c) "Restart": a FRESH prescreen hydrated from the journal — the evaluated pair is deduped,
+    # (c) "Restart": a FRESH prescreen hydrated from the journal â€” the evaluated pair is deduped,
     # the in-flight-lost pair re-publishes within its already-paid cap slot.
     def _ext(strategy_id: str) -> _Cand:
         return _Cand(
@@ -626,7 +643,7 @@ async def test_day_slot_journal_and_rehydration_round_trip(
     ps = SignalPreScreen([], lambda bar: _SC(), None, max_candidates_per_day=2)
     _hydrate_prescreen(conn, ps, _date(2026, 6, 17))
     day = _date(2026, 6, 17)
-    assert ps.admit([_ext("orb")], day) == []                       # evaluated → still deduped
+    assert ps.admit([_ext("orb")], day) == []                       # evaluated â†’ still deduped
     assert ps.admit([_ext("trend")], day) == []                     # cap full (2 charged pairs)
     assert [c.strategy_id for c in ps.admit([_ext("rsi2")], day)] == ["rsi2"]   # paid quota re-publish
 
@@ -634,7 +651,7 @@ async def test_day_slot_journal_and_rehydration_round_trip(
 async def test_stopless_candidate_never_reaches_the_analyst(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-07-29 owner decision: no stop level ⇒ max_qty_by_risk is 0 ⇒ a guaranteed no_action —
+    """2026-07-29 owner decision: no stop level â‡’ max_qty_by_risk is 0 â‡’ a guaranteed no_action â€”
     the analyst call is never spent (today: `mom` until rebalance state lands). The slot stays
     consumed (no stop will appear today) and the forward cap is not charged."""
     rearmed: list[tuple[str, str]] = []
@@ -646,7 +663,7 @@ async def test_stopless_candidate_never_reaches_the_analyst(
         rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
     )
     stopless = candidate(raw_levels=RawLevels(entry=Decimal("100.00")))
-    await pipeline.on_signal_candidate(stopless)
+    await publish_candidate(pipeline, stopless)
     assert harness.calls == []                                # no analyst spend
     assert rearmed == []                                      # slot deliberately NOT re-armed
     assert pipeline._forwarded_count == 0                     # forward cap untouched
@@ -661,7 +678,7 @@ async def test_no_action_records_the_regime_note_and_no_proposal(
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
 
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
@@ -672,7 +689,7 @@ async def test_no_action_records_the_regime_note_and_no_proposal(
 async def test_shrink_verdict_resizes_the_recommendation(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """R1: the gate may only shrink — the delivered size and notional are the APPROVED ones."""
+    """R1: the gate may only shrink â€” the delivered size and notional are the APPROVED ones."""
     harness = FakeHarness(dict(ENTER_JSON))
     gate = StubGate(verdict_of("shrink", cost_model, original_qty=10, approved_qty=4,
                                reasons=["shrink: qty 10 -> 4 (bound by per_trade_risk)"]))
@@ -680,7 +697,7 @@ async def test_shrink_verdict_resizes_the_recommendation(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness, gate=gate,
         ctx=passing_ctx(), limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
 
     payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
     assert payload["qty"] == 4
@@ -698,7 +715,7 @@ async def test_owner_approval_required_opens_a_pending_row(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness, gate=gate,
         ctx=passing_ctx(), limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
 
     row = conn.execute("SELECT * FROM owner_approvals").fetchone()
     assert row["status"] == "pending" and row["kind"] == "entry"
@@ -711,7 +728,7 @@ async def test_owner_approval_required_opens_a_pending_row(
 async def test_market_entry_zone_spans_the_sanity_band(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """MARKET has no price yet ⇒ the zone runs to the §7.1 entry_sanity_band edge (+1% MIS, +2% CNC)."""
+    """MARKET has no price yet â‡’ the zone runs to the Â§7.1 entry_sanity_band edge (+1% MIS, +2% CNC)."""
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
@@ -737,9 +754,9 @@ async def test_market_entry_zone_spans_the_sanity_band(
     assert "set alert at 248.75" in mis.manual_checklist          # stop + 0.5 x (entry - stop)
 
 
-# =========================================================================== the ledger matrix (§3.6)
+# =========================================================================== the ledger matrix (Â§3.6)
 async def test_take_close_veto_and_the_worked_pnl(conn, ticker, pclock, book, cost_model):
-    """The full outcome-capture matrix, to the paisa, with the §6.5 label it produces."""
+    """The full outcome-capture matrix, to the paisa, with the Â§6.5 label it produces."""
     rec = make_rec(cost_model)
     book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
 
@@ -766,7 +783,7 @@ async def test_take_close_veto_and_the_worked_pnl(conn, ticker, pclock, book, co
     ticker.at = NOW + timedelta(minutes=45)
     await book.close(rec.rec_id, Decimal("103.50"))
 
-    expected_gross = (Decimal("103.50") - Decimal("100.00")) * 10        # ₹35.00
+    expected_gross = (Decimal("103.50") - Decimal("100.00")) * 10        # â‚¹35.00
     expected_costs = cost_model.round_trip(Decimal("1035.00"), "MIS").total_cost
     expected_net = expected_gross - expected_costs
     assert expected_gross == Decimal("35.00")
@@ -782,7 +799,7 @@ async def test_take_close_veto_and_the_worked_pnl(conn, ticker, pclock, book, co
     closed = conn.execute("SELECT * FROM positions").fetchone()
     assert closed["state"] == "CLOSED" and closed["close_reason"] == "manual_owner"
     # positions.realized_pnl is GROSS + a separate costs column: ExposureTracker computes equity as
-    # Σ(realized_pnl − costs), so writing net here would charge the costs twice (§7.1).
+    # Î£(realized_pnl âˆ’ costs), so writing net here would charge the costs twice (Â§7.1).
     assert Decimal(closed["realized_pnl"]) == expected_gross
     assert Decimal(closed["costs"]) == expected_costs
     assert ExposureTracker(conn, pclock, CAPITAL_BASE).realized_net() == expected_net
@@ -829,7 +846,7 @@ async def test_veto_records_a_no_action_outcome(conn, book, cost_model):
 
 
 async def test_expire_stale_labels_non_fills_and_is_idempotent(conn, book, cost_model):
-    """§3.6: a non-fill is itself training signal — attribution must not be biased to taken trades."""
+    """Â§3.6: a non-fill is itself training signal â€” attribution must not be biased to taken trades."""
     stale = make_rec(cost_model, valid_until=NOW - timedelta(minutes=1))
     live = make_rec(cost_model, valid_until=NOW + timedelta(hours=2))
     taken = make_rec(cost_model, valid_until=NOW - timedelta(minutes=1))
@@ -838,7 +855,7 @@ async def test_expire_stale_labels_non_fills_and_is_idempotent(conn, book, cost_
     await book.take(taken.rec_id, 10, Decimal("100.00"))
 
     assert book.expire_stale(NOW) == 1
-    assert book.expire_stale(NOW) == 0                       # idempotent — human_action IS NULL filter
+    assert book.expire_stale(NOW) == 0                       # idempotent â€” human_action IS NULL filter
 
     actions = dict(conn.execute("SELECT rec_id, human_action FROM recommendations").fetchall())
     assert actions[stale.rec_id] == "expired"
@@ -862,7 +879,7 @@ def _open_position(conn, clock, *, style="intraday", opened_at=None, stop="99", 
 
 
 def _flat_bars(n: int = 20) -> list[Bar]:
-    """n identical 1m bars with a 1.00 range ⇒ ATR(14,1m) == 1.00 exactly."""
+    """n identical 1m bars with a 1.00 range â‡’ ATR(14,1m) == 1.00 exactly."""
     return [
         Bar(symbol=SYMBOL, ts_minute=NOW - timedelta(minutes=n - i), open=Decimal("100"),
             high=Decimal("100.50"), low=Decimal("99.50"), close=Decimal("100"), volume=1000)
@@ -873,7 +890,7 @@ def _flat_bars(n: int = 20) -> list[Bar]:
 async def test_stop_proximity_fires_once_then_debounces(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """§5.2 (b): risk-reducing, never window-gated — and at most once per position per hour."""
+    """Â§5.2 (b): risk-reducing, never window-gated â€” and at most once per position per hour."""
     position_id = _open_position(conn, pclock)
     exit_json = {
         "action": "exit", "position_id": position_id, "exit_type": "MARKET",
@@ -888,7 +905,7 @@ async def test_stop_proximity_fires_once_then_debounces(
         ctx=passing_ctx(positions_known=frozenset({position_id})),
         limits=StubLimits(limit_table), store=FakeStore(bars=_flat_bars()),
     )
-    # 0.5 x ATR(1.00) = 0.50; stop 99 ⇒ anything at or below 99.50 is "near".
+    # 0.5 x ATR(1.00) = 0.50; stop 99 â‡’ anything at or below 99.50 is "near".
     near = Bar(symbol=SYMBOL, ts_minute=NOW, open=Decimal("99.4"), high=Decimal("99.5"),
                low=Decimal("99.3"), close=Decimal("99.40"), volume=100)
 
@@ -899,7 +916,7 @@ async def test_stop_proximity_fires_once_then_debounces(
     assert rec_payload["manual_checklist"] == [f"exit at market: close {SYMBOL} x10 now"]
     assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
 
-    await pipeline.on_bar(near)                              # same position, same hour ⇒ debounced
+    await pipeline.on_bar(near)                              # same position, same hour â‡’ debounced
     assert len(harness.calls) == 1
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
 
@@ -927,10 +944,10 @@ async def test_far_from_stop_never_calls_the_analyst(
 async def test_aged_position_exit_is_deterministic(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """§7.1 max_holding: swing > 20 sessions ⇒ an exit recommendation built WITHOUT the LLM (R1)."""
+    """Â§7.1 max_holding: swing > 20 sessions â‡’ an exit recommendation built WITHOUT the LLM (R1)."""
     opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)          # far more than 20 trading sessions back
     position_id = _open_position(conn, pclock, style="swing", opened_at=opened, stop="95")
-    _open_position(conn, pclock, style="swing")               # opened today ⇒ not aged
+    _open_position(conn, pclock, style="swing")               # opened today â‡’ not aged
     harness = FakeHarness()                                   # ANY call raises: exits never use Tier 1
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
@@ -949,7 +966,7 @@ async def test_aged_position_exit_is_deterministic(
     assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
 
 
-# =========================================================================== trigger (c) — heartbeat
+# =========================================================================== trigger (c) â€” heartbeat
 async def test_heartbeat_only_updates_the_regime_note(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
@@ -984,7 +1001,7 @@ async def test_identity_mismatch_drops_payload_before_the_gate(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
     """An analyst payload naming a different symbol than the candidate is a hallucination: dropped
-    like schema-invalid output (D7) — no proposal row, no verdict, nothing delivered."""
+    like schema-invalid output (D7) â€” no proposal row, no verdict, nothing delivered."""
     hijacked = dict(ENTER_JSON, tradingsymbol="SUZLON")
     harness = FakeHarness(hijacked)
     gate = StubGate(verdict_of("approve", cost_model))
@@ -992,7 +1009,7 @@ async def test_identity_mismatch_drops_payload_before_the_gate(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness, gate=gate,
         ctx=passing_ctx(), limits=StubLimits(limit_table),
     )
-    await pipeline.on_signal_candidate(candidate())
+    await publish_candidate(pipeline, candidate())
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
     assert any("identity mismatch" in str(getattr(m, "title", "")) for m in parts["notify"].messages)
@@ -1014,14 +1031,14 @@ async def test_forward_cap_stops_analyst_calls_for_the_day(
         ctx=passing_ctx(), limits=StubLimits(limit_table), governor=CappedGovernor(),
     )
     for _i in range(4):
-        await pipeline.on_signal_candidate(candidate())
+        await publish_candidate(pipeline, candidate())
     assert len(harness.calls) == 2
 
 
 # ======================================================= WO-1: forward queue + journalled counter
 class TunableGovernor(FakeGovernor):
-    """A governor whose §5.2(a) forward cap the test can move — the live cap really does move
-    (agents.yaml ``prescreen_cap_per_day`` is 12 at DG0 and 4 at DG1+, §5.6)."""
+    """A governor whose Â§5.2(a) forward cap the test can move â€” the live cap really does move
+    (agents.yaml ``prescreen_cap_per_day`` is 12 at DG0 and 4 at DG1+, Â§5.6)."""
 
     def __init__(self, cap: int) -> None:
         super().__init__()
@@ -1054,23 +1071,23 @@ async def test_forward_queue_selects_by_per_strategy_quantile_not_raw_score(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov,
     )
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="INFY", strategy_id="rsi2", signal_id="R1", score=0.30))
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="TCS", strategy_id="orb", signal_id="O1", score=0.95))
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="WIPRO", strategy_id="orb", signal_id="O2", score=0.50))
     assert harness.calls == []                                  # cap 0 - nothing forwarded
     assert set(forward_journal(conn).values()) == {0}
 
     gov.cap = 1                                                 # one slot opens (DG1 -> DG0)
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="ITC", strategy_id="orb", signal_id="O3", score=0.01))
     assert parts["assembler"].contexts[-1].stable_block == "stable R1"    # rsi2's top, not orb's
     assert forward_journal(conn)[("INFY", "rsi2")] == 1
 
     gov.cap = 2                                                 # a second slot
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="SBIN", strategy_id="orb", signal_id="O4", score=0.02))
     assert parts["assembler"].contexts[-1].stable_block == "stable O1"    # now orb's own best
     assert forward_journal(conn)[("TCS", "orb")] == 1
@@ -1090,8 +1107,8 @@ async def test_forward_count_survives_a_mid_day_restart(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov,
     )
-    await pipeline.on_signal_candidate(candidate(symbol="TCS", strategy_id="orb", score=0.9))
-    await pipeline.on_signal_candidate(candidate(symbol="INFY", strategy_id="orb", score=0.8))
+    await publish_candidate(pipeline, candidate(symbol="TCS", strategy_id="orb", score=0.9))
+    await publish_candidate(pipeline, candidate(symbol="INFY", strategy_id="orb", score=0.8))
     assert len(harness.calls) == 2
     assert sum(forward_journal(conn).values()) == 2
 
@@ -1102,8 +1119,8 @@ async def test_forward_count_survives_a_mid_day_restart(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov,
     )
-    await restarted.on_signal_candidate(candidate(symbol="SBIN", strategy_id="orb", score=0.7))
-    await restarted.on_signal_candidate(candidate(symbol="ITC", strategy_id="orb", score=0.6))
+    await publish_candidate(restarted, candidate(symbol="SBIN", strategy_id="orb", score=0.7))
+    await publish_candidate(restarted, candidate(symbol="ITC", strategy_id="orb", score=0.6))
     assert restarted._forwarded_count == 3                      # 2 hydrated + 1, not 1
     assert len(harness2.calls) == 1                             # the 3-call day cap held across it
     assert sum(forward_journal(conn).values()) == 3
@@ -1126,7 +1143,7 @@ async def test_heartbeat_never_consumes_a_forward_slot(
     assert len(harness.calls) == 2
     assert pipeline._forwarded_count == 0
     assert forward_journal(conn) == {}                          # no day slot touched either
-    await pipeline.on_signal_candidate(candidate(symbol="TCS", strategy_id="orb", score=0.9))
+    await publish_candidate(pipeline, candidate(symbol="TCS", strategy_id="orb", score=0.9))
     assert len(harness.calls) == 3                              # the one slot was still there
     assert pipeline._forwarded_count == 1
 
@@ -1143,12 +1160,12 @@ async def test_forward_mode_arrival_is_the_rollback_to_fifo(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov, admission_mode="arrival",
     )
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="ITC", strategy_id="orb", signal_id="LOW", score=0.01))
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="TCS", strategy_id="orb", signal_id="TOP", score=0.99))
     gov.cap = 1
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="SBIN", strategy_id="orb", signal_id="MID", score=0.50))
     assert parts["assembler"].contexts[-1].stable_block == "stable LOW"   # earliest, not best
 
@@ -1166,17 +1183,215 @@ async def test_queued_candidate_expires_instead_of_going_stale(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov,
     )
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="TCS", strategy_id="orb", signal_id="STALE", score=0.99))
     ticker.at = NOW + timedelta(minutes=TTL_INTRADAY_MIN + 1)
     gov.cap = 1
-    await pipeline.on_signal_candidate(
+    await publish_candidate(pipeline,
         candidate(symbol="ITC", strategy_id="orb", signal_id="FRESH", score=0.10))
     assert parts["assembler"].contexts[-1].stable_block == "stable FRESH"
     assert forward_journal(conn)[("TCS", "orb")] == 0
 
 
-# ======================================================= WO-8: hot-path read hygiene (§3.2 inv. 7)
+# ============================================== 2026-08-14: the PACED drain (the WO-1 ranking's teeth)
+def paced_pipeline(conn, pclock, calendar, book, limit_table, cost_model, *, cap, results=6):
+    """A ranked+paced pipeline whose forward cap the test can move, with canned analyst declines."""
+    gov = TunableGovernor(cap)
+    harness = FakeHarness(*[dict(NO_ACTION_JSON) for _ in range(results)])
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    return pipeline, parts, harness, gov
+
+
+async def test_an_arriving_candidate_never_drains_its_own_slot(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """THE 2026-08-14 REGRESSION, in the shape it actually happened.
+
+    Under the inline drain the queue held exactly one entry at every slot â€” the candidate that had
+    just arrived â€” so "forward the best pending" chose between a set of one and the day's 12 slots
+    went to rsi2 [0.14 .. 0.66] inside the first five minutes while 0.83 arrived later and never got
+    one. Paced: the 0.14 only ENQUEUES, and at the next tick the 0.83 that landed inside the same
+    interval takes the slot.
+    """
+    pipeline, parts, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12)
+
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TATAMOTORS", strategy_id="rsi2", signal_id="EARLY_LOW", score=0.14))
+    assert harness.calls == []                                  # NOT evaluated inline
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["EARLY_LOW"]
+    assert pipeline._forwarded_count == 0
+
+    await pipeline.on_signal_candidate(
+        candidate(symbol="HDFCBANK", strategy_id="rsi2", signal_id="LATE_HIGH", score=0.83))
+    assert harness.calls == []                                  # still nothing spent
+
+    assert await pipeline.drain_forward_queue() is True
+    assert parts["assembler"].contexts[-1].stable_block == "stable LATE_HIGH"
+    assert forward_journal(conn)[("HDFCBANK", "rsi2")] == 1
+    assert forward_journal(conn)[("TATAMOTORS", "rsi2")] == 0   # queued, still waiting its turn
+
+
+async def test_the_drain_spends_one_slot_per_pacing_interval(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """One candidate per tick, never a burst: draining the whole remaining budget the moment it is
+    available is the inline drain again, just batched â€” the day's later candidates would still meet
+    an exhausted cap. And a tick INSIDE the interval is a no-op, which is what makes the interval an
+    accumulation window rather than a 60 s pulse."""
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12)
+    for i, symbol in enumerate(("TCS", "INFY", "WIPRO")):
+        await pipeline.on_signal_candidate(
+            candidate(symbol=symbol, strategy_id="orb", signal_id=f"Q{i}", score=0.5 + i / 10))
+
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 1                              # ONE, with three pending
+
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN - 1)
+    assert await pipeline.drain_forward_queue() is False        # inside the interval: no-op
+    assert len(harness.calls) == 1
+
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 2
+    ticker.at = NOW + timedelta(minutes=2 * FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 3
+    assert pipeline._pending_forwards == []
+
+
+async def test_the_drain_stops_at_the_forward_cap_and_keeps_the_rest_queued(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """Â§5.6: the cap bounds analyst SPEND, and a candidate refused at a full cap stays available for
+    a slot that opens later (a degrade-tier recovery raises the cap mid-day) â€” pacing must not turn
+    that into a drop."""
+    pipeline, parts, harness, gov = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=1)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="FIRST", score=0.9))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="INFY", strategy_id="orb", signal_id="SECOND", score=0.8))
+
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 1
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is False        # cap 1 is spent
+    assert len(harness.calls) == 1
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["SECOND"]
+
+    gov.cap = 2                                                 # DG1 -> DG0 mid-day
+    ticker.at = NOW + timedelta(minutes=2 * FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is True
+    assert parts["assembler"].contexts[-1].stable_block == "stable SECOND"
+    assert forward_journal(conn)[("INFY", "orb")] == 1
+
+
+async def test_the_drain_skips_a_candidate_past_its_own_ttl(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """Pacing delays a candidate, so TTL expiry is the thing it must not break: a level the scanner
+    saw 20 minutes ago is not the setup any more, and expiry never re-arms the day slot."""
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="STALE", score=0.99))
+
+    ticker.at = NOW + timedelta(minutes=TTL_INTRADAY_MIN + 1)   # 10:26, still inside the window
+    assert await pipeline.drain_forward_queue() is False
+    assert harness.calls == []
+    assert pipeline._pending_forwards == []                     # expired out of the queue
+    assert pipeline._forwarded_count == 0                       # expiry costs no analyst slot
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+
+
+async def test_the_drain_re_checks_the_window_it_was_queued_under(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """A queued candidate is dispatched LATER than it arrived, so every entry-path gate has to be
+    re-asked at the drain: the window can have closed since (Â§1.4 item 11 / Â§7.1 trade_window). A
+    closed gate leaves the queue untouched â€” it never re-arms, exactly like the cap (2026-07-29)."""
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="INWINDOW", score=0.9))
+
+    ticker.at = datetime(2026, 6, 17, 10, 31, tzinfo=IST)       # seeded window is 10:00-10:30
+    assert await pipeline.drain_forward_queue() is False
+    assert harness.calls == []
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["INWINDOW"]
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+
+
+async def test_immediate_mode_is_the_rollback_to_the_inline_drain(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """forward_drain_mode='immediate' restores the pre-2026-08-14 behaviour byte for byte: the
+    arriving candidate drains its own slot inline and the paced tick does nothing at all, so the
+    rollback is a settings edit rather than a revert (and cannot double-dispatch)."""
+    gov = TunableGovernor(2)
+    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov, forward_drain_mode="immediate",
+    )
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="INLINE", score=0.9))
+    assert len(harness.calls) == 1                              # evaluated by its OWN arrival
+    assert parts["assembler"].contexts[-1].stable_block == "stable INLINE"
+    assert pipeline._pending_forwards == []
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+
+    assert await pipeline.drain_forward_queue() is False        # the tick is inert in this mode
+    assert len(harness.calls) == 1
+
+
+async def test_paced_drain_survives_a_mid_day_restart(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """The two halves of the day's forward state under pacing: the journalled COUNTER resumes across
+    a restart (WO-1 (iv)) while the in-memory pending QUEUE does not â€” a restart drops the pointers,
+    it does not refund the quota. Both are load-bearing: refilling the counter would double the
+    day's analyst spend, and resurrecting the queue would forward levels from before the outage."""
+    pipeline, _, harness, gov = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=2)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="BEFORE_1", score=0.9))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="INFY", strategy_id="orb", signal_id="BEFORE_2", score=0.8))
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 1
+    assert len(pipeline._pending_forwards) == 1                 # BEFORE_2 still waiting
+
+    # --- the restart: a brand-new pipeline object on the same state DB ---
+    harness2 = FakeHarness(dict(NO_ACTION_JSON))
+    restarted, parts2 = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness2,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    assert await restarted.drain_forward_queue() is False       # nothing pending: the queue is gone
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+    await restarted.on_signal_candidate(
+        candidate(symbol="SBIN", strategy_id="orb", signal_id="AFTER_1", score=0.7))
+    await restarted.on_signal_candidate(
+        candidate(symbol="ITC", strategy_id="orb", signal_id="AFTER_2", score=0.6))
+    assert await restarted.drain_forward_queue() is True
+    assert restarted._forwarded_count == 2                      # 1 hydrated + 1, not 1
+    assert len(harness2.calls) == 1
+
+    ticker.at = NOW + timedelta(minutes=2 * FORWARD_PACING_MIN)
+    assert await restarted.drain_forward_queue() is False        # the 2-call day cap held across it
+    assert sum(forward_journal(conn).values()) == 2
+
+
+# ======================================================= WO-8: hot-path read hygiene (Â§3.2 inv. 7)
 class CountingStore(FakeStore):
     """A store double that HONORS the ``[start, end)`` bar window and COUNTS every read.
 
@@ -1222,7 +1437,7 @@ def _walk_bars(n: int, *, first_ts: datetime, symbol: str = SYMBOL, seed: int = 
 
 
 def _store_atr(bars: list[Bar]) -> Decimal:
-    """ATR(14,1m) THE STORE-READ WAY: the shared §6.1 primitive over a bar sequence, converted
+    """ATR(14,1m) THE STORE-READ WAY: the shared Â§6.1 primitive over a bar sequence, converted
     exactly as ``_atr_1m`` converts it. This is the reference the incremental path must equal."""
     series = wilder_atr(
         [b.high for b in bars], [b.low for b in bars], [b.close for b in bars], ATR_PERIOD
@@ -1235,10 +1450,10 @@ async def test_incremental_atr_equals_the_store_read_at_every_bar(
 ):
     """WO-8 (i) acceptance: EXACT equivalence across all three phases of the ATR seam.
 
-    * **seed** — the first bar for a symbol reads the store once and lands on the store value;
-    * **steady state** — every subsequent contiguous bar is served by the Wilder recursion alone,
+    * **seed** â€” the first bar for a symbol reads the store once and lands on the store value;
+    * **steady state** â€” every subsequent contiguous bar is served by the Wilder recursion alone,
       and equals the store-derived ATR over the same anchored window to the last bit;
-    * **gap** — a bar whose minute is not contiguous with the last seen minute RESEEDS from the
+    * **gap** â€” a bar whose minute is not contiguous with the last seen minute RESEEDS from the
       store rather than carrying a stale ATR forward, and the reseeded value differs from what
       carrying forward would have produced (otherwise the reseed would be untested decoration).
     """
@@ -1335,12 +1550,12 @@ async def test_sector_map_is_read_once_per_trading_date(
         limits=StubLimits(limit_table), store=store,
     )
     for i, symbol in enumerate(("TCS", "INFY", "WIPRO", "SBIN")):
-        await pipeline.on_signal_candidate(candidate(symbol=symbol, signal_id=f"S{i}"))
+        await publish_candidate(pipeline, candidate(symbol=symbol, signal_id=f"S{i}"))
     assert len(harness.calls) == 4
     assert store.sector_reads == 1
 
     ticker.at = NOW + timedelta(days=1)                  # Thu 2026-06-18, a trading day
-    await pipeline.on_signal_candidate(candidate(symbol="ITC", signal_id="S9"))
+    await publish_candidate(pipeline, candidate(symbol="ITC", signal_id="S9"))
     assert len(harness.calls) == 5
     assert store.sector_reads == 2                       # the date change invalidated it
 
@@ -1358,7 +1573,7 @@ async def test_hot_path_stats_count_reads_avoided_against_reads_performed(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), store=store,
     )
-    await pipeline.on_signal_candidate(candidate(symbol="TCS", signal_id="SX"))
+    await publish_candidate(pipeline, candidate(symbol="TCS", signal_id="SX"))
     for bar in _walk_bars(4, first_ts=NOW, seed=5):
         ticker.at = bar.ts_minute + timedelta(seconds=1)
         await pipeline.on_bar(bar)

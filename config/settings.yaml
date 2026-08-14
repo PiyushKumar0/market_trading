@@ -157,6 +157,13 @@ strategy:
     # and the analyst forward queue picks by per-strategy score quantile; `arrival` = the pre-WO-1
     # first-come-first-served order. `arrival` is the documented ROLLBACK setting and nothing else.
     admission_mode: ranked
+    # Forward-queue DRAIN trigger (2026-08-14). `paced` = the analyst slot is spent on a fixed
+    # cadence (engine.ops.pipeline.FORWARD_PACING_MIN, 3 min) so candidates accumulate and the
+    # ranking above actually chooses between them; `immediate` = the pre-2026-08-14 inline drain,
+    # where the arriving candidate was the only one pending and all 12 slots went in the first five
+    # minutes of the session (live 2026-08-14). `immediate` is the documented ROLLBACK and nothing
+    # else.
+    forward_drain_mode: paced
     # Per-strategy publication sub-caps [owner knob — NOT in the learnable envelope (§6.3); the
     # learner may never move a cap that decides which strategies get evaluated at all].
     # `default` binds any strategy without its own line, and at 8 = 40% of max_candidates_per_day

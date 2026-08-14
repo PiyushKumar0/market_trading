@@ -10,9 +10,12 @@ that config, not of a stub.
 
 from __future__ import annotations
 
+import gzip
+import inspect
 import json
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -20,17 +23,24 @@ import pytest
 from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_yaml
 from engine.intelligence.agents import nightly
+from engine.intelligence.context import ContextAssembler
+from engine.intelligence.context import _json as _context_json
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentResult, load_agent_defs
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.ops.jobs import AdvisoryOutcome
 from engine.ops.nightly_review import (
+    _CANDIDATE_LINE_PREFIX,
+    DECLINE_REASON_CHARS,
+    DECLINES_TITLE,
     FUNNEL_TITLE,
     NightlyReviewJob,
+    build_analyst_declines,
     build_funnel_summary,
     build_review_context,
     load_envelope_bounds,
 )
+from engine.strategy.types import RawLevels, SignalCandidate
 
 D = date(2026, 6, 17)          # the conftest FIXED_NOW trading day
 EMPTY_DAY = date(2026, 6, 18)
@@ -561,3 +571,159 @@ async def test_run_emits_the_eod_funnel_line_even_when_it_produces_no_review(
     assert await job.run(D) is AdvisoryOutcome.FAILED  # no agent def -> earliest possible return
     assert captured and captured[0].forwarded == 3
     assert captured[0].best_unforwarded_score == 0.85
+
+
+# ================================================== 2026-08-14: the analyst stage (evaluated -> ?)
+def _context_blob(symbol: str, strategy_id: str) -> bytes:
+    """A prompt archived the way AgentHarness archives one: ``gzip(system + "\\n\\n" + prompt)``.
+
+    The candidate line is built from the REAL ``SignalCandidate`` through the REAL
+    ``engine.intelligence.context._json``, not from a hand-written dict — the whole reader depends
+    on that serialization, and a fixture that rendered it its own way would test the fixture.
+    """
+    cand = SignalCandidate(
+        signal_id="01SIG", strategy_id=strategy_id, symbol=symbol, side="BUY", style="intraday",
+        raw_levels=RawLevels(entry=Decimal("100")), score=0.4,
+    )
+    prompt = "\n".join([
+        "== DAY CONTEXT (stable) ==",
+        "",
+        "== MARKET STATE (volatile) ==",
+        f"{_CANDIDATE_LINE_PREFIX}{_context_json(cand.model_dump(mode='json'))}",
+        "features: unavailable",
+    ])
+    return gzip.compress(f"system prompt\n\n{prompt}".encode())
+
+
+def test_the_review_reads_the_candidate_line_the_assembler_actually_writes() -> None:
+    """A cross-module coupling with no type to protect it: the reader greps the archived prompt for
+    a line ``ContextAssembler.for_signal`` writes. Renaming or reformatting that line would not
+    break anything loudly — the review would just start rendering every decline as "unknown". This
+    is the tripwire that makes it break loudly instead."""
+    assert _CANDIDATE_LINE_PREFIX in inspect.getsource(ContextAssembler.for_signal)
+
+
+def seed_declines(conn, d: date = D) -> None:
+    """The 2026-08-14 shape: every forwarded candidate evaluated, every one declined, zero
+    proposals — plus one row whose output_json is not JSON at all."""
+    rows = [
+        ("D-1", "09:20", "TATAMOTORS", "rsi2", "premature - the 5-minute range has not resolved"),
+        ("D-2", "09:24", "HDFCBANK", "rsi2", "no volume confirmation behind the move"),
+        ("D-3", "09:31", "TCS", "orb", "opening range still forming; entry would be a guess"),
+        ("D-4", "09:45", "INFY", "orb", "L" * 400),                 # long reason -> truncated
+        ("D-5", "10:02", "WIPRO", "trend", "trend intact but the stop is 3% away"),
+        ("D-6", "10:10", "SBIN", "trend", "gap unfilled; risk sits on the wrong side of the level"),
+    ]
+    for call_id, hhmm, symbol, strategy_id, reason in rows:
+        conn.execute(
+            "INSERT INTO agent_calls "
+            "(call_id, agent_id, trigger, model, context_gz, output_json, ok, at) "
+            "VALUES (?, 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', ?, ?, 1, ?)",
+            (call_id, _context_blob(symbol, strategy_id),
+             json.dumps({"action": "no_action", "reason": reason, "regime_note": ""}),
+             f"{d.isoformat()}T{hhmm}:00+05:30"),
+        )
+    # A malformed output on an ok=1 row: counted, never raised (D7).
+    conn.execute(
+        "INSERT INTO agent_calls "
+        "(call_id, agent_id, trigger, model, context_gz, output_json, ok, at) "
+        "VALUES ('D-BAD', 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', ?, ?, 1, ?)",
+        (_context_blob("ITC", "orb"), "{not json at all",
+         f"{d.isoformat()}T10:15:00+05:30"),
+    )
+    # An ENTER answer, so "declined" is a real count and not just "evaluated" renamed.
+    conn.execute(
+        "INSERT INTO agent_calls "
+        "(call_id, agent_id, trigger, model, context_gz, output_json, ok, at) "
+        "VALUES ('P-1', 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', ?, ?, 1, ?)",
+        (_context_blob("RELIANCE", "orb"),
+         json.dumps({"action": "enter", "tradingsymbol": "RELIANCE", "strategy_id": "orb"}),
+         f"{d.isoformat()}T10:20:00+05:30"),
+    )
+    # Different trigger + a failed call: neither is an analyst DECISION on a forwarded candidate.
+    conn.execute(
+        "INSERT INTO agent_calls (call_id, agent_id, trigger, model, output_json, ok, at) "
+        "VALUES ('HB-9', 'intraday_analyst', 'heartbeat', 'sonnet-4.6', ?, 1, ?)",
+        (json.dumps({"action": "no_action", "reason": "regime unchanged"}),
+         f"{d.isoformat()}T10:30:00+05:30"),
+    )
+    conn.execute(
+        "INSERT INTO agent_calls (call_id, agent_id, trigger, model, ok, fail_reason, at) "
+        "VALUES ('F-9', 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', 0, 'timeout', ?)",
+        (f"{d.isoformat()}T10:35:00+05:30",),
+    )
+
+
+def test_declines_are_counted_per_strategy_with_the_recent_reasons(conn) -> None:
+    """The stage the WO-9 funnel stopped short of: 8 slots spent, 6 declines, 1 proposal, and the
+    per-strategy split that says whether ONE scanner is producing setups the analyst always
+    refuses. Identity comes from the archived prompt — a no_action payload carries none."""
+    seed_declines(conn)
+    declines = build_analyst_declines(conn, D)
+
+    assert declines.evaluated == 8          # ok signal_candidate calls; heartbeat + failure excluded
+    assert declines.declined == 6
+    assert declines.proposed == 1
+    assert declines.unparseable == 1
+    assert declines.by_strategy == {"rsi2": 2, "orb": 2, "trend": 2}
+
+    assert len(declines.recent) == 5        # the day's five most recent, newest first
+    assert declines.recent[0].startswith("10:10 SBIN (trend): gap unfilled")
+    assert declines.recent[-1].startswith("09:24 HDFCBANK (rsi2): no volume")
+    long_reason = next(r for r in declines.recent if "INFY" in r)
+    assert long_reason.endswith("L" * DECLINE_REASON_CHARS)          # truncated, not dropped
+    assert len(long_reason.split(": ", 1)[1]) == DECLINE_REASON_CHARS
+
+
+def test_a_malformed_output_is_counted_not_raised(conn) -> None:
+    """D7, and the reason this reader parses defensively at all: the row that cannot be read is the
+    row most likely to be the interesting one, so it is COUNTED and the section still renders."""
+    conn.execute(
+        "INSERT INTO agent_calls (call_id, agent_id, trigger, model, output_json, ok, at) "
+        "VALUES ('BAD-1', 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', ?, 1, ?)",
+        ("<fenced prose, not JSON>", f"{D.isoformat()}T09:50:00+05:30"),
+    )
+    conn.execute(
+        "INSERT INTO agent_calls (call_id, agent_id, trigger, model, output_json, ok, at) "
+        "VALUES ('BAD-2', 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', NULL, 1, ?)",
+        (f"{D.isoformat()}T09:51:00+05:30",),
+    )
+    declines = build_analyst_declines(conn, D)
+    assert (declines.evaluated, declines.declined, declines.unparseable) == (2, 0, 2)
+    assert "unreadable output: 2" in declines.lines()[0]
+
+
+def test_a_decline_without_a_readable_context_still_renders(conn) -> None:
+    """agent_calls has no symbol column, so identity is best-effort: a missing/corrupt context blob
+    costs the LABEL, never the line — "we do not know which symbol" still beats no line at all."""
+    for call_id, blob in (("N-1", None), ("N-2", b"not gzip")):
+        conn.execute(
+            "INSERT INTO agent_calls "
+            "(call_id, agent_id, trigger, model, context_gz, output_json, ok, at) "
+            "VALUES (?, 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', ?, ?, 1, ?)",
+            (call_id, blob, json.dumps({"action": "no_action", "reason": "chop"}),
+             f"{D.isoformat()}T09:{call_id[-1]}0:00+05:30"),
+        )
+    declines = build_analyst_declines(conn, D)
+    assert declines.declined == 2
+    assert declines.by_strategy == {"unknown": 2}
+    assert all("unknown (unknown): chop" in line for line in declines.recent)
+
+
+def test_declines_section_is_in_the_review_context(conn) -> None:
+    seed_declines(conn)
+    text = build_review_context(conn, None, D, BOUNDS)
+    assert f"{DECLINES_TITLE}:" in text
+    assert "evaluated 8 -> declined 6 / proposed 1 (unreadable output: 1)" in text
+    assert "declines by strategy: orb=2 rsi2=2 trend=2" in text
+    assert "- 10:10 SBIN (trend): gap unfilled" in text
+    # The section sits with the funnel it explains, and neither replaced the other.
+    assert text.index(FUNNEL_TITLE) < text.index(DECLINES_TITLE)
+
+
+def test_a_day_with_no_analyst_calls_renders_none(conn) -> None:
+    """A quiet day and a broken query stay distinguishable (the module's D7 convention) — the block
+    says "none" rather than reporting zero declines out of zero evaluations as a finding."""
+    assert build_analyst_declines(conn, EMPTY_DAY).lines() == []
+    text = build_review_context(conn, None, EMPTY_DAY, BOUNDS)
+    assert f"{DECLINES_TITLE}: none" in text
