@@ -891,19 +891,17 @@ async def test_warmup_refresh_lifts_freeze_without_a_login_event(conn, clock, ca
     """2026-08-03 gap: the warm-up lift hung off the post-login hook only, so a VALID-TOKEN
     mid-session restart (boot 12:22, ORB lookbacks short) froze entries with NOTHING to lift them —
     no login event ever fires on such a boot. The 60s refresh cadence must lift it by itself."""
-    from engine.core.enums import RiskState
+    from engine.core.enums import Actor, RiskState
     from engine.core.protected_store import ProtectedStore
-    from engine.core.types import OwnerConfirmation
+    from engine.core.types import TradeWindow
     from engine.ops.lifecycle import SessionLifecycle
     from engine.ops.main import refresh_and_lift_warmup
     from engine.ops.selftest import SelfTest
     from engine.ops.warmup import WarmupStatus
     from engine.risk.causes import RiskStateLatch
-    from engine.core.enums import Actor
-    from engine.core.types import TradeWindow
     from engine.risk.kill import KillSwitch
     from engine.risk.mode import ModeManager
-    from tests.unit.test_lifecycle_selftest import OWNER_OK, FakeSecrets, FakeSettings, REQUIRED_AT_STARTUP
+    from tests.unit.test_lifecycle_selftest import OWNER_OK, REQUIRED_AT_STARTUP, FakeSecrets, FakeSettings
 
     cfg = tmp_path / "config"
     cfg.mkdir()

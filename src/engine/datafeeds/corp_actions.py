@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -33,8 +33,37 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.corp_actions")
 
-#: NSE corporates corporate-actions API (equities segment). [VERIFY Phase-1]; anti-bot [likely].
-NSE_CORP_ACTIONS_URL = "https://www.nseindia.com/api/corporates-corporate-actions?index=equities"
+#: NSE corporates corporate-actions API (equities segment), BASE url — ``corp_actions_url()`` appends
+#: the per-run from_date/to_date window (see below). VERIFIED 2026-08-14: NSE removed the dashed route
+#: ``corporates-corporate-actions`` (hard 404, confirmed genuine — reproduced after nse_http's antibot
+#: re-prime retry, so it is not a cookie/priming issue) in favour of ``corporates-corporateActions``
+#: (camelCase, no dash before "Actions"); cross-checked against BennyThadikaran/NseIndiaApi
+#: (github.com/BennyThadikaran/NseIndiaApi, `src/nse/NSE.py::actions()`, commit 2026-07-23) and
+#: confirmed live (HTTP 200, JSON). The live payload is now a BARE list (not ``{"data": [...]}"``) —
+#: ``_rows_of`` already accepts both shapes, no change needed there — and per-row keys are ``symbol``/
+#: ``exDate``/``subject`` (not ``purpose``), both already matched case-insensitively below. anti-bot [likely].
+NSE_CORP_ACTIONS_URL = "https://www.nseindia.com/api/corporates-corporateActions?index=equities"
+
+#: Forward window past the run day: comfortably exceeds the largest current consumer horizon
+#: (``ops.scan_context.DEFAULT_EX_HORIZON_DAYS`` = 28; ``features.engine``/``ops.preopen_planner`` use
+#: 10) so a later horizon increase doesn't silently starve. VERIFIED 2026-08-14: the bare
+#: ``?index=equities`` call with no date params returns ONLY actions whose ex-date IS the call date —
+#: useless for these forward-looking consumers, which all query ``MarketStore.get_corp_actions`` with
+#: an ``ex_to`` horizon — so every fetch is explicitly date-ranged via :func:`corp_actions_url`.
+_FORWARD_WINDOW_DAYS = 35
+#: Trailing window — "recent" per this module's docstring: ledger attribution needs ex-dates that have
+#: JUST passed (a trade near a recent ex-date); cheap insurance against a same-day gap.
+_BACKWARD_WINDOW_DAYS = 7
+
+
+def corp_actions_url(d: date) -> str:
+    """NSE corporate-actions URL for the ``[d - _BACKWARD_WINDOW_DAYS, d + _FORWARD_WINDOW_DAYS]``
+    window (``from_date``/``to_date``, ``%d-%m-%Y`` — verified param shape, mirrors
+    ``earnings_calendar.event_calendar_range_url``)."""
+    frm = d - timedelta(days=_BACKWARD_WINDOW_DAYS)
+    to = d + timedelta(days=_FORWARD_WINDOW_DAYS)
+    return f"{NSE_CORP_ACTIONS_URL}&from_date={frm:%d-%m-%Y}&to_date={to:%d-%m-%Y}"
+
 
 #: purpose-keyword → kind, checked IN ORDER (first match wins; bonus/split before dividend so a
 #: compound purpose classifies by its structural action, which is what GTT adjustment cares about).
@@ -169,7 +198,7 @@ class CorpActionsJob:
         """Fetch + upsert corporate actions (idempotent on (symbol, ex_date, kind)). ``d`` is the
         run day (audit only — the feed is forward-looking). Never raises into the scheduler (E5)."""
         try:
-            resp = await nse_get(self._http, NSE_CORP_ACTIONS_URL, timeout=self._timeout)
+            resp = await nse_get(self._http, corp_actions_url(d), timeout=self._timeout)
             rows = parse_corp_actions(json.loads(resp.content))
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"

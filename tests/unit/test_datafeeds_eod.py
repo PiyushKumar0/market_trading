@@ -212,6 +212,34 @@ async def test_corp_actions_failure_alerts_critical(store, clock):
     assert msgs and msgs[0].severity == "critical"       # A12 safety-critical set (§2.6 step 5)
     assert msgs[0].data["job_id"] == "corp_actions"
     assert ca.NSE_CORP_ACTIONS_URL.startswith("https://www.nseindia.com/")
+    assert ca.NSE_CORP_ACTIONS_URL.endswith("/corporates-corporateActions?index=equities")
+
+
+def test_corp_actions_url_windows_from_run_day():
+    """2026-08-14 route fix: the bare ``?index=equities`` call returns ONLY same-day ex-dates (verified
+    live) — useless for the forward-looking consumers (scan_context/preopen_planner/features.engine all
+    query ``get_corp_actions`` with an ``ex_to`` horizon), so every fetch is explicitly date-ranged."""
+    url = ca.corp_actions_url(date(2026, 8, 14))
+    assert url.startswith(ca.NSE_CORP_ACTIONS_URL)
+    assert "from_date=07-08-2026" in url                  # d - 7 (_BACKWARD_WINDOW_DAYS)
+    assert "to_date=18-09-2026" in url                     # d + 35 (_FORWARD_WINDOW_DAYS)
+
+
+async def test_corp_actions_run_requests_windowed_url(store, clock):
+    """The production fetch path (not just the standalone URL builder) must actually request the
+    windowed URL, anchored on the run day ``D`` (FIXED_NOW.date() == 2026-06-17)."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=CORP_ACTIONS_JSON)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = await CorpActionsJob(store, clock, client).run(D)
+    assert result.ok is True
+    assert captured["url"].startswith(ca.NSE_CORP_ACTIONS_URL)
+    assert "from_date=10-06-2026" in captured["url"]       # D - 7
+    assert "to_date=22-07-2026" in captured["url"]          # D + 35
 
 
 # =========================================================================== earnings (job 8)
