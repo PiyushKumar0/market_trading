@@ -26,6 +26,13 @@
   candidates enter Tuesday's window-open sweep through the capped/quantile-ranked/paced funnel.
   Watch: ins_crossings_run fresh-feed row counts (starvation visible by design); today is also the
   paced drain's first live day + deals-503 adjudication at midday (drift treatment if it persists).
+- **~01:45 addendum:** the weekend manual compaction drain died on a ZERO-BYTE tick fragment
+  (date=2026-08-04/MOTHERSON — flush handle opened, process killed; boot-wedge-era debris). Full
+  tree scan: exactly 2 such fragments in ~2M files (also 08-07/BEL); both quarantined to
+  data/parquet/quarantine (ticks in those partial batches lost — bars unaffected, built
+  independently). Tonight's engine-side 22:30 compaction now proceeds clean. Filed (small): the
+  compaction's per-symbol-day catch should contain InvalidInputException (too-small parquet) the
+  way it contains vanished-fragments, instead of letting it escape the run.
 
 ## 2026-08-14 (EOD, ~22:15) — ranked funnel's first live day: the drain was vacuous; fixed same-day (paced) + review gains analyst-declines sight; corp-actions deployed
 
@@ -1461,3 +1468,4 @@ the top of each dated section.
 - rsi2 `max_hold_days` time-exits modelled in the sweep (previously a no-op axis).
 - Minute-bar history extended 2025-07-10 → 2023-07-17 (`backfill_minute_years` default was 1y).
 - Backtest CLI: span-shortfall warning added.
+
