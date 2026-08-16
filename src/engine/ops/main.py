@@ -29,7 +29,7 @@ import signal
 import sqlite3
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
 
@@ -61,6 +61,7 @@ from engine.datafeeds.filings_pit import FilingsPitJob, FilingsPitResult
 from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob, FilingsPitFreshResult
 from engine.datafeeds.filings_results import FilingsResultsJob, FilingsResultsResult
 from engine.datafeeds.filings_shp import FilingsShpJob, FilingsShpResult
+from engine.datafeeds.ins_crossings import InsCrossingsJob, InsCrossingsResult
 from engine.datafeeds.news import Headline, NewsIngest
 from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
 from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
@@ -90,6 +91,7 @@ from engine.ops.jobs import (
     JOB_FILINGS_PIT_FRESH,
     JOB_FILINGS_RESULTS,
     JOB_FILINGS_SHP,
+    JOB_INS_CROSSINGS,
     JOB_INSTRUMENTS,
     JOB_NEWS_CHAIN,
     JOB_RECONCILE,
@@ -129,7 +131,7 @@ from engine.ops.warmup import WarmupGate, WarmupStatus
 from engine.risk.gate import GateContextBuilder, RiskGate
 from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
-from engine.strategy.scanners import brk20, build_enabled_scanners
+from engine.strategy.scanners import brk20, build_enabled_scanners, ins
 from engine.risk.causes import RiskStateLatch
 from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
@@ -176,6 +178,7 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_FILINGS_SHP,                                                             # run-latest (§2.8)
     JOB_RECONCILE, JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_DEALS, JOB_FEATURES,        # date-keyed
     JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
+    JOB_INS_CROSSINGS,                                                           # date-keyed (§6.1 `ins`)
     JOB_TICK_COMPACT,                                                            # date-keyed (§4.3/WO-7)
 )
 
@@ -249,6 +252,11 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
         JobSpec(JOB_FILINGS_PIT, JobClass.DATE_KEYED, settings.jobs.filings_pit_ist, fns[JOB_FILINGS_PIT], order=60),
         JobSpec(JOB_FILINGS_PIT_FRESH, JobClass.DATE_KEYED, settings.jobs.filings_pit_fresh_ist, fns[JOB_FILINGS_PIT_FRESH], order=65),
         JobSpec(JOB_FILINGS_RESULTS, JobClass.DATE_KEYED, settings.jobs.filings_results_ist, fns[JOB_FILINGS_RESULTS], order=70),
+        # §6.1 `ins`: EOD insider net-buy crossing detection -> ins_pending. order=66 puts it directly
+        # after filings_pit_fresh (65) and before filings_results (70), so a §2.6 catch-up replay of a
+        # missed day ingests the day's BSE fresh rows BEFORE computing crossings over them — the same
+        # dependency the 19:00/19:15 fire-times encode for the live path.
+        JobSpec(JOB_INS_CROSSINGS, JobClass.DATE_KEYED, settings.jobs.ins_crossings_ist, fns[JOB_INS_CROSSINGS], order=66),
         # §4.3 storage housekeeping (WO-7): collapse each closed symbol-day's ~7.5 K tick fragments
         # into one file. LAST in the date-keyed order — it reads no engine state and blocks nothing.
         JobSpec(JOB_TICK_COMPACT, JobClass.DATE_KEYED, _TICK_COMPACT_IST, fns[JOB_TICK_COMPACT], order=90),
@@ -529,6 +537,13 @@ async def run() -> int:
     filings_pit_fresh = FilingsPitFreshJob(store, clock, http, notify=notify)
     filings_results = FilingsResultsJob(store, clock, http, earnings=earnings, notify=notify)
     filings_shp = FilingsShpJob(store, clock, http, notify=notify)
+    # §6.1 `ins` (2026-08-17): EOD insider net-buy crossing detection over the SAME validated crossing
+    # function the WO-16 study runs (engine.datafeeds.insider_crossings). No HTTP — it reads the rows
+    # filings_pit_fresh ingested at 19:00 and journals crossings into ins_pending for the next
+    # session's sweep. threshold_inr is owner-fixed (it defines the validated event population).
+    ins_crossings = InsCrossingsJob(
+        store, conn, clock, calendar, threshold_inr=settings.ins.threshold_inr
+    )
     sector_map = SectorMapJob(store, clock, http, data_dir / "datafeeds" / "sector_lists.json", notify=notify)
 
     # --- news pipeline data side (§2.7 steps 1-3) ---
@@ -563,7 +578,18 @@ async def run() -> int:
             return Decimal("2.0")   # §6.3 default; the store failure is already FROZEN elsewhere
 
     cost_model = CostModel.from_config(instruments=instruments, edge_multiple_min=_edge_multiple_min())
-    gate = RiskGate(limits_engine, cost_model, clock)
+    gate = RiskGate(
+        limits_engine, cost_model, clock,
+        # §6.1 `ins` (2026-08-17): the C3 edge check derives the expected move from the proposal's
+        # TARGET, and `ins` has none by design (its exit is the §7.1 20-td time cap, and the drift it
+        # captures was MEASURED, not predicted). Rather than invent a target to feed the arithmetic,
+        # the strategy registers its validated T+20 NET drift (WO-16: +1.5797%, owner-set in
+        # settings.yaml, never learner-movable). Used ONLY when target_price is None; every other
+        # strategy and every targetless proposal without a registered edge behaves exactly as before.
+        strategy_expected_edge_pct={
+            ins.STRATEGY_ID: Decimal(str(settings.ins.expected_edge_pct)),
+        },
+    )
 
     # Warm-up status cache for the gate context: WarmupGate.status() is async + store-heavy, so the
     # gate reads a snapshot refreshed by the equity/health cadence. Unset ⇒ a NOT-READY status with a
@@ -914,6 +940,12 @@ async def run() -> int:
         # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
         return await filings_shp.run()
 
+    async def job_ins_crossings(d) -> InsCrossingsResult:
+        # §6.1 `ins`: ok-bearing (E5 — never raises). ok=False means the day could not be EVALUATED
+        # (no universe row / no daily bar), so the watermark sinks and the §2.6 sweep retries it;
+        # zero crossings on an evaluated day is ok=True — a real answer, not a failure.
+        return await ins_crossings.run(d)
+
     async def job_reconcile(d) -> None:
         if reconcile is not None:
             await reconcile.run(d)
@@ -955,6 +987,7 @@ async def run() -> int:
         JOB_FILINGS_PIT_FRESH: job_filings_pit_fresh,
         JOB_FILINGS_RESULTS: job_filings_results,
         JOB_FILINGS_SHP: job_filings_shp,
+        JOB_INS_CROSSINGS: job_ins_crossings,
         JOB_TICK_COMPACT: job_tick_compact,
         # Phase-2 (§8.3): digest always (deterministic, $0); planner/nightly/expire register even
         # when the LLM tier is down — their fns no-op internally so the watermark records the skip.
@@ -1238,7 +1271,36 @@ async def run() -> int:
                     brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map), today
                 ),
             )
-            return accepted + daily, pendings
+
+            # --- `ins` daily leg (§6.1 addendum, owner-directed 2026-08-17): the crossings last
+            #     night's ins_crossings job journalled into ins_pending. Same batch shape as brk20 —
+            #     admitted through prescreen.admit so the §3.2.5 dedupe/caps bind identically — but
+            #     the EVENT was decided EOD by the validated crossing function; nothing is re-derived
+            #     here. Rows are marked consumed as part of admission, so a second sweep the same day
+            #     (or a sweep after a mid-session restart) re-admits nothing: the flag is persisted
+            #     state, not process memory.
+            ins_pending = _read_ins_pending(conn, today)
+            ins_cands: list = []
+            if ins_pending:
+                ins_cands = _attach_feature_snapshots(
+                    features,
+                    prescreen.admit(
+                        ins.sweep_crossings(
+                            ins_pending,
+                            params={
+                                "stop_pct": settings.ins.stop_pct,
+                                "hold_sessions": settings.ins.hold_sessions,
+                                "threshold_inr": settings.ins.threshold_inr,
+                            },
+                        ),
+                        today,
+                    ),
+                )
+                # Consume EVERY row read, not just the admitted ones: a row suppressed by the daily
+                # cap or the (symbol, strategy) dedupe has HAD its evaluation — leaving it unconsumed
+                # would re-offer it on the next sweep tick forever. Suppression is a decision.
+                _consume_ins_pending(conn, today, [c.symbol for c in ins_pending], now=now)
+            return accepted + daily + ins_cands, pendings
 
         accepted, pendings = await asyncio.to_thread(_collect_and_scan)
         for cand in accepted:
@@ -1804,9 +1866,62 @@ def _hydrate_prescreen(conn: sqlite3.Connection, prescreen, today: date) -> None
     _log.info("prescreen_hydrated", d=today.isoformat(), charged=len(charged), seen=len(seen))
 
 
+# --------------------------------------------------------------------------- §6.1 `ins` pending queue
+def _read_ins_pending(conn: sqlite3.Connection, today: date) -> list[ins.Crossing]:
+    """Today's UNCONSUMED ``ins_pending`` rows (migration 0008) as :class:`ins.Crossing` tuples.
+
+    The EOD ``ins_crossings`` job wrote these last night keyed on ``for_session`` = today. Money
+    columns are TEXT and are re-hydrated to ``Decimal`` here (§8.1: money never round-trips through a
+    float). A malformed row costs itself and nothing else — the sweep must not die on one bad row."""
+    rows = conn.execute(
+        "SELECT symbol, crossing_session, trailing_value, contributing_filings_n, reference_close "
+        "FROM ins_pending WHERE for_session = ? AND consumed = 0 ORDER BY symbol",
+        (today.isoformat(),),
+    ).fetchall()
+    out: list[ins.Crossing] = []
+    for r in rows:
+        try:
+            out.append(
+                ins.Crossing(
+                    symbol=str(r["symbol"]),
+                    crossing_session=date.fromisoformat(str(r["crossing_session"])),
+                    trailing_value=Decimal(str(r["trailing_value"])),
+                    contributing_filings_n=int(r["contributing_filings_n"] or 0),
+                    reference_close=Decimal(str(r["reference_close"])),
+                )
+            )
+        except (ValueError, ArithmeticError, TypeError) as exc:
+            _log.warning("ins_pending_unparseable", symbol=str(r["symbol"]), error=str(exc))
+    return out
+
+
+def _consume_ins_pending(
+    conn: sqlite3.Connection, today: date, symbols: list[str], *, now: datetime
+) -> None:
+    """Mark today's admitted/evaluated ``ins_pending`` rows consumed — the restart-safe once-only bound.
+
+    ``now`` comes from the engine ``Clock`` (§3.2: never ``datetime.now()``). Rows are never deleted:
+    ``ins_pending`` is the audit trail of what the EOD job found, and a consumed-but-suppressed
+    candidate must stay distinguishable from one that never existed."""
+    if not symbols:
+        return
+    try:
+        # Bare execute on the autocommit connection (``isolation_level=None``), matching the other
+        # journal writers (``scan_context._write_last_rebalance_d``, ``pipeline._journal_slot``).
+        # Deliberately NOT ``transaction()``: this runs on a worker thread against the connection the
+        # loop thread also uses, and an explicit BEGIN could land inside one the OMS already opened.
+        conn.executemany(
+            "UPDATE ins_pending SET consumed = 1, consumed_at = ? "
+            "WHERE for_session = ? AND symbol = ? AND consumed = 0",
+            [(now.isoformat(), today.isoformat(), sym) for sym in symbols],
+        )
+    except Exception as exc:  # noqa: BLE001 - journalling is bookkeeping; it never kills the sweep
+        _log.warning("ins_pending_consume_failed", d=today.isoformat(), error=str(exc))
+
+
 # --------------------------------------------------------------------------- brk20 feature link (§4.3)
 def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list:
-    """Mint the §4.3 ``features_snapshot_id`` for batch-rule candidates (brk20) post-admit.
+    """Mint the §4.3 ``features_snapshot_id`` for batch-rule candidates (brk20, ins) post-admit.
 
     The per-bar path gets its id from ScanContext at signal time; batch rules bypass ScanContext, and
     a candidate with a null id is structurally un-recommendable (intraday.py Rule 6 mandates

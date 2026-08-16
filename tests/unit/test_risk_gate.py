@@ -83,8 +83,26 @@ def gate_clock() -> Clock:
     return Clock(time_source=lambda: NOW)
 
 
+#: §6.1 `ins` (2026-08-17): the per-strategy pre-registered expected edge the composition root wires
+#: from ``settings.yaml`` (``ins.expected_edge_pct`` = the validated WO-16 T+20 NET drift). Consumed by
+#: ``min_viable_size`` ONLY for a proposal with no target; every other strategy is unaffected.
+INS_EDGE_PCT = Decimal("1.58")
+
+
 @pytest.fixture
 def gate(limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock) -> RiskGate:
+    return RiskGate(
+        _StubLimits(limit_table), cost_model, gate_clock,
+        strategy_expected_edge_pct={"ins": INS_EDGE_PCT},
+    )
+
+
+@pytest.fixture
+def gate_no_registered_edges(
+    limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock
+) -> RiskGate:
+    """The pre-2026-08-17 gate: no strategy registers a measured edge, so a targetless entry is a hard
+    C3 reject for EVERY strategy. Pins that the new path is opt-in, not a weakening of the default."""
     return RiskGate(_StubLimits(limit_table), cost_model, gate_clock)
 
 
@@ -196,6 +214,20 @@ BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 10, "MIS", Decimal("2"
 #: shrunk notional, where paise-rounding of the fee components moves the breakeven (₹300 ⇒ 0.130%
 #: vs ₹1,000 ⇒ 0.126%) — a target calibrated at the opening ask would not sit on the boundary there.
 SHRUNK_BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 3, "MIS", Decimal("2"))
+
+#: A real §6.1 `ins` proposal (2026-08-17): CNC swing, long-only, entry on the pre-open reference,
+#: stop a flat 6% below it, and NO target — the exit is the §7.1 20-td time cap. qty 66 is what the
+#: shipped table actually allows: 2% swing risk on ₹20,000 = ₹400 budget / a ₹6 stop distance = 66
+#: units (₹6,600 notional, inside the ₹8,000/symbol CNC cap) — the plan's "≈ ₹6.7k notional" sizing.
+INS_ACTION: dict[str, Any] = {
+    "style": "swing",
+    "entry_type": "LIMIT",
+    "entry_price": Decimal("100"),
+    "stop_price": Decimal("94"),
+    "target_price": None,
+    "quantity": 66,
+    "strategy_id": "ins",
+}
 
 
 # --------------------------------------------------------------------------- the rule table
@@ -403,6 +435,21 @@ CASES: tuple[Case, ...] = (
     # stated entry does not clear it from the price the market has actually moved to.
     Case("min_viable_size", "edge measured from the live reference, not the stated entry",
          "fail", False, act={"target_price": BOUNDARY_TARGET}, ctx={"ltp": Decimal("100.50")}),
+    # §6.1 `ins` (2026-08-17): targetless BY DESIGN (the exit is the §7.1 20-td time cap), so the C3
+    # edge comes from the strategy's pre-registered measured drift instead of from a fabricated level.
+    # The registered edge IS consumed (see the value string) — and at the SHIPPED 6% stop it still
+    # falls short of the 2x floor. That is the OPEN BLOCKER pinned in
+    # ``test_ins_at_the_shipped_6pct_stop_is_structurally_rejected`` below; this case asserts the
+    # live arithmetic, not the outcome anyone wanted.
+    Case("min_viable_size", "ins: registered edge consumed but 6% stop sizes below the cost floor",
+         "fail", False, act=INS_ACTION),
+    # A 4% stop DOES clear — the same shape, sized larger, so the mechanism itself is sound.
+    Case("min_viable_size", "ins: registered edge clears costs at a 4% stop", "pass", True,
+         act={**INS_ACTION, "stop_price": Decimal("96"), "quantity": 40}),
+    # ...and the exception is strategy-scoped: the SAME targetless shape under any other strategy_id
+    # is the unchanged hard C3 reject, on the "no target at all" ground rather than on the numbers.
+    Case("min_viable_size", "targetless under an unregistered strategy still fails", "fail", False,
+         act={**INS_ACTION, "strategy_id": "brk20"}),
 )
 
 #: Rules whose threshold is a plain boolean flag — there is no interior value to sit exactly on, so
@@ -605,6 +652,138 @@ def test_shrink_to_sub_viable_size_rejects_cnc(gate: RiskGate) -> None:
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
     assert check_of(verdict, "min_viable_size").passed is False
+
+
+# --------------------------------------------------------------------------- §6.1 `ins` (2026-08-17)
+def test_ins_at_the_shipped_6pct_stop_is_structurally_rejected(gate: RiskGate) -> None:
+    """**OPEN BLOCKER, pinned deliberately (found 2026-08-17 building this leg).**
+
+    The §6.1 `ins` addendum sizes the leg as "2% swing risk / 6% stop ≈ ₹6.7k notional ⇒ CNC
+    round-trip ≈ 0.53% ⇒ edge multiple ≈ 3x". That arithmetic omits §7.1 ``per_trade_risk``'s
+    ``overnight_gap_mult``: for a swing/overnight position the gate charges **2.5 x the stop
+    distance** per unit (``gate.py`` ``_rule_per_trade_risk``), not the stop distance itself. So:
+
+        unit risk   = 2.5 x ₹6.00        = ₹15.00      (not ₹6.00)
+        budget      = 2% x ₹20,000       = ₹400
+        approved    = floor(400 / 15)    = 26 units    (not 66)
+        notional    = 26 x ₹100          = ₹2,600      (not ₹6,600)
+        breakeven   = CNC round trip @ ₹2,600          = 0.832692%   (not ~0.53%)
+        edge mult   = 1.58 / 0.832692    = 1.8975x  <  2.0x  ⇒ REJECT
+
+    At the ₹20,000 capital base every `ins` candidate therefore hard-rejects at C3 with the shipped
+    6% stop. This test asserts what the code ACTUALLY does; it is not an endorsement. Resolving it is
+    an owner decision (see the sibling test for which stops do clear) — the numbers are pinned here so
+    the blocker cannot be forgotten or silently "fixed" by moving a risk limit."""
+    verdict = gate.evaluate(make_action(**INS_ACTION), make_ctx())
+    assert verdict.verdict == "reject"
+    assert verdict.approved_qty == 0
+
+    # The per_trade_risk cap is what shrank it, and it says why in its own words.
+    ptr = check_of(verdict, "per_trade_risk")
+    assert "2.5x stop distance" in ptr.value
+
+    cost = verdict.cost
+    assert cost is not None
+    assert cost.notional == Decimal("2600.00")             # 26 units, not the plan's 66
+    assert cost.expected_edge_pct == INS_EDGE_PCT          # the registered edge WAS consumed
+    assert cost.breakeven_pct == Decimal("0.832692")
+    assert cost.edge_multiple == Decimal("1.8975")
+    assert cost.edge_multiple < Decimal("2.0")
+    assert "pre-registered measured edge" in check_of(verdict, "min_viable_size").value
+
+
+def test_ins_clears_the_cost_floor_at_a_4pct_stop(gate: RiskGate) -> None:
+    """The mechanism is sound — only the shipped 6% default is out of reach. Sweeping the `ins`
+    envelope [4-8] against the SHIPPED cost surface, with the 2.5x overnight multiplier applied:
+
+        4% stop -> 40 units, ₹4,000 notional, 0.626250% breakeven -> 2.5230x  PASS
+        5% stop -> 32 units, ₹3,200 notional, 0.722188% breakeven -> 2.1878x  PASS
+        6% stop -> 26 units, ₹2,600 notional, 0.832692% breakeven -> 1.8975x  REJECT (shipped)
+        7% stop -> 22 units, ₹2,200 notional, 0.940000% breakeven -> 1.6809x  REJECT
+        8% stop -> 20 units, ₹2,000 notional, 1.009000% breakeven -> 1.5659x  REJECT
+
+    A WIDER stop makes it worse, not better: it shrinks the position, and the CNC DP flat charge is
+    a bigger fraction of a smaller notional. The whole viable band is the bottom of the envelope."""
+    verdict = gate.evaluate(
+        make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 40}), make_ctx()
+    )
+    assert verdict.verdict == "approve", verdict.reasons
+    assert verdict.approved_qty == 40                      # 400 budget / (2.5 x 4.00) = 40
+    assert verdict.cost is not None
+    assert verdict.cost.notional == Decimal("4000.00")
+    assert verdict.cost.expected_edge_pct == INS_EDGE_PCT
+    assert verdict.cost.edge_multiple == Decimal("2.5230")
+
+
+def test_ins_targetless_shape_is_levels_coherent(gate: RiskGate) -> None:
+    """``levels_coherent`` must accept a missing target (BUY: stop < entry, target unconstrained) —
+    otherwise the targetless design could never reach the edge check at all."""
+    check = check_of(gate.evaluate(make_action(**INS_ACTION), make_ctx()), "levels_coherent")
+    assert check.passed is True
+
+
+def test_ins_stop_still_binds_per_trade_risk(gate: RiskGate) -> None:
+    """The 6% stop is a REAL risk distance, not a formality: it caps the position at the overnight
+    risk budget exactly as for any other swing. (The cap here is 26 units — see the blocker test —
+    and the proposal is then rejected at C3, so the verdict is reject rather than shrink.)"""
+    verdict = gate.evaluate(make_action(**{**INS_ACTION, "quantity": 200}), make_ctx())
+    ptr = check_of(verdict, "per_trade_risk")
+    assert ptr.passed is False
+    assert "max qty 26" in ptr.headroom
+    # ...and at a stop the cost floor accepts, the same over-ask SHRINKS cleanly instead of rejecting.
+    ok = gate.evaluate(
+        make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 200}), make_ctx()
+    )
+    assert ok.verdict == "shrink"
+    assert ok.approved_qty == 40
+
+
+def test_ins_measured_edge_is_opt_in_not_a_weakening_of_c3(
+    gate_no_registered_edges: RiskGate,
+) -> None:
+    """Without the registration the pre-2026-08-17 behaviour is byte-for-byte intact: a targetless
+    entry — `ins` or otherwise — is a hard C3 reject. The new path cannot be reached by accident."""
+    verdict = gate_no_registered_edges.evaluate(make_action(**INS_ACTION), make_ctx())
+    check = check_of(verdict, "min_viable_size")
+    assert check.passed is False
+    assert check.value == gate_module._NO_TARGET
+    assert verdict.verdict == "reject"
+
+
+def test_ins_registered_edge_is_never_used_when_a_target_exists(gate: RiskGate) -> None:
+    """The override is scoped to the targetless case ONLY. If an `ins` proposal ever DID carry a
+    target, the edge must still be derived from that target — a registered number may not silently
+    replace a stated one."""
+    verdict = gate.evaluate(
+        make_action(**{**INS_ACTION, "target_price": Decimal("110")}), make_ctx()
+    )
+    edge = verdict.cost.expected_edge_pct
+    assert edge == Decimal("10")                          # (110 - 100)/100, not the registered 1.58
+    assert "pre-registered measured edge" not in check_of(verdict, "min_viable_size").value
+
+
+def test_ins_measured_edge_still_faces_the_cost_floor(
+    limit_table: LimitTable, gate_clock: Clock
+) -> None:
+    """The registered edge is an INPUT to C3, never an exemption from it: a strategy whose measured
+    edge does not clear 2x the breakeven at the approved size is rejected exactly like any other."""
+    thin = RiskGate(
+        _StubLimits(limit_table),
+        CostModel(load_cost_rates(COSTS_YAML), edge_multiple_min=Decimal("2.0")),
+        gate_clock,
+        strategy_expected_edge_pct={"ins": Decimal("0.10")},   # a tenth of a percent — sub-cost
+    )
+    verdict = thin.evaluate(make_action(**INS_ACTION), make_ctx())
+    assert check_of(verdict, "min_viable_size").passed is False
+    assert verdict.verdict == "reject"
+
+
+def test_ins_edge_matches_the_shipped_settings_value() -> None:
+    """The 1.58 asserted above is the validated WO-16 T+20 NET drift the settings file actually
+    ships — the tests must not drift from the config the engine boots with."""
+    from engine.core.config import load_settings
+
+    assert Decimal(str(load_settings().ins.expected_edge_pct)) == INS_EDGE_PCT
 
 
 def test_zero_headroom_rejects_without_shrinking(gate: RiskGate) -> None:

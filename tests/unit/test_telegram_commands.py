@@ -590,6 +590,40 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     assert "current price" not in text
 
 
+# ------------------------------------------------- §6.1 `ins`: a TARGETLESS payload (2026-08-17)
+def test_recommendation_renders_a_targetless_ins_payload(clock):
+    """`ins` ships ``target = None`` by design (its exit is the §7.1 20-td time cap), so the owner
+    payload must render a recommendation with an EMPTY targets list — honestly, as "(none)", never
+    by inventing a level. The rest of the payload is unchanged: the stop, the size, the gate ledger
+    and the B7 protective-order checklist all still ship.
+
+    KNOWN GAP, asserted here so it is documented rather than assumed away: :class:`Recommendation`
+    has no informational-notes field and ``recommendation_message`` has no seam for one, so the
+    validated T+20 median (+1.21%) that the §6.1 addendum wants stated as INFORMATION cannot be
+    rendered without a contract change. Flagged for the owner; deliberately not forced in here."""
+    base = _recommendation(clock)
+    rec = base.model_copy(update={
+        "style": "swing", "product": "CNC", "targets": [],
+        "entry_zone": (Decimal("100.00"), Decimal("100.00")), "stop": Decimal("94.00"),
+        "manual_checklist": ["after entry fills place SL-M at 94.00",
+                             "time exit: square off after 20 trading days (§7.1 max_holding)"],
+    })
+    message = catalog.recommendation_message(rec, ltp=Decimal("100.50"))
+    text = message.render()
+
+    assert "swing/CNC" in text
+    assert "targets (none)" in text                 # honest absence, not a fabricated level
+    assert "stop 94.00" in text
+    assert "level 100.00 (limit-at-level)" in text  # the pre-open reference, labelled as a level
+    assert "current price 100.50" in text
+    assert "time exit: square off after 20 trading days" in text
+    assert message.data["targets"] == []
+    assert message.data["stop"] == "94.00"
+    # No notes/informational seam exists on the contract today — the gap named in the docstring.
+    assert "notes" not in message.data
+    assert not hasattr(rec, "notes")
+
+
 # ------------------------------------------------------- WO-4: level + current price (§3.6/F5)
 def _limit_recommendation(clock, level: str = "2450.00") -> Recommendation:
     """A LIMIT proposal: the entry zone is the single instructed price (``low == high``), which is

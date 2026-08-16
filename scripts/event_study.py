@@ -61,7 +61,7 @@ import os
 import statistics
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -73,6 +73,28 @@ import engine  # noqa: E402,F401  native import-order guard
 from engine.core.clock import IST, Clock  # noqa: E402
 from engine.core.config import load_settings  # noqa: E402
 from engine.core.log import configure_logging, get_logger  # noqa: E402
+
+# --- the §2.8.2/§2.8.4 crossing primitives this script VALIDATED, now owned by the engine package.
+#     Promoted 2026-08-17 with the §6.1 `ins` leg: a LIVE EOD job computes crossings on the decision
+#     path, and engine code may not path-load a loose script at runtime (the shim
+#     engine.datafeeds.filings_events used to carry, flagged in its own docstring). The dependency is
+#     inverted, not copied — this module still exports the same names at module scope, so
+#     `es.insider_buy_events(...)` and friends resolve exactly as before for
+#     scripts/filings_experiments.py and tests/unit/test_event_study_filings.py, and the study and the
+#     live `ins_crossings` job run the SAME bytes. Editing the rule means editing
+#     engine/datafeeds/insider_crossings.py and re-running this study (§2.8.4 / WO-3 margin floor).
+from engine.datafeeds.insider_crossings import (  # noqa: E402
+    INSIDER_ACQ_MODE_EXCLUSIONS,  # noqa: F401  - re-exported for `es.`-style consumers
+    INSIDER_TRAILING_SESSIONS,
+    MARKET_CLOSE_IST,  # noqa: F401  - re-exported for `es.`-style consumers
+    after_hours,  # noqa: F401  - re-exported for `es.`-style consumers
+    entry_session_index,
+    insider_buy_events,
+    insider_cluster_events,  # noqa: F401  - re-exported for `es.`-style consumers
+    is_open_market_buy,  # noqa: F401  - re-exported for `es.`-style consumers
+    is_open_market_sell,  # noqa: F401  - re-exported for `es.`-style consumers
+    to_ist,
+)
 from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 
@@ -88,24 +110,11 @@ CAT_CONFIRM_MOVE_PCT = 1.0              # §6.3 cat.confirm_move_pct default
 CAT_CONFIRM_VOL_MULT = 1.5             # §6.3 cat.confirm_vol_mult default
 REFERENCE_NOTIONAL = Decimal("20000")
 
-INSIDER_TRAILING_SESSIONS = 10          # §2.8.2 trailing-session window for the insider BUY value sum
-MARKET_CLOSE_IST = time(15, 30)         # a filing broadcast after this is NOT knowable at that close
-
 #: WO-16 entry-fill conventions (see the module docstring). ``next_open`` is the corrected default.
 ENTRY_FILL_NEXT_OPEN = "next_open"
 ENTRY_FILL_CLOSE_T = "close_t"
 ENTRY_FILLS = (ENTRY_FILL_NEXT_OPEN, ENTRY_FILL_CLOSE_T)
 DEFAULT_ENTRY_FILL = ENTRY_FILL_NEXT_OPEN
-
-# §2.8.2 taxonomy — acq_mode values that are NOT open-market purchases and are excluded from the
-# insider_net_buy aggregation. Case-insensitive SUBSTRING match (defensive: NSE varies the exact
-# label — 'ESOP' / 'ESOPs' / 'ESOP Allotment' all contain 'esop'; 'Inter-se Transfer' vs 'Inter se
-# Transfer'; 'Preferential Offer' vs 'Preferential Allotment' — the substrings below cover the family).
-INSIDER_ACQ_MODE_EXCLUSIONS = (
-    "esop", "gift", "inter-se", "inter se", "pledge invocation",
-    "preferential", "rights", "bonus",
-)
-
 
 # --------------------------------------------------------------------------- pure detection/measurement
 @dataclass
@@ -129,9 +138,10 @@ def _median(vals: list[float]) -> float:
     return statistics.median(vals) if vals else float("nan")
 
 
-def _to_ist(dt: datetime) -> datetime:
-    """Coerce to tz-aware IST. Store rows are TIMESTAMPTZ (already IST); a naive dt is assumed IST."""
-    return dt.astimezone(IST) if dt.tzinfo is not None else dt.replace(tzinfo=IST)
+#: Back-compat alias for the pre-promotion private name. ``scripts/filings_experiments.py`` reaches
+#: it as ``es._to_ist`` (the loose-script consumers address this module by attribute); keeping the
+#: alias means the 2026-08-17 promotion changed no consumer.
+_to_ist = to_ist
 
 
 def gap_volume_event_days(bars: list[DailyBar]) -> list[date]:
@@ -158,115 +168,10 @@ def gap_volume_event_days(bars: list[DailyBar]) -> list[date]:
 
 
 # ------------------------------------------------------------------ §2.8.4 point-in-time entry mapping
-def after_hours(broadcast_dt: datetime) -> bool:
-    """A broadcast strictly after 15:30 IST was NOT knowable at that session's close (§2.8.4 PIT).
-
-    **Midnight guard (WO-16).** Exchanges do not broadcast at 00:00:00, so an exact-midnight stamp
-    means the TIME IS UNKNOWN, not that the filing was public before dawn: it is what the feeds'
-    date-only parse fallbacks produce (``filings_pit._parse_dt``'s ``'%d-%b-%Y'`` branch,
-    ``filings_pit_fresh._parse_dt``'s ``'%Y-%m-%d'`` branch) and what this module synthesises for
-    date-only ``earnings_calendar`` fallback rows. Treating it as intraday would let a filing that
-    was actually disseminated at 20:39 (the shape of every real PIT row — see
-    ``tests/unit/fixtures/filings_pit.json``) enter at that same session's close: a one-session
-    lookahead. So an unknown time is treated as AFTER hours — the conservative direction.
-    """
-    t = _to_ist(broadcast_dt).time()
-    if t == time(0, 0):
-        return True
-    return t > MARKET_CLOSE_IST
-
-
-def entry_session_index(sessions: list[date], broadcast_dt: datetime) -> int | None:
-    """Index into ascending ``sessions`` of the first session at whose CLOSE ``broadcast_dt`` was
-    knowable (§2.8.4). After 15:30 IST ⇒ first session strictly AFTER the broadcast date; at/before
-    15:30 ⇒ first session on/after it. ``None`` if no such session is in the series (filing past the
-    last bar). This is the single PIT entry rule shared by the insider-buy, results and pledge legs.
-    """
-    bdate = _to_ist(broadcast_dt).date()
-    late = after_hours(broadcast_dt)
-    for i, d in enumerate(sessions):
-        if (d > bdate) if late else (d >= bdate):
-            return i
-    return None
-
-
-def is_open_market_buy(txn_type: object, acq_mode: object) -> bool:
-    """True iff an ``insider_trades`` row is an OPEN-MARKET buy (§2.8.2): ``txn_type`` == 'Buy' AND
-    ``acq_mode`` is not one of the non-market modes (:data:`INSIDER_ACQ_MODE_EXCLUSIONS`). The acq_mode
-    test is a case-insensitive substring; a blank/None acq_mode on a Buy defaults to open-market
-    (a market purchase often carries no explicit mode label — defensive toward inclusion)."""
-    if str(txn_type or "").strip().lower() != "buy":
-        return False
-    mode = str(acq_mode or "").strip().lower()
-    return not any(excl in mode for excl in INSIDER_ACQ_MODE_EXCLUSIONS)
-
-
-def is_open_market_sell(txn_type: object, acq_mode: object) -> bool:
-    """Mirror of :func:`is_open_market_buy` for the SELL side (the filings_experiments E2 adverse-context
-    leg). True iff ``txn_type`` == 'Sell' AND ``acq_mode`` is not one of the non-market modes
-    (:data:`INSIDER_ACQ_MODE_EXCLUSIONS`). The SAME §2.8.2 exclusion taxonomy applies, so an
-    ESOP-exercise SELL (acq_mode contains 'esop') is deliberately NOT counted as an open-market sell —
-    an insider disposing of just-exercised ESOP stock is not the bearish open-market signal the adverse
-    cohort is after. A blank/None acq_mode on a Sell defaults to open-market (symmetry with the buy
-    side)."""
-    if str(txn_type or "").strip().lower() != "sell":
-        return False
-    mode = str(acq_mode or "").strip().lower()
-    return not any(excl in mode for excl in INSIDER_ACQ_MODE_EXCLUSIONS)
-
-
-def insider_cluster_events(
-    sessions: list[date], filings: list[dict], threshold: object, predicate=is_open_market_buy
-) -> list[int]:
-    """Session indices at which the trailing-``INSIDER_TRAILING_SESSIONS`` sum of the value of filings
-    matching ``predicate`` first crosses ≥ ``threshold``, re-arming only after the trailing sum falls
-    back below (one event per crossing). Generalizes the transaction SIDE via ``predicate``:
-    :func:`is_open_market_buy` for the BUY cluster (the §2.8.4 ``insider_net_buy`` proxy),
-    :func:`is_open_market_sell` for the SELL cluster (E2 adverse context).
-
-    Pure. ``sessions`` = ascending session dates; ``filings`` = plain row dicts (``txn_type``,
-    ``acq_mode``, ``value``, ``broadcast_dt``). Each eligible filing's value lands on its point-in-time
-    knowable session (:func:`entry_session_index`); the crossing session is the entry T (close_T).
-    Only the absolute ₹ floor is applied here — the §2.8.2 value/20d-ADV floor is deliberately NOT part
-    of this proxy (see the module report's ambiguity note).
-    """
-    thr = Decimal(str(threshold))
-    per_session = [Decimal("0")] * len(sessions)
-    for f in filings:
-        if not predicate(f.get("txn_type"), f.get("acq_mode")):
-            continue
-        value = f.get("value")
-        bdt = f.get("broadcast_dt")
-        if value is None or bdt is None:
-            continue
-        v = Decimal(str(value))
-        if v <= 0:
-            continue
-        si = entry_session_index(sessions, bdt)
-        if si is None:
-            continue
-        per_session[si] += v
-    events: list[int] = []
-    armed = True
-    for i in range(len(sessions)):
-        lo = max(0, i - INSIDER_TRAILING_SESSIONS + 1)
-        trailing = sum(per_session[lo:i + 1], Decimal("0"))
-        if armed and trailing >= thr:
-            events.append(i)
-            armed = False
-        elif not armed and trailing < thr:
-            armed = True
-    return events
-
-
-def insider_buy_events(sessions: list[date], filings: list[dict], threshold: object) -> list[int]:
-    """Session indices T at which the trailing-``INSIDER_TRAILING_SESSIONS`` sum of open-market insider
-    BUY value first crosses ≥ ``threshold`` (§2.8.2/§2.8.4). Re-arms only after the trailing sum falls
-    back below the threshold, so one event per crossing. Thin wrapper over
-    :func:`insider_cluster_events` with the open-market BUY predicate (kept as the pinned §2.8.4 API)."""
-    return insider_cluster_events(sessions, filings, threshold, is_open_market_buy)
-
-
+# ``after_hours`` / ``entry_session_index`` / ``is_open_market_buy`` / ``is_open_market_sell`` /
+# ``insider_cluster_events`` / ``insider_buy_events`` moved to engine.datafeeds.insider_crossings on
+# 2026-08-17 (see the import block above) — imported back, not reimplemented, so this study and the
+# live §6.1 `ins` leg cannot diverge.
 def event_session_indices(sessions: list[date], broadcast_dts: list[datetime]) -> list[int]:
     """Unique, ascending PIT entry-session indices for a list of broadcast timestamps (§2.8.4). Two
     filings mapping to the same session (e.g. a result's standalone + consolidated rows share a

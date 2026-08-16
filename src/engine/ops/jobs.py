@@ -130,6 +130,7 @@ JOB_NIGHTLY_REVIEW = "nightly_review"            # §5.5 — date-keyed
 JOB_CATALYST_DIGEST = "catalyst_digest"          # §2.7 step 5 / §4.4 job 14 — run-latest (~08:35)
 JOB_RECO_EXPIRE = "reco_expire"                  # §3.6 expired-unconfirmed → no_action — run-latest
 JOB_TICK_COMPACT = "tick_compact"                # §4.3 tick-partition compaction (WO-7) — date-keyed
+JOB_INS_CROSSINGS = "ins_crossings"              # §6.1 `ins` insider net-buy crossings — date-keyed
 
 
 class JobClass(StrEnum):

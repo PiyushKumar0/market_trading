@@ -209,7 +209,8 @@ def test_registry_covers_every_phase1_job() -> None:
     # Phase-1 fns only ⇒ the Phase-2 specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 18   # +4 §2.8 filings, +1 WO-7 tick compaction
+    assert len(reg) == len(PHASE1_JOB_IDS) == 19   # +4 §2.8 filings, +1 WO-7 tick compaction,
+                                                   # +1 §6.1 ins_crossings (2026-08-17)
 
 
 def test_registry_phase2_jobs_register_when_their_fns_exist() -> None:
@@ -260,6 +261,8 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_FILINGS_PIT:       (JobClass.DATE_KEYED, time(18, 35)),
         opsmain.JOB_FILINGS_PIT_FRESH: (JobClass.DATE_KEYED, time(19, 0)),
         opsmain.JOB_FILINGS_RESULTS:   (JobClass.DATE_KEYED, time(18, 45)),
+        # §6.1 `ins` (2026-08-17): AFTER filings_pit_fresh's 19:00 — it consumes that job's rows.
+        opsmain.JOB_INS_CROSSINGS:     (JobClass.DATE_KEYED, time(19, 15)),
         opsmain.JOB_FILINGS_SHP:     (JobClass.RUN_LATEST,   time(18, 50)),
         # WO-7 storage housekeeping: post-EOD, after the nightly review's 21:00 slot.
         opsmain.JOB_TICK_COMPACT:      (JobClass.DATE_KEYED, time(22, 30)),

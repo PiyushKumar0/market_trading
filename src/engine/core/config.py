@@ -262,6 +262,31 @@ class FilingsCfg(BaseModel):
     pledge_delta_min_pct: float = 5.0             # QoQ promoter-pledge %-point change to flag (§2.8.2)
 
 
+class InsCfg(BaseModel):
+    """§6.1 ``ins`` (insider net-BUY swing) knobs — OWNER-ONLY, deliberately NOT learnable in Phase 2.
+
+    Provenance: WO-16 (2026-08-14) re-ran the §2.8.4 insider_net_buy leg under corrected mechanics
+    (disclosure-date anchoring, next-session-open fills, spread-inclusive CNC costs, WO-3 margin floor
+    on the CPCV stage) and it SURVIVED — T+10 +0.7297% / T+20 +1.5797% net, CPCV +0.0359%/day. It is
+    the only recorded edge that did, and the reason this strategy exists.
+
+    ``stop_pct`` [4-8] and ``hold_sessions`` [10-20] are FUTURE §6.3 envelope rows; they stay static
+    owner settings here for Phase 2 (no protected-store churn until the learning phase needs them).
+    ``threshold_inr`` is owner-FIXED and never learnable at all — it defines the validated event
+    population, so moving it re-opens multiplicity.
+    """
+
+    stop_pct: float = 6.0                 # disaster stop: §7.1 sizing needs a risk distance, and the
+                                          # validated design is stopless — this is the deliberate
+                                          # deviation, wide enough to rarely interrupt the T+20 drift
+    hold_sessions: int = 20               # = the §7.1 swing max_holding cap = the validated T+20
+                                          # horizon; the EXISTING max-holding machinery is the exit
+    threshold_inr: int = 10_000_000       # ₹1cr trailing-10-session open-market net-BUY floor
+    expected_edge_pct: float = 1.58       # the validated T+20 NET drift, fed to the C3 cost gate
+                                          # (target is None for `ins`, so the edge cannot be derived
+                                          # from levels — see risk/gate.py `_rule_min_viable_size`)
+
+
 class PrescreenCfg(BaseModel):
     """§6.3/§3.2.5 ``SignalPreScreen`` caps (owner-tunable). Deduped candidate origination limits;
     the gate/envelope layer owns per-parameter bounds — these are coarse per-day throttles."""
@@ -331,6 +356,8 @@ class JobTimesCfg(BaseModel):
     deals_ist: time = time(18, 45)              # §4.4 job 9 (flagged_instrument_days)
     filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)
     filings_pit_fresh_ist: time = time(19, 0)   # §2.8 filings_pit_fresh (BSE fresh insider, date-keyed)
+    ins_crossings_ist: time = time(19, 15)      # §6.1 ins_crossings — MUST stay after filings_pit_fresh
+                                                # (19:00): it consumes that job's same-day BSE rows
     filings_results_ist: time = time(18, 45)    # §2.8 filings_results (results + board-meeting dates, date-keyed)
     filings_shp_ist: time = time(18, 50)        # §2.8 filings_shp (SHP + pledge, run-latest)
     nightly_review_ist: time = time(21, 0)      # §5.5/§6.4
@@ -367,6 +394,7 @@ class Settings(BaseModel):
     news: NewsCfg = Field(default_factory=NewsCfg)
     cat: CatCfg = Field(default_factory=CatCfg)
     filings: FilingsCfg = Field(default_factory=FilingsCfg)
+    ins: InsCfg = Field(default_factory=InsCfg)
     strategy: StrategyCfg = Field(default_factory=StrategyCfg)
     reconcile: ReconcileCfg = Field(default_factory=ReconcileCfg)
     backfill: BackfillCfg = Field(default_factory=BackfillCfg)

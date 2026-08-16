@@ -140,8 +140,29 @@ SHRINKABLE_RULES: frozenset[str] = frozenset(
 )
 
 #: Sentinel for the "no target" reject (C3): the analyst MUST emit a target or the edge is
-#: unverifiable and the trade cannot be shown to clear costs.
+#: unverifiable and the trade cannot be shown to clear costs — UNLESS the strategy carries a
+#: pre-registered measured edge (see :data:`_NO_TARGET_MEASURED_EDGE` and ``RiskGate``'s
+#: ``strategy_expected_edge_pct``).
 _NO_TARGET = "no target_price — expected edge unverifiable (C3)"
+
+#: The narrow, deliberate exception to :data:`_NO_TARGET`, added 2026-08-17 for the §6.1 ``ins`` leg.
+#:
+#: The C3 check needs ONE number: the expected favourable move, as a percentage. For every strategy
+#: shipped before ``ins`` that number is derived from the proposal's own target — a target is the
+#: strategy's own statement of where it expects price to go, so deriving the edge from it is honest.
+#: ``ins`` has no target BY DESIGN: its exit is TIME (the §7.1 20-td swing cap = the validated T+20
+#: horizon), and the drift it captures was measured, not predicted. Inventing a target purely to feed
+#: this check would push a fabricated price into the gate's arithmetic and into the owner's payload —
+#: strictly worse than using the measured number directly.
+#:
+#: So a strategy MAY register a pre-measured expected edge, and it is used ONLY when the proposal has
+#: no target. Guard-rails that keep this from becoming a bypass:
+#:   * It is a per-strategy OWNER setting (``settings.yaml`` ``ins.expected_edge_pct``), never
+#:     learner-movable and never model-supplied — Tier 1 cannot hand itself an edge.
+#:   * It does not weaken the check: ``edge_multiple = edge / breakeven >= edge_multiple_min`` is
+#:     evaluated exactly as before, at the post-shrink size, against the same shipped cost surface.
+#:   * A strategy with NO registered edge and no target still hard-fails, unchanged.
+_NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registered measured edge (C3)"
 
 _HUNDRED = Decimal(100)
 _UNCLASSIFIED = "UNCLASSIFIED"
@@ -313,10 +334,22 @@ class RiskGate:
     beyond the verdict stamp, no network. Every limit value comes from :class:`LimitTable`; nothing
     here is hardcoded (R4)."""
 
-    def __init__(self, limits_engine: LimitsEngine, cost_model: CostModel, clock: Clock) -> None:
+    def __init__(
+        self,
+        limits_engine: LimitsEngine,
+        cost_model: CostModel,
+        clock: Clock,
+        *,
+        strategy_expected_edge_pct: Mapping[str, Decimal] | None = None,
+    ) -> None:
+        """``strategy_expected_edge_pct`` maps ``strategy_id`` -> a pre-registered, owner-set expected
+        edge in percent, consumed by ``min_viable_size`` ONLY for a proposal with no ``target_price``
+        (see :data:`_NO_TARGET_MEASURED_EDGE`). Unset ⇒ the pre-2026-08-17 behaviour exactly: a
+        targetless entry is a hard C3 reject."""
         self._limits = limits_engine
         self._costs = cost_model
         self._clock = clock
+        self._strategy_edge = dict(strategy_expected_edge_pct or {})
 
     # ------------------------------------------------------------------ dispatch
     def evaluate(self, action: ActionProposal, ctx: GateContext) -> GateVerdict:
@@ -922,7 +955,10 @@ class RiskGate:
         be filled at, not the one the stated entry advertises."""
         need = self._costs.edge_multiple_min
         limit = f"expected edge >= {need} x breakeven (C2/C3)"
-        if action.target_price is None:
+        # A targetless proposal is a hard reject UNLESS its strategy registered a measured edge
+        # (§6.1 `ins`, 2026-08-17 — see _NO_TARGET_MEASURED_EDGE for why and for the guard-rails).
+        measured_edge = self._strategy_edge.get(action.strategy_id)
+        if action.target_price is None and (measured_edge is None or measured_edge <= 0):
             led.add("min_viable_size", False, _NO_TARGET, limit,
                     "an entry without a target can never be shown to clear costs")
             return None
@@ -931,17 +967,23 @@ class RiskGate:
                     "fail closed")
             return None
         try:
-            edge_pct = self._costs.expected_edge_pct(risk_ref, action.stop_price, action.target_price)
+            if action.target_price is None:
+                edge_pct = Decimal(measured_edge)
+            else:
+                edge_pct = self._costs.expected_edge_pct(
+                    risk_ref, action.stop_price, action.target_price
+                )
             breakdown = self._costs.round_trip(Decimal(approved) * risk_ref, product)
         except (ValueError, TypeError) as exc:
             led.add("min_viable_size", False, f"incoherent levels: {exc}", limit, "fail closed")
             return None
         cost = self._costs.with_edge(breakdown, edge_pct)
         ok = cost.edge_multiple >= need
+        source = "" if action.target_price is not None else f" [{_NO_TARGET_MEASURED_EDGE}]"
         led.add(
             "min_viable_size", ok,
             f"edge {_q(cost.expected_edge_pct, '0.0001')}% vs breakeven "
-            f"{_q(cost.breakeven_pct, '0.000001')}% @ qty {approved} = {cost.edge_multiple}x",
+            f"{_q(cost.breakeven_pct, '0.000001')}% @ qty {approved} = {cost.edge_multiple}x{source}",
             limit,
             f"{_q(cost.edge_multiple - need, '0.0001')}x",
         )
