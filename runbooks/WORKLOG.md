@@ -1,5 +1,32 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-17 (night, ~01:15) — THE INS LEG IS LIVE (owner-directed): the surviving edge becomes the platform's first evidence-first strategy; deployed 01:13
+
+- **Owner directive: "Implement insider leg trade change."** Design-first: plan §6.1 `ins` addendum
+  written before code — trailing-10-session insider net-BUY ≥ ₹1cr crossing (owner-fixed threshold;
+  moving it re-opens multiplicity), disclosure-anchored, long-only CNC swing, batch over the full
+  eligible universe; entry = next-session-open reference; exit = the EXISTING §7.1 max_holding
+  swing cap (20 td = the validated T+20 horizon — zero new exit code); RECOMMEND-only; Phase-4
+  AUTO follows the cat precedent. Fidelity: the validated crossing function PROMOTED to
+  engine.datafeeds.insider_crossings, imported by BOTH the study and the live job (function
+  identity pinned; event_study's path-load debt retired).
+- **The implementing agent's stop-and-report caught MY arithmetic error:** the plan draft omitted
+  §7.1 overnight_gap_mult (2.5× per swing unit) — at the drafted 6% stop every ins candidate would
+  have hard-rejected at C3 (edge multiple 1.90× < 2.0). Measured band: 4%→2.52× PASS, 5%→2.19×
+  PASS, 6%+→REJECT (wider is WORSE: notional ≈ ₹400/(2.5×stop%), DP flat charge grows as notional
+  shrinks). Ruling: stop_pct 6→5 (the widest viable point); the gate limits were NOT touched —
+  weakening edge_multiple_min/gap_mult to admit a strategy is the forbidden move. Plan corrected
+  in place, error owned; only [4–5] of the future [4–8] envelope range is viable at ₹20k.
+- New seam (accepted): RiskGate strategy_expected_edge_pct — consumed only when target is None,
+  owner-set (ins: 1.58 = the validated T+20 net), unset = byte-identical behavior. Filed: payload
+  has no informational-notes field (T+20 median line can't render without a contract change);
+  the job's 120-day lookback is a documented finite-window approximation of the study's re-arm path.
+- **Deployed 01:13:04 (engine_ready clean; migration 0008 applied; ins_crossings scheduled 19:15
+  guarded).** 1,493 green. First crossings compute TONIGHT 19:15 from the fresh feed; first ins
+  candidates enter Tuesday's window-open sweep through the capped/quantile-ranked/paced funnel.
+  Watch: ins_crossings_run fresh-feed row counts (starvation visible by design); today is also the
+  paced drain's first live day + deals-503 adjudication at midday (drift treatment if it persists).
+
 ## 2026-08-14 (EOD, ~22:15) — ranked funnel's first live day: the drain was vacuous; fixed same-day (paced) + review gains analyst-declines sight; corp-actions deployed
 
 - **Day 1 under ranked admission, the honest reading (via the new funnel_utilization line):** raw
