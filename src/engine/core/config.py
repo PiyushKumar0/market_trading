@@ -248,6 +248,15 @@ class CatCfg(BaseModel):
     fanout_weight: float = 0.5            # sector/theme fan-out multiplier (§2.7 step 5)
     max_event_age_days: int = 2           # §2.7 HeadlineClusterer assignment window / `cat` catalyst
                                           # age horizon (envelope default 2; owner-only, not learnable)
+    # --- v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18): the `ins` mechanics mirror.
+    # Frozen for the whole shadow window — moving one re-opens multiplicity and restarts the clock.
+    stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the
+                                          # rule's real exit is TIME; 5 not 6 because the §7.1
+                                          # overnight_gap_mult (2.5x) arithmetic applies (ins, 08-17)
+    hold_sessions: int = 20               # = the §7.1 swing max_holding cap — the EXISTING
+                                          # max-holding machinery is the exit path
+    # Deliberately NO expected_edge_pct: `cat` has no validated edge (measuring it IS the shadow), so
+    # the §7.1 C3 check fail-closed-rejects every cat candidate. Adding the key is the §8.6 owner gate.
 
 
 class FilingsCfg(BaseModel):

@@ -131,7 +131,7 @@ from engine.ops.warmup import WarmupGate, WarmupStatus
 from engine.risk.gate import GateContextBuilder, RiskGate
 from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
-from engine.strategy.scanners import brk20, build_enabled_scanners, ins
+from engine.strategy.scanners import brk20, build_enabled_scanners, cat, ins
 from engine.risk.causes import RiskStateLatch
 from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
@@ -650,12 +650,18 @@ async def run() -> int:
         conn=conn,
     )
     prescreen = SignalPreScreen(
-        scanners=build_enabled_scanners(("orb", "rsi2", "trend", "mom")),   # `cat` lands Phase 3
+        # The registry holds only the per-bar price baselines; brk20/ins/cat are batch rules swept
+        # below and admitted through prescreen.admit (same dedupe/caps, no bypass).
+        scanners=build_enabled_scanners(("orb", "rsi2", "trend", "mom")),
         context_provider=scan_provider,
         bus=bus,
         max_candidates_per_day=settings.strategy.prescreen.max_candidates_per_day,
         max_per_strategy_day=settings.strategy.prescreen.max_per_strategy_day,
         admission_mode=settings.strategy.prescreen.admission_mode,       # WO-1 rollback flag
+        # §2.7 news carve-out (WO-18): the per-day catalyst-entry cap, read at the ENFORCEMENT site
+        # from the hash-verified limits.yaml (§2.4 item 1) — never a constructor number, never in the
+        # gate. A raise here (unverifiable store) refuses cat candidates; the pre-screen handles it.
+        catalyst_cap_fn=lambda: limits_engine.catalyst_guard().max_catalyst_entries_day,
     )
     # 2026-08-04: dedupe/caps day-state is process memory — rehydrate it from the day-slot journal
     # so a restart no longer resets the 20/day bound (observed: ~54 publications across two
@@ -1300,7 +1306,43 @@ async def run() -> int:
                 # cap or the (symbol, strategy) dedupe has HAD its evaluation — leaving it unconsumed
                 # would re-offer it on the next sweep tick forever. Suppression is a decision.
                 _consume_ins_pending(conn, today, [c.symbol for c in ins_pending], now=now)
-            return accepted + daily + ins_cands, pendings
+
+            # --- `cat` v2 SHADOW leg (§2.7 amendment, owner-directed 2026-08-18 — WO-18): today's
+            #     `originating` catalyst_watchlist rows, graded by the ~08:35 digest, on the SAME
+            #     ins-shaped batch path. No consumed flag is needed for once-only: the age<=1 filter
+            #     inside sweep_watchlist IS the single-shot rule (an age-2 re-grade of the same story
+            #     never re-originates), and a second sweep the same day hits the §3.2.5 dedupe.
+            #     Downstream, the §7.1 C3 check rejects every one of these by construction — no
+            #     cat.expected_edge_pct exists — so ADMISSION here is the shadow's validation
+            #     population, not RECOMMEND. An absent/empty digest simply yields no rows (§2.7
+            #     fail-safe ladder: cat originates nothing, every other strategy unaffected).
+            cat_rows = _read_cat_watchlist(store, today)
+            cat_cands: list = []
+            if cat_rows:
+                cat_cands = _attach_feature_snapshots(
+                    features,
+                    prescreen.admit(
+                        cat.sweep_watchlist(
+                            cat_rows,
+                            params={
+                                "stop_pct": settings.cat.stop_pct,
+                                "hold_sessions": settings.cat.hold_sessions,
+                            },
+                        ),
+                        today,
+                    ),
+                )
+            # THE starvation-visibility line (the `ins` convention, §6.1): sustained zeros must be
+            # readable as "the news layer went quiet" vs "rows arrived and the rule/caps declined
+            # them" — WO-18 pre-registers <0.2 signals/session for 3 weeks as a STARVATION finding,
+            # which is only detectable if the three counts sit on one line.
+            _log.info(
+                "cat_watchlist_sweep", d=today.isoformat(), trigger=trigger,
+                originating_rows=len(cat_rows),
+                age_eligible=sum(1 for r in cat_rows if cat.is_eligible(r)),
+                candidates=len(cat_cands),
+            )
+            return accepted + daily + ins_cands + cat_cands, pendings
 
         accepted, pendings = await asyncio.to_thread(_collect_and_scan)
         for cand in accepted:
@@ -1919,9 +1961,56 @@ def _consume_ins_pending(
         _log.warning("ins_pending_consume_failed", d=today.isoformat(), error=str(exc))
 
 
+# --------------------------------------------------------------------------- §2.7 `cat` watchlist read
+#: Calendar days to look back for the prior session's daily bar. Comfortably clears the longest NSE
+#: holiday stretch (a long weekend plus a mid-week holiday); no bar in that span means the symbol has
+#: no usable committed price, which the scanner turns into no candidate.
+_CAT_REF_CLOSE_LOOKBACK_DAYS = 10
+
+
+def _read_cat_watchlist(store: MarketStore, today: date) -> list[cat.WatchlistRow]:
+    """Today's ``originating`` ``catalyst_watchlist`` rows as :class:`cat.WatchlistRow` tuples.
+
+    The ~08:35 ``CatalystDigestJob`` wrote these; nothing here re-grades one. The ONE thing this adds
+    is ``reference_close`` — the PRIOR SESSION's bhavcopy-final close from ``bars_1d`` (the last bar
+    strictly before today), which is the freshest committed price at sweep time and the anchor for
+    the whole level set (§2.7 2026-08-18 amendment). The grade filter is pushed into the store query
+    because it is cheap there; the RULE's filter (grade ∧ direction ∧ age<=1) is re-applied inside
+    ``cat.sweep_watchlist``, which is the authority. A malformed row costs itself and nothing else —
+    the sweep must not die on one bad row (§3.2.5 fail-to-zero)."""
+    out: list[cat.WatchlistRow] = []
+    for r in store.get_catalyst_watchlist(today, grade="originating"):
+        symbol = str(r.get("symbol") or "")
+        if not symbol:
+            continue
+        try:
+            bars = store.get_bars_1d(
+                symbol,
+                today - timedelta(days=_CAT_REF_CLOSE_LOOKBACK_DAYS),
+                today - timedelta(days=1),
+            )
+            age = r.get("event_age_sessions")
+            materiality = r.get("materiality")
+            out.append(
+                cat.WatchlistRow(
+                    entry_id=str(r.get("entry_id") or ""),
+                    symbol=symbol,
+                    grade=str(r.get("grade") or ""),
+                    direction=None if r.get("direction") is None else str(r["direction"]),
+                    event_age_sessions=None if age is None else int(age),
+                    materiality=None if materiality is None else float(materiality),
+                    # No bar in the lookback ⇒ None ⇒ the scanner emits nothing for this symbol.
+                    reference_close=Decimal(str(bars[-1].close)) if bars else None,
+                )
+            )
+        except (ValueError, ArithmeticError, TypeError) as exc:
+            _log.warning("cat_watchlist_row_unparseable", symbol=symbol, error=str(exc))
+    return out
+
+
 # --------------------------------------------------------------------------- brk20 feature link (§4.3)
 def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list:
-    """Mint the §4.3 ``features_snapshot_id`` for batch-rule candidates (brk20, ins) post-admit.
+    """Mint the §4.3 ``features_snapshot_id`` for batch-rule candidates (brk20, ins, cat) post-admit.
 
     The per-bar path gets its id from ScanContext at signal time; batch rules bypass ScanContext, and
     a candidate with a null id is structurally un-recommendable (intraday.py Rule 6 mandates

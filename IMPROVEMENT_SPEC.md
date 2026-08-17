@@ -537,6 +537,49 @@ Acceptance: report with the 10-config table + the two diagnostics + a plain-lang
   the owner's question; STOPS FOR OWNER REVIEW.
 Effort: M   Depends-on: WO-10b's seeded ATR (shared unit)
 Risk: research-only; multiplicity contained by the fixed axes and the no-promotion rule.
+
+WO-18: `cat` confirmation-mechanic review + shadow start (owner-directed 2026-08-18)
+Category: B-validation-methodology   Priority: P1
+Evidence (fuel measurement, engine-down DuckDB window 2026-08-18 01:08-01:11 IST, queries in
+  scratchpad measure_cat_fuel.py; catalyst_watchlist 480 rows 2026-07-29..08-17):
+  - Originating-grade flow since the 2026-08-05 corroboration amendment: 5 rows / 3 DISTINCT
+    stories in 9 sessions (HAL rating_change 08-07, LT order_win 08-14, RELIANCE m_and_a
+    08-17; the age-2 rows are same-story re-grades). Rate 0.33 stories/session, 0.56
+    rows/session — MARGINAL vs the pre-registered >=0.5/day bar, accepted because the
+    event-class mix is 100% NON-earnings: exactly the classes the three recorded refutations
+    (all earnings-anchored) never tested.
+  - All 5 originating rows are top-100-watchlist symbols (1m data exists), all direction=long.
+  - Gate-miss structure of the 390 post-amendment context rows: materiality < 0.70 is the
+    dominant single binder (only 9 rows had materiality >= 0.70); 37 rows failed ONLY the
+    materiality floor. Thresholds are NOT moved (multiplicity — the ins lesson); near-miss
+    counts are diagnostics only.
+  - Story-level domain-union >= 2 holds for ~19% of resolved stories (52/268) — passable,
+    binding, working as designed.
+  - Resolver leak (separate from cat): most "LG Electronics" clusters resolve NO symbol (the
+    dump legal name is "lg electronics india"; the press writes "LG Electronics") — e.g. the
+    08-13/08-14 LGEINDIA Q1 story: 2 resolved of ~8 clusters. Curated-alias suggestion:
+    { alias: "LG Electronics", tradingsymbol: LGEINDIA }. Aliases are owner-set by contract
+    (config/aliases.yaml header) — SUGGESTED here, deliberately NOT applied.
+Decision (the plan-line-278 owner review, executed): the +1% intraday price/volume confirmation
+  is RETIRED for the shadow — refuted 3x on proxies (net -0.17..-0.44%), and
+  catalyst-conditioning made intraday ORB worse; the drift is a 2-4-week phenomenon. `cat` v2
+  shadow mirrors the validated `ins` mechanics instead: EOD-graded originating row (event age
+  <= 1 session, single shot, no re-fire) -> next-session sweep -> swing candidate anchored on
+  reference_close (prior-session bhavcopy close), disaster stop 5%, target None, exit = the
+  20-session max-holding path, score = row materiality. NO cat.expected_edge_pct is configured:
+  the C3 cost gate therefore fail-closed-rejects every cat candidate — correct for an
+  unvalidated edge; the validation population is the prescreen-admitted signal stream, not gate
+  outcomes. Full plan text: IMPLEMENTATION_PLAN.md §2.7 2026-08-18 amendment.
+Acceptance (kill criteria pre-registered): shadow runs >= 30 sessions AND >= 20 admitted
+  signals; then measure T+10/T+20 net drift (next-session-open fills, spread-inclusive CNC
+  costs, WO-3 margin floor) of the signal population. Net <= the cost floor at BOTH horizons =>
+  `cat` origination is retired and the watchlist stays context-only permanently. Clearing it =>
+  owner review at the §8.6 gate (R4) before any live wiring. At the measured rate the earliest
+  verdict is ~mid-October 2026; sustained < 0.2 signals/session for 3 consecutive weeks is a
+  STARVATION finding and triggers an early owner check-in instead of silent accumulation.
+Effort: S (scanner mirrors ins.py; caps/guards pre-exist)   Depends-on: —
+Risk: shadow-only; Phase 2 is structurally paper/RECOMMEND, C3 rejects by construction, and
+  catalyst_guard.max_catalyst_entries_day (2) + max_per_strategy_day cat: 2 bound the slots.
 ```
 
 ---

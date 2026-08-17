@@ -139,6 +139,12 @@ cat:
                                  # before threshold comparison. Owner-only, deliberately NOT learnable.
   max_event_age_days: 2          # §2.7 HeadlineClusterer near-duplicate assignment window + `cat` catalyst
                                  # age horizon (owner-only, NOT learnable; wired into HeadlineClusterer)
+  # --- `cat` v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18). ins-mechanics mirror.
+  # Deliberately NO expected_edge_pct: there is no validated edge (the shadow measures it), so the
+  # §7.1 C3 gate fail-closed-rejects every cat candidate — signals are journalled at prescreen
+  # admission, nothing reaches RECOMMEND. Adding the edge key is the §8.6 owner gate, post-verdict.
+  stop_pct: 5.0                  # disaster stop; §7.1 overnight_gap_mult arithmetic (the ins 5% reasoning)
+  hold_sessions: 20              # = the §7.1 swing max_holding cap; exit is TIME, target is None
 
 # §2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
 # envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: read by NO decision
@@ -222,6 +228,9 @@ strategy:
       ins: 4                     # §6.1 `ins` (2026-08-17): a rare, EOD-batch event — ~13-18 fresh
                                  # in-universe filings a day yield few crossings, so 4 is a ceiling
                                  # against a cluster day, not an expected daily draw.
+      cat: 2                     # §2.7 v2 shadow (2026-08-18, WO-18): = catalyst_guard
+                                 # .max_catalyst_entries_day; measured flow ~0.3-0.6/day, so 2 is a
+                                 # cluster-day ceiling. Binds even before the guard-side wiring.
 
 # §3.2.3 ReconcileJob drift thresholds (A13) [tunable]: alert when >max_bad_bar_fraction of compared
 # bars drift by >vol_drift_pct volume or >close_drift_ticks ticks on close. Offline spans are

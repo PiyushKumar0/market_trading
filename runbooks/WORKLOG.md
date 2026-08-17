@@ -1,5 +1,45 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (night, ~02:15) — `cat` v2 SHADOW live (owner-directed): the §2.7 review executed, the T14 forward-validation clock starts
+
+- **Owner directive:** "run the process to review and implement" news origination (follow-on from
+  the 2026-08-17 VIKRAMSOLR/LGEINDIA probe). Sequence executed: measure → review → plan-amend →
+  implement → deploy.
+- **Fuel measurement (engine-down DuckDB window 01:08–01:11, under the 2026-08-18 DB-task grant;
+  scripts in the session scratchpad, results in IMPROVEMENT_SPEC.md WO-18):** originating-grade
+  flow since the 08-05 corroboration amendment = 5 rows / **3 distinct stories in 9 sessions**
+  (HAL rating_change, LT order_win, RELIANCE m_and_a) — marginal rate (0.33 stories/day), but
+  **100% non-earnings event types: the classes no recorded refutation ever tested**. That is the
+  whole case for starting the clock. Materiality <0.70 is the dominant context-row binder (37 rows
+  missed ONLY that gate) — recorded as diagnostic, thresholds FROZEN for the shadow window.
+  Side-findings: LGEINDIA liquidity rank **196/200** (₹38.4cr median vs ₹165.9cr top-100 cutoff) —
+  the 08-17 watchlist exclusion was legitimate, carried item closed; resolver alias gap — most
+  "LG Electronics" clusters resolve NO symbol (dump name is "lg electronics india") — curated-alias
+  suggestion `{ alias: "LG Electronics", tradingsymbol: LGEINDIA }` **left for the owner**
+  (aliases.yaml is owner-set by contract; platform suggests, owner sets).
+- **The review (plan line-278's recommended owner review, executed as WO-18):** the +1% intraday
+  confirmation is RETIRED for the shadow (refuted 3×; catalyst-conditioned intraday ORB negative;
+  drift is 2–4 weeks). `cat` v2 mirrors `ins`: swing/CNC/long-only batch rule, age≤1 single-shot,
+  reference_close anchor, 5% disaster stop, target None, 20-session time exit, score=materiality.
+  **Deliberately NO cat.expected_edge_pct** ⇒ §7.1 C3 fail-closed-rejects every cat candidate:
+  prescreen ADMISSION is the validation population; nothing reaches RECOMMEND before the §8.6 gate.
+  Kill criteria pre-registered in WO-18 (≥30 sessions ∧ ≥20 signals → T+10/T+20 net vs cost floor;
+  earliest verdict ~mid-Oct; <0.2 signals/session for 3 weeks = starvation check-in).
+- **Implementation (Opus agent, audited):** scanners/cat.py (ins-pattern pure translation);
+  main.py cat leg beside ins + `cat_watchlist_sweep` visibility line (3 distinguishable zero-states);
+  prescreen catalyst_guard.max_catalyst_entries_day wired at the enforcement site (the §3.2.5 TODO
+  resolved — keyed on `catalyst_ref`, unwired/unreadable guard REFUSES cat, never un-caps);
+  CatCfg gained stop_pct/hold_sessions (pydantic extra="ignore" would have silently dropped the
+  YAML keys). **1,532 unit tests green**; ruff clean on touched files.
+- **Ops notes:** the 01:08 service stop for the DB window was raced by the watchdog, which
+  auto-restarted the engine at 01:10 (correct behaviour, observed not fought) — that restart also
+  delivered the ~01:00 entry's pending roster reload AND reset the leak counter (private bytes had
+  reached 38.4 GB by 01:05; the fresh curve keeps recording). Deployed `cat` via a second restart
+  ~02:15; boot verified. First shadow sweep fires at today's window open — RELIANCE/LT rows will be
+  age≥2 by today's digest, so day 1 is expected quiet unless fresh overnight news grades in.
+- Carried: deals-503 drift treatment (retry failed again 00:56 + 01:10); brk20 stop-geometry floor;
+  leak diagnosis; **owner decision pending: the LG Electronics alias one-liner**.
+
 ## 2026-08-18 (~01:00) — owner raised the LLM envelope ~5x; roster upgraded (Opus decision roles, Sonnet news); restart pending compaction
 
 - **Owner directive (2026-08-18, ~00:40):** (1) actual SDK bandwidth is ~5x the self-imposed

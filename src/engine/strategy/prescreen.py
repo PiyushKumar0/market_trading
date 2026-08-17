@@ -26,11 +26,16 @@ pandas-heavy scan to a worker thread (the loop is never blocked, §2.2) and awai
 Sync/replay callers use ``on_bar`` directly. The integrator wires exactly ONE of the two paths
 (``bus.subscribe("bar.1m", prescreen.handle_bar)`` in ``engine.ops``).
 
-Phase-3 ``cat`` seam (§3.2.5/§2.7): the catalyst scanner registers as a peer in
-``SCANNER_REGISTRY``; its candidates (``catalyst_ref`` set) must ADDITIONALLY respect
-``catalyst_guard.max_catalyst_entries_day`` — enforced HERE, before publication (loaded via
-``ProtectedStore.load_verified``, never inside ``RiskGate``: GateContext stays news-free, §2.4
-item 4). TODO(Phase 3): add that guard check where candidates are admitted below.
+``cat`` catalyst seam (§3.2.5/§2.7, wired 2026-08-18 with the WO-18 v2 shadow): candidates carrying
+a ``catalyst_ref`` must ADDITIONALLY respect ``catalyst_guard.max_catalyst_entries_day`` — enforced
+HERE, before publication, never inside ``RiskGate`` (GateContext stays news-free, §2.4 item 4). The
+value arrives through ``catalyst_cap_fn``, which the composition root binds to the HASH-VERIFIED
+``limits.yaml`` block (``ProtectedStore.load_verified`` via ``LimitsEngine.catalyst_guard``) — the
+anti-manipulation surface is read at the ENFORCEMENT site, exactly as ``CatalystDigestJob`` reads it,
+and never accepted as a plain constructor number. Unwired or unverifiable ⇒ catalyst candidates are
+REFUSED, never admitted uncapped (D7: the news carve-out fails to LESS activity). ``cat`` is a batch
+rule and is deliberately absent from ``SCANNER_REGISTRY``; it reaches this class through
+:meth:`admit`, so the guard sits on the shared accept spine and binds both paths.
 """
 
 from __future__ import annotations
@@ -93,6 +98,12 @@ class SignalPreScreen:
     admission_mode:
         ``"ranked"`` (default) = score-descending admission within a batch; ``"arrival"`` = the
         pre-WO-1 order. The rollback knob named in WO-1's risk note, nothing else.
+    catalyst_cap_fn:
+        Reads ``catalyst_guard.max_catalyst_entries_day`` from the hash-verified ``limits.yaml`` at
+        the enforcement site (§2.4 item 1). Binds ONLY candidates with a ``catalyst_ref`` — the §2.7
+        news→origination carve-out. ``None``, or a call that raises (an unverifiable protected
+        store), refuses every catalyst candidate: an anti-manipulation surface that cannot be read
+        must not degrade into "no cap". Price baselines are untouched either way (E5).
     """
 
     def __init__(
@@ -104,6 +115,7 @@ class SignalPreScreen:
         max_candidates_per_day: int = 20,
         max_per_strategy_day: int | Mapping[str, int] | None = None,
         admission_mode: str = "ranked",
+        catalyst_cap_fn: Callable[[], int] | None = None,
     ) -> None:
         if max_candidates_per_day < 1:
             raise ValueError("max_candidates_per_day must be >= 1")
@@ -117,6 +129,7 @@ class SignalPreScreen:
         self._max_strategy_day = default_cap                  # binds strategies without a line
         self._strategy_caps = per_strategy                    # explicit per-strategy overrides
         self._admission_mode = admission_mode
+        self._catalyst_cap_fn = catalyst_cap_fn               # §7.1 catalyst_guard, read at use
         # Per-day state (reset on bar-date change). Lock: handle_bar offloads to worker threads.
         self._lock = threading.Lock()
         self._day: date | None = None
@@ -127,6 +140,15 @@ class SignalPreScreen:
         self._charged: set[tuple[str, str]] = set()
         self._count_day = 0
         self._count_by_strategy: dict[str, int] = {}
+        #: Catalyst-bearing (``catalyst_ref`` set) admissions charged today — the
+        #: ``catalyst_guard.max_catalyst_entries_day`` counter (§2.7). Deliberately keyed on the
+        #: FIELD, not on ``strategy_id == "cat"``: the guard bounds news-originated entries, and no
+        #: strategy id may be the thing that decides whether the news guard applies. NOT restored by
+        #: :meth:`hydrate` — the day-slot journal records (symbol, strategy) pairs and carries no
+        #: catalyst flag; across a restart the coincident ``max_per_strategy_day['cat']`` (equal to
+        #: the guard by config) is what still bounds the day, and the §2.7 single-shot age filter
+        #: means the same story cannot re-offer itself anyway.
+        self._count_catalyst = 0
         #: WO-9 funnel counters, per strategy, for the CURRENT day. Process-scoped by design: they
         #: describe what this process's scanners produced, and a restart legitimately starts a new
         #: observation window (the journal, not these, is the restart-proof record).
@@ -164,6 +186,24 @@ class SignalPreScreen:
     def _cap_for(self, strategy_id: str) -> int | None:
         """The publication sub-cap binding ``strategy_id`` — its own line, else ``default``."""
         return self._strategy_caps.get(strategy_id, self._max_strategy_day)
+
+    def _catalyst_cap(self) -> int | None:
+        """``catalyst_guard.max_catalyst_entries_day``, or ``None`` meaning REFUSE (§2.7/§2.4).
+
+        Read per admission from the hash-verified protected store, so an owner change lands on the
+        next :meth:`~engine.risk.limits.LimitsEngine.reload` without a restart. ``None`` is returned
+        for an unwired reader, an unverifiable store (``IntegrityError``) and a nonsense value alike:
+        all three mean the anti-manipulation surface could not be established, and the D7 direction
+        for that is no news-originated entries at all — never an uncapped one.
+        """
+        if self._catalyst_cap_fn is None:
+            return None
+        try:
+            cap = int(self._catalyst_cap_fn())
+        except Exception as exc:  # noqa: BLE001 - an unreadable guard refuses; it never kills the scan
+            _log.warning("catalyst_guard_unreadable", error=str(exc))
+            return None
+        return cap if cap >= 0 else None
 
     # ------------------------------------------------------------------ pinned sync surface
     def on_bar(self, bar: Bar) -> list[SignalCandidate]:
@@ -307,6 +347,7 @@ class SignalPreScreen:
             self._charged.clear()
             self._count_day = 0
             self._count_by_strategy.clear()
+            self._count_catalyst = 0
             self._raw_by_strategy.clear()
             self._published_scores.clear()
             self._suppressed_cap.clear()
@@ -367,14 +408,31 @@ class SignalPreScreen:
             )
             self._suppressed_cap[cand.strategy_id] = self._suppressed_cap.get(cand.strategy_id, 0) + 1
             return False
-        # TODO(Phase 3): `cat` candidates (catalyst_ref set) are additionally capped by
-        # catalyst_guard.max_catalyst_entries_day here (§3.2.5/§7.1), loaded via
-        # ProtectedStore.load_verified — never evaluated in RiskGate (§2.4 item 4).
+        # §2.7 news carve-out: a candidate carrying a `catalyst_ref` is ADDITIONALLY bound by
+        # catalyst_guard.max_catalyst_entries_day (§3.2.5/§7.1) — read here, at the enforcement site,
+        # from the hash-verified limits.yaml; never evaluated in RiskGate (§2.4 item 4). Like every
+        # other cap it charges UNIQUE pairs, so a re-armed catalyst pair republishes inside its
+        # already-paid slot rather than spending a second entry of the day's two.
+        if cand.catalyst_ref is not None and not charged:
+            catalyst_cap = self._catalyst_cap()
+            if catalyst_cap is None or self._count_catalyst >= catalyst_cap:
+                _log.info(
+                    "prescreen_cap_suppressed", cap="catalyst_day", symbol=cand.symbol,
+                    strategy_id=cand.strategy_id, score=cand.score,
+                    catalyst_ref=cand.catalyst_ref,
+                    max_catalyst_entries_day=catalyst_cap,
+                )
+                self._suppressed_cap[cand.strategy_id] = (
+                    self._suppressed_cap.get(cand.strategy_id, 0) + 1
+                )
+                return False
         self._seen.add(key)
         if not charged:
             self._charged.add(key)
             self._count_day += 1
             self._count_by_strategy[cand.strategy_id] = per_strategy + 1
+            if cand.catalyst_ref is not None:
+                self._count_catalyst += 1
         self._published_scores.setdefault(cand.strategy_id, []).append(float(cand.score))
         _log.info(
             "signal_candidate", signal_id=cand.signal_id, strategy_id=cand.strategy_id,

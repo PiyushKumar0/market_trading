@@ -1,9 +1,16 @@
 """ORB / RSI(2) / trend / momentum baseline scanners (§6.1) + the scanner registry (§3.2.5).
 
 Importing this package registers the four Phase-1 price baselines in ``SCANNER_REGISTRY``. The
-Phase-3 ``cat`` scanner (§6.1 row 5, §2.7) will register here as a peer — same ``Scanner`` base,
-its candidates carrying ``catalyst_ref`` and additionally capped by ``catalyst_guard.
-max_catalyst_entries_day`` in the pre-screen (§3.2.5). No ``cat`` code ships in Phase 1 (§8.2).
+``brk20``, ``ins`` and ``cat`` rules are deliberately NOT in it: they are EOD-batch rules with no
+per-bar condition, so they implement no ``Scanner`` protocol and are swept + admitted directly by
+the composition root (``prescreen.admit``), which binds them to the identical §3.2.5 dedupe/caps.
+
+``cat`` (§2.7, v2 SHADOW as of the owner-directed 2026-08-18 amendment) is the one that changed
+shape: the §6.1 row-5 design registered here as a per-bar peer with an intraday price/volume
+confirmation, and that confirmation was RETIRED (WO-18). The rule now mirrors ``ins`` — a batch
+translation of today's ``originating`` watchlist rows in :mod:`engine.strategy.scanners.cat`. Its
+candidates carry ``catalyst_ref`` and are additionally capped by
+``catalyst_guard.max_catalyst_entries_day`` in the pre-screen (§3.2.5), as always planned.
 """
 
 from __future__ import annotations
