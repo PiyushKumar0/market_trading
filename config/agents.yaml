@@ -9,7 +9,9 @@
 schema_version: 1
 
 llm:
-  monthly_credit_usd: 120
+  # Raised 120→550 (owner 2026-08-18: actual SDK bandwidth is ~5x the previous self-imposed cap;
+  # this ledger figure is a governor proxy, not real spend — billing is subscription-limit based).
+  monthly_credit_usd: 550
   # Pay-as-you-go overflow default OFF (D6). If owner enables, this hard monthly cap applies.
   overflow_enabled: false
   overflow_cap_usd: 25
@@ -31,19 +33,24 @@ model_pricing_usd_per_mtok:
   opus-5:   { input: 5,  output: 25 }
   fable-5:    { input: 10, output: 50 }
 
-# Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $103 + $7 reserve = $110.
+# Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $455 + $95 reserve = $550.
 # Rebalanced 2026-07-06 for the news layer (§2.7 owner decision, §14 Q16): intraday 45→42,
 # weekly 15→12, sentiment/news 8→14. The catalyst digest is deterministic — $0.
 # Rebalanced 2026-08-11 (owner: raise the forward cap): intraday 42→52 funds prescreen_cap_per_day
 # 6→12 (~$0.115/measured signal call ⇒ +6/day ≈ +$14.5/month), taken from weekly_researcher 15→5 —
 # that agent is enabled:false until Phase 5 (§8.7); re-fund it at enablement.
+# Rebalanced 2026-08-18 (owner: bandwidth ~5x; Opus for decision roles, Sonnet replaces Haiku):
+# intraday 52→280 funds opus-5 @ prescreen 48/day (~$0.19/call ⇒ ~$192/mo at full utilization,
+# + heartbeat/position-event headroom); news 20→80 funds sonnet-5 (~3x haiku rates); nightly
+# 26→60 and preopen 10→30 fund opus-5. Allocations are set deliberately loose so the degrade
+# ladder trips only on genuine runaway spend, not on normal operation near a tight cap.
 budget_allocations_usd:
-  intraday_analyst: 52
-  nightly_reviewer: 26
+  intraday_analyst: 280
+  nightly_reviewer: 60
   weekly_researcher: 5
-  news_analyst: 20
-  preopen_planner: 10
-  reserve: 7
+  news_analyst: 80
+  preopen_planner: 30
+  reserve: 95
 
 # Degrade ladder trip points (§5.6) — cache-aware; shrink context before switching models (D8).
 degrade_ladder:
@@ -60,27 +67,35 @@ degrade_ladder:
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
   intraday_analyst:
-    model: sonnet-5           # D9/§5.2: thesis quality materially better for entry decisions; owner-confirmed
+    model: opus-5             # sonnet→opus 2026-08-18 (owner: Opus for decision roles; entry decisions
+                              # are the platform's core judgment point; Phase-2 RECOMMEND mode, so the
+                              # extra latency is not order-critical)
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1200
-    timeout_s: 120
+    timeout_s: 180             # 120→180 with the opus switch: keep ~3x measured-duration headroom
     triggers: [signal_candidate, position_event, heartbeat]   # (a)+(c) window-gated; (b) whenever up (§5.2)
     heartbeat_min: 20          # [tunable]; window-bounded (§5.6)
-    prescreen_cap_per_day: 12  # [tunable] 6→12 (owner 2026-08-11: the cap, not signal quality, was
-                               # binding — 66 candidates by 10:13 vs 6 evaluations; funded above)
+    prescreen_cap_per_day: 48  # [tunable] 6→12 (owner 2026-08-11: the cap, not signal quality, was
+                               # binding — 66 candidates by 10:13 vs 6 evaluations); 12→48 (owner
+                               # 2026-08-18: bandwidth ~5x — cap sized to clear a 66-candidate morning
+                               # with the deterministic gates still doing the quality filtering)
 
   preopen_planner:
-    model: sonnet-5
+    model: opus-5             # sonnet→opus 2026-08-18 (owner: Opus for decision roles; one call/day,
+                              # cost delta trivial)
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 2000
-    timeout_s: 180
+    timeout_s: 240             # 180→240 with the opus switch
     triggers: [schedule]
     schedule_ist: "08:50"
 
   news_analyst:                # formerly sentiment_scorer — upgraded per §5.4/§2.7 (2026-07-06)
-    model: haiku-4.5           # lean prompt < 4096-token min cacheable prefix => priced 100% miss (D8)
+    model: sonnet-5            # haiku→sonnet 2026-08-18 (owner: substitute Sonnet where it helps —
+                               # the haiku choice was cost-driven, not quality-driven; materiality/
+                               # novelty judgments feed the watchlist and `cat` origination). The old
+                               # D8 note stands: lean prompt < 4096-token cacheable prefix => 100% miss
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1500    # richer per-CLUSTER schema: scope/entities/sectors/themes/sentiment/
@@ -93,7 +108,8 @@ agents:
 
   # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps (D5) ---
   nightly_reviewer:
-    model: sonnet-5
+    model: opus-5             # sonnet→opus 2026-08-18 (owner: Opus for decision roles — review
+                              # verdicts and param_suggestions are judgment work)
     # Phase-2 v1 DEVIATION (2026-07-28): single-shot with deterministically pre-assembled context —
     # at Phase-2 volume (a handful of recommendations/day, no auto trades) the §5.5 agentic tool
     # loop adds cost + an unverified SDK MCP surface for no analytical gain. The agentic shape +
@@ -101,7 +117,8 @@ agents:
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 6000
-    timeout_s: 300             # bigger single-shot context AND up to 6000 output tokens on sonnet
+    timeout_s: 450             # bigger single-shot context AND up to 6000 output tokens, now on opus
+                               # (300→450 with the model switch: opus streams slower per token)
     run_budget_tokens: { billed_in_max: 120000, billed_out_max: 10000 }   # reserved for the Phase-3 agentic upgrade (§5.5/§11.2)
     triggers: [schedule]
     schedule_ist: "21:00"

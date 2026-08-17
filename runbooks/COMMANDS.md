@@ -84,6 +84,14 @@ uv run pytest tests/unit -q                     # full suite (~457 tests, ~2 min
 uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_sweep_signals.py -q
 ```
 
+After ANY edit to `config/agents.yaml`, validate through the engine's own loader BEFORE the
+restart that would apply it (an unmapped model name darkens the whole LLM tier — 2026-08-03):
+
+```powershell
+.venv\Scripts\python.exe -c "from engine.core.config import load_yaml, config_dir; from engine.intelligence.harness import load_agent_roster; r = load_agent_roster(load_yaml(config_dir() / 'agents.yaml')); print(r)"
+# want: every enabled agent in defs with the intended model/timeout, and quarantined={}
+```
+
 ## Store inspection (read-only; safe while engine is OFF, fails if any writer holds the lock)
 
 ```powershell

@@ -1,5 +1,32 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (~01:00) — owner raised the LLM envelope ~5x; roster upgraded (Opus decision roles, Sonnet news); restart pending compaction
+
+- **Owner directive (2026-08-18, ~00:40):** (1) actual SDK bandwidth is ~5x the self-imposed
+  caps — Haiku may be substituted with Sonnet where it helps, Opus wherever decision-making is
+  needed; (2) engine status may be modified without asking for DB tasks when the engine is idle /
+  not in a trading phase. Both recorded in memory (llm-billing, engine-service-control).
+- **Applied in `config/agents.yaml`:** monthly ledger 120→550 (~4.6x, "almost 5 times");
+  intraday_analyst sonnet→**opus-5** + prescreen_cap 12→**48**/day (the cap was the binding
+  constraint 2026-08-11: 66 candidates vs 6 evaluated) + timeout 120→180s; preopen_planner
+  sonnet→**opus-5** (240s); nightly_reviewer sonnet→**opus-5** (450s); news_analyst
+  haiku→**sonnet-5** (the haiku pick was cost-driven; materiality/novelty feed the watchlist);
+  allocations rescaled 280/60/5/80/30 + 95 reserve. weekly_researcher stays parked ($5,
+  enabled:false) until Phase 5. Heartbeat + DG-ladder percentages untouched.
+- **Verified before restart:** the edited file loads through the engine's own
+  `load_agent_roster` — all 4 enabled agents on new models/timeouts, `quarantined={}`
+  (the 2026-08-03 unmapped-model incident class); opus-5/sonnet-5 both mapped in
+  `MODEL_API_IDS` (harness.py). Allocation sum 550 == monthly ledger.
+- **Restart deferred, deliberately:** tick compaction was mid-run at 00:41 (progress: 08-13,
+  100 symbol-days — nothing *scheduled* past 21:00, but the 22:30 budgeted run was still
+  draining backlog). Not "idle" ⇒ armed a monitor on `tick_compaction_done` (also fires on
+  ERROR lines / service stop / 5-min log silence); restart + boot verification at that point.
+  Config on disk is inert until then — no behavior change mid-night.
+- **Observed in passing, not actioned:** deals:2026-08-13 catch-up failed again on NSE 503s at
+  00:26 (known carry-over); process_memory shows private bytes 30→37.6 GB over 00:00–00:45 —
+  the leak is alive and tonight's curve is being recorded for the diagnosis carried from
+  yesterday.
+
 ## 2026-08-17 (EOD, ~21:35) — paced funnel works live; first ins run (quiet, honest); a 53 GB memory leak forced a crisis restart; two same-day fixes deployed 21:25
 
 - **Funnel day 2, working as designed:** evaluations spread across the session on the 3-min
