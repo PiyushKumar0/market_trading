@@ -34,6 +34,20 @@
   decision roles" means roles whose output drives action autonomously; this one's doesn't. Same
   logic as the 2026-07-28 shape deviation. Revisit at the Phase-3 agentic upgrade. Allocation
   60→30, reserve 95→125; roster re-validated clean (4 agents, quarantined={}).
+- **01:08:47 the engine was stopped — graceful, owner-side** (stop_requested → clean shutdown,
+  state backup written, 0 open positions, reason "owner"; NOT the leak — memory ~40 GB and
+  health green to the last minute). Compaction's 22:30 run took a CancelledError mid-flight;
+  per-symbol-day work is idempotent with stale-tmp cleanup, resumes on next trigger. The stop
+  created the restart window this entry was waiting on.
+- **01:10 restarted with the new roster — boot VERIFIED:** selftest_complete ok:true (agent_roster
+  4 defs, sdk_smoke round-trip PASS, anthropic_key_absent PASS), engine_ready 01:10:56, mode
+  RECOMMEND / risk NORMAL / integrity_ok, catch-up clean except the known deals:2026-08-13 503s,
+  tick_compact re-armed (post-arm + 22:30). New config is now LIVE: intraday opus-5 @ 48/day,
+  preopen opus-5, news sonnet-5, nightly sonnet-5, ledger 550. First opus-5 governor line expected
+  at the 08:50 preopen call. Restart also reset the leak: private bytes 37.6 GB → 1.94 GB; the
+  00:00–01:08 growth curve (30→37.6 GB against a quiet overnight engine — news polling +
+  health checks only) is preserved in engine.log for the leak diagnosis: the leak does NOT need
+  market-hours tick volume to grow, which narrows the suspect list.
 
 ## 2026-08-17 (EOD, ~21:35) — paced funnel works live; first ins run (quiet, honest); a 53 GB memory leak forced a crisis restart; two same-day fixes deployed 21:25
 
