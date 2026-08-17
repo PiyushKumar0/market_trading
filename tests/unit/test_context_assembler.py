@@ -25,7 +25,7 @@ from engine.core.config import config_dir
 from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
 from engine.intelligence.context import BAR_TAIL, ContextAssembler
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import DailyBar, MarketStore
 from engine.strategy.types import RawLevels, SignalCandidate
 
 # conftest's frozen clock: Wed 2026-06-17 10:05 IST, a real trading day.
@@ -90,6 +90,34 @@ def seed_bars(store: MarketStore, count: int = 50) -> None:
         for i in range(count)
     ]
     store.insert_bars_1m(bars)
+
+
+def seed_daily_bars(store: MarketStore, symbol: str = SYMBOL, count: int = 60) -> None:
+    """`count` consecutive-calendar-day daily bars ending YESTERDAY (2026-06-16), plus one for TODAY.
+
+    Deliberately wider than the assembler's ~45-day lookback and deliberately including today's row:
+    the tail must clip to the window (dropping the oldest bars) AND must never show today's forming
+    session — the same "completed sessions only" bound ops/main.py's brk20 sweep reads on.
+    Prices ramp with the index so the first/last rendered rows are literally assertable.
+    """
+    yesterday = TODAY - timedelta(days=1)
+    bars = [
+        DailyBar(
+            symbol=symbol,
+            d=yesterday - timedelta(days=count - 1 - i),
+            open=Decimal("500.00") + i,
+            high=Decimal("510.00") + i,
+            low=Decimal("490.00") + i,
+            close=Decimal("505.00") + i,
+            volume=100_000 + i,
+        )
+        for i in range(count)
+    ]
+    bars.append(
+        DailyBar(symbol=symbol, d=TODAY, open=Decimal("999.00"), high=Decimal("999.00"),
+                 low=Decimal("999.00"), close=Decimal("999.00"), volume=999),
+    )
+    store.upsert_bars_1d(bars)
 
 
 def seed_features(store: MarketStore) -> None:
@@ -465,3 +493,194 @@ def test_news_batch_rejects_more_than_thirty_clusters(assembler):
     assert len(assembler.for_news_batch(_clusters(30), []).volatile_block) > 0
     with pytest.raises(ValueError, match="30-cluster cap"):
         assembler.for_news_batch(_clusters(31), [])
+
+
+# ------------------------------------------------- swing daily evidence (2026-08-17 live finding)
+# The analyst declined a 0.93 brk20 candidate (LGEINDIA) for "bar_count 0, no 1m bars this session".
+# brk20/ins sweep the FULL eligible universe; 1m bars exist only for the tick watchlist. So every
+# sub-watchlist swing candidate was judged on nothing at all. These tests pin the fix: swing
+# candidates carry a daily tail, an empty 1m tail is labelled structural, and intraday is untouched.
+
+UNWATCHED = "LGEINDIA"            # outside the tick watchlist: daily bars exist, 1m bars never will
+
+SWING_CANDIDATE = SignalCandidate(
+    signal_id="sig-brk20-1",
+    strategy_id="brk20",
+    symbol=UNWATCHED,
+    side="BUY",
+    style="swing",
+    raw_levels=RawLevels(entry=Decimal("564.00"), stop=Decimal("530.00")),
+    score=0.93,
+)
+
+WATCHED_SWING_CANDIDATE = SWING_CANDIDATE.model_copy(
+    update={"signal_id": "sig-rsi2-1", "strategy_id": "rsi2", "symbol": SYMBOL}
+)
+
+# seed_daily_bars ramps prices by index off 2026-06-16. The ~45-calendar-day window opens 2026-05-03,
+# so the 20-row tail is 2026-05-28 .. 2026-06-16 — both ends asserted literally below.
+DAILY_HEADER = (
+    "bars_1d last 20 (date o h l c vol, oldest first; completed sessions through 2026-06-16):"
+)
+DAILY_FIRST_ROW = "  2026-05-28 540.00 550.00 530.00 545.00 100040"
+DAILY_LAST_ROW = "  2026-06-16 559.00 569.00 549.00 564.00 100059"
+STRUCTURAL_MARKER = "STRUCTURAL ABSENCE, NOT A DATA FAILURE"
+
+
+def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_tail(assembler, store):
+    """(a) The exact live failure: swing candidate, zero 1m bars, full daily history available."""
+    seed_daily_bars(store, symbol=UNWATCHED)
+    v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
+    lines = v.splitlines()
+
+    # The 1m tail still says unavailable — but is no longer bare.
+    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in lines
+    assert f"  NOTE - {STRUCTURAL_MARKER}: {UNWATCHED} is outside the intraday tick" in lines
+    assert "  watchlist, so it has no 1m bars this session and never will. The full-universe batch" in lines
+    assert "  rules (brk20, ins) deliberately originate for ANY eligible symbol, watchlist or not." in lines
+    assert "  Judge this swing candidate on the daily bars below - that is the series its rule fired" in lines
+    assert "  on. An empty 1m tail here is neither missing evidence nor a feed outage." in lines
+
+    # 20 daily rows, oldest first, both ends literal.
+    assert DAILY_HEADER in lines
+    head = lines.index(DAILY_HEADER)
+    rows = lines[head + 1: head + 1 + 20]
+    assert len(rows) == 20
+    assert rows[0] == DAILY_FIRST_ROW
+    assert rows[-1] == DAILY_LAST_ROW
+    # ascending: ISO dates sort lexically (strict=False - the offset pairing is one short by design)
+    assert all(a < b for a, b in zip(rows, rows[1:], strict=False))
+
+    # Today's forming bar (seeded at 999) is never shown — completed sessions only, ending yesterday.
+    assert "2026-06-17" not in "\n".join(rows)
+    assert "999" not in "\n".join(rows)
+    # Window bound: the oldest seeded bar (2026-04-18) is outside the ~45-day lookback.
+    assert "2026-04-18" not in v
+
+    # Ordering: 1m line, then the absence note, then the daily header, then the session line.
+    bars_1m_at = next(i for i, ln in enumerate(lines) if ln.startswith("bars_1m last"))
+    note_at = next(i for i, ln in enumerate(lines) if STRUCTURAL_MARKER in ln)
+    session_at = next(i for i, ln in enumerate(lines) if ln.startswith("session:"))
+    assert bars_1m_at < note_at < head < session_at
+
+
+def test_swing_candidate_without_daily_history_renders_text_not_an_error(assembler, store):
+    """(b) D7 fail-to-zero: no 1m bars AND no daily bars is a thin call, never a raised one."""
+    v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
+
+    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in v
+    assert STRUCTURAL_MARKER in v
+    assert (
+        "bars_1d last 20 (date o h l c vol, oldest first; completed sessions through 2026-06-16): "
+        "unavailable (no completed daily bars in the last 45 calendar days)"
+    ) in v
+
+
+def test_swing_daily_read_failure_renders_unavailable_and_never_raises(assembler, store, monkeypatch):
+    """D7: the daily read is wrapped — a store blow-up costs the call its daily tail, not the call."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("duckdb is having a day")
+
+    monkeypatch.setattr(store, "get_bars_1d", boom)
+    v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
+
+    assert f"{DAILY_HEADER} unavailable (daily-bar read failed)" in v
+
+
+def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(assembler, store):
+    """(c) A swing candidate that IS on the tick watchlist: intraday tail AND daily tail, no note."""
+    seed_bars(store, count=5)
+    seed_daily_bars(store, symbol=SYMBOL)
+    v = assembler.for_signal(WATCHED_SWING_CANDIDATE, **SIGNAL_KW).volatile_block
+    lines = v.splitlines()
+
+    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first):" in lines
+    assert "  10:04 1404.00 1405.00 1403.00 1404.50 1004" in lines      # 1m tail present
+    assert DAILY_HEADER in lines
+    assert DAILY_FIRST_ROW in lines and DAILY_LAST_ROW in lines          # daily tail present
+    assert STRUCTURAL_MARKER not in v                                    # bars exist: nothing absent
+    assert "outside the intraday tick" not in v
+
+
+# ------------------------------------------------------------------ (d) intraday is byte-untouched
+#: The intraday volatile block captured by running ``_intraday_pin_block`` at HEAD (e8ff7db), BEFORE
+#: the daily-tail change. The fixture seeds daily bars deliberately: an intraday candidate must not
+#: render them even when they are sitting right there in the store.
+INTRADAY_VOLATILE_PIN = """== MARKET STATE (volatile) ==
+candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-1","raw_levels":{"entry":"1400.00","stop":"1390.00","target":null},"score":0.7,"side":"BUY","signal_id":"sig-1","strategy_id":"orb","style":"intraday","symbol":"RELIANCE"}
+features: {"atr14":12.5,"rvol":1.8} (as of 10:04)
+bars_1m last 30 (time o h l c vol, oldest first):
+  10:00 1400.00 1401.00 1399.00 1400.50 1000
+  10:01 1401.00 1402.00 1400.00 1401.50 1001
+  10:02 1402.00 1403.00 1401.00 1402.50 1002
+  10:03 1403.00 1404.00 1402.00 1403.50 1003
+  10:04 1404.00 1405.00 1403.00 1404.50 1004
+session: day H 1405.00 / L 1399.00, +0.32% from open, +0.17% from VWAP, 50m elapsed
+catalyst (sentiment as of 08:35):
+  watchlist entry: {"confirm_trigger":"1405.00","direction":"long","event_type":"order_win","grade":"context","invalidation":"1388.00","materiality":0.72,"source_domain_count":3}
+  sentiment symbol RELIANCE: +0.420
+  sentiment sector Energy: +0.150
+  sentiment market: -0.110
+positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)
+sector exposure: Energy 12% of 25% cap
+cost and breakeven: notional 19600, total cost 41.20, breakeven 0.21%, edge multiple 3.1
+equity: 500000.00
+max_qty_by_risk: 14
+risk headroom (informational - the gate re-checks everything):
+  - per_trade_risk: 0.6% of 1.0%
+  - daily_loss: -0.2% of -3.0%
+last price: 1404.50 at 10:04 (last completed 1m bar; context assembled at 2026-06-17T10:05:00+05:30)
+day plan age: authored 08:50 IST, 1.2h ago
+regime note age: unavailable (not yet authored today)"""
+
+
+def _intraday_pin_block(assembler, store, conn) -> str:
+    """The exact fixture whose rendering is pinned byte-for-byte by ``INTRADAY_VOLATILE_PIN``."""
+    seed_bars(store, count=5)
+    seed_features(store)
+    seed_catalyst(store)
+    seed_daily_bars(store)
+    seed_day_plan(conn)
+    return assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
+
+
+def test_intraday_volatile_block_is_byte_identical_to_pre_change(assembler, store, conn):
+    """(d) The orb path pays nothing for the swing fix — not a byte, not a token, not a query."""
+    assert _intraday_pin_block(assembler, store, conn) == INTRADAY_VOLATILE_PIN
+
+
+def test_structural_wording_never_appears_for_an_intraday_candidate(assembler, store, conn):
+    """Even with zero 1m bars: an intraday candidate with no bars IS a data problem, not a design one."""
+    bare = CANDIDATE.model_copy(update={"symbol": UNWATCHED})
+    seed_daily_bars(store, symbol=UNWATCHED)
+    v = assembler.for_signal(bare, **SIGNAL_KW).volatile_block
+
+    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in v
+    assert STRUCTURAL_MARKER not in v
+    assert "bars_1d" not in v                       # style gates the read, not symbol coverage
+    # `position` style (trend) is untouched too.
+    pos_v = assembler.for_signal(
+        bare.model_copy(update={"style": "position", "strategy_id": "trend"}), **SIGNAL_KW
+    ).volatile_block
+    assert "bars_1d" not in pos_v and STRUCTURAL_MARKER not in pos_v
+
+
+def test_daily_tail_token_delta_is_bounded(assembler, store, capsys):
+    """(e) Token cost of the addition, chars/4 convention — reported, and capped so it cannot creep.
+
+    Measured as the same candidate rendered swing vs intraday; the two blocks differ only by the new
+    lines plus the 3-char ``"swing"``/``"intraday"`` literal in the candidate JSON.
+    """
+    seed_daily_bars(store, symbol=UNWATCHED)
+    swing_v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
+    intraday_v = assembler.for_signal(
+        SWING_CANDIDATE.model_copy(update={"style": "intraday"}), **SIGNAL_KW
+    ).volatile_block
+
+    added_chars = len(swing_v) - len(intraday_v) + 3        # +3: "intraday" -> "swing" in the JSON
+    est_tokens = added_chars / 4
+    with capsys.disabled():
+        print(f"\n[token delta] worst case (absence note + 20 daily rows): "
+              f"{added_chars} chars ~= {est_tokens:.0f} tokens (chars/4)")
+
+    assert est_tokens < 400            # worst case; a watched swing candidate pays only the tail

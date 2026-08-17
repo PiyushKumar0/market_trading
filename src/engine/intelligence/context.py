@@ -54,6 +54,14 @@ _log = get_logger("engine.intelligence.context")
 #: How many trailing 1m bars the intraday context carries (§5.2 "last 30 bars summary").
 BAR_TAIL = 30
 
+#: How many trailing COMPLETED daily bars a swing candidate carries (2026-08-17 finding). 20 is the
+#: brk20 lookback itself, so the analyst reads exactly the window the scanner fired on.
+DAILY_BAR_TAIL = 20
+
+#: Calendar-day lookback for that read. 20 SESSIONS is ~28 calendar days; 45 clears it with room for
+#: a holiday-heavy stretch without dragging in a second month of rows.
+DAILY_LOOKBACK_DAYS = 45
+
 #: Watchlist columns the catalyst block shows — grade/event/materiality plus the deterministic levels
 #: (§2.7 step 5(ii)). A NULL column is omitted rather than rendered as null.
 _WATCHLIST_KEYS = (
@@ -158,6 +166,8 @@ class ContextAssembler:
         parts.append(f"candidate: {_json(candidate.model_dump(mode='json'))}")
         parts.append(f"features: {self._features_text(candidate.features_snapshot_id)}")
         parts.append(self._bars_text(bars))
+        if candidate.style == "swing":       # brk20/ins/rsi2/mom — daily-series rules (§6.1)
+            parts.append(self._swing_daily_evidence_text(candidate.symbol, d, bars))
         parts.append(self._session_aggregates_text(d, bars))
         parts.append(self._catalyst_text(candidate.symbol, d))
         parts.append(f"positions: {open_positions_summary} (as of {self._now_hhmm()})")
@@ -378,6 +388,78 @@ class ContextAssembler:
         lines = [
             f"  {b.ts_minute.strftime('%H:%M')} {b.open} {b.high} {b.low} {b.close} {b.volume}"
             for b in tail
+        ]
+        return "\n".join([header, *lines])
+
+    # ------------------------------------------------- swing daily evidence (2026-08-17 finding)
+    def _swing_daily_evidence_text(self, symbol: str, d: date, bars: Sequence[Bar]) -> str:
+        """Daily-bar evidence for a ``style="swing"`` candidate — the history its rule actually fired on.
+
+        WHY (2026-08-17, live): the analyst declined a 0.93-score brk20 candidate (LGEINDIA) for
+        "cannot be judged on live evidence: bar_count 0, no 1m bars this session". It was right about
+        the bars and wrong about the evidence. ``brk20`` and ``ins`` deliberately sweep the FULL
+        eligible universe while 1m bars exist only for the intraday tick watchlist, so EVERY
+        sub-watchlist swing candidate reached the analyst carrying no evidence whatsoever — a
+        structural no-vote, not a judgement. The daily series those rules are computed on (and
+        ``rsi2``'s RSI(2), and ``mom``'s ranking) exists for the whole universe in ``bars_1d``; it was
+        simply never rendered.
+
+        The window matches ops/main.py's brk20 sweep: completed sessions ONLY, ending YESTERDAY, never
+        today's forming bar — showing the analyst a different history than the scanner scanned is the
+        one way this block could make decisions worse rather than better.
+
+        DELIBERATELY NOT CACHED (do not re-litigate): this is a single ~20-row point query per
+        FORWARDED swing candidate — at most ~12 a day under the §3.2.5 dedupe/caps — on a code path
+        whose very next act is an LLM call costing orders of magnitude more in both latency and money.
+        A cache would buy nothing measurable and would add a staleness surface to evidence whose only
+        job is to be exactly what the scanner saw.
+        """
+        lines: list[str] = []
+        if not bars:
+            lines.extend(self._structural_absence_lines(symbol))
+        lines.append(self._daily_bars_text(symbol, d))
+        return "\n".join(lines)
+
+    def _structural_absence_lines(self, symbol: str) -> list[str]:
+        """Say WHY the 1m tail is empty for a full-universe swing candidate, in the prompt.
+
+        A bare "unavailable" reads to the model as a data failure, and the correct response to a data
+        failure is to decline — which is precisely what happened live. The absence is a property of
+        the watchlist design, so it is stated as one, next to the evidence that replaces it.
+        """
+        return [
+            f"  NOTE - STRUCTURAL ABSENCE, NOT A DATA FAILURE: {symbol} is outside the intraday tick",
+            "  watchlist, so it has no 1m bars this session and never will. The full-universe batch",
+            "  rules (brk20, ins) deliberately originate for ANY eligible symbol, watchlist or not.",
+            "  Judge this swing candidate on the daily bars below - that is the series its rule fired",
+            "  on. An empty 1m tail here is neither missing evidence nor a feed outage.",
+        ]
+
+    def _daily_bars_text(self, symbol: str, d: date) -> str:
+        """Trailing completed daily bars, oldest first, one compact line each (mirrors ``_bars_text``).
+
+        D7: a read failure renders ``unavailable`` and warns once — a swing candidate with no daily
+        history is a thinner call, never a crashed one.
+        """
+        end = d - timedelta(days=1)                      # completed sessions only (never today)
+        start = d - timedelta(days=DAILY_LOOKBACK_DAYS)
+        header = (
+            f"bars_1d last {DAILY_BAR_TAIL} (date o h l c vol, oldest first; completed sessions "
+            f"through {end.isoformat()}):"
+        )
+        try:
+            daily = self._store.get_bars_1d(symbol, start, end)
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            _log.warning("swing_daily_bars_unavailable", symbol=symbol, error=str(exc))
+            return f"{header} {_UNAVAILABLE} (daily-bar read failed)"
+        tail = daily[-DAILY_BAR_TAIL:]
+        if not tail:
+            return (
+                f"{header} {_UNAVAILABLE} (no completed daily bars in the last "
+                f"{DAILY_LOOKBACK_DAYS} calendar days)"
+            )
+        lines = [
+            f"  {b.d.isoformat()} {b.open} {b.high} {b.low} {b.close} {b.volume}" for b in tail
         ]
         return "\n".join([header, *lines])
 

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from engine.core.clock import Clock, ClockSkewUnavailable
 from engine.core.config import Settings
 from engine.core.log import get_logger
+from engine.ops.process_memory import ProcessMemoryReader
 
 _log = get_logger("engine.ops.health")
 
@@ -60,6 +61,8 @@ class HealthMonitor:
         disk_warn_gb: float = 2.0,
         calendar: Any = None,              # duck-typed: must expose .session(date) -> session|None
         keep_awake: Any = None,            # duck-typed: must expose .update(session_open: bool)
+        memory_reader: Any = None,         # duck-typed: must expose .read() -> ProcessMemory | None
+        memory_log_every: int = 5,
     ) -> None:
         self._clock = clock
         self._settings = settings
@@ -72,6 +75,16 @@ class HealthMonitor:
         # periodic tick, so it is where keep-awake is engaged (session open) / released (session close).
         self._calendar = calendar
         self._keep_awake = keep_awake
+        # Process-memory telemetry (2026-08-17 unbounded-commit crisis, ~53 GB/18h, one snapshot, no
+        # curve): sampled off the same always-on pulse. self-constructs a real ProcessMemoryReader when
+        # not injected (no-op off-Windows) so this works out of the box without extra main.py wiring.
+        self._memory_reader = memory_reader if memory_reader is not None else ProcessMemoryReader()
+        # Cadence: the health pulse is 60s (settings.lifecycle.watchdog_poll_s); logging on every pulse
+        # would add 1440 lines/day to an already-busy stream for a leak that took ~18h to reach crisis.
+        # Every 5th pulse (~5 min) still resolves that timescale (~216 samples over 18h) at 1/5th the
+        # volume. Pulse-counted, not wall-clock, so cadence is deterministic in tests.
+        self._memory_log_every = memory_log_every
+        self._pulse_count = 0
 
     async def check(self, *, check_skew: bool = True) -> HealthReport:
         report = HealthReport()
@@ -122,6 +135,23 @@ class HealthMonitor:
         #     at session close. No-op off-Windows / when disabled / without a calendar. ---
         if self._keep_awake is not None:
             self._keep_awake.update(self._session_open())
+
+        # --- process-memory telemetry (2026-08-17 crisis: no time series existed to diagnose the leak)
+        #     Pure telemetry, not a check: a read failure (already logged DEBUG inside the reader) or any
+        #     unexpected error here must never raise or affect the health verdict. ---
+        try:
+            self._pulse_count += 1
+            if self._pulse_count % self._memory_log_every == 0:
+                mem = self._memory_reader.read()
+                if mem is not None:
+                    _log.info(
+                        "process_memory",
+                        private_bytes=mem.private_bytes,
+                        working_set_bytes=mem.working_set_bytes,
+                        peak_working_set_bytes=mem.peak_working_set_bytes,
+                    )
+        except Exception:  # noqa: BLE001 - telemetry must never affect the health verdict
+            _log.debug("process_memory_log_failed")
 
         if report.problems and self._alert is not None:
             await self._alert("warning", f"health problems: {report.problems}")
