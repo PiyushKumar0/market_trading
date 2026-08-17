@@ -26,6 +26,14 @@
   00:26 (known carry-over); process_memory shows private bytes 30→37.6 GB over 00:00–00:45 —
   the leak is alive and tonight's curve is being recorded for the diagnosis carried from
   yesterday.
+- **~01:15 correction (owner challenge): nightly_reviewer reverted opus→sonnet** before it ever
+  ran on opus (engine not yet restarted). Verified consumers: Telegram summary, dashboard
+  suggestions (owner-applied only via POST /config/params), §6.4 step-1 proposals (deterministic
+  validation gates; live influence is Phase 5), and the preopen planner's
+  yesterday_review_summary (summary string only). All human-gated or gate-validated — "Opus for
+  decision roles" means roles whose output drives action autonomously; this one's doesn't. Same
+  logic as the 2026-07-28 shape deviation. Revisit at the Phase-3 agentic upgrade. Allocation
+  60→30, reserve 95→125; roster re-validated clean (4 agents, quarantined={}).
 
 ## 2026-08-17 (EOD, ~21:35) — paced funnel works live; first ins run (quiet, honest); a 53 GB memory leak forced a crisis restart; two same-day fixes deployed 21:25
 

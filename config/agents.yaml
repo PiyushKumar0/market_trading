@@ -41,16 +41,17 @@ model_pricing_usd_per_mtok:
 # that agent is enabled:false until Phase 5 (§8.7); re-fund it at enablement.
 # Rebalanced 2026-08-18 (owner: bandwidth ~5x; Opus for decision roles, Sonnet replaces Haiku):
 # intraday 52→280 funds opus-5 @ prescreen 48/day (~$0.19/call ⇒ ~$192/mo at full utilization,
-# + heartbeat/position-event headroom); news 20→80 funds sonnet-5 (~3x haiku rates); nightly
-# 26→60 and preopen 10→30 fund opus-5. Allocations are set deliberately loose so the degrade
-# ladder trips only on genuine runaway spend, not on normal operation near a tight cap.
+# + heartbeat/position-event headroom); news 20→80 funds sonnet-5 (~3x haiku rates); preopen
+# 10→30 funds opus-5; nightly 26→30 stays sonnet (owner same day: its output is human-gated —
+# see the agent's comment). Allocations are set deliberately loose so the degrade ladder trips
+# only on genuine runaway spend, not on normal operation near a tight cap.
 budget_allocations_usd:
   intraday_analyst: 280
-  nightly_reviewer: 60
+  nightly_reviewer: 30
   weekly_researcher: 5
   news_analyst: 80
   preopen_planner: 30
-  reserve: 95
+  reserve: 125
 
 # Degrade ladder trip points (§5.6) — cache-aware; shrink context before switching models (D8).
 degrade_ladder:
@@ -108,8 +109,13 @@ agents:
 
   # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps (D5) ---
   nightly_reviewer:
-    model: opus-5             # sonnet→opus 2026-08-18 (owner: Opus for decision roles — review
-                              # verdicts and param_suggestions are judgment work)
+    model: sonnet-5           # stays sonnet (owner challenge 2026-08-18): every consumer of this
+                              # output is human-gated or gate-validated — Telegram summary, dashboard
+                              # suggestions (owner applies via POST /config/params only), §6.4 step-1
+                              # proposals (deterministic validation; live influence Phase 5), and the
+                              # preopen planner's yesterday_review_summary (a summarization product,
+                              # not a judgment). Revisit → opus at the Phase-3 AGENTIC upgrade, when
+                              # the reviewer pulls its own evidence and tier starts to matter.
     # Phase-2 v1 DEVIATION (2026-07-28): single-shot with deterministically pre-assembled context —
     # at Phase-2 volume (a handful of recommendations/day, no auto trades) the §5.5 agentic tool
     # loop adds cost + an unverified SDK MCP surface for no analytical gain. The agentic shape +
@@ -117,8 +123,7 @@ agents:
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 6000
-    timeout_s: 450             # bigger single-shot context AND up to 6000 output tokens, now on opus
-                               # (300→450 with the model switch: opus streams slower per token)
+    timeout_s: 300             # bigger single-shot context AND up to 6000 output tokens on sonnet
     run_budget_tokens: { billed_in_max: 120000, billed_out_max: 10000 }   # reserved for the Phase-3 agentic upgrade (§5.5/§11.2)
     triggers: [schedule]
     schedule_ist: "21:00"
