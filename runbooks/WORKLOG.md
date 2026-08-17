@@ -1,5 +1,36 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-17 (EOD, ~21:35) — paced funnel works live; first ins run (quiet, honest); a 53 GB memory leak forced a crisis restart; two same-day fixes deployed 21:25
+
+- **Funnel day 2, working as designed:** evaluations spread across the session on the 3-min
+  cadence (declines stamped 10:26→10:44 etc.); analyst re-judging queued candidates against live
+  prices (WO-4 guards). Both live brk20 candidates correctly declined — and each decline exposed a
+  finding: IDEA (2-tick swing stop from a low-margin breakout on a ₹14 stock — brk20's translated
+  geometry degenerates on low-price/low-margin crossings; FILED: deterministic stop-geometry floor
+  vs overnight-gap stats, needs design) and LGEINDIA (0.93 score, unjudgeable — no 1m bars for an
+  unwatched symbol; FIXED same day, below).
+- **FIRST ins_crossings RUN (via catch-up, 20:58:59):** universe 200, symbols_with_filings 14,
+  fresh_rows_today 9 (all in-universe — feed ALIVE, no starvation), crossings 0 ⇒ no candidate for
+  08-18. Quiet and honest; the visibility line works.
+- **MEMORY CRISIS:** the engine's private commit reached ~53 GB (~96.5% machine commit, 0 MB
+  available; growth spurt observed 16:47–17:05); every new python process stalled — the machine was
+  unusable and the engine was stopped by the owner ~17:3x, restarted clean 20:56. The §2.6 catch-up
+  then replayed the entire missed EOD chain (bhavcopy 2,624 clean; ins first run above) in minutes.
+  LEAK UNDIAGNOSED — one snapshot is not a curve → HealthMonitor now logs process_memory
+  (private/working-set/peak) every ~5 min; tomorrow's session records the leak profile. Suspects
+  for tomorrow's read: whatever bends the curve in the 16:47–17:05 class window.
+- **Process incident, recorded as a lesson:** the first context-fix agent, working on the frozen
+  machine, reported executed results that were impossible in that state (python couldn't start) and
+  its edits never reached the tree. REDONE from scratch on the healthy machine with
+  executed-evidence-or-nothing discipline. Agent reports from a degraded environment get zero
+  benefit of the doubt.
+- **Deployed 21:25 (boot clean 21:26:51):** (1) swing candidates now carry a bars_1d 20-session
+  tail + a structural-absence note when the 1m tail is empty — full-universe brk20/ins candidates
+  are finally judged on the series their rules fired on (worst case +368 tokens, volatile-only,
+  intraday byte-identical); (2) the memory telemetry. 1,508 green.
+- Carried to tomorrow: deals 503 drift treatment (the crisis ate today's slot); the brk20
+  stop-geometry floor design; leak diagnosis from the fresh curve; ins day 2 (19:15 scheduled run).
+
 ## 2026-08-17 (night, ~01:15) — THE INS LEG IS LIVE (owner-directed): the surviving edge becomes the platform's first evidence-first strategy; deployed 01:13
 
 - **Owner directive: "Implement insider leg trade change."** Design-first: plan §6.1 `ins` addendum
