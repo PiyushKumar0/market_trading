@@ -1,6 +1,30 @@
 # WORKLOG — autonomous operations log
 
-## 2026-08-18 (night, ~03:20) — the "LG alias gap" was a resolver-universe BUG: news visibility was watchlist-cap-contaminated; fixed + 4 curated aliases (new owner grant)
+## 2026-08-18 (10:35 CORRECTION + INCIDENT + day-1 findings) — the entry below is right on substance, WRONG on time: the work landed MID-SESSION, not at night
+
+- **INCIDENT (process failure, mine):** the entry below says "~03:20" and "kept before the 08:15
+  instruments job". False. The manager last checked the clock at 01:06 and never re-checked;
+  wall-clock had moved ~9 h. Reality: the unresolved-entity dump window stopped the engine
+  **10:05:16–10:05:40 IST** and the deploy restart ran **10:20:05–10:20:31 — both inside the
+  10:00–10:30 trade window, on cat-shadow day 1**. Cost: two ~30 s hard interruptions mid-drain,
+  4 alarming Telegram notifications (2× crash-recovered + 2× critical startup), two ~30 s tick
+  gaps (15:50 reconcile will gap-fill), and today's 08:15/08:25/08:35 chain ran on OLD
+  code/aliases — the resolver fix applies to clusters resolved from ~10:20 onward and fully from
+  tomorrow's chain. No order risk existed (RECOMMEND-only). Lesson memorialized (memory
+  `reobserve-clock-before-service-actions`): re-observe clock + session state immediately before
+  ANY service-state action; a pre-market plan does not authorize a mid-session execution.
+- **Day-1 shadow findings (the visibility line works):** first sweep 10:10:49 —
+  `originating_rows=2, age_eligible=1, candidates=0`. The zero is NOT news starvation and NOT the
+  catalyst guard: the scanner produced **LT (score 0.82)** and the prescreen suppressed it on the
+  GLOBAL day cap (`max_candidates_per_day: 20` exhausted). Structural wrinkle underneath: each
+  batch leg admits separately and cat runs LAST in `_collect_and_scan`, so lower-scored brk20
+  rows (0.55/0.52) took the final slots ahead of a 0.82 cat row — WO-1's ranked admission only
+  ranks WITHIN one admit batch. FILED: day-cap slot starvation is an UN-pre-registered shadow
+  starvation mode; if it recurs, the ≥20-signal gate never closes while the news flow looks
+  healthy. Candidate fix for owner review (plan-first, NOT hot-fixed): combine the daily/ins/cat
+  batch legs into ONE ranked admit call. Watch item: per-day suppressed-cat count.
+
+## 2026-08-18 (night — CORRECTED ABOVE: actually ~10:05–10:20 IST) — the "LG alias gap" was a resolver-universe BUG: news visibility was watchlist-cap-contaminated; fixed + 4 curated aliases (new owner grant)
 
 - **Owner directive:** fix the LG alias, research other tickers missed the same way; standing
   grant issued — the platform may now edit aliases.yaml autonomously, informing on every change
