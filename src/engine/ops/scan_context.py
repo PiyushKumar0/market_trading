@@ -22,7 +22,9 @@ ONCE into a day-scoped cache, rebuilt only when the bar's date changes:
 * ``daily_bars`` per symbol (completed sessions through the PRIOR day) — one ``get_bars_1d`` per
   symbol per day; a symbol first seen mid-day is loaded lazily, once, then cached.
 * index (``NIFTY 50``) daily closes — one read per day.
-* today's ``flagged_instrument_days`` symbol set — one read per day.
+* the PRIOR session's ``flagged_instrument_days`` symbol set — one read per day (the deals job
+  writes a day's rows at 20:30 of that day, so a day's own flags are unknowable intraday; reading
+  ``d`` here was structurally empty — fixed 2026-08-18).
 * upcoming corp-action ex-dates for ALL symbols — one ``get_corp_actions`` range read per day,
   bucketed by symbol (never one read per symbol).
 * ``momentum_by_symbol`` — computed from the SAME cached daily closes (``indicators.momentum``), so a
@@ -322,7 +324,18 @@ class LiveScanContextProvider:
         daily_end = d - timedelta(days=1)
         daily_start = d - timedelta(days=self._lookback_days)
         index_closes = [b.close for b in self._store.get_bars_1d(self._index_symbol, daily_start, daily_end)]
-        flagged = frozenset(r["symbol"] for r in self._store.get_flagged_instrument_days(d))
+        # PRIOR session's bulk/block-deal flags, not day ``d``'s (2026-08-18 fix): the deals job
+        # writes ``d``'s rows at 20:30 of ``d`` itself, so an intraday read of ``d`` was structurally
+        # empty and the §6.1 orb suppression had never fired live. "A deal on the last completed
+        # session" is the only knowable — and therefore the intended — live meaning.
+        try:
+            flagged_day: date | None = self._calendar.previous_trading_day(d)
+        except ValueError:       # no prior session resolvable (calendar hole) — no flags, no error
+            flagged_day = None
+        flagged = (
+            frozenset(r["symbol"] for r in self._store.get_flagged_instrument_days(flagged_day))
+            if flagged_day is not None else frozenset()
+        )
         ex_dates: dict[str, list[date]] = {}
         for row in self._store.get_corp_actions(
             ex_from=d, ex_to=d + timedelta(days=self._ex_horizon_days)
@@ -353,6 +366,7 @@ class LiveScanContextProvider:
         _log.info(
             "scan_context_day_built",
             d=d.isoformat(), index_closes=len(index_closes), flagged=len(flagged),
+            flagged_day=None if flagged_day is None else flagged_day.isoformat(),
             ex_date_symbols=len(ex_dates), preloaded=len(preload),
             trading_day=window is not None,
         )

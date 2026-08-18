@@ -127,8 +127,10 @@ class ScanContext(BaseModel):
     """Reference-index (NIFTY 50) daily closes ascending — the rsi2 regime filter input (§6.1)."""
 
     flagged: bool = False
-    """Symbol appears in ``flagged_instrument_days`` for today (bulk/block deal) — volume-breakout
-    scanners suppress (§6.1 orb; Phase-3 cat)."""
+    """Symbol appears in ``flagged_instrument_days`` for the PRIOR trading session (bulk/block
+    deal) — volume-breakout scanners suppress (§6.1 orb; Phase-3 cat). Prior session, not today:
+    NSE publishes deals ~EOD and the deals job writes them at 20:30, so a day's own flags are
+    unknowable while it trades (2026-08-18 fix — a today-read was structurally empty)."""
 
     trade_window: tuple[datetime, datetime] | None = None
     """Today's owner trade window [start, end], already session-clamped (``NSECalendar.trade_window``)."""

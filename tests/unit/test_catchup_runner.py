@@ -11,14 +11,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST
 from engine.core.config import config_dir
-from engine.ops.jobs import CatchUpRunner, CatchUpScope, JobClass, JobRegistry, JobSpec
+from engine.ops.jobs import (
+    GIVE_UP_AFTER_DAYS,
+    CatchUpResult,
+    CatchUpRunner,
+    CatchUpScope,
+    JobClass,
+    JobRegistry,
+    JobSpec,
+)
 
 OFF_SINCE = datetime(2026, 6, 12, 18, 30, tzinfo=IST)  # Fri evening — 3-trading-day gap to Wed 17th
 FRI, MON, TUE, WED = date(2026, 6, 12), date(2026, 6, 15), date(2026, 6, 16), date(2026, 6, 17)
@@ -34,7 +42,7 @@ def _spec_recorder(calls: list, job_id: str, job_class: JobClass, at: time, *, o
     """A JobSpec whose run() appends (job_id, run_for|None) to ``calls``; raises for ``fail_on``."""
     if job_class is JobClass.DATE_KEYED:
         async def run(d: date) -> None:
-            if fail_on is not None and d == fail_on:
+            if fail_on == "always" or (fail_on is not None and d == fail_on):
                 raise RuntimeError(f"boom on {d}")
             calls.append((job_id, d))
     else:
@@ -170,25 +178,45 @@ async def test_safety_critical_failure_never_clears(conn, clock, calendar):
 
 
 @pytest.mark.asyncio
-async def test_date_keyed_failure_stops_replay_and_resumes(conn, clock, calendar):
+async def test_date_keyed_failure_continues_to_later_days(conn, clock, calendar):
+    """2026-08-18 live bug: the old first-failure ``break`` let one NSE-poisoned date
+    (``deals:2026-08-13``, 503 on every retry while adjacent dates fetched fine) block five days of
+    later dates from ever being attempted. A failed day is recorded and the replay CONTINUES."""
     calls: list = []
     reg = JobRegistry()
-    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30), fail_on=TUE))
+    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30), fail_on=MON))
     runner = _build_runner(conn, clock, calendar, reg)
     runner.record_run("bhavcopy", FRI)
 
     result = await runner.catch_up(off_since=OFF_SINCE)
-    assert [(j, d) for j, d in calls] == [("bhavcopy", MON)]          # replay stopped at the failure
-    assert result.jobs_failed == [f"bhavcopy:{TUE.isoformat()}"]
-    assert runner.last_success_date("bhavcopy") == MON                # watermark preserved
+    assert [(j, d) for j, d in calls] == [("bhavcopy", TUE)]          # MON raised, TUE still ran
+    assert result.jobs_failed == [f"bhavcopy:{MON.isoformat()}"]
+    assert result.jobs_caught_up == [f"bhavcopy:{TUE.isoformat()}"]
+    assert runner.was_run("bhavcopy", MON) is False                   # failed = still retryable
 
-    # Next startup resumes EXACTLY at the failed day (idempotent, §2.6).
+
+@pytest.mark.asyncio
+async def test_date_keyed_failed_day_is_retried_after_a_later_success(conn, clock, calendar):
+    """THE watermark edge the per-day continue creates: TUE's success advances
+    ``last_success_date`` PAST failed MON, so the scan-start shortcut (``last + 1``) alone would
+    silently abandon MON forever. ``first_failed_date`` must pull the scan back to it."""
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30), fail_on=MON))
+    runner = _build_runner(conn, clock, calendar, reg)
+    runner.record_run("bhavcopy", FRI)
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert runner.last_success_date("bhavcopy") == TUE                # watermark moved past the hole
+
+    # Next pass (transient cause gone): MON is retried and recovers, inside its paid history.
     calls.clear()
     reg2 = JobRegistry()
     reg2.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30)))
     runner2 = _build_runner(conn, clock, calendar, reg2)
-    await runner2.catch_up(off_since=OFF_SINCE)
-    assert [(j, d) for j, d in calls] == [("bhavcopy", TUE)]
+    result = await runner2.catch_up(off_since=OFF_SINCE)
+    assert [(j, d) for j, d in calls] == [("bhavcopy", MON)]
+    assert result.jobs_caught_up == [f"bhavcopy:{MON.isoformat()}"]
+    assert runner2.was_run("bhavcopy", MON) is True
 
 
 class _NotOkResult:
@@ -210,11 +238,11 @@ def _spec_recorder_notok(calls: list, job_id: str, at: time, *, notok_on: date, 
 
 
 @pytest.mark.asyncio
-async def test_date_keyed_notok_return_stops_replay_and_resumes(conn, clock, calendar):
+async def test_date_keyed_notok_return_is_a_failure_and_resumes(conn, clock, calendar):
     """2026-08-12 live bug: a job that returns ``ok=False`` WITHOUT raising (bhavcopy's E5 shape —
-    it degrades + alerts + returns, never raises) must be treated exactly like an exception: recorded
-    failed, listed in jobs_failed, replay stopped. Before the fix this hit ``record_run`` with its
-    default ``status='success'`` and the day was silently skipped by every future sweep."""
+    it degrades + alerts + returns, never raises) must be treated exactly like an exception:
+    recorded failed, listed in jobs_failed, retried next pass. Before the fix this hit
+    ``record_run`` with its default ``status='success'`` and the day was silently skipped."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder_notok(calls, "bhavcopy", time(18, 30), notok_on=TUE))
@@ -234,6 +262,153 @@ async def test_date_keyed_notok_return_stops_replay_and_resumes(conn, clock, cal
     runner2 = _build_runner(conn, clock, calendar, reg2)
     await runner2.catch_up(off_since=OFF_SINCE)
     assert [(j, d) for j, d in calls] == [("bhavcopy", TUE)]
+
+
+# ============================================================ give-up + report dedup (2026-08-18)
+def _backdate_first_failed(conn, job_id: str, d: date, first_failed: datetime) -> None:
+    """Manufacture a failing streak (the clock is frozen at FIXED_NOW, so a real streak cannot
+    elapse in-test): the row must already be ``failed`` with its streak clock in the past."""
+    conn.execute(
+        "UPDATE job_runs SET first_failed_at=? WHERE job_id=? AND run_for_date=?",
+        (first_failed.isoformat(), job_id, d.isoformat()),
+    )
+    conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_date_keyed_gives_up_after_a_failing_streak(conn, clock, calendar):
+    """A day whose failing STREAK exceeds GIVE_UP_AFTER_DAYS is marked ``skipped`` on its next
+    failure — terminal: reported once as given up, resolved for every later pass, and never a
+    success for the watermark. TUE's streak is back-dated past the grace; MON fails fresh the same
+    pass, proving the streak — not the day's calendar age or order — decides (MON is OLDER)."""
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "deals", JobClass.DATE_KEYED, time(18, 30), fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg)
+    runner.record_run("deals", FRI)
+    runner.record_run("deals", TUE, status="failed")
+    _backdate_first_failed(conn, "deals", TUE,
+                           clock.now() - timedelta(days=GIVE_UP_AFTER_DAYS + 1))
+
+    result = await runner.catch_up(off_since=OFF_SINCE)
+    assert result.jobs_failed == [
+        f"deals:{MON.isoformat()}",                                   # fresh failure — retryable
+        f"deals:{TUE.isoformat()} (gave up)",                         # streak expired — terminal
+    ]
+    assert runner.was_run("deals", TUE) is True                       # resolved — no more retries
+    assert runner.was_run("deals", MON) is False
+    assert runner.last_success_date("deals") == FRI                   # skipped (TUE > FRI) is never
+                                                                      # a success for the watermark
+    second = await runner.catch_up(off_since=OFF_SINCE)
+    assert second.jobs_failed == [f"deals:{MON.isoformat()}"]         # young one retried; TUE done
+
+
+@pytest.mark.asyncio
+async def test_give_up_boundary_is_exactly_the_constant(conn, clock, calendar):
+    """The grace boundary, driven off the imported constant (mutation-caught 2026-08-18: the old
+    fixtures bracketed it 1 vs 14 days, so any value in 2..13 — and a >/>= flip — passed unseen):
+    a streak of exactly GIVE_UP_AFTER_DAYS stays retryable; one day more is terminal."""
+    for streak_days, terminal in ((GIVE_UP_AFTER_DAYS, False), (GIVE_UP_AFTER_DAYS + 1, True)):
+        reg = JobRegistry()
+        reg.register(_spec_recorder([], f"j{streak_days}", JobClass.DATE_KEYED, time(18, 30),
+                                    fail_on=TUE))
+        runner = _build_runner(conn, clock, calendar, reg)
+        runner.record_run(f"j{streak_days}", MON)
+        runner.record_run(f"j{streak_days}", TUE, status="failed")
+        _backdate_first_failed(conn, f"j{streak_days}", TUE,
+                               clock.now() - timedelta(days=streak_days))
+
+        result = await runner.catch_up(off_since=OFF_SINCE)
+        suffix = " (gave up)" if terminal else ""
+        assert result.jobs_failed == [f"j{streak_days}:{TUE.isoformat()}{suffix}"]
+        assert runner.was_run(f"j{streak_days}", TUE) is terminal
+
+
+@pytest.mark.asyncio
+async def test_first_attempt_is_never_terminal_even_on_an_old_backlog(conn, clock, calendar):
+    """THE cold-boot protection (review-confirmed by execution before ship): an off-gap replays old
+    dates on their FIRST-ever attempt, and one burst of upstream 503s must record them ``failed``
+    (streak clock starts now) — never ``skipped``. An age-keyed rule abandoned 4 days permanently
+    in the reviewer's reproduction."""
+    off_since = datetime(2026, 6, 3, 18, 0, tzinfo=IST)               # 2-week gap to FIXED_NOW
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "deals", JobClass.DATE_KEYED, time(18, 30), fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg)
+
+    result = await runner.catch_up(off_since=off_since)
+    assert result.jobs_failed and all("(gave up)" not in e for e in result.jobs_failed)
+    assert all(not runner.was_run("deals", date.fromisoformat(e.split(":", 1)[1]))
+               for e in result.jobs_failed)                           # every day still retryable
+
+
+@pytest.mark.asyncio
+async def test_failed_day_beyond_the_lookback_horizon_is_resolved_not_pinned(conn, clock, calendar):
+    """A still-``failed`` day that drifts past ``max_lookback_days`` can never be retried, so it is
+    resolved (skipped + reported once) instead of pinning ``first_failed_date`` forever."""
+    ancient = date(2026, 5, 1)
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "deals", JobClass.DATE_KEYED, time(18, 30)))
+    runner = _build_runner(conn, clock, calendar, reg)
+    runner.record_run("deals", ancient, status="failed")
+    runner.record_run("deals", TUE)
+
+    result = await runner.catch_up(off_since=OFF_SINCE)
+    assert f"deals:{ancient.isoformat()} (gave up)" in result.jobs_failed
+    assert ancient not in [d for _, d in calls]                       # resolved WITHOUT an attempt
+    assert runner.was_run("deals", ancient) is True
+    assert runner.last_success_date("deals") == TUE
+
+    second = await runner.catch_up(off_since=OFF_SINCE)
+    assert second.jobs_failed == []                                   # resolved exactly once
+
+
+@pytest.mark.asyncio
+async def test_date_keyed_young_failure_is_not_given_up(conn, clock, calendar):
+    """A first-attempt failure stays ``failed`` (retryable) — give-up is for dates that keep
+    failing across the grace window, never for yesterday's transient."""
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "deals", JobClass.DATE_KEYED, time(18, 30), fail_on=TUE))
+    runner = _build_runner(conn, clock, calendar, reg)
+    runner.record_run("deals", FRI)
+
+    result = await runner.catch_up(off_since=OFF_SINCE)
+    assert result.jobs_failed == [f"deals:{TUE.isoformat()}"]         # no "(gave up)" suffix
+    assert runner.was_run("deals", TUE) is False                      # still retryable
+
+
+@pytest.mark.asyncio
+async def test_unchanged_failure_report_is_sent_once(conn, clock, calendar):
+    """2026-08-18: a stuck failure re-sent the identical CATCHUP_REPORT on every 30-min sweep
+    (15+/day observed live for ``deals:2026-08-13``). An unchanged pure-failure report says nothing
+    new — suppressed; any progress (caught-up) or a CHANGED failure set sends again."""
+    sent: list = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "deals", JobClass.DATE_KEYED, time(18, 30), fail_on=TUE))
+    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30)))
+    runner = _build_runner(conn, clock, calendar, reg, notify=notify)
+    runner.record_run("deals", MON)
+    runner.record_run("bhavcopy", FRI)
+
+    await runner.catch_up(off_since=OFF_SINCE)          # bhavcopy catches up + deals fails: sends
+    assert len(sent) == 1
+    await runner.catch_up(off_since=OFF_SINCE)          # same lone failure again: suppressed
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert len(sent) == 1
+
+    # TUE recovers on a later pass: caught-up progress is always news — sends again.
+    reg2 = JobRegistry()
+    reg2.register(_spec_recorder(calls, "deals", JobClass.DATE_KEYED, time(18, 30)))
+    runner2 = _build_runner(conn, clock, calendar, reg2, notify=notify)
+    await runner2.catch_up(off_since=OFF_SINCE)
+    assert len(sent) == 2
+    assert runner2.was_run("deals", TUE) is True
 
 
 @pytest.mark.asyncio
@@ -260,6 +435,25 @@ def test_stale_safety_jobs_predicate(conn, clock, calendar):
     assert runner.stale_safety_jobs() == ["instruments"]
     runner.record_run("instruments", WED)
     assert runner.stale_safety_jobs() == []
+
+
+def test_report_is_news_decision_table(conn, clock, calendar):
+    """The suppression rule itself: progress and freezes always send; a pure-failure report sends
+    only when the failure set differs from the last DELIVERED one (incl. the give-up transition,
+    whose "(gave up)" suffix changes the entry)."""
+    runner = _build_runner(conn, clock, calendar, JobRegistry())
+
+    def news(**kw) -> bool:
+        return runner._report_is_news(CatchUpResult(**kw))
+
+    assert news(jobs_caught_up=["bhavcopy:2026-06-16"]) is True
+    assert news(frozen_reasons=["data_freshness:instruments"]) is True
+    assert news(jobs_failed=["deals:2026-06-16"]) is True             # first failure report
+    runner._last_failed_alert = ["deals:2026-06-16"]
+    assert news(jobs_failed=["deals:2026-06-16"]) is False            # unchanged — suppressed
+    assert news(jobs_failed=["deals:2026-06-16", "bhavcopy:2026-06-16"]) is True
+    assert news(jobs_failed=["deals:2026-06-16 (gave up)"]) is True
+    assert news() is False                                            # nothing happened
 
 
 def test_no_registry_is_pure_watermark_store(conn, clock, calendar):

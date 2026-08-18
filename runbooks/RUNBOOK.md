@@ -140,10 +140,10 @@ uses). Times are the `jobs:` block in `config/settings.yaml`.
 | 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift (A13); one run per missed day |
 | 18:00 | `bhavcopy` | date-keyed | UDiFF cross-check/fill of `bars_1d` |
 | 18:05 | `daily_bars` | date-keyed | nightly incremental official-candle backfill (watchlist + NIFTY 50 + India VIX) |
-| 18:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; GTT adjust is Phase 3) |
 | 18:30 | `earnings_calendar` | safety-critical | results/board-meeting dates (R2/O13) |
-| 18:45 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` |
-| 18:50 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe |
+| 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |
+| 20:30 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` (moved 18:45→20:30 2026-07-24) |
+| 20:45 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe (moved 18:50→20:45 2026-08-18 — MUST stay after `deals`/`corp_actions`, it reads both) |
 | 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` (§10.5) |
 
 Live (interval, not calendar-gated, run whenever the engine is up): `bar_advance` (5 s bar

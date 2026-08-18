@@ -584,17 +584,23 @@ async def test_thin_daily_history_nulls_levels_without_blocking_the_grade(store,
 
 # --------------------------------------------------------------------------- wiring / persistence
 async def test_universe_and_flagged_exclusions_are_wired(store, make_job):
-    """Two store-sourced conditions that no pure-function test can prove: universe + block deals."""
-    seed_universe(store, WED, ("ACME", "FLAGGED"))
-    for symbol in ("ACME", "FLAGGED", "OFFUNIVERSE"):
+    """Two store-sourced conditions that no pure-function test can prove: universe + block deals.
+
+    Flags are the PRIOR session's (2026-08-18 fix): the ~08:35 digest runs before the 20:30 deals
+    job can have written day-``d`` rows, so a ``d`` read was structurally empty and ``not_flagged``
+    had never bound. A day-``d`` row must NOT flag (it cannot exist at digest time in live use)."""
+    seed_universe(store, WED, ("ACME", "FLAGGED", "SAMEDAY"))
+    for symbol in ("ACME", "FLAGGED", "SAMEDAY", "OFFUNIVERSE"):
         seed_bars(store, symbol, WED)
         seed_cluster(store, f"c-{symbol}", first_seen=at(TUE, 18, 0), symbols=(symbol,))
-    store.upsert_flagged_instrument_days([{"symbol": "FLAGGED", "d": WED, "reason": "block_deal"}])
+    store.upsert_flagged_instrument_days([{"symbol": "FLAGGED", "d": TUE, "reason": "block_deal"}])
+    store.upsert_flagged_instrument_days([{"symbol": "SAMEDAY", "d": WED, "reason": "block_deal"}])
 
     await make_job().run(WED)
     grades = {r["symbol"]: r["grade"] for r in store.get_catalyst_watchlist(WED)}
 
-    assert grades == {"ACME": "originating", "FLAGGED": "context", "OFFUNIVERSE": "context"}
+    assert grades == {"ACME": "originating", "FLAGGED": "context",
+                      "SAMEDAY": "originating", "OFFUNIVERSE": "context"}
 
 
 async def test_watchlist_cap_only_symbol_passes_in_universe(store, make_job):
@@ -629,3 +635,29 @@ async def test_rerun_replaces_the_day_and_carries_cluster_refs(store, make_job):
     assert second[0]["cluster_refs"] == ["c-1"]
     assert second[0]["direction"] == "long"
     assert second[0]["entry_id"] != first[0]["entry_id"]
+
+
+async def test_unresolvable_prior_session_degrades_to_no_flags(store, make_job):
+    """The E5 degrade on the prior-session flags read (2026-08-18): a calendar that cannot resolve
+    a prior trading day yields NO flags — origination proceeds unflagged rather than the digest
+    dying on a calendar hole."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(store, "c-ACME", first_seen=at(TUE, 18, 0), symbols=("ACME",))
+
+    job = make_job()
+    real_calendar = job._calendar
+
+    class _HolyCalendar:
+        def __getattr__(self, name):  # noqa: ANN001, ANN204 - delegate everything else
+            return getattr(real_calendar, name)
+
+        def previous_trading_day(self, d):  # noqa: ANN001 - the hole under test
+            raise ValueError("no trading day within ~1y")
+
+    job._calendar = _HolyCalendar()
+    await job.run(WED)
+
+    rows = store.get_catalyst_watchlist(WED)
+    assert [r["symbol"] for r in rows] == ["ACME"]
+    assert rows[0]["grade"] == "originating"              # not_flagged passed via the degrade

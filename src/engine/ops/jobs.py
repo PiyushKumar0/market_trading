@@ -195,6 +195,17 @@ class JobRegistry:
         return len(self._specs)
 
 
+#: Calendar days a date-keyed day may keep FAILING (measured from its first recorded failure —
+#: ``job_runs.first_failed_at``, migration 0009) before catch-up marks it ``skipped`` (terminal).
+#: A streak clock, never the day's calendar age: a cold boot after a long off-gap replays old dates
+#: on their FIRST-ever attempt, and an age rule would abandon them on one burst of NSE 503s
+#: (review-confirmed by execution, 2026-08-18). At the 30-min sweep cadence a 7-day streak means
+#: hundreds of attempts while neighboring dates succeeded — a permanent upstream condition
+#: (observed: NSE 503 on deals for exactly one date, five days running), not a transient one.
+#: The 30-day ``max_lookback_days`` horizon already implied give-up — silently.
+GIVE_UP_AFTER_DAYS = 7
+
+
 class CatchUpResult(BaseModel):
     """What a §2.6 step-5 catch-up pass did (feeds the STARTUP_REPORT / CATCHUP_REPORT)."""
 
@@ -262,6 +273,11 @@ class CatchUpRunner:
         #: even after the post-login catch-up succeeded (observed live: instruments, 2026-08-06).
         self._clear = clear
         self._max_lookback_days = int(max_lookback_days)
+        #: Last failure set sent to the owner (2026-08-18). A stuck failure used to re-send the
+        #: identical CATCHUP_REPORT on every 30-min sweep (15+/day observed); a report whose only
+        #: content is an unchanged failure set says nothing new. Process state on purpose: a fresh
+        #: boot re-sends once, which doubles as the "still broken after restart" signal.
+        self._last_failed_alert: list[str] | None = None
 
     # ------------------------------------------------------------------ watermarks (§4.2 job_runs)
     @property
@@ -269,26 +285,47 @@ class CatchUpRunner:
         return self._registry is not None and len(self._registry) > 0
 
     def record_run(self, job_id: str, run_for: date, status: str = "success") -> None:
+        """Upsert the day's watermark row. ``first_failed_at`` is the failing-STREAK clock
+        (migration 0009): set on the first ``failed`` recording, preserved across repeat failures,
+        cleared by success. The give-up decision reads it — never the day's calendar age."""
         now = self._clock.now().isoformat()
         with transaction(self._conn):
             self._conn.execute(
                 """
-                INSERT INTO job_runs (job_id, run_for_date, last_success_at, last_attempt_at, status)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO job_runs (job_id, run_for_date, last_success_at, last_attempt_at, status, first_failed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id, run_for_date) DO UPDATE SET
                     last_success_at=CASE WHEN excluded.status='success' THEN excluded.last_success_at ELSE job_runs.last_success_at END,
                     last_attempt_at=excluded.last_attempt_at,
-                    status=excluded.status
+                    status=excluded.status,
+                    first_failed_at=CASE
+                        WHEN excluded.status='success' THEN NULL
+                        WHEN excluded.status='failed' THEN COALESCE(job_runs.first_failed_at, excluded.first_failed_at)
+                        ELSE job_runs.first_failed_at
+                    END
                 """,
-                (job_id, run_for.isoformat(), now if status == "success" else None, now, status),
+                (job_id, run_for.isoformat(), now if status == "success" else None, now, status,
+                 now if status == "failed" else None),
             )
 
     def was_run(self, job_id: str, run_for: date) -> bool:
+        """Resolved for ``run_for`` — a success, or a terminal give-up (``skipped``): both mean
+        catch-up has nothing left to do for the day. ``failed`` stays unresolved (retryable)."""
         row = self._conn.execute(
             "SELECT status FROM job_runs WHERE job_id=? AND run_for_date=?",
             (job_id, run_for.isoformat()),
         ).fetchone()
-        return bool(row and row["status"] == "success")
+        return bool(row and row["status"] in ("success", "skipped"))
+
+    def first_failed_date(self, job_id: str) -> date | None:
+        """Oldest retryable (``failed``) day. With per-day continue (2026-08-18) the success
+        watermark can advance PAST a failed day, so ``_missed_days`` must anchor its scan here or a
+        transient failure would be silently abandoned the moment a later day succeeds."""
+        row = self._conn.execute(
+            "SELECT min(run_for_date) AS d FROM job_runs WHERE job_id=? AND status='failed'",
+            (job_id,),
+        ).fetchone()
+        return date.fromisoformat(row["d"]) if row and row["d"] else None
 
     def last_success_date(self, job_id: str) -> date | None:
         row = self._conn.execute(
@@ -366,16 +403,27 @@ class CatchUpRunner:
             caught_up=result.jobs_caught_up, failed=result.jobs_failed,
             frozen=result.frozen_reasons, off_duration_s=result.off_duration_s,
         )
-        if self._notify is not None and (result.jobs_caught_up or result.jobs_failed):
+        if self._notify is not None and self._report_is_news(result):
             try:
                 await self._notify(catalog.catchup_report(
                     off_duration_s=result.off_duration_s,
                     jobs_caught_up=result.jobs_caught_up,
                     jobs_failed=result.jobs_failed,
                 ))
+                # Only a DELIVERED report suppresses the next one — a failed send must retry.
+                self._last_failed_alert = list(result.jobs_failed)
             except Exception:  # noqa: BLE001 - reporting must never fail the recovery
                 _log.exception("catchup_report_notify_failed")
         return result
+
+    def _report_is_news(self, result: CatchUpResult) -> bool:
+        """Owner-report suppression (2026-08-18): progress (caught-up) and freeze events always send;
+        a pure failure report sends only when the failure set CHANGED since the last one sent —
+        an unchanged stuck failure re-reported every 30-min sweep is noise, and the pass's own
+        ``catch_up_complete`` log line keeps the full per-pass record either way."""
+        if result.jobs_caught_up or result.frozen_reasons:
+            return True
+        return bool(result.jobs_failed) and result.jobs_failed != self._last_failed_alert
 
     def _in_scope(self, job_class: JobClass, scope: CatchUpScope) -> list[JobSpec]:
         """The class's specs in dependency order, filtered by the WO-15 deferred set."""
@@ -466,22 +514,76 @@ class CatchUpRunner:
     async def _run_date_keyed(
         self, spec: JobSpec, now: datetime, off_since: datetime | None, result: CatchUpResult
     ) -> None:
-        for d in self._missed_days(spec, now, off_since):
+        """One run per missed day, ascending. A failed day is recorded and the replay CONTINUES to
+        later days (2026-08-18: the old first-failure ``break`` let one NSE-poisoned date —
+        ``deals:2026-08-13``, 503 on every retry while adjacent dates fetched fine — block five
+        days of later dates from ever being attempted). Dates are per-day independent by the
+        DATE_KEYED contract; cross-date dependencies live in the jobs' own missing-data handling.
+        A day whose failing STREAK (first recorded failure → now) exceeds
+        :data:`GIVE_UP_AFTER_DAYS` is marked ``skipped`` (terminal — ``was_run`` treats it as done)
+        instead of retrying forever; a still-``failed`` day that has drifted beyond the
+        ``max_lookback_days`` scan horizon is resolved the same way (the horizon already meant
+        give-up — silently, and it would otherwise pin ``first_failed_date`` forever)."""
+        today = now.date()
+        for stale in self._failed_dates_before(spec.job_id, today - timedelta(days=self._max_lookback_days)):
+            self.record_run(spec.job_id, stale, status="skipped")
+            _log.warning("date_keyed_gave_up", job_id=spec.job_id, run_for=stale.isoformat(),
+                         reason="drifted beyond max_lookback_days while failing")
+            result.jobs_failed.append(f"{spec.job_id}:{stale.isoformat()} (gave up)")
+        for d in self._missed_days(spec, now, off_since, include_failed=True):
             try:
                 outcome = await spec.run(d)  # type: ignore[call-arg]
                 if not _job_result_ok(outcome):
                     # degraded return = failure for the watermark; the job already alerted (E5)
                     _log.warning("date_keyed_catchup_degraded", job_id=spec.job_id, run_for=d.isoformat())
-                    self.record_run(spec.job_id, d, status="failed")
-                    result.jobs_failed.append(f"{spec.job_id}:{d.isoformat()}")
-                    break
+                    self._record_date_keyed_failure(spec, d, now, result)
+                    continue
                 self.record_run(spec.job_id, d)
                 result.jobs_caught_up.append(f"{spec.job_id}:{d.isoformat()}")
-            except Exception:  # noqa: BLE001 - stop this job's replay; watermark resumes it next startup
+            except Exception:  # noqa: BLE001 - one day's failure never blocks the later days
                 _log.exception("date_keyed_catchup_failed", job_id=spec.job_id, run_for=d.isoformat())
-                self.record_run(spec.job_id, d, status="failed")
-                result.jobs_failed.append(f"{spec.job_id}:{d.isoformat()}")
-                break
+                self._record_date_keyed_failure(spec, d, now, result)
+
+    def _record_date_keyed_failure(
+        self, spec: JobSpec, d: date, now: datetime, result: CatchUpResult
+    ) -> None:
+        """Record a failed date-keyed day: retryable (``failed``) until its failing streak — first
+        recorded failure through ``now``, NEVER the day's calendar age (a cold boot replays old
+        dates on their first-ever attempt) — exceeds :data:`GIVE_UP_AFTER_DAYS`; then terminal
+        (``skipped``). An upstream that still errors for one specific date after a week of retries,
+        while adjacent dates succeed, is a permanent condition (observed: NSE deals 503 for one date
+        across five days), and eternal 30-min retries would hammer it and alert forever. The marker
+        is plain ``job_runs`` state, so a manual re-run can still overwrite it."""
+        streak_days = self._failing_streak_days(spec.job_id, d, now)
+        if streak_days > GIVE_UP_AFTER_DAYS:
+            self.record_run(spec.job_id, d, status="skipped")
+            _log.warning("date_keyed_gave_up", job_id=spec.job_id, run_for=d.isoformat(),
+                         failing_days=streak_days)
+            result.jobs_failed.append(f"{spec.job_id}:{d.isoformat()} (gave up)")
+        else:
+            self.record_run(spec.job_id, d, status="failed")
+            result.jobs_failed.append(f"{spec.job_id}:{d.isoformat()}")
+
+    def _failing_streak_days(self, job_id: str, run_for: date, now: datetime) -> int:
+        """Whole days since ``run_for``'s first recorded failure (0 when none — first attempts and
+        pre-migration rows start their streak on THIS failure, they never give up on it)."""
+        row = self._conn.execute(
+            "SELECT first_failed_at FROM job_runs WHERE job_id=? AND run_for_date=?",
+            (job_id, run_for.isoformat()),
+        ).fetchone()
+        if not row or not row["first_failed_at"]:
+            return 0
+        return max(0, (now - datetime.fromisoformat(row["first_failed_at"])).days)
+
+    def _failed_dates_before(self, job_id: str, horizon: date) -> list[date]:
+        """Still-``failed`` days older than the scan horizon, ascending — unreachable by retry,
+        so they must be resolved (skipped) rather than left pinning the failure anchor forever."""
+        rows = self._conn.execute(
+            "SELECT run_for_date FROM job_runs WHERE job_id=? AND status='failed' AND run_for_date<? "
+            "ORDER BY run_for_date",
+            (job_id, horizon.isoformat()),
+        ).fetchall()
+        return [date.fromisoformat(r["run_for_date"]) for r in rows]
 
     # ------------------------------------------------------------------ missed-fire-day computation
     def _fires_on(self, spec: JobSpec, d: date) -> bool:
@@ -489,12 +591,20 @@ class CatchUpRunner:
             return spec.fire_day(d)
         return self._calendar.is_trading_day(d)  # default: NSE trading days (R6)
 
-    def _missed_days(self, spec: JobSpec, now: datetime, off_since: datetime | None) -> list[date]:
-        """Fire-days in the scan window whose fire-time passed without a recorded success, ascending.
+    def _missed_days(
+        self, spec: JobSpec, now: datetime, off_since: datetime | None, *, include_failed: bool = False
+    ) -> list[date]:
+        """Fire-days in the scan window whose fire-time passed without being resolved, ascending.
 
         Scan start: day after the last success watermark; a never-run job anchors at the off-window
         start (``off_since``) or today (fresh install — deep history is the backfill job's business,
         not catch-up's). Always clamped to ``max_lookback_days``.
+
+        ``include_failed`` (the DATE_KEYED caller): pull the start back to the oldest still-``failed``
+        day. Since per-day continue (2026-08-18) the success watermark advances past a failed day, so
+        without this anchor the day would silently fall out of the scan the moment a later day
+        succeeds. Run-latest callers must NOT set it: their failed rows are recorded under gap-target
+        dates and pulling the scan back would re-run an already-superseded gap forever.
         """
         today = now.date()
         last = self.last_success_date(spec.job_id)
@@ -504,6 +614,10 @@ class CatchUpRunner:
             start = off_since.date()
         else:
             start = today
+        if include_failed:
+            failed = self.first_failed_date(spec.job_id)
+            if failed is not None:
+                start = min(start, failed)
         start = max(start, today - timedelta(days=self._max_lookback_days))
 
         missed: list[date] = []

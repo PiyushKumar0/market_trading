@@ -158,9 +158,16 @@ _WATCHLIST_LOOKBACK_DAYS = 15
 #: Fire-times for the three §10.1 jobs the plan lists without a dedicated ``settings.jobs`` key: the news
 #: chain runs just before the 08:30 universe build (backfill→cluster→resolve is never entry-blocking,
 #: §2.7); the nightly incremental daily-bar backfill and the feature snapshot follow the EOD data jobs.
+#: Features moved 18:50→20:45 (2026-08-18): it reads day-``d`` deals flags and corp actions, whose
+#: jobs moved to 20:30/20:15 on 2026-07-24 (NSE evening-maintenance 503s) — at 18:50 it had been
+#: reading both BEFORE their daily writes ever since, so every live-fired features row since 07-24
+#: carried ``flagged``/ex-date context from stale data (catch-up-fired rows, ordered deals→features
+#: by ``order``, did not — an inconsistency in the training data). 20:45 restores the write→read
+#: ordering the ``order=40→50`` catch-up sequence always encoded, and stays before the 21:00 nightly
+#: review/backup slots.
 _NEWS_CHAIN_IST = time(8, 25)
 _DAILY_BARS_IST = time(18, 5)
-_FEATURES_IST = time(18, 50)
+_FEATURES_IST = time(20, 45)
 
 #: §4.3 tick-partition compaction (WO-7) — late evening, after every EOD data job and the nightly
 #: review, so a multi-minute filesystem pass never competes with them. Date-keyed: the run for day D
@@ -267,6 +274,11 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
     # digest(25) → planner(28) — the digest needs scored clusters + today's universe; the planner
     # needs the digest (§2.7 steps 4-6).
     for spec in (
+        # NOTE (2026-08-18): the digest reads the PRIOR session's deals flags. In one catch-up pass
+        # RUN_LATEST runs before DATE_KEYED, so a same-pass deals catch-up lands AFTER the digest —
+        # the ordering that saves this is WO-15: the digest is a DEFERRED job, so the boot pass
+        # replays deals first and the digest fires in the post-arm one-shot. Un-deferring the digest
+        # would reopen a stale-flags read on multi-day-gap boots.
         JobSpec(JOB_CATALYST_DIGEST, JobClass.RUN_LATEST, settings.jobs.catalyst_digest_ist,
                 fns.get(JOB_CATALYST_DIGEST), order=25),
         JobSpec(JOB_PREOPEN_PLANNER, JobClass.RUN_LATEST, settings.jobs.preopen_planner_ist,

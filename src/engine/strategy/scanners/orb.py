@@ -8,8 +8,10 @@ tick-derived high/low, so the seed bar's effective range is
 with ``volume ≥ vol_mult × median(volume over the 20 session bars immediately BEFORE the trigger
 bar)``; stop anchored at the **opposite range edge**: risk = ``stop_range_frac × (entry − range_low)``
 for BUY (mirror ``× (range_high − entry)`` for SELL); target = ``rr_target × risk`` where risk = the
-(unrounded) stop distance; suppressed on ``flagged_instrument_days`` (volume breakouts on
-bulk/block-deal days are untrustworthy, §4.4 job 9).
+(unrounded) stop distance; suppressed when the symbol had a bulk/block deal on the PRIOR trading
+session (``flagged_instrument_days`` via ``ctx.flagged`` — NSE publishes deals EOD, so the prior
+session's are the freshest knowable intraday; volume breakouts around deal activity are
+untrustworthy, §4.4 job 9).
 
 v2 note: v1 sized the stop as ``stop_atr_mult × ATR(14, 1m)`` — a noise-scale unit (~0.14% of price
 median) below the ₹20k MIS cost floor (round-trip ≈ 40–90% of the stop), which made negative net
@@ -82,7 +84,7 @@ class OrbScanner(Scanner):
 
     def scan(self, bar: Bar, ctx: ScanContext) -> list[SignalCandidate]:
         if ctx.flagged:
-            return []  # bulk/block-deal day — volume breakout suppressed (§6.1)
+            return []  # bulk/block deal on the prior session — volume breakout suppressed (§6.1)
         if ctx.session_open is None or ctx.trade_window is None:
             return []  # fail to zero on missing context (warm-up / provider gap)
         bars = ctx.intraday_bars

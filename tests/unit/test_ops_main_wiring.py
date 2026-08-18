@@ -257,7 +257,9 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_BHAVCOPY:     (JobClass.DATE_KEYED,      time(18, 0)),
         opsmain.JOB_DAILY_BARS:   (JobClass.DATE_KEYED,      time(18, 5)),
         opsmain.JOB_DEALS:        (JobClass.DATE_KEYED,      time(20, 30)),
-        opsmain.JOB_FEATURES:     (JobClass.DATE_KEYED,      time(18, 50)),
+        # features 18:50→20:45 (2026-08-18): it reads day-d deals flags + corp actions, whose jobs
+        # moved to 20:30/20:15 on 2026-07-24 — at 18:50 it read both before their daily writes.
+        opsmain.JOB_FEATURES:     (JobClass.DATE_KEYED,      time(20, 45)),
         opsmain.JOB_FILINGS_PIT:       (JobClass.DATE_KEYED, time(18, 35)),
         opsmain.JOB_FILINGS_PIT_FRESH: (JobClass.DATE_KEYED, time(19, 0)),
         opsmain.JOB_FILINGS_RESULTS:   (JobClass.DATE_KEYED, time(18, 45)),
@@ -270,6 +272,14 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
     for jid, (cls, at) in expected.items():
         assert by_id[jid].job_class == cls, jid
         assert by_id[jid].at == at, jid
+
+    # Write→read dependencies as RELATIONS, not just literals — the 2026-07-24 reschedule moved
+    # deals/corp_actions past features' 18:50 and the literal-only table above stayed green while
+    # features read pre-write data for a month (found 2026-08-18). A future reschedule must trip
+    # these, not just edit two lines of the dict.
+    assert by_id[opsmain.JOB_DEALS].at < by_id[opsmain.JOB_FEATURES].at            # flags → features
+    assert by_id[opsmain.JOB_CORP_ACTIONS].at < by_id[opsmain.JOB_FEATURES].at     # ex-dates → features
+    assert by_id[opsmain.JOB_DEALS].order < by_id[opsmain.JOB_FEATURES].order      # catch-up sequence
 
 
 def test_instruments_runs_before_surveillance_in_dependency_order() -> None:

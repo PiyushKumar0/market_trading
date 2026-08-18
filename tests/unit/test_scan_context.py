@@ -29,6 +29,7 @@ from engine.strategy.scanners.base import Scanner
 from tests.conftest import FIXED_NOW
 
 D = FIXED_NOW.date()                      # 2026-06-17 (Wed), a real trading day (conftest)
+PREV_D = date(2026, 6, 16)                # Tue — D's prior trading session (flagged reads anchor here)
 NEXT_D = date(2026, 6, 18)                # Thu, also a trading day
 SUNDAY = date(2026, 6, 21)                # not a trading day (weekend, no muhurat) — R6
 SESSION_OPEN = datetime(2026, 6, 17, 9, 15, tzinfo=IST)
@@ -227,7 +228,7 @@ def test_one_daily_read_per_symbol_per_day(store, provider):
     assert store.daily_reads.count("AAA") == 1
     assert store.daily_reads.count("BBB") == 1
     assert store.daily_reads.count("NIFTY 50") == 1
-    assert store.flagged_reads == [D]
+    assert store.flagged_reads == [PREV_D]               # prior session (2026-08-18), once per day
     assert store.corp_action_reads == 1
 
 
@@ -262,7 +263,7 @@ def test_day_cache_rebuilt_on_date_change(store, provider):
     ctx = provider(_bar("AAA", d=NEXT_D, mm=20))
     assert store.daily_reads.count("AAA") == 2           # rebuilt for the new day
     assert store.daily_reads.count("NIFTY 50") == 2
-    assert store.flagged_reads == [D, NEXT_D]
+    assert store.flagged_reads == [PREV_D, D]            # each day reads ITS prior session's flags
     assert store.corp_action_reads == 2
     assert ctx.session_open == datetime(2026, 6, 18, 9, 15, tzinfo=IST)
     assert len(ctx.intraday_bars) == 1                   # yesterday's series does not survive rollover
@@ -320,10 +321,26 @@ def test_index_daily_closes_populated(store, provider):
     assert ctx.index_daily_closes[0] < ctx.index_daily_closes[-1]
 
 
-def test_flagged_symbol_of_the_day(store, provider):
-    store.upsert_flagged_instrument_days([{"symbol": "AAA", "d": D, "reason": "block_deal"}])
-    assert provider(_bar("AAA")).flagged is True         # §6.1 orb suppresses on this
-    assert provider(_bar("BBB")).flagged is False
+def test_flagged_reads_the_prior_session(store, provider):
+    """2026-08-18 fix: the deals job writes day-``d``'s flags at 20:30 of ``d`` itself, so a
+    same-day read was structurally empty and orb's §6.1 bulk/block-deal suppression had never
+    fired live (log-verified flagged=0 on every day 08-11→08-18, including days the job
+    succeeded). The knowable — and now pinned — semantics: a deal on the PRIOR trading session
+    flags the symbol today."""
+    store.upsert_flagged_instrument_days([{"symbol": "AAA", "d": PREV_D, "reason": "block_deal"}])
+    store.upsert_flagged_instrument_days([{"symbol": "BBB", "d": D, "reason": "block_deal"}])
+    assert provider(_bar("AAA")).flagged is True          # prior-session deal — orb suppresses
+    assert provider(_bar("BBB")).flagged is False         # same-day rows are unknowable intraday
+    assert store.flagged_reads == [PREV_D]                # one read per day, prior session only
+
+
+def test_flagged_prior_session_walks_back_over_the_weekend(store, clock, calendar, features):
+    """Monday's prior session is Friday — the walk uses the trading calendar, never d-1."""
+    monday, friday = date(2026, 6, 15), date(2026, 6, 12)
+    store.upsert_flagged_instrument_days([{"symbol": "AAA", "d": friday, "reason": "bulk_deal"}])
+    provider = LiveScanContextProvider(store, clock, calendar, features)
+    assert provider(_bar("AAA", d=monday)).flagged is True
+    assert store.flagged_reads == [friday]
 
 
 def test_upcoming_ex_dates_bucketed_per_symbol(store, provider):
@@ -523,6 +540,9 @@ class _SwappableWindowCalendar:
     def is_trading_day(self, d):   # noqa: ANN001 - delegate
         return self._inner.is_trading_day(d)
 
+    def previous_trading_day(self, d):  # noqa: ANN001 - delegate
+        return self._inner.previous_trading_day(d)
+
     def trade_window(self, d):     # noqa: ANN001 - the swappable bit
         self.reads += 1
         if self.window is None:
@@ -613,3 +633,18 @@ def test_day_rollover_still_rebuilds_the_window_without_invalidation(swappable):
     assert provider(_bar("AAA", mm=20)).trade_window == OLD_W
     cal.window = NEW_W
     assert provider(_bar("AAA", d=NEXT_D, mm=20)).trade_window == NEW_W   # new date ⇒ full rebuild
+
+
+def test_flagged_degrades_to_none_when_no_prior_session_resolves(store, clock, calendar, features):
+    """The E5 degrade: an unresolvable prior session (calendar hole) yields NO flags and NO error —
+    orb runs unsuppressed rather than the whole day cache failing to build."""
+
+    class _HolyCalendar(_SwappableWindowCalendar):
+        def previous_trading_day(self, d):  # noqa: ANN001 - the hole under test
+            raise ValueError("no trading day within ~1y")
+
+    cal = _HolyCalendar(calendar, OLD_W)
+    provider = LiveScanContextProvider(store, clock, cal, features)
+    ctx = provider(_bar("AAA"))
+    assert ctx.flagged is False
+    assert store.flagged_reads == []                     # degraded BEFORE the store read

@@ -1175,9 +1175,19 @@ class CatalystDigestJob:
         fanout = float(p["fanout_weight"])
         sentiment_min = float(guard_value(guard, "sentiment_min_long"))
 
-        flagged = {
-            r["symbol"] for r in await self._store.arun(self._store.get_flagged_instrument_days, d)
-        }
+        # PRIOR session's bulk/block-deal flags (2026-08-18 fix): the ~08:35 digest runs before the
+        # 20:30 deals job can possibly have written day-``d`` rows, so a ``d`` read was structurally
+        # empty and the ``not_flagged`` origination gate had never bound. Same semantics as the scan
+        # context: a deal on the last completed session flags the symbol today.
+        try:
+            flagged_day: date | None = self._calendar.previous_trading_day(d)
+        except ValueError:       # no prior session resolvable (calendar hole) — no flags, no error
+            flagged_day = None
+        flagged = (
+            {r["symbol"]
+             for r in await self._store.arun(self._store.get_flagged_instrument_days, flagged_day)}
+            if flagged_day is not None else set()
+        )
         results_days: dict[str, set[date]] = defaultdict(set)
         for r in await self._store.arun(self._store.get_earnings_calendar, earnings_from, d):
             if r.get("kind") == _RESULTS_KIND:
