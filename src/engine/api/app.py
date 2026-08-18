@@ -25,8 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Annotated, Any
+import sqlite3
+import threading
+import time
+from typing import Annotated, Any, Literal
 
+import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -62,6 +66,43 @@ _WS_RELAY_TOPICS = (TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_KILL_STATE, TOPI
 #: Keepalive ping cadence for a live ``/ws/live`` socket (LAN dashboard / proxies see it as alive).
 _WS_PING_INTERVAL_S = 15
 
+#: ``POST /db/query`` row cap: the default an owner gets, and the ceiling a request may ask for
+#: (§3.2.11). Enforced with ``fetchmany(max_rows + 1)`` on the result STREAM — the extra row IS the
+#: ``truncated`` flag — so an unbounded scan is answered without materializing it in this process.
+_DB_QUERY_MAX_ROWS_DEFAULT = 10_000
+_DB_QUERY_MAX_ROWS_LIMIT = 100_000
+
+#: ``POST /db/query`` interrupt deadline in seconds: the default, and the longest an owner may ask
+#: for (§3.2.11). Past it the query is interrupted at its own connection and answered 504 — this is a
+#: trading process first, and an ad-hoc read never holds a worker thread indefinitely.
+_DB_QUERY_TIMEOUT_S_DEFAULT = 5.0
+_DB_QUERY_TIMEOUT_S_LIMIT = 60.0
+
+#: DuckDB statement types ``POST /db/query`` accepts. Read-only is decided by the PARSER's statement
+#: TYPE, never by inspecting the SQL text (§3.2.11). DuckDB 1.5 types ``SHOW``/``DESCRIBE``/
+#: ``SUMMARIZE``/``VALUES``/``FROM x``/read-only ``PRAGMA``s as SELECT, and everything that can mutate
+#: data, instance settings or the filesystem as its own type (INSERT/UPDATE/DELETE/CREATE/COPY/SET/
+#: ATTACH/CALL/PRAGMA/…), so SELECT + EXPLAIN is the whole read-only surface — EXPLAIN is enumerated
+#: because a query plan is exactly what an owner debugging a slow read asks for next.
+_DB_QUERY_ALLOWED_STATEMENTS = frozenset({duckdb.StatementType.SELECT, duckdb.StatementType.EXPLAIN})
+
+#: SQLite authorizer actions ``POST /db/query`` permits — sqlite's equivalent of DuckDB statement
+#: typing (§3.2.11): sqlite asks per action while preparing, and everything outside this set is DENIED
+#: before a byte is read, so INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the file.
+#: SQLITE_RECURSIVE (2026-08-19 review): WITH RECURSIVE is a read shape (walking order_events
+#: chains); the action authorizes recursion only, no write capability — allowed.
+_DB_QUERY_SQLITE_ALLOWED_ACTIONS = frozenset(
+    {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+)
+
+#: ``POST /db/query`` log-line outcome per HTTP status (§6.5 — every query is logged, including the
+#: ones that never ran).
+_DB_QUERY_OUTCOMES = {400: "rejected", 503: "unavailable", 504: "timeout"}
+
+#: Prefix of the owner's SQL carried into the log line: enough to identify the query, bounded so a
+#: pasted 50 KB statement cannot flood the log.
+_DB_QUERY_LOG_SQL_CHARS = 200
+
 
 # --------------------------------------------------------------------------- request bodies
 class TradeWindowBody(BaseModel):
@@ -91,6 +132,18 @@ class KillBody(BaseModel):
     """Owner kill payload for ``POST /kill`` (single-step, fast; §7.2)."""
 
     reason: str | None = None
+
+
+class DbQueryBody(BaseModel):
+    """Owner ad-hoc read payload for ``POST /db/query`` (§3.2.11; owner-directed 2026-08-19).
+
+    ``max_rows``/``timeout_s`` are BOUNDED here rather than clamped silently: an owner who asks for
+    more than the ceiling gets a 422 naming it, not a truncated answer they did not ask for."""
+
+    db: Literal["market", "state"]
+    sql: str
+    max_rows: int = Field(default=_DB_QUERY_MAX_ROWS_DEFAULT, ge=1, le=_DB_QUERY_MAX_ROWS_LIMIT)
+    timeout_s: float = Field(default=_DB_QUERY_TIMEOUT_S_DEFAULT, gt=0, le=_DB_QUERY_TIMEOUT_S_LIMIT)
 
 
 # --------------------------------------------------------------------------- WS fan-out hub (R8)
@@ -407,6 +460,46 @@ def create_app(
                     pass  # legacy/non-JSON diff text — surface as-is rather than 500 the whole route
             out.append({"id": r["id"], "name": r["name"], "diff": diff, "actor": r["actor"], "at": r["at"]})
         return {"config_audit": out}
+
+    # ----------------------------------------------------------------- ad-hoc DB read (POST, §3.2.11)
+    @app.post("/db/query")
+    async def db_query(body: DbQueryBody, _: Owner) -> dict[str, Any]:
+        """Owner ad-hoc SELECT over the live databases (owner-directed 2026-08-19). Motivated by the
+        2026-08-18 incidents: DuckDB's one-writer-PROCESS model made read-only questions cost engine
+        STOPS (three in one day, one of them mid-session), so the process that already HOLDS the
+        database answers them instead.
+
+        Read-only is decided by STATEMENT TYPE, never by inspecting the SQL text: ``market`` takes
+        DuckDB's parser verdict (:data:`_DB_QUERY_ALLOWED_STATEMENTS`), ``state`` runs under SQLite's
+        authorizer (:data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS`) on a ``mode=ro`` connection —
+        INSERT/COPY/SET/ATTACH/DDL and multi-statement bodies are 400, so instance-global settings and
+        the filesystem write path are unreachable from here. Both dbs execute on a worker thread
+        against a PER-REQUEST cursor/connection (never the loop — §2.2 heartbeat invariant; never a
+        shared cursor), under the row cap and an interrupt deadline (504).
+
+        Accepted residual (owner-directed): a genuine SELECT can still read local files through
+        DuckDB's ``read_*`` table functions — the single-owner bearer token IS the boundary (R10)."""
+        started = time.perf_counter()
+        try:
+            if not body.sql.strip():
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "sql is empty")
+            if body.db == "market":
+                columns, rows, truncated = await _db_query_market(app.state, body)
+            else:
+                columns, rows, truncated = await _db_query_state(app.state.conn, body)
+        except HTTPException as exc:
+            outcome = _DB_QUERY_OUTCOMES.get(exc.status_code, "error")
+            _log_db_query(body, outcome, _elapsed_ms(started), detail=str(exc.detail))
+            raise
+        elapsed_ms = _elapsed_ms(started)
+        _log_db_query(body, "ok", elapsed_ms, row_count=len(rows), truncated=truncated)
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+            "elapsed_ms": elapsed_ms,
+        }
 
     @app.get("/mode")
     async def get_mode(_: Owner) -> dict[str, Any]:
@@ -734,9 +827,13 @@ async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
 
 # --------------------------------------------------------------------------- helpers
 def _jsonable(value: Any) -> Any:
-    """Render one market-store row value for the wire. Store rows are DuckDB-native, so prices arrive
-    as ``Decimal`` and days/timestamps as ``date``/``datetime``: Decimals cross as STRINGS (§8.1
-    decimal-as-string — FastAPI's default encoder would coerce them to float and corrupt a level)."""
+    """Render one store row value for the wire. Store rows are DuckDB-native, so prices arrive as
+    ``Decimal`` and days/timestamps as ``date``/``datetime``: Decimals cross as STRINGS (§8.1
+    decimal-as-string — FastAPI's default encoder would coerce them to float and corrupt a level).
+
+    ``bytes``/``dict`` are handled for ``POST /db/query``, which returns whatever column the owner
+    asked for: FastAPI's encoder UTF-8-decodes bytes (a 500 on any real BLOB — ``agent_calls.context_gz``
+    is gzip) and never looks inside a STRUCT for the Decimals it would then float."""
     from datetime import date as _date
     from decimal import Decimal as _Decimal
 
@@ -744,9 +841,192 @@ def _jsonable(value: Any) -> Any:
         return str(value)
     if isinstance(value, _date):  # covers datetime (a date subclass) — both go out ISO-8601
         return value.isoformat()
+    if isinstance(value, bytes):
+        return value.hex()
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
     return value
+
+
+# --------------------------------------------------------------------------- /db/query (§3.2.11)
+async def _db_query_market(app_state: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
+    """Validate + run one owner SELECT on a PER-REQUEST cursor of the LIVE ``MarketStore`` connection.
+
+    ``con.cursor()`` is a fresh DuckDB connection onto the SAME instance: it sees every committed row
+    the engine has written, contends for none of the store's write lock, and its ``interrupt()`` cancels
+    only its own query (verified 2026-08-19 — the parent connection's in-flight work completes
+    untouched). Riding the store INSTANCE is forced rather than preferred: §4.1 gives exactly one
+    process ``market.duckdb`` and DuckDB's file lock refuses a second ``connect()``. The store is
+    duck-typed off ``market_store`` then ``store``, exactly like ``/news/watchlist``; its connection
+    accessor is private because there is no public one and widening the store API is not this
+    endpoint's business."""
+    store = app_state.market_store if app_state.market_store is not None else app_state.store
+    require_con = getattr(store, "_require_con", None)
+    if require_con is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "market store unavailable")
+    try:
+        con = require_con()
+    except RuntimeError as exc:  # store constructed but never open()ed
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
+    cursor = con.cursor()
+    try:
+        _reject_non_read_duckdb(cursor, body.sql)
+        return await asyncio.to_thread(_run_duckdb, cursor, body)
+    finally:
+        cursor.close()
+
+
+def _reject_non_read_duckdb(cursor: Any, sql: str) -> None:
+    """400 anything that is not EXACTLY ONE read-only DuckDB statement, by asking the PARSER for the
+    statement TYPE (§3.2.11). Text inspection is not a mechanism here — it cannot see through comments,
+    quoting or CTEs, and DuckDB already exposes the parser's own verdict."""
+    try:
+        statements = cursor.extract_statements(sql)
+    except duckdb.Error as exc:  # a parse failure is the owner's typo, not a server fault
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"sql did not parse: {exc}") from None
+    if len(statements) != 1:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"exactly one statement required (parsed {len(statements)})"
+        )
+    kind = statements[0].type
+    if kind not in _DB_QUERY_ALLOWED_STATEMENTS:
+        allowed = ", ".join(sorted(t.name for t in _DB_QUERY_ALLOWED_STATEMENTS))
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"statement type {kind.name} is not read-only (allowed: {allowed})",
+        )
+
+
+def _run_duckdb(cursor: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
+    """Execute the validated statement on a worker thread under an interrupt deadline.
+
+    ``fetchmany(max_rows + 1)`` — never ``fetchall`` — enforces the cap on the RESULT STREAM: the one
+    extra row IS the ``truncated`` flag, so an unbounded scan answers without landing in this process's
+    heap. The timer fires ``interrupt()`` on this request's own cursor, so a slow owner query cannot
+    take anything else down with it."""
+    deadline = threading.Timer(body.timeout_s, cursor.interrupt)
+    deadline.start()
+    try:
+        cursor.execute(body.sql)
+        columns = [d[0] for d in cursor.description or ()]
+        rows = cursor.fetchmany(body.max_rows + 1)
+    except duckdb.InterruptException:
+        raise HTTPException(
+            status.HTTP_504_GATEWAY_TIMEOUT, f"query interrupted after timeout_s={body.timeout_s:g}"
+        ) from None
+    except duckdb.Error as exc:  # unknown table/column, type error — the owner's SQL, answered as 400
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"query failed: {exc}") from None
+    finally:
+        deadline.cancel()
+    return _capped(columns, rows, body.max_rows)
+
+
+async def _db_query_state(conn: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
+    """Validate + run one owner SELECT on a PER-REQUEST read-only SQLite connection (worker thread).
+
+    The file comes off the app's OWN connection (``PRAGMA database_list``), never ``settings``, so this
+    surface can never answer from a different database than the engine is running on."""
+    if conn is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "state db unavailable")
+    if not sqlite3.complete_statement(_semicolon_terminated(body.sql)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "sql is not a complete statement")
+    return await asyncio.to_thread(_run_sqlite, _state_db_uri_path(conn), body)
+
+
+def _semicolon_terminated(sql: str) -> str:
+    """``sqlite3.complete_statement`` judges a SEMICOLON-terminated string (the stdlib REPL's own
+    idiom), so an owner query without the trailing ';' is given one for the completeness check only."""
+    return sql if sql.rstrip().endswith(";") else sql + ";"
+
+
+def _state_db_uri_path(conn: Any) -> str:
+    """The file the app's SQLite connection is attached to, percent-encoded for a ``file:`` URI."""
+    from pathlib import Path
+    from urllib.parse import quote
+
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row["name"] == "main" and row["file"]:
+            return quote(Path(row["file"]).as_posix(), safe="/:")
+    raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "state db is not file-backed")
+
+
+def _run_sqlite(db_uri_path: str, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
+    """Execute the owner statement on a fresh ``mode=ro`` connection under an interrupt deadline.
+
+    Three independent read-only guarantees, none of them text inspection (§3.2.11): the connection is
+    opened READ-ONLY (a WAL reader — the engine keeps writing throughout), the authorizer DENIES every
+    action outside :data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS` while sqlite prepares the statement, and
+    sqlite3 itself refuses more than one statement per ``execute``. All three answer 400.
+
+    ``check_same_thread=False`` because the deadline timer touches the connection from its own thread.
+    The deadline is FLAGGED rather than sniffed out of the message: sqlite3 reports an interrupt as a
+    plain ``OperationalError('interrupted')``, indistinguishable by type from a real SQL error."""
+    con = sqlite3.connect(f"file:{db_uri_path}?mode=ro", uri=True, check_same_thread=False)
+    con.row_factory = None  # plain tuples — the wire shape is rows-as-lists, not rows-as-objects
+    con.set_authorizer(_db_query_sqlite_authorizer)
+    timed_out = threading.Event()
+
+    def _on_deadline() -> None:
+        timed_out.set()
+        con.interrupt()
+
+    deadline = threading.Timer(body.timeout_s, _on_deadline)
+    deadline.start()
+    try:
+        cursor = con.execute(body.sql)
+        columns = [d[0] for d in cursor.description or ()]
+        rows = cursor.fetchmany(body.max_rows + 1)
+    except sqlite3.Error as exc:
+        if timed_out.is_set():
+            raise HTTPException(
+                status.HTTP_504_GATEWAY_TIMEOUT, f"query interrupted after timeout_s={body.timeout_s:g}"
+            ) from None
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"query rejected: {exc}") from None
+    finally:
+        deadline.cancel()
+        con.close()
+    return _capped(columns, rows, body.max_rows)
+
+
+def _db_query_sqlite_authorizer(action: int, *_args: Any) -> int:
+    """SQLite's per-action gate for ``POST /db/query`` — sqlite's equivalent of DuckDB statement typing
+    (§3.2.11). Everything outside the read set is DENIED as the statement is prepared, so
+    INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the (already read-only) file."""
+    return sqlite3.SQLITE_OK if action in _DB_QUERY_SQLITE_ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def _capped(columns: list[str], rows: list[Any], max_rows: int) -> tuple[list[str], list[list[Any]], bool]:
+    """Shape one over-fetched result for the wire: drop the cap-probe row, flag the truncation."""
+    return columns, [[_jsonable(v) for v in row] for row in rows[:max_rows]], len(rows) > max_rows
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 1)
+
+
+def _log_db_query(
+    body: DbQueryBody,
+    outcome: str,
+    elapsed_ms: float,
+    *,
+    row_count: int | None = None,
+    truncated: bool | None = None,
+    detail: str | None = None,
+) -> None:
+    """One INFO line per owner query, run or rejected (§3.2.11/§6.5) — the audit trail for a surface
+    that can read any row in either database."""
+    _log.info(
+        "db_query",
+        db=body.db,
+        sql=body.sql[:_DB_QUERY_LOG_SQL_CHARS],
+        outcome=outcome,
+        row_count=row_count,
+        truncated=truncated,
+        elapsed_ms=elapsed_ms,
+        detail=detail,
+    )
 
 
 def _digest_block(

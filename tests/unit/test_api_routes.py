@@ -572,3 +572,166 @@ def test_recommendations_latest_delivered_first_with_payload_and_human_action(co
     assert taken["recommendation"]["gate"]["verdict"] == "approve"
 
     assert next(rec for rec in recs if rec["rec_id"] == "rec-2")["human_action"] is None
+
+
+# --------------------------------------------------------------------------- POST /db/query (§3.2.11)
+# Owner ad-hoc read surface (owner-directed 2026-08-19): the engine process HOLDS market.duckdb, so it
+# answers read-only questions instead of being STOPPED for them. Read-only is enforced by statement
+# TYPE (DuckDB's parser) / authorizer action (SQLite) — never by inspecting the SQL text, so these
+# rejection cases must hold for anything the parser classifies as a write, not just the literal strings.
+_REJECTED = [
+    ("market", "INSERT INTO catalyst_watchlist (entry_id, d, symbol, grade) "
+               "VALUES ('x', DATE '2026-08-19', 'AAA', 'context')", "insert"),
+    ("market", "COPY (SELECT 1) TO 'pwned.csv'", "copy-to"),
+    ("market", "SET memory_limit='64GB'", "set"),
+    ("market", "ATTACH 'elsewhere.duckdb' AS other", "attach"),
+    ("market", "SELECT 1; SELECT 2", "two-statements"),
+    ("market", "", "empty"),
+    ("market", "   ", "blank"),
+    ("state", "INSERT INTO proposals (proposal_id, agent_id, action, payload, inputs_digest) "
+              "VALUES ('x', 'a', 'enter', '{}', 'd')", "insert"),
+    ("state", "COPY (SELECT 1) TO 'pwned.csv'", "copy-to"),
+    ("state", "SET memory_limit='64GB'", "set"),
+    ("state", "ATTACH DATABASE 'elsewhere.db' AS other", "attach"),
+    ("state", "SELECT 1; SELECT 2", "two-statements"),
+    ("state", "", "empty"),
+    ("state", "   ", "blank"),
+]
+
+
+def test_db_query_requires_the_bearer_token(conn, clock, market_store) -> None:
+    client = _client(conn=conn, clock=clock, market_store=market_store)
+    payload = {"db": "market", "sql": "SELECT 1"}
+
+    assert client.post("/db/query", json=payload).status_code == 401
+    assert client.post("/db/query", headers={"Authorization": "Bearer wrong"}, json=payload).status_code == 401
+
+
+def test_db_query_unwired_dbs_answer_503_not_500() -> None:
+    client = _client()  # no market_store / conn
+
+    assert client.post("/db/query", headers=AUTH, json={"db": "market", "sql": "SELECT 1"}).status_code == 503
+    assert client.post("/db/query", headers=AUTH, json={"db": "state", "sql": "SELECT 1"}).status_code == 503
+
+
+def test_db_query_state_allows_recursive_cte(conn, clock) -> None:
+    """SQLITE_RECURSIVE is in the allow-set (2026-08-19 review): WITH RECURSIVE is a read shape
+    (walking order_events chains) and authorizes recursion only — it must not be denied."""
+    client = _client(conn=conn, clock=clock)
+    body = {
+        "db": "state",
+        "sql": "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 5) "
+               "SELECT n FROM seq",
+    }
+
+    resp = client.post("/db/query", headers=AUTH, json=body)
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["columns"] == ["n"]
+    assert [r[0] for r in data["rows"]] == [1, 2, 3, 4, 5]
+    assert data["truncated"] is False
+
+
+@pytest.mark.parametrize("db, sql, why", _REJECTED, ids=[f"{d}-{w}" for d, _s, w in _REJECTED])
+def test_db_query_rejects_everything_but_one_read_statement(conn, clock, market_store, db, sql, why) -> None:
+    client = _client(conn=conn, clock=clock, market_store=market_store)
+
+    r = client.post("/db/query", headers=AUTH, json={"db": db, "sql": sql})
+    assert r.status_code == 400, (db, why, r.status_code, r.text)
+
+
+def test_db_query_market_roundtrip_encodes_decimal_and_date(clock, market_store) -> None:
+    d = clock.today()
+    _seed_watchlist(market_store, d)
+    client = _client(clock=clock, market_store=market_store)
+
+    r = client.post("/db/query", headers=AUTH, json={
+        "db": "market",
+        "sql": "SELECT symbol, d, confirm_trigger FROM catalyst_watchlist ORDER BY symbol",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["columns"] == ["symbol", "d", "confirm_trigger"]
+    assert (body["row_count"], body["truncated"]) == (2, False)
+    assert body["elapsed_ms"] >= 0
+    # DECIMAL crosses as a STRING (§8.1 — a float would corrupt the level), DATE as ISO-8601.
+    assert body["rows"] == [["AAA", d.isoformat(), "1410.50"], ["BBB", d.isoformat(), None]]
+
+    # EXPLAIN is the one non-SELECT statement type enumerated as read-only (a plan is what the owner
+    # asks for next when a read is slow).
+    assert client.post("/db/query", headers=AUTH,
+                       json={"db": "market", "sql": "EXPLAIN SELECT 1"}).status_code == 200
+
+
+def test_db_query_state_reads_the_engines_own_database(conn, clock) -> None:
+    _insert_proposal(conn, "p-1", agent_id="orb_scanner")
+    _insert_proposal(conn, "p-2", agent_id="cat_scanner")
+    client = _client(conn=conn, clock=clock)
+
+    r = client.post("/db/query", headers=AUTH, json={
+        "db": "state",
+        "sql": "SELECT proposal_id, agent_id FROM proposals ORDER BY proposal_id",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["columns"] == ["proposal_id", "agent_id"]
+    assert body["rows"] == [["p-1", "orb_scanner"], ["p-2", "cat_scanner"]]
+    assert (body["row_count"], body["truncated"]) == (2, False)
+
+
+def test_db_query_row_cap_flags_truncation(conn, clock, market_store) -> None:
+    client = _client(conn=conn, clock=clock, market_store=market_store)
+
+    over = client.post("/db/query", headers=AUTH,
+                       json={"db": "market", "sql": "SELECT * FROM range(50)", "max_rows": 10}).json()
+    assert (over["row_count"], over["truncated"]) == (10, True)
+    assert over["rows"][0] == [0]
+
+    # Exactly at the cap is NOT truncated — the +1 over-fetch probe must never become a false flag.
+    exact = client.post("/db/query", headers=AUTH,
+                        json={"db": "market", "sql": "SELECT * FROM range(10)", "max_rows": 10}).json()
+    assert (exact["row_count"], exact["truncated"]) == (10, False)
+
+    for i in range(6):
+        _insert_proposal(conn, f"cap-{i}")
+    state = client.post("/db/query", headers=AUTH,
+                        json={"db": "state", "sql": "SELECT proposal_id FROM proposals", "max_rows": 4}).json()
+    assert (state["row_count"], state["truncated"]) == (4, True)
+
+    # Past the hard ceilings the request is REFUSED, never silently clamped.
+    assert client.post("/db/query", headers=AUTH,
+                       json={"db": "market", "sql": "SELECT 1", "max_rows": 200_000}).status_code == 422
+    assert client.post("/db/query", headers=AUTH,
+                       json={"db": "market", "sql": "SELECT 1", "timeout_s": 120}).status_code == 422
+
+
+def test_db_query_timeout_interrupts_the_query_and_answers_504(clock, market_store) -> None:
+    """A runaway owner query is interrupted at ITS OWN cursor: this is a trading process first, and the
+    store's connection must survive the interrupt untouched."""
+    client = _client(clock=clock, market_store=market_store)
+
+    r = client.post("/db/query", headers=AUTH, json={
+        "db": "market",
+        "sql": "SELECT count(*) FROM range(100000000000) a, range(100) b",
+        "timeout_s": 1,
+    })
+    assert r.status_code == 504, r.text
+    assert "timeout_s=1" in r.json()["detail"]
+    assert market_store.table_names()          # the store's own connection still answers
+
+
+def test_db_query_market_connection_is_memory_bounded(clock, market_store) -> None:
+    """2026-08-18 (the 53 GB incident) generalized by §3.2.11: the LIVE store connection carries an
+    explicit DuckDB memory_limit, so nothing — this endpoint's arbitrary SELECTs included — can commit
+    the machine. Asserted numerically because DuckDB renders the limit in GiB (mirrors
+    test_tick_compaction.py::test_compaction_connection_is_memory_bounded)."""
+    client = _client(clock=clock, market_store=market_store)
+
+    r = client.post("/db/query", headers=AUTH,
+                    json={"db": "market", "sql": "SELECT current_setting('memory_limit')"})
+    assert r.status_code == 200, r.text
+    limit = r.json()["rows"][0][0]
+    value, unit = limit.split()
+    assert unit in ("GiB", "GB"), limit
+    assert float(value) <= 8.0, limit

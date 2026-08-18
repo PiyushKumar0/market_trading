@@ -1,5 +1,25 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-19 (~00:5x) — POST /db/query live: the engine answers read-only questions instead of being stopped for them; store instance memory-bounded
+
+- **Owner-directed** (follow-on from the migration assessment: the recorded ALTERNATIVE to a
+  client-server DB move — plan §3.2.11 amendment carries the decision + re-evaluation triggers).
+- **The endpoint:** bearer-authed POST /db/query, `db` ∈ {market, state}. Read-only enforced by
+  STATEMENT TYPE, never text inspection: DuckDB parser verdict (SELECT/EXPLAIN only; DuckDB 1.5.4
+  types SHOW/DESCRIBE/SUMMARIZE/read-PRAGMA as SELECT and setter-PRAGMA as SET — probed, not
+  assumed) / SQLite authorizer deny-by-default (+ mode=ro + single-statement). Per-request
+  cursor/connection on a worker thread, fetchmany row cap (10k default/100k max, truncated flag),
+  interrupt-on-timeout (5s/60s → 504), every query logged (§6.5). Review call: SQLITE_RECURSIVE
+  added to the allow-set (WITH RECURSIVE is a read shape; recursion-only action).
+- **Companion:** MarketStore's live DuckDB connection now carries memory_limit=8GB (the 53 GB
+  lesson generalized — every DuckDB instance in the platform has a stated ceiling; binds at this
+  deploy's restart). _jsonable extended (bytes→hex, dict recursion) for arbitrary-SELECT results.
+- **Verification:** 1,592 unit green (implementer run) + 43 API / 41 store-compaction green after
+  the RECURSIVE widening; deploy restart + boot verified below; live probe: unauthed /db/query
+  → 401 (route present, auth gating). Known pre-existing ruff debt in app.py (4 items) untouched.
+- Deploy restart re-kills the bounded compaction drain mid-backlog — idempotent/resumable by
+  design; post-arm re-fires it; leak-watch monitor stays armed on the new boot.
+
 ## 2026-08-18 (23:5x) — the 53 GB "leak" DIAGNOSED and FIXED: unbounded DuckDB memory in tick compaction; bounded + deployed, backlog re-drains under watch
 
 - **Owner asked (22:30): is the memory overflow fixed?** It was not — 08-17 shipped telemetry

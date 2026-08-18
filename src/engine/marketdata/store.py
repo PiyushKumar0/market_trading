@@ -59,6 +59,14 @@ _log = get_logger("engine.marketdata.store")
 
 T = TypeVar("T")
 
+#: Hard ceiling on the LIVE store connection's DuckDB memory (§3.2.11, generalizing the 53 GB incident
+#: of 2026-08-17). DuckDB's default is ~80% of RAM (~25 GB here), so one bad scan can commit the whole
+#: machine while the engine is trading — and ``POST /db/query`` now runs owner SQL on this very
+#: instance. Past the limit DuckDB spills to its temp directory instead of taking the RAM. Higher than
+#: ``tick_compact._MEMORY_LIMIT`` (4 GB) on purpose: this connection serves the session, that one is a
+#: maintenance job that must never compete with it.
+_MEMORY_LIMIT = "8GB"
+
 # ---------------------------------------------------------------------- retention (§4.5, plan-pinned)
 TICKS_RETENTION_DAYS = 30          # raw tick Parquet — enough to calibrate the fill model (R9)
 NEWS_RETENTION_DAYS = 365          # news + sentiment scores
@@ -687,6 +695,9 @@ class MarketStore:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._parquet_root.mkdir(parents=True, exist_ok=True)
             self._con = duckdb.connect(str(self._db_path))
+            # Every DuckDB instance in this platform carries a stated ceiling (§3.2.11) — set BEFORE
+            # any query so no job or endpoint can commit the machine's memory.
+            self._con.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
             # Session timezone pinned so TIMESTAMPTZ round-trips as IST wall time (§3.2 convention).
             self._con.execute("SET TimeZone='Asia/Kolkata'")
             self.init_schema()
