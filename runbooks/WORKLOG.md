@@ -1,5 +1,26 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (21:20-21:30 IST, third deploy) — deals feed migrated to NSE's replacement endpoint; ALL six outage days recovered on the first pass
+
+- **Owner question ("both endpoints dead, no alternatives?") answered by probe:** NSE retired
+  `/api/historical/{bulk,block}-deals` (~08-13) but serves the same data — historical included —
+  from `/api/historicalOR/bulk-block-short-deals?optionType={bulk_deals|block_deals}`. Verified on
+  one session: old route 503 for every date, new route 200 with 08-13's 70 bulk + 20 block rows;
+  archives `bulk.csv`/`block.csv` and the snapshot largedeal API also live (same-day only —
+  fallbacks if NSE migrates again).
+- **Fix (commit `9eecd9a`):** URL templates only — `parse_deals`' alias tables already covered the
+  `BD_*` row shape (the Phase-1 defensive parser paid for itself). Tests: mock routers switched to
+  the `optionType` discriminator + a live-shape fixture test with verbatim probe rows. 1,570 green.
+- **Deployed 21:26, clean boot; recovery validated live:** the streak-clock catch-up (this
+  afternoon's `5c95576`) healed the whole outage in ONE boot pass with zero manual DB surgery —
+  deals 08-13 (90 rows), 08-14 (70), 08-17 (74), 08-18 (116) all `caught_up`, `failed=[]`, streak
+  clocks cleared on success. 08-15/16 were holiday/weekend (correctly never enumerated).
+- **features:2026-08-18 rebuild queued** (job_runs row deleted; next 30-min sweep re-runs it after
+  the now-present 08-18 deals rows — PIT-clean, same-night inputs). Once it lands, the
+  `flagged_instrument_day` unreliable span in the previous entry SHRINKS to 07-24→08-17, and
+  tomorrow's scan context reads real prior-session (08-18) flags — the orb/digest manipulation
+  filter binds with real data for the first time ever.
+
 ## 2026-08-18 (19:54-21:05 IST, second deploy) — catch-up head-of-line + give-up redesign live; flagged reads prior session; deals endpoint confirmed DEAD server-side
 
 - **Deployed** commit `5c95576` at 19:54 (idle engine, clock re-observed). Boot verified: migration
