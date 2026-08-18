@@ -1,5 +1,27 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (23:5x) — the 53 GB "leak" DIAGNOSED and FIXED: unbounded DuckDB memory in tick compaction; bounded + deployed, backlog re-drains under watch
+
+- **Owner asked (22:30): is the memory overflow fixed?** It was not — 08-17 shipped telemetry
+  only. Tonight the telemetry answered: flat 1.8–2.2 GB for 21 h across four boots and a full
+  session, then at the 22:30 budgeted compaction trigger 2.19→10.55 GB in 35 min with ZERO
+  progress markers (the deals-outage backfill left ~5k-fragment partitions; one partition was
+  taking tens of minutes). The 08-17 crisis boot had compaction draining backlog the entire time
+  it grew. Mechanism (code-confirmed): `_compact_ticks_locked` held ONE `duckdb.connect()` with
+  NO memory_limit (DuckDB default ≈80% RAM ≈25 GB here) across up to 400 symbol-days of
+  read_parquet/EXCEPT/ORDER-BY work; allocator retention compounded until restart.
+- **Fix deployed:** `_open_connection()` — memory_limit 4GB, dot-named spill dir in ticks/
+  (invisible to partition enumeration + reader globs), preserve_insertion_order off — and a
+  reconnect PER DATE partition. Slow is fine; competing with the machine for memory is not.
+  13/13 compaction tests, **1,571 unit green**. Restart kills the runaway 22:30 run (~11+ GB at
+  kill); compaction is idempotent/resumable by design and the post-arm one-shot re-drains
+  BOUNDED immediately — the live leak-watch monitor stays on it (baseline/2 GB-move/crisis-band
+  events + final number at tick_compaction_done).
+- **Honest residual:** the 08-17 "16:47–17:05 in-session spurt" timestamp predates telemetry
+  (Task Manager observation, low precision) — if a bounded run still grows, that thread reopens.
+  Watch items: tonight's bounded drain curve; per-partition duration on the 5k-fragment
+  outage-day partitions (budget 400 symbol-days may take several nights — fine, monotone).
+
 ## 2026-08-18 (21:20-21:30 IST, third deploy) — deals feed migrated to NSE's replacement endpoint; ALL six outage days recovered on the first pass
 
 - **Owner question ("both endpoints dead, no alternatives?") answered by probe:** NSE retired

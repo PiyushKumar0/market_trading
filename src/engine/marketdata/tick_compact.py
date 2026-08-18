@@ -74,6 +74,34 @@ _COMPACT_LOCK = threading.Lock()
 #: truly corrupt file is a real problem and must stay at ERROR, not be swallowed by this benign case.
 _MISSING_FILE_MARKER = "No files found"
 
+#: Hard ceiling on the compaction connection's DuckDB memory (2026-08-18, the 53 GB incident of
+#: 2026-08-17). DuckDB's DEFAULT limit is ~80% of RAM (~25 GB here), and this job's shape — EXCEPT
+#: containment checks and ORDER BY COPYs over thousands of tiny fragments, for up to
+#: ``max_symbol_days`` partitions — will actually get there: telemetry recorded 2.2→10.6 GB in the
+#: first 35 minutes of the 2026-08-18 22:30 run. Past this limit DuckDB spills to
+#: :data:`_SPILL_DIRNAME` instead of committing RAM. A maintenance job may be slow; it may never
+#: again compete with the machine for memory.
+_MEMORY_LIMIT = "4GB"
+
+#: DuckDB spill directory for the bounded connection, created inside ``ticks/``. The leading dot
+#: keeps it out of the date-partition enumeration (``date=`` prefix check) and every reader's
+#: ``*.parquet`` glob; DuckDB owns the contents.
+_SPILL_DIRNAME = ".compact_spill"
+
+
+def _open_connection(ticks_root: Path) -> duckdb.DuckDBPyConnection:
+    """One BOUNDED connection (2026-08-18): ``memory_limit`` + disk spill, insertion order off
+    (every consumer here either counts rows or ORDER BYs explicitly). Opened per DATE partition by
+    the caller — closing between dates hands allocator retention back instead of compounding it
+    across a multi-hour backlog drain."""
+    con = duckdb.connect()
+    con.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
+    spill = ticks_root / _SPILL_DIRNAME
+    spill.mkdir(exist_ok=True)
+    con.execute(f"SET temp_directory='{spill.as_posix()}'")
+    con.execute("SET preserve_insertion_order=false")
+    return con
+
 
 @dataclass
 class TickCompactionResult:
@@ -159,10 +187,13 @@ def _compact_ticks_locked(
             continue
         day_dirs.append((d, p))
 
-    con = duckdb.connect()
-    try:
-        for d, day_dir in day_dirs[-max_dates:]:
-            result.dates.append(d.isoformat())
+    for d, day_dir in day_dirs[-max_dates:]:
+        result.dates.append(d.isoformat())
+        # Per-DATE connection (2026-08-18): the 53 GB incident was one unbounded connection held
+        # across the whole backlog drain — bounding (see _open_connection) caps the working set,
+        # and reconnecting per date releases what the allocator would otherwise retain for hours.
+        con = _open_connection(ticks_root)
+        try:
             for sym_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
                 if result.symbol_days_compacted >= max_symbol_days:
                     result.budget_exhausted = True
@@ -173,8 +204,8 @@ def _compact_ticks_locked(
                 if result.symbol_days_compacted and result.symbol_days_compacted % 50 == 0:
                     _log.info("tick_compaction_progress", date=d.isoformat(),
                               symbol_days=result.symbol_days_compacted, rows=result.rows_written)
-    finally:
-        con.close()
+        finally:
+            con.close()
     return _done(result)
 
 

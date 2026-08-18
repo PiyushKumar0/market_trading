@@ -276,3 +276,27 @@ def test_a_run_is_bounded_and_resumes_where_it_stopped(store, tmp_path):
     assert (second.symbol_days_compacted, second.budget_exhausted) == (1, False)
     assert all([f.name for f in _files(store, YESTERDAY, s)] == [COMPACT_NAME]
                for s in ("AAA", "BBB", "CCC"))
+
+
+def test_compaction_connection_is_memory_bounded(store, tmp_path):
+    """2026-08-18 (the 53 GB incident): the compaction connection must carry an explicit DuckDB
+    memory_limit and a spill temp_directory inside ticks/, and the dot-named spill dir must be
+    invisible to the date-partition enumeration (a run with it present still succeeds)."""
+    ticks_root = tmp_path / "ticks"
+    ticks_root.mkdir(parents=True, exist_ok=True)
+    con = tick_compact_module._open_connection(ticks_root)
+    try:
+        # DuckDB normalizes '4GB' to a GiB rendering — assert the bound numerically, not textually:
+        # anything at or under 4 GiB and far from the ~80%-of-RAM default proves the SET applied.
+        limit = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        value, unit = limit.split()
+        assert unit in ("GiB", "GB"), limit
+        assert float(value) <= 4.0, limit
+        tmpdir = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+        assert tick_compact_module._SPILL_DIRNAME in tmpdir
+    finally:
+        con.close()
+    assert (ticks_root / tick_compact_module._SPILL_DIRNAME).is_dir()
+    result = compact_ticks(tmp_path, upto=date(2026, 8, 14), today=date(2026, 8, 18))
+    assert result.ok
+    assert result.dates == []  # the spill dir is not a date partition and breaks nothing
