@@ -300,7 +300,10 @@ class PrescreenCfg(BaseModel):
     """§6.3/§3.2.5 ``SignalPreScreen`` caps (owner-tunable). Deduped candidate origination limits;
     the gate/envelope layer owns per-parameter bounds — these are coarse per-day throttles."""
 
-    max_candidates_per_day: int = 20               # signal.candidate publications per trading day
+    max_candidates_per_day: int = 48               # signal.candidate publications per trading day
+                                                   # (20→48 2026-08-18, kept = the analyst forward
+                                                   # cap `prescreen_cap_per_day`; shipped value in
+                                                   # settings.yaml — this default is the fallback)
     #: Per-strategy publication sub-cap. int = the same cap for every strategy; MAPPING
     #: {strategy_id: cap} = per-strategy values with the reserved key `default` binding any strategy
     #: without a line of its own (WO-1 (iii), 2026-08-13 — owner knob, never learner-movable, §6.3).

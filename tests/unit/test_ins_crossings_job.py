@@ -433,13 +433,21 @@ def test_prescreen_per_strategy_cap_binds_ins(conn, calendar):
     assert prescreen.admit(ins.sweep_crossings(crossings), NEXT_SESSION) == []
 
 
-def test_shipped_settings_cap_ins_at_four(conn):
-    """The cap asserted above is the one ``config/settings.yaml`` actually ships."""
+def test_shipped_settings_cap_ins(conn):
+    """``config/settings.yaml`` ships an explicit ``ins`` sub-cap, below the ``default``.
+
+    4→8 on 2026-08-18 when the day cap was rescaled 20→48 (the origination cap had fallen 2.4x below
+    the analyst forward cap it exists to protect). The behavioural test above deliberately pins its
+    OWN caps rather than reading the shipped file, so a future rescale changes this assertion only.
+    What must stay true is the SHAPE: `ins` is a rare EOD-batch event and stays capped under
+    `default`, so a cluster day cannot let it crowd out the per-bar strategies.
+    """
     from engine.core.config import load_settings
 
     caps = load_settings().strategy.prescreen.max_per_strategy_day
     assert isinstance(caps, dict)
-    assert caps["ins"] == 4
+    assert caps["ins"] == 8
+    assert caps["ins"] < caps["default"]
 
 
 # =========================================================================== the exit path (§7.1)

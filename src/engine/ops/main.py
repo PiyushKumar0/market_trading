@@ -638,8 +638,10 @@ async def run() -> int:
     if telegram is not None:
         telegram.set_reco_book(book)
 
-    # --- live pre-screen (§3.2.5): scanners → signal.candidate. Runs whenever the engine is up;
-    #     candidate-forwarding to the analyst is window-gated inside the pipeline, not here. ---
+    # --- live pre-screen (§3.2.5): scanners → signal.candidate. Runs whenever the engine is up.
+    #     Since 2026-08-18 origination is ALSO window-gated here, on bar time, so a candidate the
+    #     pipeline is guaranteed to drop never charges an unrefundable day slot; the pipeline's own
+    #     Clock-based check remains the authoritative gate on tradability. ---
     scan_provider = LiveScanContextProvider(
         store, clock, calendar, features, index_symbol=INDEX_SYMBOL,
         # Late-bound: watchlist_symbols is defined further down this function; the lambda resolves it
@@ -668,6 +670,20 @@ async def run() -> int:
     # mid-session restarts) or re-sends already-evaluated candidates.
     _hydrate_prescreen(conn, prescreen, clock.today())
     bus.subscribe("bar.1m", prescreen.handle_bar)
+
+    # 2026-08-18: the scan context day-caches `trade_window` (per PROCESS per date), so an owner
+    # change mid-session was invisible to every scanner until the next restart. ModeManager has
+    # always published `trade_window.changed` — only telegram and the API relay listened. Wiring the
+    # scan provider to it is what stops `orb` intersecting a window that no longer exists (live
+    # 2026-08-18: cache built 09:52:06 holding 10:00–10:30, owner moved it to 10:10–15:30 at
+    # 09:57:52, orb fired 10:00:05–10:01:07 against the stale copy and burned its whole 6-slot
+    # sub-cap nine minutes before the real window opened).
+    from engine.risk.events import TOPIC_TRADE_WINDOW
+
+    async def _refresh_scan_window(_event) -> None:
+        scan_provider.invalidate_trade_window()
+
+    bus.subscribe(TOPIC_TRADE_WINDOW, _refresh_scan_window)
 
     # --- Tier-1 jobs (all fail to no-output, never blocking — D7/E5) ---
     # §6.5 envelope_state read at boot, same policy as `edge_multiple_min` above (re-read at boot;
@@ -1247,6 +1263,18 @@ async def run() -> int:
             #     prescreen.admit so the §3.2.5 dedupe/caps bind identically; a second sweep the
             #     same day re-admits nothing.
             today = now.date()
+            # --- Trade-window gate for the BATCH legs (2026-08-18). The bar-driven leg above gates
+            #     itself off BAR time inside the pre-screen (which stays Clock-free for §9.6); these
+            #     candidates carry no bar, so the sweep — which HAS the Clock — decides, applying the
+            #     same test as `pipeline.on_signal_candidate`. Without it a /scan_now outside the
+            #     window spends unrefundable day slots on candidates the pipeline is guaranteed to
+            #     drop as `signal_candidate_out_of_window`. The window-open sweep is unaffected: it
+            #     fires ON the INACTIVE→ACTIVE edge, so the window is open by construction.
+            try:
+                _w = calendar.trade_window(today)
+                batch_in_window = _w[0] <= now <= _w[1]
+            except ValueError:
+                batch_in_window = False      # not a trading day ⇒ no window ⇒ nothing originates (R6)
             uni = store.get_universe_daily(today)
             eligible = [
                 r["symbol"] for r in uni
@@ -1269,14 +1297,7 @@ async def run() -> int:
             ):
                 if row.get("ex_date") is not None:
                     ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
-            # Snapshot mint AFTER admit (dedupe/caps first — a suppressed candidate never spends a
-            # snapshot write); without it the analyst's Rule 6 refuses every batch candidate unseen.
-            daily = _attach_feature_snapshots(
-                features,
-                prescreen.admit(
-                    brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map), today
-                ),
-            )
+            brk20_raw = brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map)
 
             # --- `ins` daily leg (§6.1 addendum, owner-directed 2026-08-17): the crossings last
             #     night's ins_crossings job journalled into ins_pending. Same batch shape as brk20 —
@@ -1286,26 +1307,16 @@ async def run() -> int:
             #     (or a sweep after a mid-session restart) re-admits nothing: the flag is persisted
             #     state, not process memory.
             ins_pending = _read_ins_pending(conn, today)
-            ins_cands: list = []
+            ins_raw: list = []
             if ins_pending:
-                ins_cands = _attach_feature_snapshots(
-                    features,
-                    prescreen.admit(
-                        ins.sweep_crossings(
-                            ins_pending,
-                            params={
-                                "stop_pct": settings.ins.stop_pct,
-                                "hold_sessions": settings.ins.hold_sessions,
-                                "threshold_inr": settings.ins.threshold_inr,
-                            },
-                        ),
-                        today,
-                    ),
+                ins_raw = ins.sweep_crossings(
+                    ins_pending,
+                    params={
+                        "stop_pct": settings.ins.stop_pct,
+                        "hold_sessions": settings.ins.hold_sessions,
+                        "threshold_inr": settings.ins.threshold_inr,
+                    },
                 )
-                # Consume EVERY row read, not just the admitted ones: a row suppressed by the daily
-                # cap or the (symbol, strategy) dedupe has HAD its evaluation — leaving it unconsumed
-                # would re-offer it on the next sweep tick forever. Suppression is a decision.
-                _consume_ins_pending(conn, today, [c.symbol for c in ins_pending], now=now)
 
             # --- `cat` v2 SHADOW leg (§2.7 amendment, owner-directed 2026-08-18 — WO-18): today's
             #     `originating` catalyst_watchlist rows, graded by the ~08:35 digest, on the SAME
@@ -1317,21 +1328,45 @@ async def run() -> int:
             #     population, not RECOMMEND. An absent/empty digest simply yields no rows (§2.7
             #     fail-safe ladder: cat originates nothing, every other strategy unaffected).
             cat_rows = _read_cat_watchlist(store, today)
-            cat_cands: list = []
+            cat_raw: list = []
             if cat_rows:
-                cat_cands = _attach_feature_snapshots(
-                    features,
-                    prescreen.admit(
-                        cat.sweep_watchlist(
-                            cat_rows,
-                            params={
-                                "stop_pct": settings.cat.stop_pct,
-                                "hold_sessions": settings.cat.hold_sessions,
-                            },
-                        ),
-                        today,
-                    ),
+                cat_raw = cat.sweep_watchlist(
+                    cat_rows,
+                    params={
+                        "stop_pct": settings.cat.stop_pct,
+                        "hold_sessions": settings.cat.hold_sessions,
+                    },
                 )
+
+            # --- ONE ranked admission across all three batch legs (2026-08-18). Until now brk20,
+            #     ins and cat each made their OWN prescreen.admit call, and WO-1's ranking orders
+            #     only WITHIN one batch — so the legs were effectively first-come, in source order,
+            #     and cat ran last. Live 2026-08-18: brk20 OBEROIRLTY (0.552) and BHEL (0.523) took
+            #     the day's final slots and cat LT (0.82) was suppressed on the day cap 94 ms later.
+            #     That is unrecoverable, not merely unlucky: `cat` is single-shot by construction
+            #     (cat.MAX_EVENT_AGE_SESSIONS = 1), so a story that loses the race can never
+            #     re-originate at age 2. Concatenating first lets _rank see all three legs as one
+            #     batch and a binding cap keeps the best of them, whatever leg produced it.
+            #     Snapshot mint stays AFTER admit (dedupe/caps first — a suppressed candidate never
+            #     spends a snapshot write); without it the analyst's Rule 6 refuses every batch
+            #     candidate unseen.
+            batch = _attach_feature_snapshots(
+                features,
+                prescreen.admit(
+                    brk20_raw + ins_raw + cat_raw, today, in_window=batch_in_window
+                ),
+            )
+            if ins_pending and batch_in_window:
+                # Consume EVERY row read, not just the admitted ones: a row suppressed by the daily
+                # cap or the (symbol, strategy) dedupe has HAD its evaluation — leaving it unconsumed
+                # would re-offer it on the next sweep tick forever. Suppression is a decision.
+                # A WINDOW refusal is NOT (2026-08-18 review finding): the whole premise of the
+                # window gate is that a shut-window candidate was never evaluated, so an
+                # out-of-window /scan_now must leave the day's crossings pending for the next
+                # in-window sweep rather than silently destroying them. (Before the combined-admit
+                # rewrite this same path consumed the rows anyway — the loss was pre-existing;
+                # the gate is what makes not-consuming correct.)
+                _consume_ins_pending(conn, today, [c.symbol for c in ins_pending], now=now)
             # THE starvation-visibility line (the `ins` convention, §6.1): sustained zeros must be
             # readable as "the news layer went quiet" vs "rows arrived and the rule/caps declined
             # them" — WO-18 pre-registers <0.2 signals/session for 3 weeks as a STARVATION finding,
@@ -1340,9 +1375,10 @@ async def run() -> int:
                 "cat_watchlist_sweep", d=today.isoformat(), trigger=trigger,
                 originating_rows=len(cat_rows),
                 age_eligible=sum(1 for r in cat_rows if cat.is_eligible(r)),
-                candidates=len(cat_cands),
+                candidates=sum(1 for c in batch if c.strategy_id == cat.STRATEGY_ID),
+                in_window=batch_in_window,
             )
-            return accepted + daily + ins_cands + cat_cands, pendings
+            return accepted + batch, pendings
 
         accepted, pendings = await asyncio.to_thread(_collect_and_scan)
         for cand in accepted:

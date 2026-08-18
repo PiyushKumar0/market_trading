@@ -48,8 +48,26 @@ def _stub(sid: str = "stub") -> Scanner:
     return _Stub()
 
 
-def _prescreen(scanners=None, bus=None, **kw) -> SignalPreScreen:
-    return SignalPreScreen(scanners or [_stub()], lambda bar: ScanContext(), bus, **kw)
+def _window(day: int = 17, start=(9, 15), end=(15, 30)) -> tuple[datetime, datetime]:
+    return (datetime(2026, 6, day, *start, tzinfo=IST), datetime(2026, 6, day, *end, tzinfo=IST))
+
+
+def _ctx(bar: Bar) -> ScanContext:
+    """Default provider: a normally-OPEN trade window on the scanned bar's own date.
+
+    Every test outside the "trade-window gate" section below is about dedupe/caps/ranking, so the
+    default context models an open 09:15-15:30 window — otherwise the 2026-08-18 window gate
+    (which fails closed on a ``None`` window) would refuse every candidate and mask what they test.
+    """
+    day = bar.ts_minute.day
+    return ScanContext(
+        trade_window=_window(day),
+        session_open=datetime(2026, 6, day, 9, 15, tzinfo=IST),
+    )
+
+
+def _prescreen(scanners=None, bus=None, context_provider=None, **kw) -> SignalPreScreen:
+    return SignalPreScreen(scanners or [_stub()], context_provider or _ctx, bus, **kw)
 
 
 # ---------------------------------------------------------------------------- dedupe (§3.2.5)
@@ -214,7 +232,7 @@ def _pending_stub(sid: str = "pend") -> Scanner:
 
 
 def test_sweep_scans_with_normal_dedupe_and_reports_pending():
-    ps = SignalPreScreen([_stub(), _pending_stub()], lambda bar: ScanContext())
+    ps = SignalPreScreen([_stub(), _pending_stub()], _ctx)
     accepted, pending = ps.sweep([_bar(symbol="AAA"), _bar(symbol="BBB", mm=1)])
     assert [c.symbol for c in accepted] == ["AAA", "BBB"]
     assert [p.symbol for p in pending] == ["AAA", "BBB"]
@@ -242,7 +260,7 @@ def test_sweep_suppresses_pending_for_pairs_that_already_published():
             return [PendingSetup(strategy_id="both", symbol=bar.symbol, side="SELL",
                                  style="intraday", trigger_price=Decimal("90"))]
 
-    ps = SignalPreScreen([_Both()], lambda bar: ScanContext())
+    ps = SignalPreScreen([_Both()], _ctx)
     accepted, pending = ps.sweep([_bar(symbol="AAA")])
     assert len(accepted) == 1
     assert pending == []                                  # published this very sweep — pending muted
@@ -508,3 +526,144 @@ def test_funnel_counters_track_raw_published_and_suppressed():
     assert counters["suppressed_cap"]["orb"] == 1
     assert ps.raw_counts(_date(2026, 6, 17)) == {"orb": 3}
     assert ps.raw_counts(_date(2026, 6, 18)) == {}        # another day's counters are not this day's
+
+
+# ================================================ trade-window gate (§7.1, 2026-08-18 origination fix)
+#
+# THE BUG this section pins. The caps bind on unique (symbol, strategy) pairs and are never refunded
+# ("the spam bound counts attempts, not outcomes" — SignalPreScreen.rearm). Before this gate the
+# pre-screen published on every bar from session open, the pipeline dropped each one as
+# `signal_candidate_out_of_window` and re-armed it — but the CHARGE stayed. Live 2026-08-18: 15 of
+# the day's 20 slots, and all 6 of orb's sub-cap, were spent before the trade window ever opened;
+# the cap filled completely 44 s after it did, and the session produced 2,549 refusals and 0
+# proposals. The gate refuses BEFORE charging, which is the only place a doomed candidate can be
+# stopped — there is deliberately no decrement path for `_charged` anywhere in the codebase.
+
+def _not_yet_open(bar: Bar) -> ScanContext:
+    """Window opens LATER than the scanned bar — the live 2026-08-18 shape (owner window 10:10)."""
+    return ScanContext(trade_window=_window(bar.ts_minute.day, start=(10, 10), end=(15, 30)),
+                       session_open=datetime(2026, 6, bar.ts_minute.day, 9, 15, tzinfo=IST))
+
+
+def _already_closed(bar: Bar) -> ScanContext:
+    """Window already SHUT for the scanned bar (10:10-13:45 — today's early close)."""
+    return ScanContext(trade_window=_window(bar.ts_minute.day, start=(10, 10), end=(13, 45)),
+                       session_open=datetime(2026, 6, bar.ts_minute.day, 9, 15, tzinfo=IST))
+
+
+def test_out_of_window_candidate_is_refused_before_the_open():
+    assert _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52)) == []
+
+
+def test_out_of_window_candidate_is_refused_after_the_close():
+    assert _prescreen(context_provider=_already_closed).on_bar(_bar(hh=14, mm=0)) == []
+
+
+def test_out_of_window_candidate_charges_no_day_slot():
+    """THE regression. A pre-window bar must leave the pair able to publish once the window opens —
+    that is the whole defect: those early fires permanently consumed the slot."""
+    state = {"open": False}
+
+    def provider(bar: Bar) -> ScanContext:
+        return _ctx(bar) if state["open"] else _not_yet_open(bar)
+
+    ps = _prescreen(context_provider=provider, max_candidates_per_day=1)
+    for minute in range(5):                     # 09:52-09:56, exactly the live pre-window burst
+        assert ps.on_bar(_bar(hh=9, mm=52 + minute)) == []
+    state["open"] = True
+    admitted = ps.on_bar(_bar(hh=10, mm=10))    # the window opens: the slot must still be there
+    assert len(admitted) == 1
+    assert admitted[0].symbol == "TCS"
+
+
+def test_out_of_window_does_not_consume_the_per_strategy_sub_cap():
+    """orb's 6-slot sub-cap was exhausted at 10:01 against a stale window, nine minutes before the
+    real one opened — so the sub-cap must survive a shut window too, not just the day cap."""
+    state = {"open": False}
+
+    def provider(bar: Bar) -> ScanContext:
+        return _ctx(bar) if state["open"] else _not_yet_open(bar)
+
+    ps = _prescreen([_stub("orb")], context_provider=provider,
+                    max_candidates_per_day=20, max_per_strategy_day={"orb": 2})
+    for i in range(6):
+        assert ps.on_bar(_bar(symbol=f"S{i}", hh=10, mm=0)) == []
+    state["open"] = True
+    assert len(ps.on_bar(_bar(symbol="A", hh=10, mm=10))) == 1
+    assert len(ps.on_bar(_bar(symbol="B", hh=10, mm=11))) == 1
+    assert ps.on_bar(_bar(symbol="C", hh=10, mm=12)) == []         # now the sub-cap genuinely binds
+
+
+def test_absent_window_fails_closed():
+    """No window ⇒ nothing originates: the R6/§2.7 fail-to-zero direction every other guard takes.
+    A ``None`` here means "not a trading day" or an unreadable window, never "unrestricted"."""
+    ps = _prescreen(context_provider=lambda bar: ScanContext())
+    assert ps.on_bar(_bar()) == []
+
+
+def test_window_edges_are_inclusive_on_the_bar_close_instant():
+    """The instant tested is ts_minute + 1m — when an entry off this bar could actually be placed —
+    matching OrbScanner.scan's `entry_dt`, so orb and the pre-screen agree to the minute."""
+    from engine.strategy.prescreen import bar_in_trade_window
+    w = _window(17, start=(10, 0), end=(10, 30))
+    assert not bar_in_trade_window(_bar(hh=9, mm=58), w)    # closes 09:59 — before the open
+    assert bar_in_trade_window(_bar(hh=9, mm=59), w)        # closes 10:00 — exactly the lower edge
+    assert bar_in_trade_window(_bar(hh=10, mm=29), w)       # closes 10:30 — exactly the upper edge
+    assert not bar_in_trade_window(_bar(hh=10, mm=30), w)   # closes 10:31 — past the close
+    assert not bar_in_trade_window(_bar(hh=10, mm=0), None)
+
+
+def test_admit_batch_path_honours_the_window_flag():
+    """brk20/ins/cat carry no bar, so the sweep (which has the Clock) decides. Same property: a
+    refused batch charges nothing, so a later in-window sweep still admits."""
+    from datetime import date as _date
+    ps = _prescreen([], max_candidates_per_day=1)
+    day = _date(2026, 6, 17)
+    cands = _multi_stub("brk20", {"A": 0.9}).scan(_bar(), _ctx(_bar()))
+    assert ps.admit(cands, day, in_window=False) == []
+    assert len(ps.admit(cands, day, in_window=True)) == 1
+
+
+def test_admit_defaults_to_in_window_for_backward_compatibility():
+    """The parameter is purely additive: omitting it reproduces pre-2026-08-18 behaviour exactly."""
+    from datetime import date as _date
+    ps = _prescreen([])
+    cands = _multi_stub("brk20", {"A": 0.9}).scan(_bar(), _ctx(_bar()))
+    assert len(ps.admit(cands, _date(2026, 6, 17))) == 1
+
+
+def test_window_suppression_is_counted_apart_from_cap_suppression():
+    """A large suppressed_window is healthy budget protection; a large suppressed_cap is starvation.
+    Conflating them would make the WO-9 funnel line unreadable. `raw` still counts what fired."""
+    ps = _prescreen([_multi_stub("orb", {"A": 0.9, "B": 0.8})], context_provider=_not_yet_open)
+    ps.on_bar(_bar(hh=9, mm=52))
+    counters = ps.funnel_counters()
+    assert counters["raw"]["orb"] == 2                    # the scanners DID produce
+    assert counters["suppressed_window"]["orb"] == 2
+    assert counters["published"] == {}
+    assert counters["suppressed_cap"] == {}
+
+
+def test_window_gate_uses_bar_time_not_wall_clock():
+    """§9.6: the pre-screen takes no Clock. The same bar stream must decide the same way whenever it
+    is replayed, so the gate reads bar.ts_minute against ctx.trade_window and nothing else."""
+    a = _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52))
+    b = _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52))
+    assert a == b == []
+    assert len(_prescreen(context_provider=_ctx).on_bar(_bar(hh=9, mm=52))) == 1
+
+
+# ============================== one ranked admission across batch legs (2026-08-18, the `cat` loss)
+def test_admit_ranks_across_strategies_in_one_batch():
+    """Live 2026-08-18: brk20 (0.552, 0.523) took the day's last slots and cat LT (0.82) was
+    suppressed 94 ms later, because run_scan_sweep made three SEPARATE admit calls and WO-1 ranks
+    only WITHIN a batch. `cat` is single-shot (MAX_EVENT_AGE_SESSIONS = 1), so that loss is
+    permanent. Concatenating the legs into ONE admit is what lets the best candidate win."""
+    from datetime import date as _date
+    ps = _prescreen([], max_candidates_per_day=1)
+    ctx, bar = _ctx(_bar()), _bar()
+    brk20_leg = _multi_stub("brk20", {"OBEROIRLTY": 0.552}).scan(bar, ctx)
+    cat_leg = _multi_stub("cat", {"LT": 0.82}).scan(bar, ctx)
+    admitted = ps.admit(brk20_leg + cat_leg, _date(2026, 6, 17))   # brk20 FIRST in source order
+    assert [c.strategy_id for c in admitted] == ["cat"]
+    assert admitted[0].symbol == "LT"

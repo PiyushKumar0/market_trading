@@ -54,6 +54,27 @@ turnover. The provider now persists the last-rebalanced trading day in ``mom_reb
 genuine "never rebalanced" bootstrap case (fresh install / no ``conn`` wired); the scanner already
 treats ``None`` and "due" identically (``engine.strategy.scanners.momentum``).
 
+Trade-window staleness (fixed 2026-08-18)
+-----------------------------------------
+``trade_window`` is day-cached like everything else above, but unlike the rest of the cache it is a
+CONTROL-PLANE value the owner can change mid-session (``/trade_window``, ``POST /config/trade_window``
+— §3.2.7). The cache is per PROCESS per date, so before this fix an owner change was invisible to
+every scanner until the next restart or day rollover. Observed live 2026-08-18: the cache was built
+09:52:06 holding 10:00–10:30, the owner moved the window to 10:10–15:30 at 09:57:52, and ``orb``
+(which intersects ``ctx.trade_window`` at :meth:`~engine.strategy.scanners.orb.OrbScanner.scan`)
+went on firing from 10:00:05 against the window that no longer existed — exhausting its entire
+6-slot day sub-cap nine minutes before the real window opened, and refusing a score-1.0 KOTAKBANK
+to do it.
+
+:meth:`LiveScanContextProvider.invalidate_trade_window` is the fix, wired in ``engine.ops.main`` to
+the ``trade_window.changed`` bus event that :class:`~engine.risk.mode.ModeManager` has always
+published (the event existed; only telegram and the API relay listened). It refreshes ONE field
+rather than dropping the cache — a full rebuild would re-run the index/flagged/ex-date reads and the
+~100-symbol momentum preload on the event-loop's worker, which is precisely the per-bar read budget
+this cache exists to protect. This is the one piece of cross-thread state in the class (the flag is
+set on the event loop, consumed on the pre-screen worker thread), hence the :class:`threading.Event`
+where nothing else here is synchronized.
+
 Known v1 gaps (deliberate, documented — not silent)
 ---------------------------------------------------
 * ``momentum_by_symbol`` spans the symbols CACHED SO FAR today, not the whole universe — the
@@ -67,6 +88,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -96,6 +118,11 @@ DEFAULT_EX_HORIZON_DAYS = 28
 #: override into ``build_enabled_scanners`` yet, so they cannot drift in production; a future
 #: per-strategy envelope override would need to pass the same value here.
 DEFAULT_MOM_REBALANCE_DAYS = 15
+
+
+def _render_window(w: tuple[datetime, datetime] | None) -> str:
+    """``HH:MM-HH:MM`` (or ``none``) for the window-change log line — never a raw datetime pair."""
+    return "none" if w is None else f"{w[0]:%H:%M}-{w[1]:%H:%M}"
 
 
 @dataclass
@@ -196,6 +223,10 @@ class LiveScanContextProvider:
         # Built lazily on the first __call__ — NO store read happens at construction (a provider is
         # wired at composition time, long before the worker thread exists).
         self._cache: _DayCache | None = None
+        #: Set from the event loop by :meth:`invalidate_trade_window`, consumed on the pre-screen
+        #: worker thread by :meth:`_day` (module docstring "Trade-window staleness"). The only
+        #: cross-thread state in this class.
+        self._window_dirty = threading.Event()
 
     # ------------------------------------------------------------------ ContextProvider surface
     def __call__(self, bar: Bar) -> ScanContext:
@@ -220,18 +251,68 @@ class LiveScanContextProvider:
             features_snapshot_id=self._snapshot_id(symbol),
         )
 
+    # ------------------------------------------------------------------ owner window changes (§3.2.7)
+    def invalidate_trade_window(self) -> None:
+        """Mark the cached ``trade_window`` stale; the next :meth:`_day` re-reads it (2026-08-18).
+
+        Wired to the ``trade_window.changed`` bus topic in ``engine.ops.main``. Deliberately does NOT
+        touch the cache here: this runs on the event loop while the pre-screen worker thread may be
+        mid-``__call__``, and every other field is built under the "provider calls are serialized by
+        the pre-screen's lock" assumption this module documents. Setting a flag is the only mutation
+        that is safe from either thread; the refresh itself happens on the worker, in :meth:`_day`.
+
+        Idempotent, and safe before the first ``__call__`` (no cache yet ⇒ the first build reads the
+        new value anyway).
+        """
+        self._window_dirty.set()
+        _log.info("scan_context_window_invalidated")
+
     # ------------------------------------------------------------------ day-scoped cache
     def _day(self, d: date) -> _DayCache:
-        """The cache for ``d``, rebuilt whenever the bar date moves (day rollover / replay jump)."""
+        """The cache for ``d``, rebuilt whenever the bar date moves (day rollover / replay jump).
+
+        Also services a pending :meth:`invalidate_trade_window` — one field, not a rebuild (module
+        docstring "Trade-window staleness").
+        """
         cache = self._cache
         if cache is not None and cache.d == d:
+            if self._window_dirty.is_set():
+                self._refresh_window(cache)
             return cache
         cache = self._build_day(d)
         self._cache = cache
         return cache
 
+    def _refresh_window(self, cache: _DayCache) -> None:
+        """Re-read the owner trade window into an EXISTING day cache (worker thread)."""
+        # Cleared BEFORE the read: an owner change landing during the read leaves the flag set, so
+        # the next bar re-reads. Clearing after would swallow it.
+        self._window_dirty.clear()
+        try:
+            window: tuple[datetime, datetime] | None = self._calendar.trade_window(cache.d)
+        except ValueError:
+            window = None           # not a trading day — same meaning as in _build_day (R6)
+        except Exception as exc:  # noqa: BLE001 - an UNEXPECTED read failure must not eat the event
+            # (2026-08-18 review): the flag is already cleared, so swallowing this would drop the
+            # owner's change until the NEXT change or restart. Re-arm the flag (the next bar
+            # retries) and keep the last-known window — one bad SQLite read degrades to a
+            # one-bar-late refresh, never to a silently stale session.
+            self._window_dirty.set()
+            _log.warning("scan_context_window_refresh_failed", d=cache.d.isoformat(),
+                         error=f"{type(exc).__name__}: {exc}")
+            return
+        if window == cache.trade_window:
+            return
+        _log.info(
+            "scan_context_window_refreshed", d=cache.d.isoformat(),
+            old=_render_window(cache.trade_window), new=_render_window(window),
+        )
+        cache.trade_window = window
+
     def _build_day(self, d: date) -> _DayCache:
         session = self._calendar.session(d)
+        # Cleared BEFORE the read, same race reasoning as _refresh_window.
+        self._window_dirty.clear()
         try:
             window: tuple[datetime, datetime] | None = self._calendar.trade_window(d)
         except ValueError:

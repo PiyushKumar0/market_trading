@@ -145,9 +145,10 @@ FORWARD_MODES = ("ranked", "arrival")
 #: its middling ones. A finer grid would spuriously rank a 0.71 above a 0.69 across strategies.
 QUANTILE_BANDS = 5
 
-#: Hard ceiling on the pending-forward queue. The §3.2.5 publication cap (20/day) already bounds it
-#: an order of magnitude below this; the ceiling exists so a misconfigured publication cap cannot
-#: turn a refused-candidate pointer list into unbounded process memory.
+#: Hard ceiling on the pending-forward queue. The §3.2.5 publication cap (settings
+#: ``max_candidates_per_day`` — 48 since 2026-08-18, was 20) already bounds it below this; the
+#: ceiling exists so a misconfigured publication cap cannot turn a refused-candidate pointer list
+#: into unbounded process memory.
 MAX_PENDING_FORWARDS = 100
 
 #: §5.2(a) forward-DRAIN trigger modes (2026-08-14). ``paced`` = the queue is drained on a fixed
@@ -988,8 +989,9 @@ class RecommendationPipeline:
             _log.warning("signal_candidate_governor_blocked", signal_id=candidate.signal_id,
                          reason=getattr(decision, "reason", None))
             return
-        # §5.2(a) forward cap (agents.yaml prescreen_cap_per_day at DG0 — 12 since 2026-08-11,
-        # was 6; 4 at DG1+ — §5.6): the governor owns the number, this counter the enforcement
+        # §5.2(a) forward cap (agents.yaml prescreen_cap_per_day at DG0 — 48 since 2026-08-18,
+        # was 12 from 2026-08-11, 6 before; 4 at DG1+ — §5.6): the governor owns the number, this
+        # counter the enforcement
         # (2026-07-28 review: it had no consumer, so a volatile day could burn 20 analyst calls).
         # Counts only calls that reach the harness; the coarse prescreen settings cap still bounds
         # candidate PUBLICATION. Since WO-1 the slot goes to the best PENDING candidate rather than

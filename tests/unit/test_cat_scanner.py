@@ -315,3 +315,21 @@ def test_catalyst_cap_keeps_the_best_of_a_batch():
         DAY,
     )
     assert [c.symbol for c in out] == ["TOP", "MID"]
+
+
+def test_shipped_cat_subcap_matches_catalyst_guard():
+    """The settings.yaml ``max_per_strategy_day.cat`` sub-cap is MANUALLY kept equal to
+    limits.yaml ``catalyst_guard.max_catalyst_entries_day`` — two files, one meaning, no derivation
+    (the guard is a hash-verified protected store, so settings cannot import it at load time).
+    2026-08-18 review: the coupling had no regression net; a drift would let one file's cap bind
+    while the other's documentation lies. This is that net."""
+    import yaml
+    from engine.core.config import config_dir, load_settings
+
+    settings_cat = load_settings().strategy.prescreen.max_per_strategy_day["cat"]
+    with open(config_dir() / "limits.yaml", encoding="utf-8") as fh:
+        guard_cat = yaml.safe_load(fh)["limits"]["catalyst_guard"]["max_catalyst_entries_day"]
+    assert settings_cat == guard_cat, (
+        f"settings max_per_strategy_day.cat ({settings_cat}) has drifted from "
+        f"catalyst_guard.max_catalyst_entries_day ({guard_cat}) — change them together"
+    )

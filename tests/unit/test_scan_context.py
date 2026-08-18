@@ -496,3 +496,120 @@ def test_provider_satisfies_the_prescreen_context_provider_seam(store, provider)
     assert len(seen) == 2
     assert seen[-1].session_open == SESSION_OPEN
     assert [b.ts_minute.minute for b in seen[-1].intraday_bars] == [20, 21]
+
+
+# ================================ owner window changes mid-session (§3.2.7, 2026-08-18 origination fix)
+#
+# THE BUG this section pins. `trade_window` is day-cached like the rest, but unlike the rest it is a
+# CONTROL-PLANE value the owner can change mid-session. The cache is per PROCESS per date, so a
+# change was invisible to every scanner until the next restart or day rollover. Live 2026-08-18: the
+# cache was built 09:52:06 holding 10:00-10:30, the owner moved the window to 10:10-15:30 at
+# 09:57:52, and `orb` — which intersects ctx.trade_window — went on firing from 10:00:05 against the
+# window that no longer existed, exhausting its whole 6-slot day sub-cap nine minutes before the real
+# window opened. ModeManager had always published `trade_window.changed`; nothing in the scan path
+# listened. engine.ops.main now wires it to invalidate_trade_window().
+
+class _SwappableWindowCalendar:
+    """Real calendar with an owner-swappable ``trade_window`` — the §3.2.7 seam, without SQLite."""
+
+    def __init__(self, inner: NSECalendar, window) -> None:
+        self._inner = inner
+        self.window = window
+        self.reads = 0
+
+    def session(self, d):          # noqa: ANN001 - delegate
+        return self._inner.session(d)
+
+    def is_trading_day(self, d):   # noqa: ANN001 - delegate
+        return self._inner.is_trading_day(d)
+
+    def trade_window(self, d):     # noqa: ANN001 - the swappable bit
+        self.reads += 1
+        if self.window is None:
+            raise ValueError(f"{d} is not a trading day; no trade window")
+        return self.window
+
+
+OLD_W = (datetime(2026, 6, 17, 10, 0, tzinfo=IST), datetime(2026, 6, 17, 10, 30, tzinfo=IST))
+NEW_W = (datetime(2026, 6, 17, 10, 10, tzinfo=IST), datetime(2026, 6, 17, 15, 30, tzinfo=IST))
+
+
+@pytest.fixture
+def swappable(store, clock, calendar, features):
+    cal = _SwappableWindowCalendar(calendar, OLD_W)
+    return cal, LiveScanContextProvider(store, clock, cal, features)
+
+
+def test_window_change_is_invisible_until_invalidated(swappable):
+    """The staleness itself — asserted so the fix cannot be silently reverted into a per-bar read."""
+    cal, provider = swappable
+    assert provider(_bar("AAA", mm=20)).trade_window == OLD_W
+    cal.window = NEW_W                                   # owner moves it mid-session
+    assert provider(_bar("AAA", mm=21)).trade_window == OLD_W    # still cached — this WAS the bug
+    assert cal.reads == 1                                # and the read budget is why
+
+
+def test_invalidate_trade_window_refreshes_on_the_next_bar(swappable):
+    cal, provider = swappable
+    assert provider(_bar("AAA", mm=20)).trade_window == OLD_W
+    cal.window = NEW_W
+    provider.invalidate_trade_window()                   # what `trade_window.changed` now triggers
+    assert provider(_bar("AAA", mm=21)).trade_window == NEW_W
+    assert cal.reads == 2                                # exactly one extra read, not one per bar
+    # ...and it stays refreshed without re-reading again.
+    assert provider(_bar("AAA", mm=22)).trade_window == NEW_W
+    assert cal.reads == 2
+
+
+def test_invalidate_refreshes_only_the_window_not_the_whole_day_cache(store, swappable):
+    """Why one field and not a cache drop: a rebuild re-runs the index/flagged/ex-date reads and the
+    ~100-symbol momentum preload on the pre-screen's worker — exactly the per-bar read budget this
+    cache exists to protect (§3.2 hot-path invariant)."""
+    cal, provider = swappable
+    provider(_bar("AAA", mm=20))
+    daily, flagged, minute = list(store.daily_reads), list(store.flagged_reads), list(store.minute_reads)
+
+    cal.window = NEW_W
+    provider.invalidate_trade_window()
+    assert provider(_bar("AAA", mm=21)).trade_window == NEW_W
+
+    assert store.daily_reads == daily                    # no re-read of ANY day-scoped input
+    assert store.flagged_reads == flagged
+    assert store.minute_reads == minute
+
+
+def test_invalidate_before_the_first_bar_is_a_no_op(swappable):
+    """Wired at composition time, long before the worker thread exists — must not build or crash."""
+    cal, provider = swappable
+    provider.invalidate_trade_window()
+    assert cal.reads == 0                                # nothing read at construction (§3.2)
+    assert provider(_bar("AAA", mm=20)).trade_window == OLD_W
+    assert cal.reads == 1
+
+
+def test_invalidate_is_idempotent(swappable):
+    cal, provider = swappable
+    provider(_bar("AAA", mm=20))
+    cal.window = NEW_W
+    for _ in range(5):                                   # five owner changes before the next bar
+        provider.invalidate_trade_window()
+    assert provider(_bar("AAA", mm=21)).trade_window == NEW_W
+    assert cal.reads == 2                                # coalesced into ONE refresh
+
+
+def test_window_refresh_degrades_to_none_when_unreadable(swappable):
+    """A window that stops resolving degrades to ``None`` — which the pre-screen treats as
+    fail-closed (no origination), never as unrestricted."""
+    cal, provider = swappable
+    provider(_bar("AAA", mm=20))
+    cal.window = None                                    # NSECalendar would raise ValueError here
+    provider.invalidate_trade_window()
+    assert provider(_bar("AAA", mm=21)).trade_window is None
+
+
+def test_day_rollover_still_rebuilds_the_window_without_invalidation(swappable):
+    """The dirty flag is an ADDITION to date-change rebuilds, never a replacement."""
+    cal, provider = swappable
+    assert provider(_bar("AAA", mm=20)).trade_window == OLD_W
+    cal.window = NEW_W
+    assert provider(_bar("AAA", d=NEXT_D, mm=20)).trade_window == NEW_W   # new date ⇒ full rebuild

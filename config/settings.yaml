@@ -200,7 +200,16 @@ ins:
 # learner-writable envelope_state (R4), never here — these are coarse per-day caps only.
 strategy:
   prescreen:
-    max_candidates_per_day: 20   # signal.candidate publications per trading day (SignalPreScreen)
+    # signal.candidate publications per trading day (SignalPreScreen). 20→48 (2026-08-18): this cap
+    # exists to protect the ANALYST forward budget, and that budget moved without it — agents.yaml
+    # `intraday_analyst.prescreen_cap_per_day` went 6→12 (2026-08-11) →48 (2026-08-18, the ~5x
+    # envelope raise, sized "to clear a 66-candidate morning") while this number sat at 20, unchanged
+    # since Phase 1. Origination was therefore throttled 2.4x BELOW the thing it throttles for.
+    # Observed live 2026-08-18: 20/20 slots spent by 10:10:49, then 2,549 refusals for the rest of
+    # the session (47 distinct orb pairs at score >= 0.99) against 13 analyst calls and 0 proposals.
+    # Set EQUAL to prescreen_cap_per_day deliberately — one number, one meaning; if the forward cap
+    # moves again this must move with it (there is no derivation, only this comment).
+    max_candidates_per_day: 48
     # Admission ORDER (WO-1, 2026-08-13). `ranked` = the pre-screen admits a batch score-descending
     # and the analyst forward queue picks by per-strategy score quantile; `arrival` = the pre-WO-1
     # first-come-first-served order. `arrival` is the documented ROLLBACK setting and nothing else.
@@ -214,20 +223,32 @@ strategy:
     forward_drain_mode: paced
     # Per-strategy publication sub-caps [owner knob — NOT in the learnable envelope (§6.3); the
     # learner may never move a cap that decides which strategies get evaluated at all].
-    # `default` binds any strategy without its own line, and at 8 = 40% of max_candidates_per_day
+    # `default` binds any strategy without its own line, and at 16 = 33% of max_candidates_per_day
     # it STRUCTURALLY prevents any single strategy — including one added after this file was
-    # written — from taking more than 40% of the day's slots. orb is capped explicitly: on
+    # written — from taking more than a third of the day's slots. orb is capped explicitly: on
     # 2026-08-11 it took 55% of the day's publications purely by firing first.
+    # Rescaled with the day cap 2026-08-18 (20→48). The sub-caps SUM to 63 > 48, same shape as
+    # before the rescale (36 > 20): the day cap is the aggregate bound, these decide the MIX.
+    # orb is deliberately NOT scaled with the rest — two independent reasons:
+    #   (i) drain physics: orb is the only intraday-style scanner, so its queued candidates carry
+    #       TTL_INTRADAY_MIN (20 min) against FORWARD_PACING_MIN (3 min) — a simultaneous burst of
+    #       N can drain at most ~7 before TTL expiry, and expiry never re-arms the day slot. A cap
+    #       above 7 guarantees burned slots on a burst day, and orb IS bursty (it fires at
+    #       range-completion). 7 = floor(20/3) + 1, the largest burst the pacing can fully serve.
+    #   (ii) score quality: 2026-08-18 showed orb firing on 76 symbols with 883 fires at exactly
+    #        score 1.0 — a SATURATED score, under which WO-1's ranked admission degenerates to
+    #        emission order. Until that is diagnosed, more orb slots just buy first-come noise.
     max_per_strategy_day:
-      default: 8
-      orb: 6
-      rsi2: 8
-      trend: 6
-      mom: 4
-      brk20: 6
-      ins: 4                     # §6.1 `ins` (2026-08-17): a rare, EOD-batch event — ~13-18 fresh
-                                 # in-universe filings a day yield few crossings, so 4 is a ceiling
-                                 # against a cluster day, not an expected daily draw.
+      default: 16
+      orb: 7
+      rsi2: 16
+      trend: 10
+      mom: 8
+      brk20: 12
+      ins: 8                     # §6.1 `ins` (2026-08-17): a rare, EOD-batch event — ~13-18 fresh
+                                 # in-universe filings a day yield few crossings, so this is a
+                                 # ceiling against a cluster day, not an expected daily draw (4→8
+                                 # 2026-08-18 with the day cap; the expected draw is unchanged).
       cat: 2                     # §2.7 v2 shadow (2026-08-18, WO-18): = catalyst_guard
                                  # .max_catalyst_entries_day; measured flow ~0.3-0.6/day, so 2 is a
                                  # cluster-day ceiling. Binds even before the guard-side wiring.

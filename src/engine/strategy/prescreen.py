@@ -19,7 +19,27 @@ happened yet — the forward queue in ``engine.ops.pipeline`` owns selection acr
 
 Determinism (§9.6): the pre-screen takes NO Clock — "today" is ``bar.ts_minute.date()``, so a replay
 of the same bar stream reproduces the same dedupe/cap decisions byte-for-byte (modulo the minted
-``signal_id`` ULIDs). Per-day state (seen set, counters) resets when the bar date changes.
+``signal_id`` ULIDs). Per-day state (seen set, counters) resets when the bar date changes. The
+trade-window gate below preserves this: it reads ``ScanContext.trade_window`` and compares it against
+``bar.ts_minute``, never a Clock — the same bar-derived shape ``OrbScanner.scan`` already uses.
+
+Trade-window gate (2026-08-18)
+------------------------------
+A candidate whose bar-close instant falls OUTSIDE the owner trade window is refused here, before it
+can charge anything. The caps bind on unique (symbol, strategy) pairs and are deliberately NEVER
+refunded — "the spam bound counts attempts, not outcomes" (:meth:`rearm`) — so a publication that the
+pipeline is structurally guaranteed to drop as ``signal_candidate_out_of_window`` used to spend a day
+slot permanently on a candidate nothing could ever act upon. Observed live 2026-08-18: 20/20 day
+slots were spent by 10:10:49 (15 of them before the window opened at all), after which every further
+candidate was refused for the rest of the session — 2,549 suppressions, 47 distinct ``orb`` pairs at
+score >= 0.99, and zero proposals.
+
+This gate PREVENTS the charge; it deliberately does not refund one. Refunding would require a
+decrement path for ``_charged``, which does not exist anywhere by design — adding one would erode the
+same spam bound. The pipeline's own window check (``engine.ops.pipeline.on_signal_candidate``) is
+unchanged and remains the authoritative gate: it reads the live Clock, this reads bar time, and at a
+window edge they can disagree by up to one minute. That is intended defence in depth — this gate
+exists to protect the day's BUDGET, not to decide tradability.
 
 Async surface (§3.2 convention 4): ``handle_bar`` is the ``"bar.1m"`` bus handler — it offloads the
 pandas-heavy scan to a worker thread (the loop is never blocked, §2.2) and awaits publication.
@@ -43,7 +63,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel
@@ -70,6 +90,23 @@ ADMISSION_MODES = ("ranked", "arrival")
 #: strategy id (no scanner may ever be called "default") — it is the structural ceiling that makes
 #: the ≤40%-of-the-day guarantee hold for strategies added after the config was written.
 DEFAULT_CAP_KEY = "default"
+
+
+def bar_in_trade_window(bar: Bar, window: tuple[datetime, datetime] | None) -> bool:
+    """Is ``bar``'s CLOSE instant inside the owner trade window? (§7.1, 2026-08-18)
+
+    Bar-derived and Clock-free, so §9.6 replay determinism is preserved. The instant tested is
+    ``ts_minute + 1m`` — the moment an entry off this bar could actually be placed — which is exactly
+    the ``entry_dt`` convention :meth:`~engine.strategy.scanners.orb.OrbScanner.scan` already uses, so
+    the pre-screen and orb agree on what "in the window" means down to the minute.
+
+    ``None`` (not a trading day, or an unreadable window) is FALSE: no window ⇒ nothing may originate,
+    the same fail-to-zero direction every other §2.7/§7.1 guard takes.
+    """
+    if window is None:
+        return False
+    entry_dt = bar.ts_minute + timedelta(minutes=1)
+    return window[0] <= entry_dt <= window[1]
 
 
 class SignalPreScreen:
@@ -156,6 +193,13 @@ class SignalPreScreen:
         self._published_scores: dict[str, list[float]] = {}
         self._suppressed_cap: dict[str, int] = {}
         self._suppressed_dedupe: dict[str, int] = {}
+        #: Candidates refused because the owner trade window was shut (2026-08-18). Distinct from
+        #: ``_suppressed_cap``: these cost NOTHING — the whole point is that no slot was charged — so
+        #: a large number here is healthy budget protection, where a large ``_suppressed_cap`` is
+        #: starvation. Keeping them apart is what makes the WO-9 funnel line readable.
+        self._suppressed_window: dict[str, int] = {}
+        #: Strategies already logged as window-refused today (one INFO per strategy per day).
+        self._window_logged: set[str] = set()
 
     @staticmethod
     def _parse_caps(
@@ -302,7 +346,9 @@ class SignalPreScreen:
             for cand in accepted:
                 await self._bus.apublish(SIGNAL_CANDIDATE_TOPIC, cand)
 
-    def admit(self, cands: Sequence[SignalCandidate], day: date) -> list[SignalCandidate]:
+    def admit(
+        self, cands: Sequence[SignalCandidate], day: date, *, in_window: bool = True
+    ) -> list[SignalCandidate]:
         """Admit EXTERNALLY-scanned candidates through the same dedupe/caps/telemetry spine.
 
         The brk20 daily sweep (2026-08-04, owner-directed after the BPCL miss) scans completed
@@ -310,10 +356,16 @@ class SignalPreScreen:
         its candidates must face the identical §3.2.5 bounds (same-day (symbol, strategy) dedupe,
         the daily and per-strategy caps) or the sweep would be a cap bypass. ``day`` is the
         session date (the caller's clock); publication stays the caller's job, as in :meth:`sweep`.
+
+        ``in_window`` is the batch-path counterpart of the bar-driven trade-window gate (module
+        docstring). These candidates carry no bar, so the caller — which HAS a Clock — decides; the
+        pre-screen stays Clock-free. It defaults to ``True`` so the parameter is purely additive:
+        omitting it reproduces the pre-2026-08-18 behaviour exactly, and the pipeline's own window
+        check still backstops every path. ``engine.ops.main.run_scan_sweep`` passes it explicitly.
         """
         with self._lock:
             self._roll_day_locked(day)
-            return self._admit_batch_locked(cands)
+            return self._admit_batch_locked(cands, in_window=in_window)
 
     # ------------------------------------------------------------------ funnel telemetry (WO-9)
     def funnel_counters(self) -> dict[str, Any]:
@@ -331,6 +383,7 @@ class SignalPreScreen:
                 "published_scores": {k: list(v) for k, v in self._published_scores.items()},
                 "suppressed_cap": dict(self._suppressed_cap),
                 "suppressed_dedupe": dict(self._suppressed_dedupe),
+                "suppressed_window": dict(self._suppressed_window),
             }
 
     def raw_counts(self, d: date) -> dict[str, int]:
@@ -352,6 +405,8 @@ class SignalPreScreen:
             self._published_scores.clear()
             self._suppressed_cap.clear()
             self._suppressed_dedupe.clear()
+            self._suppressed_window.clear()
+            self._window_logged.clear()
 
     def _rank(self, cands: Sequence[SignalCandidate]) -> list[SignalCandidate]:
         """Order one admission batch (WO-1 (i)).
@@ -368,18 +423,44 @@ class SignalPreScreen:
             return list(cands)
         return sorted(cands, key=lambda c: -float(c.score))
 
-    def _admit_batch_locked(self, cands: Sequence[SignalCandidate]) -> list[SignalCandidate]:
-        """Count the batch as raw, rank it, and run each candidate through the accept spine."""
+    def _admit_batch_locked(
+        self, cands: Sequence[SignalCandidate], *, in_window: bool = True
+    ) -> list[SignalCandidate]:
+        """Count the batch as raw, rank it, and run each candidate through the accept spine.
+
+        ``raw`` counts the batch BEFORE the window gate: what the scanners produced is a fact about
+        the scanners, and WO-9's starvation reading depends on it staying that (otherwise a shut
+        window renders as "nothing fired").
+        """
         for cand in cands:
             self._raw_by_strategy[cand.strategy_id] = (
                 self._raw_by_strategy.get(cand.strategy_id, 0) + 1
             )
-        return [c for c in self._rank(cands) if self._admit_one_locked(c)]
+        return [c for c in self._rank(cands) if self._admit_one_locked(c, in_window=in_window)]
 
-    def _admit_one_locked(self, cand: SignalCandidate) -> bool:
-        """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): dedupe, caps,
+    def _admit_one_locked(self, cand: SignalCandidate, *, in_window: bool = True) -> bool:
+        """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): window, dedupe, caps,
         telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
         key = (cand.symbol, cand.strategy_id)
+        # Trade-window gate FIRST (2026-08-18, module docstring): "the window is shut" is a statement
+        # about the clock that precedes any per-pair reasoning, and refusing here is the only point at
+        # which a doomed candidate can be stopped BEFORE it charges an unrefundable day slot.
+        if not in_window:
+            self._suppressed_window[cand.strategy_id] = (
+                self._suppressed_window.get(cand.strategy_id, 0) + 1
+            )
+            # Once per strategy per day: this fires on every bar of a shut window across the whole
+            # watchlist (thousands of candidates on 2026-08-18), and a per-candidate line would bury
+            # the log exactly like `prescreen_cap_suppressed` does. The per-strategy counter in
+            # :meth:`funnel_counters` carries the volume; this line carries the fact that it is on.
+            if cand.strategy_id not in self._window_logged:
+                self._window_logged.add(cand.strategy_id)
+                _log.info(
+                    "prescreen_out_of_window", symbol=cand.symbol, strategy_id=cand.strategy_id,
+                    score=cand.score,
+                    reason="outside owner trade window — not charging a day slot (§7.1)",
+                )
+            return False
         if key in self._seen:
             # Same (symbol, strategy) already fired today — a breakout re-closing beyond
             # the range every minute must not re-trigger Tier-1 (D5 dedupe).
@@ -452,4 +533,6 @@ class SignalPreScreen:
             produced: list[SignalCandidate] = []
             for scanner in self._scanners:
                 produced.extend(scanner.scan(bar, ctx))
-            return self._admit_batch_locked(produced)
+            return self._admit_batch_locked(
+                produced, in_window=bar_in_trade_window(bar, ctx.trade_window)
+            )
