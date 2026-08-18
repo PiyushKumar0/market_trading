@@ -1,5 +1,44 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (15:43-15:46 IST, post-session deploy) — origination day-budget fix live: window-fresh scan context, charge-free out-of-window refusal, caps 20→48, one ranked batch admit
+
+- **Owner-directed** ("We need to have all data before we begin generating recommendations" +
+  explicit go-ahead after the owner closed the window early at 13:39). Commit `7d73035`, deployed
+  via `Restart-Service mt-engine` at 15:43:56 — session over (15:30), window shut, 0 open
+  positions, log tail quiet, clock re-observed 15:43:31 immediately before acting (incident
+  lesson applied). Boot verified: `engine_boot` 15:44:31, `startup_complete` 15:45:40,
+  `integrity_ok: true`, `frozen: []`, `prescreen_hydrated charged=20 seen=20` (today's spent
+  state correctly preserved under the new cap).
+- **What shipped (4 fixes):** (1) `LiveScanContextProvider.invalidate_trade_window()` wired to the
+  `trade_window.changed` bus event — the 09:57:52 window change was invisible to the scanners'
+  day cache, which is how orb burned its 6-slot sub-cap 10:00-10:01 against a window that no
+  longer existed. (2) Trade-window gate FIRST on the prescreen accept spine, bar-time-derived
+  (§9.6 intact): out-of-window candidates are refused BEFORE charging the unrefundable day slots —
+  today 15/20 slots were spent pre-window, the cap filled 44s after the window opened, and the
+  session ended 2,549 suppressions / 0 proposals. (3) `max_candidates_per_day` 20→48, set equal
+  to the analyst forward cap it exists to protect (which had moved 6→12→48 without it); sub-caps
+  rescaled, orb deliberately held at 7 = the largest burst the 3-min forward pacing can drain
+  inside the 20-min intraday TTL (expiry never re-arms). (4) run_scan_sweep's brk20/ins/cat legs
+  now admit as ONE ranked batch — cat LT 0.82 lost today's last slots to brk20 0.55/0.52 purely
+  by leg order, and cat is single-shot (age≤1) so that loss was permanent.
+- **Review:** 4-lens adversarial pass, 14 findings → 8 fixed pre-deploy (incl. out-of-window
+  /scan_now no longer consumes `ins_pending` — a window refusal is not an evaluation; and the
+  window-refresh failure path re-arms its dirty flag instead of silently dropping the owner's
+  change), 3 accepted with verified rationale, 3 refuted. 1,557 tests green (+18 new).
+- **Watch items (first live session, 2026-08-19):** `prescreen_out_of_window` should appear
+  pre-window with `suppressed_window` counting (healthy = budget protection working);
+  `scan_context_window_refreshed` must fire if the owner moves the window mid-session;
+  `prescreen_cap_suppressed` before ~14:00 on a normal day would mean 48 is still too tight.
+- **FILED, not fixed (owner decision pending):** (a) deals catch-up head-of-line blocking —
+  `deals:2026-08-13` (NSE 503s both sources) blocks 08-14→08-18 from ever being attempted
+  (`_run_date_keyed` breaks on first failure; no skip/give-up path; Telegram alert re-fires every
+  30-min sweep). (b) `ctx.flagged` is structurally 0 in the live scan path — deals writes flags at
+  20:30 for day d, the context reads day d's flags intraday, so orb's bulk/block-deal filter has
+  never suppressed anything live (log-verified across 08-11→08-18, including days the job
+  succeeded). (c) orb score saturation (883 fires at exactly 1.0 across 76 symbols, still firing
+  ~14/min at 13:17) — ranked admission degenerates to first-come under ties; needs its own
+  diagnosis before orb's sub-cap is raised further.
+
 ## 2026-08-18 (10:35 CORRECTION + INCIDENT + day-1 findings) — the entry below is right on substance, WRONG on time: the work landed MID-SESSION, not at night
 
 - **INCIDENT (process failure, mine):** the entry below says "~03:20" and "kept before the 08:15
