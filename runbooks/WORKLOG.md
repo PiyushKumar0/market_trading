@@ -1,5 +1,35 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (19:54-21:05 IST, second deploy) — catch-up head-of-line + give-up redesign live; flagged reads prior session; deals endpoint confirmed DEAD server-side
+
+- **Deployed** commit `5c95576` at 19:54 (idle engine, clock re-observed). Boot verified: migration
+  `0009_job_runs_first_failed` applied, `startup_complete` clean. Review before ship: 3 adversarial
+  lenses, 18 findings → 8 confirmed → all closed pre-deploy; the big one (execution-proven): my
+  first give-up design keyed on DATE AGE would have abandoned cold-boot backlogs on their first
+  attempt — redesigned onto a failing-STREAK clock (`job_runs.first_failed_at`) before ship. Two
+  mutation-proven test gaps also closed (GIVE_UP_AFTER_DAYS and its boundary were unpinned: any
+  value 2..13 passed the old suite). 1,569 tests green.
+- **Validation, live:** boot pass attempted deals 08-13 AND 08-14 AND 08-17 in one pass (first time
+  ever past 08-13 — head-of-line gone); 20:25/20:55 sweeps retried the full failed set including
+  the newly-failed 08-18 (`first_failed` anchor working); features fired at 20:45 post-reschedule
+  (100 rows, after the 20:15 corp_actions + 20:30 deals slots it reads).
+- **Root cause reframed by the validation:** every deals date 503s — including 08-18 tonight and
+  08-12, a date fetched successfully ON 08-12. Direct probe (same cookie-primed session):
+  `/api/historical/bulk-deals` → 503 for any date; control `/api/corporates-corporateActions` →
+  200 with data; corp_actions job succeeded 20:15 tonight. **The NSE historical bulk/block-deals
+  API is dead server-side since ~08-13** — "one poisoned date" was an artifact of head-of-line
+  blocking (only 08-13 was ever attempted intraday). FILED: find the replacement endpoint (NSE API
+  migration pattern); until then dates give up cleanly after their 7-day streak (08-13→18 clocks
+  all started tonight → terminal ~08-25) and the owner gets one alert per failure-set change
+  (daily while the feed is down — intended visibility).
+- **Data caveat (standing):** `features_daily.flagged_instrument_day` is unreliable for live-fired
+  rows 2026-07-24→2026-08-18 (features ran 18:50, deals wrote 20:30; catch-up-fired rows in the
+  same span ARE correct — inconsistent column). No historical rebuild performed: PIT inputs
+  (earnings revisions) make silent rebuilds dishonest, and no learner consumes the column yet.
+  From 2026-08-19 the column is correct. ScanContext.flagged / digest not_flagged now mean "deal
+  on the PRIOR session" — the only intraday-knowable semantics; both were structurally inert
+  before (never one live suppression).
+
 ## 2026-08-18 (15:43-15:46 IST, post-session deploy) — origination day-budget fix live: window-fresh scan context, charge-free out-of-window refusal, caps 20→48, one ranked batch admit
 
 - **Owner-directed** ("We need to have all data before we begin generating recommendations" +
