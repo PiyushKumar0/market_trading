@@ -30,13 +30,20 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.deals")
 
-#: NSE historical bulk/block-deal APIs (single-day window ``from=to=d``). [VERIFY Phase-1];
-#: anti-bot [likely] — the api host is cookie/UA-gated like the other NSE JSON endpoints.
+#: NSE historical bulk/block-deal API (single-day window ``from=to=d``); cookie/UA-gated like the
+#: other NSE JSON endpoints. MIGRATED 2026-08-18: the original ``/api/historical/bulk-deals`` +
+#: ``/api/historical/block-deals`` routes started returning 503 for EVERY date ~2026-08-13 (probed:
+#: 503 even for dates previously fetched fine, on a session where sibling APIs return 200 — an
+#: NSE-side retirement, not anti-bot). The replacement is one route with an ``optionType``
+#: discriminator; its row shape (``BD_*`` keys, ``{"data": [...]}`` envelope) was already covered
+#: by the ``parse_deals`` aliases, so only the URLs changed.
 NSE_BULK_DEALS_URL_TEMPLATE = (
-    "https://www.nseindia.com/api/historical/bulk-deals?from={d:%d-%m-%Y}&to={d:%d-%m-%Y}"
+    "https://www.nseindia.com/api/historicalOR/bulk-block-short-deals"
+    "?optionType=bulk_deals&from={d:%d-%m-%Y}&to={d:%d-%m-%Y}"
 )
 NSE_BLOCK_DEALS_URL_TEMPLATE = (
-    "https://www.nseindia.com/api/historical/block-deals?from={d:%d-%m-%Y}&to={d:%d-%m-%Y}"
+    "https://www.nseindia.com/api/historicalOR/bulk-block-short-deals"
+    "?optionType=block_deals&from={d:%d-%m-%Y}&to={d:%d-%m-%Y}"
 )
 
 #: ``flagged_instrument_days.reason`` vocabulary (PK component, §4.3).

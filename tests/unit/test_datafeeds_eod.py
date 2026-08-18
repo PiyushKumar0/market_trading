@@ -297,6 +297,26 @@ async def test_earnings_repeated_failure_alerts_once(store, clock):
 
 
 # =========================================================================== deals (job 9)
+def test_parse_deals_historical_or_live_shape():
+    """The post-migration (2026-08-18) ``historicalOR/bulk-block-short-deals`` response, verbatim
+    rows from the live probe that found the new route — pins that the alias tables really do cover
+    the ``BD_*`` shape end to end (the migration shipped as a URL-only change on that claim)."""
+    payload = {"data": [
+        {"BD_DT_DATE": "13-AUG-2026", "BD_DT_ORDER": "2026-08-12T18:30:00.000Z",
+         "BD_SYMBOL": "APOLLOPIPE", "BD_SCRIP_NAME": "Apollo Pipes Limited",
+         "BD_CLIENT_NAME": "ANIL LAXMICHAND SHAH", "BD_BUY_SELL": "BUY",
+         "BD_QTY_TRD": 247365, "BD_TP_WATP": 508.81, "BD_REMARKS": "-"},
+        {"BD_DT_DATE": "12-AUG-2026", "BD_DT_ORDER": "2026-08-11T18:30:00.000Z",
+         "BD_SYMBOL": "OTHERDAY", "BD_SCRIP_NAME": "Wrong Day Ltd",
+         "BD_CLIENT_NAME": "X", "BD_BUY_SELL": "SELL",
+         "BD_QTY_TRD": 1, "BD_TP_WATP": 1.0, "BD_REMARKS": "-"},
+    ]}
+    rows = parse_deals(payload, date(2026, 8, 13), REASON_BULK)
+    assert [r["symbol"] for r in rows] == ["APOLLOPIPE"]      # wrong-day row dropped
+    details = json.loads(rows[0]["details"])
+    assert details == {"client": "ANIL LAXMICHAND SHAH", "qty": "247365", "price": "508.81"}
+
+
 def test_parse_deals_fixture():
     rows = parse_deals(BULK_DEALS_JSON, D, REASON_BULK)
     # Wrong-day row and blank-symbol row dropped; both LOWFLT prints keyed to (symbol, d, reason).
@@ -308,7 +328,7 @@ def test_parse_deals_fixture():
 
 async def test_deals_run_flags_bulk_and_block_days(store, clock):
     def handler(request: httpx.Request) -> httpx.Response:
-        if "bulk-deals" in str(request.url):
+        if "optionType=bulk_deals" in str(request.url):
             return httpx.Response(200, json=BULK_DEALS_JSON)
         return httpx.Response(200, json=BLOCK_DEALS_JSON)
 
@@ -323,7 +343,7 @@ async def test_deals_run_flags_bulk_and_block_days(store, clock):
 
 async def test_deals_partial_failure_keeps_other_source(store, clock):
     def handler(request: httpx.Request) -> httpx.Response:
-        if "block-deals" in str(request.url):
+        if "optionType=block_deals" in str(request.url):
             raise httpx.ConnectError("blocked", request=request)
         return httpx.Response(200, json=BULK_DEALS_JSON)
 
@@ -343,7 +363,7 @@ async def test_deals_repeated_partial_failure_alerts_once(store, clock):
     down) — the dedup guards the ``_alert`` call site itself, keyed on ``d``, not on ``ok``. Two
     consecutive partial-failure runs for the same date must still produce exactly one notify."""
     def handler(request: httpx.Request) -> httpx.Response:
-        if "block-deals" in str(request.url):
+        if "optionType=block_deals" in str(request.url):
             raise httpx.ConnectError("blocked", request=request)
         return httpx.Response(200, json=BULK_DEALS_JSON)
 
