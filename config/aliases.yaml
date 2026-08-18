@@ -1,9 +1,11 @@
 # config/aliases.yaml — CURATED entity-alias additions (§3.2.4/§4.3: "seed + curated additions").
 #
 # The daily seed derives aliases from the instruments dump's LEGAL names; colloquial press names
-# that the legal name does not contain live here. Owner-editable (the §5.5 weekly loop SUGGESTS
-# additions from the unresolved-entity log; only the owner adds them — platform suggests, owner
-# sets, §6.3). Merged into entity_aliases by the daily instruments job with source='curated'.
+# that the legal name does not contain live here. Owner-editable. GOVERNANCE AMENDED 2026-08-18
+# (owner directive): the platform may now add rows autonomously, with the duty to inform the owner
+# on every change (was: §5.5 loop suggests, only the owner adds). Additions stay evidence-first —
+# each row cites its unresolved-entity basis. Merged into entity_aliases by the daily instruments
+# job with source='curated'.
 #
 # Seeded 2026-08-03 from the owner's G1 sample verdict (rows 43/44/48/50):
 #   - Groww's legal name is "Billionbrains Garage Ventures Ltd." — no headline ever says that.
@@ -53,3 +55,17 @@ aliases:
   - { alias: "SBI Funds Management", tradingsymbol: SBIFUNDS }
   - { alias: "SBI MF",           tradingsymbol: SBIFUNDS }
   - { alias: "SBI Mutual Fund",  tradingsymbol: SBIFUNDS }
+  # 2026-08-18 (platform-added under the amended governance above; basis = the unresolved-entity
+  # dump behind the resolver-universe fix, WORKLOG this date). Press short forms the dump's legal
+  # names can never yield — the seed rows are "britannia industries" / "dabur india" / "grasim
+  # industries", and headlines routinely drop the second word. Subsumption keeps the long seed
+  # form winning whenever it is present, so these change only the bare-form headlines.
+  # NOT added: "LG Electronics" — both LG seed forms already exist; those headlines failed on the
+  # resolver's watchlist-cap universe bug (fixed this date), not on a missing alias.
+  - { alias: "Britannia",        tradingsymbol: BRITANNIA }   # 11 unresolved hits to 08-13
+  - { alias: "Dabur",            tradingsymbol: DABUR }       # 10 unresolved hits to 08-10
+  - { alias: "Grasim",           tradingsymbol: GRASIM }      # 3 bare-form hits to 08-13
+  # Vikram Solar is OUT of the NIFTY200 universe: the LLOYDSME pattern — the alias exists so the
+  # resolver records out_of_universe (the §3.2.4 disposition) instead of a bare no_match, keeping
+  # the 2026-08-17 probe's motivating name visible in the audit trail.
+  - { alias: "Vikram Solar",     tradingsymbol: VIKRAMSOLR }

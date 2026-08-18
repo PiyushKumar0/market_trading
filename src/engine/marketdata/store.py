@@ -583,6 +583,11 @@ AMEND_NO_BAR = "no_bar"            # no stored row for (symbol, minute)
 AMEND_FOREIGN_SRC = "foreign_src"  # row is no longer src=<require_src> (official/backfilled): untouchable
 AMEND_RACE_LOST = "race_lost"      # CAS predicate missed: the row changed under us; nothing written
 
+# Duplicated from ``engine.universe.builder.EXCL_CAP``: this module CANNOT import that one (builder
+# imports the store — a store->builder import would cycle). Must stay equal to ``EXCL_CAP``;
+# ``tests/unit/test_market_store.py`` asserts the two constants match.
+_EXCL_CAP = "watchlist_cap"
+
 _TICK_STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _tick_stage (
         instrument_token BIGINT,
@@ -1224,6 +1229,21 @@ class MarketStore:
         if included_only:
             sql += " AND included"
         return self._fetch_dicts(sql + " ORDER BY symbol", [d])
+
+    def get_universe_eligible_symbols(self, d: date) -> list[str]:
+        """The ELIGIBLE universe for ``d``: every symbol that passed every §3.2.4 rule, whether or
+        not it made today's top-N focus watchlist — i.e. ``included`` rows PLUS rows excluded for
+        the cap alone (``exclusion_reasons == ['watchlist_cap']``). This is the brk20/ins batch-rule
+        universe (``src/engine/ops/main.py`` ``run_scan_sweep``), not the ``included_only`` focus
+        watchlist — use it wherever "did this symbol clear the rules" matters more than "is it in
+        today's top 100" (the 2026-08-04 BPCL lesson: watchlist-cap-contaminated visibility silently
+        drops otherwise-eligible symbols).
+        """
+        rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
+        return sorted(
+            r["symbol"] for r in rows
+            if r["included"] or list(r["exclusion_reasons"] or []) == [_EXCL_CAP]
+        )
 
     # ================================================================== features (§3.2.5/§6.2)
     def upsert_features_daily(self, rows: Sequence[dict[str, Any]]) -> int:

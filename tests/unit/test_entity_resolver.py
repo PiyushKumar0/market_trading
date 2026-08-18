@@ -219,6 +219,66 @@ def test_unknown_universe_defers_filtering():
     assert rc.unresolved == []
 
 
+# --------------------------------------------------------------------------- eligible-universe load (2026-08-18)
+async def test_watchlist_cap_only_symbol_resolves_via_load(store, clock):
+    """The news-layer fix: a rule-passing symbol that fell past the top-N cap alone
+    (``exclusion_reasons == ['watchlist_cap']``) is ELIGIBLE and must resolve — this used to be
+    dropped as out_of_universe because ``load`` fetched only the ``included`` top-100 watchlist
+    (the 2026-08-04 BPCL lesson, re-found in the news layer)."""
+    d = clock.today()
+    store.upsert_entity_aliases([{"alias": "lg electronics india", "tradingsymbol": "LGEINDIA"}])
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "LGEINDIA", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+    ])
+    resolver = EntityResolver(store, clock)
+    await resolver.aload(d)
+    rc = resolver.resolve(_cluster("LG Electronics India files draft IPO papers"))
+    assert rc.symbols == ["LGEINDIA"]
+    assert rc.unresolved == []
+
+
+async def test_surveillance_excluded_symbol_still_drops_out_of_universe(store, clock):
+    """An exclusion reason OTHER than the cap (surveillance_gsm) is a true outsider — still
+    out_of_universe, never attached, even though it has a universe_daily row. INFY is seeded
+    ``included`` alongside it so the loaded universe is a non-empty frozenset (an all-excluded
+    universe_daily degenerates to "unknown" — see :meth:`EntityResolver.load` — which is not the
+    case under test here)."""
+    d = clock.today()
+    store.upsert_entity_aliases([
+        {"alias": "infosys", "tradingsymbol": "INFY"},
+        {"alias": "vikram solar", "tradingsymbol": "VIKRAMSOLR"},
+    ])
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "INFY", "included": True},
+        {"d": d, "symbol": "VIKRAMSOLR", "included": False, "exclusion_reasons": ["surveillance_gsm"]},
+    ])
+    resolver = EntityResolver(store, clock)
+    await resolver.aload(d)
+    rc = resolver.resolve(_cluster("Vikram Solar shares rally on order win"))
+    assert rc.symbols == []
+    (u,) = rc.unresolved
+    assert u.reason == "out_of_universe"
+    assert u.candidate_symbols == ("VIKRAMSOLR",)
+
+
+async def test_symbol_absent_from_universe_daily_drops_out_of_universe(store, clock):
+    """A symbol with NO universe_daily row at all (never built / delisted) is also a true
+    outsider — still out_of_universe, never attached."""
+    d = clock.today()
+    store.upsert_entity_aliases([
+        {"alias": "infosys", "tradingsymbol": "INFY"},
+        {"alias": "vikram solar", "tradingsymbol": "VIKRAMSOLR"},
+    ])
+    store.upsert_universe_daily([{"d": d, "symbol": "INFY", "included": True}])
+    resolver = EntityResolver(store, clock)
+    await resolver.aload(d)
+    rc = resolver.resolve(_cluster("Vikram Solar shares rally on order win"))
+    assert rc.symbols == []
+    (u,) = rc.unresolved
+    assert u.reason == "out_of_universe"
+    assert u.candidate_symbols == ("VIKRAMSOLR",)
+
+
 # --------------------------------------------------------------------------- sector / theme tagging
 def test_sector_and_theme_tags_use_the_same_whole_word_rule():
     resolver = EntityResolver(

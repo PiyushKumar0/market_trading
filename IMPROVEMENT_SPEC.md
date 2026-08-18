@@ -580,6 +580,16 @@ Acceptance (kill criteria pre-registered): shadow runs >= 30 sessions AND >= 20 
 Effort: S (scanner mirrors ins.py; caps/guards pre-exist)   Depends-on: —
 Risk: shadow-only; Phase 2 is structurally paper/RECOMMEND, C3 rejects by construction, and
   catalyst_guard.max_catalyst_entries_day (2) + max_per_strategy_day cat: 2 bound the slots.
+Day-0 addendum (2026-08-18, ~03:15 — BEFORE the first shadow sweep, so the population is not
+  contaminated mid-stream): the resolver-universe bug found the same night (EntityResolver +
+  CatalystDigestJob loaded included_only=True = the top-100 WATCHLIST, silently dropping every
+  eligible-but-sub-cap symbol at resolution) was fixed before any cat signal existed. Two
+  consequences for reading this WO's evidence: (i) the measured 0.33-0.56/day fuel rate was
+  observed UNDER the bug and is a LOWER bound — sub-cap news (roughly half the eligible universe)
+  could not reach originating grade at all; the starvation thresholds stay valid as lower bounds.
+  (ii) "all 5 originating rows are top-100-watchlist symbols" is EXPLAINED by the bug, not a
+  property of the flow. The shadow's population definition from signal #1 onward is the FIXED
+  eligible universe (store.get_universe_eligible_symbols).
 ```
 
 ---

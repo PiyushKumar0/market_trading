@@ -1,5 +1,36 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-18 (night, ~03:20) — the "LG alias gap" was a resolver-universe BUG: news visibility was watchlist-cap-contaminated; fixed + 4 curated aliases (new owner grant)
+
+- **Owner directive:** fix the LG alias, research other tickers missed the same way; standing
+  grant issued — the platform may now edit aliases.yaml autonomously, informing on every change
+  (governance header amended; memory `owner-alias-delegation`).
+- **Diagnosis reversed by evidence:** the unresolved-entity dump (second engine-down window,
+  ~01:50; watchdog raced the first stop at 01:08 and revived the engine — observed, not fought)
+  showed BOTH LG seed aliases already present, and household NIFTY names (IndusInd, Asian Paints,
+  Coal India, Voltas, MRF, Bharat Forge, Britannia…) in the unresolved stream. Not an alias gap:
+  **EntityResolver.load and CatalystDigestJob loaded `included_only=True` = the top-100
+  WATCHLIST**, so every eligible-but-sub-cap symbol (LGEINDIA at rank 196, ~half the universe)
+  alias-matched and was then dropped `out_of_universe` (news_pipeline 640-649). The BPCL
+  watchlist-cap lesson (2026-08-04), re-found in the news layer.
+- **Fix (Sonnet, audited):** new `MarketStore.get_universe_eligible_symbols` (included ∪
+  watchlist_cap-only — the brk20/ins batch-rule set; literal guarded by a cross-module equality
+  test vs builder.EXCL_CAP) now feeds both the resolver and the digest's in_universe gate.
+  True outsiders (VIKRAMSOLR) still record `out_of_universe`; surveillance-excluded names still
+  drop. 6 new tests; **1,538 green**. Pre-existing edge noted, not touched: an ALL-excluded
+  universe_daily loads as `None` ("unknown") and disables filtering — filed as an observation.
+- **WO-18 day-0 addendum recorded:** the fix lands BEFORE the first cat shadow sweep, so the
+  shadow population is the fixed eligible universe from signal #1; the measured fuel rate
+  (0.33–0.56/day) becomes a LOWER bound, and "all 5 originating rows were watched symbols" is
+  explained by the bug.
+- **aliases.yaml (platform-added under the new grant):** Britannia→BRITANNIA (11 hits),
+  Dabur→DABUR (10), Grasim→GRASIM (3 bare-form) — press short forms the dump's legal names can
+  never yield; Vikram Solar→VIKRAMSOLR (LLOYDSME out-of-universe-disposition pattern). **LG line
+  NOT added** — the seed already covers both forms; the bug fix is the correction. Restraint on
+  the rest of the unresolved list: most entries are bug victims, re-check after a few fixed days.
+- Deployed ~03:2x (third restart tonight — kept before the 08:15 instruments job so the curated
+  rows merge and the 08:25 chain runs on the fixed resolver); boot verified below.
+
 ## 2026-08-18 (night, ~02:15) — `cat` v2 SHADOW live (owner-directed): the §2.7 review executed, the T14 forward-validation clock starts
 
 - **Owner directive:** "run the process to review and implement" news origination (follow-on from

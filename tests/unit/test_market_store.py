@@ -451,6 +451,29 @@ def test_instruments_universe_features_roundtrip(store, clock):
     assert store.get_feature_snapshot("NOPE") is None
 
 
+def test_get_universe_eligible_symbols_includes_watchlist_cap_only_rows(store, clock):
+    """The 2026-08-18 news-layer fix: ``included`` rows AND watchlist_cap-only exclusions are
+    eligible; any other exclusion reason (alone or alongside the cap) is not."""
+    d = clock.today()
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "RELIANCE", "included": True},
+        {"d": d, "symbol": "LGEINDIA", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+        {"d": d, "symbol": "GSMCO", "included": False, "exclusion_reasons": ["surveillance_gsm"]},
+        {"d": d, "symbol": "BOTHCO", "included": False,
+         "exclusion_reasons": ["watchlist_cap", "surveillance_gsm"]},
+    ])
+    assert store.get_universe_eligible_symbols(d) == ["LGEINDIA", "RELIANCE"]
+
+
+def test_universe_eligible_symbols_literal_matches_builder_excl_cap():
+    """The store cannot import ``engine.universe.builder`` (layering — builder imports the store),
+    so the ``watchlist_cap`` literal is duplicated; this test is the guard against the two drifting."""
+    from engine.marketdata.store import _EXCL_CAP
+    from engine.universe.builder import EXCL_CAP
+
+    assert _EXCL_CAP == EXCL_CAP
+
+
 # --------------------------------------------------------------------------- async wrappers
 async def test_async_wrappers_offload_sync_core(store, clock):
     minute = clock.combine(clock.today(), time(10, 0))

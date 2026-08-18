@@ -597,6 +597,24 @@ async def test_universe_and_flagged_exclusions_are_wired(store, make_job):
     assert grades == {"ACME": "originating", "FLAGGED": "context", "OFFUNIVERSE": "context"}
 
 
+async def test_watchlist_cap_only_symbol_passes_in_universe(store, make_job):
+    """The 2026-08-18 news-layer fix: a rule-passing symbol excluded ONLY for the top-N cap
+    (``exclusion_reasons == ['watchlist_cap']``) must clear ``in_universe`` and originate — this
+    used to be silently dropped because the digest fetched only the ``included`` top-100 watchlist
+    (the 2026-08-04 BPCL lesson, re-found in the news layer)."""
+    store.upsert_universe_daily([
+        {"d": WED, "symbol": "ACME", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+    ])
+    seed_bars(store, "ACME", WED)
+    seed_cluster(store, "c-1", first_seen=at(TUE, 18, 0), symbols=("ACME",))
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["symbol"] for r in rows] == ["ACME"]
+    assert rows[0]["grade"] == "originating"
+
+
 async def test_rerun_replaces_the_day_and_carries_cluster_refs(store, make_job):
     """Run-latest catch-up (§2.6): a second run for the same day never duplicates rows."""
     seed_qualifying(store)

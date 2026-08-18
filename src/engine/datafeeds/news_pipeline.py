@@ -429,7 +429,10 @@ class EntityResolver:
     theme_map:
         ``theme -> keywords[]`` (§4.3 ``theme_map`` seeded from config/themes.yaml).
     universe:
-        Today's included universe symbols, or None if not yet built.
+        Today's ELIGIBLE universe symbols (every rule-passing symbol, including beyond-cap rows —
+        the brk20/ins batch-rule set), NOT the top-100 focus watchlist, or None if not yet built.
+        News visibility must not be watchlist-cap-contaminated (the 2026-08-04 BPCL lesson,
+        re-found in the news layer 2026-08-18).
     """
 
     def __init__(
@@ -499,6 +502,11 @@ class EntityResolver:
         curated symbol(s) load — the owner's explicit mapping overrides the machine seed (§6.3
         platform-suggests-owner-sets; e.g. "Reliance" pins RELIANCE over the conglomerate-prefix
         ambiguity union the seed produces).
+
+        Universe loads via :meth:`MarketStore.get_universe_eligible_symbols` — the ELIGIBLE
+        universe (rule-passing incl. beyond-cap rows, the brk20/ins batch-rule set), NOT the
+        top-100 focus watchlist; news visibility must not be watchlist-cap-contaminated (the
+        2026-08-04 BPCL lesson, re-found in the news layer 2026-08-18).
         """
         if self._store is None:
             raise RuntimeError("EntityResolver.load requires a MarketStore")
@@ -515,8 +523,8 @@ class EntityResolver:
         self.set_theme_map({r["theme"]: list(r["keywords"] or []) for r in self._store.get_theme_map()})
         if d is None and self._clock is not None:
             d = self._clock.today()
-        universe_rows = self._store.get_universe_daily(d, included_only=True) if d is not None else []
-        self._universe = frozenset(r["symbol"] for r in universe_rows) or None
+        universe_symbols = self._store.get_universe_eligible_symbols(d) if d is not None else []
+        self._universe = frozenset(universe_symbols) or None
 
     async def aload(self, d: Any = None) -> None:
         if self._store is None:
@@ -951,8 +959,9 @@ class CatalystDigestJob:
     - ``market``-scope clusters contribute to the ``market`` row ONLY — never a symbol row and
       never a watchlist row (§2.7: market news feeds regime context, "**never** origination").
     - Sector/theme fan-out consumes the RESOLVER's tags (``sectors``/``themes``) and is intersected
-      with today's included universe when one exists; with no universe row yet the raw constituents
-      are used and the ``in_universe`` condition still blocks origination.
+      with today's ELIGIBLE universe (rule-passing incl. beyond-cap rows, not just the top-100 focus
+      watchlist) when one exists; with no universe row yet the raw constituents are used and the
+      ``in_universe`` condition still blocks origination.
     - The ``market``/``market`` row is written on EVERY run (0.0 when no market cluster scored), so
       "the digest ran" is observable even for an empty corpus — otherwise an empty-but-fresh digest
       would be indistinguishable from a missing one (§2.7 fail-safe ladder needs that distinction).
@@ -1050,10 +1059,7 @@ class CatalystDigestJob:
             r["theme"]: set(r["symbols"] or [])
             for r in await self._store.arun(self._store.get_theme_map)
         }
-        universe = {
-            r["symbol"]
-            for r in await self._store.arun(self._store.get_universe_daily, d, included_only=True)
-        }
+        universe = set(await self._store.arun(self._store.get_universe_eligible_symbols, d))
 
         sentiment_rows = self._sentiment_rows(clusters, ran_at, sector_symbols, theme_symbols, universe)
         await self._store.arun(self._store.upsert_sentiment_agg, sentiment_rows)
