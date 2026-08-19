@@ -46,6 +46,7 @@ from engine.core.log import get_logger
 from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
 from engine.marketdata.store import MarketStore
+from engine.strategy import contracts
 from engine.strategy.indicators import vwap
 from engine.strategy.types import SignalCandidate
 
@@ -164,6 +165,7 @@ class ContextAssembler:
         bars = self._bars(candidate.symbol, d)      # read ONCE: the bar tail and the LTP line share it
         parts: list[str] = ["== MARKET STATE (volatile) =="]
         parts.append(f"candidate: {_json(candidate.model_dump(mode='json'))}")
+        parts.append(self._strategy_contract_text(candidate.strategy_id))
         parts.append(f"features: {self._features_text(candidate.features_snapshot_id)}")
         parts.append(self._bars_text(bars))
         if candidate.style == "swing":       # brk20/ins/rsi2/mom — daily-series rules (§6.1)
@@ -357,9 +359,42 @@ class ContextAssembler:
             _log.warning("day_plan_unparseable", d=d.isoformat())
             return "no day plan"
 
+    # ------------------------------------------------- WO-20a: the per-strategy evaluation contract
+    def _strategy_contract_text(self, strategy_id: str) -> str:
+        """The candidate's own evaluation frame (:mod:`engine.strategy.contracts`), indented as a block.
+
+        WHY (2026-08-20 funnel autopsy): 63/63 evaluations ended ``no_action`` because ONE intraday
+        day-trade rubric was applied to seven strategies with five different timeframes and three
+        different exit mechanisms — a 20-session insider-crossing hold was declined for being below
+        VWAP at 09:20. The contract states, per leg, what "good" means for THAT leg: timeframe class,
+        exit mechanism, reward basis, evidence status, entry-anchor semantics and the leg's own
+        disqualifier list.
+
+        NEVER RAISES (D7). An unregistered ``strategy_id`` renders the explicit UNKNOWN frame and
+        warns, because a new scanner shipped without a contract is a deployment defect that must be
+        visible in the log rather than a silently thinner prompt.
+        """
+        try:
+            body = contracts.contract_text(strategy_id)
+            if strategy_id not in contracts.STRATEGY_CONTRACTS:
+                _log.warning("strategy_contract_missing", strategy_id=strategy_id)
+        except Exception as exc:                     # noqa: BLE001 - D7: never blocks a call
+            _log.warning("strategy_contract_render_failed", strategy_id=strategy_id, error=str(exc))
+            body = contracts.UNKNOWN_CONTRACT
+        indented = "\n".join(f"  {line}" for line in body.splitlines())
+        return f"strategy contract ({strategy_id}):\n{indented}"
+
     def _features_text(self, snapshot_id: str | None) -> str:
         """The candidate's frozen feature vector (§4.3) with its as-of stamp (WO-6 ii), or
-        ``unavailable`` — never a fabricated timestamp on absent data (D7)."""
+        ``unavailable`` — never a fabricated timestamp on absent data (D7).
+
+        WO-20c (2026-08-20): a present ``rel_volume`` carries its DENOMINATOR in the text. The number
+        is cumulative session volume ÷ 20d median FULL-DAY volume with no time-of-day adjustment, so
+        it is structurally tiny early in the session; read as time-adjusted participation it says
+        "nobody is trading this" at 09:20 on a perfectly normal tape, and that misreading was cited
+        in 44 of the 63 all-time analyst declines. The legend is a stopgap — the correct fix is a
+        time-normalized ``rel_volume_tod`` feature (filed, not in this WO).
+        """
         if not snapshot_id:
             return _UNAVAILABLE
         row = self._store.get_feature_snapshot(snapshot_id)
@@ -371,7 +406,10 @@ class ContextAssembler:
             return _UNAVAILABLE
         as_of = row.get("ts")
         suffix = f" (as of {as_of.strftime('%H:%M')})" if isinstance(as_of, datetime) else ""
-        return f"{_json(features)}{suffix}"
+        note = ""
+        if isinstance(features, Mapping) and features.get("rel_volume") is not None:
+            note = "\n  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume — NOT time-of-day adjusted; structurally small early in the session (~0.02-0.05 in the first minutes, ~0.2-0.4 by mid-morning on an average day)"
+        return f"{_json(features)}{suffix}{note}"
 
     def _bars(self, symbol: str, d: date) -> list[Bar]:
         """Today's completed 1m bars up to "now" (the end bound is exclusive in the store)."""
@@ -496,8 +534,20 @@ class ContextAssembler:
         return "\n".join(lines)
 
     def _sentiment_line(self, label: str, value: float | None) -> str:
+        """One sentiment scope's line, with the RAIL labelled for what it is (WO-20c, 2026-08-20).
+
+        ``sentiment_agg`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
+        bounded index: a handful of same-direction headlines reaches ±1.0 and stays there. It railed
+        on 7 of 17 digest days, and the analyst read "-1.000, the floor of the scale" as extreme
+        regime evidence in 46 of the 63 all-time declines. The label states the semantics inline,
+        where the number is, because a legend the model has to remember is a legend it will not use.
+        The follow-up fix — storing the UNCLIPPED sum and the cluster count so saturation is a
+        measured quantity rather than an annotation — is filed, not in this WO.
+        """
         if value is None:
             return f"  sentiment {label}: {_UNAVAILABLE}"
+        if abs(value) >= 0.999:
+            return f"  sentiment {label}: {value:+.3f} (SATURATED: a clipped decay-weighted SUM of headline scores — a handful of same-direction headlines reaches the rail; read as net {'negative' if value < 0 else 'positive'} headline flow, not extremity)"
         return f"  sentiment {label}: {value:+.3f}"
 
     def _ltp_line(self, bars: Sequence[Bar]) -> str:

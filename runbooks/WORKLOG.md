@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-20 (02:1x) — WO-20: origination drought DIAGNOSED and fixed — the analyst was judging every strategy as a day-trade, fed two inputs that lie
+
+- **The autopsy answer (08-13→08-19, full evidence in the plan's WO-20 paragraph):** the funnel dies at
+  exactly ONE stage — 63/63 analyst evaluations ended `no_action`; zero proposals all-time; the §7.1
+  gate has NEVER been invoked (0 `gate_verdict` lines, corroborated DB+logs). Not an outage (111/111
+  job_runs green), not the gate, not prescreen.
+- **Root causes, each verified in code + the analyst's own words:** (E1) `rel_volume` = session cum
+  volume ÷ 20d median FULL-DAY volume, no time adjustment — the analyst read "0.033 ≈ 3% of normal
+  for this time of day" (it is neither); cited in 44/63 declines. (E2) `sentiment_agg` = clipped SUM:
+  at a rail on 7/17 digest days (+1.0 on 08-04/05/06/14, −1.0 on 08-17/18/19); "−1.000 the floor"
+  read as extreme regime — and on the +1.0 day the analyst still declined 12/12, proving it biases
+  but doesn't bind. (E3) target=None-by-design legs (rsi2 indicator exit, ins time exit) declined for
+  "no target ⇒ no reward ⇒ I won't invent one" — 52/63 declines; the gate's expected-edge seam sits
+  one layer BELOW where candidates die. (E4) swing holds judged on 09:20 microstructure; the 08-19
+  HCLTECH `ins` decline (the only validated-edge candidate ever originated) cited below-VWAP/downtrend/
+  plan-avoid — the EXPECTED population for insider crossings; the deployment re-imposed the filter the
+  validation removed. Counterweight recorded: orb/brk20 declines largely matched our own backtest
+  reasoning — the defect is lying inputs + one frame for seven legs, not "the analyst is broken".
+- **Shipped (1637 unit green, ruff clean):** per-strategy contract block in every candidate context
+  (`engine/strategy/contracts.py`, 7 legs: class, exit, reward basis, honest evidence status, per-leg
+  disqualifiers); SYSTEM_PROMPT rules 12/13 rewritten (contract-frame judgement; null target ≠ missing
+  reward; false "earned their edge over years" claim deleted); rel_volume legend + sentiment SATURATED
+  label at render; WO-20d drain guard (transport failure ⇒ one front re-queue + WARNING, second ⇒
+  `forward_evaluation_lost` ERROR — closes the 08-18 KALYANKJIL silent-vanish). Gate untouched.
+- **Filed follow-ups:** time-normalized `rel_volume_tod` (same-elapsed-minutes denominator from
+  bars_1m); digest stores UNCLIPPED sum + cluster count. Watch: first `ins`/`rsi2` verdicts under the
+  contract frame; nightly analyst-declines block now readable against stated grounds.
+
 ## 2026-08-20 (01:2x) — universe watchlist cap 100→200 (owner-directed); origination investigation opened
 
 - **Owner directive (overnight):** the zero-recommendation drought is the project's core failure —

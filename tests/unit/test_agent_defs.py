@@ -141,6 +141,33 @@ def test_intraday_prompt_states_the_section_5_2_hard_rules():
     assert "Every entry MUST carry a stop price" in prompt
 
 
+def test_intraday_prompt_binds_judgement_to_the_strategy_contract():
+    """WO-20b (2026-08-20): the rubric half of the zero-recommendation fix.
+
+    Rule 12 used to assert that "the deterministic strategies earned their edge on price and volume
+    alone, measured over years of history" — false for six of the seven legs, and it licensed one
+    intraday day-trade rubric over all of them. Evidence status now lives per-contract
+    (``engine.strategy.contracts``), so the blanket claim must be GONE, not merely softened.
+    """
+    prompt = intraday.SYSTEM_PROMPT
+
+    assert "strategy contract" in prompt
+    assert "A null target is not a missing reward" in prompt
+    assert "measured over years of history" not in prompt
+    assert "earned their edge" not in prompt
+    # The two behaviours the contract frame exists to produce.
+    assert "Do not impose intraday day-trade criteria" in prompt
+    assert "never invent a target to fill the gap" in prompt
+
+
+def test_intraday_prompt_rules_stay_uniquely_numbered_one_to_fifteen():
+    """Inserting a rule mid-list is exactly the edit that silently produces two rule 13s. The list
+    is the model's index into its own instructions, so a duplicate number is a real defect."""
+    numbers = [int(n) for n in re.findall(r"^(\d+)\.", intraday.SYSTEM_PROMPT, re.MULTILINE)]
+
+    assert numbers == list(range(1, 16))
+
+
 def test_preopen_prompt_is_grounded_in_auction_mechanics():
     """A14/§5.3: the one confabulation this agent is most prone to is planning off an indicative tick."""
     prompt = preopen.SYSTEM_PROMPT

@@ -7,6 +7,11 @@ never here. A prompt that changes bytes between calls is a guaranteed cache miss
 
 ``AGENT_ID`` is the ``config/agents.yaml`` key: the budget governor's ledger, the allocation table and
 the degrade ladder all key off this exact string.
+
+Byte-stability is a property of the constant, not of its history: WO-20b (2026-08-20) rewrote rules
+12-15 once, deliberately, so the analyst judges each candidate inside its own strategy contract
+(``engine.strategy.contracts``) instead of one intraday day-trade rubric — a one-time cache reset,
+after which the prompt is again identical call to call.
 """
 
 from __future__ import annotations
@@ -55,14 +60,20 @@ HARD RULES
 
 WEIGHING THE EVIDENCE
 
-12. The scanner setup is your primary evidence. The deterministic strategies earned their edge on
-    price and volume alone, measured over years of history with no news input at all. Judge the
-    setup first on its own structure: the levels, the volume, the trend context, the day plan's
-    market read.
-13. Absent news is neutral, never negative. Most symbols carry no catalyst entry, no symbol
+12. The scanner setup is your primary evidence, and the candidate block's `strategy contract` is the
+    frame you judge it in: timeframe class, exit mechanism, reward basis, evidence status, and which
+    evidence classes are disqualifying FOR THAT STRATEGY. Do not impose intraday day-trade criteria
+    (VWAP position, opening-range state, session participation) on swing, positional or event
+    candidates — for those classes such facts are context, not disqualifiers, unless the contract
+    says otherwise.
+13. A null target is not a missing reward. When the contract states a time or indicator exit, the
+    reward basis is the contract's stated edge or exit rule, and the deterministic gate consumes the
+    configured expected edge for such strategies. Never answer no_action solely because
+    raw_levels.target is null, and never invent a target to fill the gap.
+14. Absent news is neutral, never negative. Most symbols carry no catalyst entry, no symbol
     sentiment and no sector sentiment on most days — that is the normal state, not a warning sign.
     Never answer no_action solely because catalyst or sentiment data is missing or unavailable.
-14. Evidence that IS present weighs in one direction each. Adverse news, an explicit day-plan
+15. Evidence that IS present weighs in one direction each. Adverse news, an explicit day-plan
     warning, or hostile price structure argue for no_action or reduced confidence. Supportive
     catalyst evidence may raise confidence, but never substitutes for a sound setup.
 

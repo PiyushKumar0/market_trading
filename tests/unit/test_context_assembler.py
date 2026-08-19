@@ -606,8 +606,16 @@ def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(as
 #: The intraday volatile block captured by running ``_intraday_pin_block`` at HEAD (e8ff7db), BEFORE
 #: the daily-tail change. The fixture seeds daily bars deliberately: an intraday candidate must not
 #: render them even when they are sitting right there in the store.
+#:
+#: WO-20a (2026-08-20) added exactly ONE block to this pin — the two-line ``orb`` strategy contract,
+#: immediately after the candidate line. Nothing else about the intraday rendering moved: the
+#: rel_volume legend needs a ``rel_volume`` key this fixture does not carry, and the saturation label
+#: needs a railed sentiment value this fixture does not carry either.
 INTRADAY_VOLATILE_PIN = """== MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-1","raw_levels":{"entry":"1400.00","stop":"1390.00","target":null},"score":0.7,"side":"BUY","signal_id":"sig-1","strategy_id":"orb","style":"intraday","symbol":"RELIANCE"}
+strategy contract (orb):
+  class: intraday (MIS), same-day squareoff; the rule supplies a price target. The intraday frame FULLY applies: participation, VWAP, acceptance above the range, the day plan's read — judge exactly as an intraday breakout trade.
+  evidence status: exploratory — repeatedly tested gross-negative at retail costs in this book; demand exceptional quality.
 features: {"atr14":12.5,"rvol":1.8} (as of 10:04)
 bars_1m last 30 (time o h l c vol, oldest first):
   10:00 1400.00 1401.00 1399.00 1400.50 1000
@@ -684,3 +692,120 @@ def test_daily_tail_token_delta_is_bounded(assembler, store, capsys):
               f"{added_chars} chars ~= {est_tokens:.0f} tokens (chars/4)")
 
     assert est_tokens < 400            # worst case; a watched swing candidate pays only the tail
+
+
+# ============================================ WO-20 (2026-08-20): the contract frame + input honesty
+# The funnel autopsy: 63/63 analyst evaluations ended no_action, zero proposals ever created, the
+# §7.1 gate never invoked. Two inputs lied (rel_volume's denominator, sentiment_agg's rail) and one
+# intraday rubric was applied to seven strategies. These tests pin the render-time half of the fix.
+
+INS_CANDIDATE = SignalCandidate(
+    signal_id="sig-ins-1",
+    strategy_id="ins",
+    symbol=UNWATCHED,
+    side="BUY",
+    style="swing",
+    raw_levels=RawLevels(entry=Decimal("564.00"), stop=Decimal("535.80")),   # target=None BY DESIGN
+    score=0.62,
+)
+
+
+def test_every_signal_context_carries_its_strategy_contract(assembler, store):
+    """(a) The block exists at all, and sits directly under the candidate line it frames."""
+    seed_bars(store)
+    v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
+    lines = v.splitlines()
+
+    assert "strategy contract (orb):" in lines
+    assert lines.index("strategy contract (orb):") == lines.index(
+        next(ln for ln in lines if ln.startswith("candidate: "))) + 1
+    assert "  class: intraday (MIS), same-day squareoff" in v
+    assert "  evidence status: exploratory" in v
+
+
+def test_the_ins_contract_reaches_the_prompt_verbatim(assembler, store):
+    """(b) The 2026-08-19 HCLTECH decline, answered in the context itself.
+
+    ``ins`` is the only validated edge; its crossings cluster in drawdowns, so a red tape and a
+    below-VWAP price ARE the validated entry population, and its ``target=None`` is design rather
+    than a missing reward. All three statements must arrive in the block the analyst reads.
+    """
+    seed_daily_bars(store, symbol=UNWATCHED)
+    v = assembler.for_signal(INS_CANDIDATE, **SIGNAL_KW).volatile_block
+
+    assert "strategy contract (ins):" in v.splitlines()
+    assert "EXPECTED entry population" in v
+    assert "ONLY validated edge" in v
+    assert "target=None BY DESIGN" in v
+    assert "never invent one" in v
+
+
+def test_an_unregistered_strategy_renders_the_unknown_frame_and_warns(assembler, store, caplog):
+    """(c) D7: a scanner shipped without a contract costs the call its frame, never the call — and
+    the omission is a WARNING line, because silently thinner prompts are how this class of defect
+    survives for weeks."""
+    import logging
+
+    bare = CANDIDATE.model_copy(update={"strategy_id": "newleg"})
+    with caplog.at_level(logging.WARNING, logger="engine.intelligence.context"):
+        v = assembler.for_signal(bare, **SIGNAL_KW).volatile_block
+
+    assert "strategy contract (newleg):" in v.splitlines()
+    assert "  UNKNOWN (unregistered strategy_id — evaluate conservatively and flag it)" in v
+    records = [r for r in caplog.records if r.getMessage() == "strategy_contract_missing"]
+    assert records and records[0].strategy_id == "newleg"
+
+
+# ------------------------------------------------------------------ WO-20c (E2): the sentiment rail
+def test_a_railed_sentiment_value_is_labelled_saturated(assembler):
+    """``sentiment_agg`` is a CLIPPED SUM: a handful of same-direction headlines reaches ±1.0. The
+    analyst read the rail as "the floor of the scale" in 46 of 63 declines, so the semantics are
+    stated where the number is."""
+    line = assembler._sentiment_line("symbol RELIANCE", -1.0)
+
+    assert "SATURATED" in line
+    assert "net negative" in line
+    assert "clipped decay-weighted SUM" in line
+    assert line.startswith("  sentiment symbol RELIANCE: -1.000 (SATURATED:")
+
+    positive = assembler._sentiment_line("market", 1.0)
+    assert "net positive" in positive
+
+
+def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
+    """The label is for the RAIL only: a normal reading must not grow an explanation it does not
+    need (D8 — every extra byte here is on the volatile path of every call)."""
+    assert assembler._sentiment_line("market", 0.5) == "  sentiment market: +0.500"
+    assert assembler._sentiment_line("market", -0.998) == "  sentiment market: -0.998"
+    assert assembler._sentiment_line("market", None) == "  sentiment market: unavailable"
+
+
+# --------------------------------------------------------- WO-20c (E1): the rel_volume denominator
+def test_rel_volume_carries_its_full_day_denominator(assembler, store):
+    """cumulative session volume ÷ 20d median FULL-DAY volume, NOT time-adjusted — so 0.03 at 09:20
+    is an ordinary tape, not a dead one. Phantom thinness was cited in 44 of the 63 declines."""
+    store.insert_feature_snapshot(
+        "fs-rv", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
+        '{"atr14":12.5,"rel_volume":0.03}',
+    )
+    cand = CANDIDATE.model_copy(update={"features_snapshot_id": "fs-rv"})
+    v = assembler.for_signal(cand, **SIGNAL_KW).volatile_block
+
+    assert "NOT time-of-day adjusted" in v
+    assert "20d median FULL-DAY volume" in v
+    assert "  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume" in v
+
+
+@pytest.mark.parametrize(
+    "features_json", ['{"atr14":12.5,"rvol":1.8}', '{"atr14":12.5,"rel_volume":null}']
+)
+def test_no_rel_volume_legend_when_the_feature_is_absent_or_null(assembler, store, features_json):
+    """The legend annotates a number that is THERE. Absent or null ⇒ not a byte spent."""
+    store.insert_feature_snapshot(
+        "fs-norv", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1, features_json,
+    )
+    cand = CANDIDATE.model_copy(update={"features_snapshot_id": "fs-norv"})
+    v = assembler.for_signal(cand, **SIGNAL_KW).volatile_block
+
+    assert "NOT time-of-day adjusted" not in v
+    assert "note: rel_volume" not in v

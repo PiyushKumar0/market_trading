@@ -16,7 +16,9 @@ governor) and REAL everywhere the behaviour under test depends on real policy:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import random
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -1488,6 +1490,182 @@ async def test_paced_drain_survives_a_mid_day_restart(
     ticker.at = NOW + timedelta(minutes=2 * FORWARD_PACING_MIN)
     assert await restarted.drain_forward_queue() is False        # the 2-call day cap held across it
     assert sum(forward_journal(conn).values()) == 2
+
+
+# ================================= WO-20d (2026-08-20): the drain never silently loses a candidate
+class FlakyHarness(FakeHarness):
+    """A harness that blows up mid-call, exactly where the 2026-08-18 KALYANKJIL incident did.
+
+    An ``asyncio.CancelledError`` raised inside the analyst-call transport propagated out of
+    ``_evaluate_forward``, through the drain, and killed the APScheduler tick. The candidate had
+    already been popped from the queue and charged a forward in the day-slot journal, and the call
+    never reached the point where an ``agent_calls`` row is written -- so the day's record said
+    ``forwarded=1`` and every other measure said nothing at all. Invisible, not merely failed.
+
+    Raises ``error`` on the first ``failures`` calls, then behaves like :class:`FakeHarness`. A
+    failing attempt is counted in ``attempts`` but never lands in ``calls``, so "was this candidate
+    actually EVALUATED" stays a clean assertion.
+    """
+
+    def __init__(self, error: type[BaseException], failures: int, *results: Any) -> None:
+        super().__init__(*results)
+        self.error = error
+        self.failures = failures
+        self.attempts = 0
+
+    async def run_single_shot(self, agent_def, context, validate, *, json_schema=None, call_class=None):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise self.error("analyst transport died mid-call")
+        return await super().run_single_shot(
+            agent_def, context, validate, json_schema=json_schema, call_class=call_class
+        )
+
+
+def flaky_pipeline(
+    conn, pclock, calendar, book, limit_table, cost_model, *, error, failures, cap=12, results=2
+):
+    """A ranked+paced pipeline whose analyst call fails ``failures`` times before it works."""
+    gov = TunableGovernor(cap)
+    harness = FlakyHarness(error, failures, *[dict(NO_ACTION_JSON) for _ in range(results)])
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=gov,
+    )
+    return pipeline, parts, harness
+
+
+def log_events(caplog, event: str) -> list[Any]:
+    return [r for r in caplog.records if r.getMessage() == event]
+
+
+async def test_a_blown_up_evaluation_is_requeued_at_the_FRONT_and_retried_next_tick(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
+):
+    """First failure: the tick survives, the candidate goes back at the FRONT, the next tick retries.
+
+    "Front" is the load-bearing word and this fixture proves it rather than assuming it. BOOM is
+    re-queued first; a HIGHER-scoring rival then arrives and would win the ranked selection outright
+    (its per-strategy quantile band is 4 against BOOM's 2). The re-queued candidate still goes first,
+    because it already won a slot once and is owed the answer that slot bought.
+    """
+    pipeline, parts, harness = flaky_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, error=RuntimeError, failures=1)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="BOOM", score=0.9))
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is True      # the tick does NOT die
+    assert harness.attempts == 1
+    assert harness.calls == []                                   # never evaluated: it blew up
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["BOOM"]
+    assert pipeline._pending_forwards[0].front is True
+
+    requeued = log_events(caplog, "forward_evaluation_requeued")
+    assert len(requeued) == 1
+    assert (requeued[0].signal_id, requeued[0].symbol, requeued[0].strategy_id) == (
+        "BOOM", "TCS", "orb")
+    assert requeued[0].error_class == "RuntimeError"
+
+    # A strictly better candidate lands in the meantime and still does not jump the retry.
+    await pipeline.on_signal_candidate(
+        candidate(symbol="INFY", strategy_id="orb", signal_id="RIVAL", score=0.99))
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is True
+
+    assert len(harness.calls) == 1
+    assert parts["assembler"].contexts[-1].stable_block == "stable BOOM"
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["RIVAL"]
+    # Journalling semantics are UNCHANGED: forwarded counts ATTEMPTS against the Â§5.2(a) cap
+    # (2026-07-29), so the retry is a second real charge -- not a refund, not a silent freebie.
+    assert forward_journal(conn)[("TCS", "orb")] == 2
+    assert pipeline._forwarded_count == 2
+
+
+async def test_a_second_failure_is_lost_loudly_and_never_re_queued_again(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
+):
+    """One retry, not a loop. A candidate failing twice is failing for a reason a third attempt will
+    not fix, and a self-refilling queue would spend the whole day's analyst cap on one broken
+    symbol. The drain survives both times; the loss is an ERROR line naming the candidate."""
+    pipeline, _, harness = flaky_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, error=RuntimeError, failures=2)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="BOOM", score=0.9))
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is True
+        ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+        assert await pipeline.drain_forward_queue() is True       # survives the SECOND blow-up too
+
+    assert harness.attempts == 2
+    assert harness.calls == []                                    # never evaluated
+    assert pipeline._pending_forwards == []                       # not re-queued a second time
+    lost = log_events(caplog, "forward_evaluation_lost")
+    assert len(lost) == 1
+    assert (lost[0].signal_id, lost[0].symbol, lost[0].strategy_id) == ("BOOM", "TCS", "orb")
+    assert lost[0].error_class == "RuntimeError"
+    assert lost[0].levelname == "ERROR"                           # a lost candidate is not a warning
+    assert len(log_events(caplog, "forward_evaluation_requeued")) == 1
+
+    ticker.at = NOW + timedelta(minutes=2 * FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is False           # the queue really is empty
+
+
+async def test_cancellation_requeues_the_candidate_and_still_propagates(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
+):
+    """THE INCIDENT ITSELF, in both halves.
+
+    A ``CancelledError`` is how the engine is asked to STOP: swallowing it to protect the tick would
+    make shutdown hang, so it is re-raised in every branch. But the candidate is still saved first --
+    which is precisely what did not happen on 2026-08-18, when the forwarded candidate left no
+    ``agent_calls`` row and simply ceased to exist.
+    """
+    pipeline, _, harness = flaky_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model,
+        error=asyncio.CancelledError, failures=2)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="BOOM", score=0.9))
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline.drain_forward_queue()
+
+        assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["BOOM"]
+        assert pipeline._pending_forwards[0].front is True
+        requeued = log_events(caplog, "forward_evaluation_requeued")
+        assert len(requeued) == 1 and requeued[0].error_class == "CancelledError"
+
+        # Second cancellation: no re-queue, and the cancellation STILL propagates.
+        ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline.drain_forward_queue()
+
+    assert pipeline._pending_forwards == []
+    assert harness.calls == []
+    lost = log_events(caplog, "forward_evaluation_lost")
+    assert len(lost) == 1 and lost[0].error_class == "CancelledError"
+
+
+async def test_the_retry_budget_is_per_day_like_the_rest_of_the_forward_state(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
+):
+    """The re-queued set rolls with ``_roll_forward_day``: a candidate that burned its one retry
+    yesterday is not still carrying that debt today, and the set can never outlive the queue it
+    points into."""
+    pipeline, _, _ = flaky_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, error=RuntimeError, failures=1)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="BOOM", score=0.9))
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is True
+    assert pipeline._requeued_forwards == {"BOOM"}
+
+    pipeline._roll_forward_day(TODAY + timedelta(days=1))
+    assert pipeline._requeued_forwards == set()
+    assert pipeline._pending_forwards == []
 
 
 # ======================================================= WO-8: hot-path read hygiene (Â§3.2 inv. 7)

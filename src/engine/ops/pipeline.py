@@ -50,6 +50,7 @@ Conventions that are load-bearing here:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
@@ -193,6 +194,7 @@ class _PendingForward:
     fired_at: datetime          # when the PIPELINE received it (platform clock, §3.2 — never LLM)
     seq: int                    # arrival sequence: the last, always-unique deterministic tie-break
     expires_at: datetime        # the candidate's own §5.2 TTL horizon; past it the levels are stale
+    front: bool = False         # WO-20d: a re-queued failed evaluation, ahead of every fresh arrival
 
 
 #: ``owner_approvals.kind`` per action type (§3.4 ``owner_approval_required``).
@@ -613,6 +615,10 @@ class RecommendationPipeline:
         #: IS the accumulation window, so an empty one still spends its place in the cadence.
         self._drain_mode = forward_drain_mode
         self._last_forward_drain: datetime | None = None
+        #: WO-20d: signal_ids whose evaluation blew up once and were re-queued for it. Bounds the
+        #: retry to ONE per candidate per day; rolled with the rest of the forward state in
+        #: :meth:`_roll_forward_day`, so it can never outlive the queue it refers to.
+        self._requeued_forwards: set[str] = set()
         #: strategy_id -> today's observed scores, the population the forward quantile ranks in.
         self._day_scores: dict[str, list[float]] = {}
         #: WO-8 hot-path caches, all rolled together by :meth:`_roll_hot_path_day`.
@@ -727,6 +733,7 @@ class RecommendationPipeline:
         self._forwarded_day = d
         self._pending_forwards.clear()
         self._forward_seq = 0
+        self._requeued_forwards.clear()          # WO-20d: the retry budget is per DAY, like the queue
         self._forwarded_count, self._day_scores = self._hydrate_forward_state(d)
 
     def _hydrate_forward_state(self, d: date) -> tuple[int, dict[str, list[float]]]:
@@ -766,11 +773,13 @@ class RecommendationPipeline:
         quantile = sum(1 for s in population if s <= score) / len(population)
         return min(QUANTILE_BANDS - 1, int(quantile * QUANTILE_BANDS))
 
-    def _forward_key(self, entry: _PendingForward) -> tuple[int, datetime, int]:
+    def _forward_key(self, entry: _PendingForward) -> tuple[int, int, datetime, int]:
         """THE FORWARD SELECTION RULE (§5.2(a), WO-1 (ii)).
 
         At each analyst slot, forward the highest-priority published-but-unevaluated candidate:
 
+          0. FRONT entries first (WO-20d) — a candidate whose evaluation blew up mid-call is owed the
+             very next slot, not a place in the ranking it already won once;
           1. per-strategy score QUANTILE BAND, descending — rank within that strategy's own day,
              never the raw score (scores are comparable inside a strategy, not across them);
           2. inside one band, ``fired_at`` ASCENDING — comparable standing means the older setup
@@ -779,13 +788,23 @@ class RecommendationPipeline:
              on every replay (two candidates can share a timestamp; they cannot share a seq).
 
         ``min()`` over this key is the queue pop; the negated band makes "higher band" sort first.
+        The same key run through ``max()`` picks the overflow eviction, so a front entry is also the
+        LAST thing a full queue drops — deliberate: it is the only entry we know is mid-retry.
         """
-        return (-self._quantile_band(entry.candidate), entry.fired_at, entry.seq)
+        return (0 if entry.front else 1, -self._quantile_band(entry.candidate),
+                entry.fired_at, entry.seq)
 
-    def _enqueue_forward(self, candidate: SignalCandidate) -> None:
+    def _enqueue_forward(self, candidate: SignalCandidate, *, front: bool = False) -> None:
         """Put a candidate into the pending-forward queue, replacing any earlier entry for the same
         (symbol, strategy): a re-published pair is ONE waiting candidate at its latest levels, not
-        two competing copies of itself."""
+        two competing copies of itself.
+
+        ``front=True`` is the WO-20d re-queue primitive: the entry sorts ahead of every fresh arrival
+        in BOTH selection modes, so a failed evaluation is retried at the next slot rather than
+        re-entering the competition. It re-stamps ``fired_at`` and the TTL exactly as a fresh
+        publication would — the levels are the ones the failed call was assembled from, and one
+        pacing interval of extra life is what a retry costs.
+        """
         now = self._clock.now()
         self._forward_seq += 1
         key = (candidate.symbol, candidate.strategy_id)
@@ -795,7 +814,7 @@ class RecommendationPipeline:
         ]
         self._pending_forwards.append(_PendingForward(
             candidate=candidate, fired_at=now, seq=self._forward_seq,
-            expires_at=self._ttl(candidate.style),
+            expires_at=self._ttl(candidate.style), front=front,
         ))
         if len(self._pending_forwards) > MAX_PENDING_FORWARDS:
             worst = max(self._pending_forwards, key=self._forward_key)
@@ -829,7 +848,10 @@ class RecommendationPipeline:
         if not self._pending_forwards:
             return None
         if self._forward_mode == "arrival":
-            entry = min(self._pending_forwards, key=lambda p: (p.fired_at, p.seq))
+            # WO-20d: the front flag outranks arrival order here too — the rollback mode must not
+            # quietly lose the re-queue guarantee.
+            entry = min(self._pending_forwards,
+                        key=lambda p: (0 if p.front else 1, p.fired_at, p.seq))
         else:
             entry = min(self._pending_forwards, key=self._forward_key)
         self._pending_forwards.remove(entry)
@@ -918,8 +940,62 @@ class RecommendationPipeline:
                   forwarded=self._forwarded_count, cap=None if cap is None else int(cap),
                   queued=len(self._pending_forwards),
                   best_unforwarded_score=self._best_pending_score())
-        await self._evaluate_forward(chosen, d)
+        await self._evaluate_forward_guarded(chosen, d)
         return True
+
+    # ------------------------------------------------------------ WO-20d: the drain never loses one
+    async def _evaluate_forward_guarded(self, candidate: SignalCandidate, d: date) -> None:
+        """Evaluate ``candidate``, and make a blown-up evaluation VISIBLE and RECOVERABLE.
+
+        THE INCIDENT (2026-08-18, KALYANKJIL). An ``asyncio.CancelledError`` raised inside the
+        analyst-call transport propagated out of :meth:`_evaluate_forward`, through the drain, and
+        killed the APScheduler tick. The candidate had already been popped from the queue and
+        charged a forward in the journal, and the call never reached the point where an
+        ``agent_calls`` row is written — so the day's record said ``forwarded=1`` and nothing else
+        anywhere. Invisible to every DB measure we have: not a decline, not a failure, just gone.
+
+        The decision table (WO-20d):
+
+        * **first failure for a signal_id** — re-queue at the FRONT and log ``forward_evaluation_requeued``
+          at WARNING. A ``CancelledError`` is then RE-RAISED: shutdown cancellation must propagate or
+          the engine cannot stop. A generic exception is swallowed so the tick survives for the rest
+          of the queue.
+        * **second failure** — no re-queue; log ``forward_evaluation_lost`` at ERROR, then the same
+          re-raise/swallow split. One retry, not a loop: a candidate that fails twice is failing for
+          a reason a third attempt will not fix, and a self-refilling queue would spend the day's
+          whole analyst cap on one broken symbol.
+
+        Journalling is deliberately untouched. The forward was already charged by
+        :meth:`_take_forward_slot` and STAYS charged — ``_journal_forward`` counts attempts, not
+        successes (2026-07-29), and a retry is a second real attempt against the §5.2(a) cap. A lost
+        candidate is never marked evaluated by any path here.
+
+        This guard wraps the DRAIN only. ``immediate`` mode (the WO-1 rollback, where an arriving
+        candidate evaluates itself inline on the bus handler) is out of scope: the incident is a
+        scheduler-tick death, and that path has no tick to kill.
+        """
+        try:
+            await self._evaluate_forward(candidate, d)
+        except asyncio.CancelledError:
+            self._handle_forward_failure(candidate, "CancelledError")
+            raise                                # shutdown cancellation always propagates
+        except Exception as exc:                 # noqa: BLE001 - the tick must outlive one candidate
+            self._handle_forward_failure(candidate, type(exc).__name__)
+
+    def _handle_forward_failure(self, candidate: SignalCandidate, error_class: str) -> None:
+        """Re-queue once, then let it go loudly (WO-20d). Never raises: it is the failure path."""
+        fields = {
+            "signal_id": candidate.signal_id,
+            "symbol": candidate.symbol,
+            "strategy_id": candidate.strategy_id,
+            "error_class": error_class,
+        }
+        if candidate.signal_id in self._requeued_forwards:
+            _log.error("forward_evaluation_lost", **fields)
+            return
+        self._requeued_forwards.add(candidate.signal_id)
+        self._enqueue_forward(candidate, front=True)
+        _log.warning("forward_evaluation_requeued", queued=len(self._pending_forwards), **fields)
 
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
