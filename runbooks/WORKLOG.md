@@ -1,5 +1,26 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-20 (01:2x) — universe watchlist cap 100→200 (owner-directed); origination investigation opened
+
+- **Owner directive (overnight):** the zero-recommendation drought is the project's core failure —
+  investigate whether it is (a) a silent defect, (b) a structural framing problem, or (c) a missing
+  agent-led capability; and expand the watchlist to the full NIFTY 200.
+- **Expansion shipped:** `data.universe_max_watchlist` 100→200 (settings.yaml + plan §3.2.4 comment +
+  dated addendum after the `ins` addendum). Evidence-first scope note: the cap only ever throttled the
+  per-bar scanners (orb/rsi2/trend/mom) + momentum preload/features/sector map — `brk20`, `ins`, and the
+  news resolver already read the full eligible set (the 08-18 resolver fix). With cap ≥ eligible count,
+  `watchlist_cap` exclusions become structurally empty. Costs accepted: ~2× tick volume (~1.5 GB/day
+  compacted, 426 GB free), A3 ticker cap 15× headroom (~205 tokens vs 3,000), first-morning A2-throttled
+  1m backfill for ~100 new names (08-04 precedent: longer warm-up). Prescreen budgets deliberately
+  unchanged (48/day, score-ranked admission — more competition, same LLM spend). Binds at the next
+  boot's 08:30 universe build → restart scheduled pre-market (bundled with the investigation outcome).
+- **Investigation running:** funnel autopsy 08-13→08-20 (per-stage per-strategy counts, decline reasons,
+  gate rejections) + the HCLTECH trace — the one validated-edge (`ins`) candidate ever originated
+  (crossed ₹1.75cr 08-18, consumed 08-19 10:10, produced NO recommendation; where it died is the
+  highest-value single fact in the drought question). Diagnosis + strategy proposal to follow.
+- **Compaction memory: CLOSED overnight** (00:48 entry below) — per-query reader metadata, self-healing;
+  no action item remains beyond the armed tripwire.
+
 ## 2026-08-19 (23:15, observation — no action) — compaction memory: the 4GB bound is necessary but NOT sufficient; residual growth channel identified, one more night of curve decides
 
 - Tonight's 22:30 drain (08-13 monster partitions: ITC 2,362 fragments recovered 22:40, then
