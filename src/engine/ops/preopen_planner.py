@@ -244,8 +244,10 @@ class PreopenPlannerJob:
             frame = self._store.get_bars_1d_frame(sym, d - timedelta(days=70), yesterday)
             if len(frame):
                 histories[sym] = [
-                    brk20.DailyRow(high=float(h), close=float(c), volume=float(v))
-                    for h, c, v in zip(frame["high"], frame["close"], frame["volume"])
+                    brk20.DailyRow(high=float(h), close=float(c), volume=float(v), open=float(o))
+                    for h, c, v, o in zip(
+                        frame["high"], frame["close"], frame["volume"], frame["open"]
+                    )
                 ]
         ex_map: dict[str, list[date]] = {}
         for row in self._store.get_corp_actions(
@@ -253,6 +255,9 @@ class PreopenPlannerJob:
         ):
             if row.get("ex_date") is not None:
                 ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
+        # No WO-19 veto accumulator here: this path is ADVISORY context, and the actionable run of
+        # the same rule is the window-open sweep, which logs the counts. A second set from a second
+        # run of the rule over the same universe would double-count the day's vetoes in the log.
         cands = brk20.sweep_daily(histories, today=d, ex_dates_by_symbol=ex_map)
         # WO-4 semantics: entry = the broken 20d-high LEVEL, stop = 2*level - close(y), so
         # close(y) is recovered as 2*entry - stop; the summary names the close and the level.

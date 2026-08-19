@@ -1299,8 +1299,10 @@ async def run() -> int:
                 frame = store.get_bars_1d_frame(sym, hist_start, yesterday)
                 if len(frame):
                     histories[sym] = [
-                        brk20.DailyRow(high=float(h), close=float(c), volume=float(v))
-                        for h, c, v in zip(frame["high"], frame["close"], frame["volume"])
+                        brk20.DailyRow(high=float(h), close=float(c), volume=float(v), open=float(o))
+                        for h, c, v, o in zip(
+                            frame["high"], frame["close"], frame["volume"], frame["open"]
+                        )
                     ]
             ex_map: dict[str, list[date]] = {}
             for row in store.get_corp_actions(
@@ -1309,7 +1311,22 @@ async def run() -> int:
             ):
                 if row.get("ex_date") is not None:
                     ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
-            brk20_raw = brk20.sweep_daily(histories, today=today, ex_dates_by_symbol=ex_map)
+            brk20_vetoes: dict[str, int] = {}
+            brk20_raw = brk20.sweep_daily(
+                histories, today=today, ex_dates_by_symbol=ex_map, veto_counts=brk20_vetoes
+            )
+            # WO-19 veto visibility (the `cat` line's discipline, §6.1): the stop-geometry floor
+            # refuses candidates that used to ship, so a run where it eats everything must be
+            # readable as a floor decision rather than as an empty tape. Counts are ORIGINATION-
+            # stage — pre-admission, so candidates + vetoes reconcile against symbols_scanned on one
+            # line; what the §3.2.5 caps then do with the survivors is the prescreen's own logging.
+            _log.info(
+                "brk20_sweep", d=today.isoformat(), trigger=trigger,
+                symbols_scanned=len(histories),
+                candidates=len(brk20_raw),
+                gap_floor_vetoes=brk20_vetoes.get(brk20.VETO_GAP_FLOOR, 0),
+                floor_unavailable=brk20_vetoes.get(brk20.VETO_FLOOR_UNAVAILABLE, 0),
+            )
 
             # --- `ins` daily leg (§6.1 addendum, owner-directed 2026-08-17): the crossings last
             #     night's ins_crossings job journalled into ins_pending. Same batch shape as brk20 —

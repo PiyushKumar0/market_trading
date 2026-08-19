@@ -590,6 +590,30 @@ Day-0 addendum (2026-08-18, ~03:15 — BEFORE the first shadow sweep, so the pop
   (ii) "all 5 originating rows are top-100-watchlist symbols" is EXPLAINED by the bug, not a
   property of the flow. The shadow's population definition from signal #1 onward is the FIXED
   eligible universe (store.get_universe_eligible_symbols).
+
+WO-19: brk20 overnight-gap stop-geometry floor (owner-directed 2026-08-19)
+Category: A-correctness (origination hygiene)   Priority: P1
+Evidence: the LIMIT-AT-LEVEL risk unit R = close(y) - H20 degenerates on marginal breakouts.
+  Live: IDEA 2026-08-17 (R = Rs 0.10, two ticks — analyst-declined, FILED that day); 2026-08-19
+  MFSL 0.61% / MCX 0.54% / LENSKART 0.17% of entry — 3 of the day's 4 brk20 candidates. A swing
+  stop under routine overnight-gap scale is stopped at the next open with high probability while
+  paying the full round trip, and §7.1 sizing inverts on it (notional ~ risk/(2.5 x stop%)).
+  LENSKART was caught only by the §7.1 entry_sanity_band (price had run away by evaluation) —
+  the band rejects unfillable ENTRIES, not unsurvivable STOPS; backstop, not fix.
+Change: per-symbol overnight-gap floor inside scan_daily, pinned in the plan §6.1 addendum
+  (2026-08-19): gaps = |open_t/close_{t-1} - 1| over gap_lookback_sessions(20) pairs ending at y
+  (skip non-finite/<=0 pairs); < gap_min_sessions(10) valid gaps => no candidate
+  (floor_unavailable); tick-exact R < gap_floor_mult(2.0) x median(gaps) x entry => no candidate
+  (gap_floor veto; equality passes). VETO, never widen. Knobs in a module mapping SEPARATE from
+  the §6.3 envelope dict — owner-only, never learnable. DailyRow gains required `open`; both
+  call sites updated; sweep call sites log symbols_scanned/candidates/gap_floor_vetoes/
+  floor_unavailable per run.
+Acceptance: unit fixtures reproducing the four live geometries with plausible gap histories —
+  BOSCHLTD-class (R ~2.1%) passes unchanged (field-exact regression), MFSL/MCX/LENSKART-class
+  veto; floor_unavailable on short/dirty gap history; boundary R == floor passes; no-lookahead
+  (gaps only from completed sessions <= y); full suite green.
+Effort: S   Depends-on: —
+Risk: origination-only; fewer candidates, never different levels; no gate/envelope changes.
 ```
 
 ---

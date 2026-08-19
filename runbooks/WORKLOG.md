@@ -1,5 +1,30 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-19 (~12:50) — WO-19 brk20 overnight-gap stop-geometry floor: designed, implemented, adversarially reviewed; COMMITTED, deploy scheduled post-close
+
+- **Owner-directed** after the morning's candidate sweep showed 3 of 4 brk20 stops degenerate
+  (MFSL 0.61% / MCX 0.54% / LENSKART 0.17% of entry — the 08-17 IDEA finding at scale; the §7.1
+  entry_sanity_band caught LENSKART only because price had run away: band ≠ floor).
+- **Design (plan §6.1 WO-19 paragraph, pinned):** per-symbol floor = 2.0 × median |open_t/close_{t−1}−1|
+  over the last 20 completed pairs ending at y (≥10 valid pairs required, else floor_unavailable);
+  tick-exact R < floor ⇒ VETO, never widen; knobs in FLOOR_PARAMS, structurally separate from the
+  §6.3 envelope dict (never learnable); DailyRow gains required `open` (loud arity at every
+  constructor); brk20_sweep visibility line (symbols_scanned/candidates/gap_floor_vetoes/
+  floor_unavailable). Complementary to, not replaced by, the entry_sanity_band.
+- **Adversarial review (owner-directed dimensions; 19-agent workflow, full record in the session
+  transcript):** 15 findings raised, **11 refuted under verification** — notably: the corp-action
+  ex-date concern dies on window co-extensiveness (the gap window reads exactly the h20 window's
+  rows, so an unadjusted split that could inflate the median has already destroyed the breakout
+  level itself); the median=0 collapse needs a ≥11/20 exact-zero-gap symbol that the ₹5cr
+  liquidity filter structurally excludes, and its harm path is C3-blocked. **4 findings survived,
+  all test-coverage** — down-gap abs() untested, constant-gap fixtures unable to distinguish
+  median from mean, counters-only-count-shippable unproven, 2 of 4 dirty-pair clauses never
+  individually tripped — all four closed with hand-computed fixtures (incl. the outlier-robustness
+  test: 19×0.4% + one 8% fake-split night must not move the floor).
+- **1,606 unit green** (22 in test_brk20.py). Committed; DEPLOY DEFERRED to the post-close window
+  (~15:35, clock + in-flight-jobs check first — the 08-18 lesson): the floor binds at tomorrow's
+  window-open sweep either way.
+
 ## 2026-08-19 (~00:5x) — POST /db/query live: the engine answers read-only questions instead of being stopped for them; store instance memory-bounded
 
 - **Owner-directed** (follow-on from the migration assessment: the recorded ALTERNATIVE to a
