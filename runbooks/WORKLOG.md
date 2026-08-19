@@ -1,5 +1,21 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-19 (23:15, observation — no action) — compaction memory: the 4GB bound is necessary but NOT sufficient; residual growth channel identified, one more night of curve decides
+
+- Tonight's 22:30 drain (08-13 monster partitions: ITC 2,362 fragments recovered 22:40, then
+  ~28 min silent on the next partition): private 2.0→7.65 GB by 23:08, working set 5.4 GB —
+  **with the spill dir EMPTY (0 files)**. Zero spill means the 4 GB operator limit is not
+  binding; the growth lives OUTSIDE memory_limit's jurisdiction — parquet-reader metadata over
+  thousands of tiny fragments + allocator retention across symbol-days within one DATE
+  connection's lifetime (08-13 alone is hundreds of symbol-days on one connection). The store
+  instance's own 8 GB allowance (live since 15:07) may also contribute; not externally
+  attributable. Contrast: last night's bounded overnight drain held ≤ ~3.8 GB — tonight's
+  difference is plausibly the 08-13 fragment-count pathology reaching its worst partitions.
+- **No action tonight** (7.65 GB on a 31.5 GB box, post-market, 400-symbol-day budget ends the
+  run, 20 GB tripwire armed). If the curve keeps the ~7 GB/h slope or the per-date release fails
+  to appear at the date boundary / budget end, the next fix is pinned in advance: per-SYMBOL-DAY
+  reconnect (or chunked read_parquet file lists) — deletion of retention, not another limit knob.
+
 ## 2026-08-19 (~12:50) — WO-19 brk20 overnight-gap stop-geometry floor: designed, implemented, adversarially reviewed; COMMITTED, deploy scheduled post-close
 
 - **Owner-directed** after the morning's candidate sweep showed 3 of 4 brk20 stops degenerate
