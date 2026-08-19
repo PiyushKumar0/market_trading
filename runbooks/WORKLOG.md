@@ -21,9 +21,11 @@
   median from mean, counters-only-count-shippable unproven, 2 of 4 dirty-pair clauses never
   individually tripped — all four closed with hand-computed fixtures (incl. the outlier-robustness
   test: 19×0.4% + one 8% fake-split night must not move the floor).
-- **1,606 unit green** (22 in test_brk20.py). Committed; DEPLOY DEFERRED to the post-close window
-  (~15:35, clock + in-flight-jobs check first — the 08-18 lesson): the floor binds at tomorrow's
-  window-open sweep either way.
+- **1,606 unit green** (22 in test_brk20.py). Committed; deploy was staged for ~15:35, then
+  **owner directed deploy at 15:07** ("trade window closed"): entries impossible, only tick
+  flushes in flight, ~40 s capture gap owned by the 15:50 reconcile's designed repair path.
+  Boot verified 15:07:53 (selftest ok, RECOMMEND/NORMAL, integrity ok). The floor binds at
+  tomorrow's window-open sweep; watch the first brk20_sweep line's veto split.
 
 ## 2026-08-19 (~00:5x) — POST /db/query live: the engine answers read-only questions instead of being stopped for them; store instance memory-bounded
 
