@@ -15,6 +15,17 @@
   run, 20 GB tripwire armed). If the curve keeps the ~7 GB/h slope or the per-date release fails
   to appear at the date boundary / budget end, the next fix is pinned in advance: per-SYMBOL-DAY
   reconnect (or chunked read_parquet file lists) — deletion of retention, not another limit knob.
+- **00:48 RESOLUTION (2026-08-20) — diagnosis corrected and CLOSED:** private released 9.18→3.15 GB
+  at 00:48 with the run still INSIDE date 08-13 (progress: 50 symbol-days, 943,833 rows at 00:38)
+  — so the release is per-QUERY, not per-date-reconnect: the growth is reader METADATA held only
+  while one monster fragment-list query runs (ITC-class ~2.4-5k fragments ≈ hours + several GB),
+  freed on that query's completion. NOT accumulating retention. Exposure is therefore bounded by
+  the WORST SINGLE PARTITION's fragment count (~9.2 GB observed peak), shrinks permanently as the
+  backlog compacts (every finished symbol-day becomes ONE file), and the per-symbol-day-reconnect
+  fix is WITHDRAWN — it would not touch in-query memory. Verdict: the 53 GB incident = unbounded
+  operator memory (fixed, 4GB+spill) stacked on monster-partition metadata peaks (self-healing);
+  normal nightly compaction runs at trivial memory once the outage backlog is digested. Watch:
+  tripwire stays armed until the backlog clears; expect declining nightly peaks.
 
 ## 2026-08-19 (~12:50) — WO-19 brk20 overnight-gap stop-geometry floor: designed, implemented, adversarially reviewed; COMMITTED, deploy scheduled post-close
 
