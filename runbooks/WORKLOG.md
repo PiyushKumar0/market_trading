@@ -1,5 +1,20 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-20 (17:35) — compaction backlog FULLY DIGESTED; memory arc closed end-to-end; one hygiene observation filed
+
+- **tick_compaction_done 17:32:15: ok=true, budget_exhausted=false, failures=[], symbol_days=3
+  (final pass), fragments_removed=13,173, all retained dates 07-22..08-19 scanned, today skipped
+  (writer owns it).** The standing backlog is now one-file-per-symbol-day; nightly runs from here
+  face a single fresh day (trivial memory/time). Private settled **2.43 GB** on completion — the
+  full-release behaviour the closed diagnosis predicted. Peak observed across the whole episode:
+  12.2 GB (bounded operator memory + per-query metadata + 200-symbol session, all understood).
+  Memory tripwire RETIRED with the watch's clean exit; process_memory telemetry keeps recording.
+- **Hygiene observation (filed, not urgent):** the ticks tree contains a `date=1970-01-01`
+  partition — some past flush wrote ticks with an epoch/zero timestamp. Readers glob by real
+  session dates so impact is ~nil, but it marks a historical timestamp bug in a writer path;
+  worth a one-off look at the partition's contents and a guard on flush (reject epoch-dated
+  ticks) when convenient.
+
 ## 2026-08-20 (18:0x) — day-one validation: WO-20 WORKED (first `enter` outputs in platform history), killed by the guidance-schema trap; WO-21 closes it + token/compaction ops hardenings
 
 - **Day-one verdict:** analyst behavior transformed — brk20 ICICIAMC + POLICYBZR got reasoned,
