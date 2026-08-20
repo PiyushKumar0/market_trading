@@ -21,6 +21,13 @@ Three locked conventions (Phase-0 deliverables, §8.1):
    mandatory ``additionalProperties:false`` / no recursive schemas) are enforced CLIENT-SIDE by
    re-validating the model after parse — which is exactly what :func:`parse_and_stamp` does. See
    :data:`STRUCTURED_OUTPUT_NOTES`.
+
+   Corollary (WO-21, 2026-08-20): the intraday wire schema is the FLAT merge
+   :func:`intraday_guidance_json_schema`, which advertises EVERY action's fields for EVERY action,
+   while the authoritative union forbids extras on each variant. The two disagree by construction,
+   so :func:`parse_intraday` runs :func:`_sanitize_guidance_extras` first — it drops the
+   ADVERTISED-but-wrong-for-this-action keys and nothing else. Genuinely foreign keys (never
+   advertised) still die ``schema_invalid``: ``extra="forbid"`` keeps its R1 teeth.
 """
 
 from __future__ import annotations
@@ -47,6 +54,9 @@ from engine.core.contracts import (
     Recommendation,
     _to_decimal,
 )
+from engine.core.log import get_logger
+
+_log = get_logger("engine.intelligence.schemas")
 
 __all__ = [
     "ACTION_MODELS",
@@ -153,6 +163,15 @@ class NoActionOutput(BaseModel):
     # action, so the model legitimately attaches them when declining — 9 schema_invalid failures on
     # 2026-08-12 (retries hit the same shape; one terminal). Accepted here, unused downstream;
     # ``extra="forbid"`` still rejects genuinely foreign fields (R1 structural coherence intact).
+    #
+    # WO-21 (2026-08-20) GENERALISES this half-patch: two accepted fields only ever covered the two
+    # extras seen that day, and the same schema mismatch killed BOTH of the first-ever ``enter``
+    # outputs (ICICIAMC + POLICYBZR brk20, all 3 retries burned on ``extra_forbidden``; 8 of 13
+    # intraday calls failed that way). :func:`_sanitize_guidance_extras` now DROPS every
+    # advertised-but-wrong-for-this-action key before union validation, for every action — so no
+    # further per-model field needs to be added here as the guidance schema grows. These two stay
+    # (dropping is silent on the wire but these are the two the model most often means, and keeping
+    # them costs nothing); everything else the guidance advertises is handled by the sanitizer.
     confidence: float | None = Field(default=None, ge=0, le=1)
     thesis: str | None = None
 
@@ -223,6 +242,53 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
     }
 
 
+def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str:
+    """Drop the guidance-advertised fields THIS action forbids, before the union validates (WO-21).
+
+    The wire schema (:func:`intraday_guidance_json_schema`) is a FLAT merge — it must be, or the CLI
+    degrades to text mode (pinned 2026-07-29) — so it advertises every action's fields for every
+    action. The model therefore legitimately attaches ``reason``/``regime_note`` to an ``enter``, or
+    ``tradingsymbol``/``signal_id``/``strategy_id`` to a ``no_action``, and the authoritative
+    discriminated union (``extra="forbid"`` everywhere) rejects it as ``extra_forbidden``. On
+    2026-08-20 that killed both first-ever ``enter`` outputs plus 8 of 13 intraday calls: retries
+    re-emit the same shape because the schema keeps inviting it, so retrying can never converge.
+
+    What is dropped is EXACTLY ``raw ∩ (advertised − target-model fields)``:
+
+    * a key the guidance never advertised (a confabulated ``frobnicate``) is untouched and still
+      dies ``schema_invalid`` — R1 structural coherence is preserved, the union stays authoritative;
+    * platform-stamped fields (``proposal_id``/``agent_id``/``valid_until``/``inputs_digest``) are
+      deliberately NOT advertised, so they pass through here and are overwritten by
+      :func:`parse_and_stamp` exactly as before;
+    * a missing or unrecognised ``action`` sanitizes NOTHING — the payload is undiscriminatable, so
+      it must fail validation as it does today rather than be silently reshaped.
+
+    A ``str`` payload is JSON-decoded first; anything that is not a JSON object (bad JSON, a list, a
+    scalar) is returned verbatim so the caller's original validation path produces the original error.
+    """
+    payload: Any = raw
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return raw                      # let validate_json raise the ValidationError it always did
+    if not isinstance(payload, dict):
+        return raw
+    action = payload.get("action")
+    if not isinstance(action, str):
+        return payload
+    target = NoActionOutput if action == "no_action" else ACTION_MODELS.get(action)
+    if target is None:
+        return payload                      # unrecognised action ⇒ sanitize nothing, fail as today
+    advertised = set(intraday_guidance_json_schema()["properties"]) - {"action"}
+    droppable = advertised - set(target.model_fields)
+    dropped = sorted(key for key in payload if key in droppable)
+    if not dropped:
+        return payload
+    _log.info("guidance_extras_dropped", action=action, dropped=dropped)
+    return {key: value for key, value in payload.items() if key not in droppable}
+
+
 def parse_intraday(
     raw: dict[str, Any] | str,
     *,
@@ -237,8 +303,17 @@ def parse_intraday(
     overwritten exactly as they are on every other action path; ``no_action`` is plain-validated —
     stamping it would imply it can be acted on. A schema-invalid payload raises ``ValidationError``
     here and resolves to no-proposal + alert upstream (D7) — never re-parsed from prose.
+
+    WO-21: :func:`_sanitize_guidance_extras` runs FIRST, reconciling the flat wire schema with the
+    discriminated union. It only ever removes keys the wire schema itself advertised; required-field
+    and value-constraint enforcement below is untouched.
     """
-    model = IntradayOutputAdapter.validate_json(raw) if isinstance(raw, str) else IntradayOutputAdapter.validate_python(raw)
+    sanitized = _sanitize_guidance_extras(raw)
+    model = (
+        IntradayOutputAdapter.validate_json(sanitized)
+        if isinstance(sanitized, str)
+        else IntradayOutputAdapter.validate_python(sanitized)
+    )
     if isinstance(model, NoActionOutput):
         return model
     return parse_and_stamp(

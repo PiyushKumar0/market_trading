@@ -1,5 +1,36 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-20 (18:0x) — day-one validation: WO-20 WORKED (first `enter` outputs in platform history), killed by the guidance-schema trap; WO-21 closes it + token/compaction ops hardenings
+
+- **Day-one verdict:** analyst behavior transformed — brk20 ICICIAMC + POLICYBZR got reasoned,
+  sized `enter` verdicts (12:10–12:15); rel_volume read correctly via the legend in every mention;
+  −1.000 digest readings contextualized ("net negative headline flow, not a directional edge");
+  all 4 orb declines contract-honest quality calls. 12/13 calls used contract-frame vocabulary.
+- **But 8/13 calls died `extra_forbidden`** — the flat guidance schema advertises every action's
+  fields for all actions, the discriminated union forbids them; both enter signals burned all 3
+  retries (retries re-emit the same shape — the schema keeps inviting it). Both first-ever
+  proposals lost; brk20 fresh-cross means they don't refire. Cost accepted, cause closed:
+  **WO-21(a)** `_sanitize_guidance_extras` in `parse_intraday` — drops advertised-but-wrong-for-
+  this-action keys pre-validation (`guidance_extras_dropped`), foreign keys still die (R1 teeth
+  kept), core contracts untouched. Generalizes the 2026-08-12 NoActionOutput half-patch.
+- **Operational incident, separate from all the above:** stale daily Kite token → first rejection
+  09:50 mid-session → FROZEN + 96-min process gap → recovery 11:26 → owner window 11:45–13:35.
+  The 11:26 mid-session boot fired the tick_compact post-arm catch-up INTO the session: 16 GB
+  peak, tick processing >1 h behind wall clock by close, /db/query unresponsive, 183 Telegram
+  TimedOut. **WO-21(b)** post-arm tick_compact gated out of live sessions (trading day ∧
+  08:45–15:45 ⇒ `post_arm_skipped_in_session`; 22:30 slot unchanged; CatchUpRunner gains an
+  `exclude` param). **WO-21(c)** `token_check` job (trading days 08:40, no watermark, never
+  load-bearing): `margins()` probe; TokenException ⇒ CRITICAL `token_check_failed` + login-prompt
+  notify (R6 breaker double-alert accepted as redundancy); probe errors ⇒ UNVERIFIED warning.
+- **WO-19 first bind:** brk20_sweep 11:49:34 — 200 scanned, 2 candidates, 0 gap_floor_vetoes,
+  0 floor_unavailable. Universe 200 built clean (200/200 eligible, 100 added, 202 tokens post-
+  recovery); normal-day resubscribe-after-build still unverified (outage masked it) — watch item.
+- **Ops actions:** 4 zero-byte 08-17 fragments quarantined 17:2x (ABB×2, ADANIENSOL, BAJFINANCE —
+  the tick_compact 08-19 catch-up failure; row retries clean next pass). Filed: Telegram
+  "Message is too long" truncation (2×); ins_crossings tonight watch (0 pending for 08-20).
+- 1663 unit green (+26), ruff 0 new. Deployed this evening; tomorrow is the first day the full
+  candidate → proposal → gate → recommendation pipe can flow.
+
 ## 2026-08-20 (02:1x) — WO-20: origination drought DIAGNOSED and fixed — the analyst was judging every strategy as a day-trade, fed two inputs that lie
 
 - **The autopsy answer (08-13→08-19, full evidence in the plan's WO-20 paragraph):** the funnel dies at

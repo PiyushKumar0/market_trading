@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import date, time, timedelta
+import logging
+from datetime import date, datetime, time, timedelta
 
 import httpx
 import pytest
 
 from engine.broker.instruments import InstrumentStore
 from engine.core.calendar import NSECalendar
+from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
 from engine.datafeeds.bhavcopy import BhavcopyJob
 from engine.marketdata.store import MarketStore
@@ -483,6 +485,24 @@ def test_same_registry_arms_every_job_on_the_live_scheduler(conn, clock, calenda
     # The weekly sector-map job carries a day-of-week cron; the daily ones do not.
     sector_trigger = str(next(j for j in sched._sched.get_jobs() if j.id == JOB_SECTOR_MAP).trigger)
     assert "day_of_week='sun'" in sector_trigger
+
+
+def test_pre_open_token_check_is_armed_at_0840(clock, calendar) -> None:
+    """WO-21 (iii): the pre-open token probe is a calendar-guarded 08:40 daily fire, and it is
+    deliberately NOT a registry job — a watermark would make a pre-open check catch-up-eligible,
+    and a token check replayed at 14:00 answers a question nobody is asking."""
+    from engine.ops.token_check import TokenCheckJob
+
+    sched = Scheduler(clock, calendar)
+    job = TokenCheckJob(kite=object(), clock=clock, calendar=calendar, notify=None)
+
+    opsmain._arm_token_check(sched, job)
+
+    armed = {j.id for j in sched._sched.get_jobs()}
+    assert "token_check" in armed
+    trigger = str(next(j for j in sched._sched.get_jobs() if j.id == "token_check").trigger)
+    assert "hour='8'" in trigger and "minute='40'" in trigger
+    assert "token_check" not in set(PHASE1_JOB_IDS) | set(POST_ARM_JOB_IDS)
 
 
 def test_live_interval_jobs_are_armed(clock, calendar) -> None:
@@ -1019,7 +1039,7 @@ async def test_scheduler_is_armed_before_the_deferred_chain_fires(conn, clock, c
     catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events),
                              deferred=POST_ARM_JOB_IDS)
 
-    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up)
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
 
     assert events == ["scheduler_armed"]           # the chain has not even started yet
     await task
@@ -1040,7 +1060,7 @@ async def test_news_backlog_boot_reaches_engine_ready_in_load_bearing_time(conn,
 
     async def boot_tail() -> asyncio.Task | None:
         await catch_up.catch_up()                  # what SessionLifecycle.startup awaits (2.6 step 5)
-        task = start_scheduler_and_fire_post_arm(scheduler, catch_up)
+        task = start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar)
         events.append("engine_ready")
         return task
 
@@ -1064,7 +1084,7 @@ async def test_a_failing_post_arm_chain_records_a_failed_watermark_and_never_rai
     catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events, boom=True),
                              deferred=POST_ARM_JOB_IDS)
 
-    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up)
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
     await task                                     # a chain failure never escapes into the boot path
 
     assert task.exception() is None
@@ -1088,8 +1108,118 @@ async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, cal
     assert events == ["universe_build", "chain_started", "chain_finished"]
 
     scheduler = _FakeScheduler(events)
-    assert start_scheduler_and_fire_post_arm(scheduler, catch_up) is None
+    assert start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar) is None
     assert scheduler.started is True               # arming still happens, unconditionally
+
+
+# ============================================= WO-21 (ii): no in-session tick compaction (2026-08-20)
+# An 11:26 IST crash-recovery boot fired the post-arm compaction backlog DURING the session: ~16 GB
+# peak, tick processing >1 h behind wall clock, /db/query unresponsive, Telegram timing out. The
+# post-arm one-shot now vetoes tick_compact for an in-session boot; the 22:30 slot still covers the
+# day. Every OTHER post-arm job is untouched — a mid-session recovery still wants the news chain.
+
+# Trading day (Wed), IST times around the session; and a weekend inside the same clock window.
+_IN_SESSION = datetime(2026, 6, 17, 11, 26, tzinfo=IST)      # the incident's own boot time
+_EVENING = datetime(2026, 6, 17, 20, 0, tzinfo=IST)
+_WEEKEND_MIDDAY = datetime(2026, 6, 20, 11, 26, tzinfo=IST)  # Saturday
+
+
+def _clock_at(when: datetime) -> Clock:
+    return Clock(time_source=lambda: when)
+
+
+def _compaction_registry(events: list[str]) -> JobRegistry:
+    """news_chain (deferred, kept) + tick_compact (deferred, the WO-21 veto target)."""
+    async def chain() -> None:
+        events.append("chain")
+
+    async def compact(d: date) -> None:
+        events.append(f"compact:{d.isoformat()}")
+
+    reg = JobRegistry()
+    reg.register(JobSpec(opsmain.JOB_NEWS_CHAIN, JobClass.RUN_LATEST, time(8, 25), chain, order=20))
+    reg.register(JobSpec(opsmain.JOB_TICK_COMPACT, JobClass.DATE_KEYED, time(22, 30), compact, order=90))
+    return reg
+
+
+def _compaction_catch_up(conn, clock, calendar, events: list[str], *, last_done: date) -> CatchUpRunner:
+    """A runner with a real compaction BACKLOG — the 2026-08-20 shape. ``tick_compact`` is DATE_KEYED
+    at 22:30, so without a prior watermark today's fire-time has not passed and there is nothing to
+    replay; seeding a success at ``last_done`` makes the days after it genuinely missed."""
+    catch_up = CatchUpRunner(conn, clock, calendar, _compaction_registry(events),
+                             deferred=POST_ARM_JOB_IDS)
+    catch_up.record_run(opsmain.JOB_TICK_COMPACT, last_done)
+    return catch_up
+
+
+@pytest.mark.asyncio
+async def test_in_session_boot_skips_tick_compact_and_logs_it(conn, calendar, caplog) -> None:
+    clock = _clock_at(_IN_SESSION)
+    events: list[str] = []
+    catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 14))
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+    await task
+
+    # The backlog (Mon 15th + Tue 16th) is real — the evening test below runs it — and NONE of it
+    # starts inside the session: that pass is what peaked at ~16 GB on 2026-08-20.
+    assert not [e for e in events if e.startswith("compact")]
+    assert "chain" in events                       # every other post-arm job is unchanged
+    skips = [r for r in caplog.records if r.getMessage() == "post_arm_skipped_in_session"]
+    assert len(skips) == 1
+    assert skips[0].job_id == opsmain.JOB_TICK_COMPACT
+    assert skips[0].now.startswith("2026-06-17T11:26")
+    # A veto is per-pass, not a watermark: nothing is recorded, so the 22:30 slot / next ALL sweep
+    # still owns the backlog.
+    assert catch_up.was_run(opsmain.JOB_TICK_COMPACT, date(2026, 6, 15)) is False
+
+
+@pytest.mark.asyncio
+async def test_evening_boot_still_fires_tick_compact(conn, calendar, caplog) -> None:
+    clock = _clock_at(_EVENING)
+    events: list[str] = []
+    catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 14))
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+    await task
+
+    assert [e for e in events if e.startswith("compact")] == [
+        "compact:2026-06-15", "compact:2026-06-16",
+    ]
+    assert "chain" in events
+    assert not [r for r in caplog.records if r.getMessage() == "post_arm_skipped_in_session"]
+
+
+@pytest.mark.asyncio
+async def test_weekend_boot_in_the_clock_window_still_fires_tick_compact(conn, calendar) -> None:
+    """The gate protects a SESSION, not a wall-clock range: a Saturday 11:26 recovery boot is
+    exactly when the fragment backlog should be collapsed."""
+    clock = _clock_at(_WEEKEND_MIDDAY)
+    assert calendar.is_trading_day(clock.today()) is False
+    events: list[str] = []
+    catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 17))
+
+    await start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+
+    assert [e for e in events if e.startswith("compact")] == [
+        "compact:2026-06-18", "compact:2026-06-19",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("when", "expected"),
+    [
+        (datetime(2026, 6, 17, 8, 44, tzinfo=IST), ()),                          # just before open-side bound
+        (datetime(2026, 6, 17, 8, 45, tzinfo=IST), (opsmain.JOB_TICK_COMPACT,)),  # inclusive lower bound
+        (datetime(2026, 6, 17, 15, 45, tzinfo=IST), (opsmain.JOB_TICK_COMPACT,)),  # inclusive upper bound
+        (datetime(2026, 6, 17, 15, 46, tzinfo=IST), ()),                         # just after close-side bound
+        (datetime(2026, 6, 17, 3, 0, tzinfo=IST), ()),                           # small hours
+    ],
+)
+def test_post_arm_exclusion_window_bounds(calendar, when: datetime, expected: tuple) -> None:
+    assert opsmain.post_arm_exclusions(_clock_at(when), calendar) == expected
 
 
 # =========================================================================== WO-14 (c) translation

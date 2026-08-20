@@ -252,3 +252,157 @@ def test_no_action_accepts_the_fields_the_guidance_schema_advertises():
         NoActionOutput.model_validate({
             "action": "no_action", "reason": "chop — no resolution", "confidence": 1.7,
         })
+
+
+# ------------------------------------------------- guidance-extras sanitizer (WO-21, 2026-08-20)
+# The FLAT wire schema advertises every action's fields for EVERY action; the authoritative union
+# forbids extras on each variant. On 2026-08-20 BOTH first-ever ``enter`` outputs (ICICIAMC,
+# POLICYBZR brk20) burned all three retries on ``extra_forbidden`` and died — 8 of 13 intraday calls
+# failed that way, because a retry re-emits the shape the schema keeps inviting. parse_intraday now
+# drops exactly the advertised-but-wrong-for-this-action keys before validating.
+
+
+def _enter_no_action_stamp(model) -> None:
+    """Every stamped action carries the platform values, never the model's."""
+    assert model.proposal_id == STAMP["proposal_id"]
+    assert model.agent_id == STAMP["agent_id"]
+    assert model.valid_until == STAMP["valid_until"]
+    assert model.inputs_digest == STAMP["inputs_digest"]
+
+
+def test_no_action_with_enter_only_extras_parses() -> None:
+    """The live no_action shape: the model attaches entry identity fields it was shown."""
+    from engine.intelligence.schemas import NoActionOutput, parse_intraday
+
+    out = parse_intraday(
+        {
+            "action": "no_action",
+            "reason": "brk20 candidate failed the volume confirmation",
+            "tradingsymbol": "ICICIAMC",
+            "signal_id": "sig-123",
+            "strategy_id": "brk20",
+        },
+        **STAMP,
+    )
+    assert isinstance(out, NoActionOutput)
+    assert out.reason == "brk20 candidate failed the volume confirmation"
+
+
+def test_enter_with_no_action_extras_parses_and_is_stamped() -> None:
+    """The 2026-08-20 gating failure: a valid ``enter`` carrying ``reason``/``regime_note``."""
+    from engine.intelligence.schemas import parse_intraday
+
+    raw = {
+        **RAW_BY_ACTION["enter"],
+        "reason": "breakout confirmed on the 20-day high",
+        "regime_note": "trend day, breadth positive",
+    }
+    model = parse_intraday(raw, **STAMP)
+    assert isinstance(model, EnterAction)
+    assert model.tradingsymbol == "RELIANCE"
+    assert model.quantity == 14
+    _enter_no_action_stamp(model)
+
+
+def test_sanitizer_does_not_admit_genuinely_foreign_keys() -> None:
+    """A key the guidance schema never advertised is a confabulation, not a schema mismatch — it
+    must still die schema_invalid (R1 structural coherence: the union stays authoritative)."""
+    from engine.intelligence.schemas import parse_intraday
+
+    with pytest.raises(ValidationError):
+        parse_intraday({**RAW_BY_ACTION["enter"], "frobnicate": 1}, **STAMP)
+
+
+def test_sanitizer_does_not_mask_a_missing_required_field() -> None:
+    """Dropping extras must not soften required-field enforcement: a stopless enter still dies."""
+    from engine.intelligence.schemas import parse_intraday
+
+    raw = {**RAW_BY_ACTION["enter"], "reason": "looks strong"}
+    raw.pop("stop_price")
+    with pytest.raises(ValidationError):
+        parse_intraday(raw, **STAMP)
+
+
+def test_no_action_with_price_extras_parses() -> None:
+    """``limit_price``/``new_stop`` are advertised for every action and alien to no_action."""
+    from engine.intelligence.schemas import NoActionOutput, parse_intraday
+
+    out = parse_intraday(
+        {
+            "action": "no_action",
+            "reason": "no candidate cleared the gate today",
+            "limit_price": "101.25",
+            "new_stop": "99.00",
+        },
+        **STAMP,
+    )
+    assert isinstance(out, NoActionOutput)
+
+
+def test_sanitizer_handles_the_json_string_input_path() -> None:
+    """The harness hands parse_output the raw JSON TEXT, so the string path must sanitize too."""
+    from engine.intelligence.schemas import parse_intraday
+
+    text = json.dumps({
+        **RAW_BY_ACTION["enter"],
+        "reason": "breakout confirmed",
+        "regime_note": "trend day",
+    })
+    model = parse_intraday(text, **STAMP)
+    assert isinstance(model, EnterAction)
+    _enter_no_action_stamp(model)
+
+
+def test_unrecognised_action_sanitizes_nothing_and_still_fails() -> None:
+    """An unknown/missing discriminator is not reshaped into validity — it fails as it always did."""
+    from engine.intelligence.schemas import parse_intraday
+
+    with pytest.raises(ValidationError):
+        parse_intraday({"action": "levitate", "reason": "why not"}, **STAMP)
+    with pytest.raises(ValidationError):
+        parse_intraday({"reason": "no discriminator at all"}, **STAMP)
+
+
+def test_sanitizer_logs_one_line_naming_what_it_dropped(caplog) -> None:
+    """One structlog line per sanitized payload, carrying the action + the sorted dropped keys —
+    the mismatch must stay VISIBLE in the log, not silently papered over."""
+    import logging
+
+    from engine.intelligence.schemas import parse_intraday
+
+    with caplog.at_level(logging.INFO, logger="engine.intelligence.schemas"):
+        parse_intraday(
+            {**RAW_BY_ACTION["enter"], "reason": "breakout", "regime_note": "trend"}, **STAMP
+        )
+    records = [r for r in caplog.records if r.getMessage() == "guidance_extras_dropped"]
+    assert len(records) == 1
+    assert records[0].action == "enter"
+    assert records[0].dropped == ["reason", "regime_note"]
+
+
+def test_clean_payloads_log_nothing(caplog) -> None:
+    """No extras ⇒ no log line (the sanitizer is silent on the normal path)."""
+    import logging
+
+    from engine.intelligence.schemas import parse_intraday
+
+    with caplog.at_level(logging.INFO, logger="engine.intelligence.schemas"):
+        parse_intraday(RAW_BY_ACTION["enter"], **STAMP)
+        parse_intraday({"action": "no_action", "reason": "nothing set up today"}, **STAMP)
+    assert not [r for r in caplog.records if r.getMessage() == "guidance_extras_dropped"]
+
+
+def test_platform_stamped_fields_are_not_dropped_by_the_sanitizer() -> None:
+    """proposal_id/agent_id/valid_until/inputs_digest are NOT advertised, so the sanitizer leaves
+    them alone — parse_and_stamp keeps overwriting them exactly as before."""
+    from engine.intelligence.schemas import parse_intraday
+
+    raw = {
+        **RAW_BY_ACTION["enter"],
+        "reason": "breakout",
+        "proposal_id": "LLM-INVENTED",
+        "agent_id": "LLM-INVENTED",
+        "valid_until": "1999-01-01T00:00:00+05:30",
+        "inputs_digest": "LLM-INVENTED",
+    }
+    _enter_no_action_stamp(parse_intraday(raw, **STAMP))

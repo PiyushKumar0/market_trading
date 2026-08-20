@@ -362,9 +362,18 @@ class CatchUpRunner:
 
     # ------------------------------------------------------------------ the catch-up pass (§2.6 step 5)
     async def catch_up(
-        self, *, off_since: datetime | None = None, scope: CatchUpScope = CatchUpScope.LOAD_BEARING
+        self,
+        *,
+        off_since: datetime | None = None,
+        scope: CatchUpScope = CatchUpScope.LOAD_BEARING,
+        exclude: Collection[str] = (),
     ) -> CatchUpResult:
         """Replay every missed job in ``scope`` over the off-window, by class then dependency order.
+
+        ``exclude`` (WO-21) drops named job ids from THIS pass only — a caller-side, per-pass veto
+        with no watermark side effects, so the next pass that does not veto them replays them
+        normally. It exists for the post-arm one-shot's in-session ``tick_compact`` gate
+        (``engine.ops.main``); ``deferred`` is the standing set, this is the situational one.
 
         SINGLE-FLIGHT (WO-15 (ii)): a pass firing while another is still running is a logged no-op,
         never a second concurrent replay. Watermarks make a *later* pass a cheap no-op anyway, but
@@ -380,9 +389,11 @@ class CatchUpRunner:
             )
             return CatchUpResult(skipped_in_flight=True)
         async with self._pass_lock:
-            return await self._pass(off_since=off_since, scope=scope)
+            return await self._pass(off_since=off_since, scope=scope, exclude=exclude)
 
-    async def _pass(self, *, off_since: datetime | None, scope: CatchUpScope) -> CatchUpResult:
+    async def _pass(
+        self, *, off_since: datetime | None, scope: CatchUpScope, exclude: Collection[str] = ()
+    ) -> CatchUpResult:
         now = self._clock.now()
         result = CatchUpResult(
             off_duration_s=max(0.0, (now - off_since).total_seconds()) if off_since else 0.0
@@ -391,11 +402,11 @@ class CatchUpRunner:
             _log.info("catch_up_no_registry", note="Phase-1 jobs registered by the integrator (§2.6)")
             return result
 
-        for spec in self._in_scope(JobClass.SAFETY_CRITICAL, scope):
+        for spec in self._in_scope(JobClass.SAFETY_CRITICAL, scope, exclude):
             await self._run_safety_critical(spec, now, result)
-        for spec in self._in_scope(JobClass.RUN_LATEST, scope):
+        for spec in self._in_scope(JobClass.RUN_LATEST, scope, exclude):
             await self._run_latest(spec, now, off_since, result)
-        for spec in self._in_scope(JobClass.DATE_KEYED, scope):
+        for spec in self._in_scope(JobClass.DATE_KEYED, scope, exclude):
             await self._run_date_keyed(spec, now, off_since, result)
 
         _log.info(
@@ -425,9 +436,17 @@ class CatchUpRunner:
             return True
         return bool(result.jobs_failed) and result.jobs_failed != self._last_failed_alert
 
-    def _in_scope(self, job_class: JobClass, scope: CatchUpScope) -> list[JobSpec]:
-        """The class's specs in dependency order, filtered by the WO-15 deferred set."""
+    def _in_scope(
+        self, job_class: JobClass, scope: CatchUpScope, exclude: Collection[str] = ()
+    ) -> list[JobSpec]:
+        """The class's specs in dependency order, filtered by the WO-15 deferred set.
+
+        ``exclude`` (WO-21) is applied FIRST and to every scope — a per-pass veto is unconditional
+        by construction, otherwise an ``ALL`` sweep would quietly reinstate what the caller vetoed.
+        """
         specs = self._registry.specs(job_class)  # type: ignore[union-attr]
+        if exclude:
+            specs = [s for s in specs if s.job_id not in exclude]
         if scope is CatchUpScope.ALL or not self._deferred:
             return specs
         if scope is CatchUpScope.DEFERRED:

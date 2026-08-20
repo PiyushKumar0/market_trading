@@ -119,6 +119,7 @@ from engine.ops.post_login import (
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
 from engine.ops.single_instance import InstanceLock
+from engine.ops.token_check import TOKEN_CHECK_IST, TokenCheckJob
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentHarness, load_agent_roster, run_sdk_smoke
@@ -218,6 +219,17 @@ POST_ARM_JOB_IDS: tuple[str, ...] = (
 #: catch-up pass runs the whole registry (``deferred`` empty ⇒ every scope is the full registry) and
 #: the post-arm one-shot becomes a no-op. Flip + restart; no other code path changes.
 DEFER_POST_ARM_JOBS = True
+
+#: WO-21 (ii): the IST window in which a boot must NOT fire the post-arm ``tick_compact`` one-shot.
+#: 2026-08-20, 11:26 IST — a mid-session crash-recovery boot fired the compaction backlog catch-up
+#: while the market was open: ~16 GB memory peak, tick processing fell more than an hour behind wall
+#: clock, ``/db/query`` went unresponsive and Telegram sends timed out. Compaction is idle-hours
+#: housekeeping (§4.3/WO-7): the 22:30 scheduled slot still covers the day, and the 30-min ``ALL``
+#: sweep re-runs whatever the skipped one-shot left unwatermarked once the session is over — so the
+#: skip costs a few hours of fragment retention, never a compaction. Bounds bracket the session with
+#: margin either side (08:45 is ahead of the 09:00 pre-open, 15:45 behind the 15:30 close).
+_IN_SESSION_START_IST = time(8, 45)
+_IN_SESSION_END_IST = time(15, 45)
 
 
 def _is_sunday(d: date) -> bool:
@@ -1476,6 +1488,14 @@ async def run() -> int:
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
+    # WO-21 (iii): pre-open token probe at 08:40. Wired only when a broker facade exists (no api_key
+    # ⇒ nothing to authenticate); NOT a registry job — a pre-open check has no meaningful catch-up.
+    if kite is not None:
+        _arm_token_check(
+            scheduler,
+            TokenCheckJob(kite=kite, clock=clock, calendar=calendar, notify=notify,
+                          login_url=session.login_url),
+        )
     _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
                    ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
                    scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
@@ -1565,7 +1585,7 @@ async def run() -> int:
     # WO-15 (i)+(iii): arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it
     # as a background task. engine_ready (below) must not wait on the news chain — a wedged chain now
     # costs the digest, not the whole scheduled day (2026-08-10). Its own 600 s resolve cap bounds it.
-    post_arm_task = start_scheduler_and_fire_post_arm(scheduler, catch_up)
+    post_arm_task = start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar)
     if telegram is not None and report.needs_login and not login_prompt_sent:
         await notify(login_prompt(session.login_url()))
 
@@ -1601,8 +1621,29 @@ async def run() -> int:
 
 
 # --------------------------------------------------------------------------- boot tail (WO-15)
+def post_arm_exclusions(clock: Clock, calendar: NSECalendar) -> tuple[str, ...]:
+    """Post-arm one-shots this boot must NOT fire, given WHEN the boot happened (WO-21 (ii)).
+
+    Only ``tick_compact`` is ever vetoed, and only for a boot landing inside a live trading session
+    (:data:`_IN_SESSION_START_IST`..:data:`_IN_SESSION_END_IST` on an NSE trading day). Every other
+    post-arm job is unchanged: the news chain / digest / planner are pre-open work that a
+    mid-session recovery boot still wants done, whereas compaction competes with the tick writer for
+    exactly the resources the session needs (2026-08-20 11:26 IST — see the constants above).
+
+    Non-trading day (weekend / holiday) inside the same clock window ⇒ no veto: there is no session
+    to protect, and a Saturday recovery boot is precisely when the backlog SHOULD be collapsed.
+    """
+    now = clock.now()
+    if not calendar.is_trading_day(now.date()):
+        return ()
+    if not (_IN_SESSION_START_IST <= now.time() <= _IN_SESSION_END_IST):
+        return ()
+    _log.info("post_arm_skipped_in_session", job_id=JOB_TICK_COMPACT, now=now.isoformat())
+    return (JOB_TICK_COMPACT,)
+
+
 def start_scheduler_and_fire_post_arm(
-    scheduler: Scheduler, catch_up: CatchUpRunner
+    scheduler: Scheduler, catch_up: CatchUpRunner, clock: Clock, calendar: NSECalendar
 ) -> asyncio.Task | None:
     """Arm the scheduler, THEN fire the deferred one-shots behind it — never the other way round.
 
@@ -1617,15 +1658,22 @@ def start_scheduler_and_fire_post_arm(
     caller logs ``engine_ready`` immediately after, and that is the invariant WO-15 (iii) demands.
     Returns the task (``None`` when the rollback flag is off / nothing is deferred) so shutdown can
     cancel it; a crash inside is logged, never raised into the boot path.
+
+    WO-21 (ii): :func:`post_arm_exclusions` decides, from the boot's own wall clock, which one-shots
+    this boot must skip — today only the in-session ``tick_compact``.
     """
     scheduler.start()
     if not (DEFER_POST_ARM_JOBS and POST_ARM_JOB_IDS):
         return None
+    exclude = post_arm_exclusions(clock, calendar)
+    fired = [j for j in POST_ARM_JOB_IDS if j not in exclude]
 
     async def _fire() -> None:
         try:
-            result: CatchUpResult = await catch_up.catch_up(scope=CatchUpScope.DEFERRED)
-            _log.info("post_arm_jobs_complete", jobs=list(POST_ARM_JOB_IDS),
+            result: CatchUpResult = await catch_up.catch_up(
+                scope=CatchUpScope.DEFERRED, exclude=exclude
+            )
+            _log.info("post_arm_jobs_complete", jobs=fired,
                       caught_up=result.jobs_caught_up, failed=result.jobs_failed,
                       skipped_in_flight=result.skipped_in_flight)
         except asyncio.CancelledError:
@@ -1633,7 +1681,7 @@ def start_scheduler_and_fire_post_arm(
         except Exception:  # noqa: BLE001 - these jobs are never entry-blocking (§2.6/§2.7)
             _log.exception("post_arm_jobs_failed")
 
-    _log.info("post_arm_jobs_fired", jobs=list(POST_ARM_JOB_IDS))
+    _log.info("post_arm_jobs_fired", jobs=fired, skipped=list(exclude))
     return asyncio.create_task(_fire(), name="post_arm_catchup")
 
 
@@ -1666,6 +1714,20 @@ def _arm_registry_jobs(
             )
         else:
             scheduler.add_trading_day_job(fire, hour=spec.at.hour, minute=spec.at.minute, job_id=spec.job_id)
+
+
+def _arm_token_check(scheduler: Scheduler, job: TokenCheckJob) -> None:
+    """Arm the WO-21 (iii) pre-open token probe — one calendar-guarded daily fire at 08:40 IST.
+
+    Deliberately NOT routed through ``_scheduled_runner``: that wrapper records a ``job_runs``
+    watermark, and a watermark is what makes a job catch-up-eligible. A pre-open check replayed
+    hours later is meaningless, so this job stays outside the registry entirely (see
+    :mod:`engine.ops.token_check`). ``TokenCheckJob.run`` never raises, so no failure wrapper is
+    needed here either.
+    """
+    scheduler.add_trading_day_job(
+        job.run, hour=TOKEN_CHECK_IST.hour, minute=TOKEN_CHECK_IST.minute, job_id="token_check",
+    )
 
 
 def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
