@@ -935,7 +935,9 @@ class CatalystDigestJob:
 
     (i) ``sentiment_agg`` — ``clip(Σᵢ sentimentᵢ·materialityᵢ·wᵢ·0.5^(age_hᵢ/half-life), −1, +1)`` per
     ``(scope, scope_key)`` over scored clusters with ``age_h ≤ 6×`` half-life, age measured from
-    cluster ``first_seen`` to the run time. A decayed SUM, never a mean.
+    cluster ``first_seen`` to the run time. A decayed SUM, never a mean. Each row also carries the
+    UNCLIPPED ``raw_sum`` and the contributing ``n_clusters`` (WO-21) — the clip is lossy exactly
+    where it matters, so what it discarded is stored beside it rather than inferred downstream.
 
     (ii) ``catalyst_watchlist`` — every scored cluster whose TRADING-SESSION event age ≤
     ``cat.max_event_age_days``, best cluster per symbol, graded by :func:`originating_conditions`
@@ -1114,6 +1116,10 @@ class CatalystDigestJob:
         halflife = float(self._params["decay_halflife_h"])
         fanout = float(self._params["fanout_weight"])
         totals: dict[tuple[str, str], float] = defaultdict(float)
+        # Contributing clusters per (scope, key), counted in lockstep with ``totals`` — with the
+        # unclipped sum this makes SATURATION a measured quantity instead of a guess at the rail
+        # (WO-21): "−1.000" alone cannot distinguish two mild headlines from nine severe ones.
+        counts: dict[tuple[str, str], int] = defaultdict(int)
         for c in clusters:
             # Clamp a future first_seen (clock skew / bad feed timestamp) to age 0: decay may fade a
             # contribution, never AMPLIFY it beyond its unaged weight.
@@ -1124,16 +1130,26 @@ class CatalystDigestJob:
             w = fanout if c.scope in ("sector", "theme") else 1.0
             for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
                 totals[("symbol", symbol)] += base * w
+                counts[("symbol", symbol)] += 1
             for sector in c.sectors or []:
                 totals[("sector", sector)] += base
+                counts[("sector", sector)] += 1
             for theme in c.themes or []:
                 totals[("theme", theme)] += base
+                counts[("theme", theme)] += 1
             if c.scope == "market":
                 totals[("market", "market")] += base
+                counts[("market", "market")] += 1
         totals.setdefault(("market", "market"), 0.0)   # digest-ran marker (see class docstring)
+        counts.setdefault(("market", "market"), 0)     # …and the marker contributes no cluster
         return [
-            {"scope": scope, "scope_key": key, "as_of": ran_at, "value": _clip(value)}
-            for (scope, key), value in sorted(totals.items())
+            {
+                "scope": scope, "scope_key": key, "as_of": ran_at,
+                "value": _clip(total),                 # the §2.7 formula's clipped value, unchanged
+                "raw_sum": total,                      # …and what it was clipped FROM
+                "n_clusters": counts[(scope, key)],
+            }
+            for (scope, key), total in sorted(totals.items())
         ]
 
     def _symbol_targets(

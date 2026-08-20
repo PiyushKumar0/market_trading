@@ -142,7 +142,8 @@ def notify(sent):
     return _notify
 
 
-def make_job(conn, gov, clock, calendar, agent_defs, harness, notify=None, store=None) -> NightlyReviewJob:
+def make_job(conn, gov, clock, calendar, agent_defs, harness, notify=None, store=None,
+             funnel_raw=None) -> NightlyReviewJob:
     return NightlyReviewJob(
         store if store is not None else FakeProtectedStore(),
         conn,
@@ -153,6 +154,7 @@ def make_job(conn, gov, clock, calendar, agent_defs, harness, notify=None, store
         clock,
         calendar,
         notify=notify,
+        funnel_raw=funnel_raw,
     )
 
 
@@ -580,6 +582,55 @@ def test_funnel_log_fields_are_flat_scalars(conn) -> None:
     assert fields["best_unforwarded_score"] == 0.85
     assert fields["published_by_strategy"] == {"orb": 3, "rsi2": 2}
     assert json.dumps(fields)                        # no Decimal/date/Row leaks into the log line
+
+
+# ------------------------------------ 2026-08-21: the raw row is read from the table, not from RAM
+def seed_raw_counts(conn, d: date = D, **fires: int) -> None:
+    for strategy_id, n in fires.items():
+        conn.execute(
+            "INSERT INTO funnel_raw_counts (d, strategy_id, fires) VALUES (?, ?, ?)",
+            (d.isoformat(), strategy_id, n),
+        )
+
+
+def test_funnel_raw_prefers_the_persisted_rows_over_a_restarted_counter(conn) -> None:
+    """THE BUG (4 of the last 6 trade days): the pre-screen's raw counters are process memory, so a
+    mid-day restart zeroed them and the 22:35 line reported ``raw=None`` — or, worse, the handful of
+    fires that happened after the bounce. The table holds the day's total across every process that
+    ran it, so it WINS; ``raw_by_strategy`` here is the post-restart remnant it has to beat."""
+    seed_funnel(conn)
+    seed_raw_counts(conn, orb=40, rsi2=6)
+    summary = build_funnel_summary(conn, D, raw_by_strategy={"orb": 2})
+
+    assert summary.raw == 46                                       # 40 + 6, never the in-RAM 2
+    assert {s.strategy_id: s.raw for s in summary.by_strategy} == {"orb": 40, "rsi2": 6}
+
+
+def test_funnel_raw_falls_back_to_the_in_process_counter_for_an_unflushed_day(conn) -> None:
+    """A day with no persisted rows (pre-2026-08-21, or counters that never flushed) still renders
+    the live number rather than dropping to "unmeasured" — the table is a preference, not a gate."""
+    seed_funnel(conn)
+    assert build_funnel_summary(conn, D, raw_by_strategy={"orb": 40, "rsi2": 6}).raw == 46
+    assert build_funnel_summary(conn, D).raw is None               # neither source ⇒ unmeasured
+
+
+@pytest.mark.asyncio
+async def test_the_eod_funnel_line_reads_the_table_after_a_mid_day_restart(
+    conn, gov, clock, calendar
+) -> None:
+    """End to end at the job seam: the 22:35 review is correct after any number of restarts because
+    ``_log_funnel`` goes through the same table-first read."""
+    seed_funnel(conn)
+    seed_raw_counts(conn, orb=40, rsi2=6)
+    job = make_job(conn, gov, clock, calendar, {}, FakeHarness(raw=json.dumps(REVIEW)),
+                   funnel_raw=lambda d: {"orb": 2})    # the counter as a 14:00 restart left it
+    captured: list[Any] = []
+    real = job._log_funnel
+    job._log_funnel = lambda d: captured.append(real(d))
+
+    assert await job.run(D) is AdvisoryOutcome.FAILED   # no agent def -> earliest possible return
+    assert captured and captured[0].raw == 46
+    assert "raw 46 -> published 5" in "\n".join(captured[0].lines())
 
 
 @pytest.mark.asyncio

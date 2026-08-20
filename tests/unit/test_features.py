@@ -398,9 +398,117 @@ def test_intraday_snapshot_no_bars_is_warmup_not_error(engine, store):
     f = vec.features
     assert set(f) == set(INTRADAY_FEATURE_KEYS)                   # full key set even when thin
     assert f["bar_count"] == 0 and f["or_high"] is None and f["rel_volume"] is None
+    assert f["rel_volume_tod"] is None                            # no numerator => no pace ratio
     assert f["vwap"] is None and f["atr14_1m"] is None
     assert f["or_complete"] is True                               # 10:05 is past the 09:45 OR end
     assert load_snapshot(store, vec.features_snapshot_id) is not None
+
+
+# ------------------------------------------- WO-21: time-of-day-normalized relative volume (§6.2)
+#: Stamped on the 10:05 bar of every seeded historical session. 10:05 is exactly the cutoff and the
+#: cutoff is EXCLUSIVE, so this volume must never reach a denominator — if it does, every ratio
+#: collapses by ~6 orders of magnitude and the assertions below say so loudly.
+_CUTOFF_SENTINEL_VOLUME = 10 ** 9
+
+
+def _hist_sessions(daily_bars: list[DailyBar]) -> list[date]:
+    """The same 20 completed sessions ``rel_volume``'s denominator is built from (strictly < D)."""
+    return [b.d for b in daily_bars if b.d < D][-20:]
+
+
+def _seed_hist_intraday(store, clock, symbol: str, vol_by_day: dict[date, int]) -> None:
+    """51 flat 1m bars from 09:15 on each given session: 50 carrying that day's per-bar volume
+    (09:15..10:04 — the window "now" = 10:05 closes) plus the sentinel bar stamped exactly 10:05.
+    So each session's cumulative volume through the cutoff is exactly ``50 * vol``."""
+    bars = []
+    for dd, vol in vol_by_day.items():
+        open_915 = clock.combine(dd, time(9, 15))
+        price = Decimal("100.00")
+        bars.extend(
+            Bar(
+                symbol=symbol, ts_minute=open_915 + timedelta(minutes=i),
+                open=price, high=price, low=price, close=price,
+                volume=vol if i < 50 else _CUTOFF_SENTINEL_VOLUME,
+            )
+            for i in range(51)
+        )
+    store.insert_bars_1m(bars)
+
+
+def test_rel_volume_tod_is_the_median_pace_at_the_same_elapsed_minute(engine, store, clock, seeded):
+    """WO-21: today's cumulative volume ÷ the MEDIAN cumulative volume of the same 20 sessions
+    through the SAME 50 elapsed minutes. 1.0 = a typical pace for this time of day — the number a
+    reader means by "relative volume", which ``rel_volume``'s full-day denominator never was."""
+    _seed_intraday(store, clock, "AAA")                           # today: 50 bars x 1000 = 50_000
+    days = _hist_sessions(seeded["AAA"])
+    per_bar = {dd: 100 * (i + 1) for i, dd in enumerate(days)}     # 100..2000 per bar, per session
+    _seed_hist_intraday(store, clock, "AAA", per_bar)
+
+    f = engine.intraday_snapshot("AAA").features
+    cums = [50 * v for v in per_bar.values()]                     # 5_000..100_000; sentinel excluded
+    assert len(cums) == 20 and statistics.median(cums) == 52_500
+    assert f["rel_volume_tod"] == pytest.approx(50_000 / 52_500)
+    assert f["rel_volume_tod"] == pytest.approx(50_000 / statistics.median(cums))
+    # The legacy key is untouched beside it: same numerator, 20d median FULL-DAY denominator.
+    daily_vols = [b.volume for b in seeded["AAA"] if b.d < D][-20:]
+    assert f["rel_volume"] == pytest.approx(50_000 / statistics.median(daily_vols))
+    assert f["rel_volume"] != pytest.approx(f["rel_volume_tod"])   # different denominators, by design
+
+
+def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, seeded):
+    """Fewer than 10 usable sessions ⇒ None, never a guess: a "median pace" over a handful of
+    sessions is noise. Only the intraday tick watchlist carries 1m history, so a thin symbol is
+    ordinary — and ``rel_volume``, which needs only daily bars, must keep computing."""
+    _seed_intraday(store, clock, "AAA")
+    days = _hist_sessions(seeded["AAA"])
+    _seed_hist_intraday(store, clock, "AAA", {dd: 500 for dd in days[-9:]})
+
+    f9 = engine.intraday_snapshot("AAA").features
+    assert f9["rel_volume_tod"] is None
+    assert f9["rel_volume"] is not None                           # independent denominators
+
+    _seed_hist_intraday(store, clock, "AAA", {days[-10]: 500})     # the tenth session flips it on
+    f10 = engine.intraday_snapshot("AAA").features
+    assert f10["rel_volume_tod"] == pytest.approx(50_000 / (50 * 500))
+    assert f10["rel_volume"] == pytest.approx(f9["rel_volume"])    # nothing else moved
+
+
+def test_rel_volume_tod_excludes_zero_volume_sessions(engine, store, clock, seeded):
+    """A session with bars but no traded volume (halt, suspension, a gap-filled shell) is not a
+    zero-pace day to average in — it is absent evidence and leaves the median entirely."""
+    _seed_intraday(store, clock, "AAA")
+    a_days = _hist_sessions(seeded["AAA"])
+    _seed_hist_intraday(store, clock, "AAA", {
+        dd: (0 if i < 6 else 200) for i, dd in enumerate(a_days)   # 6 dead, 14 alive
+    })
+    assert engine.intraday_snapshot("AAA").features["rel_volume_tod"] == pytest.approx(
+        50_000 / (50 * 200)                                       # median of the 14 alive sessions
+    )
+
+    _seed_intraday(store, clock, "BBB")                           # 11 dead, 9 alive => under the floor
+    b_days = _hist_sessions(seeded["BBB"])
+    _seed_hist_intraday(store, clock, "BBB", {
+        dd: (0 if i < 11 else 300) for i, dd in enumerate(b_days)
+    })
+    assert engine.intraday_snapshot("BBB").features["rel_volume_tod"] is None
+
+
+def test_rel_volume_tod_skips_the_ranged_read_without_todays_bars(
+    engine, store, clock, seeded, monkeypatch
+):
+    """No tape today ⇒ no numerator ⇒ None, and the ranged 1m history read never happens: the new
+    feature rides the gate that already guards ``rel_volume`` (only today's own bars are read)."""
+    _seed_hist_intraday(store, clock, "AAA", {dd: 400 for dd in _hist_sessions(seeded["AAA"])})
+    reads: list[tuple] = []
+    original = store.get_bars_1m
+    monkeypatch.setattr(
+        store, "get_bars_1m", lambda *a, **kw: (reads.append(a), original(*a, **kw))[1]
+    )
+
+    f = engine.intraday_snapshot("AAA").features                  # today's bars never seeded
+    assert f["bar_count"] == 0
+    assert f["rel_volume_tod"] is None and f["rel_volume"] is None
+    assert len(reads) == 1                                        # today's bars only, no history sweep
 
 
 def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):

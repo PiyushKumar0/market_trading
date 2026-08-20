@@ -611,6 +611,9 @@ def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(as
 #: immediately after the candidate line. Nothing else about the intraday rendering moved: the
 #: rel_volume legend needs a ``rel_volume`` key this fixture does not carry, and the saturation label
 #: needs a railed sentiment value this fixture does not carry either.
+#:
+#: WO-21 (2026-08-21) left it byte-identical for the same reason — the legend now names
+#: ``rel_volume_tod`` too, but this fixture's features carry neither key, so it renders nothing.
 INTRADAY_VOLATILE_PIN = """== MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-1","raw_levels":{"entry":"1400.00","stop":"1390.00","target":null},"score":0.7,"side":"BUY","signal_id":"sig-1","strategy_id":"orb","style":"intraday","symbol":"RELIANCE"}
 strategy contract (orb):
@@ -760,24 +763,69 @@ def test_an_unregistered_strategy_renders_the_unknown_frame_and_warns(assembler,
 def test_a_railed_sentiment_value_is_labelled_saturated(assembler):
     """``sentiment_agg`` is a CLIPPED SUM: a handful of same-direction headlines reaches ±1.0. The
     analyst read the rail as "the floor of the scale" in 46 of 63 declines, so the semantics are
-    stated where the number is."""
-    line = assembler._sentiment_line("symbol RELIANCE", -1.0)
+    stated where the number is. A row with NO WO-21 measures keeps this prose verbatim."""
+    line = assembler._sentiment_line("symbol RELIANCE", {"value": -1.0})
 
     assert "SATURATED" in line
     assert "net negative" in line
     assert "clipped decay-weighted SUM" in line
     assert line.startswith("  sentiment symbol RELIANCE: -1.000 (SATURATED:")
 
-    positive = assembler._sentiment_line("market", 1.0)
+    positive = assembler._sentiment_line("market", {"value": 1.0})
     assert "net positive" in positive
 
 
 def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
     """The label is for the RAIL only: a normal reading must not grow an explanation it does not
-    need (D8 — every extra byte here is on the volatile path of every call)."""
-    assert assembler._sentiment_line("market", 0.5) == "  sentiment market: +0.500"
-    assert assembler._sentiment_line("market", -0.998) == "  sentiment market: -0.998"
+    need (D8 — every extra byte here is on the volatile path of every call). Measures present or
+    absent makes no difference off the rail."""
+    assert assembler._sentiment_line("market", {"value": 0.5}) == "  sentiment market: +0.500"
+    assert assembler._sentiment_line("market", {"value": -0.998}) == "  sentiment market: -0.998"
     assert assembler._sentiment_line("market", None) == "  sentiment market: unavailable"
+    measured = {"value": 0.5, "raw_sum": 0.5, "n_clusters": 3}
+    assert assembler._sentiment_line("market", measured) == "  sentiment market: +0.500"
+
+
+# ------------------------------------------------------- WO-21 (2026-08-21): the measured rail
+def test_a_railed_sentiment_value_reports_its_measured_saturation(assembler):
+    """With the digest's own ``raw_sum``/``n_clusters``, the rail stops being an annotation and
+    becomes a reading: how far past the clip the flow ran, and over how many clusters."""
+    line = assembler._sentiment_line(
+        "market", {"value": -1.0, "raw_sum": -2.3149, "n_clusters": 9}
+    )
+
+    assert line == (
+        "  sentiment market: -1.000 (clipped SUM saturated: raw -2.31 across 9 clusters "
+        "— read as net negative headline flow, not extremity)"
+    )
+    assert "SATURATED:" not in line          # the measurement REPLACES the WO-20 prose
+
+    positive = assembler._sentiment_line(
+        "symbol RELIANCE", {"value": 1.0, "raw_sum": 1.0004, "n_clusters": 1}
+    )
+    assert "raw +1.00 across 1 cluster —" in positive      # singular, and the sign is explicit
+    assert "net positive" in positive
+
+
+def test_a_half_measured_rail_falls_back_to_the_wo20_prose(assembler):
+    """Either measure missing ⇒ no measurement: an unmeasured rail must never borrow the credibility
+    of a measured one by printing half of it."""
+    for partial in ({"value": -1.0, "raw_sum": -2.31}, {"value": -1.0, "n_clusters": 9}):
+        line = assembler._sentiment_line("market", partial)
+        assert "SATURATED:" in line and "raw " not in line
+
+
+def test_the_catalyst_block_renders_the_measured_rail_end_to_end(assembler, store):
+    """The seam this WO threads: ``_catalyst_text`` must pass the FULL store row through, not the
+    bare value — otherwise the measures never reach the render."""
+    as_of = datetime(2026, 6, 17, 8, 35, tzinfo=IST)
+    store.upsert_sentiment_agg([
+        {"scope": "market", "scope_key": "market", "as_of": as_of, "value": -1.0,
+         "raw_sum": -2.31, "n_clusters": 9},
+    ])
+    text = assembler._catalyst_text(SYMBOL, TODAY)
+
+    assert "  sentiment market: -1.000 (clipped SUM saturated: raw -2.31 across 9 clusters" in text
 
 
 # --------------------------------------------------------- WO-20c (E1): the rel_volume denominator
@@ -796,8 +844,47 @@ def test_rel_volume_carries_its_full_day_denominator(assembler, store):
     assert "  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume" in v
 
 
+# ------------------------------------------------- WO-21: the corrected number ships beside it
+def test_both_relative_volume_keys_are_explained(assembler, store):
+    """``rel_volume_tod`` is the pace number (1.0 = typical for this time of day) and ``rel_volume``
+    is the legacy full-day ratio. Two ratios named alike on one page ⇒ the legend names BOTH
+    denominators, and points at the one to read."""
+    store.insert_feature_snapshot(
+        "fs-rvt", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
+        '{"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12}',
+    )
+    cand = CANDIDATE.model_copy(update={"features_snapshot_id": "fs-rvt"})
+    v = assembler.for_signal(cand, **SIGNAL_KW).volatile_block
+
+    assert (
+        "  note: rel_volume_tod = cumulative session volume / the 20d MEDIAN cumulative volume "
+        "at the SAME elapsed time" in v
+    )
+    assert "1.0 = a typical participation pace" in v and "read this one" in v
+    assert "  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume" in v
+    assert "NOT time-of-day adjusted" in v
+
+
+def test_the_legend_renders_when_only_the_tod_key_carries_a_number(assembler, store):
+    """Either key alone earns the legend: a lone ``rel_volume_tod`` still needs its denominator
+    named, and a null one beside it is itself information (too little 1m history to judge pace)."""
+    store.insert_feature_snapshot(
+        "fs-tod-only", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
+        '{"atr14":12.5,"rel_volume":null,"rel_volume_tod":0.87}',
+    )
+    cand = CANDIDATE.model_copy(update={"features_snapshot_id": "fs-tod-only"})
+    v = assembler.for_signal(cand, **SIGNAL_KW).volatile_block
+
+    assert "note: rel_volume_tod = " in v and "note: rel_volume = " in v
+
+
 @pytest.mark.parametrize(
-    "features_json", ['{"atr14":12.5,"rvol":1.8}', '{"atr14":12.5,"rel_volume":null}']
+    "features_json",
+    [
+        '{"atr14":12.5,"rvol":1.8}',
+        '{"atr14":12.5,"rel_volume":null}',
+        '{"atr14":12.5,"rel_volume":null,"rel_volume_tod":null}',
+    ],
 )
 def test_no_rel_volume_legend_when_the_feature_is_absent_or_null(assembler, store, features_json):
     """The legend annotates a number that is THERE. Absent or null ⇒ not a byte spent."""

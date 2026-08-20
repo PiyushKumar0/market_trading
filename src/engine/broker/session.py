@@ -84,6 +84,13 @@ class SessionManager:
         # Behavioural validity state (NOT a hard clock — see module docstring).
         self._access_token: str | None = secrets.get_optional(KITE_ACCESS_TOKEN)
         self._rejected: bool = False
+        #: Dedup flag for the MID-DAY circuit breaker ONLY — set by :meth:`on_token_rejected` when it
+        #: actually fires ``_on_invalidated``, cleared by :meth:`complete_login`. Split out of
+        #: ``_rejected`` after the 2026-08-20 suppression incident: the boot probe also sets
+        #: ``_rejected`` (deliberately silently), which used to make the first GENUINE live rejection
+        #: of the day look like a duplicate and swallow the owner's only alert. ``_rejected`` keeps
+        #: its behavioural-validity meaning for every other consumer (:meth:`token_valid`).
+        self._breaker_fired: bool = False
         self._last_success: datetime | None = None
 
         # Optional async hook fired on mid-day invalidation; wired by the caller (R6).
@@ -123,7 +130,8 @@ class SessionManager:
         Runs ``kc.generate_session(request_token, api_secret=...)`` in a thread executor (the
         underlying call is blocking ``requests`` I/O). On success: extracts ``access_token``, stores
         it via ``secrets.set(KITE_ACCESS_TOKEN, token)`` (DPAPI, R10), arms it on the KiteConnect
-        instance, clears ``_rejected``, and stamps ``_last_success`` from the Clock.
+        instance, clears ``_rejected`` AND the circuit breaker's ``_breaker_fired`` dedup (so a token
+        that dies again later in the day re-alerts the owner), and stamps ``_last_success``.
         """
         api_secret = self._secrets.get(KITE_API_SECRET)
         kc = self._connect()
@@ -140,6 +148,7 @@ class SessionManager:
 
         self._access_token = token
         self._rejected = False
+        self._breaker_fired = False   # a fresh token re-arms the mid-day breaker's one-shot alert
         self._last_success = self._clock.now()
         _log.info("session_live", at=self._last_success.isoformat())
         # §2.6 RE-TRIGGER: a token just became valid — fire the post-login recovery hooks. Both login
@@ -190,7 +199,10 @@ class SessionManager:
         * ``"rejected"`` — the broker returned :class:`TokenException`: sets ``_rejected`` so
           :meth:`token_valid` is now False. Deliberately does NOT fire the ``_on_invalidated`` hook
           — at boot the self-test's needs_login / login-prompt path owns owner comms; that hook is
-          for MID-DAY invalidation (freeze + alert) only.
+          for MID-DAY invalidation (freeze + alert) only. It also no longer SUPPRESSES that hook:
+          the breaker dedups on its own ``_breaker_fired`` flag, which this probe never touches
+          (2026-08-20 incident — a boot-probe rejection silently swallowed the 11:26:40 live
+          rejection's critical "entries FROZEN" alert, leaving the owner with zero notification).
         * ``"inconclusive"`` — any other error (network/DNS/5xx): cannot verify is NOT the same as
           invalid, so ALL state is left untouched and the Fix-3 circuit breaker catches a truly dead
           token on the first real call.
@@ -239,11 +251,23 @@ class SessionManager:
         Marks the token invalid and fires the invalidation hook (which publishes a risk/feed event);
         the caller freezes entries and alerts the owner. Idempotent — repeated 403s in a burst only
         fire the hook the first time so we don't spam the owner.
+
+        The dedup is ``_breaker_fired`` — this method's OWN flag — not ``_rejected`` (WO-23). Until
+        2026-08-20 it gated on ``_rejected``, which :meth:`verify_token`'s boot probe also sets
+        (deliberately silently): a boot on a dead token therefore made the day's FIRST genuine live
+        rejection look like a burst duplicate. That is exactly what happened at 11:26:40 on
+        2026-08-20 — the live TokenException produced ZERO owner notifications because the breaker's
+        critical "entries FROZEN" alert + login prompt were deduped against a boot probe hours
+        earlier. A boot-probe rejection now costs at most ONE redundant alert (the same deliberate
+        redundancy posture as the 08:40 token_check job); silence costs a frozen, unexplained day.
         """
-        already = self._rejected
+        already = self._breaker_fired
         self._rejected = True
         _log.warning("token_rejected", at=self._clock.now().isoformat(), first=not already)
         if not already and self._on_invalidated is not None:
+            # Set BEFORE awaiting: a burst's second rejection can arrive while the hook is still
+            # in flight, and it must not fire a second alert.
+            self._breaker_fired = True
             await self._on_invalidated()
 
     def access_token(self) -> str | None:

@@ -37,6 +37,7 @@ from engine.core.types import Bar, TradeWindow
 from engine.intelligence.context import AssembledContext
 from engine.intelligence.harness import AgentDef, AgentResult
 from engine.notify.catalog import MessageKind
+from engine.ops.nightly_review import read_funnel_raw_counts
 from engine.ops.pipeline import (
     ATR_PERIOD,
     FORWARD_PACING_MIN,
@@ -50,6 +51,7 @@ from engine.risk.gate import GateContext, RiskGate
 from engine.risk.limits import LimitTable
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import wilder_atr
+from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.types import RawLevels, SignalCandidate
 
 REPO = Path(__file__).resolve().parents[2]
@@ -347,8 +349,8 @@ async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandid
 
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
-    mode=None, kill=None, notify=None, assembler=None, rearm=None, admission_mode="ranked",
-    forward_drain_mode="paced",
+    mode=None, kill=None, notify=None, assembler=None, rearm=None, funnel_raw=None,
+    admission_mode="ranked", forward_drain_mode="paced",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
         "assembler": assembler or FakeAssembler(),
@@ -366,7 +368,8 @@ def make_pipeline(
         parts["assembler"], harness, agent_defs(), gate, parts["ctx_builder"], book,
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
-        admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
+        funnel_raw=funnel_raw, admission_mode=admission_mode,
+        forward_drain_mode=forward_drain_mode,
     )
     return pipeline, parts
 
@@ -1862,3 +1865,99 @@ async def test_hot_path_stats_count_reads_avoided_against_reads_performed(
     assert (stats["sector_store_reads"], stats["sector_cache_hits"]) == (1, 0)
     assert stats["store_reads_avoided"] == 3 and stats["store_reads_performed"] == 2
     assert stats["atr_store_read_ms"] >= 0.0 and stats["atr_incremental_ms"] >= 0.0
+
+
+# ================================ 2026-08-21: the WO-9 RAW counters survive a restart (funnel_raw_counts)
+#
+# THE BUG. `raw` — what the scanners PRODUCED, before dedupe and the caps — was the one funnel number
+# with no DB home, so every engine restart zeroed it and the 22:35 `funnel_utilization` line reported
+# `raw=None` ("unmeasured") for the whole day. That happened on 4 of the last 6 trade days. The 60 s
+# drain tick now flushes the counters; the pre-screen loads them back on its first day roll.
+
+def funnel_rows(conn, d: date = TODAY) -> dict[str, int]:
+    rows = conn.execute(
+        "SELECT strategy_id, fires FROM funnel_raw_counts WHERE d = ? ORDER BY strategy_id",
+        (d.isoformat(),),
+    ).fetchall()
+    return {r["strategy_id"]: r["fires"] for r in rows}
+
+
+def restartable_prescreen(conn) -> SignalPreScreen:
+    """A pre-screen wired to the DB exactly as the composition root wires it — no scanners needed,
+    since `admit` (the brk20/cat batch leg) runs the same raw-counting spine as the bar path."""
+    return SignalPreScreen([], lambda bar: None,
+                           raw_counts_loader=lambda d: read_funnel_raw_counts(conn, d))
+
+
+async def test_the_drain_tick_flushes_the_raw_funnel_counters(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """One flush per tick, ABSOLUTE values, and only when the counts CHANGED — the counters move at
+    most once per bar, so an unchanged afternoon must cost a dict comparison and no write at all."""
+    counts: dict[str, int] = {"orb": 3}
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), funnel_raw=lambda d: dict(counts),
+    )
+    await pipeline.drain_forward_queue()
+    assert funnel_rows(conn) == {"orb": 3}
+
+    counts.update({"orb": 9, "rsi2": 2})                 # a morning's worth of further fires
+    await pipeline.drain_forward_queue()
+    assert funnel_rows(conn) == {"orb": 9, "rsi2": 2}    # absolute, not 3+9
+
+    # Unchanged counters => the tick writes NOTHING. Proven by moving the row out from under it:
+    # a write would put the flushed value back.
+    conn.execute("UPDATE funnel_raw_counts SET fires = 999 WHERE strategy_id = 'orb'")
+    await pipeline.drain_forward_queue()
+    assert funnel_rows(conn) == {"orb": 999, "rsi2": 2}
+
+
+async def test_a_restart_continues_the_raw_count_instead_of_resetting_it(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """THE REGRESSION, in the shape it actually happened: new pre-screen + new pipeline over the same
+    DB (a mid-session restart) must CONTINUE the day's count, not start it over."""
+    day = pclock.today()
+    ps1 = restartable_prescreen(conn)
+    p1, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), funnel_raw=ps1.raw_counts,
+    )
+    ps1.admit([candidate(symbol="TCS", signal_id="A", score=0.9, catalyst_ref=None),
+               candidate(symbol="INFY", signal_id="B", score=0.8, catalyst_ref=None)], day)
+    await p1.drain_forward_queue()
+    assert ps1.raw_counts(day) == {"orb": 2}
+    assert funnel_rows(conn) == {"orb": 2}
+
+    ps2 = restartable_prescreen(conn)                    # --- restart: nothing in memory survives ---
+    p2, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), funnel_raw=ps2.raw_counts,
+    )
+    ps2.admit([candidate(symbol="SBIN", signal_id="C", score=0.7, catalyst_ref=None)], day)
+    assert ps2.raw_counts(day) == {"orb": 3}             # 2 hydrated + 1 new, NOT 1
+    await p2.drain_forward_queue()
+    assert funnel_rows(conn) == {"orb": 3}
+
+
+async def test_a_failed_raw_funnel_flush_warns_and_never_reaches_the_drain(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D7: telemetry must not be able to break trading. A dead connection costs the raw row for this
+    tick and nothing else — and leaves the flushed-state marker untouched, so the next healthy tick
+    still writes rather than believing it already had."""
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), funnel_raw=lambda d: {"orb": 3},
+    )
+    conn.close()
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is False      # no raise, no tick lost
+
+    assert [r for r in caplog.records if r.getMessage() == "funnel_raw_flush_failed"]
+    assert pipeline._funnel_raw_flushed == {} and pipeline._funnel_raw_day is None

@@ -528,6 +528,64 @@ def test_funnel_counters_track_raw_published_and_suppressed():
     assert ps.raw_counts(_date(2026, 6, 18)) == {}        # another day's counters are not this day's
 
 
+# ================================= raw counters survive a restart (2026-08-21, `funnel_raw_counts`)
+#
+# THE BUG this section pins. `raw` was the only WO-9 funnel number with no DB home, so a mid-session
+# restart zeroed it and the 22:35 `funnel_utilization` line reported `raw=None` ("unmeasured") for
+# the WHOLE day — on 4 of the last 6 trade days. That is WO-9's own "the analyst never saw it" vs
+# "nothing fired" ambiguity, re-introduced by the restart. The counters are now seeded on every day
+# roll (the first roll of a fresh process included) from what the drain tick flushed.
+
+def test_raw_counters_continue_from_the_loader_instead_of_restarting_at_zero():
+    """A fresh process rolls onto today, hydrates the day's persisted total, and counts ON from it."""
+    from datetime import date as _date
+    day = _date(2026, 6, 17)
+    ps = _prescreen([_stub("orb")], raw_counts_loader=lambda d: {"orb": 40} if d == day else {})
+    assert ps.raw_counts(day) == {}                       # nothing rolled yet — no day, no counters
+    ps.on_bar(_bar(symbol="TCS"))                         # first roll hydrates, THEN counts this bar
+    assert ps.raw_counts(day) == {"orb": 41}
+    ps.on_bar(_bar(symbol="INFY", mm=1))
+    assert ps.raw_counts(day) == {"orb": 42}
+    # The published/suppressed counters are deliberately NOT hydrated — they describe what this
+    # process's admission spine did, and the day-slot journal is their restart-proof record.
+    assert ps.funnel_counters()["published"] == {"orb": 2}
+
+
+def test_raw_counter_hydration_is_per_day_never_carried_forward():
+    """A roll onto a genuinely NEW day loads that day's rows (none yet) and starts at zero — carrying
+    yesterday's total into today would be the same lie ``raw_counts`` already refuses to tell."""
+    from datetime import date as _date
+    ps = _prescreen([_stub("orb")],
+                    raw_counts_loader=lambda d: {"orb": 40} if d == _date(2026, 6, 17) else {})
+    ps.on_bar(_bar(day=17))
+    assert ps.raw_counts(_date(2026, 6, 17)) == {"orb": 41}
+    ps.on_bar(_bar(day=18))
+    assert ps.raw_counts(_date(2026, 6, 18)) == {"orb": 1}
+
+
+def test_a_broken_raw_counts_loader_never_costs_a_scan():
+    """D7: a telemetry read that cannot be served degrades to the pre-2026-08-21 behaviour (counting
+    from zero) — it must never propagate out of the scan path."""
+    from datetime import date as _date
+
+    def _boom(_d):
+        raise RuntimeError("database is locked")
+
+    ps = _prescreen([_stub("orb")], raw_counts_loader=_boom)
+    assert len(ps.on_bar(_bar())) == 1
+    assert ps.raw_counts(_date(2026, 6, 17)) == {"orb": 1}
+
+
+def test_hydrate_seeds_the_raw_counters_too():
+    """The boot path (``engine.ops.main._hydrate_prescreen``) rolls the day through the same seam, so
+    a restart's dedupe/cap state and its raw counters are restored in one step."""
+    from datetime import date as _date
+    day = _date(2026, 6, 17)
+    ps = _prescreen([_stub("orb")], raw_counts_loader=lambda d: {"orb": 40, "rsi2": 6})
+    ps.hydrate(day, seen=[("TCS", "orb")], charged=[("TCS", "orb")])
+    assert ps.raw_counts(day) == {"orb": 40, "rsi2": 6}
+
+
 # ================================================ trade-window gate (§7.1, 2026-08-18 origination fix)
 #
 # THE BUG this section pins. The caps bind on unique (symbol, strategy) pairs and are never refunded

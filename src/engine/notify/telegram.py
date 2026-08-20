@@ -92,6 +92,14 @@ _log = get_logger("engine.notify.telegram")
 _SEND_TIMEOUT_S = 15.0
 _START_TIMEOUT_S = 45.0
 
+#: Telegram's hard per-message cap — a send past this raises BadRequest "Message is too long" (two
+#: owner alerts died to exactly this on 2026-08-20). ``_SPLIT_CHUNK_CHARS`` is the raw-content budget
+#: per split part, kept well under the cap so the "(part i/N)" / truncation marker always fits inside
+#: it with room to spare.
+_TELEGRAM_MAX_CHARS = 4096
+_SPLIT_CHUNK_CHARS = 4000
+_SPLIT_MAX_PARTS = 5
+
 # How long a pending two-step challenge stays valid before it must be re-issued (R10). A short TTL
 # keeps a stale confirm phrase from authorising a destructive action long after the owner asked.
 _CHALLENGE_TTL = timedelta(minutes=2)
@@ -389,12 +397,30 @@ class TelegramBot:
         Accepts a ``CatalogMessage`` (rendered via its ``.render()`` / ``.text`` / ``str()``) or a raw
         string — the catalog model itself lands in Phase 2 (§8). Outbound never blocks the engine: a
         send failure is logged, not raised, so an alert path can never take down a caller (R8).
+
+        LONG-MESSAGE GUARD (2026-08-20): Telegram hard-rejects anything over
+        :data:`_TELEGRAM_MAX_CHARS` with BadRequest "Message is too long" — two owner alerts died to
+        exactly that today. Text at or under the cap ships unchanged, one send. Over the cap it is
+        split (:func:`_split_message`) into numbered parts and sent sequentially, each through
+        :meth:`_send_text` — so every part inherits the same bounded-timeout / logged-not-raised
+        handling as a normal send. An alert must degrade, never vanish silently.
         """
         app = self._app
         if app is None:
             _log.warning("telegram_send_dropped", reason="not_started")
             return
         text = self._render(msg)
+        if len(text) <= _TELEGRAM_MAX_CHARS:
+            await self._send_text(app, text)
+            return
+        parts = _split_message(text)
+        _log.info("telegram_message_split", parts=len(parts), total_chars=len(text))
+        for part in parts:
+            await self._send_text(app, part)
+
+    async def _send_text(self, app: Application, text: str) -> None:
+        """Put one already-bounded string on the wire (the choke point every outbound send/part
+        passes through). Best-effort: a hang or failure is logged, never raised (R8)."""
         try:
             # BOUNDED (2026-08-07): a hanging send wedged the boot between catch_up_complete and
             # scheduler start. Alerts are best-effort — a bounded drop beats an unbounded wait.
@@ -1108,6 +1134,47 @@ def _realized_today(exposure: Any, day: date) -> Decimal | None:
     except Exception:  # noqa: BLE001 - a display line is never worth failing the command over
         _log.exception("telegram_realized_today_failed")
         return None
+
+
+def _split_message(
+    text: str, max_chars: int = _SPLIT_CHUNK_CHARS, max_parts: int = _SPLIT_MAX_PARTS
+) -> list[str]:
+    """Split an over-cap message into ``<= max_parts`` Telegram-sized pieces (2026-08-20 guard).
+
+    Walks ``text`` by index rather than ``str.split("\\n")`` + rejoin, so every chunk is an exact
+    substring and the remaining-character count on truncation is exact, not reconstructed. Each window
+    prefers the last newline inside it (a line boundary), so a chunk never cuts a line mid-word; a
+    single line longer than ``max_chars`` falls back to a hard cut at ``max_chars``. The newline at a
+    boundary is a separator between two Telegram messages, so it is dropped, not carried into either
+    chunk.
+
+    Every returned piece carries a ``"(part i/N)"`` suffix. Beyond ``max_parts`` chunks, the remaining
+    content is dropped from the wire and accounted for on the final part as
+    ``"... [truncated K chars]"`` — an oversized alert must degrade, never vanish silently.
+    """
+    pieces: list[tuple[str, int]] = []  # (chunk text, index in `text` right after the chunk)
+    pos, n = 0, len(text)
+    while pos < n:
+        end = min(pos + max_chars, n)
+        if end < n:
+            nl = text.rfind("\n", pos, end)
+            if nl > pos:
+                pieces.append((text[pos:nl], nl + 1))  # drop the boundary newline itself
+                pos = nl + 1
+                continue
+        pieces.append((text[pos:end], end))
+        pos = end
+
+    total = len(pieces)
+    if total <= max_parts:
+        return [f"{chunk}\n(part {i}/{total})" for i, (chunk, _end) in enumerate(pieces, start=1)]
+
+    kept = pieces[:max_parts]
+    remaining = n - kept[-1][1]
+    parts = [f"{chunk}\n(part {i}/{max_parts})" for i, (chunk, _end) in enumerate(kept[:-1], start=1)]
+    last_chunk = kept[-1][0]
+    parts.append(f"{last_chunk}\n(part {max_parts}/{max_parts})\n... [truncated {remaining} chars]")
+    return parts
 
 
 def _parse_hhmm(raw: str):

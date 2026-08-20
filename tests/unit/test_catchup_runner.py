@@ -411,6 +411,115 @@ async def test_unchanged_failure_report_is_sent_once(conn, clock, calendar):
     assert runner2.was_run("deals", TUE) is True
 
 
+# ===================================================== WO-23: freeze-notify is once per (job, day)
+# IMPROVEMENT_SPEC.md:205 ("fires per attempt"): ``was_run`` keeps a failed safety-critical job
+# retryable, so a persistently failing one re-ran — and re-alerted — on EVERY 30-min sweep. The
+# FREEZE stays unconditional (idempotent state that must always hold); only the notify is one-shot.
+
+
+def _freeze_alerts(sent: list) -> list:
+    return [m for m in sent if str(m.kind) == "data_freshness_frozen"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_safety_critical_failure_freezes_every_pass_but_alerts_once(
+    conn, clock, calendar
+):
+    frozen: list[str] = []
+    sent: list = []
+
+    async def freeze(reason: str) -> None:
+        frozen.append(reason)
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15),
+                                fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg, freeze=freeze, notify=notify)
+
+    await runner.catch_up(off_since=OFF_SINCE)
+    await runner.catch_up(off_since=OFF_SINCE)          # the next 30-min sweep
+
+    # The freeze is re-asserted on every pass — entries must STAY frozen while the job is stale.
+    assert frozen == ["data_freshness:instruments"] * 2
+    # The owner hears about it once.
+    assert len(_freeze_alerts(sent)) == 1
+
+
+@pytest.mark.asyncio
+async def test_freeze_alert_dedup_is_per_job(conn, clock, calendar):
+    """Two different failing jobs are two different pieces of news — dedup is per (job, day), never
+    a global one-shot that would hide the second failure."""
+    sent: list = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15),
+                                order=10, fail_on="always"))
+    reg.register(_spec_recorder([], "surveillance", JobClass.SAFETY_CRITICAL, time(8, 20),
+                                order=20, fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg, notify=notify)
+
+    await runner.catch_up(off_since=OFF_SINCE)
+    await runner.catch_up(off_since=OFF_SINCE)
+
+    alerts = _freeze_alerts(sent)
+    assert len(alerts) == 2
+    assert sorted(m.data["job_id"] for m in alerts) == ["instruments", "surveillance"]
+
+
+@pytest.mark.asyncio
+async def test_restart_re_alerts_once(conn, clock, calendar):
+    """Per-PROCESS scope, deliberately (same posture as ``_last_failed_alert``): a fresh runner over
+    the SAME watermarks alerts once more — "still broken after a restart" is worth one message."""
+    sent: list = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    def _runner():
+        reg = JobRegistry()
+        reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15),
+                                    fail_on="always"))
+        return _build_runner(conn, clock, calendar, reg, notify=notify)
+
+    runner = _runner()
+    await runner.catch_up(off_since=OFF_SINCE)
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert len(_freeze_alerts(sent)) == 1
+
+    await _runner().catch_up(off_since=OFF_SINCE)       # restart
+    assert len(_freeze_alerts(sent)) == 2
+
+
+@pytest.mark.asyncio
+async def test_freeze_alert_retries_when_the_send_itself_failed(conn, clock, calendar):
+    """Only a DELIVERED alert suppresses the next one (mirrors the CATCHUP_REPORT rule): a notify
+    that raised must still reach the owner on the following pass."""
+    sent: list = []
+    boom = {"n": 1}
+
+    async def notify(msg) -> None:
+        if boom["n"]:
+            boom["n"] -= 1
+            raise RuntimeError("telegram down")
+        sent.append(msg)
+
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15),
+                                fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg, notify=notify)
+
+    with pytest.raises(RuntimeError):
+        await runner.catch_up(off_since=OFF_SINCE)      # first send blows up: nothing recorded
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert len(_freeze_alerts(sent)) == 1
+
+
 @pytest.mark.asyncio
 async def test_safety_critical_not_yet_due_today_is_skipped(conn, clock, calendar):
     """A safety job whose fire-time is later today is NOT force-run — the re-armed scheduler fires

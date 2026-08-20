@@ -571,6 +571,7 @@ class RecommendationPipeline:
         conn: sqlite3.Connection,
         store: Any,
         rearm: Callable[[str, str], bool] | None = None,
+        funnel_raw: Callable[[date], Mapping[str, int]] | None = None,
         admission_mode: str = "ranked",
         forward_drain_mode: str = "paced",
     ) -> None:
@@ -599,6 +600,13 @@ class RecommendationPipeline:
         #: (symbol, strategy_id) -> re-arm the prescreen's day dedupe after an analyst
         #: INFRASTRUCTURE failure (owner-directed 2026-07-29); wired to SignalPreScreen.rearm.
         self._rearm = rearm
+        #: ``day -> {strategy_id: raw fires}`` (wired to ``SignalPreScreen.raw_counts``) plus the
+        #: last set actually written to ``funnel_raw_counts`` and the day it belongs to. The
+        #: comparison is the "changed since the last flush" test that keeps the 60 s drain tick from
+        #: rewriting an unchanged row set all afternoon (2026-08-21). See :meth:`_flush_funnel_raw`.
+        self._funnel_raw = funnel_raw
+        self._funnel_raw_day: date | None = None
+        self._funnel_raw_flushed: dict[str, int] = {}
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
         self._last_position_event: dict[str, datetime] = {}
         #: §5.2(a) analyst forward cap — per-day count of candidates that reached the harness (§5.6).
@@ -865,6 +873,52 @@ class RecommendationPipeline:
         cap_fn = getattr(self._governor, "prescreen_forward_cap", None)
         return cap_fn() if cap_fn is not None else None
 
+    # ------------------------------------------------- WO-9 raw funnel counters, persisted (2026-08-21)
+    def _flush_funnel_raw(self) -> None:
+        """UPSERT today's per-strategy RAW pre-screen counts into ``funnel_raw_counts``.
+
+        THE BUG. The top of the WO-9 funnel — what the scanners PRODUCED, before dedupe and the
+        §3.2.5 caps — was the one funnel number with no DB home, so every engine restart zeroed it
+        and the 22:35 ``funnel_utilization`` line reported ``raw=None`` ("unmeasured") for the whole
+        day. That happened on 4 of the last 6 trade days, which is WO-9's own "the analyst never saw
+        it vs nothing fired" ambiguity, re-introduced by the restart.
+
+        WHY HERE. The 60 s drain tick already runs all session for exactly this class of paced,
+        non-urgent work, and it is the one live-engine cadence the pre-screen counters can be read
+        from off the scan path. At most one flush per tick, and only when the counts CHANGED since
+        the last one — the counters move at most once per bar, so an unchanged afternoon costs a
+        dict comparison and no write at all.
+
+        ABSOLUTE values, never increments. The in-memory counter is itself hydrated from these rows
+        on the pre-screen's first day roll (``SignalPreScreen._load_raw_counts_locked``), so what it
+        holds IS the day's running total across every process that ran the day — an UPSERT of it is
+        idempotent, and a duplicated or replayed flush cannot double-count.
+
+        Never raises (D7): telemetry must not be able to break trading. A failed flush logs
+        ``funnel_raw_flush_failed`` and leaves the previously-persisted rows exactly as they were —
+        the review then reads a slightly stale raw count, which still beats "unmeasured".
+        """
+        if self._funnel_raw is None:
+            return
+        try:
+            d = self._clock.today()
+            counts = {str(k): int(v) for k, v in self._funnel_raw(d).items()}
+            if d == self._funnel_raw_day and counts == self._funnel_raw_flushed:
+                return                              # nothing fired since the last tick
+            if counts:                              # a day-roll to an empty set writes nothing
+                with transaction(self._conn):
+                    for strategy_id, fires in counts.items():
+                        self._conn.execute(
+                            "INSERT INTO funnel_raw_counts (d, strategy_id, fires) "
+                            "VALUES (?, ?, ?) "
+                            "ON CONFLICT(d, strategy_id) DO UPDATE SET fires=excluded.fires",
+                            (d.isoformat(), strategy_id, fires),
+                        )
+            self._funnel_raw_day = d
+            self._funnel_raw_flushed = counts
+        except Exception as exc:  # noqa: BLE001 - a telemetry write never costs the drain a tick
+            _log.warning("funnel_raw_flush_failed", error=str(exc))
+
     # ------------------------------------------------------------ §5.2(a) paced drain (2026-08-14)
     async def drain_forward_queue(self) -> bool:
         """Spend at most one analyst slot, at most once per ``FORWARD_PACING_MIN`` minutes.
@@ -879,7 +933,12 @@ class RecommendationPipeline:
         five minutes into the session on rsi2 scores [0.14, 0.17, 0.27, 0.46, 0.48, 0.66] while the
         day's best unforwarded candidates (rsi2 0.83, orb 1.00, mom 1.00) arrived later and never
         got one. Pacing is what gives the ranking rule a population to rank.
+
+        The tick ALSO carries the pre-screen's raw-counter flush (2026-08-21) — run before the
+        drain-mode check, so the ``immediate`` rollback keeps its telemetry. See
+        :meth:`_flush_funnel_raw`.
         """
+        self._flush_funnel_raw()
         if self._drain_mode != "paced":
             return False
         now = self._clock.now()

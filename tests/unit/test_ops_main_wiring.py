@@ -28,6 +28,7 @@ from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
 from engine.datafeeds.bhavcopy import BhavcopyJob
 from engine.marketdata.store import MarketStore
+from engine.marketdata.tick_compact import TickCompactionResult
 from engine.ops import main as opsmain
 from engine.ops.jobs import (
     JOB_BHAVCOPY,
@@ -1308,3 +1309,75 @@ async def test_harness_failure_sinks_the_watermark_and_the_sweep_retry_is_govern
     assert nightly.governor_calls == 2 and nightly.harness_calls == 1      # retried, spent nothing
     assert catch_up.was_run(JOB_NIGHTLY_REVIEW, today) is True             # blocked => correct outcome
     assert result.jobs_failed == []
+
+
+# =========================================================== WO-23: §4.5 retention actually WIRED
+# ``MarketStore.apply_retention`` (ticks 30 d, news/clusters/sentiment 1 y, corrections 90 d) was
+# designed, implemented and unit-tested — and never CALLED from any scheduled job. It now hangs off
+# the nightly tick_compact pass, which already owns the closed tick partitions.
+
+
+class _FakeRetentionStore:
+    """The one MarketStore seam ``apply_tick_retention`` uses."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.calls = 0
+        self._raises = raises
+
+    async def aapply_retention(self) -> dict[str, int]:
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        return {"tick_partitions": 2, "corrections_log": 5, "news": 0,
+                "news_clusters": 0, "sentiment_agg": 0}
+
+
+@pytest.mark.asyncio
+async def test_retention_runs_after_a_successful_compaction(caplog) -> None:
+    store = _FakeRetentionStore()
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        await opsmain.apply_tick_retention(store, TickCompactionResult(ok=True))
+
+    assert store.calls == 1
+    applied = [r for r in caplog.records if r.getMessage() == "tick_retention_applied"]
+    assert len(applied) == 1
+    assert applied[0].tick_partitions == 2            # the report is logged, not swallowed
+    assert applied[0].corrections_log == 5
+
+
+@pytest.mark.asyncio
+async def test_retention_failure_warns_and_never_breaks_the_job(caplog) -> None:
+    store = _FakeRetentionStore(raises=OSError("parquet dir busy"))
+    with caplog.at_level(logging.WARNING, logger="engine.ops.main"):
+        await opsmain.apply_tick_retention(store, TickCompactionResult(ok=True))   # must NOT raise
+
+    failed = [r for r in caplog.records if r.getMessage() == "tick_retention_failed"]
+    assert len(failed) == 1
+    assert failed[0].error_type == "OSError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        TickCompactionResult(ok=False, failures=["2026-08-01/RELIANCE: boom"]),
+        TickCompactionResult(skipped_in_flight=True),
+    ],
+    ids=["degraded_pass", "another_run_holds_the_lock"],
+)
+async def test_retention_is_gated_on_a_clean_pass(result: TickCompactionResult) -> None:
+    """A degraded pass leaves un-compacted symbol-days for the retry; a skipped-in-flight pass means
+    ANOTHER compaction run is walking those partitions right now. Neither is a moment to rmtree."""
+    store = _FakeRetentionStore()
+    await opsmain.apply_tick_retention(store, result)
+    assert store.calls == 0
+
+
+def test_tick_compact_closure_calls_retention_after_the_pass() -> None:
+    """Source-level pin (same technique as the ok-bearing forwarding sweep): the wiring lives in the
+    composition-root closure, which cannot be constructed without booting the engine. A future edit
+    that drops the retention call — the exact defect WO-23 fixes — fails here."""
+    body = _wrapper_body(inspect.getsource(opsmain.run), "job_tick_compact")
+    assert "await apply_tick_retention(store, result)" in body
+    assert body.index("compact_ticks") < body.index("apply_tick_retention")   # AFTER the pass
+    assert "return result" in body                          # and the job's own verdict is unchanged

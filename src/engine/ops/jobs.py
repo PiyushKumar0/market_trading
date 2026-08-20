@@ -278,6 +278,13 @@ class CatchUpRunner:
         #: content is an unchanged failure set says nothing new. Process state on purpose: a fresh
         #: boot re-sends once, which doubles as the "still broken after restart" signal.
         self._last_failed_alert: list[str] | None = None
+        #: (job_id, run_for_date) pairs whose data_freshness FREEZE has already been announced to the
+        #: owner (WO-23, IMPROVEMENT_SPEC §205 "fires per attempt"). ``was_run`` keeps a failed
+        #: safety-critical job retryable, so without this every 30-min sweep re-sent the identical
+        #: freeze alert. The FREEZE itself stays unconditional (idempotent state that must always
+        #: hold) — only the notify is one-shot. Process state on purpose, exactly like
+        #: ``_last_failed_alert``: a restart re-alerts once, which doubles as "still broken".
+        self._freeze_notified: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------ watermarks (§4.2 job_runs)
     @property
@@ -494,19 +501,27 @@ class CatchUpRunner:
 
     async def _fail_safety_critical(self, spec: JobSpec, today: date, result: CatchUpResult) -> None:
         """Shared failure handling for the safety-critical path — an exception and a not-ok return
-        are treated identically (record failed, freeze, notify)."""
+        are treated identically (record failed, freeze, notify).
+
+        The freeze is unconditional (idempotent); the NOTIFY is once per (job, day) per process
+        (WO-23) — a persistently failing job used to re-alert on every 30-min sweep.
+        """
         self.record_run(spec.job_id, today, status="failed")
         result.jobs_failed.append(f"{spec.job_id}:{today.isoformat()}")
         reason = f"data_freshness:{spec.job_id}"
         result.frozen_reasons.append(reason)
         if self._freeze is not None:
             await self._freeze(reason)
-        if self._notify is not None:
+        key = (spec.job_id, today.isoformat())
+        if self._notify is not None and key not in self._freeze_notified:
             await self._notify(catalog.data_freshness_frozen(
                 job_id=spec.job_id,
                 last_success=self.last_success_at(spec.job_id),
                 reason="safety-critical catch-up run failed (§2.6 step 5)",
             ))
+            # Only a DELIVERED alert suppresses the next one (mirrors ``_last_failed_alert``): a
+            # send that raised must still reach the owner on the following pass.
+            self._freeze_notified.add(key)
 
     async def _run_latest(
         self, spec: JobSpec, now: datetime, off_since: datetime | None, result: CatchUpResult

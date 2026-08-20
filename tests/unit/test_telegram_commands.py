@@ -12,6 +12,7 @@ Three properties are load-bearing and each has a test here:
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from pathlib import Path
 
@@ -768,6 +769,86 @@ async def test_attach_bus_is_idempotent(wired_bot, bus, clock):
 async def test_attach_bus_without_a_bus_is_a_noop(bot):
     bot.attach_bus()                     # no bus injected, none passed — logs and returns
     assert bot._bus_attached is False
+
+
+# --------------------------------------------------------------------------- long-message guard (2026-08-20)
+# Two owner alerts died today to Telegram's BadRequest "Message is too long" (hard cap 4096 chars).
+# `send()` now splits anything over the cap instead of losing it silently; these pin the split shape.
+@pytest.mark.asyncio
+async def test_send_short_message_is_a_single_unsplit_send(wired_bot, caplog):
+    bot, sender = wired_bot
+    with caplog.at_level(logging.INFO):
+        await bot.send("short message\nline2")
+    assert sender.sent == [(OWNER_CHAT, "short message\nline2")]
+    assert not any(r.getMessage() == "telegram_message_split" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_send_splits_a_long_multiline_message_on_line_boundaries(wired_bot):
+    bot, sender = wired_bot
+    lines = [f"line {i:03d}: " + "x" * 90 for i in range(90)]      # 9089 chars, well past the cap
+    text = "\n".join(lines)
+
+    await bot.send(text)
+
+    texts = [t for _chat, t in sender.sent]
+    assert len(texts) == 3
+    assert all(chat == OWNER_CHAT for chat, _t in sender.sent)
+    assert all(len(t) <= 4096 for t in texts)
+    assert [t.splitlines()[-1] for t in texts] == ["(part 1/3)", "(part 2/3)", "(part 3/3)"]
+    # split on line boundaries: every body line (marker line stripped) is a whole original line —
+    # never a fragment of one.
+    original_lines = set(lines)
+    for t in texts:
+        for ln in t.splitlines()[:-1]:
+            assert ln in original_lines
+
+
+@pytest.mark.asyncio
+async def test_send_hard_splits_a_single_oversized_line(wired_bot):
+    bot, sender = wired_bot
+    text = "A" * 5000                                    # one line, no "\n" to break on anywhere
+
+    await bot.send(text)
+
+    texts = [t for _chat, t in sender.sent]
+    assert len(texts) == 2
+    assert all(len(t) <= 4096 for t in texts)
+    assert texts[0] == "A" * 4000 + "\n(part 1/2)"
+    assert texts[1] == "A" * 1000 + "\n(part 2/2)"
+
+
+@pytest.mark.asyncio
+async def test_send_truncates_a_pathological_message_at_five_parts(wired_bot):
+    bot, sender = wired_bot
+    text = "X" * 30000
+
+    await bot.send(text)
+
+    texts = [t for _chat, t in sender.sent]
+    assert len(texts) == 5
+    assert all(len(t) <= 4096 for t in texts)
+    for i, t in enumerate(texts[:-1], start=1):
+        assert t.endswith(f"\n(part {i}/5)")
+    assert texts[-1].endswith("\n(part 5/5)\n... [truncated 10000 chars]")     # 30000 - 5*4000
+    # the 20000 chars actually shipped are an exact, contiguous prefix of the original message.
+    bodies = [t.rsplit("\n(part ", 1)[0] for t in texts]
+    assert "".join(bodies) == "X" * 20000
+
+
+@pytest.mark.asyncio
+async def test_send_split_emits_one_log_event_with_parts_and_total_chars(wired_bot, caplog):
+    bot, sender = wired_bot
+    text = "X" * 30000
+
+    with caplog.at_level(logging.INFO):
+        await bot.send(text)
+
+    split_events = [r for r in caplog.records if r.getMessage() == "telegram_message_split"]
+    assert len(split_events) == 1
+    assert split_events[0].parts == 5
+    assert split_events[0].total_chars == 30000
+    assert len(sender.sent) == 5                          # the split really did produce 5 sends
 
 
 @pytest.mark.asyncio

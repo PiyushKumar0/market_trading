@@ -184,6 +184,36 @@ def test_parse_tick_frame_rejects_missing_load_bearing_fields():
             parse_tick_frame(broken, "X")
 
 
+def test_parse_tick_frame_rejects_an_epoch_exchange_timestamp():
+    """2026-08-20: a zeroed wire ``exchange_timestamp`` arrives as ``datetime.fromtimestamp(0)`` and
+    used to parse cleanly into a tz-aware 1970 datetime — valid to the Tick model, and a
+    ``date=1970-01-01`` tick partition in the store. It is a zeroed field, not a timestamp, so it
+    takes the SAME path as a missing one (ValueError ⇒ the caller drops that single tick)."""
+    epoch_wire = dt.datetime.fromtimestamp(0).isoformat()      # what ticker/main.py would forward
+    broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": epoch_wire}
+    with pytest.raises(ValueError, match="exchange_timestamp"):
+        parse_tick_frame(broken, "RELIANCE")
+
+
+@pytest.mark.parametrize(
+    ("wire", "ok"),
+    [
+        ("2019-12-31T23:59:59", False),      # below the floor
+        ("2020-01-01T00:00:00", True),       # the floor itself is plausible (inclusive)
+        ("2026-08-20T11:26:40", True),       # real data
+    ],
+)
+def test_exchange_timestamp_plausibility_floor(wire: str, ok: bool):
+    frame = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": wire}
+    if ok:
+        assert parse_tick_frame(frame, "X").exchange_ts == dt.datetime.fromisoformat(wire).replace(
+            tzinfo=IST
+        )
+    else:
+        with pytest.raises(ValueError):
+            parse_tick_frame(frame, "X")
+
+
 # --------------------------------------------------------------------------- hello / heartbeat
 def test_hello_frame_carries_version_secret_and_token_count():
     app = _app(tokens=[1, 2, 3])

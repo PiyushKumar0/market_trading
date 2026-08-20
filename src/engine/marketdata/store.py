@@ -291,12 +291,19 @@ _SCHEMA: tuple[str, ...] = (
     """,
     # sentiment_agg — clipped decay-weighted SUM per (scope, scope_key, as_of) (§2.7 step 5(i));
     # the §6.2 features-v2 source. Not money ⇒ DOUBLE.
+    # ``raw_sum``/``n_clusters`` (both nullable, WO-22) are the SATURATION MEASUREMENT: the UNCLIPPED
+    # sum and how many clusters produced it. ``value`` stays clip(raw_sum, −1, +1) — the rail told a
+    # reader nothing about how far past it the flow ran, and it railed on 7 of 17 digest days. They
+    # are the LAST columns so a fresh DB and a DB widened by _migrate_sentiment_measures (which can
+    # only append) carry identical column order.
     """
     CREATE TABLE IF NOT EXISTS sentiment_agg (
-        scope     TEXT NOT NULL CHECK (scope IN ('symbol','sector','theme','market')),
-        scope_key TEXT NOT NULL,
-        as_of     TIMESTAMPTZ NOT NULL,
-        value     DOUBLE NOT NULL,
+        scope      TEXT NOT NULL CHECK (scope IN ('symbol','sector','theme','market')),
+        scope_key  TEXT NOT NULL,
+        as_of      TIMESTAMPTZ NOT NULL,
+        value      DOUBLE NOT NULL,
+        raw_sum    DOUBLE,
+        n_clusters INTEGER,
         PRIMARY KEY (scope, scope_key, as_of)
     )
     """,
@@ -506,7 +513,7 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("theme",),
     ),
     "sentiment_agg": (
-        ("scope", "scope_key", "as_of", "value"),
+        ("scope", "scope_key", "as_of", "value", "raw_sum", "n_clusters"),
         ("scope", "scope_key", "as_of"),
     ),
     "catalyst_watchlist": (
@@ -739,7 +746,8 @@ class MarketStore:
 
         Also runs the one-shot ``instruments_daily.tick_size`` widen (2026-07-21): ``CREATE TABLE IF
         NOT EXISTS`` never alters an existing column, so a legacy DB would keep truncating sub-paisa
-        ticks to 0.00 and losing them on hydrate. Same reason for the ``corrections_log.reason`` add.
+        ticks to 0.00 and losing them on hydrate. Same reason for the ``corrections_log.reason`` add
+        and the ``sentiment_agg`` saturation-measure adds.
         """
         with self._lock:
             con = self._require_con()
@@ -747,6 +755,7 @@ class MarketStore:
                 con.execute(stmt)
             self._migrate_instruments_tick_scale(con)
             self._migrate_corrections_reason(con)
+            self._migrate_sentiment_measures(con)
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
@@ -775,6 +784,31 @@ class MarketStore:
         if row is None:
             con.execute("ALTER TABLE corrections_log ADD COLUMN reason TEXT")
             _log.info("corrections_log_reason_column_added")
+
+    #: Nullable ``sentiment_agg`` saturation measures appended by :meth:`_migrate_sentiment_measures`,
+    #: in the order the ALTERs must run to match the fresh-DB column order (WO-22).
+    _SENTIMENT_MEASURE_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("raw_sum", "DOUBLE"), ("n_clusters", "INTEGER"),
+    )
+
+    def _migrate_sentiment_measures(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``sentiment_agg.raw_sum``/``n_clusters`` columns to a legacy
+        DB (WO-22), mirroring :meth:`_migrate_corrections_reason`: ``CREATE TABLE IF NOT EXISTS``
+        never alters an existing table, so a DB written before the measurement existed would reject
+        every digest upsert carrying it. Guarded per column on ``information_schema`` so each ALTER
+        runs EXACTLY ONCE; a fresh DB already has both and this no-ops. Nullable + appended-last ⇒
+        digest rows written BEFORE WO-22 keep reading back with NULL measures, which is exactly what
+        the analyst render treats as "no measurement for this row"."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'sentiment_agg'"
+            ).fetchall()
+        }
+        for column, sql_type in self._SENTIMENT_MEASURE_COLUMNS:
+            if column not in present:
+                con.execute(f"ALTER TABLE sentiment_agg ADD COLUMN {column} {sql_type}")
+                _log.info("sentiment_agg_column_added", column=column)
 
     def table_names(self) -> set[str]:
         """Names of the persistent tables in the store (for self-tests / the schema lockstep test)."""
@@ -1389,9 +1423,12 @@ class MarketStore:
         return self._fetch_dicts("SELECT * FROM theme_map ORDER BY theme")
 
     def upsert_sentiment_agg(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Write digest rows. ``raw_sum``/``n_clusters`` (the WO-22 saturation measure) are OPTIONAL:
+        a row omitting them stores NULL, so a caller written before the measure existed still works."""
         return self._upsert_rows("sentiment_agg", rows)
 
     def get_sentiment_agg(self, as_of: datetime) -> list[dict[str, Any]]:
+        """One run's rows, including ``raw_sum``/``n_clusters`` — NULL on rows digested before WO-22."""
         return self._fetch_dicts(
             "SELECT * FROM sentiment_agg WHERE as_of = ? ORDER BY scope, scope_key", [as_of]
         )

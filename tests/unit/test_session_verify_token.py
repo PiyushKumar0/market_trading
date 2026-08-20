@@ -113,3 +113,80 @@ async def test_verify_token_absent_when_api_key_but_no_token(clock) -> None:
 async def test_verify_token_no_api_key_on_fresh_install(clock) -> None:
     session = _session(_FakeSecrets({}))   # nothing seeded
     assert await session.verify_token() == "no_api_key"
+
+
+# ===================================================================== WO-23: breaker-vs-probe split
+# 2026-08-20 live incident: the 11:26:40 LIVE TokenException produced ZERO owner notifications. The
+# mid-day circuit breaker (``on_token_rejected`` → freeze entries + critical alert + login prompt)
+# deduped against ``_rejected``, which the boot probe ALSO sets (deliberately silently) — so the
+# day's first genuine rejection looked like a burst duplicate and the alert was swallowed. The
+# breaker now dedups on its own ``_breaker_fired`` flag, which the probe never touches.
+
+
+def _breaker_session(clock, kc: _FakeKC, fired: list[int]) -> SessionManager:
+    """A session wired the way ``engine.ops.main`` wires it: the invalidation hook is the freeze +
+    critical-alert + login-prompt path, recorded here as one entry per firing."""
+    secrets = _FakeSecrets({KITE_API_KEY: "ak", KITE_API_SECRET: "as", KITE_ACCESS_TOKEN: "tok"})
+    session = SessionManager(secrets, clock)
+    session._connect = lambda: kc
+
+    async def hook() -> None:
+        fired.append(1)
+
+    session.set_invalidation_hook(hook)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_boot_probe_rejection_no_longer_suppresses_the_live_breaker(clock) -> None:
+    """THE incident: boot probe rejected, then a live call rejects ⇒ the owner IS alerted (once)."""
+    fired: list[int] = []
+    session = _breaker_session(clock, _FakeKC(profile_raises=TokenException("bad token")), fired)
+
+    assert await session.verify_token() == "rejected"
+    assert fired == []                       # boot comms stay with the boot path (login_prompt)
+
+    await session.on_token_rejected()        # 11:26:40 — the real live rejection
+    assert fired == [1]                      # pre-fix: [] (silently swallowed)
+    assert session.token_valid() is False
+
+
+@pytest.mark.asyncio
+async def test_live_rejection_burst_still_fires_once(clock) -> None:
+    """The dedup that MATTERS is preserved: a burst of 403s is one alert, not one per call."""
+    fired: list[int] = []
+    session = _breaker_session(clock, _FakeKC(), fired)
+
+    await session.on_token_rejected()
+    await session.on_token_rejected()
+    await session.on_token_rejected()
+    assert fired == [1]
+
+
+@pytest.mark.asyncio
+async def test_relogin_rearms_the_breaker(clock) -> None:
+    """``complete_login`` clears ``_breaker_fired`` alongside ``_rejected`` — a token that dies
+    AGAIN after a re-login must alert again (twice in one day is a real shape)."""
+    fired: list[int] = []
+    session = _breaker_session(clock, _FakeKC(), fired)
+
+    await session.on_token_rejected()
+    assert fired == [1]
+
+    await session.complete_login("req-token")
+    assert session.token_valid() is True
+
+    await session.on_token_rejected()
+    assert fired == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_boot_probe_rejection_alone_never_fires_the_breaker(clock) -> None:
+    """The probe's deliberate silence is intact: no freeze/critical-alert from the boot path itself
+    (main.py's needs_login self-test owns boot comms), and it does not pre-arm the breaker either."""
+    fired: list[int] = []
+    session = _breaker_session(clock, _FakeKC(profile_raises=TokenException("bad token")), fired)
+
+    assert await session.verify_token() == "rejected"
+    assert fired == []
+    assert session._breaker_fired is False   # nothing to dedup against later

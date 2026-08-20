@@ -119,6 +119,14 @@ def _tick_frame(token: int = 1, ltp: str = "101.00", cum: int = 500,
     }
 
 
+def _collect(sink: list):
+    """An async ``tick`` subscriber that appends every published Tick to ``sink``."""
+    async def _h(tick) -> None:
+        sink.append(tick)
+
+    return _h
+
+
 @pytest.mark.asyncio
 async def test_start_refuses_without_api_key(clock, monkeypatch):
     # 2026-07-23 root cause: api_key defaulted to "" and the child dialed the WS with it forever
@@ -338,6 +346,84 @@ async def test_feed_stats_snapshot_counts_and_resets(clock):
     assert snap["frames_dropped"]["unknown_frame"] == 1
 
     assert sup.stats_snapshot() == {"ticks_received": 0, "frames_dropped": {}}  # reset-on-read
+
+
+# ------------------------------------------------- epoch-0 exchange_timestamp guard (2026-08-20)
+# A tick whose wire ``exchange_timestamp`` is Unix epoch 0 (a zeroed broker field — kiteconnect
+# returns ``datetime.fromtimestamp(0)``) sailed through every layer: the child ISO-serializes it,
+# ``_wire_timestamp`` IST-localizes it, and the Tick validator only checks tz-awareness — so it
+# landed in a ``date=1970-01-01`` tick partition (103 rows before they were quarantined by hand).
+# It is now treated exactly like a MISSING timestamp: dropped, one WARNING, stream untouched.
+
+#: What ``datetime.fromtimestamp(0)`` produces on an IST box, as the child would serialize it.
+_EPOCH_IST = dt.datetime(1970, 1, 1, 5, 30, 0)
+
+
+@pytest.mark.asyncio
+async def test_epoch_timestamp_tick_is_dropped_with_a_warning(clock, monkeypatch):
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    bus = EventBus()
+    published: list = []
+    bus.subscribe(TICK_TOPIC, _collect(published))
+    sup = TickerSupervisor(_FakeSettings(), clock, bus, symbol_for_token=lambda t: "R")
+
+    await sup._handle_frame(_tick_frame(token=1, ts=_EPOCH_IST.replace(tzinfo=IST)))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert published == []                                     # never reaches BarBuilder/the store
+    assert sup.stats_snapshot()["frames_dropped"]["parse_error"] == 1
+    warns = [kw for (lvl, ev, kw) in rec.calls if ev == "tick_timestamp_implausible"]
+    assert len(warns) == 1
+    assert warns[0]["symbol"] == "R"
+    assert warns[0]["parsed"].startswith("1970-01-01")
+    assert all(lvl == "warning" for (lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible")
+
+
+@pytest.mark.asyncio
+async def test_normal_tick_is_unaffected_by_the_guard(clock, monkeypatch):
+    """The guard is a floor far below any real data: a live 2026 tick still publishes, unlogged."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    bus = EventBus()
+    published: list = []
+    bus.subscribe(TICK_TOPIC, _collect(published))
+    sup = TickerSupervisor(_FakeSettings(), clock, bus, symbol_for_token=lambda t: "R")
+
+    await sup._handle_frame(_tick_frame(token=1, ts=_at(10, 5, 0)))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert len(published) == 1
+    assert published[0].exchange_ts == _at(10, 5, 0)
+    assert sup.stats_snapshot()["frames_dropped"] == {}
+    assert [ev for (_lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_epoch_tick_never_stops_the_stream(clock):
+    """One bad tick is dropped, not the feed: the very next good tick flows normally."""
+    bus = EventBus()
+    published: list = []
+    bus.subscribe(TICK_TOPIC, _collect(published))
+    sup = TickerSupervisor(_FakeSettings(), clock, bus, symbol_for_token=lambda t: "R")
+
+    await sup._handle_frame(_tick_frame(token=1, ts=_EPOCH_IST.replace(tzinfo=IST)))
+    await sup._handle_frame(_tick_frame(token=1, ltp="102.50", ts=_at(10, 5, 1)))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert len(published) == 1 and published[0].ltp == Decimal("102.50")
+    # Both frames were consumed off the wire (the drop is per-TICK, never a read-loop abort) and
+    # exactly one of them was dropped.
+    snap = sup.stats_snapshot()
+    assert snap["ticks_received"] == 2
+    assert snap["frames_dropped"] == {"parse_error": 1}
 
 
 # --------------------------------------------------------- sleep/resume WARMING-wedge (2026-07-23 13:41)

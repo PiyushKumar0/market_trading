@@ -1,5 +1,37 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-21 (02:0x–03:1x) — WO-22 (four quality follow-ups) + WO-23 (two safety-notify fixes + tick lifecycle); mom verdict closed
+
+- **Owner-directed** ("start work on points 3, 4, 5, 6"). Ran as a workflow: 3 read-only
+  investigations + 4 implementation tracks + verify. The run hit the session usage limit mid-flight
+  (resets 00:50) — both "failed" tracks turned out to have COMPLETED their edits and gone green
+  before dying; audited from the tree, full suite 1689 → 1709 across the combined work.
+- **WO-22 shipped:** (a) `rel_volume_tod` — participation vs 20d median cumulative volume at the
+  SAME elapsed minutes (1.0 = typical pace; ≥10 valid sessions else None); legacy `rel_volume` kept,
+  context legend explains both. (b) `sentiment_agg` now stores `raw_sum`/`n_clusters` — the rail
+  line renders "raw −2.31 across 9 clusters" (measured) vs the WO-20 prose (unmeasured legacy rows).
+  (c) Telegram 4096 guard — line-boundary split ≤5 parts + truncation marker; `telegram_message_split`.
+  (d) `funnel_raw_counts` (migration 0010) — drain-tick flush + day-roll hydration; restarts continue
+  counts instead of zeroing; nightly review prefers the table.
+- **Investigation verdicts (mine):** `mom` never-forwarded = NOT a defect (stop:null → deliberate
+  2026-07-29 unsizeable gate; doubly dead leg, stays as-is). Freeze-notify dedup = REAL both ways:
+  the boot probe's `_rejected` arming SWALLOWED the 08-20 11:26:40 live rejection's critical alert
+  (zero owner notifications — confirmed in logs), and catch-up safety-critical freeze notifies per
+  attempt. 1970 partition = 103 epoch-0-timestamp ticks (zeroed wire field; no plausibility check
+  anywhere) + the §4.5 retention policy was NEVER WIRED to any job.
+- **WO-23 shipped:** breaker dedups on its own `_breaker_fired` (probe no longer suppresses;
+  probe-then-live now alerts), catch-up freeze notifies once per (job,date) per process (freeze
+  itself stays unconditional), `_wire_timestamp` drops pre-2020 timestamps via the missing-ts path
+  (`tick_timestamp_implausible`), and `apply_retention` (full §4.5: ticks 30d/corrections 90d/news 1y)
+  runs after each successful non-skipped compaction — first real purge lands weeks out.
+- **Ops:** `date=1970-01-01` partition (245 KB, dead 6+ days) moved to quarantine. Self-inflicted +
+  repaired: a PowerShell relabel pass mojibake'd 3 UTF-8 files (ANSI round-trip); reversed
+  byte-exactly (cp1252→utf-8 inverse), verified zero residue — rule reinforced: Edit tool only for
+  source files, never Get-Content/Set-Content rewrites.
+- **1709 unit green; ruff 16 pre-existing, 0 new.** Deployed pre-market; today's watch: 08:40 token
+  probe first live run, 08:30 build → resubscribe diff (first normal-day observation), first valid
+  proposal → gate → recommendation.
+
 ## 2026-08-20 (17:35) — compaction backlog FULLY DIGESTED; memory arc closed end-to-end; one hygiene observation filed
 
 - **tick_compaction_done 17:32:15: ok=true, budget_exhausted=false, failures=[], symbol_days=3

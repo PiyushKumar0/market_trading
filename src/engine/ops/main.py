@@ -124,7 +124,7 @@ from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentHarness, load_agent_roster, run_sdk_smoke
 from engine.ops.news_scoring import NewsScoringJob
-from engine.ops.nightly_review import NightlyReviewJob
+from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.preopen_planner import PreopenPlannerJob
 from engine.ops.scan_context import LiveScanContextProvider
@@ -650,6 +650,10 @@ async def run() -> int:
             # Late-bound like momentum_universe below: `prescreen` is constructed a few lines further
             # down; the lambda resolves it at call time (an analyst failure long after wiring).
             rearm=lambda sym, sid: prescreen.rearm(sym, sid),
+            # 2026-08-21: the drain tick also flushes the WO-9 RAW counters to `funnel_raw_counts`
+            # (late-bound for the same reason as `rearm`). Paired with `raw_counts_loader` below —
+            # the flush writes ABSOLUTE totals, so it must only ever run against a hydrated counter.
+            funnel_raw=lambda d: prescreen.raw_counts(d),
             admission_mode=settings.strategy.prescreen.admission_mode,   # WO-1 rollback flag
             # 2026-08-14 rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
             forward_drain_mode=settings.strategy.prescreen.forward_drain_mode,
@@ -688,6 +692,12 @@ async def run() -> int:
         # from the hash-verified limits.yaml (§2.4 item 1) — never a constructor number, never in the
         # gate. A raise here (unverifiable store) refuses cat candidates; the pre-screen handles it.
         catalyst_cap_fn=lambda: limits_engine.catalyst_guard().max_catalyst_entries_day,
+        # 2026-08-21: the WO-9 RAW counters were the last piece of funnel state with no DB home, so
+        # every restart zeroed them and the 22:35 review reported `raw=None` for the whole day (4 of
+        # the last 6 trade days). Loaded on the first day roll of this process, flushed back by the
+        # drain tick above — the two halves ship together or the flush would overwrite the day's
+        # persisted total with this process's smaller one.
+        raw_counts_loader=lambda d: read_funnel_raw_counts(conn, d),
     )
     # 2026-08-04: dedupe/caps day-state is process memory — rehydrate it from the day-slot journal
     # so a restart no longer resets the 20/day bound (observed: ~54 publications across two
@@ -1011,9 +1021,13 @@ async def run() -> int:
         # never the live MarketStore's, which is the bar/tick write path. Today's partition is
         # skipped inside compact_ticks (the writer still owns it). Ok-bearing: a failed symbol-day
         # sinks the watermark and the next sweep retries only what did not compact.
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             compact_ticks, settings.parquet_dir(), upto=d, today=clock.today()
         )
+        # WO-23: the §4.5 retention sweep runs HERE, right after the nightly compaction — see
+        # ``apply_tick_retention``. It never changes this job's ok-bearing result.
+        await apply_tick_retention(store, result)
+        return result
 
     registry = build_job_registry(settings, {
         JOB_INSTRUMENTS: job_instruments,
@@ -2153,6 +2167,33 @@ def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list
             sid = None
         out.append(c.model_copy(update={"features_snapshot_id": sid}))
     return out
+
+
+# --------------------------------------------------------------------------- retention (§4.5)
+async def apply_tick_retention(store: MarketStore, result: TickCompactionResult) -> None:
+    """Run the §4.5 retention purge after a successful nightly compaction pass (WO-23).
+
+    ``MarketStore.apply_retention`` (ticks 30 d by partition dir, news/clusters/sentiment 1 y,
+    corrections 90 d) was designed, implemented and unit-tested — and never CALLED from any
+    scheduled job. This is the missing wiring, hung off ``tick_compact`` because that job already
+    owns the closed tick partitions and runs nightly after the writer is done with them.
+
+    Gated on a clean pass: ``ok=False`` means a symbol-day is still un-compacted (retention would be
+    purging under a job that is going to be retried), and ``skipped_in_flight=True`` means ANOTHER
+    compaction run holds the lock right now — ``rmtree`` of an old partition while that run is
+    walking it is the one race worth avoiding. Either way the next nightly pass sweeps.
+
+    Failure is contained: a retention error WARNs and returns, never touching the compaction job's
+    ok-bearing result (a purge that could not run is not a data-freshness failure).
+    """
+    if not result.ok or result.skipped_in_flight:
+        return
+    try:
+        report = await store.aapply_retention()
+    except Exception as exc:  # noqa: BLE001 - retention must never fail the compaction job
+        _log.warning("tick_retention_failed", error=str(exc), error_type=type(exc).__name__)
+    else:
+        _log.info("tick_retention_applied", **report)
 
 
 # --------------------------------------------------------------------------- backup (§10.5)

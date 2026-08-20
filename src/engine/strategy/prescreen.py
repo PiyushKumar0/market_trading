@@ -141,6 +141,15 @@ class SignalPreScreen:
         news→origination carve-out. ``None``, or a call that raises (an unverifiable protected
         store), refuses every catalyst candidate: an anti-manipulation surface that cannot be read
         must not degrade into "no cap". Price baselines are untouched either way (E5).
+    raw_counts_loader:
+        ``day -> {strategy_id: raw fires}`` reader for the persisted WO-9 raw counters
+        (``funnel_raw_counts``, 2026-08-21), called on every day ROLL — which includes the first
+        roll of a fresh process. The composition root binds it to the state DB; replay/backtest
+        paths leave it ``None`` and stay pure, so §9.6 bar-stream determinism is untouched. It is
+        the READ half of a pair: whatever hydrates here is what
+        :meth:`~engine.ops.pipeline.RecommendationPipeline._flush_funnel_raw` later writes back as
+        the day's absolute total, so wiring the flush WITHOUT this loader would have each restart
+        overwrite the day's persisted count with the new process's smaller one.
     """
 
     def __init__(
@@ -153,6 +162,7 @@ class SignalPreScreen:
         max_per_strategy_day: int | Mapping[str, int] | None = None,
         admission_mode: str = "ranked",
         catalyst_cap_fn: Callable[[], int] | None = None,
+        raw_counts_loader: Callable[[date], Mapping[str, int]] | None = None,
     ) -> None:
         if max_candidates_per_day < 1:
             raise ValueError("max_candidates_per_day must be >= 1")
@@ -167,6 +177,7 @@ class SignalPreScreen:
         self._strategy_caps = per_strategy                    # explicit per-strategy overrides
         self._admission_mode = admission_mode
         self._catalyst_cap_fn = catalyst_cap_fn               # §7.1 catalyst_guard, read at use
+        self._raw_counts_loader = raw_counts_loader           # WO-9 raw counters, restored on roll
         # Per-day state (reset on bar-date change). Lock: handle_bar offloads to worker threads.
         self._lock = threading.Lock()
         self._day: date | None = None
@@ -186,9 +197,12 @@ class SignalPreScreen:
         #: the guard by config) is what still bounds the day, and the §2.7 single-shot age filter
         #: means the same story cannot re-offer itself anyway.
         self._count_catalyst = 0
-        #: WO-9 funnel counters, per strategy, for the CURRENT day. Process-scoped by design: they
-        #: describe what this process's scanners produced, and a restart legitimately starts a new
-        #: observation window (the journal, not these, is the restart-proof record).
+        #: WO-9 funnel counters, per strategy, for the CURRENT day. ``_raw_by_strategy`` alone is
+        #: RESTART-PROOF (2026-08-21): it is seeded from ``funnel_raw_counts`` on every day roll and
+        #: flushed back by the drain tick, because a raw count that resets is indistinguishable from
+        #: "nothing fired" — the exact ambiguity WO-9 exists to remove, and it cost the nightly line
+        #: 4 of the last 6 trade days. The rest stay process-scoped: they describe what THIS
+        #: process's admission spine did, and the day-slot journal is their restart-proof record.
         self._raw_by_strategy: dict[str, int] = {}
         self._published_scores: dict[str, list[float]] = {}
         self._suppressed_cap: dict[str, int] = {}
@@ -388,7 +402,10 @@ class SignalPreScreen:
 
     def raw_counts(self, d: date) -> dict[str, int]:
         """Raw per-strategy candidate counts for ``d`` — ``{}`` when ``d`` is not the tracked day
-        (the counters are per-day state; reporting yesterday's numbers as today's would be a lie)."""
+        (the counters are per-day state; reporting yesterday's numbers as today's would be a lie).
+
+        With ``raw_counts_loader`` wired these are the day's RUNNING TOTAL across every process that
+        ran it (2026-08-21), which is what makes this safe to persist as an absolute value."""
         with self._lock:
             return dict(self._raw_by_strategy) if self._day == d else {}
 
@@ -407,6 +424,32 @@ class SignalPreScreen:
             self._suppressed_dedupe.clear()
             self._suppressed_window.clear()
             self._window_logged.clear()
+            self._load_raw_counts_locked(day)
+
+    def _load_raw_counts_locked(self, day: date) -> None:
+        """Seed ``day``'s RAW counters from ``funnel_raw_counts`` (2026-08-21, lock held).
+
+        The roll that matters is the FIRST one of a process: a mid-session restart used to reset the
+        raw row to zero, and the 22:35 review then reported ``raw=None`` for the whole day even
+        though the morning's scanners had fired hundreds of times. Loading the persisted total here
+        makes the counter CONTINUE — the flush writes absolute values, so a hydrate/flush cycle is
+        idempotent no matter how many times the engine bounces.
+
+        A genuine roll onto a NEW day loads ``{}`` (no rows written for it yet) and the counters
+        legitimately start at zero. Unwired ⇒ no-op, the pre-2026-08-21 behaviour. Never raises: a
+        telemetry read must not be able to kill a scan (D7)."""
+        if self._raw_counts_loader is None:
+            return
+        try:
+            loaded = {str(k): int(v) for k, v in self._raw_counts_loader(day).items() if int(v) > 0}
+        except Exception as exc:  # noqa: BLE001 - an unreadable counter costs telemetry, never a scan
+            _log.warning("funnel_raw_hydrate_failed", d=day.isoformat(), error=str(exc))
+            return
+        if not loaded:
+            return
+        self._raw_by_strategy.update(loaded)
+        _log.info("funnel_raw_hydrated", d=day.isoformat(), strategies=len(loaded),
+                  fires=sum(loaded.values()))
 
     def _rank(self, cands: Sequence[SignalCandidate]) -> list[SignalCandidate]:
         """Order one admission batch (WO-1 (i)).

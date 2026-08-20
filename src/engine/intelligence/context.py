@@ -392,8 +392,14 @@ class ContextAssembler:
         is cumulative session volume ÷ 20d median FULL-DAY volume with no time-of-day adjustment, so
         it is structurally tiny early in the session; read as time-adjusted participation it says
         "nobody is trading this" at 09:20 on a perfectly normal tape, and that misreading was cited
-        in 44 of the 63 all-time analyst declines. The legend is a stopgap — the correct fix is a
-        time-normalized ``rel_volume_tod`` feature (filed, not in this WO).
+        in 44 of the 63 all-time analyst declines.
+
+        WO-22 (2026-08-21): the correct number now ships beside it — ``rel_volume_tod``, today's
+        cumulative volume ÷ the 20d median cumulative volume at the SAME elapsed time (1.0 = a
+        typical pace for this time of day). The legend therefore names BOTH keys and points at the
+        one to read; it renders when EITHER is present, because the reader needs the vocabulary
+        whenever a relative-volume number is on the page (``rel_volume_tod`` is None on a symbol
+        without enough 1m history, and the legacy key is what remains).
         """
         if not snapshot_id:
             return _UNAVAILABLE
@@ -407,8 +413,13 @@ class ContextAssembler:
         as_of = row.get("ts")
         suffix = f" (as of {as_of.strftime('%H:%M')})" if isinstance(as_of, datetime) else ""
         note = ""
-        if isinstance(features, Mapping) and features.get("rel_volume") is not None:
-            note = "\n  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume — NOT time-of-day adjusted; structurally small early in the session (~0.02-0.05 in the first minutes, ~0.2-0.4 by mid-morning on an average day)"
+        if isinstance(features, Mapping) and any(
+            features.get(key) is not None for key in ("rel_volume_tod", "rel_volume")
+        ):
+            note = (
+                "\n  note: rel_volume_tod = cumulative session volume / the 20d MEDIAN cumulative volume at the SAME elapsed time — time-of-day adjusted, so 1.0 = a typical participation pace for this point of the session (read this one; null = too little 1m history to judge pace)"
+                "\n  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume — NOT time-of-day adjusted; structurally small early in the session (~0.02-0.05 in the first minutes, ~0.2-0.4 by mid-morning on an average day)"
+            )
         return f"{_json(features)}{suffix}{note}"
 
     def _bars(self, symbol: str, d: date) -> list[Bar]:
@@ -523,7 +534,9 @@ class ContextAssembler:
         if as_of is None:
             lines.append(f"  sentiment {_UNAVAILABLE}")
             return "\n".join(lines)
-        agg = {(r["scope"], r["scope_key"]): r["value"] for r in self._store.get_sentiment_agg(as_of)}
+        # The FULL row, not just ``value``: the rail line renders raw_sum/n_clusters when the digest
+        # measured them (WO-22).
+        agg = {(r["scope"], r["scope_key"]): r for r in self._store.get_sentiment_agg(as_of)}
         sector = self._sector_of(symbol, d)
         lines.append(self._sentiment_line(f"symbol {symbol}", agg.get(("symbol", symbol))))
         if sector is None:
@@ -533,7 +546,7 @@ class ContextAssembler:
         lines.append(self._sentiment_line("market", agg.get(("market", "market"))))
         return "\n".join(lines)
 
-    def _sentiment_line(self, label: str, value: float | None) -> str:
+    def _sentiment_line(self, label: str, row: Mapping[str, Any] | None) -> str:
         """One sentiment scope's line, with the RAIL labelled for what it is (WO-20c, 2026-08-20).
 
         ``sentiment_agg`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
@@ -541,14 +554,25 @@ class ContextAssembler:
         on 7 of 17 digest days, and the analyst read "-1.000, the floor of the scale" as extreme
         regime evidence in 46 of the 63 all-time declines. The label states the semantics inline,
         where the number is, because a legend the model has to remember is a legend it will not use.
-        The follow-up fix — storing the UNCLIPPED sum and the cluster count so saturation is a
-        measured quantity rather than an annotation — is filed, not in this WO.
+
+        WO-22 (2026-08-21) replaces the guess with the digest's own measurement: when the row carries
+        ``raw_sum``/``n_clusters``, the rail line reports how far past the clip the flow actually ran
+        and how many clusters produced it — "raw -2.31 across 9 clusters" is a fact the model can
+        weigh, where the WO-20 prose was only a warning it had to take on trust. A row digested
+        BEFORE WO-22 has no measures (NULL), and keeps the WO-20 wording verbatim: an unmeasured rail
+        must not borrow the credibility of a measured one.
         """
-        if value is None:
+        if row is None or row.get("value") is None:
             return f"  sentiment {label}: {_UNAVAILABLE}"
-        if abs(value) >= 0.999:
-            return f"  sentiment {label}: {value:+.3f} (SATURATED: a clipped decay-weighted SUM of headline scores — a handful of same-direction headlines reaches the rail; read as net {'negative' if value < 0 else 'positive'} headline flow, not extremity)"
-        return f"  sentiment {label}: {value:+.3f}"
+        value = float(row["value"])
+        if abs(value) < 0.999:
+            return f"  sentiment {label}: {value:+.3f}"
+        direction = "negative" if value < 0 else "positive"
+        raw_sum, n_clusters = row.get("raw_sum"), row.get("n_clusters")
+        if raw_sum is None or n_clusters is None:
+            return f"  sentiment {label}: {value:+.3f} (SATURATED: a clipped decay-weighted SUM of headline scores — a handful of same-direction headlines reaches the rail; read as net {direction} headline flow, not extremity)"
+        n = int(n_clusters)
+        return f"  sentiment {label}: {value:+.3f} (clipped SUM saturated: raw {float(raw_sum):+.2f} across {n} cluster{'' if n == 1 else 's'} — read as net {direction} headline flow, not extremity)"
 
     def _ltp_line(self, bars: Sequence[Bar]) -> str:
         """Precomputed as-of text: engine "now" plus the last completed bar (§3.2 — never the model's)."""

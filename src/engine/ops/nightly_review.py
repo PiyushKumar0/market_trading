@@ -395,6 +395,27 @@ class FunnelSummary:
         }
 
 
+def read_funnel_raw_counts(conn: sqlite3.Connection, d: date) -> dict[str, int]:
+    """``{strategy_id: raw fires}`` persisted for ``d`` in ``funnel_raw_counts``, or ``{}``.
+
+    The restart-proof half of the funnel's top row (2026-08-21): the pre-screen's raw counters are
+    flushed here by the forward-drain tick and re-loaded from here whenever a fresh process rolls
+    onto the day, so these rows hold the day's total across EVERY process that ran it. An unreadable
+    table costs the raw row, never the review (D7) — the same direction the day-slot read takes.
+    Also the loader the composition root hands the pre-screen, which is why it lives at module scope.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT strategy_id, fires FROM funnel_raw_counts WHERE d = ? ORDER BY strategy_id",
+            (_day_prefix(d),),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        _log.warning("funnel_journal_unreadable", d=_day_prefix(d), table="funnel_raw_counts",
+                     error=f"{type(exc).__name__}: {exc}")
+        return {}
+    return {str(r["strategy_id"]): int(r["fires"]) for r in rows}
+
+
 def build_funnel_summary(
     conn: sqlite3.Connection,
     d: date,
@@ -402,10 +423,13 @@ def build_funnel_summary(
 ) -> FunnelSummary:
     """Assemble ``d``'s funnel from ``prescreen_day_slots`` + the proposal/verdict/agent-call audit.
 
-    A pure read, like the rest of this module. ``raw_by_strategy`` is the pre-admission scanner
-    count, which lives in the pre-screen's process memory rather than the DB (it is not a decision,
-    so it is not journaled) — unwired, the raw row renders "unmeasured" rather than "0": a number we
-    did not measure and a number that was zero are different facts (D7).
+    A pure read, like the rest of this module. The pre-admission scanner count comes from
+    ``funnel_raw_counts`` (2026-08-21) in PREFERENCE to ``raw_by_strategy``: the latter is whatever
+    the live pre-screen happens to hold, and a mid-day restart zeroes it — the raw row then read
+    "unmeasured" for the whole day on 4 of the last 6 trade days before the table existed. The
+    in-process value stays as the FALLBACK for a day with no persisted rows (a pre-2026-08-21 day,
+    or a session whose counters never flushed), because a number we did not measure and a number
+    that was zero are different facts (D7) — with neither source, the raw row renders "unmeasured".
     """
     day = _day_prefix(d)
     try:
@@ -445,7 +469,9 @@ def build_funnel_summary(
             continue
         (forwarded_scores if n_forwarded else unforwarded).setdefault(sid, []).append(score)
 
-    raw_map = dict(raw_by_strategy or {})
+    # Persisted first, in-process second (2026-08-21): the table is the only source that survives a
+    # restart, and the review runs at 22:35 — hours after any bounce the day happened to take.
+    raw_map = read_funnel_raw_counts(conn, d) or dict(raw_by_strategy or {})
     slices = tuple(
         StrategyFunnel(
             strategy_id=sid,
@@ -768,8 +794,10 @@ class NightlyReviewJob:
         Owner sink for the ``DAILY_SUMMARY`` message. Unwired ⇒ the review still persists.
     funnel_raw:
         Optional ``day -> {strategy_id: raw candidate count}`` reader (WO-9), normally
-        ``SignalPreScreen.raw_counts``. Raw scanner output is the one funnel number that is not in
-        the DB — it is not a decision, so it is not journaled. Unwired ⇒ the row reads "unmeasured".
+        ``SignalPreScreen.raw_counts``. Since 2026-08-21 raw scanner output IS persisted
+        (``funnel_raw_counts``) and :func:`build_funnel_summary` prefers those rows — this reader is
+        the fallback for a day that has none, which is what makes an un-flushed or pre-2026-08-21
+        day still readable. Neither source ⇒ the row reads "unmeasured", never "0".
     """
 
     def __init__(

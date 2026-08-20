@@ -92,6 +92,16 @@ _LEN_PREFIX = struct.Struct(">I")
 #: Wire-protocol version we accept from the child's ``hello`` (ticker/main.py ``_PROTOCOL_VERSION``).
 PROTOCOL_VERSION = 1
 
+#: Floor for a believable ``exchange_timestamp`` (2026-08-20 investigation). A tick whose wire field
+#: is a zeroed/absent broker value arrives as Unix epoch 0 — kiteconnect turns it into
+#: ``datetime.fromtimestamp(0)``, the child ISO-serializes it, and it used to sail through every
+#: layer (the Tick validator only checks tz-awareness) into a ``date=1970-01-01`` tick partition;
+#: 103 such rows accumulated before they were quarantined by hand. That is a zeroed field, not a
+#: timestamp, so anything below this is treated exactly like a MISSING timestamp: the tick is
+#: dropped. The floor is far below any real data (this platform's ticks start 2026-08) and far
+#: above epoch, so it can only catch garbage.
+_MIN_PLAUSIBLE_EXCHANGE_TS = datetime(2020, 1, 1, 0, 0, tzinfo=IST)
+
 
 class OrderUpdateFrame(BaseModel):
     """A verbatim Kite order postback (A3) as forwarded by the mt-ticker child.
@@ -110,18 +120,25 @@ def _wire_decimal(value: Any) -> Decimal | None:
     return Decimal(str(value))
 
 
-def _wire_timestamp(value: Any) -> datetime | None:
+def _wire_timestamp(value: Any, symbol: str | None = None) -> datetime | None:
     """A wire ISO-8601 NAIVE-IST timestamp → tz-aware IST ``datetime`` (§3.2 convention).
 
     ticker/main.py forwards KiteTicker's naive IST wall time as an ISO string; we attach
     ``Asia/Kolkata`` here. A tz-aware value (defensive) is converted, not re-stamped.
+
+    A value older than :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` is treated as MISSING (None) — see that
+    constant: an epoch-0 wire field is not a timestamp, it is a zeroed field.
     """
     if value is None or value == "":
         return None
     ts = datetime.fromisoformat(value) if isinstance(value, str) else value
     if not isinstance(ts, datetime):
         return None
-    return ts.replace(tzinfo=IST) if ts.tzinfo is None else ts.astimezone(IST)
+    ts = ts.replace(tzinfo=IST) if ts.tzinfo is None else ts.astimezone(IST)
+    if ts < _MIN_PLAUSIBLE_EXCHANGE_TS:
+        _log.warning("tick_timestamp_implausible", symbol=symbol, parsed=ts.isoformat())
+        return None
+    return ts
 
 
 def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
@@ -131,13 +148,16 @@ def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
     ``Decimal`` exactly; ``volume_traded`` is the broker's CUMULATIVE day volume, verbatim (A13);
     ``exchange_timestamp`` is naive-IST ISO and becomes tz-aware IST. ``tradingsymbol`` is resolved
     by the caller (the wire carries only the instrument token). Raises ``ValueError`` on a frame
-    missing its load-bearing fields — the caller logs and drops it (never crashes the read loop).
+    missing its load-bearing fields — or carrying an implausible ``exchange_timestamp``
+    (:data:`_MIN_PLAUSIBLE_EXCHANGE_TS`) — and the caller logs and drops that single tick (never
+    crashes the read loop).
     """
     ltp = _wire_decimal(frame.get("last_price"))
     if ltp is None:
         raise ValueError("tick frame missing last_price")
-    exchange_ts = _wire_timestamp(frame.get("exchange_timestamp"))
+    exchange_ts = _wire_timestamp(frame.get("exchange_timestamp"), tradingsymbol)
     if exchange_ts is None:
+        # Missing OR implausible (epoch-0, see ``_MIN_PLAUSIBLE_EXCHANGE_TS``) — same drop path.
         raise ValueError("tick frame missing exchange_timestamp")
     token = frame.get("instrument_token")
     if token is None:

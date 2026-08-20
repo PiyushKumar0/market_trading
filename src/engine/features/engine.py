@@ -32,7 +32,8 @@ Feature set v2 (§6.2, ``feature_set_version = 2`` stamped on every row):
   fields = None) when today's watchlist has no row for the symbol. An in-distribution "no news"
   vector, never NaN/missing (§6.2, chaos case 20). Only ``sentiment_agg`` + ``catalyst_watchlist``
   are read here — never ``news``/``news_clusters`` directly (§2.4 single-seam discipline).
-* **Microstructure (intraday only):** opening-range stats, VWAP distance, relative volume,
+* **Microstructure (intraday only):** opening-range stats, VWAP distance, relative volume (both the
+  legacy full-day-denominator ``rel_volume`` and the time-of-day-normalized ``rel_volume_tod``),
   ATR(14) 1m, last-30-bar summary.
 
 Schema stability: every row carries the FULL key set (:data:`DAILY_FEATURE_KEYS` /
@@ -120,7 +121,7 @@ INTRADAY_FEATURE_KEYS: tuple[str, ...] = (
     "or_complete", "or_high", "or_low", "or_range_pct",
     "last_price", "cum_volume",
     "vwap", "vwap_dist",
-    "atr14_1m", "rel_volume",
+    "atr14_1m", "rel_volume", "rel_volume_tod",
     "last30_ret", "last30_range_pct", "last30_up_frac", "last30_volume",
     # sentiment / catalyst (§6.2 v2) — same block + fallback rules as DAILY_FEATURE_KEYS
     *ABSENT_NEWS_DEFAULTS,
@@ -128,6 +129,13 @@ INTRADAY_FEATURE_KEYS: tuple[str, ...] = (
 )
 
 _ANNUALIZATION = math.sqrt(252.0)   # NSE ~252 trading sessions/year (realized-vol convention)
+
+#: How many of the 20 completed sessions must have a usable cumulative volume at the same elapsed
+#: minute before ``rel_volume_tod`` is computed. A "median pace" built from three surviving sessions
+#: is noise wearing a baseline's clothes — below the floor the feature is None, never a guess (§6.2
+#: warm-up rule). Missing 1m history is ordinary: only the intraday tick watchlist carries minute
+#: bars, so a symbol swept daily can have 20 daily bars and no minute history at all.
+_REL_VOLUME_TOD_MIN_SESSIONS = 10
 
 
 # --------------------------------------------------------------------------- pure stat helpers
@@ -489,13 +497,66 @@ class FeatureEngine:
             feats["last30_volume"] = sum(volumes[-30:])
 
         # Relative volume: today's cumulative volume vs the 20d median DAILY volume (strictly
-        # before today — day d has no completed daily bar intraday).
-        hist = self._store.get_bars_1d(symbol, d - timedelta(days=90), d - timedelta(days=1))
-        daily_vols = [b.volume for b in hist][-20:]
-        if bars and len(daily_vols) == 20:
-            med = statistics.median(daily_vols)
+        # before today — day d has no completed daily bar intraday). The 20 sessions this read
+        # yields are ALSO the sessions rel_volume_tod normalizes against — one daily read, not two.
+        hist = self._store.get_bars_1d(symbol, d - timedelta(days=90), d - timedelta(days=1))[-20:]
+        if bars and len(hist) == 20:
+            med = statistics.median(b.volume for b in hist)
             feats["rel_volume"] = cum_volume / med if med > 0 else None
+            feats["rel_volume_tod"] = self._rel_volume_tod(
+                symbol, [b.d for b in hist], session_open, now, cum_volume,
+            )
         return feats
+
+    def _rel_volume_tod(
+        self,
+        symbol: str,
+        hist_days: list[date],
+        session_open: datetime,
+        now: datetime,
+        cum_volume: int,
+    ) -> float | None:
+        """Time-of-day-normalized relative volume: today's cumulative volume ÷ the MEDIAN cumulative
+        volume of the same 20 completed sessions through the SAME elapsed minutes after their open.
+
+        1.0 = a typical participation pace for this point of the session — the number a reader
+        actually means by "relative volume". ``rel_volume`` is kept unchanged beside it for
+        continuity, but its denominator is the median FULL-DAY volume, so it is structurally
+        ~0.02-0.3 for most of the session and reads as "nobody is trading this" on an ordinary tape
+        (the misreading WO-20's legend documents and this feature retires).
+
+        Returns None — never a guess — when the session has not opened yet or fewer than
+        :data:`_REL_VOLUME_TOD_MIN_SESSIONS` of the 20 sessions have a usable (>0) cumulative volume
+        at the cutoff. Each session's cutoff is its own 09:15 IST + elapsed and is EXCLUSIVE, so the
+        bar stamped exactly at the cutoff minute is out of both today's sum and every historical one.
+
+        Cost: ONE ranged ``get_bars_1m`` call spanning the whole window (grouped by date here), on
+        the same gate that already guards ``rel_volume`` — a symbol with no bars today never pays it.
+        """
+        elapsed = now - session_open
+        if elapsed <= timedelta(0):
+            return None
+        cutoffs = {day: self._clock.combine(day, time(9, 15)) + elapsed for day in hist_days}
+        hist_bars = self._store.get_bars_1m(
+            symbol, self._clock.combine(hist_days[0], time(9, 15)), cutoffs[hist_days[-1]],
+        )
+        cum_by_day: dict[date, int] = dict.fromkeys(hist_days, 0)
+        bars_by_day: set[date] = set()
+        for b in hist_bars:                      # the range spans whole sessions; clip each to ITS cutoff
+            day = b.ts_minute.date()
+            cutoff = cutoffs.get(day)
+            if cutoff is None or b.ts_minute >= cutoff:
+                continue
+            cum_by_day[day] += b.volume
+            bars_by_day.add(day)
+        valid = [cum_by_day[day] for day in hist_days if day in bars_by_day and cum_by_day[day] > 0]
+        if len(valid) < _REL_VOLUME_TOD_MIN_SESSIONS:
+            _log.debug(
+                "rel_volume_tod_insufficient_history",
+                symbol=symbol, valid_sessions=len(valid), required=_REL_VOLUME_TOD_MIN_SESSIONS,
+            )
+            return None
+        return cum_volume / statistics.median(valid)
 
 
 def _sector_means(
