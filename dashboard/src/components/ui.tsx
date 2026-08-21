@@ -1,17 +1,21 @@
 /** Shared primitives for the panels: a titled panel shell, a status chip, and small formatters. */
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 
 export type Tone = 'neutral' | 'ok' | 'warn' | 'bad' | 'info'
 
+/** `bodyRef` hands a panel its own scroll container (`.panel-body` is the bounded, scrolling box):
+ *  only the notifications transcript uses it, to keep the newest row in view. */
 export function Panel({
   title,
   aside,
   wide,
+  bodyRef,
   children,
 }: {
   title: string
   aside?: ReactNode
   wide?: boolean
+  bodyRef?: Ref<HTMLDivElement>
   children: ReactNode
 }) {
   return (
@@ -20,14 +24,28 @@ export function Panel({
         <span>{title}</span>
         {aside ? <span className="dim">{aside}</span> : null}
       </h2>
-      <div className="panel-body">{children}</div>
+      <div className="panel-body" ref={bodyRef}>
+        {children}
+      </div>
     </section>
   )
 }
 
-export function Chip({ k, v, tone = 'neutral' }: { k?: string; v: ReactNode; tone?: Tone }) {
+/** `title` is the native hover tooltip — for a chip whose detail (a delivery error, a timestamp) is
+ *  worth reading but not worth the row width. */
+export function Chip({
+  k,
+  v,
+  tone = 'neutral',
+  title,
+}: {
+  k?: string
+  v: ReactNode
+  tone?: Tone
+  title?: string
+}) {
   return (
-    <span className={tone === 'neutral' ? 'chip' : `chip ${tone}`}>
+    <span className={tone === 'neutral' ? 'chip' : `chip ${tone}`} title={title}>
       {k ? <span className="k">{k}</span> : null}
       <span>{v}</span>
     </span>

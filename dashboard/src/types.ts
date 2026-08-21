@@ -224,6 +224,30 @@ export interface WatchlistResponse {
   digest: DigestFreshness
 }
 
+// --------------------------------------------------------------------------- GET /notifications
+/** One row of the `notifications` journal (migration 0011) — every `TelegramBot.send` writes one
+ *  BEFORE the wire attempt, so `status` is the delivery truth, not an intent. */
+export interface NotificationRow {
+  notification_id: string
+  created_at: string | null
+  kind: string | null
+  severity: 'info' | 'warning' | 'critical' | null
+  title: string | null
+  body: string | null
+  status: 'pending' | 'delivered' | 'failed' | null
+  attempts: number | null
+  delivered_at: string | null
+  last_error: string | null
+  last_attempt_at: string | null
+}
+
+/** `d` is the IST day the engine resolved (today when the request omits `?d=`); rows are
+ *  CHRONOLOGICAL (created_at ASC) and this console never re-sorts them. */
+export interface NotificationsResponse {
+  d: string | null
+  rows: NotificationRow[]
+}
+
 // --------------------------------------------------------------------------- WS /ws/live
 /** Frames relayed off the bus by `WSHub.broadcast`, plus the `hello` handshake and 15 s `ping`. */
 export interface LiveFrame {

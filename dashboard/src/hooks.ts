@@ -9,6 +9,8 @@ import type {
   LiveEvent,
   LiveFrame,
   ModeResponse,
+  NotificationRow,
+  NotificationsResponse,
   PositionsResponse,
   RecommendationsResponse,
   Snapshot,
@@ -17,6 +19,11 @@ import type {
 } from './types'
 
 export const POLL_INTERVAL_MS = 10_000
+
+/** The notification journal is a day's transcript, not a live tape — a minute of latency on a row
+ *  that was already delivered to Telegram costs nothing, so it rides its own slow cycle instead of
+ *  adding a ninth route to the 10 s poll. */
+export const NOTIFICATIONS_INTERVAL_MS = 60_000
 
 /** Most recent frames kept in the events feed — a LAN console, not an archive (the audit trail is
  *  the engine's own tables). */
@@ -114,6 +121,77 @@ export function usePoll(token: string): {
   }, [token, nonce])
 
   return { snapshot, error, unauthorized, lastPollAt, refresh }
+}
+
+/** What one `/notifications` cycle leaves behind for the panel to render. */
+export interface NotificationsState {
+  d: string | null
+  rows: NotificationRow[]
+  loading: boolean
+  error: string | null
+  unauthorized: boolean
+  lastRefreshAt: string | null
+}
+
+/**
+ * Poll `GET /notifications` every 60 s for the engine's CURRENT IST day.
+ *
+ * `?d=` is deliberately omitted: the engine defaults to today off its own clock, so the day shown is
+ * the engine's, never the browser's — a browser-derived date would read as yesterday for anything
+ * before 05:30 IST on a UTC-set machine.
+ *
+ * A failed cycle KEEPS the rows already on screen (same posture as `usePoll`'s per-key merge): a
+ * blipped request must not blank the day's transcript. A 401 is surfaced separately — that is a token
+ * problem the owner has to act on, not a transient.
+ */
+export function useNotifications(token: string): NotificationsState {
+  const [state, setState] = useState<NotificationsState>({
+    d: null,
+    rows: [],
+    loading: true,
+    error: null,
+    unauthorized: false,
+    lastRefreshAt: null,
+  })
+
+  useEffect(() => {
+    if (!token) return
+    let cancelled = false
+
+    async function cycle() {
+      const at = () => new Date().toTimeString().slice(0, 8)
+      try {
+        const res = await apiGet<NotificationsResponse>('/notifications')
+        if (cancelled) return
+        setState({
+          d: res.d,
+          rows: res.rows ?? [],
+          loading: false,
+          error: null,
+          unauthorized: false,
+          lastRefreshAt: at(),
+        })
+      } catch (e) {
+        if (cancelled) return
+        setState((prev) => ({
+          ...prev,
+          loading: false,
+          error: e instanceof Error ? e.message : String(e),
+          unauthorized: e instanceof ApiError && e.status === 401,
+          lastRefreshAt: at(),
+        }))
+      }
+    }
+
+    void cycle()
+    const timer = window.setInterval(() => void cycle(), NOTIFICATIONS_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [token])
+
+  return state
 }
 
 /**

@@ -34,7 +34,14 @@
   integration filed. (e) implausible-timestamp ticks now drop under their own counter, one WARNING,
   no traceback. (f) news_analyst timeout 120→240s (4 timeouts/2 days, ~$0.28 each).
 - Filed: store-stall owner alert (instrumentation-only for now); GateContextTimeout landing on the
-  two position paths (contained; accepted unlanded); SPA integration of the notifications page.
+  two position paths (contained; accepted unlanded).
+- **(17:4x, owner-directed) notifications moved INTO the main dashboard:** `NotificationsPanel` as
+  the last full-width panel below news/catalyst (App.tsx:128), SPA idiom throughout (Panel shell,
+  Chip tones, usePoll-shaped 60 s hook, `mt_token` auth reused — one token covers everything),
+  chronological with sticky-to-newest scroll that releases while reading history. `tsc -b` strict
+  clean; rebuilt dist picked up by the LIVE engine with zero restart (static serving) — verified
+  new bundle `index-CsLo9kTO.js` served at "/". `/notifications-ui` stays as fallback (note: it
+  uses its own `mt_dashboard_token` key). Source committed; dist stays untracked per convention.
 
 ## 2026-08-21 (02:0x–03:1x) — WO-22 (four quality follow-ups) + WO-23 (two safety-notify fixes + tick lifecycle); mom verdict closed
 

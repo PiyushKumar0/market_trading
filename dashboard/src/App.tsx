@@ -11,12 +11,13 @@
  */
 import { useState } from 'react'
 import { ApiError, apiPost, getToken, setToken } from './api'
-import { useLiveEvents, usePoll } from './hooks'
+import { useLiveEvents, useNotifications, usePoll } from './hooks'
 import { BudgetPanel } from './components/BudgetPanel'
 import { DecisionsPanel } from './components/DecisionsPanel'
 import { EventsPanel } from './components/EventsPanel'
 import { HeadroomPanel } from './components/HeadroomPanel'
 import { NewsPanel } from './components/NewsPanel'
+import { NotificationsPanel } from './components/NotificationsPanel'
 import { PositionsPanel } from './components/PositionsPanel'
 import { RecommendationsPanel } from './components/RecommendationsPanel'
 import { StatusHeader } from './components/StatusHeader'
@@ -63,6 +64,7 @@ export default function App() {
   const [token, setTokenState] = useState(getToken())
   const { snapshot, error, unauthorized, lastPollAt, refresh } = usePoll(token)
   const { events, conn } = useLiveEvents(token)
+  const notifications = useNotifications(token)
 
   function saveToken(next: string) {
     setToken(next)
@@ -121,6 +123,9 @@ export default function App() {
         <TradeWindowForm data={snapshot.tradeWindow} onSubmit={setTradeWindow} />
         <EventsPanel events={events} conn={conn} />
         <NewsPanel data={snapshot.watchlist} />
+        {/* Last panel on purpose (owner-directed 2026-08-21: "at the bottom, below news/catalyst
+            watchlist") — the day's transcript is reference, read after the live state above it. */}
+        <NotificationsPanel {...notifications} />
       </div>
     </div>
   )

@@ -309,6 +309,69 @@ ul.checklist {
   overflow-wrap: anywhere;
 }
 
+/* Notifications transcript — the events feed's row rhythm, but wrapping: a notification carries a
+   human title and an expandable body, not a one-line JSON payload. */
+.notifs {
+  font-size: 12px;
+}
+
+.notifs .nt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 0;
+}
+
+.notifs .nt:last-child {
+  border-bottom: none;
+}
+
+.notifs .nt .at {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.notifs .nt .title {
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.notifs .nt .kind {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* Full-width row of its own: an expanded body must not squeeze the badges. */
+.notifs .nt details {
+  flex: 1 1 100%;
+}
+
+.notifs .nt summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.notifs .nt pre.body {
+  font: inherit;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+}
+
+/* The transport's own failure text, inside an expanded row. */
+.notifs .nt pre.body.err {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
 .err {
   color: var(--bad);
 }
