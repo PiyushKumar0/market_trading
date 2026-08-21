@@ -97,10 +97,21 @@ PROTOCOL_VERSION = 1
 #: ``datetime.fromtimestamp(0)``, the child ISO-serializes it, and it used to sail through every
 #: layer (the Tick validator only checks tz-awareness) into a ``date=1970-01-01`` tick partition;
 #: 103 such rows accumulated before they were quarantined by hand. That is a zeroed field, not a
-#: timestamp, so anything below this is treated exactly like a MISSING timestamp: the tick is
-#: dropped. The floor is far below any real data (this platform's ticks start 2026-08) and far
-#: above epoch, so it can only catch garbage.
+#: timestamp, so anything below this is dropped — via its OWN ``implausible_timestamp`` path
+#: (WO-24e, 2026-08-21), distinct from a genuinely MISSING timestamp, with a single WARNING and no
+#: exception traceback (pre-market ~16 not-yet-traded instruments send this on every resubscribe).
+#: The floor is far below any real data (this platform's ticks start 2026-08) and far above epoch,
+#: so it can only catch garbage.
 _MIN_PLAUSIBLE_EXCHANGE_TS = datetime(2020, 1, 1, 0, 0, tzinfo=IST)
+
+
+class _ImplausibleTimestamp(ValueError):
+    """A wire ``exchange_timestamp`` below :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` (epoch-0 zeroed
+    field) — NOT a missing one. Raised by :func:`_wire_timestamp`, propagated verbatim by
+    :func:`parse_tick_frame`, and caught in :meth:`TickerSupervisor._parse_tick` BEFORE the
+    generic parse-error handler so this working-as-designed drop gets its own reason/counter
+    (``implausible_timestamp``) and skips the ERROR-level traceback — the WARNING already fired
+    inside :func:`_wire_timestamp` (WO-24e, 2026-08-21)."""
 
 
 class OrderUpdateFrame(BaseModel):
@@ -126,8 +137,9 @@ def _wire_timestamp(value: Any, symbol: str | None = None) -> datetime | None:
     ticker/main.py forwards KiteTicker's naive IST wall time as an ISO string; we attach
     ``Asia/Kolkata`` here. A tz-aware value (defensive) is converted, not re-stamped.
 
-    A value older than :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` is treated as MISSING (None) — see that
-    constant: an epoch-0 wire field is not a timestamp, it is a zeroed field.
+    A value older than :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` raises :class:`_ImplausibleTimestamp`
+    (own drop path, WO-24e) — see that constant: an epoch-0 wire field is not a timestamp, it is a
+    zeroed field, not a MISSING one. A genuinely missing/empty value still returns None.
     """
     if value is None or value == "":
         return None
@@ -137,7 +149,7 @@ def _wire_timestamp(value: Any, symbol: str | None = None) -> datetime | None:
     ts = ts.replace(tzinfo=IST) if ts.tzinfo is None else ts.astimezone(IST)
     if ts < _MIN_PLAUSIBLE_EXCHANGE_TS:
         _log.warning("tick_timestamp_implausible", symbol=symbol, parsed=ts.isoformat())
-        return None
+        raise _ImplausibleTimestamp(f"tick exchange_timestamp implausible: {ts.isoformat()}")
     return ts
 
 
@@ -148,16 +160,16 @@ def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
     ``Decimal`` exactly; ``volume_traded`` is the broker's CUMULATIVE day volume, verbatim (A13);
     ``exchange_timestamp`` is naive-IST ISO and becomes tz-aware IST. ``tradingsymbol`` is resolved
     by the caller (the wire carries only the instrument token). Raises ``ValueError`` on a frame
-    missing its load-bearing fields — or carrying an implausible ``exchange_timestamp``
-    (:data:`_MIN_PLAUSIBLE_EXCHANGE_TS`) — and the caller logs and drops that single tick (never
-    crashes the read loop).
+    missing its load-bearing fields; raises :class:`_ImplausibleTimestamp` (a ``ValueError``
+    subclass, propagated verbatim from :func:`_wire_timestamp`) when ``exchange_timestamp`` is
+    below :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` (epoch-0) — its OWN drop path, distinct from a missing
+    field (WO-24e). Either way the caller drops that single tick and never crashes the read loop.
     """
     ltp = _wire_decimal(frame.get("last_price"))
     if ltp is None:
         raise ValueError("tick frame missing last_price")
-    exchange_ts = _wire_timestamp(frame.get("exchange_timestamp"), tradingsymbol)
+    exchange_ts = _wire_timestamp(frame.get("exchange_timestamp"), tradingsymbol)  # may raise _ImplausibleTimestamp
     if exchange_ts is None:
-        # Missing OR implausible (epoch-0, see ``_MIN_PLAUSIBLE_EXCHANGE_TS``) — same drop path.
         raise ValueError("tick frame missing exchange_timestamp")
     token = frame.get("instrument_token")
     if token is None:
@@ -730,6 +742,12 @@ class TickerSupervisor:
             return None
         try:
             return parse_tick_frame(frame, symbol)
+        except _ImplausibleTimestamp:
+            # Working-as-designed drop (epoch-0 zeroed field, e.g. a not-yet-traded instrument's
+            # pre-market resubscribe snapshot) — own reason/counter, no ERROR traceback: the
+            # WARNING already fired inside _wire_timestamp (WO-24e, 2026-08-21).
+            self._drop("implausible_timestamp")
+            return None
         except Exception:  # noqa: BLE001 - malformed frame is dropped, never crashes the read loop
             _log.exception("ticker_tick_parse_error", instrument_token=token)
             self._drop("parse_error")
@@ -891,8 +909,8 @@ class TickerSupervisor:
         """Return + reset the since-last-call feed counters for the periodic ``feed_stats`` line (R8).
 
         ``ticks_received`` counts tick frames off the wire; ``frames_dropped`` maps drop-reason →
-        count (unresolved_symbol / parse_error / unknown_frame / decode_error). Reset-on-read gives the
-        composition-root emitter clean per-interval deltas."""
+        count (unresolved_symbol / parse_error / implausible_timestamp / unknown_frame /
+        decode_error). Reset-on-read gives the composition-root emitter clean per-interval deltas."""
         snap: dict[str, Any] = {
             "ticks_received": self._ticks_received,
             "frames_dropped": dict(self._frames_dropped),

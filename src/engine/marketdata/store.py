@@ -736,6 +736,23 @@ class MarketStore:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def ping(self) -> bool:
+        """Cheapest possible proof that this store is ALIVE: take ``_lock``, run ``SELECT 1``, return.
+
+        WO-24b-prime (2026-08-21). The 09:56 freeze stalled every store-touching path at once —
+        feature snapshots, the ``warmup_refresh`` job, the gate-context read — for 14 minutes, and
+        afterwards the platform could not say WHICH shared resource had seized, because nothing was
+        probing any of them. This is that probe. It acquires the same ``_lock`` every other method
+        acquires and runs the smallest statement DuckDB has, so a call that does not RETURN means
+        precisely one thing: nobody can get the lock, or the connection itself is wedged.
+
+        Deliberately not wrapped in try/except — raising is a different and equally useful answer
+        from hanging, and the caller (:class:`~engine.ops.health.HealthMonitor`) distinguishes them.
+        """
+        with self._lock:
+            self._require_con().execute("SELECT 1").fetchone()
+        return True
+
     #: Scale ``instruments_daily.tick_size`` must carry (2026-07-21 lossless-hydrate incident). The
     #: ``DECIMAL(18,6)`` DDL applies to fresh DBs; a DB created under the old ``DECIMAL(10,2)`` is
     #: widened once by :meth:`_migrate_instruments_tick_scale` on the next open.
@@ -1795,6 +1812,14 @@ class MarketStore:
         """Run any MarketStore method (or callable) in a worker thread — the generic offload for
         calls without a dedicated wrapper below."""
         return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def aping(self) -> bool:
+        """:meth:`ping` off the loop — the liveness probe the health pulse awaits (WO-24b-prime).
+
+        Goes through the SAME ``asyncio.to_thread`` offload as every other wrapper here on purpose:
+        a probe that took a private thread would answer "the lock is free" while the path the engine
+        actually uses was starved, which is the one lie this watchdog must not be able to tell."""
+        return await asyncio.to_thread(self.ping)
 
     async def ainsert_bars_1m(self, bars: Sequence[Bar]) -> int:
         return await asyncio.to_thread(self.insert_bars_1m, bars)

@@ -1122,6 +1122,9 @@ async def run() -> int:
     health = HealthMonitor(
         clock, settings, ticker_supervisor=ticker, alert=alert,
         calendar=calendar, keep_awake=keep_awake,
+        # WO-24b-prime: the store stall watchdog rides the always-on health pulse — the one timer
+        # that kept beating through the 2026-08-21 freeze while every store path was wedged.
+        store=store,
     )
     scheduler = Scheduler(clock, calendar)
 

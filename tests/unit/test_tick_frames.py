@@ -25,6 +25,7 @@ from engine.broker.ticker_supervisor import (
     TICK_TOPIC,
     OrderUpdateFrame,
     TickerSupervisor,
+    _ImplausibleTimestamp,
     parse_tick_frame,
 )
 from engine.core.clock import IST
@@ -187,12 +188,15 @@ def test_parse_tick_frame_rejects_missing_load_bearing_fields():
 def test_parse_tick_frame_rejects_an_epoch_exchange_timestamp():
     """2026-08-20: a zeroed wire ``exchange_timestamp`` arrives as ``datetime.fromtimestamp(0)`` and
     used to parse cleanly into a tz-aware 1970 datetime — valid to the Tick model, and a
-    ``date=1970-01-01`` tick partition in the store. It is a zeroed field, not a timestamp, so it
-    takes the SAME path as a missing one (ValueError ⇒ the caller drops that single tick)."""
+    ``date=1970-01-01`` tick partition in the store. It is a zeroed field, not a timestamp.
+
+    WO-24e (2026-08-21): this is now its OWN drop path — ``_ImplausibleTimestamp``, a ``ValueError``
+    subclass — distinct from a genuinely MISSING field (still the plain ``ValueError`` below)."""
     epoch_wire = dt.datetime.fromtimestamp(0).isoformat()      # what ticker/main.py would forward
     broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": epoch_wire}
-    with pytest.raises(ValueError, match="exchange_timestamp"):
+    with pytest.raises(_ImplausibleTimestamp, match="exchange_timestamp"):
         parse_tick_frame(broken, "RELIANCE")
+    assert issubclass(_ImplausibleTimestamp, ValueError)        # callers that only catch ValueError still work
 
 
 @pytest.mark.parametrize(
@@ -210,8 +214,17 @@ def test_exchange_timestamp_plausibility_floor(wire: str, ok: bool):
             tzinfo=IST
         )
     else:
-        with pytest.raises(ValueError):
+        with pytest.raises(_ImplausibleTimestamp):               # WO-24e: own subclass, below the floor
             parse_tick_frame(frame, "X")
+
+
+def test_parse_tick_frame_missing_exchange_timestamp_is_plain_valueerror_not_implausible():
+    """WO-24e: an ABSENT ``exchange_timestamp`` is a different defect than epoch-0 — it stays the
+    plain ``ValueError`` (generic parse_error path), never ``_ImplausibleTimestamp``."""
+    broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": None}
+    with pytest.raises(ValueError, match="missing exchange_timestamp") as exc_info:
+        parse_tick_frame(broken, "X")
+    assert not isinstance(exc_info.value, _ImplausibleTimestamp)
 
 
 # --------------------------------------------------------------------------- hello / heartbeat

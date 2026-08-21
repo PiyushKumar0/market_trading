@@ -353,7 +353,9 @@ async def test_feed_stats_snapshot_counts_and_resets(clock):
 # returns ``datetime.fromtimestamp(0)``) sailed through every layer: the child ISO-serializes it,
 # ``_wire_timestamp`` IST-localizes it, and the Tick validator only checks tz-awareness — so it
 # landed in a ``date=1970-01-01`` tick partition (103 rows before they were quarantined by hand).
-# It is now treated exactly like a MISSING timestamp: dropped, one WARNING, stream untouched.
+# It is dropped: one WARNING, stream untouched. WO-24e (2026-08-21) split it onto its OWN drop
+# path/counter (``implausible_timestamp``, no ERROR traceback) — distinct from a genuinely missing
+# timestamp, which still logs+counts as ``parse_error`` via the generic exception handler.
 
 #: What ``datetime.fromtimestamp(0)`` produces on an IST box, as the child would serialize it.
 _EPOCH_IST = dt.datetime(1970, 1, 1, 5, 30, 0)
@@ -375,12 +377,15 @@ async def test_epoch_timestamp_tick_is_dropped_with_a_warning(clock, monkeypatch
         await asyncio.sleep(0)
 
     assert published == []                                     # never reaches BarBuilder/the store
-    assert sup.stats_snapshot()["frames_dropped"]["parse_error"] == 1
+    assert sup.stats_snapshot()["frames_dropped"] == {"implausible_timestamp": 1}  # own drop path (WO-24e)
     warns = [kw for (lvl, ev, kw) in rec.calls if ev == "tick_timestamp_implausible"]
     assert len(warns) == 1
     assert warns[0]["symbol"] == "R"
     assert warns[0]["parsed"].startswith("1970-01-01")
     assert all(lvl == "warning" for (lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible")
+    # WO-24e: no ERROR-level traceback for this working-as-designed drop — the WARNING is the ONLY log line.
+    assert [ev for (_lvl, ev, _kw) in rec.calls if ev == "ticker_tick_parse_error"] == []
+    assert len(rec.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -420,10 +425,37 @@ async def test_the_epoch_tick_never_stops_the_stream(clock):
 
     assert len(published) == 1 and published[0].ltp == Decimal("102.50")
     # Both frames were consumed off the wire (the drop is per-TICK, never a read-loop abort) and
-    # exactly one of them was dropped.
+    # exactly one of them was dropped, on its own counter (WO-24e).
     snap = sup.stats_snapshot()
     assert snap["ticks_received"] == 2
-    assert snap["frames_dropped"] == {"parse_error": 1}
+    assert snap["frames_dropped"] == {"implausible_timestamp": 1}
+
+
+@pytest.mark.asyncio
+async def test_missing_timestamp_tick_still_takes_the_generic_parse_error_path(clock, monkeypatch):
+    """A genuinely ABSENT ``exchange_timestamp`` is a different defect than epoch-0 (WO-24e split
+    them): it still raises the plain ``ValueError`` from :func:`parse_tick_frame`, still logs
+    ``ticker_tick_parse_error`` with a traceback, and still counts as ``parse_error`` — unchanged."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    bus = EventBus()
+    published: list = []
+    bus.subscribe(TICK_TOPIC, _collect(published))
+    sup = TickerSupervisor(_FakeSettings(), clock, bus, symbol_for_token=lambda t: "R")
+
+    frame = _tick_frame(token=1)
+    frame["exchange_timestamp"] = None
+    await sup._handle_frame(frame)
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert published == []
+    assert sup.stats_snapshot()["frames_dropped"] == {"parse_error": 1}     # NOT implausible_timestamp
+    exc_levels = [lvl for (lvl, ev, _kw) in rec.calls if ev == "ticker_tick_parse_error"]
+    assert exc_levels == ["exception"]                                      # ERROR-level w/ traceback, fired
+    assert [ev for (_lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible"] == []
 
 
 # --------------------------------------------------------- sleep/resume WARMING-wedge (2026-07-23 13:41)

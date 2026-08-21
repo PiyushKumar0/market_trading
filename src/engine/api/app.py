@@ -461,6 +461,44 @@ def create_app(
             out.append({"id": r["id"], "name": r["name"], "diff": diff, "actor": r["actor"], "at": r["at"]})
         return {"config_audit": out}
 
+    @app.get("/notifications")
+    async def notifications(_: Owner, d: str | None = None) -> dict[str, Any]:
+        """One IST day of owner notifications, CHRONOLOGICAL (WO-24d; owner-directed 2026-08-21).
+
+        Reads the ``notifications`` journal every ``TelegramBot.send`` writes to (migration 0011) —
+        the same rows the retry outbox drains, so the page can never show a "delivered" the wire never
+        saw. Ascending on purpose: this is the day's transcript, read top-to-bottom, not a
+        newest-first feed like ``/orders``.
+
+        ``d`` defaults to today off the app's clock. The day is a ``created_at`` RANGE rather than a
+        ``substr``/``LIKE`` match so the ``idx_notifications_created_at`` index is usable — every
+        timestamp is IST-stamped by :class:`~engine.core.clock.Clock`, and ISO-8601 with a fixed
+        ``+05:30`` offset sorts lexicographically, so the range IS the day. Read-only, on a
+        per-request cursor that is always closed."""
+        clock = app.state.clock
+        raw = d if d else (clock.today().isoformat() if clock is not None else None)
+        if raw is None:
+            return {"d": None, "rows": []}
+        try:
+            day, next_day = _day_bounds(raw)
+        except ValueError:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, f"invalid date {raw!r}; expected ISO YYYY-MM-DD"
+            ) from None
+        conn = app.state.conn
+        if conn is None:
+            return {"d": day, "rows": []}
+        cursor = conn.cursor()
+        try:
+            rows = cursor.execute(
+                "SELECT * FROM notifications WHERE created_at >= ? AND created_at < ? "
+                "ORDER BY created_at ASC",
+                (day, next_day),
+            ).fetchall()
+        finally:
+            cursor.close()
+        return {"d": day, "rows": [dict(r) for r in rows]}
+
     # ----------------------------------------------------------------- ad-hoc DB read (POST, §3.2.11)
     @app.post("/db/query")
     async def db_query(body: DbQueryBody, _: Owner) -> dict[str, Any]:
@@ -733,6 +771,9 @@ def create_app(
             hub.unregister(websocket)
 
     # ----------------------------------------------------------------- static dashboard (R8)
+    # ORDER MATTERS: the dashboard mount is a catch-all at "/", so every narrower route has to be
+    # registered before it or the SPA swallows the path (Starlette takes the FIRST matching route).
+    _add_notifications_ui_route(app)
     _mount_dashboard_if_present(app, settings)
 
     _log.info("api_app_created", host=settings.api.host, port=settings.api.port)
@@ -1050,12 +1091,67 @@ def _digest_block(
     }
 
 
+def _day_bounds(value: str) -> tuple[str, str]:
+    """``'2026-08-21'`` → ``('2026-08-21', '2026-08-22')``, the half-open range one IST day of
+    ISO-8601 ``created_at`` strings falls in. Raises ``ValueError`` on anything that is not an ISO
+    date, which the caller answers 422 — a malformed ``?d=`` must never silently return "no rows"."""
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    day = _date.fromisoformat(value)
+    return day.isoformat(), (day + _timedelta(days=1)).isoformat()
+
+
 def _parse_hhmm(value: str):
     """Parse an 'HH:MM' IST clock string into a ``datetime.time`` (owner input; not a trading 'now')."""
     from datetime import time as _time
 
     hh, mm = value.split(":")[:2]
     return _time(int(hh), int(mm))
+
+
+#: URL path of the WO-24d notifications page, served as an explicit ROUTE rather than as a candidate
+#: of the "/" dashboard mount below. Two reasons, both load-bearing:
+#:
+#: * ``<repo>/dashboard/dist`` already exists on the LAN box and is the FIRST candidate of that
+#:   mount, so ``web/dist`` would never be reached — and promoting it above the React build would
+#:   silently replace the whole dashboard with this one page. A separate path also keeps a
+#:   hand-written, dependency-free page out of reach of the next ``npm run build``.
+#: * A ``StaticFiles`` MOUNT here would answer ``/notifications-ui/`` but 404 the bare
+#:   ``/notifications-ui`` the owner actually types: Starlette only issues its add-the-slash redirect
+#:   when NO route matched, and the catch-all dashboard mount at "/" always matches. Registering the
+#:   real path (and its trailing-slash twin) sidesteps that entirely — the page is ONE self-contained
+#:   file, so a static-directory mount buys nothing anyway.
+_NOTIFICATIONS_UI_PATHS = ("/notifications-ui", "/notifications-ui/")
+
+
+def _add_notifications_ui_route(app: FastAPI) -> None:
+    """Serve the self-contained notifications page (``<repo>/web/dist/index.html``) at
+    :data:`_NOTIFICATIONS_UI_PATHS`. 404s when the file is absent, so a checkout without it still
+    runs the API — same degrade-quietly posture as the dashboard mount.
+
+    UNAUTHENTICATED, by necessity and by design: a browser navigating to a URL cannot attach an
+    ``Authorization`` header, and this app has no auth MIDDLEWARE — auth is per-route via
+    ``Depends(_require_owner)``, which this route deliberately does not carry. What ships here is
+    therefore an empty SHELL: it holds no state, prompts for the dashboard token itself, and every
+    byte it displays comes from bearer-authed ``GET /notifications`` (R10). Same posture as the
+    existing "/" dashboard mount — the LAN bind plus the token is the boundary."""
+    from pathlib import Path
+
+    from fastapi.responses import FileResponse
+
+    page: Path = repo_root() / "web" / _DASHBOARD_DIST_DIRNAME / "index.html"
+
+    async def notifications_ui() -> Any:
+        if not page.is_file():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "notifications page is not installed")
+        # no-store: the page is the owner's live view of an outage; a cached shell pointing at a
+        # stale token prompt is worse than a round trip on a LAN.
+        return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+    for path in _NOTIFICATIONS_UI_PATHS:
+        app.add_api_route(path, notifications_ui, methods=["GET"], include_in_schema=False)
+    _log.info("notifications_ui_route", path=str(page), url=_NOTIFICATIONS_UI_PATHS[0])
 
 
 def _mount_dashboard_if_present(app: FastAPI, settings: Settings) -> None:

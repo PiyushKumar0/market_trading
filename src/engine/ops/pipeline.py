@@ -166,6 +166,46 @@ FORWARD_DRAIN_MODES = ("paced", "immediate")
 #: 2026-08-14 arrival rate (66 candidates by 10:13 ⇒ ~2 per pacing interval at the open).
 FORWARD_PACING_MIN = 3
 
+#: Wall-clock ceiling on ONE gate-context build inside :meth:`RecommendationPipeline._gate_and_persist`
+#: (seconds). WO-24a, THE INCIDENT (2026-08-21 09:56:40): the platform's first-ever proposal reached
+#: ``_gate_and_persist``, and at that exact moment the market store stopped answering — the feature
+#: snapshots, the ``warmup_refresh`` interval job and this context read all stalled together and
+#: stayed stalled for 14 minutes, until a restart. The ``await`` on the builder had no deadline, so
+#: the drain tick sat inside it: the proposal row was already written, no verdict was ever written,
+#: no alert was ever sent and no later candidate was ever evaluated. A funnel FREEZE, not a failure.
+#: 90 s is orders of magnitude above a healthy build (a handful of point reads) and below the
+#: FORWARD_PACING_MIN cadence that drives the drain, so it can only fire on a real stall.
+_GATE_CONTEXT_DEADLINE_S = 90.0
+
+#: A proposal still carrying no verdict this many minutes after it was written is ORPHANED (WO-24c).
+#: Comfortably above ``_GATE_CONTEXT_DEADLINE_S`` so the timeout path's own alert always lands first
+#: and the sweep is the BACKSTOP (a crash between the two writes, a stall nothing else caught) rather
+#: than a duplicate of it.
+_ORPHAN_TTL_MIN = 10
+
+#: How often the orphan sweep actually reads the DB, minutes. The 60 s forward-drain tick invokes it
+#: on every pulse; this throttle decides which pulses do the work (WO-24c).
+_ORPHAN_SWEEP_INTERVAL_MIN = 5
+
+
+class GateContextTimeout(Exception):
+    """One gate-context build blew ``_GATE_CONTEXT_DEADLINE_S`` (WO-24a — see the constant).
+
+    Carries the symbol AND the ``proposal_id`` because :meth:`RecommendationPipeline._gate_and_persist`
+    has ALREADY written the proposal row by the time the build is awaited: the raise leaves a real
+    orphan behind, deliberately. Fabricating a verdict to tidy it up would put a decision the gate
+    never made into the audit trail (§3.4 — a verdict row is a claim that the gate judged this
+    proposal); :meth:`RecommendationPipeline.sweep_orphaned_proposals` is what closes the loop.
+    """
+
+    def __init__(self, symbol: str, proposal_id: str) -> None:
+        super().__init__(
+            f"gate context for {symbol} did not build within {_GATE_CONTEXT_DEADLINE_S:.0f}s "
+            f"(proposal {proposal_id} is persisted with no verdict)"
+        )
+        self.symbol = symbol
+        self.proposal_id = proposal_id
+
 
 @dataclass(frozen=True)
 class _AtrState:
@@ -627,6 +667,13 @@ class RecommendationPipeline:
         #: retry to ONE per candidate per day; rolled with the rest of the forward state in
         #: :meth:`_roll_forward_day`, so it can never outlive the queue it refers to.
         self._requeued_forwards: set[str] = set()
+        #: WO-24c: proposal_ids the orphan sweep has already alerted on, plus the day that set
+        #: belongs to and when the sweep last read the DB. Rolled daily by :meth:`_roll_orphan_day`
+        #: exactly like ``_requeued_forwards`` — a per-PROCESS memo, so a restart re-alerts a
+        #: standing orphan once (the right side to be wrong on: silence is what WO-24 is about).
+        self._orphans_alerted: set[str] = set()
+        self._orphans_alerted_day: date | None = None
+        self._last_orphan_sweep: datetime | None = None
         #: strategy_id -> today's observed scores, the population the forward quantile ranks in.
         self._day_scores: dict[str, list[float]] = {}
         #: WO-8 hot-path caches, all rolled together by :meth:`_roll_hot_path_day`.
@@ -919,6 +966,114 @@ class RecommendationPipeline:
         except Exception as exc:  # noqa: BLE001 - a telemetry write never costs the drain a tick
             _log.warning("funnel_raw_flush_failed", error=str(exc))
 
+    # -------------------------------------------------- WO-24c: the orphaned-proposal sweep
+    async def _sweep_orphans_if_due(self) -> None:
+        """Run :meth:`sweep_orphaned_proposals` at most once per ``_ORPHAN_SWEEP_INTERVAL_MIN``.
+
+        The drain tick pulses every 60 s; re-reading the proposals⋈verdicts join every minute buys
+        nothing that an orphan already ``_ORPHAN_TTL_MIN`` minutes old will not still prove five
+        minutes later. The anchor advances on every sweep that passes the guard — dispatched or
+        not — exactly like :attr:`_last_forward_drain`.
+        """
+        now = self._clock.now()
+        last = self._last_orphan_sweep
+        if last is not None and now - last < timedelta(minutes=_ORPHAN_SWEEP_INTERVAL_MIN):
+            return
+        self._last_orphan_sweep = now
+        await self.sweep_orphaned_proposals()
+
+    async def sweep_orphaned_proposals(self) -> int:
+        """Announce every proposal that has carried NO verdict for ``_ORPHAN_TTL_MIN`` minutes.
+
+        WO-24c — the backstop half of the 2026-08-21 funnel freeze. :meth:`_gate_and_persist`
+        writes the proposal row and only THEN builds the gate context, so anything that kills the
+        path between those two points (the WO-24a store stall, a crash, a killed process) strands a
+        proposal that no measure the platform has would ever mention again: it is not a decline, not
+        an agent failure, not a rejection — it is a row with nothing attached to it. This sweep is
+        that missing measure.
+
+        Today's real orphan ``01M0H8ZXM3PYNAVXF54A5TDGV0`` — the platform's FIRST-EVER proposal,
+        stranded at 09:56:40 on 2026-08-21 — will be caught by the first live sweep after this
+        ships. That is expected and correct, not a false positive: the incident really did leave it
+        there, and the point of the sweep is that such a row can never again sit unnoticed.
+
+        Each ``proposal_id`` is announced ONCE per process-day (:attr:`_orphans_alerted`, rolled by
+        :meth:`_roll_orphan_day`): an orphan that is still an orphan tomorrow is still a problem, so
+        it re-announces once a day rather than either repeating every five minutes or going silent
+        forever. Returns how many NEW orphans were announced. Never raises — a watchdog that can
+        kill the tick it rides on is not a watchdog.
+        """
+        now = self._clock.now()
+        self._roll_orphan_day(self._clock.today())
+        cutoff = now - timedelta(minutes=_ORPHAN_TTL_MIN)
+        try:
+            rows = self._conn.execute(
+                "SELECT p.proposal_id AS proposal_id, p.action AS action, "
+                "p.created_at AS created_at "
+                "FROM proposals p LEFT JOIN verdicts v ON v.proposal_id = p.proposal_id "
+                "WHERE v.verdict_id IS NULL AND p.created_at < ? "
+                "ORDER BY p.created_at",
+                (cutoff.isoformat(),),
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - the watchdog never costs the drain a tick
+            _log.warning("orphan_sweep_failed", error=str(exc))
+            return 0
+        announced = 0
+        for row in rows:
+            proposal_id = str(row["proposal_id"])
+            if proposal_id in self._orphans_alerted:
+                continue
+            # Memoised BEFORE the send, so a failed notification cannot turn one orphan into an
+            # alert on every subsequent sweep (``_send`` is best-effort by design).
+            self._orphans_alerted.add(proposal_id)
+            announced += 1
+            action = str(row["action"] or "")
+            age_min = self._orphan_age_min(row["created_at"], now)
+            _log.error("proposal_orphaned", proposal_id=proposal_id, action=action,
+                       age_min=age_min, created_at=str(row["created_at"]))
+            await self._send(CatalogMessage(
+                kind=MessageKind.LIMIT_BREACH,
+                title=f"Proposal orphaned: no gate verdict ({action or 'unknown'})",
+                body=(
+                    f"Proposal {proposal_id} ({action or 'unknown action'}) has been persisted for "
+                    f"{'?' if age_min is None else age_min} minutes with no verdict row. The gate "
+                    "never finished judging it, so nothing was recommended and nothing was "
+                    "decided — the proposal is evidence of a funnel stall, not of a rejection "
+                    "(WO-24c, after the 2026-08-21 gate-context freeze). No verdict is invented "
+                    "for it; check the log around its created_at."
+                ),
+                severity="warning",
+                data={
+                    "rule_id": "proposal_orphaned",
+                    "proposal_id": proposal_id,
+                    "action": action,
+                    "age_min": str(age_min),
+                    "value": f"{age_min} min with no verdict",
+                    "limit": f"a proposal must reach a verdict within {_ORPHAN_TTL_MIN} min",
+                },
+            ))
+        return announced
+
+    def _roll_orphan_day(self, d: date) -> None:
+        """Drop the announced-orphan memo on a date change — the sibling of the
+        ``_requeued_forwards`` clear in :meth:`_roll_forward_day`, and what bounds this set."""
+        if self._orphans_alerted_day == d:
+            return
+        self._orphans_alerted_day = d
+        self._orphans_alerted.clear()
+
+    @staticmethod
+    def _orphan_age_min(created_at: Any, now: datetime) -> float | None:
+        """Minutes since ``created_at`` (an ISO string from the row), or None if it will not parse.
+        An unparseable timestamp still gets an alert — the orphan is the finding, not its age."""
+        try:
+            created = datetime.fromisoformat(str(created_at))
+        except (TypeError, ValueError):
+            return None
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=now.tzinfo)
+        return round((now - created).total_seconds() / 60.0, 1)
+
     # ------------------------------------------------------------ §5.2(a) paced drain (2026-08-14)
     async def drain_forward_queue(self) -> bool:
         """Spend at most one analyst slot, at most once per ``FORWARD_PACING_MIN`` minutes.
@@ -936,9 +1091,12 @@ class RecommendationPipeline:
 
         The tick ALSO carries the pre-screen's raw-counter flush (2026-08-21) — run before the
         drain-mode check, so the ``immediate`` rollback keeps its telemetry. See
-        :meth:`_flush_funnel_raw`.
+        :meth:`_flush_funnel_raw`. The WO-24c orphan sweep rides the same tick on the same terms
+        (see :meth:`_sweep_orphans_if_due`): both are watchdogs on the funnel, and a funnel that has
+        stopped moving is exactly when they have to still run.
         """
         self._flush_funnel_raw()
+        await self._sweep_orphans_if_due()
         if self._drain_mode != "paced":
             return False
         now = self._clock.now()
@@ -1247,10 +1405,20 @@ class RecommendationPipeline:
                 ))
                 return
 
-        verdict, gate_ctx = await self._gate_and_persist(
-            payload, candidate.symbol, str(getattr(payload, "side", candidate.side)),
-            candidate.style, d,
-        )
+        try:
+            verdict, gate_ctx = await self._gate_and_persist(
+                payload, candidate.symbol, str(getattr(payload, "side", candidate.side)),
+                candidate.style, d,
+            )
+        except GateContextTimeout as exc:
+            # WO-24a: handled HERE, deliberately not left to _evaluate_forward_guarded. That guard
+            # re-queues a blown-up evaluation at the FRONT of the queue (WO-20d), which is exactly
+            # the wrong move for this failure: the store is the thing that is stalled, so the retry
+            # would take the next slot, hit the same dead store and spend a second analyst call to
+            # learn nothing. Re-arming the day slot instead hands the pair back to the prescreen, so
+            # it re-publishes on its own terms once the store answers again.
+            await self._handle_gate_context_timeout(candidate, exc)
+            return
         if verdict.verdict == "owner_approval_required":
             await self._request_owner_approval(payload, verdict)
             return
@@ -1282,6 +1450,48 @@ class RecommendationPipeline:
         live_ltp = getattr(gate_ctx, "ltp", None)
         await self._send(catalog.recommendation_message(
             rec, ltp=_dec(live_ltp) if live_ltp is not None else None,
+        ))
+
+    async def _handle_gate_context_timeout(
+        self, candidate: SignalCandidate, exc: GateContextTimeout
+    ) -> None:
+        """The WO-24a landing: say it loudly, give the slot back, and leave the orphan alone.
+
+        No verdict is fabricated. The proposal row survives with nothing attached to it, and
+        :meth:`sweep_orphaned_proposals` is the thing that notices — an invented ``reject`` here
+        would read, forever after, as a decision the gate made (§3.4). Never raises: it IS the
+        failure path, and the drain tick has to survive to reach the next candidate.
+        """
+        _log.error(
+            "gate_context_timeout", signal_id=candidate.signal_id, symbol=candidate.symbol,
+            strategy_id=candidate.strategy_id, proposal_id=exc.proposal_id,
+            deadline_s=_GATE_CONTEXT_DEADLINE_S,
+        )
+        # Same treatment as an analyst INFRASTRUCTURE failure (2026-07-29): the candidate was never
+        # judged, so its once-per-day publication goes back to the prescreen.
+        self._rearm_slot(candidate)
+        await self._send(CatalogMessage(
+            kind=MessageKind.LIMIT_BREACH,
+            title=f"Gate context timed out ({candidate.symbol})",
+            body=(
+                f"The gate context for {candidate.symbol} did not build within "
+                f"{_GATE_CONTEXT_DEADLINE_S:.0f}s, so candidate {candidate.signal_id} was never "
+                f"judged and nothing was recommended (D7). Proposal {exc.proposal_id} is persisted "
+                "with no verdict — the market store is the suspect (WO-24a, 2026-08-21). The "
+                f"({candidate.symbol}, {candidate.strategy_id}) day slot has been handed back so "
+                "the setup can re-publish; deterministic exits, stops and square-offs are "
+                "unaffected (R1)."
+            ),
+            severity="critical",
+            data={
+                "rule_id": "gate_context_timeout",
+                "signal_id": candidate.signal_id,
+                "symbol": candidate.symbol,
+                "strategy_id": candidate.strategy_id,
+                "proposal_id": exc.proposal_id,
+                "value": f"{_GATE_CONTEXT_DEADLINE_S:.0f}s deadline exceeded",
+                "limit": "a gate-context build must answer within the deadline",
+            },
         ))
 
     # ================================================================== recommendation assembly
@@ -1539,9 +1749,20 @@ class RecommendationPipeline:
         Both rows exist whatever the verdict — a rejection IS the audit trail (§3.4). The context is
         returned alongside so a caller can price off the SAME facts the gate judged on. Publishing
         the verdict on the bus is the caller's wiring; this class holds no bus handle.
+
+        WO-24a: the context build — the ONLY store-touching await on this path — carries a deadline.
+        Nothing else here is wrapped: :meth:`_persist_proposal`/:meth:`_persist_verdict` are local
+        SQLite writes and ``self._gate.evaluate`` is pure CPU, so a stall can only ever be the build.
+        Blowing it raises :class:`GateContextTimeout` and leaves the proposal row orphaned on
+        purpose (see that class); the caller decides what the trigger path does about it.
         """
         self._persist_proposal(action)
-        gate_ctx = await self._ctx_builder.build(symbol, side, style, d)
+        try:
+            gate_ctx = await asyncio.wait_for(
+                self._ctx_builder.build(symbol, side, style, d), _GATE_CONTEXT_DEADLINE_S
+            )
+        except TimeoutError as exc:      # 3.12: asyncio.TimeoutError IS the builtin TimeoutError
+            raise GateContextTimeout(symbol, str(action.proposal_id)) from exc
         verdict = self._gate.evaluate(action, gate_ctx)
         self._persist_verdict(verdict)
         return verdict, gate_ctx
@@ -2015,6 +2236,7 @@ __all__ = [
     "STOP_PROXIMITY_ATR_MULT",
     "TIME_STOP_THESIS",
     "TTL_INTRADAY_MIN",
+    "GateContextTimeout",
     "NotifyFn",
     "RecommendationBook",
     "RecommendationPipeline",

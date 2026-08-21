@@ -38,18 +38,20 @@ challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()`
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import secrets as _secrets
 import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Protocol
 
 from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from ulid import ULID
 
 from engine.core.clock import Clock
 from engine.core.db import transaction
@@ -59,6 +61,7 @@ from engine.core.log import get_logger
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.notify import catalog
+from engine.notify.catalog import _SEVERITY_GLYPH, MessageKind
 from engine.risk.causes import CAUSE_OWNER_PAUSE, CAUSE_REJECTION_STORM
 from engine.risk.events import (
     TOPIC_KILL_STATE,
@@ -99,6 +102,56 @@ _START_TIMEOUT_S = 45.0
 _TELEGRAM_MAX_CHARS = 4096
 _SPLIT_CHUNK_CHARS = 4000
 _SPLIT_MAX_PARTS = 5
+
+# --------------------------------------------------------------------- notification journal (WO-24d)
+#: 2026-08-21: a failed send used to be a LOG LINE AND NOTHING ELSE — 223 ConnectTimeouts on 08-20,
+#: 186 on 08-19, and a recommendation fired inside one of those windows was simply gone. Every
+#: outbound message is now journalled to ``notifications`` (migration 0011) BEFORE the wire attempt,
+#: which makes one table serve two jobs: the retry OUTBOX drained below, and the owner dashboard's
+#: chronological view of the day. See ``0011_notifications.sql`` for the state machine.
+
+#: Drainer cadence and per-pass batch. FIVE oldest-first rows per pass, re-attempted SEQUENTIALLY, so
+#: a recovered link replays the backlog in the order the engine raised it instead of flooding the
+#: owner's chat with an out-of-order burst.
+_DRAIN_INTERVAL_S = 30.0
+_DRAIN_BATCH = 5
+
+#: Per-row exponential backoff: ``min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * 2**(attempts-1))`` seconds
+#: after the row's last attempt. A row whose next-attempt time has not arrived is SKIPPED (it keeps
+#: its place in the queue) rather than retried — the point of the outbox is to survive a multi-hour
+#: outage without hammering a dead link once every 30 s per row.
+_BACKOFF_BASE_S = 30
+_BACKOFF_MAX_S = 300
+
+#: How long a NON-critical row may stay ``pending`` before the drainer gives up on it (``failed``).
+#: Six hours is deliberately longer than any single session's usefulness window: past it a feed-stale
+#: or budget-tier alert is history, not news. Critical rows are exempt — see :data:`CRITICAL_KINDS`.
+_EXPIRY_H = 6
+
+#: Consecutive drainer failures before ONE loud ``telegram_outage`` line is logged. Reset by any
+#: successful delivery, so a long outage pages once per episode instead of twice a minute.
+_OUTAGE_STREAK = 10
+
+#: Bound on the journalled ``last_error`` label (exception class + first line of its message): enough
+#: to tell a ConnectTimeout from a BadRequest at a glance, bounded so a stack-y message cannot bloat
+#: the row the dashboard renders.
+_ERROR_LABEL_CHARS = 200
+
+#: Kinds that NEVER expire, regardless of their catalog severity — the messages whose late delivery
+#: still beats no delivery. ``RECOMMENDATION`` is the load-bearing member: its catalog severity is
+#: ``info`` (it is not an alarm), yet losing one is losing the entire product (§3.6). The rest are the
+#: login and freeze/halt kinds: without the login nothing trades at all (R6), and a freeze/kill the
+#: owner never heard about is a position they think is armed when it is not.
+CRITICAL_KINDS: frozenset[str] = frozenset(
+    {
+        MessageKind.RECOMMENDATION.value,
+        MessageKind.REC_FILL_SUSPECTED.value,
+        MessageKind.LOGIN_PROMPT.value,
+        MessageKind.KILL.value,
+        MessageKind.WARMUP_FROZEN.value,
+        MessageKind.DATA_FRESHNESS_FROZEN.value,
+    }
+)
 
 # How long a pending two-step challenge stays valid before it must be re-issued (R10). A short TTL
 # keeps a stale confirm phrase from authorising a destructive action long after the owner asked.
@@ -292,6 +345,11 @@ class TelegramBot:
         self._bus_attached = False
         # At most one challenge is pending at a time — a new destructive command supersedes the old.
         self._pending: _PendingChallenge | None = None
+        #: WO-24d outbox drainer: owned by this bot, started with polling, cancelled by stop().
+        self._drain_task: asyncio.Task[None] | None = None
+        #: Consecutive FAILED drainer attempts, and whether this streak has already been logged loud.
+        self._drain_fail_streak = 0
+        self._outage_logged = False
 
     def set_reco_book(self, book: RecoBook) -> None:
         """Late-wire the recommendation book (built after the bot in the composition root)."""
@@ -329,6 +387,9 @@ class TelegramBot:
             await self._teardown_app(app)
             return
         self._app = app
+        # The outbox drainer starts with polling and only on a SUCCESSFUL start: a disabled bot has no
+        # transport to drain to, and its journal rows simply wait for the next process (WO-24d).
+        self._start_outbox_drainer()
         _log.info("telegram_started", owner_chat_id=self._owner_chat_id)
 
     async def _start_network(self, app: Application) -> None:
@@ -357,7 +418,12 @@ class TelegramBot:
 
     async def stop(self) -> None:
         """Stop polling and shut the application down cleanly — including a partially-started app
-        left behind by a degraded start() (its poller may still be live; 2026-08-07)."""
+        left behind by a degraded start() (its poller may still be live; 2026-08-07).
+
+        The outbox drainer is cancelled FIRST and unconditionally (before the ``app is None`` early
+        return): a background task that outlives the connection it queries would raise into a closed
+        SQLite handle during the composition root's teardown (§2.6 shutdown order)."""
+        await self._stop_outbox_drainer()
         failed, self._failed_app = self._failed_app, None
         if failed is not None:
             await self._teardown_app(failed)
@@ -398,29 +464,66 @@ class TelegramBot:
         string — the catalog model itself lands in Phase 2 (§8). Outbound never blocks the engine: a
         send failure is logged, not raised, so an alert path can never take down a caller (R8).
 
+        JOURNAL FIRST (WO-24d, 2026-08-21): the row lands in ``notifications`` BEFORE the wire is
+        touched, so a message raised during a Telegram outage — or before the transport has even
+        started — exists on the platform regardless of what the network does next. That row is both
+        the retry outbox (:meth:`_drain_outbox_once`) and what ``GET /notifications`` shows the owner.
+        Journalling is best-effort in the other direction too: with no state store wired, or on a
+        write failure, the send proceeds exactly as it did before (see :meth:`_journal_insert`).
+
         LONG-MESSAGE GUARD (2026-08-20): Telegram hard-rejects anything over
         :data:`_TELEGRAM_MAX_CHARS` with BadRequest "Message is too long" — two owner alerts died to
-        exactly that today. Text at or under the cap ships unchanged, one send. Over the cap it is
-        split (:func:`_split_message`) into numbered parts and sent sequentially, each through
+        exactly that. Text at or under the cap ships unchanged, one send. Over the cap it is split
+        (:func:`_split_message`) into numbered parts and sent sequentially, each through
         :meth:`_send_text` — so every part inherits the same bounded-timeout / logged-not-raised
-        handling as a normal send. An alert must degrade, never vanish silently.
+        handling as a normal send. The split is a TRANSPORT detail: one notification is ONE journal
+        row however many parts the wire needed.
+        """
+        text = self._render(msg)
+        notification_id = self._journal_insert(msg, text)
+        await self._deliver(text, notification_id)
+
+    async def _deliver(self, text: str, notification_id: str | None) -> bool:
+        """Put one already-journalled message on the wire and stamp its row with the verdict.
+
+        Returns True when every part reached Telegram. The part loop STOPS at the first failure: the
+        retry re-sends the message from part 1, so shipping parts 3..5 after part 2 died would only
+        duplicate them later — and a partial message is worse reading than a whole one that arrives
+        late. A ``None`` transport (bot disabled / not started yet) is a first-class failure here,
+        not a silent drop: the row stays ``pending`` and the drainer picks it up once polling is up.
         """
         app = self._app
         if app is None:
             _log.warning("telegram_send_dropped", reason="not_started")
-            return
-        text = self._render(msg)
+            self._journal_attempt_failed(notification_id, "NotStarted: telegram transport not started")
+            return False
         if len(text) <= _TELEGRAM_MAX_CHARS:
-            await self._send_text(app, text)
-            return
-        parts = _split_message(text)
-        _log.info("telegram_message_split", parts=len(parts), total_chars=len(text))
+            parts = [text]
+        else:
+            parts = _split_message(text)
+            _log.info("telegram_message_split", parts=len(parts), total_chars=len(text))
+        error: str | None = None
         for part in parts:
-            await self._send_text(app, part)
+            error = await self._send_text(app, part)
+            if error is not None:
+                break
+        if error is not None:
+            self._journal_attempt_failed(notification_id, error)
+            return False
+        self._journal_delivered(notification_id)
+        # Any success ends an outage streak, whether it came from a live send or a drainer retry.
+        self._drain_fail_streak = 0
+        self._outage_logged = False
+        return True
 
-    async def _send_text(self, app: Application, text: str) -> None:
+    async def _send_text(self, app: Application, text: str) -> str | None:
         """Put one already-bounded string on the wire (the choke point every outbound send/part
-        passes through). Best-effort: a hang or failure is logged, never raised (R8)."""
+        passes through). Best-effort: a hang or failure is logged, never raised (R8).
+
+        RETURNS the failure verdict rather than swallowing it whole (WO-24d): ``None`` on success, or
+        a bounded ``"ExcClass: first line"`` label for the journal's ``last_error``. The caller still
+        never sees an exception — the outbox needs to know *whether* a send worked, and the log line
+        alone could not tell it."""
         try:
             # BOUNDED (2026-08-07): a hanging send wedged the boot between catch_up_complete and
             # scheduler start. Alerts are best-effort — a bounded drop beats an unbounded wait.
@@ -430,8 +533,185 @@ class TelegramBot:
             )
         except TimeoutError:
             _log.error("telegram_send_timeout", timeout_s=_SEND_TIMEOUT_S)
-        except Exception:  # noqa: BLE001 - alerting must never crash the caller (R8)
+            return f"TimeoutError: send exceeded {_SEND_TIMEOUT_S:g}s"
+        except Exception as exc:  # noqa: BLE001 - alerting must never crash the caller (R8)
             _log.exception("telegram_send_failed")
+            return _error_label(exc)
+        return None
+
+    # ------------------------------------------------------------------ notification journal (WO-24d)
+    def _journal_insert(self, msg: Any, text: str) -> str | None:
+        """Write the ``pending`` row for one outbound message; return its id (None if not journalled).
+
+        EVERY journal write in this class is guarded the same way: a broken/locked/missing store logs
+        ``notification_journal_failed`` at WARNING and returns, because the notification itself is
+        still worth attempting. The journal exists to stop messages being lost — it must never become
+        the thing that loses them.
+        """
+        conn = self._conn
+        if conn is None:
+            return None
+        try:
+            kind, severity, title, body = _journal_fields(msg, text)
+            notification_id = str(ULID())
+            now = self._clock.now().isoformat()
+            with transaction(conn):
+                conn.execute(
+                    "INSERT INTO notifications (notification_id, created_at, kind, severity, title, "
+                    "body, status, attempts) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0)",
+                    (notification_id, now, kind, severity, title, body),
+                )
+            return notification_id
+        except Exception as exc:  # noqa: BLE001 - journalling must never block a send (R8)
+            _log.warning("notification_journal_failed", op="insert", error=_error_label(exc))
+            return None
+
+    def _journal_delivered(self, notification_id: str | None) -> None:
+        """Stamp a row delivered. ``attempts`` counts the attempt that SUCCEEDED too, so the dashboard
+        can show "delivered on attempt 4" rather than implying it went first time."""
+        if notification_id is None or self._conn is None:
+            return
+        try:
+            now = self._clock.now().isoformat()
+            with transaction(self._conn):
+                self._conn.execute(
+                    "UPDATE notifications SET status='delivered', attempts=attempts+1, "
+                    "delivered_at=?, last_attempt_at=?, last_error=NULL WHERE notification_id=?",
+                    (now, now, notification_id),
+                )
+        except Exception as exc:  # noqa: BLE001 - see _journal_insert
+            _log.warning("notification_journal_failed", op="delivered", error=_error_label(exc))
+
+    def _journal_attempt_failed(self, notification_id: str | None, error: str) -> None:
+        """Count a failed attempt against a row and record why. Status is left ``pending`` on purpose —
+        only expiry (:meth:`_expire_if_due`) may move a row to ``failed``. The ``status='pending'``
+        guard makes the write a no-op on a row some other path already resolved."""
+        if notification_id is None or self._conn is None:
+            return
+        try:
+            now = self._clock.now().isoformat()
+            with transaction(self._conn):
+                self._conn.execute(
+                    "UPDATE notifications SET attempts=attempts+1, last_attempt_at=?, last_error=? "
+                    "WHERE notification_id=? AND status='pending'",
+                    (now, error[:_ERROR_LABEL_CHARS], notification_id),
+                )
+        except Exception as exc:  # noqa: BLE001 - see _journal_insert
+            _log.warning("notification_journal_failed", op="attempt_failed", error=_error_label(exc))
+
+    # ------------------------------------------------------------------ outbox drainer (WO-24d)
+    def _start_outbox_drainer(self) -> None:
+        """Start the background drain loop (idempotent). No state store ⇒ no outbox ⇒ no task."""
+        if self._conn is None:
+            _log.info("telegram_outbox_disabled", reason="no_state_store")
+            return
+        if self._drain_task is not None and not self._drain_task.done():
+            return
+        self._drain_task = asyncio.create_task(self._drain_outbox_forever())
+        _log.info("telegram_outbox_started", interval_s=_DRAIN_INTERVAL_S, batch=_DRAIN_BATCH)
+
+    async def _stop_outbox_drainer(self) -> None:
+        """Cancel + await the drain loop. Awaiting matters: the task may be mid-``execute`` on the
+        shared connection, and the composition root closes that connection right after ``stop()``."""
+        task, self._drain_task = self._drain_task, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        _log.info("telegram_outbox_stopped")
+
+    async def _drain_outbox_forever(self) -> None:
+        """Re-attempt pending journal rows every :data:`_DRAIN_INTERVAL_S` until cancelled.
+
+        The loop itself is unkillable by a bad pass: any exception out of one drain is logged and the
+        loop continues, because the retry mechanism dying silently would restore exactly the failure
+        mode (a lost notification nobody knows about) this whole feature exists to remove."""
+        while True:
+            try:
+                await asyncio.sleep(_DRAIN_INTERVAL_S)
+                await self._drain_outbox_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one bad pass must never end the drainer
+                _log.exception("telegram_outbox_drain_failed")
+
+    async def _drain_outbox_once(self) -> None:
+        """One drain pass: expire what is stale, retry what is due, in ``created_at`` order.
+
+        Batch-bounded and oldest-first, so a recovered link replays a backlog in the order the engine
+        raised it. A row still inside its backoff window is SKIPPED and keeps its place — it is not
+        swapped for a younger row, which would reorder the owner's chat."""
+        conn = self._conn
+        if conn is None or self._app is None:
+            return
+        now = self._clock.now()
+        rows = conn.execute(
+            "SELECT notification_id, created_at, kind, severity, title, body, attempts, "
+            "last_attempt_at FROM notifications WHERE status='pending' "
+            "ORDER BY created_at ASC LIMIT ?",
+            (_DRAIN_BATCH,),
+        ).fetchall()
+        for row in rows:
+            if self._expire_if_due(row, now):
+                continue
+            if not _backoff_elapsed(row, now):
+                continue
+            text = _wire_text(row["severity"], row["title"], row["body"])
+            delivered = await self._deliver(text, row["notification_id"])
+            if delivered:
+                _log.info(
+                    "notification_retry_delivered",
+                    notification_id=row["notification_id"],
+                    kind=row["kind"],
+                    attempts=(row["attempts"] or 0) + 1,
+                )
+            else:
+                self._note_drain_failure()
+
+    def _expire_if_due(self, row: Any, now: datetime) -> bool:
+        """Flip a NON-critical row that has been pending past :data:`_EXPIRY_H` to ``failed``.
+
+        Critical rows never expire (see :data:`CRITICAL_KINDS`): a recommendation or a kill alert is
+        worth delivering late, and the alternative — deleting it on a timer — is the silent loss this
+        replaced. They retry until delivered or the process ends."""
+        if _is_critical(row["severity"], row["kind"]):
+            return False
+        created = _parse_iso(row["created_at"])
+        if created is None or (now - created) < timedelta(hours=_EXPIRY_H):
+            return False
+        try:
+            with transaction(self._conn):
+                self._conn.execute(
+                    "UPDATE notifications SET status='failed' "
+                    "WHERE notification_id=? AND status='pending'",
+                    (row["notification_id"],),
+                )
+        except Exception as exc:  # noqa: BLE001 - see _journal_insert
+            _log.warning("notification_journal_failed", op="expire", error=_error_label(exc))
+            return False
+        _log.warning(
+            "notification_expired",
+            notification_id=row["notification_id"],
+            kind=row["kind"],
+            attempts=row["attempts"],
+            age_h=_EXPIRY_H,
+        )
+        return True
+
+    def _note_drain_failure(self) -> None:
+        """Count a failed retry and raise ONE loud line per outage episode (§10.3-style alerting).
+
+        Per streak, not per failure: with a dead link and five pending rows the drainer fails ten
+        times a minute, and an ERROR per failure would bury the log it is trying to make legible."""
+        self._drain_fail_streak += 1
+        if self._drain_fail_streak >= _OUTAGE_STREAK and not self._outage_logged:
+            self._outage_logged = True
+            _log.error(
+                "telegram_outage",
+                consecutive_failures=self._drain_fail_streak,
+                note="owner notifications are queued in the notifications journal, not lost",
+            )
 
     @staticmethod
     def _render(msg: Any) -> str:
@@ -1175,6 +1455,86 @@ def _split_message(
     last_chunk = kept[-1][0]
     parts.append(f"{last_chunk}\n(part {max_parts}/{max_parts})\n... [truncated {remaining} chars]")
     return parts
+
+
+# ---------------------------------------------------------------------- notification journal helpers
+
+
+def _journal_fields(msg: Any, text: str) -> tuple[str | None, str | None, str, str]:
+    """Split one outbound message into the ``(kind, severity, title, body)`` the journal row stores.
+
+    A :class:`~engine.notify.catalog.CatalogMessage` already carries all four. A PLAIN STRING (the
+    ``alert()`` path and a handful of ad-hoc sends) is split on its FIRST newline — first line as the
+    title, remainder as the body — which is the same shape the catalog produces, so the dashboard
+    renders both alike and :func:`_wire_text` reconstructs the original string exactly.
+    """
+    kind = getattr(msg, "kind", None)
+    severity = getattr(msg, "severity", None)
+    title = getattr(msg, "title", None)
+    body = getattr(msg, "body", None)
+    if not isinstance(title, str) or not isinstance(body, str):
+        title, _, body = text.partition("\n")
+    return (
+        str(kind) if kind is not None else None,
+        str(severity) if severity is not None else None,
+        title,
+        body,
+    )
+
+
+def _wire_text(severity: str | None, title: str, body: str) -> str:
+    """Rebuild the exact wire text of a journalled row — the inverse of :func:`_journal_fields`.
+
+    Mirrors ``CatalogMessage.render`` for a catalog row (severity glyph + title, then body) and is the
+    identity for a plain-string row (no severity ⇒ no glyph ⇒ ``title`` + ``\\n`` + ``body``). Kept
+    here rather than re-rendering a reconstructed model: the journal stores presentation text, and a
+    retry must ship the SAME bytes the first attempt did, not a re-derivation that could drift."""
+    glyph = _SEVERITY_GLYPH.get(severity or "", "")
+    head = f"{glyph} {title}".strip() if glyph else title
+    return f"{head}\n{body}" if body else head
+
+
+def _is_critical(severity: str | None, kind: str | None) -> bool:
+    """True for a row that must never expire: a ``critical`` severity, or a :data:`CRITICAL_KINDS`
+    kind whose catalog severity understates how bad losing it would be (``recommendation`` is
+    ``info``)."""
+    return severity == "critical" or (kind is not None and kind in CRITICAL_KINDS)
+
+
+def _parse_iso(raw: str | None) -> datetime | None:
+    """Parse a journalled IST timestamp back to a tz-aware datetime; None if absent/unparseable.
+
+    Never raises: a garbled timestamp must not stall the drainer, and every caller treats None as
+    "cannot judge this row on time" and falls through to the safe branch (retry now, never expire)."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _backoff_elapsed(row: Any, now: datetime) -> bool:
+    """Has this row's next-attempt time arrived? ``min(300, 30 * 2**(attempts-1))`` s after the last
+    attempt (or after ``created_at`` when the row has never been attempted at all)."""
+    attempts = int(row["attempts"] or 0)
+    if attempts <= 0:
+        return True                      # journalled but never attempted — eligible immediately
+    last = _parse_iso(row["last_attempt_at"]) or _parse_iso(row["created_at"])
+    if last is None:
+        return True                      # no usable clock on the row: retry rather than strand it
+    # The exponent is clamped as well as the result: a critical row never expires, so ``attempts`` on
+    # a multi-day outage grows without bound and an unclamped 2**attempts would be the expensive part
+    # of a pass that is otherwise a no-op.
+    delay = min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * (2 ** min(attempts - 1, 16)))
+    return (now - last) >= timedelta(seconds=delay)
+
+
+def _error_label(exc: BaseException) -> str:
+    """``"ExcClass: first line of its message"``, bounded for the journal's ``last_error`` column."""
+    detail = str(exc).strip().splitlines()
+    return f"{type(exc).__name__}: {detail[0] if detail else ''}"[:_ERROR_LABEL_CHARS]
 
 
 def _parse_hhmm(raw: str):

@@ -1,5 +1,41 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-21 (09:56–15:3x) — first-proposal day: store freeze at the worst moment, Telegram down all day; WO-24 built (freeze immunity + delivery guarantees + owner dashboard)
+
+- **The morning:** funnel alive under WO-20/21 — 14 candidates queued across 4 strategies by 09:56,
+  a thesis-too-long schema bounce RECOVERED on retry, and at 09:56:18 the platform's FIRST proposal
+  ever (rsi2 GVT&D `01M0H8ZXM3PYNAVXF54A5TDGV0`, enter, conf 0.55). At 09:56:40, at the exact
+  handoff to the gate, the market store FROZE: feature snapshots, warmup_refresh and the gate-context
+  read stalled simultaneously (correlated network blip 09:56:44); recovery restart 10:11; proposal
+  orphaned (gate STILL unexercised), 12 queued candidates lost to spent slots. Warm-up gap healed
+  (200 symbols, 0 failures); WO-21's in-session compaction skip fired correctly on the mid-day boot
+  (first live bind). Token probe: valid on its first live run.
+- **Diagnosis honesty:** my "network I/O inside the store lock" hypothesis was REFUTED by the
+  implementer's investigation (fetch/write properly split at backfill.py:284-296; kiteconnect carries
+  a 7s requests timeout). Open hypotheses: lock convoy exhausting the shared default executor
+  (26 workers, all store to_thread + all Kite REST share it) vs. a store-internal op that never
+  returned. No restructure on a guess — instead the next freeze self-diagnoses (watchdog below).
+- **Telegram:** 223 ConnectTimeout send failures (186 on 08-20) and `_send_text` DROPPED on failure —
+  the owner's channel was effectively down; a recommendation fired in an outage window would have
+  been silently lost. Owner directed a dashboard section listing the day's notifications.
+- **WO-24 built (1758 unit green, +49; ruff 0 new):**
+  (a) gate-context deadline 90s — a hung build costs ONE candidate (slot re-armed, alert), never the
+  funnel; explicitly kept out of the WO-20d re-queue guard. (b-prime) store stall WATCHDOG on the
+  health pulse (which kept beating through the freeze): single-flight `aping` probe, 10s timeout,
+  `store_stalled` ERROR + once-per-episode all-thread stack dump (`store_stall_stacks`, bounded),
+  `store_stall_recovered`; shield keeps the abandoned probe as evidence. (c) orphaned-proposal sweep
+  (TTL 10 min, 5-min throttle on the drain tick, once-per-proposal alert) — will announce today's
+  GVT&D orphan on first live sweep, expected. (d) `notifications` journal (migration 0011) written
+  BEFORE any Telegram attempt = retry outbox (30s drainer, backoff to 300s, non-critical expire 6h,
+  critical kinds never; `telegram_outage` at 10 consecutive failures) = dashboard data source; new
+  bearer-authed GET /notifications + self-contained page at /notifications-ui (token in localStorage;
+  severity + delivery badges; day picker). Discovery: a built React dashboard ALREADY exists at
+  dashboard/dist (2026-07-28) served at "/" — the new page is a companion, not a replacement; SPA
+  integration filed. (e) implausible-timestamp ticks now drop under their own counter, one WARNING,
+  no traceback. (f) news_analyst timeout 120→240s (4 timeouts/2 days, ~$0.28 each).
+- Filed: store-stall owner alert (instrumentation-only for now); GateContextTimeout landing on the
+  two position paths (contained; accepted unlanded); SPA integration of the notifications page.
+
 ## 2026-08-21 (02:0x–03:1x) — WO-22 (four quality follow-ups) + WO-23 (two safety-notify fixes + tick lifecycle); mom verdict closed
 
 - **Owner-directed** ("start work on points 3, 4, 5, 6"). Ran as a workflow: 3 read-only

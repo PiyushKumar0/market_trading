@@ -35,6 +35,11 @@ dashboard/node_modules/
 dashboard/dist/
 dashboard/.vite/
 
+# web/dist/ is SOURCE, not build output: the hand-written, dependency-free notifications page
+# (WO-24d, served at /notifications-ui). The generic `dist/` rule above would otherwise swallow it,
+# so the only file the platform's own dashboard page consists of could never be committed.
+!web/dist/
+
 # --- OS / editor ---
 Thumbs.db
 desktop.ini

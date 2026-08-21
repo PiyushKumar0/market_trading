@@ -16,6 +16,7 @@ EXPECTED_TABLES = {
     "learning_ledger", "param_sets", "model_registry", "envelope_state", "shadow_trades",
     "recommendations", "backfill_checkpoints", "filings_backfill_checkpoints", "schema_migrations",
     "day_plans", "agent_calls", "equity_snapshots", "risk_state_causes", "nightly_reviews",
+    "notifications",
 }
 
 
@@ -75,6 +76,44 @@ def test_funnel_raw_counts_table_upserts_absolute_values(db_path):
             "SELECT strategy_id, fires FROM funnel_raw_counts ORDER BY strategy_id"
         ).fetchall()
         assert [(r["strategy_id"], r["fires"]) for r in rows] == [("orb", 37), ("rsi2", 4)]
+    finally:
+        conn.close()
+
+
+def test_notifications_journal_table_and_status_machine(db_path):
+    """WO-24d (2026-08-21): the owner-notification journal that is simultaneously the Telegram retry
+    outbox and the dashboard's data source. ``status`` is the state machine and the CHECK constraint
+    is what keeps a fourth, undefined state from ever reaching the drainer or the page."""
+    import sqlite3
+
+    conn = connect(db_path)
+    try:
+        apply_migrations(conn)
+        assert "notifications" in _tables(conn)
+        conn.execute(
+            "INSERT INTO notifications (notification_id, created_at, kind, severity, title, body) "
+            "VALUES ('n1', '2026-08-21T10:00:00+05:30', 'recommendation', 'info', 'T', 'B')"
+        )
+        row = conn.execute("SELECT * FROM notifications WHERE notification_id='n1'").fetchone()
+        assert row["status"] == "pending" and row["attempts"] == 0        # defaults, not caller-supplied
+        assert row["delivered_at"] is None and row["last_error"] is None
+        assert row["last_attempt_at"] is None                             # backoff clock starts unset
+
+        try:
+            conn.execute("UPDATE notifications SET status='queued' WHERE notification_id='n1'")
+            conn.commit()
+            raise AssertionError("expected CHECK to reject a status outside the state machine")
+        except sqlite3.IntegrityError:
+            conn.rollback()
+
+        # The day read (GET /notifications) and the outbox drain are both created_at scans.
+        indexes = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='notifications'"
+            ).fetchall()
+        }
+        assert "idx_notifications_created_at" in indexes
     finally:
         conn.close()
 
