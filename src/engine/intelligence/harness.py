@@ -61,6 +61,7 @@ from engine.core.clock import Clock
 from engine.core.db import transaction
 from engine.core.log import get_logger
 from engine.intelligence.governor import BudgetGovernor, TokenUsage
+from engine.notify.episodes import AlertEpisodes
 
 _log = get_logger("engine.intelligence.harness")
 
@@ -596,6 +597,12 @@ class AgentHarness:
         self._query_fn = query_fn
         self._options_cls = options_cls
         self._alert = alert
+        #: Owner-alert cadence per ``(agent_id, reason)`` (WO-25b): the FIRST failure of a kind alerts,
+        #: repeats inside the window are logged only, and a successful call closes the episode so the
+        #: next failure is heard again. The D7 behaviour is untouched — every failure still resolves to
+        #: no-action and is still logged; what changes is how many times the owner's phone buzzes for
+        #: one broken thing (an SDK outage used to alert on every call for hours).
+        self._alert_episodes = AlertEpisodes()
 
     # ------------------------------------------------------------------ public API
     async def run_single_shot(
@@ -792,6 +799,9 @@ class AgentHarness:
                     in_tokens=usage.in_tokens,
                     out_tokens=usage.out_tokens,
                 )
+                # A working agent closes every open alert episode it owns (WO-25b): the next failure,
+                # whatever its reason, is a NEW incident and must reach the owner immediately.
+                self._alert_episodes.reset(agent_def.agent_id)
                 return AgentResult.Ok(
                     call_id=call_id, payload=payload, usage=usage, raw_text=text, attempts=attempt
                 )
@@ -1070,10 +1080,30 @@ class AgentHarness:
         raw_text: str | None = None,
         attempts: int = 0,
     ) -> AgentResult:
+        """Build the D7 ``Failed`` result and alert the owner ONCE PER EPISODE (WO-25b).
+
+        The failure itself is unchanged — ``agent_call_failed`` is logged by the caller for every
+        single occurrence, and the returned result is identical. What is throttled is the OWNER ALERT:
+        the first failure of a ``(agent, reason)`` alerts, further ones inside
+        :data:`~engine.notify.episodes.REPEAT_AFTER` are logged as suppressed, and any successful call
+        by that agent closes the episode (see :meth:`_run`). A dead SDK used to raise one owner alert
+        per call for as long as it stayed dead, which is how a queue 200 deep gets built.
+        """
         result = AgentResult.Failed(
             reason, detail, call_id=call_id, usage=usage, raw_text=raw_text, attempts=attempts
         )
         if self._alert is not None:
+            if not self._alert_episodes.should_alert(
+                (agent_def.agent_id, str(reason)), self._clock.now()
+            ):
+                _log.info(
+                    "agent_alert_throttled",
+                    agent=agent_def.agent_id,
+                    reason=reason,
+                    call_id=call_id,
+                    note="repeat inside the episode window; logged, not alerted (WO-25b)",
+                )
+                return result
             try:
                 await self._alert(
                     "error",

@@ -28,6 +28,7 @@ import os
 import signal
 import sqlite3
 import threading
+import time as time_module  # `time` itself is datetime.time here (below) — WO-25c needs monotonic()
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -335,6 +336,19 @@ async def run() -> int:
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
 
+    # --- WO-25c BOOT CONTRACT WATCHDOG, armed HERE — the first point at which this process is
+    #     committed to running (the instance lock is held, signals are wired) and still ahead of every
+    #     resource that can wedge: sqlite, MarketStore.open, Telegram, the :8400 bind, the token probe,
+    #     lifecycle.startup, and the warm-up seeding. On 2026-08-24 the 12:44:58 boot logged
+    #     startup_complete at 12:46:56 and then NOTHING — it parked inside the pre-arm warm-up refresh
+    #     and scheduler.start() was never reached, so not one trigger fired for the rest of the day and
+    #     no alarm existed to say so (the health pulse that would have noticed is itself an APScheduler
+    #     job). This watchdog is a PLAIN asyncio task on purpose: it must stay alive precisely when the
+    #     scheduler is the broken thing. `boot_state` is late-bound — the watchdog reads it at check
+    #     time, so it can be armed before the alert sink / scheduler / engine_ready even exist. ---
+    boot_state: dict[str, Any] = {"engine_ready": False, "scheduler": None, "alert": None}
+    boot_watchdog = asyncio.create_task(boot_contract_watchdog(boot_state), name="boot_contract")
+
     # --- persistence + migrations ---
     conn = connect(settings.sqlite_path())
     applied = apply_migrations(conn)
@@ -422,6 +436,12 @@ async def run() -> int:
     async def kill_alert(message: str) -> None:
         await alert("critical", message)
 
+    # WO-25c: hand the boot-contract watchdog its owner channel now that one exists. Telegram itself
+    # comes up later (`telegram.start()`); `alert` reads `telegram_holder` at CALL time, so a violation
+    # detected at T+180 s always uses whatever channel is live by then — and falls back to the
+    # structured CRITICAL log when none is.
+    boot_state["alert"] = alert
+
     kill = KillSwitch(conn, clock, bus, alert_callback=kill_alert)
     session = SessionManager(secrets, clock, redirect_path=settings.broker.kite_login_redirect_path)
 
@@ -481,7 +501,9 @@ async def run() -> int:
     # BarBuilder: ticks (published by TickerSupervisor on "tick") → finalized 1m bars → bar.1m +
     # single-writer batch persist. It also buffers raw ticks into the §4.3 Parquet dataset (do NOT
     # buffer a second time elsewhere). advance() runs on a coarse timer; flush_all() at EOD/shutdown.
-    bar_builder = BarBuilder(store, clock, bus)
+    # notify: the WO-25a processing-lag watchdog pages the owner ONCE per lag episode (2026-08-24
+    # late-tick death spiral — the engine ran 20 min behind for two hours with nothing but INFO lines).
+    bar_builder = BarBuilder(store, clock, bus, notify=notify)
     bus.subscribe("tick", bar_builder.on_tick_event)
 
     # Shared injected httpx client for every best-effort feed (convention 11 / E5). Owned here.
@@ -1127,6 +1149,7 @@ async def run() -> int:
         store=store,
     )
     scheduler = Scheduler(clock, calendar)
+    boot_state["scheduler"] = scheduler   # WO-25c: the watchdog reads its REAL running state
 
     # --- §2.6 injected recovery hooks (steps 4 & 7) ---
     async def backfill_hook() -> None:
@@ -1593,8 +1616,23 @@ async def run() -> int:
     # Boot-scoped skew verdict for the gate's §7.1 clock_skew rule (self-test measured it above);
     # seed the warm-up snapshot immediately so the gate isn't blind until the first 60s refresh.
     skew_holder["ok"] = "clock_skew" not in report.frozen_reasons
-    await warmup_refresh()
-    await health.check(check_skew=False)
+    # WO-25c ROOT CAUSE. These two seeding refreshes used to be bare awaits sitting between
+    # startup_complete and scheduler.start(), and on 2026-08-24 the 12:44:58 mid-session boot parked
+    # in the first one FOREVER: the ticker came up 1.5 s earlier, the tick flush loop began taking
+    # MarketStore._lock a few hundred times per flush (one COPY per (date, symbol) partition —
+    # store.flush_ticks), and WarmupGate._evaluate's ~400 sequential to_thread hops for the same lock
+    # never got through. The scheduler was never armed; no forward drain, no health pulse, no EOD job
+    # fired for 11 h. WO-15 established the invariant — nothing unbounded ahead of scheduler.start() —
+    # but only moved the CATCH-UP behind it; these two awaits were left in front and are the same bug.
+    #
+    # The seeding is a convenience, never a safety property: an unseeded warm-up holder reads
+    # _WARMUP_UNREFRESHED (fail-CLOSED, both §7.1 readiness rules blocking) and the 60 s
+    # warmup_status_refresh / health_check jobs re-seed both the moment the scheduler is up. So the
+    # correct trade is a hard deadline and carry on — losing a snapshot costs one fail-closed minute,
+    # losing the scheduler costs the trading day.
+    await seed_boot_snapshots(
+        warmup_refresh, lambda: health.check(check_skew=False), alert=alert,
+    )
 
     # --- start remaining services + idle until a stop signal (§2.6: being up is an active period). The
     #     login API is already bound (above); only prompt again here if startup still needs a login AND we
@@ -1609,11 +1647,15 @@ async def run() -> int:
     # stop_event + signal handlers were installed EARLY (right after the instance lock) so a wedged boot
     # is still interruptible; here we simply idle on it until the first signal requests a graceful stop.
     _log.info("engine_ready", host=settings.api.host, port=settings.api.port, mode=mode.mode().value)
+    boot_state["engine_ready"] = True   # WO-25c: the other half of the boot contract
     await stop_event.wait()
 
     # --- graceful shutdown (§2.6/§10.8 shutdown guard): flatten in-flight bars, stop the ticker, run
     #     the lifecycle guard (backup + STOPPED commit + heartbeat join), then tear down the rest. ---
     _log.info("engine_stopping")
+    await cancel_post_arm(boot_watchdog)      # WO-25c: retire the contract watchdog BEFORE the
+    # scheduler stops — otherwise a slow teardown re-reads is_running()==False and pages a violation
+    # for an engine that is deliberately shutting down.
     scheduler.shutdown()                      # no new job fires can race the teardown
     await cancel_post_arm(post_arm_task)      # a still-running post-arm one-shot never blocks a stop
     bar_builder.flush_all()                   # finalize any open minute bars (EOD/shutdown, §4.4 job 1)
@@ -1800,6 +1842,10 @@ def _arm_live_jobs(
             "feed_stats",
             ticks_received=ts["ticks_received"], frames_dropped=ts["frames_dropped"],
             bars_finalized=bs["bars_finalized"], bars_written=bs["bars_written"],
+            # WO-25a: late-tick pressure, and how much of it reached DuckDB. late_ticks >>
+            # late_store_calls is the in-memory range check absorbing them (healthy); the two
+            # climbing together means real amendments — or the recent-bars window being missed.
+            late_ticks=bs["late_ticks"], late_store_calls=bs["late_store_calls"],
             feed_state=ticker.health().state,
         )
 
@@ -1946,6 +1992,152 @@ async def boot_phase_ticks(refresh, health_check, *, interval_s: float = 60.0) -
             await health_check()
         except Exception:  # noqa: BLE001 - observation must keep ticking; CancelledError still propagates
             _log.exception("boot_tick_failed")
+
+
+# --------------------------------------------------------------------------- boot tail hardening (WO-25c)
+#: Budget for the two pre-arm seeding refreshes (warm-up snapshot + first health pulse). Generous
+#: against their measured cost — the healthy 2026-08-24 10:41:20 boot did both in 1.66 s — because the
+#: point is not to trim a slow boot but to put a CEILING on a wedged one.
+_BOOT_SEED_TIMEOUT_S = 45.0
+
+
+async def seed_boot_snapshots(
+    warmup_refresh, health_check, *, timeout_s: float = _BOOT_SEED_TIMEOUT_S, alert=None
+) -> bool:
+    """Seed the warm-up + health snapshots before arming — under a deadline that CANNOT be missed.
+
+    WO-25c. The 2026-08-24 12:44:58 boot died here: ``await warmup_refresh()`` never returned, so
+    ``scheduler.start()`` was never called and the engine ran the whole day with no timers at all.
+    The invariant this restores is WO-15's, applied to the last two awaits it did not cover: **the
+    boot tail reaches ``scheduler.start()`` no matter what the seeding does.**
+
+    Bulletproofing detail (the reason this is not just ``asyncio.wait_for``): ``wait_for`` cancels the
+    inner task and then AWAITS the cancellation, so a coroutine parked on a thread-offload that will
+    not come back can wedge the timeout too. :func:`asyncio.wait` returns after ``timeout_s``
+    unconditionally — it neither cancels nor joins — so the deadline is real. The straggler is
+    cancelled afterwards and deliberately never awaited; the 60 s ``warmup_status_refresh`` /
+    ``health_check`` interval jobs re-do this work the moment the scheduler is up.
+
+    Returns True when the seeding completed inside the budget, False on the loud timeout path.
+    """
+    started = time_module.monotonic()
+
+    async def _seed() -> None:
+        await warmup_refresh()
+        await health_check()
+
+    task = asyncio.create_task(_seed(), name="boot_seed_snapshots")
+    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    if done:
+        exc = task.exception()
+        if exc is not None:
+            # A RAISING seed is not the incident this guards, but it must not reach the boot path
+            # either: the snapshots stay fail-closed and arming proceeds.
+            _log.exception("boot_seed_failed", exc_info=exc)
+            return False
+        return True
+
+    elapsed = time_module.monotonic() - started
+    _log.critical(
+        "boot_seed_timeout", timeout_s=timeout_s, elapsed_s=round(elapsed, 1),
+        hint="warm-up/health seeding did not return (2026-08-24 WO-25c); arming the scheduler anyway "
+             "— the gate stays fail-closed until the 60s refresh jobs re-seed it",
+    )
+    task.cancel()   # fire-and-forget: awaiting it is exactly what we refuse to do
+    if alert is not None:
+        try:
+            await alert(
+                "critical",
+                f"boot seeding wedged >{timeout_s:.0f}s (warm-up/health snapshot) — scheduler armed "
+                "anyway; entries stay FROZEN until the next refresh lands",
+            )
+        except Exception:  # noqa: BLE001 - the alert is best-effort; arming must not depend on it
+            _log.exception("boot_seed_timeout_alert_failed")
+    return False
+
+
+# --------------------------------------------------------------------------- boot contract (WO-25c)
+#: How long a boot may take before the contract is checked. The four healthy 2026-08-24 boots reached
+#: engine_ready in 22 s / 13 s / 15 s / 15 s; 180 s leaves ~10x headroom for a multi-day-gap catch-up
+#: while still paging inside the same session a mid-session restart happens in.
+_BOOT_CONTRACT_DEADLINE_S = 180.0
+
+#: Re-check/re-log cadence while the contract stands violated.
+_BOOT_CONTRACT_RECHECK_S = 300.0
+
+
+def _boot_contract_missing(boot_state: Mapping[str, Any]) -> list[str]:
+    """Which half (or both) of the boot contract is unmet: ``engine_ready`` and a RUNNING scheduler."""
+    missing: list[str] = []
+    if not boot_state.get("engine_ready"):
+        missing.append("engine_ready")
+    scheduler = boot_state.get("scheduler")
+    if scheduler is None or not scheduler.is_running():
+        missing.append("scheduler_running")
+    return missing
+
+
+async def boot_contract_watchdog(
+    boot_state: Mapping[str, Any],
+    *,
+    deadline_s: float = _BOOT_CONTRACT_DEADLINE_S,
+    recheck_s: float = _BOOT_CONTRACT_RECHECK_S,
+) -> None:
+    """Verify the boot actually COMPLETED, and page the owner when it did not (WO-25c).
+
+    The 2026-08-24 12:44:58 boot is the case this exists for: ``startup_complete`` logged, ticks
+    processed, bars built, features written — every outward sign of a live engine — while APScheduler
+    had never been started and no scheduled job fired again until the process was killed at midnight.
+    Nothing noticed for 11 hours, because everything that could have noticed was itself a scheduled
+    job.
+
+    So this is a PLAIN asyncio task, armed at the top of :func:`run` and owned by nobody else. It must
+    keep working when the scheduler is the broken component, which rules out an APScheduler job; the
+    owner-notify path is likewise an asyncio send, independent of any trigger.
+
+    Contract: by ``deadline_s`` the boot must have reached ``engine_ready`` AND
+    ``Scheduler.is_running()`` must be True — read from APScheduler's own state, never from a flag the
+    boot path sets (see :meth:`engine.ops.scheduler.Scheduler.is_running`). Satisfied ⇒ one INFO
+    ``boot_contract_ok`` and the task retires. Violated ⇒ CRITICAL ``boot_incomplete`` naming what is
+    missing, ONE owner page, then a re-check + re-log every ``recheck_s`` until it resolves (a boot
+    that arms late still gets its ``boot_contract_ok``).
+
+    Never crashes the boot: it is detached, and every failure inside it — including a raising alert
+    sink — is swallowed. Cancelled at shutdown via :func:`cancel_post_arm`.
+    """
+    started = time_module.monotonic()
+    try:
+        await asyncio.sleep(deadline_s)
+        paged = False
+        while True:
+            missing = _boot_contract_missing(boot_state)
+            elapsed = round(time_module.monotonic() - started, 1)
+            if not missing:
+                _log.info("boot_contract_ok", elapsed_s=elapsed)
+                return
+            _log.critical(
+                "boot_incomplete", missing=missing, elapsed_s=elapsed,
+                hint="the boot never finished arming (2026-08-24 WO-25c): no scheduled job can fire "
+                     "in this state — restart the engine",
+            )
+            if not paged:
+                paged = True   # ONE page per episode; the CRITICAL log carries the repeats
+                alert = boot_state.get("alert")
+                if alert is not None:
+                    try:
+                        await alert(
+                            "critical",
+                            f"BOOT INCOMPLETE after {elapsed:.0f}s — missing: {', '.join(missing)}. "
+                            "No scheduled job (forward drains, health pulses, EOD jobs) can fire. "
+                            "Restart the engine.",
+                        )
+                    except Exception:  # noqa: BLE001 - a failed page must not end the watchdog
+                        _log.exception("boot_incomplete_alert_failed")
+            await asyncio.sleep(recheck_s)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - the watchdog must never take the boot down with it
+        _log.exception("boot_contract_watchdog_failed")
 
 
 # --------------------------------------------------------------------------- warm-up gap self-repair

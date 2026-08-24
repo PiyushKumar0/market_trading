@@ -52,9 +52,11 @@ from engine.ops.main import (
     _arm_live_jobs,
     _arm_registry_jobs,
     _scheduled_runner,
+    boot_contract_watchdog,
     build_job_registry,
     cancel_post_arm,
     hydrate_instruments_at_startup,
+    seed_boot_snapshots,
     start_scheduler_and_fire_post_arm,
 )
 from engine.ops.scheduler import Scheduler
@@ -999,6 +1001,10 @@ class _FakeScheduler:
         self.started = True
         self._events.append("scheduler_armed")
 
+    def is_running(self) -> bool:
+        """WO-25c: the boot-contract surface the real Scheduler exposes off APScheduler's own state."""
+        return self.started
+
 
 def _post_arm_registry(events: list[str], *, gate: asyncio.Event | None = None,
                        boom: bool = False) -> JobRegistry:
@@ -1381,3 +1387,230 @@ def test_tick_compact_closure_calls_retention_after_the_pass() -> None:
     assert "await apply_tick_retention(store, result)" in body
     assert body.index("compact_ticks") < body.index("apply_tick_retention")   # AFTER the pass
     assert "return result" in body                          # and the job's own verdict is unchanged
+
+
+# =========================================================================== WO-25c boot contract
+# 2026-08-24, the 12:44:58 mid-session restart: `startup_complete` logged at 12:46:56 and run() then
+# logged NOTHING for 11 h. It had parked in the pre-arm warm-up seeding — two bare awaits that WO-15
+# left standing in front of `scheduler.start()` — so APScheduler was never started: no forward drain,
+# no health pulse, no EOD job, while ticks/bars/features kept flowing and made the engine look alive.
+# Layer 1: the seeding can no longer gate arming. Layer 2: a plain asyncio task (never an APScheduler
+# job — it has to work when the scheduler is the broken thing) checks the boot contract and pages.
+
+
+def _boot_state(*, ready: bool, armed: bool, pages: list | None = None) -> dict:
+    """The late-bound holder run() hands the watchdog: engine_ready flag, scheduler, alert sink."""
+    scheduler = _FakeScheduler([])
+    if armed:
+        scheduler.start()
+    sink = pages if pages is not None else []
+
+    async def alert(severity: str, message: str) -> None:
+        sink.append((severity, message))
+
+    return {"engine_ready": ready, "scheduler": scheduler, "alert": alert}
+
+
+# --------------------------------------------------------------------------- layer 1: bounded seeding
+@pytest.mark.asyncio
+async def test_boot_seeding_completes_and_reports_success() -> None:
+    """The healthy path is unchanged: both refreshes run, in order, and the boot is told so."""
+    order: list[str] = []
+
+    async def warmup_refresh() -> None:
+        order.append("warmup")
+
+    async def health_check() -> None:
+        order.append("health")
+
+    assert await seed_boot_snapshots(warmup_refresh, health_check, timeout_s=5) is True
+    assert order == ["warmup", "health"]
+
+
+@pytest.mark.asyncio
+async def test_wedged_boot_seeding_times_out_loudly(caplog) -> None:
+    """THE 2026-08-24 SHAPE: warm-up seeding never returns (the DuckDB single-writer lock was being
+    taken a few hundred times per tick flush and ~400 sequential coverage probes never got through).
+    It must now hit a ceiling, say so at CRITICAL, page the owner, and hand control back."""
+    wedged = asyncio.Event()                    # never set
+    healths: list[int] = []
+    pages: list[tuple[str, str]] = []
+
+    async def warmup_refresh() -> None:
+        await wedged.wait()
+
+    async def health_check() -> None:
+        healths.append(1)
+
+    async def alert(severity: str, message: str) -> None:
+        pages.append((severity, message))
+
+    with caplog.at_level(logging.CRITICAL, logger="engine.ops.main"):
+        # The outer wait_for is the assertion: if the deadline were awaited-on-cancel (plain
+        # asyncio.wait_for inside), a coroutine parked on a thread offload would wedge it too.
+        ok = await asyncio.wait_for(
+            seed_boot_snapshots(warmup_refresh, health_check, timeout_s=0.05, alert=alert),
+            timeout=5,
+        )
+
+    assert ok is False
+    assert healths == []                        # the health seed never ran — the 60 s job re-does it
+    timeouts = [r for r in caplog.records if r.getMessage() == "boot_seed_timeout"]
+    assert len(timeouts) == 1
+    assert timeouts[0].levelno == logging.CRITICAL
+    assert pages == [pages[0]] and pages[0][0] == "critical"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_boot_seed_never_reaches_the_boot_path(caplog) -> None:
+    """A seed that RAISES is not the incident, but it must not propagate into run() either."""
+    async def warmup_refresh() -> None:
+        raise RuntimeError("duckdb connection invalidated")
+
+    async def health_check() -> None:
+        raise AssertionError("must not be reached")
+
+    with caplog.at_level(logging.ERROR, logger="engine.ops.main"):
+        assert await seed_boot_snapshots(warmup_refresh, health_check, timeout_s=5) is False
+    assert [r for r in caplog.records if r.getMessage() == "boot_seed_failed"]
+
+
+@pytest.mark.asyncio
+async def test_wedged_seeding_boot_still_arms_the_scheduler(conn, clock, calendar) -> None:
+    """WO-25c acceptance. Before the fix the wedged seed sat bare in front of
+    ``start_scheduler_and_fire_post_arm`` and the scheduler was never armed for the rest of the day.
+    The boot tail must now reach arming — and engine_ready — regardless."""
+    events: list[str] = []
+    wedged = asyncio.Event()                    # never set: the 12:44:58 warm-up refresh
+    catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events),
+                             deferred=POST_ARM_JOB_IDS)
+    scheduler = _FakeScheduler(events)
+
+    async def warmup_refresh() -> None:
+        events.append("seed_started")
+        await wedged.wait()
+
+    async def health_check() -> None:
+        events.append("health_seeded")
+
+    async def boot_tail() -> asyncio.Task | None:
+        await seed_boot_snapshots(warmup_refresh, health_check, timeout_s=0.05)
+        task = start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar)
+        events.append("engine_ready")
+        return task
+
+    task = await asyncio.wait_for(boot_tail(), timeout=5)
+
+    assert events == ["seed_started", "scheduler_armed", "engine_ready"]
+    assert scheduler.is_running() is True       # the whole point: triggers can fire again
+    await cancel_post_arm(task)
+
+
+# --------------------------------------------------------------------------- layer 2: the watchdog
+def test_boot_contract_names_exactly_what_is_missing() -> None:
+    """Both halves are reported, and a scheduler object that exists but was never started counts as
+    missing — that is precisely the 12:44:58 state (Scheduler built, ``start()`` never called)."""
+    from engine.ops.main import _boot_contract_missing
+
+    assert _boot_contract_missing({"engine_ready": True, "scheduler": None}) == ["scheduler_running"]
+    assert _boot_contract_missing(
+        {"engine_ready": False, "scheduler": None}
+    ) == ["engine_ready", "scheduler_running"]
+    unarmed = _boot_state(ready=False, armed=False)
+    assert _boot_contract_missing(unarmed) == ["engine_ready", "scheduler_running"]
+    assert _boot_contract_missing(_boot_state(ready=True, armed=True)) == []
+
+
+@pytest.mark.asyncio
+async def test_boot_contract_ok_fires_once_when_the_boot_completed(caplog) -> None:
+    state = _boot_state(ready=True, armed=True)
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        await asyncio.wait_for(
+            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01), timeout=5
+        )
+    oks = [r for r in caplog.records if r.getMessage() == "boot_contract_ok"]
+    assert len(oks) == 1                        # once, then the task retires
+    assert oks[0].levelno == logging.INFO
+    assert oks[0].elapsed_s >= 0
+    assert not [r for r in caplog.records if r.getMessage() == "boot_incomplete"]
+
+
+@pytest.mark.asyncio
+async def test_unarmed_scheduler_pages_once_repeats_then_resolves_when_it_arms_late(caplog) -> None:
+    """The alarm that did not exist on 2026-08-24: CRITICAL + ONE owner page, re-logged on the
+    re-check cadence while it stands, and closed out with a single boot_contract_ok if it heals."""
+    pages: list[tuple[str, str]] = []
+    state = _boot_state(ready=True, armed=False, pages=pages)
+
+    def _records(event: str) -> list:
+        return [r for r in caplog.records if r.getMessage() == event]
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = asyncio.create_task(
+            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01)
+        )
+        try:
+            while len(_records("boot_incomplete")) < 3:      # re-logs on the cadence
+                await asyncio.sleep(0.005)
+            incomplete = _records("boot_incomplete")
+            assert all(r.levelno == logging.CRITICAL for r in incomplete)
+            assert incomplete[0].missing == ["scheduler_running"]
+            assert len(pages) == 1                           # ONE page however long it stands
+            assert pages[0][0] == "critical"
+            assert "scheduler_running" in pages[0][1]
+            state["scheduler"].start()                       # a late arm resolves the contract
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            await cancel_post_arm(task)
+    assert len(_records("boot_contract_ok")) == 1
+    assert len(pages) == 1                                   # resolving never pages again
+
+
+@pytest.mark.asyncio
+async def test_a_raising_owner_page_never_ends_the_watchdog(caplog) -> None:
+    """The notify path is best-effort: a dead Telegram must not silence the CRITICAL cadence."""
+    async def bad_alert(severity: str, message: str) -> None:
+        raise RuntimeError("telegram outage")
+
+    state = {"engine_ready": False, "scheduler": None, "alert": bad_alert}
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = asyncio.create_task(
+            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01)
+        )
+        try:
+            while len([r for r in caplog.records
+                       if r.getMessage() == "boot_incomplete"]) < 3:
+                await asyncio.sleep(0.005)
+        finally:
+            await cancel_post_arm(task)
+    assert [r for r in caplog.records if r.getMessage() == "boot_incomplete_alert_failed"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_the_boot_watchdog_cleanly() -> None:
+    """run()'s teardown retires it with the same helper it uses for the post-arm one-shot, BEFORE
+    scheduler.shutdown() — otherwise a slow stop would page a violation for a deliberate stop."""
+    state = _boot_state(ready=False, armed=False)
+    task = asyncio.create_task(boot_contract_watchdog(state, deadline_s=60, recheck_s=60))
+    await asyncio.sleep(0.01)
+    await cancel_post_arm(task)                 # the exact call the teardown makes
+    assert task.done() and task.cancelled()
+
+    teardown = inspect.getsource(opsmain.run)
+    assert teardown.index("cancel_post_arm(boot_watchdog)") < teardown.index("scheduler.shutdown()")
+
+
+@pytest.mark.asyncio
+async def test_scheduler_is_running_reads_apscheduler_state(clock, calendar) -> None:
+    """The watchdog must not be able to be lied to: is_running() reads APScheduler's own state, so a
+    Scheduler that was built but never started answers False — the 12:44:58 condition."""
+    s = Scheduler(clock, calendar)
+    assert s.is_running() is False              # built, never armed
+    s.start()
+    assert s.is_running() is True
+    s.shutdown()
+    # APScheduler 3.11 defers AsyncIOScheduler.shutdown to the loop (@run_in_event_loop), so the flip
+    # lands on the NEXT turn, not synchronously. Pinned so the caveat in is_running() stays honest.
+    assert s.is_running() is True
+    await asyncio.sleep(0.05)
+    assert s.is_running() is False

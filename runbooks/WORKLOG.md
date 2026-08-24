@@ -1,5 +1,39 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-25 (00:4x–02:2x) — WO-25: the 08-24 full-day incident dissected and closed (late-path amplifier, notification queue, and the zombie-boot bug)
+
+- **08-24 post-mortem, corrected twice by evidence:** (1) my Wi-Fi diagnosis was wrong — the morning's
+  collapse was the bar-builder LATE-PATH amplifier: 4 DuckDB stmts + 2 lock acquisitions + 1 INFO line
+  per late tick vs zero on the fast path; 215,823 late ticks by 12:44, 93.4% of them in_range (paid
+  two store round-trips to discover nothing to do). (2) There was NO second spiral — the afternoon
+  was the 12:44:58 boot parking FOREVER at main.py:1598 (`await warmup_refresh()`) under the tick-
+  flush-backlog lock convoy: `startup_complete` was that process's last main-loop line; APScheduler
+  was NEVER STARTED (jobs registered, no trigger ever fired) — no drains (the owner's 12:58–13:35
+  window evaluated nothing), no health pulses, no EOD jobs, engine a zombie until the 00:36 stop.
+  WO-15's own "nothing unbounded ahead of scheduler.start()" had left two awaits in front. Root
+  TRIGGER both days: the raw-tick parquet flush backlog (98k ticks vs 2k cap, from 09:40 — flush
+  takes the store lock once per (date,symbol) ≈203×/flush) — filed as WO-26, not fixed tonight.
+- **WO-25a:** in-range late ticks now O(memory) — last-5-bars-per-symbol cache, zero store calls
+  (test asserts `spy.calls == []`), zero corrections_log rows (no production consumer — verified);
+  ≤1 log line per (symbol,minute) + late_ticks_summary per wall minute; lag watchdog
+  (`tick_processing_lagging` ≥120s, episode-paced, owner-notified, recovery announced).
+- **WO-25b:** HTTPXRequest connect 20s/read 30s/write 30s/pool 10s (first-connects MEASURED 4.25/4.84s
+  vs the 5s default), send wait_for 95s > transport worst case, start timeout 45→120s (same ordering
+  law); drainer selects retry-ELIGIBLE rows critical-first then chronological over a 100-row scan
+  (head-of-line fixed; buried spam now expires — the 203-queue mechanism); episode alerts everywhere:
+  health problem-set change/30-min-repeat/recovery-once, (agent,reason) throttle in harness+pipeline
+  with success reset (shared engine/notify/episodes.py).
+- **WO-25c:** boot seeding under a 45s ceiling (asyncio.wait, never wait_for — a cancel can itself
+  wedge on a stuck thread offload) — on expiry CRITICAL `boot_seed_timeout` + page + ARM THE
+  SCHEDULER ANYWAY (unseeded = fail-closed for one minute; unarmed = the day); boot-contract
+  watchdog (plain task, armed before anything can wedge): 180s check of engine_ready ∧
+  scheduler.is_running() → `boot_contract_ok` once, or CRITICAL `boot_incomplete` + page,
+  re-checked/5min; Scheduler.is_running() reads APScheduler's own state, never a wrapper flag.
+- **1809 unit green** (two independent full-suite runs on the combined tree); ruff 0 new. Deployed
+  ~02:2x with the boot that catches up 08-24's missed EOD chain overnight. Audit note owned: my
+  12:45 restart verification never confirmed boot completion — the zombie ran 11 hours undetected;
+  the boot contract now makes that structurally impossible to miss.
+
 ## 2026-08-21 (09:56–15:3x) — first-proposal day: store freeze at the worst moment, Telegram down all day; WO-24 built (freeze immunity + delivery guarantees + owner dashboard)
 
 - **The morning:** funnel alive under WO-20/21 — 14 candidates queued across 4 strategies by 09:56,

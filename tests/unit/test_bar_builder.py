@@ -5,11 +5,17 @@ post-close drop (WO-5), volume = Δ(cumulative day volume) (A13), minute+5s-grac
 finalization, late-tick corrections incl. the official-bar-untouchable guard (WO-5), the
 cumulative-decrease restatement guard (never negative volume), day rollover, and the mid-session
 first-tick rule. Time is controlled through an injected mutable Clock time source.
+
+WO-25a adds the late-tick cost tests: an in-range late tick must touch NO store method at all (the
+2026-08-24 death spiral), an out-of-range one must still amend through the WO-5 CAS path, the log
+must be deduped per (symbol, minute) behind a per-wall-minute aggregate, and the processing-lag
+watchdog must fire once per episode and recover.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import threading
 from decimal import Decimal
 
@@ -17,7 +23,13 @@ import pytest
 
 from engine.core.clock import IST, Clock
 from engine.core.types import Tick
-from engine.marketdata.bar_builder import BAR_1M_TOPIC, BarBuilder
+from engine.marketdata.bar_builder import (
+    BAR_1M_TOPIC,
+    LAG_LOG_INTERVAL_S,
+    LAG_THRESHOLD_S,
+    RECENT_BARS_PER_SYMBOL,
+    BarBuilder,
+)
 from engine.marketdata.store import MarketStore
 
 D = dt.date(2026, 6, 17)          # a real 2026 trading day (matches conftest FIXED_NOW)
@@ -183,21 +195,20 @@ def test_late_tick_goes_to_corrections_and_amends_range(store, mclock, now):
     assert stored.close == Decimal("100.50")     # close never restated post-finalize
     assert stored.volume == 700                  # volume never restated post-finalize
 
-    # A late print INSIDE the range: logged only, bar untouched.
+    # A late print INSIDE the (now amended) range: bar untouched AND no correction row — WO-25a makes
+    # the in-range case free, and "nothing to widen" was never worth a DuckDB INSERT.
     now.set(at(9, 16, 12))
     bb.on_tick(tick("R", at(9, 15, 45), "100.80", 721))
     again = store.get_bars_1m("R", at(9, 15), at(9, 16))[0]
     assert again.high == Decimal("102.00") and again.volume == 700
 
     corrections = store.get_corrections(D)          # ordered by tick_ts, not insertion order
-    assert len(corrections) == 2
-    by_tick_ts = {row["tick_ts"]: row for row in corrections}
-    outside = by_tick_ts[at(9, 15, 59)]             # the range-amending late print
-    inside = by_tick_ts[at(9, 15, 45)]              # the inside-range late print
+    assert len(corrections) == 1                    # only the amending print is recorded (WO-25a)
+    outside = corrections[0]                        # the range-amending late print
+    assert outside["tick_ts"] == at(9, 15, 59)
     assert outside["amended"] is True
     assert outside["value"] == Decimal("102.00")
     assert outside["cumulative_volume"] == 720
-    assert inside["amended"] is False
 
     # The cumulative chain ignored the late ticks: next live minute deltas off the 700 baseline.
     feed(bb, now, tick("R", at(9, 16, 20), "101.00", 900))
@@ -352,8 +363,12 @@ def test_stats_snapshot_counts_finalized_and_written_then_resets(store, mclock, 
     snap = bb.stats_snapshot()
     assert snap["bars_finalized"] == 2
     assert snap["bars_written"] == 2
+    assert (snap["late_ticks"], snap["late_store_calls"]) == (0, 0)   # WO-25a late-tick pressure
     # reset-on-read (ticks_dropped: bar-exclusion reason -> count, WO-5)
-    assert bb.stats_snapshot() == {"bars_finalized": 0, "bars_written": 0, "ticks_dropped": {}}
+    assert bb.stats_snapshot() == {
+        "bars_finalized": 0, "bars_written": 0, "ticks_dropped": {},
+        "late_ticks": 0, "late_store_calls": 0,
+    }
 
 
 # ------------------------------------------------------------------ raw tick persistence (§4.3)
@@ -366,3 +381,208 @@ def test_raw_ticks_buffered_including_preopen(store, mclock, now):
     store.flush_ticks()
     persisted = store.get_ticks("R", D)
     assert [t.exchange_ts for t in persisted] == [pre.exchange_ts, live.exchange_ts]
+
+
+# ==================================================================== WO-25a: the late-tick cost
+# 2026-08-24: once processing slipped past the finalize grace EVERY tick took the late path
+# (amend CAS + corrections INSERT + one INFO line), throughput fell below real time and the lag grew
+# without bound — 215,823 late_tick_past_grace lines by lunchtime, 201,537 of them 'in_range', i.e.
+# paying two store round-trips each to discover there was nothing to do.
+
+
+class _SpyStore:
+    """Delegating :class:`MarketStore` proxy that records which store methods a path actually calls.
+
+    A spy rather than a stub on purpose: the store still does the real DuckDB work, so a test can
+    assert BOTH the call ledger (the cost) and the persisted outcome (the correctness) at once.
+    """
+
+    def __init__(self, inner: MarketStore) -> None:
+        self._inner = inner
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def _record(*args, **kwargs):
+            self.calls.append(name)
+            return attr(*args, **kwargs)
+
+        return _record
+
+
+def late_events(caplog, event: str) -> list:
+    return [r for r in caplog.records if r.getMessage() == event]
+
+
+def test_in_range_late_tick_touches_no_store_method_at_all(store, mclock, now):
+    """The 212k case: a late print already inside the finalized bar's range has nothing to widen and
+    nothing to correct, so it must issue ZERO store calls — no CAS read, no corrections INSERT."""
+    spy = _SpyStore(store)
+    bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
+    _finalize_915_self_bar(bb, now)              # 09:15 src='self', high 101.00 / low 100.50
+    spy.calls.clear()
+
+    now.set(at(9, 16, 10))
+    for i, px in enumerate(("100.50", "100.75", "101.00", "100.60")):   # incl. both range endpoints
+        bb.on_tick(tick("R", at(9, 15, 40 + i), px, 700 + i))
+
+    assert spy.calls == []                       # <- the whole fix in one assertion
+    assert store.get_corrections(D) == []
+    stored = store.get_bars_1m("R", at(9, 15), at(9, 16))[0]
+    assert (stored.high, stored.low) == (Decimal("101.00"), Decimal("100.50"))
+    snap = bb.stats_snapshot()
+    assert (snap["late_ticks"], snap["late_store_calls"]) == (4, 0)
+
+
+def test_out_of_range_late_tick_still_amends_through_the_cas_path(store, mclock, now):
+    """The genuinely-amending case is unchanged: one ``amend_bar_1m_extremes`` (the WO-5 single-lock
+    read-decide-write CAS) plus its ``corrections_log`` row. Only after it lands does the print
+    become free — the amendment widens the REMEMBERED range in the same step."""
+    spy = _SpyStore(store)
+    bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
+    _finalize_915_self_bar(bb, now)
+    spy.calls.clear()
+
+    now.set(at(9, 16, 10))
+    bb.on_tick(tick("R", at(9, 15, 59), "102.00", 720))
+    assert spy.calls == ["amend_bar_1m_extremes", "append_correction"]
+    stored = store.get_bars_1m("R", at(9, 15), at(9, 16))[0]
+    assert (stored.high, stored.low) == (Decimal("102.00"), Decimal("100.50"))
+    assert stored.close == Decimal("100.50") and stored.volume == 700   # never restated post-finalize
+    (corr,) = store.get_corrections(D)
+    assert corr["amended"] is True and corr["value"] == Decimal("102.00")
+
+    # Memory now mirrors the widened row: the same print costs nothing the second time.
+    spy.calls.clear()
+    bb.on_tick(tick("R", at(9, 15, 58), "102.00", 721))
+    assert spy.calls == []
+    assert len(store.get_corrections(D)) == 1
+    assert bb.stats_snapshot()["late_store_calls"] == 1
+
+
+def test_recent_bar_window_is_bounded_so_an_old_minute_falls_back_to_the_store(store, mclock, now):
+    """The in-memory window is deliberately small (N=5). A minute that has aged out of it is NOT
+    assumed in-range — it goes back to the store, exactly as before."""
+    spy = _SpyStore(store)
+    bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
+    minutes = range(15, 15 + RECENT_BARS_PER_SYMBOL + 2)
+    for i, m in enumerate(minutes):
+        feed(bb, now, tick("R", at(9, m, 10), f"{100 + i}.00", 1000 * (i + 1)))
+    oldest, newest = 15, 15 + RECENT_BARS_PER_SYMBOL   # the last minute fed is still OPEN, not late
+    assert bb._finalized_through["R"] == at(9, newest)
+
+    now.set(at(9, newest, 30))
+    spy.calls.clear()
+    bb.on_tick(tick("R", at(9, newest, 20), f"{100 + RECENT_BARS_PER_SYMBOL}.00", 99_000))
+    assert spy.calls == []                                  # newest minute: remembered, so free
+
+    spy.calls.clear()
+    bb.on_tick(tick("R", at(9, oldest, 20), "100.00", 99_001))   # evicted minute: back to the store
+    assert spy.calls == ["amend_bar_1m_extremes", "append_correction"]
+    (corr,) = store.get_corrections(D)
+    assert corr["minute"] == at(9, oldest) and corr["amended"] is False   # its own price: in range
+
+
+def test_late_tick_logs_at_most_one_line_per_symbol_minute(store, mclock, now, caplog):
+    """The 215k-line storm is itself part of the spiral's cost: structlog render + a synchronous file
+    write per tick. One line per (symbol, minute) — volume moves to the aggregate."""
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False)
+    _finalize_915_self_bar(bb, now)
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(at(9, 16, 10))
+        for i in range(50):
+            bb.on_tick(tick("R", at(9, 15, 10 + (i % 40)), "100.75", 700 + i))
+
+        lines = late_events(caplog, "late_tick_past_grace")
+        assert len(lines) == 1                        # 50 late ticks, ONE line
+        assert (lines[0].symbol, lines[0].outcome) == ("R", "in_range")
+        assert lines[0].minute == at(9, 15).isoformat()
+
+        # A different (symbol, minute) gets its own line — the budget is per key, not global.
+        feed(bb, now, tick("Z", at(9, 15, 5), "50.00", 10))
+        now.set(at(9, 16, 20))
+        bb.advance()
+        for i in range(20):
+            bb.on_tick(tick("Z", at(9, 15, 6), "50.00", 11 + i))
+        keys = {(r.symbol, r.minute) for r in late_events(caplog, "late_tick_past_grace")}
+    assert keys == {("R", at(9, 15).isoformat()), ("Z", at(9, 15).isoformat())}
+
+
+def test_late_ticks_summary_aggregates_the_wall_minute(store, mclock, now, caplog):
+    """The per-minute aggregate carries what the per-tick lines used to: how many, how many symbols,
+    how far behind, and how much of it actually reached DuckDB."""
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False)
+    _finalize_915_self_bar(bb, now)
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(at(9, 16, 10))
+        for i in range(30):
+            bb.on_tick(tick("R", at(9, 15, 20), "100.75", 700 + i))
+        assert late_events(caplog, "late_ticks_summary") == []   # still inside the same wall minute
+
+        now.set(at(9, 17, 1))                                    # wall minute turns over
+        bb.advance()
+        (summary,) = late_events(caplog, "late_ticks_summary")
+
+    assert summary.late_ticks == 30
+    assert summary.symbols == 1
+    assert (summary.store_calls, summary.amended) == (0, 0)
+    assert summary.max_lag_s == pytest.approx(50.0)              # 09:16:10 − 09:15:20
+    assert summary.window == at(9, 16).isoformat()
+
+
+# ------------------------------------------------------------- WO-25a: processing-lag watchdog
+async def test_lag_watchdog_fires_once_per_episode_paces_its_log_and_recovers(store, mclock, now, caplog):
+    """ERROR at :data:`LAG_THRESHOLD_S`, re-logged no more than every :data:`LAG_LOG_INTERVAL_S`,
+    ONE owner alert per episode, and an INFO line when it clears."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+
+    async def at_lag(wall: dt.datetime, lag_s: int, px: str, cum: int) -> None:
+        now.set(wall)
+        await bb.on_tick_event(tick("R", wall - dt.timedelta(seconds=lag_s), px, cum))
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        await at_lag(at(10, 0, 0), 0, "100.00", 1000)                       # healthy
+        assert late_events(caplog, "tick_processing_lagging") == []
+        assert sent == []
+
+        await at_lag(at(10, 5, 0), LAG_THRESHOLD_S + 30, "100.10", 1100)    # episode 1 opens
+        await at_lag(at(10, 5, 30), LAG_THRESHOLD_S + 30, "100.20", 1200)   # inside the log interval
+        assert len(late_events(caplog, "tick_processing_lagging")) == 1
+        assert len(sent) == 1                                               # ONE page per episode
+
+        # Past the pacing interval: a second ERROR, still no second page.
+        await at_lag(at(10, 5, 0) + dt.timedelta(seconds=LAG_LOG_INTERVAL_S + 5),
+                     LAG_THRESHOLD_S + 30, "100.30", 1300)
+        assert len(late_events(caplog, "tick_processing_lagging")) == 2
+        assert len(sent) == 1
+
+        await at_lag(at(10, 12, 0), 0, "100.40", 1400)                      # caught up
+        recovered = late_events(caplog, "tick_processing_recovered")
+        assert len(recovered) == 1 and recovered[0].levelname == "INFO"
+
+        await at_lag(at(10, 20, 0), LAG_THRESHOLD_S + 60, "100.50", 1500)   # episode 2: pages again
+        errors = late_events(caplog, "tick_processing_lagging")
+
+    assert len(errors) == 3
+    assert all(r.levelname == "ERROR" for r in errors)
+    assert [r.lag_s for r in errors] == [150.0, 150.0, 180.0]
+    assert len(sent) == 2
+    assert {m.severity for m in sent} == {"warning"}
+    assert [m.data["lag_s"] for m in sent] == [150.0, 180.0]
+
+
+async def test_lag_watchdog_without_a_notify_sink_is_log_only(store, mclock, now, caplog):
+    """``notify=None`` (bare/offline contexts) must still log — and must never raise."""
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False)
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(at(10, 5, 0))
+        await bb.on_tick_event(tick("R", at(10, 2, 0), "100.00", 1000))
+    assert len(late_events(caplog, "tick_processing_lagging")) == 1

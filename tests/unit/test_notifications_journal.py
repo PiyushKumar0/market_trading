@@ -34,7 +34,19 @@ from engine.core.config import repo_root
 from engine.core.secrets import DASHBOARD_TOKEN
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
-from engine.notify.telegram import CRITICAL_KINDS, TelegramBot, _wire_text
+from engine.notify.telegram import (
+    _CONNECT_TIMEOUT_S,
+    _DRAIN_BATCH,
+    _DRAIN_SCAN,
+    _POOL_TIMEOUT_S,
+    _READ_TIMEOUT_S,
+    _SEND_TIMEOUT_S,
+    _WRITE_TIMEOUT_S,
+    CRITICAL_KINDS,
+    TelegramBot,
+    _build_request,
+    _wire_text,
+)
 
 OWNER_CHAT = 4242
 _TOKEN = "s3cret-dash-token"
@@ -465,6 +477,165 @@ async def test_drain_loop_survives_a_bad_pass(conn, clock, monkeypatch):
     await bot._stop_outbox_drainer()
 
     assert len(passes) >= 2                            # it kept going after the first explosion
+
+
+# ------------------------------------------------- head-of-line blocking (WO-25b, 2026-08-24)
+# The 08-24 incident: 203 rows queued, almost all of them stale alert spam at 46 attempts each (so
+# backing off the full five minutes), and the drainer took the FIVE OLDEST every pass and skipped the
+# ones inside their window — spending the whole pass on rows it was never going to send. A fresh
+# owner-action ack sat at attempt 1 for hours behind them. The rule the fix adds: a row that cannot be
+# attempted yet costs nothing and blocks nobody.
+def _stale_backlog(conn, moving, n: int = 20, *, attempts: int = 46) -> None:
+    """``n`` old, heavily-retried, non-critical rows — all deep inside their 5-minute backoff."""
+    base = moving.now() - timedelta(hours=2)
+    for i in range(n):
+        _insert(conn, f"old{i:02d}", (base + timedelta(seconds=i)).isoformat(), title=f"OLD{i}",
+                attempts=attempts, last_attempt_at=moving.now().isoformat())
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_critical_row_is_not_blocked_by_a_backlog_in_backoff(conn, moving):
+    """THE regression. Twenty older rows, none of them due; one fresh critical row at the BACK of the
+    queue. The next pass must attempt the critical row — under the old oldest-five selection it would
+    not have been looked at until the backlog drained, which is hours."""
+    sender = _ScriptedBot()
+    bot, _ = _bot(conn, moving.clock, sender)
+    _stale_backlog(conn, moving)
+    _insert(conn, "fresh", moving.now().isoformat(), kind=MessageKind.RECOMMENDATION.value,
+            severity="info", title="RELIANCE long", body="entry 1400 stop 1380")
+
+    await bot._drain_outbox_once()
+
+    assert [t.splitlines()[0] for t in sender.sent] == ["ℹ️ RELIANCE long"]
+    assert sender.attempts == 1                        # the backlog consumed no attempt at all
+    assert conn.execute(
+        "SELECT status FROM notifications WHERE notification_id='fresh'"
+    ).fetchone()["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_rows_inside_their_backoff_window_do_not_consume_the_batch(conn, moving):
+    """The mechanism behind the regression above, isolated: twenty rows in backoff plus three that are
+    DUE. All three fly in one pass — the batch is spent on eligible rows, never on skipped ones."""
+    sender = _ScriptedBot()
+    bot, _ = _bot(conn, moving.clock, sender)
+    _stale_backlog(conn, moving)
+    for i in range(3):
+        _insert(conn, f"due{i}", (moving.now() + timedelta(seconds=i)).isoformat(), title=f"DUE{i}")
+
+    await bot._drain_outbox_once()
+
+    assert [t.splitlines()[0] for t in sender.sent] == ["⚠️ DUE0", "⚠️ DUE1", "⚠️ DUE2"]
+    assert {r["status"] for r in _rows(conn) if r["notification_id"].startswith("old")} == {"pending"}
+
+
+@pytest.mark.asyncio
+async def test_critical_rows_go_first_and_chronology_holds_inside_each_class(conn, moving):
+    """Ordering, in full: criticals ahead of the rest, and within EACH class the order the engine
+    raised them. Interleaved on purpose — a stable sort is what keeps the second half true."""
+    sender = _ScriptedBot()
+    bot, _ = _bot(conn, moving.clock, sender)
+    base = moving.now()
+    plan = [
+        ("t0", "T0", MessageKind.FEED_DEGRADED.value, "warning"),
+        ("c0", "C0", MessageKind.RECOMMENDATION.value, "info"),        # critical by KIND
+        ("t1", "T1", MessageKind.FEED_DEGRADED.value, "warning"),
+        ("c1", "C1", MessageKind.FEED_STALE.value, "critical"),        # critical by SEVERITY
+        ("t2", "T2", MessageKind.FEED_DEGRADED.value, "warning"),
+    ]
+    for i, (nid, title, kind, severity) in enumerate(plan):
+        _insert(conn, nid, (base + timedelta(seconds=i)).isoformat(), title=title, kind=kind,
+                severity=severity)
+
+    await bot._drain_outbox_once()
+
+    assert [t.splitlines()[0].split(" ")[-1] for t in sender.sent] == ["C0", "C1", "T0", "T1", "T2"]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_row_expires_wherever_it_sits_in_the_queue(conn, moving):
+    """Expiry now runs over the whole scan window, not just the front of it: a 6-hour-old row buried
+    behind nineteen others is retired on the next pass. Otherwise a spam backlog is re-scanned
+    forever and the queue never shrinks — which is how it reached 203 rows."""
+    bot, _ = _bot(conn, moving.clock, _ScriptedBot())
+    _stale_backlog(conn, moving)
+    _insert(conn, "buried", (moving.now() - timedelta(hours=7)).isoformat(), title="BURIED",
+            attempts=46, last_attempt_at=moving.now().isoformat())
+
+    await bot._drain_outbox_once()
+
+    assert conn.execute(
+        "SELECT status FROM notifications WHERE notification_id='buried'"
+    ).fetchone()["status"] == "failed"
+
+
+def test_the_scan_window_is_wider_than_the_batch():
+    """The two numbers do different jobs and must not be collapsed back into one: the SCAN decides
+    what the pass may CONSIDER (and expire), the BATCH decides how many it may SEND. Equal values are
+    the old head-of-line bug restored."""
+    assert _DRAIN_SCAN > _DRAIN_BATCH and _DRAIN_BATCH == 5
+
+
+# ------------------------------------------------- the HTTP transport (WO-25b, 2026-08-24)
+def test_the_transport_timeouts_clear_the_measured_connect_times():
+    """The whole 08-24 finding in one assertion: first connects to api.telegram.org were MEASURED at
+    4.25 s and 4.84 s, against python-telegram-bot's stock 5.0 s connect timeout. The budget must sit
+    far enough above the measurement that ordinary jitter cannot cross it."""
+    assert _CONNECT_TIMEOUT_S >= 4 * 4.84
+    assert _READ_TIMEOUT_S >= 30.0 and _WRITE_TIMEOUT_S >= 30.0 and _POOL_TIMEOUT_S >= 10.0
+
+
+def test_the_send_wait_outlasts_the_transports_own_budget():
+    """ORDERING CONSTRAINT. The outer ``asyncio.wait_for`` must not pre-empt httpx: if it fires first,
+    every slow send is journalled as an anonymous TimeoutError instead of the ConnectTimeout /
+    ReadTimeout that names the broken leg — the exact ambiguity that took three days to resolve."""
+    transport_worst_case = _POOL_TIMEOUT_S + _CONNECT_TIMEOUT_S + _WRITE_TIMEOUT_S + _READ_TIMEOUT_S
+    assert _SEND_TIMEOUT_S > transport_worst_case
+
+
+def test_build_request_carries_the_budget_into_httpx():
+    """Not just declared — actually threaded into the httpx client the send flies on. Read off
+    ``_client.timeout`` (the httpx.Timeout the request builds) rather than trusting the kwargs."""
+    timeout = _build_request()._client.timeout
+    assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (
+        _CONNECT_TIMEOUT_S, _READ_TIMEOUT_S, _WRITE_TIMEOUT_S, _POOL_TIMEOUT_S
+    )
+    # The polling role keeps PTB's single-connection pool; only the timeouts differ from stock.
+    assert _build_request(get_updates=True)._client_kwargs["limits"].max_connections == 1
+    assert _build_request()._client_kwargs["limits"].max_connections == 256
+
+
+@pytest.mark.asyncio
+async def test_start_hands_both_roles_their_own_widened_request(conn, clock, monkeypatch):
+    """The wiring itself: ``start()`` must pass an explicit HTTPXRequest for BOTH the bot and the
+    long-poll updater, and they must be DISTINCT objects — a BaseRequest is initialized/shut down by
+    the bot that owns it, so sharing one instance breaks teardown. Asserted off the builder's own
+    slots, which is where the wiring is observable."""
+    from engine.notify import telegram as tg_mod
+
+    seen: list = []
+
+    def _capture_build(self):
+        seen.append(self)
+        return _App(_ScriptedBot())
+
+    async def _ok(self, app):
+        return None
+
+    monkeypatch.setattr(TelegramBot, "_start_network", _ok)
+    monkeypatch.setattr(TelegramBot, "_register_handlers", lambda self, app: None)
+    monkeypatch.setattr(tg_mod.ApplicationBuilder, "build", _capture_build)
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
+
+    await bot.start()
+    await bot.stop()
+
+    builder = seen[0]
+    send_req, poll_req = builder._request, builder._get_updates_request
+    assert send_req is not poll_req
+    for req in (send_req, poll_req):
+        assert req._client.timeout.connect == _CONNECT_TIMEOUT_S
+        assert req._client.timeout.read == _READ_TIMEOUT_S
 
 
 # --------------------------------------------------------------------------- GET /notifications

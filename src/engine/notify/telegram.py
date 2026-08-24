@@ -42,7 +42,7 @@ import contextlib
 import json
 import secrets as _secrets
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
 from ulid import ULID
 
 from engine.core.clock import Clock
@@ -85,6 +86,24 @@ if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
 
 _log = get_logger("engine.notify.telegram")
 
+#: HTTP transport budget (WO-25b, 2026-08-24). python-telegram-bot builds its ``HTTPXRequest`` with a
+#: 5.0 s ``connect_timeout`` by default — and the LAN box's first TCP connect to ``api.telegram.org``
+#: was MEASURED at 4.25 s and 4.84 s on 08-24, i.e. INSIDE that default by fractions of a second. That
+#: is the whole explanation for three days of mass ConnectTimeout (139-223 failed sends/day): the
+#: link was not down, it was ~200 ms slower than a library default nobody had ever set. The connect
+#: budget below is ~4x the measured worst case, and the read/write/pool budgets are widened with it —
+#: on a slow link a send should be LATE, never lost (the outbox exists for genuinely dead links).
+_CONNECT_TIMEOUT_S = 20.0
+_READ_TIMEOUT_S = 30.0
+_WRITE_TIMEOUT_S = 30.0
+_POOL_TIMEOUT_S = 10.0
+
+#: PTB's own per-request connection-pool sizes, restated because constructing the request objects by
+#: hand bypasses the builder that would otherwise supply them: 256 for the bot, 1 for the long-poll
+#: updater (``ApplicationBuilder._build_request``). Only the timeouts change; the pools do not.
+_POOL_SIZE = 256
+_GET_UPDATES_POOL_SIZE = 1
+
 #: Hard bounds on Telegram network awaits (2026-08-07): the library's own retry/connect behavior is
 #: not trusted to terminate under the LAN box's flaky network — a hanging send after
 #: ``catch_up_complete`` held the whole boot (no scheduler, no warm-up lift) until a manual restart,
@@ -92,8 +111,15 @@ _log = get_logger("engine.notify.telegram")
 #: so a bounded drop is strictly better than an unbounded wait. Start gets a longer budget (four
 #: network round-trips) and degrades to a DISABLED bot — the engine must boot without Telegram
 #: rather than never.
-_SEND_TIMEOUT_S = 15.0
-_START_TIMEOUT_S = 45.0
+#:
+#: ORDERING CONSTRAINT (WO-25b): these two must stay STRICTLY LONGER than the transport budget above,
+#: whose worst case for one request is pool 10 + connect 20 + write 30 + read 30 = 90 s. If the outer
+#: ``wait_for`` fires first it PRE-EMPTS httpx, and every slow send is journalled as an anonymous
+#: ``TimeoutError`` instead of the ConnectTimeout / ReadTimeout that says WHICH leg is broken — which
+#: is exactly the diagnosis that took three days to make. Widen the transport and these move with it;
+#: never the reverse.
+_SEND_TIMEOUT_S = 95.0
+_START_TIMEOUT_S = 120.0
 
 #: Telegram's hard per-message cap — a send past this raises BadRequest "Message is too long" (two
 #: owner alerts died to exactly this on 2026-08-20). ``_SPLIT_CHUNK_CHARS`` is the raw-content budget
@@ -110,11 +136,20 @@ _SPLIT_MAX_PARTS = 5
 #: which makes one table serve two jobs: the retry OUTBOX drained below, and the owner dashboard's
 #: chronological view of the day. See ``0011_notifications.sql`` for the state machine.
 
-#: Drainer cadence and per-pass batch. FIVE oldest-first rows per pass, re-attempted SEQUENTIALLY, so
-#: a recovered link replays the backlog in the order the engine raised it instead of flooding the
-#: owner's chat with an out-of-order burst.
+#: Drainer cadence and per-pass batch. FIVE rows per pass, re-attempted SEQUENTIALLY, so a recovered
+#: link replays the backlog in the order the engine raised it instead of flooding the owner's chat
+#: with an out-of-order burst.
+#:
+#: :data:`_DRAIN_SCAN` is the WO-25b head-of-line fix (2026-08-24). The old pass SELECTed the five
+#: OLDEST pending rows and then SKIPPED any still inside its backoff window — so with 203 rows queued
+#: (mostly stale alert spam at 46 attempts each, i.e. backing off the full five minutes), the five
+#: oldest were almost always all in backoff and the pass did nothing. A fresh owner-action ack sat at
+#: attempt 1 for HOURS behind rows that were never going to be attempted. The pass now scans a wide
+#: window of the queue and spends its five attempts on rows that are actually DUE, critical first: a
+#: row inside its backoff window occupies no slot and blocks nobody.
 _DRAIN_INTERVAL_S = 30.0
 _DRAIN_BATCH = 5
+_DRAIN_SCAN = 100
 
 #: Per-row exponential backoff: ``min(_BACKOFF_MAX_S, _BACKOFF_BASE_S * 2**(attempts-1))`` seconds
 #: after the row's last attempt. A row whose next-attempt time has not arrived is SKIPPED (it keeps
@@ -280,6 +315,26 @@ def _menu_commands() -> list[BotCommand]:
     return [BotCommand(c.name, c.summary[:256]) for c in _COMMANDS if c.live]
 
 
+def _build_request(*, get_updates: bool = False) -> HTTPXRequest:
+    """One :class:`~telegram.request.HTTPXRequest` carrying the WO-25b timeout budget.
+
+    The library's defaults (connect 5 s, read/write 5 s, pool 1 s) are the bug: the measured first
+    connect to ``api.telegram.org`` from this box is 4.25-4.84 s, so a normal day's sends were racing
+    a 5 s fuse and losing. A FRESH instance is required per role — a ``BaseRequest`` is
+    ``initialize()``d and ``shutdown()``n by the bot that owns it, so the polling request and the send
+    request may never be the same object — and the pool sizes mirror what ``ApplicationBuilder`` would
+    have supplied (v21+/22.x idiom: build the request, hand it to ``.request()`` /
+    ``.get_updates_request()``; the per-timeout builder setters are mutually exclusive with those).
+    """
+    return HTTPXRequest(
+        connection_pool_size=_GET_UPDATES_POOL_SIZE if get_updates else _POOL_SIZE,
+        connect_timeout=_CONNECT_TIMEOUT_S,
+        read_timeout=_READ_TIMEOUT_S,
+        write_timeout=_WRITE_TIMEOUT_S,
+        pool_timeout=_POOL_TIMEOUT_S,
+    )
+
+
 @dataclass
 class _PendingChallenge:
     """A stashed two-step confirmation awaiting the owner's follow-up ``/confirm <phrase>`` (R10).
@@ -370,7 +425,15 @@ class TelegramBot:
         if self._app is not None:
             _log.warning("telegram_start_noop", reason="already_started")
             return
-        app = ApplicationBuilder().token(self._token).build()
+        # Explicit transport (WO-25b): the stock 5 s connect timeout is narrower than this box's
+        # measured connect time — see :func:`_build_request`. Both roles get their own instance.
+        app = (
+            ApplicationBuilder()
+            .token(self._token)
+            .request(_build_request())
+            .get_updates_request(_build_request(get_updates=True))
+            .build()
+        )
         self._register_handlers(app)
         # BOUNDED start (2026-08-07): the four network awaits below must never hold the boot —
         # timeout or error degrades to a DISABLED bot (sends drop "not_started"; the owner still
@@ -637,11 +700,16 @@ class TelegramBot:
                 _log.exception("telegram_outbox_drain_failed")
 
     async def _drain_outbox_once(self) -> None:
-        """One drain pass: expire what is stale, retry what is due, in ``created_at`` order.
+        """One drain pass: expire what is stale, then retry what is DUE — critical first, else oldest.
 
-        Batch-bounded and oldest-first, so a recovered link replays a backlog in the order the engine
-        raised it. A row still inside its backoff window is SKIPPED and keeps its place — it is not
-        swapped for a younger row, which would reorder the owner's chat."""
+        WO-25b changed the SELECTION and nothing else (batch size, backoff, expiry and the outage
+        streak are all untouched). The pass reads a wide window of the queue (:data:`_DRAIN_SCAN`) and
+        decides eligibility in Python: expire the stale, drop anything still inside its backoff
+        window, order what remains critical-first / chronological, attempt at most
+        :data:`_DRAIN_BATCH`. The property that buys is the one the old version lacked — a row that
+        cannot be attempted yet costs no slot, so it can never sit in front of a fresh critical
+        message.
+        """
         conn = self._conn
         if conn is None or self._app is None:
             return
@@ -650,13 +718,9 @@ class TelegramBot:
             "SELECT notification_id, created_at, kind, severity, title, body, attempts, "
             "last_attempt_at FROM notifications WHERE status='pending' "
             "ORDER BY created_at ASC LIMIT ?",
-            (_DRAIN_BATCH,),
+            (_DRAIN_SCAN,),
         ).fetchall()
-        for row in rows:
-            if self._expire_if_due(row, now):
-                continue
-            if not _backoff_elapsed(row, now):
-                continue
+        for row in self._due_rows(rows, now):
             text = _wire_text(row["severity"], row["title"], row["body"])
             delivered = await self._deliver(text, row["notification_id"])
             if delivered:
@@ -668,6 +732,36 @@ class TelegramBot:
                 )
             else:
                 self._note_drain_failure()
+
+    def _due_rows(self, rows: Sequence[Any], now: datetime) -> list[Any]:
+        """Pick the (at most :data:`_DRAIN_BATCH`) rows this pass will actually attempt.
+
+        Three steps, in this order:
+
+        * **expire first, over the WHOLE scan** — a stale non-critical row is retired wherever it sits
+          in the queue, not only when it happens to reach the front. That is what stops a spam
+          backlog from being re-scanned forever.
+        * **eligible only** — ``_backoff_elapsed`` is the SAME computation as before; a row that fails
+          it is simply not a candidate this pass, rather than a candidate that consumes a slot and
+          then declines to use it. This is the head-of-line fix.
+        * **critical first, chronological within a class** — ``CRITICAL_KINDS`` or
+          ``severity == 'critical'`` (:func:`_is_critical`, the same predicate expiry uses). The
+          enumeration index is the tie-breaker, so inside each class the SELECT's ``created_at ASC``
+          order survives verbatim: the owner still reads a backlog in the order the engine raised it,
+          and no timestamp is re-parsed to achieve that.
+        """
+        eligible = [
+            (rank, row)
+            for rank, row in enumerate(rows)
+            if not self._expire_if_due(row, now) and _backoff_elapsed(row, now)
+        ]
+        eligible.sort(
+            key=lambda item: (
+                0 if _is_critical(item[1]["severity"], item[1]["kind"]) else 1,
+                item[0],
+            )
+        )
+        return [row for _rank, row in eligible[:_DRAIN_BATCH]]
 
     def _expire_if_due(self, row: Any, now: datetime) -> bool:
         """Flip a NON-critical row that has been pending past :data:`_EXPIRY_H` to ``failed``.

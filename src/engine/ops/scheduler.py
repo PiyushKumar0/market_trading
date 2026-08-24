@@ -35,6 +35,23 @@ class Scheduler:
         self._sched.start()
         _log.info("scheduler_started")
 
+    def is_running(self) -> bool:
+        """Is the underlying APScheduler ACTUALLY running (WO-25c)?
+
+        Deliberately reads ``AsyncIOScheduler.running`` rather than a flag this wrapper sets in
+        :meth:`start`: the 2026-08-24 12:44:58 boot proved the failure mode is "``start()`` was never
+        reached at all", and a boot-contract check that trusted our own bookkeeping could only ever
+        confirm what the boot path already believed. The scheduler's own state is the ground truth —
+        it is False before ``start()`` and True only once triggers can actually fire.
+
+        Timing caveat (APScheduler 3.11 ``AsyncIOScheduler.shutdown`` is ``@run_in_event_loop``): the
+        stop is DEFERRED to the loop, so this still answers True for the remainder of the turn in
+        which :meth:`shutdown` was called and flips False on the next one. Irrelevant to the boot
+        contract — the watchdog is retired before ``shutdown()`` is ever called — but it means this is
+        an "is armed" probe, not a synchronous stop acknowledgement.
+        """
+        return bool(getattr(self._sched, "running", False))
+
     def shutdown(self) -> None:
         self._sched.shutdown(wait=False)
         _log.info("scheduler_stopped")

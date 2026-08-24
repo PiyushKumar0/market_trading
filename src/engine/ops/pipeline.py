@@ -84,6 +84,7 @@ from engine.intelligence.schemas import (
 )
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
+from engine.notify.episodes import AlertEpisodes
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
 from engine.strategy.types import SignalCandidate
@@ -656,6 +657,13 @@ class RecommendationPipeline:
         self._funnel_raw_flushed: dict[str, int] = {}
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
         self._last_position_event: dict[str, datetime] = {}
+        #: Owner-alert cadence for "Intraday analyst unavailable", per ``(agent, reason)`` (WO-25b).
+        #: One alert per failure meant one alert per heartbeat for as long as the SDK stayed down —
+        #: those repeats were a large share of the 203-deep notification backlog on 2026-08-24. The
+        #: D7 behaviour is unchanged (a Tier-1 failure is still no-proposal, still logged every time);
+        #: only how often the owner is told the same thing changes. A successful analyst call closes
+        #: the episode, so the next outage is heard immediately.
+        self._agent_alert_episodes = AlertEpisodes()
         #: §5.2(a) analyst forward cap — per-day count of candidates that reached the harness (§5.6).
         #: Hydrated from the day-slot journal on every day roll (WO-1 (iv)), so a mid-day restart
         #: RESUMES the day's analyst quota instead of refilling it.
@@ -1375,6 +1383,7 @@ class RecommendationPipeline:
                 self._rearm_slot(candidate)
             await self._alert_agent_failed("signal_candidate", result)
             return
+        self._note_agent_ok()
         payload = result.payload
         if isinstance(payload, NoActionOutput):
             if payload.regime_note:
@@ -1646,6 +1655,7 @@ class RecommendationPipeline:
         if not result.ok:
             await self._alert_agent_failed("position_event", result)
             return
+        self._note_agent_ok()
         action = result.payload
         if isinstance(action, NoActionOutput):
             return
@@ -1752,6 +1762,7 @@ class RecommendationPipeline:
         if not result.ok:
             await self._alert_agent_failed("heartbeat", result)
             return
+        self._note_agent_ok()
         payload = result.payload
         if isinstance(payload, NoActionOutput) and payload.regime_note:
             self._assembler.set_regime_note(payload.regime_note)
@@ -2207,11 +2218,32 @@ class RecommendationPipeline:
         except KeyError as exc:          # a missing def is a wiring bug, not a runtime condition
             raise KeyError(f"agent def '{INTRADAY_AGENT_ID}' is not loaded (agents.yaml)") from exc
 
+    def _note_agent_ok(self) -> None:
+        """A successful analyst call closes its alert episodes (WO-25b) — the next failure is news
+        again, not a repeat of the last outage."""
+        self._agent_alert_episodes.reset(INTRADAY_AGENT_ID)
+
     async def _alert_agent_failed(self, trigger: str, result: Any) -> None:
         """D7: every Tier-1 failure resolves to no-proposal + an owner alert. Best-effort — a failed
-        send must not turn a no-proposal into an exception on the trigger path."""
+        send must not turn a no-proposal into an exception on the trigger path.
+
+        WO-25b throttles the ALERT, never the failure handling: the ``intraday_agent_failed`` WARNING
+        below still fires on every occurrence, and the caller still returns no-proposal. Repeats of the
+        same ``(agent, reason)`` inside :data:`~engine.notify.episodes.REPEAT_AFTER` are logged as
+        suppressed instead of buzzing the owner again — a dead SDK produced one "Intraday analyst
+        unavailable" per trigger for hours, which is queue-building noise, not new information. The
+        key deliberately excludes ``trigger``: a heartbeat and a candidate failing on the same reason
+        are one outage, and the alert body already says the analyst is unavailable.
+        """
         _log.warning("intraday_agent_failed", trigger=trigger, reason=getattr(result, "reason", None),
                      detail=getattr(result, "detail", None), call_id=getattr(result, "call_id", None))
+        reason = str(getattr(result, "reason", "unknown"))
+        if not self._agent_alert_episodes.should_alert(
+            (INTRADAY_AGENT_ID, reason), self._clock.now()
+        ):
+            _log.info("intraday_agent_alert_throttled", trigger=trigger, reason=reason,
+                      note="repeat inside the episode window; logged, not alerted (WO-25b)")
+            return
         await self._send(CatalogMessage(
             kind=MessageKind.LIMIT_BREACH,
             title="Intraday analyst unavailable",

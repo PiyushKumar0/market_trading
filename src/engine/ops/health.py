@@ -21,7 +21,7 @@ import sys
 import threading
 import traceback
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,12 @@ AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message)
 #: ping is a lock acquisition plus ``SELECT 1`` — sub-millisecond — so 10 s is not a latency budget,
 #: it is the line past which "slow" is no longer a plausible explanation (WO-24b-prime).
 STORE_PING_TIMEOUT_S = 10.0
+
+#: How long an UNCHANGED problem set stays quiet between owner alerts (WO-25b, 2026-08-24). The pulse
+#: is 60 s and used to alert on every one of them — 57 identical ``health problems: ['feed_stale']``
+#: messages in a single morning, the bulk of the 203-deep notification backlog that then starved a
+#: fresh owner ack. A CHANGE in the problem set still alerts immediately; this only governs repeats.
+HEALTH_REPEAT_MIN = 30
 
 #: Stack-dump bounds. Deepest ``_STACK_FRAME_LIMIT`` frames per thread, and the whole dump is capped
 #: at ``_STACK_DUMP_MAX_CHARS`` — a ~30-thread process in a deep call tree would otherwise emit a
@@ -127,6 +133,12 @@ class HealthMonitor:
         #: One stack dump per STALL EPISODE, not per pulse. Reset by the next successful probe, so a
         #: second, later freeze dumps again while a 14-minute one does not dump fourteen times.
         self._store_stacks_dumped = False
+        # --- problem-set alert episodes (WO-25b) ---
+        #: The problem set the owner was last alerted about (sorted tuple; () = "all clear"), and when.
+        #: Together they make ``_alert_problems`` fire on a CHANGE, repeat at most every
+        #: :data:`HEALTH_REPEAT_MIN` minutes, and announce recovery exactly once.
+        self._problem_episode: tuple[str, ...] = ()
+        self._problem_alerted_at: datetime | None = None
 
     async def check(self, *, check_skew: bool = True) -> HealthReport:
         report = HealthReport()
@@ -203,11 +215,55 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - a watchdog that can kill its own host is not a watchdog
             _log.exception("store_watchdog_failed")
 
-        if report.problems and self._alert is not None:
-            await self._alert("warning", f"health problems: {report.problems}")
+        await self._alert_problems(report.problems)
         _log.info("health_check", feed=report.feed_state, skew_ok=report.clock_skew_ok,
                   disk_free_gb=report.disk_free_gb, problems=report.problems)
         return report
+
+    # ------------------------------------------------------------------ problem-set episodes (WO-25b)
+    async def _alert_problems(self, problems: list[str]) -> None:
+        """Owner-alert the problem set as an EPISODE, not once per pulse (WO-25b, 2026-08-24).
+
+        The pulse runs every 60 s and used to alert on every pulse a problem existed: 57 identical
+        ``health problems: ['feed_stale']`` messages in one morning, which is most of what built the
+        203-deep Telegram outbox that then starved a fresh owner ack. One persistent problem is one
+        thing to know.
+
+        The episode's identity is the problem SET (sorted, so a reordered list is not a "change"):
+
+        * **set changes** — a new problem appears, or one clears while others remain: alert now. A
+          change is news by definition, whatever the quiet window says.
+        * **set unchanged** — silence until :data:`HEALTH_REPEAT_MIN` minutes have passed, then one
+          reminder, and so on. A real outage keeps nagging; it just stops shouting.
+        * **all clear** — announce recovery ONCE and close the episode, so the owner learns the
+          incident ended without having to infer it from the alerts stopping.
+
+        The check itself is untouched: ``report.problems`` is computed exactly as before and the
+        ``health_check`` log line still fires every pulse. Only the owner-facing cadence changes.
+        State is per-process (a restart re-announces, which is correct: it IS a new situation).
+        """
+        if self._alert is None:
+            return
+        current = tuple(sorted(problems))
+        now = self._clock.now()
+        if not current:
+            if self._problem_episode:
+                recovered, self._problem_episode = self._problem_episode, ()
+                self._problem_alerted_at = None
+                await self._alert("info", f"health recovered: all clear (was {list(recovered)})")
+            return
+        unchanged = current == self._problem_episode
+        if (
+            unchanged
+            and self._problem_alerted_at is not None
+            and (now - self._problem_alerted_at) < timedelta(minutes=HEALTH_REPEAT_MIN)
+        ):
+            return
+        # Stamped BEFORE the await: an alert callback that raises must not leave the window open and
+        # turn the next pulse into a repeat.
+        self._problem_episode = current
+        self._problem_alerted_at = now
+        await self._alert("warning", f"health problems: {problems}")
 
     # ------------------------------------------------------------------ store stall watchdog
     async def _probe_store(self) -> None:
