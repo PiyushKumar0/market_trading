@@ -328,6 +328,31 @@ async def test_an_orphan_past_the_ttl_is_announced_once_and_not_again(
     assert counted_rows(conn, "verdicts") == 0
 
 
+async def test_a_stale_orphan_is_noted_quietly_and_never_pages_the_owner(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """An orphan older than 24 h is history, not news (2026-08-24: the GVT&D orphan paged the owner
+    three times over one weekend — every boot and day-roll re-announced it). Past the cap: one INFO
+    line per process-day, zero owner messages, and the memo still stops a same-day repeat."""
+    pipeline, parts = build_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ancient = write_proposal(
+        conn,
+        created_at=NOW - timedelta(minutes=pipeline_mod._ORPHAN_ALERT_MAX_AGE_MIN + 30),
+    )
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        assert await pipeline.sweep_orphaned_proposals() == 1
+        assert await pipeline.sweep_orphaned_proposals() == 0
+
+    assert log_events(caplog, "proposal_orphaned") == []
+    stale = log_events(caplog, "proposal_orphaned_stale")
+    assert len(stale) == 1
+    assert stale[0].levelname == "INFO"
+    assert stale[0].proposal_id == ancient
+    assert orphan_alerts(parts) == []
+    assert counted_rows(conn, "verdicts") == 0
+
+
 async def test_a_proposal_younger_than_the_ttl_is_left_alone(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):

@@ -183,6 +183,13 @@ _GATE_CONTEXT_DEADLINE_S = 90.0
 #: than a duplicate of it.
 _ORPHAN_TTL_MIN = 10
 
+#: Oldest orphan that still pages the owner, minutes (24 h). A permanent orphan can never be
+#: resolved (no verdict is ever invented), so without a cap it re-announced on every boot and every
+#: day-roll forever — the owner received the 2026-08-21 GVT&D orphan's alert three times (Fri 15:39,
+#: Sat 00:04, Mon 08:11) before this cap (2026-08-24). Past it: INFO log once per process-day,
+#: nightly-review counting unchanged, no owner page — an orphan older than a day is history, not news.
+_ORPHAN_ALERT_MAX_AGE_MIN = 24 * 60
+
 #: How often the orphan sweep actually reads the DB, minutes. The 60 s forward-drain tick invokes it
 #: on every pulse; this throttle decides which pulses do the work (WO-24c).
 _ORPHAN_SWEEP_INTERVAL_MIN = 5
@@ -998,10 +1005,13 @@ class RecommendationPipeline:
         there, and the point of the sweep is that such a row can never again sit unnoticed.
 
         Each ``proposal_id`` is announced ONCE per process-day (:attr:`_orphans_alerted`, rolled by
-        :meth:`_roll_orphan_day`): an orphan that is still an orphan tomorrow is still a problem, so
-        it re-announces once a day rather than either repeating every five minutes or going silent
-        forever. Returns how many NEW orphans were announced. Never raises — a watchdog that can
-        kill the tick it rides on is not a watchdog.
+        :meth:`_roll_orphan_day`) — but only while it is YOUNGER than
+        :data:`_ORPHAN_ALERT_MAX_AGE_MIN` (24 h). A permanent orphan is unresolvable by design (no
+        verdict is ever invented), and before the cap the same 2026-08-21 orphan paged the owner on
+        every boot and day-roll (three times over one weekend). Past the cap it is logged at INFO
+        once per process-day and counted by the nightly review, never paged: an orphan older than a
+        day is history, not news. Returns how many orphans were announced OR quietly noted. Never
+        raises — a watchdog that can kill the tick it rides on is not a watchdog.
         """
         now = self._clock.now()
         self._roll_orphan_day(self._clock.today())
@@ -1029,6 +1039,12 @@ class RecommendationPipeline:
             announced += 1
             action = str(row["action"] or "")
             age_min = self._orphan_age_min(row["created_at"], now)
+            if age_min is not None and age_min > _ORPHAN_ALERT_MAX_AGE_MIN:
+                # History, not news (see _ORPHAN_ALERT_MAX_AGE_MIN): visible in the log and the
+                # nightly review, but it never pages the owner again.
+                _log.info("proposal_orphaned_stale", proposal_id=proposal_id, action=action,
+                          age_min=age_min, created_at=str(row["created_at"]))
+                continue
             _log.error("proposal_orphaned", proposal_id=proposal_id, action=action,
                        age_min=age_min, created_at=str(row["created_at"]))
             await self._send(CatalogMessage(
