@@ -2058,9 +2058,11 @@ async def seed_boot_snapshots(
 
 # --------------------------------------------------------------------------- boot contract (WO-25c)
 #: How long a boot may take before the contract is checked. The four healthy 2026-08-24 boots reached
-#: engine_ready in 22 s / 13 s / 15 s / 15 s; 180 s leaves ~10x headroom for a multi-day-gap catch-up
-#: while still paging inside the same session a mid-session restart happens in.
-_BOOT_CONTRACT_DEADLINE_S = 180.0
+#: engine_ready in 22 s / 13 s / 15 s / 15 s — but the watchdog's FIRST live run (2026-08-25 01:26,
+#: a crash-recovery boot catching up a full missed EOD day: 14 jobs) took a legitimate 305 s and
+#: paged a false positive at 180 s. 420 s clears an honest heavy catch-up boot while still paging a
+#: real zombie (the 2026-08-24 one ran ELEVEN HOURS) within the same trading window it broke in.
+_BOOT_CONTRACT_DEADLINE_S = 420.0
 
 #: Re-check/re-log cadence while the contract stands violated.
 _BOOT_CONTRACT_RECHECK_S = 300.0
