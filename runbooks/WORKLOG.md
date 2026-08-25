@@ -1,5 +1,31 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-25 (08:3x–14:3x) — a lost session dissected in real time; WO-26 closes the starvation class and the supervisor's three defects
+
+- **Morning:** owner's 08:31 boot legally re-fired the overnight compaction (pre-08:45) against the
+  08-24 partition — now measured at 1,092,573 fragments — and the disk contention stalled flushes
+  (the stall watchdog's stack dump caught ~20 executor threads queued on `_flush_lock`, one inside
+  per-partition mkdir). 08:50 restart deferred compaction to 22:30 (in-session gate held: first
+  live `post_arm_skipped_in_session` on an owner boot). Token probe ok 08:40; 08:40 DNS blip
+  (Telegram + Kite both, getaddrinfo) transient.
+- **Session (09:30–13:20 window): EMPTY — zero candidates evaluated.** Ticks/bars/flushes flowed,
+  but the flush pile-up saturated the shared default executor from ~09:15 (store probe pending
+  4.4 h, consecutive=264) and starved every intelligence-layer store read. Third consecutive
+  degraded trading day, each one layer deeper: schema → gate freeze/zombie → executor starvation.
+- **WO-26a:** flush single-flight with skip (never queue; `close()` keeps a bounded 15 s wait),
+  `mt-store` (4) + `mt-flush` (1) dedicated pools — zero `asyncio.to_thread` left in store.py, the
+  starvation is impossible by construction; per-day partition-dir cache (zero steady-state fs
+  calls); watchdog re-probes every 5th pulse with `abandoned=` accounting.
+- **WO-26b — the supervisor's three defects (4 documented multi-hour freezes, incl. 03:37→08:30
+  TODAY):** every frame now stamps liveness (tick IS a heartbeat) + monitor discounts its own
+  wake-up overshoot before declaring silence; STALE→HEALTHY recovers on any frame
+  (`feed_stale_recovered` — was a one-way door); and the respawn DEADLOCK: cancel-read-loop-first
+  awaited `server.wait_closed()` (CPython ≥3.12 waits for the child link to drop) while
+  `_terminate_child` sat behind the same lock — terminate-first ordering + 5 s close bound.
+  Discrimination proofs: restoring each old rule reproduces its incident.
+- **1828 unit green; ruff 0 new.** Deployed 14:3x; tonight's 22:30 compaction (the million-fragment
+  digest) is the first at-scale test of the isolated architecture.
+
 ## 2026-08-25 (00:4x–02:2x) — WO-25: the 08-24 full-day incident dissected and closed (late-path amplifier, notification queue, and the zombie-boot bug)
 
 - **08-24 post-mortem, corrected twice by evidence:** (1) my Wi-Fi diagnosis was wrong — the morning's

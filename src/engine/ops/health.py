@@ -53,6 +53,14 @@ HEALTH_REPEAT_MIN = 30
 _STACK_FRAME_LIMIT = 40
 _STACK_DUMP_MAX_CHARS = 60_000
 
+#: While a probe is pending, issue a FRESH one every Nth consecutive pending pulse (WO-26a,
+#: 2026-08-25). Strict single-flight produced a watchdog that could freeze with the freeze: on 08-25
+#: the first probe never got a worker thread and the pulse then reported ``probe_pending=true,
+#: consecutive=264`` for 4 h 24 min — 264 log lines, all of them repeating the same one observation
+#: made at 09:15. Re-probing every 5th pending pulse (~5 min) costs one thread per five minutes and
+#: buys the one fact the old design could not produce: whether the store is STILL stuck NOW.
+_STORE_REPROBE_EVERY = 5
+
 
 def _swallow_probe_result(task: asyncio.Future) -> None:
     """Retrieve an abandoned probe's exception so it cannot surface as an unretrieved-exception
@@ -123,10 +131,16 @@ class HealthMonitor:
         # timer proven to survive the failure it is watching for.
         self._store = store
         self._store_ping_timeout_s = float(store_ping_timeout_s)
-        #: The single outstanding probe. At most ONE exists at any moment: a pulse that finds the
-        #: previous one still pending does NOT start another (that is the no-pile-up rule), and the
-        #: pending probe is itself the strongest evidence of a stall we could ask for.
+        #: The probe currently being watched. A pulse that finds it still pending normally starts no
+        #: other one — the pending probe IS evidence — but every ``_STORE_REPROBE_EVERY``th such
+        #: pulse it is ABANDONED for a fresh one, because evidence from 4 hours ago is not evidence
+        #: about now (WO-26a).
         self._store_probe: asyncio.Future | None = None
+        #: Probes abandoned that way and still unfinished. Kept referenced (a dropped pending future
+        #: would surface as a loop warning) and reported as ``abandoned=`` — a rising count is the
+        #: distinctive signature of "worker threads are going in and not coming out".
+        self._store_abandoned: list[asyncio.Future] = []
+        self._store_pending_pulses = 0                  # consecutive pulses that found one pending
         self._store_stall_count = 0                     # consecutive stalled pulses
         self._store_stall_since: datetime | None = None
         self._store_last_ok: datetime | None = None
@@ -271,25 +285,42 @@ class HealthMonitor:
 
         Three outcomes, and the difference between them is the diagnosis:
 
-        * **the previous probe is STILL PENDING** — no new probe is started. A ping that has not
-          returned since the last pulse is the finding, and issuing a second one would just queue
-          another thread behind the same seized resource.
+        * **the previous probe is STILL PENDING** — normally no new probe is started. A ping that
+          has not returned since the last pulse is the finding, and issuing one per pulse would
+          queue a thread per minute behind the same seized resource. But every
+          ``_STORE_REPROBE_EVERY``th consecutive pending pulse the old probe is ABANDONED and a
+          fresh one issued (WO-26a): a probe pending since 09:15 says nothing about 13:39, and on
+          2026-08-25 that is exactly what the pulse spent 4.4 h saying — 264 identical lines, no
+          new information, while the actual fault (a starved thread pool, not a seized lock) was
+          invisible because it could only have been seen by a probe that got a worker.
         * **this probe times out** — the store is stalled. A timed-out probe is left RUNNING on
           purpose: when it eventually returns it proves how long the seizure lasted, and until then
           it keeps the pending branch above truthful.
         * **the probe RAISES** — the store answered, with an error. That is a different animal
           entirely (a closed connection, a DuckDB error) and is logged as such, not as a stall.
+
+        A fresh probe that SUCCEEDS while older ones still hang is its own diagnosis: the store is
+        reachable and something is holding threads. That is ``store_probe_anomaly`` (see
+        :meth:`_note_store_ok`) and it counts as recovered — the engine can work again, which is
+        the question this watchdog exists to answer.
         """
         if self._store is None:
             return
         now = self._clock.now()
         probe = self._store_probe
         if probe is not None and not probe.done():
-            self._note_store_stall(now, pending=True)
-            return
+            self._store_pending_pulses += 1
+            if self._store_pending_pulses % _STORE_REPROBE_EVERY != 0:
+                self._note_store_stall(now, pending=True)
+                return
+            # Nth pending pulse: abandon (never cancel — cancelling destroys the evidence) and
+            # re-probe, so the next line reports the store as it is NOW.
+            self._store_abandoned.append(probe)
+            self._store_probe = None
         task = asyncio.ensure_future(self._store.aping())
         task.add_done_callback(_swallow_probe_result)
         self._store_probe = task
+        self._store_pending_pulses = 0
         try:
             # shield: a timeout must ABANDON the probe, never cancel it — a cancelled probe would
             # destroy the evidence that the next pulse's pending-branch reads.
@@ -314,6 +345,7 @@ class HealthMonitor:
             seconds_since_last_success=self._seconds_since(self._store_last_ok, now),
             stalled_s=self._seconds_since(self._store_stall_since, now),
             probe_pending=pending,
+            abandoned=self._outstanding_abandoned(),
             timeout_s=self._store_ping_timeout_s,
         )
         if not self._store_stacks_dumped:
@@ -321,16 +353,35 @@ class HealthMonitor:
             self._dump_thread_stacks()
 
     def _note_store_ok(self, now: datetime) -> None:
+        abandoned = self._outstanding_abandoned()
+        if abandoned:
+            # A fresh ping answered while N earlier ones are STILL hanging. Both facts matter and
+            # neither alone is the story: the store is usable again (so: recovered), and something
+            # swallowed N worker threads that never came back (so: not fine). This is the line the
+            # 08-25 morning could not produce.
+            _log.info(
+                "store_probe_anomaly",
+                abandoned=abandoned,
+                consecutive=self._store_stall_count,
+                stalled_s=self._seconds_since(self._store_stall_since, now),
+            )
         if self._store_stall_count:
             _log.info(
                 "store_stall_recovered",
                 stalled_s=self._seconds_since(self._store_stall_since, now),
                 consecutive=self._store_stall_count,
+                abandoned=abandoned,
             )
         self._store_stall_count = 0
         self._store_stall_since = None
         self._store_stacks_dumped = False          # the NEXT episode gets its own dump
         self._store_last_ok = now
+
+    def _outstanding_abandoned(self) -> int:
+        """How many abandoned probes have still not answered — pruned of the ones that came back,
+        so this is a live count of threads currently swallowed, not a lifetime total."""
+        self._store_abandoned = [p for p in self._store_abandoned if not p.done()]
+        return len(self._store_abandoned)
 
     @staticmethod
     def _seconds_since(then: datetime | None, now: datetime) -> float | None:

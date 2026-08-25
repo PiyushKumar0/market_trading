@@ -18,8 +18,13 @@ serialize; mirrors the SQLite convention).
 Threading / async model (§3.2 convention 4): the core is **synchronous** (DuckDB is native/CPU-bound
 work) with every call serialized by an internal lock — safe because there is exactly one writer and
 readers go through the same connection. Scan-heavy/bulky calls have thin ``a``-prefixed async
-wrappers that offload via ``asyncio.to_thread`` so the asyncio loop is never blocked (§2.2 heartbeat
-invariant); anything without a dedicated wrapper can be offloaded with :meth:`MarketStore.arun`.
+wrappers that offload to the store's OWN bounded worker pool so the asyncio loop is never blocked
+(§2.2 heartbeat invariant); anything without a dedicated wrapper can be offloaded with
+:meth:`MarketStore.arun`. Those wrappers deliberately do **not** use ``asyncio.to_thread``: that is
+the process-wide default executor shared with every other offload, and on 2026-08-25 a slow tick
+flush filled it with blocked threads and starved the entire intelligence layer for 4.4 h (WO-26a).
+Store work now lives in ``mt-store`` (4 workers, reads/writes) and ``mt-flush`` (1 worker, the tick
+flush), so neither can starve the other and nothing outside can starve either.
 
 Tick Parquet dataset (§4.3 ``ticks``): raw FULL-mode frames (cumulative volume + depth top, A13) are
 buffered in memory and flushed every ``flush_interval_s`` (60 s default) or ``max_buffered_ticks``, whichever
@@ -37,9 +42,11 @@ daily bars indefinitely — no purge implemented for them here.
 from __future__ import annotations
 
 import asyncio
+import functools
 import shutil
 import threading
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -66,6 +73,22 @@ T = TypeVar("T")
 #: ``tick_compact._MEMORY_LIMIT`` (4 GB) on purpose: this connection serves the session, that one is a
 #: maintenance job that must never compete with it.
 _MEMORY_LIMIT = "8GB"
+
+#: Width of the store's private worker pool (``mt-store``), WO-26a. Every DuckDB call serializes on
+#: ``_lock`` anyway, so this is not a parallelism knob — it is a QUEUE depth: enough that the health
+#: probe and a scan read are never behind the same single worker, small enough that a wedged store
+#: cannot bloom threads. 4 is two concurrent readers plus headroom for the probe and one job.
+_STORE_EXECUTOR_WORKERS = 4
+
+#: Quiet window between ``flush_skipped_in_flight`` lines (seconds). Skips are the DESIGNED response
+#: to a burst (see :meth:`MarketStore.flush_ticks`), so one line per skip would mean one line per
+#: tick during exactly the storm the skip exists to survive. The counter carries the real signal.
+_FLUSH_SKIP_LOG_EVERY_S = 60.0
+
+#: How long :meth:`MarketStore.close` waits for an in-flight background flush before giving up on it
+#: (seconds). It is the one caller that must not skip — the connection is about to go — but shutdown
+#: must not hang on a wedged flush either, so the wait is bounded and the give-up is logged.
+_CLOSE_FLUSH_WAIT_S = 15.0
 
 # ---------------------------------------------------------------------- retention (§4.5, plan-pinned)
 TICKS_RETENTION_DAYS = 30          # raw tick Parquet — enough to calibrate the fill model (R9)
@@ -684,9 +707,24 @@ class MarketStore:
         self._con: duckdb.DuckDBPyConnection | None = None
         self._lock = threading.RLock()          # serializes ALL DuckDB access (single writer, §4.1)
         self._tick_lock = threading.Lock()      # tick buffer only — appends never wait on DuckDB
-        self._flush_lock = threading.Lock()     # serializes whole tick flushes (shared stage table)
+        self._flush_lock = threading.Lock()     # single-flight gate for flushes — try-acquired, never queued
         self._tick_buffer: list[Tick] = []
         self._last_flush_at: datetime = clock.now()
+
+        # --- WO-26a (2026-08-25) flush single-flight telemetry: skipped flushes are normal under
+        #     load, so they are COUNTED always and logged at most once per minute.
+        self._flush_skip_lock = threading.Lock()          # counter only — never held across I/O
+        self._flush_skips = 0
+        self._flush_skip_logged_at: datetime | None = None
+        # --- WO-26a partition-dir cache: (see _tick_partition_dir) symbols whose ticks directory is
+        #     known to exist for _tick_dirs_day. Touched only under _flush_lock.
+        self._tick_dirs: set[str] = set()
+        self._tick_dirs_day: date | None = None
+        # --- WO-26a private worker pools (see _pool / _flush_pool). Created lazily so a sync-only
+        #     user (tests, offline jobs) never spawns a thread; released by close().
+        self._pool_lock = threading.Lock()
+        self._store_executor: ThreadPoolExecutor | None = None
+        self._flush_executor: ThreadPoolExecutor | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings, clock: Clock, **kwargs: Any) -> MarketStore:
@@ -718,17 +756,71 @@ class MarketStore:
 
         The flush runs BEFORE taking ``_lock``: flush_ticks acquires ``_flush_lock`` then ``_lock``
         per statement, so calling it while already holding ``_lock`` inverts the order against any
-        in-flight background flush (aflush_ticks worker) — a reproducible AB-BA deadlock."""
+        in-flight background flush (aflush_ticks worker) — a reproducible AB-BA deadlock.
+
+        This is also the ONE caller that waits on an in-flight flush instead of skipping it
+        (WO-26a): after this returns the connection is gone, so a skipped batch would have nowhere
+        left to go. The wait is bounded by ``_CLOSE_FLUSH_WAIT_S`` — shutdown must not hang on a
+        wedged flush, which is the failure mode this work order exists to survive."""
         if self._con is None:
+            self._shutdown_pools()
             return
         try:
-            self.flush_ticks()
+            self.flush_ticks(wait_s=_CLOSE_FLUSH_WAIT_S)
         finally:
             with self._lock:
                 if self._con is not None:
                     self._con.close()
                     self._con = None
+            self._shutdown_pools()
         _log.info("market_store_closed", db=str(self._db_path))
+
+    # ------------------------------------------------------------------ worker pools (WO-26a)
+    def _pool(self) -> ThreadPoolExecutor:
+        """The store's PRIVATE worker pool (``mt-store``) — where every async wrapper below runs.
+
+        2026-08-25 root cause: the wrappers offloaded via ``asyncio.to_thread``, i.e. the ONE
+        default executor shared by every offload in the process. A slow tick flush parked ~20
+        threads on ``_flush_lock`` inside that pool, and from then on nothing else could get a
+        worker: the health probe stayed pending 09:15→13:39 (consecutive=264) and the entire
+        intelligence layer ran empty — zero candidates, zero analyst calls, a whole session.
+
+        A pool the store owns makes that structurally impossible in both directions: store work
+        cannot starve the rest of the process, and no SDK call, HTTP parse or other ``to_thread``
+        user can starve a store read. Created lazily, released by :meth:`close`."""
+        with self._pool_lock:
+            if self._store_executor is None:
+                self._store_executor = ThreadPoolExecutor(
+                    max_workers=_STORE_EXECUTOR_WORKERS, thread_name_prefix="mt-store"
+                )
+            return self._store_executor
+
+    def _flush_pool(self) -> ThreadPoolExecutor:
+        """The tick flush's own single-thread pool (``mt-flush``), separate from :meth:`_pool`.
+
+        One thread is exactly the right width because flushes are single-flight already
+        (:meth:`flush_ticks` skips rather than queues). Keeping it out of ``mt-store`` means a long
+        flush can never consume a worker that a store read — or the health probe — needs, which is
+        the other half of the 08-25 lesson."""
+        with self._pool_lock:
+            if self._flush_executor is None:
+                self._flush_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="mt-flush"
+                )
+            return self._flush_executor
+
+    def _shutdown_pools(self) -> None:
+        """Release both pools. ``wait=False`` on purpose: :meth:`close` runs on the event loop at
+        engine shutdown (and inside another pool's worker for the CLI jobs), so joining here would
+        trade a clean stop for a hang on exactly the wedged flush this design exists to survive.
+        Already-queued work still runs; a flush that lands after the connection is gone re-stages
+        its batch and warns (``tick_flush_skipped_store_closed``)."""
+        with self._pool_lock:
+            pools = [p for p in (self._store_executor, self._flush_executor) if p is not None]
+            self._store_executor = None
+            self._flush_executor = None
+        for pool in pools:
+            pool.shutdown(wait=False)
 
     def __enter__(self) -> MarketStore:
         return self.open()
@@ -1649,6 +1741,16 @@ class MarketStore:
         with self._tick_lock:
             return len(self._tick_buffer)
 
+    @property
+    def tick_flush_skips(self) -> int:
+        """Flushes that returned immediately because another was already running (WO-26a).
+
+        A steadily climbing count is not an error — it is the pile-up that used to happen instead,
+        now costing nothing. A count climbing while ``ticks_flushed`` does NOT is the shape worth
+        alerting on: it means one flush never finished."""
+        with self._flush_skip_lock:
+            return self._flush_skips
+
     def stage_tick(self, tick: Tick) -> bool:
         """Append one tick to the buffer WITHOUT flushing; True when a flush is due.
 
@@ -1688,52 +1790,121 @@ class MarketStore:
             return self.flush_ticks()
         return []
 
-    def flush_ticks(self) -> list[Path]:
+    def flush_ticks(self, *, wait_s: float = 0.0) -> list[Path]:
         """Write the buffered batch to ``ticks/date=…/symbol=…/<ulid>.parquet`` (one file per
         (date, symbol) group in the batch) and reset the flush timer. Decimal/tz exact.
+
+        **Single-flight with SKIP (WO-26a, 2026-08-25).** A flush that finds another flush already
+        running returns IMMEDIATELY — it never queues behind ``_flush_lock``. The live path calls
+        this once per tick event whose batch is due (``BarBuilder.on_tick_event``), so a flush that
+        runs long used to convert every subsequent tick into one more BLOCKED worker thread: on
+        08-25 a stack dump caught ~20 of them stopped at this lock inside the shared
+        ``asyncio.to_thread`` pool, with the whole process starved behind them. Skipping costs
+        nothing at all: the staged ticks stay in the buffer, ``_last_flush_at`` is only reset by a
+        flush that actually RUNS, so the batch is still due and the next tick event flushes it.
+
+        ``wait_s`` > 0 waits that long for the in-flight flush instead of skipping. Only
+        :meth:`close` uses it — see there for why it is the one caller that may not skip.
 
         Lock discipline: ``_flush_lock`` serializes whole flushes (the stage table is shared
         working space); the DuckDB ``_lock`` is held only per statement — one staged bulk write
         for the WHOLE batch, then one brief COPY per (date, symbol) partition — so concurrent
         bar upserts wait at most one statement (~ms), never a whole flush."""
-        with self._flush_lock:
+        acquired = (
+            self._flush_lock.acquire(timeout=wait_s)
+            if wait_s > 0
+            else self._flush_lock.acquire(blocking=False)
+        )
+        if not acquired:
+            self._note_flush_skipped(waited_s=wait_s)
+            return []
+        try:
+            return self._flush_locked()
+        finally:
+            self._flush_lock.release()
+
+    def _note_flush_skipped(self, *, waited_s: float = 0.0) -> None:
+        """Count a skipped flush; log at most one line per ``_FLUSH_SKIP_LOG_EVERY_S`` (WO-26a).
+
+        The counter (:attr:`tick_flush_skips`) is the telemetry; the periodic line is the
+        breadcrumb that says the skip path is doing its job, carrying the running total and the
+        backlog it left staged."""
+        with self._flush_skip_lock:
+            self._flush_skips += 1
+            total = self._flush_skips
+            now = self._clock.now()
+            due = (
+                self._flush_skip_logged_at is None
+                or (now - self._flush_skip_logged_at).total_seconds() >= _FLUSH_SKIP_LOG_EVERY_S
+            )
+            if due:
+                self._flush_skip_logged_at = now
+        if due:
+            _log.info(
+                "flush_skipped_in_flight",
+                skipped_total=total,
+                pending_ticks=self.pending_tick_count,
+                waited_s=waited_s,
+            )
+
+    def _tick_partition_dir(self, d: date, symbol: str) -> Path:
+        """The ``ticks/date=…/symbol=…`` directory, created ONCE per (date, symbol) per process.
+
+        WO-26a: the flush used to ``mkdir(parents=True, exist_ok=True)`` for every one of the ~200
+        symbols in each batch — ~200 filesystem round-trips per pass, all of them inside
+        ``_flush_lock``, all of them re-proving what the previous flush 60 s earlier had already
+        established. On a busy Windows volume that is a large part of what made a flush long enough
+        for callers to pile up behind it in the first place.
+
+        The cache is cleared on DATE rollover, so it stays one trading day wide (~200 entries) and
+        a new day still gets its directories created. Called only under ``_flush_lock``, which is
+        what makes the unsynchronized set access safe."""
+        part_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}" / f"symbol={symbol}"
+        if d != self._tick_dirs_day:
+            self._tick_dirs_day = d
+            self._tick_dirs.clear()
+        if symbol not in self._tick_dirs:
+            part_dir.mkdir(parents=True, exist_ok=True)
+            self._tick_dirs.add(symbol)
+        return part_dir
+
+    def _flush_locked(self) -> list[Path]:
+        """The flush proper. Callers hold ``_flush_lock`` — see :meth:`flush_ticks`."""
+        with self._tick_lock:
+            batch, self._tick_buffer = self._tick_buffer, []
+            self._last_flush_at = self._clock.now()
+        if not batch:
+            return []
+        group_keys = sorted(
+            {(t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) for t in batch}
+        )
+        with self._lock:
+            closed = self._con is None
+            if not closed:
+                self._con.execute("DELETE FROM _tick_stage")
+        if closed:
+            # Orphaned late flush after close() (shutdown edge): restage rather than crash a
+            # background worker; nothing can write these post-close — the loss is explicit.
             with self._tick_lock:
-                batch, self._tick_buffer = self._tick_buffer, []
-                self._last_flush_at = self._clock.now()
-            if not batch:
-                return []
-            group_keys = sorted(
-                {(t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) for t in batch}
-            )
+                self._tick_buffer[:0] = batch
+            _log.warning("tick_flush_skipped_store_closed", ticks=len(batch))
+            return []
+        self._bulk_write(
+            "_tick_stage", _TICK_COLUMNS, [[getattr(t, c) for c in _TICK_COLUMNS] for t in batch]
+        )
+        written: list[Path] = []
+        for d, symbol in group_keys:
+            out = self._tick_partition_dir(d, symbol) / f"{ULID()!s}.parquet"
             with self._lock:
-                closed = self._con is None
-                if not closed:
-                    self._con.execute("DELETE FROM _tick_stage")
-            if closed:
-                # Orphaned late flush after close() (shutdown edge): restage rather than crash a
-                # background worker; nothing can write these post-close — the loss is explicit.
-                with self._tick_lock:
-                    self._tick_buffer[:0] = batch
-                _log.warning("tick_flush_skipped_store_closed", ticks=len(batch))
-                return []
-            self._bulk_write(
-                "_tick_stage", _TICK_COLUMNS, [[getattr(t, c) for c in _TICK_COLUMNS] for t in batch]
-            )
-            written: list[Path] = []
-            for d, symbol in group_keys:
-                part_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}" / f"symbol={symbol}"
-                part_dir.mkdir(parents=True, exist_ok=True)
-                out = part_dir / f"{ULID()!s}.parquet"
-                with self._lock:
-                    self._require_con().execute(
-                        "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
-                        "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
-                        f"TO '{out.as_posix()}' (FORMAT PARQUET)",
-                        [symbol, d],
-                    )
-                written.append(out)
-            _log.info("ticks_flushed", ticks=len(batch), files=len(written))
-            return written
+                self._require_con().execute(
+                    "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
+                    "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
+                    f"TO '{out.as_posix()}' (FORMAT PARQUET)",
+                    [symbol, d],
+                )
+            written.append(out)
+        _log.info("ticks_flushed", ticks=len(batch), files=len(written))
+        return written
 
     def get_ticks(self, symbol: str, d: date) -> list[Tick]:
         """Read back a day's ticks for ``symbol`` from the Parquet dataset (fill-model calibration, R9)."""
@@ -1806,68 +1977,92 @@ class MarketStore:
         return report
 
     # ================================================================== async wrappers (§3.2 conv. 4)
-    # Thin `asyncio.to_thread` offloads so scan-heavy DuckDB work never blocks the asyncio loop
-    # (§2.2 heartbeat invariant). The sync core stays the single implementation.
+    # Thin offloads so scan-heavy DuckDB work never blocks the asyncio loop (§2.2 heartbeat
+    # invariant). The sync core stays the single implementation. Every one of them goes through
+    # :meth:`_off` onto the store's PRIVATE ``mt-store`` pool — never ``asyncio.to_thread``, whose
+    # shared default executor is what a slow flush drained on 2026-08-25 (WO-26a; see :meth:`_pool`).
+    async def _off(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        """Run ``fn`` on the store's own pool — the single offload seam for the wrappers below."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._pool(), functools.partial(fn, *args, **kwargs))
+
     async def arun(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
         """Run any MarketStore method (or callable) in a worker thread — the generic offload for
         calls without a dedicated wrapper below."""
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        return await self._off(fn, *args, **kwargs)
 
     async def aping(self) -> bool:
         """:meth:`ping` off the loop — the liveness probe the health pulse awaits (WO-24b-prime).
 
-        Goes through the SAME ``asyncio.to_thread`` offload as every other wrapper here on purpose:
-        a probe that took a private thread would answer "the lock is free" while the path the engine
-        actually uses was starved, which is the one lie this watchdog must not be able to tell."""
-        return await asyncio.to_thread(self.ping)
+        Goes through the SAME offload as every other wrapper here on purpose: a probe that took a
+        private thread would answer "the lock is free" while the path the engine actually uses was
+        starved, which is the one lie this watchdog must not be able to tell. Since WO-26a that
+        path is the ``mt-store`` pool — so this probe now tests both halves of the real thing, the
+        lock AND the ability to get a worker, which is precisely the pair that failed on 08-25."""
+        return await self._off(self.ping)
 
     async def ainsert_bars_1m(self, bars: Sequence[Bar]) -> int:
-        return await asyncio.to_thread(self.insert_bars_1m, bars)
+        return await self._off(self.insert_bars_1m, bars)
 
     async def aget_bars_1m(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
-        return await asyncio.to_thread(self.get_bars_1m, symbol, start, end)
+        return await self._off(self.get_bars_1m, symbol, start, end)
 
     async def alast_bar_time(self, symbol: str) -> datetime | None:
-        return await asyncio.to_thread(self.last_bar_time, symbol)
+        return await self._off(self.last_bar_time, symbol)
 
     async def acoverage_gaps(self, symbol: str, start: datetime, end: datetime) -> list[datetime]:
-        return await asyncio.to_thread(self.coverage_gaps, symbol, start, end)
+        return await self._off(self.coverage_gaps, symbol, start, end)
 
     async def ahas_contiguous_coverage(self, symbol: str, start: datetime, end: datetime) -> bool:
-        return await asyncio.to_thread(self.has_contiguous_coverage, symbol, start, end)
+        return await self._off(self.has_contiguous_coverage, symbol, start, end)
 
     async def aupsert_bars_1d(self, bars: Sequence[DailyBar]) -> int:
-        return await asyncio.to_thread(self.upsert_bars_1d, bars)
+        return await self._off(self.upsert_bars_1d, bars)
 
     async def aget_bars_1d(self, symbol: str, start: date, end: date) -> list[DailyBar]:
-        return await asyncio.to_thread(self.get_bars_1d, symbol, start, end)
+        return await self._off(self.get_bars_1d, symbol, start, end)
 
     async def adaily_bar_span(self, symbol: str) -> tuple[date | None, int]:
-        return await asyncio.to_thread(self.daily_bar_span, symbol)
+        return await self._off(self.daily_bar_span, symbol)
 
     async def aflush_ticks(self) -> list[Path]:
-        return await asyncio.to_thread(self.flush_ticks)
+        """Flush on the DEDICATED single-thread ``mt-flush`` pool (WO-26a) — never the store read
+        pool, never the shared default executor. Combined with the skip semantics of
+        :meth:`flush_ticks`, a slow flush can now delay nothing but the next flush.
+
+        The skip is decided HERE, on the loop, when a flush is visibly already running. The live
+        caller is ``BarBuilder.on_tick_event``, which awaits this once per due tick: hopping to the
+        pool only to discover the lock is taken would put both a queue entry and the tick handler's
+        own latency behind a flush that can run for seconds — the pile-up in its last remaining
+        form. The check is optimistic and the try-acquire inside :meth:`flush_ticks` remains the
+        authority; losing the race costs one skipped cycle and never a tick, because the batch
+        stays staged and stays due."""
+        if self._flush_lock.locked():
+            self._note_flush_skipped()
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._flush_pool(), self.flush_ticks)
 
     async def aget_ticks(self, symbol: str, d: date) -> list[Tick]:
-        return await asyncio.to_thread(self.get_ticks, symbol, d)
+        return await self._off(self.get_ticks, symbol, d)
 
     async def aapply_retention(self) -> dict[str, int]:
-        return await asyncio.to_thread(self.apply_retention)
+        return await self._off(self.apply_retention)
 
     async def ainsert_news(self, rows: Sequence[dict[str, Any]]) -> int:
-        return await asyncio.to_thread(self.insert_news, rows)
+        return await self._off(self.insert_news, rows)
 
     async def aupsert_news_clusters(self, rows: Sequence[dict[str, Any]]) -> int:
-        return await asyncio.to_thread(self.upsert_news_clusters, rows)
+        return await self._off(self.upsert_news_clusters, rows)
 
     async def aget_news_clusters(self, **filters: Any) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(lambda: self.get_news_clusters(**filters))
+        return await self._off(self.get_news_clusters, **filters)
 
     async def areplace_catalyst_watchlist(self, d: date, rows: Sequence[dict[str, Any]]) -> int:
-        return await asyncio.to_thread(self.replace_catalyst_watchlist, d, rows)
+        return await self._off(self.replace_catalyst_watchlist, d, rows)
 
     async def aget_catalyst_watchlist(self, d: date, *, grade: str | None = None) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(lambda: self.get_catalyst_watchlist(d, grade=grade))
+        return await self._off(self.get_catalyst_watchlist, d, grade=grade)
 
     # --- §2.8 corporate-filings async offloads (the jobs upsert under store.arun; these are the
     #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop) ---

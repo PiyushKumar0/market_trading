@@ -558,3 +558,354 @@ async def test_warming_backoff_caps_and_escalates_once(monkeypatch):
     sup._set_state("HEALTHY")
     assert sup._wedge_respawns == 0
     assert sup._wedge_escalated is False
+
+
+# ================================================================== WO-26b: the false-STALE wedge
+# Three occurrences (2026-08-20 pm, 08-24 10:01, 08-25 11:28) of the same shape: HEALTHY→STALE while
+# the feed was perfect — ~46,000 ticks per 5 min and 1,010 bars written per interval kept flowing all
+# through a "STALE" that lasted 40 min / 2 h 14 min. Two independent defects produced it:
+#   1. Liveness was stamped ONLY on the dedicated heartbeat frame, so a stall on the shared event
+#      loop (the reader and the watchdog live on it together) read as a dead child.
+#   2. STALE was a one-way door AND the advertised kill+respawn self-deadlocked (_respawn cancelled
+#      the read loop first, whose `server.wait_closed()` — CPython ≥3.12 — waits for the live child
+#      link to drop, which only `_terminate_child()` two lines later could cause).
+
+
+class _FakeProc:
+    """Stand-in for a live child process: alive (returncode None) with a pid to log."""
+
+    returncode = None
+    pid = 4242
+
+
+class _StopMonitor(Exception):
+    """Ends a scripted `_monitor_loop` run (the loop has no bare `except`, so it propagates)."""
+
+
+def _monitor_sup(clock, *, state="HEALTHY", **kw):
+    """A supervisor parked in a running state with a live child — the watchdog's normal world."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(),
+                           symbol_for_token=lambda t: "R", **kw)
+    sup._state = state
+    sup._proc = _FakeProc()
+    sup._started_at = clock.now()
+    sup._last_frame_at = clock.now()
+    sup._last_heartbeat_at = clock.now()
+    sup._healthy_since = clock.now()
+    return sup
+
+
+async def _run_monitor(sup, monkeypatch, cycle, cycles):
+    """Drive the REAL ``_monitor_loop`` for ``cycles`` iterations, deterministically.
+
+    ``cycle(i)`` stands in for one ``await _monitor_sleep(1.0)``: it advances the fake clock by
+    however much wall time that cycle actually consumed (1 s = on time, more = the loop was starved)
+    and may deliver frames. Nothing really sleeps, so a 30 s starvation costs a microsecond.
+    """
+    import engine.broker.ticker_supervisor as mod
+
+    state = {"i": 0}
+
+    async def fake_sleep(_seconds):
+        i = state["i"]
+        state["i"] += 1
+        if i >= cycles:
+            raise _StopMonitor
+        await cycle(i)
+
+    monkeypatch.setattr(mod, "_monitor_sleep", fake_sleep)
+    try:
+        await sup._monitor_loop()
+    except _StopMonitor:
+        pass
+
+
+# ------------------------------------------------------------------ 1. a tick IS a heartbeat
+@pytest.mark.asyncio
+async def test_ticks_keep_the_feed_healthy_without_any_heartbeat_frame(monkeypatch):
+    """Ticks flowing but ZERO heartbeat frames must stay HEALTHY — no STALE, no respawn.
+
+    The heartbeat frame is a supplement for a quiet tape, not the sole evidence of life: a tick
+    proves the child is alive and the link is carrying bytes just as well. Under the old rule the
+    heartbeat age was the only input, so this exact situation (data perfect, heartbeat stamp stale)
+    is what declared a healthy feed dead."""
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    sup = _monitor_sup(clock)
+    sup._last_heartbeat_at = _at(9, 0, 0)          # an HOUR of heartbeat silence ...
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(_i):
+        now.set(now.value + dt.timedelta(seconds=1))
+        await sup._handle_frame(_tick_frame(token=1, ts=now.value))   # ... but ticks every second
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=30)            # 30 s > kill_after (10 s)
+
+    assert respawns == []                                             # never killed a live child
+    assert sup.health().state == "HEALTHY"
+    assert sup.health().heartbeat_age_s > 3600                        # heartbeat genuinely ancient ...
+    assert sup.health().last_frame_age_s <= 1.0                       # ... liveness genuinely fresh
+
+
+# ------------------------------------------------------------------ 2. the kill_after contract is real
+@pytest.mark.asyncio
+async def test_true_silence_past_kill_after_restarts_the_child(monkeypatch):
+    """NO ticks and NO heartbeats past kill_after_s ⇒ the child is actually restarted, logged once.
+
+    This is the contract the module advertises and did not honour: on 08-24/08-25 the supervisor
+    logged `ticker_respawn` and then did nothing at all for hours."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    sup = _monitor_sup(clock)
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(_i):
+        now.set(now.value + dt.timedelta(seconds=1))   # on-time cycles: no starvation to discount
+        # ... and not a single frame of any kind.
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=30)
+
+    assert respawns == ["heartbeat_silence"]           # the child was really restarted, once
+    silence = [kw for (lvl, ev, kw) in rec.calls if ev == "ticker_heartbeat_silence"]
+    assert len(silence) == 1                           # one line per episode, not one per second
+    assert silence[0]["frame_silence_s"] > 10.0
+    assert silence[0]["loop_starved_s"] == 0.0         # honestly attributed to the child
+    assert sup.health().state == "STALE"
+
+
+# ------------------------------------------------------------------ 3. STALE recovers on frames
+@pytest.mark.asyncio
+async def test_stale_recovers_to_healthy_when_frames_resume(clock):
+    """A STALE feed must recover on the very next frame — never wait for a reconnect that never comes.
+
+    On 08-24 10:01 STALE held for 40 minutes while ~46,000 ticks per 5 min flowed through
+    `_handle_frame` itself; nothing in the state machine could act on that evidence."""
+    bus = EventBus()
+    events: list = []
+
+    async def _h(fh) -> None:
+        events.append(fh.state)
+
+    bus.subscribe(FEED_HEALTH_TOPIC, _h)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus, symbol_for_token=lambda t: "R")
+    sup._state = "STALE"
+
+    await sup._handle_frame(_tick_frame(token=1, ts=_at(10, 5, 0)))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert sup.health().state == "HEALTHY"
+    assert events == ["HEALTHY"]           # the feed.health transition was published, not just set
+
+
+@pytest.mark.asyncio
+async def test_a_tick_promotes_warming_to_healthy(clock):
+    """WARMING is the other place the heartbeat frame used to be privileged (WO-26b).
+
+    A child whose heartbeat LoopingCall never started but whose ticks flow perfectly would sit in
+    WARMING and be respawned every warming_timeout_s forever — throwing away a working feed."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), symbol_for_token=lambda t: "R")
+    sup._state = "WARMING"
+    sup._started_at = clock.now()
+
+    await sup._handle_frame(_tick_frame(token=1, ts=_at(10, 5, 0)))
+
+    assert sup.health().state == "HEALTHY"
+    assert sup._wedge_respawns == 0            # and the wedge backoff is reset, as on any promotion
+
+
+@pytest.mark.asyncio
+async def test_stale_recovers_on_a_heartbeat_frame_too(clock):
+    """Recovery is keyed on FRAMES, not on tick frames specifically — a quiet tape recovers as well."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus())
+    sup._state = "STALE"
+
+    await sup._handle_frame({"type": "heartbeat"})
+
+    assert sup.health().state == "HEALTHY"
+
+
+# ------------------------------------------------------------------ 4. stamping lives on the frame path
+@pytest.mark.asyncio
+async def test_every_frame_type_stamps_liveness_on_the_frame_path(clock):
+    """Liveness is stamped in `_handle_frame` — the SAME seam every frame goes through.
+
+    That is the point of the fix: liveness cannot be starved separately from the data it guards,
+    because it is refreshed by the data. Any frame counts, including an order postback and a frame
+    `_read_frame` could not decode (reduced to `{}`): bytes off the link ARE proof of life."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), symbol_for_token=lambda t: "R")
+
+    for frame in ({"type": "tick", **_tick_frame(token=1)},
+                  {"type": "order", "data": {"order_id": "x"}},
+                  {"type": "heartbeat"},
+                  {}):                                   # undecodable frame -> still liveness
+        sup._last_frame_at = None
+        await sup._handle_frame(frame)
+        assert sup._last_frame_at == clock.now(), f"no liveness stamp for {frame.get('type')!r}"
+
+
+# ------------------------------------------------------------------ 5. don't blame the child for our stall
+@pytest.mark.asyncio
+async def test_silence_measured_across_a_starved_loop_does_not_kill(monkeypatch):
+    """A silence the watchdog only 'observed' because its own loop was frozen must not kill the child.
+
+    This is the 08-24/08-25 mechanism: the feature engine blocked the shared event loop for ~30 s at
+    a stretch (no `ticks_flushed` for 34 s, then 3,124 ticks in one flush; `store_stalled` reporting
+    `seconds_since_last_success=900.154`). Nothing was read during the freeze, so the wall-clock
+    frame age looked fatal — while the child was fine and its frames were queued in TCP."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    sup = _monitor_sup(clock)
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(i):
+        # Cycle 0 takes 31 wall-seconds instead of 1: the loop was blocked, not the feed.
+        now.set(now.value + dt.timedelta(seconds=31 if i == 0 else 1))
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=6)
+
+    assert respawns == []                                     # a live child was NOT killed
+    discounted = [kw for (lvl, ev, kw) in rec.calls if ev == "ticker_silence_discounted_loop_starved"]
+    assert len(discounted) == 1                               # said once per episode, not per cycle
+    assert discounted[0]["loop_starved_s"] == pytest.approx(30.0)
+    assert discounted[0]["frame_silence_s"] > 10.0             # the raw age really did look fatal
+    assert [ev for (_l, ev, _k) in rec.calls if ev == "ticker_heartbeat_silence"] == []
+
+
+@pytest.mark.asyncio
+async def test_starvation_discount_still_kills_a_genuinely_dead_child(monkeypatch):
+    """The discount defers one episode; it never grants immunity. Once the loop runs normally again
+    and the child is STILL silent, the kill fires for real."""
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    sup = _monitor_sup(clock)
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(i):
+        now.set(now.value + dt.timedelta(seconds=31 if i == 0 else 1))   # starved, then healthy loop
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=30)
+
+    assert respawns == ["heartbeat_silence"]      # silence outran the starvation credit ⇒ restarted
+
+
+# ------------------------------------------------------------------ 6. the respawn deadlock itself
+@pytest.mark.asyncio
+async def test_respawn_terminates_the_child_before_cancelling_the_read_loop(clock, monkeypatch):
+    """Regression for the wedge that made kill_after a lie (WO-26b).
+
+    `_read_loop`'s cleanup awaits `server.wait_closed()`, which under CPython ≥3.12 blocks until
+    every accepted connection has dropped — the child link included. Cancelling the read loop BEFORE
+    killing the child therefore waited on an event only the not-yet-run `_terminate_child()` could
+    produce, behind the same lock: the supervisor logged `ticker_respawn` and froze for 40 min
+    (08-24 10:01), 2 h 14 min (08-25 11:28) and 4 h 53 min (08-25 03:37), each ending only when an
+    unrelated `ticker_link_closed` released the wait. Order is the fix."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
+    sup._read_task = asyncio.create_task(asyncio.Event().wait())
+    sup._access_token = "tok"
+
+    order: list[str] = []
+
+    async def fake_terminate():
+        order.append("terminate_child")
+        sup._proc = None
+
+    async def fake_cancel_read():
+        order.append("cancel_read_task")
+
+    async def fake_spawn():
+        order.append("spawn_child")
+
+    monkeypatch.setattr(sup, "_terminate_child", fake_terminate)
+    monkeypatch.setattr(sup, "_cancel_read_task", fake_cancel_read)
+    monkeypatch.setattr(sup, "_spawn_child", fake_spawn)
+
+    await sup._respawn(reason="heartbeat_silence")
+
+    assert order == ["terminate_child", "cancel_read_task", "spawn_child"]
+    sup._read_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_stop_kills_the_child_between_the_two_cancels(clock, monkeypatch):
+    """`stop()` carries the same constraint plus one of its own: the monitor must go FIRST so it
+    cannot respawn the child being killed, then the child, then the read loop."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
+    order: list[str] = []
+
+    async def rec(name):
+        order.append(name)
+
+    monkeypatch.setattr(sup, "_cancel_monitor_task", lambda: rec("cancel_monitor"))
+    monkeypatch.setattr(sup, "_terminate_child", lambda: rec("terminate_child"))
+    monkeypatch.setattr(sup, "_cancel_read_task", lambda: rec("cancel_read_task"))
+
+    await sup.stop()
+
+    assert order == ["cancel_monitor", "terminate_child", "cancel_read_task"]
+    assert sup.health().state == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_read_loop_cleanup_cannot_hang_on_a_child_that_will_not_let_go(clock, monkeypatch):
+    """Belt-and-braces: even with the child link still open, cancelling the read loop must COMPLETE.
+
+    `server.wait_closed()` is bounded and the timeout is logged, so a child that survives both
+    SIGTERM and SIGKILL can no longer freeze supervision the way it did for hours."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    monkeypatch.setattr(mod, "_SERVER_CLOSE_TIMEOUT_S", 0.05)
+
+    class _NeverClosingServer:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            await asyncio.Event().wait()          # a live connection that never drops
+
+    async def fake_start_server(*_a, **_kw):
+        return _NeverClosingServer()
+
+    monkeypatch.setattr(mod.asyncio, "start_server", fake_start_server)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
+    sup._read_task = asyncio.create_task(sup._read_loop())
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    await asyncio.wait_for(sup._cancel_read_task(), timeout=5.0)      # must not hang
+
+    assert [ev for (_l, ev, _k) in rec.calls if ev == "ticker_server_close_timeout"]
