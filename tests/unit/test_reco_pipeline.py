@@ -889,6 +889,33 @@ async def test_market_entry_zone_spans_the_sanity_band(
     assert "set alert at 248.75" in mis.manual_checklist          # stop + 0.5 x (entry - stop)
 
 
+async def test_an_expired_recommendation_still_accepts_the_owners_taken(
+    conn, ticker, pclock, book, cost_model
+):
+    """2026-08-26, the FIRST live /taken: the owner executed intraday and recorded in the evening —
+    the 15:45 sweep had already labelled the row 'expired' and the book refused the platform's first
+    real fill. Expiry marks 'no longer actionable', never 'never happened': expired → taken is
+    legal; dismissed stays refused."""
+    rec = make_rec(cost_model)
+    book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    conn.execute(
+        "UPDATE recommendations SET human_action='expired' WHERE rec_id=?", (rec.rec_id,)
+    )
+
+    summary = await book.take(rec.rec_id, 3, Decimal("101.50"))
+
+    assert "recorded" in summary
+    rec_row = conn.execute("SELECT * FROM recommendations").fetchone()
+    assert rec_row["human_action"] == "taken" and rec_row["human_fill_price"] == "101.50"
+    assert conn.execute("SELECT COUNT(1) FROM positions").fetchone()[0] == 1
+
+    conn.execute(
+        "UPDATE recommendations SET human_action='dismissed' WHERE rec_id=?", (rec.rec_id,)
+    )
+    with pytest.raises(ValueError, match="already 'dismissed'"):
+        await book.take(rec.rec_id, 3, Decimal("101.50"))
+
+
 # =========================================================================== the ledger matrix (Â§3.6)
 async def test_take_close_veto_and_the_worked_pnl(conn, ticker, pclock, book, cost_model):
     """The full outcome-capture matrix, to the paisa, with the Â§6.5 label it produces."""

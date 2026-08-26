@@ -384,11 +384,16 @@ class RecommendationBook:
         if price <= 0:
             raise ValueError(f"price must be positive, got {price}")
         row = self._rec_row(rec_id)
-        if row["human_action"]:
+        if row["human_action"] and row["human_action"] != "expired":
             raise ValueError(
-                f"recommendation {rec_id} is already '{row['human_action']}' — /taken applies only to "
-                "an open recommendation"
+                f"recommendation {rec_id} is already '{row['human_action']}' — /taken applies only "
+                "to an open (or expired-unrecorded) recommendation"
             )
+        # ``expired`` → ``taken`` is legal (2026-08-26, the FIRST live /taken): the owner executed
+        # the HDFCAMC entry intraday and recorded it in the evening — by then the 15:45 sweep had
+        # already labelled the row expired, and both command forms refused the platform's first real
+        # fill. Expiry marks "no longer actionable", not "never happened"; the owner is the
+        # authority on what they executed while it was live. dismissed/closed/taken stay refused.
         data = self._rec_payload(row)
         if (data.get("kind") or "entry") != "entry":
             # 2026-07-28 review: /taken on an exit/adjust rec would OPEN a new position on the

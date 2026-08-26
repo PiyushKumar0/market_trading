@@ -1197,7 +1197,8 @@ class TelegramBot:
         return recs
 
     async def _resolve_rec_arg(
-        self, update: Update, arg: str, *, human_action: str | None
+        self, update: Update, arg: str, *, human_action: str | None,
+        include_expired: bool = False,
     ) -> str | None:
         """Resolve a capture command's first argument to a real ``rec_id`` — or reply and return None.
 
@@ -1222,6 +1223,12 @@ class TelegramBot:
             return arg
         try:
             recs = self._ledger_recs(human_action)
+            if include_expired:
+                # /taken only (2026-08-26, the first live fill): the owner executed intraday and
+                # recorded in the evening — the 15:45 sweep had already labelled the row expired,
+                # and the symbol form found nothing. Expired rows are /taken-able (the book now
+                # accepts expired→taken), so the resolver must see them too.
+                recs = recs + self._ledger_recs("expired")
         except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane (R8)
             _log.exception("telegram_rec_lookup_failed", arg=arg)
             if _is_ulid(arg):
@@ -1272,7 +1279,9 @@ class TelegramBot:
         if qty is None or qty <= 0 or price is None or price <= 0:
             await _reply(update, f"invalid qty/price; usage: {_USAGE_TAKEN}")
             return
-        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None)
+        rec_id = await self._resolve_rec_arg(
+            update, args[0], human_action=None, include_expired=True,
+        )
         if rec_id is None:
             return                              # unresolvable: _resolve_rec_arg already replied
         _log.warning("telegram_cmd_taken", arg=args[0], rec_id=rec_id, qty=qty, price=str(price))
