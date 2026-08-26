@@ -1,5 +1,32 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-26 (10:2x–15:3x) — THE FIRST RECOMMENDATION: BUY HDFCAMC qty 3 @ ₹2,644.80, delivered 12:46:39 (WO-27 mid-session deploy, first-ever gate verdicts, WO-28 sizing alignment)
+
+- **10:24 owner report: FROZEN, no recommendations.** Warm-up bars complete since ~09:30 but the
+  EVALUATION starved 55 min behind the scan-path lock contention (53 busy-skips) — WO-27 (committed,
+  awaiting post-close deploy) was the fix; deployed 10:25 under recovery authority. Freeze cleared
+  10:35 ("warmup_ready cleared; re-armed"). The 15:36 deploy timer was thereby stale.
+- **12:1x scan sweep: 12 candidates to the analyst** (6 rsi2 dip-buys, 5 brk20, 1 cat — FEDERALBNK,
+  the first live news-catalyst origination). Sweep notification DELIVERED to the owner (transport
+  fixes holding).
+- **The gate's first three verdicts ever (10:40/10:54/11:05): all REJECT, all CORRECT** — and they
+  exposed the last two inter-layer inconsistencies: (1) `_max_qty_by_risk` quoted the analyst a cap
+  WITHOUT the 2.5× overnight gap mult the gate charges (prompt rule 7 bound proposals to the bad
+  number → every swing proposal ~2.5× oversized: MOTHERSON qty 60 vs real 24, HAL qty 2 vs true 0);
+  (2) `min_viable_size` rejects null-target proposals from legs with no configured validated edge
+  (rsi2/trend/mom) — correct governance (the expected-edge seam stays ins-only); their contracts now
+  tell the analyst the gate needs an explicit target derived from shown levels. **WO-28 deployed
+  12:24** (commit fdf360b).
+- **12:46:39 — recommendation 01M0YEV6301CGP57ESYNTY2F9W: BUY HDFCAMC qty 3, limit 2644.80
+  (limit-at-level retest), stop 2607.60, brk20** — proposed 12:46 (analyst thesis: fresh 20d cross
+  on 1.12m shares, margin + participation confirmed), gate-APPROVED at the corrected size, journaled,
+  Telegram `delivered` attempt 1. Day totals: 19 evaluations, 7 proposals, 7 verdicts, 1 delivered.
+  human_action pending — the §8.3 G2 executed-recommendations clock can now actually start.
+- **EOD residuals:** tick_compact 08-24/08-25 rows FAILED on the 15:2x catch-up retries — but the
+  08-24 partition is down from 1,092,573 to 5,464 fragments (last night's isolated-architecture run
+  digested ~99.5%); tonight's 22:30 + the failure cause (likely corrupt-fragment stragglers, the
+  known class) to be checked this evening.
+
 ## 2026-08-26 (09:3x–10:1x) — WO-27: the scan hot path stops reading the database (second entrance of the starvation class, caught on camera)
 
 - **09:36 stall-dump verdict:** ~20 shared-pool threads queued on prescreen._lock; the holder inside a
