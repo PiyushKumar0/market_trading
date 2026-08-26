@@ -75,6 +75,31 @@ def test_fragments_collapse_to_one_file_with_identical_rows(store, tmp_path):
     assert result.dates == [YESTERDAY.isoformat()]
 
 
+def test_a_zero_byte_fragment_is_quarantined_and_the_survivors_still_compact(store, tmp_path):
+    """2026-08-26 containment — the FOURTH manual quarantine of this class became the last: a
+    truncated (0-byte) fragment used to fail the WHOLE partition via DuckDB's read_parquet
+    ("too small to be a Parquet file"); it is now moved to the quarantine dir exactly the way the
+    manual ritual did it, and the partition compacts from the survivors with ok=True."""
+    _write_fragments(store, YESTERDAY, n=3)
+    before = store.get_ticks("RELIANCE", YESTERDAY)   # BEFORE planting: the reader's glob would
+    part = store._parquet_root / "ticks" / f"date={YESTERDAY.isoformat()}" / "symbol=RELIANCE"
+    corrupt = part / "01ZZZZZZZZZZZZZZZZZZZZZZZZ.parquet"
+    corrupt.write_bytes(b"")                          # choke on the 0-byte file exactly like DuckDB
+
+    result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+
+    assert result.ok is True and result.failures == []
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert store.get_ticks("RELIANCE", YESTERDAY) == before
+    qdir = store._parquet_root / "quarantine"
+    quarantined = list(qdir.glob("*.parquet"))
+    assert [q.name for q in quarantined] == [
+        f"{YESTERDAY.isoformat()}_RELIANCE_{corrupt.name}"
+    ]
+    assert quarantined[0].stat().st_size == 0
+    assert not corrupt.exists()
+
+
 def test_rerun_on_a_compacted_day_is_a_no_op(store, tmp_path):
     _write_fragments(store, YESTERDAY, n=4)
     compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)

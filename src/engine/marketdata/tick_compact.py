@@ -74,6 +74,11 @@ _COMPACT_LOCK = threading.Lock()
 #: truly corrupt file is a real problem and must stay at ERROR, not be swallowed by this benign case.
 _MISSING_FILE_MARKER = "No files found"
 
+#: Smallest structurally-possible parquet file: the 4-byte PAR1 magic at both ends plus the 4-byte
+#: footer length. Anything under this is a truncated write, not data (2026-08-26 containment; every
+#: live corrupt fragment across four incidents measured exactly 0 bytes).
+_MIN_PARQUET_BYTES = 12
+
 #: Hard ceiling on the compaction connection's DuckDB memory (2026-08-18, the 53 GB incident of
 #: 2026-08-17). DuckDB's DEFAULT limit is ~80% of RAM (~25 GB here), and this job's shape — EXCEPT
 #: containment checks and ORDER BY COPYs over thousands of tiny fragments, for up to
@@ -232,6 +237,27 @@ def _compact_symbol_day(
     fragments = [p for p in files if not p.name.startswith(COMPACT_PREFIX)]
     label = f"{d.isoformat()}/{sym_dir.name.removeprefix('symbol=')}"
     try:
+        # Corrupt-fragment containment (2026-08-26, the FOURTH manual quarantine of this class):
+        # truncated writes from crash/backlog eras leave 0-byte fragments, and DuckDB's
+        # read_parquet fails the WHOLE partition on one ("too small to be a Parquet file") — every
+        # live case (MOTHERSON 08-04/08-24, BEL 08-07, ABB/ADANIENSOL/BAJFINANCE 08-17, INDIA VIX
+        # 08-25) was 0 bytes. A structurally-possible parquet file is >= 12 bytes (PAR1 magic twice
+        # + footer length); anything smaller is quarantined exactly the way the manual ritual did
+        # it, and the partition compacts from the survivors. A quarantine move that itself fails
+        # falls to the generic handler below and degrades this partition only, same as before.
+        corrupt = [p for p in fragments if p.stat().st_size < _MIN_PARQUET_BYTES]
+        if corrupt:
+            qdir = sym_dir.parent.parent.parent / "quarantine"
+            qdir.mkdir(exist_ok=True)
+            for p in corrupt:
+                p.replace(
+                    qdir / f"{d.isoformat()}_{sym_dir.name.removeprefix('symbol=')}_{p.name}"
+                )
+            _log.warning("tick_compaction_fragments_quarantined", partition=label,
+                         files=[p.name for p in corrupt], quarantine=str(qdir))
+            fragments = [p for p in fragments if p not in corrupt]
+            if not fragments and not existing:
+                return                        # nothing readable left — partition resolves empty
         if existing:
             # Interrupted unlink (the only way this state is reachable: a past date's fragments can
             # no longer grow). Delete the leftovers ONLY if their rows are provably already inside
