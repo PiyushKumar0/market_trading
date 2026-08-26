@@ -12,6 +12,7 @@ Three properties are load-bearing and each has a test here:
 
 from __future__ import annotations
 
+import json
 import logging
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +49,17 @@ OWNER_CHAT = 4242
 FOREIGN_CHAT = 999
 REAL_LIMITS_PATH = Path(__file__).resolve().parents[2] / "config" / "limits.yaml"
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="two-step")
+
+# --- WO-29 ticker resolution: real rec_id shapes. 26 chars of Crockford base32 (no I/L/O/U), which is
+# what ``str(ULID())`` produces and what the resolver's id path keys off. The first is the actual id
+# of the platform's first-ever proposal (IMPLEMENTATION_PLAN WO-24), kept verbatim as a shape sample.
+REC_A = "01M0H8ZXM3PYNAVXF54A5TDGV0"
+REC_B = "01M0H8ZXM3PYNAVXF54A5TDGV1"
+REC_C = "01M0H8ZXM3PYNAVXF54A5TDGV2"
+# Frozen-clock anchors (conftest FIXED_NOW = 2026-06-17 10:05 IST).
+LIVE_UNTIL = "2026-06-17T15:15:00+05:30"      # after now  -> still open
+DEAD_UNTIL = "2026-06-17T09:45:00+05:30"      # before now -> expired, whatever the sweep has done
+DELIVERED_AT = "2026-06-17T09:32:00+05:30"
 
 
 # --------------------------------------------------------------------------- test doubles
@@ -260,7 +272,7 @@ async def test_taken_rejects_wrong_arity(clock, msg, args):
     book = _FakeBook()
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)
     await bot._cmd_taken(_Update(msg), _Ctx(*args))
-    assert msg.sent == ["usage: /taken <rec_id> <qty> <price>"]
+    assert msg.sent == ["usage: /taken <symbol|rec_id> <qty> <price>"]
     assert book.calls == []
 
 
@@ -309,6 +321,290 @@ async def test_close_is_honest_guidance_and_marks_nothing(clock, conn, msg):
     assert "not implemented" not in text.lower()                    # honest wording, not a dead stub
     assert book.calls == []
     assert conn.execute("SELECT state FROM positions WHERE position_id='pos-1'").fetchone()["state"] == "OPEN"
+
+
+# ------------------------------------------- WO-29: the capture commands speak TICKER, not rec_id
+def _insert_rec(
+    conn,
+    rec_id: str,
+    *,
+    instrument: str = "HDFCAMC",
+    side: str = "BUY",
+    qty: int = 12,
+    kind: str = "entry",
+    valid_until: str | None = LIVE_UNTIL,
+    delivered_at: str | None = DELIVERED_AT,
+    human_action: str | None = None,
+    payload: str | None = None,
+) -> None:
+    """One delivered ``recommendations`` row.
+
+    Instrument / side / qty / kind / valid_until all live INSIDE the payload JSON — migration 0001
+    gives the table only ``rec_id / payload / delivered_at / human_action / human_fill_price /
+    outcome`` — which is precisely why the resolver parses the blob instead of SELECTing columns.
+    """
+    blob = payload if payload is not None else json.dumps(
+        {"rec_id": rec_id, "instrument": instrument, "side": side, "qty": qty, "kind": kind,
+         "valid_until": valid_until}
+    )
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at, human_action) VALUES (?,?,?,?)",
+        (rec_id, blob, delivered_at, human_action),
+    )
+
+
+def _capture_bot(clock, conn, book) -> TelegramBot:
+    """A bot wired for outcome capture: the book to act through, the state store to resolve against."""
+    return TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)
+
+
+@pytest.mark.asyncio
+async def test_taken_resolves_a_symbol_to_the_real_rec_id(clock, conn, msg):
+    """The whole point of WO-29: the owner types the ticker they were shown, and the book receives the
+    26-char id they were never shown. Lower-case on purpose — the match is case-insensitive."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", qty=12)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("hdfcamc", "12", "4,210.50"))
+
+    assert book.calls == [("take", REC_A, 12, Decimal("4210.50"))]
+    assert msg.sent == [f"recorded: took {REC_A} 12 @ 4210.50"]
+
+
+@pytest.mark.asyncio
+async def test_veto_resolves_a_symbol_to_the_real_rec_id(clock, conn, msg):
+    _insert_rec(conn, REC_A, instrument="HDFCAMC")
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
+    assert book.calls == [("veto", REC_A)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["M&M", "GVT&D", "BAJAJ-AUTO"])
+async def test_symbols_with_ampersands_and_hyphens_resolve(clock, conn, msg, symbol):
+    """``&`` and ``-`` are real NSE ticker characters — and the reason a ticker can never be mistaken
+    for a Crockford-base32 id."""
+    _insert_rec(conn, REC_A, instrument=symbol)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx(symbol.lower(), "3", "100"))
+    assert book.calls == [("take", REC_A, 3, Decimal("100"))]
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_symbol_lists_the_candidates_and_acts_on_none(clock, conn, msg):
+    """Two live recommendations on one ticker: guessing which the owner meant is a money decision the
+    bot has no business making. It lists them WITH THE FULL IDS (the tiebreak handle) and stops."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", side="BUY", qty=12,
+                delivered_at="2026-06-17T09:32:00+05:30")
+    _insert_rec(conn, REC_B, instrument="HDFCAMC", side="SELL", qty=5,
+                delivered_at="2026-06-17T09:58:00+05:30")
+    book = _FakeBook()
+
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
+
+    text = msg.sent[0]
+    assert book.calls == []                                  # nothing acted on
+    assert "2 recommendations match HDFCAMC" in text and "nothing done" in text
+    assert REC_A in text and REC_B in text                   # FULL ids: a truncated id is no handle
+    assert "HDFCAMC BUY x12 · delivered 09:32" in text
+    assert "HDFCAMC SELL x5 · delivered 09:58" in text
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_symbol_replies_with_what_is_actually_open(clock, conn, msg):
+    """A bare "unknown" would leave the owner guessing at a handle they have never been shown — the
+    exact defect WO-29 closes. The refusal ships the actionable set with it."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", side="BUY", qty=12)
+    book = _FakeBook()
+
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("tcs", "5", "3100"))
+
+    text = msg.sent[0]
+    assert book.calls == []
+    assert text.startswith("no open recommendation for TCS.")
+    assert "open now:" in text
+    assert f"HDFCAMC BUY x12 · delivered 09:32 · id {REC_A}" in text
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_symbol_with_an_empty_book_says_none_open(clock, conn, msg):
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("TCS"))
+    assert msg.sent == ["no open recommendation for TCS. none open right now."]
+    assert book.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_ulid_argument_keeps_the_original_id_path(clock, conn, msg):
+    """A 26-char Crockford id is passed through VERBATIM — including one the ledger does not know, so
+    the book stays the sole authority on which ids are real (it answers with its own ValueError)."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC")
+    book = _FakeBook()
+    bot = _capture_bot(clock, conn, book)
+
+    await bot._cmd_taken(_Update(msg), _Ctx(REC_A, "12", "4210"))
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_C))            # not in the ledger at all
+
+    assert book.calls == [("take", REC_A, 12, Decimal("4210")), ("veto", REC_C)]
+
+
+@pytest.mark.asyncio
+async def test_a_ulid_reaches_the_book_even_when_the_symbol_would_not(clock, conn, msg):
+    """The id path is the escape hatch: an EXPIRED recommendation is unreachable by ticker but still
+    addressable by id, so the owner is never locked out of a row the book might still accept."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=DEAD_UNTIL)
+    book = _FakeBook()
+    bot = _capture_bot(clock, conn, book)
+
+    await bot._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
+    assert book.calls == [] and "no open recommendation for HDFCAMC" in msg.sent[0]
+
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A))
+    assert book.calls == [("veto", REC_A)]
+
+
+@pytest.mark.asyncio
+async def test_expiry_is_recomputed_inline_not_read_off_human_action(clock, conn, msg):
+    """The honest "open" predicate. ``reco_expire`` only runs at 15:45, so between ``valid_until``
+    passing and that sweep a DEAD row still reads ``human_action IS NULL``. Resolution must apply the
+    same rule ``RecommendationBook.expire_stale`` does, or it would hand the owner a stale trade."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=DEAD_UNTIL)   # dead, unswept
+    _insert_rec(conn, REC_B, instrument="TCS", valid_until=LIVE_UNTIL)       # live
+    book = _FakeBook()
+    bot = _capture_bot(clock, conn, book)
+
+    await bot._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
+    assert book.calls == []
+    assert "no open recommendation for HDFCAMC." in msg.sent[0]
+    assert REC_A not in msg.sent[0] and REC_B in msg.sent[0]     # only the live one is listed
+
+    await bot._cmd_taken(_Update(msg), _Ctx("TCS", "12", "3100"))
+    assert book.calls == [("take", REC_B, 12, Decimal("3100"))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_until", [None, "not-a-timestamp", "2026-06-17T09:45:00"])
+async def test_an_unusable_valid_until_stays_open(clock, conn, msg, valid_until):
+    """``expire_stale`` SKIPS a row whose ``valid_until`` is missing, unparseable or NAIVE — it never
+    expires one. The resolver mirrors that skip exactly; the two surfaces must not disagree about
+    which recommendations exist (the last case is a real IST wall-clock with no tzinfo)."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=valid_until)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
+    assert book.calls == [("veto", REC_A)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("human_action", ["taken", "dismissed", "expired", "closed"])
+async def test_an_already_actioned_recommendation_is_not_open(clock, conn, msg, human_action):
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", human_action=human_action)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
+    assert book.calls == []
+    assert "no open recommendation for HDFCAMC" in msg.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_closed_resolves_among_taken_not_open_recommendations(clock, conn, msg):
+    """/closed and /taken read DIFFERENT universes on the same ticker: a taken recommendation is a
+    position to report on, an open one is a proposal to act on. Same symbol, two ids, no crossover."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", qty=12, human_action="taken")
+    _insert_rec(conn, REC_B, instrument="HDFCAMC", qty=4, human_action=None,
+                delivered_at="2026-06-17T10:01:00+05:30")
+    book = _FakeBook()
+    bot = _capture_bot(clock, conn, book)
+
+    await bot._cmd_closed(_Update(msg), _Ctx("hdfcamc", "4300.25"))
+    await bot._cmd_taken(_Update(msg), _Ctx("hdfcamc", "4", "4295"))
+
+    assert book.calls == [
+        ("close", REC_A, Decimal("4300.25")),               # the TAKEN row
+        ("take", REC_B, 4, Decimal("4295")),                # the OPEN row
+    ]
+
+
+@pytest.mark.asyncio
+async def test_closed_on_a_symbol_with_nothing_taken_says_so(clock, conn, msg):
+    """An open-but-unconfirmed recommendation is not closable — and the reply names the right state,
+    not a generic "unknown"."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC")
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_closed(_Update(msg), _Ctx("HDFCAMC", "4300"))
+    assert book.calls == []
+    assert msg.sent == ["no taken recommendation for HDFCAMC. none taken right now."]
+
+
+@pytest.mark.asyncio
+async def test_resolution_never_precedes_qty_or_price_validation(clock, conn, msg):
+    """A malformed price is rejected before the ledger is touched — same reply as before WO-29."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC")
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "abc"))
+    assert book.calls == []
+    assert msg.sent == ["invalid qty/price; usage: /taken <symbol|rec_id> <qty> <price>"]
+
+
+@pytest.mark.asyncio
+async def test_without_a_state_store_the_argument_passes_through(clock, msg):
+    """No ledger to resolve against ⇒ no resolution, and no invented refusal: the argument reaches the
+    book exactly as it did before WO-29, and the book answers for its own id namespace."""
+    book = _FakeBook()
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)   # conn=None
+    await bot._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
+    assert book.calls == [("take", "HDFCAMC", 12, Decimal("4210"))]
+
+
+@pytest.mark.asyncio
+async def test_a_long_open_list_is_capped_and_the_remainder_accounted_for(clock, conn, msg):
+    """``_reply`` writes straight to ``reply_text`` — it does NOT pass through ``send()``'s splitter —
+    so an unbounded list would hit Telegram's 4096-char cap and the owner would get NO reply at all.
+    The overflow is summarised, never silently dropped."""
+    for i in range(14):
+        _insert_rec(conn, f"01M0H8ZXM3PYNAVXF54A5TDG{i:02d}", instrument=f"SYM{i:02d}")
+    book = _FakeBook()
+
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("NOPE"))
+
+    text = msg.sent[0]
+    assert book.calls == []
+    assert len(text) <= 4096
+    assert len([ln for ln in text.splitlines() if " · id " in ln]) == 12
+    assert "… and 2 more" in text
+
+
+@pytest.mark.asyncio
+async def test_a_garbled_payload_is_listed_by_id_but_never_ticker_resolved(clock, conn, msg):
+    """A row whose payload will not parse has no ticker to match — matching an EMPTY instrument
+    (against, say, an empty argument) would be the worst kind of resolution. It still appears in the
+    listing with its id, because it remains actionable that way."""
+    _insert_rec(conn, REC_A, payload="{not json")
+    book = _FakeBook()
+    bot = _capture_bot(clock, conn, book)
+
+    await bot._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
+    assert book.calls == []
+    assert REC_A in msg.sent[0]                      # listed: the id is still a usable handle
+
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A))   # …and it works
+    assert book.calls == [("veto", REC_A)]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_ledger_read_never_takes_down_the_command(clock, conn, msg, monkeypatch):
+    """R8: the resolver is a read-only convenience. A failing read refuses the ticker with a usable
+    instruction — and still lets a full id through, because that path needs no ledger at all."""
+    def _boom(*_args, **_kw):
+        raise RuntimeError("database is locked")
+
+    book = _FakeBook()
+    bot = _capture_bot(clock, conn, book)
+    monkeypatch.setattr(bot, "_ledger_recs", _boom)
+
+    await bot._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
+    assert book.calls == []
+    assert "could not read the recommendation ledger to resolve HDFCAMC" in msg.sent[0]
+
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A))
+    assert book.calls == [("veto", REC_A)]
 
 
 # --------------------------------------------------------------------------- read-only reports
@@ -676,6 +972,61 @@ def test_recommendation_without_a_quote_never_invents_one(clock):
     assert "level 2450.00 (limit-at-level)" in text
     assert "current price" not in text
     assert message.data["ltp"] is None and message.data["level"] == "2450.00"
+
+
+# ------------------------------------------- WO-29: the copy-ready capture footer (§3.6 delivery)
+def test_recommendation_ends_with_a_copy_ready_capture_footer(clock):
+    """The message must teach its own reply. Before WO-29 the only handle it carried for /taken was a
+    rec_id it never printed — which is how the platform's first executed recommendation ended up
+    unrecordable. Symbol and qty are prefilled; ONLY the fill price stays a placeholder, because that
+    number is the owner's and a guessed one would be a fabrication in their own audit trail."""
+    text = catalog.recommendation_message(_recommendation(clock)).render()
+    footer = "record: /taken RELIANCE 5 <price> · decline: /veto RELIANCE"
+
+    assert footer in text
+    assert text.splitlines()[-1] == footer          # LAST line: the reply, after the B7 checklist
+    assert "rec-1" not in text                      # the internal id is still not the owner's handle
+
+
+def test_exit_recommendation_footer_asks_for_closed(clock):
+    """An exit is an order whose RESULT is reported — /taken would open a phantom position on the
+    closing side (the trap ``RecommendationBook.take`` already refuses)."""
+    rec = _recommendation(clock).model_copy(update={"kind": "exit", "side": "SELL"})
+    text = catalog.recommendation_message(rec).render()
+    assert text.splitlines()[-1] == "record: /closed RELIANCE <price> · decline: /veto RELIANCE"
+    assert "/taken" not in text
+
+
+def test_adjust_recommendation_footer_offers_only_the_decline(clock):
+    """An adjust places NO order — its checklist is "move the stop". Telling the owner to /closed a
+    position the platform just asked them to KEEP would be a wrong instruction on a money surface."""
+    rec = _recommendation(clock).model_copy(update={"kind": "adjust"})
+    text = catalog.recommendation_message(rec).render()
+    assert text.splitlines()[-1] == "decline: /veto RELIANCE"
+    assert "/taken" not in text and "/closed" not in text
+
+
+@pytest.mark.asyncio
+async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, msg):
+    """End-to-end WO-29: what the owner reads in the delivery message, typed back verbatim, reaches
+    the book as the 26-char id they were never shown. Neither half is useful without the other."""
+    rec = _recommendation(clock).model_copy(update={"rec_id": REC_A})
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?,?,?)",
+        (rec.rec_id, json.dumps(rec.model_dump(mode="json")), DELIVERED_AT),
+    )
+
+    footer = catalog.recommendation_message(rec).render().splitlines()[-1]
+    record, _sep, decline = footer.partition(" · ")
+    symbol, qty, placeholder = record.removeprefix("record: /taken ").split()
+    assert (symbol, qty, placeholder) == ("RELIANCE", "5", "<price>")
+    assert decline == "decline: /veto RELIANCE"
+
+    book = _FakeBook()
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)
+    await bot._cmd_taken(_Update(msg), _Ctx(symbol, qty, "2450.75"))
+
+    assert book.calls == [("take", REC_A, 5, Decimal("2450.75"))]
 
 
 @pytest.mark.parametrize(

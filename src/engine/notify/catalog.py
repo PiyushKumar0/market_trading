@@ -754,6 +754,39 @@ def catalyst_disabled(reason: str) -> CatalogMessage:
 THESIS_MAX_CHARS = 300
 MAX_HEADROOM_LINES = 5
 
+#: Placeholder for the one field the platform must NOT prefill: the price the owner actually paid.
+#: Everything else in the footer is known at delivery time; a guessed fill price would be a fabricated
+#: number in the owner's own audit trail (§8.1 — the recommendation's entry zone is not a fill).
+_PRICE_PLACEHOLDER = "<price>"
+
+
+def _capture_footer(rec: Recommendation) -> str:
+    """The copy-ready outcome-capture line that closes every §3.6 recommendation (WO-29, 2026-08-26).
+
+    The message used to end at the B7 checklist, and the only handle it carried for ``/taken`` was a
+    ``rec_id`` printed nowhere — so on the first day the owner actually took a recommendation, the
+    capture command was untypable. The footer now states the command verbatim, with the INSTRUMENT as
+    the handle (which the owner commands resolve, WO-29(a)) and the recommended qty already filled in.
+    Only the fill price stays a placeholder, because that number is the owner's, not the platform's.
+
+    Three kinds, three honest footers. An ``entry`` is a fill to record or decline. An ``exit`` asks
+    for an order whose result is reported with ``/closed``. An ``adjust`` places NO order at all (its
+    checklist is "move the stop"), so it gets the decline half only — instructing the owner to
+    ``/closed`` a position the platform just asked them to KEEP would be a wrong instruction on a
+    money surface, and "the exit-kind form" is not one an adjust can honestly carry.
+    """
+    if rec.kind == "entry":
+        return (
+            f"record: /taken {rec.instrument} {rec.qty} {_PRICE_PLACEHOLDER} · "
+            f"decline: /veto {rec.instrument}"
+        )
+    if rec.kind == "exit":
+        return (
+            f"record: /closed {rec.instrument} {_PRICE_PLACEHOLDER} · "
+            f"decline: /veto {rec.instrument}"
+        )
+    return f"decline: /veto {rec.instrument}"
+
 
 def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -> CatalogMessage:
     """Render a §3.6 :class:`~engine.core.contracts.Recommendation` for the owner (§10.3
@@ -778,6 +811,11 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
     Failed gate checks sort first among the at-most :data:`MAX_HEADROOM_LINES` headroom lines: a
     ``shrink``/``owner_approval_required`` verdict is only meaningful next to the rule that caused it.
     The thesis is truncated at :data:`THESIS_MAX_CHARS`; the full object is on the dashboard.
+
+    CAPTURE FOOTER (WO-29, 2026-08-26). The final line is the command the owner types back, with the
+    instrument as its handle — see :func:`_capture_footer`. Before it, the §8.3 capture flow needed a
+    ``rec_id`` this message never printed, which is exactly how the first executed recommendation
+    ended up unrecordable.
     """
     low, high = rec.entry_zone
     at_level = low == high
@@ -816,6 +854,8 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
     )
     lines.append("checklist (yours to place — the platform places no orders in RECOMMEND, B7):")
     lines += [f"  • {item}" for item in rec.manual_checklist]
+    # WO-29: the last line is the reply the owner types back — the message teaches its own capture.
+    lines.append(_capture_footer(rec))
 
     return CatalogMessage(
         kind=MessageKind.RECOMMENDATION,
@@ -844,7 +884,11 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
             "valid_until": rec.valid_until.isoformat(),
         },
         # One-tap outcome capture (§3.6): the owner confirms the fill with the observed qty/price.
-        reply_keyboard=[[{"text": f"✓ /taken {rec.rec_id}", "command": f"/taken {rec.rec_id} {rec.qty} "}]],
+        # Keyed on the INSTRUMENT since WO-29, so this hint and the rendered footer prefill the same
+        # command — a keyboard that still handed back a rec_id would reintroduce the exact defect the
+        # footer exists to close, on the day someone finally wires the widget.
+        reply_keyboard=[[{"text": f"✓ /taken {rec.instrument}",
+                          "command": f"/taken {rec.instrument} {rec.qty} "}]],
     )
 
 

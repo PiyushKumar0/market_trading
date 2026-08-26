@@ -19,6 +19,10 @@ The Phase-2 data sources arrive as **optional keyword dependencies** — ``reco_
 which case its command replies "… not wired" instead of pretending to act. Composition (§3.2.12) wires
 them in a later wave; the bot itself never constructs a dependency and never originates an order.
 
+The §3.6 capture commands (``/taken``, ``/closed``, ``/veto``) speak **ticker, not rec_id** (WO-29):
+their first argument is resolved against the recommendation ledger, with the ULID id path kept intact
+underneath — see :meth:`TelegramBot._resolve_rec_arg`.
+
 Two RECOMMEND-mode honesty rules are encoded here (B7/§3.6): the platform places **zero API orders**,
 so ``/close`` returns guidance rather than sending anything, and ``/approve`` writes only its
 ``owner_approvals`` row (a tracked position's stop is updated only if the injected recommendation book
@@ -195,6 +199,34 @@ _CHALLENGE_TTL = timedelta(minutes=2)
 # Reply text for a command registered from the catalog but whose downstream is not yet wired.
 _PHASE0_STUB = "not yet implemented in Phase 0"
 
+# ------------------------------------------------------------------- ticker → rec_id (WO-29)
+#: 2026-08-26, the evening of the FIRST executed recommendation. ``rec_id`` is a 26-char ULID that no
+#: owner-facing surface has ever printed, so ``/taken <rec_id> …`` was untypable on the one day it
+#: mattered. The outcome-capture commands now resolve their first argument as a TICKER against the
+#: owner's own recommendation ledger, falling back to the id path when the argument is ULID-shaped.
+#:
+#: The two namespaces cannot collide: a ULID is exactly 26 Crockford-base32 characters (the alphabet
+#: drops I/L/O/U so a human never confuses them with 1/0), while NSE tickers are shorter and may carry
+#: ``&`` or ``-`` (GVT&D, M&M, BAJAJ-AUTO) — characters no ULID contains. That is what makes
+#: "ticker first, id second" safe rather than a heuristic.
+_ULID_CHARS = 26
+_ULID_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+#: Owner-facing signatures for the §3.6 capture commands, defined ONCE: :data:`_COMMANDS` (which feeds
+#: ``/help`` and the Telegram autocomplete menu) and the handlers' own ``usage:`` replies both read
+#: these, so the advertised form and the rejected form can never disagree. The ticker comes first
+#: because it is the form the owner can actually type from the delivery message (WO-29).
+_USAGE_TAKEN = "/taken <symbol|rec_id> <qty> <price>"
+_USAGE_CLOSED = "/closed <symbol|rec_id> <price>"
+_USAGE_VETO = "/veto <symbol|rec_id>"
+
+#: Rows a resolution reply may list before it summarises the rest. ``_reply`` writes straight to
+#: ``reply_text`` — it does NOT pass through ``send()``'s splitter — so an unbounded list would
+#: eventually hit Telegram's 4096-char cap and the owner would get NO reply at all, which is the
+#: worst possible answer to "I don't know which one you meant". Twelve rows is far past any real
+#: open book (the day-slot budget is single digits) while keeping the message comfortably legible.
+_MAX_LIST_ROWS = 12
+
 
 class RecoBook(Protocol):
     """The RECOMMEND outcome-capture seam (§3.6) — implemented by ``RecommendationBook``.
@@ -258,11 +290,13 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("resume_entries", "/resume_entries",
                  "Resume entries: clears the owner pause AND a rejection-storm freeze.", True),
     # --- RECOMMEND outcome capture (§3.6) ---
-    _CommandSpec("taken", "/taken <rec_id> <qty> <price>",
-                 "Confirm you took a recommendation at qty/price (origin=recommended).", True),
-    _CommandSpec("closed", "/closed <rec_id> <price>",
-                 "Mark a taken recommendation closed at price (records the outcome).", True),
-    _CommandSpec("veto", "/veto <rec_id>",
+    _CommandSpec("taken", _USAGE_TAKEN,
+                 "Confirm you took a recommendation at qty/price (origin=recommended). The symbol is "
+                 "enough while exactly one recommendation on it is open.", True),
+    _CommandSpec("closed", _USAGE_CLOSED,
+                 "Mark a taken recommendation closed at price (records the outcome). The symbol is "
+                 "enough while exactly one taken recommendation on it is open.", True),
+    _CommandSpec("veto", _USAGE_VETO,
                  "Decline an open recommendation; it is recorded as vetoed, never as taken.", True),
     _CommandSpec("close", "/close <position_id>",
                  "Guidance for exiting a position — in RECOMMEND the exit is yours to place (B7).",
@@ -347,6 +381,24 @@ class _PendingChallenge:
     phrase: str                                   # one-time confirmation phrase
     expires_at: Any                               # tz-aware IST datetime (Clock.now() + TTL)
     apply: Callable[[OwnerConfirmation], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class _LedgerRec:
+    """One ``recommendations`` row flattened for owner-facing lookup and listing (WO-29).
+
+    Only ``rec_id`` and ``delivered_at`` are actual columns: migration 0001 gives the table
+    ``rec_id / payload / delivered_at / human_action / human_fill_price / outcome`` and nothing else,
+    so the instrument, side, qty and kind are all parsed out of the ``payload`` JSON blob — the same
+    place ``RecommendationBook.expire_stale`` reads ``valid_until`` from.
+    """
+
+    rec_id: str
+    instrument: str
+    side: str
+    qty: int
+    kind: str
+    delivered_at: str | None
 
 
 class TelegramBot:
@@ -1095,38 +1147,158 @@ class TelegramBot:
             text += " Still latched by: " + ", ".join(remaining) + "."
         await _reply(update, text)
 
+    # ------------------------------------------------------------------ ticker → rec_id (WO-29)
+    def _ledger_recs(self, human_action: str | None) -> list[_LedgerRec]:
+        """Delivered recommendations in ONE lifecycle state, oldest first (read-only SELECT).
+
+        ``human_action`` carries the whole lifecycle in a single column — NULL (open) → ``taken`` →
+        ``closed``, or ``dismissed`` / ``expired`` — so the two states the capture commands care about
+        are exactly ``None`` (open: what ``/taken`` and ``/veto`` may act on) and ``'taken'`` (taken and
+        not yet closed: what ``/closed`` may act on; a closed row has already moved to ``'closed'``, so
+        no second predicate is needed). ``delivered_at IS NOT NULL`` is the "the owner has actually
+        seen it" half of open — a row is written by ``RecommendationBook.deliver`` with its stamp, so
+        this excludes nothing today and stays honest if a draft state is ever introduced.
+
+        EXPIRY IS NOT A COLUMN. A recommendation dies when its ``payload.valid_until`` passes; the
+        15:45 ``reco_expire`` sweep only *labels* that fact afterwards, so between the two a dead row
+        is still ``human_action IS NULL``. The filter recomputes it inline with EXACTLY the predicate
+        ``RecommendationBook.expire_stale`` uses (tz-aware and strictly in the past) — including its
+        skip: an unparseable or naive ``valid_until`` is KEPT, because that is the row the sweep would
+        also leave alone, and the two surfaces disagreeing about which recommendations exist would be
+        worse than either rule alone. Applied to the open set only — a taken recommendation is an open
+        position, and positions do not expire.
+        """
+        if self._conn is None:
+            return []
+        sql = (
+            "SELECT rec_id, payload, delivered_at FROM recommendations "
+            "WHERE delivered_at IS NOT NULL AND human_action IS NULL ORDER BY delivered_at"
+            if human_action is None else
+            "SELECT rec_id, payload, delivered_at FROM recommendations "
+            "WHERE delivered_at IS NOT NULL AND human_action=? ORDER BY delivered_at"
+        )
+        rows = self._conn.execute(sql, () if human_action is None else (human_action,)).fetchall()
+        now = self._clock.now()
+        recs: list[_LedgerRec] = []
+        for row in rows:
+            data = _payload_dict(row["payload"])
+            if human_action is None and _is_expired(data.get("valid_until"), now):
+                continue
+            recs.append(
+                _LedgerRec(
+                    rec_id=str(row["rec_id"]),
+                    instrument=str(data.get("instrument") or ""),
+                    side=str(data.get("side") or "?"),
+                    qty=_parse_int(str(data.get("qty") or 0)) or 0,
+                    kind=str(data.get("kind") or "entry"),
+                    delivered_at=row["delivered_at"],
+                )
+            )
+        return recs
+
+    async def _resolve_rec_arg(
+        self, update: Update, arg: str, *, human_action: str | None
+    ) -> str | None:
+        """Resolve a capture command's first argument to a real ``rec_id`` — or reply and return None.
+
+        WO-29 (2026-08-26): ``rec_id`` is internal plumbing the owner has never been shown, so the
+        argument is matched as a TICKER first and only then as an id:
+
+        * **ticker, exactly one match** → that row's real ``rec_id``; everything downstream runs as if
+          the id had been typed.
+        * **ticker, several matches** → the list, with the FULL ids as the tiebreak handle, and NO
+          action taken. Guessing which of two live recommendations the owner meant is a money decision
+          the bot has no business making.
+        * **ULID-shaped** → returned verbatim, the pre-WO-29 id path unchanged (:func:`_is_ulid`).
+        * **neither** → a refusal that names the argument AND lists what is actually actionable, so
+          the owner's next message can be right rather than another guess.
+
+        With no state store wired there is nothing to resolve against and the argument passes straight
+        through to the book, exactly as before WO-29: the book owns the id namespace and already
+        answers an unknown id with an owner-facing ``ValueError``. A refusal the bot cannot justify
+        would be worse than that round trip.
+        """
+        if self._conn is None:
+            return arg
+        try:
+            recs = self._ledger_recs(human_action)
+        except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane (R8)
+            _log.exception("telegram_rec_lookup_failed", arg=arg)
+            if _is_ulid(arg):
+                return arg                     # the id path needs no ledger read; don't strand it
+            await _reply(
+                update,
+                f"could not read the recommendation ledger to resolve {arg.strip().upper()}; "
+                "re-send with the full rec_id.",
+            )
+            return None
+        wanted = arg.strip().upper()
+        # ``rec.instrument`` is "" for a row whose payload would not parse; requiring a non-empty
+        # ticker keeps such a row out of the MATCH set (it stays reachable by id, which is correct)
+        # and stops an empty argument from resolving to it.
+        matches = [rec for rec in recs if rec.instrument and rec.instrument.strip().upper() == wanted]
+        if len(matches) == 1:
+            _log.info(
+                "telegram_rec_resolved",
+                symbol=matches[0].instrument, rec_id=matches[0].rec_id, state=human_action or "open",
+            )
+            return matches[0].rec_id
+        if matches:
+            _log.warning("telegram_rec_ambiguous", symbol=wanted, count=len(matches))
+            await _reply(update, _ambiguous_reply(wanted, matches))
+            return None
+        if _is_ulid(arg):
+            return arg
+        _log.info(
+            "telegram_rec_unresolved", arg=wanted, state=human_action or "open", candidates=len(recs)
+        )
+        await _reply(update, _no_match_reply(wanted, recs, human_action))
+        return None
+
     # ------------------------------------------------------------------ RECOMMEND outcome capture (§3.6)
     async def _cmd_taken(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner confirms they took a recommendation — creates the ``origin='recommended'`` position."""
+        """Owner confirms they took a recommendation — creates the ``origin='recommended'`` position.
+
+        The first argument is a SYMBOL or a ``rec_id`` (WO-29); qty/price are validated BEFORE the
+        ledger is touched, so a typo'd price costs a parse rather than a database read."""
         if self._reco_book is None:
             await _reply(update, "/taken: recommendation book not wired.")
             return
         args = _args(context)
         if len(args) != 3:
-            await _reply(update, "usage: /taken <rec_id> <qty> <price>")
+            await _reply(update, f"usage: {_USAGE_TAKEN}")
             return
         qty, price = _parse_int(args[1]), _parse_decimal(args[2])
         if qty is None or qty <= 0 or price is None or price <= 0:
-            await _reply(update, "invalid qty/price; usage: /taken <rec_id> <qty> <price>")
+            await _reply(update, f"invalid qty/price; usage: {_USAGE_TAKEN}")
             return
-        _log.warning("telegram_cmd_taken", rec_id=args[0], qty=qty, price=str(price))
-        await _reply(update, await _book_result(self._reco_book.take(args[0], qty, price)))
+        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None)
+        if rec_id is None:
+            return                              # unresolvable: _resolve_rec_arg already replied
+        _log.warning("telegram_cmd_taken", arg=args[0], rec_id=rec_id, qty=qty, price=str(price))
+        await _reply(update, await _book_result(self._reco_book.take(rec_id, qty, price)))
 
     async def _cmd_closed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner marks a taken recommendation closed at ``price`` (§3.6 outcome capture)."""
+        """Owner marks a taken recommendation closed at ``price`` (§3.6 outcome capture).
+
+        Resolves the symbol among the TAKEN-not-closed recommendations (WO-29) — the open set would
+        be the wrong universe here: those are proposals, not positions."""
         if self._reco_book is None:
             await _reply(update, "/closed: recommendation book not wired.")
             return
         args = _args(context)
         if len(args) != 2:
-            await _reply(update, "usage: /closed <rec_id> <price>")
+            await _reply(update, f"usage: {_USAGE_CLOSED}")
             return
         price = _parse_decimal(args[1])
         if price is None or price <= 0:
-            await _reply(update, "invalid price; usage: /closed <rec_id> <price>")
+            await _reply(update, f"invalid price; usage: {_USAGE_CLOSED}")
             return
-        _log.warning("telegram_cmd_closed", rec_id=args[0], price=str(price))
-        await _reply(update, await _book_result(self._reco_book.close(args[0], price)))
+        rec_id = await self._resolve_rec_arg(update, args[0], human_action="taken")
+        if rec_id is None:
+            return
+        _log.warning("telegram_cmd_closed", arg=args[0], rec_id=rec_id, price=str(price))
+        await _reply(update, await _book_result(self._reco_book.close(rec_id, price)))
 
     async def _cmd_veto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner declines an open recommendation. Recorded as vetoed — never silently as a non-fill,
@@ -1136,10 +1308,13 @@ class TelegramBot:
             return
         args = _args(context)
         if len(args) != 1:
-            await _reply(update, "usage: /veto <rec_id>")
+            await _reply(update, f"usage: {_USAGE_VETO}")
             return
-        _log.warning("telegram_cmd_veto", rec_id=args[0])
-        await _reply(update, await _book_result(self._reco_book.veto(args[0])))
+        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None)
+        if rec_id is None:
+            return
+        _log.warning("telegram_cmd_veto", arg=args[0], rec_id=rec_id)
+        await _reply(update, await _book_result(self._reco_book.veto(rec_id)))
 
     async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Exit guidance — the v1 answer, and an honest one: in RECOMMEND the platform places ZERO API
@@ -1152,7 +1327,7 @@ class TelegramBot:
             update,
             f"/close {target}: nothing was sent to the broker. In RECOMMEND the exit decision AND the "
             "order are yours — the platform places zero API orders (B7). Square off in your terminal, "
-            "then send /closed <rec_id> <price> so the outcome is recorded (§3.6). Platform-placed "
+            f"then send {_USAGE_CLOSED} so the outcome is recorded (§3.6). Platform-placed "
             "exits arrive with AUTO in Phase 3.",
         )
 
@@ -1482,6 +1657,94 @@ async def _book_result(call: Awaitable[str]) -> str:
     except Exception as exc:  # noqa: BLE001 - report, never crash the bot (R8)
         _log.exception("telegram_reco_book_failed")
         return f"failed: {exc}"
+
+
+# ---------------------------------------------------------------------- ticker resolution (WO-29)
+
+
+def _is_ulid(arg: str) -> bool:
+    """Is this argument SHAPED like a ``rec_id`` — 26 characters of Crockford base32?
+
+    Shape only, never a claim the row exists: the recommendation book stays the sole authority on
+    which ids are real, and answers an unknown one with an owner-facing message. The check exists to
+    keep a genuine id out of the ticker branch, and it is safe because Crockford's alphabet omits
+    I/L/O/U (so a human never misreads 1/0) and contains no ``&`` or ``-`` — a 26-character NSE ticker
+    made only of those 32 characters does not exist.
+    """
+    text = arg.strip().upper()
+    return len(text) == _ULID_CHARS and all(char in _ULID_ALPHABET for char in text)
+
+
+def _payload_dict(raw: str | None) -> dict[str, Any]:
+    """The ``recommendations.payload`` blob as a mapping; ``{}`` for anything unreadable.
+
+    Never raises. A garbled payload costs the row its ticker (it can still be actioned by id) — it
+    must never cost the owner the whole listing, which is exactly what an exception here would do."""
+    try:
+        data = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_expired(raw: Any, now: datetime) -> bool:
+    """Has this ``valid_until`` passed? Mirrors ``RecommendationBook.expire_stale`` exactly.
+
+    Both halves of that predicate are deliberate: an unparseable or NAIVE timestamp returns False
+    (the sweep skips such a row rather than expiring it), and the comparison is strict ``<``, so a
+    recommendation is live right up to its stated instant. Two surfaces disagreeing about which
+    recommendations exist would be worse than either rule on its own."""
+    valid_until = _parse_iso(str(raw)) if raw else None
+    return valid_until is not None and valid_until < now
+
+
+def _rec_line(rec: _LedgerRec) -> str:
+    """One ledger row as owner prose, carrying the FULL ``rec_id``.
+
+    The id is the tiebreak handle the owner types back when the ticker is ambiguous, and a truncated
+    id is not a handle — this is the one place the internal id is deliberately shown."""
+    return (
+        f"  {rec.instrument} {rec.side} x{rec.qty} · delivered {_hhmm(rec.delivered_at)} · "
+        f"id {rec.rec_id}"
+    )
+
+
+def _hhmm(raw: str | None) -> str:
+    """A journalled IST timestamp as ``HH:MM`` for the owner; ``?`` when it cannot be read."""
+    stamp = _parse_iso(raw)
+    return stamp.strftime("%H:%M") if stamp is not None else "?"
+
+
+def _rec_lines(recs: list[_LedgerRec]) -> list[str]:
+    """At most :data:`_MAX_LIST_ROWS` ledger lines, with the overflow ACCOUNTED FOR rather than
+    dropped — a silently short list would misinform the owner about what is live."""
+    if len(recs) <= _MAX_LIST_ROWS:
+        return [_rec_line(rec) for rec in recs]
+    shown = recs[:_MAX_LIST_ROWS]
+    return [*(_rec_line(rec) for rec in shown), f"  … and {len(recs) - _MAX_LIST_ROWS} more"]
+
+
+def _ambiguous_reply(symbol: str, matches: list[_LedgerRec]) -> str:
+    """Several live recommendations share a ticker: list them and act on NONE (WO-29)."""
+    return "\n".join(
+        [
+            f"{len(matches)} recommendations match {symbol} — nothing done. "
+            "Re-send with the full rec_id:",
+            *_rec_lines(matches),
+        ]
+    )
+
+
+def _no_match_reply(symbol: str, recs: list[_LedgerRec], human_action: str | None) -> str:
+    """No recommendation answers to this argument: say so, then show what the owner CAN act on.
+
+    A bare "unknown" would leave the owner guessing at a handle they have never been shown — the whole
+    defect WO-29 exists to close — so the actionable set ships with the refusal."""
+    label = "open" if human_action is None else human_action
+    head = f"no {label} recommendation for {symbol}."
+    if not recs:
+        return f"{head} none {label} right now."
+    return "\n".join([head, f"{label} now:", *_rec_lines(recs)])
 
 
 def _render_payload(raw: str | None) -> str:
