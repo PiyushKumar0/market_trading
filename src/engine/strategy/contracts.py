@@ -47,16 +47,19 @@ valid decline grounds, exhaustively: a fresh materially-negative symbol catalyst
 _RSI2 = """class: swing (CNC), 2-5 sessions typical. Exit = RSI(2) recovery or max_hold_days. target=None BY DESIGN — reward is the mean-reversion exit, not a price level; never decline solely for a missing target.
 design: fires on SHORT-TERM WEAKNESS in names above their 200-DMA in an uptrending index. Red recent tape, below-VWAP price and a down last-30m drift are the expected entry population. Judge whether the pullback is ORDERLY (routine profit-taking within an intact uptrend) vs DISORDERLY (news-driven break, structural distribution) — not whether the tape is red.
 intraday microstructure (opening-range completeness, session participation, VWAP position) is context, NOT disqualifying for a multi-session hold. A day-plan 'avoid' grade that merely restates 'this symbol fell recently' does not bind a counter-trend entry; a plan warning citing a concrete adverse catalyst does.
-evidence status: exploratory — no validated net edge at retail costs. Be selective on reversion quality (uptrend intact, orderly pullback, sane stop distance vs the cost floor), within THIS frame."""
+evidence status: exploratory — no validated net edge at retail costs. Be selective on reversion quality (uptrend intact, orderly pullback, sane stop distance vs the cost floor), within THIS frame.
+gate note (2026-08-26): rsi2 carries NO configured validated edge, so the deterministic gate can verify the C3 economics ONLY from an explicit target. When you DO propose, include a target_price derived from the shown levels (a prior shelf, the mean-reversion objective, a visible resistance) — an enter without one is gate-rejected as unverifiable, whatever its merits. Declining still never requires a target."""
 
 _ORB = """class: intraday (MIS), same-day squareoff; the rule supplies a price target. The intraday frame FULLY applies: participation, VWAP, acceptance above the range, the day plan's read — judge exactly as an intraday breakout trade.
 evidence status: exploratory — repeatedly tested gross-negative at retail costs in this book; demand exceptional quality."""
 
 _TREND = """class: positional (CNC), up to 120 sessions; exit = trailing ATR stop. target=None BY DESIGN — never decline solely for a missing target. Judge on the DAILY series (cross validity, ADX regime, structure); a single session's intraday tape is context only.
-evidence status: exploratory — no validated net edge at retail costs."""
+evidence status: exploratory — no validated net edge at retail costs.
+gate note (2026-08-26): no configured validated edge — the gate verifies C3 economics only from an explicit target; include a target_price derived from shown levels when proposing, or the enter is gate-rejected as unverifiable."""
 
 _MOM = """class: swing (CNC) on a rebalance cadence; exit = the next rebalance. target=None BY DESIGN — never decline solely for a missing target. Judge relative-strength quality on the daily series; intraday microstructure is context only.
-evidence status: exploratory — momentum entries repeatedly tested net-negative at retail costs; demand exceptional quality."""
+evidence status: exploratory — momentum entries repeatedly tested net-negative at retail costs; demand exceptional quality.
+gate note (2026-08-26): no configured validated edge — the gate verifies C3 economics only from an explicit target; include a target_price derived from shown levels when proposing, or the enter is gate-rejected as unverifiable."""
 
 _BRK20 = """class: swing (CNC). Entry is LIMIT-AT-LEVEL: the broken 20d-high level itself, BELOW the current price by design — a retest fill, not a chase and not 'bidding into weakness'. Stop geometry is pre-vetted upstream (overnight-gap floor). Judge breakout validity on the DAILY series (fresh cross, volume confirmation, margin), with the intraday tape as context.
 evidence status: exploratory — no expectancy presumption; originates for judgement."""

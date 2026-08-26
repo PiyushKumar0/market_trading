@@ -653,6 +653,37 @@ async def test_day_slot_journal_and_rehydration_round_trip(
     assert [c.strategy_id for c in ps.admit([_ext("rsi2")], day)] == ["rsi2"]   # paid quota re-publish
 
 
+async def test_swing_max_qty_charges_the_overnight_gap_mult_like_the_gate(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-08-26: the gate's first three LIVE verdicts all rejected on ``per_trade_risk`` because
+    this quote omitted the overnight gap multiplier — every swing proposal arrived sized ~2.5× over
+    the real budget and prompt rule 7 had bound the analyst to the bad number. The quote must
+    MIRROR the gate's unit-risk formula: gap-charged for swing/position, raw distance intraday."""
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+    )
+    ptr = limit_table.limits.per_trade_risk
+    entry, stop = Decimal("100.00"), Decimal("98.00")
+    swing = candidate(style="swing", raw_levels=RawLevels(entry=entry, stop=stop, target=None))
+    intraday = candidate(
+        style="intraday", raw_levels=RawLevels(entry=entry, stop=stop, target=None)
+    )
+    equity = pipeline._exposure.equity()
+    gap = Decimal(str(ptr.overnight_gap_mult))
+    expected_swing = int(
+        (Decimal(str(ptr.swing_position_pct)) / 100 * equity) / ((entry - stop) * gap)
+    )
+    expected_intraday = int(
+        (Decimal(str(ptr.intraday_pct)) / 100 * equity) / (entry - stop)
+    )
+    assert pipeline._max_qty_by_risk(swing) == expected_swing
+    assert pipeline._max_qty_by_risk(intraday) == expected_intraday
+    assert gap > 1 and expected_swing < expected_intraday
+
+
 async def test_stopless_candidate_never_reaches_the_analyst(
     conn, pclock, calendar, book, limit_table, cost_model
 ):

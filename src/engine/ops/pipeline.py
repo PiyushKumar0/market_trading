@@ -1928,18 +1928,26 @@ class RecommendationPipeline:
         return pct / _HUNDRED * self._exposure.equity()
 
     def _max_qty_by_risk(self, candidate: SignalCandidate) -> int:
-        """``equity × per_trade_risk% / |entry − stop|``, floored at an int ≥ 0 (§7.1).
+        """``equity × per_trade_risk% / unit_risk``, floored at an int ≥ 0 — the GATE's formula (§7.1).
 
-        Informational context for the analyst, not an authorisation: the gate re-derives its own cap
-        and additionally charges ``overnight_gap_mult`` on swing/position, so the approved size can be
-        smaller than this. A candidate with no stop level is unpriceable for risk ⇒ 0, never
-        "unbounded".
+        ``unit_risk`` = |entry − stop|, ×``overnight_gap_mult`` for swing/position exactly as the
+        §7.1 ``per_trade_risk`` rule charges it. This number is quoted to the analyst, and prompt
+        rule 7 binds proposals to it — so it must MIRROR the gate, not approximate it: the original
+        version omitted the gap multiplier ("informational, not an authorisation"), and the gate's
+        first three live verdicts (2026-08-26) all rejected on ``per_trade_risk`` because every
+        swing proposal arrived sized ~2.5× over the real budget. A quoted cap the gate always
+        shrinks is not information, it is a trap. A candidate with no stop level is unpriceable for
+        risk ⇒ 0, never "unbounded"; a swing whose gap-charged unit risk exceeds the whole budget
+        now reads 0 here and takes the unsizeable path before spending an analyst call.
         """
         stop = candidate.raw_levels.stop
         if stop is None:
             return 0
         budget = self._risk_budget_inr(candidate)
-        return _floor_div(budget, abs(_dec(candidate.raw_levels.entry) - _dec(stop)))
+        unit = abs(_dec(candidate.raw_levels.entry) - _dec(stop))
+        if candidate.style != "intraday":
+            unit *= _dec(self._limits.load().limits.per_trade_risk.overnight_gap_mult)
+        return _floor_div(budget, unit)
 
     def _entry_band_pct(self, product: str) -> float:
         band = self._limits.load().limits.entry_sanity_band
