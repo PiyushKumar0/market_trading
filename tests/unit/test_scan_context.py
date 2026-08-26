@@ -45,10 +45,21 @@ class SpyStore(MarketStore):
         self.minute_reads: list[str] = []
         self.flagged_reads: list[date] = []
         self.corp_action_reads: int = 0
+        # WO-27: the per-bar reads the FeatureEngine used to make from inside the pre-screen lock.
+        self.sector_map_reads: int = 0
+        self.catalyst_reads: int = 0
 
     def get_bars_1d(self, symbol, start, end):        # noqa: ANN001, ANN201 - spy passthrough
         self.daily_reads.append(symbol)
         return super().get_bars_1d(symbol, start, end)
+
+    def get_sector_map(self, **kwargs):               # noqa: ANN201
+        self.sector_map_reads += 1
+        return super().get_sector_map(**kwargs)
+
+    def get_catalyst_watchlist(self, d, **kwargs):    # noqa: ANN001, ANN201
+        self.catalyst_reads += 1
+        return super().get_catalyst_watchlist(d, **kwargs)
 
     def get_bars_1m(self, symbol, start, end):        # noqa: ANN001, ANN201
         self.minute_reads.append(symbol)
@@ -64,14 +75,20 @@ class SpyStore(MarketStore):
 
 
 class StubFeatures:
-    """Minimal ``FeatureEngine`` stand-in: the provider only reads ``features_snapshot_id``."""
+    """Minimal ``FeatureEngine`` stand-in: the provider only reads ``features_snapshot_id``.
+
+    Records the ``bars`` series handed to each call (WO-27) — the provider must pass the today's
+    session series it just built, not leave the engine to re-read it from DuckDB per bar.
+    """
 
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.calls: list[str] = []
+        self.bars_seen: list[list] = []
 
-    def intraday_snapshot(self, symbol: str):         # noqa: ANN201 - duck-typed FeatureVector
+    def intraday_snapshot(self, symbol: str, *, bars=None):   # noqa: ANN001, ANN201 - duck-typed
         self.calls.append(symbol)
+        self.bars_seen.append(None if bars is None else list(bars))
         if self.fail:
             raise RuntimeError("duckdb read failed mid-session")
 
@@ -491,6 +508,46 @@ def test_real_feature_engine_snapshot_is_persisted(store, clock, calendar):
     assert snapshot_id is not None
     vector = load_snapshot(store, snapshot_id)
     assert vector is not None and vector.symbol == "AAA"
+
+
+def test_provider_hands_the_feature_engine_its_in_memory_series(store, provider, features):
+    """WO-27: the FeatureEngine used to re-read today's bars from DuckDB for EVERY scanned bar, on
+    the thread holding the pre-screen lock — the very rows this provider already keeps in memory.
+    It now passes that series, so the snapshot costs no round trip and cannot lag the writer."""
+    _seed_intraday(store, "AAA", range(15, 20))          # 09:15..09:19 already persisted
+
+    b20 = _bar(mm=20, close="120.00")
+    ctx1 = provider(b20)
+    assert features.bars_seen[0] == ctx1.intraday_bars    # the same series the scanners get
+    assert features.bars_seen[0][-1] == b20               # ...ending with the bar being scanned
+
+    b21 = _bar(mm=21, close="121.00")
+    ctx2 = provider(b21)
+    assert features.bars_seen[1] == ctx2.intraday_bars
+    assert len(features.bars_seen[1]) == len(features.bars_seen[0]) + 1
+    assert store.minute_reads == ["AAA"]                  # still exactly one seed read for the day
+
+
+def test_real_feature_engine_reads_nothing_on_later_bars(store, clock, calendar):
+    """End-to-end §3.2 read budget (WO-27): after a symbol's first bar, a whole scan — context AND
+    feature snapshot — touches DuckDB only to WRITE the snapshot row. Before this, each bar cost
+    ~9 statements inside ``SignalPreScreen._scan``'s lock."""
+    engine = FeatureEngine(store, clock, calendar)
+    provider = LiveScanContextProvider(store, clock, calendar, engine)
+    _seed_daily(store, "AAA", _weekdays_back(D - timedelta(days=1), 30), 100.0, 0.5)
+    _seed_intraday(store, "AAA", range(15, 20))
+
+    assert provider(_bar(mm=20)).features_snapshot_id is not None   # warm-up bar pays for the reads
+    store.daily_reads.clear()
+    store.minute_reads.clear()
+    store.sector_map_reads = 0
+    store.catalyst_reads = 0
+
+    ids = [provider(_bar(mm=mm)).features_snapshot_id for mm in (21, 22, 23)]
+
+    assert all(i is not None for i in ids) and len(set(ids)) == 3
+    assert store.daily_reads == [] and store.minute_reads == []
+    assert store.sector_map_reads == 0 and store.catalyst_reads == 0
 
 
 # --------------------------------------------------------------------------- pre-screen wiring

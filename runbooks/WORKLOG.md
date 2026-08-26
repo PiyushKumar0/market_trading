@@ -1,5 +1,20 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-26 (09:3x–10:1x) — WO-27: the scan hot path stops reading the database (second entrance of the starvation class, caught on camera)
+
+- **09:36 stall-dump verdict:** ~20 shared-pool threads queued on prescreen._lock; the holder inside a
+  SYNC `get_catalyst_watchlist` DuckDB read from the scan path (features/engine.py:453) — WO-26's
+  mt-store isolation covers async wrappers only. Episodes OSCILLATED (stall→recover ~2 min), bars
+  stayed current, snapshots streamed — chokepoint, not a lost session. WO-26's flush/mt-store pools
+  sat idle and innocent in the same dump: Monday's fix held; this is the next, narrower layer.
+- **WO-27 shipped (session-safe tree edits; deploy post-close):** TTL'd day-context cache (60 s, one
+  combined read for sentiment/watchlist/themes/sector map, digest as-of folded in); DAY caches for
+  the per-symbol daily window and the rel_volume_tod curves (the ~7,500-row-per-bar read the agent's
+  inventory surfaced as the true heavyweight — array prefix sums + bisect); today's tape passed
+  in-memory from the scan provider (never cached; BarBuilder persists before publishing). Contract
+  test spies MarketStore._execute: steady-state snapshot = ZERO DuckDB reads + exactly one INSERT
+  (the §4.3 audit write, deliberately kept). 145 tests green across the three affected files.
+
 ## 2026-08-25 (08:3x–14:3x) — a lost session dissected in real time; WO-26 closes the starvation class and the supervisor's three defects
 
 - **Morning:** owner's 08:31 boot legally re-fired the overnight compaction (pre-08:45) against the

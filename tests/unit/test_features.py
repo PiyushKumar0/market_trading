@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
+import threading
 from datetime import date, time, timedelta
 from decimal import Decimal
 
@@ -17,6 +18,7 @@ from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir
 from engine.core.types import Bar
 from engine.features.engine import (
+    _SENTIMENT_CACHE_TTL_S,  # noqa: PLC2701 - the TTL under test; a literal 60 would drift silently
     ABSENT_NEWS_DEFAULTS,
     DAILY_FEATURE_KEYS,
     INTRADAY_FEATURE_KEYS,
@@ -455,7 +457,7 @@ def test_rel_volume_tod_is_the_median_pace_at_the_same_elapsed_minute(engine, st
     assert f["rel_volume"] != pytest.approx(f["rel_volume_tod"])   # different denominators, by design
 
 
-def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, seeded):
+def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, calendar, seeded):
     """Fewer than 10 usable sessions ⇒ None, never a guess: a "median pace" over a handful of
     sessions is noise. Only the intraday tick watchlist carries 1m history, so a thin symbol is
     ordinary — and ``rel_volume``, which needs only daily bars, must keep computing."""
@@ -468,7 +470,10 @@ def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, seeded):
     assert f9["rel_volume"] is not None                           # independent denominators
 
     _seed_hist_intraday(store, clock, "AAA", {days[-10]: 500})     # the tenth session flips it on
-    f10 = engine.intraday_snapshot("AAA").features
+    # WO-27: the 20-session baseline is day-cached, so an engine that already built it does not see
+    # a mid-session reseed — which is the point (those sessions are completed and cannot change in
+    # production). A fresh engine is the honest stand-in for "the tenth session existed all along".
+    f10 = FeatureEngine(store, clock, calendar).intraday_snapshot("AAA").features
     assert f10["rel_volume_tod"] == pytest.approx(50_000 / (50 * 500))
     assert f10["rel_volume"] == pytest.approx(f9["rel_volume"])    # nothing else moved
 
@@ -529,6 +534,217 @@ def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, 
     assert f["materiality"] == pytest.approx(0.75)
     assert f["catalyst_source_domain_count"] == 3
     assert f["catalyst_event_age_h"] == pytest.approx(5.5)
+
+
+# ---------------------------------------- WO-27: the scan-path read budget (2026-08-26 open stall)
+class _StatementSpy:
+    """Census of every DuckDB statement the store issues while the spy is installed.
+
+    Wraps ``MarketStore._execute`` — the single funnel ``_fetchall`` / ``_fetch_dicts`` and the
+    simple writes all pass through — rather than individual read methods, so a read introduced by
+    some future helper cannot slip past these assertions the way a per-method spy would let it.
+    """
+
+    def __init__(self, store, monkeypatch) -> None:      # noqa: ANN001 - test helper
+        self.sql: list[str] = []
+        original = store._execute
+
+        def spy(sql, *args, **kwargs):                   # noqa: ANN001, ANN202 - passthrough recorder
+            self.sql.append(" ".join(str(sql).split()))
+            return original(sql, *args, **kwargs)
+
+        monkeypatch.setattr(store, "_execute", spy)
+
+    @property
+    def reads(self) -> list[str]:
+        return [s for s in self.sql if s.upper().startswith("SELECT")]
+
+    @property
+    def writes(self) -> list[str]:
+        return [s for s in self.sql if not s.upper().startswith("SELECT")]
+
+    def refreshes(self) -> int:
+        """Day-context refreshes: the watchlist read happens exactly once per combined refresh."""
+        return sum(1 for s in self.reads if "catalyst_watchlist" in s)
+
+    def clear(self) -> None:
+        self.sql.clear()
+
+
+class _FakeMonotonic:
+    """Controllable stand-in for ``time.monotonic`` — the TTL's only clock.
+
+    Starts far ahead of any real monotonic reading so the first call under it always sees the
+    warm-up's stamp as expired and re-anchors the cache on this clock.
+    """
+
+    def __init__(self, start: float = 1e9) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+@pytest.fixture
+def hot_path(engine, store, clock, seeded) -> list[Bar]:
+    """A warmed-up engine plus today's 1m series, in the shape the SCAN path calls it: the provider
+    hands over the series it already holds (``bars=``), so nothing on the path needs the store."""
+    _seed_sentiment_layer(store, clock)
+    _seed_hist_intraday(store, clock, "AAA", {dd: 400 for dd in _hist_sessions(seeded["AAA"])})
+    bars = _seed_intraday(store, clock, "AAA")
+    engine.intraday_snapshot("AAA", bars=bars)      # warm-up: day context + per-symbol baselines
+    return bars
+
+
+def test_steady_state_scan_snapshot_issues_zero_reads(engine, store, monkeypatch, hot_path):
+    """The WO-27 result contract. ``intraday_snapshot`` runs inside ``SignalPreScreen._scan``'s lock,
+    so every store read there is held across the pre-screen lock AND the store's connection lock — at
+    the 2026-08-26 09:36 open ~20 executor threads were queued behind one ``get_catalyst_watchlist``
+    from this path. After warm-up a snapshot must read NOTHING; the only statement left is the §4.3
+    audit-chain INSERT that IS the snapshot."""
+    spy = _StatementSpy(store, monkeypatch)
+
+    vectors = [engine.intraday_snapshot("AAA", bars=hot_path) for _ in range(5)]
+
+    assert spy.reads == []                                          # zero DuckDB reads per snapshot
+    assert len(spy.writes) == 5
+    assert all(w.upper().startswith("INSERT INTO FEATURE_SNAPSHOTS") for w in spy.writes)
+    assert len({v.features_snapshot_id for v in vectors}) == 5       # identity still minted per call
+    assert all(v.features == vectors[0].features for v in vectors)   # memory serves the same answers
+    assert vectors[0].features["on_watchlist"] is True               # ...and they are the REAL values,
+    assert vectors[0].features["sentiment_symbol"] == pytest.approx(0.42)
+    assert vectors[0].features["rel_volume_tod"] is not None         # not absent-news/warm-up defaults
+
+
+def test_batch_path_snapshot_still_reads_only_todays_tape(engine, store, monkeypatch, hot_path):
+    """A caller with no series of its own (the brk20/ins/cat sweep in ``engine.ops.main``) keeps the
+    one read it genuinely needs — today's tape is the snapshot's payload and can never be cached —
+    and pays for nothing else. That path is per-candidate, not per-bar."""
+    spy = _StatementSpy(store, monkeypatch)
+
+    engine.intraday_snapshot("AAA")
+
+    assert len(spy.reads) == 1
+    assert "FROM bars_1m" in spy.reads[0]
+
+
+def test_caller_supplied_bars_reproduce_the_store_read_exactly(engine, store, hot_path):
+    """The ``bars=`` shortcut must be an optimization, never a semantic change: the provider's
+    in-memory series and the store read it replaces describe the same session (``BarBuilder``
+    persists before publishing ``bar.1m``), so the features are identical."""
+    passed = engine.intraday_snapshot("AAA", bars=hot_path).features
+    read = engine.intraday_snapshot("AAA").features
+    assert passed == read
+
+
+def test_day_context_refreshes_at_most_once_per_ttl(engine, store, monkeypatch, hot_path):
+    """Bounded refresh: snapshot VOLUME buys no reads at all, and one elapsed TTL buys exactly one
+    combined read — not one per snapshot, and not one per store table."""
+    mono = _FakeMonotonic()
+    monkeypatch.setattr("engine.features.engine.monotonic", mono)
+    engine.intraday_snapshot("AAA", bars=hot_path)      # re-anchor the cache on the fake clock
+    spy = _StatementSpy(store, monkeypatch)
+
+    for _ in range(10):
+        engine.intraday_snapshot("AAA", bars=hot_path)
+    assert spy.reads == []                              # ten snapshots inside one TTL: no reads
+
+    mono.advance(_SENTIMENT_CACHE_TTL_S + 1)
+    spy.clear()
+    for _ in range(10):
+        engine.intraday_snapshot("AAA", bars=hot_path)
+
+    assert spy.refreshes() == 1                         # exactly ONE refresh, then memory again
+    # ...and that refresh is ONE combined read: as_of + sentiment_agg + theme_map +
+    # catalyst_watchlist + sector_map (two statements — latest snapshot date, then its rows).
+    assert len(spy.reads) == 6
+
+
+def test_digest_rerun_reaches_the_feature_block_within_one_ttl(
+    engine, store, clock, monkeypatch, hot_path
+):
+    """The as-of stamp is refreshed BY the TTL'd read, never probed per bar — so a mid-session digest
+    re-run is invisible for at most one TTL and then lands whole. 60 s of staleness is immaterial
+    here: the digest updates a few times a day, and the precision consumer of catalyst context is the
+    analyst path, which reads the store directly."""
+    mono = _FakeMonotonic()
+    monkeypatch.setattr("engine.features.engine.monotonic", mono)
+    before = engine.intraday_snapshot("AAA", bars=hot_path).features
+    assert before["on_watchlist"] is True and before["sentiment_symbol"] == pytest.approx(0.42)
+
+    store.upsert_sentiment_agg([{                        # a fresh digest run, newer as_of
+        "scope": "symbol", "scope_key": "AAA",
+        "as_of": clock.now() - timedelta(minutes=5), "value": -0.90,
+    }])
+    store.replace_catalyst_watchlist(D, [])              # ...which drops AAA off the watchlist
+
+    assert engine.intraday_snapshot("AAA", bars=hot_path).features == before   # inside the TTL
+
+    mono.advance(_SENTIMENT_CACHE_TTL_S + 1)
+    after = engine.intraday_snapshot("AAA", bars=hot_path).features
+    assert after["sentiment_symbol"] == pytest.approx(-0.90)     # the new run's rows, whole
+    assert after["on_watchlist"] is False and after["watchlist_grade"] is None
+
+
+def test_day_context_refreshes_on_day_change(engine, store, monkeypatch, hot_path):
+    """A day-keyed cache may never outlive its day: ``catalyst_watchlist`` is day-keyed and so is the
+    ``sector_map`` as-of, so a session rollover can never be served yesterday's watchlist."""
+    spy = _StatementSpy(store, monkeypatch)
+
+    engine._day_context(D)
+    assert spy.refreshes() == 0                          # warm cache, same day, TTL unexpired
+
+    engine._day_context(D - timedelta(days=1))
+    assert spy.refreshes() == 1                          # a different day is never served from memory
+
+    engine._day_context(D)
+    assert spy.refreshes() == 2                          # single slot: rolling back re-reads, never lies
+
+
+def test_concurrent_snapshots_collapse_into_one_day_context_read(
+    store, clock, calendar, monkeypatch, seeded
+):
+    """Thread-safety (the scan path runs on the shared executor's threads, and the batch sweep calls
+    the same engine off that path): two threads arriving across a cold cache must produce ONE store
+    read, not two, and neither may see an exception."""
+    _seed_sentiment_layer(store, clock)
+    bars = _seed_intraday(store, clock, "AAA")
+    engine = FeatureEngine(store, clock, calendar)       # cold caches: both threads race everything
+
+    reading = threading.Event()
+    reads: list[date] = []
+    original = store.get_catalyst_watchlist
+
+    def slow(d, **kwargs):                               # noqa: ANN001, ANN202 - blocking passthrough
+        reads.append(d)
+        reading.set()
+        threading.Event().wait(0.3)                      # hold the refresh long enough to queue a peer
+        return original(d, **kwargs)
+
+    monkeypatch.setattr(store, "get_catalyst_watchlist", slow)
+
+    results, errors = [], []
+
+    def run() -> None:
+        try:
+            results.append(engine.intraday_snapshot("AAA", bars=bars))
+        except Exception as exc:                         # noqa: BLE001 - "no exception" IS the assertion
+            errors.append(exc)
+
+    first, second = threading.Thread(target=run), threading.Thread(target=run)
+    first.start()
+    assert reading.wait(5)                               # the second thread joins mid-refresh
+    second.start()
+    first.join(10)
+    second.join(10)
+
+    assert errors == []
+    assert len(results) == 2 and len({v.features_snapshot_id for v in results}) == 2
+    assert reads == [D]                                  # ONE combined refresh served both threads
+    assert all(v.features["on_watchlist"] is True for v in results)
 
 
 # --------------------------------------------------------------------------- serialization contract

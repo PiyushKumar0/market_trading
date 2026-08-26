@@ -32,7 +32,13 @@ ONCE into a day-scoped cache, rebuilt only when the bar's date changes:
 * ``trade_window`` / ``session_open`` — pure ``NSECalendar`` lookups, cached with the day.
 
 Per bar the provider therefore does at most: zero store reads (steady state), plus the intraday seed
-on a symbol's first bar of the day, plus whatever ``FeatureEngine.intraday_snapshot`` costs.
+on a symbol's first bar of the day, plus whatever ``FeatureEngine.intraday_snapshot`` costs — which,
+since WO-27 (2026-08-26), is also zero reads in steady state. That last clause used to be the leak:
+``intraday_snapshot`` re-read today's 1m bars, the whole ``sector_map`` and the four §2.7 digest
+tables on EVERY bar, each taking the store's connection lock while the pre-screen held its own —
+~20 worker threads were observed queued behind one ``get_catalyst_watchlist`` at the 09:36 open. The
+provider now hands the FeatureEngine the today's-bars series it already keeps in memory (see
+:meth:`LiveScanContextProvider._snapshot_id`); the rest is cached inside ``engine.features.engine``.
 
 Intraday bars
 -------------
@@ -238,8 +244,11 @@ class LiveScanContextProvider:
         daily = day.daily_bars.get(symbol)
         if daily is None:
             daily = self._load_daily(day, symbol)
+        # Bound once and handed to BOTH consumers (WO-27): the FeatureEngine gets the series we
+        # already hold instead of re-reading the identical rows from DuckDB on the pre-screen lock.
+        intraday = self._intraday(day, bar)
         return ScanContext(
-            intraday_bars=self._intraday(day, bar),
+            intraday_bars=intraday,
             daily_bars=daily,
             index_daily_closes=day.index_closes,
             flagged=symbol in day.flagged,
@@ -250,7 +259,7 @@ class LiveScanContextProvider:
             # WO-13: real trading-session count (or None = never rebalanced ⇒ due now), day-cached —
             # see _resolve_mom_rebalance / module docstring "mom rebalance-day state".
             mom_sessions_since_rebalance=day.mom_sessions_since_rebalance,
-            features_snapshot_id=self._snapshot_id(symbol),
+            features_snapshot_id=self._snapshot_id(symbol, intraday),
         )
 
     # ------------------------------------------------------------------ owner window changes (§3.2.7)
@@ -472,12 +481,16 @@ class LiveScanContextProvider:
         return bars
 
     # ------------------------------------------------------------------ feature snapshot
-    def _snapshot_id(self, symbol: str) -> str | None:
+    def _snapshot_id(self, symbol: str, bars: Sequence[Bar]) -> str | None:
         """Mint this bar's ``features_snapshot_id`` (§3.2.5). A minting failure degrades to ``None``
         (the candidate loses its feature link) and NEVER raises: a FeatureEngine problem must not take
-        the whole scan path down mid-session."""
+        the whole scan path down mid-session.
+
+        ``bars`` is the same today's-session series this provider just built for the context (WO-27).
+        The FeatureEngine used to re-read it from DuckDB per bar, inside the pre-screen lock — see
+        ``FeatureEngine.intraday_snapshot``'s ``bars`` parameter for why the two are equivalent."""
         try:
-            return self._features.intraday_snapshot(symbol).features_snapshot_id
+            return self._features.intraday_snapshot(symbol, bars=bars).features_snapshot_id
         except Exception as exc:  # noqa: BLE001 - fail to None, never propagate into the scan path
             _log.warning("scan_context_snapshot_failed", symbol=symbol, error=str(exc))
             return None
