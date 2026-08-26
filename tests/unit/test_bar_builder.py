@@ -534,6 +534,47 @@ def test_late_ticks_summary_aggregates_the_wall_minute(store, mclock, now, caplo
 
 
 # ------------------------------------------------------------- WO-25a: processing-lag watchdog
+async def test_stale_snapshot_echoes_never_page_the_lag_watchdog(store, mclock, now, caplog):
+    """2026-08-26 23:21 false page: an after-hours ticker reconnect replayed snapshot frames stamped
+    ~17:35 and 'now − ts' read as a 5.8 h backlog on a stream with none. Guard (i): a previous-day
+    stamp is a snapshot echo, never lag. Guard (ii): outside session hours the alarm neither fires
+    nor keeps an episode alive."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        # (i) previous-day stamp at 23:21 — the live incident's exact shape.
+        wall = at(23, 21, 0)
+        now.set(wall)
+        await bb.on_tick_event(tick("R", wall - dt.timedelta(hours=5, minutes=46), "100.00", 1000))
+        assert late_events(caplog, "tick_processing_lagging") == []
+        assert sent == []
+
+        # (ii) SAME-day stale stamp but outside session hours (post-close) — still no page.
+        await bb.on_tick_event(tick("R", wall - dt.timedelta(minutes=30), "100.10", 1100))
+        assert late_events(caplog, "tick_processing_lagging") == []
+        assert sent == []
+
+        # An episode opened in-session is reset quietly by an out-of-session tick, never paged.
+        in_session = at(15, 40, 0)
+        now.set(in_session)
+        await bb.on_tick_event(
+            tick("R", in_session - dt.timedelta(seconds=LAG_THRESHOLD_S + 60), "100.20", 1200)
+        )
+        assert len(sent) == 1                       # genuine in-session episode still pages
+        post_close = at(15, 50, 0)
+        now.set(post_close)
+        await bb.on_tick_event(
+            tick("R", post_close - dt.timedelta(seconds=LAG_THRESHOLD_S + 60), "100.30", 1300)
+        )
+        assert len(late_events(caplog, "tick_lag_watch_suspended_out_of_session")) == 1
+        assert len(sent) == 1                       # no second page from the reset
+
+
 async def test_lag_watchdog_fires_once_per_episode_paces_its_log_and_recovers(store, mclock, now, caplog):
     """ERROR at :data:`LAG_THRESHOLD_S`, re-logged no more than every :data:`LAG_LOG_INTERVAL_S`,
     ONE owner alert per episode, and an INFO line when it clears."""

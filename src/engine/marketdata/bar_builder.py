@@ -140,6 +140,12 @@ LAG_THRESHOLD_S = 120
 #: alert is sent once per episode regardless; this only paces the log.
 LAG_LOG_INTERVAL_S = 300
 
+#: The lag alarm only evaluates inside these IST wall-clock bounds (session 09:15–15:30 plus the
+#: square-off/settlement tail): outside them a "lag" is a stale-stamped snapshot echo, not a
+#: backlog (2026-08-26 23:21 false page — see :meth:`BarBuilder._watch_lag`).
+_LAG_WATCH_START = time(9, 15)
+_LAG_WATCH_END = time(15, 45)
+
 #: ``amend_bar_1m_extremes`` outcome → ``corrections_log.reason`` for the rows we could NOT amend.
 #: ``AMEND_IN_RANGE`` (the ordinary "late print inside the bar" case) keeps a NULL reason: it is not
 #: a refusal, there was simply nothing to widen.
@@ -634,7 +640,26 @@ class BarBuilder:
         Evaluated on the TICK path only, deliberately: lag is a property of tick consumption, so an
         idle overnight engine (no ticks, ever-growing "age" of the last print) must not page anyone.
         The ERROR line repeats at most every :data:`LAG_LOG_INTERVAL_S` while the episode lasts; the
-        owner alert is staged ONCE per episode and dispatched from :meth:`on_tick_event`."""
+        owner alert is staged ONCE per episode and dispatched from :meth:`on_tick_event`.
+
+        Two plausibility guards (2026-08-26 23:21 false page): a ticker reconnect after hours made
+        Kite replay snapshot frames stamped ~17:35, and "now − ts" read as a 5.8 h backlog on a
+        stream with no backlog at all. (i) A tick stamped on a PREVIOUS day is definitionally a
+        snapshot echo, never consumption lag — it neither alarms nor recovers an episode. (ii) The
+        alarm only evaluates inside session hours (:data:`_LAG_WATCH_START`–:data:`_LAG_WATCH_END`
+        IST) — outside them an active episode is reset quietly, because the spiral this watchdog
+        exists for can only grow while the exchange is producing ticks. Residual accepted: a
+        holiday-morning reconnect echoing SAME-day stamps inside the window could still page once;
+        the calendar is deliberately not threaded in here for that rare case."""
+        if ts.date() != now.date():
+            return                              # previous-day snapshot echo — not consumption lag
+        if not (_LAG_WATCH_START <= now.time() <= _LAG_WATCH_END):
+            if self._lagging:
+                self._lagging = False
+                self._lag_logged_at = None
+                self._pending_alert = None
+                _log.info("tick_lag_watch_suspended_out_of_session")
+            return
         lag_s = (now - ts).total_seconds()
         if lag_s >= LAG_THRESHOLD_S:
             if not self._lagging:
