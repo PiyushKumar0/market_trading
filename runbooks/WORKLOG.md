@@ -1,5 +1,27 @@
 # WORKLOG — autonomous operations log
 
+## 2026-08-28 (day + 20:4x deploy) — HDFCAMC/HINDZINC loss post-mortem: six fixes + 7-finder review, single deploy (commit 9662ca8)
+
+- **Post-mortem verdict on the two losing recommendations:** HDFCAMC = no catalyst data existed +
+  the stop was never protected and two exit recs expired unactioned; HINDZINC = the engine traded
+  through its own KNOWN bearish regulatory_policy entry that DIPAM had already publicly denied —
+  best-cluster selection never aged, so the resolved story still read direction=short.
+- **Shipped (all owner-directed):** decay-ranked best-cluster selection; prescreen TTL/overflow slot
+  refunds; admission-cap displacement (owner knob `displacement_margin: 0.10`); sector_overrides.yaml
+  (HDFCAMC/ICICIAMC → FINANCIAL_SERVICES, name-validated); market-wide-shock materiality anchor;
+  `cat_reversal` shadow (T+5/T+10 pre-registered); NO_EDGE_SHADOW_STRATEGIES gate registration for
+  BOTH cat legs — closed the analyst-volunteered-target hole in "fail-closed" (never exploited: 0
+  cat recommendations ever). Catalyst budget now dedups by catalyst_ref (one story = one charge).
+- **cat v2 shadow clock RESTARTED** (plan §2.7 annotated): the selection-rule change perturbs the
+  frozen population per WO-18's own pre-registration; 08-18..08-28 signals excluded from the verdict.
+- **Also fixed en route:** WO-26b regression — every normal ticker stop() leaked the read loop since
+  08-25 (two leftover lines); lag watchdog now follows session overrides; three-way expiry-predicate
+  drift unified in core/recommendations.py.
+- **Deploy 20:48:** clock+log-tail checked first (post-EOD-features gap), restart clean —
+  startup_complete 20:49:41, scheduler_started + post_arm_jobs_complete 20:49:46 (the WO-25 zombie
+  check), 0 failed jobs. 1957 unit green, ruff clean. GDELT re-probed: ~21% success, failures now
+  73% server-side 429s — left best-effort, not client-fixable.
+
 ## 2026-08-26 (10:2x–15:3x) — THE FIRST RECOMMENDATION: BUY HDFCAMC qty 3 @ ₹2,644.80, delivered 12:46:39 (WO-27 mid-session deploy, first-ever gate verdicts, WO-28 sizing alignment)
 
 - **10:24 owner report: FROZEN, no recommendations.** Warm-up bars complete since ~09:30 but the
