@@ -16,7 +16,7 @@ from datetime import date, datetime, time, timedelta
 import pytest
 
 from engine.core.calendar import NSECalendar
-from engine.core.clock import IST
+from engine.core.clock import IST, Clock
 from engine.core.config import config_dir
 from engine.ops.jobs import (
     GIVE_UP_AFTER_DAYS,
@@ -35,6 +35,16 @@ FRI, MON, TUE, WED = date(2026, 6, 12), date(2026, 6, 15), date(2026, 6, 16), da
 @pytest.fixture
 def calendar(clock):
     return NSECalendar(config_dir() / "calendar", clock, strict=False)
+
+
+class Ticker:
+    """A movable time source — ``ticker.at = ...`` advances every Clock built on it."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+
+    def __call__(self) -> datetime:
+        return self.at
 
 
 def _spec_recorder(calls: list, job_id: str, job_class: JobClass, at: time, *, order=100, fire_day=None,
@@ -518,6 +528,39 @@ async def test_freeze_alert_retries_when_the_send_itself_failed(conn, clock, cal
         await runner.catch_up(off_since=OFF_SINCE)      # first send blows up: nothing recorded
     await runner.catch_up(off_since=OFF_SINCE)
     assert len(_freeze_alerts(sent)) == 1
+
+
+@pytest.mark.asyncio
+async def test_freeze_notified_prunes_prior_day_entries(conn, calendar):
+    """``_freeze_notified`` keys are (job_id, date) pairs and every write ADDS a new key — a date
+    never recurs, so nothing ever naturally overwrites yesterday's entry. Left unpruned the set grows
+    by one member per (job, day) failure for the life of the process. Same-day dedup must still hold
+    on both sides of a day roll."""
+    sent: list = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    ticker = Ticker(datetime(2026, 6, 17, 10, 5, tzinfo=IST))          # Wed
+    clk = Clock(time_source=ticker)
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15),
+                                fail_on="always"))
+    runner = _build_runner(conn, clk, calendar, reg, notify=notify)
+
+    await runner.catch_up(off_since=OFF_SINCE)
+    await runner.catch_up(off_since=OFF_SINCE)                        # same-day dedup holds
+    assert len(_freeze_alerts(sent)) == 1
+    assert ("instruments", "2026-06-17") in runner._freeze_notified
+
+    ticker.at = datetime(2026, 6, 18, 10, 5, tzinfo=IST)               # Thu — the day rolls
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert len(_freeze_alerts(sent)) == 2                              # new day, new alert
+    assert ("instruments", "2026-06-17") not in runner._freeze_notified   # prior day evicted
+    assert ("instruments", "2026-06-18") in runner._freeze_notified
+
+    await runner.catch_up(off_since=OFF_SINCE)                         # same-day dedup holds again
+    assert len(_freeze_alerts(sent)) == 2
 
 
 @pytest.mark.asyncio

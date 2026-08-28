@@ -99,12 +99,11 @@ VERDICT CRITERIA, PRE-REGISTERED (WO-18 — binding):
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import NamedTuple
 
-from ulid import ULID
-
-from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
+from engine.strategy.scanners import _shadow_catalyst
+from engine.strategy.types import SignalCandidate
 
 STRATEGY_ID = "cat"
 
@@ -156,13 +155,17 @@ def is_eligible(row: WatchlistRow) -> bool:
     Split out from :func:`sweep_watchlist` so the caller can COUNT age-eligible rows for its
     starvation-visibility line using the same predicate the sweep applies — a second, drifting copy
     of the filter in the composition root is exactly how "no signals" stops being diagnosable.
+
+    The three conditions ARE the whole event for ``cat``; ``_shadow_catalyst.is_originating`` holds
+    the mechanics and this module holds the bounds it is checked against, so ``cat_reversal`` (which
+    adds a fourth condition) can share the prefix without either rule reaching into the other's
+    constants.
     """
-    age = row.event_age_sessions
-    return (
-        row.grade == ORIGINATING_GRADE
-        and row.direction == LONG_DIRECTION
-        and age is not None
-        and 0 <= int(age) <= MAX_EVENT_AGE_SESSIONS
+    return _shadow_catalyst.is_originating(
+        row,
+        grade=ORIGINATING_GRADE,
+        direction=LONG_DIRECTION,
+        max_age_sessions=MAX_EVENT_AGE_SESSIONS,
     )
 
 
@@ -175,49 +178,14 @@ def scan_entry(
     degeneracy (a stop that does not survive rounding as strictly below the entry) — never raises on
     ordinary data (§3.2.5 fail-to-zero posture). Assumes eligibility: :func:`sweep_watchlist` applies
     :func:`is_eligible` first, and grading itself happened upstream in the digest.
+
+    The arithmetic itself is ``_shadow_catalyst.build_candidate``, shared with ``cat_reversal``; what
+    stays here is ``cat``'s own identity and its own ``stop_pct`` (see :data:`DEFAULT_PARAMS` — the
+    two rules' knobs are deliberately separate blocks).
     """
     p = {**DEFAULT_PARAMS, **(params or {})}
-    ref = row.reference_close
-    if ref is None:
-        return None                 # no prior daily bar — no committed price to anchor on
-    if not isinstance(ref, Decimal):
-        try:
-            ref = Decimal(str(ref))
-        except (InvalidOperation, ValueError, TypeError):
-            return None
-    if not ref.is_finite() or ref <= 0:
-        return None
-
-    stop_pct = Decimal(str(p["stop_pct"]))
-    if stop_pct <= 0 or stop_pct >= 100:
-        return None   # a non-positive or total stop is not a risk distance
-
-    # ---- levels: entry anchored on the pre-open reference, stop a fixed % below it, NO target.
-    entry = round_to_tick(ref)
-    stop = round_to_tick(entry * (Decimal(1) - stop_pct / Decimal(100)))
-    if stop >= entry:
-        return None   # tick-rounding degenerate (a sub-tick stop distance) — no structural risk
-
-    # ---- score: the digest's weighted materiality, clamped into the contract's [0, 1]. A row with
-    # NO materiality still originates — the GRADE is the origination decision and it was already
-    # made — but it ranks at the floor: an unmeasured magnitude may never flatter the funnel.
-    materiality = row.materiality
-    try:
-        score = 0.0 if materiality is None else min(1.0, max(0.0, float(materiality)))
-    except (ValueError, TypeError):
-        score = 0.0
-    if score != score:                      # NaN — the one float that survives min/max unchanged
-        score = 0.0
-
-    return SignalCandidate(
-        signal_id=str(ULID()),
-        strategy_id=STRATEGY_ID,
-        symbol=row.symbol,
-        side="BUY",
-        style="swing",
-        raw_levels=RawLevels(entry=entry, stop=stop, target=None),
-        score=score,
-        catalyst_ref=row.entry_id,
+    return _shadow_catalyst.build_candidate(
+        row, strategy_id=STRATEGY_ID, stop_pct=p["stop_pct"]
     )
 
 
@@ -234,10 +202,8 @@ def sweep_watchlist(
     may still narrow its fetch (``grade='originating'`` is a cheap store-level filter); this pass is
     the authority, so a widened fetch can never widen the rule.
     """
-    out: list[SignalCandidate] = []
-    for row in sorted((r for r in rows if is_eligible(r)), key=lambda r: r.symbol):
-        cand = scan_entry(row, params=params)
-        if cand is not None:
-            out.append(cand)
-    out.sort(key=lambda c: (-c.score, c.symbol))
-    return out
+    return _shadow_catalyst.sweep(
+        rows,
+        is_eligible=is_eligible,
+        translate=lambda r: scan_entry(r, params=params),
+    )

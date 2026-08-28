@@ -1136,8 +1136,6 @@ class TickerSupervisor:
                 await task
             except asyncio.CancelledError:
                 pass
-        self._read_task = None
-        self._monitor_task = None
 
     # ------------------------------------------------------------------ health helpers
 

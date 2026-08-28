@@ -62,7 +62,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from difflib import SequenceMatcher
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
 from ulid import ULID
@@ -799,6 +799,105 @@ _GUARD_FALLBACKS: dict[str, Any] = {
 #: only — no watchlist row at all (the §5.4 rubric noise line).
 INCLUSION_FLOOR = 0.2
 
+
+class _BestCluster(NamedTuple):
+    """The cluster chosen to REPRESENT a symbol in the day's ``catalyst_watchlist``.
+
+    Two materiality values, deliberately distinct (2026-08-27 HINDZINC fix):
+
+    ``rank_materiality`` is the RECENCY-DECAYED weight and exists ONLY to order candidates —
+    it never reaches a threshold, a grade or a stored column. ``weighted_materiality`` is the
+    undecayed ``materiality × fanout`` value that the §2.7 inclusion floor, the
+    :func:`originating_conditions` AND-list and the persisted ``materiality`` column all use,
+    exactly as before: the row must describe its cluster faithfully, and origination must not
+    silently narrow just because the whole corpus aged an hour.
+    """
+
+    cluster: NewsCluster
+    rank_materiality: float
+    weighted_materiality: float
+    weighted_sentiment: float
+    age_sessions: int
+
+
+class _StoryMember(NamedTuple):
+    """One age-eligible cluster's contribution to a ``(symbol, event_type)`` STORY.
+
+    The story-level view the 2026-08-05 corroboration amendment already needed (``story_domains`` /
+    ``story_refs``), carrying the extra facts :func:`reversal_source` needs to reason about
+    DIRECTION over time: when the cluster was first seen, its UNDECAYED weighted materiality /
+    sentiment, and whether the cluster NAMED this symbol. Materiality and sentiment arrive already
+    multiplied by ``cat.fanout_weight`` for a fanned-out sector/theme cluster — the same convention
+    every other threshold in this module uses.
+
+    ``named`` is False for a fan-out membership: the resolver placed the symbol in the story because
+    the cluster tagged its sector/theme, not because anything resolved to the symbol itself.
+    """
+
+    cluster_id: str
+    first_seen: datetime
+    weighted_materiality: float
+    weighted_sentiment: float
+    named: bool
+
+
+def reversal_source(
+    members: Sequence[_StoryMember],
+    *,
+    winner_id: str,
+    winner_first_seen: datetime,
+    sentiment_min: float,
+) -> str | None:
+    """Did this story ESTABLISH the opposite direction before the winning cluster reversed it?
+
+    Returns the ``cluster_id`` of the earlier, floor-clearing, OPPOSITE-direction (short) cluster the
+    winner reverses, or ``None``. The caller invokes this only when the winning direction is ``long``
+    (§2.7 ``cat_reversal``, 2026-08-27), so "opposite" always means the short side — the mirror case
+    (a positive story getting denied) is deliberately NOT detected here: that is an exit-side signal
+    on an existing position, already owned by the §5.2(b) risk-reducing exit path.
+
+    The four conditions, each load-bearing:
+
+    * **``named`` — the predecessor RESOLVED to this symbol**, rather than reaching it by sector/theme
+      fan-out. A sector-wide bearish cluster clears the two bars below for every constituent at once
+      (0.6 materiality × 0.5 fan-out = 0.30 > floor; −0.7 × 0.5 = −0.35 ≤ −0.30), so without this the
+      next symbol-specific positive headline of that event_type would be a "reversal" of a story that
+      never named the symbol — one sector headline manufacturing a reversal per constituent. Fan-out
+      still corroborates (step 5(ii)) and can still WIN the row; it cannot be what was REVERSED.
+      Applies to the PREDECESSOR only — the winning cluster's scope rules are untouched.
+    * **strictly earlier ``first_seen``** — a reversal needs something to reverse. Equal timestamps do
+      NOT qualify: two clusters landing in the same instant are a disagreement between outlets, not a
+      story that changed its mind, and the §2.7 corroboration rule already fails those to LESS
+      activity. Strict ``<`` also excludes the winner from reversing itself.
+    * **cleared :data:`INCLUSION_FLOOR` on its own UNDECAYED weighted materiality** — the same bar
+      that decides whether a cluster may REPRESENT a symbol at all. A sub-floor bearish murmur is
+      noise the digest already refuses to build a row from, and it must not be promotable into
+      "an established bearish claim" merely by being reversed.
+    * **weighted sentiment <= -``sentiment_min``** — the exact mirror of the long classification the
+      row itself uses (``sentiment_min_long``), so "opposite direction" means what the rest of §2.7
+      means by direction and cannot drift from it.
+
+    Ties break on the strongest claim (highest weighted materiality), then on ``cluster_id`` ascending
+    — a total order over corpus-only facts, so §9.1 replay yields the identical answer. This function
+    reads NOTHING outside its arguments: no clock, no store, no LLM call.
+    """
+    best_id: str | None = None
+    best_key: tuple[float, str] | None = None
+    for m in members:
+        if not m.named:
+            continue
+        if m.cluster_id == winner_id or m.first_seen >= winner_first_seen:
+            continue
+        if m.weighted_materiality < INCLUSION_FLOOR:
+            continue
+        if m.weighted_sentiment > -sentiment_min:
+            continue
+        key = (-m.weighted_materiality, m.cluster_id)
+        if best_key is None or key < best_key:
+            best_key, best_id = key, m.cluster_id
+    return best_id
+
+
 #: ``earnings_calendar.kind`` marking a results day T (R2 no-entry day + the O13 reaction bar).
 #: ``EarningsCalendarJob.classify_event`` already folds results-considering board meetings into it.
 _RESULTS_KIND = "results"
@@ -894,6 +993,32 @@ def _clip(value: float) -> float:
     return max(-1.0, min(1.0, value))
 
 
+def _age_hours(ran_at: datetime, first_seen: datetime) -> float:
+    """Hours from ``first_seen`` to the run's single fixed ``ran_at``, CLAMPED AT ZERO.
+
+    The clamp is the point: a future ``first_seen`` (clock skew, a bad feed timestamp) must be able to
+    fade a contribution, never AMPLIFY it beyond its unaged weight — a negative age would make
+    :func:`_decay` return a factor above 1.
+    """
+    return max(0.0, (ran_at - first_seen).total_seconds() / 3600.0)
+
+
+def _decay(age_h: float, halflife: float) -> float:
+    """§2.7 step-5 recency decay: ``0.5 ^ (age_h / cat.decay_halflife_h)``.
+
+    ONE definition for both consumers, so ``sentiment_agg`` (step 5(i)) and the watchlist's
+    best-cluster ranking (step 5(ii)) age a story on the same clock — the 2026-08-27 HINDZINC split
+    was exactly the two outputs disagreeing about which news is current, and a second copy of this
+    exponent is how that reappears.
+
+    The two callers apply it to different things and only one bounds it: step 5(i) is an additive
+    SUM and drops clusters past ``6 * halflife`` (a <1.6% contribution not worth carrying), while the
+    ranking is a pure comparison key where an equivalent cutoff would delete a symbol's row rather
+    than merely down-weight it. That asymmetry is deliberate; see the callers.
+    """
+    return 0.5 ** (age_h / halflife)
+
+
 def _paise(value: Decimal) -> Decimal:
     """Quantize to the DECIMAL(12,2) column scale. NO tick snapping here: the watchlist stores raw
     deterministic levels; the live scanner is what publishes tick-legal order prices (§3.2.5)."""
@@ -941,7 +1066,9 @@ class CatalystDigestJob:
 
     (ii) ``catalyst_watchlist`` — every scored cluster whose TRADING-SESSION event age ≤
     ``cat.max_event_age_days``, best cluster per symbol, graded by :func:`originating_conditions`
-    with §6.1 levels on ``originating`` rows only.
+    with §6.1 levels on ``originating`` rows only. "Best" is the highest materiality after the
+    SAME ``0.5^(age_h/cat.decay_halflife_h)`` decay (ii) shares with (i) — a ranking key only
+    (see :class:`_BestCluster`), so the two outputs always agree on which news is current.
 
     Parameters
     ----------
@@ -967,8 +1094,13 @@ class CatalystDigestJob:
     - The ``market``/``market`` row is written on EVERY run (0.0 when no market cluster scored), so
       "the digest ran" is observable even for an empty corpus — otherwise an empty-but-fresh digest
       would be indistinguishable from a missing one (§2.7 fail-safe ladder needs that distinction).
-    - The row's ``materiality`` is the WEIGHTED value (what the grade decision used); ``event_age_h``
-      is informational, ``event_age_sessions`` is the eligibility clock.
+    - The row's ``materiality`` is the WEIGHTED, UNDECAYED value (what the grade decision used);
+      the recency decay orders candidates and is never stored. ``event_age_h`` is informational,
+      ``event_age_sessions`` is the eligibility clock.
+    - A cluster below :data:`INCLUSION_FLOOR` can corroborate a story but never REPRESENT a symbol
+      (2026-08-27): the floor gates candidacy, not the finished row, so decayed ranking cannot let
+      a fresh sub-floor mention take the slot and delete a still-material story's row. A symbol
+      carries a row iff some cluster targeting it clears the floor — unchanged by the decay.
     - ``source_domain_count`` is the STORY-level union (2026-08-05): distinct domains across ALL
       age-eligible clusters targeting the same ``(symbol, event_type)`` — cross-outlet paraphrase
       never merges under the pinned §3.2.4 similarity, so cluster-level counting was structurally
@@ -1121,12 +1253,14 @@ class CatalystDigestJob:
         # (WO-21): "−1.000" alone cannot distinguish two mild headlines from nine severe ones.
         counts: dict[tuple[str, str], int] = defaultdict(int)
         for c in clusters:
-            # Clamp a future first_seen (clock skew / bad feed timestamp) to age 0: decay may fade a
-            # contribution, never AMPLIFY it beyond its unaged weight.
-            age_h = max(0.0, (ran_at - c.first_seen).total_seconds() / 3600.0)
+            age_h = _age_hours(ran_at, c.first_seen)
+            # Past six half-lives a cluster contributes under 1.6% of its weight to this SUM; dropping
+            # it keeps a long tail of near-zero terms from accumulating into the aggregate. A cutoff
+            # is meaningful here precisely because this is an additive total — the step-5(ii) ranking
+            # deliberately has no equivalent (see :func:`_decay` and the ranking comment there).
             if age_h > 6.0 * halflife:
                 continue
-            base = float(c.sentiment) * float(c.materiality) * 0.5 ** (age_h / halflife)
+            base = float(c.sentiment) * float(c.materiality) * _decay(age_h, halflife)
             w = fanout if c.scope in ("sector", "theme") else 1.0
             for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
                 totals[("symbol", symbol)] += base * w
@@ -1189,6 +1323,10 @@ class CatalystDigestJob:
         p = self._params
         max_days = int(p["max_event_age_days"])
         fanout = float(p["fanout_weight"])
+        # Same §6.3 knob step 5(i) decays `sentiment_agg` with — the watchlist's best-cluster
+        # ranking must age a story on the SAME clock as the aggregate, or the two outputs disagree
+        # about which news is current (the 2026-08-27 HINDZINC split; see the ranking comment below).
+        halflife = float(p["decay_halflife_h"])
         sentiment_min = float(guard_value(guard, "sentiment_min_long"))
 
         # PRIOR session's bulk/block-deal flags (2026-08-18 fix): the ~08:35 digest runs before the
@@ -1209,37 +1347,90 @@ class CatalystDigestJob:
             if r.get("kind") == _RESULTS_KIND:
                 results_days[r["symbol"]].add(r["event_date"])
 
-        # Best cluster per symbol = highest WEIGHTED materiality; ties break on cluster_id (§9.1
-        # determinism: the same corpus must yield the same watchlist). The same pass builds the
-        # STORY-level corroboration maps (§2.7 step 5(ii), 2026-08-05 owner-directed): cross-outlet
+        # Best cluster per symbol = highest RECENCY-DECAYED weighted materiality; ties break on
+        # cluster_id (§9.1 determinism: the same corpus must yield the same watchlist — decay is a
+        # pure function of first_seen against the run's single fixed ``ran_at``).
+        #
+        # The decay is step 5(i)'s, to the same shared :func:`_decay`/:func:`_age_hours`. What this
+        # path does NOT take from 5(i) is its `6 * halflife` cutoff, and that is deliberate: there the
+        # cutoff drops a negligible term from an additive SUM, whereas here the decayed value is a
+        # pure ORDERING key. A cutoff in this loop would skip the cluster out of the corroboration and
+        # reversal maps built below, or — applied only to candidacy — delete a symbol's row outright
+        # when its one floor-clearing cluster is old, the same failure the INCLUSION_FLOOR note guards
+        # against. Eligibility here is the SESSION bound (`max_event_age_days`, applied above) because
+        # sessions are the unit the rule is written in; ranking needs no second, hour-based bound.
+        # 2026-08-27 (HINDZINC): ranking on RAW materiality let a stale cluster hold the slot
+        # indefinitely. A regulatory_policy cluster (Aug 24–25, stake-sale speculation, short,
+        # materiality 0.6) outranked the Aug 26 DIPAM denial that resolved it (+5.1% on the day),
+        # so the Aug 27 watchlist still read `direction: short` while `sentiment_agg` — which
+        # already decays — had correctly netted +0.569. The row and the aggregate disagreed
+        # because only one of them counted the clock. Decaying the RANKING key lets a fresher
+        # cluster overtake a stale one on its own, with no "is this a denial of that" detection:
+        # at the 24h default half-life a same-day follow-up outranks a day-old cluster of up to
+        # ~2× its materiality, and yesterday's story keeps the slot against today's trivia.
+        #
+        # The same pass builds the STORY-level corroboration maps (§2.7 step 5(ii), 2026-08-05
+        # owner-directed) — UNCHANGED and deliberately upstream of every filter below: cross-outlet
         # paraphrase never merges under the pinned §3.2.4 similarity (measured: 0/1,400 live
         # cross-feed pairs ≥ 0.75, best TRUE pair below a FALSE pair), so the min_source_domains
         # count is the union of domains across ALL age-eligible clusters targeting the same
         # (symbol, event_type) — an event_type disagreement between outlets loses the corroboration
         # (fails to LESS activity, never false-corroboration).
-        best: dict[str, tuple[NewsCluster, float, float, int]] = {}
+        best: dict[str, _BestCluster] = {}
         story_domains: dict[tuple[str, str | None], set[str]] = defaultdict(set)
         story_refs: dict[tuple[str, str | None], set[str]] = defaultdict(set)
+        # Same story grouping as story_refs, keeping the DIRECTION-over-time facts `reversal_of`
+        # needs (§2.7 `cat_reversal`, 2026-08-27). Built in this pass, from the same corpus, so the
+        # reversal verdict stays a pure function of (clusters, ran_at) — §9.1 determinism.
+        story_members: dict[tuple[str, str | None], list[_StoryMember]] = defaultdict(list)
         for c in clusters:
             age_sessions = self.event_age_sessions(c.first_seen, d)
             if age_sessions > max_days:
                 continue
             w = fanout if c.scope in ("sector", "theme") else 1.0
             weighted_materiality = float(c.materiality) * w
+            weighted_sentiment = float(c.sentiment) * w
+            rank_materiality = weighted_materiality * _decay(_age_hours(ran_at, c.first_seen), halflife)
+            named = set(c.symbols or ())        # resolved to the symbol vs reached by fan-out
             for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
                 story_domains[(symbol, c.event_type)].update(c.source_domains or [])
                 story_refs[(symbol, c.event_type)].add(c.cluster_id)
+                story_members[(symbol, c.event_type)].append(
+                    _StoryMember(
+                        cluster_id=c.cluster_id,
+                        first_seen=c.first_seen,
+                        weighted_materiality=weighted_materiality,
+                        weighted_sentiment=weighted_sentiment,
+                        named=symbol in named,
+                    )
+                )
+                if weighted_materiality < INCLUSION_FLOOR:
+                    # Noise-line clusters corroborate (above) but can never REPRESENT a symbol.
+                    # The floor is tested on the UNDECAYED value and gates CANDIDACY rather than
+                    # the finished row, which keeps the set of symbols carrying a row identical to
+                    # the pre-decay behaviour: a symbol has a row iff some cluster of its own
+                    # clears the floor. Testing the decayed value here, or leaving the floor
+                    # downstream of the ranking, would let a fresh sub-floor mention win the slot
+                    # and delete a still-material story's row outright.
+                    continue
                 current = best.get(symbol)
-                if current is None or (-weighted_materiality, c.cluster_id) < (
-                    -current[1], current[0].cluster_id
+                if current is None or (-rank_materiality, c.cluster_id) < (
+                    -current.rank_materiality, current.cluster.cluster_id
                 ):
-                    best[symbol] = (c, weighted_materiality, float(c.sentiment) * w, age_sessions)
+                    best[symbol] = _BestCluster(
+                        cluster=c,
+                        rank_materiality=rank_materiality,
+                        weighted_materiality=weighted_materiality,
+                        weighted_sentiment=weighted_sentiment,
+                        age_sessions=age_sessions,
+                    )
 
         rows: list[dict[str, Any]] = []
         for symbol in sorted(best):
-            c, weighted_materiality, weighted_sentiment, age_sessions = best[symbol]
-            if weighted_materiality < INCLUSION_FLOOR:
-                continue                       # below the noise line: sentiment_agg only, no row
+            # Everything from here down uses the UNDECAYED weighted materiality: decay chose WHICH
+            # cluster speaks for the symbol, and says nothing about whether that cluster is
+            # material enough to trade (the inclusion floor already bound at candidacy).
+            c, _rank, weighted_materiality, weighted_sentiment, age_sessions = best[symbol]
             symbol_results = results_days.get(symbol, set())
             t_day = max((t for t in symbol_results if t < d), default=None)
             history: list[DailyBar] | None = None
@@ -1281,6 +1472,22 @@ class CatalystDigestJob:
                 else "short" if weighted_sentiment <= -sentiment_min
                 else None
             )
+            # §2.7 `cat_reversal` (2026-08-27, the HINDZINC denial): this story previously ESTABLISHED
+            # the opposite (short) direction and the winning cluster reverses it — a resolved-uncertainty
+            # relief setup, not merely fresh good news. LONG-ONLY by construction: computed only when
+            # the winner is long, so a positive story being denied is never flagged here (that is the
+            # exit side, §5.2(b)). Purely additive — no existing field, grade, level or condition above
+            # reads it, so `cat` v2's event definition is untouched. (Its shadow CLOCK is not: the
+            # decay ranking above restarts it under WO-18's pre-registration — §2.7, 2026-08-28.)
+            reversal_of = (
+                reversal_source(
+                    story_members.get((symbol, c.event_type), ()),
+                    winner_id=c.cluster_id,
+                    winner_first_seen=c.first_seen,
+                    sentiment_min=sentiment_min,
+                )
+                if direction == "long" else None
+            )
             rows.append({
                 "entry_id": str(ULID()),
                 "symbol": symbol,
@@ -1296,6 +1503,9 @@ class CatalystDigestJob:
                 "event_age_h": (ran_at - c.first_seen).total_seconds() / 3600.0,
                 "event_age_sessions": age_sessions,
                 "expires_at": self._expires_at(c.first_seen, max_days),
+                # NULL on every non-reversal row (the overwhelming normal case) — the `cat_reversal`
+                # scanner's ONLY input beyond the columns `cat` already reads (§2.7, single seam O11).
+                "reversal_of": reversal_of,
                 **levels,
             })
         return rows

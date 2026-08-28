@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -58,6 +58,7 @@ from engine.core.contracts import (
 )
 from engine.core.enums import Mode, RiskState
 from engine.core.log import get_logger
+from engine.core.recommendations import parse_valid_until
 from engine.core.types import TradeWindow
 from engine.risk.limits import LimitTable
 
@@ -163,6 +164,26 @@ _NO_TARGET = "no target_price — expected edge unverifiable (C3)"
 #:     evaluated exactly as before, at the post-shrink size, against the same shipped cost surface.
 #:   * A strategy with NO registered edge and no target still hard-fails, unchanged.
 _NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registered measured edge (C3)"
+
+#: Sentinel for the SHADOW reject (C3): the strategy is registered in ``no_edge_shadow_strategies``,
+#: so C3 refuses it unconditionally — whatever ``target_price`` the proposal carries.
+#:
+#: WHY THIS EXISTS (2026-08-27, shipped with §2.7 ``cat_reversal``). A shadow strategy accumulates a
+#: validation population and must reach RECOMMEND exactly never until its §8.6 owner gate. The
+#: mechanism relied on until now was INDIRECT: ship no ``expected_edge_pct``, and let the
+#: :data:`_NO_TARGET` branch below reject every candidate. That reasoning has a hole — the branch
+#: fires only when ``target_price is None``, but the ANALYST emits the ``EnterAction`` and the wire
+#: schema (``intelligence.schemas``) lets it supply a target; nothing between the candidate and this
+#: gate reconciles that field against the candidate's ``raw_levels.target``. An analyst that
+#: volunteers a target hands C3 a real edge basis and the shadow's defining property evaporates on a
+#: model whim.
+#:
+#: So the property is declared here instead of inferred: a registered id is rejected BEFORE the target
+#: is even read. It is Tier-2 owned, fails closed by construction, can only ever REJECT (it adds no
+#: path to approval), and no prompt, model output or upstream layer can bypass it. Promoting a
+#: strategy out of the shadow means removing it from this set at the §8.6 gate — a deliberate,
+#: reviewable edit, which is exactly the ceremony the promotion deserves.
+_SHADOW_NO_EDGE = "shadow strategy — no validated edge exists; C3 cannot be satisfied at any target"
 
 _HUNDRED = Decimal(100)
 _UNCLASSIFIED = "UNCLASSIFIED"
@@ -341,15 +362,22 @@ class RiskGate:
         clock: Clock,
         *,
         strategy_expected_edge_pct: Mapping[str, Decimal] | None = None,
+        no_edge_shadow_strategies: Iterable[str] | None = None,
     ) -> None:
         """``strategy_expected_edge_pct`` maps ``strategy_id`` -> a pre-registered, owner-set expected
         edge in percent, consumed by ``min_viable_size`` ONLY for a proposal with no ``target_price``
         (see :data:`_NO_TARGET_MEASURED_EDGE`). Unset ⇒ the pre-2026-08-17 behaviour exactly: a
-        targetless entry is a hard C3 reject."""
+        targetless entry is a hard C3 reject.
+
+        ``no_edge_shadow_strategies`` lists ``strategy_id``s in SHADOW mode: C3 rejects them
+        unconditionally, whatever target the proposal carries (see :data:`_SHADOW_NO_EDGE`). Unset ⇒
+        behaviour is byte-identical to before this parameter existed. An id in BOTH mappings is a
+        deployment defect and the shadow wins — refusing is the safe reading of a contradiction."""
         self._limits = limits_engine
         self._costs = cost_model
         self._clock = clock
         self._strategy_edge = dict(strategy_expected_edge_pct or {})
+        self._shadow_no_edge = frozenset(no_edge_shadow_strategies or ())
 
     # ------------------------------------------------------------------ dispatch
     def evaluate(self, action: ActionProposal, ctx: GateContext) -> GateVerdict:
@@ -955,6 +983,13 @@ class RiskGate:
         be filled at, not the one the stated entry advertises."""
         need = self._costs.edge_multiple_min
         limit = f"expected edge >= {need} x breakeven (C2/C3)"
+        # SHADOW strategies are refused FIRST and unconditionally — before target_price is read at
+        # all, so an analyst-supplied target cannot buy one an edge basis (:data:`_SHADOW_NO_EDGE`).
+        # This is the property that keeps a shadow's signals a measurement and never a recommendation.
+        if action.strategy_id in self._shadow_no_edge:
+            led.add("min_viable_size", False, _SHADOW_NO_EDGE, limit,
+                    "shadow mode: origination is journalled for validation, never recommended")
+            return None
         # A targetless proposal is a hard reject UNLESS its strategy registered a measured edge
         # (§6.1 `ins`, 2026-08-17 — see _NO_TARGET_MEASURED_EDGE for why and for the guard-rails).
         measured_edge = self._strategy_edge.get(action.strategy_id)
@@ -1320,7 +1355,13 @@ class GateContextBuilder:
         return n
 
     def _pending_entry_rec_symbols(self, now: datetime) -> frozenset[str]:
-        """Unexpired, UNCONFIRMED entry recommendations — they still occupy position slots."""
+        """Unexpired, UNCONFIRMED entry recommendations — they still occupy position slots.
+
+        Shares ``core.recommendations.parse_valid_until`` with the expiry predicate rather than
+        negating it: an absent/naive/unparseable ``valid_until`` must stay excluded here (not flip to
+        "pending" the way negating ``recommendation_expired`` would), so this reads the parsed instant
+        directly and applies its own ``> now`` (still-in-the-future) comparison.
+        """
         out: set[str] = set()
         for row in self._recommendations():
             if row["human_action"]:
@@ -1328,12 +1369,8 @@ class GateContextBuilder:
             data = self._payload(row)
             if data.get("kind") != "entry":
                 continue
-            raw = str(data.get("valid_until") or "")
-            try:
-                valid_until = datetime.fromisoformat(raw)
-            except ValueError:
-                continue
-            if valid_until.tzinfo is not None and valid_until > now and data.get("instrument"):
+            valid_until = parse_valid_until(data.get("valid_until"))
+            if valid_until is not None and valid_until > now and data.get("instrument"):
                 out.add(str(data["instrument"]))
         return frozenset(out)
 

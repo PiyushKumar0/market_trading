@@ -259,6 +259,26 @@ class CatCfg(BaseModel):
     # the §7.1 C3 check fail-closed-rejects every cat candidate. Adding the key is the §8.6 owner gate.
 
 
+class CatReversalCfg(BaseModel):
+    """§2.7 ``cat_reversal`` SHADOW knobs (2026-08-27) — OWNER-ONLY, deliberately NOT learnable.
+
+    A SEPARATE block from :class:`CatCfg` on purpose. ``cat`` v2 and ``cat_reversal`` are two
+    experiments with independently pre-registered thresholds and independently running clocks; sharing
+    a ``stop_pct`` would let a future tuning of one silently move the other and invalidate whichever
+    shadow window happened to be open. Frozen for the whole ``cat_reversal`` shadow window.
+    """
+
+    stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the
+                                          # rule's real exit is TIME; the §7.1 overnight_gap_mult
+                                          # (2.5x) arithmetic applies to a swing entry (ins, 08-17)
+    hold_sessions: int = 10               # intended exit if the §8.6 gate ever opens = the longer
+                                          # pre-registered horizon (T+10). INERT during the shadow:
+                                          # nothing is held, because C3 rejects every candidate.
+    # Deliberately NO expected_edge_pct — and, unlike `cat`, the absence is not what enforces it: the
+    # strategy is listed in the gate's `no_edge_shadow_strategies`, so C3 rejects it whatever target
+    # the analyst supplies. Adding an edge here is the §8.6 owner gate, post-verdict.
+
+
 class FilingsCfg(BaseModel):
     """§2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
     envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: these are read by no
@@ -315,6 +335,13 @@ class PrescreenCfg(BaseModel):
     #: ``FORWARD_PACING_MIN`` minutes on a scheduler pulse, so candidates accumulate and the ranking
     #: above has a population to rank; "immediate" = the pre-2026-08-14 inline drain — rollback only.
     forward_drain_mode: str = "paced"
+    #: How much better a later candidate must score to take a full cap's admission slot from an
+    #: unevaluated incumbent of the same strategy (2026-08-27 — owner knob, never learner-movable,
+    #: §6.3, exactly like ``max_per_strategy_day`` above: it decides which candidates get evaluated
+    #: at all). ``null`` DISABLES displacement, restoring the pre-2026-08-27 "whoever fires first
+    #: keeps the slot all day" behaviour — the rollback flag, nothing else. Shipped value lives in
+    #: settings.yaml with its reasoning; this default is the fallback.
+    displacement_margin: float | None = 0.10
 
 
 class StrategyCfg(BaseModel):
@@ -405,6 +432,7 @@ class Settings(BaseModel):
     data: DataCfg = Field(default_factory=DataCfg)
     news: NewsCfg = Field(default_factory=NewsCfg)
     cat: CatCfg = Field(default_factory=CatCfg)
+    cat_reversal: CatReversalCfg = Field(default_factory=CatReversalCfg)
     filings: FilingsCfg = Field(default_factory=FilingsCfg)
     ins: InsCfg = Field(default_factory=InsCfg)
     strategy: StrategyCfg = Field(default_factory=StrategyCfg)

@@ -223,13 +223,19 @@ class CatalogMessage(BaseModel):
 # nothing is mangled by float formatting; mirrors the §8.1 decimal-as-string convention).
 
 
+def login_instruction(url: str) -> str:
+    """The tappable re-login instruction sentence, shared by every login-required alert body
+    (``login_prompt`` below and ``ops.token_check``'s pre-open probe)."""
+    return f"Open: {url}\nThen send /token <request_token>."
+
+
 def login_prompt(url: str) -> CatalogMessage:
     """Daily Kite login required (R6). ``url`` is the broker login URL; the owner opens it and
     returns the ``request_token`` via ``/token`` (§3.2.11)."""
     return CatalogMessage(
         kind=MessageKind.LOGIN_PROMPT,
         title="Kite login required",
-        body=f"Daily login needed before trading can resume. Open: {url}\nThen send /token <request_token>.",
+        body=f"Daily login needed before trading can resume. {login_instruction(url)}",
         severity="critical",
         data={"login_url": url},
     )

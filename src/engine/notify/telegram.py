@@ -63,6 +63,7 @@ from engine.core.db import transaction
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
+from engine.core.recommendations import recommendation_expired
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.notify import catalog
@@ -1161,9 +1162,10 @@ class TelegramBot:
 
         EXPIRY IS NOT A COLUMN. A recommendation dies when its ``payload.valid_until`` passes; the
         15:45 ``reco_expire`` sweep only *labels* that fact afterwards, so between the two a dead row
-        is still ``human_action IS NULL``. The filter recomputes it inline with EXACTLY the predicate
-        ``RecommendationBook.expire_stale`` uses (tz-aware and strictly in the past) — including its
-        skip: an unparseable or naive ``valid_until`` is KEPT, because that is the row the sweep would
+        is still ``human_action IS NULL``. The filter recomputes it with the SAME shared predicate
+        (``core.recommendations.recommendation_expired``) ``RecommendationBook.expire_stale`` uses
+        (tz-aware and strictly in the past) — including its skip: an unparseable or naive
+        ``valid_until`` is KEPT, because that is the row the sweep would
         also leave alone, and the two surfaces disagreeing about which recommendations exist would be
         worse than either rule alone. Applied to the open set only — a taken recommendation is an open
         position, and positions do not expire.
@@ -1182,7 +1184,7 @@ class TelegramBot:
         recs: list[_LedgerRec] = []
         for row in rows:
             data = _payload_dict(row["payload"])
-            if human_action is None and _is_expired(data.get("valid_until"), now):
+            if human_action is None and recommendation_expired(data.get("valid_until"), now):
                 continue
             recs.append(
                 _LedgerRec(
@@ -1694,17 +1696,6 @@ def _payload_dict(raw: str | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def _is_expired(raw: Any, now: datetime) -> bool:
-    """Has this ``valid_until`` passed? Mirrors ``RecommendationBook.expire_stale`` exactly.
-
-    Both halves of that predicate are deliberate: an unparseable or NAIVE timestamp returns False
-    (the sweep skips such a row rather than expiring it), and the comparison is strict ``<``, so a
-    recommendation is live right up to its stated instant. Two surfaces disagreeing about which
-    recommendations exist would be worse than either rule on its own."""
-    valid_until = _parse_iso(str(raw)) if raw else None
-    return valid_until is not None and valid_until < now
 
 
 def _rec_line(rec: _LedgerRec) -> str:

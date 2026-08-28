@@ -37,6 +37,7 @@ from engine.core.types import Bar, TradeWindow
 from engine.intelligence.context import AssembledContext
 from engine.intelligence.harness import AgentDef, AgentResult
 from engine.notify.catalog import MessageKind
+from engine.ops import pipeline as pipeline_module
 from engine.ops.nightly_review import read_funnel_raw_counts
 from engine.ops.pipeline import (
     ATR_PERIOD,
@@ -350,6 +351,7 @@ async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandid
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
     mode=None, kill=None, notify=None, assembler=None, rearm=None, funnel_raw=None,
+    claim_slot=None, take_displaced=None,
     admission_mode="ranked", forward_drain_mode="paced",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
@@ -368,8 +370,8 @@ def make_pipeline(
         parts["assembler"], harness, agent_defs(), gate, parts["ctx_builder"], book,
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
-        funnel_raw=funnel_raw, admission_mode=admission_mode,
-        forward_drain_mode=forward_drain_mode,
+        funnel_raw=funnel_raw, claim_slot=claim_slot, take_displaced=take_displaced,
+        admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
     )
     return pipeline, parts
 
@@ -1356,16 +1358,35 @@ async def test_queued_candidate_expires_instead_of_going_stale(
 
 
 # ============================================== 2026-08-14: the PACED drain (the WO-1 ranking's teeth)
-def paced_pipeline(conn, pclock, calendar, book, limit_table, cost_model, *, cap, results=6):
-    """A ranked+paced pipeline whose forward cap the test can move, with canned analyst declines."""
+def paced_pipeline(conn, pclock, calendar, book, limit_table, cost_model, *, cap, results=6,
+                   rearm=None, prescreen=None):
+    """A ranked+paced pipeline whose forward cap the test can move, with canned analyst declines.
+
+    ``prescreen`` wires the whole §3.2.5 admission seam at once (2026-08-27) — the ``rearm`` callback
+    plus the two displacement halves — so an integration test drives a REAL ``SignalPreScreen``
+    rather than a mock of the class whose bookkeeping is the thing under test.
+    """
     gov = TunableGovernor(cap)
     harness = FakeHarness(*[dict(NO_ACTION_JSON) for _ in range(results)])
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov,
+        rearm=rearm if prescreen is None else prescreen.rearm,
+        claim_slot=None if prescreen is None else prescreen.claim_slot,
+        take_displaced=None if prescreen is None else prescreen.take_displaced,
     )
     return pipeline, parts, harness, gov
+
+
+def slot_evaluated(conn) -> dict[tuple[str, str], int]:
+    """The day-slot journal's ``evaluated`` flag per pair â€” 1 = the slot is spent, 0 = re-armed."""
+    return {
+        (r["symbol"], r["strategy_id"]): int(r["evaluated"])
+        for r in conn.execute(
+            "SELECT symbol, strategy_id, evaluated FROM prescreen_day_slots"
+        ).fetchall()
+    }
 
 
 async def test_an_arriving_candidate_never_drains_its_own_slot(
@@ -1458,9 +1479,12 @@ async def test_the_drain_skips_a_candidate_past_its_own_ttl(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
     """Pacing delays a candidate, so TTL expiry is the thing it must not break: a level the scanner
-    saw 20 minutes ago is not the setup any more, and expiry never re-arms the day slot."""
+    saw 20 minutes ago is not the setup any more. Expiry costs no §5.2(a) analyst slot â€” and since
+    2026-08-27 it hands the §3.2.5 admission slot back, because nothing evaluated it."""
+    rearmed: list[tuple[str, str]] = []
     pipeline, _, harness, _ = paced_pipeline(
-        conn, pclock, calendar, book, limit_table, cost_model, cap=12)
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
     await pipeline.on_signal_candidate(
         candidate(symbol="TCS", strategy_id="orb", signal_id="STALE", score=0.99))
 
@@ -1470,6 +1494,89 @@ async def test_the_drain_skips_a_candidate_past_its_own_ttl(
     assert pipeline._pending_forwards == []                     # expired out of the queue
     assert pipeline._forwarded_count == 0                       # expiry costs no analyst slot
     assert forward_journal(conn)[("TCS", "orb")] == 0
+    assert rearmed == [("TCS", "orb")]                          # never evaluated â‡’ slot back
+    assert slot_evaluated(conn)[("TCS", "orb")] == 0
+
+
+async def test_a_candidate_that_ages_out_unseen_gets_its_day_slot_back(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """THE 2026-08-27 BURN, in the shape it actually happened, against a REAL pre-screen.
+
+    SHRIRAMFIN and POLICYBZR (both ``orb``) were admitted at 09:46:0x, queued behind the paced
+    drain, and aged out at their own 20-minute TTL with ZERO rows between them anywhere in
+    ``agent_calls`` â€” no analyst call, no gate verdict, nobody judged them. Expiry nevertheless left
+    both (symbol, strategy) pairs deduped for the rest of the session, permanently spending 2 of
+    ``orb``'s daily admission slots on candidates nothing had looked at. A never-evaluated drop is
+    exactly what :meth:`SignalPreScreen.rearm` is for (2026-07-29), so the pairs come back the SAME
+    day â€” inside their already-paid quota, since ``_charged`` is never refunded.
+    """
+    prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 2})
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12, rearm=prescreen.rearm)
+    cands = [candidate(symbol=sym, strategy_id="orb", signal_id=sym, score=0.9, catalyst_ref=None)
+             for sym in ("SHRIRAMFIN", "POLICYBZR")]
+
+    assert [c.symbol for c in prescreen.admit(cands, TODAY)] == ["SHRIRAMFIN", "POLICYBZR"]
+    assert prescreen.admit(cands, TODAY) == []                  # both day slots are now spent
+    for cand in cands:
+        await pipeline.on_signal_candidate(cand)
+    assert harness.calls == []                                  # queued only â€” never evaluated
+    assert slot_evaluated(conn) == {("SHRIRAMFIN", "orb"): 1, ("POLICYBZR", "orb"): 1}
+
+    ticker.at = NOW + timedelta(minutes=TTL_INTRADAY_MIN + 1)   # 10:26, still inside the window
+    assert await pipeline.drain_forward_queue() is False
+    assert harness.calls == []                                  # aged out with no analyst call
+    assert pipeline._pending_forwards == []
+    assert forward_journal(conn) == {("SHRIRAMFIN", "orb"): 0, ("POLICYBZR", "orb"): 0}
+    assert slot_evaluated(conn) == {("SHRIRAMFIN", "orb"): 0, ("POLICYBZR", "orb"): 0}
+
+    # THE FIX: both pairs are admissible again the same day, and the ``orb`` cap of 2 does not
+    # bite a second time â€” a re-armed pair re-publishes inside the quota it already paid for.
+    assert [c.symbol for c in prescreen.admit(cands, TODAY)] == ["SHRIRAMFIN", "POLICYBZR"]
+
+
+async def test_a_real_evaluation_never_gets_its_day_slot_back(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """The other half of the 2026-08-27 rule: only NEVER-EVALUATED is refundable.
+
+    An analyst that RAN and answered ``no_action``, and a candidate the gate actually judged, are
+    both real evaluations â€” the day slot stays spent, exactly as it did before (2026-07-29). Nor can
+    either be refunded retroactively: :meth:`_take_forward_slot` pops an entry off the queue before
+    anything downstream sees it, so no later expiry sweep can ever reach a dispatched candidate.
+    """
+    rearmed: list[tuple[str, str]] = []
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    await publish_candidate(
+        pipeline, candidate(symbol="TCS", strategy_id="orb", signal_id="01SIGNAL", score=0.9))
+    assert len(harness.calls) == 1                              # the analyst RAN and declined
+    assert pipeline._pending_forwards == []                     # off the queue before the call
+    assert rearmed == []                                        # a real evaluation keeps the slot
+    assert slot_evaluated(conn)[("TCS", "orb")] == 1
+
+    ticker.at = NOW + timedelta(minutes=TTL_INTRADAY_MIN + 1)   # past its TTL, but long gone
+    assert await pipeline.drain_forward_queue() is False
+    assert rearmed == []                                        # no retroactive refund
+    assert slot_evaluated(conn)[("TCS", "orb")] == 1
+
+    ticker.at = NOW
+    judged: list[tuple[str, str]] = []
+    gated, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(dict(ENTER_JSON)),
+        gate=StubGate(verdict_of("reject", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: judged.append((sym, sid)) or True,
+    )
+    await publish_candidate(gated, candidate(score=0.9))        # RELIANCE/orb, matches ENTER_JSON
+    assert judged == []                                         # a gate verdict IS an evaluation
+    assert slot_evaluated(conn)[(SYMBOL, "orb")] == 1
 
 
 async def test_the_drain_re_checks_the_window_it_was_queued_under(
@@ -2019,3 +2126,182 @@ async def test_a_failed_raw_funnel_flush_warns_and_never_reaches_the_drain(
 
     assert [r for r in caplog.records if r.getMessage() == "funnel_raw_flush_failed"]
     assert pipeline._funnel_raw_flushed == {} and pipeline._funnel_raw_day is None
+
+
+# ====================== 2026-08-27: the per-strategy cap stops being "first 90 seconds wins the day"
+def orb_candidate(symbol: str, score: float, **kw) -> SignalCandidate:
+    """An ``orb`` candidate with NO catalyst_ref - the default one would make it undisplaceable."""
+    return candidate(symbol=symbol, signal_id=f"01{symbol}", score=score, catalyst_ref=None, **kw)
+
+
+async def test_a_better_afternoon_candidate_takes_a_locked_out_admission_slot(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """THE 2026-08-27 LOCKOUT, end to end against a REAL pre-screen and a REAL forward queue.
+
+    All 7 of ``orb``'s daily admission slots were charged between 09:46:06 and 09:47:05 - 90 seconds
+    of the trade window. TATACONSUM (0.80, 12:28) and KALYANKJIL (**1.0**, 12:49) were then refused
+    outright with ``prescreen_cap_suppressed cap="strategy_day"``, three hours later, with zero
+    chance regardless of quality and no trace anywhere but the raw log line. A 12:49 ``orb`` fire is
+    by design: the scanner's entry window runs to 14:30 and only its RANGE is the first 30 minutes.
+
+    Now the slot moves off the worst incumbent NOBODY HAS LOOKED AT, and both halves of that land:
+    the pre-screen re-assigns the admission slot, and the pipeline drops the evicted candidate from
+    the forward queue and reverts its journal row - so the freed slot cannot be spent twice.
+    """
+    prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 2})
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12, prescreen=prescreen)
+
+    morning = [orb_candidate("SHRIRAMFIN", 0.50), orb_candidate("POLICYBZR", 0.62)]
+    assert len(prescreen.admit(morning, TODAY)) == 2            # 09:46 - the burst takes both slots
+    for cand in morning:
+        await pipeline.on_signal_candidate(cand)
+    assert harness.calls == []                                  # queued, unevaluated, paced
+    assert slot_evaluated(conn) == {("SHRIRAMFIN", "orb"): 1, ("POLICYBZR", "orb"): 1}
+
+    # 12:49. Before this fix `prescreen.admit` returned [] here, and KALYANKJIL ended the day with
+    # zero rows in prescreen_day_slots and zero in agent_calls - the log line was its only trace.
+    kalyan = orb_candidate("KALYANKJIL", 1.0)
+    assert [c.symbol for c in prescreen.admit([kalyan], TODAY)] == ["KALYANKJIL"]
+    await pipeline.on_signal_candidate(kalyan)
+
+    # SHRIRAMFIN (0.50, the WORST unevaluated incumbent - not merely the oldest) gave up its slot,
+    # and the pipeline acted on that: off the queue, and journalled as never-evaluated.
+    queued = {(p.candidate.symbol, p.candidate.strategy_id) for p in pipeline._pending_forwards}
+    assert queued == {("POLICYBZR", "orb"), ("KALYANKJIL", "orb")}
+    assert slot_evaluated(conn)[("SHRIRAMFIN", "orb")] == 0
+    assert slot_evaluated(conn)[("KALYANKJIL", "orb")] == 1
+    assert prescreen._count_by_strategy["orb"] == 2             # the SWAP kept the cap exact
+
+    # The analyst budget follows the re-assignment: KALYANKJIL is evaluated, SHRIRAMFIN never is.
+    await pipeline._drain_one_forward()
+    await pipeline._drain_one_forward()
+    assert forward_journal(conn) == {
+        ("SHRIRAMFIN", "orb"): 0, ("POLICYBZR", "orb"): 1, ("KALYANKJIL", "orb"): 1,
+    }
+    assert len(harness.calls) == 2                              # exactly the cap, never cap + 1
+
+
+async def test_an_evaluated_candidate_survives_a_better_arrival(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """INVARIANT #1 END TO END - now load-bearing across three fixes (2026-07-29 re-arm, the
+    2026-08-27 TTL refund, and displacement), so it gets an integration test of its own.
+
+    Once the analyst has actually been spent on a candidate its slot is permanent. A later arrival
+    scoring a PERFECT 1.0 - the strongest displacement claim the score range can express - is
+    refused flat, because the cap is now protecting a budget that has genuinely been consumed
+    rather than protecting an arrival order.
+    """
+    prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 1})
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12, prescreen=prescreen)
+
+    incumbent = orb_candidate("SHRIRAMFIN", 0.20)               # a WEAK incumbent, deliberately
+    assert len(prescreen.admit([incumbent], TODAY)) == 1
+    await publish_candidate(pipeline, incumbent)                # publish AND drain: the analyst runs
+    assert len(harness.calls) == 1
+    assert pipeline._pending_forwards == []                     # off the queue before the call
+    assert forward_journal(conn)[("SHRIRAMFIN", "orb")] == 1
+    assert slot_evaluated(conn)[("SHRIRAMFIN", "orb")] == 1
+
+    # 0.20 against 1.00 is the widest margin the clamped score range allows. It still loses.
+    assert prescreen.admit([orb_candidate("KALYANKJIL", 1.0)], TODAY) == []
+    assert prescreen.take_displaced() == []
+    assert prescreen._charged == {("SHRIRAMFIN", "orb")}
+    assert slot_evaluated(conn)[("SHRIRAMFIN", "orb")] == 1     # untouched, still spent
+    assert len(harness.calls) == 1                              # and no second analyst call
+
+
+async def test_a_displaced_candidate_is_refused_at_the_analyst_slot(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """The belt-and-braces half: ``claim_slot`` catches a displacement the queue sweep has not seen.
+
+    ``_apply_displacements`` is the tidy path and runs on the event loop, but the pre-screen decides
+    displacement on a SCAN WORKER THREAD, so a drain tick can pop an entry in between. Here the
+    displacing candidate is admitted and deliberately NOT published, which leaves the pipeline
+    holding a queue pointer to a pair that no longer owns an admission slot. Forwarding it anyway
+    would spend the re-assigned slot twice and breach the cap by a real analyst call.
+    """
+    prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 1})
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12, prescreen=prescreen)
+
+    incumbent = orb_candidate("SHRIRAMFIN", 0.50)
+    assert len(prescreen.admit([incumbent], TODAY)) == 1
+    await pipeline.on_signal_candidate(incumbent)               # queued, never evaluated
+
+    kalyan = orb_candidate("KALYANKJIL", 1.0)
+    assert len(prescreen.admit([kalyan], TODAY)) == 1           # displaces SHRIRAMFIN...
+    assert len(pipeline._pending_forwards) == 1                 # ...but the queue has not heard yet
+
+    await pipeline._drain_one_forward()
+    assert harness.calls == []                                  # refused at the claim: no call made
+    assert pipeline._pending_forwards == []                     # and dropped rather than left to rot
+    assert pipeline._forwarded_count == 0                       # a refusal costs no Â§5.2(a) slot
+    assert forward_journal(conn)[("SHRIRAMFIN", "orb")] == 0
+    assert slot_evaluated(conn)[("SHRIRAMFIN", "orb")] == 0     # journalled as never-evaluated
+
+    # The slot's new owner still gets what it won - the refusal above is a skip, not a stall.
+    await publish_candidate(pipeline, kalyan)
+    assert forward_journal(conn)[("KALYANKJIL", "orb")] == 1
+    assert len(harness.calls) == 1
+
+
+async def test_a_queue_overflow_hands_back_the_admission_slot_it_drops(
+    conn, pclock, calendar, book, limit_table, cost_model, monkeypatch
+):
+    """The ``MAX_PENDING_FORWARDS`` eviction is the same never-evaluated fact a TTL expiry is.
+
+    Both leave the queue without ever reaching ``_take_forward_slot``, so no analyst call, no
+    ``agent_calls`` row and no gate verdict exists for the dropped candidate - which is exactly the
+    case the 2026-08-27 TTL refund was written for. The overflow path was left out of that change
+    and went on burning the (symbol, strategy) admission slot permanently.
+    """
+    monkeypatch.setattr(pipeline_module, "MAX_PENDING_FORWARDS", 2)
+    prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 5})
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12, prescreen=prescreen)
+
+    cands = [orb_candidate("AAA", 0.90), orb_candidate("BBB", 0.50), orb_candidate("CCC", 0.80)]
+    assert len(prescreen.admit(cands, TODAY)) == 3
+    for cand in cands:
+        await pipeline.on_signal_candidate(cand)          # paced: enqueue only, no drain
+    assert harness.calls == []
+    assert [p.candidate.symbol for p in pipeline._pending_forwards] == ["AAA", "CCC"]
+
+    # BBB was the worst pending candidate and is the one the overflow drops - so its slot goes back,
+    # in memory and in the journal, and it may compete again later.
+    assert slot_evaluated(conn)[("BBB", "orb")] == 0
+    assert ("BBB", "orb") not in prescreen._seen
+    assert slot_evaluated(conn)[("AAA", "orb")] == 1       # the retained entries are untouched
+    assert slot_evaluated(conn)[("CCC", "orb")] == 1
+
+
+async def test_a_front_entry_kept_in_the_queue_is_not_re_armed(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """``_apply_displacements`` walks the queue and the displaced pairs separately, and the two must
+    agree. The prune deliberately RETAINS a WO-20d ``front`` entry (a forward was already charged for
+    it, so the pre-screen could not have chosen it as a victim), but the re-arm walk flipped every
+    pair in the notice list - handing back a slot the queue still holds a live pointer to. Latent
+    under the live wiring; cheap to make consistent."""
+    rearmed: list[tuple[str, str]] = []
+    notices = [("SHRIRAMFIN", "orb"), ("POLICYBZR", "orb")]
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book,
+        harness=FakeHarness(dict(NO_ACTION_JSON)),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+        rearm=lambda sym, sid: bool(rearmed.append((sym, sid))),
+        take_displaced=lambda: notices,
+    )
+    pipeline._enqueue_forward(orb_candidate("SHRIRAMFIN", 0.50), front=True)
+    pipeline._enqueue_forward(orb_candidate("POLICYBZR", 0.50))
+
+    pipeline._apply_displacements()
+    # The front entry is kept, so it keeps its slot too; the ordinary one leaves and gives its back.
+    assert [p.candidate.symbol for p in pipeline._pending_forwards] == ["SHRIRAMFIN"]
+    assert rearmed == [("POLICYBZR", "orb")]

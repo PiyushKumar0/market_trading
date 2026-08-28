@@ -352,7 +352,12 @@ _SCHEMA: tuple[str, ...] = (
         stop_band_high      DECIMAL(12,2),
         target_band_low     DECIMAL(12,2),
         target_band_high    DECIMAL(12,2),
-        expires_at          DATE
+        expires_at          DATE,
+        -- §2.7 `cat_reversal` (2026-08-27): cluster_id of the EARLIER opposite-direction (short)
+        -- cluster of this same (symbol, event_type) story that the row's winning cluster reverses;
+        -- NULL on every ordinary row. Nullable and LAST so a fresh DB and a DB widened by
+        -- _migrate_watchlist_reversal share one column order.
+        reversal_of         TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_watchlist_day ON catalyst_watchlist(d, symbol)",
@@ -543,7 +548,7 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("entry_id", "d", "symbol", "grade", "direction", "event_type", "cluster_refs",
          "materiality", "source_domain_count", "event_age_h", "event_age_sessions",
          "confirm_trigger", "invalidation", "stop_band_low", "stop_band_high",
-         "target_band_low", "target_band_high", "expires_at"),
+         "target_band_low", "target_band_high", "expires_at", "reversal_of"),
         ("entry_id",),
     ),
     "calendar": (
@@ -865,6 +870,7 @@ class MarketStore:
             self._migrate_instruments_tick_scale(con)
             self._migrate_corrections_reason(con)
             self._migrate_sentiment_measures(con)
+            self._migrate_watchlist_reversal(con)
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
@@ -918,6 +924,26 @@ class MarketStore:
             if column not in present:
                 con.execute(f"ALTER TABLE sentiment_agg ADD COLUMN {column} {sql_type}")
                 _log.info("sentiment_agg_column_added", column=column)
+
+    def _migrate_watchlist_reversal(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``catalyst_watchlist.reversal_of`` column (§2.7
+        ``cat_reversal``, 2026-08-27), mirroring :meth:`_migrate_sentiment_measures`.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB written before the
+        reversal flag existed would reject every digest upsert carrying it — and the digest is the
+        08:35 job the whole news chain hangs off. Guarded on ``information_schema`` so the ALTER runs
+        EXACTLY ONCE; a fresh DB already has the column and this no-ops. Nullable + appended-last ⇒
+        every watchlist row written before today reads back with ``reversal_of = NULL``, i.e. "not a
+        reversal", which is the correct answer for rows graded before the detector existed."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'catalyst_watchlist'"
+            ).fetchall()
+        }
+        if "reversal_of" not in present:
+            con.execute("ALTER TABLE catalyst_watchlist ADD COLUMN reversal_of TEXT")
+            _log.info("catalyst_watchlist_column_added", column="reversal_of")
 
     def table_names(self) -> set[str]:
         """Names of the persistent tables in the store (for self-tests / the schema lockstep test)."""

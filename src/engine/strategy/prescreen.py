@@ -13,9 +13,65 @@ binding cap keeps the batch's best rather than its first. ``SignalCandidate.scor
 computed, logged and read by no decision at all (audit finding F1). Ties keep emission order
 (``sorted`` is stable), so §9.6 replay determinism is unchanged, and the returned list is in the same
 ranked order — the caller publishes best-first, which is what the §5.2(a) forward cap then sees.
-``admission_mode="arrival"`` is the rollback flag to the pre-WO-1 behaviour. Cross-BATCH ordering is
-NOT this class's job: a candidate firing at 10:05 cannot be compared against one that has not
-happened yet — the forward queue in ``engine.ops.pipeline`` owns selection across the day.
+``admission_mode="arrival"`` is the rollback flag to the pre-WO-1 behaviour. Cross-BATCH FORWARD
+ordering is still not this class's job — the forward queue in ``engine.ops.pipeline`` owns which
+admitted candidate the analyst sees next, and in what order. Cross-batch ADMISSION is, since
+2026-08-27; see the displacement section below for why the two had to be split.
+
+Cap displacement (2026-08-27)
+-----------------------------
+THE BUG. The per-strategy day cap was "whoever showed up first in a 90-second burst wins the whole
+day". Live 2026-08-27: all 7 of ``orb``'s admission slots were charged between 09:46:06 and 09:47:05,
+and TATACONSUM (score 0.80, 12:28) and KALYANKJIL (**score 1.0**, 12:49) were then refused outright
+with ``prescreen_cap_suppressed cap="strategy_day"`` — zero chance regardless of quality, three hours
+later, with no trace anywhere but the raw log line. A 12:49 ``orb`` fire is not an edge case: the
+scanner's entry window is 09:30–14:30 and only its RANGE is fixed to the first 30 minutes, so ``orb``
+is designed to fire all day into a cap that is designed to be gone by 09:47.
+
+WHY IT COULD NOT BE FIXED IN THE PIPELINE. The forward queue already ranks across time
+(``_forward_key``), but a candidate refused HERE never reaches it — the pipeline never sees the
+symbol at all. Only this class knows the cap is full, so only this class can decide that a later
+arrival deserves the slot more than an incumbent.
+
+THE RULE. When a cap would refuse a NEW pair, look for a same-strategy pair that is charged, has
+NEVER BEEN EVALUATED, carries no ``catalyst_ref``, and scores at least ``displacement_margin`` BELOW
+the arrival. Evict the worst such pair (lowest score, then earliest admission — a total order) and
+give the arrival its slot. Everything else refuses exactly as before.
+
+WHAT MAKES THIS SAFE, in the four places it could have gone wrong:
+
+1. *An evaluated candidate is permanent.* :meth:`claim_slot` is the pipeline's atomic compare-and-set
+   at ``_take_forward_slot`` — the single instant an analyst call is committed. It runs under THIS
+   lock, so a pair is either claimed (and thereafter undisplaceable) or displaced, never both. The
+   loser is told: a displaced pair's ``claim_slot`` returns ``False`` and the pipeline skips it, so a
+   freed slot can never be spent twice. This is the same load-bearing invariant :meth:`rearm` and the
+   TTL refund rest on (2026-07-29, 2026-08-27) and it is not weakened here.
+2. *The spam bound survives.* This is the first decrement path ``_charged`` has ever had — the
+   trade-window gate's docstring below still says one "would erode the spam bound", and for a REFUND
+   that remains true. A displacement is not a refund: it is a SWAP, and the charged count is
+   invariant across it, so the number of candidates that can ever reach the analyst is still exactly
+   the cap. What a swap does inflate is PUBLICATIONS, so displacements carry TWO derived budgets, one
+   per binding cap — a strategy's own ``max_per_strategy_day``, and ``max_candidates_per_day`` for
+   the day as a whole. Both are needed: displacement also fires on a full DAY cap, so a per-strategy
+   budget alone would let N strategies each spend theirs against the one day cap. Together they bound
+   admissions at ≤ 2× cap per strategy (``orb``: ≤ 14) AND ≤ 2× the day cap overall, with no new
+   owner knob to get out of sync with the caps they are derived from.
+3. *The §2.7 ref set only grows.* A candidate carrying a ``catalyst_ref`` is never evicted, so
+   ``_catalyst_refs`` never shrinks and the anti-manipulation cap cannot be churned. An arrival that
+   carries one still faces that cap on its own after winning the displacement.
+4. *No cross-strategy comparison.* The victim is always the same strategy as the arrival, so only
+   scores that WO-1 already blesses as comparable ("comparable inside a strategy, not across them")
+   are ever compared — even when it is the aggregate day cap that is binding.
+
+Determinism (§9.6) is analysed in :meth:`_displacement_scan_locked`; the short version is that a
+pure bar-stream replay is byte-identical, and the live coupling is the pre-existing
+``hydrate``/``rearm`` carve-out, not a new one.
+
+LIMIT, stated because it bounds how much this fix can do: ``orb``'s score SATURATES — scanners clamp
+to [0, 1] and a large share of live ``orb`` fires land at exactly 1.0. Against seven incumbents all
+at 1.0, nothing displaces anything, which is the right answer (there is no basis to prefer the later
+one) but not a satisfying one. The saturation itself, with the measured count, is flagged as
+undiagnosed in ``config/settings.yaml``'s ``max_per_strategy_day`` comment and is a separate problem.
 
 Determinism (§9.6): the pre-screen takes NO Clock — "today" is ``bar.ts_minute.date()``, so a replay
 of the same bar stream reproduces the same dedupe/cap decisions byte-for-byte (modulo the minted
@@ -64,7 +120,7 @@ import asyncio
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel
 
@@ -90,6 +146,53 @@ ADMISSION_MODES = ("ranked", "arrival")
 #: strategy id (no scanner may ever be called "default") — it is the structural ceiling that makes
 #: the ≤40%-of-the-day guarantee hold for strategies added after the config was written.
 DEFAULT_CAP_KEY = "default"
+
+#: FALLBACK for ``displacement_margin`` — how much better a later arrival must score to take a full
+#: cap's slot from an unevaluated incumbent of the same strategy (2026-08-27, module docstring).
+#: The SHIPPED value is ``strategy.prescreen.displacement_margin`` in ``config/settings.yaml``, an
+#: owner knob (§6.3) alongside ``max_per_strategy_day``, and the reasoning for 0.10 — plus the
+#: orb-saturation caveat that bounds what any margin can do — lives there with it. This constant
+#: exists so a directly-constructed pre-screen (tests, replay, backtest) behaves like the shipped
+#: engine without having to load settings; it is deliberately the same number.
+DEFAULT_DISPLACEMENT_MARGIN = 0.10
+
+#: Scores are compared in integer BASIS POINTS, never as raw float arithmetic (2026-08-27). This is
+#: not defensive noise: ``0.90 - 0.80`` is ``0.09999999999999998`` in IEEE-754, so a float margin
+#: test silently refuses a displacement that is exactly at the boundary — and refuses it for some
+#: pairs of scores and not others, which is precisely the kind of "deterministic but arbitrary"
+#: behaviour §9.1/§9.6 exist to keep out of policy decisions. Scanner scores are clamped to [0, 1]
+#: and none carries four significant decimals, so 1e-4 resolution loses nothing real.
+SCORE_BASIS = 10_000
+
+
+def score_bp(score: float) -> int:
+    """A [0, 1] score as an integer basis-point count — the only form displacement compares."""
+    return int(round(float(score) * SCORE_BASIS))
+
+
+def hydrated_catalyst_ref(symbol: str) -> str:
+    """The stand-in ``catalyst_ref`` :meth:`SignalPreScreen.hydrate` charges for ``symbol``.
+
+    The day-slot journal records (symbol, strategy) pairs and carries no ref column, so a restart
+    cannot read back the refs the §2.7 guard actually spent. It CAN read which of those pairs
+    belonged to a catalyst strategy, and the twins one story projects share their symbol as well as
+    their ref (one watchlist row per symbol per day) — so distinct symbols reconstruct the distinct-
+    ref count. See :meth:`SignalPreScreen.hydrate` for the direction this is wrong in.
+    """
+    return f"hydrated:{symbol}"
+
+
+class _DisplacementScan(NamedTuple):
+    """One pass over ``_admitted``: who may be evicted, and how many could have been.
+
+    ``victim`` is the eviction decision; ``displaceable`` is the refusal diagnostic — ``None`` when
+    displacement is disabled entirely, which is NOT the same reading as ``0`` ("every incumbent has
+    really been evaluated"). They are returned together because they are two readings of the same
+    walk — see :meth:`SignalPreScreen._displacement_scan_locked`.
+    """
+
+    victim: tuple[str, str] | None
+    displaceable: int | None
 
 
 def bar_in_trade_window(bar: Bar, window: tuple[datetime, datetime] | None) -> bool:
@@ -150,6 +253,16 @@ class SignalPreScreen:
         :meth:`~engine.ops.pipeline.RecommendationPipeline._flush_funnel_raw` later writes back as
         the day's absolute total, so wiring the flush WITHOUT this loader would have each restart
         overwrite the day's persisted count with the new process's smaller one.
+    displacement_margin:
+        How much better a later candidate must score to take a full cap's admission slot from an
+        unevaluated incumbent of the same strategy [settings tunable —
+        ``strategy.prescreen.displacement_margin``; owner knob, NOT learner-movable (§6.3), for the
+        same reason ``max_per_strategy_day`` is not: it decides which candidates get evaluated at
+        all]. ``None`` DISABLES displacement, restoring the pre-2026-08-27 behaviour where the first
+        candidates to fire keep the strategy's slots for the whole session — the rollback flag, the
+        way ``admission_mode`` is WO-1's. The shipped 0.10 and the reasoning behind it live in
+        ``config/settings.yaml``; :data:`DEFAULT_DISPLACEMENT_MARGIN` mirrors it for direct
+        construction. See the cap-displacement section of the module docstring for the mechanism.
     """
 
     def __init__(
@@ -163,9 +276,12 @@ class SignalPreScreen:
         admission_mode: str = "ranked",
         catalyst_cap_fn: Callable[[], int] | None = None,
         raw_counts_loader: Callable[[date], Mapping[str, int]] | None = None,
+        displacement_margin: float | None = DEFAULT_DISPLACEMENT_MARGIN,
     ) -> None:
         if max_candidates_per_day < 1:
             raise ValueError("max_candidates_per_day must be >= 1")
+        if displacement_margin is not None and not 0.0 < float(displacement_margin) <= 1.0:
+            raise ValueError("displacement_margin must be in (0, 1], or None to disable")
         if admission_mode not in ADMISSION_MODES:
             raise ValueError(f"admission_mode must be one of {ADMISSION_MODES}, got {admission_mode!r}")
         default_cap, per_strategy = self._parse_caps(max_per_strategy_day)
@@ -178,6 +294,11 @@ class SignalPreScreen:
         self._admission_mode = admission_mode
         self._catalyst_cap_fn = catalyst_cap_fn               # §7.1 catalyst_guard, read at use
         self._raw_counts_loader = raw_counts_loader           # WO-9 raw counters, restored on roll
+        #: ``None`` disables displacement entirely — the pre-2026-08-27 "first 90 seconds win the
+        #: day" behaviour, kept as the rollback knob the way ``admission_mode`` is for WO-1.
+        self._displacement_margin = (
+            None if displacement_margin is None else float(displacement_margin)
+        )
         # Per-day state (reset on bar-date change). Lock: handle_bar offloads to worker threads.
         self._lock = threading.Lock()
         self._day: date | None = None
@@ -188,15 +309,41 @@ class SignalPreScreen:
         self._charged: set[tuple[str, str]] = set()
         self._count_day = 0
         self._count_by_strategy: dict[str, int] = {}
-        #: Catalyst-bearing (``catalyst_ref`` set) admissions charged today — the
-        #: ``catalyst_guard.max_catalyst_entries_day`` counter (§2.7). Deliberately keyed on the
-        #: FIELD, not on ``strategy_id == "cat"``: the guard bounds news-originated entries, and no
-        #: strategy id may be the thing that decides whether the news guard applies. NOT restored by
-        #: :meth:`hydrate` — the day-slot journal records (symbol, strategy) pairs and carries no
-        #: catalyst flag; across a restart the coincident ``max_per_strategy_day['cat']`` (equal to
-        #: the guard by config) is what still bounds the day, and the §2.7 single-shot age filter
-        #: means the same story cannot re-offer itself anyway.
-        self._count_catalyst = 0
+        #: DISTINCT ``catalyst_ref`` values charged today — the
+        #: ``catalyst_guard.max_catalyst_entries_day`` budget (§2.7), which the cap compares by
+        #: ``len``. Deliberately keyed on the FIELD, not on ``strategy_id == "cat"``: the guard
+        #: bounds news-originated ENTRIES, and no strategy id may be the thing that decides whether
+        #: the news guard applies. A SET rather than a counter because one watchlist row projects
+        #: into both a ``cat`` and a ``cat_reversal`` candidate sharing its ``entry_id`` as their
+        #: ref — two experiments on ONE story, which must pay one of the day's two entries, not
+        #: both. Restored across a restart by :meth:`hydrate`.
+        self._catalyst_refs: set[str] = set()
+        # ---------------------------------------------------------- cap displacement (2026-08-27)
+        #: Every CHARGED pair -> (score at admission, admission sequence, carried a catalyst_ref).
+        #: The displaceable population and the total order over it both come from here, and every
+        #: field is a fact about the candidate stream alone — which is what keeps §9.6 replay exact.
+        self._admitted: dict[tuple[str, str], tuple[float, int, bool]] = {}
+        #: Monotonic admission counter — the final tie-break when two pairs share a score.
+        self._admit_seq = 0
+        #: Pairs whose slot is PERMANENT: an analyst call was committed for them (:meth:`claim_slot`),
+        #: or they were restored by :meth:`hydrate` and this process cannot prove otherwise. Never
+        #: displaceable. This set IS invariant #1 (2026-07-29 / 2026-08-27).
+        self._evaluated: set[tuple[str, str]] = set()
+        #: Displacements SPENT per strategy today, budgeted against that strategy's own cap so the
+        #: swap cannot become an unbounded publication treadmill (module docstring, point 2).
+        self._displacements: dict[str, int] = {}
+        #: Displacements spent across ALL strategies today, budgeted against ``max_candidates_per_day``
+        #: — the second half of point 2. Displacement fires on a full DAY cap as well as a full
+        #: per-strategy one, and it is also the only bound left when no per-strategy cap is
+        #: configured at all (the replay/backtest construction, where ``_cap_for`` is ``None``).
+        self._day_displacements = 0
+        #: Every pair displaced today — read by :meth:`claim_slot` to refuse a slot the pipeline is
+        #: still holding a queue pointer to. Kept for the whole day, unlike ``_displaced_pending``.
+        self._displaced: set[tuple[str, str]] = set()
+        #: Displacement notices not yet collected by the pipeline (:meth:`take_displaced`). The
+        #: pipeline drains this on the EVENT LOOP, which is the only place ``_pending_forwards`` may
+        #: be touched — admission itself runs in a scan worker thread and must never reach into it.
+        self._displaced_pending: list[tuple[str, str]] = []
         #: WO-9 funnel counters, per strategy, for the CURRENT day. ``_raw_by_strategy`` alone is
         #: RESTART-PROOF (2026-08-21): it is seeded from ``funnel_raw_counts`` on every day roll and
         #: flushed back by the drain tick, because a raw count that resets is indistinguishable from
@@ -287,14 +434,67 @@ class SignalPreScreen:
         still-true setup for the rest of the day (observed 2026-07-29: six candidates burned by a
         broken analyst could not re-publish in the repaired window). An analyst that RAN and said
         no_action, or a gate rejection, is a real evaluation — those must NOT re-arm. Daily caps are
-        deliberately not refunded (the spam bound counts attempts, not outcomes)."""
+        deliberately not refunded (the spam bound counts attempts, not outcomes).
+
+        The pair also leaves ``_evaluated`` (2026-08-28). :meth:`claim_slot` adds it at DISPATCH, one
+        instant before the call this method exists to say never happened, so leaving it there made
+        the pair permanently undisplaceable on the strength of an evaluation nobody performed — with
+        the journal recording ``evaluated=0`` for the same pair. Safe by the same argument the rest
+        of this method rests on: only a never-completed call ever re-arms."""
         with self._lock:
             key = (symbol, strategy_id)
             if key in self._seen:
                 self._seen.discard(key)
+                self._evaluated.discard(key)
                 _log.info("prescreen_rearmed", symbol=symbol, strategy_id=strategy_id)
                 return True
             return False
+
+    # ------------------------------------------------------- cap displacement (2026-08-27)
+    def claim_slot(self, symbol: str, strategy_id: str) -> bool:
+        """Commit ``(symbol, strategy)``'s slot to a real evaluation — atomically (2026-08-27).
+
+        The pipeline calls this from ``_take_forward_slot``, the one instant an analyst call is
+        actually about to be spent, and honours the answer:
+
+        * ``True``  — the pair still holds its slot, and is now marked EVALUATED. From here it can
+          never be displaced, which is invariant #1 (an evaluated candidate never loses its slot).
+        * ``False`` — the pair was DISPLACED while it sat in the forward queue and no longer holds a
+          slot at all. The pipeline must skip it, or the slot handed to the better arrival would be
+          spent twice and the cap would be breached by one analyst call.
+
+        The compare-and-set runs under the same lock as the displacement decision, so the two orders
+        are the only two possible: claim-then-displace (the pair is in ``_evaluated``, displacement
+        passes it over) or displace-then-claim (the pair is gone from ``_charged``, this returns
+        ``False``). There is no interleaving in which both succeed.
+
+        FAIL-OPEN on anything unrecognised — a pair this process never charged, or one from before a
+        day roll, is claimable. The two failure directions are not symmetric: refusing wrongly
+        silently drops a legitimate analyst call, while allowing wrongly costs at most one extra
+        call. Only an actual displacement, recorded in ``_displaced``, is ever refused.
+        """
+        with self._lock:
+            key = (symbol, strategy_id)
+            if key in self._displaced and key not in self._charged:
+                _log.info("prescreen_slot_claim_refused", symbol=symbol, strategy_id=strategy_id,
+                          reason="slot was displaced by a better candidate for this strategy")
+                return False
+            self._evaluated.add(key)
+            return True
+
+    def take_displaced(self) -> list[tuple[str, str]]:
+        """Pop the displacement notices the pipeline has not acted on yet (2026-08-27).
+
+        Displacement is decided HERE, on a scan worker thread; its consequences — dropping the
+        evicted entry from ``_pending_forwards`` and flipping its day-slot journal row back to
+        ``evaluated=0`` — belong to the pipeline and must happen on the event loop. This hand-off is
+        that seam, and it is deliberately a pull rather than a callback: a push from the scan thread
+        would be reaching into loop-confined state, which is precisely the race this design exists
+        to avoid.
+        """
+        with self._lock:
+            pending, self._displaced_pending = self._displaced_pending, []
+            return pending
 
     def hydrate(
         self,
@@ -302,6 +502,7 @@ class SignalPreScreen:
         *,
         seen: Sequence[tuple[str, str]],
         charged: Sequence[tuple[str, str]],
+        catalyst_strategies: Sequence[str] = (),
     ) -> None:
         """Restore ``day``'s dedupe/cap state from the persisted journal at boot (2026-08-04).
 
@@ -312,16 +513,43 @@ class SignalPreScreen:
         refused: governor/forward-cap/unsizeable); a charged-but-unseen pair was lost in flight and
         may re-publish within its already-paid quota — exactly the :meth:`rearm` semantics. Boot-only
         (composition root, from ``prescreen_day_slots``): replay/backtest paths never call this, so
-        §9.6 bar-stream determinism is untouched."""
+        §9.6 bar-stream determinism is untouched.
+
+        Restored pairs are marked EVALUATED, i.e. undisplaceable (2026-08-27). The journal cannot
+        prove a negative: ``evaluated``/``forwarded`` record what a PREVIOUS process did, and a
+        restart cannot reconstruct whether the analyst got as far as reading one. Invariant #1 says
+        an evaluated candidate never loses its slot, so the only safe direction across a boot is to
+        assume it was. The cost is that displacement is inert for pre-restart pairs; the alternative
+        risks handing a second candidate the slot of one that had already been judged.
+
+        ``catalyst_strategies`` (2026-08-28) restores the §2.7 ``_catalyst_refs`` budget, which this
+        used to leave empty — justified while ``max_per_strategy_day['cat']`` equalled the guard and
+        so bounded the day on its own, and broken the moment ``cat_reversal: 2`` was added alongside
+        it (post-restart bound 4 against a guard of 2). The journal has no ref column, but the pairs
+        that could have charged one are exactly those whose ``strategy_id`` is in this set, and the
+        twins one story projects share their SYMBOL as well as their ref (one watchlist row per
+        symbol per day) — so distinct symbols among them reconstruct the distinct-ref count. That is
+        the conservative reconstruction AVAILABLE, not an exact one: two different event_types on
+        one symbol the same day are two refs read back as one, which is fail-OPEN by at most that
+        difference. One story per symbol per day is the overwhelming case, and the alternative — a
+        journal column migration — buys exactness for a case that has never occurred. Unwired ⇒ the
+        pre-2026-08-28 behaviour (an empty budget), so replay/backtest paths are unaffected."""
+        catalyst_ids = frozenset(catalyst_strategies)
         with self._lock:
             self._roll_day_locked(day)
             self._seen = set(seen)
             self._charged = set(charged) | self._seen
+            self._evaluated = set(self._charged)
             self._count_day = len(self._charged)
             counts: dict[str, int] = {}
             for _, strategy_id in self._charged:
                 counts[strategy_id] = counts.get(strategy_id, 0) + 1
             self._count_by_strategy = counts
+            self._catalyst_refs = {
+                hydrated_catalyst_ref(symbol)
+                for symbol, strategy_id in self._charged
+                if strategy_id in catalyst_ids
+            }
 
     def sweep(self, bars: Sequence[Bar]) -> tuple[list[SignalCandidate], list[PendingSetup]]:
         """Re-scan the LATEST bar of each symbol on demand (§3.2.5 sweep addendum, 2026-07-29).
@@ -417,7 +645,14 @@ class SignalPreScreen:
             self._charged.clear()
             self._count_day = 0
             self._count_by_strategy.clear()
-            self._count_catalyst = 0
+            self._catalyst_refs.clear()
+            self._admitted.clear()
+            self._admit_seq = 0
+            self._evaluated.clear()
+            self._displacements.clear()
+            self._day_displacements = 0
+            self._displaced.clear()
+            self._displaced_pending.clear()
             self._raw_by_strategy.clear()
             self._published_scores.clear()
             self._suppressed_cap.clear()
@@ -466,6 +701,137 @@ class SignalPreScreen:
             return list(cands)
         return sorted(cands, key=lambda c: -float(c.score))
 
+    def _displacement_scan_locked(
+        self, cand: SignalCandidate, batch_floor: int | None = None
+    ) -> _DisplacementScan:
+        """The pair ``cand`` may evict to take a full cap's slot (or ``None``), and the diagnostic
+        count of displaceable incumbents — from ONE pass over ``_admitted`` (2026-08-27).
+
+        Both outputs come from the same walk because the refusal path needs both and the two
+        predicates are nested: ``displaceable`` counts every incumbent that clears the base
+        eligibility below, and ``victim`` is the worst of those that ALSO clears the batch floor and
+        the margin. Counting was previously a second full scan of the same dict on the per-bar
+        admission path, under this lock, purely to populate a log field.
+
+        The count is deliberately the BASE predicate only — it answers "were there any candidates
+        for displacement at all", which is what makes a refusal readable: ``0`` means every incumbent
+        has really been evaluated (the cap is doing its job), while a non-zero count next to a
+        refusal means the arrival simply was not ``displacement_margin`` better, or a displacement
+        budget is spent. So it is still computed when a budget is exhausted — that is one of the
+        cases the field has to distinguish. It is NOT computed when displacement is disabled
+        outright: no victim can exist, so the walk would buy only a log field, and a ``0`` there
+        would read as the "every incumbent was evaluated" diagnosis rather than "the mechanism is
+        off". That case returns ``None`` and logs as null.
+
+        PURE SELECTION — it mutates nothing, so a candidate that passes the cap check on a
+        displacement and is then refused by a LATER check (the §2.7 catalyst cap) has not silently
+        destroyed an incumbent. :meth:`_commit_displacement_locked` is the mutation, and it runs at
+        the accept point once every other bound has already said yes.
+
+        Eligibility, all four required:
+
+        * same ``strategy_id`` — the only comparison WO-1 permits with raw scores, and the reason
+          this stays legitimate even when it is the aggregate DAY cap that binds;
+        * admitted in an EARLIER batch (``seq <= batch_floor``) — displacement decides cross-batch
+          competition, ranking decides intra-batch competition, and the two must not overlap;
+        * not in ``_evaluated`` — invariant #1, the whole point;
+        * no ``catalyst_ref`` — keeps ``_catalyst_refs`` from ever shrinking (§2.7 anti-manipulation);
+        * ``cand.score - incumbent >= _displacement_margin`` — "materially better", not "better by a
+          rounding error" (``strategy.prescreen.displacement_margin`` in ``config/settings.yaml``,
+          which carries the reasoning for the shipped 0.10).
+
+        Among the eligible, the victim is the WORST: lowest score, ties broken by earliest admission
+        sequence. Two pairs can share a score; they cannot share a sequence, so the order is TOTAL.
+        Both the margin test and the ordering run in integer basis points (:func:`score_bp`) — float
+        subtraction makes ``0.90 - 0.80`` land *under* a 0.10 margin, which would have made the
+        policy boundary depend on IEEE-754 representation rather than on the rule.
+
+        DETERMINISM (§9.6), worked through rather than asserted. The decision reads exactly five
+        pieces of state: ``_admitted`` (score/seq/catalyst per charged pair), ``_evaluated``,
+        ``_displacements``, ``_charged`` and the caps. Four of the five are written only by
+        :meth:`_admit_one_locked` and :meth:`_commit_displacement_locked`, both of which are driven
+        solely by the candidate stream in arrival order — no Clock is read anywhere on this path,
+        the tie-break is total, and float comparison of identical inputs is exact. So a REPLAY of the
+        same bar/candidate stream through this class reproduces every admission and displacement
+        byte-for-byte, which is the §9.6 guarantee.
+
+        The fifth, ``_evaluated``, is the honest exception and it is not a new one. It is also
+        written by :meth:`claim_slot`, which the LIVE pipeline calls on its own 3-minute drain
+        cadence — so under live operation the displacement outcome does depend on drain timing,
+        governor state and the forward cap. That is exactly the shape of the carve-out :meth:`hydrate`
+        and ``raw_counts_loader`` already document: those seams are wired by the composition root and
+        left unwired by replay/backtest paths, which is what keeps the replay guarantee pure. A replay
+        never calls :meth:`claim_slot`, so ``_evaluated`` stays empty and the decision is a pure
+        function of the stream. A LIVE session was never byte-reproducible against a different day's
+        drain timing, and this changes nothing about that.
+        """
+        margin = self._displacement_margin
+        if margin is None:                # displacement OFF — nothing to walk for (docstring above)
+            return _DisplacementScan(None, None)
+        strategy_id = cand.strategy_id
+        # Both derived budgets bind (module docstring, point 2). The per-strategy one is absent under
+        # a capless construction, where the day-level one is the whole bound.
+        budget = self._cap_for(strategy_id)
+        selecting = self._day_displacements < self._max_day and not (
+            budget is not None and self._displacements.get(strategy_id, 0) >= budget
+        )
+        incoming_bp = score_bp(cand.score)
+        margin_bp = score_bp(margin)
+        displaceable = 0
+        best: tuple[int, int, tuple[str, str]] | None = None
+        for pair, (score, seq, has_catalyst) in self._admitted.items():
+            if pair[1] != strategy_id or has_catalyst or pair in self._evaluated:
+                continue
+            displaceable += 1
+            if not selecting:
+                continue
+            if batch_floor is not None and seq > batch_floor:
+                continue                              # admitted by THIS batch — not up for eviction
+            incumbent_bp = score_bp(score)
+            if incoming_bp - incumbent_bp < margin_bp:
+                continue
+            if best is None or (incumbent_bp, seq) < (best[0], best[1]):
+                best = (incumbent_bp, seq, pair)
+        return _DisplacementScan(None if best is None else best[2], displaceable)
+
+    def _commit_displacement_locked(self, victim: tuple[str, str], cand: SignalCandidate) -> None:
+        """Evict ``victim`` and hand its charge back to the caps so ``cand`` can take it.
+
+        The SWAP that keeps the spam bound (module docstring, point 2): ``_count_day`` and
+        ``_count_by_strategy`` drop by one here and are immediately re-charged by the caller, so the
+        cap is never actually exceeded at any point — this is not a refund path in disguise. The
+        pair leaves ``_seen`` too, so a still-true setup may legitimately re-publish later and
+        compete for whatever slot is free then.
+
+        Nothing is hidden: ``prescreen_slot_displaced`` carries both sides of the trade, and the
+        pipeline is separately handed the pair (:meth:`take_displaced`) so the evicted candidate
+        leaves the forward queue and its journal row reverts to ``evaluated=0`` — the same
+        never-evaluated accounting the TTL refund uses (2026-08-27), because it is the same fact.
+        """
+        score, seq, _ = self._admitted.pop(victim)
+        strategy_id = victim[1]
+        self._seen.discard(victim)
+        self._charged.discard(victim)
+        self._count_day = max(0, self._count_day - 1)
+        self._count_by_strategy[strategy_id] = max(
+            0, self._count_by_strategy.get(strategy_id, 1) - 1
+        )
+        self._displacements[strategy_id] = self._displacements.get(strategy_id, 0) + 1
+        self._day_displacements += 1
+        self._displaced.add(victim)
+        self._displaced_pending.append(victim)
+        _log.info(
+            "prescreen_slot_displaced", cap="strategy_day", strategy_id=strategy_id,
+            symbol=cand.symbol, score=float(cand.score),
+            displaced_symbol=victim[0], displaced_score=score, displaced_seq=seq,
+            margin=self._displacement_margin,
+            displacements_used=self._displacements[strategy_id],
+            displacement_budget=self._cap_for(strategy_id),
+            day_displacements_used=self._day_displacements,
+            day_displacement_budget=self._max_day,
+            reason="cap full; this candidate scores materially better than an unevaluated incumbent",
+        )
+
     def _admit_batch_locked(
         self, cands: Sequence[SignalCandidate], *, in_window: bool = True
     ) -> list[SignalCandidate]:
@@ -479,9 +845,23 @@ class SignalPreScreen:
             self._raw_by_strategy[cand.strategy_id] = (
                 self._raw_by_strategy.get(cand.strategy_id, 0) + 1
             )
-        return [c for c in self._rank(cands) if self._admit_one_locked(c, in_window=in_window)]
+        # Displacement is a CROSS-BATCH mechanism and must not reach inside this one (2026-08-27).
+        # Everything admitted from here on carries a sequence above this floor and is off limits as a
+        # victim, for two reasons. Correctness: the accepted list returned below is what the caller
+        # PUBLISHES, so a candidate admitted and then evicted by a later member of its own batch
+        # would be published holding no slot. Design: WO-1 already decides intra-batch competition by
+        # ranking, and under ``ranked`` a later candidate can never outscore an earlier one anyway —
+        # only the ``arrival`` rollback could trip this, and a rollback flag that quietly changed
+        # behaviour would not be one.
+        batch_floor = self._admit_seq
+        return [
+            c for c in self._rank(cands)
+            if self._admit_one_locked(c, in_window=in_window, batch_floor=batch_floor)
+        ]
 
-    def _admit_one_locked(self, cand: SignalCandidate, *, in_window: bool = True) -> bool:
+    def _admit_one_locked(
+        self, cand: SignalCandidate, *, in_window: bool = True, batch_floor: int | None = None
+    ) -> bool:
         """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): window, dedupe, caps,
         telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
         key = (cand.symbol, cand.strategy_id)
@@ -514,49 +894,105 @@ class SignalPreScreen:
         # Caps bind on UNIQUE pairs (2026-07-29): a re-armed pair re-publishes within
         # its already-paid quota; only a NEW pair can be suppressed by a full cap.
         charged = key in self._charged
-        if not charged and self._count_day >= self._max_day:
+        per_strategy = self._count_by_strategy.get(cand.strategy_id, 0)
+        strategy_cap = self._cap_for(cand.strategy_id)
+        # A binding cap is no longer the end of the conversation (2026-08-27, module docstring). If
+        # this strategy is holding a slot on a candidate NOBODY HAS LOOKED AT that scores materially
+        # worse, the slot moves. Selection only — nothing is evicted until every remaining bound
+        # (including the §2.7 catalyst cap below) has also said yes.
+        day_full = self._count_day >= self._max_day
+        strategy_full = strategy_cap is not None and per_strategy >= strategy_cap
+        cap_binding = not charged and (day_full or strategy_full)
+        # One walk of `_admitted` yields both the eviction decision and the refusal diagnostic below.
+        victim, displaceable = (
+            self._displacement_scan_locked(cand, batch_floor)
+            if cap_binding else _DisplacementScan(None, 0)
+        )
+        if not charged and victim is None and day_full:
             _log.info(
                 "prescreen_cap_suppressed", cap="day", symbol=cand.symbol,
                 strategy_id=cand.strategy_id, score=cand.score,
                 max_candidates_per_day=self._max_day,
+                displaceable=displaceable,
+                day_displacements_used=self._day_displacements,
+                day_displacement_budget=self._max_day,
             )
             self._suppressed_cap[cand.strategy_id] = self._suppressed_cap.get(cand.strategy_id, 0) + 1
             return False
-        per_strategy = self._count_by_strategy.get(cand.strategy_id, 0)
-        strategy_cap = self._cap_for(cand.strategy_id)
-        if not charged and strategy_cap is not None and per_strategy >= strategy_cap:
+        if not charged and victim is None and strategy_full:
+            # Still a flat refusal — but the log now says WHY displacement did not save it, so
+            # "the cap is full and every incumbent is better or already evaluated" is readable
+            # apart from "the cap is full and the displacement budget is spent" (WO-9 funnel).
             _log.info(
                 "prescreen_cap_suppressed", cap="strategy_day", symbol=cand.symbol,
                 strategy_id=cand.strategy_id, score=cand.score,
                 max_per_strategy_day=strategy_cap,
+                displaceable=displaceable,
+                displacements_used=self._displacements.get(cand.strategy_id, 0),
+                displacement_budget=strategy_cap,
+                day_displacements_used=self._day_displacements,
+                day_displacement_budget=self._max_day,
             )
             self._suppressed_cap[cand.strategy_id] = self._suppressed_cap.get(cand.strategy_id, 0) + 1
             return False
         # §2.7 news carve-out: a candidate carrying a `catalyst_ref` is ADDITIONALLY bound by
         # catalyst_guard.max_catalyst_entries_day (§3.2.5/§7.1) — read here, at the enforcement site,
-        # from the hash-verified limits.yaml; never evaluated in RiskGate (§2.4 item 4). Like every
-        # other cap it charges UNIQUE pairs, so a re-armed catalyst pair republishes inside its
-        # already-paid slot rather than spending a second entry of the day's two.
+        # from the hash-verified limits.yaml; never evaluated in RiskGate (§2.4 item 4). The budget
+        # counts DISTINCT REFS, not admissions: one story is one news event however many strategies
+        # enter on it (`cat` and `cat_reversal` share the watchlist row's entry_id), and charging it
+        # twice spent the whole day's news budget on one headline. A ref already charged — including
+        # one reconstructed by :meth:`hydrate` for this SYMBOL across a restart — admits free; its
+        # story has paid. The pair-level `charged` test still short-circuits a re-armed pair, which
+        # is the same "already paid" fact one level down.
+        already_charged_ref = False
         if cand.catalyst_ref is not None and not charged:
+            already_charged_ref = (
+                str(cand.catalyst_ref) in self._catalyst_refs
+                or hydrated_catalyst_ref(cand.symbol) in self._catalyst_refs
+            )
             catalyst_cap = self._catalyst_cap()
-            if catalyst_cap is None or self._count_catalyst >= catalyst_cap:
+            if catalyst_cap is None or (
+                not already_charged_ref and len(self._catalyst_refs) >= catalyst_cap
+            ):
                 _log.info(
                     "prescreen_cap_suppressed", cap="catalyst_day", symbol=cand.symbol,
                     strategy_id=cand.strategy_id, score=cand.score,
                     catalyst_ref=cand.catalyst_ref,
                     max_catalyst_entries_day=catalyst_cap,
+                    catalyst_entries_used=len(self._catalyst_refs),
                 )
                 self._suppressed_cap[cand.strategy_id] = (
                     self._suppressed_cap.get(cand.strategy_id, 0) + 1
                 )
                 return False
+        # Every bound has now said yes, so the eviction is safe to commit: the counters it frees are
+        # re-charged three lines down, and the cap is never over-subscribed in between.
+        if victim is not None:
+            self._commit_displacement_locked(victim, cand)
         self._seen.add(key)
         if not charged:
             self._charged.add(key)
             self._count_day += 1
-            self._count_by_strategy[cand.strategy_id] = per_strategy + 1
-            if cand.catalyst_ref is not None:
-                self._count_catalyst += 1
+            # Re-read rather than reuse `per_strategy`: a displacement just decremented it.
+            self._count_by_strategy[cand.strategy_id] = (
+                self._count_by_strategy.get(cand.strategy_id, 0) + 1
+            )
+            self._admit_seq += 1
+            self._admitted[key] = (
+                float(cand.score), self._admit_seq, cand.catalyst_ref is not None
+            )
+            if cand.catalyst_ref is not None and not already_charged_ref:
+                self._catalyst_refs.add(str(cand.catalyst_ref))
+        elif key in self._admitted:
+            # A re-armed pair re-publishing inside its paid quota (2026-07-29) arrives with FRESH
+            # levels and a fresh score; `_admitted` held the one it was first charged at, so a later
+            # arrival was measured against a number that no longer described anything. The sequence
+            # advances too: this is a new publication, and its position in the total order should say
+            # so. Both are facts about the candidate stream in arrival order, so §9.6 replay is
+            # unchanged. The catalyst flag is NOT re-read — it is what keeps the pair out of the
+            # victim pool, and §2.7 monotonicity is not a per-publication judgement.
+            self._admit_seq += 1
+            self._admitted[key] = (float(cand.score), self._admit_seq, self._admitted[key][2])
         self._published_scores.setdefault(cand.strategy_id, []).append(float(cand.score))
         _log.info(
             "signal_candidate", signal_id=cand.signal_id, strategy_id=cand.strategy_id,

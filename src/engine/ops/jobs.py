@@ -512,7 +512,14 @@ class CatchUpRunner:
         result.frozen_reasons.append(reason)
         if self._freeze is not None:
             await self._freeze(reason)
-        key = (spec.job_id, today.isoformat())
+        # Prune before keying: every write below ADDS a new (job_id, date) pair — a date never
+        # recurs, so nothing ever overwrites yesterday's — and this is the only write site, so
+        # left alone the set grows by one member per (job, day) failure for the life of the
+        # process. `today` here is always the real current date (§2.6 — safety-critical is a
+        # deadline job, never backdated), so anything stamped with a different date is stale.
+        today_iso = today.isoformat()
+        self._freeze_notified = {k for k in self._freeze_notified if k[1] == today_iso}
+        key = (spec.job_id, today_iso)
         if self._notify is not None and key not in self._freeze_notified:
             await self._notify(catalog.data_freshness_frozen(
                 job_id=spec.job_id,

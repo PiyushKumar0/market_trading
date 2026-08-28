@@ -19,6 +19,18 @@ the scheduler.
 The same job refreshes ``theme_map`` from the ``config/themes.yaml`` seed — rows are written
 VERBATIM (owner-approved additions only: the weekly researcher SUGGESTS, the owner edits the YAML,
 §5.5/§6.3 — nothing is ever auto-added here).
+
+A small owner-curated supplement, ``config/sector_overrides.yaml`` (same §5.5/§6.3 convention as
+``themes.yaml``), folds names the scraped indices structurally exclude (e.g. AMCs are tagged
+Industry=Financial Services by NSE but are not constituents of the real Nifty Financial Services
+index) into their natural sector. Applied AFTER the index-scrape classification as a pure
+supplement — ``mapping.setdefault``, so a symbol already classified by a real index is never
+touched — on top of BOTH a fresh scrape and a reused frozen-cache fallback. Same E5 guarantee as
+everything else here: a malformed/missing override file degrades to "no overrides this run" and
+alerts, never breaks sector classification. Sector NAMES in the file are also validated against
+:data:`SECTOR_SOURCES` at merge time (``_load_overrides``) — an unknown name is dropped (its
+symbols stay UNCLASSIFIED) and alerted rather than minting a phantom sector bucket the exposure
+gate never groups on.
 """
 
 from __future__ import annotations
@@ -141,6 +153,37 @@ def load_theme_seed(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_sector_overrides(path: str | Path) -> dict[str, str]:
+    """``config/sector_overrides.yaml`` → ``{symbol: sector}``, owner-curated supplement.
+
+    Shape: ``overrides: {sector_name: [symbol, ...]}``. Same §5.5/§6.3 owner-approval convention
+    as :func:`load_theme_seed` (platform suggests, owner edits the YAML). Flattened to one sector
+    per symbol here for the caller's merge; if a symbol is listed under two sectors in the file
+    itself, the later one wins (dict overwrite) — the file is small and owner-curated, so this is
+    a YAML-authoring mistake, not a runtime concern.
+
+    Raises (never caught here — E5 degrade-and-alert is the caller's job, matching
+    ``_refresh_themes``'s handling of :func:`load_theme_seed`) on a missing file or malformed
+    schema so the caller can tell "no overrides configured / broken" apart from "empty file".
+    """
+    raw = load_yaml(path)
+    overrides = raw.get("overrides") or {}
+    if not isinstance(overrides, dict):
+        raise ValueError("sector_overrides.yaml: 'overrides' must be a mapping")
+    out: dict[str, str] = {}
+    for sector, symbols in overrides.items():
+        sector_name = str(sector).strip().upper()
+        if not sector_name:
+            continue
+        if not isinstance(symbols, list):
+            raise ValueError(f"sector_overrides.yaml: '{sector}' symbols must be a list")
+        for sym in symbols:
+            symbol = str(sym).strip().upper()
+            if symbol:
+                out[symbol] = sector_name
+    return out
+
+
 class SectorMapJob:
     """§4.4 job 13 — weekly ``sector_map`` snapshot + ``theme_map`` seed refresh (R1, E5).
 
@@ -157,6 +200,9 @@ class SectorMapJob:
         sector — the frozen fallback copy reused per-source on failure, surviving restarts.
     themes_path:
         The theme seed YAML; defaults to ``config/themes.yaml`` under the configured config dir.
+    overrides_path:
+        The owner-curated sector-override YAML; defaults to ``config/sector_overrides.yaml``
+        under the configured config dir.
     notify:
         Optional owner-alert sink; degraded sources / a skipped snapshot alert through it.
     """
@@ -169,6 +215,7 @@ class SectorMapJob:
         cache_path: str | Path,
         *,
         themes_path: str | Path | None = None,
+        overrides_path: str | Path | None = None,
         notify: NotifySink | None = None,
         request_timeout_s: float = 20.0,
     ) -> None:
@@ -177,6 +224,9 @@ class SectorMapJob:
         self._http = http
         self._cache_path = Path(cache_path)
         self._themes_path = Path(themes_path) if themes_path is not None else config_dir() / "themes.yaml"
+        self._overrides_path = (
+            Path(overrides_path) if overrides_path is not None else config_dir() / "sector_overrides.yaml"
+        )
         self._notify = notify
         self._timeout = float(request_timeout_s)
         #: Per-``d`` (as_of) alert dedup (2026-08-13, mirrors bhavcopy): guards all THREE alert sites
@@ -254,6 +304,15 @@ class SectorMapJob:
                 themes_written=themes_written, reason="no sector data (all sources failed, no cache)",
             )
 
+        # Owner-curated supplement (config/sector_overrides.yaml) — see the module docstring for the
+        # placement, the setdefault semantics and the E5 degrade rule. Entries are validated against
+        # the known-good SECTOR_SOURCES sector names here (not in load_sector_overrides, which only
+        # validates YAML shape) — an unknown name must never mint a phantom sector bucket that
+        # per_sector_exposure never groups on (see _load_overrides).
+        overrides = await self._load_overrides(valid_sectors=frozenset(s for s, _ in SECTOR_SOURCES))
+        for symbol, sector in overrides.items():
+            mapping.setdefault(symbol, sector)
+
         extra = sorted(
             {str(s).strip().upper() for s in (universe_symbols or []) if str(s).strip()} - set(mapping)
         )
@@ -280,6 +339,7 @@ class SectorMapJob:
             unclassified=len(extra),
             degraded=degraded,
             themes=themes_written,
+            overrides=len(overrides),
         )
         return SectorMapResult(
             as_of=d,
@@ -311,6 +371,48 @@ class SectorMapJob:
         stamped = [{**row, "updated_at": now} for row in rows]
         written = await self._store.arun(self._store.upsert_theme_map, stamped)
         return True, written
+
+    # ------------------------------------------------------------------ sector overrides (owner supplement)
+    async def _load_overrides(self, *, valid_sectors: frozenset[str]) -> dict[str, str]:
+        """``config/sector_overrides.yaml`` supplement — same E5 shape as ``_refresh_themes``: a
+        missing or malformed file degrades to "no overrides this run" (never blocks the
+        index-scrape classification in ``_run``), alerted but non-fatal.
+
+        ``load_sector_overrides`` validates YAML shape only, not sector names — an entry naming a
+        sector outside ``valid_sectors`` (a typo, e.g. 'FINANCIALSERVICES') is dropped here rather
+        than merged: left in, it would create a phantom one-symbol sector bucket that
+        ``per_sector_exposure`` never groups on, so the symbol's notional escapes the cap silently
+        instead of landing in UNCLASSIFIED (the conservative fallback). Valid entries in the same
+        file are unaffected.
+        """
+        try:
+            overrides = load_sector_overrides(self._overrides_path)
+        except Exception as exc:  # noqa: BLE001 - E5: override failure never blocks classification
+            reason = f"{type(exc).__name__}: {exc}"
+            _log.warning("sector_overrides_unreadable", path=str(self._overrides_path), error=reason)
+            await self._alert(
+                title="Sector overrides file unreadable",
+                body=f"config/sector_overrides.yaml could not be loaded ({reason}). Proceeding with "
+                "index-scrape classification only this run — overrides are never load-bearing (E5).",
+                severity="warning",
+                data={"job_id": "sector_map", "reason": reason},
+            )
+            return {}
+
+        unknown = sorted({sector for sector in overrides.values() if sector not in valid_sectors})
+        if not unknown:
+            return overrides
+        _log.warning("sector_overrides_unknown_sector", sectors=unknown)
+        await self._alert(
+            title="Sector overrides reference unknown sector name(s)",
+            body=f"config/sector_overrides.yaml names sector(s) not in SECTOR_SOURCES: "
+            f"{', '.join(unknown)}. Those entries are skipped this run — affected symbols stay "
+            "UNCLASSIFIED (conservative) rather than form an uncapped phantom bucket (E5). Other "
+            "entries in the file still apply.",
+            severity="warning",
+            data={"job_id": "sector_map", "unknown_sectors": unknown},
+        )
+        return {sym: sector for sym, sector in overrides.items() if sector in valid_sectors}
 
     # ------------------------------------------------------------------ cache (frozen fallback, E5)
     def _load_cache(self) -> dict[str, dict[str, Any]]:

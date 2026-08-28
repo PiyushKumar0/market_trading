@@ -879,6 +879,29 @@ async def test_stop_kills_the_child_between_the_two_cancels(clock, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stop_cancels_the_real_read_task(clock, monkeypatch):
+    """`_cancel_monitor_task` must touch only the monitor task. Two leftover lines from the
+    pre-WO-26b combined `_cancel_supervision` (`self._read_task = None` plus a redundant
+    `self._monitor_task = None`) cleared `_read_task` before step 3 ever ran, so `stop()`'s own
+    `_cancel_read_task()` found nothing to cancel and the real read-loop task leaked on every
+    normal stop — the opposite of what `stop()`'s docstring promises."""
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
+    old_read = asyncio.create_task(asyncio.Event().wait())
+    sup._read_task = old_read
+    sup._monitor_task = asyncio.create_task(asyncio.Event().wait())
+
+    async def fake_terminate():
+        sup._proc = None
+
+    monkeypatch.setattr(sup, "_terminate_child", fake_terminate)
+
+    await sup.stop()
+
+    assert old_read.cancelled()          # the real read-loop task was cancelled, not leaked
+    assert sup._read_task is None
+
+
+@pytest.mark.asyncio
 async def test_read_loop_cleanup_cannot_hang_on_a_child_that_will_not_let_go(clock, monkeypatch):
     """Belt-and-braces: even with the child link still open, cancelling the read loop must COMPLETE.
 

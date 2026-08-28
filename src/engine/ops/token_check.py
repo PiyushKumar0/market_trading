@@ -35,7 +35,7 @@ from kiteconnect.exceptions import TokenException
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.core.log import get_logger
-from engine.notify.catalog import CatalogMessage, MessageKind
+from engine.notify.catalog import CatalogMessage, MessageKind, login_instruction
 
 _log = get_logger("engine.ops.token_check")
 
@@ -120,7 +120,7 @@ class TokenCheckJob:
             except Exception:  # noqa: BLE001 - a missing api_key must not break the alert
                 url = None
         if url:
-            return f"Open: {url}\nThen send /token <request_token>."
+            return login_instruction(url)
         return "Send /token <request_token> after logging in to Kite."
 
     def _invalid_message(self, error: str) -> CatalogMessage:

@@ -575,6 +575,44 @@ async def test_stale_snapshot_echoes_never_page_the_lag_watchdog(store, mclock, 
         assert len(sent) == 1                       # no second page from the reset
 
 
+async def test_lag_watchdog_window_follows_overridden_session_times(store, mclock, now, caplog):
+    """A shortened/muhurat session parameterizes session_open/session_close in the constructor
+    (~:306/313/415/444) exactly like the ordinary hours do — the lag watch window must follow suit
+    rather than staying pinned to the regular-session 09:15-15:45 constants. Otherwise a muhurat
+    session run entirely in the evening (as real muhurat sessions are) would never be watched at
+    all, and a session ending well before 15:45 would stay "watched" long past its own close."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(
+        store, mclock, persist_raw_ticks=False, notify=notify,
+        session_open=dt.time(18, 0), session_close=dt.time(19, 0),
+    )
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        # Inside the muhurat window but well outside the regular-hours 09:15-15:45 constants: a
+        # genuine lag here must still page.
+        wall = at(19, 10, 0)
+        now.set(wall)
+        await bb.on_tick_event(
+            tick("R", wall - dt.timedelta(seconds=LAG_THRESHOLD_S + 30), "100.00", 1000)
+        )
+        assert len(late_events(caplog, "tick_processing_lagging")) == 1
+        assert len(sent) == 1
+
+        # Past session_close (19:00) + the 15-minute buffer (i.e. after 19:15): the window has
+        # closed, so the open episode is suspended quietly rather than left watched through 15:45.
+        after_buffer = at(19, 16, 0)
+        now.set(after_buffer)
+        await bb.on_tick_event(
+            tick("R", after_buffer - dt.timedelta(seconds=LAG_THRESHOLD_S + 30), "100.10", 1100)
+        )
+        assert len(late_events(caplog, "tick_lag_watch_suspended_out_of_session")) == 1
+        assert len(sent) == 1                     # no second page from the reset
+
+
 async def test_lag_watchdog_fires_once_per_episode_paces_its_log_and_recovers(store, mclock, now, caplog):
     """ERROR at :data:`LAG_THRESHOLD_S`, re-logged no more than every :data:`LAG_LOG_INTERVAL_S`,
     ONE owner alert per episode, and an INFO line when it clears."""

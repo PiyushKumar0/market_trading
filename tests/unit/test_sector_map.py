@@ -17,6 +17,7 @@ from engine.datafeeds.sector_map import (
     SECTOR_SOURCES,
     UNCLASSIFIED,
     SectorMapJob,
+    load_sector_overrides,
     load_theme_seed,
     parse_constituents_csv,
 )
@@ -59,6 +60,18 @@ THEMES_YAML = (
     "    symbols: []\n"
 )
 
+#: Default for tests that don't care about overrides — isolates every test from the real
+#: config/sector_overrides.yaml (mirrors the THEMES_YAML isolation pattern above).
+OVERRIDES_YAML_EMPTY = "schema_version: 1\noverrides: {}\n"
+
+#: HDFCAMC/ICICIAMC — the two real AMC seed entries (mirrors what's shipped in
+#: config/sector_overrides.yaml), used by the override-specific tests below.
+OVERRIDES_YAML = (
+    "schema_version: 1\n"
+    "overrides:\n"
+    "  FINANCIAL_SERVICES: [HDFCAMC, ICICIAMC]\n"
+)
+
 
 @pytest.fixture
 def store(tmp_path, clock):
@@ -95,13 +108,17 @@ def failing_client() -> httpx.AsyncClient:
 
 def make_job(
     tmp_path, store, clock, client, *, cache_name="sector_lists.json", themes=THEMES_YAML,
-    notify=None,
+    overrides=OVERRIDES_YAML_EMPTY, notify=None,
 ) -> SectorMapJob:
     themes_path = tmp_path / "themes.yaml"
     if themes is not None and not themes_path.exists():
         themes_path.write_text(themes, encoding="utf-8")
+    overrides_path = tmp_path / "sector_overrides.yaml"
+    if overrides is not None and not overrides_path.exists():
+        overrides_path.write_text(overrides, encoding="utf-8")
     return SectorMapJob(
-        store, clock, client, tmp_path / cache_name, themes_path=themes_path, notify=notify
+        store, clock, client, tmp_path / cache_name, themes_path=themes_path,
+        overrides_path=overrides_path, notify=notify,
     )
 
 
@@ -211,15 +228,162 @@ async def test_all_sources_down_no_cache_keeps_previous_snapshot(tmp_path, store
 
 
 async def test_theme_seed_unreadable_alerts_but_sector_part_proceeds(tmp_path, store, clock):
+    overrides_path = tmp_path / "sector_overrides.yaml"
+    overrides_path.write_text(OVERRIDES_YAML_EMPTY, encoding="utf-8")  # isolate from the real file
     msgs, sink = collect_alerts()
     job = SectorMapJob(
         store, clock, make_client(), tmp_path / "cache.json",
-        themes_path=tmp_path / "missing_themes.yaml", notify=sink,
+        themes_path=tmp_path / "missing_themes.yaml", overrides_path=overrides_path, notify=sink,
     )
     result = await job.run(D)
     assert result.ok is True and result.themes_ok is False
     assert store.get_sector_map(as_of=D)                 # sector snapshot still written
     assert any("theme" in m.title.lower() for m in msgs)
+
+
+# --------------------------------------------------------------------------- sector overrides (owner supplement)
+async def test_override_classifies_amc_as_financial_services(tmp_path, store, clock):
+    """HDFCAMC/ICICIAMC are NOT constituents of the real scraped Financial Services index (the
+    happy-path FINANCIAL_SERVICES fixture is a one-symbol filler, not either AMC) — the
+    owner-curated override supplement folds them into FINANCIAL_SERVICES anyway."""
+    job = make_job(tmp_path, store, clock, make_client(), overrides=OVERRIDES_YAML)
+    result = await job.run(D, universe_symbols=["HDFCAMC", "ICICIAMC"])
+
+    assert result.ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["HDFCAMC"] == "FINANCIAL_SERVICES"
+    assert rows["ICICIAMC"] == "FINANCIAL_SERVICES"
+    assert result.unclassified == 0                      # neither fell through to UNCLASSIFIED
+
+
+async def test_override_never_reclassifies_a_symbol_already_in_a_real_index(tmp_path, store, clock):
+    """A conflicting override entry for a symbol ALREADY classified by a real scraped index must
+    never win: ``mapping.setdefault`` means the override only fills gaps, never overwrites real
+    classification. SBIN is genuinely PSU_BANK (first-wins over BANK too) via the real fixtures;
+    an override file that (wrongly) claims it for IT must be silently ignored for SBIN specifically,
+    while a non-conflicting entry in the SAME file still applies."""
+    conflicting = (
+        "schema_version: 1\n"
+        "overrides:\n"
+        "  IT: [SBIN]\n"                                 # conflicts with the real PSU_BANK scrape
+        "  FINANCIAL_SERVICES: [HDFCAMC]\n"               # no conflict — HDFCAMC is in no real index
+    )
+    job = make_job(tmp_path, store, clock, make_client(), overrides=conflicting)
+    result = await job.run(D, universe_symbols=["SBIN", "HDFCAMC"])
+
+    assert result.ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["SBIN"] == "PSU_BANK"                     # real scrape wins; override ignored here
+    assert rows["HDFCAMC"] == "FINANCIAL_SERVICES"        # non-conflicting override entry still applies
+
+
+async def test_override_applies_on_reused_frozen_cache_not_just_fresh_scrape(tmp_path, store, clock):
+    """The override merge happens AFTER the SECTOR_SOURCES loop, whose ``mapping`` already absorbed
+    both fresh-scrape and frozen-cache-reuse results by that point — so a run where a source is
+    degraded (reusing its frozen copy) still gets the override applied, not just the happy path."""
+    seed = make_job(tmp_path, store, clock, make_client(), overrides=OVERRIDES_YAML)
+    assert (await seed.run(D)).ok is True                 # seeds the frozen cache for D
+
+    job = make_job(
+        tmp_path, store, clock, make_client(fail_urls={_URLS["FINANCIAL_SERVICES"]}),
+        overrides=OVERRIDES_YAML,
+    )
+    result = await job.run(D, universe_symbols=["HDFCAMC"])
+
+    assert result.ok is True and result.degraded_sources == ("FINANCIAL_SERVICES",)
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["HDFCAMC"] == "FINANCIAL_SERVICES"        # override applied despite the degraded source
+    assert rows["FINANCIAL_SERVICESSTK"] == "FINANCIAL_SERVICES"  # frozen copy's own symbol still present
+
+
+async def test_override_unknown_sector_name_skipped_and_alerts(tmp_path, store, clock):
+    """A typo'd sector name (not one of SECTOR_SOURCES) must not create a phantom one-symbol
+    bucket that per_sector_exposure never groups on — the affected symbol stays UNCLASSIFIED
+    (conservative, gate-visible) rather than escaping the cap silently. A valid sibling entry in
+    the SAME file still applies, and the alert names the bad sector string."""
+    typo = (
+        "schema_version: 1\n"
+        "overrides:\n"
+        "  FINANCIALSERVICES: [HDFCAMC]\n"          # typo — missing underscore, not a real sector
+        "  FINANCIAL_SERVICES: [ICICIAMC]\n"        # valid sibling entry, same file
+    )
+    msgs, sink = collect_alerts()
+    job = make_job(tmp_path, store, clock, make_client(), overrides=typo, notify=sink)
+    result = await job.run(D, universe_symbols=["HDFCAMC", "ICICIAMC"])
+
+    assert result.ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["HDFCAMC"] == UNCLASSIFIED                 # bad-sector entry skipped, stays conservative
+    assert rows["ICICIAMC"] == "FINANCIAL_SERVICES"        # valid sibling entry still applied
+    assert any("FINANCIALSERVICES" in m.body for m in msgs)
+    assert any(m.severity == "warning" for m in msgs)
+
+
+async def test_missing_overrides_file_alerts_but_sector_part_proceeds(tmp_path, store, clock):
+    """Missing config/sector_overrides.yaml is E5 (§ module docstring: never load-bearing) — the
+    real index-scrape classification proceeds unaffected, just without any override applied."""
+    themes_path = tmp_path / "themes.yaml"
+    themes_path.write_text(THEMES_YAML, encoding="utf-8")
+    msgs, sink = collect_alerts()
+    job = SectorMapJob(
+        store, clock, make_client(), tmp_path / "cache.json",
+        themes_path=themes_path, overrides_path=tmp_path / "missing_overrides.yaml",  # never created
+        notify=sink,
+    )
+    result = await job.run(D, universe_symbols=["SBIN"])
+
+    assert result.ok is True and result.themes_ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["SBIN"] == "PSU_BANK"                     # real classification unaffected
+    assert any("sector overrides" in m.title.lower() for m in msgs)
+
+
+async def test_malformed_overrides_file_degrades_gracefully(tmp_path, store, clock):
+    """``overrides`` must be a mapping — a list (or any other malformed schema) is E5: alert, but
+    classification proceeds exactly as if there were no overrides configured this run."""
+    (tmp_path / "sector_overrides.yaml").write_text("overrides: [not, a, mapping]\n", encoding="utf-8")
+    msgs, sink = collect_alerts()
+    job = make_job(tmp_path, store, clock, make_client(), overrides=None, notify=sink)  # keep the file above
+    result = await job.run(D, universe_symbols=["SBIN"])
+
+    assert result.ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["SBIN"] == "PSU_BANK"                     # sector classification unaffected
+    assert any("sector overrides" in m.title.lower() for m in msgs)
+
+
+def test_load_sector_overrides_rejects_non_mapping(tmp_path):
+    bad = tmp_path / "sector_overrides.yaml"
+    bad.write_text("overrides: [not, a, mapping]\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_sector_overrides(bad)
+
+
+def test_load_sector_overrides_normalizes_and_flattens(tmp_path):
+    path = tmp_path / "sector_overrides.yaml"
+    path.write_text(
+        "overrides:\n"
+        "  financial_services: [hdfcamc, ' iciciamc ']\n",
+        encoding="utf-8",
+    )
+    assert load_sector_overrides(path) == {
+        "HDFCAMC": "FINANCIAL_SERVICES", "ICICIAMC": "FINANCIAL_SERVICES",
+    }
+
+
+def test_load_sector_overrides_missing_key_returns_empty_dict(tmp_path):
+    path = tmp_path / "sector_overrides.yaml"
+    path.write_text("schema_version: 1\n", encoding="utf-8")   # no 'overrides' key at all
+    assert load_sector_overrides(path) == {}
+
+
+def test_committed_sector_overrides_loads_and_contains_amc_seed():
+    """The shipped config/sector_overrides.yaml parses; seeded with the AMC names confirmed absent
+    from the real scraped Nifty Financial Services index (data/datafeeds/sector_lists.json,
+    as_of 2026-08-24) despite NSE tagging both Industry=Financial Services in the universe CSVs."""
+    overrides = load_sector_overrides(repo_root() / "config" / "sector_overrides.yaml")
+    assert overrides["HDFCAMC"] == "FINANCIAL_SERVICES"
+    assert overrides["ICICIAMC"] == "FINANCIAL_SERVICES"
 
 
 # --------------------------------------------------------------------------- parsers / seeds

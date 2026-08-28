@@ -67,6 +67,9 @@ from engine.datafeeds.news import Headline, NewsIngest
 from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
 from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
 from engine.features.engine import FeatureEngine
+from engine.intelligence.context import ContextAssembler
+from engine.intelligence.governor import BudgetGovernor
+from engine.intelligence.harness import AgentHarness, load_agent_roster, run_sdk_smoke
 from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.bar_builder import BarBuilder
 from engine.marketdata.reconcile import ReconcileJob
@@ -85,9 +88,6 @@ from engine.ops.jobs import (
     JOB_DEALS,
     JOB_EARNINGS,
     JOB_FEATURES,
-    JOB_NIGHTLY_REVIEW,
-    JOB_PREOPEN_PLANNER,
-    JOB_RECO_EXPIRE,
     JOB_FILINGS_PIT,
     JOB_FILINGS_PIT_FRESH,
     JOB_FILINGS_RESULTS,
@@ -95,6 +95,9 @@ from engine.ops.jobs import (
     JOB_INS_CROSSINGS,
     JOB_INSTRUMENTS,
     JOB_NEWS_CHAIN,
+    JOB_NIGHTLY_REVIEW,
+    JOB_PREOPEN_PLANNER,
+    JOB_RECO_EXPIRE,
     JOB_RECONCILE,
     JOB_SECTOR_MAP,
     JOB_SURVEILLANCE,
@@ -111,34 +114,31 @@ from engine.ops.jobs import (
 )
 from engine.ops.keep_awake import KeepAwake
 from engine.ops.lifecycle import SessionLifecycle
+from engine.ops.news_scoring import NewsScoringJob
+from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
+from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.post_login import (
     PostLoginRecovery,
     hydrate_instruments_at_startup,
     regime_and_warmup_backfill,
     resume_ticker,
 )
+from engine.ops.preopen_planner import PreopenPlannerJob
+from engine.ops.scan_context import LiveScanContextProvider
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
 from engine.ops.single_instance import InstanceLock
 from engine.ops.token_check import TOKEN_CHECK_IST, TokenCheckJob
-from engine.intelligence.context import ContextAssembler
-from engine.intelligence.governor import BudgetGovernor
-from engine.intelligence.harness import AgentHarness, load_agent_roster, run_sdk_smoke
-from engine.ops.news_scoring import NewsScoringJob
-from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
-from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
-from engine.ops.preopen_planner import PreopenPlannerJob
-from engine.ops.scan_context import LiveScanContextProvider
 from engine.ops.warmup import WarmupGate, WarmupStatus
-from engine.risk.gate import GateContextBuilder, RiskGate
-from engine.strategy.cost_model import CostModel
-from engine.strategy.prescreen import SignalPreScreen
-from engine.strategy.scanners import brk20, build_enabled_scanners, cat, ins
 from engine.risk.causes import RiskStateLatch
 from engine.risk.exposure import ExposureTracker
+from engine.risk.gate import GateContextBuilder, RiskGate
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
+from engine.strategy.cost_model import CostModel
+from engine.strategy.prescreen import SignalPreScreen
+from engine.strategy.scanners import brk20, build_enabled_scanners, cat, cat_reversal, ins
 from engine.universe.builder import EXCL_CAP, UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
 from engine.universe.surveillance import SurveillanceIngest
@@ -635,6 +635,11 @@ async def run() -> int:
         strategy_expected_edge_pct={
             ins.STRATEGY_ID: Decimal(str(settings.ins.expected_edge_pct)),
         },
+        # §2.7 news SHADOWS: C3 rejects these unconditionally, before target_price is even read, so
+        # "signals are a measurement, never a recommendation" is ENFORCED at Tier 2 rather than
+        # inferred from a missing expected_edge_pct (see risk/gate.py _SHADOW_NO_EDGE for why, and
+        # NO_EDGE_SHADOW_STRATEGIES below for the membership and its history).
+        no_edge_shadow_strategies=NO_EDGE_SHADOW_STRATEGIES,
     )
 
     # Warm-up status cache for the gate context: WarmupGate.status() is async + store-heavy, so the
@@ -676,6 +681,13 @@ async def run() -> int:
             # (late-bound for the same reason as `rearm`). Paired with `raw_counts_loader` below —
             # the flush writes ABSOLUTE totals, so it must only ever run against a hydrated counter.
             funnel_raw=lambda d: prescreen.raw_counts(d),
+            # 2026-08-27 cap displacement, the two halves of the §3.2.5 admission seam (same
+            # late-binding reason as `rearm`). `claim_slot` is the compare-and-set the pipeline must
+            # pass before spending an analyst call — it is what makes an EVALUATED candidate's slot
+            # permanent; `take_displaced` pulls the pre-screen's evictions onto the event loop, the
+            # only place the forward queue may be touched. Both unwired ⇒ pre-2026-08-27 behaviour.
+            claim_slot=lambda sym, sid: prescreen.claim_slot(sym, sid),
+            take_displaced=lambda: prescreen.take_displaced(),
             admission_mode=settings.strategy.prescreen.admission_mode,   # WO-1 rollback flag
             # 2026-08-14 rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
             forward_drain_mode=settings.strategy.prescreen.forward_drain_mode,
@@ -720,6 +732,10 @@ async def run() -> int:
         # drain tick above — the two halves ship together or the flush would overwrite the day's
         # persisted total with this process's smaller one.
         raw_counts_loader=lambda d: read_funnel_raw_counts(conn, d),
+        # 2026-08-27: how much better a later candidate must score to take a full cap's slot from an
+        # unevaluated incumbent. Owner knob (§6.3) — the reasoning, and the orb-saturation caveat,
+        # live with the value in settings.yaml. `null` there disables displacement outright.
+        displacement_margin=settings.strategy.prescreen.displacement_margin,
     )
     # 2026-08-04: dedupe/caps day-state is process memory — rehydrate it from the day-slot journal
     # so a restart no longer resets the 20/day bound (observed: ~54 publications across two
@@ -1353,7 +1369,8 @@ async def run() -> int:
                     histories[sym] = [
                         brk20.DailyRow(high=float(h), close=float(c), volume=float(v), open=float(o))
                         for h, c, v, o in zip(
-                            frame["high"], frame["close"], frame["volume"], frame["open"]
+                            frame["high"], frame["close"], frame["volume"], frame["open"],
+                            strict=True,  # columns of ONE frame — a length mismatch is corrupt data
                         )
                     ]
             ex_map: dict[str, list[date]] = {}
@@ -1408,7 +1425,7 @@ async def run() -> int:
             #     cat.expected_edge_pct exists — so ADMISSION here is the shadow's validation
             #     population, not RECOMMEND. An absent/empty digest simply yields no rows (§2.7
             #     fail-safe ladder: cat originates nothing, every other strategy unaffected).
-            cat_rows = _read_cat_watchlist(store, today)
+            cat_rows, cat_rev_rows = _read_cat_watchlist(store, today)
             cat_raw: list = []
             if cat_rows:
                 cat_raw = cat.sweep_watchlist(
@@ -1416,6 +1433,28 @@ async def run() -> int:
                     params={
                         "stop_pct": settings.cat.stop_pct,
                         "hold_sessions": settings.cat.hold_sessions,
+                    },
+                )
+
+            # --- `cat_reversal` SHADOW leg (§2.7, 2026-08-27 — the HINDZINC denial): the SUBSET of
+            #     today's originating rows whose winning cluster REVERSES an earlier, floor-clearing,
+            #     opposite-direction cluster of the same (symbol, event_type) story. A separate
+            #     experiment from `cat` v2 with its own thresholds, its own T+5/T+10 clock and its own
+            #     journal series — `cat`'s in-flight shadow window is untouched, which is also why a
+            #     reversal row deliberately still originates for `cat` as well (narrowing `cat` would
+            #     restart its clock). Both legs' entries share the ONE
+            #     catalyst_guard.max_catalyst_entries_day budget — the pre-screen keys that cap off
+            #     catalyst_ref, not strategy_id — so adding this strategy widens no exposure surface.
+            #     Downstream the §7.1 C3 check rejects every one of these UNCONDITIONALLY (registered
+            #     in the gate's no_edge_shadow_strategies, so an analyst-supplied target cannot buy it
+            #     an edge basis either): ADMISSION here is the shadow's validation population.
+            cat_rev_raw: list = []
+            if cat_rev_rows:
+                cat_rev_raw = cat_reversal.sweep_watchlist(
+                    cat_rev_rows,
+                    params={
+                        "stop_pct": settings.cat_reversal.stop_pct,
+                        "hold_sessions": settings.cat_reversal.hold_sessions,
                     },
                 )
 
@@ -1434,7 +1473,8 @@ async def run() -> int:
             batch = _attach_feature_snapshots(
                 features,
                 prescreen.admit(
-                    brk20_raw + ins_raw + cat_raw, today, in_window=batch_in_window
+                    brk20_raw + ins_raw + cat_raw + cat_rev_raw, today,
+                    in_window=batch_in_window,
                 ),
             )
             if ins_pending and batch_in_window:
@@ -1452,11 +1492,19 @@ async def run() -> int:
             # readable as "the news layer went quiet" vs "rows arrived and the rule/caps declined
             # them" — WO-18 pre-registers <0.2 signals/session for 3 weeks as a STARVATION finding,
             # which is only detectable if the three counts sit on one line.
+            # `cat_reversal` shares this line rather than adding a second one: its own starvation
+            # criterion (pre-registered in scanners/cat_reversal.py's docstring) is only checkable
+            # against the originating flow it is a subset OF, and splitting the counts across two log
+            # events is how that comparison stops being greppable.
             _log.info(
                 "cat_watchlist_sweep", d=today.isoformat(), trigger=trigger,
                 originating_rows=len(cat_rows),
                 age_eligible=sum(1 for r in cat_rows if cat.is_eligible(r)),
                 candidates=sum(1 for c in batch if c.strategy_id == cat.STRATEGY_ID),
+                reversal_eligible=sum(1 for r in cat_rev_rows if cat_reversal.is_eligible(r)),
+                reversal_candidates=sum(
+                    1 for c in batch if c.strategy_id == cat_reversal.STRATEGY_ID
+                ),
                 in_window=batch_in_window,
             )
             return accepted + batch, pendings
@@ -2235,14 +2283,20 @@ def _hydrate_prescreen(conn: sqlite3.Connection, prescreen, today: date) -> None
     ``charged`` = every pair published today (the caps bound — counts attempts, never refunded);
     ``seen`` = pairs whose slot is spent (``evaluated=1``). A charged-but-unseen pair was lost
     in flight (or re-armed) and may re-publish within its already-paid quota — the 2026-07-29
-    rearm semantics, now restart-proof."""
+    rearm semantics, now restart-proof.
+
+    ``catalyst_strategies`` is what lets the pre-screen rebuild the §2.7
+    ``catalyst_guard.max_catalyst_entries_day`` budget from the same rows (2026-08-28); the journal
+    has no ref column, so the reconstruction and its one fail-open direction are documented at
+    :meth:`~engine.strategy.prescreen.SignalPreScreen.hydrate`."""
     rows = conn.execute(
         "SELECT symbol, strategy_id, evaluated FROM prescreen_day_slots WHERE d = ?",
         (today.isoformat(),),
     ).fetchall()
     charged = {(r["symbol"], r["strategy_id"]) for r in rows}
     seen = {(r["symbol"], r["strategy_id"]) for r in rows if r["evaluated"]}
-    prescreen.hydrate(today, seen=sorted(seen), charged=sorted(charged))
+    prescreen.hydrate(today, seen=sorted(seen), charged=sorted(charged),
+                      catalyst_strategies=CATALYST_STRATEGY_IDS)
     _log.info("prescreen_hydrated", d=today.isoformat(), charged=len(charged), seen=len(seen))
 
 
@@ -2306,17 +2360,51 @@ def _consume_ins_pending(
 _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 
 
-def _read_cat_watchlist(store: MarketStore, today: date) -> list[cat.WatchlistRow]:
-    """Today's ``originating`` ``catalyst_watchlist`` rows as :class:`cat.WatchlistRow` tuples.
+#: Strategies in SHADOW mode: the §7.1 C3 cost check rejects them UNCONDITIONALLY, so their signals
+#: accumulate a validation population and can never become a recommendation (see ``risk/gate.py``
+#: :data:`~engine.risk.gate._SHADOW_NO_EDGE` for why this is declared rather than inferred from a
+#: missing ``expected_edge_pct``). A module-level constant so the property is assertable without
+#: booting the engine — a wiring that only exists inside ``build_engine`` is a wiring that silently
+#: disappears. Removing an id from here is the §8.6 owner promotion gate, never a refactor.
+#:
+#: ``cat`` joined 2026-08-28: it rested on the SAME indirect argument ``cat_reversal``'s docstring
+#: identifies the hole in (ship no ``expected_edge_pct``, rely on C3's targetless branch) — an
+#: analyst-volunteered ``target_price`` defeats that argument for ``cat`` exactly as it would have
+#: for ``cat_reversal``. Zero ``cat`` recommendations have ever been delivered (queried live), so
+#: this closes a real but not-yet-exploited hole rather than fixing an incident.
+NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset({cat.STRATEGY_ID, cat_reversal.STRATEGY_ID})
+
+#: Strategies whose candidates can carry a ``catalyst_ref`` — the §2.7 news-originated legs. Read at
+#: ONE place: :func:`_hydrate_prescreen`, which uses it to rebuild the
+#: ``catalyst_guard.max_catalyst_entries_day`` budget across a restart from a journal that records no
+#: refs (see ``SignalPreScreen.hydrate``). Enforcement itself is keyed on the FIELD, never on this
+#: set — a strategy id must not be what decides whether the news guard applies — so a leg missing
+#: from here still faces the cap while it runs; it only loses budget continuity over a boot.
+CATALYST_STRATEGY_IDS: frozenset[str] = frozenset({cat.STRATEGY_ID, cat_reversal.STRATEGY_ID})
+
+
+def _read_cat_watchlist(
+    store: MarketStore, today: date
+) -> tuple[list[cat.WatchlistRow], list[cat_reversal.WatchlistRow]]:
+    """Today's ``originating`` ``catalyst_watchlist`` rows, as BOTH scanners' row tuples.
 
     The ~08:35 ``CatalystDigestJob`` wrote these; nothing here re-grades one. The ONE thing this adds
     is ``reference_close`` — the PRIOR SESSION's bhavcopy-final close from ``bars_1d`` (the last bar
     strictly before today), which is the freshest committed price at sweep time and the anchor for
     the whole level set (§2.7 2026-08-18 amendment). The grade filter is pushed into the store query
-    because it is cheap there; the RULE's filter (grade ∧ direction ∧ age<=1) is re-applied inside
-    ``cat.sweep_watchlist``, which is the authority. A malformed row costs itself and nothing else —
-    the sweep must not die on one bad row (§3.2.5 fail-to-zero)."""
+    because it is cheap there; each RULE's own filter (``cat``: grade ∧ direction ∧ age<=1;
+    ``cat_reversal``: the same PLUS ``reversal_of``) is re-applied inside its ``sweep_watchlist``,
+    which is the authority. A malformed row costs itself and nothing else — the sweep must not die on
+    one bad row (§3.2.5 fail-to-zero).
+
+    ONE fetch, two projections (2026-08-27): the ``cat_reversal`` shadow reads exactly the same rows
+    and the same per-symbol ``bars_1d`` lookup ``cat`` already does, so building both here keeps the
+    added strategy free at the store — a second pass would double the sweep's query count for a leg
+    that fires on a strict subset of the same rows. The projections are independent tuples so the two
+    pre-registered event definitions can diverge later without a lockstep edit.
+    """
     out: list[cat.WatchlistRow] = []
+    rev: list[cat_reversal.WatchlistRow] = []
     for r in store.get_catalyst_watchlist(today, grade="originating"):
         symbol = str(r.get("symbol") or "")
         if not symbol:
@@ -2329,21 +2417,36 @@ def _read_cat_watchlist(store: MarketStore, today: date) -> list[cat.WatchlistRo
             )
             age = r.get("event_age_sessions")
             materiality = r.get("materiality")
-            out.append(
-                cat.WatchlistRow(
-                    entry_id=str(r.get("entry_id") or ""),
-                    symbol=symbol,
-                    grade=str(r.get("grade") or ""),
-                    direction=None if r.get("direction") is None else str(r["direction"]),
-                    event_age_sessions=None if age is None else int(age),
-                    materiality=None if materiality is None else float(materiality),
-                    # No bar in the lookback ⇒ None ⇒ the scanner emits nothing for this symbol.
-                    reference_close=Decimal(str(bars[-1].close)) if bars else None,
-                )
+            entry_id = str(r.get("entry_id") or "")
+            grade = str(r.get("grade") or "")
+            direction = None if r.get("direction") is None else str(r["direction"])
+            age_sessions = None if age is None else int(age)
+            score = None if materiality is None else float(materiality)
+            # No bar in the lookback ⇒ None ⇒ the scanner emits nothing for this symbol.
+            reference_close = Decimal(str(bars[-1].close)) if bars else None
+            shared_fields = dict(
+                entry_id=entry_id,
+                symbol=symbol,
+                grade=grade,
+                direction=direction,
+                event_age_sessions=age_sessions,
+                materiality=score,
+                reference_close=reference_close,
             )
+            out.append(cat.WatchlistRow(**shared_fields))
+            # `reversal_of` is NULL on every ordinary row and on every row a pre-2026-08-27 DB wrote
+            # (the column is nullable and back-filled by no one) — both read as "not a reversal". Such
+            # a row can never satisfy ``cat_reversal.is_eligible`` (it requires a NON-EMPTY
+            # ``reversal_of``), so it is skipped here rather than built and discarded downstream —
+            # harmless either way: the starvation-visibility ``reversal_eligible`` count sums
+            # ``is_eligible`` over this list, and a row that can never pass it contributes 0 whether
+            # or not it is in the population being summed.
+            reversal_of = r.get("reversal_of")
+            if reversal_of:
+                rev.append(cat_reversal.WatchlistRow(**shared_fields, reversal_of=str(reversal_of)))
         except (ValueError, ArithmeticError, TypeError) as exc:
             _log.warning("cat_watchlist_row_unparseable", symbol=symbol, error=str(exc))
-    return out
+    return out, rev
 
 
 # --------------------------------------------------------------------------- brk20 feature link (§4.3)

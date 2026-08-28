@@ -140,11 +140,11 @@ LAG_THRESHOLD_S = 120
 #: alert is sent once per episode regardless; this only paces the log.
 LAG_LOG_INTERVAL_S = 300
 
-#: The lag alarm only evaluates inside these IST wall-clock bounds (session 09:15–15:30 plus the
-#: square-off/settlement tail): outside them a "lag" is a stale-stamped snapshot echo, not a
-#: backlog (2026-08-26 23:21 false page — see :meth:`BarBuilder._watch_lag`).
-_LAG_WATCH_START = time(9, 15)
-_LAG_WATCH_END = time(15, 45)
+#: Buffer past session_close the lag watchdog keeps watching (the square-off/settlement tail) before
+#: treating a stale timestamp as a snapshot echo rather than a backlog (2026-08-26 23:21 false page —
+#: see :meth:`BarBuilder._watch_lag`). Added to the (possibly overridden) session close rather than a
+#: fixed wall-clock time, so a shortened/muhurat session's watch window follows ITS close.
+_LAG_WATCH_END_BUFFER = timedelta(minutes=15)
 
 #: ``amend_bar_1m_extremes`` outcome → ``corrections_log.reason`` for the rows we could NOT amend.
 #: ``AMEND_IN_RANGE`` (the ordinary "late print inside the bar" case) keeps a NULL reason: it is not
@@ -252,6 +252,11 @@ class BarBuilder:
         self._bus = bus
         self._session_open = session_open
         self._session_close = session_close
+        # Lag watchdog window end (WO-25a / 2026-08-26 guard ii): session_close + the settlement-tail
+        # buffer, so a special session's window tracks ITS close rather than the ordinary 15:45.
+        self._lag_watch_end = (
+            datetime.combine(date.min, session_close) + _LAG_WATCH_END_BUFFER
+        ).time()
         self._grace = timedelta(minutes=1, seconds=int(grace_s))
         self._persist_raw_ticks = persist_raw_ticks
         self._notify = notify
@@ -459,7 +464,7 @@ class BarBuilder:
         prev = self._finalized_through.get(ob.symbol)
         if prev is None or ob.minute > prev:
             self._finalized_through[ob.symbol] = ob.minute
-        self._remember(ob.symbol, ob.minute, ob.high, ob.low)
+        self._remember(ob.symbol, ob.minute, _RecentBar(high=ob.high, low=ob.low))
         self._bars_finalized += 1
         return Bar(
             symbol=ob.symbol, ts_minute=ob.minute,
@@ -505,12 +510,15 @@ class BarBuilder:
         """Count one tick excluded from bar building (feed_stats; zero-cost, no hot-path logging)."""
         self._ticks_dropped[reason] = self._ticks_dropped.get(reason, 0) + 1
 
-    def _remember(self, symbol: str, minute: datetime, high: Decimal, low: Decimal) -> None:
-        """Record a finalized minute's range in the bounded per-symbol recent-bars window (WO-25a)."""
+    def _remember(self, symbol: str, minute: datetime, bar: _RecentBar) -> None:
+        """Get-or-create the per-symbol OrderedDict, insert/overwrite ``bar`` at ``minute``, move it to
+        the MRU end, then evict from the LRU end past :data:`RECENT_BARS_PER_SYMBOL` (WO-25a). Shared
+        by :meth:`_finalize` (a real finalized range) and :meth:`_handle_late_tick` (a ``ranged=False``
+        placeholder for a minute we no longer remember)."""
         recent = self._recent.get(symbol)
         if recent is None:
             recent = self._recent[symbol] = OrderedDict()
-        recent[minute] = _RecentBar(high=high, low=low)
+        recent[minute] = bar
         recent.move_to_end(minute)
         while len(recent) > RECENT_BARS_PER_SYMBOL:
             recent.popitem(last=False)
@@ -561,7 +569,7 @@ class BarBuilder:
             # A minute we no longer remember: keep a placeholder so the log-dedup budget still applies
             # (and gets evicted normally), but leave ``ranged`` False — its true range is unknown, so
             # every later tick for it must keep asking the store.
-            self._remember_placeholder(symbol, minute)
+            self._remember(symbol, minute, _RecentBar(high=Decimal(0), low=Decimal(0), ranged=False))
             known = self._recent[symbol][minute]
         elif known.ranged and outcome in (AMEND_APPLIED, AMEND_IN_RANGE):
             # The store accepted this print into the row's range; widen memory to match so the next
@@ -569,15 +577,6 @@ class BarBuilder:
             known.high = max(known.high, tick.ltp)
             known.low = min(known.low, tick.ltp)
         self._note_late(known, symbol, minute, tick, now, outcome=outcome, touched=True)
-
-    def _remember_placeholder(self, symbol: str, minute: datetime) -> None:
-        recent = self._recent.get(symbol)
-        if recent is None:
-            recent = self._recent[symbol] = OrderedDict()
-        recent[minute] = _RecentBar(high=Decimal(0), low=Decimal(0), ranged=False)
-        recent.move_to_end(minute)
-        while len(recent) > RECENT_BARS_PER_SYMBOL:
-            recent.popitem(last=False)
 
     # ------------------------------------------------------- late-tick observability (WO-25a)
 
@@ -646,19 +645,17 @@ class BarBuilder:
         Kite replay snapshot frames stamped ~17:35, and "now − ts" read as a 5.8 h backlog on a
         stream with no backlog at all. (i) A tick stamped on a PREVIOUS day is definitionally a
         snapshot echo, never consumption lag — it neither alarms nor recovers an episode. (ii) The
-        alarm only evaluates inside session hours (:data:`_LAG_WATCH_START`–:data:`_LAG_WATCH_END`
-        IST) — outside them an active episode is reset quietly, because the spiral this watchdog
-        exists for can only grow while the exchange is producing ticks. Residual accepted: a
-        holiday-morning reconnect echoing SAME-day stamps inside the window could still page once;
-        the calendar is deliberately not threaded in here for that rare case."""
+        alarm only evaluates inside the session window (``self._session_open``–``self._lag_watch_end``,
+        i.e. session_close plus :data:`_LAG_WATCH_END_BUFFER` — a special session's window follows ITS
+        close, not the ordinary 15:45) — outside them an active episode is reset quietly, because the
+        spiral this watchdog exists for can only grow while the exchange is producing ticks. Residual
+        accepted: a holiday-morning reconnect echoing SAME-day stamps inside the window could still
+        page once; the calendar is deliberately not threaded in here for that rare case."""
         if ts.date() != now.date():
             return                              # previous-day snapshot echo — not consumption lag
-        if not (_LAG_WATCH_START <= now.time() <= _LAG_WATCH_END):
+        if not (self._session_open <= now.time() <= self._lag_watch_end):
             if self._lagging:
-                self._lagging = False
-                self._lag_logged_at = None
-                self._pending_alert = None
-                _log.info("tick_lag_watch_suspended_out_of_session")
+                self._close_lag_episode("tick_lag_watch_suspended_out_of_session")
             return
         lag_s = (now - ts).total_seconds()
         if lag_s >= LAG_THRESHOLD_S:
@@ -674,10 +671,16 @@ class BarBuilder:
                     newest_tick_ts=ts.isoformat(),
                 )
         elif self._lagging:
-            self._lagging = False
-            self._lag_logged_at = None
-            self._pending_alert = None      # never send a stale page for an episode already over
-            _log.info("tick_processing_recovered", lag_s=round(lag_s, 1))
+            self._close_lag_episode("tick_processing_recovered", lag_s=round(lag_s, 1))
+
+    def _close_lag_episode(self, event: str, **fields: Any) -> None:
+        """Reset lag-episode state and log ``event`` (WO-25a): shared by :meth:`_watch_lag`'s
+        out-of-session-suspend and in-session-recovery branches, which differ only in which line
+        closes the episode — both must never send a stale page for an episode already over."""
+        self._lagging = False
+        self._lag_logged_at = None
+        self._pending_alert = None
+        _log.info(event, **fields)
 
 
 def _lagging_alert(lag_s: float) -> CatalogMessage:

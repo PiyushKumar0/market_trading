@@ -29,9 +29,14 @@ deterministic pipeline aggregates, decays and threshold-checks before any symbol
 
 MATERIALITY RUBRIC - use these anchors literally
 
-- 0.8 and above: company-transforming. An order worth roughly 10 percent or more of annual revenue,
-  a merger or acquisition, direct regulatory action, or a major government program naming the sector.
-- 0.5 to 0.8: clearly price-relevant. A reasonable trader would expect the stock to move on this.
+- 0.8 and above: company-transforming, OR a market-wide shock. Company-transforming means an order
+  worth roughly 10 percent or more of annual revenue, a merger or acquisition, direct regulatory
+  action, or a major government program naming the sector. A market-wide shock is the same tier by a
+  different route: a country-level tariff or trade-policy action, a central-bank rate decision, an
+  escalating geopolitical conflict, or a macro data surprise (PMI, inflation, FII/DII flow reversal)
+  that would be expected to move the broad market or many sectors at once, not just one stock.
+- 0.5 to 0.8: clearly price-relevant. A reasonable trader would expect the stock, sector or market to
+  move on this.
 - 0.2 to 0.5: routine coverage. Real news, ordinary course of business, no obvious repricing.
 - below 0.2: noise or public relations. Rehashed commentary, promotional copy, listicles, generic
   market wraps.

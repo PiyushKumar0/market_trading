@@ -44,32 +44,50 @@ reward basis: target=None BY DESIGN. Reward is the validated expected edge, whic
 entry anchor: entry is the crossing session's close — a stale-by-design pre-open REFERENCE for a next-open-style fill (replay determinism; the gate sizes off max(entry, LTP)). entry below the live price does NOT mean 'bidding into weakness'.
 valid decline grounds, exhaustively: a fresh materially-negative symbol catalyst of the fraud/default/pledge-invocation class; surveillance flags; the results-day entry ban; evident liquidity collapse; concrete evidence the disclosure itself is suspect. Absent those grounds the validated design expects this candidate to become a proposal — if you decline, name which ground applies."""
 
-_RSI2 = """class: swing (CNC), 2-5 sessions typical. Exit = RSI(2) recovery or max_hold_days. target=None BY DESIGN — reward is the mean-reversion exit, not a price level; never decline solely for a missing target.
+#: The C3-cost-check reminder for every leg that ships with NO configured validated edge (rsi2,
+#: trend, mom): the gate can only verify C3 economics from an explicit target on these legs, so a
+#: targetless enter is rejected as unverifiable regardless of merit. One constant, not three pastes.
+_NO_EDGE_GATE_NOTE = (
+    "no configured validated edge — the gate verifies C3 economics only from an explicit target; "
+    "include a target_price derived from shown levels when proposing, or the enter is gate-rejected "
+    "as unverifiable."
+)
+
+_RSI2 = f"""class: swing (CNC), 2-5 sessions typical. Exit = RSI(2) recovery or max_hold_days. target=None BY DESIGN — reward is the mean-reversion exit, not a price level; never decline solely for a missing target.
 design: fires on SHORT-TERM WEAKNESS in names above their 200-DMA in an uptrending index. Red recent tape, below-VWAP price and a down last-30m drift are the expected entry population. Judge whether the pullback is ORDERLY (routine profit-taking within an intact uptrend) vs DISORDERLY (news-driven break, structural distribution) — not whether the tape is red.
 intraday microstructure (opening-range completeness, session participation, VWAP position) is context, NOT disqualifying for a multi-session hold. A day-plan 'avoid' grade that merely restates 'this symbol fell recently' does not bind a counter-trend entry; a plan warning citing a concrete adverse catalyst does.
 evidence status: exploratory — no validated net edge at retail costs. Be selective on reversion quality (uptrend intact, orderly pullback, sane stop distance vs the cost floor), within THIS frame.
-gate note (2026-08-26): rsi2 carries NO configured validated edge, so the deterministic gate can verify the C3 economics ONLY from an explicit target. When you DO propose, include a target_price derived from the shown levels (a prior shelf, the mean-reversion objective, a visible resistance) — an enter without one is gate-rejected as unverifiable, whatever its merits. Declining still never requires a target."""
+gate note (2026-08-26): rsi2 carries {_NO_EDGE_GATE_NOTE} Declining still never requires a target."""
 
 _ORB = """class: intraday (MIS), same-day squareoff; the rule supplies a price target. The intraday frame FULLY applies: participation, VWAP, acceptance above the range, the day plan's read — judge exactly as an intraday breakout trade.
 evidence status: exploratory — repeatedly tested gross-negative at retail costs in this book; demand exceptional quality."""
 
-_TREND = """class: positional (CNC), up to 120 sessions; exit = trailing ATR stop. target=None BY DESIGN — never decline solely for a missing target. Judge on the DAILY series (cross validity, ADX regime, structure); a single session's intraday tape is context only.
+_TREND = f"""class: positional (CNC), up to 120 sessions; exit = trailing ATR stop. target=None BY DESIGN — never decline solely for a missing target. Judge on the DAILY series (cross validity, ADX regime, structure); a single session's intraday tape is context only.
 evidence status: exploratory — no validated net edge at retail costs.
-gate note (2026-08-26): no configured validated edge — the gate verifies C3 economics only from an explicit target; include a target_price derived from shown levels when proposing, or the enter is gate-rejected as unverifiable."""
+gate note (2026-08-26): {_NO_EDGE_GATE_NOTE}"""
 
-_MOM = """class: swing (CNC) on a rebalance cadence; exit = the next rebalance. target=None BY DESIGN — never decline solely for a missing target. Judge relative-strength quality on the daily series; intraday microstructure is context only.
+_MOM = f"""class: swing (CNC) on a rebalance cadence; exit = the next rebalance. target=None BY DESIGN — never decline solely for a missing target. Judge relative-strength quality on the daily series; intraday microstructure is context only.
 evidence status: exploratory — momentum entries repeatedly tested net-negative at retail costs; demand exceptional quality.
-gate note (2026-08-26): no configured validated edge — the gate verifies C3 economics only from an explicit target; include a target_price derived from shown levels when proposing, or the enter is gate-rejected as unverifiable."""
+gate note (2026-08-26): {_NO_EDGE_GATE_NOTE}"""
 
 _BRK20 = """class: swing (CNC). Entry is LIMIT-AT-LEVEL: the broken 20d-high level itself, BELOW the current price by design — a retest fill, not a chase and not 'bidding into weakness'. Stop geometry is pre-vetted upstream (overnight-gap floor). Judge breakout validity on the DAILY series (fresh cross, volume confirmation, margin), with the intraday tape as context.
 evidence status: exploratory — no expectancy presumption; originates for judgement."""
 
-_CAT = """class: swing (CNC), long-only, news-catalyst drift; entry only on the rule's price/volume confirmation — intraday confirmation evidence IS binding for this class.
-evidence status: exploratory (forward/shadow-validated separately)."""
+_CAT = """class: swing (CNC), long-only, news-catalyst drift. Exit is TIME (the §7.1 max-holding path, 20 trading sessions); the 5% stop is a DISASTER stop, not the exit. target=None BY DESIGN — never decline solely for a missing target, and never invent one (see the gate note).
+design: a pure EOD-batch translation of today's 'originating' catalyst_watchlist rows, mirroring ins — NOT a per-bar scanner. The intraday price/volume confirmation the v1 rule required was RETIRED (WO-18, 2026-08-18): it refuted 3x on proxies and the drift this rule targets is a 2-4-week phenomenon an intraday trigger cannot express. Judge the STORY (materiality, source class, novelty) on the digest's own read; the intraday tape at admission time is not evidence for this rule.
+entry anchor: entry is the prior session's close — a stale-by-design pre-open REFERENCE for a next-open-style fill (replay determinism; the gate sizes off max(entry, LTP)). entry below the live price does NOT mean 'bidding into weakness'.
+evidence status: exploratory, SHADOW — no validated edge; measuring one is the entire point (WO-18 verdict criteria: >=30 sessions / >=20 signals, T+10/T+20 net-drift study).
+gate note (2026-08-28): cat is registered as a no-edge SHADOW strategy, so the deterministic gate rejects EVERY proposal at the C3 cost check whatever target it carries. Your evaluation is recorded as validation evidence and cannot become a recommendation. Judge it honestly on its merits anyway — a thesis written to flatter a rule that cannot trade only corrupts the study."""
 
-#: ``strategy_id`` -> the contract rendered into that candidate's context block. The seven keys are
-#: exactly the §6.1 deterministic legs; a new leg MUST land here in the same commit that ships it,
-#: or its candidates reach the analyst with :data:`UNKNOWN_CONTRACT` and a warning in the log.
+_CAT_REVERSAL = """class: swing (CNC), long-only, news-catalyst REVERSAL. Exit is TIME (the §7.1 max-holding path); the 5% stop is a DISASTER stop, not the exit. target=None BY DESIGN — never decline solely for a missing target, and never invent one (see the gate note).
+design: the event is NOT 'good news arrived'. This story ESTABLISHED a bearish claim first (a materially-scored, opposite-direction cluster of the same symbol+event_type), and the winning cluster REVERSES it — a denial, refutation or withdrawal that resolves a known uncertainty. The motivating case: a government stake-sale story on HINDZINC, officially denied by DIPAM the next day, +5.1%. Judge whether the reversal is CREDIBLE and AUTHORITATIVE (an official/primary-source denial of a specific prior claim) rather than a second opinion, a partial walk-back, or an unsourced rebuttal — that distinction is the whole thesis and it is the one thing you can judge that the deterministic layer cannot.
+entry anchor: entry is the prior session's close — a stale-by-design pre-open REFERENCE for a next-open-style fill (replay determinism; the gate sizes off max(entry, LTP)). Note the reversal day's own repricing is already in that close: this rule targets the RESIDUAL drift, not the jump.
+evidence status: exploratory, SHADOW — no validated edge; measuring one is the entire point. Pre-registered horizons T+5/T+10.
+gate note (2026-08-27): cat_reversal is registered as a no-edge SHADOW strategy, so the deterministic gate rejects EVERY proposal at the C3 cost check whatever target it carries. Your evaluation is recorded as validation evidence and cannot become a recommendation. Judge it honestly on its merits anyway — a thesis written to flatter a rule that cannot trade only corrupts the study."""
+
+#: ``strategy_id`` -> the contract rendered into that candidate's context block. The keys are exactly
+#: the §6.1 deterministic legs; a new leg MUST land here in the same commit that ships it, or its
+#: candidates reach the analyst with :data:`UNKNOWN_CONTRACT` and a warning in the log.
 STRATEGY_CONTRACTS: dict[str, str] = {
     "ins": _INS,
     "rsi2": _RSI2,
@@ -78,6 +96,7 @@ STRATEGY_CONTRACTS: dict[str, str] = {
     "mom": _MOM,
     "brk20": _BRK20,
     "cat": _CAT,
+    "cat_reversal": _CAT_REVERSAL,
 }
 
 

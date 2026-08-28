@@ -148,6 +148,21 @@ cat:
   stop_pct: 5.0                  # disaster stop; §7.1 overnight_gap_mult arithmetic (the ins 5% reasoning)
   hold_sessions: 20              # = the §7.1 swing max_holding cap; exit is TIME, target is None
 
+# §2.7 `cat_reversal` SHADOW (2026-08-27, the HINDZINC denial) — story-level directional REVERSAL as
+# its own catalyst: the winning cluster of a (symbol, event_type) story reverses an EARLIER,
+# floor-clearing, opposite-direction cluster of the same story. Separate experiment from `cat` v2,
+# with its own pre-registered horizons (T+5 / T+10), its own clock and its own knobs — deliberately
+# NOT sharing `cat.stop_pct`, so tuning one can never silently move the other.
+#
+# Entries count against the SAME catalyst_guard.max_catalyst_entries_day budget `cat` uses (the cap
+# keys off the candidate's catalyst_ref, not its strategy_id) — adding a strategy must not widen the
+# platform's total news-originated exposure surface. No expected_edge_pct: registered instead in the
+# gate's no_edge_shadow_strategies, so C3 rejects every candidate whatever target the analyst emits.
+cat_reversal:
+  stop_pct: 5.0                  # disaster stop; §7.1 overnight_gap_mult arithmetic (the ins reasoning)
+  hold_sessions: 10              # intended exit if §8.6 ever opens = the longer horizon (T+10);
+                                 # INERT during the shadow — nothing is ever held
+
 # §2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
 # envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: read by NO decision
 # path yet (event typing §2.8.2 + catalyst wiring are later stages, gated on the §2.8.4 event study).
@@ -254,6 +269,36 @@ strategy:
       cat: 2                     # §2.7 v2 shadow (2026-08-18, WO-18): = catalyst_guard
                                  # .max_catalyst_entries_day; measured flow ~0.3-0.6/day, so 2 is a
                                  # cluster-day ceiling. Binds even before the guard-side wiring.
+      cat_reversal: 2            # §2.7 cat_reversal shadow (2026-08-27). Matches `cat`'s value: this
+                                 # is a PRESCREEN admission slot budget (analyst spend), a different
+                                 # and NON-shared budget from catalyst_guard.max_catalyst_entries_day
+                                 # — which cat_reversal DOES share with `cat`, so the platform's total
+                                 # news-originated entry ceiling stays 2/day with this strategy added.
+                                 # Reversal rows are a strict SUBSET of originating rows, so the real
+                                 # flow is well under `cat`'s; 2 is a ceiling, not an expectation.
+    # How much better a later candidate must score to take a full cap's admission slot from an
+    # unevaluated incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
+    # same reason as max_per_strategy_day above: it decides which candidates get evaluated at all].
+    #
+    # Why the cap needed displacement at all, and what makes it safe: the module docstring of
+    # src/engine/strategy/prescreen.py (the "Cap displacement" section) — the 2026-08-27 incident,
+    # the invariants, and why it could not be fixed in the pipeline.
+    #
+    # Why 0.10 rather than a bare "strictly higher":
+    #   (i) scores are clamped to [0, 1], so strict inequality lets 0.801 evict 0.800 — a
+    #       publication, a journal write and a discarded queue entry spent on noise, and an
+    #       oscillation that a margin makes structurally impossible;
+    #  (ii) 0.10 is a tenth of the clamped [0, 1] score range — the smallest gap that still names a
+    #       materially better candidate rather than noise, and small enough that a real afternoon
+    #       fire can clear it. Deliberately NOT tied to the forward ranker's quintile bands: those
+    #       are EMPIRICAL rank quintiles of a strategy's own day, not fixed 0.2-wide slices of the
+    #       score, so "one band" is not a score distance and there is no equivalence to borrow.
+    # Compared in integer basis points, never float arithmetic: 0.90 - 0.80 is 0.09999999999999998
+    # in IEEE-754, which would make this boundary depend on representation rather than on the rule.
+    # Raising it makes displacement rarer; `null` disables it entirely (the pre-2026-08-27 rollback).
+    # NOTE: orb's score SATURATES (883 fires at exactly 1.0 on 2026-08-18, see (ii) above), and equal
+    # incumbents are undisplaceable at ANY margin — so this knob cannot rescue a saturated strategy.
+    displacement_margin: 0.10
 
 # §3.2.3 ReconcileJob drift thresholds (A13) [tunable]: alert when >max_bad_bar_fraction of compared
 # bars drift by >vol_drift_pct volume or >close_drift_ticks ticks on close. Offline spans are

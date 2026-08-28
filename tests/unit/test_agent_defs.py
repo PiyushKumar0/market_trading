@@ -187,6 +187,18 @@ def test_news_prompt_anchors_the_materiality_rubric_and_the_closed_taxonomy():
     assert "below 0.2: noise or public relations" in prompt
     assert "One score per cluster" in prompt
     assert "VERBATIM STRINGS" in prompt
+    # Deliberate addition (2026-08-27 diagnostic): every original 0.8+ anchor was scaled to a single
+    # company/sector, leaving macro/market-wide news (event_type macro_data/global_market/sector_policy
+    # already exist in the closed taxonomy below) with nothing to map onto at the top tier — a real risk
+    # of under-scoring genuinely market-moving stories into the 0.2-0.5 "routine" band. This asserts the
+    # new top-tier anchor and the 0.5-0.8 tier's broadened "stock, sector or market" phrasing are both
+    # present, so a future edit that quietly drops either one fails loudly here instead of passing by
+    # omission.
+    assert "OR a market-wide shock" in prompt
+    assert "country-level tariff or trade-policy action" in prompt
+    assert "central-bank rate decision" in prompt
+    assert "move the broad market or many sectors at once, not just one stock" in prompt
+    assert "the stock, sector or market to\n  move on this" in prompt
     for event_type in CLUSTER_EVENT_TYPES:
         assert event_type in prompt, event_type
     assert news_analyst.MAX_CLUSTERS_PER_CALL == 30

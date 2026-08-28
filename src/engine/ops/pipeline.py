@@ -53,7 +53,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
@@ -75,6 +75,7 @@ from engine.core.contracts import (
 from engine.core.db import transaction
 from engine.core.enums import Mode, RiskState
 from engine.core.log import get_logger
+from engine.core.recommendations import recommendation_expired
 from engine.core.types import Bar
 from engine.features.snapshots import FEATURE_SET_VERSION
 from engine.intelligence.schemas import (
@@ -541,10 +542,9 @@ class RecommendationBook:
         for row in rows:
             try:
                 data = json.loads(row["payload"] or "{}")
-                valid_until = datetime.fromisoformat(str(data.get("valid_until") or ""))
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue                        # unparseable payload: leave it alone, log-and-skip
-            if valid_until.tzinfo is not None and valid_until < now:
+            if recommendation_expired(data.get("valid_until"), now):
                 stale.append(str(row["rec_id"]))
         if not stale:
             return 0
@@ -625,6 +625,8 @@ class RecommendationPipeline:
         store: Any,
         rearm: Callable[[str, str], bool] | None = None,
         funnel_raw: Callable[[date], Mapping[str, int]] | None = None,
+        claim_slot: Callable[[str, str], bool] | None = None,
+        take_displaced: Callable[[], Sequence[tuple[str, str]]] | None = None,
         admission_mode: str = "ranked",
         forward_drain_mode: str = "paced",
     ) -> None:
@@ -658,6 +660,16 @@ class RecommendationPipeline:
         #: comparison is the "changed since the last flush" test that keeps the 60 s drain tick from
         #: rewriting an unchanged row set all afternoon (2026-08-21). See :meth:`_flush_funnel_raw`.
         self._funnel_raw = funnel_raw
+        #: §3.2.5 cap-displacement seam (2026-08-27), both wired to ``SignalPreScreen``:
+        #: ``claim_slot`` is the atomic compare-and-set this pipeline MUST pass before spending an
+        #: analyst call — ``False`` means a better candidate took this pair's admission slot while it
+        #: waited in the queue, so forwarding it anyway would breach the cap by one real call.
+        #: ``take_displaced`` pulls the evictions the pre-screen decided on a scan worker thread, so
+        #: the queue surgery and the journal correction happen HERE, on the event loop, where
+        #: ``_pending_forwards`` may actually be touched. Unwired ⇒ every claim succeeds and no
+        #: eviction ever arrives, which is exactly the pre-2026-08-27 behaviour.
+        self._claim_slot = claim_slot
+        self._take_displaced = take_displaced
         self._funnel_raw_day: date | None = None
         self._funnel_raw_flushed: dict[str, int] = {}
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
@@ -708,16 +720,23 @@ class RecommendationPipeline:
 
     def _rearm_slot(self, candidate: SignalCandidate) -> None:
         """Hand the (symbol, strategy) day slot back after a never-evaluated drop (2026-07-29)."""
+        self._rearm_slot_pair(candidate.symbol, candidate.strategy_id)
+
+    def _rearm_slot_pair(self, symbol: str, strategy_id: str) -> None:
+        """:meth:`_rearm_slot` by PAIR — the displacement path (2026-08-27) knows which pair lost its
+        slot but does not necessarily still hold the candidate object, and a pre-screen displacement
+        is the same never-evaluated fact this write has always recorded. The ``rearm`` call is a
+        harmless no-op there (the pre-screen already dropped the pair from its dedupe set)."""
         try:
             self._conn.execute(
                 "UPDATE prescreen_day_slots SET evaluated=0 WHERE d=? AND symbol=? AND strategy_id=?",
-                (self._clock.today().isoformat(), candidate.symbol, candidate.strategy_id),
+                (self._clock.today().isoformat(), symbol, strategy_id),
             )
         except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
-            _log.warning("day_slot_journal_failed", op="rearm", symbol=candidate.symbol,
-                         strategy_id=candidate.strategy_id, error=str(exc))
+            _log.warning("day_slot_journal_failed", op="rearm", symbol=symbol,
+                         strategy_id=strategy_id, error=str(exc))
         if self._rearm is not None:
-            self._rearm(candidate.symbol, candidate.strategy_id)
+            self._rearm(symbol, strategy_id)
 
     def _journal_slot(self, candidate: SignalCandidate, d: date) -> None:
         """§3.2.5 day-slot journal (2026-08-04): a received publication spends the (symbol, strategy)
@@ -879,6 +898,11 @@ class RecommendationPipeline:
         re-entering the competition. It re-stamps ``fired_at`` and the TTL exactly as a fresh
         publication would — the levels are the ones the failed call was assembled from, and one
         pacing interval of extra life is what a retry costs.
+
+        An overflow eviction re-arms the dropped candidate's §3.2.5 admission slot on exactly the
+        rule :meth:`_expire_forwards` documents: an entry that leaves this queue without passing
+        through :meth:`_take_forward_slot` was never evaluated by anything, so its slot is not spent
+        — except for a ``front`` entry, for which a forward was already charged.
         """
         now = self._clock.now()
         self._forward_seq += 1
@@ -895,19 +919,101 @@ class RecommendationPipeline:
             worst = max(self._pending_forwards, key=self._forward_key)
             self._pending_forwards.remove(worst)
             _log.warning("forward_queue_overflow", dropped=worst.candidate.signal_id,
-                         symbol=worst.candidate.symbol, limit=MAX_PENDING_FORWARDS)
+                         symbol=worst.candidate.symbol,
+                         strategy_id=worst.candidate.strategy_id, limit=MAX_PENDING_FORWARDS,
+                         rearmed=not worst.front)
+            if not worst.front:
+                self._rearm_slot(worst.candidate)
 
     def _expire_forwards(self, now: datetime) -> None:
-        """Drop queued candidates past their own §5.2 TTL horizon. A queued candidate is a REFUSED
-        one we kept a pointer to, so expiry does NOT re-arm its day slot — the forward cap has never
-        re-armed (2026-07-29: the analyst quota is spent on real evaluations)."""
-        live = [p for p in self._pending_forwards if p.expires_at > now]
+        """Drop queued candidates past their own §5.2 TTL horizon, handing the §3.2.5 day slot back
+        to every one of them that was never evaluated (2026-08-27).
+
+        THE BUG this replaced. The old rationale here was "expiry does NOT re-arm its day slot — the
+        forward cap has never re-armed (2026-07-29: the analyst quota is spent on real evaluations)",
+        and it is factually wrong about this case. It conflates two different counters. The §5.2(a)
+        forward CAP is indeed never refunded — but a TTL expiry never CHARGED one: entries leave this
+        queue through :meth:`_take_forward_slot`, which pops an entry *before* it journals a forward,
+        so anything still queued has had no analyst call, no ``agent_calls`` row and no gate verdict.
+        Nobody judged it. That is exactly the never-evaluated case
+        :meth:`~engine.strategy.prescreen.SignalPreScreen.rearm` exists for, and aging out of a paced
+        queue is architecturally identical to the analyst INFRASTRUCTURE failure it was written for.
+
+        Live 2026-08-27: SHRIRAMFIN and POLICYBZR (both ``orb``, admitted 09:46:0x, ``evaluated=1``
+        and ``forwarded=0`` in ``prescreen_day_slots``, zero rows anywhere in ``agent_calls``) aged
+        out unseen and permanently burned 2 of ``orb``'s 7 daily admission slots on candidates
+        nothing had looked at.
+
+        Scope, deliberately narrow: this refunds the §3.2.5 ADMISSION slot only. The §5.2(a) forward
+        cap and ``_forwarded_count`` are untouched, and a ``front`` entry — the WO-20d re-queue of an
+        evaluation that blew up mid-call — is EXCLUDED: a forward was already charged for it and the
+        analyst call was at least attempted, so by the 2026-07-29 test it is an evaluated candidate
+        and its slot stays spent.
+        """
+        live: list[_PendingForward] = []
         for stale in self._pending_forwards:
-            if stale.expires_at <= now:
-                _log.info("forward_queue_expired", signal_id=stale.candidate.signal_id,
-                          symbol=stale.candidate.symbol, strategy_id=stale.candidate.strategy_id,
-                          score=stale.candidate.score, queued_at=stale.fired_at.isoformat())
+            if stale.expires_at > now:
+                live.append(stale)
+                continue
+            _log.info("forward_queue_expired", signal_id=stale.candidate.signal_id,
+                      symbol=stale.candidate.symbol, strategy_id=stale.candidate.strategy_id,
+                      score=stale.candidate.score, queued_at=stale.fired_at.isoformat(),
+                      rearmed=not stale.front)
+            if not stale.front:
+                self._rearm_slot(stale.candidate)
         self._pending_forwards = live
+
+    def _apply_displacements(self) -> None:
+        """Act on the §3.2.5 admission slots the pre-screen re-assigned (2026-08-27).
+
+        The pre-screen decides displacement on a scan worker thread and can only record the verdict;
+        the two things that verdict IMPLIES both live here and both must happen on the event loop:
+        the evicted candidate leaves ``_pending_forwards`` (it no longer holds a slot, so it must
+        never reach the analyst), and its day-slot journal row goes back to ``evaluated=0`` — the
+        same never-evaluated accounting :meth:`_expire_forwards` uses, because it is the same fact.
+
+        This is the tidy path, not the safe one. Safety is :meth:`SignalPreScreen.claim_slot`, which
+        catches the entry already popped by a drain tick that ran between the pre-screen's decision
+        and this sweep. A displaced entry that somehow survives both is still harmless — its TTL
+        expiry re-arms it exactly as before.
+
+        ``front`` entries (WO-20d retries) are skipped defensively: a forward was already charged for
+        one, so the pre-screen marked it evaluated at :meth:`_take_forward_slot` and could not have
+        chosen it — but the queue is the thing that would be corrupted if that ever stopped holding.
+        A pair RETAINED by that skip is not re-armed either: the two walks below have to agree, or
+        the retained entry would keep its queue pointer while its slot was handed back as free.
+
+        Never raises (D7): a telemetry-adjacent hand-off must not be able to kill the trigger path.
+        """
+        if self._take_displaced is None:
+            return
+        try:
+            pairs = list(self._take_displaced())
+        except Exception as exc:  # noqa: BLE001 - a broken hand-off costs tidiness, never a trade
+            _log.warning("displacement_apply_failed", error=str(exc))
+            return
+        if not pairs:
+            return
+        victims = set(pairs)
+        live: list[_PendingForward] = []
+        retained: set[tuple[str, str]] = set()
+        for entry in self._pending_forwards:
+            key = (entry.candidate.symbol, entry.candidate.strategy_id)
+            if key in victims:
+                if not entry.front:
+                    _log.info("forward_queue_displaced", signal_id=entry.candidate.signal_id,
+                              symbol=entry.candidate.symbol,
+                              strategy_id=entry.candidate.strategy_id,
+                              score=entry.candidate.score, queued_at=entry.fired_at.isoformat(),
+                              reason="admission slot reassigned to a better candidate (§3.2.5)")
+                    continue
+                retained.add(key)
+            live.append(entry)
+        self._pending_forwards = live
+        for pair in pairs:
+            if pair in retained:
+                continue
+            self._rearm_slot_pair(*pair)
 
     def _best_pending_score(self) -> float | None:
         """Highest score sitting unforwarded in the queue — the live starvation reading (WO-9)."""
@@ -916,24 +1022,57 @@ class RecommendationPipeline:
         return max(float(p.candidate.score) for p in self._pending_forwards)
 
     def _take_forward_slot(self, cap: int | None) -> SignalCandidate | None:
-        """Spend one analyst slot on the best pending candidate, or return None if none is due."""
+        """Spend one analyst slot on the best pending candidate, or return None if none is due.
+
+        THE COMMIT POINT for two different budgets, which is why the claim lives here and nowhere
+        else. Popping the entry spends the §5.2(a) forward cap; :meth:`SignalPreScreen.claim_slot`
+        simultaneously commits the §3.2.5 ADMISSION slot to a real evaluation, making it permanent
+        (2026-08-27). A ``False`` claim means a better same-strategy candidate took that admission
+        slot while this one waited — forwarding it anyway would spend the reassigned slot twice — so
+        the entry is dropped and the loop tries the next-best, rather than returning ``None`` and
+        stalling a whole pacing interval on a candidate that no longer exists.
+
+        The claim runs under the PRE-SCREEN's lock, which is what makes it atomic against the
+        displacement decision itself: claim-then-displace leaves the pair evaluated and undisplaceable,
+        displace-then-claim returns ``False`` here. Neither order can produce two spends.
+        """
         self._expire_forwards(self._clock.now())
         if cap is not None and self._forwarded_count >= int(cap):
             return None
-        if not self._pending_forwards:
-            return None
-        if self._forward_mode == "arrival":
-            # WO-20d: the front flag outranks arrival order here too — the rollback mode must not
-            # quietly lose the re-queue guarantee.
-            entry = min(self._pending_forwards,
-                        key=lambda p: (0 if p.front else 1, p.fired_at, p.seq))
-        else:
-            entry = min(self._pending_forwards, key=self._forward_key)
-        self._pending_forwards.remove(entry)
-        self._forwarded_count += 1
-        if self._forwarded_day is not None:
-            self._journal_forward(entry.candidate, self._forwarded_day)
-        return entry.candidate
+        while self._pending_forwards:
+            if self._forward_mode == "arrival":
+                # WO-20d: the front flag outranks arrival order here too — the rollback mode must not
+                # quietly lose the re-queue guarantee.
+                entry = min(self._pending_forwards,
+                            key=lambda p: (0 if p.front else 1, p.fired_at, p.seq))
+            else:
+                entry = min(self._pending_forwards, key=self._forward_key)
+            self._pending_forwards.remove(entry)
+            if not self._claim_forward_slot(entry.candidate):
+                _log.info("forward_slot_displaced", signal_id=entry.candidate.signal_id,
+                          symbol=entry.candidate.symbol,
+                          strategy_id=entry.candidate.strategy_id, score=entry.candidate.score,
+                          reason="admission slot was reassigned to a better candidate (§3.2.5)")
+                self._rearm_slot(entry.candidate)
+                continue
+            self._forwarded_count += 1
+            if self._forwarded_day is not None:
+                self._journal_forward(entry.candidate, self._forwarded_day)
+            return entry.candidate
+        return None
+
+    def _claim_forward_slot(self, candidate: SignalCandidate) -> bool:
+        """Ask the pre-screen to commit this pair's admission slot. Unwired ⇒ ``True`` (the
+        pre-2026-08-27 behaviour). A RAISING claim is also ``True``: the §3.2.5 seam failing must
+        degrade to "forward it anyway", never to silently withholding analyst calls (D7)."""
+        if self._claim_slot is None:
+            return True
+        try:
+            return bool(self._claim_slot(candidate.symbol, candidate.strategy_id))
+        except Exception as exc:  # noqa: BLE001 - a broken claim seam never withholds an evaluation
+            _log.warning("forward_slot_claim_failed", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
+            return True
 
     def _forward_cap(self) -> int | None:
         """Today's §5.6 analyst forward cap, or ``None`` when the governor does not publish one."""
@@ -1125,6 +1264,10 @@ class RecommendationPipeline:
         stopped moving is exactly when they have to still run.
         """
         self._flush_funnel_raw()
+        # 2026-08-27: settle reassigned admission slots here too. The batch admission path
+        # (``run_scan_sweep`` → ``prescreen.admit``) can displace without any candidate reaching
+        # :meth:`on_signal_candidate`, and this is the one cadence that always runs.
+        self._apply_displacements()
         await self._sweep_orphans_if_due()
         if self._drain_mode != "paced":
             return False
@@ -1145,8 +1288,10 @@ class RecommendationPipeline:
         Every gate :meth:`on_signal_candidate` applies at arrival is re-applied HERE because time
         has passed since the candidate was queued: the window can have closed, the owner can have
         killed or frozen, the budget can have run out. A closed gate leaves the queue untouched and
-        re-arms nothing — a queued candidate is a REFUSED one we kept a pointer to, and its only
-        exit is its own TTL (2026-07-29: the forward cap never re-arms).
+        re-arms nothing AT THAT MOMENT — a queued candidate is a REFUSED one we kept a pointer to,
+        and its only exit is its own TTL. Since 2026-08-27 that exit DOES hand the §3.2.5 admission
+        slot back (:meth:`_expire_forwards`), because a candidate that ages out unseen was never
+        evaluated; the §5.2(a) forward cap still never re-arms (2026-07-29).
         """
         if not self._pending_forwards:
             return False
@@ -1262,7 +1407,15 @@ class RecommendationPipeline:
         # (window opens, freeze lifts, mode returns). The prescreen charges its caps once per pair,
         # so the re-arm/re-publish cycle can never exhaust a day cap. Deliberate NON-re-arms:
         # a governor block (budget policy), the forward cap (the analyst quota was spent on real
-        # evaluations), and an unsizeable candidate (no stop ⇒ nothing to wait for today).
+        # evaluations), and an unsizeable candidate (no stop ⇒ nothing to wait for today). A
+        # cap-refused candidate is QUEUED rather than dropped, so it is not stranded either: if no
+        # slot ever opens for it, its TTL expiry hands the day slot back (:meth:`_expire_forwards`,
+        # 2026-08-27).
+        #
+        # FIRST, settle any admission slot the pre-screen reassigned — very possibly THIS candidate's
+        # arrival is what caused one, since publication follows admission immediately. Doing it before
+        # the journal write below keeps the two rows from fighting over the same table.
+        self._apply_displacements()
         self._journal_slot(candidate, self._clock.today())
         if self._mode.mode() not in (Mode.RECOMMEND, Mode.AUTO):
             self._rearm_slot(candidate)

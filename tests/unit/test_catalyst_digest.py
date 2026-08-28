@@ -412,6 +412,416 @@ async def test_fanout_weight_scales_the_symbol_row_but_not_the_sector_row(store,
     assert values[("symbol", "ACME")] == pytest.approx(0.4)
 
 
+# ------------------------------------------------------- best-cluster selection (recency-decayed)
+# The 2026-08-27 HINDZINC fix. "Best" used to mean highest RAW weighted materiality, so a stale
+# cluster held the symbol's slot for its whole `cat.max_event_age_days` life no matter what
+# followed it. Ranking now applies step 5(i)'s own decay — 0.5^(age_h / cat.decay_halflife_h),
+# half-life 24h by default — to the COMPARISON key only.
+#
+# Every rank below is hand-computed against ran_at = WED 08:35 IST (the `now_box` default):
+#   MON 04:00 -> age 52.5833h -> 0.5^2.190972 = 0.21899
+#   MON 10:00 -> age 46.5833h -> 0.5^1.940972 = 0.26043
+#   TUE 11:00 -> age 21.5833h -> 0.5^0.899306 = 0.53614
+#   TUE 18:00 -> age 14.5833h -> 0.5^0.607639 = 0.65625
+#   WED 08:00 -> age  0.5833h -> 0.5^0.024306 = 0.98329
+#   WED 08:30 -> age  0.0833h -> 0.5^0.003472 = 0.99759
+async def test_fresher_cluster_overtakes_a_stale_higher_materiality_one(store, make_job):
+    """HINDZINC, 2026-08-27 — the bug this selection rule exists to prevent.
+
+    A `regulatory_policy` cluster (Aug 24-25: government stake-sale/OFS speculation, direction
+    SHORT, materiality 0.6) was followed by DIPAM officially denying any stake-sale plan (Aug 26;
+    the stock rallied +5.1%). ``sentiment_agg`` — which decays — netted correctly positive
+    (+0.569), but the discrete watchlist row still read ``direction: short`` and fed a live
+    recommendation with already-resolved information framed as current, because the original
+    cluster's RAW materiality was the higher of the two forever.
+
+    Ranks: stale 0.60 x 0.26043 = 0.1563 vs fresh 0.50 x 0.53614 = 0.2681 -> the denial wins.
+    Under the old rule the comparison was 0.60 vs 0.50 on raw materiality, so the stale
+    speculation won and this test would assert `short` / c-stale / 0.60 on every line below.
+    """
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-stale", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.55, materiality=0.60,
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.50,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["symbol"] for r in rows] == ["ACME"]
+    assert rows[0]["direction"] == "long"                     # the denial, not the speculation
+    assert list(rows[0]["cluster_refs"]) == ["c-fresh", "c-stale"]   # best FIRST (§6.5 audit)
+    # The STORED materiality is the winner's UNDECAYED weighted value — decay ranks, never labels.
+    assert rows[0]["materiality"] == pytest.approx(0.50)
+    assert rows[0]["event_age_h"] == pytest.approx(21.58333, abs=1e-4)
+    assert rows[0]["event_age_sessions"] == 1
+
+
+# ------------------------------------------------------------------ story-level REVERSAL detection
+# §2.7 `cat_reversal` (2026-08-27). The other half of the HINDZINC lesson: once decay lets the denial
+# take the slot, the fact that it REVERSED this platform's own earlier bearish reading is itself
+# information, and it was being thrown away. `reversal_of` records it deterministically — the same
+# (symbol, event_type) story contains an EARLIER cluster that cleared the inclusion floor on its own
+# UNDECAYED materiality and carried the opposite (short) direction. Purely additive: no grade, level,
+# condition or existing column reads it, so `cat` v2's event definition is untouched (its clock is
+# not — the decay ranking restarted it, §2.7 2026-08-28).
+async def test_hindzinc_shape_is_flagged_as_a_reversal(store, make_job):
+    """The motivating case, now labelled. Same corpus as the decay test above: the Aug-24/25 bearish
+    stake-sale speculation (short, materiality 0.60 — floor-clearing, so a real established claim)
+    followed by the DIPAM denial that resolves it (long, the decay winner). The row must say WHICH
+    cluster was reversed, not merely that today's reading is positive.
+
+    The denial is seeded at materiality 0.75 — above ``cat.materiality_min`` (0.70) — so the row
+    actually reaches ``originating``, which is the only grade ``cat_reversal`` can originate from. The
+    reversal flag itself is computed for context rows too (it describes the corpus, not the grade);
+    what the scanner needs is a row that is BOTH originating and a reversal, and that is this one.
+    Rank: stale 0.60 x 0.26043 = 0.1563 vs fresh 0.75 x 0.53614 = 0.4021 -> the denial holds the slot.
+    """
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-stale", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.55, materiality=0.60,
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.75,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["grade"] == "originating"
+    assert rows[0]["event_age_sessions"] == 1                   # cat_reversal's age bound, satisfied
+    # The whole point: the reversed cluster is NAMED, and it is the earlier bearish one.
+    assert rows[0]["reversal_of"] == "c-stale"
+
+
+async def test_a_story_with_no_directional_conflict_is_not_a_reversal(store, make_job):
+    """The control. Two positive clusters of one story — ordinary catalyst drift, exactly what `cat`
+    v2 already originates on. Nothing was reversed, so the flag must stay NULL: if plain good news
+    were flagged, `cat_reversal` would silently become a duplicate of `cat` and its separate shadow
+    population would measure nothing of its own."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(store, "c-major", first_seen=at(TUE, 18, 0), symbols=("ACME",), materiality=0.80)
+    seed_cluster(store, "c-minor", first_seen=at(WED, 8, 0), symbols=("ACME",), materiality=0.30)
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["grade"] == "originating"
+    assert rows[0]["reversal_of"] is None
+
+
+async def test_a_sub_floor_bearish_murmur_does_not_establish_a_reversal(store, make_job):
+    """The earlier opposite cluster must clear :data:`INCLUSION_FLOOR` on its OWN undecayed weighted
+    materiality — the same bar that decides whether a cluster may represent a symbol at all.
+
+    A 0.15-materiality bearish mention is noise the digest already refuses to build a row from, and
+    it must not become promotable into "an established bearish claim" merely because something
+    positive followed it. Otherwise almost any long row with one stray negative headline in its
+    history would qualify, and the reversal population would be indistinguishable from `cat`'s."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-murmur", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.55, materiality=0.15,   # < 0.2 floor
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.50,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert INCLUSION_FLOOR == 0.2                              # the bar this test is pinned to
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["reversal_of"] is None
+
+
+async def test_a_LATER_opposite_cluster_is_not_a_reversal(store, make_job):
+    """Direction of time is load-bearing: a reversal needs something that came BEFORE it to reverse.
+
+    Here the bearish cluster is the FRESHER one and merely loses the slot on rank
+    (0.25 x 0.98329 = 0.2458 < 0.50 x 0.53614 = 0.2681). That is a story turning negative, which is
+    the mirror case this rule deliberately does NOT trade — it is an exit-side signal on an existing
+    position (§5.2(b)), not an entry."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-good", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.50,
+    )
+    seed_cluster(
+        store, "c-bad-later", first_seen=at(WED, 8, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.55, materiality=0.25,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "long"                       # c-good still holds the slot
+    assert rows[0]["reversal_of"] is None
+
+
+async def test_a_winning_SHORT_row_is_never_flagged_as_a_reversal(store, make_job):
+    """LONG-ONLY, enforced at detection. A positive story getting denied is a real event, but it is
+    an exit-side signal on an existing position — already owned by the §5.2(b) risk-reducing exit
+    path — and NSE cash equities cannot be shorted overnight anyway. Building the mirror case would
+    add a short-side origination surface behind a flag nobody gated."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-good-old", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.55, materiality=0.60,
+    )
+    seed_cluster(
+        store, "c-denial", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.50, materiality=0.50,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "short"
+    assert rows[0]["reversal_of"] is None
+
+
+async def test_reversal_is_scoped_to_ONE_story_not_the_whole_symbol(store, make_job):
+    """The story key is ``(symbol, event_type)`` — the same grouping the 2026-08-05 corroboration
+    amendment already uses — not the symbol alone.
+
+    An unrelated bearish rating_change does not make a positive regulatory_policy headline a
+    "reversal" of it; they are two different stories that happen to share an issuer. Scoping to the
+    symbol would manufacture reversals out of ordinary mixed news flow, which is the most likely way
+    this detector could quietly over-fire."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-other-story", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="rating_change", sentiment=-0.55, materiality=0.60,
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.50,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["event_type"] == "regulatory_policy"         # 0.2681 rank beats 0.1563
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["reversal_of"] is None
+
+
+# The predecessor must have NAMED the symbol. These two differ ONLY in the predecessor's scope; the
+# weighted materiality (0.30) and weighted sentiment (−0.35) it reaches the predicate with are equal
+# in both, so nothing but the scope can explain the different verdicts.
+async def test_a_FANNED_OUT_sector_predecessor_does_not_establish_a_reversal(store, make_job):
+    """A sector story is not "this symbol's own earlier bearish claim". At the default 0.5 fan-out a
+    sector-wide bearish cluster (materiality 0.60, sentiment −0.70) clears the floor AND the direction
+    bar for EVERY constituent at once, so any later symbol-specific positive headline of the same
+    event_type would be labelled a reversal of a story that never named the symbol — one sector
+    headline manufacturing a reversal per constituent. Fan-out corroborates (step 5(ii)) and it can
+    still WIN a row; what it cannot do is be the thing that was reversed."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    store.upsert_sector_map(WED, [{"symbol": "ACME", "sector": "METALS"}])
+    seed_cluster(
+        store, "c-sector-bear", first_seen=at(MON, 10, 0), scope="sector", sectors=("METALS",),
+        event_type="regulatory_policy", sentiment=-0.70, materiality=0.60,   # ×0.5 ⇒ −0.35 / 0.30
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.75,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["grade"] == "originating"
+    assert rows[0]["reversal_of"] is None
+
+
+async def test_a_STOCK_scope_predecessor_of_the_same_strength_does_establish_a_reversal(store, make_job):
+    """The control for the test above: identical weighted numbers (0.30 materiality, −0.35 sentiment),
+    reached WITHOUT fan-out because the cluster resolved directly to ACME. This one is flagged — the
+    scope filter must not have narrowed the rule to nothing."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    store.upsert_sector_map(WED, [{"symbol": "ACME", "sector": "METALS"}])
+    seed_cluster(
+        store, "c-stock-bear", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.35, materiality=0.30,   # weight 1 ⇒ as seeded
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.75,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["grade"] == "originating"
+    assert rows[0]["reversal_of"] == "c-stock-bear"
+
+
+async def test_a_sector_cluster_that_NAMES_the_symbol_still_establishes_a_reversal(store, make_job):
+    """The filter is "did this cluster resolve to the symbol", not "was its scope literally stock" — a
+    sector-scope cluster whose resolver DID name ACME made a claim about ACME and keeps its standing
+    (its materiality still carries the fan-out weight, as everywhere else in this module)."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    store.upsert_sector_map(WED, [{"symbol": "ACME", "sector": "METALS"}])
+    seed_cluster(
+        store, "c-sector-named", first_seen=at(MON, 10, 0), scope="sector", sectors=("METALS",),
+        symbols=("ACME",), event_type="regulatory_policy", sentiment=-0.70, materiality=0.60,
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.75,
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert rows[0]["direction"] == "long"
+    assert rows[0]["reversal_of"] == "c-sector-named"
+
+
+async def test_reversal_detection_is_deterministic_across_runs(store, make_job):
+    """§9.1: the verdict is a pure function of (corpus, ran_at) — no clock read of its own, no
+    cross-day DB lookup, no LLM call. Re-running the same digest must reproduce it exactly."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-stale", first_seen=at(MON, 10, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.55, materiality=0.60,
+    )
+    seed_cluster(
+        store, "c-stale-2", first_seen=at(MON, 4, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=-0.45, materiality=0.55,
+    )
+    seed_cluster(
+        store, "c-fresh", first_seen=at(TUE, 11, 0), symbols=("ACME",),
+        event_type="regulatory_policy", sentiment=0.50, materiality=0.50,
+    )
+
+    await make_job().run(WED)
+    first = store.get_catalyst_watchlist(WED)[0]["reversal_of"]
+    await make_job().run(WED)
+    second = store.get_catalyst_watchlist(WED)[0]["reversal_of"]
+
+    # Two floor-clearing bearish predecessors ⇒ the tie-break must be total and stable: the STRONGEST
+    # claim (0.60 > 0.55) is the one named, not "whichever the row iteration reached first".
+    assert first == "c-stale"
+    assert second == first
+
+
+async def test_stale_cluster_keeps_the_slot_against_fresher_trivia(store, make_job):
+    """The other half of the rule: recency is a WEIGHT, not an override. A materially bigger
+    story from yesterday evening still outranks a minor mention filed this morning — otherwise
+    the fix would trade one stale-row failure for a churn-on-every-headline failure."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(store, "c-major", first_seen=at(TUE, 18, 0), symbols=("ACME",), materiality=0.80)
+    seed_cluster(store, "c-minor", first_seen=at(WED, 8, 0), symbols=("ACME",), materiality=0.30)
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    # 0.80 x 0.65625 = 0.5250 vs 0.30 x 0.98329 = 0.2950.
+    assert list(rows[0]["cluster_refs"]) == ["c-major", "c-minor"]
+    assert rows[0]["materiality"] == pytest.approx(0.80)
+    assert rows[0]["grade"] == "originating"
+
+
+async def test_sub_floor_mention_corroborates_but_never_takes_the_slot(store, make_job):
+    """The inclusion floor gates CANDIDACY, not the finished row (2026-08-27).
+
+    On decayed rank alone the sub-floor mention would win here (0.19 x 0.99759 = 0.1895 >
+    0.80 x 0.21899 = 0.1752) and — being below the 0.2 floor — would then delete ACME's row
+    outright, losing a still-material story. Filtering candidates on the UNDECAYED floor keeps
+    the pre-decay invariant exact: a symbol carries a row iff some cluster of its own clears the
+    floor. The mention still corroborates, exactly as before."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(
+        store, "c-major", first_seen=at(MON, 4, 0), symbols=("ACME",), materiality=0.80,
+        domains=("economictimes.indiatimes.com",),
+    )
+    seed_cluster(
+        store, "c-mention", first_seen=at(WED, 8, 30), symbols=("ACME",), materiality=0.19,
+        domains=("livemint.com",),
+    )
+
+    await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    assert [r["symbol"] for r in rows] == ["ACME"]
+    assert list(rows[0]["cluster_refs"]) == ["c-major", "c-mention"]
+    assert rows[0]["materiality"] == pytest.approx(0.80)
+    assert rows[0]["source_domain_count"] == 2               # story union is untouched by ranking
+    assert rows[0]["grade"] == "originating"
+
+
+async def test_fresher_winner_can_narrow_origination_to_context(store, make_job):
+    """Origination follows whichever cluster now REPRESENTS the symbol, and the materiality leg
+    can only tighten: the old rule picked the raw-materiality argmax, so any cluster the decay
+    promotes has materiality <= the one it displaced. Here a fresh 0.60 cluster takes the slot
+    from a stale 0.90 one and the row drops below `cat.materiality_min` (0.70) to `context` —
+    the §2.7 fail-safe direction (LESS activity), on the correct, current story."""
+    seed_universe(store, WED, ("ACME",))
+    seed_bars(store, "ACME", WED)
+    seed_cluster(store, "c-stale", first_seen=at(MON, 4, 0), symbols=("ACME",), materiality=0.90)
+    seed_cluster(store, "c-fresh", first_seen=at(WED, 8, 0), symbols=("ACME",), materiality=0.60)
+
+    result = await make_job().run(WED)
+    rows = store.get_catalyst_watchlist(WED)
+
+    # 0.90 x 0.21899 = 0.1971 vs 0.60 x 0.98329 = 0.5900.
+    assert list(rows[0]["cluster_refs"]) == ["c-fresh", "c-stale"]
+    assert rows[0]["materiality"] == pytest.approx(0.60)
+    assert rows[0]["grade"] == "context"
+    assert (result.n_originating, result.n_context) == (0, 1)
+    assert rows[0]["confirm_trigger"] is None                # context rows carry no §6.1 levels
+
+
+async def test_decayed_ranking_stays_deterministic_across_runs(store, make_job):
+    """§9.1: the same corpus at the same clock must yield the same watchlist. Decay is a pure
+    function of ``first_seen`` against the run's single fixed ``ran_at``, and equal ranks still
+    break on ``cluster_id`` — so a re-run reproduces every field but the minted ``entry_id``."""
+    seed_universe(store, WED, ("ACME", "BETA"))
+    seed_bars(store, "ACME", WED)
+    seed_bars(store, "BETA", WED)
+    seed_cluster(store, "c-a1", first_seen=at(MON, 10, 0), symbols=("ACME",), materiality=0.60)
+    seed_cluster(store, "c-a2", first_seen=at(TUE, 11, 0), symbols=("ACME",), materiality=0.50)
+    seed_cluster(store, "c-b1", first_seen=at(TUE, 18, 0), symbols=("BETA",), materiality=0.80)
+    seed_cluster(store, "c-b2", first_seen=at(TUE, 18, 0), symbols=("BETA",), materiality=0.80)
+    job = make_job()
+
+    await job.run(WED)
+    first = [{k: v for k, v in r.items() if k != "entry_id"} for r in store.get_catalyst_watchlist(WED)]
+    await job.run(WED)
+    second = [{k: v for k, v in r.items() if k != "entry_id"} for r in store.get_catalyst_watchlist(WED)]
+
+    assert first == second
+    refs = {r["symbol"]: list(r["cluster_refs"]) for r in store.get_catalyst_watchlist(WED)}
+    assert refs["ACME"] == ["c-a2", "c-a1"]                  # fresher wins on decayed materiality
+    assert refs["BETA"] == ["c-b1", "c-b2"]                  # identical rank => cluster_id breaks it
+
+
 # --------------------------------------------------------------------------- session age (R6/O13)
 def test_friday_evening_event_is_age_one_on_monday(make_job):
     job = make_job()

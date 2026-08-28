@@ -17,7 +17,7 @@ from engine.strategy.contracts import STRATEGY_CONTRACTS, UNKNOWN_CONTRACT, cont
 
 #: Every §6.1 deterministic origination leg. A new scanner without a contract must fail HERE, at the
 #: cheapest possible place, rather than reaching the analyst with an UNKNOWN frame in production.
-EXPECTED_STRATEGIES = {"orb", "rsi2", "trend", "mom", "cat", "brk20", "ins"}
+EXPECTED_STRATEGIES = {"orb", "rsi2", "trend", "mom", "cat", "brk20", "ins", "cat_reversal"}
 
 
 def test_every_shipped_strategy_has_exactly_one_contract():
