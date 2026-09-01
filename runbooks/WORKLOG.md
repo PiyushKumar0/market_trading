@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-01 (21:48, engine stopped 21:47) — hi52 pre-registered backtest: first run + verdict
+
+- **Run:** `scripts/backtest_hi52.py` vs market.duckdb (window 2020→2026-09-01 ⇒ effective
+  2022-07-12 start, 1027 sessions, 2731 symbols; params byte-identical to the live shadow, N=1, no
+  sweep). Report: `data/reports/backtest_hi52_2026-09-01.json`.
+- **Discrete fresh-cross (the live hi52 rule): GEOMETRY VIABLE at T+5/T+10/T+20 and CPCV
+  PROMOTABLE at all three** — T+20 median NET +1.94% / mean +2.78% / 59.0% hit / n=2545;
+  fold_pass 93.3% vs 60% bar, median passing 0.126%/day vs 0.016 floor. Nominally stronger than
+  `ins` (+1.58% net T+20).
+- **The academic rank construct did NOT transfer:** top-decile monthly rank not promotable
+  (33-50% fold pass), and the long-short spread is NEGATIVE (−0.9..−1.4%) — the cross-section
+  here mean-reverts at these horizons; the EVENT (fresh cross) carries the signal, not static
+  proximity.
+- **Frog-in-the-Pan splits INVERTED in-sample:** jumpy approaches and gap-day entries OUTPERFORMED
+  smooth/quiet ones (T+20 mean net 3.10 vs 2.03; gap-only 4.12) — the planned quiet-approach
+  filter is not supported and will NOT be added.
+- **Critical caveat, verified post-run (depth query):** bhavcopy full-market history begins
+  2026-07-13 (~35 sessions); only 195 symbols have ≥378 sessions (kite_official, watchlist-scoped,
+  2022-07-12→). The measured population is therefore the deep-history ~index class; the
+  EXTENDED-name thesis (WELCORP/DYCL class — the original motivation) is UNTESTED (n=22, a
+  survivorship-odd sliver). Plus the standing caveats: delisted names absent (optimistic), a
+  bull-heavy window, current-membership index proxy.
+- **Verdict (§8.6):** no promotion — shadow soak continues and now covers exactly what the
+  backtest cannot (the true forward population incl. extended names, from tomorrow's first wide
+  08:30 build). **Named follow-up:** historical bhavcopy archive backfill (2022→2026-07, date-keyed
+  job over NSE archives) to re-run the study genuinely full-market; re-run also naturally
+  strengthens as daily bhavcopy accumulates (~126 extended sessions by mid-Jan 2027 without
+  backfill).
+
 ## 2026-09-01 (evening, owner-approved "go ahead") — §3.2.4 batch-universe extended leg + hi52 shadow + proximity features
 
 - **Evidence first (3-agent workflow, movers validation):** all six out-of-universe movers the owner
