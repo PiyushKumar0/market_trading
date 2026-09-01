@@ -1,5 +1,29 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-01 (mid-session hotfix, owner-directed) — catchup_safety_jobs freeze latch: 2 sessions of silent zero-origination
+
+- **Found while investigating the JINDALSAW/BALRAMCHIN miss (out-of-universe, separate writeup):**
+  `catchup_safety_jobs` (FROZEN, detail `data_freshness:instruments`) was set 08-31 09:59:33 by the
+  step-5 belt-and-suspenders freeze (lifecycle.py) and had **no clear site anywhere** — a later
+  successful catch-up pass cleared nothing, and the latch survives reboots via `risk_state_causes`.
+  Effect: `_drain_one_forward`/`_evaluate_forward` require risk_state==NORMAL, so 08-31 saw
+  432 fires → 17 prescreen slots → 0 forwarded → 0 entry proposals (4 exit recs only, exits bypass
+  the gate), and 09-01 repeated it (881 orb fires, 13 slots, 0 forwarded) until this fix. The
+  09-01 boot's `catch_up_complete` was fully clean (`failed:[], frozen:[]`) — the latch was stale.
+- **Fix:** step-5 inverse branch in `SessionLifecycle.startup` — a clean catch-up pass (no
+  frozen_reasons, not killed, latch wired) clears `catchup_safety_jobs` via the cause ledger
+  (idempotent, cause-scoped; owner_pause/floor/warm-up causes untouched — same
+  clear-only-what-was-re-verified rule as the warm-up lift). Freeze side unchanged.
+- **Tests:** watched the repro fail first (stale latch survived clean startup), then green: 3 new
+  (`test_startup_clears_stale_catchup_safety_latch`, `..._respects_other_causes`,
+  `..._freezes_on_catchup_safety_failure` pins the fail-closed side). Full suite 1960 passed.
+- **Deploy:** owner-directed mid-session restart ("fix right now — impacting current trade cycle"),
+  clock re-observed 11:40 IST, log tail checked for in-flight jobs before stop. Boot verification
+  logged below the restart.
+- **Follow-ups (not shipped here):** frozen-during-session-hours alarm + funnel-zero alarm
+  (slots>0, forwarded=0) so a silent zero-origination day pages; IMPLEMENTATION_PLAN §2.6 step-5
+  addendum for the clear branch.
+
 ## 2026-08-28 (day + 20:4x deploy) — HDFCAMC/HINDZINC loss post-mortem: six fixes + 7-finder review, single deploy (commit 9662ca8)
 
 - **Post-mortem verdict on the two losing recommendations:** HDFCAMC = no catalyst data existed +

@@ -316,6 +316,14 @@ class SessionLifecycle:
             report.frozen_reasons.extend(r for r in result.frozen_reasons if r not in report.frozen_reasons)
             if not self._kill.is_killed():
                 await self._freeze("catchup_safety_jobs", ",".join(result.frozen_reasons))
+        elif self._latch is not None and not self._kill.is_killed():
+            # Inverse of the freeze above (2026-09-01: the cause had a set site but no clear site,
+            # so one transient boot failure kept entries FROZEN for two full sessions after the
+            # catch-up had recovered). A clean pass IS the re-verification of exactly this cause's
+            # predicate — same clear-only-what-was-re-verified rule as _maybe_lift_warmup_freeze;
+            # clear_cause is an idempotent no-op when the cause is not latched, and cause-scoped,
+            # so any other standing freeze (owner_pause, floor rung, warm-up) keeps the state.
+            await self._latch.clear_cause("catchup_safety_jobs", Actor.RISK_GATE)
 
         # 6) Cold-start warm-up gate (§2.6 step 6 / §7.1 warmup_ready + regime_data_ready).
         await self._apply_warmup_gate(report)
