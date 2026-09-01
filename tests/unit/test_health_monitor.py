@@ -273,3 +273,219 @@ async def test_process_memory_reader_failure_does_not_block_health_check():
 
     assert report.problems == baseline_report.problems
     assert report.healthy == baseline_report.healthy
+
+
+# ----------------------------------------------- origination liveness (2026-09-01 latch incident)
+# The catchup_safety_jobs latch froze entries for TWO whole sessions (08-31, 09-01) with zero pages:
+# the engine hummed, exits flowed, and nothing said "you are not originating". Two problems close
+# that class: entries_frozen_in_session (armed mode + risk != NORMAL past a threshold) and
+# funnel_zero_in_session (slots published, zero forwarded, risk NORMAL past a threshold).
+class _FakeMode:
+    def __init__(self, mode: str = "RECOMMEND", risk: str = "FROZEN") -> None:
+        from engine.core.enums import Mode, RiskState
+        self._mode, self._risk = Mode(mode), RiskState(risk)
+
+    def mode(self):
+        return self._mode
+
+    def risk_state(self):
+        return self._risk
+
+
+class _FakeLatch:
+    def active_causes(self):
+        return [("catchup_safety_jobs", "FROZEN", "data_freshness:instruments")]
+
+
+def _origination_monitor(*, mode: str = "RECOMMEND", risk: str = "FROZEN", funnel=None,
+                         at: datetime | None = None, calendar: bool = True):
+    ticker = _Ticker(at or datetime(2026, 6, 17, 10, 0, tzinfo=IST))    # trading Wednesday, in-session
+    clock = Clock(time_source=ticker)
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    cal = NSECalendar(config_dir() / "calendar", clock, strict=False) if calendar else None
+    mon = HealthMonitor(clock, load_settings(), ticker_supervisor=FakeTicker("HEALTHY"), alert=alert,
+                        calendar=cal, mode_manager=_FakeMode(mode, risk), latch=_FakeLatch(),
+                        funnel_probe=funnel)
+    return mon, alerts, ticker
+
+
+async def test_frozen_in_session_pages_after_threshold_not_before():
+    """The 08-31 replay: RECOMMEND + FROZEN from the open — quiet through the warm-up-sized grace
+    (a morning boot legitimately holds ~20 min of warm-up freeze), then a page."""
+    mon, alerts, ticker = _origination_monitor()
+
+    # The episode clock starts at the FIRST OBSERVING pulse (a sampling watchdog cannot know the
+    # true onset), so 30 elapsed minutes exist on the 31st minute-cadence pulse.
+    for _ in range(30):                                       # observed minutes 0..29 — inside the grace
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "entries_frozen_in_session" not in report.problems
+
+    ticker.at = ticker.at + timedelta(minutes=1)              # 30 observed minutes: past the threshold
+    report = await mon.check(check_skew=False)
+    assert "entries_frozen_in_session" in report.problems
+    assert any("entries_frozen_in_session" in m for _s, m in alerts)
+    # The page itself is diagnosable without a shell (2026-09-01 review): cause + state ride the text.
+    assert any("catchup_safety_jobs" in m and "FROZEN" in m for _s, m in alerts)
+
+
+async def test_frozen_timer_resets_on_normal_and_counts_only_in_session():
+    """A freeze that clears resets the clock (no page for accumulated non-contiguous minutes), and
+    out-of-session or unarmed-mode observations never start the clock at all."""
+    mon, alerts, ticker = _origination_monitor()
+    for _ in range(25):                                       # 25 frozen minutes — inside the grace
+        ticker.at = ticker.at + timedelta(minutes=1)
+        await mon.check(check_skew=False)
+    mon._mode_manager = _FakeMode("RECOMMEND", "NORMAL")      # freeze lifts
+    ticker.at = ticker.at + timedelta(minutes=1)
+    await mon.check(check_skew=False)
+    mon._mode_manager = _FakeMode("RECOMMEND", "FROZEN")      # re-freezes: a NEW clock
+    for _ in range(10):                                       # only 10 contiguous minutes
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+    assert "entries_frozen_in_session" not in report.problems
+    assert alerts == []
+
+    # Out-of-session: FROZEN at 07:00 for hours must never page (lag-watchdog lesson, 2026-08-26).
+    mon2, alerts2, ticker2 = _origination_monitor(at=datetime(2026, 6, 17, 7, 0, tzinfo=IST))
+    for _ in range(90):
+        ticker2.at = ticker2.at + timedelta(minutes=1)        # 07:01..08:30, all pre-open
+        report2 = await mon2.check(check_skew=False)
+        assert "entries_frozen_in_session" not in report2.problems
+    assert alerts2 == []
+
+    # Mode OFF in-session: not armed, never counts.
+    mon3, alerts3, ticker3 = _origination_monitor(mode="OFF")
+    for _ in range(60):
+        ticker3.at = ticker3.at + timedelta(minutes=1)
+        report3 = await mon3.check(check_skew=False)
+        assert "entries_frozen_in_session" not in report3.problems
+    assert alerts3 == []
+
+
+async def test_funnel_zero_pages_only_when_risk_is_normal():
+    """The 08-31 shape (slots published, zero forwarded all day) pages after the threshold while
+    NORMAL; while FROZEN it stays quiet (the frozen problem owns that page — one incident, one
+    problem). The first eligible pulse only baselines, so the clock starts one pulse later."""
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=lambda: (5, 0, 6))
+    for _ in range(121):                                      # baseline pulse + 120 observed minutes
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report.problems
+    ticker.at = ticker.at + timedelta(minutes=1)              # threshold crossed
+    report = await mon.check(check_skew=False)
+    assert "funnel_zero_in_session" in report.problems
+    assert any("funnel_zero_in_session" in m and "forwarded stuck at 0" in m for _s, m in alerts)
+
+    # Same funnel shape while FROZEN: the funnel problem must never fire.
+    mon2, _alerts2, ticker2 = _origination_monitor(risk="FROZEN", funnel=lambda: (5, 0, 6))
+    for _ in range(130):
+        ticker2.at = ticker2.at + timedelta(minutes=1)
+        report2 = await mon2.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report2.problems
+
+
+async def test_funnel_zero_resets_once_anything_forwards():
+    """A forward is PROGRESS: it re-baselines and resets the clock, and a static published count
+    thereafter is not a stall (nothing new arrived for the analyst)."""
+    calls = {"n": 0}
+
+    def funnel():
+        calls["n"] += 1
+        return (5, 0, 6) if calls["n"] < 100 else (5, 1, 6)   # a forward lands on pulse 100
+
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=funnel)
+    for _ in range(140):
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report.problems
+    assert alerts == []
+
+
+async def test_funnel_stall_after_first_forward_still_pages():
+    """2026-09-01 review (blocking): `forwarded` is day-cumulative and never returns to zero, so a
+    forward path that wedges AFTER the day's first forward must still page — new slots keep
+    publishing past the last-progress baseline while the forward count stays put."""
+    calls = {"n": 0}
+
+    def funnel():
+        calls["n"] += 1
+        return (3, 1, 6) if calls["n"] == 1 else (10, 1, 6)   # baseline (3,1), then the wedge
+
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=funnel)
+    for _ in range(121):                                      # baseline pulse + 120 observed minutes
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report.problems
+    ticker.at = ticker.at + timedelta(minutes=1)
+    report = await mon.check(check_skew=False)
+    assert "funnel_zero_in_session" in report.problems
+    assert any("forwarded stuck at 1" in m for _s, m in alerts)
+
+
+async def test_funnel_quiet_when_forward_cap_is_spent():
+    """A spent §5.6 daily forward cap is quiet BY DESIGN: slots keep publishing on a busy afternoon
+    but the governor is deliberately done forwarding — paging here would train the owner to ignore
+    the alarm (WO-25b lesson)."""
+    calls = {"n": 0}
+
+    def funnel():
+        calls["n"] += 1
+        return (50 + calls["n"], 6, 6)                        # published grows, cap 6 fully spent
+
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=funnel)
+    for _ in range(130):
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report.problems
+    assert alerts == []
+
+
+async def test_funnel_unreadable_cap_narrows_to_zero_forwarded_shape():
+    """cap=None (governor unreadable) must not invent pages: with any forward on the book the alarm
+    stays quiet, while the unambiguous zero-forwarded-all-day shape still pages."""
+    calls = {"n": 0}
+
+    def growing_with_forward():
+        calls["n"] += 1
+        return (10 + calls["n"], 1, None)
+
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=growing_with_forward)
+    for _ in range(130):
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report.problems
+    assert alerts == []
+
+    mon2, alerts2, ticker2 = _origination_monitor(risk="NORMAL", funnel=lambda: (10, 0, None))
+    for _ in range(121):
+        ticker2.at = ticker2.at + timedelta(minutes=1)
+        await mon2.check(check_skew=False)
+    ticker2.at = ticker2.at + timedelta(minutes=1)
+    report2 = await mon2.check(check_skew=False)
+    assert "funnel_zero_in_session" in report2.problems
+
+
+async def test_origination_watch_failures_never_break_the_pulse():
+    """A raising funnel probe (or a monitor with no mode manager wired) must never raise into the
+    pulse and never invent a problem."""
+    def bad_funnel():
+        raise RuntimeError("boom")
+
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=bad_funnel)
+    for _ in range(3):
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)            # must not raise
+    assert "funnel_zero_in_session" not in report.problems and alerts == []
+
+    # No mode manager wired (older construction): both checks are inert, nothing raises.
+    clock = Clock(time_source=lambda: datetime(2026, 6, 17, 11, 0, tzinfo=IST))
+    plain = HealthMonitor(clock, load_settings(),
+                          calendar=NSECalendar(config_dir() / "calendar", clock, strict=False))
+    report = await plain.check(check_skew=False)
+    assert "entries_frozen_in_session" not in report.problems
+    assert "funnel_zero_in_session" not in report.problems

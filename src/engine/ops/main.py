@@ -1157,12 +1157,33 @@ async def run() -> int:
     # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
     # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.
     keep_awake = KeepAwake(enabled=settings.ticker.keep_awake_in_session)
+    def _prescreen_funnel_today() -> tuple[int, int, int | None]:
+        # Origination-liveness probe (2026-09-01): today's prescreen slot count, forward events that
+        # reached the analyst, and the governor's live daily forward cap. `forwarded` is the
+        # LLM-reach marker (`evaluated` is re-armed to 0 on age-out, so a drought day reads
+        # all-zeros there — see prescreen_day_slots semantics in pipeline.py); it is day-cumulative,
+        # which is why the monitor stalls on "no PROGRESS", not on "zero". A cap read failure
+        # degrades to None (the monitor then alarms only on the zero-forwarded shape).
+        row = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(forwarded), 0) FROM prescreen_day_slots WHERE d = ?",
+            (clock.today().isoformat(),),
+        ).fetchone()
+        try:
+            cap: int | None = int(governor.prescreen_forward_cap())
+        except Exception:  # noqa: BLE001 - the cap refines the alarm; its absence must not kill it
+            cap = None
+        return (int(row[0]), int(row[1]), cap)
+
     health = HealthMonitor(
         clock, settings, ticker_supervisor=ticker, alert=alert,
         calendar=calendar, keep_awake=keep_awake,
         # WO-24b-prime: the store stall watchdog rides the always-on health pulse — the one timer
         # that kept beating through the 2026-08-21 freeze while every store path was wedged.
         store=store,
+        # Origination liveness (2026-09-01, catchup_safety_jobs latch incident: FROZEN entries for
+        # two whole sessions, zero pages): entries_frozen_in_session + funnel_zero_in_session ride
+        # the same always-on pulse and the WO-25b episode cadence.
+        mode_manager=mode, latch=latch, funnel_probe=_prescreen_funnel_today,
     )
     scheduler = Scheduler(clock, calendar)
     boot_state["scheduler"] = scheduler   # WO-25c: the watchdog reads its REAL running state

@@ -1,5 +1,29 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-01 (afternoon, owner-directed follow-up) — origination-liveness alarms + §2.6/§3.2.12 plan addenda
+
+- **Shipped the two alarms the latch incident called for**, on the always-on 60s health pulse
+  (`HealthMonitor._check_origination`) riding the WO-25b episode cadence (change alerts at once,
+  unchanged reminds every 30 min, recovery announced once):
+  `entries_frozen_in_session` — armed mode (RECOMMEND/AUTO) ∧ risk_state≠NORMAL ≥30 contiguous
+  in-session minutes (grace covers the ~17-19 min legitimate morning warm-up freezes; active causes +
+  state + duration ride the Telegram text). `funnel_zero_in_session` — no forward PROGRESS (the
+  day-cumulative forward count static while published slots grow past the last-progress baseline)
+  ≥120 contiguous in-session minutes while NORMAL, gated on remaining §5.6 forward capacity.
+- **Three-lens adversarial review before commit** (state-machine / safety-interaction /
+  time-session) caught 1 blocking + 1 should-fix, both fixed: (i) v1 used `forwarded==0`, which goes
+  permanently mute after the day's first forward (cumulative counter) — replaced with
+  baseline-progress stall detection + governor-cap gate (spent cap = quiet by design; unreadable
+  cap narrows to the zero-forwarded shape); (ii) alert text carried no diagnostic detail — added a
+  `problem_details` side-channel that rides the message, never the episode identity. Time-session
+  lens: zero findings (30-min grace clears every documented legitimate boot-freeze duration).
+- **Validation:** all new tests written red-first; health file 27 passed; full suite green
+  (count in commit). Wiring probe reads prescreen_day_slots + `governor.prescreen_forward_cap()`
+  on the shared conn (same-loop discipline verified by the review's safety lens).
+- **Deploy:** rides the next engine boot (no mid-session restart needed — the alarms are
+  monitoring, not trading-path). IMPLEMENTATION_PLAN updated: §2.6 step-5 freeze-latch-symmetry +
+  origination-liveness addendum; §3.2.12 HealthMonitor summary block.
+
 ## 2026-09-01 (mid-session hotfix, owner-directed) — catchup_safety_jobs freeze latch: 2 sessions of silent zero-origination
 
 - **Found while investigating the JINDALSAW/BALRAMCHIN miss (out-of-universe, separate writeup):**

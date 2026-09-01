@@ -20,7 +20,7 @@ import shutil
 import sys
 import threading
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from engine.core.clock import Clock, ClockSkewUnavailable
 from engine.core.config import Settings
+from engine.core.enums import Mode, RiskState
 from engine.core.log import get_logger
 from engine.ops.process_memory import ProcessMemoryReader
 
@@ -78,6 +79,10 @@ class HealthReport(BaseModel):
     disk_free_gb: float | None = None
     wal_size_mb: float | None = None
     problems: list[str] = Field(default_factory=list)
+    #: problem -> owner-facing detail line. Rides the ALERT TEXT so a page is diagnosable without a
+    #: shell (2026-09-01 review); never part of the WO-25b episode identity, which stays the problem
+    #: SET alone — evolving detail (minutes counting up) must not re-trigger an unchanged episode.
+    problem_details: dict[str, str] = Field(default_factory=dict)
 
     @property
     def healthy(self) -> bool:
@@ -103,6 +108,13 @@ class HealthMonitor:
         memory_log_every: int = 5,
         store: Any = None,                 # duck-typed: must expose .aping() -> Awaitable[bool]
         store_ping_timeout_s: float = STORE_PING_TIMEOUT_S,
+        mode_manager: Any = None,          # duck-typed: must expose .mode() and .risk_state()
+        latch: Any = None,                 # duck-typed: must expose .active_causes() (detail only)
+        funnel_probe: Callable[[], tuple[int, int, int | None]] | None = None,
+        # funnel_probe: () -> today's (slots published, forward events, governor daily forward cap
+        # or None when unreadable — None narrows the alarm to the unambiguous zero-forwarded shape)
+        frozen_alarm_after_min: float = 30.0,
+        funnel_zero_alarm_after_min: float = 120.0,
     ) -> None:
         self._clock = clock
         self._settings = settings
@@ -153,6 +165,24 @@ class HealthMonitor:
         #: :data:`HEALTH_REPEAT_MIN` minutes, and announce recovery exactly once.
         self._problem_episode: tuple[str, ...] = ()
         self._problem_alerted_at: datetime | None = None
+        # --- origination liveness (2026-09-01, after the catchup_safety_jobs latch incident) ---
+        self._mode_manager = mode_manager
+        self._latch = latch
+        self._funnel_probe = funnel_probe
+        self._frozen_alarm_after_min = float(frozen_alarm_after_min)
+        self._funnel_zero_alarm_after_min = float(funnel_zero_alarm_after_min)
+        #: First pulse that observed each alarm's condition — the episode clocks. Reset QUIETLY the
+        #: moment the condition breaks (incl. out-of-session, the 2026-08-26 lag-watchdog lesson).
+        #: Per-process: a restart restarts the clocks, which is correct — the boot just re-verified
+        #: the gates.
+        self._frozen_since: datetime | None = None
+        self._funnel_zero_since: datetime | None = None
+        #: (published-at-last-forward-progress, forwarded) — the funnel stall baseline. `forwarded`
+        #: is day-cumulative and monotonic (pipeline upserts +1 per forward, never resets mid-day),
+        #: so "zero forwarded" alone goes permanently mute after the day's FIRST forward (2026-09-01
+        #: review, blocking): a stall is instead "published grew past the baseline while the forward
+        #: count did not move". None ⇒ re-baseline on the next eligible pulse.
+        self._funnel_baseline: tuple[int, int] | None = None
 
     async def check(self, *, check_skew: bool = True) -> HealthReport:
         report = HealthReport()
@@ -198,6 +228,14 @@ class HealthMonitor:
             if report.wal_size_mb > self._wal_warn_mb:
                 report.problems.append("large_wal")  # checkpoint at EOD (§4.1)
 
+        # --- origination liveness (2026-09-01: the catchup_safety_jobs latch froze entries for two
+        #     whole sessions with zero pages — the engine hummed, exits flowed, nothing said "you are
+        #     not originating". These two problems make that silence impossible.) ---
+        try:
+            self._check_origination(report)
+        except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
+            _log.exception("origination_watch_failed")
+
         # --- in-session OS keep-awake (2026-07-23 sleep/resume wedge): while a trading session is open,
         #     keep the OS awake so it does not auto-sleep mid-session and freeze the tick feed; release
         #     at session close. No-op off-Windows / when disabled / without a calendar. ---
@@ -229,13 +267,101 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - a watchdog that can kill its own host is not a watchdog
             _log.exception("store_watchdog_failed")
 
-        await self._alert_problems(report.problems)
+        await self._alert_problems(report.problems, report.problem_details)
         _log.info("health_check", feed=report.feed_state, skew_ok=report.clock_skew_ok,
                   disk_free_gb=report.disk_free_gb, problems=report.problems)
         return report
 
+    # ------------------------------------------------------------- origination liveness (2026-09-01)
+    def _check_origination(self, report: HealthReport) -> None:
+        """Two problems that were silent by construction until the 08-31/09-01 latch incident:
+
+        * ``entries_frozen_in_session`` — an armed mode (RECOMMEND/AUTO) with ``risk_state != NORMAL``
+          for ``frozen_alarm_after_min`` CONTIGUOUS in-session minutes. The grace exists because a
+          morning boot legitimately holds a warm-up freeze for up to ~20 minutes; a freeze that
+          outlives it is an incident whatever its cause (the active causes ride the log line so the
+          page is diagnosable without a shell).
+        * ``funnel_zero_in_session`` — NO FORWARD PROGRESS while eligible work keeps arriving:
+          today's forward count unchanged for ``funnel_zero_alarm_after_min`` CONTIGUOUS in-session
+          minutes while slots published GREW past the last-progress baseline, risk_state IS NORMAL,
+          and forward capacity remains under the governor's daily cap (a spent cap is quiet by
+          design, not by fault; an unreadable cap narrows the alarm to the unambiguous
+          zero-forwarded-all-day shape). A frozen state is the first problem's page, not this
+          one's — one incident, one problem. Catches a wedged forward/analyst path that a healthy
+          risk state would otherwise hide, including one that wedges AFTER the day's first forward
+          (the day-cumulative forward counter never returns to zero — 2026-09-01 review).
+
+        Both clocks reset QUIETLY whenever their condition breaks — risk recovers, a forward lands,
+        the session closes, the mode disarms (the 2026-08-26 lag-watchdog lesson: alarms evaluate
+        only inside session hours). Unwired ``mode_manager`` ⇒ both checks are inert, matching the
+        calendar-less feed_stale behaviour: a misconfigured deploy stays quiet, not noisy.
+        """
+        if self._mode_manager is None:
+            return
+        now = self._clock.now()
+        armed = self._mode_manager.mode() in (Mode.RECOMMEND, Mode.AUTO) and self._session_open()
+        state = self._mode_manager.risk_state()
+
+        if armed and state != RiskState.NORMAL:
+            if self._frozen_since is None:
+                self._frozen_since = now
+            frozen_min = (now - self._frozen_since).total_seconds() / 60.0
+            if frozen_min >= self._frozen_alarm_after_min:
+                report.problems.append("entries_frozen_in_session")
+                causes: list[str] | None = None
+                if self._latch is not None:
+                    try:
+                        causes = [c for c, _s, _d in self._latch.active_causes()]
+                    except Exception:  # noqa: BLE001 - diagnostic detail, never the verdict
+                        causes = None
+                report.problem_details["entries_frozen_in_session"] = (
+                    f"risk_state={state.value} for {round(frozen_min)}m, causes={causes}"
+                )
+                _log.error("entries_frozen_in_session", risk_state=state.value,
+                           frozen_min=round(frozen_min, 1), causes=causes)
+        else:
+            self._frozen_since = None
+
+        if self._funnel_probe is None:
+            return
+        if not (armed and state == RiskState.NORMAL):
+            self._funnel_zero_since = None
+            self._funnel_baseline = None       # re-baseline when the gate re-opens
+            return
+        published, forwarded, cap = self._funnel_probe()
+        base = self._funnel_baseline
+        rolled = base is not None and (published < base[0] or forwarded < base[1])
+        if base is None or rolled or forwarded != base[1]:
+            # (Re)baseline on first look, day rollover, or forward progress. The published-baseline
+            # is what "new work since the last forward" is measured against: 0 while nothing has
+            # forwarded today (the 08-31 shape — every published slot counts), else the published
+            # count at progress time (a mid-day restart cannot know which older slots were already
+            # served, so only NEW publications evidence a stall — conservative by construction).
+            self._funnel_baseline = (published if forwarded > 0 else 0, forwarded)
+            self._funnel_zero_since = None
+            return
+        # Same day, forward count static. A stall needs BOTH new work beyond the baseline AND
+        # remaining capacity — a day whose §5.6 forward cap is spent goes quiet by design, and an
+        # unreadable cap (None) narrows eligibility to the unambiguous zero-forwarded shape.
+        capacity_left = forwarded == 0 or (cap is not None and forwarded < cap)
+        if published > self._funnel_baseline[0] and capacity_left:
+            if self._funnel_zero_since is None:
+                self._funnel_zero_since = now
+            zero_min = (now - self._funnel_zero_since).total_seconds() / 60.0
+            if zero_min >= self._funnel_zero_alarm_after_min:
+                report.problems.append("funnel_zero_in_session")
+                report.problem_details["funnel_zero_in_session"] = (
+                    f"{published} slots published, forwarded stuck at {forwarded} "
+                    f"for {round(zero_min)}m (cap {cap})"
+                )
+                _log.error("funnel_zero_in_session", published=published, forwarded=forwarded,
+                           cap=cap, zero_min=round(zero_min, 1))
+        else:
+            self._funnel_zero_since = None
+
     # ------------------------------------------------------------------ problem-set episodes (WO-25b)
-    async def _alert_problems(self, problems: list[str]) -> None:
+    async def _alert_problems(self, problems: list[str],
+                              details: Mapping[str, str] | None = None) -> None:
         """Owner-alert the problem set as an EPISODE, not once per pulse (WO-25b, 2026-08-24).
 
         The pulse runs every 60 s and used to alert on every pulse a problem existed: 57 identical
@@ -277,7 +403,15 @@ class HealthMonitor:
         # turn the next pulse into a repeat.
         self._problem_episode = current
         self._problem_alerted_at = now
-        await self._alert("warning", f"health problems: {problems}")
+        msg = f"health problems: {problems}"
+        if details:
+            # Detail rides the MESSAGE only (2026-09-01 review: a page must be diagnosable without a
+            # shell) — episode identity above stays the problem set, so evolving detail (minutes
+            # counting up) never re-triggers an unchanged episode; a reminder just reads fresher.
+            extras = [f"{p}: {details[p]}" for p in problems if p in details]
+            if extras:
+                msg += " — " + "; ".join(extras)
+        await self._alert("warning", msg)
 
     # ------------------------------------------------------------------ store stall watchdog
     async def _probe_store(self) -> None:
