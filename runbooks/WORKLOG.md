@@ -18,8 +18,14 @@
   (`test_startup_clears_stale_catchup_safety_latch`, `..._respects_other_causes`,
   `..._freezes_on_catchup_safety_failure` pins the fail-closed side). Full suite 1960 passed.
 - **Deploy:** owner-directed mid-session restart ("fix right now — impacting current trade cycle"),
-  clock re-observed 11:40 IST, log tail checked for in-flight jobs before stop. Boot verification
-  logged below the restart.
+  clock re-observed 11:54 IST, log tail checked for in-flight jobs before stop (routine tick flushes
+  only). Clean stop 11:55 → start 11:56 (commit e462c1b live). **Boot verified:** 11:57:43
+  `catch_up_complete (failed:[], frozen:[])` → `risk_cause_cleared catchup_safety_jobs
+  was_active=true` → `risk_state_changed FROZEN→NORMAL`; by 12:12 open causes = [], mode/risk =
+  RECOMMEND/NORMAL; forwarding resumed — `signal_candidate_queued` BHEL/NAUKRI/IDEA and
+  `forward_drained` CIPLA 12:06:25, BHEL 12:09:29 — first candidates to reach the analyst since
+  Friday. Boot flagged crash_recovered=true (NSSM stop beat the clean-STOPPED commit — benign,
+  every startup is a full recovery by design).
 - **Follow-ups (not shipped here):** frozen-during-session-hours alarm + funnel-zero alarm
   (slots>0, forwarded=0) so a silent zero-origination day pages; IMPLEMENTATION_PLAN §2.6 step-5
   addendum for the clear branch.
