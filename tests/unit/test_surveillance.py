@@ -97,10 +97,15 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
     assert lists.reasons_for("gsmstk") == ["surveillance_gsm"]      # case-insensitive
     assert lists.reasons_for("NORMALEQ") == []
 
-    # Last-good cache written per source (the reuse-yesterday fallback, E5).
+    # Listed-equity master (2026-09-01 batch-universe extended leg): EQ-series rows of the same
+    # EQUITY_L pass — companies only, never part of flagged()/reasons_for.
+    assert lists.equity_master == {"NORMALEQ"}
+
+    # Last-good cache written per source (the reuse-yesterday fallback, E5) + the master.
     cache = json.loads((tmp_path / "surveillance.json").read_text(encoding="utf-8"))
-    assert set(cache) == {"gsm", "asm", "t2t", "esm"}
+    assert set(cache) == {"gsm", "asm", "t2t", "esm", "equity_master"}
     assert cache["gsm"]["symbols"] == ["GSMSTK"]
+    assert cache["equity_master"]["symbols"] == ["NORMALEQ"]
 
 
 async def test_current_refreshes_once_then_reuses(tmp_path, clock):
@@ -124,6 +129,20 @@ async def test_failed_source_reuses_yesterday_and_alerts(tmp_path, clock):
     assert lists.gsm == {"GSMSTK"}                      # other sources unaffected
     assert len(msgs) == 1 and msgs[0].severity == "critical"
     assert msgs[0].data["degraded_sources"] == ["asm"]
+
+
+async def test_failed_t2t_reuses_yesterdays_equity_master(tmp_path, clock):
+    """The equity master rides the T2T download (one EQUITY_L pass) — a failed fetch reuses the
+    cached master exactly like the cached T2T list (2026-09-01 extended leg, fail-closed-not-empty
+    only when BOTH source and cache are gone)."""
+    await make_ingest(tmp_path, clock).refresh()        # seed the cache
+
+    ingest = make_ingest(tmp_path, clock, fail_urls={sv.NSE_T2T_URL})
+    lists = await ingest.refresh()
+
+    assert lists.t2t == {"T2TSTK", "T2TBZ"}             # yesterday reused
+    assert lists.equity_master == {"NORMALEQ"}          # master reused from the same cache
+    assert "t2t" in lists.degraded_sources
 
 
 async def test_failed_source_without_cache_is_empty_and_degraded(tmp_path, clock):

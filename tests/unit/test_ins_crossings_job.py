@@ -86,10 +86,10 @@ class _FakeStore:
         self.closes = closes
         self.bars_calls: list[str] = []
 
-    def get_universe_daily(self, d: date) -> list[dict[str, Any]]:
-        return [
-            {"d": d, "symbol": s, "included": True, "exclusion_reasons": []} for s in self.universe
-        ]
+    def get_universe_eligible_symbols(self, d: date) -> list[str]:
+        # 2026-09-01: the job reads the centralized store method now (the inline predicate copy
+        # over get_universe_daily rows was retired with the batch-universe addendum).
+        return sorted(self.universe)
 
     def get_insider_trades(self, *, symbol=None, broadcast_from=None, broadcast_to=None):
         out = []

@@ -47,6 +47,7 @@ __all__ = [
     "wilder_dmi",
     "wilder_adx",
     "rolling_median_volume",
+    "rolling_max_high",
     "momentum",
     "cross_sectional_rank",
     "vwap",
@@ -219,6 +220,13 @@ def rolling_median_volume(volumes: Sequence[Any] | pd.Series, window: int = 20) 
     """Rolling median volume over ``window`` bars; NaN until a full window exists (orb vol filter)."""
     s = as_float_series(volumes)
     return s.rolling(window, min_periods=window).median()
+
+
+def rolling_max_high(highs: Sequence[Any] | pd.Series, n: int) -> pd.Series:
+    """Rolling max high over the trailing ``n`` bars (incl. current); NaN until a full window exists
+    (52-week / 20-day high proximity, §6.2 ``prox_52wk_high`` / ``prox_20d_high``)."""
+    s = as_float_series(highs)
+    return s.rolling(n, min_periods=n).max()
 
 
 def momentum(

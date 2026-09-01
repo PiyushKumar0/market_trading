@@ -18,6 +18,7 @@ from engine.strategy.indicators import (
     cross_sectional_rank,
     ema,
     momentum,
+    rolling_max_high,
     rolling_median_volume,
     sma,
     vwap,
@@ -134,6 +135,25 @@ def test_rolling_median_volume_hand_computed():
     assert np.isnan(out.iloc[0]) and np.isnan(out.iloc[1])
     assert out.iloc[2] == pytest.approx(20.0)
     assert out.iloc[3] == pytest.approx(30.0)
+
+
+def test_rolling_max_high_hand_computed():
+    out = rolling_max_high([10, 12, 8, 15, 9], 3)
+    assert np.isnan(out.iloc[0]) and np.isnan(out.iloc[1])
+    assert out.iloc[2] == pytest.approx(12.0)   # max(10, 12, 8)
+    assert out.iloc[3] == pytest.approx(15.0)   # max(12, 8, 15)
+    assert out.iloc[4] == pytest.approx(15.0)   # max(8, 15, 9)
+
+
+def test_rolling_max_high_window_longer_than_data_is_all_nan():
+    # n=5 exceeds the 2-bar history: never a full window => all-NaN, same convention as
+    # rolling_median_volume / sma when the lookback exceeds available history.
+    assert rolling_max_high([10, 12], 5).isna().all()
+
+
+def test_rolling_max_high_empty_is_empty():
+    out = rolling_max_high([], 3)
+    assert len(out) == 0
 
 
 def test_momentum_hand_computed():

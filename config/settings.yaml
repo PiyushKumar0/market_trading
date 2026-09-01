@@ -89,6 +89,12 @@ data:
   min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
   backfill_daily_years: 2
   backfill_minute_years: 1
+  batch_universe_enabled: true            # §3.2.4 extended leg (owner-directed 2026-09-01, movers review):
+                                          # criteria-passing NON-index symbols persisted included=False,
+                                          # exclusion_reasons=['not_nifty200'] — batch rules / news shadow /
+                                          # pre-open advisory only; tick watchlist + risk gate stay NIFTY200.
+                                          # false = exact pre-addendum universe shape (the rollback line).
+  batch_universe_max: 600                 # top-N extended by median traded value (sanity cap)
 
 # --- News-intelligence layer (§2.7) — owner-only operational config; changes audited (config_audit) ---
 news:
@@ -276,6 +282,10 @@ strategy:
                                  # news-originated entry ceiling stays 2/day with this strategy added.
                                  # Reversal rows are a strict SUBSET of originating rows, so the real
                                  # flow is well under `cat`'s; 2 is a ceiling, not an expectation.
+      hi52: 3                    # §3.2.4/§6.1 hi52 shadow (2026-09-01): 52wk-high-proximity fresh-
+                                 # crosses over the BATCH universe. Fresh-cross-only keeps natural
+                                 # flow to a handful/day; 3 caps analyst spend on a cluster day.
+                                 # Shadow: C3 rejects all — admission = validation population only.
     # How much better a later candidate must score to take a full cap's admission slot from an
     # unevaluated incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
     # same reason as max_per_strategy_day above: it decides which candidates get evaluated at all].

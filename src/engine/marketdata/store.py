@@ -626,10 +626,11 @@ AMEND_NO_BAR = "no_bar"            # no stored row for (symbol, minute)
 AMEND_FOREIGN_SRC = "foreign_src"  # row is no longer src=<require_src> (official/backfilled): untouchable
 AMEND_RACE_LOST = "race_lost"      # CAS predicate missed: the row changed under us; nothing written
 
-# Duplicated from ``engine.universe.builder.EXCL_CAP``: this module CANNOT import that one (builder
-# imports the store — a store->builder import would cycle). Must stay equal to ``EXCL_CAP``;
-# ``tests/unit/test_market_store.py`` asserts the two constants match.
+# Duplicated from ``engine.universe.builder.EXCL_CAP``/``EXCL_INDEX``: this module CANNOT import
+# that one (builder imports the store — a store->builder import would cycle). Must stay equal to
+# the builder constants; ``tests/unit/test_market_store.py`` asserts the pairs match.
 _EXCL_CAP = "watchlist_cap"
+_EXCL_INDEX = "not_nifty200"
 
 _TICK_STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _tick_stage (
@@ -1404,6 +1405,22 @@ class MarketStore:
     def upsert_universe_daily(self, rows: Sequence[dict[str, Any]]) -> int:
         return self._upsert_rows("universe_daily", rows)
 
+    def replace_universe_daily(self, d: date, rows: Sequence[dict[str, Any]]) -> int:
+        """Day-``d`` universe write with extended-leg hygiene (2026-09-01 review finding): plain
+        upserts never delete, so a same-day re-build with ``batch_universe_enabled`` flipped off —
+        or a shrunken extended candidate set — would leave stale ``not_nifty200`` rows feeding
+        :meth:`get_batch_universe_symbols` for the rest of the day, defeating the flag's documented
+        rollback guarantee. Extended rows are therefore delete-then-inserted under one lock hold
+        (the ``catalyst_watchlist`` idempotent-rewrite precedent); index-member rows stay pure
+        upserts — every build re-writes their full audit rows by construction."""
+        with self._lock:
+            self._execute(
+                "DELETE FROM universe_daily WHERE d = ? AND len(exclusion_reasons) = 1 "
+                "AND exclusion_reasons[1] = ?",
+                [d, _EXCL_INDEX],
+            )
+            return self._upsert_rows("universe_daily", rows)
+
     def get_universe_daily(self, d: date, *, included_only: bool = False) -> list[dict[str, Any]]:
         sql = "SELECT * FROM universe_daily WHERE d = ?"
         if included_only:
@@ -1423,6 +1440,20 @@ class MarketStore:
         return sorted(
             r["symbol"] for r in rows
             if r["included"] or list(r["exclusion_reasons"] or []) == [_EXCL_CAP]
+        )
+
+    def get_batch_universe_symbols(self, d: date) -> list[str]:
+        """The BATCH universe for ``d`` (§3.2.4 extended-leg addendum, 2026-09-01): the eligible set
+        (see :meth:`get_universe_eligible_symbols`) PLUS criteria-passing NON-index symbols persisted
+        with ``exclusion_reasons == ['not_nifty200']``. This is the widest rule-passing scan set —
+        news resolver/digest shadow, pre-open breakout advisory, and shadow batch scanners (hi52).
+        NEVER feed it to anything RECOMMEND-capable: the risk gate approves ``included`` rows only,
+        so an actionable strategy scanning this set would originate un-approvable candidates."""
+        rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
+        return sorted(
+            r["symbol"] for r in rows
+            if r["included"]
+            or list(r["exclusion_reasons"] or []) in ([_EXCL_CAP], [_EXCL_INDEX])
         )
 
     # ================================================================== features (§3.2.5/§6.2)

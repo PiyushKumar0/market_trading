@@ -4,13 +4,20 @@ The PINNED universe rule (§3.2.4, zero latitude):
 
     NIFTY200 ∩ MIS-eligible (Zerodha leverage file) ∩ NOT in GSM/ASM/T2T/ESM (A8)
     ∩ median 20d traded value ≥ ₹5cr [``data.min_median_traded_value_inr``, tunable];
-    mis_candidates ⊆ F&O list (C7); active intraday watchlist capped at 50
-    [``data.universe_max_watchlist``, tunable] — capacity is not the binding constraint; focus is.
+    mis_candidates ⊆ F&O list (C7); active intraday watchlist capped at
+    ``data.universe_max_watchlist`` [tunable] — capacity is not the binding constraint; focus is.
 
 Every NIFTY200 symbol gets a ``universe_daily`` row with its per-symbol exclusion reasons
 (auditable, §4.3). ``included=True`` means "in today's ACTIVE watchlist" (≤ cap): symbols that pass
 every rule but fall past the cap are persisted ``included=False`` with reason ``watchlist_cap`` so
 the audit trail explains exactly why an otherwise-eligible name is out.
+
+**Extended leg (§3.2.4 addendum, owner-directed 2026-09-01):** when ``data.batch_universe_enabled``,
+criteria-PASSING symbols outside the index (candidates = MIS-margins keys ∩ NSE listed-equity master
+− NIFTY200, top ``data.batch_universe_max`` by median traded value) are additionally persisted as
+``included=False`` rows with reason ``not_nifty200`` — visible to batch rules, the news shadow and
+the pre-open advisory through ``get_batch_universe_symbols``, invisible to the tick watchlist and
+the risk gate (both read ``included_only``). Failing non-index candidates get NO row.
 
 NIFTY200 membership is best-effort (E5): download the NSE indices constituents CSV
 (``settings.universe.nifty200_source_url``, [VERIFY Phase-1]) → on failure fall back to the runtime
@@ -63,6 +70,10 @@ EXCL_ESM = "surveillance_esm"
 EXCL_LOW_VALUE = "below_min_traded_value"             # median 20d traded value < threshold
 EXCL_NO_DATA = "no_liquidity_data"                    # no bars_1d history ⇒ liquidity unconfirmable
 EXCL_CAP = "watchlist_cap"                            # eligible, but past the top-N focus cap
+EXCL_INDEX = "not_nifty200"                           # §3.2.4 extended leg (2026-09-01): passes every
+                                                      # criteria rule but is outside the NIFTY200 index —
+                                                      # batch/news/advisory visibility only, never the
+                                                      # tick watchlist or the risk gate
 
 #: Calendar-day lookback that comfortably contains 20 TRADING days (holidays/weekends margin).
 _TRADED_VALUE_LOOKBACK_DAYS = 45
@@ -93,6 +104,10 @@ class Universe(BaseModel):
     median_traded_value: dict[str, Decimal] = Field(default_factory=dict)
     nifty200_source: Nifty200Source = "none"
     degraded: bool = False
+    #: §3.2.4 extended leg (2026-09-01): criteria-passing NON-index symbols (sorted). Persisted as
+    #: included=False rows with exclusion_reasons=['not_nifty200'] — the batch-rule / news-shadow /
+    #: pre-open-advisory set beyond the index, never the tick watchlist and never gate-approvable.
+    extended: tuple[str, ...] = ()
 
 
 def parse_index_constituents_csv(text: str) -> list[str]:
@@ -242,7 +257,47 @@ class UniverseBuilder:
             }
             for symbol in nifty200
         ]
-        await self._store.arun(self._store.upsert_universe_daily, rows)
+
+        # §3.2.4 extended leg (owner-directed 2026-09-01, JINDALSAW/movers review): the SAME criteria
+        # rules over criteria-passing NON-index symbols. Candidates = MIS-margins keys ∩ the NSE
+        # listed-equity master (EQ series — keeps ETFs/SME boards out) − NIFTY200. Only PASSING
+        # symbols get a row (included=False, exclusion_reasons=['not_nifty200'] — the marker every
+        # batch/news reader treats as "outside the index, inside the rules"); failing candidates get
+        # no row at all, unlike NIFTY200 members whose exclusions are the audit trail. An empty
+        # equity master (source + cache both down) builds an empty leg — fail closed, never guess.
+        extended: list[str] = []
+        ext_medians: dict[str, Decimal] = {}
+        if self._settings.data.batch_universe_enabled:
+            candidates = sorted(
+                (set(leverage.leverages) & set(surveillance.equity_master)) - set(nifty200)
+            )
+            screened = [
+                s for s in candidates
+                if leverage.is_mis_eligible(s) and not surveillance.reasons_for(s)
+            ]
+            ext_medians = await self._store.arun(self._median_traded_values, screened, d)
+            passing = [
+                s for s in screened
+                if s in ext_medians and ext_medians[s] >= min_value
+            ]
+            ext_cap = int(self._settings.data.batch_universe_max)
+            extended = sorted(sorted(passing, key=lambda s: (-ext_medians[s], s))[:ext_cap])
+            rows.extend(
+                {
+                    "d": d,
+                    "symbol": symbol,
+                    "included": False,
+                    "mis_candidate": self._instruments.is_fno(symbol),
+                    "exclusion_reasons": [EXCL_INDEX],
+                    "median_traded_value": ext_medians[symbol].quantize(_PAISE),
+                }
+                for symbol in extended
+            )
+
+        # replace, not upsert (2026-09-01 review): stale extended rows from an earlier same-day
+        # build (flag flipped off between retries, or a shrunken candidate set) must never survive —
+        # the store deletes day-d's not_nifty200 rows before persisting this build's truth.
+        await self._store.arun(self._store.replace_universe_daily, d, rows)
 
         degraded = source != "download" or leverage.degraded or bool(surveillance.degraded_sources)
         universe = Universe(
@@ -251,9 +306,12 @@ class UniverseBuilder:
             mis_candidates=mis_candidates,
             eligible=tuple(sorted(eligible)),
             exclusions={s: tuple(r) for s, r in exclusions.items()},
-            median_traded_value={s: v.quantize(_PAISE) for s, v in medians.items()},
+            median_traded_value={
+                s: v.quantize(_PAISE) for s, v in {**medians, **ext_medians}.items()
+            },
             nifty200_source=source,
             degraded=degraded,
+            extended=tuple(extended),
         )
         _log.info(
             "universe_built",
@@ -262,6 +320,7 @@ class UniverseBuilder:
             eligible=len(eligible),
             watchlist=len(watchlist),
             mis_candidates=len(mis_candidates),
+            extended=len(extended),
             source=source,
             degraded=degraded,
         )

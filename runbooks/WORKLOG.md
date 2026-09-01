@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-01 (evening, owner-approved "go ahead") — §3.2.4 batch-universe extended leg + hi52 shadow + proximity features
+
+- **Evidence first (3-agent workflow, movers validation):** all six out-of-universe movers the owner
+  flagged (ENGINERSIN +7.2%, SSWL +14.9%, DYCL +10.1%, CAPLIPOINT +8.1%, WELCORP +6.9%, AEROFLEX
+  +5.4%) printed/approached fresh 52wk/ATH on 09-01, four within ~2-7% of their high at the prior
+  close; the six NIFTY200 movers sat 62-87% of their highs (no breakout shape; four died at the orb
+  strategy-day cap, ITC never fired, RELIANCE forwarded → no_action). bars_1d already full-market
+  (bhavcopy unfiltered) — widening needed no new ingestion.
+- **Shipped:** (1) §3.2.4 extended leg — criteria-passing non-index rows (MIS ∩ EQUITY_L EQ-master ∩
+  not-surveillance ∩ ₹5cr, top 600 by median) persisted included=False/['not_nifty200'] behind
+  data.batch_universe_enabled (rollback = flag off; replace-write clears stale rows on retry);
+  equity master now retained from the same EQUITY_L download (cached, reuse-on-failure).
+  (2) get_batch_universe_symbols view; the 3 inline eligibility-predicate copies centralized into
+  store methods. News resolver + catalyst digest + pre-open breakout advisory → batch view; brk20/ins
+  actionable legs deliberately stay on the eligible view; BOTH cat legs' origination pinned to the
+  eligible set (frozen WO-18 verdict populations + shared catalyst budget stay uncontaminated).
+  (3) `hi52` shadow scanner (8th rule, NO_EDGE at birth): 0.95×52wk-high fresh-cross + vol confirm
+  over the batch universe, prescreen cap 3, Frog-in-the-Pan diagnostics journaled; §6.1 addendum
+  pre-registers the full backtest protocol. (4) prox_52wk_high/prox_20d_high daily features +
+  indicators.rolling_max_high.
+- **Three-lens review before commit caught 5 should-fixes, all fixed:** stale-extended-row rollback
+  gap (→ replace_universe_daily delete-then-insert); hi52 sweep cost/timing on the live path +
+  score-clustering slot competition (→ leg moved AFTER the actionable admit, own second admit call =
+  leftover capacity only, window_open-only); ex_map horizon hardcoded to brk20 (→ max of both);
+  cat shadow-population skew from the news widening (→ origination pinned to eligible).
+- **Validation:** full suite green pre-review (1989) and re-run post-fixes (count in commit); tick
+  watchlist + risk gate verified untouched by two independent mechanisms (included_only + NO_EDGE).
+  Deploys at next boot; first extended build tomorrow 08:30.
+
 ## 2026-09-01 (afternoon, owner-directed follow-up) — origination-liveness alarms + §2.6/§3.2.12 plan addenda
 
 - **Shipped the two alarms the latch incident called for**, on the always-on 60s health pulse

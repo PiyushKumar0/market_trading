@@ -140,6 +140,13 @@ class DataCfg(BaseModel):
     min_median_traded_value_inr: int = 50_000_000
     backfill_daily_years: int = 2
     backfill_minute_years: int = 1
+    # §3.2.4 batch-universe extended leg (2026-09-01, owner-directed after the JINDALSAW/movers
+    # review): criteria-passing NON-index symbols (MIS ∩ EQ-master ∩ not-surveillance ∩ ₹5cr median)
+    # persisted included=False / exclusion_reasons=['not_nifty200'] for BATCH rules, news shadow and
+    # pre-open advisory only — the tick watchlist and the risk gate stay NIFTY200-scoped. The flag
+    # is the rollback: False restores the pre-addendum universe shape exactly.
+    batch_universe_enabled: bool = False
+    batch_universe_max: int = 600                 # top-N extended by median traded value (sanity cap)
 
 
 class RssFeedCfg(BaseModel):

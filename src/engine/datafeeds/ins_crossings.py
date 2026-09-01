@@ -58,7 +58,6 @@ from engine.core.log import get_logger
 from engine.datafeeds.filings_events import insider_net_buy, row_source
 from engine.datafeeds.filings_pit_fresh import BSE_SOURCE
 from engine.marketdata.store import MarketStore
-from engine.universe.builder import EXCL_CAP
 
 _log = get_logger("engine.datafeeds.ins_crossings")
 
@@ -132,12 +131,11 @@ class InsCrossingsJob:
         #     batch rule over the whole eligible universe). A watchlist-cap exclusion is the ONE
         #     exclusion that still leaves a symbol tradeable — it means "not in today's top-N focus
         #     list", not "ineligible" — and cap symbols have no 1m bars, which is precisely why a
-        #     batch rule exists at all.
-        universe = self._store.get_universe_daily(d)
-        eligible = {
-            str(r["symbol"]) for r in universe
-            if r["included"] or list(r["exclusion_reasons"] or []) == [EXCL_CAP]
-        }
+        #     batch rule exists at all. (2026-09-01: predicate centralized in the store method —
+        #     this was an inline duplicate; `ins` deliberately stays on the ELIGIBLE set, NOT the
+        #     batch-universe extended set, because its registered edge was measured on index members
+        #     and its candidates must be gate-approvable.)
+        eligible = set(self._store.get_universe_eligible_symbols(d))
         if not eligible:
             _log.warning("ins_crossings_no_universe", d=d.isoformat())
             return InsCrossingsResult(d=d, ok=False, reason="no universe_daily rows for the run day")

@@ -64,7 +64,6 @@ from engine.intelligence.schemas import DayPlan
 from engine.marketdata.store import MarketStore
 from engine.ops.jobs import AdvisoryOutcome
 from engine.strategy.scanners import brk20
-from engine.universe.builder import EXCL_CAP
 
 _log = get_logger("engine.ops.preopen_planner")
 
@@ -223,19 +222,20 @@ class PreopenPlannerJob:
 
     # ------------------------------------------------------------------ brk20 (§6.1 addendum, 2026-08-04)
     def _breakout_lines(self, d: date) -> list[str]:
-        """Yesterday's 20d-high daily-close breakouts over the FULL ELIGIBLE universe (brk20).
+        """Yesterday's 20d-high daily-close breakouts over the BATCH universe (brk20 rule).
 
         Advisory context only (§5.3: the planner never originates) — the ACTIONABLE candidates are
         admitted by the window-open sweep through the prescreen caps. Full-universe by design:
         watchlist_cap symbols are invisible to the per-bar scanners (the BPCL 2026-08-03 miss),
-        and this section is exactly where the planner learns about them.
+        and this section is exactly where the planner learns about them. 2026-09-01 (§3.2.4
+        extended-leg addendum): widened from the eligible set to the BATCH universe — the morning
+        plan now also surfaces criteria-passing non-index breakouts (the JINDALSAW/WELCORP class);
+        those lines are advisory-only by construction since the gate never approves non-included
+        symbols. Predicate centralized in the store method (was an inline duplicate).
         """
         rows = self._store.get_universe_daily(d)
         included = {r["symbol"] for r in rows if r["included"]}
-        eligible = [
-            r["symbol"] for r in rows
-            if r["included"] or list(r["exclusion_reasons"] or []) == [EXCL_CAP]
-        ]
+        eligible = self._store.get_batch_universe_symbols(d)
         if not eligible:
             return [_UNAVAILABLE]
         yesterday = d - timedelta(days=1)

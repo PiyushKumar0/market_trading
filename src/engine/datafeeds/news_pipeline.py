@@ -503,10 +503,14 @@ class EntityResolver:
         platform-suggests-owner-sets; e.g. "Reliance" pins RELIANCE over the conglomerate-prefix
         ambiguity union the seed produces).
 
-        Universe loads via :meth:`MarketStore.get_universe_eligible_symbols` — the ELIGIBLE
-        universe (rule-passing incl. beyond-cap rows, the brk20/ins batch-rule set), NOT the
-        top-100 focus watchlist; news visibility must not be watchlist-cap-contaminated (the
-        2026-08-04 BPCL lesson, re-found in the news layer 2026-08-18).
+        Universe loads via :meth:`MarketStore.get_batch_universe_symbols` — the BATCH universe
+        (rule-passing incl. beyond-cap AND criteria-passing non-index rows, §3.2.4 extended-leg
+        addendum 2026-09-01), NOT the top-N focus watchlist; news visibility must not be
+        watchlist-cap-contaminated (the 2026-08-04 BPCL lesson, re-found in the news layer
+        2026-08-18) nor index-contaminated (the 2026-08-31 BALRAMCHIN sugar-policy day: a
+        sector_policy catalyst on a criteria-passing non-index symbol was invisible to the whole
+        news layer). `cat`/`cat_reversal` remain fail-closed at the C3 gate, so the widening grows
+        the SHADOW evidence base at zero trading risk.
         """
         if self._store is None:
             raise RuntimeError("EntityResolver.load requires a MarketStore")
@@ -523,7 +527,7 @@ class EntityResolver:
         self.set_theme_map({r["theme"]: list(r["keywords"] or []) for r in self._store.get_theme_map()})
         if d is None and self._clock is not None:
             d = self._clock.today()
-        universe_symbols = self._store.get_universe_eligible_symbols(d) if d is not None else []
+        universe_symbols = self._store.get_batch_universe_symbols(d) if d is not None else []
         self._universe = frozenset(universe_symbols) or None
 
     async def aload(self, d: Any = None) -> None:
@@ -1193,7 +1197,10 @@ class CatalystDigestJob:
             r["theme"]: set(r["symbols"] or [])
             for r in await self._store.arun(self._store.get_theme_map)
         }
-        universe = set(await self._store.arun(self._store.get_universe_eligible_symbols, d))
+        # 2026-09-01 (§3.2.4 extended-leg addendum): the digest grades over the BATCH universe so
+        # catalyst_watchlist/in_universe covers criteria-passing non-index names — shadow-only by
+        # construction (both cat legs are C3-fail-closed; the gate never approves non-included rows).
+        universe = set(await self._store.arun(self._store.get_batch_universe_symbols, d))
 
         sentiment_rows = self._sentiment_rows(clusters, ran_at, sector_symbols, theme_symbols, universe)
         await self._store.arun(self._store.upsert_sentiment_agg, sentiment_rows)

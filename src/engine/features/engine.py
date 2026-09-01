@@ -138,6 +138,8 @@ DAILY_FEATURE_KEYS: tuple[str, ...] = (
     "atr14_1d", "realized_vol_20d",
     "gap_open_pct", "gap_abs_mean_20d",
     "dist_sma20", "dist_sma50", "dist_sma200",
+    # 2026-09-01 origination review: 52wk-high proximity was absent from the vocabulary (JINDALSAW/movers miss).
+    "prox_52wk_high", "prox_20d_high",
     "day_range_pos",
     # volume / liquidity
     "median_traded_value_20d",
@@ -244,6 +246,20 @@ def _dist_sma(closes: list[float], n: int) -> float | None:
         return None
     m = sum(closes[-n:]) / n
     return closes[-1] / m - 1.0 if m > 0.0 else None
+
+
+def _prox_high(closes: list[float], highs: list[float], n: int) -> float | None:
+    """Fractional proximity of the last close to the max high over the last ``min(n, len(highs))``
+    sessions (including today); 1.0 = at the high. Unlike ``_dist_sma`` this never blocks on a
+    lookback exceeding available history — it degrades to whatever window exists (§6.2 stable-schema
+    contract), so it is None only when there is no price history at all (the same early-return case
+    every other price feature shares in ``_price_features``).
+    2026-09-01 origination review: 52wk-high proximity was absent from the vocabulary (JINDALSAW/movers miss).
+    """
+    if not highs:
+        return None
+    peak = max(highs[-n:])
+    return closes[-1] / peak if peak > 0.0 else None
 
 
 def _trend_state(closes: list[float]) -> int | None:
@@ -463,6 +479,7 @@ class FeatureEngine:
         out: dict[str, Any] = dict.fromkeys((
             "ret_1d", "ret_5d", "ret_20d", "atr14_1d", "realized_vol_20d",
             "gap_open_pct", "gap_abs_mean_20d", "dist_sma20", "dist_sma50", "dist_sma200",
+            "prox_52wk_high", "prox_20d_high",
             "day_range_pos", "median_traded_value_20d",
         ))
         if not bars or bars[-1].d != d:
@@ -483,6 +500,9 @@ class FeatureEngine:
         out["dist_sma20"] = _dist_sma(closes, 20)
         out["dist_sma50"] = _dist_sma(closes, 50)
         out["dist_sma200"] = _dist_sma(closes, 200)
+        # 2026-09-01 origination review: 52wk-high proximity was absent from the vocabulary (JINDALSAW/movers miss).
+        out["prox_52wk_high"] = _prox_high(closes, highs, 252)
+        out["prox_20d_high"] = _prox_high(closes, highs, 20)
         rng = highs[-1] - lows[-1]
         out["day_range_pos"] = (closes[-1] - lows[-1]) / rng if rng > 0.0 else 0.5
         if len(bars) >= 20:

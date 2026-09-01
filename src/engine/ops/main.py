@@ -138,8 +138,8 @@ from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
 from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
-from engine.strategy.scanners import brk20, build_enabled_scanners, cat, cat_reversal, ins
-from engine.universe.builder import EXCL_CAP, UniverseBuilder
+from engine.strategy.scanners import brk20, build_enabled_scanners, cat, cat_reversal, hi52, ins
+from engine.universe.builder import UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
 from engine.universe.surveillance import SurveillanceIngest
 
@@ -1376,11 +1376,12 @@ async def run() -> int:
                 batch_in_window = _w[0] <= now <= _w[1]
             except ValueError:
                 batch_in_window = False      # not a trading day ⇒ no window ⇒ nothing originates (R6)
-            uni = store.get_universe_daily(today)
-            eligible = [
-                r["symbol"] for r in uni
-                if r["included"] or list(r["exclusion_reasons"] or []) == [EXCL_CAP]
-            ]
+            # 2026-09-01 refactor: the eligibility predicate lives in ONE place now
+            # (store.get_universe_eligible_symbols) — this was one of three inline duplicates of the
+            # strict reasons==['watchlist_cap'] equality that the batch-universe addendum would have
+            # silently missed. Semantics unchanged: brk20/ins stay on the ELIGIBLE (gate-approvable)
+            # set; only the shadow hi52 leg below scans the wider batch universe.
+            eligible = store.get_universe_eligible_symbols(today)
             histories: dict[str, list[brk20.DailyRow]] = {}
             hist_start = today - timedelta(days=70)   # comfortably ≥ lookback+2 sessions
             yesterday = today - timedelta(days=1)     # completed sessions only, never today's forming bar
@@ -1395,9 +1396,16 @@ async def run() -> int:
                         )
                     ]
             ex_map: dict[str, list[date]] = {}
+            # Horizon = the WIDEST ex_skip_days of every rule that reuses this map (2026-09-01
+            # review: a hardcoded brk20 horizon would silently under-fetch for hi52 if either
+            # default is ever retuned — the veto then sees an empty list and fires anyway).
+            _ex_horizon = max(
+                int(brk20.DEFAULT_PARAMS["ex_skip_days"]),
+                int(hi52.DEFAULT_PARAMS["ex_skip_days"]),
+            )
             for row in store.get_corp_actions(
                 ex_from=today,
-                ex_to=today + timedelta(days=int(brk20.DEFAULT_PARAMS["ex_skip_days"])),
+                ex_to=today + timedelta(days=_ex_horizon),
             ):
                 if row.get("ex_date") is not None:
                     ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
@@ -1447,6 +1455,16 @@ async def run() -> int:
             #     population, not RECOMMEND. An absent/empty digest simply yields no rows (§2.7
             #     fail-safe ladder: cat originates nothing, every other strategy unaffected).
             cat_rows, cat_rev_rows = _read_cat_watchlist(store, today)
+            # 2026-09-01 review (§3.2.4 widening): the news layer now grades the BATCH universe, but
+            # BOTH cat legs' origination stays pinned to the ELIGIBLE (index) set — their WO-18/§2.7
+            # verdict populations and clocks are FROZEN (restarted 2026-08-28, verdict ~mid-Oct), and
+            # an extended-symbol candidate would both skew that population (different cost/liquidity
+            # class) and burn the shared 2/day catalyst budget an index story may need. Extended
+            # symbols' originating-grade rows still journal in catalyst_watchlist (analyzable later);
+            # they just never become cat/cat_reversal candidates inside the frozen window.
+            _eligible_set = set(eligible)
+            cat_rows = [r for r in cat_rows if r.get("symbol") in _eligible_set]
+            cat_rev_rows = [r for r in cat_rev_rows if r.get("symbol") in _eligible_set]
             cat_raw: list = []
             if cat_rows:
                 cat_raw = cat.sweep_watchlist(
@@ -1528,7 +1546,55 @@ async def run() -> int:
                 ),
                 in_window=batch_in_window,
             )
-            return accepted + batch, pendings
+
+            # --- `hi52` SHADOW leg (§3.2.4 extended-leg + §6.1 addendum, owner-directed 2026-09-01
+            #     after the JINDALSAW/movers review): 52-week-high-proximity FRESH-CROSSES over the
+            #     BATCH universe — criteria-passing non-index names included, the WELCORP/DYCL class
+            #     the index-scoped scanners structurally never see. Swing thesis (T+5..T+20, George
+            #     & Hwang drift; intraday capture is cost-refuted). C3 rejects every candidate
+            #     UNCONDITIONALLY (no_edge_shadow_strategies): ADMISSION is the shadow's validation
+            #     population, pending the backtest + §8.6 owner gate. Placement is load-bearing
+            #     (2026-09-01 review, two findings): the leg runs AFTER the actionable admit — its
+            #     ~800-symbol × 400-day history fetch never delays the admission race (the 08-18
+            #     94 ms lesson), and its own SECOND admit call means shadow candidates whose scores
+            #     cluster in [0.95, 1] take LEFTOVER day-cap capacity only, never an actionable
+            #     leg's slot. window_open-only: the signal derives from COMPLETED sessions, so one
+            #     scan per session is its natural cadence and /scan_now stays cheap (a mid-day
+            #     restart re-fires window_open on the next INACTIVE→ACTIVE edge, so coverage holds).
+            hi52_admitted: list = []
+            if trigger == "window_open":
+                hi52_histories: dict[str, list[brk20.DailyRow]] = {}
+                hi52_start = today - timedelta(days=400)   # ≥252 sessions + weekend/holiday margin
+                for sym in store.get_batch_universe_symbols(today):
+                    frame = store.get_bars_1d_frame(sym, hi52_start, yesterday)
+                    if len(frame):
+                        hi52_histories[sym] = [
+                            brk20.DailyRow(
+                                high=float(h), close=float(c), volume=float(v), open=float(o)
+                            )
+                            for h, c, v, o in zip(
+                                frame["high"], frame["close"], frame["volume"], frame["open"],
+                                strict=True,
+                            )
+                        ]
+                hi52_vetoes: dict[str, int] = {}
+                hi52_raw = hi52.sweep_daily(
+                    hi52_histories, today=today, ex_dates_by_symbol=ex_map,
+                    veto_counts=hi52_vetoes,
+                )
+                hi52_admitted = _attach_feature_snapshots(
+                    features,
+                    prescreen.admit(hi52_raw, today, in_window=batch_in_window),
+                )
+                _log.info(
+                    "hi52_sweep", d=today.isoformat(), trigger=trigger,
+                    symbols_scanned=len(hi52_histories),
+                    candidates=len(hi52_raw),
+                    admitted=len(hi52_admitted),
+                    ex_date_vetoes=hi52_vetoes.get(hi52.VETO_EX_DATE_SKIP, 0),
+                )
+
+            return accepted + batch + hi52_admitted, pendings
 
         accepted, pendings = await asyncio.to_thread(_collect_and_scan)
         for cand in accepted:
@@ -2393,7 +2459,13 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: analyst-volunteered ``target_price`` defeats that argument for ``cat`` exactly as it would have
 #: for ``cat_reversal``. Zero ``cat`` recommendations have ever been delivered (queried live), so
 #: this closes a real but not-yet-exploited hole rather than fixing an incident.
-NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset({cat.STRATEGY_ID, cat_reversal.STRATEGY_ID})
+#: 2026-09-01 (§3.2.4/§6.1 addendum): ``hi52`` joins at birth — a 52wk-high-proximity swing shadow
+#: over the BATCH universe with no measured edge until its backtest + §8.6 owner gate. Its shadow
+#: status is doubly load-bearing: beyond the no-edge rule, most of its candidates are non-included
+#: (extended-leg) symbols the gate could never approve anyway.
+NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
+    {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID, hi52.STRATEGY_ID}
+)
 
 #: Strategies whose candidates can carry a ``catalyst_ref`` — the §2.7 news-originated legs. Read at
 #: ONE place: :func:`_hydrate_prescreen`, which uses it to rebuild the

@@ -23,6 +23,7 @@ from engine.features.engine import (
     DAILY_FEATURE_KEYS,
     INTRADAY_FEATURE_KEYS,
     FeatureEngine,
+    _prox_high,
     _trend_state,
 )
 from engine.features.snapshots import (
@@ -233,6 +234,21 @@ def test_trend_state_branches_up_down_flat_and_warmup():
     assert _trend_state([100.0] * 199) is None                      # warm-up: needs 200 sessions
 
 
+def test_prox_high_hand_computed_window_shorter_and_longer_than_data():
+    """2026-09-01 origination review: 52wk/20d-high proximity. Unlike ``_dist_sma`` this degrades
+    gracefully to whatever window is available rather than requiring a FULL ``n``-session lookback."""
+    highs = [100.0, 150.0, 90.0, 130.0, 95.0]
+    closes = [95.0, 140.0, 85.0, 125.0, 90.0]
+    # n=3 (shorter than the 5-bar history): last 3 highs = [90, 130, 95] -> peak 130.
+    assert _prox_high(closes, highs, 3) == pytest.approx(90.0 / 130.0)
+    # n=10 (longer than the available history): degrades to the full 5-bar history -> peak 150.
+    assert _prox_high(closes, highs, 10) == pytest.approx(90.0 / 150.0)
+
+
+def test_prox_high_no_history_is_none():
+    assert _prox_high([], [], 20) is None
+
+
 def test_daily_per_symbol_context_flags(engine, store, seeded):
     engine.daily_snapshot(D)
     by_symbol = _rows_by_symbol(store)
@@ -288,6 +304,61 @@ def test_daily_symbol_without_day_d_bar_gets_none_price_features(engine, store, 
     assert feats["ret_1d"] is None and feats["atr14_1d"] is None and feats["day_range_pos"] is None
     assert feats["sentiment_available"] is False and feats["sentiment_symbol"] == 0
     assert feats["nifty_ret_1d"] is not None                      # market context still present
+    assert feats["prox_52wk_high"] is None and feats["prox_20d_high"] is None
+
+
+# ------------------------------------------- 2026-09-01 origination review: 52wk/20d-high proximity
+def test_prox_high_keys_registered_in_daily_feature_vocabulary():
+    assert "prox_52wk_high" in DAILY_FEATURE_KEYS
+    assert "prox_20d_high" in DAILY_FEATURE_KEYS
+
+
+def test_daily_prox_high_features_respect_window_caps(engine, store):
+    """Exact-value check on a constructed 260-session history: an ancient spike outside BOTH
+    windows must never leak in, and the 252-session and 20-session windows must resolve against
+    DIFFERENT peaks so the test cannot pass on a single shared (unwindowed) max."""
+    days = _weekdays_back(D, 260)                                  # index 0 oldest .. 259 == D
+    highs = [100.0] * 260
+    highs[5] = 999.0     # ancient spike: outside the 252-session window (260-252=8) => excluded
+    highs[50] = 150.0    # the 252-session-window peak: inside [8,259], outside the 20-session window
+    highs[250] = 130.0   # the 20-session-window peak: inside [240,259] AND inside [8,259]
+    bars = []
+    for i, dd in enumerate(days):
+        close = Decimal("90.00") if dd == D else Decimal("95.00")
+        bars.append(DailyBar(
+            symbol="PROXTEST", d=dd, open=Decimal("95.00"),
+            high=Decimal(f"{highs[i]:.2f}"), low=Decimal("80.00"), close=close, volume=10_000,
+        ))
+    store.upsert_bars_1d(bars)
+    store.upsert_universe_daily([{"d": D, "symbol": "PROXTEST", "included": True}])
+
+    engine.daily_snapshot(D)
+    feats = _rows_by_symbol(store)["PROXTEST"]
+    assert feats["prox_52wk_high"] == pytest.approx(90.0 / 150.0)   # peak = idx50 (999 excluded)
+    assert feats["prox_20d_high"] == pytest.approx(90.0 / 130.0)    # peak = idx250 (idx50 outside 20d)
+
+
+def test_daily_prox_high_features_use_partial_window_when_history_is_short(engine, store):
+    """Unlike ``dist_sma20`` (None below a full 20-session window), prox_*_high degrades
+    gracefully: 5 sessions is far short of even the 20-session window, but the feature still
+    resolves against whatever history exists rather than returning None."""
+    days = _weekdays_back(D, 5)
+    highs = [100.0, 100.0, 120.0, 100.0, 110.0]
+    bars = []
+    for i, dd in enumerate(days):
+        close = Decimal("90.00") if dd == D else Decimal("95.00")
+        bars.append(DailyBar(
+            symbol="THIN", d=dd, open=Decimal("95.00"),
+            high=Decimal(f"{highs[i]:.2f}"), low=Decimal("80.00"), close=close, volume=10_000,
+        ))
+    store.upsert_bars_1d(bars)
+    store.upsert_universe_daily([{"d": D, "symbol": "THIN", "included": True}])
+
+    engine.daily_snapshot(D)
+    feats = _rows_by_symbol(store)["THIN"]
+    assert feats["dist_sma20"] is None                                  # too little history for SMA20
+    assert feats["prox_52wk_high"] == pytest.approx(90.0 / 120.0)       # degrades to all 5 sessions
+    assert feats["prox_20d_high"] == pytest.approx(90.0 / 120.0)        # same 5-session window
 
 
 def test_daily_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):

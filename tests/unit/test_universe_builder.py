@@ -353,3 +353,96 @@ async def test_leverage_failure_without_cache_fails_closed(tmp_path, clock):
 
 def failing_transport_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=failing_transport())
+
+
+# ------------------------------------------------- §3.2.4 extended leg (batch universe, 2026-09-01)
+def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master=None):
+    """Builder wired for the extended leg: NIFTY200 from the fixture CSV, plus non-index candidates
+    across every extended rule leg (good / illiquid / surveilled / no-MIS / not-in-master / no-data)."""
+    settings = make_settings(tmp_path, batch_universe_enabled=enabled, batch_universe_max=ext_cap)
+    leverages = {s: 5.0 for s in ALL_SYMBOLS if s != "NOMIS"}
+    leverages.update({"EXTGOOD": 5.0, "EXTLOWVAL": 5.0, "EXTGSM": 5.0,
+                      "EXTETF": 5.0, "EXTNODATA": 5.0, "EXTSECOND": 5.0})
+    if master is None:
+        master = {"EXTGOOD", "EXTLOWVAL", "EXTGSM", "EXTNOMIS", "EXTNODATA", "EXTSECOND"}
+    surveillance = surveillance_lists(
+        gsm={"GSMSTK", "EXTGSM"}, asm={"ASMSTK"}, t2t={"T2TSTK"}, esm={"ESMSTK"},
+        equity_master=frozenset(master),
+    )
+    for sym in ALL_SYMBOLS:
+        if sym == "NODATA":
+            continue
+        if sym == "LOWVAL":
+            seed_daily_bars(store, sym, close="100.00", volume=100)       # keep the fixture's shape
+        else:
+            seed_daily_bars(store, sym, close="200.00", volume=500_000)
+    seed_daily_bars(store, "EXTGOOD", close="300.00", volume=500_000)     # ₹15cr — passes, rank 1
+    seed_daily_bars(store, "EXTSECOND", close="200.00", volume=500_000)   # ₹10cr — passes, rank 2
+    seed_daily_bars(store, "EXTLOWVAL", close="100.00", volume=100)       # ₹10k — fails liquidity
+    seed_daily_bars(store, "EXTGSM", close="200.00", volume=500_000)      # liquid but surveilled
+    return make_builder(settings, store, clock, serving_transport(NIFTY200_CSV),
+                        leverages=leverages, surveillance=surveillance)
+
+
+async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, store, clock):
+    """Only criteria-PASSING non-index candidates get rows — included=False, reasons
+    ['not_nifty200'] (the exact marker every batch reader keys on); failing candidates get NO row,
+    and the eligible view stays index-scoped while the batch view widens."""
+    from engine.marketdata import store as store_mod
+    from engine.universe.builder import EXCL_INDEX
+
+    builder = _extended_setup(tmp_path, store, clock)
+    universe = await builder.build(D)
+
+    assert universe.extended == ("EXTGOOD", "EXTSECOND")
+    assert universe.symbols == ("RELIANCE", "TCS")                  # watchlist untouched
+    rows = {r["symbol"]: r for r in store.get_universe_daily(D)}
+    assert rows["EXTGOOD"]["included"] is False
+    assert rows["EXTGOOD"]["exclusion_reasons"] == [EXCL_INDEX]
+    assert rows["EXTGOOD"]["median_traded_value"] == Decimal("150000000.00")
+    for absent in ("EXTLOWVAL", "EXTGSM", "EXTNOMIS", "EXTETF", "EXTNODATA"):
+        assert absent not in rows                                   # failing candidates: no row at all
+
+    assert "EXTGOOD" not in store.get_universe_eligible_symbols(D)  # eligible = index members only
+    batch = store.get_batch_universe_symbols(D)
+    assert {"EXTGOOD", "EXTSECOND", "RELIANCE", "TCS"} <= set(batch)
+    assert "EXTLOWVAL" not in batch and "GSMSTK" not in batch
+    # The store-side duplicated constant must track the builder constant (import-cycle duplication).
+    assert store_mod._EXCL_INDEX == EXCL_INDEX
+    # included_only view (tick watchlist / risk gate) never sees extended rows.
+    assert all(not r["symbol"].startswith("EXT") for r in store.get_universe_daily(D, included_only=True))
+
+
+async def test_extended_leg_disabled_is_the_exact_rollback(tmp_path, store, clock):
+    """batch_universe_enabled=False restores the pre-addendum shape exactly — INCLUDING a same-day
+    re-build over rows an earlier enabled build already persisted (2026-09-01 review: upserts never
+    delete, so without the replace-write a flag flip mid-day would leave stale not_nifty200 rows
+    feeding the batch view for the rest of the day)."""
+    enabled = _extended_setup(tmp_path, store, clock, enabled=True)
+    first = await enabled.build(D)
+    assert first.extended == ("EXTGOOD", "EXTSECOND")            # the stale rows a retry must clear
+
+    builder = _extended_setup(tmp_path / "again", store, clock, enabled=False)
+    universe = await builder.build(D)
+
+    assert universe.extended == ()
+    assert all(not r["symbol"].startswith("EXT") for r in store.get_universe_daily(D))
+    assert store.get_batch_universe_symbols(D) == store.get_universe_eligible_symbols(D)
+
+
+async def test_extended_leg_cap_and_empty_master_fail_closed(tmp_path, store, clock):
+    """batch_universe_max keeps the top-N by median traded value; an empty equity master (source and
+    cache both gone) builds an empty leg — fail closed, never guess membership."""
+    builder = _extended_setup(tmp_path, store, clock, ext_cap=1)
+    universe = await builder.build(D)
+    assert universe.extended == ("EXTGOOD",)                        # ₹15cr outranks ₹10cr
+
+    store2_path = tmp_path / "m2.duckdb"
+    from engine.marketdata.store import MarketStore as _MS
+    store2 = _MS(store2_path, tmp_path / "p2", clock).open()
+    try:
+        builder2 = _extended_setup(tmp_path / "b2", store2, clock, master=set())
+        universe2 = await builder2.build(D)
+        assert universe2.extended == ()
+    finally:
+        store2.close()

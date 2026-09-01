@@ -80,6 +80,12 @@ class SurveillanceLists(BaseModel):
     sms: frozenset[str] = Field(default_factory=frozenset)
     degraded_sources: tuple[str, ...] = ()
     unconfirmed_symbols: frozenset[str] = Field(default_factory=frozenset)
+    #: EQ-series rows of the same EQUITY_L.csv the T2T parse reads — the NSE listed-EQUITY master
+    #: (companies only; ETFs/SME series are absent). The §3.2.4 batch-universe extended leg
+    #: (2026-09-01) intersects candidates with this set to keep ETFs/SME boards out. Informational —
+    #: never part of ``flagged()``/``reasons_for``. Empty when the source AND cache are both
+    #: unavailable (the extended leg then builds nothing — fail closed).
+    equity_master: frozenset[str] = Field(default_factory=frozenset)
 
     def flagged(self) -> frozenset[str]:
         """Union of the four universe-rule lists (GSM/ASM/T2T/ESM — not SMS, §3.2.4)."""
@@ -120,20 +126,30 @@ def _symbols_from_json(payload: Any) -> set[str]:
     return found
 
 
-def _t2t_from_csv(text: str) -> set[str]:
-    """T2T symbols = securities-master rows whose SERIES is BE/BZ (defensive column lookup)."""
+def _parse_equity_master(text: str) -> tuple[set[str], set[str]]:
+    """One pass over EQUITY_L.csv → ``(t2t_symbols, eq_master)`` (defensive column lookup).
+
+    T2T = rows whose SERIES is BE/BZ (the §3.2.4 exclusion input, unchanged). ``eq_master`` = rows
+    whose SERIES is EQ — the listed-equity master the batch-universe extended leg intersects with
+    (2026-09-01): ETFs and SME-board series never appear in it, so it doubles as the
+    keep-companies-only filter without a second download."""
     reader = csv.DictReader(io.StringIO(text))
     norm = {(name or "").strip().lower(): name for name in (reader.fieldnames or [])}
     sym_col, series_col = norm.get("symbol"), norm.get("series")
     if sym_col is None or series_col is None:
         raise ValueError(f"EQUITY_L.csv missing SYMBOL/SERIES columns: {reader.fieldnames}")
-    out: set[str] = set()
+    t2t: set[str] = set()
+    master: set[str] = set()
     for row in reader:
         series = (row.get(series_col) or "").strip().upper()
         symbol = (row.get(sym_col) or "").strip().upper()
-        if symbol and series in _T2T_SERIES:
-            out.add(symbol)
-    return out
+        if not symbol:
+            continue
+        if series in _T2T_SERIES:
+            t2t.add(symbol)
+        elif series == "EQ":
+            master.add(symbol)
+    return t2t, master
 
 
 class SurveillanceIngest:
@@ -185,6 +201,7 @@ class SurveillanceIngest:
         results: dict[str, frozenset[str]] = {}
         degraded: list[str] = []
         unconfirmed: set[str] = set()
+        equity_master: frozenset[str] = frozenset()
 
         for key, coro in (
             ("gsm", self._fetch_json_symbols(NSE_GSM_URL)),
@@ -193,7 +210,17 @@ class SurveillanceIngest:
             ("esm", self._fetch_json_symbols(NSE_ESM_URL)),
         ):
             try:
-                symbols = await coro
+                if key == "t2t":
+                    # One EQUITY_L.csv download serves both the T2T exclusion list and the
+                    # listed-equity master (batch-universe extended leg, 2026-09-01) — see
+                    # _parse_equity_master. The master rides the same cache entry so a failed
+                    # download reuses yesterday's master exactly like it reuses yesterday's list.
+                    symbols, master = await coro
+                    equity_master = frozenset(master)
+                    cache["equity_master"] = {"as_of": today.isoformat(),
+                                              "symbols": sorted(equity_master)}
+                else:
+                    symbols = await coro
                 results[key] = frozenset(symbols)
                 cache[key] = {"as_of": today.isoformat(), "symbols": sorted(symbols)}
             except Exception as exc:  # noqa: BLE001 - E5: per-source degrade, never raise
@@ -207,6 +234,8 @@ class SurveillanceIngest:
                 results[key] = previous
                 degraded.append(key)
                 unconfirmed |= previous
+                if key == "t2t":
+                    equity_master = frozenset(cache.get("equity_master", {}).get("symbols") or [])
 
         self._save_cache(cache)
         lists = SurveillanceLists(
@@ -218,12 +247,13 @@ class SurveillanceIngest:
             # sms retired (source removed by NSE 2026-07-28) — pinned empty, see the note at the top.
             degraded_sources=tuple(degraded),
             unconfirmed_symbols=frozenset(unconfirmed),
+            equity_master=equity_master,
         )
         self._current = lists
         _log.info(
             "surveillance_refreshed",
             gsm=len(lists.gsm), asm=len(lists.asm), t2t=len(lists.t2t), esm=len(lists.esm),
-            sms=len(lists.sms), degraded=degraded,
+            sms=len(lists.sms), equity_master=len(lists.equity_master), degraded=degraded,
         )
         if degraded:
             await self._alert(degraded=degraded, unconfirmed=len(unconfirmed))
@@ -235,10 +265,11 @@ class SurveillanceIngest:
         resp = await nse_get(self._http, url, timeout=self._timeout)
         return _symbols_from_json(json.loads(resp.content))
 
-    async def _fetch_t2t(self) -> set[str]:
+    async def _fetch_t2t(self) -> tuple[set[str], set[str]]:
         # nsearchives host: browser headers + retry, no priming (no cookie gate on archives, A4).
+        # Returns (t2t_symbols, eq_master) from one EQUITY_L.csv pass — see _parse_equity_master.
         resp = await nse_get(self._http, NSE_T2T_URL, timeout=self._timeout)
-        return _t2t_from_csv(resp.text)
+        return _parse_equity_master(resp.text)
 
     # ------------------------------------------------------------------ cache (reuse-yesterday, E5)
     def _load_cache(self) -> dict[str, dict[str, Any]]:
