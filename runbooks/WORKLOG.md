@@ -20,9 +20,17 @@
 - **Validation:** all new tests written red-first; health file 27 passed; full suite green
   (count in commit). Wiring probe reads prescreen_day_slots + `governor.prescreen_forward_cap()`
   on the shared conn (same-loop discipline verified by the review's safety lens).
-- **Deploy:** rides the next engine boot (no mid-session restart needed — the alarms are
-  monitoring, not trading-path). IMPLEMENTATION_PLAN updated: §2.6 step-5 freeze-latch-symmetry +
-  origination-liveness addendum; §3.2.12 HealthMonitor summary block.
+- **Deploy (owner-directed "do it now", executed just past close):** restart request landed at
+  15:29:05 IST — inside the close minute, one of the flagged dangerous moments — so held to
+  15:32:30, then clean stop 15:32:53 (2s, only news polling in flight) → start 15:33 on e9e1376.
+  **Boot verified 15:34:** `startup_complete` mode=RECOMMEND frozen=[] needs_login=false,
+  crash_recovered=false (clean stop properly recorded this time); `catch_up_complete` clean → the
+  e462c1b clear branch ran as the designed idempotent no-op (`risk_cause_cleared
+  catchup_safety_jobs was_active=false`, resolved NORMAL); health pulse beating on the new build
+  (STOPPED during boot → HEALTHY, problems=[]) with ZERO `origination_watch_failed` events —
+  `_check_origination` runs clean every pulse, correctly inert out-of-session. First armed
+  evaluation window: tomorrow 09:15 IST. IMPLEMENTATION_PLAN updated: §2.6 step-5
+  freeze-latch-symmetry + origination-liveness addendum; §3.2.12 HealthMonitor summary block.
 
 ## 2026-09-01 (mid-session hotfix, owner-directed) — catchup_safety_jobs freeze latch: 2 sessions of silent zero-origination
 
