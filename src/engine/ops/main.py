@@ -1339,7 +1339,8 @@ async def run() -> int:
             # news chain / digest / planner / compaction run that failed after arming is swept here
             # exactly like any other missed job. Single-flight makes a sweep landing on top of a
             # still-running pass a logged no-op rather than a double replay.
-            await catch_up.catch_up(scope=CatchUpScope.ALL)
+            result = await catch_up.catch_up(scope=CatchUpScope.ALL)
+            await _reconcile_catchup_freeze(result, latch, kill)
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
 
@@ -2036,6 +2037,26 @@ def _arm_live_jobs(
 
 
 # --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)
+async def _reconcile_catchup_freeze(result: CatchUpResult, latch, kill) -> None:
+    """``catchup_safety_jobs`` symmetry on the SWEEP path (2026-09-02 review: the 09-01 fix cleared
+    only at boot, so a boot-latched freeze survived a mid-session recovery until the next reboot).
+
+    Same rule as lifecycle step 5: a pass with safety-critical failures latches, a CLEAN pass — the
+    re-verification of exactly this cause's predicate — clears. A ``skipped_in_flight`` pass
+    verified nothing and leaves the latch alone; so does a killed engine. The clear fires only when
+    the cause is actually ACTIVE — ``clear_cause`` is idempotent but logs every call, and an
+    unconditional clear would add ~48 no-op WARNING lines a day (review, minor)."""
+    if result.skipped_in_flight or kill.is_killed():
+        return
+    if result.frozen_reasons:
+        await latch.set_cause(
+            "catchup_safety_jobs", RiskState.FROZEN,
+            ",".join(result.frozen_reasons), Actor.RISK_GATE,
+        )
+    elif any(c == "catchup_safety_jobs" for c, _s, _d in latch.active_causes()):
+        await latch.clear_cause("catchup_safety_jobs", Actor.RISK_GATE)
+
+
 async def refresh_warmup_snapshot(warmup_gate, warmup_holder: dict):
     """Refresh the gate's warm-up snapshot ONLY — no latch mutation, no lift, no repair.
 

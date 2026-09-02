@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-02 (late evening, owner-directed) — /code-review fixes applied: 7 surgical, refactors deferred
+
+- **Review pipeline:** 8 finders → 29 candidates → 29 adversarial verifiers → 22 confirmed,
+  6 refuted, 1 re-corrected by the manager (the corp-action refutation holds for Kite-adjusted
+  watchlist history only — the 600 extended names are bhavcopy-raw with no self-heal; hi52's
+  proximity window inherits phantom highs once they reach min_sessions ~mid-Jan 2027, and the
+  archive-backfill plan inherits the same exposure. DEFERRED with that horizon).
+- **Fixed (each test-pinned unless noted):** (1) learning-ledger corruption — take() now un-expires
+  outcome_label/closed_at so an expired→taken→closed trade records its real outcome (was
+  permanently 'no_action'); (2) hi52 STRATEGY_CONTRACTS entry (the same-commit rule violation —
+  IDFCFIRSTB was evaluated under the generic frame); (3) catchup_safety_jobs set/clear symmetry on
+  the 30-min sweep path, extracted to a tested helper, clear fires only on an ACTIVE latch (no
+  no-op WARNING churn) — completes the 09-01 boot-only fix; (4) five pre-WO-26a store wrappers
+  to_thread→_off + a source-level pin that no shared-executor call site remains; (5) funnel_zero
+  alarm quiet on a deliberate cap=0 (known cap authoritative; only cap=None falls back to the
+  zero-forwarded shape); (6) bar-builder placeholders can no longer evict real cached ranges (the
+  WO-25a cache survives stale-minute late-tick bursts); (7) _shadow_catalyst NaN comment corrected
+  (the old text was backwards and would have misled a refactor).
+- **Post-fix single-lens review:** no blockers; its two items (untested closure branching, no-op
+  clear churn) drove the helper extraction in (3). Notably it REFUTED my own framing: the sweep
+  path already froze mid-session via per-job data_freshness causes — (3) adds only the symmetric
+  aggregate, no behavior expansion.
+- **Deferred per the owner's no-over-engineering directive (recorded, not lost):** proximity-math
+  consolidation (+ dead rolling_max_high), shared backoff helper, generic column-migration helper,
+  dashboard polling hook, batch-leg scanner interface, bulk bars_1d fetches (hi52 sweep + builder
+  medians), event-study stats sharing, Telegram subject resolver + split-retry dedup, hydrate
+  catalyst-ref undercount (needs a journal schema change), inert hold_sessions knob.
+- Full suite green (count in commit). Deploys at next boot.
+
 ## 2026-09-02 (evening, owner-directed) — orb slot allocation: score de-saturation + cap release schedule
 
 - **Owner question ("why not JSWENERGY/KALYANKJIL/VMM/IDEA/OIL today") forensics:** all five are

@@ -665,3 +665,28 @@ async def test_lag_watchdog_without_a_notify_sink_is_log_only(store, mclock, now
         now.set(at(10, 5, 0))
         await bb.on_tick_event(tick("R", at(10, 2, 0), "100.00", 1000))
     assert len(late_events(caplog, "tick_processing_lagging")) == 1
+
+
+def test_a_stale_minute_placeholder_never_evicts_a_real_cached_bar(store, mclock, now):
+    """2026-09-02 review (CONFIRMED): ranged=False placeholders shared the 5-entry LRU with real
+    finalized bars, so a reconnect replaying 5+ distinct stale minutes wiped the whole WO-25a cache
+    and put every current-minute tick back on the store path. A placeholder is only remembered when
+    it does not displace a real range."""
+    spy = _SpyStore(store)
+    bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
+    minutes = range(15, 15 + RECENT_BARS_PER_SYMBOL + 2)
+    for i, m in enumerate(minutes):
+        feed(bb, now, tick("R", at(9, m, 10), f"{100 + i}.00", 1000 * (i + 1)))
+    newest = 15 + RECENT_BARS_PER_SYMBOL
+    now.set(at(9, newest, 30))
+
+    # A burst of late ticks for RECENT_BARS_PER_SYMBOL distinct ANCIENT minutes (all long evicted).
+    for j in range(RECENT_BARS_PER_SYMBOL):
+        bb.on_tick(tick("R", at(9, 15 + j, 20), "100.00", 90_000 + j))
+
+    # The real cached ranges survived: the newest minute's in-range late tick is still FREE.
+    spy.calls.clear()
+    bb.on_tick(tick("R", at(9, newest, 20), f"{100 + RECENT_BARS_PER_SYMBOL}.00", 99_500))
+    assert spy.calls == []
+    # And no placeholder displaced a real entry: every remembered bar still carries a real range.
+    assert all(b.ranged for b in bb._recent["R"].values())

@@ -414,3 +414,17 @@ async def test_the_abandoned_count_drops_once_the_stuck_probe_finally_answers(ca
     finally:
         store.gate.set()
         await drain_all(mon)
+
+
+def test_no_shared_executor_dispatch_remains_in_store_py():
+    """2026-09-02 review: five pre-WO-26a filings wrappers were missed by the to_thread->_off
+    migration, silently re-opening the shared-executor starvation path. Pin the invariant the
+    WO-26a docstrings claim ("never asyncio.to_thread") at the source level."""
+    from pathlib import Path
+
+    import engine.marketdata.store as store_mod
+
+    source = Path(store_mod.__file__).read_text(encoding="utf-8")
+    # Call sites only — the WO-26a docstrings legitimately NAME asyncio.to_thread while explaining
+    # why it must never be used here.
+    assert "asyncio.to_thread(" not in source

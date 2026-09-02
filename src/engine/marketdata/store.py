@@ -2122,18 +2122,20 @@ class MarketStore:
         return await self._off(self.get_catalyst_watchlist, d, grade=grade)
 
     # --- §2.8 corporate-filings async offloads (the jobs upsert under store.arun; these are the
-    #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop) ---
+    #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop).
+    #     2026-09-02 review: these five predate WO-26a and were missed by its to_thread→_off
+    #     migration — the last shared-executor path into the store, now closed. ---
     async def alatest_insider_broadcast(self) -> datetime | None:
-        return await asyncio.to_thread(self.latest_insider_broadcast)
+        return await self._off(self.latest_insider_broadcast)
 
     async def alatest_shp_broadcast(self) -> datetime | None:
-        return await asyncio.to_thread(self.latest_shp_broadcast)
+        return await self._off(self.latest_shp_broadcast)
 
     async def alatest_results_broadcast(self) -> datetime | None:
-        return await asyncio.to_thread(self.latest_results_broadcast)
+        return await self._off(self.latest_results_broadcast)
 
     async def asymbol_isin_map(self) -> dict[str, dict[str, Any]]:
-        return await asyncio.to_thread(self.symbol_isin_map)
+        return await self._off(self.symbol_isin_map)
 
     async def abse_scrip_symbol_map(self) -> dict[str, str]:
-        return await asyncio.to_thread(self.bse_scrip_symbol_map)
+        return await self._off(self.bse_scrip_symbol_map)

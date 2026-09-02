@@ -115,7 +115,12 @@ def build_candidate(
         score = 0.0 if materiality is None else min(1.0, max(0.0, float(materiality)))
     except (ValueError, TypeError):
         score = 0.0
-    if score != score:                      # NaN — the one float that survives min/max unchanged
+    if score != score:
+        # NaN belt: with THIS argument order, max(0.0, nan) happens to return 0.0 (CPython keeps
+        # the first arg when comparisons are False), so this check is currently unreachable — but
+        # max(nan, 0.0) would return nan, so the guard is what survives an innocent argument swap
+        # (2026-09-02 review: the previous comment claimed NaN always passes min/max, which is
+        # exactly backwards for this ordering and would mislead a refactor).
         score = 0.0
 
     return SignalCandidate(

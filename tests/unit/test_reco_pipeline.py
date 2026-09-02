@@ -2305,3 +2305,32 @@ async def test_a_front_entry_kept_in_the_queue_is_not_re_armed(
     # The front entry is kept, so it keeps its slot too; the ordinary one leaves and gives its back.
     assert [p.candidate.symbol for p in pipeline._pending_forwards] == ["SHRIRAMFIN"]
     assert rearmed == [("POLICYBZR", "orb")]
+
+
+async def test_expired_then_taken_then_closed_records_the_real_outcome(
+    conn, ticker, pclock, book, cost_model
+):
+    """2026-09-02 review (CONFIRMED): expire_stale stamps outcome_label='no_action', and close()'s
+    completion UPDATE matches `outcome_label IS NULL` only - so before the fix an expired->taken->
+    closed trade kept the no_action label forever and its real P&L never reached the ledger.
+    take() must un-expire the ledger row (outcome_label/closed_at back to NULL)."""
+    from datetime import timedelta as _td
+
+    rec = make_rec(cost_model)
+    book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    assert book.expire_stale(NOW + _td(days=1)) == 1
+    row = conn.execute("SELECT outcome_label FROM learning_ledger WHERE rec_id=?", (rec.rec_id,)).fetchone()
+    assert row["outcome_label"] == "no_action"                # the expiry stamp the fix must undo
+
+    await book.take(rec.rec_id, 10, Decimal("100.00"))
+    row = conn.execute(
+        "SELECT outcome_label, closed_at FROM learning_ledger WHERE rec_id=?", (rec.rec_id,)
+    ).fetchone()
+    assert row["outcome_label"] is None and row["closed_at"] is None   # un-expired
+
+    await book.close(rec.rec_id, Decimal("103.50"))
+    row = conn.execute(
+        "SELECT outcome_label, net_pnl FROM learning_ledger WHERE rec_id=?", (rec.rec_id,)
+    ).fetchone()
+    assert row["outcome_label"] == "win"                      # the real outcome, not no_action
+    assert row["net_pnl"] is not None

@@ -343,7 +343,10 @@ class HealthMonitor:
         # Same day, forward count static. A stall needs BOTH new work beyond the baseline AND
         # remaining capacity — a day whose §5.6 forward cap is spent goes quiet by design, and an
         # unreadable cap (None) narrows eligibility to the unambiguous zero-forwarded shape.
-        capacity_left = forwarded == 0 or (cap is not None and forwarded < cap)
+        # cap=None (unreadable) ⇒ only the unambiguous zero-forwarded shape is eligible; a KNOWN cap
+        # is authoritative even at 0 (2026-09-02 review: a deliberate cap=0 full pause used to page
+        # via the forwarded==0 short-circuit — a spent-or-zero cap is quiet by design).
+        capacity_left = (cap is None and forwarded == 0) or (cap is not None and forwarded < cap)
         if published > self._funnel_baseline[0] and capacity_left:
             if self._funnel_zero_since is None:
                 self._funnel_zero_since = now

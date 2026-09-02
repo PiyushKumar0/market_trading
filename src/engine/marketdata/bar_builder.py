@@ -514,10 +514,24 @@ class BarBuilder:
         """Get-or-create the per-symbol OrderedDict, insert/overwrite ``bar`` at ``minute``, move it to
         the MRU end, then evict from the LRU end past :data:`RECENT_BARS_PER_SYMBOL` (WO-25a). Shared
         by :meth:`_finalize` (a real finalized range) and :meth:`_handle_late_tick` (a ``ranged=False``
-        placeholder for a minute we no longer remember)."""
+        placeholder for a minute we no longer remember).
+
+        A placeholder never evicts a REAL range (2026-09-02 review): a reconnect replaying 5+
+        distinct stale minutes used to wipe the whole cache with ``ranged=False`` entries, putting
+        every current-minute tick back on the store path — the exact WO-25a death-spiral pattern,
+        during the lag episode when the store is busiest. A full-of-real-bars cache simply skips
+        remembering the placeholder; that stale minute keeps asking the store, which is what
+        ``ranged=False`` meant anyway (bounded: late ticks for unremembered minutes are rare)."""
         recent = self._recent.get(symbol)
         if recent is None:
             recent = self._recent[symbol] = OrderedDict()
+        if (
+            not bar.ranged
+            and minute not in recent
+            and len(recent) >= RECENT_BARS_PER_SYMBOL
+            and next(iter(recent.values())).ranged
+        ):
+            return
         recent[minute] = bar
         recent.move_to_end(minute)
         while len(recent) > RECENT_BARS_PER_SYMBOL:
@@ -568,9 +582,13 @@ class BarBuilder:
         if known is None:
             # A minute we no longer remember: keep a placeholder so the log-dedup budget still applies
             # (and gets evicted normally), but leave ``ranged`` False — its true range is unknown, so
-            # every later tick for it must keep asking the store.
-            self._remember(symbol, minute, _RecentBar(high=Decimal(0), low=Decimal(0), ranged=False))
-            known = self._recent[symbol][minute]
+            # every later tick for it must keep asking the store. _remember may SKIP the insert when
+            # the cache is full of real ranges (2026-09-02 review — a placeholder never evicts a real
+            # bar); the local instance then still feeds _note_late, costing only per-tick log dedup
+            # for a minute that could not be cached anyway.
+            placeholder = _RecentBar(high=Decimal(0), low=Decimal(0), ranged=False)
+            self._remember(symbol, minute, placeholder)
+            known = self._recent[symbol].get(minute, placeholder)
         elif known.ranged and outcome in (AMEND_APPLIED, AMEND_IN_RANGE):
             # The store accepted this print into the row's range; widen memory to match so the next
             # tick at this price is answered without a round-trip.

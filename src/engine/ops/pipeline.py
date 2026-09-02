@@ -421,8 +421,13 @@ class RecommendationBook:
                 "UPDATE recommendations SET human_action='taken', human_fill_price=? WHERE rec_id=?",
                 (str(price), rec_id),
             )
+            # outcome_label/closed_at reset to NULL (2026-09-02 review): an expired→taken rec has
+            # already been stamped 'no_action' by expire_stale, and close()'s completion UPDATE
+            # matches `outcome_label IS NULL` only — without the reset the real trade's outcome is
+            # permanently mislabeled a non-event. On a never-expired rec both are already NULL.
             self._conn.execute(
-                "UPDATE learning_ledger SET entry_px=?, qty=?, position_id=? WHERE rec_id=?",
+                "UPDATE learning_ledger SET entry_px=?, qty=?, position_id=?, "
+                "outcome_label=NULL, closed_at=NULL WHERE rec_id=?",
                 (str(price), int(qty), position_id, rec_id),
             )
         _log.warning("recommendation_taken", rec_id=rec_id, position_id=position_id, qty=qty,

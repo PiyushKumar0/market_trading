@@ -1637,3 +1637,62 @@ def test_watchlist_eligible_pin_filters_real_row_tuples() -> None:
     rev_row = cat_reversal.WatchlistRow(**rev_fields)
     assert _watchlist_rows_for_symbols([rev_row], {"HINDZINC"}) == [rev_row]
     assert _watchlist_rows_for_symbols([rev_row], {"RELIANCE"}) == []
+
+
+async def test_reconcile_catchup_freeze_branching() -> None:
+    """2026-09-02 review: the sweep-path catchup_safety_jobs symmetry, extracted testable. Failures
+    latch; a clean pass clears ONLY an active latch (no no-op clear churn); a skipped single-flight
+    pass and a killed engine leave the latch alone."""
+    from engine.core.enums import Actor, RiskState
+    from engine.ops.jobs import CatchUpResult
+    from engine.ops.main import _reconcile_catchup_freeze
+
+    class FakeLatch:
+        def __init__(self, active=()):
+            self.active = list(active)
+            self.calls: list[tuple] = []
+
+        def active_causes(self):
+            return [(c, RiskState.FROZEN, "d") for c in self.active]
+
+        async def set_cause(self, cause, state, detail, who):
+            self.calls.append(("set", cause, detail))
+
+        async def clear_cause(self, cause, who):
+            self.calls.append(("clear", cause))
+
+    class FakeKill:
+        def __init__(self, killed=False):
+            self._killed = killed
+
+        def is_killed(self):
+            return self._killed
+
+    # Safety-critical failure -> latch.
+    latch = FakeLatch()
+    await _reconcile_catchup_freeze(
+        CatchUpResult(frozen_reasons=["data_freshness:instruments"]), latch, FakeKill()
+    )
+    assert latch.calls == [("set", "catchup_safety_jobs", "data_freshness:instruments")]
+
+    # Clean pass with the cause ACTIVE -> clear.
+    latch = FakeLatch(active=["catchup_safety_jobs"])
+    await _reconcile_catchup_freeze(CatchUpResult(), latch, FakeKill())
+    assert latch.calls == [("clear", "catchup_safety_jobs")]
+
+    # Clean pass, cause NOT active -> no calls at all (no 48-a-day no-op WARNING churn).
+    latch = FakeLatch()
+    await _reconcile_catchup_freeze(CatchUpResult(), latch, FakeKill())
+    assert latch.calls == []
+
+    # Skipped single-flight pass verified nothing -> untouched, even with the cause active.
+    latch = FakeLatch(active=["catchup_safety_jobs"])
+    await _reconcile_catchup_freeze(CatchUpResult(skipped_in_flight=True), latch, FakeKill())
+    assert latch.calls == []
+
+    # Killed engine -> untouched in both directions.
+    latch = FakeLatch(active=["catchup_safety_jobs"])
+    await _reconcile_catchup_freeze(
+        CatchUpResult(frozen_reasons=["x"]), latch, FakeKill(killed=True)
+    )
+    assert latch.calls == []

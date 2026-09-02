@@ -85,9 +85,16 @@ entry anchor: entry is the prior session's close — a stale-by-design pre-open 
 evidence status: exploratory, SHADOW — no validated edge; measuring one is the entire point. Pre-registered horizons T+5/T+10.
 gate note (2026-08-27): cat_reversal is registered as a no-edge SHADOW strategy, so the deterministic gate rejects EVERY proposal at the C3 cost check whatever target it carries. Your evaluation is recorded as validation evidence and cannot become a recommendation. Judge it honestly on its merits anyway — a thesis written to flatter a rule that cannot trade only corrupts the study."""
 
+_HI52 = """class: swing (CNC), long-only, 52-week-high-proximity fresh-cross over the BATCH universe (criteria-passing non-index names included). Exit is TIME (the §7.1 max-holding path, 20 trading sessions); the 6% stop is a DISASTER stop, not the exit. target=None BY DESIGN — never decline solely for a missing target, and never invent one (see the gate note).
+design: a pure EOD-batch rule off COMPLETED daily sessions (brk20's shape) — the entry reference is the trigger session's own close, a stale-by-design anchor for a next-open-style fill; entry below the live price does NOT mean 'bidding into weakness'. Judge breakout validity on the DAILY series (fresh cross into the proximity band, volume confirmation, the multi-week approach); intraday microstructure is context only. Thesis: the George & Hwang 52wk-high drift is a weeks-to-months phenomenon — intraday capture is cost-refuted in this book.
+evidence status: exploratory, SHADOW — backtest on the deep-history population is promising (T+20 CPCV-promotable) but the extended-name population is untested; measuring it is the entire point.
+gate note (2026-09-01): hi52 is registered as a no-edge SHADOW strategy, so the deterministic gate rejects EVERY proposal at the C3 cost check whatever target it carries — and most hi52 symbols are additionally outside the gate-approvable watchlist. Your evaluation is recorded as validation evidence and cannot become a recommendation. Judge it honestly on its merits anyway — a thesis written to flatter a rule that cannot trade only corrupts the study."""
+
 #: ``strategy_id`` -> the contract rendered into that candidate's context block. The keys are exactly
 #: the §6.1 deterministic legs; a new leg MUST land here in the same commit that ships it, or its
 #: candidates reach the analyst with :data:`UNKNOWN_CONTRACT` and a warning in the log.
+#: (That rule was violated once: hi52 shipped 2026-09-01 without its entry and IDFCFIRSTB was
+#: evaluated under the generic frame — caught by the 2026-09-02 review.)
 STRATEGY_CONTRACTS: dict[str, str] = {
     "ins": _INS,
     "rsi2": _RSI2,
@@ -97,6 +104,7 @@ STRATEGY_CONTRACTS: dict[str, str] = {
     "brk20": _BRK20,
     "cat": _CAT,
     "cat_reversal": _CAT_REVERSAL,
+    "hi52": _HI52,
 }
 
 

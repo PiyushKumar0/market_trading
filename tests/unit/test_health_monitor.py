@@ -489,3 +489,17 @@ async def test_origination_watch_failures_never_break_the_pulse():
     report = await plain.check(check_skew=False)
     assert "entries_frozen_in_session" not in report.problems
     assert "funnel_zero_in_session" not in report.problems
+
+
+async def test_funnel_quiet_when_forward_cap_is_deliberately_zero():
+    """2026-09-02 review: a KNOWN cap of 0 (deliberate full pause on analyst spend) is spent from
+    minute one and must stay quiet - only cap=None (unreadable) falls back to the zero-forwarded
+    shape."""
+    from datetime import timedelta
+
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=lambda: (5, 0, 0))
+    for _ in range(130):
+        ticker.at = ticker.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+        assert "funnel_zero_in_session" not in report.problems
+    assert alerts == []
