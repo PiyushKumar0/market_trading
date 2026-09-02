@@ -286,6 +286,12 @@ strategy:
                                  # crosses over the BATCH universe. Fresh-cross-only keeps natural
                                  # flow to a handful/day; 3 caps analyst spend on a cluster day.
                                  # Shadow: C3 rejects all — admission = validation population only.
+    cap_release_schedule:        # Owner-directed 2026-09-02 (3rd straight session of window-open cap
+      orb:                       # lockout: 08-27 KALYANKJIL 1.0@12:49, 09-01 PERSISTENT/HCLTECH/INFY,
+        "10:00": 3               # 09-02 IDEA/VMM/OIL all 1.0, all refused). Cumulative tranches by
+        "11:30": 5               # IST bar time; effective cap = min(max_per_strategy_day, tranche).
+        "13:00": 7               # Paired with the same-day orb score de-saturation so displacement
+                                 # discriminates WITHIN a tranche. Absent/removed = flat caps (rollback).
     # How much better a later candidate must score to take a full cap's admission slot from an
     # unevaluated incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
     # same reason as max_per_strategy_day above: it decides which candidates get evaluated at all].

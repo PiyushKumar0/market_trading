@@ -1069,3 +1069,165 @@ def test_hydrate_restores_the_catalyst_budget_across_a_restart():
         == ["TITAN"]
     # ...and the third is refused, exactly as it would have been without the restart.
     assert ps.admit([_scored("LT", 0.5, "cat", catalyst_ref="r3")], day) == []
+
+
+# ------------------------------------------ cap release schedule (owner-directed 2026-09-02)
+# Three days running (08-27 KALYANKJIL 1.0@12:49; 09-01 PERSISTENT et al.; 09-02 IDEA/VMM/OIL 1.0),
+# the orb sub-cap was fully spent within the window-open burst and later, better fires were locked
+# out. The schedule releases the cap in cumulative tranches by IST bar time, so afternoon capacity
+# is guaranteed; scores (de-saturated the same day) + displacement then allocate WITHIN a tranche.
+def _sched_prescreen(**kw):
+    defaults = dict(
+        scanners=[],
+        context_provider=lambda bar: None,
+        max_candidates_per_day=48,
+        max_per_strategy_day={"orb": 7},
+        cap_release_schedule={"orb": {"10:00": 3, "11:30": 5, "13:00": 7}},
+    )
+    defaults.update(kw)
+    return SignalPreScreen(**defaults)
+
+
+def _orb_cand(symbol: str, score: float = 0.6):
+    from engine.strategy.types import RawLevels, SignalCandidate
+    return SignalCandidate(
+        signal_id=f"sig-orb-{symbol}", strategy_id="orb", symbol=symbol, side="BUY",
+        style="intraday",
+        raw_levels=RawLevels(entry=Decimal("103.00"), stop=Decimal("100.00")), score=score,
+    )
+
+
+def _at(hh: int, mm: int):
+    from datetime import datetime
+    from engine.core.clock import IST
+    return datetime(2026, 9, 3, hh, mm, tzinfo=IST)
+
+
+def test_cap_schedule_releases_cumulative_tranches() -> None:
+    """Before 11:30 only the first tranche (3) admits; a bar at 11:30 opens tranche 2 (5); 13:00
+    opens the full cap (7). The suppression at a full tranche logs the EFFECTIVE cap."""
+    from datetime import date as _date
+
+    ps = _sched_prescreen()
+    day = _date(2026, 9, 3)
+    with ps._lock:
+        ps._roll_day_locked(day)
+        for i in range(3):
+            assert ps._admit_one_locked(_orb_cand(f"AAA{i}"), at=_at(10, 5)) is True
+        assert ps._admit_one_locked(_orb_cand("BBB"), at=_at(10, 6)) is False   # tranche 1 full
+        assert ps._admit_one_locked(_orb_cand("CCC"), at=_at(11, 30)) is True   # tranche 2 opens
+        assert ps._admit_one_locked(_orb_cand("DDD"), at=_at(12, 0)) is True
+        assert ps._admit_one_locked(_orb_cand("EEE"), at=_at(12, 1)) is False   # tranche 2 full
+        assert ps._admit_one_locked(_orb_cand("FFF"), at=_at(13, 0)) is True    # full cap
+        assert ps._admit_one_locked(_orb_cand("GGG"), at=_at(14, 0)) is True
+        assert ps._admit_one_locked(_orb_cand("HHH"), at=_at(14, 1)) is False   # 7 = flat cap
+
+
+def test_cap_schedule_unscheduled_paths_use_flat_cap() -> None:
+    """No `at` (the batch admit path) and strategies without a schedule line use the flat cap
+    exactly as before — the schedule is purely additive."""
+    from datetime import date as _date
+
+    ps = _sched_prescreen(max_per_strategy_day={"orb": 7, "brk20": 2})
+    day = _date(2026, 9, 3)
+    with ps._lock:
+        ps._roll_day_locked(day)
+        for i in range(7):                                     # at=None -> flat cap 7
+            assert ps._admit_one_locked(_orb_cand(f"AAA{i}")) is True
+        assert ps._admit_one_locked(_orb_cand("BBB")) is False
+        for i in range(2):                                     # brk20 has no schedule line
+            assert ps._admit_one_locked(_ext_cand(f"KKK{i}"), at=_at(10, 5)) is True
+        assert ps._admit_one_locked(_ext_cand("KKK9"), at=_at(10, 5)) is False
+
+
+def test_cap_schedule_is_capped_by_the_flat_cap_and_validated() -> None:
+    """The schedule can never RAISE the flat cap (effective = min(flat, scheduled)); a
+    non-monotone or malformed schedule is a constructor error, not a silent behavior."""
+    import pytest as _pytest
+    from datetime import date as _date
+
+    ps = _sched_prescreen(
+        max_per_strategy_day={"orb": 4},
+        cap_release_schedule={"orb": {"10:00": 3, "11:30": 9}},   # 9 > flat 4 -> min() binds at 4
+    )
+    day = _date(2026, 9, 3)
+    with ps._lock:
+        ps._roll_day_locked(day)
+        for i in range(3):
+            assert ps._admit_one_locked(_orb_cand(f"AAA{i}"), at=_at(10, 5)) is True
+        assert ps._admit_one_locked(_orb_cand("BBB"), at=_at(10, 6)) is False
+        assert ps._admit_one_locked(_orb_cand("CCC"), at=_at(11, 31)) is True
+        assert ps._admit_one_locked(_orb_cand("DDD"), at=_at(11, 32)) is False  # min(4, 9) = 4
+
+    with _pytest.raises(ValueError):
+        _sched_prescreen(cap_release_schedule={"orb": {"10:00": 5, "11:30": 3}})  # decreasing
+    with _pytest.raises(ValueError):
+        _sched_prescreen(cap_release_schedule={"orb": {"nonsense": 3}})
+    with _pytest.raises(ValueError):
+        _sched_prescreen(cap_release_schedule={"orb": {"10:00": 0}})
+
+
+def test_cap_schedule_before_first_release_uses_first_tranche() -> None:
+    """A bar EARLIER than the first schedule entry admits under the first tranche's value — the
+    schedule keys mark release times, and pre-open/early candidates get the opening allocation."""
+    from datetime import date as _date
+
+    ps = _sched_prescreen()
+    day = _date(2026, 9, 3)
+    with ps._lock:
+        ps._roll_day_locked(day)
+        for i in range(3):
+            assert ps._admit_one_locked(_orb_cand(f"AAA{i}"), at=_at(9, 50)) is True
+        assert ps._admit_one_locked(_orb_cand("BBB"), at=_at(9, 51)) is False
+
+
+def test_cap_schedule_tranche_boundary_uses_entry_time_convention() -> None:
+    """2026-09-02 review: the tranche instant is ENTRY time (ts_minute + 1m, the file-wide boundary
+    convention) - an 11:29-close bar enters AT 11:30 and gets the 11:30 tranche."""
+    from datetime import date as _date
+
+    ps = _sched_prescreen()
+    day = _date(2026, 9, 3)
+    with ps._lock:
+        ps._roll_day_locked(day)
+        for i in range(3):
+            assert ps._admit_one_locked(_orb_cand(f"AAA{i}"), at=_at(10, 5)) is True
+        assert ps._admit_one_locked(_orb_cand("BBB"), at=_at(11, 28)) is False  # entry 11:29 - tranche 1
+        assert ps._admit_one_locked(_orb_cand("CCC"), at=_at(11, 29)) is True   # entry 11:30 - tranche 2
+
+
+def test_cap_schedule_bounds_the_displacement_budget_per_tranche() -> None:
+    """2026-09-02 review (blocking): the displacement budget derives from the RELEASED tranche, not
+    the flat cap - a busy early tranche can no longer burn the whole day's displacement allowance
+    and void the afternoon's contested-seat guarantee."""
+    from datetime import date as _date
+
+    ps = _sched_prescreen(
+        max_per_strategy_day={"orb": 4},
+        cap_release_schedule={"orb": {"10:00": 2, "13:00": 4}},
+    )
+    day = _date(2026, 9, 3)
+    with ps._lock:
+        ps._roll_day_locked(day)
+        assert ps._admit_one_locked(_orb_cand("AAA", 0.40), at=_at(10, 5)) is True
+        assert ps._admit_one_locked(_orb_cand("BBB", 0.45), at=_at(10, 6)) is True   # tranche 1 full
+        # Churn within tranche 1: budget = released tranche (2), NOT the flat cap (4).
+        assert ps._admit_one_locked(_orb_cand("CC1", 0.56), at=_at(10, 10)) is True  # displaces 0.40
+        assert ps._admit_one_locked(_orb_cand("CC2", 0.67), at=_at(10, 11)) is True  # displaces 0.45
+        assert ps._displacements.get("orb") == 2
+        assert ps._admit_one_locked(_orb_cand("CC3", 0.90), at=_at(10, 12)) is False  # budget spent
+        # 13:00 tranche opens: direct capacity (count 2 < 4) admits without displacement, and the
+        # budget headroom returns (budget 4 > used 2) for genuine afternoon churn.
+        assert ps._admit_one_locked(_orb_cand("DDD", 0.30), at=_at(13, 1)) is True
+        assert ps._admit_one_locked(_orb_cand("EEE", 0.31), at=_at(13, 2)) is True
+        assert ps._admit_one_locked(_orb_cand("FFF", 0.55), at=_at(13, 3)) is True   # displaces 0.30
+        assert ps._displacements.get("orb") == 3
+
+
+def test_cap_schedule_duplicate_release_times_are_a_loud_error() -> None:
+    """2026-09-02 review: "09:00" and "9:00" parse to one instant - a silent last-writer-wins on an
+    owner-typed YAML block must be a constructor error instead."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        _sched_prescreen(cap_release_schedule={"orb": {"09:00": 3, "9:00": 5}})

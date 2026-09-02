@@ -338,6 +338,11 @@ class PrescreenCfg(BaseModel):
     #: Publication/forward admission ORDER: "ranked" = by score (prescreen) and per-strategy score
     #: quantile (analyst forwarding); "arrival" = the pre-WO-1 order — the rollback flag, nothing else.
     admission_mode: str = "ranked"
+    #: Cumulative per-strategy sub-cap tranches by IST time-of-day (owner-directed 2026-09-02, after
+    #: three straight sessions of window-open cap lockout): {strategy: {"HH:MM": cumulative_cap}}.
+    #: Effective cap = min(max_per_strategy_day, released tranche); absent = flat caps (rollback).
+    #: Owner knob, never learner-movable (§6.3) — it decides which candidates get evaluated at all.
+    cap_release_schedule: dict[str, dict[str, int]] | None = None
     #: WHEN the analyst forward queue is drained (2026-08-14): "paced" = one slot per
     #: ``FORWARD_PACING_MIN`` minutes on a scheduler pulse, so candidates accumulate and the ranking
     #: above has a population to rank; "immediate" = the pre-2026-08-14 inline drain — rollback only.

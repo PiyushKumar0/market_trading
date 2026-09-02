@@ -1,5 +1,32 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-02 (evening, owner-directed) — orb slot allocation: score de-saturation + cap release schedule
+
+- **Owner question ("why not JSWENERGY/KALYANKJIL/VMM/IDEA/OIL today") forensics:** all five are
+  NIFTY200, all FIRED orb, all refused at the strategy-day cap — spent entirely in the window-open
+  burst (10:50:07), three at score 1.0 (IDEA 36 suppressions, VMM 27, OIL 8). Third straight session
+  of the same signature (08-27 KALYANKJIL, 09-01 PERSISTENT/HCLTECH/INFY). External validation:
+  none of the five was a clean orb/brk20/hi52 shape (rating-filing drifts, spike-fades, macro
+  creep) — the misses were defensible, the ALLOCATION was not.
+- **Root cause:** orb score = min(1, vol_ratio/3) clamps most post-range bars to a 1.0 tie, so
+  WO-1 ranking + 08-27 displacement had nothing to discriminate with, and first-fire-wins spent the
+  cap in minute one.
+- **Shipped (deploys next boot):** (i) orb score → vol_ratio/(vol_ratio+3) — monotone squash, 1/3
+  at threshold, asymptote 1 never reached, no ties (ranking heuristic, no edge claim, not
+  learnable); (ii) `cap_release_schedule` (owner knob): orb 3@10:00 / 5@11:30 / 7@13:00 cumulative
+  tranches keyed to the candidate's ENTRY time (ts+1m, the file convention) — effective cap =
+  min(flat, tranche), schedule can only hold capacity back, batch admit stays flat, §9.6
+  Clock-free. Deliberately NOT raised: the orb cap (24 straight analyst declines of the class).
+- **Two-lens review caught 1 blocking + 2 should-fix + 3 accepted-documented, all resolved:**
+  displacement budget was flat-cap-derived (a busy tranche-1 could burn the day's churn allowance —
+  now tranche-aware, test-pinned); tranche boundary used bar-close not entry time (fixed);
+  duplicate "9:00"/"09:00" keys silently collapsed (now a loud error). Accepted + documented:
+  ≥(1−margin)-score incumbents are undisplaceable (rare ≥27× volume prints, was MOST fires before);
+  muhurat sessions open past the last release get the flat cap (45-min session can't stagger);
+  nightly-review score medians will step down across the deploy boundary (formula rescale, not a
+  quality regression — this line is the marker).
+- Full suite green (count in commit). Plan: slot-allocation addendum added before WO-20.
+
 ## 2026-09-02 (12:35, engine running mid-session, NOT restarted) — decision log printed position ULIDs for the owner's exits
 
 - **Reported (owner, screenshot):** the dashboard's Decision log showed `01M0ZKFMN1T15X3JZMKCDYQDW4`

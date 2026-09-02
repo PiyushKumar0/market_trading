@@ -67,11 +67,38 @@ Determinism (§9.6) is analysed in :meth:`_displacement_scan_locked`; the short 
 pure bar-stream replay is byte-identical, and the live coupling is the pre-existing
 ``hydrate``/``rearm`` carve-out, not a new one.
 
-LIMIT, stated because it bounds how much this fix can do: ``orb``'s score SATURATES — scanners clamp
-to [0, 1] and a large share of live ``orb`` fires land at exactly 1.0. Against seven incumbents all
-at 1.0, nothing displaces anything, which is the right answer (there is no basis to prefer the later
-one) but not a satisfying one. The saturation itself, with the measured count, is flagged as
-undiagnosed in ``config/settings.yaml``'s ``max_per_strategy_day`` comment and is a separate problem.
+LIMIT — RESOLVED 2026-09-02: ``orb``'s score used to SATURATE (a large share of live fires at
+exactly 1.0), so against seven incumbents all at 1.0 nothing displaced anything and this fix was
+bounded by it — observed again live on 09-01 (PERSISTENT/HCLTECH/INFY at 1.0 refused) and 09-02
+(IDEA/VMM/OIL at 1.0 refused). Two owner-directed changes the same day close it: the orb score is
+now a saturation-free squash (``scanners/orb.py`` — scores discriminate, so the margin means
+something), and the cap-release schedule below stops the window-open burst from spending the whole
+day's sub-cap in its first minute.
+
+Cap release schedule (owner-directed 2026-09-02)
+------------------------------------------------
+``cap_release_schedule`` (constructor / ``strategy.prescreen`` config) lists CUMULATIVE per-strategy
+sub-cap tranches by IST time-of-day, e.g. ``orb: {"10:00": 3, "11:30": 5, "13:00": 7}``: at most 3
+orb pairs may charge before 11:30, 5 before 13:00, 7 after — so midday/afternoon fires are
+guaranteed a contested seat instead of racing a burst that is over by the window's first minute
+(the third recurrence of the 2026-08-27 lockout, three sessions running, was the trigger). The
+effective cap is ``min(max_per_strategy_day, released tranche)`` — a schedule can only ever HOLD
+BACK capacity, never add any, so every spam bound and displacement budget derived from the flat cap
+is untouched. The release time is the candidate's BAR time (``_scan`` threads ``bar.ts_minute``
+through; the batch :meth:`admit` path carries no bar and keeps flat caps), never a Clock — §9.6
+replay determinism holds by construction. Unscheduled strategies and an absent config are byte-for-
+byte the prior behaviour; tranche values must be non-decreasing (a shrinking tranche would demand
+the cap decrement path the spam bound forbids). The tranche instant is the candidate's ENTRY time
+(``ts_minute + 1m`` — the file-wide boundary convention), and the per-strategy displacement budget
+derives from the RELEASED tranche, not the flat cap (both 2026-09-02 review findings).
+
+Known, accepted limits of the pair of fixes (2026-09-02 review, documented rather than redesigned):
+an incumbent scoring ≥ (1 − margin) — under orb's squash, a ≥27×-median-volume print — can never be
+displaced, because no arrival on a sub-1.0 scale can clear an absolute margin above it; that band
+held MOST live fires under the old clamp and now holds only genuinely extraordinary ones, which
+arguably deserve their seat. And on a special session whose window opens after the last release
+time (muhurat ~13:45), the schedule is inert and the full flat cap applies from the first bar — a
+45-minute session cannot be meaningfully staggered.
 
 Determinism (§9.6): the pre-screen takes NO Clock — "today" is ``bar.ts_minute.date()``, so a replay
 of the same bar stream reproduces the same dedupe/cap decisions byte-for-byte (modulo the minted
@@ -119,7 +146,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, NamedTuple
 
 from pydantic import BaseModel
@@ -277,6 +304,7 @@ class SignalPreScreen:
         catalyst_cap_fn: Callable[[], int] | None = None,
         raw_counts_loader: Callable[[date], Mapping[str, int]] | None = None,
         displacement_margin: float | None = DEFAULT_DISPLACEMENT_MARGIN,
+        cap_release_schedule: Mapping[str, Mapping[str, int]] | None = None,
     ) -> None:
         if max_candidates_per_day < 1:
             raise ValueError("max_candidates_per_day must be >= 1")
@@ -299,6 +327,10 @@ class SignalPreScreen:
         self._displacement_margin = (
             None if displacement_margin is None else float(displacement_margin)
         )
+        #: Cumulative per-strategy cap tranches by IST bar time-of-day (owner-directed 2026-09-02,
+        #: after three consecutive sessions of window-open cap lockout — see the schedule section of
+        #: the module docstring). ``{}`` = no schedule anywhere = flat caps, the exact prior shape.
+        self._cap_schedule = self._parse_cap_schedule(cap_release_schedule)
         # Per-day state (reset on bar-date change). Lock: handle_bar offloads to worker threads.
         self._lock = threading.Lock()
         self._day: date | None = None
@@ -388,9 +420,70 @@ class SignalPreScreen:
             raise ValueError("max_per_strategy_day must be >= 1 (or None)")
         return cap, {}
 
-    def _cap_for(self, strategy_id: str) -> int | None:
-        """The publication sub-cap binding ``strategy_id`` — its own line, else ``default``."""
-        return self._strategy_caps.get(strategy_id, self._max_strategy_day)
+    @staticmethod
+    def _parse_cap_schedule(
+        spec: Mapping[str, Mapping[str, int]] | None,
+    ) -> dict[str, list[tuple[time, int]]]:
+        """Normalise ``cap_release_schedule`` into per-strategy (release_time, cumulative_cap)
+        lists, sorted by time. Malformed input is a constructor error, never a silent behaviour:
+        times must parse ``HH:MM``, values must be >= 1 and NON-DECREASING with time (a shrinking
+        tranche would demand a decrement path the spam bound forbids)."""
+        out: dict[str, list[tuple[time, int]]] = {}
+        for strategy_id, entries in (spec or {}).items():
+            parsed: list[tuple[time, int]] = []
+            for key, value in entries.items():
+                try:
+                    hh, mm = str(key).split(":")
+                    release = time(int(hh), int(mm))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"cap_release_schedule[{strategy_id!r}]: bad time key {key!r} (want HH:MM)"
+                    ) from exc
+                cap = int(value)
+                if cap < 1:
+                    raise ValueError(
+                        f"cap_release_schedule[{strategy_id!r}][{key!r}] must be >= 1, got {cap}"
+                    )
+                parsed.append((release, cap))
+            parsed.sort()
+            if len({t for t, _ in parsed}) != len(parsed):
+                # Two distinct string keys parsing to one instant ("09:00"/"9:00") would silently
+                # keep only the later-sorted entry (2026-09-02 review) — a config typo must be loud.
+                raise ValueError(
+                    f"cap_release_schedule[{strategy_id!r}] has duplicate release times"
+                )
+            for (_, lo), (_, hi) in zip(parsed, parsed[1:]):
+                if hi < lo:
+                    raise ValueError(
+                        f"cap_release_schedule[{strategy_id!r}] must be non-decreasing over time"
+                    )
+            if parsed:
+                out[str(strategy_id)] = parsed
+        return out
+
+    def _cap_for(self, strategy_id: str, at: datetime | None = None) -> int | None:
+        """The publication sub-cap binding ``strategy_id`` — its own line, else ``default``.
+
+        With a ``cap_release_schedule`` line AND a bar-derived ``at`` (2026-09-02): the effective
+        cap is ``min(flat cap, cumulative tranche at at.time())`` — a candidate earlier than the
+        first release competes for the first tranche. ``at=None`` (the batch :meth:`admit` path,
+        which carries no bar) and unscheduled strategies keep the flat cap exactly as before; the
+        schedule can only ever HOLD BACK capacity, never add any. ``at`` is bar time, never a
+        Clock — §9.6 replay determinism is preserved by construction."""
+        flat = self._strategy_caps.get(strategy_id, self._max_strategy_day)
+        schedule = self._cap_schedule.get(strategy_id)
+        if schedule is None or at is None:
+            return flat
+        released = schedule[0][1]                       # pre-first-release ⇒ the opening tranche
+        # ENTRY time, not bar-close time (2026-09-02 review): this file's own convention for every
+        # time boundary is entry_dt = ts_minute + 1m — "the moment an entry off this bar could be
+        # placed" (bar_in_trade_window, OrbScanner.scan). An 11:29-close bar enters AT 11:30 and
+        # gets the 11:30 tranche.
+        bar_tod = (at + timedelta(minutes=1)).time()    # naive IST clock time (bars are IST-aware)
+        for release, cap in schedule:
+            if release <= bar_tod:
+                released = cap
+        return released if flat is None else min(flat, released)
 
     def _catalyst_cap(self) -> int | None:
         """``catalyst_guard.max_catalyst_entries_day``, or ``None`` meaning REFUSE (§2.7/§2.4).
@@ -702,7 +795,8 @@ class SignalPreScreen:
         return sorted(cands, key=lambda c: -float(c.score))
 
     def _displacement_scan_locked(
-        self, cand: SignalCandidate, batch_floor: int | None = None
+        self, cand: SignalCandidate, batch_floor: int | None = None,
+        at: datetime | None = None,
     ) -> _DisplacementScan:
         """The pair ``cand`` may evict to take a full cap's slot (or ``None``), and the diagnostic
         count of displaceable incumbents — from ONE pass over ``_admitted`` (2026-08-27).
@@ -770,8 +864,12 @@ class SignalPreScreen:
             return _DisplacementScan(None, None)
         strategy_id = cand.strategy_id
         # Both derived budgets bind (module docstring, point 2). The per-strategy one is absent under
-        # a capless construction, where the day-level one is the whole bound.
-        budget = self._cap_for(strategy_id)
+        # a capless construction, where the day-level one is the whole bound. TRANCHE-AWARE
+        # (2026-09-02 review, blocking): the budget derives from the same effective cap the
+        # admission check uses — a flat budget here let a busy early tranche burn the whole day's
+        # displacement allowance, voiding the schedule's contested-seat guarantee for the afternoon
+        # (the lockout this change exists to fix, relocated into the budget).
+        budget = self._cap_for(strategy_id, at)
         selecting = self._day_displacements < self._max_day and not (
             budget is not None and self._displacements.get(strategy_id, 0) >= budget
         )
@@ -794,7 +892,9 @@ class SignalPreScreen:
                 best = (incumbent_bp, seq, pair)
         return _DisplacementScan(None if best is None else best[2], displaceable)
 
-    def _commit_displacement_locked(self, victim: tuple[str, str], cand: SignalCandidate) -> None:
+    def _commit_displacement_locked(
+        self, victim: tuple[str, str], cand: SignalCandidate, at: datetime | None = None
+    ) -> None:
         """Evict ``victim`` and hand its charge back to the caps so ``cand`` can take it.
 
         The SWAP that keeps the spam bound (module docstring, point 2): ``_count_day`` and
@@ -826,14 +926,17 @@ class SignalPreScreen:
             displaced_symbol=victim[0], displaced_score=score, displaced_seq=seq,
             margin=self._displacement_margin,
             displacements_used=self._displacements[strategy_id],
-            displacement_budget=self._cap_for(strategy_id),
+            # Tranche-aware, matching the suppression log's field (2026-09-02 review: the two log
+            # sites reported flat vs tranche values under one field name).
+            displacement_budget=self._cap_for(strategy_id, at),
             day_displacements_used=self._day_displacements,
             day_displacement_budget=self._max_day,
             reason="cap full; this candidate scores materially better than an unevaluated incumbent",
         )
 
     def _admit_batch_locked(
-        self, cands: Sequence[SignalCandidate], *, in_window: bool = True
+        self, cands: Sequence[SignalCandidate], *, in_window: bool = True,
+        at: datetime | None = None,
     ) -> list[SignalCandidate]:
         """Count the batch as raw, rank it, and run each candidate through the accept spine.
 
@@ -856,11 +959,12 @@ class SignalPreScreen:
         batch_floor = self._admit_seq
         return [
             c for c in self._rank(cands)
-            if self._admit_one_locked(c, in_window=in_window, batch_floor=batch_floor)
+            if self._admit_one_locked(c, in_window=in_window, batch_floor=batch_floor, at=at)
         ]
 
     def _admit_one_locked(
-        self, cand: SignalCandidate, *, in_window: bool = True, batch_floor: int | None = None
+        self, cand: SignalCandidate, *, in_window: bool = True, batch_floor: int | None = None,
+        at: datetime | None = None,
     ) -> bool:
         """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): window, dedupe, caps,
         telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
@@ -895,7 +999,7 @@ class SignalPreScreen:
         # its already-paid quota; only a NEW pair can be suppressed by a full cap.
         charged = key in self._charged
         per_strategy = self._count_by_strategy.get(cand.strategy_id, 0)
-        strategy_cap = self._cap_for(cand.strategy_id)
+        strategy_cap = self._cap_for(cand.strategy_id, at)
         # A binding cap is no longer the end of the conversation (2026-08-27, module docstring). If
         # this strategy is holding a slot on a candidate NOBODY HAS LOOKED AT that scores materially
         # worse, the slot moves. Selection only — nothing is evicted until every remaining bound
@@ -905,7 +1009,7 @@ class SignalPreScreen:
         cap_binding = not charged and (day_full or strategy_full)
         # One walk of `_admitted` yields both the eviction decision and the refusal diagnostic below.
         victim, displaceable = (
-            self._displacement_scan_locked(cand, batch_floor)
+            self._displacement_scan_locked(cand, batch_floor, at)
             if cap_binding else _DisplacementScan(None, 0)
         )
         if not charged and victim is None and day_full:
@@ -968,7 +1072,7 @@ class SignalPreScreen:
         # Every bound has now said yes, so the eviction is safe to commit: the counters it frees are
         # re-charged three lines down, and the cap is never over-subscribed in between.
         if victim is not None:
-            self._commit_displacement_locked(victim, cand)
+            self._commit_displacement_locked(victim, cand, at)
         self._seen.add(key)
         if not charged:
             self._charged.add(key)
@@ -1013,5 +1117,7 @@ class SignalPreScreen:
             for scanner in self._scanners:
                 produced.extend(scanner.scan(bar, ctx))
             return self._admit_batch_locked(
-                produced, in_window=bar_in_trade_window(bar, ctx.trade_window)
+                produced, in_window=bar_in_trade_window(bar, ctx.trade_window),
+                # Bar time, never a Clock (§9.6) — drives the cap-release schedule (2026-09-02).
+                at=bar.ts_minute,
             )

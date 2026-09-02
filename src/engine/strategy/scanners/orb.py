@@ -32,8 +32,16 @@ Documented choices where the sketch is silent:
 * **Both directions are emitted** (BUY above the range, SELL below): the sketch says "beyond range".
   Whether SELL (MIS short) candidates are tradeable is downstream policy (§1.4.9 shorts gate / risk
   gate) — the baseline records both for §6.1 attribution.
-* **Score** = ``min(1, volume_ratio / (2 × vol_mult))`` — 0.5 exactly at the volume threshold, 1.0
-  at twice the threshold. Informational only (§3.2.5).
+* **Score** = ``vol_ratio / (vol_ratio + 2 × vol_mult)`` — a saturating-free squash (owner-directed
+  2026-09-02): 1/3 exactly at the volume threshold, 1/2 at twice it, asymptote 1 never reached. The
+  previous ``min(1, vol_ratio / (2 × vol_mult))`` clamped at 1.0 from 2×-threshold volume upward,
+  which most post-range bars clear — so on 2026-08-27/09-01/09-02 a large share of live fires tied
+  at exactly 1.0, the WO-1 ranking and the 2026-08-27 displacement margin had nothing to
+  discriminate with, and the window-open burst kept the whole day's sub-cap regardless of quality
+  (three sessions of ``prescreen_cap_suppressed`` on later score-1.0 fires). Scores have been
+  ranking-RELEVANT since WO-1 (admission order + displacement), not merely informational; this is a
+  RANKING heuristic within the strategy, monotone in the one quality signal orb's own rule uses —
+  it claims no edge and is not a learnable parameter.
 """
 
 from __future__ import annotations
@@ -150,7 +158,8 @@ class OrbScanner(Scanner):
                 entry=bar.close,
                 stop=stop,
                 target=target,
-                score=vol_ratio / (2.0 * p["vol_mult"]),
+                # Saturation-free squash (2026-09-02, module docstring): 1/3 at threshold, →1 never.
+                score=vol_ratio / (vol_ratio + 2.0 * p["vol_mult"]),
             )
         ]
 

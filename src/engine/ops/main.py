@@ -722,6 +722,9 @@ async def run() -> int:
         max_candidates_per_day=settings.strategy.prescreen.max_candidates_per_day,
         max_per_strategy_day=settings.strategy.prescreen.max_per_strategy_day,
         admission_mode=settings.strategy.prescreen.admission_mode,       # WO-1 rollback flag
+        # 2026-09-02: cumulative cap tranches by bar time — the window-open burst can no longer
+        # spend a whole sub-cap in its first minute (see the prescreen module docstring).
+        cap_release_schedule=settings.strategy.prescreen.cap_release_schedule,
         # §2.7 news carve-out (WO-18): the per-day catalyst-entry cap, read at the ENFORCEMENT site
         # from the hash-verified limits.yaml (§2.4 item 1) — never a constructor number, never in the
         # gate. A raise here (unverifiable store) refuses cat candidates; the pre-screen handles it.

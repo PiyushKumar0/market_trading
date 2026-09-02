@@ -110,7 +110,8 @@ def test_orb_buy_breakout_hand_computed_levels():
     #   stop   = 102.05 − 2.55 = 99.50            → round_to_tick 99.50
     #   target = 102.05 + 1.5 × 2.55 = 105.875    → round_to_tick 105.90
     #            (105.875 / 0.05 = 2117.5 steps, ROUND_HALF_UP → 2118 → 2118 × 0.05 = 105.90)
-    # score = 1.5 / (2 × 1.5) = 0.5.
+    # score = 1.5 / (1.5 + 2 × 1.5) = 1/3 — the 2026-09-02 saturation-free squash (1/3 exactly at
+    # the volume threshold; the old min(1, ratio/3) clamped most live fires to a 1.0 tie).
     trigger = _buy_trigger(_dt(9, 35))
     ctx = _orb_ctx(_orb_session(trigger), features_snapshot_id="fs-001")
     out = _orb().scan(trigger, ctx)
@@ -123,7 +124,7 @@ def test_orb_buy_breakout_hand_computed_levels():
     assert c.raw_levels.entry == Decimal("102.05")
     assert c.raw_levels.stop == Decimal("99.50")
     assert c.raw_levels.target == Decimal("105.90")
-    assert c.score == pytest.approx(0.5)
+    assert c.score == pytest.approx(1.0 / 3.0)
     assert c.features_snapshot_id == "fs-001"
     assert c.catalyst_ref is None            # price baseline — never a catalyst link (§3.2.5)
     assert len(c.signal_id) == 26            # ULID (§3.2 convention 6)
@@ -505,3 +506,19 @@ def test_rsi2_pending_silent_when_live_or_regime_off():
     assert Rsi2Scanner().pending(_swing_bar("194.50"), live_ctx) == []     # already oversold: live
     flat = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=FLAT_INDEX)
     assert Rsi2Scanner().pending(_swing_bar("199.00"), flat) == []         # index regime filter off
+
+
+def test_orb_score_never_saturates_and_stays_monotone():
+    """2026-09-02 de-saturation: heavier volume must always score strictly higher, and 1.0 is an
+    asymptote never reached - the three-session lockout (08-27/09-01/09-02) happened because most
+    live fires tied at a clamped 1.0 and neither ranking nor displacement could discriminate."""
+    scores = []
+    for mult in (1.0, 2.0, 4.0, 10.0, 40.0):
+        vol = int(1000 * 1.5 * mult)                     # median is 1000 ⇒ vol_ratio = 1.5 × mult
+        trigger = _buy_trigger(_dt(9, 35), volume=vol)
+        out = _orb().scan(trigger, _orb_ctx(_orb_session(trigger)))
+        assert len(out) == 1
+        scores.append(out[0].score)
+    assert scores == sorted(scores)                      # strictly monotone in volume
+    assert len(set(scores)) == len(scores)               # no ties anywhere on the curve
+    assert scores[-1] < 1.0                              # 60x-median volume still is not "1.0"
