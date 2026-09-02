@@ -1463,8 +1463,8 @@ async def run() -> int:
             # symbols' originating-grade rows still journal in catalyst_watchlist (analyzable later);
             # they just never become cat/cat_reversal candidates inside the frozen window.
             _eligible_set = set(eligible)
-            cat_rows = [r for r in cat_rows if r.get("symbol") in _eligible_set]
-            cat_rev_rows = [r for r in cat_rev_rows if r.get("symbol") in _eligible_set]
+            cat_rows = _watchlist_rows_for_symbols(cat_rows, _eligible_set)
+            cat_rev_rows = _watchlist_rows_for_symbols(cat_rev_rows, _eligible_set)
             cat_raw: list = []
             if cat_rows:
                 cat_raw = cat.sweep_watchlist(
@@ -2474,6 +2474,16 @@ NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
 #: set — a strategy id must not be what decides whether the news guard applies — so a leg missing
 #: from here still faces the cap while it runs; it only loses budget continuity over a boot.
 CATALYST_STRATEGY_IDS: frozenset[str] = frozenset({cat.STRATEGY_ID, cat_reversal.STRATEGY_ID})
+
+
+def _watchlist_rows_for_symbols(rows: list, symbols: set[str]) -> list:
+    """Watchlist rows (cat/cat_reversal ``WatchlistRow`` NamedTuples) whose ``symbol`` is in
+    ``symbols`` — the §3.2.4 eligible-pin filter (2026-09-01 review). ATTRIBUTE access, never
+    ``.get``: the 2026-09-02 10:51 window_open sweep died on exactly that (``'WatchlistRow' object
+    has no attribute 'get'`` — the whole batch admission incl. hi52's first sweep aborted), because
+    the filter shipped inline without a test on the real row type. Now a helper, tested with the
+    real NamedTuples."""
+    return [r for r in rows if r.symbol in symbols]
 
 
 def _read_cat_watchlist(

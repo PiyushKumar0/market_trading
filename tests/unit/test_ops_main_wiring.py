@@ -1614,3 +1614,26 @@ async def test_scheduler_is_running_reads_apscheduler_state(clock, calendar) -> 
     assert s.is_running() is True
     await asyncio.sleep(0.05)
     assert s.is_running() is False
+
+
+def test_watchlist_eligible_pin_filters_real_row_tuples() -> None:
+    """2026-09-02 incident regression: the eligible-pin filter must work on the REAL cat/cat_reversal
+    WatchlistRow NamedTuples (attribute access) - the inline .get() version killed the 10:51
+    window_open sweep (batch admission + hi52 first sweep aborted for the morning)."""
+    from decimal import Decimal
+
+    from engine.ops.main import _watchlist_rows_for_symbols
+    from engine.strategy.scanners import cat, cat_reversal
+
+    cat_row = cat.WatchlistRow(
+        entry_id="e1", symbol="RELIANCE", grade="originating", direction="long",
+        event_age_sessions=0, materiality=0.8, reference_close=Decimal("1300"),
+    )
+    ext_row = cat_row._replace(entry_id="e2", symbol="JINDALSAW")
+    assert _watchlist_rows_for_symbols([cat_row, ext_row], {"RELIANCE"}) == [cat_row]
+
+    rev_fields = {f: None for f in cat_reversal.WatchlistRow._fields}
+    rev_fields.update(entry_id="r1", symbol="HINDZINC", grade="originating")
+    rev_row = cat_reversal.WatchlistRow(**rev_fields)
+    assert _watchlist_rows_for_symbols([rev_row], {"HINDZINC"}) == [rev_row]
+    assert _watchlist_rows_for_symbols([rev_row], {"RELIANCE"}) == []
