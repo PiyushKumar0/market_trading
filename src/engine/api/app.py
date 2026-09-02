@@ -283,15 +283,18 @@ def create_app(
             LIMIT 100
             """
         ).fetchall()
+        proposals = [json.loads(row["proposal_payload"]) for row in rows]
+        subjects = _decision_subjects(conn, proposals)
         out = []
-        for row in rows:
+        for row, proposal, subject in zip(rows, proposals, subjects, strict=True):
             verdict_payload = json.loads(row["verdict_payload"]) if row["verdict_payload"] else None
             out.append(
                 {
                     "proposal_id": row["proposal_id"],
                     "agent_id": row["agent_id"],
                     "action": row["action"],
-                    "proposal": json.loads(row["proposal_payload"]),
+                    "proposal": proposal,
+                    "subject": subject,
                     "created_at": row["created_at"],
                     "verdict_id": row["verdict_id"],
                     "verdict": row["verdict_outcome"],
@@ -778,6 +781,56 @@ def create_app(
 
     _log.info("api_app_created", host=settings.api.host, port=settings.api.port)
     return app
+
+
+# --------------------------------------------------------------------------- /decisions subject
+def _decision_subjects(conn: Any, proposals: list[dict[str, Any]]) -> list[str | None]:
+    """The human subject of each stored ``ActionProposal``, positionally aligned with ``proposals``.
+
+    Only ``enter`` names its instrument; ``exit`` / ``modify-*`` carry a ``position_id`` and ``cancel``
+    an ``order_id`` (``engine.core.contracts``), which is what the decision log used to print for the
+    owner's own positions (reported 2026-09-02). Resolved here, in two batched lookups, rather than in
+    the dashboard: ``/positions`` is unbounded today but need not stay so, and the provenance view
+    should carry its subject. An id whose row is gone stays visible as the id — never blank."""
+    order_ids = sorted({p["order_id"] for p in proposals if isinstance(p.get("order_id"), str)})
+    position_of_order: dict[str, str] = {}
+    if order_ids:
+        marks = ",".join("?" * len(order_ids))
+        position_of_order = {
+            r["order_id"]: r["position_id"]
+            for r in conn.execute(
+                f"SELECT order_id, position_id FROM orders WHERE order_id IN ({marks})", order_ids
+            )
+            if r["position_id"]
+        }
+    position_ids = sorted(
+        {p["position_id"] for p in proposals if isinstance(p.get("position_id"), str)}
+        | set(position_of_order.values())
+    )
+    symbol_of_position: dict[str, str] = {}
+    if position_ids:
+        marks = ",".join("?" * len(position_ids))
+        symbol_of_position = {
+            r["position_id"]: r["symbol"]
+            for r in conn.execute(
+                f"SELECT position_id, symbol FROM positions WHERE position_id IN ({marks})", position_ids
+            )
+        }
+
+    out: list[str | None] = []
+    for p in proposals:
+        symbol = p.get("tradingsymbol")
+        if isinstance(symbol, str) and symbol:
+            out.append(symbol)
+            continue
+        order_id = p.get("order_id") if isinstance(p.get("order_id"), str) else None
+        position_id = p.get("position_id") if isinstance(p.get("position_id"), str) else None
+        position_id = position_id or (position_of_order.get(order_id) if order_id else None)
+        if position_id:
+            out.append(symbol_of_position.get(position_id, position_id))
+        else:
+            out.append(order_id)
+    return out
 
 
 # --------------------------------------------------------------------------- auth (R10)

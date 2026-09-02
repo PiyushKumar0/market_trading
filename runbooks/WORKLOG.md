@@ -1,5 +1,25 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-02 (12:35, engine running mid-session, NOT restarted) — decision log printed position ULIDs for the owner's exits
+
+- **Reported (owner, screenshot):** the dashboard's Decision log showed `01M0ZKFMN1T15X3JZMKCDYQDW4`
+  as the subject of every `intraday_analyst exit` row while enters showed the ticker. Cause:
+  `ExitAction`/`Modify*Action` carry only `position_id` and `CancelAction` only `order_id`
+  (`engine.core.contracts`); `/decisions` returned the raw payload and `DecisionsPanel` printed
+  whichever id it had. Verified against state.db (read-only): all 16 exit proposals resolve —
+  `01M0ZK…` = HDFCAMC, `01M110…` = HINDZINC, both `origin=recommended` (the owner's own positions).
+- **Fix (red-first, `test_decisions_subject_resolves_position_and_order_ids_to_symbols`):**
+  `/decisions` now carries `subject` — enter → tradingsymbol; exit/modify-* → `positions.symbol`
+  via position_id; cancel → `orders.position_id` → symbol; an id with no row stays visible as the
+  id, never blank (`_decision_subjects`, two batched lookups). `DecisionsPanel` shows `subject`,
+  falls back to the `/positions` snapshot on an engine that predates the field, and keeps the raw
+  id in the cell tooltip (provenance). `test_api_routes.py`: 44 passed.
+- **Deploy:** `npm run build` 12:32 — `dashboard/dist` is served from disk by the running engine
+  (StaticFiles), so the FRONTEND fix is live now through the snapshot fallback (verified `/`
+  serves `index-BEzBKlj4.js`). The BACKEND `subject` field lands at the NEXT engine restart —
+  deliberately not restarted at 12:3x with HDFCAMC/HINDZINC OPEN and exit chains firing (08-18
+  rule: a cosmetic change never buys a mid-session service action). No follow-up beyond that.
+
 ## 2026-09-02 (midday hotfix, owner-reported analyst failures) — prose-overflow clamp + sweep-crash fix, deployed 11:58
 
 - **Fault 1 (reported):** exit-path analyst calls died `string_too_long` on `exit.thesis` — the flat

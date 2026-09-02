@@ -136,10 +136,11 @@ def _insert_position(
 
 def _insert_order(
     conn, order_id, *, role="entry", state="COMPLETE", product="MIS", created_at="2026-06-17T09:30:00+05:30",
+    position_id=None,
 ) -> None:
     conn.execute(
-        "INSERT INTO orders (order_id, role, state, product, created_at) VALUES (?, ?, ?, ?, ?)",
-        (order_id, role, state, product, created_at),
+        "INSERT INTO orders (order_id, role, state, product, created_at, position_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (order_id, role, state, product, created_at, position_id),
     )
 
 
@@ -249,6 +250,37 @@ def test_decisions_left_join_verdict_and_verdicts_route(conn, clock) -> None:
     assert len(verdicts) == 1
     assert verdicts[0]["verdict_id"] == "verd-1"
     assert verdicts[0]["payload"]["reasons"] == ["per_trade_risk_shrink"]
+
+
+def test_decisions_subject_resolves_position_and_order_ids_to_symbols(conn, clock) -> None:
+    """Owner-reported 2026-09-02: the decision log printed exit proposals as their position ULID. The
+    proposal payload only carries the id (contracts: exit/modify-* → position_id, cancel → order_id), so
+    the route resolves each to the position's symbol; an id with no row falls back to the id itself."""
+    _insert_position(conn, "pos-1", symbol="HDFCAMC")
+    _insert_order(conn, "o-1", role="protective_sl", position_id="pos-1")
+    _insert_order(conn, "o-orphan", role="entry")  # no position_id → cannot resolve
+    _insert_proposal(conn, "p-enter", action="enter", created_at="2026-06-17T09:20:00+05:30")
+    _insert_proposal(conn, "p-exit", action="exit", created_at="2026-06-17T09:21:00+05:30",
+                     payload={"action": "exit", "position_id": "pos-1", "exit_type": "MARKET"})
+    _insert_proposal(conn, "p-mod", action="modify-stop", created_at="2026-06-17T09:22:00+05:30",
+                     payload={"action": "modify-stop", "position_id": "pos-ghost", "new_stop": "100"})
+    _insert_proposal(conn, "p-cancel", action="cancel", created_at="2026-06-17T09:23:00+05:30",
+                     payload={"action": "cancel", "order_id": "o-1"})
+    _insert_proposal(conn, "p-cancel-orphan", action="cancel", created_at="2026-06-17T09:24:00+05:30",
+                     payload={"action": "cancel", "order_id": "o-orphan"})
+    _insert_proposal(conn, "p-cancel-ghost", action="cancel", created_at="2026-06-17T09:25:00+05:30",
+                     payload={"action": "cancel", "order_id": "o-ghost"})
+    client = _client(conn=conn, clock=clock)
+
+    subjects = {d["proposal_id"]: d["subject"] for d in client.get("/decisions", headers=AUTH).json()["decisions"]}
+    assert subjects == {
+        "p-enter": "AAA",               # enter carries its own tradingsymbol
+        "p-exit": "HDFCAMC",            # position_id → positions.symbol
+        "p-mod": "pos-ghost",           # unknown position → the id, never blank
+        "p-cancel": "HDFCAMC",          # order_id → orders.position_id → positions.symbol
+        "p-cancel-orphan": "o-orphan",  # order without a position → the order id
+        "p-cancel-ghost": "o-ghost",    # unknown order → the id
+    }
 
 
 # --------------------------------------------------------------------------- config/audit
