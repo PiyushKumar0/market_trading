@@ -1,5 +1,28 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-02 (midday hotfix, owner-reported analyst failures) — prose-overflow clamp + sweep-crash fix, deployed 11:58
+
+- **Fault 1 (reported):** exit-path analyst calls died `string_too_long` on `exit.thesis` — the flat
+  wire schema advertised `thesis` uncapped (the 600 limit lived only in the client-side prose note);
+  retries re-invite the same verbosity so they cannot converge (the WO-21 argument, value-shaped).
+  Impact: 9 failed calls (~$1.55); 10:4x chains recovered on retry, the 11:43-11:45 chains were
+  TERMINAL — both refreshed HDFCAMC/HINDZINC exit recs lost that cycle. Fix (`e567eb9`, red-first):
+  wire schema now advertises maxLength derived from the contract; `_sanitize_guidance_extras` clamps
+  ADVERTISED prose to the MATCHED model's declared cap (`guidance_prose_clamped`); min_length/enum/
+  numeric enforcement untouched.
+- **Fault 2 (found while verifying, self-inflicted):** the 09-01 eligible-pin filter used `.get()`
+  on cat/cat_reversal WatchlistRow NamedTuples → `window_open_sweep_failed` at 10:51 killed today's
+  batch admission (ins/cat) AND hi52's first sweep. It shipped inline without a test on the real row
+  type. Fix (`e3dc1b0`): tested `_watchlist_rows_for_symbols` helper, attribute access, regression
+  test on the real NamedTuples. Lesson: review-fixes get red-first tests too.
+- **Deploy + live verification:** suite 2007 green → clean stop/start 11:57-11:58 → re-fired
+  window_open sweep 12:01 SUCCEEDED: `hi52_sweep symbols_scanned=800 candidates=1 admitted=1` —
+  hi52's FIRST production shadow candidate (IDFCFIRSTB) + a cat candidate (TMCV) admitted; both
+  refreshed exit recommendations delivered 12:01:13/12:01:19 (attempt-2 convergence observed:
+  with the length-half clamped, the model self-corrects the remaining `exit.reason` enum slip on
+  retry — that enum was the hidden second error in the morning's 2-error chains; deliberately NOT
+  coerced, R1). First wide universe build also confirmed in production: `extended=600` at 10:38.
+
 ## 2026-09-01 (21:48, engine stopped 21:47) — hi52 pre-registered backtest: first run + verdict
 
 - **Run:** `scripts/backtest_hi52.py` vs market.duckdb (window 2020→2026-09-01 ⇒ effective
