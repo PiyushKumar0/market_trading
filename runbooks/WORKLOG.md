@@ -18,7 +18,18 @@
   (StaticFiles), so the FRONTEND fix is live now through the snapshot fallback (verified `/`
   serves `index-BEzBKlj4.js`). The BACKEND `subject` field lands at the NEXT engine restart —
   deliberately not restarted at 12:3x with HDFCAMC/HINDZINC OPEN and exit chains firing (08-18
-  rule: a cosmetic change never buys a mid-session service action). No follow-up beyond that.
+  rule: a cosmetic change never buys a mid-session service action).
+- **Post-review (`/simplify`, 4 angles, 13:1x):** the client-side positions-snapshot fallback was
+  REMOVED from source — a second, weaker copy (no cancel leg) of a rule the engine owns, reachable
+  only in the rebuild-without-restart window; `_decision_subjects` collapsed to one local lookup
+  helper + a coalescing chain (same six asserted cases). `dashboard/dist` was deliberately NOT
+  rebuilt, so the served bundle keeps the stopgap until the restart (harmless: it prefers the
+  server `subject`). **Pair the post-close restart with `npm run build`** to bring dist in line.
+  **Named follow-ups (behaviour, not cleanup — out of this diff):** (1) `RecommendationsPanel`
+  matches provenance on `d.proposal.tradingsymbol`, so exit/adjust cards never find their gate
+  reasons — should match on `subject` with an action↔kind guard; (2) the Telegram owner-approval
+  prompt (`pipeline.py` `_request_owner_approval`) prints the bare `position_id` — the same defect
+  class on the higher-stakes channel; stamp `position["symbol"]` at write time there.
 
 ## 2026-09-02 (midday hotfix, owner-reported analyst failures) — prose-overflow clamp + sweep-crash fix, deployed 11:58
 

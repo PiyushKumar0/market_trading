@@ -789,47 +789,36 @@ def _decision_subjects(conn: Any, proposals: list[dict[str, Any]]) -> list[str |
 
     Only ``enter`` names its instrument; ``exit`` / ``modify-*`` carry a ``position_id`` and ``cancel``
     an ``order_id`` (``engine.core.contracts``), which is what the decision log used to print for the
-    owner's own positions (reported 2026-09-02). Resolved here, in two batched lookups, rather than in
-    the dashboard: ``/positions`` is unbounded today but need not stay so, and the provenance view
-    should carry its subject. An id whose row is gone stays visible as the id — never blank."""
-    order_ids = sorted({p["order_id"] for p in proposals if isinstance(p.get("order_id"), str)})
-    position_of_order: dict[str, str] = {}
-    if order_ids:
-        marks = ",".join("?" * len(order_ids))
-        position_of_order = {
-            r["order_id"]: r["position_id"]
-            for r in conn.execute(
-                f"SELECT order_id, position_id FROM orders WHERE order_id IN ({marks})", order_ids
-            )
-            if r["position_id"]
-        }
-    position_ids = sorted(
-        {p["position_id"] for p in proposals if isinstance(p.get("position_id"), str)}
-        | set(position_of_order.values())
-    )
-    symbol_of_position: dict[str, str] = {}
-    if position_ids:
-        marks = ",".join("?" * len(position_ids))
-        symbol_of_position = {
-            r["position_id"]: r["symbol"]
-            for r in conn.execute(
-                f"SELECT position_id, symbol FROM positions WHERE position_id IN ({marks})", position_ids
-            )
-        }
+    owner's own positions (reported 2026-09-02). Resolved here rather than in the dashboard:
+    ``/positions`` is unbounded today but need not stay so, and the provenance view should carry its
+    subject. An id whose row is gone stays visible as the id — never blank."""
 
+    def _str(p: dict[str, Any], key: str) -> str:
+        value = p.get(key)
+        return value if isinstance(value, str) else ""
+
+    def _lookup(table: str, key: str, val: str, ids: list[str]) -> dict[str, str]:
+        wanted = sorted({i for i in ids if i})
+        if not wanted:
+            return {}
+        marks = ",".join("?" * len(wanted))
+        rows = conn.execute(f"SELECT {key}, {val} FROM {table} WHERE {key} IN ({marks})", wanted)
+        return {r[key]: r[val] for r in rows if r[val]}
+
+    position_of_order = _lookup(
+        "orders", "order_id", "position_id", [_str(p, "order_id") for p in proposals]
+    )
+    symbol_of_position = _lookup(
+        "positions", "position_id", "symbol",
+        [_str(p, "position_id") for p in proposals] + list(position_of_order.values()),
+    )
     out: list[str | None] = []
     for p in proposals:
-        symbol = p.get("tradingsymbol")
-        if isinstance(symbol, str) and symbol:
-            out.append(symbol)
-            continue
-        order_id = p.get("order_id") if isinstance(p.get("order_id"), str) else None
-        position_id = p.get("position_id") if isinstance(p.get("position_id"), str) else None
-        position_id = position_id or (position_of_order.get(order_id) if order_id else None)
-        if position_id:
-            out.append(symbol_of_position.get(position_id, position_id))
-        else:
-            out.append(order_id)
+        order_id = _str(p, "order_id")
+        position_id = _str(p, "position_id") or position_of_order.get(order_id, "")
+        out.append(
+            _str(p, "tradingsymbol") or symbol_of_position.get(position_id, position_id) or order_id or None
+        )
     return out
 
 

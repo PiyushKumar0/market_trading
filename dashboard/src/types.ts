@@ -72,10 +72,9 @@ export interface DecisionRow {
   agent_id: string | null
   action: string | null
   proposal: ProposalPayload
-  /** Human subject resolved server-side: the tradingsymbol for enter, the position's symbol for
-   *  exit / modify-* / cancel (via position_id, or order_id → its position). Falls back to the raw
-   *  id when the row is gone. Absent (undefined) on an engine that predates the field. */
-  subject?: string | null
+  /** Resolved server-side: the tradingsymbol for enter, the position's symbol for exit / modify-* /
+   *  cancel (via position_id, or order_id → its position); the raw id when that row is gone. */
+  subject: string | null
   created_at: string | null
   verdict_id: string | null
   verdict: string | null // approve | shrink | reject | owner_approval_required

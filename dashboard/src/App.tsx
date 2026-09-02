@@ -117,10 +117,7 @@ export default function App() {
           decisions={snapshot.decisions?.decisions ?? []}
         />
         <PositionsPanel data={snapshot.positions} />
-        <DecisionsPanel
-          rows={snapshot.decisions?.decisions ?? []}
-          positions={snapshot.positions?.positions ?? []}
-        />
+        <DecisionsPanel rows={snapshot.decisions?.decisions ?? []} />
         <HeadroomPanel data={snapshot.headroom} />
         <BudgetPanel data={snapshot.budget} />
         <TradeWindowForm data={snapshot.tradeWindow} onSubmit={setTradeWindow} />
