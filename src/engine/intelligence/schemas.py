@@ -212,7 +212,11 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
                 "enum": [*ACTION_MODELS.keys(), "no_action"],
             },
             # ActionBase / NoActionOutput
-            "thesis": {"type": "string"},
+            # maxLength derived from the authoritative contract (2026-09-02: the cap lived only in
+            # the client-side prose note and a verbose exit died string_too_long on all retries,
+            # twice — advertise it structurally so the runtime's schema coaching steers the model;
+            # the parse-side clamp in _sanitize_guidance_extras remains the converging backstop).
+            "thesis": {"type": "string", "maxLength": _contract_max_len("thesis")},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "reason": {"type": "string"},        # no_action free text; exit uses its closed reasons
             "regime_note": {"type": "string"},
@@ -242,6 +246,24 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
     }
 
 
+def _field_max_len(field_info: Any) -> int | None:
+    """The declared ``max_length`` of a pydantic field, or None when unconstrained."""
+    for meta in getattr(field_info, "metadata", ()):
+        cap = getattr(meta, "max_length", None)
+        if isinstance(cap, int):
+            return cap
+    return None
+
+
+def _contract_max_len(field: str) -> int:
+    """A contract field's ``max_length`` for the guidance schema — single source of truth (the
+    ActionProposal base carries it identically on every action model)."""
+    cap = _field_max_len(ACTION_MODELS["exit"].model_fields[field])
+    if cap is None:  # pragma: no cover - a contract change this guards against loudly
+        raise RuntimeError(f"contract field {field!r} no longer declares max_length")
+    return cap
+
+
 def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str:
     """Drop the guidance-advertised fields THIS action forbids, before the union validates (WO-21).
 
@@ -263,6 +285,17 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     * a missing or unrecognised ``action`` sanitizes NOTHING — the payload is undiscriminatable, so
       it must fail validation as it does today rather than be silently reshaped.
 
+    **Value-shaped reconciliation (2026-09-02, the exit-thesis incident):** the same flat-schema
+    mismatch exists for VALUES — ``thesis``'s 600-char cap lived only in the client-side prose note,
+    so a verbose-but-valid EXIT died ``string_too_long`` on all 3 attempts, twice, losing both
+    refreshed exit recommendations for open positions (retries re-invite the same verbosity, so
+    retrying cannot converge — the WO-21 argument exactly). An ADVERTISED ``str`` field overflowing
+    the MATCHED model's own declared ``max_length`` is therefore clamped to that cap (logged
+    ``guidance_prose_clamped``). Truncation is the ONLY reshaping: ``min_length``, enum, numeric and
+    every other constraint still fail exactly as before (too-short prose is deficient content, and
+    silently altering a number or id would corrupt semantics, R1); a field the guidance never
+    advertised, or whose target declares no cap, is untouched.
+
     A ``str`` payload is JSON-decoded first; anything that is not a JSON object (bad JSON, a list, a
     scalar) is returned verbatim so the caller's original validation path produces the original error.
     """
@@ -283,10 +316,19 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     advertised = set(intraday_guidance_json_schema()["properties"]) - {"action"}
     droppable = advertised - set(target.model_fields)
     dropped = sorted(key for key in payload if key in droppable)
-    if not dropped:
-        return payload
-    _log.info("guidance_extras_dropped", action=action, dropped=dropped)
-    return {key: value for key, value in payload.items() if key not in droppable}
+    if dropped:
+        _log.info("guidance_extras_dropped", action=action, dropped=dropped)
+        payload = {key: value for key, value in payload.items() if key not in droppable}
+    for name, info in target.model_fields.items():
+        if name not in advertised:
+            continue
+        value = payload.get(name)
+        cap = _field_max_len(info)
+        if isinstance(value, str) and cap is not None and len(value) > cap:
+            _log.info("guidance_prose_clamped", action=action, field=name,
+                      from_len=len(value), to_len=cap)
+            payload = {**payload, name: value[:cap]}
+    return payload
 
 
 def parse_intraday(

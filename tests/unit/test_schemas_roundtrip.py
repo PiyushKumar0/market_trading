@@ -406,3 +406,58 @@ def test_platform_stamped_fields_are_not_dropped_by_the_sanitizer() -> None:
         "inputs_digest": "LLM-INVENTED",
     }
     _enter_no_action_stamp(parse_intraday(raw, **STAMP))
+
+
+# --------------------------------------------- prose-overflow clamp (2026-09-02 exit-thesis incident)
+def test_overlong_advertised_thesis_is_clamped_not_fatal() -> None:
+    """The 2026-09-02 failure class: the wire schema advertises `thesis` as a bare string (the 600
+    cap lived only in a client-side prose note), so a verbose-but-valid EXIT died string_too_long
+    on all 3 attempts twice - both refreshed exit recommendations for open positions were lost.
+    An advertised prose field overflowing the MATCHED model's declared max_length is clamped, not
+    fatal: retries must converge, and an exit decision must never die of verbosity."""
+    from engine.intelligence.schemas import parse_intraday
+
+    long_thesis = "Swing CNC long from 2668.80; " + ("invalidation detail " * 40)
+    assert len(long_thesis) > 600
+    model = parse_intraday({**RAW_BY_ACTION["exit"], "thesis": long_thesis}, **STAMP)
+    assert model.thesis == long_thesis[:600]
+
+
+def test_clamp_keys_off_the_matched_models_own_cap() -> None:
+    """NoActionOutput.thesis is deliberately unconstrained - the same over-long prose on a
+    no_action passes through UNCLAMPED, proving the clamp reads the matched model's declared
+    max_length rather than a hardcoded number."""
+    from engine.intelligence.schemas import NoActionOutput, parse_intraday
+
+    long_thesis = "declining on regime grounds " * 40
+    assert len(long_thesis) > 600
+    out = parse_intraday(
+        {"action": "no_action", "reason": "regime adverse", "thesis": long_thesis}, **STAMP
+    )
+    assert isinstance(out, NoActionOutput)
+    assert out.thesis == long_thesis
+
+
+def test_clamp_never_softens_min_length_or_numeric_constraints() -> None:
+    """Truncation is the ONLY reshaping: a too-SHORT thesis is deficient content and still dies,
+    and numeric constraint enforcement (confidence <= 1) is untouched."""
+    from engine.intelligence.schemas import parse_intraday
+
+    with pytest.raises(ValidationError):
+        parse_intraday({**RAW_BY_ACTION["exit"], "thesis": "too short"}, **STAMP)
+    with pytest.raises(ValidationError):
+        parse_intraday({**RAW_BY_ACTION["exit"], "confidence": 1.7}, **STAMP)
+
+
+def test_guidance_schema_advertises_the_thesis_cap() -> None:
+    """Prevention half: the wire schema now carries maxLength for `thesis`, derived from the
+    authoritative contract (single source of truth), so the runtime's schema coaching steers the
+    model off over-long prose before the client-side clamp ever has to act."""
+    from engine.core.contracts import ExitAction
+    from engine.intelligence.schemas import intraday_guidance_json_schema
+
+    cap = next(
+        m.max_length for m in ExitAction.model_fields["thesis"].metadata
+        if getattr(m, "max_length", None) is not None
+    )
+    assert intraday_guidance_json_schema()["properties"]["thesis"]["maxLength"] == cap == 600
