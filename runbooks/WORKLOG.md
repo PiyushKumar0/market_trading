@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-03 (12:0x–15:1x, owner-directed "start with your recommended fixes") — store-stall page, hi52 unadjusted-history veto, bhavcopy archive backfill tool
+
+- **Item 3 shipped (`d2c5c8c`, deploys at next boot):** the WO-24b store stall is an owner-facing
+  `store_stalled` health problem when the ping is unanswered on 2 consecutive pulses, or while a
+  probe abandoned by the WO-26a re-probe still hangs — riding the WO-25b episode cadence, in
+  session only. Two Opus reviews caught three lifecycle defects in my first cut, all fixed: the
+  count only reset on a SUCCESSFUL ping (a store that started raising after a stall would page
+  "unanswered for Ns" forever — the catchup_safety_jobs latch class); the re-probe anomaly reset
+  the count and flapped the episode every 6 pulses with a false all-clear while the pool lost
+  threads; and the 22:30 compaction holds the store lock for minutes on a healthy engine (nightly
+  false page) — hence in-session only, like feed_stale. 4 new tests; fixtures moved to the
+  watchdog test module (import cycle). Plan §3.2.12 line added.
+- **Item 7 shipped (`15bff68`) — and the 09-02 premise corrected:** the deferral assumed Kite-official
+  history is corp-action adjusted. It is adjusted at FETCH time (A11), but the stored series is
+  seeded once and extended one session a day (`job_daily_bars` fetches `[d, d]`; `BackfillJob`
+  never re-fetches past a checkpoint), so an ex-date after the seed leaves the watchlist names
+  straddling two units too — and those 195 deep-history names are the ONLY ones that can pass
+  `min_sessions` before ~mid-Jan 2027. My first cut vetoed only extended names (the population that
+  cannot fire); the review caught it. Now: every symbol with a bonus/split/rights/demerger ex-date
+  inside the 400-day frame window sits out (`hi52.unadjusted_history` over `corp_actions`, counted
+  `unadjusted_history`), and `classify_purpose` learned the rescaling vocabulary the allow-list
+  let through as `other` (consolidation, "sub division", demerger, capital reduction). AGM/EGM
+  stay `other` on purpose. **Precondition:** `corp_actions` holds windowed rows only since
+  2026-08-14 (call-date-only before) — the veto under-counts until the archive tool below runs
+  `--skip-bhavcopy` over the lookback. Residuals: the count is taken before the `min_sessions`
+  gate; `backtest_hi52.py` does not apply the veto yet.
+- **Item 6 built, NOT run (committed with this entry):** `scripts/backfill_bhavcopy.py` — every
+  calendar date 2022-07-01..2026-07-12, LEGACY archive URL before 2024-07-08 / UDiFF from it
+  (both probed today; 2022-2023 are legacy-only), fallback on 404, 404-on-both = holiday, persisted
+  through `BhavcopyJob._persist` (Kite rows never overwritten); corp-actions leg over ≤35-day
+  windows from 400 days before `--from` (NSE serves 2022/2023 history — probed). Opus review
+  applied: weekday filter removed (NSE's Saturday DR drills / Muhurat Sunday / Budget Saturday would
+  have been dropped silently), 7-day holiday-streak guard un-checkpoints an archive outage, zero-row
+  windows fail, failed dates + per-window rows in the report, pre-flight on a missing store file.
+  12 tests. **Run order in COMMANDS.md** (engine off): corp-actions lookback first, then the full
+  history, then `backtest_hi52.py` once it applies the veto.
+- **Process notes:** the account's session limit killed four Opus agents at 12:4x (reset 14:30);
+  the store-stall re-verification was done by hand, the rest re-launched after the reset. Full
+  suite 2035 (item 3) → 2044 (item 7) passed with the engine live; the script's tests run in
+  isolation (a new file the engine never imports). Both peer sessions were asked to hold the
+  post-window restart until the src commits landed (12:41) and released at 15:0x.
+- **Open from the 09-02 list:** the deferred-refactor list (owner call). New follow-ups: run the
+  archive tool (engine-off evening), then make `backtest_hi52.py` apply `unadjusted_history`; the
+  `symbols_scanned` field counts vetoed symbols (candidates + vetoes reconcile, as brk20's does).
+
 ## 2026-09-03 (00:4x–11:5x, owner-directed "start with the fixes") — four follow-ups from the 09-02 phase audit, red-first + two-lens review
 
 - **Shipped (deploys at next boot; dashboard dist already rebuilt 11:3x and served from disk):**

@@ -162,3 +162,21 @@ this repair. Run with the engine idle (health pulses only in the log tail). Find
 #   WHERE entry_id=? AND outcome_label='no_action' AND exit_px IS NULL
 #     AND position_id IN (SELECT position_id FROM positions WHERE state='OPEN')
 ```
+
+## Bhavcopy archive backfill (2026-09-03) — full-market bars_1d + corp-action history, 2022-07 → 2026-07-12
+
+Engine must be OFF (single DuckDB writer); ~1,000 sessions at ~1-2 s each, checkpointed per date in
+`filings_backfill_checkpoints` (feed `bhavcopy_archive`; `corp_actions_archive` per ≤35-day window), so
+it is safe to interrupt and resume across evenings. Kite-official rows are never overwritten (A11).
+
+```powershell
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --status          # read-only progress; safe with the engine live
+# FIRST (precondition for the live hi52 unadjusted-history veto, 2026-09-03): corp-action history over the
+# veto's 400-day lookback — the daily job only holds windowed rows since 2026-08-14 (call-date-only before):
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2025-06-01 --to 2026-08-14 --skip-bhavcopy
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py                   # default 2022-07-01..2026-07-12, both legs
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2024-07-01 --to 2024-12-31 --skip-corp-actions
+```
+Then re-run `scripts\backtest_hi52.py` (engine still off) — and note the backtest must apply the same
+unadjusted-history veto the live sweep applies (`hi52.unadjusted_history` over `corp_actions`), which
+the corp-actions leg makes possible for the 2022→2026 population.
