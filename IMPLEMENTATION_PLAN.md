@@ -901,6 +901,9 @@ class HealthMonitor:    # feed staleness, clock skew, disk, ticker subprocess, S
                         # funnel_zero_in_session (no forward PROGRESS vs the last-progress baseline ≥120 in-session min
                         # while NORMAL, gated on remaining §5.6 forward capacity) on the same pulse; alert text carries
                         # the diagnostic detail (state/causes/minutes) — detail never enters WO-25b episode identity.
+                        # store_stalled (2026-09-03): the WO-24b store ping unanswered on ≥2 consecutive pulses, or a
+                        # probe still swallowed after a fresh one answered (WO-26a anomaly) — in-session only (the 22:30
+                        # compaction legitimately holds the store lock for minutes); ends on any answer, success or error.
                         # In-engine (dies with the process — cannot detect its OWN death). The engine_lifecycle.last_alive_at
                         # liveness heartbeat is written every lifecycle.heartbeat_write_s by a DEDICATED OS THREAD (not this loop,
                         # §2.2) so long CPU work never starves it; all CPU-bound/native work runs in an executor (§9.1 invariant).

@@ -42,6 +42,11 @@ AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message)
 #: it is the line past which "slow" is no longer a plausible explanation (WO-24b-prime).
 STORE_PING_TIMEOUT_S = 10.0
 
+#: Consecutive stalled pulses before the stall becomes an OWNER-FACING health problem (2026-09-03).
+#: One timed-out ping is an observation (ERROR line + stack dump); the same stall still there a
+#: pulse later is an incident — two pulses means the store has been unreachable for ~60 s.
+STORE_STALL_ALARM_PULSES = 2
+
 #: How long an UNCHANGED problem set stays quiet between owner alerts (WO-25b, 2026-08-24). The pulse
 #: is 60 s and used to alert on every one of them — 57 identical ``health problems: ['feed_stale']``
 #: messages in a single morning, the bulk of the 203-deep notification backlog that then starved a
@@ -259,13 +264,31 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - telemetry must never affect the health verdict
             _log.debug("process_memory_log_failed")
 
-        # --- store stall watchdog (WO-24b-prime): make the NEXT freeze diagnose itself. Pure
-        #     instrumentation — it never contributes a problem, an alert or a verdict, and it can
-        #     never raise into the pulse (the pulse surviving is the entire premise). ---
+        # --- store stall watchdog (WO-24b-prime): make the NEXT freeze diagnose itself. The probe
+        #     can never raise into the pulse (the pulse surviving is the entire premise). A stall
+        #     still there on the STORE_STALL_ALARM_PULSES-th consecutive pulse — or a probe still
+        #     swallowed after a fresh one answered (the WO-26a anomaly: the pool is losing
+        #     threads) — is a problem like any other and pages through the episode cadence below.
+        #     In-session only, like feed_stale: the 22:30 compaction legitimately holds the store
+        #     lock for minutes and never runs in session; a night-time wedge surfaces as EOD job
+        #     failures. ---
         try:
             await self._probe_store()
         except Exception:  # noqa: BLE001 - a watchdog that can kill its own host is not a watchdog
             _log.exception("store_watchdog_failed")
+        abandoned = self._outstanding_abandoned()
+        stalled = self._store_stall_count >= STORE_STALL_ALARM_PULSES
+        if (stalled or abandoned) and self._session_open():
+            detail = []
+            if self._store_stall_count:
+                stalled_s = self._seconds_since(self._store_stall_since, self._clock.now()) or 0.0
+                detail.append(
+                    f"ping unanswered for {stalled_s:.0f}s (consecutive={self._store_stall_count})"
+                )
+            if abandoned:
+                detail.append(f"{abandoned} abandoned probe(s) still hanging")
+            report.problems.append("store_stalled")
+            report.problem_details["store_stalled"] = "market store: " + "; ".join(detail)
 
         await self._alert_problems(report.problems, report.problem_details)
         _log.info("health_check", feed=report.feed_state, skew_ok=report.clock_skew_ok,
@@ -467,6 +490,11 @@ class HealthMonitor:
             return
         except Exception as exc:  # noqa: BLE001 - answering with an error is not stalling
             self._store_probe = None
+            # ...and it ENDS a stall episode: the lock was free. Symmetric with _note_store_ok, or
+            # a raise after a stall would carry that stall's count forever (2026-09-03 review).
+            self._store_stall_count = 0
+            self._store_stall_since = None
+            self._store_stacks_dumped = False
             _log.warning("store_ping_failed", error=str(exc), error_type=type(exc).__name__)
             return
         self._store_probe = None

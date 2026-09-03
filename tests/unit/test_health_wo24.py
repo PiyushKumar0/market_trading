@@ -12,7 +12,10 @@ What is pinned here is the watchdog's whole contract, in the order it matters:
 * it is SINGLE-FLIGHT -- a pulse that finds the previous probe still pending starts no new one,
   because queueing a second thread behind a seized lock is how a diagnostic becomes an incident;
 * the stacks are dumped ONCE per stall episode and again for the next one;
-* and none of it can raise into, or slow down, the pulse it rides on.
+* none of it can raise into, or slow down, the pulse it rides on;
+* and (2026-09-03) a stall still there on the second pulse, or a probe still swallowed after a
+  fresh one answered, is an owner-facing ``store_stalled`` problem -- in session only -- that ends
+  when the store answers, with success OR with an error.
 """
 
 from __future__ import annotations
@@ -23,8 +26,9 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
-from engine.core.config import load_settings
+from engine.core.config import config_dir, load_settings
 from engine.marketdata.store import MarketStore
 from engine.ops.health import _STACK_DUMP_MAX_CHARS, HealthMonitor
 
@@ -90,6 +94,164 @@ async def drain_probe(mon: HealthMonitor) -> None:
     probe = mon._store_probe
     if probe is not None:
         await asyncio.wait_for(asyncio.shield(probe), 5)
+
+
+class StuckThenFreshStore:
+    """The 08-25 shape: the FIRST ping goes into the pool and never comes out (its worker was gone),
+    while the store itself is perfectly able to answer anyone who can get a thread. Under strict
+    single-flight this store looks dead forever -- the only probe that could have said otherwise was
+    the one that was never issued."""
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.pings = 0
+
+    async def aping(self) -> bool:
+        self.pings += 1
+        if self.pings == 1:
+            await self.gate.wait()
+        return True
+
+
+async def drain_all(mon) -> None:
+    """Let every probe the monitor is still holding -- current and abandoned -- finish, so the loop
+    is left clean."""
+    for probe in [mon._store_probe, *mon._store_abandoned]:
+        if probe is not None:
+            await asyncio.wait_for(asyncio.shield(probe), 5)
+
+
+def paged_monitor(store, *, at: Ticker) -> tuple[HealthMonitor, list[tuple[str, str]]]:
+    """A monitor with the owner alert wired and the calendar present (NOW is a trading Wednesday,
+    in session) -- the shape under which a stall is allowed to page."""
+    clock = Clock(time_source=at)
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    mon = HealthMonitor(
+        clock, load_settings(), store=store, store_ping_timeout_s=FAST_PING_TIMEOUT_S, alert=alert,
+        calendar=NSECalendar(config_dir() / "calendar", clock, strict=False),
+    )
+    return mon, alerts
+
+
+async def test_a_stall_that_survives_a_second_pulse_pages_the_owner_as_a_health_problem():
+    """2026-09-03: the stall was log-only (ERROR lines + a stack dump) -- the 08-21 and 08-25 freezes
+    were read off the log after the fact. One timed-out ping is an observation; the SAME stall still
+    there on the next pulse is an incident, and it rides the WO-25b episode cadence: one page on the
+    change, silence while unchanged (reminder after HEALTH_REPEAT_MIN), recovery announced once."""
+    at = Ticker(NOW)
+    store = HangingStore()
+    mon, alerts = paged_monitor(store, at=at)
+    try:
+        report = await mon.check(check_skew=False)             # pulse 1: the probe times out
+        assert "store_stalled" not in report.problems and alerts == []
+
+        at.at = NOW + timedelta(seconds=60)
+        report = await mon.check(check_skew=False)             # pulse 2: still pending -> incident
+        assert "store_stalled" in report.problems
+        assert "60s" in report.problem_details["store_stalled"]
+        assert len(alerts) == 1 and "store_stalled" in alerts[0][1]
+        # (the reminder / recovery cadence itself is _alert_problems' contract, pinned in
+        #  test_health_monitor -- not re-pinned here)
+
+        store.gate.set()                                       # the store answers
+        await drain_probe(mon)
+        at.at = NOW + timedelta(seconds=120)
+        report = await mon.check(check_skew=False)             # pulse 3: a fresh probe succeeds
+        assert "store_stalled" not in report.problems
+    finally:
+        store.gate.set()
+        await drain_probe(mon)
+
+
+async def test_a_stall_out_of_session_never_pages():
+    """The 22:30 tick compaction holds the store lock for minutes on a healthy engine and never runs
+    in session (WO-21), so the page is in-session only, exactly like feed_stale."""
+    at = Ticker(NOW.replace(hour=22, minute=35))
+    store = HangingStore()
+    mon, alerts = paged_monitor(store, at=at)
+    try:
+        for i in range(3):
+            at.at = NOW.replace(hour=22, minute=35) + timedelta(seconds=60 * i)
+            report = await mon.check(check_skew=False)
+            assert "store_stalled" not in report.problems
+        assert alerts == []
+    finally:
+        store.gate.set()
+        await drain_probe(mon)
+
+
+class HangThenRaiseStore:
+    """A store that stalls once and then answers every later ping with an ERROR -- the wedge killed
+    the connection. Answering is not stalling, so the episode must END, not latch."""
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.pings = 0
+
+    async def aping(self) -> bool:
+        self.pings += 1
+        if self.pings == 1:
+            await self.gate.wait()
+            return True
+        raise RuntimeError("connection is closed")
+
+
+async def test_a_ping_that_raises_after_a_stall_ends_the_episode(caplog):
+    """Review finding (2026-09-03): the count only ever reset on a SUCCESSFUL ping, so a store that
+    started raising after two stalled pulses would have paged 'unanswered for Ns' forever."""
+    at = Ticker(NOW)
+    store = HangThenRaiseStore()
+    mon, alerts = paged_monitor(store, at=at)
+    try:
+        await mon.check(check_skew=False)                      # pulse 1: times out
+        at.at = NOW + timedelta(seconds=60)
+        await mon.check(check_skew=False)                      # pulse 2: still pending -> page
+        assert len(alerts) == 1
+
+        store.gate.set()                                       # the first probe finally returns
+        await drain_probe(mon)
+        at.at = NOW + timedelta(seconds=120)
+        with caplog.at_level(logging.WARNING, logger="engine.ops.health"):
+            report = await mon.check(check_skew=False)         # pulse 3: a fresh probe RAISES
+        assert events(caplog, "store_ping_failed")
+        assert "store_stalled" not in report.problems
+        assert len(alerts) == 2 and alerts[1][1].startswith("health recovered")
+        assert mon._store_stall_count == 0 and mon._store_stall_since is None
+    finally:
+        store.gate.set()
+        await drain_probe(mon)
+
+
+async def test_a_swallowed_probe_keeps_the_problem_up_until_it_returns():
+    """The WO-26a anomaly (08-25 shape): the re-probe on the 5th pending pulse gets a thread and
+    answers while the first probe is still swallowed. That resets the stall count, but the pool is
+    still losing threads -- so the problem stays up (no false 'all clear', no flap back and forth
+    two pulses later) until the swallowed probe actually comes back."""
+    at = Ticker(NOW)
+    store = StuckThenFreshStore()
+    mon, alerts = paged_monitor(store, at=at)
+    try:
+        for i in range(6):                                     # pulse 6 = the WO-26a re-probe
+            at.at = NOW + timedelta(seconds=60 * i)
+            report = await mon.check(check_skew=False)
+        assert store.pings == 2 and mon._store_stall_count == 0     # fresh probe answered
+        assert "store_stalled" in report.problems                   # ...but one is still swallowed
+        assert "1 abandoned probe(s) still hanging" in report.problem_details["store_stalled"]
+        assert len(alerts) == 1                                     # the pulse-2 page; no all-clear
+
+        store.gate.set()                                       # the swallowed probe returns
+        await drain_all(mon)
+        at.at = NOW + timedelta(seconds=60 * 6)
+        report = await mon.check(check_skew=False)
+        assert "store_stalled" not in report.problems
+        assert len(alerts) == 2 and alerts[1][1].startswith("health recovered")
+    finally:
+        store.gate.set()
+        await drain_all(mon)
 
 
 async def test_a_hung_store_ping_stalls_dumps_stacks_once_and_then_recovers(caplog):

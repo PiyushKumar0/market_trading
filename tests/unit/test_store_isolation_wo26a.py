@@ -38,7 +38,14 @@ from engine.core.clock import Clock
 from engine.core.types import Tick
 from engine.marketdata.store import _STORE_EXECUTOR_WORKERS, MarketStore
 from engine.ops.health import _STORE_REPROBE_EVERY
-from tests.unit.test_health_wo24 import NOW, Ticker, events, monitor
+from tests.unit.test_health_wo24 import (
+    NOW,
+    StuckThenFreshStore,
+    Ticker,
+    drain_all,
+    events,
+    monitor,
+)
 
 #: Every deliberately-slow flush in this file self-releases after this long. A regression must fail
 #: the assertion, never hang the suite (there is no pytest-timeout here).
@@ -323,31 +330,7 @@ def test_partition_dirs_are_created_once_per_day_not_once_per_flush(store, clock
 
 
 # ------------------------------------------------------------------ 6: the watchdog re-probe
-class StuckThenFreshStore:
-    """The 08-25 shape: the FIRST ping goes into the pool and never comes out (its worker was gone),
-    while the store itself is perfectly able to answer anyone who can get a thread. Under strict
-    single-flight this store looks dead forever -- the only probe that could have said otherwise was
-    the one that was never issued."""
-
-    def __init__(self) -> None:
-        self.gate = asyncio.Event()
-        self.pings = 0
-
-    async def aping(self) -> bool:
-        self.pings += 1
-        if self.pings == 1:
-            await self.gate.wait()
-        return True
-
-
-async def drain_all(mon) -> None:
-    """Let every probe the monitor is still holding -- current and abandoned -- finish, so the loop
-    is left clean."""
-    for probe in [mon._store_probe, *mon._store_abandoned]:
-        if probe is not None:
-            await asyncio.wait_for(asyncio.shield(probe), 5)
-
-
+# (StuckThenFreshStore + drain_all live in test_health_wo24 with the other watchdog fixtures.)
 async def test_a_pending_probe_no_longer_blocks_fresh_evidence(caplog):
     """264 consecutive pulses of the same 09:15 observation must be unreachable.
 
