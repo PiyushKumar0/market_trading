@@ -1569,6 +1569,13 @@ async def run() -> int:
             if trigger == "window_open":
                 hi52_histories: dict[str, list[brk20.DailyRow]] = {}
                 hi52_start = today - timedelta(days=400)   # ≥252 sessions + weekend/holiday margin
+                # No bars_1d source re-adjusts STORED history across an ex-date (Kite candles are
+                # adjusted at fetch time, but the series is seeded once and extended one session at
+                # a time; bhavcopy rows are raw), so a bonus/split/rights/demerger inside the window
+                # leaves phantom pre-ex highs: those symbols sit out until it rolls past (2026-09-03).
+                hi52_unadjusted = hi52.unadjusted_history(
+                    store.get_corp_actions(ex_from=hi52_start, ex_to=yesterday)
+                )
                 for sym in store.get_batch_universe_symbols(today):
                     frame = store.get_bars_1d_frame(sym, hi52_start, yesterday)
                     if len(frame):
@@ -1584,7 +1591,7 @@ async def run() -> int:
                 hi52_vetoes: dict[str, int] = {}
                 hi52_raw = hi52.sweep_daily(
                     hi52_histories, today=today, ex_dates_by_symbol=ex_map,
-                    veto_counts=hi52_vetoes,
+                    unadjusted_symbols=hi52_unadjusted, veto_counts=hi52_vetoes,
                 )
                 hi52_admitted = _attach_feature_snapshots(
                     features,
@@ -1596,6 +1603,7 @@ async def run() -> int:
                     candidates=len(hi52_raw),
                     admitted=len(hi52_admitted),
                     ex_date_vetoes=hi52_vetoes.get(hi52.VETO_EX_DATE_SKIP, 0),
+                    unadjusted_vetoes=hi52_vetoes.get(hi52.VETO_UNADJUSTED_HISTORY, 0),
                 )
 
             return accepted + batch + hi52_admitted, pendings

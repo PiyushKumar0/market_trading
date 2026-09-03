@@ -116,6 +116,34 @@ def test_sweep_orders_by_score_desc_then_symbol():
     assert all(c.signal_id for c in out) and len({c.signal_id for c in out}) == 3
 
 
+# ============================================================ 6b. unadjusted-history veto (2026-09-03)
+def test_unadjusted_history_symbol_is_skipped_by_the_sweep_and_counted():
+    """Stored daily history is never re-adjusted across an ex-date (Kite rows are adjusted at fetch
+    time but seeded once; bhavcopy rows are raw), so a structural ex-date inside the lookback leaves
+    phantom pre-ex highs: the sweep must not read that symbol at all until the window rolls past —
+    and must count the refusal (§6.1 observability)."""
+    counts: dict[str, int] = {}
+    out = sweep_daily(
+        {"RAW": _fresh_cross_rows(close_y=96.0), "IDX": _fresh_cross_rows(close_y=96.0)},
+        today=TODAY, params=SMALL_P, unadjusted_symbols={"RAW"}, veto_counts=counts,
+    )
+    assert [c.symbol for c in out] == ["IDX"]
+    assert counts == {hi52.VETO_UNADJUSTED_HISTORY: 1}
+
+
+def test_unadjusted_history_picks_the_structural_kinds_only():
+    rows = [
+        {"symbol": "A", "kind": "bonus"},           # rescales the series -> vetoed
+        {"symbol": "B", "kind": "dividend"},        # cash event, no rescale -> not vetoed
+        {"symbol": "C", "kind": "buyback"},
+        {"symbol": "D", "kind": "split"},           # incl. a consolidation (classify_purpose maps it here)
+        {"symbol": "E", "kind": "rights"},
+        {"symbol": "F", "kind": "demerger"},
+        {"symbol": "G", "kind": "other"},           # AGM/EGM/unrecognised: not a rescale
+    ]
+    assert hi52.unadjusted_history(rows) == {"A", "D", "E", "F"}
+
+
 # ============================================================ 7. never-raise
 def test_never_raises_on_malformed_short_or_empty_rows():
     # Length-gate refusals on ordinary/empty data.

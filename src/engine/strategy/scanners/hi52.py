@@ -45,6 +45,11 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   observable from day one, not bolted on after a starvation scare the way ``cat``'s visibility line
   was, so ``hi52`` counts it. This is a deliberate divergence from ``brk20``'s literal pattern, not
   an oversight.
+* Unadjusted-history veto (2026-09-03): a symbol with a :data:`UNADJUSTED_KINDS` ex-date inside the
+  lookback is not read at all (counted as :data:`VETO_UNADJUSTED_HISTORY`) — stored ``bars_1d``
+  history is never re-adjusted across an ex-date, so its window holds bars in two units and the
+  proximity read is meaningless until the window rolls past. The composition root supplies the set
+  from ``corp_actions`` over the frame window (:func:`unadjusted_history`).
 * Levels: ``entry = round_to_tick(close(y))`` — the trigger session's own close. Unlike ``brk20``
   there is no "broken level" to retest (a proximity read isn't a level break), so the close IS the
   reference. ``stop = round_to_tick(entry × (1 − stop_pct/100))``, default **6%** — a disaster stop
@@ -78,9 +83,10 @@ Tier-1 judgement and the owner's decision; it carries no presumption of positive
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Mapping, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 from ulid import ULID
 
@@ -102,6 +108,20 @@ DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped learnable envelope, frozen
 #: Veto class surfaced through the optional accumulator (§6.1 observability). See the module
 #: docstring for why hi52 counts this where brk20 does not.
 VETO_EX_DATE_SKIP = "ex_date_skip"
+
+#: Corp-action kinds that RESCALE the price series: after a bonus/split/rights/demerger ex-date every
+#: earlier bar is in a different unit. Neither ``bars_1d`` source re-adjusts STORED history — Kite
+#: candles are adjusted at fetch time (A11) but the series is seeded once and then extended one
+#: session at a time, and bhavcopy rows are raw — so ANY symbol with one of these inside its
+#: lookback carries phantom pre-ex highs until the window rolls past (2026-09-03 review).
+UNADJUSTED_KINDS = frozenset({"bonus", "split", "rights", "demerger"})
+VETO_UNADJUSTED_HISTORY = "unadjusted_history"
+
+
+def unadjusted_history(corp_rows: Iterable[Mapping[str, Any]]) -> frozenset[str]:
+    """Symbols with a structural action among ``corp_rows`` (``MarketStore.get_corp_actions`` rows
+    for the lookback window). Pure; the caller picks the window."""
+    return frozenset(r["symbol"] for r in corp_rows if r["kind"] in UNADJUSTED_KINDS)
 
 
 class Diagnostics(NamedTuple):
@@ -262,16 +282,22 @@ def sweep_daily(
     *,
     today: date,
     ex_dates_by_symbol: Mapping[str, Sequence[date]] | None = None,
+    unadjusted_symbols: Collection[str] = (),
     params: Mapping[str, float] | None = None,
     veto_counts: dict[str, int] | None = None,
 ) -> list[SignalCandidate]:
     """Run :func:`scan_daily` over every symbol; deterministic order (§9.6): score desc, symbol asc.
 
-    ``veto_counts`` is threaded straight through — the caller owns the accumulator and reads
-    :data:`VETO_EX_DATE_SKIP` off it after the sweep returns (§6.1 observability)."""
+    ``unadjusted_symbols`` (see :func:`unadjusted_history`) are not read at all — their window
+    contains bars in two units — and each is counted as :data:`VETO_UNADJUSTED_HISTORY`.
+    ``veto_counts`` is threaded straight through — the caller owns the accumulator and reads the
+    veto classes off it after the sweep returns (§6.1 observability)."""
     ex_map = ex_dates_by_symbol or {}
     out: list[SignalCandidate] = []
     for symbol in sorted(histories):
+        if symbol in unadjusted_symbols:
+            _bump(veto_counts, VETO_UNADJUSTED_HISTORY)
+            continue
         cand = scan_daily(
             symbol,
             histories[symbol],

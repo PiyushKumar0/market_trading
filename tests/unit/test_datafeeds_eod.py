@@ -177,6 +177,11 @@ def test_classify_purpose_deterministic():
     # Compound purpose classifies by the structural action (bonus/split before dividend).
     assert classify_purpose("Bonus 2:1 and Dividend Rs 3")[0] == "bonus"
     assert classify_purpose("Scheme of Arrangement") == ("other", None, None)   # recorded, not guessed
+    # 2026-09-03: the rescaling vocabulary the hi52 unadjusted-history veto keys on.
+    assert classify_purpose("Consolidation of Equity Shares")[0] == "split"
+    assert classify_purpose("Sub Division of Equity Shares From Rs 10 To Rs 1")[0] == "split"
+    assert classify_purpose("Demerger")[0] == "demerger"
+    assert classify_purpose("Reduction of Capital")[0] == "demerger"
 
 
 def test_parse_corp_actions_fixture():

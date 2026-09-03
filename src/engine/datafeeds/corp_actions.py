@@ -72,7 +72,12 @@ _KIND_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("split", "split"),
     ("sub-division", "split"),
     ("subdivision", "split"),
+    ("sub division", "split"),
+    ("consolidation", "split"),          # a reverse split rescales the series the same way (2026-09-03)
     ("rights", "rights"),
+    ("demerger", "demerger"),            # the parent's series rescales on the ex-date (2026-09-03)
+    ("capital reduction", "demerger"),
+    ("reduction of capital", "demerger"),
     ("buyback", "buyback"),
     ("buy back", "buyback"),
     ("dividend", "dividend"),
