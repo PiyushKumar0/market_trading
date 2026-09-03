@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-03 (15:0x–15:4x, engine stopped by the owner) — archive backfill RUN + hi52 backtest re-run: the extended-name thesis is NOT supported
+
+- **Backfill (`scripts/backfill_bhavcopy.py --from 2022-07-01 --to 2026-08-14 --pace-s 0.6`, 15:08→15:32):**
+  1,506 calendar dates attempted, 1,022 sessions ingested, 484 holidays, **0 failed, no streak
+  abort**; 1,801,620 bars_1d rows written, 243,085 cross-checked against existing rows, 47,505
+  mismatched — the adjusted-vs-raw unit difference on names with corp actions, i.e. the B1 premise
+  correction measured. bars_1d now: 2022 229k rows/1,981 symbols (H2), 2023 450k/2,187, 2024
+  470k/2,310, 2025 533k/2,555, 2026 406k/2,905. Corp-actions leg 2021-05-27→2026-08-14: 55 windows,
+  12,829 rows (min window 38 rows in the year-end lull, median 149 — no capped windows); the table
+  now holds **819 structural rows** (split 274, bonus 273, rights 209, demerger 63) 2021-06→2026-09,
+  ~150–200/yr, so the live veto's 400-day lookback is fully backed. Report:
+  `data/reports/bhavcopy_archive_backfill.json`.
+- **Backtest (`scripts/backtest_hi52.py` with the veto, `e148bb2`; 3,199 symbols, 1,035 sessions,
+  window 2020→2026-09-03 ⇒ effective 2022-07; 16,042 discrete trades vs 2,545 on 09-01; vetoes:
+  485 signals discrete / 6,063 symbol-days rank).** Report: `data/reports/backtest_hi52_2026-09-03.json`.
+  - **Geometry (discrete fresh cross): DEAD at T+5 (median gross −0.45%) and T+10 (−0.18%), viable
+    at T+20 by +0.09% only** (+0.41% vs the 0.32% CNC floor). 09-01 (index class only): viable at all
+    three, T+20 +2.26%.
+  - **CPCV: T+10 and T+20 "promotable" by the house rule (73.3% fold pass, median passing
+    0.144%/day vs 0.016 floor), T+5 fails (40%).** The pooled pass is carried by one cell:
+  - **Population split at T+20 (median net / hit / n):** index_member_proxy **+1.89% / 58.4% / 2,120**
+    (09-01: +1.94% / 59.0% / 2,545 — reproduced); **extended_non_index_proxy −0.26% / 49.1% / 13,922**,
+    and negative at T+5/T+10. The WELCORP/DYCL-class motivation for scanning the extended universe
+    has no edge after costs on 4 years of full-market history. The fresh-cross effect here is an
+    index-class effect.
+  - **Frog-in-the-Pan now points the way the literature says:** smooth_approach T+20 +1.14% / 55.6%
+    vs jumpy −0.57% / 48.0% — the 09-01 in-sample INVERSION on the index class does not survive the
+    full market (descriptive cut: full-sample medians, not knowable at signal time). gap_days_excluded
+    +0.78% / 53.4% vs gap_days_only −1.19%.
+  - Rank construct: top decile viable only at T+20 (+0.37% gross), CPCV 33–50% ⇒ not promotable;
+    long–short spread +0.75% at T+20 (bottom decile −1.34%) — the academic sign appears on the full
+    cross-section, but the short leg is not executable (CNC).
+  - **§8.6 verdict: no promotion, and the shadow's ORIGINATION SCOPE is now the question for the
+    owner** — as an extended-universe originator hi52 measures no edge; the evidence supports an
+    index-class rule with a smooth-approach / no-gap-day filter (a pre-registered v2 would need a
+    signal-time definition of "smooth"). Options: restrict origination to the eligible universe;
+    pre-register v2; or drop. Not shipped — owner decision.
+  - Caveats carried: index split is a survivorship-tainted proxy (current membership); bars
+    survivorship is now PARTIAL (the archive carries since-delisted names' history, but a name
+    delisted inside the horizon books no trade — the report's "delisted names absent" line is stale
+    and should say so); N=1, no sweep; CNC ₹20k costs incl. spread.
+- **Process:** the backtest-veto change was built red-first and Opus-reviewed (two should-fixes
+  applied: structural vs all-kinds coverage; the rank window ends ON the rebalance day so its veto
+  calls with d+1); 19 tests. Peers held the restart 15:08→15:4x and were released after the run.
+
 ## 2026-09-03 (12:0x–15:1x, owner-directed "start with your recommended fixes") — store-stall page, hi52 unadjusted-history veto, bhavcopy archive backfill tool
 
 - **Item 3 shipped (`d2c5c8c`, deploys at next boot):** the WO-24b store stall is an owner-facing
