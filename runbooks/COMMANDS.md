@@ -140,3 +140,25 @@ uv run python -c "import duckdb, collections; con = duckdb.connect(r'data\market
 # session scratchpad probe_feeds.py pattern; quick single-feed check:
 uv run python -c "import httpx, xml.etree.ElementTree as ET; r = httpx.get('https://www.livemint.com/rss/markets', headers={'User-Agent': 'Mozilla/5.0'}, follow_redirects=True, timeout=30); print(r.status_code, [i.findtext('pubDate') for i in ET.fromstring(r.content).findall('.//item')][:3])"
 ```
+
+## Gate G2 evidence (Phase 2 exit gate, §8.3)
+
+```powershell
+.venv\Scripts\python.exe scripts\g2_evidence.py --json data\reports\g2_evidence.json   # read-only state.db; safe with engine up
+```
+Read the SOURCES + COVERAGE CAVEATS block before quoting; RUNBOOK "Gate G2 evidence checklist" lists the owner-manual halves.
+
+## One-off ledger repair (2026-09-03) — expired→taken entry row stuck at 'no_action'
+
+Symptom: a recommendation /taken AFTER it expired keeps `expire_stale`'s `outcome_label='no_action'`
+on its ENTRY row, and `pipeline.close()` completes only `WHERE outcome_label IS NULL`, so the real
+outcome never lands. Fixed prospectively in `take()` (commit 2184a2a); rows taken before that need
+this repair. Run with the engine idle (health pulses only in the log tail). Find candidates first:
+
+```powershell
+.venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('file:data/state.db?mode=ro', uri=True); print(c.execute(\"SELECT l.entry_id, p.symbol, l.outcome_label, l.closed_at FROM learning_ledger l JOIN positions p ON p.position_id=l.position_id WHERE p.state='OPEN' AND l.strategy_id IS NOT NULL AND l.outcome_label IS NOT NULL\").fetchall())"
+# then, per entry_id, inside BEGIN IMMEDIATE with rowcount==1 asserted (script pattern: session scratchpad ledger_fix_hdfcamc.py):
+#   UPDATE learning_ledger SET outcome_label=NULL, closed_at=NULL
+#   WHERE entry_id=? AND outcome_label='no_action' AND exit_px IS NULL
+#     AND position_id IN (SELECT position_id FROM positions WHERE state='OPEN')
+```
