@@ -134,10 +134,11 @@ import math
 import os
 import statistics
 import sys
+from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -165,6 +166,9 @@ from engine.strategy.scanners.brk20 import DailyRow  # noqa: E402
 from engine.strategy.scanners.hi52 import (  # noqa: E402
     DEFAULT_PARAMS,
     STRATEGY_ID,
+    UNADJUSTED_KINDS,
+    VETO_UNADJUSTED_HISTORY,
+    _bump,       # the live veto accumulator, so a count here means what the live sweep's count means
     _proximity,  # the ONE proximity definition — imported, never copied (plan: one crossing function)
     diagnostics_for,
     scan_daily,
@@ -185,6 +189,10 @@ GAP_DAY_PCT = 5.0                                 # |close/prev_close - 1| > 5% 
 REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size (§6.4/§7.1)
 PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS (overnight holds)
 RANK_TOP_DECILE = 0.10
+
+#: Trailing CALENDAR-day window of the unadjusted-history veto. Source of truth is the live sweep's
+#: own history window, ``hi52_start = today - timedelta(days=400)`` (engine/ops/main.py window_open).
+UNADJUSTED_LOOKBACK_DAYS = 400
 
 CONSTRUCT_DISCRETE = "discrete_fresh_cross"
 CONSTRUCT_RANK_TOP = "rank_top_decile"
@@ -328,6 +336,53 @@ def load_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[date]]:
     return {k: sorted(v) for k, v in out.items()}
 
 
+def load_structural_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[date]]:
+    """``symbol -> sorted ex-dates`` for the RESCALING kinds alone (``hi52.UNADJUSTED_KINDS``).
+
+    The kind test is the live one (``hi52.unadjusted_history``): exact membership on the stored
+    ``kind``, never case-folded or fuzzy, so this study vetoes the same rows the sweep vetoes.
+    """
+    try:
+        rows = conn.execute("SELECT symbol, ex_date, kind FROM corp_actions").fetchall()
+    except Exception:  # noqa: BLE001 - a missing/renamed table must not sink an offline study
+        return {}
+    out: dict[str, list[date]] = defaultdict(list)
+    for sym, xd, kind in rows:
+        if xd is None or kind not in UNADJUSTED_KINDS:
+            continue
+        out[str(sym)].append(xd.date() if hasattr(xd, "date") else xd)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """``{rows, ex_date_min, ex_date_max, structural_rows, structural_ex_date_min, ..._max}``.
+
+    The veto reaches exactly as far as the STRUCTURAL rows do — the table is dividend-dominated, so
+    an all-kinds count says only whether it was backfilled at all — and an empty or short structural
+    span silently disables it, so both are reported next to the counts rather than assumed.
+    """
+    empty = {"rows": 0, "ex_date_min": None, "ex_date_max": None,
+             "structural_rows": 0, "structural_ex_date_min": None, "structural_ex_date_max": None}
+    kinds = ", ".join(f"'{k}'" for k in sorted(UNADJUSTED_KINDS))
+    try:
+        rows, lo, hi = conn.execute(
+            "SELECT count(*), min(ex_date), max(ex_date) FROM corp_actions"
+        ).fetchone()
+        s_rows, s_lo, s_hi = conn.execute(
+            f"SELECT count(*), min(ex_date), max(ex_date) FROM corp_actions WHERE kind IN ({kinds})"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - same posture as load_ex_dates
+        return empty
+    return {
+        "rows": int(rows or 0),
+        "ex_date_min": None if lo is None else str(lo),
+        "ex_date_max": None if hi is None else str(hi),
+        "structural_rows": int(s_rows or 0),
+        "structural_ex_date_min": None if s_lo is None else str(s_lo),
+        "structural_ex_date_max": None if s_hi is None else str(s_hi),
+    }
+
+
 def load_index_members(db_path: Path, override: Path | None = None) -> tuple[set[str], str]:
     """CURRENT NIFTY200 membership + its provenance string (a survivorship-tainted proxy, see above).
 
@@ -395,17 +450,36 @@ def _window(series: Series, i: int, lookback: int) -> list[DailyRow]:
     return series.rows[max(0, i + 1 - lookback) : i + 1]
 
 
+def _unadjusted_at(structural: Sequence[date], today: date) -> bool:
+    """Whether a rescaling ex-date falls in ``[today - UNADJUSTED_LOOKBACK_DAYS, today - 1]``.
+
+    ``structural`` must be ascending (:func:`load_structural_ex_dates` sorts). ``today`` itself is
+    OUT of range: on the ex-date every bar the window holds is still pre-ex, in one unit — that day
+    is the upcoming-ex skip's case, not this one.
+    """
+    if not structural:
+        return False
+    j = bisect_left(structural, today - timedelta(days=UNADJUSTED_LOOKBACK_DAYS))
+    return j < len(structural) and structural[j] < today
+
+
 def discrete_signals(
     series: Series,
     params: dict[str, float],
     ex_dates: Sequence[date],
+    structural_ex_dates: Sequence[date] = (),
     *,
     exhaustive: bool = False,
+    veto_counts: dict[str, int] | None = None,
 ) -> list[tuple[int, float]]:
     """``(signal index, score)`` for every hi52 fresh cross in this symbol's history.
 
     ``exhaustive`` bypasses the prefilter and offers EVERY eligible day to ``scan_daily`` — the
     ``--verify-prefilter`` path (and the unit test's equality assertion).
+
+    ``structural_ex_dates`` applies the live sweep's unadjusted-history veto (:func:`_unadjusted_at`)
+    to the decision day, so the measured population is the one the shadow can actually originate.
+    Counted on ``veto_counts`` when one is supplied; ``None`` keeps this function pure.
     """
     n = len(series)
     min_sessions = int(params["min_sessions"])
@@ -425,6 +499,9 @@ def discrete_signals(
             params=params,
         )
         if cand is not None:
+            if _unadjusted_at(structural_ex_dates, today):
+                _bump(veto_counts, VETO_UNADJUSTED_HISTORY)
+                continue
             out.append((i, float(cand.score)))
     return out
 
@@ -710,6 +787,8 @@ def run_study(
     if not series_by_symbol:
         raise ValueError("no bars_1d rows in the requested window")
     ex_dates = load_ex_dates(conn)
+    structural = load_structural_ex_dates(conn)
+    coverage = corp_actions_coverage(conn)
     index_members, index_source = load_index_members(
         Path(db_path) if db_path is not None else repo_root() / "data" / "market.duckdb",
         nifty200_csv,
@@ -719,14 +798,16 @@ def run_study(
     # ---------------------------------------------------------------- (a) discrete fresh cross
     discrete: list[Trade] = []
     n_signals_discrete = 0
+    discrete_vetoes: dict[str, int] = {}
     verify_left = int(verify_prefilter)
     verify_checked = 0
     for sym in sorted(series_by_symbol):
         s = series_by_symbol[sym]
         xd = ex_dates.get(sym, [])
-        sigs = discrete_signals(s, p, xd)
+        sx = structural.get(sym, [])
+        sigs = discrete_signals(s, p, xd, sx, veto_counts=discrete_vetoes)
         if verify_left > 0:
-            exhaustive = discrete_signals(s, p, xd, exhaustive=True)
+            exhaustive = discrete_signals(s, p, xd, sx, exhaustive=True)
             if [i for i, _ in exhaustive] != [i for i, _ in sigs]:
                 raise AssertionError(
                     f"prefilter/scan_daily disagreement on {sym}: "
@@ -753,6 +834,7 @@ def run_study(
     }
     rank_top: list[Trade] = []
     rank_bottom: list[Trade] = []
+    rank_vetoes: dict[str, int] = {}
     n_rebalances_used = 0
     lookback = int(p["lookback_sessions"])
     min_sessions = int(p["min_sessions"])
@@ -761,6 +843,11 @@ def run_study(
         for sym, s in series_by_symbol.items():
             i = pos[sym].get(d)
             if i is None or i + 1 < min_sessions:
+                continue
+            # The rank window ENDS at d (the discrete window ends at y = d - 1), so an ex-date ON d
+            # already puts a post-ex close under a pre-ex high: the taint range here is [d-400, d].
+            if _unadjusted_at(structural.get(sym, []), d + timedelta(days=1)):
+                _bump(rank_vetoes, VETO_UNADJUSTED_HISTORY)
                 continue
             prox_hi = _proximity(_window(s, i, lookback), lookback=lookback)
             if prox_hi is None:
@@ -812,6 +899,18 @@ def run_study(
         "NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N=1 "
         "(fold_pass_min = 60%)."
     )
+    notes.append(
+        "UNADJUSTED-HISTORY VETO mirrors the live sweep: a symbol carrying a "
+        + "/".join(sorted(UNADJUSTED_KINDS))
+        + f" ex-date in the {UNADJUSTED_LOOKBACK_DAYS} calendar days before the decision day is not "
+        "read at all (stored bars_1d history is never re-adjusted, so its window holds bars in two "
+        f"units). The veto's reach IS the STRUCTURAL corp_actions coverage - "
+        f"{coverage['structural_rows']} rows, ex_date {coverage['structural_ex_date_min']} -> "
+        f"{coverage['structural_ex_date_max']} (all kinds: {coverage['rows']} rows): an empty or "
+        "short span silently disables it and the measured population then exceeds the one the shadow "
+        "can originate. Counts are in different units: discrete = suppressed SIGNALS, rank = "
+        "suppressed SYMBOL-DAYS, the live sweep = symbols per sweep."
+    )
 
     doc: dict[str, Any] = {
         "meta": {
@@ -840,6 +939,11 @@ def run_study(
             "prefilter_verified_symbols": verify_checked,
             "n_rebalances": n_rebalances_used,
             "n_discrete_signals_fired": n_signals_discrete,
+        },
+        "corp_actions_coverage": coverage,
+        "unadjusted_vetoes": {
+            "discrete": discrete_vetoes.get(VETO_UNADJUSTED_HISTORY, 0),
+            "rank": rank_vetoes.get(VETO_UNADJUSTED_HISTORY, 0),
         },
         "geometry": {},
         "constructs": {},
@@ -1011,6 +1115,11 @@ def render_text(doc: dict[str, Any]) -> str:
     add("-" * 96)
     add("NOTES / CAVEATS (reported, not massaged)")
     add("-" * 96)
+    cov = doc["corp_actions_coverage"]
+    vetoes = doc["unadjusted_vetoes"]
+    add(f"  unadjusted-history vetoes: discrete {vetoes['discrete']} signals, rank {vetoes['rank']} "
+        f"symbol-days   [structural corp_actions rows={cov['structural_rows']}, ex_date "
+        f"{cov['structural_ex_date_min']} -> {cov['structural_ex_date_max']}; all kinds {cov['rows']}]")
     for n in doc["notes"]:
         add(f"  * {n}")
     add("")

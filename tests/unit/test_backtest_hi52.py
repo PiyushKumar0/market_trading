@@ -106,16 +106,45 @@ def spiker_bars() -> list[DailyBar]:
     return bars
 
 
-@pytest.fixture
-def db_file(tmp_path, clock) -> Path:
+#: WINNER's ex-date: 30 calendar days before its decision day, i.e. inside the veto's trailing
+#: window but far outside the 10-day UPCOMING-ex skip, so the two vetoes cannot be confused.
+ACTION_EX = SESSIONS[ENTRY_IDX] - timedelta(days=30)
+
+
+def _corp_action(sym: str, ex: date, kind: str, clock) -> dict:
+    """One ``corp_actions`` row shaped as ``CorpActionsJob.run`` stamps them."""
+    return {
+        "symbol": sym, "ex_date": ex, "kind": kind, "ratio": None, "amount": None,
+        "source": "test", "recorded_at": clock.now(),
+    }
+
+
+def _seed(path: Path, parquet: Path, clock, corp_actions: list[dict]) -> Path:
     """A temp market.duckdb seeded with the three symbols, CLOSED so the study can attach read-only."""
-    path = tmp_path / "market.duckdb"
-    store = MarketStore(path, tmp_path / "parquet", clock).open()
+    store = MarketStore(path, parquet, clock).open()
     try:
         store.upsert_bars_1d(winner_bars() + gapper_bars() + spiker_bars())
+        if corp_actions:
+            store.upsert_corp_actions(corp_actions)
     finally:
         store.close()
     return path
+
+
+@pytest.fixture
+def db_file(tmp_path, clock) -> Path:
+    return _seed(tmp_path / "market.duckdb", tmp_path / "parquet", clock, [])
+
+
+@pytest.fixture
+def db_with_action(tmp_path, clock):
+    """``kind -> `` a temp DB whose WINNER carries that corp action on :data:`ACTION_EX`."""
+    def _make(kind: str) -> Path:
+        return _seed(
+            tmp_path / f"market_{kind}.duckdb", tmp_path / f"parquet_{kind}", clock,
+            [_corp_action("WINNER", ACTION_EX, kind, clock)],
+        )
+    return _make
 
 
 @pytest.fixture
@@ -129,22 +158,25 @@ def index_csv(tmp_path) -> Path:
     return p
 
 
-@pytest.fixture
-def study(db_file, index_csv):
-    conn = bt.open_readonly(db_file)
+def _run(db: Path, index_csv: Path):
+    conn = bt.open_readonly(db)
     try:
-        doc, trades = bt.run_study(
+        return bt.run_study(
             conn,
             start=SESSIONS[0],
             end=SESSIONS[-1],
             cost_model=CostModel.from_config(),
             nifty200_csv=index_csv,
-            db_path=db_file,
+            db_path=db,
             verify_prefilter=10,          # brute-force every eligible day for all three symbols
         )
     finally:
         conn.close()
-    return doc, trades
+
+
+@pytest.fixture
+def study(db_file, index_csv):
+    return _run(db_file, index_csv)
 
 
 def _by_symbol(trades) -> dict:
@@ -256,6 +288,16 @@ def test_prefilter_agrees_with_an_exhaustive_scan_daily(db_file):
         fast = bt.discrete_signals(s, bt.PRE_REGISTERED_PARAMS, [])
         slow = bt.discrete_signals(s, bt.PRE_REGISTERED_PARAMS, [], exhaustive=True)
         assert [i for i, _ in fast] == [i for i, _ in slow] == [SIGNAL_IDX], sym
+        # the unadjusted-history veto must land on BOTH paths, or --verify-prefilter would fire on it
+        counts: dict[str, int] = {}
+        vetoed_fast = bt.discrete_signals(
+            s, bt.PRE_REGISTERED_PARAMS, [], [ACTION_EX], veto_counts=counts
+        )
+        vetoed_slow = bt.discrete_signals(
+            s, bt.PRE_REGISTERED_PARAMS, [], [ACTION_EX], exhaustive=True
+        )
+        assert vetoed_fast == vetoed_slow == [], sym
+        assert counts == {hi52.VETO_UNADJUSTED_HISTORY: 1}, sym
 
 
 def test_index_split_is_labelled_a_survivorship_tainted_proxy(study):
@@ -362,3 +404,73 @@ def test_refuses_a_locked_database_file(db_file, tmp_path, clock, capsys):
     assert "cannot open read-only" in err
     assert "mt-engine" in err
     assert not (tmp_path / "y.json").exists()
+
+
+# ============================================================ 6. the unadjusted-history veto
+def test_unadjusted_at_window_boundaries():
+    """The trailing window is [today - 400, today - 1] INCLUSIVE; today itself belongs to the
+    upcoming-ex skip (every bar in the window is still pre-ex, one unit)."""
+    today = date(2025, 6, 30)
+    span = bt.UNADJUSTED_LOOKBACK_DAYS
+    assert bt._unadjusted_at([], today) is False
+    assert bt._unadjusted_at([today], today) is False
+    assert bt._unadjusted_at([today - timedelta(days=1)], today) is True
+    assert bt._unadjusted_at([today - timedelta(days=span)], today) is True
+    assert bt._unadjusted_at([today - timedelta(days=span + 1)], today) is False
+    assert bt._unadjusted_at([today + timedelta(days=1)], today) is False
+    # The rank construct's window ends ON the rebalance day, so it calls with d + 1: an ex-date on
+    # the rebalance day itself is then in range (owned by this veto, not by the upcoming-ex skip).
+    assert bt._unadjusted_at([today], today + timedelta(days=1)) is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "books_trade", "vetoes"),
+    [("bonus", False, 1), ("dividend", True, 0)],
+)
+def test_a_structural_ex_date_vetoes_the_discrete_signal(
+    db_with_action, index_csv, kind, books_trade, vetoes
+):
+    """A bonus 30 days before WINNER's cross holds its window in two units; a dividend does not."""
+    doc, trades = _run(db_with_action(kind), index_csv)
+    booked = {t.symbol for t in trades[bt.CONSTRUCT_DISCRETE]}
+    assert ("WINNER" in booked) is books_trade
+    assert booked >= {"GAPPER", "SPIKER"}                    # the veto is per symbol, never global
+    assert doc["unadjusted_vetoes"]["discrete"] == vetoes
+    assert doc["meta"]["n_discrete_signals_fired"] == (3 if books_trade else 2)
+
+
+def test_rank_construct_skips_a_symbol_with_unadjusted_history(db_with_action, index_csv):
+    """Every rebalance whose index clears min_sessions is a skip for WINNER — and none for a
+    dividend, whose ex-date rescales nothing."""
+    eligible = [i for i in bt.month_end_indices(SESSIONS) if i >= SIGNAL_IDX]
+    assert eligible                                          # the fixture must reach a rebalance
+    doc, _trades = _run(db_with_action("bonus"), index_csv)
+    assert doc["unadjusted_vetoes"]["rank"] == len(eligible)
+    doc_div, _ = _run(db_with_action("dividend"), index_csv)
+    assert doc_div["unadjusted_vetoes"]["rank"] == 0
+
+
+def test_corp_actions_coverage_is_reported_with_the_veto_counts(db_file, db_with_action, index_csv):
+    """The veto reaches exactly as far as corp_actions does, so the report states the coverage."""
+    doc_empty, _ = _run(db_file, index_csv)
+    assert doc_empty["corp_actions_coverage"] == {
+        "rows": 0, "ex_date_min": None, "ex_date_max": None,
+        "structural_rows": 0, "structural_ex_date_min": None, "structural_ex_date_max": None,
+    }
+    assert doc_empty["unadjusted_vetoes"] == {"discrete": 0, "rank": 0}
+
+    doc, _trades = _run(db_with_action("bonus"), index_csv)
+    assert doc["corp_actions_coverage"] == {
+        "rows": 1, "ex_date_min": str(ACTION_EX), "ex_date_max": str(ACTION_EX),
+        "structural_rows": 1, "structural_ex_date_min": str(ACTION_EX),
+        "structural_ex_date_max": str(ACTION_EX),
+    }
+    # A dividend-only table is "backfilled" but gives the veto NO reach: the structural span is empty.
+    doc_div, _ = _run(db_with_action("dividend"), index_csv)
+    assert doc_div["corp_actions_coverage"]["rows"] == 1
+    assert doc_div["corp_actions_coverage"]["structural_rows"] == 0
+    assert any("UNADJUSTED-HISTORY VETO" in n for n in doc["notes"])
+    text = bt.render_text(doc)
+    assert "unadjusted-history vetoes: discrete 1 signals" in text
+    assert "structural corp_actions rows=1" in text
+    assert str(ACTION_EX) in text
