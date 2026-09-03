@@ -5,30 +5,13 @@
  * closed — set through Telegram `/taken` `/closed`, never from here: this dashboard is read-only over
  * the recommendation ledger).
  *
- * Rows are enriched with the matching `/decisions` provenance (agent + gate reasons) where the
- * recommendation's own gate payload is absent.
+ * Gate reasons come from the recommendation's own embedded verdict (§3.6 `gate`) — never from
+ * `/decisions`: a different proposal's verdict is never this card's provenance.
  */
-import type { DecisionRow, RecommendationRow } from '../types'
+import type { RecommendationRow } from '../types'
 import { Chip, Empty, Panel, dash, hhmmss, toneFor } from './ui'
 
-function reasonsFor(rec: RecommendationRow, decisions: DecisionRow[]): string[] {
-  const own = rec.recommendation?.gate?.reasons
-  if (own && own.length > 0) return own
-  // Fall back to the provenance view (/decisions is ordered newest-first): the most recent judged
-  // proposal on the same instrument.
-  const match = decisions.find(
-    (d) => d.proposal.tradingsymbol === rec.recommendation?.instrument && d.verdict !== null,
-  )
-  return match?.reasons ?? []
-}
-
-export function RecommendationsPanel({
-  rows,
-  decisions,
-}: {
-  rows: RecommendationRow[]
-  decisions: DecisionRow[]
-}) {
+export function RecommendationsPanel({ rows }: { rows: RecommendationRow[] }) {
   return (
     <Panel title="Recommendations" aside={rows.length ? `${rows.length}` : undefined} wide>
       {rows.length === 0 ? (
@@ -38,7 +21,7 @@ export function RecommendationsPanel({
           const rec = row.recommendation
           const gate = rec?.gate
           const zone = rec?.entry_zone
-          const reasons = reasonsFor(row, decisions)
+          const reasons = gate?.reasons ?? []
           return (
             <div className="rec" key={row.rec_id}>
               <div className="row">

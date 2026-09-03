@@ -241,8 +241,8 @@ async def test_surveillance_excluded_symbol_still_drops_out_of_universe(store, c
     """An exclusion reason OTHER than the cap (surveillance_gsm) is a true outsider — still
     out_of_universe, never attached, even though it has a universe_daily row. INFY is seeded
     ``included`` alongside it so the loaded universe is a non-empty frozenset (an all-excluded
-    universe_daily degenerates to "unknown" — see :meth:`EntityResolver.load` — which is not the
-    case under test here)."""
+    universe_daily fails closed to an empty frozenset — see :meth:`EntityResolver.load` — which is
+    not the case under test here)."""
     d = clock.today()
     store.upsert_entity_aliases([
         {"alias": "infosys", "tradingsymbol": "INFY"},
@@ -277,6 +277,37 @@ async def test_symbol_absent_from_universe_daily_drops_out_of_universe(store, cl
     (u,) = rc.unresolved
     assert u.reason == "out_of_universe"
     assert u.candidate_symbols == ("VIKRAMSOLR",)
+
+
+async def test_all_excluded_universe_fails_closed(store, clock):
+    """FIX 5: a universe_daily build that RAN but passed nothing (every row excluded) must FAIL
+    CLOSED, not degrade to "unknown" — the pre-fix bug: an empty ``get_batch_universe_symbols``
+    result loaded as ``None`` (universe unknown), disabling the out-of-universe filter entirely
+    and attaching every resolved symbol as if eligible."""
+    d = clock.today()
+    store.upsert_entity_aliases([{"alias": "infosys", "tradingsymbol": "INFY"}])
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "INFY", "included": False, "exclusion_reasons": ["surveillance_gsm"]},
+    ])
+    resolver = EntityResolver(store, clock)
+    await resolver.aload(d)
+    rc = resolver.resolve(_cluster("Infosys wins large European banking deal"))
+    assert rc.symbols == []
+    (u,) = rc.unresolved
+    assert u.reason == "out_of_universe"
+    assert u.candidate_symbols == ("INFY",)
+
+
+async def test_no_universe_rows_for_the_day_stays_unknown(store, clock):
+    """No ``universe_daily`` rows at all for ``d`` (pre-08:30 build) still means "unknown" — the
+    out-of-universe filter stays disabled here; the step-5 digest re-checks."""
+    d = clock.today()
+    store.upsert_entity_aliases([{"alias": "infosys", "tradingsymbol": "INFY"}])
+    resolver = EntityResolver(store, clock)
+    await resolver.aload(d)
+    rc = resolver.resolve(_cluster("Infosys wins large European banking deal"))
+    assert rc.symbols == ["INFY"]
+    assert rc.unresolved == []
 
 
 # --------------------------------------------------------------------------- sector / theme tagging

@@ -862,6 +862,42 @@ async def test_owner_approval_required_opens_a_pending_row(
     assert parts["notify"].messages[0].data["approval_id"] == row["approval_id"]
 
 
+async def test_owner_approval_on_a_position_event_names_the_symbol(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """An exit/modify action carries only a position_id, so the prompt used to be a bare ULID — an
+    owner cannot approve what they cannot identify. The caller's symbol is persisted and printed."""
+    position_id = _open_position(conn, pclock)
+    exit_json = {
+        "action": "exit", "position_id": position_id, "exit_type": "MARKET",
+        "reason": "risk_event", "confidence": 0.9,
+        "thesis": "Price is inside half an ATR of the stop; the breakout thesis is failing.",
+    }
+    harness = FakeHarness(dict(exit_json))
+    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("owner_approval_required", cost_model,
+                                 reasons=["exit sizing is above the auto-approval band"])),
+        ctx=passing_ctx(positions_known=frozenset({position_id})),
+        limits=StubLimits(limit_table), store=FakeStore(bars=_flat_bars()),
+    )
+    near = Bar(symbol=SYMBOL, ts_minute=NOW, open=Decimal("99.4"), high=Decimal("99.5"),
+               low=Decimal("99.3"), close=Decimal("99.40"), volume=100)
+
+    await pipeline.on_bar(near)
+
+    row = conn.execute("SELECT * FROM owner_approvals").fetchone()
+    assert row["status"] == "pending" and row["kind"] == "exit"
+    payload = json.loads(row["payload"])
+    assert payload["symbol"] == SYMBOL                       # the whole point
+    assert payload["position_id"] == position_id             # provenance is kept, not replaced
+    message = parts["notify"].messages[-1]
+    assert SYMBOL in message.title
+    assert SYMBOL in message.body and position_id in message.body
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
+
+
 async def test_market_entry_zone_spans_the_sanity_band(
     conn, pclock, calendar, book, limit_table, cost_model
 ):

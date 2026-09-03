@@ -1682,6 +1682,56 @@ class RecommendationPipeline:
             },
         ))
 
+    async def _handle_gate_context_timeout_position(
+        self, position: sqlite3.Row, action: Any, exc: GateContextTimeout
+    ) -> None:
+        """The same WO-24a landing for the two position-management paths (trigger (b) and the §7.1
+        sweep). No verdict is fabricated and the orphan is left for :meth:`sweep_orphaned_proposals`,
+        exactly as on the candidate path; there is no day slot to hand back here, because neither
+        path is a prescreen publication. Shares the ERROR event name with the candidate handler so
+        one grep finds every timeout. Never raises: it IS the failure path.
+        """
+        position_id = str(position["position_id"])
+        symbol = str(position["symbol"])
+        _log.error(
+            "gate_context_timeout", position_id=position_id, symbol=symbol, action=action.action,
+            proposal_id=exc.proposal_id, deadline_s=_GATE_CONTEXT_DEADLINE_S,
+        )
+        # The deterministic time stop is the only proposal here the platform builds itself.
+        if str(action.agent_id) == PLATFORM_AGENT_ID:
+            next_step = (
+                "the sweep finishes the other aged positions, then fails the reco_expire job so "
+                "the catch-up retries it (30-min sweep / next startup); it is idempotent by age"
+            )
+        else:
+            next_step = (
+                "the stop-proximity debounce stamp was taken BEFORE the gate call, so the next "
+                f"re-evaluation of this position waits the full {POSITION_EVENT_DEBOUNCE_MIN}-minute "
+                "window"
+            )
+        await self._send(CatalogMessage(
+            kind=MessageKind.LIMIT_BREACH,
+            title=f"Gate context timed out ({symbol})",
+            body=(
+                f"The gate context for {symbol} did not build within "
+                f"{_GATE_CONTEXT_DEADLINE_S:.0f}s, so the {action.action} recommendation for "
+                f"position {position_id} was never judged and nothing was recommended. Proposal "
+                f"{exc.proposal_id} is persisted with no verdict — the market store is the suspect "
+                f"(WO-24a). Next: {next_step}. Any stop the owner already placed on this position "
+                "stands regardless (R3)."
+            ),
+            severity="critical",
+            data={
+                "rule_id": "gate_context_timeout",
+                "position_id": position_id,
+                "symbol": symbol,
+                "action": action.action,
+                "proposal_id": exc.proposal_id,
+                "value": f"{_GATE_CONTEXT_DEADLINE_S:.0f}s deadline exceeded",
+                "limit": "a gate-context build must answer within the deadline",
+            },
+        ))
+
     # ================================================================== recommendation assembly
     def build_recommendation(
         self, action: EnterAction, verdict: GateVerdict, entry_ref: Decimal
@@ -1829,12 +1879,18 @@ class RecommendationPipeline:
                          position_id=position["position_id"])
             return
 
-        verdict, _ = await self._gate_and_persist(
-            action, str(position["symbol"]), str(position["side"] or "BUY"), style,
-            self._clock.today(),
-        )
+        try:
+            verdict, _ = await self._gate_and_persist(
+                action, str(position["symbol"]), str(position["side"] or "BUY"), style,
+                self._clock.today(),
+            )
+        except GateContextTimeout as exc:
+            # WO-24a on trigger (b): unguarded this came out of on_bar, i.e. out of the tick handler
+            # for every symbol, not just this position.
+            await self._handle_gate_context_timeout_position(position, action, exc)
+            return
         if verdict.verdict == "owner_approval_required":
-            await self._request_owner_approval(action, verdict)
+            await self._request_owner_approval(action, verdict, symbol=str(position["symbol"]))
             return
         if verdict.verdict not in ("approve", "shrink"):
             return
@@ -1848,7 +1904,9 @@ class RecommendationPipeline:
 
         DETERMINISTIC: the ``ExitAction`` is built in Python and the harness is never called. R1 —
         an exit that only happens when a model answers is not an exit. Returns how many exit
-        recommendations were issued.
+        recommendations were issued. A ``GateContextTimeout`` on one position is alerted and the
+        sweep continues, but it is re-raised once the loop is done so the job's watermark records a
+        failure and the catch-up retries — a swallowed timeout would defer a §7.1 exit by a day.
         """
         table = self._limits.load()
         caps = {
@@ -1859,6 +1917,7 @@ class RecommendationPipeline:
             "SELECT * FROM positions WHERE state='OPEN' AND origin='recommended'"
         ).fetchall()
         issued = 0
+        timed_out: GateContextTimeout | None = None
         for position in rows:
             style = str(position["style"] or "")
             cap = caps.get(style)
@@ -1879,9 +1938,16 @@ class RecommendationPipeline:
                 exit_type="MARKET",
                 reason="time_stop",
             )
-            verdict, _ = await self._gate_and_persist(
-                action, str(position["symbol"]), str(position["side"] or "BUY"), style, d
-            )
+            try:
+                verdict, _ = await self._gate_and_persist(
+                    action, str(position["symbol"]), str(position["side"] or "BUY"), style, d
+                )
+            except GateContextTimeout as exc:
+                # One stalled position may not take the sweep down with it: the aged positions
+                # BEHIND it still have to be looked at (WO-24a). Re-raised after the loop.
+                await self._handle_gate_context_timeout_position(position, action, exc)
+                timed_out = timed_out or exc
+                continue
             if verdict.verdict not in ("approve", "shrink"):
                 continue
             rec = self._manage_recommendation(action, verdict, position, None)
@@ -1895,6 +1961,8 @@ class RecommendationPipeline:
         # The §7.1 sweep is this class's own end-of-session hook, so it is where the WO-8 read
         # ledger gets emitted — one line per session, no new wiring in the composition root.
         self.log_hot_path_stats("eod")
+        if timed_out is not None:
+            raise timed_out
         return issued
 
     # ================================================================== trigger (c): heartbeat
@@ -1978,9 +2046,16 @@ class RecommendationPipeline:
             ),
         )
 
-    async def _request_owner_approval(self, action: Any, verdict: GateVerdict) -> None:
+    async def _request_owner_approval(
+        self, action: Any, verdict: GateVerdict, *, symbol: str | None = None
+    ) -> None:
         """Route a gate ``owner_approval_required`` verdict to the owner (§3.4). The row is the
-        pending decision; the message is the prompt. Nothing is applied until ``/approve``."""
+        pending decision; the message is the prompt. Nothing is applied until ``/approve``.
+
+        ``symbol`` is the caller's: an ``ExitAction``/``ModifyStopAction`` carries only a
+        ``position_id``, and a bare ULID is not a thing an owner can approve. Persisted in the row
+        as well as printed, so an approval read back later still names the instrument.
+        """
         approval_id = str(ULID())
         payload = {
             "action": action.action,
@@ -1988,6 +2063,10 @@ class RecommendationPipeline:
             "verdict_id": verdict.verdict_id,
             "reasons": "; ".join(verdict.reasons) or "gate routed this to the owner",
         }
+        named = getattr(action, "tradingsymbol", None)
+        if named is None and symbol is not None:
+            payload["symbol"] = symbol        # above the ids below: what, then which row
+            named = symbol
         for field in ("tradingsymbol", "position_id", "new_stop", "new_target", "order_id"):
             value = getattr(action, field, None)
             if value is not None:
@@ -2004,7 +2083,7 @@ class RecommendationPipeline:
                      proposal_id=action.proposal_id)
         await self._send(CatalogMessage(
             kind=MessageKind.LIMIT_BREACH,
-            title=f"Owner approval required: {action.action}",
+            title=f"Owner approval required: {action.action}" + (f" {named}" if named else ""),
             body="\n".join([
                 f"approval {approval_id} is pending — reply /approve {approval_id} or "
                 f"/reject {approval_id}.",

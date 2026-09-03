@@ -112,10 +112,7 @@ export default function App() {
       />
 
       <div className="grid">
-        <RecommendationsPanel
-          rows={snapshot.recommendations?.recommendations ?? []}
-          decisions={snapshot.decisions?.decisions ?? []}
-        />
+        <RecommendationsPanel rows={snapshot.recommendations?.recommendations ?? []} />
         <PositionsPanel data={snapshot.positions} />
         <DecisionsPanel rows={snapshot.decisions?.decisions ?? []} />
         <HeadroomPanel data={snapshot.headroom} />

@@ -1,5 +1,44 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-03 (00:4x–11:5x, owner-directed "start with the fixes") — four follow-ups from the 09-02 phase audit, red-first + two-lens review
+
+- **Shipped (deploys at next boot; dashboard dist already rebuilt 11:3x and served from disk):**
+  (1) `_request_owner_approval` takes a keyword-only `symbol`; the §5.2(b) caller passes
+  `position["symbol"]`, persisted in `owner_approvals.payload` and printed in the title/body beside
+  the raw position_id — the prompt no longer asks the owner to approve a bare ULID. (2)
+  `GateContextTimeout` contained on both position paths: the position event alerts and returns; the
+  §7.1 `max_holding` sweep alerts per position, finishes the aged positions BEHIND the stalled one,
+  then **re-raises** so `reco_expire`'s watermark records a failure and the catch-up retries it.
+  (3) `EntityResolver.load` fails CLOSED on an all-excluded `universe_daily` (rows exist, none
+  eligible → empty frozenset + `universe_empty_fail_closed`); "no rows" keeps the pre-08:30
+  "unknown" semantics. (4) `RecommendationsPanel`: the `/decisions` fallback and its `decisions`
+  prop deleted — a card's own embedded gate verdict is its only provenance.
+- **Method:** 3 implementers (disjoint files, failing test pasted before each change), 6 adversarial
+  reviews (correctness + minimality per diff, per the owner's no-redundancy directive). Two
+  should-fix findings ruled and applied: (a) the sweep guard as first written SWALLOWED the timeout,
+  so `job_reco_expire` returned None → success watermark → a §7.1 exit deferred a full day while the
+  alert promised a catch-up retry (both reviewers converged; fix = re-raise after the loop, test
+  inverted to `pytest.raises`); (b) the dashboard fallback, even narrowed to subject + action↔kind,
+  can BY CONSTRUCTION only ever return some other proposal's reasons (own reasons win whenever
+  present; when the own list is empty there is nothing to find) — deleted rather than refined.
+  Nits applied: `str(d)` in the warning, comment trim, mojibake in three new docstrings.
+- **Accepted residuals (recorded, not built):** a total-failure universe build persists NO rows
+  (builder.py:300) and still reads as "unknown" at the resolver — the digest's `in_universe` gate
+  (news_pipeline.py:1203/1457) is the trading-side backstop and already fails closed on an empty
+  set; the resolver's two reads are not one snapshot across the 08:30 build boundary (one poll's
+  clusters could resolve out_of_universe; the next poll reloads).
+- **Self-inflicted, caught, fixed:** a mojibake-repair script passed through a PowerShell ASCII
+  here-string had its replacement keys degrade to `?` and rewrote two new `??` operators in the
+  dashboard sources to `?`; caught by the on-disk-change notice, reverted, rebuilt (tsc clean).
+  Lesson in memory: non-ASCII scripts go through the Write tool or `\u` escapes.
+- **Validation:** `test_reco_pipeline.py` 64, `test_reco_pipeline_wo24.py` 12,
+  `test_entity_resolver.py` 32, ruff clean, `npm run build` clean; **full suite 2029 passed**
+  (6m34s with the engine live). **Deploy:** committed at 11:5x mid-session, engine NOT restarted
+  (window open); rides the post-12:50 restart the morning session already planned for 36608b3.
+- **Follow-ups still open from the 09-02 list:** store-stall owner alert (item 3), extended-name
+  corp-action exposure before mid-Jan 2027 (item 7, must precede item 6), hi52 bhavcopy archive
+  backfill (item 6), the deferred-refactor list (owner call).
+
 ## 2026-09-03 (morning, owner-reported log errors) — wire-schema thesis maxLength REVERTED; drain-skip benign
 
 - **Owner flagged two log lines:** a forward_drain_tick "skipped: maximum number of running

@@ -26,14 +26,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal
 
 import pytest
 import yaml
 from ulid import ULID
 
 from engine.core.calendar import NSECalendar
-from engine.core.clock import Clock
+from engine.core.clock import IST, Clock
+from engine.core.types import Bar
 from engine.ops import pipeline as pipeline_mod
 from engine.ops.pipeline import FORWARD_PACING_MIN, GateContextTimeout, RecommendationBook
 from engine.risk.limits import LimitTable
@@ -46,9 +48,12 @@ from tests.unit.test_reco_pipeline import (
     SYMBOL,
     TODAY,
     FakeHarness,
+    FakeStore,
     StubGate,
     StubLimits,
     Ticker,
+    _flat_bars,
+    _open_position,
     candidate,
     log_events,
     make_pipeline,
@@ -130,7 +135,7 @@ class StubAction:
 # =========================================================================== helpers
 def build_pipeline(
     conn, pclock, calendar, book, limit_table, cost_model, *,
-    ctx_builder=None, harness=None, rearm=None,
+    ctx_builder=None, harness=None, rearm=None, store=None,
 ):
     """A ranked+paced pipeline whose context builder can be swapped for the hanging one.
 
@@ -141,7 +146,7 @@ def build_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book,
         harness=harness or FakeHarness(),
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
-        limits=StubLimits(limit_table), rearm=rearm,
+        limits=StubLimits(limit_table), rearm=rearm, store=store,
     )
     if ctx_builder is not None:
         pipeline._ctx_builder = ctx_builder
@@ -295,6 +300,86 @@ async def test_a_frozen_store_costs_one_candidate_and_the_drain_keeps_going(
     assert len(rearmed) == 2
     assert len(log_events(caplog, "gate_context_timeout")) == 2
     assert pipeline._pending_forwards == []
+
+
+def timeout_alerts(parts) -> list:
+    return [m for m in parts["notify"].messages if m.data.get("rule_id") == "gate_context_timeout"]
+
+
+async def test_a_hung_context_on_a_position_event_never_escapes_on_bar(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
+):
+    """The same dead store, reached through §5.2 (b) instead of (a). Unguarded, the timeout came out
+    of ``on_bar`` — i.e. out of the tick handler for EVERY symbol, not just this position."""
+    monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
+    position_id = _open_position(conn, pclock)
+    exit_json = {
+        "action": "exit", "position_id": position_id, "exit_type": "MARKET",
+        "reason": "risk_event", "confidence": 0.9,
+        "thesis": "Price is inside half an ATR of the stop; the breakout thesis is failing.",
+    }
+    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
+    hanging = HangingCtxBuilder()
+    pipeline, parts = build_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model,
+        ctx_builder=hanging, harness=FakeHarness(dict(exit_json)),
+        store=FakeStore(bars=_flat_bars()),
+    )
+    near = Bar(symbol=SYMBOL, ts_minute=NOW, open=Decimal("99.4"), high=Decimal("99.5"),
+               low=Decimal("99.3"), close=Decimal("99.40"), volume=100)
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await pipeline.on_bar(near)                          # must NOT raise
+
+    assert hanging.cancelled == 1
+    assert counted_rows(conn, "proposals") == 1
+    assert counted_rows(conn, "verdicts") == 0
+    assert counted_rows(conn, "recommendations") == 0
+
+    alerts = timeout_alerts(parts)
+    assert len(parts["notify"].messages) == 1 and len(alerts) == 1
+    assert alerts[0].severity == "critical" and SYMBOL in alerts[0].title
+    assert alerts[0].data["position_id"] == position_id
+
+    timeouts = log_events(caplog, "gate_context_timeout")
+    assert len(timeouts) == 1 and timeouts[0].levelname == "ERROR"
+    assert timeouts[0].position_id == position_id
+
+
+async def test_a_hung_context_on_the_time_stop_sweep_alerts_per_position_then_fails_the_job(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
+):
+    """§7.1 ``max_holding`` runs EOD and as a startup catch-up, so an escaping timeout takes out the
+    whole sweep — including the aged positions BEHIND the one that stalled. Each is now its own
+    alert, and the timeout is re-raised only once the sweep is done: a swallowed one would record a
+    success watermark for ``reco_expire`` and defer the exit by a day instead of the catch-up
+    retrying it."""
+    monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
+    opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)         # far more than 20 trading sessions back
+    aged = {
+        _open_position(conn, pclock, style="swing", opened_at=opened, stop="95"),
+        _open_position(conn, pclock, style="swing", opened_at=opened, stop="95"),
+    }
+    hanging = HangingCtxBuilder()
+    pipeline, parts = build_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model,
+        ctx_builder=hanging, harness=FakeHarness(),          # ANY call raises: exits never use Tier 1
+    )
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        with pytest.raises(GateContextTimeout):
+            await pipeline.check_aged_positions(TODAY)
+
+    assert hanging.cancelled == 2                            # the sweep reached BOTH positions
+    assert counted_rows(conn, "proposals") == 2
+    assert counted_rows(conn, "verdicts") == 0
+    assert counted_rows(conn, "recommendations") == 0
+
+    alerts = timeout_alerts(parts)
+    assert len(alerts) == 2
+    assert all(a.severity == "critical" and SYMBOL in a.title for a in alerts)
+    assert {a.data["position_id"] for a in alerts} == aged
+    assert len(log_events(caplog, "gate_context_timeout")) == 2
 
 
 # ============================================================ Fix C: the orphaned-proposal sweep

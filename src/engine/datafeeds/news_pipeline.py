@@ -413,9 +413,12 @@ class EntityResolver:
     """§2.7 step 3 — deterministic-first symbol/sector/theme tagging. Ambiguous ⇒ NO match, ever.
 
     State (alias map, sector map, theme keywords, universe) is loaded from the store via
-    :meth:`load` / :meth:`aload`, or injected directly for tests/pure use. ``universe=None`` means
-    "universe unknown" (e.g. before the 08:30 build): no out-of-universe filtering happens here and
-    the §2.7 step-5 digest re-checks ``symbol ∈ universe`` before anything can be traded.
+    :meth:`load` / :meth:`aload`, or injected directly for tests/pure use. ``universe`` is one of
+    three states after :meth:`load`: a non-empty frozenset (the built batch universe, filtered
+    normally); an EMPTY frozenset (the build ran but nothing passed — FAIL CLOSED, every symbol
+    resolves ``out_of_universe``); or ``None`` ("universe unknown", e.g. before the 08:30 build —
+    no ``universe_daily`` rows for the day at all), where no out-of-universe filtering happens here
+    and the §2.7 step-5 digest re-checks ``symbol ∈ universe`` before anything can be traded.
 
     Parameters
     ----------
@@ -527,8 +530,21 @@ class EntityResolver:
         self.set_theme_map({r["theme"]: list(r["keywords"] or []) for r in self._store.get_theme_map()})
         if d is None and self._clock is not None:
             d = self._clock.today()
-        universe_symbols = self._store.get_batch_universe_symbols(d) if d is not None else []
-        self._universe = frozenset(universe_symbols) or None
+        if d is None:
+            self._universe = None
+        else:
+            universe_symbols = self._store.get_batch_universe_symbols(d)
+            if universe_symbols:
+                self._universe = frozenset(universe_symbols)
+            else:
+                rows = self._store.get_universe_daily(d)
+                if rows:
+                    # Rows exist but none passed (every row excluded) — the build ran, so this is
+                    # "empty", not "unknown".
+                    _log.warning("universe_empty_fail_closed", d=str(d), rows=len(rows))
+                    self._universe = frozenset()
+                else:
+                    self._universe = None
 
     async def aload(self, d: Any = None) -> None:
         if self._store is None:
