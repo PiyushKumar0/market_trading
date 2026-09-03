@@ -212,11 +212,17 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
                 "enum": [*ACTION_MODELS.keys(), "no_action"],
             },
             # ActionBase / NoActionOutput
-            # maxLength derived from the authoritative contract (2026-09-02: the cap lived only in
-            # the client-side prose note and a verbose exit died string_too_long on all retries,
-            # twice — advertise it structurally so the runtime's schema coaching steers the model;
-            # the parse-side clamp in _sanitize_guidance_extras remains the converging backstop).
-            "thesis": {"type": "string", "maxLength": _contract_max_len("thesis")},
+            # NO maxLength here — deliberately (2026-09-03). It was advertised for one session
+            # (2026-09-02) as "prevention" and proved net harmful: the runtime enforces the wire
+            # schema on the StructuredOutput tool input and RE-PROMPTS on violation, each bounce
+            # costing a turn, so a verbose thesis that the client-side clamp would truncate for free
+            # instead burned 3-4x output tokens per call and, on 2026-09-03 09:51, exhausted the
+            # 4-turn budget — the FIRST-EVER intraday max-turns sdk_error (terminal: no D7 retry,
+            # candidate re-armed, $0.33 gone). Post-deploy the clamp fired 0 times and
+            # string_too_long vanished: overflow was being intercepted upstream at the worse layer.
+            # The prose note in `numeric_constraints_client_side` stays; the clamp in
+            # _sanitize_guidance_extras is the converging mechanism.
+            "thesis": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "reason": {"type": "string"},        # no_action free text; exit uses its closed reasons
             "regime_note": {"type": "string"},
@@ -253,15 +259,6 @@ def _field_max_len(field_info: Any) -> int | None:
         if isinstance(cap, int):
             return cap
     return None
-
-
-def _contract_max_len(field: str) -> int:
-    """A contract field's ``max_length`` for the guidance schema — single source of truth (the
-    ActionProposal base carries it identically on every action model)."""
-    cap = _field_max_len(ACTION_MODELS["exit"].model_fields[field])
-    if cap is None:  # pragma: no cover - a contract change this guards against loudly
-        raise RuntimeError(f"contract field {field!r} no longer declares max_length")
-    return cap
 
 
 def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str:

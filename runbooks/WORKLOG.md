@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-03 (morning, owner-reported log errors) — wire-schema thesis maxLength REVERTED; drain-skip benign
+
+- **Owner flagged two log lines:** a forward_drain_tick "skipped: maximum number of running
+  instances (1)" and an intraday_analyst `sdk_error: Reached maximum number of turns (4)` (09:51,
+  INDUSINDBK, $0.33, candidate re-armed, "Intraday analyst unavailable" alert).
+- **Diagnosis (three converging observations):** (i) FIRST-EVER intraday max-turns in the log
+  history — every prior one (07-28 → 09-02) was the multi-turn news_analyst/nightly_reviewer — one
+  session after the 09-02 deploy advertised `maxLength: 600` on `thesis` in the wire schema;
+  (ii) the failed call emitted 4,430 output tokens in 61s vs ~750-1,950 normal (several attempts
+  inside one call — the runtime re-prompting on its own schema check, each bounce a turn); the next
+  ok call paid 4,339 too; (iii) since the deploy the client clamp fired 0× and string_too_long
+  vanished despite a 10-in-9 overflow morning just before — overflow was being intercepted
+  UPSTREAM, at the terminal layer (sdk_error has no D7 retry). The "prevention" half converted a
+  free, always-converging client fix into a token tax plus occasional terminal failure.
+- **Fix:** maxLength removed from the wire schema (deletion; `_contract_max_len` gone); the clamp
+  is the sole mechanism; test inverted to pin "no prose field advertises maxLength". Schema tests
+  30/30. The drain-tick skip is benign: `_drain_one_forward` awaits the analyst inline, a >60s call
+  overlaps one 60s tick, APScheduler's single-instance guard skips it, pacing resumes next tick.
+- **Deploy:** window was OPEN (owner set 09:50–12:50 at 09:36; 6 slots by 10:00) on the first clean
+  session of the new allocation — restart deferred to just after 12:50, not mid-window.
+
+## 2026-09-03 (00:1x–00:2x, owner-executed restart + push; owner-directed ledger repair)
+
+- **Owner restarted the engine paired with `npm run build` (dist 00:12:11) and pushed phase2
+  (origin in sync at 2184a2a, 0/0).** Boot verified from engine.log: `engine_boot` 00:13:27 →
+  `catch_up_complete` load-bearing clean (off 2077 s) → `startup_report` mode=RECOMMEND
+  risk=NORMAL **crash_recovered=false** (clean STOPPED commit this time) frozen=[] blockers=[] →
+  `startup_complete` 00:13:52 → `engine_ready` 00:13:54 → `post_arm_jobs_complete` failed=[]
+  (news_chain / catalyst_digest / preopen_planner / tick_compact). Health pulse HEALTHY,
+  problems=[]. The four post-11:58 commits (020f9f8, 4ec0e1a, 174963f, 2184a2a) are now live;
+  first armed session for the orb cap-release schedule + hi52 contract = 09-03.
+- **Ledger repair (one row, owner-directed "fix the ledger"):** HDFCAMC rec
+  `01M0YEV6301CGP57ESYNTY2F9W` was /taken AFTER `expire_stale` had stamped its ENTRY row
+  `01M0YEV6327D902NQ5K3C3HA3Z` outcome_label='no_action' (closed_at 08-26 15:45); `close()` completes
+  only `WHERE outcome_label IS NULL` (pipeline.py:494), so the real P&L could never land. The 09-02
+  `take()` un-expire fix (2184a2a) is prospective only. Applied at 00:2x IST with the engine idle
+  (health pulses only): `BEGIN IMMEDIATE; UPDATE learning_ledger SET outcome_label=NULL,
+  closed_at=NULL WHERE entry_id=? AND outcome_label='no_action' AND exit_px IS NULL AND position_id
+  IN (SELECT position_id FROM positions WHERE state='OPEN')` — rowcount 1, verified before/after;
+  a generic scan (entry rows of OPEN positions with a non-NULL label) now returns 0. HINDZINC's
+  entry row was already NULL. Script recorded in COMMANDS.md ("One-off ledger repair").
+- **Status recap from the 09-02 phase audit (`scripts/g2_evidence.py`, workflow-verified):** G2
+  NOT met on digest-before-open (73%), owner executions (2/5, 0 closed), rec-days (6/20); Phase-2
+  code scope 19/19 shipped; Phase-3 (§8.4) = 2 shipped / 6 seams / 5 partial / 9 absent.
+
 ## 2026-09-02 (late evening, owner-directed) — /code-review fixes applied: 7 surgical, refactors deferred
 
 - **Review pipeline:** 8 finders → 29 candidates → 29 adversarial verifiers → 22 confirmed,

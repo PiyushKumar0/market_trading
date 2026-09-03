@@ -449,15 +449,14 @@ def test_clamp_never_softens_min_length_or_numeric_constraints() -> None:
         parse_intraday({**RAW_BY_ACTION["exit"], "confidence": 1.7}, **STAMP)
 
 
-def test_guidance_schema_advertises_the_thesis_cap() -> None:
-    """Prevention half: the wire schema now carries maxLength for `thesis`, derived from the
-    authoritative contract (single source of truth), so the runtime's schema coaching steers the
-    model off over-long prose before the client-side clamp ever has to act."""
-    from engine.core.contracts import ExitAction
+def test_guidance_schema_does_not_advertise_a_thesis_cap() -> None:
+    """2026-09-03: the wire schema must NOT carry maxLength for `thesis`. Advertised for one session
+    as 'prevention', it made the runtime bounce verbose StructuredOutput inputs turn after turn -
+    3-4x output tokens per call and the first-ever intraday max-turns sdk_error (terminal, no D7
+    retry) - while the client-side clamp would have truncated the same output for free. Prose
+    fields stay uncapped on the wire; the clamp is the converging mechanism."""
     from engine.intelligence.schemas import intraday_guidance_json_schema
 
-    cap = next(
-        m.max_length for m in ExitAction.model_fields["thesis"].metadata
-        if getattr(m, "max_length", None) is not None
-    )
-    assert intraday_guidance_json_schema()["properties"]["thesis"]["maxLength"] == cap == 600
+    props = intraday_guidance_json_schema()["properties"]
+    assert "maxLength" not in props["thesis"]
+    assert "maxLength" not in props["reason"] and "maxLength" not in props["regime_note"]
