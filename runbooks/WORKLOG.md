@@ -1,6 +1,24 @@
 # WORKLOG — autonomous operations log
 
-## 2026-09-03 (15:0x–15:4x, engine stopped by the owner) — archive backfill RUN + hi52 backtest re-run: the extended-name thesis is NOT supported
+## 2026-09-03 (15:38–15:41) — deploy-by-start: d2c5c8c (store-stall paging) + 15bff68 (hi52 ex-date veto) + c0b39eb live; boot verified
+
+- **Coordinated with the backfill session** (cross-session): held my planned 15:42 restart when the
+  owner stopped the engine at 15:06 for the DuckDB-writer backfill; started only on its RELEASE
+  message after probing the store free myself (read-only connect OK, bars_1d 2,086,808 rows —
+  consistent with the 1.80M-row archive write on top of the Kite-official rows).
+- **Boot 15:38→15:40:** scheduler_started 15:40:04, post_arm fired news_chain/catalyst_digest/
+  preopen_planner with 0 failed (tick_compact correctly deferred in-window to 22:30), feed HEALTHY,
+  `store_stalled` absent from out-of-session pulses as designed. The 15:06–15:30 bar tail recovers
+  via the §2.6 warmup backfill; tonight's EOD jobs run on their normal schedule.
+- **WATCH ITEM — boot-into-buffer false lag episode:** at 15:40:02 the tick-lag watchdog fired an
+  ERROR burst (`tick_processing_lagging`, lag ~494–526s) on Kite's connect-time snapshot ticks
+  stamped with the ~15:31 close prints, while the watch window was still armed (session_close+15m
+  = 15:45). It self-closed within ~1s (`tick_processing_recovered`, lag 26s) — under the paging
+  debounce, so no owner page — but any post-close boot inside the 15:30–15:45 buffer will repeat
+  this noise. Candidate fix for a future WO: suppress the first lag evaluation until N live ticks
+  after a (re)connect, or exclude connect-snapshot ticks from the lag clock. Log-noise only today.
+- First armed evaluation of `store_stalled` and hi52's `unadjusted_vetoes` (expected >0, backtest
+  vetoed ~3%) is tomorrow's window_open sweep.
 
 - **Backfill (`scripts/backfill_bhavcopy.py --from 2022-07-01 --to 2026-08-14 --pace-s 0.6`, 15:08→15:32):**
   1,506 calendar dates attempted, 1,022 sessions ingested, 484 holidays, **0 failed, no streak
