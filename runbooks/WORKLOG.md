@@ -37,8 +37,16 @@
   the endpoint returns the newest 20 rows per call (a 15:30 filing rush can exceed 20 in 5 min — a
   paged/from-to variant is the lever); `news.drop_title_patterns` also applies to filing titles
   (0/20 collisions live). KPI to watch: share of top-10 movers with a catalyst in corpus (47% baseline).
-- Engine restart: manual after the deploy gate (the 17:50 cron was cancelled so the working tree
-  deploys clean).
+- **Deploy:** full suite re-run as the gate (2,157 passed, 4:27) → commit fefa761 → `nssm start`
+  16:03:04 on a clean tree (service Stopped, 0 market_trading processes). Boot: `catch_up_complete`
+  16:06:14, `catchup_safety_jobs` cleared 16:06:15, `startup_complete` 16:06:23, ticker handshake
+  16:06:24, pulses HEALTHY; risk FROZEN on `warmup_ready` post-close as on the 09-03 15:40 boot (rolls
+  at midnight; no session until Monday). New jobs armed: `news_poll_nse_ann`, `news_poll_bs_markets`,
+  `news_poll_bs_companies`. **First exchange poll 16:08:36–16:08:55: 20 rows → 17 kept, 3 dropped
+  (administrative subjects), 17 inserted** (`news_nse_ann_filtered`, `news_polled feeds=nse_ann`).
+  Telegram still ConnectTimeout at boot (network-level, unchanged). Monday watch items: the 08:35
+  digest carrying `nseindia.com` as a corroborating domain, `[NSE:…]` clusters resolving with
+  `symbols` set, and the mover-catalyst KPI.
 
 ## 2026-09-04 (14:03–14:4x, owner: "I have stopped the engine, continue; validate without bias") — `tdc` backtest RUN and REFUTED; movers attribution; engine stopped 14:04 by me, restart scheduled 15:36
 
