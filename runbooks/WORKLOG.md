@@ -26,6 +26,13 @@
   (would have raised on the retired attribute), `scripts/backtest_hi52.py` cache path (+ `--index-csv`
   alias), RUNBOOK.md and sector_overrides.yaml prose. Learning-module provenance strings that record a
   NIFTY200-measured spread are deliberately untouched.
+- **Deploy:** committed 5cdd2eb (21 files); deploy-gate full suite re-run by me on that tree: 2,163
+  passed (6:48). Evening jobs done (deals ingested 20:30:00), nothing in flight → `nssm stop` 20:31:48
+  → `start` → `catch_up_complete` 20:33:50, `catchup_safety_jobs` cleared, `startup_complete` 20:33:57,
+  ticker handshake 20:34:03, feed HEALTHY 20:34:33. `universe_build` armed for Monday 08:30 — the first
+  NIFTY 500 build happens then (no rebuild at boot: today's watermark is done). The boot again
+  reported crash-recovery after a clean nssm stop (lifecycle row still RUNNING at exit) — unchanged,
+  harmless. Telegram polling/sends still failing at the network level.
 - **Shadow populations:** `cat`/`cat_reversal`/`hi52` verdicts must be computed before/after the first
   NIFTY 500 build (Monday 08:30). Watch items Monday: `universe_built index_name="NIFTY 500"
   index_size≈499 eligible≈350–450 watchlist=200`, `watchlist_cap` rows non-empty, brk20/ins/hi52
