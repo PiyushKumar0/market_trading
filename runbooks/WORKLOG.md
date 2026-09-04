@@ -1,5 +1,35 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-04 (14:03–14:4x, owner: "I have stopped the engine, continue; validate without bias") — `tdc` backtest RUN and REFUTED; movers attribution; engine stopped 14:04 by me, restart scheduled 15:36
+
+- **Engine state on arrival:** service still Running at 14:03 with `store_stalled`, `late_tick_past_grace`
+  and `warmup_refresh` skips — the 30-min catch-up sweep had started a tick-compaction recovery
+  in-session at 11:39 (`tick_compaction_recovered 2026-09-02/NHPC`; the in-session gate covers only the
+  post-boot path). No stop/command event since 13:30: the owner's stop never reached the engine (Telegram
+  ConnectTimeout all day). Owner intent explicit → `nssm stop` 14:04:22, 0 processes at 14:04:34.
+  Follow-up filed: gate the sweep-path `tick_compact` in-session too.
+- **Backtest (Opus delegation, brief `runbooks/briefs/tdc_backtest_brief_2026-09-04.md`):**
+  `scripts/backtest_tdc.py` + `tests/unit/test_backtest_tdc.py` (30 passed, re-run by me) +
+  `data/reports/backtest_tdc_2026-09-04.json`. Manager audit: bars ≤ T filtered before the window
+  functions (backtest_tdc.py:364), acceptance vs running VWAP (:382), entry = next bar OPEN (:677),
+  VWAP-loss exit at the FOLLOWING open (:684), squareoff at the last bar ≤ 15:15 (:685), cost =
+  `CostModel.breakeven_pct` + 1 tick/side (:694); two hand-verified trades against raw bars.
+  Clarifications I issued mid-run (recorded as protocol notes, not sweeps): equal-weight universe
+  return as index proxy before 2026-07-23; catalyst_at_T split; full 2023-07 history with the plan
+  window reported as its own cell.
+- **Verdict:** REFUTED, every variant × split (plan §6.1 `tdc` paragraph carries the numbers). H1 n=3,370,
+  mean net −0.129%, t=−4.63, CPCV 0/15; mean GROSS +0.035% vs cost 0.164%. Two thin positive cells on
+  record (breadth ≥ 50% trend days, n≈110; catalyst_at_T true, n≈46) — future pre-registrations, not
+  findings. No origination change (§8.6).
+- **Attribution (scratch `attribution.py`, 23 sessions, top-10 movers/day, n=230):** 47% had a catalyst
+  in our corpus, 16% a sector-wide move, 4% an index up-day, 46% none of the three. Hindsight shape:
+  +1.45% by 11:00, +1.04% after, 83% still up after 11:00. **Ex-ante** (no hindsight, 20 sessions):
+  every name up ≥ +1% at 11:00 (n=329) averaged −0.014% to 15:15 (win 47%); ≥ +2% (n=82) −0.24% (win
+  40%). Today to 14:02: metals sector-wide (+1.8% median; HINDZINC govt_program catalyst 17:24 prior
+  evening), names up ≥ 1% at 11:00 (n=25) −0.32% after (win 32%); the day's leaders (APLAPOLLO, PFC,
+  TATASTEEL) moved AFTER 11:00 and were not selectable by price at 11:00. Leaders rotate intraday.
+- Restart: scheduled 15:36 (post-close) with boot verification.
+
 ## 2026-09-04 (13:40–13:5x, owner question) — "would the flagged tickers be recommended under the updated logic?" → NO; `tdc` pre-registered, backtest tonight
 
 - **Replay evidence (scratch `replay_alloc_0903.py`):** 09-03's in-window `orb` stream (3,953 arrivals from
