@@ -20,9 +20,15 @@ Red-first, inline (the subscription session limit was exhausted until 06:10, so 
   (+1, exact string updated), test_preopen_planner (+1), test_agent_harness (+1 test, +2 params).
 - **Validation:** red confirmed (`AttributeError: no attribute 'decline'`); touched modules 327 passed;
   full unit suite **2060 passed** (5:27).
-- **Deploy:** NOT restarted — clock 10:50 IST, session open, engine mid-window (owner window 09:50–12:50;
-  boot 09:39 after a 02:26–09:39 stop, warm-up FROZEN until 10:37:32). Restart scheduled for 15:31
-  (post-close) with boot verification; the fix is therefore live from Monday's session.
+- **Deploy:** first held (10:50 IST, session open, owner window 09:50–12:50; morning boot 09:39 after a
+  02:26–09:39 stop, warm-up FROZEN until 10:37:32), then **owner-directed "deploy it now"**: re-observed
+  11:06:42 (last analyst call ok 11:04:08, nothing in flight), `nssm stop` 11:07:33 → `start` 11:07:40 →
+  `startup_complete` 11:09:30 on 8c398c7 (`catchup_safety_jobs` cleared 11:09:25, feed HEALTHY, prescreen
+  hydrated). Warm-up FROZEN 11:09:27 on one missing COROMANDEL 1m bar (store_stalled ×2 during the
+  restart backfill, 11:10–11:11); the §2.6 self-repair fired at 11:15:18 (attempt 1, 1 bar written) and
+  risk went NORMAL 11:16:13 — entries blocked 8m40s. Boot reported "crash-recovered" despite the clean
+  nssm stop (lifecycle row still RUNNING at exit) — harmless, noted. First `prescreen_slot_declined`
+  will appear on the next no_action verdict.
 - **Observed today, not caused by this change:** Telegram sends failing since the 09:39 boot
   (`httpx.ConnectTimeout`, 14 sends + set_commands; TCP 443 to api.telegram.org connects but an
   HTTPS HEAD times out from PowerShell too — machine/network-level, owner not receiving alerts);
