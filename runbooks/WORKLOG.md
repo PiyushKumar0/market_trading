@@ -1,5 +1,29 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-04 (13:40–13:5x, owner question) — "would the flagged tickers be recommended under the updated logic?" → NO; `tdc` pre-registered, backtest tonight
+
+- **Replay evidence (scratch `replay_alloc_0903.py`):** 09-03's in-window `orb` stream (3,953 arrivals from
+  the log) through the deployed pre-screen (`decline()` + displacement, tranche-faithful via
+  `_admit_batch_locked(at=…)`, pipeline modelled as one forward per 3 min with every verdict no_action):
+  9 admissions, 4 displacements, **6 forwards** (INDUSINDBK, COROMANDEL, TATACONSUM, INDUSTOWER,
+  IDFCFIRSTB, TATACOMM) vs 5 on the day. Of the six flagged names only IDFCFIRSTB reaches the analyst —
+  as on the day. BSE/KEI/GMRAIRPORT/UNITDSPR/CGPOWER are never admitted: the `orb` score (single-bar
+  volume-ratio squash) ranks spike names above steady climbers and 0.10 over ~0.9 incumbents is
+  unreachable. Even if admitted, ORB's OR-anchored geometry is what the analyst declines (hindsight
+  replay 09-03: the 11 ORB candidates −4.78% net at ORB geometry; the six held to 15:15 5/6 positive).
+- **Diagnosis:** the flagged names are trend-day continuation setups; no leg in the book targets that
+  shape, and `orb` cannot be tuned into one without a sweep the methodology forbids.
+- **Solution, evidence-gated:** `tdc` pre-registered in IMPLEMENTATION_PLAN §6.1 (paragraph before
+  WO-20): acceptance above OR high + 15 closes above VWAP, `rel_volume_tod` ≥ 1.5, RS ≥ +1.0% vs
+  NIFTY at 11:00; entry next open; VWAP-loss stop or 15:15; variant B hold-to-close; robustness
+  variants reported never selected; splits by index regime and breadth; promotion iff mean net > 0,
+  t > 2, n ≥ 200, CPCV ≥ 60% positive. Brief: `runbooks/briefs/tdc_backtest_brief_2026-09-04.md`.
+  Run needs the DuckDB writer stopped → scheduled 15:41 (engine idle, owner-permitted DB-task stop,
+  Opus delegation, engine restarted after). A refutation means no origination change and the honest
+  answer stays "not capturable at retail costs".
+- Geometry-at-live-price check for the six could not complete: the 09-03 tick partition was being
+  compacted mid-query (files moving); not needed for the verdict.
+
 ## 2026-09-04 (owner-directed "apply the fixes and validate them") — declined-incumbent displacement, measured digest for the planner, SDK result text; deploy held to after close
 
 Red-first, inline (the subscription session limit was exhausted until 06:10, so no delegation).
