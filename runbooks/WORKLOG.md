@@ -28,7 +28,16 @@
   40%). Today to 14:02: metals sector-wide (+1.8% median; HINDZINC govt_program catalyst 17:24 prior
   evening), names up ≥ 1% at 11:00 (n=25) −0.32% after (win 32%); the day's leaders (APLAPOLLO, PFC,
   TATASTEEL) moved AFTER 11:00 and were not selectable by price at 11:00. Leaders rotate intraday.
-- Restart: scheduled 15:36 (post-close) with boot verification.
+- Restart: moved to 17:50 (the candle battery + coverage probe run on the stopped engine until then;
+  the 18:05 EOD jobs still run on schedule).
+- **Sweep-path in-session compaction veto closed (red-first):** `_catchup_sweep_once` (main.py) applies
+  `post_arm_exclusions(path="sweep")` to every 30-min catch-up pass, so a missed `tick_compact` is no
+  longer replayed inside a live session (today's 11:39 recovery → afternoon store stalls / late ticks).
+  Test `test_catchup_sweep_vetoes_tick_compact_in_session`; wiring + lifecycle modules 90 passed; plan
+  WO-21 fix (b) note appended.
+- **Owner follow-ups launched (engine stopped):** pre-registered candle/price-action battery (5 rules
+  × 2 exits, brief `runbooks/briefs/candles_backtest_brief_2026-09-04.md`, plan §6.1 paragraph) and a
+  news-coverage audit + source probe (Sonnet) — results in the next entry.
 
 ## 2026-09-04 (13:40–13:5x, owner question) — "would the flagged tickers be recommended under the updated logic?" → NO; `tdc` pre-registered, backtest tonight
 

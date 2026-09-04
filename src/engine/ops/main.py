@@ -1340,9 +1340,9 @@ async def run() -> int:
             # ALL scope (WO-15): the sweep is the retry path for the post-arm one-shots too — a
             # news chain / digest / planner / compaction run that failed after arming is swept here
             # exactly like any other missed job. Single-flight makes a sweep landing on top of a
-            # still-running pass a logged no-op rather than a double replay.
-            result = await catch_up.catch_up(scope=CatchUpScope.ALL)
-            await _reconcile_catchup_freeze(result, latch, kill)
+            # still-running pass a logged no-op rather than a double replay. The in-session
+            # tick_compact veto applies here too (2026-09-04) — see _catchup_sweep_once.
+            await _catchup_sweep_once(catch_up, latch, kill, clock, calendar)
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
 
@@ -1829,25 +1829,42 @@ async def run() -> int:
 
 
 # --------------------------------------------------------------------------- boot tail (WO-15)
-def post_arm_exclusions(clock: Clock, calendar: NSECalendar) -> tuple[str, ...]:
-    """Post-arm one-shots this boot must NOT fire, given WHEN the boot happened (WO-21 (ii)).
+def post_arm_exclusions(
+    clock: Clock, calendar: NSECalendar, *, path: str = "post_arm"
+) -> tuple[str, ...]:
+    """Catch-up jobs a pass must NOT fire, given WHEN it runs (WO-21 (ii)).
 
-    Only ``tick_compact`` is ever vetoed, and only for a boot landing inside a live trading session
+    Only ``tick_compact`` is ever vetoed, and only for a pass landing inside a live trading session
     (:data:`_IN_SESSION_START_IST`..:data:`_IN_SESSION_END_IST` on an NSE trading day). Every other
-    post-arm job is unchanged: the news chain / digest / planner are pre-open work that a
-    mid-session recovery boot still wants done, whereas compaction competes with the tick writer for
-    exactly the resources the session needs (2026-08-20 11:26 IST — see the constants above).
+    job is unchanged: the news chain / digest / planner are pre-open work that a mid-session recovery
+    still wants done, whereas compaction competes with the tick writer for exactly the resources the
+    session needs (2026-08-20 11:26 IST — see the constants above).
+
+    Two callers share the veto (``path`` names which, in the log): the post-arm one-shot at boot,
+    and — since 2026-09-04 — every 30-min catch-up sweep (:func:`_catchup_sweep_once`): on 09-04 the
+    sweep replayed a missed ``tick_compact`` at 11:39 IST inside the session and the engine spent
+    the afternoon in store stalls and late ticks, the very class the one-shot veto exists for.
 
     Non-trading day (weekend / holiday) inside the same clock window ⇒ no veto: there is no session
-    to protect, and a Saturday recovery boot is precisely when the backlog SHOULD be collapsed.
+    to protect, and a Saturday pass is precisely when the backlog SHOULD be collapsed.
     """
     now = clock.now()
     if not calendar.is_trading_day(now.date()):
         return ()
     if not (_IN_SESSION_START_IST <= now.time() <= _IN_SESSION_END_IST):
         return ()
-    _log.info("post_arm_skipped_in_session", job_id=JOB_TICK_COMPACT, now=now.isoformat())
+    _log.info("post_arm_skipped_in_session", job_id=JOB_TICK_COMPACT, now=now.isoformat(), path=path)
     return (JOB_TICK_COMPACT,)
+
+
+async def _catchup_sweep_once(catch_up: CatchUpRunner, latch, kill, clock: Clock, calendar: NSECalendar):
+    """One 30-min catch-up sweep: ALL scope, the in-session ``tick_compact`` veto, then the
+    catchup_safety_jobs freeze reconciliation (2026-09-02). Extracted from the scheduler closure so
+    the veto on THIS path is testable (2026-09-04)."""
+    exclude = post_arm_exclusions(clock, calendar, path="sweep")
+    result = await catch_up.catch_up(scope=CatchUpScope.ALL, exclude=exclude)
+    await _reconcile_catchup_freeze(result, latch, kill)
+    return result
 
 
 def start_scheduler_and_fire_post_arm(

@@ -1696,3 +1696,52 @@ async def test_reconcile_catchup_freeze_branching() -> None:
         CatchUpResult(frozen_reasons=["x"]), latch, FakeKill(killed=True)
     )
     assert latch.calls == []
+
+
+async def test_catchup_sweep_vetoes_tick_compact_in_session(calendar) -> None:
+    """2026-09-04 11:39 IST: the 30-min sweep (ALL scope) replayed a missed ``tick_compact`` INSIDE
+    the live session — ``tick_compaction_recovered 2026-09-02/NHPC`` — and the engine spent the next
+    hours in store stalls and late ticks (the 2026-08-20 class). WO-21 (ii)'s veto guarded only the
+    post-arm one-shot; the sweep path takes the same veto now, and still reconciles the freeze."""
+    from engine.core.enums import RiskState
+    from engine.ops.jobs import CatchUpResult
+    from engine.ops.main import _catchup_sweep_once
+
+    class FakeCatchUp:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def catch_up(self, **kw):
+            self.calls.append(kw)
+            return CatchUpResult()
+
+    class FakeLatch:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def active_causes(self):
+            return [("catchup_safety_jobs", RiskState.FROZEN, "d")]
+
+        async def set_cause(self, cause, state, detail, who):
+            self.calls.append(("set", cause))
+
+        async def clear_cause(self, cause, who):
+            self.calls.append(("clear", cause))
+
+    class FakeKill:
+        def is_killed(self):
+            return False
+
+    # In-session on a trading day: tick_compact is vetoed for THIS pass; the freeze still reconciles.
+    cu, latch = FakeCatchUp(), FakeLatch()
+    await _catchup_sweep_once(cu, latch, FakeKill(), _clock_at(datetime(2026, 6, 17, 11, 39, tzinfo=IST)), calendar)
+    assert cu.calls[0]["exclude"] == (opsmain.JOB_TICK_COMPACT,)
+    assert latch.calls == [("clear", "catchup_safety_jobs")]
+
+    # After the close (and on a weekend) nothing is vetoed — the backlog SHOULD collapse then.
+    cu = FakeCatchUp()
+    await _catchup_sweep_once(cu, FakeLatch(), FakeKill(), _clock_at(datetime(2026, 6, 17, 16, 0, tzinfo=IST)), calendar)
+    assert cu.calls[0]["exclude"] == ()
+    cu = FakeCatchUp()
+    await _catchup_sweep_once(cu, FakeLatch(), FakeKill(), _clock_at(_WEEKEND_MIDDAY), calendar)
+    assert cu.calls[0]["exclude"] == ()
