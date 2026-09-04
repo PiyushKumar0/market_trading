@@ -1,5 +1,91 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-04 (owner-directed "apply the fixes and validate them") — declined-incumbent displacement, measured digest for the planner, SDK result text; deploy held to after close
+
+Red-first, inline (the subscription session limit was exhausted until 06:10, so no delegation).
+
+- **(a) Declined incumbents are displaceable** — `SignalPreScreen.decline()` (prescreen.py), called
+  from the pipeline's `no_action` branch (pipeline.py, wired in main.py). The pair stays SEEN and its
+  journal row stays `evaluated=1` (not the 07-29 re-arm); eviction of a declined incumbent is charged
+  to the day displacement budget only (`_displacement_scan_locked` / `_commit_displacement_locked`,
+  log field `displaced_declined`, event `prescreen_slot_declined`). Hydrated pairs unchanged.
+- **(b) Digest rail shared** — `sentiment_rail_note()` in context.py, now with the per-cluster mean
+  ("raw -9.48 across 759 clusters, mean -0.012 per cluster"); `preopen_planner._digest_lines` uses it.
+  `sentiment_agg.value` untouched (cat shadow thresholds).
+- **(c) Harness** — `_error_result_text()` raises the CLI's own `result` text from an `is_error`
+  result before the SDK's bare "error result: success"; `_classify` maps session/usage-limit and
+  `rate_limit` text to `overloaded`. Process rule added to CLAUDE.md (no agent fan-outs 09:15–15:30).
+- **Plan:** §6.1 addendum before WO-20; settings.yaml comment; tests: test_prescreen (+3),
+  test_reco_pipeline (no_action → decline hook + journal stays evaluated=1), test_context_assembler
+  (+1, exact string updated), test_preopen_planner (+1), test_agent_harness (+1 test, +2 params).
+- **Validation:** red confirmed (`AttributeError: no attribute 'decline'`); touched modules 327 passed;
+  full unit suite **2060 passed** (5:27).
+- **Deploy:** NOT restarted — clock 10:50 IST, session open, engine mid-window (owner window 09:50–12:50;
+  boot 09:39 after a 02:26–09:39 stop, warm-up FROZEN until 10:37:32). Restart scheduled for 15:31
+  (post-close) with boot verification; the fix is therefore live from Monday's session.
+- **Observed today, not caused by this change:** Telegram sends failing since the 09:39 boot
+  (`httpx.ConnectTimeout`, 14 sends + set_commands; TCP 443 to api.telegram.org connects but an
+  HTTPS HEAD times out from PowerShell too — machine/network-level, owner not receiving alerts);
+  `store_stalled` ×2 during the in-session warm-up backfill; hi52 first sweep on adjusted history:
+  800 scanned, 13 candidates, 3 admitted (JINDWORLD, EDELWEISS, MANALIPETC), `unadjusted_vetoes` 62.
+  Today's orb tranche-1 verdicts so far: ASHOKLEY/GODFRYPHLP/RELIANCE all no_action (chase/stalled).
+
+## 2026-09-04 (02:10–02:5x, owner question) — 09-03 movers forensics: CGPOWER/UNITDSPR/BSE/GMRAIRPORT/KEI/IDFCFIRSTB (+BRIGADE/JYOTICNC/INOXWIND); no code change
+
+Read-only investigation (engine running, DuckDB locked; evidence = `engine.log.2026-09-03`, `state.db`,
+raw tick Parquet `data/parquet/ticks/date=2026-09-03`, Claude Code transcripts). Scratch scripts:
+`forensics_0903b.py`, `verdicts_0903.py`, `intraday_0903b.py`, `replay_0903.py` (session scratchpad).
+
+- **Membership.** Six are NIFTY200; BRIGADE/JYOTICNC/INOXWIND are MIS-eligible and off every
+  surveillance list, so they belong to the extended 600 by criteria — advisory/hi52 only, no ticker
+  subscription (0 tick files), not RECOMMEND-able by the 09-01 design. hi52 sweep 09:50: 800 scanned,
+  0 candidates (pre-backfill history; fresh-cross required).
+- **Funnel, first clean session on tranches 3/5/7 + displacement:** ORB fires 4,090 across 159 names
+  → 10 slots (3 at 09:50–09:52, 2 at 11:30) → 6 forwards (INDUSINDBK ×2 after the max-turns re-arm,
+  COROMANDEL, IREDA, ENRIN, IDFCFIRSTB) → 5 no_action → 0 entries; 3,984 `prescreen_cap_suppressed`;
+  5 `prescreen_slot_displaced` (INDUSINDBK>BLUESTARCO, IREDA>CGPOWER, COROMANDEL>COLPAL,
+  ENRIN>ASHOKLEY, IDFCFIRSTB>BEL) — the mechanism works as specified. All six in-universe names fired
+  ORB inside the 09:50–12:50 window (best scores UNITDSPR 0.967, IDFCFIRSTB 0.917, GMRAIRPORT 0.895,
+  KEI 0.825, CGPOWER 0.812, BSE 0.811); only IDFCFIRSTB reached the analyst (declined 11:32).
+- **Cause 1 — declined evaluations lock the cap.** `rearm` is infra-failure-only (prescreen.py:522,
+  owner-directed 07-29) and displacement targets unevaluated incumbents only (prescreen.py:934), so
+  `displaceable=0` from 09:52 (3 slots) and 11:30:07 (5 slots) for the rest of the window; 6 of the
+  48 daily forwards used. Tranche boundaries admit whoever fires in that minute (ASHOKLEY 0.42, BEL
+  0.50 at 11:30:05). The owner's 09-02 ask ("push new candidates without the hard cap") is NOT met yet.
+- **Cause 2 — sentiment SUM rails; planner renders it bare.** `sentiment_agg` market = clip(Σ…)
+  (news_pipeline.py:1081): 09-03 value −1.000 from raw −9.48 across 759 clusters (≈ −0.012/cluster,
+  i.e. neutral); 09-02 also −1.000. `ContextAssembler._sentiment_line` carries the WO-22 wording, but
+  `preopen_planner._digest_lines` (preopen_planner.py:282) emits "market: -1.000" with no measure →
+  day plan "risk-off, failed breakouts fade hard" → heartbeat regime notes repeat "pinned at its floor"
+  → every ORB verdict cites a hostile tape. Tape (raw ticks): NIFTY +0.34% open, high 09:48, close
+  −0.12%; breadth 104 up / 97 down, 45 up ≥1%, 44 closed in the top quartile and up — the planner's
+  "chop, narrow stock-specific bid" was defensible, its stated reason was an artifact. The nightly
+  reviewer flagged the same suspicion independently.
+- **Cause 3 — ORB geometry on momentum names.** Tick-level hindsight replay (entry at decision price,
+  first stop/target touch else 15:15 squareoff, 0.126% cost): the five declined trades net −3.5%
+  (IDFCFIRSTB +0.86% the only winner); all 11 candidates −4.78%. The owner's six bought at first fire
+  and held to squareoff: 5/6 positive (+0.73…+2.03% net), CGPOWER −0.49% (run over by 09:50).
+  Momentum-day capture needs a hold/trail structure the book does not have and has never tested; the
+  OR-anchored target/stop makes any post-trigger fill sub-1R (analyst's stated reason on 3 of 5).
+  Analyst latency at the open 4–8 min (serialized ~60 s calls; IREDA "failed in place" by 09:59).
+- **LLM outage 12:42–14:32 IST (31 calls, then again 19:07–19:28):** the SDK reports a limit-hit
+  result (subtype `success`, `is_error`, empty `errors[]`) as "Claude Code returned an error result:
+  success" and drops the text (claude_agent_sdk/_internal/query.py:306). Claude Code transcripts in
+  the project dir show "hit your session limit · resets 2:30pm" from 12:42 IST and "resets 7:30pm" at
+  19:07; this session's research agents were refused at 02:21 with "resets 6:10am". The engine and the
+  dev sessions share one subscription window. Impact 09-03: two hourly position reviews and the news
+  analyst dark for ~1h50m; no signal candidate lost (window closed 12:50, cap already full).
+- **Morning (not a cause):** Kite daily token expiry dropped the websocket 07:17:55 (1006, then 403);
+  supervisor killed the child 09:34:23 (8,174 s silence), TokenException → FROZEN + login prompt,
+  stop_forced 09:34:59, crash-recovery boot 09:35:47, owner login 09:36:02, window set 09:36:43,
+  NORMAL 09:45:27. Pre-open plan ran 09:53 (after window open); first analyst call saw "no day plan".
+- **Recommended (not implemented — owner's call):** (1) make no_action incumbents displaceable
+  (margin 0.10, per-symbol cooldown, bounded by the 48/day forward cap); (2) replace the clipped SUM
+  with a bounded mean/z-score and give the planner the WO-22 measure; (3) pre-register a
+  trend-continuation intraday backtest (acceptance + pullback entry, trailing exit, breadth gate) on
+  bars_1m before any origination change; (4) log the SDK result text on failure and keep heavy agent
+  work off 09:15–15:30 IST.
+
 ## 2026-09-03 (15:38–15:41) — deploy-by-start: d2c5c8c (store-stall paging) + 15bff68 (hi52 ex-date veto) + c0b39eb live; boot verified
 
 - **Coordinated with the backfill session** (cross-session): held my planned 15:42 restart when the

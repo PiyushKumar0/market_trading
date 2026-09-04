@@ -632,6 +632,7 @@ class RecommendationPipeline:
         funnel_raw: Callable[[date], Mapping[str, int]] | None = None,
         claim_slot: Callable[[str, str], bool] | None = None,
         take_displaced: Callable[[], Sequence[tuple[str, str]]] | None = None,
+        decline: Callable[[str, str], bool] | None = None,
         admission_mode: str = "ranked",
         forward_drain_mode: str = "paced",
     ) -> None:
@@ -675,6 +676,9 @@ class RecommendationPipeline:
         #: eviction ever arrives, which is exactly the pre-2026-08-27 behaviour.
         self._claim_slot = claim_slot
         self._take_displaced = take_displaced
+        #: (symbol, strategy_id) -> the analyst RAN and said no_action, so the pair is displaceable
+        #: again (2026-09-04; wired to SignalPreScreen.decline). Not a re-arm: the slot stays spent.
+        self._decline = decline
         self._funnel_raw_day: date | None = None
         self._funnel_raw_flushed: dict[str, int] = {}
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
@@ -1553,6 +1557,11 @@ class RecommendationPipeline:
                 self._assembler.set_regime_note(payload.regime_note)
             _log.info("signal_candidate_no_action", signal_id=candidate.signal_id,
                       reason=payload.reason)
+            # A declined evaluation holds no position and so holds no slot: hand the pair back to
+            # cap displacement (2026-09-04 — five no_action verdicts locked every orb slot on 09-03).
+            # The journal row stays evaluated=1: the analyst ran, this is not the 07-29 re-arm.
+            if self._decline is not None:
+                self._decline(candidate.symbol, candidate.strategy_id)
             return
 
         # STRUCTURAL COHERENCE (R1 — the structural half of "the analyst disposes of THIS candidate"):

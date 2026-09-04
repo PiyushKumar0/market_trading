@@ -443,6 +443,26 @@ def _is_result_message(message: Any) -> bool:
     return _attr(message, "total_cost_usd") is not None or "Result" in type(message).__name__
 
 
+def _error_result_text(message: Any) -> str | None:
+    """The CLI's own reason when a result message reports ``is_error`` (2026-09-04); else ``None``.
+
+    A usage-limit hit arrives as a result with ``is_error`` set, subtype ``success``, an empty
+    ``errors`` list and the reason only in ``result``. The SDK then raises "Claude Code returned an
+    error result: success" — it joins ``errors`` and falls back to the subtype — which is all the log
+    and the audit row carried for the 31 failures of 2026-09-03 12:42–14:32. Read the text here,
+    before the SDK's exception discards it.
+    """
+    if not _is_result_message(message) or not _attr(message, "is_error"):
+        return None
+    result = _attr(message, "result")
+    if isinstance(result, str) and result:
+        return result
+    errors = _attr(message, "errors")
+    if isinstance(errors, (list, tuple)) and errors:
+        return "; ".join(str(e) for e in errors)
+    return str(_attr(message, "subtype") or "unknown error")
+
+
 def _extract_usage(message: Any) -> TokenUsage | None:
     raw = _attr(message, "usage")
     if raw is None:
@@ -566,7 +586,12 @@ def _classify(exc: BaseException) -> tuple[FailReason, str]:
     """Map an SDK exception to a D7 failure reason (all of which resolve to no-action + alert)."""
     detail = f"{type(exc).__name__}: {exc}"
     lowered = detail.lower()
-    if "429" in lowered or "overload" in lowered or "rate limit" in lowered:
+    # "session limit"/"usage limit": the subscription's rolling window (2026-09-03 12:42–14:32 —
+    # shared with every Claude Code session on the machine); transient, like a 429.
+    if (
+        "429" in lowered or "overload" in lowered or "rate limit" in lowered
+        or "rate_limit" in lowered or "session limit" in lowered or "usage limit" in lowered
+    ):
         return "overloaded", detail
     if "credit" in lowered or "billing" in lowered or "insufficient funds" in lowered:
         return "credit_exhausted", detail
@@ -878,6 +903,9 @@ class AgentHarness:
         aborted = False
         async with _closing(query(prompt=prompt, options=options)) as stream:
             async for message in stream:
+                error = _error_result_text(message)
+                if error is not None:
+                    raise RuntimeError(f"Claude Code returned an error result: {error}")
                 text = _message_text(message)
                 if text:
                     texts.append(text)

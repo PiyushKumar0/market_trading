@@ -34,9 +34,13 @@ symbol at all. Only this class knows the cap is full, so only this class can dec
 arrival deserves the slot more than an incumbent.
 
 THE RULE. When a cap would refuse a NEW pair, look for a same-strategy pair that is charged, has
-NEVER BEEN EVALUATED, carries no ``catalyst_ref``, and scores at least ``displacement_margin`` BELOW
-the arrival. Evict the worst such pair (lowest score, then earliest admission — a total order) and
-give the arrival its slot. Everything else refuses exactly as before.
+NEVER BEEN EVALUATED — or was evaluated and DECLINED (:meth:`decline`, 2026-09-04) — carries no
+``catalyst_ref``, and scores at least ``displacement_margin`` BELOW the arrival. Evict the worst such
+pair (lowest score, then earliest admission — a total order) and give the arrival its slot.
+Everything else refuses exactly as before. A declined incumbent's eviction is a NEW analyst call,
+so it is charged to the day-level displacement budget (and bounded by the forward cap), not to the
+per-strategy churn budget in point 2 — on 2026-09-03 five declined evaluations held all five
+``orb`` slots from 11:30 to the close with that budget already spent.
 
 WHAT MAKES THIS SAFE, in the four places it could have gone wrong:
 
@@ -361,6 +365,9 @@ class SignalPreScreen:
         #: or they were restored by :meth:`hydrate` and this process cannot prove otherwise. Never
         #: displaceable. This set IS invariant #1 (2026-07-29 / 2026-08-27).
         self._evaluated: set[tuple[str, str]] = set()
+        #: Evaluated pairs the analyst DECLINED (:meth:`decline`, 2026-09-04): still charged and seen,
+        #: but displaceable again — a no_action verdict holds no position and so holds no slot.
+        self._declined: set[tuple[str, str]] = set()
         #: Displacements SPENT per strategy today, budgeted against that strategy's own cap so the
         #: swap cannot become an unbounded publication treadmill (module docstring, point 2).
         self._displacements: dict[str, int] = {}
@@ -575,6 +582,28 @@ class SignalPreScreen:
             self._evaluated.add(key)
             return True
 
+    def decline(self, symbol: str, strategy_id: str) -> bool:
+        """The analyst RAN on ``(symbol, strategy)`` and said ``no_action`` (2026-09-04).
+
+        2026-09-03: five declined ``orb`` evaluations held all five of the strategy's slots from
+        09:52/11:30 to the close — ``displaceable=0`` on 3,984 refusals, UNITDSPR at 0.967 among
+        them — because :meth:`claim_slot` makes a pair permanent and nothing ever un-made it. A
+        declined evaluation holds no position, so it holds no slot either: the pair becomes a
+        displacement victim again, under the same margin and order as an unevaluated incumbent. It
+        stays SEEN — its once-per-day publication is spent; this is NOT :meth:`rearm`, which exists
+        for calls that never happened, and the spam bound still counts attempts, not outcomes.
+        Evicting it costs one more analyst call, which the day-level displacement budget and the
+        forward cap bound (:meth:`_displacement_scan_locked`). Pairs restored by :meth:`hydrate` are
+        not in ``_admitted`` and stay permanent — the documented restart carve-out, unchanged.
+        """
+        with self._lock:
+            key = (symbol, strategy_id)
+            if key not in self._admitted:
+                return False
+            self._declined.add(key)
+            _log.info("prescreen_slot_declined", symbol=symbol, strategy_id=strategy_id)
+            return True
+
     def take_displaced(self) -> list[tuple[str, str]]:
         """Pop the displacement notices the pipeline has not acted on yet (2026-08-27).
 
@@ -633,6 +662,7 @@ class SignalPreScreen:
             self._seen = set(seen)
             self._charged = set(charged) | self._seen
             self._evaluated = set(self._charged)
+            self._declined = set()
             self._count_day = len(self._charged)
             counts: dict[str, int] = {}
             for _, strategy_id in self._charged:
@@ -742,6 +772,7 @@ class SignalPreScreen:
             self._admitted.clear()
             self._admit_seq = 0
             self._evaluated.clear()
+            self._declined.clear()
             self._displacements.clear()
             self._day_displacements = 0
             self._displaced.clear()
@@ -870,7 +901,8 @@ class SignalPreScreen:
         # displacement allowance, voiding the schedule's contested-seat guarantee for the afternoon
         # (the lockout this change exists to fix, relocated into the budget).
         budget = self._cap_for(strategy_id, at)
-        selecting = self._day_displacements < self._max_day and not (
+        day_open = self._day_displacements < self._max_day
+        strategy_open = not (
             budget is not None and self._displacements.get(strategy_id, 0) >= budget
         )
         incoming_bp = score_bp(cand.score)
@@ -878,10 +910,15 @@ class SignalPreScreen:
         displaceable = 0
         best: tuple[int, int, tuple[str, str]] | None = None
         for pair, (score, seq, has_catalyst) in self._admitted.items():
-            if pair[1] != strategy_id or has_catalyst or pair in self._evaluated:
+            if pair[1] != strategy_id or has_catalyst:
+                continue
+            declined = pair in self._declined
+            if pair in self._evaluated and not declined:
                 continue
             displaceable += 1
-            if not selecting:
+            # A declined incumbent's eviction is a NEW evaluation: the day budget and the forward
+            # cap bound it; the per-strategy budget bounds pre-evaluation churn only (2026-09-04).
+            if not day_open or not (declined or strategy_open):
                 continue
             if batch_floor is not None and seq > batch_floor:
                 continue                              # admitted by THIS batch — not up for eviction
@@ -910,13 +947,17 @@ class SignalPreScreen:
         """
         score, seq, _ = self._admitted.pop(victim)
         strategy_id = victim[1]
+        declined = victim in self._declined
         self._seen.discard(victim)
         self._charged.discard(victim)
+        self._evaluated.discard(victim)       # a declined victim WAS evaluated; its slot is gone now
+        self._declined.discard(victim)
         self._count_day = max(0, self._count_day - 1)
         self._count_by_strategy[strategy_id] = max(
             0, self._count_by_strategy.get(strategy_id, 1) - 1
         )
-        self._displacements[strategy_id] = self._displacements.get(strategy_id, 0) + 1
+        if not declined:                      # declined evictions are day-budget-only (2026-09-04)
+            self._displacements[strategy_id] = self._displacements.get(strategy_id, 0) + 1
         self._day_displacements += 1
         self._displaced.add(victim)
         self._displaced_pending.append(victim)
@@ -924,14 +965,19 @@ class SignalPreScreen:
             "prescreen_slot_displaced", cap="strategy_day", strategy_id=strategy_id,
             symbol=cand.symbol, score=float(cand.score),
             displaced_symbol=victim[0], displaced_score=score, displaced_seq=seq,
+            displaced_declined=declined,
             margin=self._displacement_margin,
-            displacements_used=self._displacements[strategy_id],
+            displacements_used=self._displacements.get(strategy_id, 0),
             # Tranche-aware, matching the suppression log's field (2026-09-02 review: the two log
             # sites reported flat vs tranche values under one field name).
             displacement_budget=self._cap_for(strategy_id, at),
             day_displacements_used=self._day_displacements,
             day_displacement_budget=self._max_day,
-            reason="cap full; this candidate scores materially better than an unevaluated incumbent",
+            reason=(
+                "cap full; this candidate scores materially better than a declined incumbent"
+                if declined else
+                "cap full; this candidate scores materially better than an unevaluated incumbent"
+            ),
         )
 
     def _admit_batch_locked(

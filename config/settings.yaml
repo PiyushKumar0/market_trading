@@ -293,7 +293,7 @@ strategy:
         "13:00": 7               # Paired with the same-day orb score de-saturation so displacement
                                  # discriminates WITHIN a tranche. Absent/removed = flat caps (rollback).
     # How much better a later candidate must score to take a full cap's admission slot from an
-    # unevaluated incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
+    # unevaluated (or, since 2026-09-04, declined) incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
     # same reason as max_per_strategy_day above: it decides which candidates get evaluated at all].
     #
     # Why the cap needed displacement at all, and what makes it safe: the module docstring of

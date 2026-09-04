@@ -51,3 +51,7 @@ A **miss** = the output fails any element of the written spec. New defects found
 > Judge the output, not the price tag. If a cheaper model's work misses the bar, escalate without asking.
 
 Escalation is one-way per task — never bounce a task back down. And a clean result from a cheap model is a clean result; don't re-do work on Fable just because it was done cheaply.
+
+## Operations — the live engine shares this account's Claude subscription
+
+The engine's analysts (`mt-engine`) draw on the same subscription session window as every Claude Code session on this machine. On 2026-09-03 a session-limit hit blacked out the intraday and news analysts 12:42–14:32 IST (logged by the SDK as "error result: success"). **On trading days, keep agent fan-outs, workflows, review swarms and delegated full-suite runs out of 09:15–15:30 IST**; inline work is fine. If you see "You've hit your session limit", assume the engine is dark too and check its log.

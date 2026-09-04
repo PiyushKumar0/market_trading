@@ -688,6 +688,8 @@ async def run() -> int:
             # only place the forward queue may be touched. Both unwired ⇒ pre-2026-08-27 behaviour.
             claim_slot=lambda sym, sid: prescreen.claim_slot(sym, sid),
             take_displaced=lambda: prescreen.take_displaced(),
+            # 2026-09-04: a no_action verdict makes its pair displaceable again (same late binding).
+            decline=lambda sym, sid: prescreen.decline(sym, sid),
             admission_mode=settings.strategy.prescreen.admission_mode,   # WO-1 rollback flag
             # 2026-08-14 rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
             forward_drain_mode=settings.strategy.prescreen.forward_drain_mode,

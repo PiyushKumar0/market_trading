@@ -229,6 +229,34 @@ async def test_movers_ranked_by_absolute_return_descending(store, conn, assemble
     )
 
 
+# ------------------------------------------------------- the digest rail, measured (2026-09-04)
+async def test_a_railed_market_digest_reaches_the_planner_with_its_measure(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """2026-09-03: the planner's digest lines rendered a bare ``market: -1.000`` (no WO-22 measure),
+    read it as "pinned at its floor", and wrote a risk-off day plan that every intraday verdict then
+    cited — from raw -9.48 across 759 clusters, i.e. neutral flow. The planner gets the same measured
+    rail line the analyst context already carries; an unrailed sector line is unchanged."""
+    as_of = clock.now()
+    store.upsert_sentiment_agg([
+        {"scope": "market", "scope_key": "market", "as_of": as_of, "value": -1.0,
+         "raw_sum": -9.48, "n_clusters": 759},
+        {"scope": "sector", "scope_key": "BANK", "as_of": as_of, "value": 0.088,
+         "raw_sum": 0.088, "n_clusters": 3},
+    ])
+    harness = FakeHarness(AgentResult.Ok(call_id="c9", payload=_plan()))
+    job = _job(store, conn, assembler, harness, agent_defs, FakeGovernor(allowed=True), clock, calendar)
+
+    assert await job.run(TODAY) is AdvisoryOutcome.RAN
+
+    volatile = harness.calls[0]["context"].volatile_block
+    assert (
+        "  - market: -1.000 (clipped SUM saturated: raw -9.48 across 759 clusters, "
+        "mean -0.012 per cluster — read as net negative headline flow, not extremity)"
+    ) in volatile
+    assert "  - sector BANK: +0.088\n" in volatile
+
+
 # --------------------------------------------------------------------------- fail-to-zero rendering
 async def test_empty_tables_render_unavailable_without_raising(store, conn, assembler, agent_defs, clock, calendar):
     """D7: every deterministic input on a completely empty store/conn degrades to text, never raises."""

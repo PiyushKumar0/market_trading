@@ -57,7 +57,7 @@ from engine.core.clock import Clock
 from engine.core.db import transaction
 from engine.core.log import get_logger
 from engine.intelligence.agents import preopen
-from engine.intelligence.context import ContextAssembler
+from engine.intelligence.context import ContextAssembler, sentiment_rail_note
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
@@ -271,7 +271,12 @@ class PreopenPlannerJob:
     # ------------------------------------------------------------------ catalyst digest (§2.7 step 5)
     def _digest_lines(self) -> list[str]:
         """Market + top-5 sector sentiment rows from the latest digest run; ``unavailable`` only when
-        the digest has never run (mirrors ``ContextAssembler._catalyst_text``'s convention)."""
+        the digest has never run (mirrors ``ContextAssembler._catalyst_text``'s convention).
+
+        A railed row carries the same measured note the analyst context renders
+        (:func:`sentiment_rail_note`, 2026-09-04): this job used to print the bare ``-1.000``, the
+        plan called it "pinned at its floor", and every intraday verdict on 2026-09-03 cited that
+        risk-off frame — from raw −9.48 across 759 clusters, i.e. neutral flow."""
         as_of = self._store.latest_sentiment_as_of()
         if as_of is None:
             return [_UNAVAILABLE]
@@ -279,13 +284,16 @@ class PreopenPlannerJob:
         lines: list[str] = []
         market = next((r for r in rows if r.get("scope") == "market"), None)
         if market is not None:
-            lines.append(f"market: {market['value']:+.3f}")
+            lines.append(f"market: {market['value']:+.3f}{sentiment_rail_note(market)}")
         sectors = sorted(
             (r for r in rows if r.get("scope") == "sector"),
             key=lambda r: abs(r["value"]),
             reverse=True,
         )
-        lines.extend(f"sector {r['scope_key']}: {r['value']:+.3f}" for r in sectors[:SECTOR_TOP_N])
+        lines.extend(
+            f"sector {r['scope_key']}: {r['value']:+.3f}{sentiment_rail_note(r)}"
+            for r in sectors[:SECTOR_TOP_N]
+        )
         return lines or [_UNAVAILABLE]
 
     # ------------------------------------------------------------------ watchlist (§2.7 step 5(ii))

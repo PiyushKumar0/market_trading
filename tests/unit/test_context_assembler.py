@@ -795,16 +795,24 @@ def test_a_railed_sentiment_value_reports_its_measured_saturation(assembler):
     )
 
     assert line == (
-        "  sentiment market: -1.000 (clipped SUM saturated: raw -2.31 across 9 clusters "
-        "— read as net negative headline flow, not extremity)"
+        "  sentiment market: -1.000 (clipped SUM saturated: raw -2.31 across 9 clusters, "
+        "mean -0.257 per cluster — read as net negative headline flow, not extremity)"
     )
     assert "SATURATED:" not in line          # the measurement REPLACES the WO-20 prose
 
     positive = assembler._sentiment_line(
         "symbol RELIANCE", {"value": 1.0, "raw_sum": 1.0004, "n_clusters": 1}
     )
-    assert "raw +1.00 across 1 cluster —" in positive      # singular, and the sign is explicit
+    assert "raw +1.00 across 1 cluster, mean +1.000 per cluster —" in positive   # singular, signed
     assert "net positive" in positive
+
+
+def test_a_railed_sum_over_a_large_corpus_reports_its_near_zero_mean(assembler):
+    """2026-09-03: the market row read -1.000 from raw -9.48 across 759 clusters — about -0.01 per
+    cluster, i.e. neutral flow — and both the planner and the analyst read the rail as a risk-off
+    regime all day. The per-cluster mean is the number that says otherwise, so it is printed."""
+    line = assembler._sentiment_line("market", {"value": -1.0, "raw_sum": -9.48, "n_clusters": 759})
+    assert "raw -9.48 across 759 clusters, mean -0.012 per cluster" in line
 
 
 def test_a_half_measured_rail_falls_back_to_the_wo20_prose(assembler):

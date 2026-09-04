@@ -962,6 +962,53 @@ def test_displacement_margin_rejects_a_nonsense_value():
             _prescreen([], displacement_margin=bad)
 
 
+# ================================= declined incumbents are displaceable (2026-09-04, the 09-03 lockout)
+def test_a_declined_incumbent_is_displaceable_again():
+    """2026-09-03: five analyst no_action verdicts held all five orb slots from 09:52/11:30 to the
+    close (``displaceable=0`` on 3,984 refusals, UNITDSPR at 0.967 among them). A declined evaluation
+    holds no position, so it must not hold the slot either: it stays SEEN (no re-publication) and
+    is evicted by the first materially better arrival, exactly like an unevaluated incumbent."""
+    ps = _prescreen([], max_per_strategy_day={"orb": 1})
+    day = _the_day()
+    assert len(ps.admit([_scored("IREDA", 0.72)], day)) == 1
+    assert ps.claim_slot("IREDA", "orb") is True
+    assert ps.admit([_scored("UNITDSPR", 0.97)], day) == []      # evaluated, in flight: untouchable
+    assert ps.decline("IREDA", "orb") is True                     # the analyst RAN and said no
+    assert ps.admit([_scored("KEI", 0.79)], day) == []            # 0.07 better: not materially
+    assert [c.symbol for c in ps.admit([_scored("UNITDSPR", 0.97)], day)] == ["UNITDSPR"]
+    assert ps.take_displaced() == [("IREDA", "orb")]
+    assert ("IREDA", "orb") not in ps._evaluated and ("IREDA", "orb") not in ps._declined
+    assert ps._count_by_strategy["orb"] == 1                      # a swap, never a refund
+    assert ps.decline("NOBODY", "orb") is False                   # never charged: nothing to decline
+
+
+def test_a_declined_displacement_spends_the_day_budget_not_the_strategy_budget():
+    """Evicting a declined incumbent costs one more analyst call, which the day-level displacement
+    budget and the forward cap bound. The per-strategy budget bounds PRE-evaluation churn only — on
+    2026-09-03 it was spent (5/5) by 11:30 and would otherwise have re-locked the afternoon."""
+    ps = _prescreen([], max_per_strategy_day={"orb": 1})
+    day = _the_day()
+    assert len(ps.admit([_scored("A", 0.30)], day)) == 1
+    assert len(ps.admit([_scored("B", 0.50)], day)) == 1          # unevaluated A evicted: budget 1/1
+    assert ps._displacements["orb"] == 1
+    assert ps.claim_slot("B", "orb") and ps.decline("B", "orb")
+    assert len(ps.admit([_scored("C", 0.70)], day)) == 1          # declined B evicted regardless
+    assert ps.take_displaced() == [("A", "orb"), ("B", "orb")]
+    assert ps._displacements["orb"] == 1                          # strategy budget untouched
+    assert ps._day_displacements == 2                             # the day budget counted it
+
+
+def test_the_day_displacement_budget_still_binds_declined_displacements():
+    ps = _prescreen([], max_candidates_per_day=1, max_per_strategy_day={"orb": 1})
+    day = _the_day()
+    assert len(ps.admit([_scored("A", 0.30)], day)) == 1
+    assert ps.claim_slot("A", "orb") and ps.decline("A", "orb")
+    assert len(ps.admit([_scored("B", 0.90)], day)) == 1          # day budget 1/1 spent here
+    assert ps.claim_slot("B", "orb") and ps.decline("B", "orb")
+    assert ps.admit([_scored("C", 1.0)], day) == []               # budget exhausted: refused
+    assert ps.funnel_counters()["suppressed_cap"] == {"orb": 1}
+
+
 # =========================================== displacement/catalyst accounting audit (2026-08-28)
 def test_displacements_are_bounded_by_the_day_cap_too():
     """The per-strategy displacement budget alone does not bound the DAY.

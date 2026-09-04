@@ -351,7 +351,7 @@ async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandid
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
     mode=None, kill=None, notify=None, assembler=None, rearm=None, funnel_raw=None,
-    claim_slot=None, take_displaced=None,
+    claim_slot=None, take_displaced=None, decline=None,
     admission_mode="ranked", forward_drain_mode="paced",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
@@ -371,6 +371,7 @@ def make_pipeline(
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
         funnel_raw=funnel_raw, claim_slot=claim_slot, take_displaced=take_displaced,
+        decline=decline,
         admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
     )
     return pipeline, parts
@@ -810,17 +811,28 @@ async def test_no_action_records_the_regime_note_and_no_proposal(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
     harness = FakeHarness(dict(NO_ACTION_JSON))
+    declined: list[tuple[str, str]] = []
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
         limits=StubLimits(limit_table),
+        decline=lambda sym, sid: declined.append((sym, sid)) or True,
     )
-    await publish_candidate(pipeline, candidate())
+    cand = candidate()
+    await publish_candidate(pipeline, cand)
 
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
     assert parts["assembler"].regime_notes == [NO_ACTION_JSON["regime_note"]]
     assert parts["notify"].messages == []
+    # 2026-09-04: a no_action verdict hands the slot back to displacement (the analyst RAN, so the
+    # day slot itself stays spent — this is not the 2026-07-29 infrastructure re-arm).
+    assert declined == [(cand.symbol, cand.strategy_id)]
+    row = conn.execute(
+        "SELECT evaluated FROM prescreen_day_slots WHERE symbol=? AND strategy_id=?",
+        (cand.symbol, cand.strategy_id),
+    ).fetchone()
+    assert row["evaluated"] == 1
 
 
 async def test_shrink_verdict_resizes_the_recommendation(

@@ -79,6 +79,36 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def sentiment_rail_note(row: Mapping[str, Any]) -> str:
+    """The rail annotation for one ``sentiment_agg`` row — ``""`` off the rail (WO-20c / WO-22).
+
+    ``sentiment_agg.value`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
+    bounded index: a handful of same-direction headlines reaches ±1.0 and stays there. When the row
+    carries the WO-22 measures, the note reports the unclipped sum, the cluster count and — since
+    2026-09-04 — the PER-CLUSTER MEAN, which is the number that says whether the flow is extreme or
+    merely wide: on 2026-09-03 the market row read −1.000 from raw −9.48 across 759 clusters, about
+    −0.01 per cluster (neutral), and both the planner and the analyst read the rail as a risk-off
+    regime all day. One function, so the pre-open planner and the analyst context cannot disagree.
+    """
+    value = float(row["value"])
+    if abs(value) < 0.999:
+        return ""
+    direction = "negative" if value < 0 else "positive"
+    raw_sum, n_clusters = row.get("raw_sum"), row.get("n_clusters")
+    if raw_sum is None or n_clusters is None:
+        return (
+            " (SATURATED: a clipped decay-weighted SUM of headline scores — a handful of "
+            f"same-direction headlines reaches the rail; read as net {direction} headline flow, "
+            "not extremity)"
+        )
+    n = int(n_clusters)
+    mean = float(raw_sum) / n if n else 0.0
+    return (
+        f" (clipped SUM saturated: raw {float(raw_sum):+.2f} across {n} cluster{'' if n == 1 else 's'}, "
+        f"mean {mean:+.3f} per cluster — read as net {direction} headline flow, not extremity)"
+    )
+
+
 def _digest(system_prompt: str, stable_block: str, volatile_block: str) -> str:
     """sha256 of the three blocks, NUL-separated so block boundaries cannot be forged by content."""
     joined = "\x00".join((system_prompt, stable_block, volatile_block))
@@ -561,18 +591,14 @@ class ContextAssembler:
         weigh, where the WO-20 prose was only a warning it had to take on trust. A row digested
         BEFORE WO-22 has no measures (NULL), and keeps the WO-20 wording verbatim: an unmeasured rail
         must not borrow the credibility of a measured one.
+
+        The note itself is :func:`sentiment_rail_note` (2026-09-04) — shared with the pre-open
+        planner's digest lines, which until then rendered the bare value and read the rail as a
+        regime.
         """
         if row is None or row.get("value") is None:
             return f"  sentiment {label}: {_UNAVAILABLE}"
-        value = float(row["value"])
-        if abs(value) < 0.999:
-            return f"  sentiment {label}: {value:+.3f}"
-        direction = "negative" if value < 0 else "positive"
-        raw_sum, n_clusters = row.get("raw_sum"), row.get("n_clusters")
-        if raw_sum is None or n_clusters is None:
-            return f"  sentiment {label}: {value:+.3f} (SATURATED: a clipped decay-weighted SUM of headline scores — a handful of same-direction headlines reaches the rail; read as net {direction} headline flow, not extremity)"
-        n = int(n_clusters)
-        return f"  sentiment {label}: {value:+.3f} (clipped SUM saturated: raw {float(raw_sum):+.2f} across {n} cluster{'' if n == 1 else 's'} — read as net {direction} headline flow, not extremity)"
+        return f"  sentiment {label}: {float(row['value']):+.3f}{sentiment_rail_note(row)}"
 
     def _ltp_line(self, bars: Sequence[Bar]) -> str:
         """Precomputed as-of text: engine "now" plus the last completed bar (§3.2 — never the model's)."""

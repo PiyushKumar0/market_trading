@@ -649,6 +649,8 @@ async def test_timeout_fails_without_retry(defs, gov, clock, conn, alert, alerts
         (RuntimeError("your credit balance is too low"), "credit_exhausted"),
         (RuntimeError("billing error: subscription lapsed"), "credit_exhausted"),
         (RuntimeError("CLI subprocess died"), "sdk_error"),
+        (RuntimeError("You've hit your session limit · resets 2:30pm (Asia/Kolkata)"), "overloaded"),
+        (RuntimeError("error type rate_limit"), "overloaded"),
     ],
 )
 async def test_sdk_exceptions_map_to_failure_reasons(defs, gov, clock, conn, exc, reason) -> None:
@@ -713,6 +715,37 @@ async def test_call_class_drives_admission(defs, gov, clock, conn, real_cfg, cal
         defs["intraday_analyst"], FakeContext(call_class="signal"), enter_validator(clock)
     )
     assert allowed.ok and len(fake.calls) == 1
+
+
+class FakeErrorResultMessage(FakeResultMessage):
+    """The CLI's limit-hit shape (2026-09-03 12:42–14:32, 31 calls): a result with ``is_error`` set,
+    subtype ``success``, an empty ``errors`` list and the real reason only in ``result``. The SDK
+    then raises a bare "Claude Code returned an error result: success" — which is all the log had."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(usage=None, total_cost_usd=0.0)
+        self.is_error = True
+        self.subtype = "success"
+        self.errors: list[str] = []
+        self.result = text
+
+
+async def test_an_error_result_fails_with_the_clis_own_text(defs, gov, clock, conn, alert, alerts) -> None:
+    text = "You've hit your session limit · resets 2:30pm (Asia/Kolkata)"
+    fake = FakeQuery([
+        FakeErrorResultMessage(text),
+        RuntimeError("Claude Code returned an error result: success"),
+    ])
+    harness = make_harness(defs, gov, clock, conn, fake, alert=alert)
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert not result.ok and result.reason == "overloaded"
+    assert text in (result.detail or "")
+    (row,) = rows(conn)
+    assert row["fail_reason"] == "overloaded" and text in row["output_json"]
+    assert len(fake.calls) == 1 and fake.closed == 1
+    assert alerts and text in alerts[0][1]
 
 
 # --------------------------------------------------------------------------- tool-knob guarantees
