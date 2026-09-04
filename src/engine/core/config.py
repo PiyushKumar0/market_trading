@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --------------------------------------------------------------------------- paths
@@ -142,9 +142,10 @@ class DataCfg(BaseModel):
     backfill_minute_years: int = 1
     # §3.2.4 batch-universe extended leg (2026-09-01, owner-directed after the JINDALSAW/movers
     # review): criteria-passing NON-index symbols (MIS ∩ EQ-master ∩ not-surveillance ∩ ₹5cr median)
-    # persisted included=False / exclusion_reasons=['not_nifty200'] for BATCH rules, news shadow and
-    # pre-open advisory only — the tick watchlist and the risk gate stay NIFTY200-scoped. The flag
-    # is the rollback: False restores the pre-addendum universe shape exactly.
+    # persisted included=False / exclusion_reasons=['not_in_index'] for BATCH rules, news shadow and
+    # pre-open advisory only — the tick watchlist and the risk gate stay scoped to the configured
+    # index (NIFTY 500 since 2026-09-04, O15). The flag is the rollback: False restores the
+    # pre-addendum universe shape exactly.
     batch_universe_enabled: bool = False
     batch_universe_max: int = 600                 # top-N extended by median traded value (sanity cap)
 
@@ -416,13 +417,28 @@ class BackfillCfg(BaseModel):
 
 
 class UniverseCfg(BaseModel):
-    """§3.2.4 UniverseBuilder inputs (A8). The NIFTY200 list is best-effort-fetched (E5) with a
-    seed-file fallback so universe build never depends on an NSE page being reachable."""
+    """§3.2.4 UniverseBuilder inputs (A8) — the index that seeds the eligible universe. The list is
+    best-effort-fetched (E5) with a seed-file fallback so universe build never depends on an NSE
+    page being reachable.
 
-    nifty200_source_url: str = (
-        "https://archives.nseindia.com/content/indices/ind_nifty200list.csv"  # [VERIFY Phase-1] E5 anti-bot caveat
+    O15 (owner-directed 2026-09-04): the index is NIFTY 500, widened from NIFTY200. The fields are
+    named generically because the index is now CONFIG, not a constant — swapping it is these three
+    keys plus a seed file. ``extra="forbid"`` (deliberately narrower than the rest of this module,
+    which takes pydantic's default ignore) exists for exactly that reason: the retired
+    ``nifty200_source_url`` / ``nifty200_seed_path`` keys got no aliases, and a settings.yaml left
+    on them must fail loudly at boot rather than be silently ignored while the defaults below
+    present a different universe as live.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    index_name: str = "NIFTY 500"
+    """Display name of the eligible-universe index — carried on the ``universe_built`` log line and
+    in the fallback alert, so ops can see WHICH index a degraded build fell back to."""
+    index_source_url: str = (
+        "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]
     )
-    nifty200_seed_path: str = "config/universe/nifty200_seed.csv"
+    index_seed_path: str = "config/universe/nifty500_seed.csv"
 
 
 class JobTimesCfg(BaseModel):

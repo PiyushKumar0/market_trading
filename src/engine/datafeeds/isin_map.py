@@ -163,12 +163,13 @@ def scrip_for_isin(entries: list[dict[str, str]], isin: str) -> str | None:
 
 
 def load_constituents_isin(settings: Settings) -> dict[str, str]:
-    """Read the cached NIFTY-constituents CSV (download-cache → committed seed ladder) for ISINs.
+    """Read the cached index-constituents CSV (download-cache → committed seed ladder) for ISINs.
 
-    Mirrors ``UniverseBuilder``'s cache/seed paths (``builder.py`` untouched); returns ``{}`` if
-    neither is readable (the caller then relies on the announcements fallback)."""
-    cache = settings.resolved_data_dir() / "universe" / "nifty200_cached.csv"
-    seed_rel = Path(settings.universe.nifty200_seed_path)
+    Mirrors ``UniverseBuilder``'s cache/seed paths (``builder.py`` untouched) — both renamed by O15
+    (2026-09-04) when the index became config (NIFTY 500); returns ``{}`` if neither is readable
+    (the caller then relies on the announcements fallback)."""
+    cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
+    seed_rel = Path(settings.universe.index_seed_path)
     seed = seed_rel if seed_rel.is_absolute() else repo_root() / seed_rel
     for path in (cache, seed):
         try:

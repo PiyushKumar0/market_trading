@@ -57,7 +57,7 @@ _log = get_logger("engine.datafeeds.sector_map")
 #: Sector for symbols in no sectoral index — the gate caps it at 1 open position (§4.4 job 13).
 UNCLASSIFIED = "UNCLASSIFIED"
 
-#: NSE sectoral-index constituent CSVs (archives host — same format as the NIFTY200 list:
+#: NSE sectoral-index constituent CSVs (archives host — same format as the universe index list:
 #: ``Company Name,Industry,Symbol,Series,ISIN Code``). All [VERIFY Phase-1] — NSE moves these.
 #: ORDER IS LOAD-BEARING: classification is first-wins, most-specific index first (PSU Bank before
 #: Bank before Financial Services), so overlapping memberships resolve deterministically.
@@ -104,7 +104,7 @@ class SectorMapResult(BaseModel):
 def parse_constituents_csv(text: str) -> list[str]:
     """Symbols from an NSE index-constituents CSV (``Company Name,Industry,Symbol,Series,ISIN``).
 
-    Defensive (E5), same conventions as the NIFTY200 parser in ``engine.universe.builder`` (kept
+    Defensive (E5), same conventions as the index parser in ``engine.universe.builder`` (kept
     local — no universe→datafeeds import edge): ``#`` comment lines skipped, ``Symbol`` column
     located case-insensitively, a ``Series`` column (if present) filters to EQ. Order-preserving,
     de-duplicated, uppercased.
@@ -239,9 +239,13 @@ class SectorMapJob:
     async def run(self, d: date, *, universe_symbols: Iterable[str] | None = None) -> SectorMapResult:
         """Build + persist the ``as_of=d`` sector snapshot and refresh ``theme_map``.
 
-        ``universe_symbols`` (typically today's NIFTY200/watchlist) get explicit ``UNCLASSIFIED``
-        rows when no index claims them, so the snapshot is total over the tradeable set. Idempotent
-        run-latest (§2.6): the (as_of, symbol) upsert makes a re-run harmless. Never raises (E5).
+        ``universe_symbols`` (since O15, 2026-09-04: today's BATCH universe — eligible + capped +
+        extended, ~800 names against the pre-O15 ~200 watchlist) get explicit ``UNCLASSIFIED`` rows
+        when no index claims them, so the snapshot is total over the tradeable set. The widening is
+        a pure set-difference pass over the already-fetched sectoral lists plus that many more
+        upserted rows — no extra HTTP: the ten sectoral fetches are per-index, not per-symbol.
+        Idempotent run-latest (§2.6): the (as_of, symbol) upsert makes a re-run harmless.
+        Never raises (E5).
         """
         try:
             return await self._run(d, universe_symbols)

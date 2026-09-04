@@ -1156,6 +1156,33 @@ class RiskGate:
 
 
 # --------------------------------------------------------------------------- context assembly
+#: The §3.2.4 focus-cap marker, duplicated from ``engine.universe.builder.EXCL_CAP`` for the same
+#: layering reason ``engine.marketdata.store`` duplicates it: the gate must not import the universe
+#: builder. A row excluded for the cap ALONE is eligible; any other reason, or the extended-leg
+#: markers, is not.
+_EXCL_CAP_ONLY = ["watchlist_cap"]
+
+
+def _eligible_universe_row(rows: Sequence[Mapping[str, Any]], symbol: str) -> dict[str, Any] | None:
+    """``symbol``'s ``universe_daily`` row iff it is in the ELIGIBLE set: ``included`` (the tick
+    watchlist) OR excluded for ``watchlist_cap`` alone (O15, 2026-09-04).
+
+    Until O15 the gate read ``included_only`` rows, which equalled the eligible set only because the
+    200 cap did not bind on a 200-name index. With NIFTY 500 eligible at ~350–450 names, that shortcut
+    would have rejected every swing candidate from the capped tail as out-of-universe and made the
+    widening a no-op. The cap governs ticks; the RECOMMEND boundary is the eligible set by definition
+    (§3.2.4). Extended-leg rows (``not_in_index`` / legacy ``not_nifty200``) and rows carrying any
+    real exclusion stay out — the gate approves nothing the rule did not pass.
+    """
+    for row in rows:
+        if row.get("symbol") != symbol:
+            continue
+        if row.get("included") or list(row.get("exclusion_reasons") or []) == _EXCL_CAP_ONLY:
+            return dict(row)
+        return None
+    return None
+
+
 class GateContextBuilder:
     """Assembles a :class:`GateContext` from DETERMINISTIC broker/exchange sources only (R1).
 
@@ -1376,11 +1403,10 @@ class GateContextBuilder:
 
     # ------------------------------------------------------------------ store reads (executor)
     async def _universe_row(self, symbol: str, d: date) -> dict[str, Any] | None:
-        rows = await self._store.arun(self._store.get_universe_daily, d, included_only=True)
-        for row in rows:
-            if row.get("symbol") == symbol:
-                return row
-        return None
+        """``symbol``'s ``universe_daily`` row for ``d`` iff the symbol is ELIGIBLE — see
+        :func:`_eligible_universe_row` (O15, 2026-09-04)."""
+        rows = await self._store.arun(self._store.get_universe_daily, d)
+        return _eligible_universe_row(rows, symbol)
 
     async def _surveillance_flag(self, symbol: str, d: date) -> str | None:
         rows = await self._store.arun(self._store.get_instruments_daily, d)

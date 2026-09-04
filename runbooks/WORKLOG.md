@@ -1,5 +1,36 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-04 (16:3x–17:xx, owner-directed "extend the eligible universe to nifty 500") — O15 implemented; gate membership gap found and closed
+
+- **Decision recorded first** (plan §6.1 O15, commit 7bc900d): scope over the same-day evidence, with
+  the evidence written down; watchlist cap stays 200 (load), swing/batch legs read the full eligible
+  set; of the owner's cited names only IDEA and NIACL are in NIFTY 500 (PCJEWELLER, JINDWORLD, PAISALO
+  are outside it). Brief: `runbooks/briefs/nifty500_universe_brief_2026-09-04.md`.
+- **Implementation (Opus, red-first 11 → green, full suite 2,162):** `universe.index_name/index_source_url/
+  index_seed_path` (config.py:433–441, `extra="forbid"` on `UniverseCfg` only so a retired key fails at
+  boot); seed `config/universe/nifty500_seed.csv` from one live fetch (500 rows → 499 EQ symbols;
+  HFCL is series BE and correctly dropped); builder generic (`_load_index` builder.py:346,
+  `EXCL_INDEX="not_in_index"` :79, `universe_built` carries `index_name`/`index_size`, cache
+  `data/universe/index_cached.csv`, isin_map.py follows); store reads both index markers and the
+  replace deletes both (store.py:633/640/1428–1431/1471); sector map runs over the batch universe via
+  a bounded look-back helper (main.py:813, call :1025 — Sunday has no universe row, so a literal
+  same-day read would have been a permanent no-op); type alias `IndexSource`; fixture renamed.
+- **Audit finding, closed inline (red-first):** `RiskGate._universe_row` read `included_only=True`
+  (gate.py:1379) — exact only while the cap did not bind; under O15 every candidate from the ~200
+  eligible-but-capped names would have been rejected as out-of-universe, making the widening a no-op
+  for swing recommendations. New `_eligible_universe_row` (gate.py, before `GateContextBuilder`)
+  accepts `included` rows and `watchlist_cap`-only rows, rejects `not_in_index`/`not_nifty200` and any
+  real exclusion; test `test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist`;
+  gate + pipeline + digest modules 315 passed. Plan O15 paragraph and builder docstring updated.
+- **Residue (agent-flagged, applied on my instruction):** `scripts/backfill.py`, `scripts/backfill_filings.py`
+  (would have raised on the retired attribute), `scripts/backtest_hi52.py` cache path (+ `--index-csv`
+  alias), RUNBOOK.md and sector_overrides.yaml prose. Learning-module provenance strings that record a
+  NIFTY200-measured spread are deliberately untouched.
+- **Shadow populations:** `cat`/`cat_reversal`/`hi52` verdicts must be computed before/after the first
+  NIFTY 500 build (Monday 08:30). Watch items Monday: `universe_built index_name="NIFTY 500"
+  index_size≈499 eligible≈350–450 watchlist=200`, `watchlist_cap` rows non-empty, brk20/ins/hi52
+  sweeps over the wider set, gate `in_universe=True` on a capped name when one is proposed.
+
 ## 2026-09-04 (15:0x–15:4x, owner: "can't we track the candles?" + "improve the coverage") — candle battery RUN and REFUTED; coverage audit; NSE announcements feed implemented
 
 - **Candle / price-action battery (Opus, brief `runbooks/briefs/candles_backtest_brief_2026-09-04.md`,

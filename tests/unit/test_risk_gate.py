@@ -1187,3 +1187,26 @@ def test_gate_source_reads_no_origination_tables() -> None:
         f"engine/risk/gate.py must not reference the origination tables {offenders} "
         "(§9.1 deterministic-context invariant)"
     )
+
+
+def test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist() -> None:
+    """O15 (2026-09-04): with the eligible set at ~350–450 NIFTY 500 names and the tick watchlist
+    capped at 200, ``universe_daily`` rows excluded for ``watchlist_cap`` ALONE are eligible and must
+    clear the gate's ``in_universe`` check — reading ``included_only`` (the pre-O15 shortcut, exact
+    only while the cap did not bind) would have rejected every swing candidate from the widened
+    tail as out-of-universe. Extended-leg rows (``not_in_index``, legacy ``not_nifty200``) and rows
+    with any real exclusion stay OUT: the RECOMMEND boundary is the eligible set by definition."""
+    rows = [
+        {"symbol": "RELIANCE", "included": True, "exclusion_reasons": None, "mis_candidate": True},
+        {"symbol": "NIACL", "included": False, "exclusion_reasons": ["watchlist_cap"], "mis_candidate": False},
+        {"symbol": "JINDWORLD", "included": False, "exclusion_reasons": ["not_in_index"], "mis_candidate": True},
+        {"symbol": "OLDEXT", "included": False, "exclusion_reasons": ["not_nifty200"], "mis_candidate": True},
+        {"symbol": "LOWVAL", "included": False, "exclusion_reasons": ["watchlist_cap", "low_value"], "mis_candidate": True},
+    ]
+    pick = gate_module._eligible_universe_row
+    assert pick(rows, "RELIANCE")["symbol"] == "RELIANCE"
+    assert pick(rows, "NIACL")["symbol"] == "NIACL"            # capped, still eligible
+    assert pick(rows, "JINDWORLD") is None                      # extended leg: advisory only
+    assert pick(rows, "OLDEXT") is None                         # legacy marker, same verdict
+    assert pick(rows, "LOWVAL") is None                         # a real exclusion alongside the cap
+    assert pick(rows, "ABSENT") is None

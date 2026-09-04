@@ -380,6 +380,17 @@ def _wrapper_body(src: str, wrapper_name: str) -> str:
     return src[start:end]
 
 
+def test_sector_map_wrapper_classifies_the_batch_universe() -> None:
+    """O15 (2026-09-04): ``job_sector_map`` must feed sector_map the day's BATCH universe, not the
+    tick watchlist. With the eligible set at NIFTY 500 and ``universe_max_watchlist`` still 200, a
+    watchlist-scoped run leaves every capped/extended name unclassified — and §7.1 caps the
+    UNCLASSIFIED bucket at 1 open position, so the widened swing legs would be gate-blocked.
+    Source-level, like the forwarding sweep above: no engine boot needed to pin the seam."""
+    body = _wrapper_body(inspect.getsource(opsmain.run), "job_sector_map")
+    assert "batch_universe_symbols()" in body
+    assert "universe_symbols=watchlist_symbols()" not in body
+
+
 @pytest.mark.parametrize("wrapper_name", _FORWARDING_WRAPPERS)
 def test_ok_bearing_wrapper_forwards_return_value(wrapper_name: str) -> None:
     """Composition-root regression (2026-08-13), swept over all 9 ok-bearing closures: each MUST

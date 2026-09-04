@@ -3,8 +3,8 @@
 # NOT a protected store (owner-editable operational config, like themes.yaml). The NSE
 # sectoral-index constituent CSVs scraped by sector_map.py (SECTOR_SOURCES) are committee-curated
 # indices, not a full industry taxonomy — some genuinely financial-sector companies are NOT
-# constituents of any scraped index even though NSE's own "Industry" column (in the NIFTY200
-# universe CSVs) tags them Financial Services. Left unclassified, they'd land in UNCLASSIFIED and
+# constituents of any scraped index even though NSE's own "Industry" column (in the universe
+# index CSVs) tags them Financial Services. Left unclassified, they'd land in UNCLASSIFIED and
 # get capped at 1 open position by the risk gate (conservative, but loses sector context).
 #
 # Shape: overrides: {sector_name: [symbol, ...]}
@@ -34,10 +34,11 @@ overrides:
     - HDFCAMC
     # ICICI Prudential Asset Management Company Ltd. (ICICIAMC) — same pattern as HDFCAMC:
     # Industry="Financial Services" in the seed CSV, same confirmed absence from the scraped
-    # index. The only other AMC in the current NIFTY200 universe (searched both
-    # config/universe/nifty200_seed.csv and the live cached universe,
-    # data/universe/nifty200_cached.csv, for "Asset Management"/"AMC"/RTA/depository/ratings/
-    # broking/exchange Industry hits — no other AMC or RTA name found).
+    # index. The only other AMC in the then-current NIFTY200 universe (searched both the committed
+    # seed and the live cached universe — at the time config/universe/nifty200_seed.csv and
+    # data/universe/nifty200_cached.csv, since O15 2026-09-04 nifty500_seed.csv and
+    # index_cached.csv — for "Asset Management"/"AMC"/RTA/depository/ratings/broking/exchange
+    # Industry hits; no other AMC or RTA name found. NOT re-searched over the wider NIFTY 500.)
     - ICICIAMC
 
 # NOTE (found, deliberately left OUT — flagging for an explicit owner call rather than guessing):

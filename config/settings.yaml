@@ -84,15 +84,21 @@ data:
                                           # was structurally invisible); 100 -> 200 owner-directed 2026-08-20
                                           # (origination review: cap >= eligible set, watchlist_cap exclusion
                                           # now structurally empty - per-bar scanners see the full eligible
-                                          # NIFTY200). First boot after a raise backfills 1m history for the
-                                          # newly watched symbols (A2 throttled - longer warm-up that morning)
+                                          # NIFTY200). O15 2026-09-04: eligible widened to NIFTY 500, so this
+                                          # cap BINDS again by design - the tick watchlist is the top 200
+                                          # eligible by traded value, the rest audit as watchlist_cap; raising
+                                          # it is a separate, measured step (tick volume, bar building and
+                                          # per-minute feature snapshots all scale with it). First boot after a
+                                          # raise backfills 1m history for the newly watched symbols (A2
+                                          # throttled - longer warm-up that morning)
   min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
   backfill_daily_years: 2
   backfill_minute_years: 1
   batch_universe_enabled: true            # §3.2.4 extended leg (owner-directed 2026-09-01, movers review):
                                           # criteria-passing NON-index symbols persisted included=False,
-                                          # exclusion_reasons=['not_nifty200'] — batch rules / news shadow /
-                                          # pre-open advisory only; tick watchlist + risk gate stay NIFTY200.
+                                          # exclusion_reasons=['not_in_index'] — batch rules / news shadow /
+                                          # pre-open advisory only; tick watchlist + risk gate stay scoped to
+                                          # the configured index (NIFTY 500 since 2026-09-04, O15).
                                           # false = exact pre-addendum universe shape (the rollback line).
   batch_universe_max: 600                 # top-N extended by median traded value (sanity cap)
 
@@ -359,10 +365,14 @@ backfill:
   day_chunk_days: 2000           # max span per day-interval historical request
 
 # §3.2.4 UniverseBuilder inputs (A8). The NSE list fetch is best-effort (E5); the seed CSV is the
-# offline fallback so universe build never hard-depends on an NSE page.
+# offline fallback so universe build never hard-depends on an NSE page. The index is CONFIG, not a
+# constant: O15 (owner-directed 2026-09-04) widened the eligible universe NIFTY200 -> NIFTY 500.
+# The retired nifty200_* keys have NO aliases — UniverseCfg forbids extras, so a stale settings.yaml
+# fails loudly at boot instead of quietly presenting the wrong universe as live.
 universe:
-  nifty200_source_url: "https://archives.nseindia.com/content/indices/ind_nifty200list.csv"  # [VERIFY Phase-1]
-  nifty200_seed_path: "config/universe/nifty200_seed.csv"
+  index_name: "NIFTY 500"                  # logged on universe_built; named in the fallback alert
+  index_source_url: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]
+  index_seed_path: "config/universe/nifty500_seed.csv"   # nifty200_seed.csv stays as history, unread
 
 # §10.1 scheduler fire-times (IST, trading days, R6). Fire-times only — every job is also §2.6
 # catch-up-eligible on the next startup if its fire-time passed while the engine was off.

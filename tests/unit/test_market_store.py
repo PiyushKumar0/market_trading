@@ -468,10 +468,52 @@ def test_get_universe_eligible_symbols_includes_watchlist_cap_only_rows(store, c
 def test_universe_eligible_symbols_literal_matches_builder_excl_cap():
     """The store cannot import ``engine.universe.builder`` (layering — builder imports the store),
     so the ``watchlist_cap`` literal is duplicated; this test is the guard against the two drifting."""
-    from engine.marketdata.store import _EXCL_CAP
-    from engine.universe.builder import EXCL_CAP
+    from engine.marketdata.store import _EXCL_CAP, _EXCL_INDEX
+    from engine.universe.builder import EXCL_CAP, EXCL_INDEX
 
     assert _EXCL_CAP == EXCL_CAP
+    assert _EXCL_INDEX == EXCL_INDEX
+
+
+def test_batch_universe_reads_both_index_markers(store, clock):
+    """O15 (2026-09-04): the extended-leg marker was renamed ``not_nifty200`` → ``not_in_index``
+    when the index became NIFTY 500. Rows written 2026-09-01…09-04 carry the LEGACY marker and
+    nothing rewrites history, so the batch view must honour both — otherwise every extended name
+    persisted before the rename silently leaves the news/advisory/shadow scan set."""
+    from engine.marketdata.store import _EXCL_INDEX, _EXCL_INDEX_LEGACY
+
+    assert (_EXCL_INDEX, _EXCL_INDEX_LEGACY) == ("not_in_index", "not_nifty200")
+    d = clock.today()
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "RELIANCE", "included": True},
+        {"d": d, "symbol": "CAPPED", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+        {"d": d, "symbol": "NEWEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX]},
+        {"d": d, "symbol": "OLDEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX_LEGACY]},
+        {"d": d, "symbol": "GSMCO", "included": False, "exclusion_reasons": ["surveillance_gsm"]},
+    ])
+    assert store.get_batch_universe_symbols(d) == ["CAPPED", "NEWEXT", "OLDEXT", "RELIANCE"]
+    # The eligible (index-scoped) view is unchanged by either marker.
+    assert store.get_universe_eligible_symbols(d) == ["CAPPED", "RELIANCE"]
+
+
+def test_replace_universe_daily_clears_both_index_markers(store, clock):
+    """The delete-then-insert hygiene of :meth:`replace_universe_daily` must clear LEGACY-marker
+    rows too: a 2026-09-04 build that rewrites the extended leg would otherwise leave the previous
+    build's ``not_nifty200`` rows alive in the batch view for the rest of the day."""
+    from engine.marketdata.store import _EXCL_INDEX, _EXCL_INDEX_LEGACY
+
+    d = clock.today()
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "OLDEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX_LEGACY]},
+        {"d": d, "symbol": "STALEEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX]},
+        {"d": d, "symbol": "CAPPED", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+    ])
+    store.replace_universe_daily(d, [
+        {"d": d, "symbol": "RELIANCE", "included": True},
+        {"d": d, "symbol": "FRESHEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX]},
+    ])
+    rows = {r["symbol"] for r in store.get_universe_daily(d)}
+    assert rows == {"RELIANCE", "FRESHEXT", "CAPPED"}      # both stale markers gone, cap row kept
 
 
 # --------------------------------------------------------------------------- async wrappers
@@ -511,12 +553,27 @@ def test_settings_load_with_new_phase1_keys():
     assert s.lifecycle.active_period_starts == [time(8, 0)]
     assert (s.lifecycle.start_grace_s, s.lifecycle.catchup_grace_s) == (900, 900)
     assert s.lifecycle.crashloop_window_s == 600
-    assert s.universe.nifty200_seed_path == "config/universe/nifty200_seed.csv"
-    assert s.universe.nifty200_source_url.startswith("https://")
+    # O15 (2026-09-04): the eligible universe is the CONFIGURED index, NIFTY 500 since this date.
+    assert s.universe.index_name == "NIFTY 500"
+    assert s.universe.index_seed_path == "config/universe/nifty500_seed.csv"
+    assert s.universe.index_source_url.endswith("ind_nifty500list.csv")
     assert s.jobs.reconcile_ist == time(15, 50) and s.jobs.catalyst_digest_ist == time(8, 35)
     assert s.jobs.sector_map_weekly_day == "SUN"
     # Pre-existing keys still load (additive-only change).
     assert s.trade_window.start_ist == dt.time(10, 0) and s.data.minute_candles_adjusted is True
+
+
+def test_retired_nifty200_universe_keys_are_rejected_not_ignored():
+    """O15 (2026-09-04): ``nifty200_source_url`` / ``nifty200_seed_path`` were REPLACED, not
+    aliased. ``UniverseCfg`` therefore forbids extras — a settings.yaml left on the old keys must
+    fail loudly at boot instead of silently falling through to the NIFTY 500 defaults and
+    presenting a stale config as live."""
+    from engine.core.config import UniverseCfg
+
+    with pytest.raises(ValidationError):
+        UniverseCfg(nifty200_source_url="https://example.invalid/ind_nifty200list.csv")
+    with pytest.raises(ValidationError):
+        UniverseCfg(nifty200_seed_path="config/universe/nifty200_seed.csv")
 
 
 # --------------------------------------------------------------------------- notify catalog additions

@@ -630,7 +630,14 @@ AMEND_RACE_LOST = "race_lost"      # CAS predicate missed: the row changed under
 # that one (builder imports the store — a store->builder import would cycle). Must stay equal to
 # the builder constants; ``tests/unit/test_market_store.py`` asserts the pairs match.
 _EXCL_CAP = "watchlist_cap"
-_EXCL_INDEX = "not_nifty200"
+_EXCL_INDEX = "not_in_index"
+#: The pre-O15 spelling of ``_EXCL_INDEX``. The extended leg shipped 2026-09-01 writing
+#: ``not_nifty200``; O15 (2026-09-04) renamed the marker when the index became config. Rows written
+#: 2026-09-01…09-04 still carry the legacy string and NOTHING rewrites history (universe_daily is an
+#: append-per-day audit trail, and a day's rows are the record of what that day's build decided), so
+#: every read of the extended leg accepts EITHER marker and the day-d replace deletes both. Not a
+#: permanent widening: it can be dropped once no retained universe_daily day predates 2026-09-05.
+_EXCL_INDEX_LEGACY = "not_nifty200"
 
 _TICK_STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _tick_stage (
@@ -1408,16 +1415,20 @@ class MarketStore:
     def replace_universe_daily(self, d: date, rows: Sequence[dict[str, Any]]) -> int:
         """Day-``d`` universe write with extended-leg hygiene (2026-09-01 review finding): plain
         upserts never delete, so a same-day re-build with ``batch_universe_enabled`` flipped off —
-        or a shrunken extended candidate set — would leave stale ``not_nifty200`` rows feeding
+        or a shrunken extended candidate set — would leave stale extended rows feeding
         :meth:`get_batch_universe_symbols` for the rest of the day, defeating the flag's documented
         rollback guarantee. Extended rows are therefore delete-then-inserted under one lock hold
         (the ``catalyst_watchlist`` idempotent-rewrite precedent); index-member rows stay pure
-        upserts — every build re-writes their full audit rows by construction."""
+        upserts — every build re-writes their full audit rows by construction.
+
+        BOTH index markers are deleted (O15, 2026-09-04): a re-build on a day whose earlier build
+        wrote the legacy ``not_nifty200`` marker must clear those rows too, or the rollback
+        guarantee holds only for rows the renamed build happened to write."""
         with self._lock:
             self._execute(
                 "DELETE FROM universe_daily WHERE d = ? AND len(exclusion_reasons) = 1 "
-                "AND exclusion_reasons[1] = ?",
-                [d, _EXCL_INDEX],
+                "AND exclusion_reasons[1] IN (?, ?)",
+                [d, _EXCL_INDEX, _EXCL_INDEX_LEGACY],
             )
             return self._upsert_rows("universe_daily", rows)
 
@@ -1445,15 +1456,19 @@ class MarketStore:
     def get_batch_universe_symbols(self, d: date) -> list[str]:
         """The BATCH universe for ``d`` (§3.2.4 extended-leg addendum, 2026-09-01): the eligible set
         (see :meth:`get_universe_eligible_symbols`) PLUS criteria-passing NON-index symbols persisted
-        with ``exclusion_reasons == ['not_nifty200']``. This is the widest rule-passing scan set —
-        news resolver/digest shadow, pre-open breakout advisory, and shadow batch scanners (hi52).
+        with the extended-leg marker alone. This is the widest rule-passing scan set — news
+        resolver/digest shadow, pre-open breakout advisory, and shadow batch scanners (hi52).
         NEVER feed it to anything RECOMMEND-capable: the risk gate approves ``included`` rows only,
-        so an actionable strategy scanning this set would originate un-approvable candidates."""
+        so an actionable strategy scanning this set would originate un-approvable candidates.
+
+        Either index marker counts (O15, 2026-09-04) — see :data:`_EXCL_INDEX_LEGACY`: rows written
+        2026-09-01…09-04 spell it ``not_nifty200``, and reading only the new spelling would silently
+        drop every pre-rename extended name out of the batch scan set."""
         rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
         return sorted(
             r["symbol"] for r in rows
             if r["included"]
-            or list(r["exclusion_reasons"] or []) in ([_EXCL_CAP], [_EXCL_INDEX])
+            or list(r["exclusion_reasons"] or []) in ([_EXCL_CAP], [_EXCL_INDEX], [_EXCL_INDEX_LEGACY])
         )
 
     # ================================================================== features (§3.2.5/§6.2)

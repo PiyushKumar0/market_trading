@@ -1,6 +1,7 @@
 """UniverseBuilder (§3.2.4): the pinned universe rule with per-symbol exclusion reasons (auditable
-``universe_daily``), the top-N watchlist cap, ``mis_candidates ⊆ F&O`` (C7), the NIFTY200
-download → cache → seed ladder (E5), and never-raise fail-closed behavior on total failure."""
+``universe_daily``), the top-N watchlist cap, ``mis_candidates ⊆ F&O`` (C7), the configured-index
+(NIFTY 500 since 2026-09-04, O15) download → cache → seed ladder (E5), and never-raise fail-closed
+behavior on total failure."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from engine.core.config import Settings, repo_root
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.universe.builder import (
     EXCL_CAP,
+    EXCL_INDEX,
     EXCL_LOW_VALUE,
     EXCL_NO_DATA,
     EXCL_NOT_MIS,
@@ -27,7 +29,7 @@ from engine.universe.surveillance import SurveillanceLists
 from tests.conftest import FIXED_NOW
 
 FIXTURES = Path(__file__).parent / "fixtures"
-NIFTY200_CSV = (FIXTURES / "nifty200_test.csv").read_text(encoding="utf-8")
+INDEX_CSV = (FIXTURES / "index_test.csv").read_text(encoding="utf-8")
 
 D = FIXED_NOW.date()
 ALL_SYMBOLS = ["RELIANCE", "TCS", "GSMSTK", "ASMSTK", "T2TSTK", "ESMSTK", "NOMIS", "LOWVAL", "NODATA"]
@@ -145,7 +147,7 @@ def make_builder(
 
 # --------------------------------------------------------------------------- the pinned rule (§3.2.4)
 async def test_universe_rule_every_exclusion_reason(tmp_path, store, clock):
-    """One symbol per rule leg: NIFTY200 ∩ MIS ∩ not-surveillance ∩ liquidity, all auditable."""
+    """One symbol per rule leg: index ∩ MIS ∩ not-surveillance ∩ liquidity, all auditable."""
     settings = make_settings(tmp_path)
     for sym in ALL_SYMBOLS:
         if sym == "NODATA":
@@ -155,13 +157,13 @@ async def test_universe_rule_every_exclusion_reason(tmp_path, store, clock):
         else:
             seed_daily_bars(store, sym, close="200.00", volume=500_000)      # ₹10cr ≥ ₹5cr
 
-    builder = make_builder(settings, store, clock, serving_transport(NIFTY200_CSV))
+    builder = make_builder(settings, store, clock, serving_transport(INDEX_CSV))
     universe = await builder.build(D)
 
     assert universe.symbols == ("RELIANCE", "TCS")
     assert universe.eligible == ("RELIANCE", "TCS")
     assert universe.mis_candidates == ("RELIANCE",)    # C7: TCS is not F&O-listed
-    assert universe.nifty200_source == "download"
+    assert universe.index_source == "download"
     assert universe.degraded is False
     assert universe.exclusions == {
         "GSMSTK": ("surveillance_gsm",),
@@ -174,7 +176,7 @@ async def test_universe_rule_every_exclusion_reason(tmp_path, store, clock):
     }
     assert universe.median_traded_value["RELIANCE"] == Decimal("100000000.00")
 
-    # Persisted universe_daily rows are the audit trail (§4.3): every NIFTY200 symbol has a row.
+    # Persisted universe_daily rows are the audit trail (§4.3): every index symbol has a row.
     rows = {r["symbol"]: r for r in store.get_universe_daily(D)}
     assert set(rows) == set(ALL_SYMBOLS)
     assert rows["RELIANCE"]["included"] is True and rows["RELIANCE"]["mis_candidate"] is True
@@ -208,7 +210,7 @@ async def test_watchlist_cap_keeps_top_by_traded_value(tmp_path, store, clock):
     for sym in ("GSMSTK", "ASMSTK", "T2TSTK", "ESMSTK", "NOMIS", "LOWVAL"):
         seed_daily_bars(store, sym, close="100.00", volume=100)
 
-    builder = make_builder(settings, store, clock, serving_transport(NIFTY200_CSV))
+    builder = make_builder(settings, store, clock, serving_transport(INDEX_CSV))
     universe = await builder.build(D)
 
     assert universe.symbols == ("RELIANCE",)           # higher median wins the focus cap
@@ -218,19 +220,19 @@ async def test_watchlist_cap_keeps_top_by_traded_value(tmp_path, store, clock):
     assert rows["TCS"]["included"] is False and rows["TCS"]["exclusion_reasons"] == [EXCL_CAP]
 
 
-# --------------------------------------------------------------------------- NIFTY200 ladder (E5)
+# ----------------------------------------------------------------- configured-index ladder (E5)
 async def test_download_failure_falls_back_to_seed_and_alerts(tmp_path, store, clock):
     settings = make_settings(tmp_path)
     seed = tmp_path / "seed.csv"
-    seed.write_text("# owner-refreshed seed\n" + NIFTY200_CSV, encoding="utf-8")
-    settings.universe.nifty200_seed_path = str(seed)
+    seed.write_text("# owner-refreshed seed\n" + INDEX_CSV, encoding="utf-8")
+    settings.universe.index_seed_path = str(seed)
     seed_daily_bars(store, "RELIANCE", close="200.00", volume=500_000)
     msgs, sink = collect_alerts()
 
     builder = make_builder(settings, store, clock, failing_transport(), notify=sink)
     universe = await builder.build(D)
 
-    assert universe.nifty200_source == "seed"
+    assert universe.index_source == "seed"
     assert universe.degraded is True                   # not freshly downloaded (E5)
     assert "RELIANCE" in universe.symbols
     assert any("fallback" in m.title.lower() or "fallback" in m.body.lower() for m in msgs)
@@ -238,32 +240,32 @@ async def test_download_failure_falls_back_to_seed_and_alerts(tmp_path, store, c
 
 async def test_successful_download_writes_cache_then_cache_is_used(tmp_path, store, clock):
     settings = make_settings(tmp_path)
-    settings.universe.nifty200_seed_path = str(tmp_path / "missing_seed.csv")
+    settings.universe.index_seed_path = str(tmp_path / "missing_seed.csv")
     seed_daily_bars(store, "RELIANCE", close="200.00", volume=500_000)
 
-    ok = make_builder(settings, store, clock, serving_transport(NIFTY200_CSV))
-    assert (await ok.build(D)).nifty200_source == "download"
-    cache = settings.resolved_data_dir() / "universe" / "nifty200_cached.csv"
+    ok = make_builder(settings, store, clock, serving_transport(INDEX_CSV))
+    assert (await ok.build(D)).index_source == "download"
+    cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
     assert cache.exists()
 
     msgs, sink = collect_alerts()
     degraded = make_builder(settings, store, clock, failing_transport(), notify=sink)
     universe = await degraded.build(D)
-    assert universe.nifty200_source == "cache"
+    assert universe.index_source == "cache"
     assert universe.degraded is True and msgs
 
 
 async def test_total_failure_never_raises_returns_empty_degraded(tmp_path, store, clock):
     """E5: no download, no cache, no seed ⇒ alert + empty degraded universe, NEVER an exception."""
     settings = make_settings(tmp_path)
-    settings.universe.nifty200_seed_path = str(tmp_path / "missing_seed.csv")
+    settings.universe.index_seed_path = str(tmp_path / "missing_seed.csv")
     msgs, sink = collect_alerts()
 
     builder = make_builder(settings, store, clock, failing_transport(), notify=sink)
     universe = await builder.build(D)
 
     assert universe.symbols == () and universe.mis_candidates == ()
-    assert universe.degraded is True and universe.nifty200_source == "none"
+    assert universe.degraded is True and universe.index_source == "none"
     assert any(m.severity == "critical" for m in msgs)
     assert store.get_universe_daily(D) == []           # nothing persisted — fail closed
 
@@ -287,10 +289,13 @@ def test_parse_index_constituents_csv_requires_symbol_column():
 
 
 def test_committed_seed_is_real_and_parses():
-    """The shipped config/universe/nifty200_seed.csv must always parse as a usable fallback."""
-    text = (repo_root() / "config" / "universe" / "nifty200_seed.csv").read_text(encoding="utf-8")
+    """The shipped seed named by ``universe.index_seed_path`` must always parse as a usable
+    fallback — and it must be the NIFTY 500 file since O15 (2026-09-04), not the retired
+    NIFTY200 one that stays in the tree as history."""
+    assert Settings().universe.index_seed_path == "config/universe/nifty500_seed.csv"
+    text = (repo_root() / "config" / "universe" / "nifty500_seed.csv").read_text(encoding="utf-8")
     symbols = parse_index_constituents_csv(text)
-    assert len(symbols) >= 100                          # a meaningful subset of the 200
+    assert len(symbols) >= 400                          # a meaningful subset of the 500
     assert len(symbols) == len(set(symbols))
     # Stable blue-chips only — e.g. TATAMOTORS left the list when the 2025 demerger split it
     # into TMCV/TMPV, so index membership of any single name is never guaranteed forever.
@@ -357,7 +362,7 @@ def failing_transport_client() -> httpx.AsyncClient:
 
 # ------------------------------------------------- §3.2.4 extended leg (batch universe, 2026-09-01)
 def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master=None):
-    """Builder wired for the extended leg: NIFTY200 from the fixture CSV, plus non-index candidates
+    """Builder wired for the extended leg: the index from the fixture CSV, plus non-index candidates
     across every extended rule leg (good / illiquid / surveilled / no-MIS / not-in-master / no-data)."""
     settings = make_settings(tmp_path, batch_universe_enabled=enabled, batch_universe_max=ext_cap)
     leverages = {s: 5.0 for s in ALL_SYMBOLS if s != "NOMIS"}
@@ -380,17 +385,17 @@ def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master
     seed_daily_bars(store, "EXTSECOND", close="200.00", volume=500_000)   # ₹10cr — passes, rank 2
     seed_daily_bars(store, "EXTLOWVAL", close="100.00", volume=100)       # ₹10k — fails liquidity
     seed_daily_bars(store, "EXTGSM", close="200.00", volume=500_000)      # liquid but surveilled
-    return make_builder(settings, store, clock, serving_transport(NIFTY200_CSV),
+    return make_builder(settings, store, clock, serving_transport(INDEX_CSV),
                         leverages=leverages, surveillance=surveillance)
 
 
 async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, store, clock):
     """Only criteria-PASSING non-index candidates get rows — included=False, reasons
-    ['not_nifty200'] (the exact marker every batch reader keys on); failing candidates get NO row,
-    and the eligible view stays index-scoped while the batch view widens."""
+    ['not_in_index'] (the exact marker every batch reader keys on since O15, 2026-09-04); failing
+    candidates get NO row, and the eligible view stays index-scoped while the batch view widens."""
     from engine.marketdata import store as store_mod
-    from engine.universe.builder import EXCL_INDEX
 
+    assert EXCL_INDEX == "not_in_index"          # O15 rename of the pre-2026-09-04 'not_nifty200'
     builder = _extended_setup(tmp_path, store, clock)
     universe = await builder.build(D)
 
@@ -416,7 +421,7 @@ async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, sto
 async def test_extended_leg_disabled_is_the_exact_rollback(tmp_path, store, clock):
     """batch_universe_enabled=False restores the pre-addendum shape exactly — INCLUDING a same-day
     re-build over rows an earlier enabled build already persisted (2026-09-01 review: upserts never
-    delete, so without the replace-write a flag flip mid-day would leave stale not_nifty200 rows
+    delete, so without the replace-write a flag flip mid-day would leave stale not_in_index rows
     feeding the batch view for the rest of the day)."""
     enabled = _extended_setup(tmp_path, store, clock, enabled=True)
     first = await enabled.build(D)
@@ -446,3 +451,59 @@ async def test_extended_leg_cap_and_empty_master_fail_closed(tmp_path, store, cl
         assert universe2.extended == ()
     finally:
         store2.close()
+
+
+# ------------------------------------------------------ O15: NIFTY 500 eligible set (2026-09-04)
+_WIDE_INDEX_SIZE = 500
+_WIDE_SYMBOLS = [f"SYM{i:03d}" for i in range(_WIDE_INDEX_SIZE)]
+
+
+def _wide_index_csv() -> str:
+    """A NIFTY-500-sized constituents CSV: 500 EQ rows in the NSE column shape."""
+    rows = "".join(f"Co {s},Misc,{s},EQ,INE{i:09d}\n" for i, s in enumerate(_WIDE_SYMBOLS))
+    return "Company Name,Industry,Symbol,Series,ISIN Code\n" + rows
+
+
+async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, store, clock):
+    """O15 (2026-09-04): with the eligible set widened to NIFTY 500 the focus cap BINDS again —
+    ``universe_max_watchlist`` (200 in settings.yaml) is no longer ≥ the eligible set, as it was
+    for NIFTY200 since 2026-08-20. Exactly 200 rows come back ``included``, chosen top-down by
+    median traded value, and every one of the other 300 rule-passing names is persisted with the
+    single auditable reason ``watchlist_cap`` — never silently dropped (§4.3). The extended leg's
+    candidate set still SUBTRACTS the index, so an index member that also sits in the MIS/equity
+    master never earns a second, ``not_in_index`` row."""
+    settings = make_settings(
+        tmp_path, universe_max_watchlist=200, batch_universe_enabled=True, batch_universe_max=600,
+    )
+    # Strictly descending traded value: SYM000 is the most liquid, SYM499 the least (still ≥ ₹5cr).
+    for i, sym in enumerate(_WIDE_SYMBOLS):
+        seed_daily_bars(store, sym, close="100.00", volume=1_000_000 - i * 1_000, days=3)
+    seed_daily_bars(store, "EXTONE", close="100.00", volume=1_000_000, days=3)
+
+    leverages = {s: 5.0 for s in _WIDE_SYMBOLS}
+    leverages["EXTONE"] = 5.0
+    builder = make_builder(
+        settings, store, clock, serving_transport(_wide_index_csv()),
+        leverages=leverages,
+        # SYM000 is in the equity master too — the extended leg must still not claim it.
+        surveillance=surveillance_lists(equity_master=frozenset({"EXTONE", "SYM000"})),
+    )
+    universe = await builder.build(D)
+
+    assert len(universe.eligible) == _WIDE_INDEX_SIZE          # every name clears the rules
+    assert universe.symbols == tuple(_WIDE_SYMBOLS[:200])      # top 200 by median traded value
+    assert universe.exclusions == {s: (EXCL_CAP,) for s in _WIDE_SYMBOLS[200:]}
+
+    rows = {r["symbol"]: r for r in store.get_universe_daily(D)}
+    included = [s for s, r in rows.items() if r["included"]]
+    assert len(included) == 200
+    assert rows["SYM199"]["included"] is True                  # the last name inside the cap
+    assert rows["SYM200"]["included"] is False                 # the first name past it
+    assert rows["SYM200"]["exclusion_reasons"] == [EXCL_CAP]
+    assert len(store.get_universe_eligible_symbols(D)) == _WIDE_INDEX_SIZE
+
+    # Extended leg: index members are subtracted from the candidate set, so only EXTONE qualifies.
+    assert universe.extended == ("EXTONE",)
+    assert rows["EXTONE"]["exclusion_reasons"] == [EXCL_INDEX]
+    assert rows["SYM000"]["exclusion_reasons"] == []
+    assert set(store.get_batch_universe_symbols(D)) == {*_WIDE_SYMBOLS, "EXTONE"}

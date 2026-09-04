@@ -2,28 +2,36 @@
 
 The PINNED universe rule (§3.2.4, zero latitude):
 
-    NIFTY200 ∩ MIS-eligible (Zerodha leverage file) ∩ NOT in GSM/ASM/T2T/ESM (A8)
+    <configured index> ∩ MIS-eligible (Zerodha leverage file) ∩ NOT in GSM/ASM/T2T/ESM (A8)
     ∩ median 20d traded value ≥ ₹5cr [``data.min_median_traded_value_inr``, tunable];
     mis_candidates ⊆ F&O list (C7); active intraday watchlist capped at
-    ``data.universe_max_watchlist`` [tunable] — capacity is not the binding constraint; focus is.
+    ``data.universe_max_watchlist`` [tunable].
 
-Every NIFTY200 symbol gets a ``universe_daily`` row with its per-symbol exclusion reasons
-(auditable, §4.3). ``included=True`` means "in today's ACTIVE watchlist" (≤ cap): symbols that pass
-every rule but fall past the cap are persisted ``included=False`` with reason ``watchlist_cap`` so
-the audit trail explains exactly why an otherwise-eligible name is out.
+**O15 (owner-directed 2026-09-04):** the index is CONFIG (``universe.index_name`` /
+``index_source_url`` / ``index_seed_path``), NIFTY 500 since this date — widened from NIFTY200.
+The focus cap is deliberately UNCHANGED at 200 and therefore BINDS again: eligible is now ~350–450
+names, so the tick watchlist is the top 200 by median traded value and the remainder audit as
+``watchlist_cap``. Raising the cap is a separate, measured step (tick volume, bar building and
+per-minute feature snapshots all scale with it); every swing/batch leg reads the full eligible set.
+
+Every index symbol gets a ``universe_daily`` row with its per-symbol exclusion reasons (auditable,
+§4.3). ``included=True`` means "in today's ACTIVE watchlist" (≤ cap): symbols that pass every rule
+but fall past the cap are persisted ``included=False`` with reason ``watchlist_cap`` so the audit
+trail explains exactly why an otherwise-eligible name is out.
 
 **Extended leg (§3.2.4 addendum, owner-directed 2026-09-01):** when ``data.batch_universe_enabled``,
 criteria-PASSING symbols outside the index (candidates = MIS-margins keys ∩ NSE listed-equity master
-− NIFTY200, top ``data.batch_universe_max`` by median traded value) are additionally persisted as
-``included=False`` rows with reason ``not_nifty200`` — visible to batch rules, the news shadow and
-the pre-open advisory through ``get_batch_universe_symbols``, invisible to the tick watchlist and
-the risk gate (both read ``included_only``). Failing non-index candidates get NO row.
+− the index, top ``data.batch_universe_max`` by median traded value) are additionally persisted as
+``included=False`` rows with reason ``not_in_index`` — visible to batch rules, the news shadow and
+the pre-open advisory through ``get_batch_universe_symbols``, invisible to the tick watchlist
+(``included_only``) and rejected by the risk gate, which accepts the ELIGIBLE set — ``included``
+rows plus ``watchlist_cap`` rows — and nothing marked ``not_in_index`` (O15, 2026-09-04: the cap
+governs ticks, not the RECOMMEND boundary). Failing non-index candidates get NO row.
 
-NIFTY200 membership is best-effort (E5): download the NSE indices constituents CSV
-(``settings.universe.nifty200_source_url``, [VERIFY Phase-1]) → on failure fall back to the runtime
-cached copy under ``data/universe/`` → then to the committed seed
-``config/universe/nifty200_seed.csv`` (owner-refreshed). Non-download provenance alerts but never
-blocks the build.
+Index membership is best-effort (E5): download the NSE indices constituents CSV
+(``settings.universe.index_source_url``) → on failure fall back to the runtime cached copy under
+``data/universe/`` → then to the committed seed ``settings.universe.index_seed_path``
+(owner-refreshed). Non-download provenance alerts but never blocks the build.
 
 Resolved ambiguities (documented, plan-silent):
 - Median traded value uses ``close × volume`` over the last up-to-20 ``bars_1d`` rows strictly
@@ -70,10 +78,13 @@ EXCL_ESM = "surveillance_esm"
 EXCL_LOW_VALUE = "below_min_traded_value"             # median 20d traded value < threshold
 EXCL_NO_DATA = "no_liquidity_data"                    # no bars_1d history ⇒ liquidity unconfirmable
 EXCL_CAP = "watchlist_cap"                            # eligible, but past the top-N focus cap
-EXCL_INDEX = "not_nifty200"                           # §3.2.4 extended leg (2026-09-01): passes every
-                                                      # criteria rule but is outside the NIFTY200 index —
+EXCL_INDEX = "not_in_index"                           # §3.2.4 extended leg (2026-09-01): passes every
+                                                      # criteria rule but is outside the CONFIGURED index —
                                                       # batch/news/advisory visibility only, never the
-                                                      # tick watchlist or the risk gate
+                                                      # tick watchlist or the risk gate. Renamed from
+                                                      # 'not_nifty200' by O15 (2026-09-04) when the index
+                                                      # became config; the store still READS the legacy
+                                                      # marker for rows written 09-01…09-04.
 
 #: Calendar-day lookback that comfortably contains 20 TRADING days (holidays/weekends margin).
 _TRADED_VALUE_LOOKBACK_DAYS = 45
@@ -82,7 +93,7 @@ _PAISE = Decimal("0.01")
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
-Nifty200Source = Literal["download", "cache", "seed", "none"]
+IndexSource = Literal["download", "cache", "seed", "none"]
 
 
 class Universe(BaseModel):
@@ -90,8 +101,8 @@ class Universe(BaseModel):
 
     ``symbols`` is the ACTIVE intraday watchlist (≤ cap, sorted); ``mis_candidates`` ⊆ ``symbols``
     ∩ F&O list (C7). ``eligible`` is the pre-cap rule-passing set (audit). ``exclusions`` maps every
-    excluded NIFTY200 symbol to its reasons. ``degraded=True`` when any input was reused/stale
-    (NIFTY200 not freshly downloaded, leverage file cached, or a surveillance source down).
+    excluded index symbol to its reasons. ``degraded=True`` when any input was reused/stale (index
+    list not freshly downloaded, leverage file cached, or a surveillance source down).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -102,10 +113,10 @@ class Universe(BaseModel):
     eligible: tuple[str, ...] = ()
     exclusions: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     median_traded_value: dict[str, Decimal] = Field(default_factory=dict)
-    nifty200_source: Nifty200Source = "none"
+    index_source: IndexSource = "none"
     degraded: bool = False
     #: §3.2.4 extended leg (2026-09-01): criteria-passing NON-index symbols (sorted). Persisted as
-    #: included=False rows with exclusion_reasons=['not_nifty200'] — the batch-rule / news-shadow /
+    #: included=False rows with exclusion_reasons=['not_in_index'] — the batch-rule / news-shadow /
     #: pre-open-advisory set beyond the index, never the tick watchlist and never gate-approvable.
     extended: tuple[str, ...] = ()
 
@@ -144,7 +155,7 @@ class UniverseBuilder:
     Parameters
     ----------
     settings:
-        Typed config — thresholds (``data.*``), NIFTY200 source URL + seed path (``universe.*``).
+        Typed config — thresholds (``data.*``), index name + source URL + seed path (``universe.*``).
     store:
         Single-writer :class:`MarketStore` (convention 12) — ``bars_1d`` reads + ``universe_daily``
         writes, all executor-offloaded via ``store.arun`` (convention 4).
@@ -156,7 +167,7 @@ class UniverseBuilder:
     clock:
         Single source of "now" (§3.2).
     http:
-        Injected ``httpx.AsyncClient`` for the NIFTY200 download (convention 11, E5).
+        Injected ``httpx.AsyncClient`` for the index-constituents download (convention 11, E5).
     notify:
         Optional owner-alert sink for degraded inputs / build failure.
     """
@@ -183,9 +194,11 @@ class UniverseBuilder:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        seed = Path(settings.universe.nifty200_seed_path)
+        seed = Path(settings.universe.index_seed_path)
         self._seed_path = seed if seed.is_absolute() else repo_root() / seed
-        self._cache_path = settings.resolved_data_dir() / "universe" / "nifty200_cached.csv"
+        # Index-agnostic cache name (O15, 2026-09-04): the file holds whatever index
+        # ``universe.index_source_url`` points at, so it must not be named for one of them.
+        self._cache_path = settings.resolved_data_dir() / "universe" / "index_cached.csv"
 
     async def build(self, d: date) -> Universe:
         """Build + persist day ``d``'s universe. NEVER raises into the scheduler (E5): a total
@@ -202,22 +215,23 @@ class UniverseBuilder:
                 severity="critical",
                 data={"job_id": "universe_build", "d": d.isoformat()},
             )
-            return Universe(d=d, nifty200_source="none", degraded=True)
+            return Universe(d=d, index_source="none", degraded=True)
 
     # ------------------------------------------------------------------ core
     async def _build(self, d: date) -> Universe:
+        index_name = self._settings.universe.index_name
         leverage = await self._leverage.current()
         surveillance = await self._surveillance.current()
-        nifty200, source = await self._load_nifty200()
-        if not nifty200:
-            raise ValueError("NIFTY200 membership unavailable from download, cache, and seed")
+        members, source = await self._load_index()
+        if not members:
+            raise ValueError(f"{index_name} membership unavailable from download, cache, and seed")
 
-        medians = await self._store.arun(self._median_traded_values, nifty200, d)
+        medians = await self._store.arun(self._median_traded_values, members, d)
         min_value = Decimal(self._settings.data.min_median_traded_value_inr)
 
         exclusions: dict[str, list[str]] = {}
         eligible: list[str] = []
-        for symbol in nifty200:
+        for symbol in members:
             reasons: list[str] = []
             if not leverage.is_mis_eligible(symbol):
                 reasons.append(EXCL_NOT_MIS)
@@ -233,6 +247,8 @@ class UniverseBuilder:
                 eligible.append(symbol)
 
         # Focus cap (§3.2.4): top-N eligible by median traded value desc, symbol asc tie-break.
+        # BINDING again since O15 (2026-09-04): the NIFTY 500 eligible set is ~350–450 names against
+        # a cap of 200, so the ranked tail below is real and its watchlist_cap rows are the audit.
         cap = int(self._settings.data.universe_max_watchlist)
         ranked = sorted(eligible, key=lambda s: (-medians[s], s))
         watchlist = sorted(ranked[:cap])
@@ -255,21 +271,21 @@ class UniverseBuilder:
                     medians[symbol].quantize(_PAISE) if symbol in medians else None
                 ),
             }
-            for symbol in nifty200
+            for symbol in members
         ]
 
         # §3.2.4 extended leg (owner-directed 2026-09-01, JINDALSAW/movers review): the SAME criteria
         # rules over criteria-passing NON-index symbols. Candidates = MIS-margins keys ∩ the NSE
-        # listed-equity master (EQ series — keeps ETFs/SME boards out) − NIFTY200. Only PASSING
-        # symbols get a row (included=False, exclusion_reasons=['not_nifty200'] — the marker every
+        # listed-equity master (EQ series — keeps ETFs/SME boards out) − the index. Only PASSING
+        # symbols get a row (included=False, exclusion_reasons=['not_in_index'] — the marker every
         # batch/news reader treats as "outside the index, inside the rules"); failing candidates get
-        # no row at all, unlike NIFTY200 members whose exclusions are the audit trail. An empty
+        # no row at all, unlike index members whose exclusions are the audit trail. An empty
         # equity master (source + cache both down) builds an empty leg — fail closed, never guess.
         extended: list[str] = []
         ext_medians: dict[str, Decimal] = {}
         if self._settings.data.batch_universe_enabled:
             candidates = sorted(
-                (set(leverage.leverages) & set(surveillance.equity_master)) - set(nifty200)
+                (set(leverage.leverages) & set(surveillance.equity_master)) - set(members)
             )
             screened = [
                 s for s in candidates
@@ -296,7 +312,8 @@ class UniverseBuilder:
 
         # replace, not upsert (2026-09-01 review): stale extended rows from an earlier same-day
         # build (flag flipped off between retries, or a shrunken candidate set) must never survive —
-        # the store deletes day-d's not_nifty200 rows before persisting this build's truth.
+        # the store deletes day-d's extended rows (either index marker) before persisting this
+        # build's truth.
         await self._store.arun(self._store.replace_universe_daily, d, rows)
 
         degraded = source != "download" or leverage.degraded or bool(surveillance.degraded_sources)
@@ -309,14 +326,15 @@ class UniverseBuilder:
             median_traded_value={
                 s: v.quantize(_PAISE) for s, v in {**medians, **ext_medians}.items()
             },
-            nifty200_source=source,
+            index_source=source,
             degraded=degraded,
             extended=tuple(extended),
         )
         _log.info(
             "universe_built",
             d=d.isoformat(),
-            nifty200=len(nifty200),
+            index_name=index_name,
+            index_size=len(members),
             eligible=len(eligible),
             watchlist=len(watchlist),
             mis_candidates=len(mis_candidates),
@@ -326,20 +344,24 @@ class UniverseBuilder:
         )
         return universe
 
-    # ------------------------------------------------------------------ NIFTY200 membership (E5)
-    async def _load_nifty200(self) -> tuple[list[str], Nifty200Source]:
+    # -------------------------------------------------------- configured-index membership (E5)
+    async def _load_index(self) -> tuple[list[str], IndexSource]:
         """Download → runtime cache → committed seed (E5 ladder). Alerts when not freshly downloaded."""
-        url = self._settings.universe.nifty200_source_url
+        index_name = self._settings.universe.index_name
+        url = self._settings.universe.index_source_url
         try:
             resp = await self._http.get(url, timeout=self._timeout)
             resp.raise_for_status()
             symbols = parse_index_constituents_csv(resp.text)
             if not symbols:
-                raise ValueError("downloaded NIFTY200 CSV parsed to zero symbols")
+                raise ValueError(f"downloaded {index_name} CSV parsed to zero symbols")
             self._write_cache(resp.text)
             return symbols, "download"
         except Exception as exc:  # noqa: BLE001 - E5: fall down the ladder, never raise
-            _log.warning("nifty200_download_failed", url=url, error=f"{type(exc).__name__}: {exc}")
+            _log.warning(
+                "index_download_failed",
+                index_name=index_name, url=url, error=f"{type(exc).__name__}: {exc}",
+            )
 
         for path, source in ((self._cache_path, "cache"), (self._seed_path, "seed")):
             try:
@@ -347,7 +369,7 @@ class UniverseBuilder:
                     symbols = parse_index_constituents_csv(path.read_text(encoding="utf-8"))
                     if symbols:
                         await self._alert(
-                            title="NIFTY200 download failed — using fallback",
+                            title=f"{index_name} download failed — using fallback",
                             body=f"NSE constituents download failed; using the {source} copy "
                             f"({len(symbols)} symbols). Membership may be stale (E5).",
                             severity="warning",
@@ -355,7 +377,7 @@ class UniverseBuilder:
                         )
                         return symbols, source  # type: ignore[return-value]
             except (OSError, ValueError):
-                _log.exception("nifty200_fallback_unreadable", path=str(path))
+                _log.exception("index_fallback_unreadable", path=str(path))
         return [], "none"
 
     def _write_cache(self, text: str) -> None:
@@ -363,7 +385,7 @@ class UniverseBuilder:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._cache_path.write_text(text, encoding="utf-8")
         except OSError:
-            _log.exception("nifty200_cache_write_failed", path=str(self._cache_path))
+            _log.exception("index_cache_write_failed", path=str(self._cache_path))
 
     # ------------------------------------------------------------------ liquidity filter
     def _median_traded_values(self, symbols: list[str], d: date) -> dict[str, Decimal]:

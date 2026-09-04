@@ -74,10 +74,10 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
     Honest caveat: the medians are full-sample statistics, so the split is DESCRIPTIVE — a live rule
     could not have known them at signal time. It is not a tradeable filter and is not reported as
     one.
-  - *index members vs extended names*. NIFTY200 membership as of the SIGNAL DATE is not stored
+  - *index members vs extended names*. Index membership as of the SIGNAL DATE is not stored
     anywhere in this platform, so this split uses the **CURRENT** membership list (the runtime cache
-    ``<data>/universe/nifty200_cached.csv``, falling back to the committed
-    ``config/universe/nifty200_seed.csv``) applied backwards over the whole window. That is a
+    ``<data>/universe/index_cached.csv``, falling back to the committed
+    ``config/universe/nifty500_seed.csv``) applied backwards over the whole window. That is a
     **SURVIVORSHIP-TAINTED PROXY**: a name that entered the index after a big run appears as an
     "index member" throughout its climb, and a name that was dropped is mislabelled the other way.
     Every rendering of this split carries the label; the JSON carries
@@ -384,17 +384,19 @@ def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
 
 
 def load_index_members(db_path: Path, override: Path | None = None) -> tuple[set[str], str]:
-    """CURRENT NIFTY200 membership + its provenance string (a survivorship-tainted proxy, see above).
+    """CURRENT index membership + its provenance string (a survivorship-tainted proxy, see above).
 
-    Ladder: explicit ``--nifty200-csv`` -> the runtime cache beside the DB
-    (``<data>/universe/nifty200_cached.csv``) -> the committed seed. Parsing reuses the universe
-    builder's own ``parse_index_constituents_csv`` (one CSV definition, never a copy).
+    Ladder: explicit ``--index-csv`` (alias ``--nifty200-csv``) -> the runtime cache beside the DB
+    (``<data>/universe/index_cached.csv``) -> the committed seed. Both file names, and the seed's
+    index, changed with O15 (2026-09-04) when the eligible index became config (NIFTY 500);
+    a run against an older DB tree simply falls through to the committed seed. Parsing reuses the
+    universe builder's own ``parse_index_constituents_csv`` (one CSV definition, never a copy).
     """
     candidates: list[tuple[Path, str]] = []
     if override is not None:
-        candidates.append((Path(override), "explicit --nifty200-csv"))
-    candidates.append((Path(db_path).parent / "universe" / "nifty200_cached.csv", "runtime cache"))
-    candidates.append((repo_root() / "config" / "universe" / "nifty200_seed.csv", "committed seed"))
+        candidates.append((Path(override), "explicit --index-csv"))
+    candidates.append((Path(db_path).parent / "universe" / "index_cached.csv", "runtime cache"))
+    candidates.append((repo_root() / "config" / "universe" / "nifty500_seed.csv", "committed seed"))
     for path, label in candidates:
         try:
             if not path.exists():
@@ -872,7 +874,7 @@ def run_study(
 
     if not index_members:
         notes.append(
-            "NIFTY200 membership list UNAVAILABLE - the index/extended split is not computable; "
+            "Index membership list UNAVAILABLE - the index/extended split is not computable; "
             "every trade fell into the extended cell by default. Treat that split as absent."
         )
     notes.append(
@@ -1151,7 +1153,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="reference per-trade notional the round-trip cost is quoted at")
     ap.add_argument("--symbols", default=None, help="comma-separated symbol subset (smoke runs)")
     ap.add_argument("--max-symbols", type=int, default=None, help="cap the symbol count (smoke runs)")
-    ap.add_argument("--nifty200-csv", type=Path, default=None,
+    # ``--index-csv`` is the reading name since O15 (2026-09-04, index became config); the original
+    # ``--nifty200-csv`` stays as an alias onto the SAME dest so recorded run commands, COMMANDS.md
+    # entries and the harness tests keep working verbatim. dest is pinned because argparse would
+    # otherwise derive it from the first option string and silently orphan ``args.nifty200_csv``.
+    ap.add_argument("--index-csv", "--nifty200-csv", type=Path, default=None, dest="nifty200_csv",
                     help="override the CURRENT index-membership CSV used by the index/extended split")
     ap.add_argument("--verify-prefilter", type=int, default=0, metavar="K",
                     help="brute-force every eligible day for the first K symbols and abort on any "

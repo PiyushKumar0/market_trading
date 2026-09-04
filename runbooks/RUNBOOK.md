@@ -258,8 +258,9 @@ re-pointed, not left broken. Feed set is `config_audit`-tracked (owner-only chan
       empty ⇒ no symbol MIS-eligible).
 - [ ] **Surveillance** (`datafeeds`… `universe/surveillance.py`): NSE GSM/ASM/ESM report APIs, T2T from
       `EQUITY_L.csv` (series BE/BZ), unsolicited-SMS list.
-- [ ] **NIFTY200 membership** — `universe.nifty200_source_url` (archives host); falls back to
-      `data/universe/nifty200_cached.csv` then the committed `config/universe/nifty200_seed.csv`.
+- [ ] **Index membership** (`universe.index_name`, NIFTY 500 since 2026-09-04, O15) —
+      `universe.index_source_url` (archives host); falls back to `data/universe/index_cached.csv`
+      then the committed `universe.index_seed_path` (`config/universe/nifty500_seed.csv`).
 - [ ] **Bhavcopy** — `BHAVCOPY_URL_TEMPLATE` (UDiFF, archives host).
 - [ ] **Corp actions** — `https://www.nseindia.com/api/corporates-corporate-actions?index=equities`.
 - [ ] **Event calendar** — `https://www.nseindia.com/api/event-calendar`.

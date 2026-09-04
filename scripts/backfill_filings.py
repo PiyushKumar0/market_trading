@@ -107,12 +107,15 @@ def _cp_clear_feed(conn: sqlite3.Connection, feed: str) -> int:
 
 # --------------------------------------------------------------------------- universe resolution
 def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str]:
-    """Resolve the working symbol set + source label (runtime cache → committed seed → --symbols)."""
+    """Resolve the working symbol set + source label (runtime cache → committed seed → --symbols).
+
+    Cache/seed names track ``UniverseBuilder``; both were renamed off ``nifty200`` by O15
+    (2026-09-04), when the eligible index became config (NIFTY 500)."""
     if symbols_arg:
         syms = sorted({s.strip().upper() for s in symbols_arg.split(",") if s.strip()})
         return syms, "--symbols override"
-    cache = settings.resolved_data_dir() / "universe" / "nifty200_cached.csv"
-    seed_rel = Path(settings.universe.nifty200_seed_path)
+    cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
+    seed_rel = Path(settings.universe.index_seed_path)
     seed = seed_rel if seed_rel.is_absolute() else repo_root() / seed_rel
     for path, label in ((cache, f"runtime cache {cache}"), (seed, f"committed seed {seed}")):
         try:
@@ -339,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     if not universe:
         print(
             "backfill_filings: no universe resolved — pass --symbols, or ensure the runtime cache / "
-            f"committed seed ({repo_root() / settings.universe.nifty200_seed_path}) exists",
+            f"committed seed ({repo_root() / settings.universe.index_seed_path}) exists",
             file=sys.stderr,
         )
         return 2

@@ -810,6 +810,22 @@ async def run() -> int:
             d = d - timedelta(days=1)
         return []
 
+    def batch_universe_symbols() -> list[str]:
+        """Today's BATCH universe (latest ``universe_daily`` snapshot ≤ today): eligible + capped +
+        extended names — the widest rule-passing set (``store.get_batch_universe_symbols``).
+
+        Same bounded look-back as :func:`watchlist_symbols`, and for a stronger reason: the only
+        consumer is the SUNDAY sector-map job, and Sunday has no universe row of its own. Falls back
+        to the active watchlist when nothing is found in the window (pre-first-build / a cold boot),
+        which is the pre-O15 behaviour."""
+        d = clock.today()
+        for _ in range(_WATCHLIST_LOOKBACK_DAYS):
+            symbols = store.get_batch_universe_symbols(d)
+            if symbols:
+                return symbols
+            d = d - timedelta(days=1)
+        return watchlist_symbols()
+
     def held_symbols() -> list[str]:
         """Open platform/recommended position symbols — MUST stay in the feed even after the universe
         drops them (2026-07-28 review: an unsubscribed holding marks at avg_entry, so its loss is
@@ -999,7 +1015,14 @@ async def run() -> int:
     async def job_sector_map() -> SectorMapResult:
         # Forwarded (2026-08-13): sector_map degrades-without-raising (E5) — the watermark verdict
         # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
-        return await sector_map.run(clock.today(), universe_symbols=watchlist_symbols())
+        # O15 (2026-09-04): classify the BATCH universe, not the tick watchlist. The eligible set is
+        # now NIFTY 500 while universe_max_watchlist stays 200, so a watchlist-scoped run would
+        # leave every capped and extended name without a sector_map row — and §7.1 caps the
+        # UNCLASSIFIED bucket at 1 open position, which would gate-block the widened swing legs.
+        # Only the UNCLASSIFIED fill-in list grows (~200 → ~800 set-membership checks against the
+        # already-fetched sectoral lists, then that many more upserted rows); the ten NSE fetches
+        # are per-index and unchanged.
+        return await sector_map.run(clock.today(), universe_symbols=batch_universe_symbols())
 
     async def job_corp_actions() -> CorpActionsResult:
         # Forwarded (2026-08-13): corp_actions degrades-without-raising (E5) — the watermark verdict
