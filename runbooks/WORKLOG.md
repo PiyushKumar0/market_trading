@@ -1,5 +1,30 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-04 (15:0x–15:4x, owner: "can't we track the candles?" + "improve the coverage") — candle battery RUN and REFUTED; coverage audit; NSE announcements feed implemented
+
+- **Candle / price-action battery (Opus, brief `runbooks/briefs/candles_backtest_brief_2026-09-04.md`,
+  plan §6.1 pre-registration):** `scripts/backtest_candles.py` + `tests/unit/test_backtest_candles.py`
+  (41 passed, re-run by me) + `data/reports/backtest_candles_2026-09-04.json`. Manager audit: 5m buckets
+  09:15-anchored and filtered before the VWAP window (backtest_candles.py:435–503), E1 stop/target on
+  bars strictly after entry with stop-wins-ties and a refused stop ≥ entry (:895–935), E2 trail fills
+  at the next 1m open (:938–973), cost byte-identical to tdc (:976); two trades hand-verified against
+  raw bars (BANKBARODA 2023-07-17 R1|E1 target; ALKEM 2023-07-17 R3|E2 trail). **Verdict: REFUTED in
+  all 10 cells and every split** (755 sessions; n ≈ 3,600–3,760/cell; mean net −0.14…−0.18%; t −8.9…
+  −20.6; CPCV 0/6 everywhere). Decisive: mean GROSS is −0.03…+0.01% per cell — no edge exists for
+  cost to erode; candle rules are noise at 5m resolution here. Plan §6.1 verdict appended.
+- **Coverage audit (Sonnet, verifiable pointers):** eight live domains (the 08-04 "ET-only" picture is
+  superseded), 13,609 headlines/30d, 14.2% resolve a symbol, median ingest lag ~85 min; 47% of top-10
+  movers had any cluster naming them; of ten 09-03/09-04 movers, five (GMRAIRPORT, CGPOWER, APLAPOLLO,
+  PFC, TATASTEEL) had no press headline AND no NSE filing — catalyst-silent. Probes: NSE corporate
+  announcements live via `nse_get` with native `symbol`/`sm_isin` (carried UNITDSPR's Reg-30 09-03 16:30
+  and HINDZINC's LoI ~2 h before the press); BSE announcements live; Business Standard RSS alive again;
+  Moneycontrol RSS still frozen (2024-04); GDELT 429s any concurrent same-IP request. Plan §2.7 addendum
+  (commit 6069dcc) + brief `runbooks/briefs/nse_announcements_feed_brief_2026-09-04.md`; implementation
+  delegated to Opus (main tree; the worktree isolation refused a stale locked worktree, left in place
+  while its holder pid lives). KPI: share of top-10 movers with a catalyst in corpus (47% baseline).
+- Engine restart: manual after the NSE-feed audit (the 17:50 cron was cancelled so the working tree
+  deploys clean).
+
 ## 2026-09-04 (14:03–14:4x, owner: "I have stopped the engine, continue; validate without bias") — `tdc` backtest RUN and REFUTED; movers attribution; engine stopped 14:04 by me, restart scheduled 15:36
 
 - **Engine state on arrival:** service still Running at 14:03 with `store_stalled`, `late_tick_past_grace`
