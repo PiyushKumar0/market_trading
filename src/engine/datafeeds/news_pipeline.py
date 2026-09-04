@@ -12,8 +12,12 @@ catalyst watchlist, so there is zero implementation latitude and NO LLM anywhere
   ``news.cluster_sim_threshold`` (default 0.75), considering only clusters with ``last_seen`` inside
   the ``cat.max_event_age_days`` window; no match ⇒ a new cluster with this headline as
   representative. A cluster carries its DISTINCT ``source_domains`` set. Deterministic and
-  golden-file unit-tested (§9.1): same headlines in ⇒ same clusters out.
-- **EntityResolver** (§2.7 step 3): case-insensitive WHOLE-WORD PHRASE containment of the normalized
+  golden-file unit-tested (§9.1): same headlines in ⇒ same clusters out. One preference on top
+  (§2.7 amendment 2026-09-04): a joining member carrying an :data:`EXCHANGE_TOKEN_RE` token becomes
+  the representative, so a filing merged with its press coverage stays exactly resolvable.
+- **EntityResolver** (§2.7 step 3): an explicit ``[NSE:<SYMBOL>]`` exchange token (§2.7 amendment
+  2026-09-04) resolves first and exactly, under the same universe check and stripped before alias
+  matching; then case-insensitive WHOLE-WORD PHRASE containment of the normalized
   alias in the normalized title. Alias seed = instruments-dump company names with legal suffixes
   stripped MINUS a curated common-English-word stoplist. AMBIGUOUS (an alias mapping to >1 distinct
   tradingsymbol, OR different companies' aliases matching overlapping title spans) ⇒ NO match, never
@@ -124,6 +128,34 @@ _CLUSTER_ROW_FIELDS: tuple[str, ...] = (
 def title_tokens(text: str) -> list[str]:
     """Lowercase alphanumeric tokens IN ORDER — the resolver's whole-word normalization (§3.2.4)."""
     return _TOKEN_RE.findall(text.lower())
+
+
+#: §2.7 amendment 2026-09-04 — the EXPLICIT EXCHANGE TOKEN. ``NewsIngest``'s ``nse_ann`` feed
+#: prefixes every announcement title with ``[NSE:<SYMBOL>]``, taken verbatim from the exchange
+#: payload's ``symbol`` field. It is an EXACT identification, not a guess: the resolver honours it
+#: ahead of alias matching (still subject to the universe check), and the clusterer prefers a
+#: token-bearing headline as a cluster's representative so a filing merged with its press coverage
+#: stays resolvable. The character class covers NSE tradingsymbols (``M&MFIN``, ``BAJAJ-AUTO``).
+EXCHANGE_TOKEN_RE = re.compile(r"\[NSE:([A-Z0-9&\-]+)\]")
+
+
+def exchange_tokens(text: str) -> list[str]:
+    """The exchange-token symbols in ``text``, in order of appearance, deduped (usually one)."""
+    out: list[str] = []
+    for symbol in EXCHANGE_TOKEN_RE.findall(text or ""):
+        if symbol not in out:
+            out.append(symbol)
+    return out
+
+
+def strip_exchange_tokens(text: str) -> str:
+    """``text`` with every exchange token removed — alias matching must NEVER see it.
+
+    The token is exchange-assigned identity, not prose: left in, its ``NSE`` prefix and the symbol
+    itself are ordinary words to :meth:`EntityResolver._match_aliases`, and either could match an
+    alias (or poison a span component into ``ambiguous``).
+    """
+    return EXCHANGE_TOKEN_RE.sub(" ", text or "")
 
 
 #: §3.2.4 boilerplate strip (2026-08-03, plan-amended): recurring TEMPLATE phrases in Indian
@@ -368,6 +400,15 @@ class HeadlineClusterer:
                 clusters.append(target)
                 norms[cid] = norm
             else:
+                # §2.7 amendment 2026-09-04: a token-bearing member PROMOTES itself to
+                # representative. The resolver only ever sees the representative, so a filing that
+                # merges into its press coverage would otherwise lose the one string that names its
+                # symbol exactly. Deterministic: the earliest such member (processing order) keeps
+                # the seat — an existing token representative is never displaced. The cluster's
+                # comparison norm follows the representative, per the pinned §3.2.4 rule.
+                if exchange_tokens(h.title) and not exchange_tokens(target.representative):
+                    target.representative = h.title
+                    norms[target.cluster_id] = norm
                 if h.source_domain not in target.source_domains:
                     target.source_domains = sorted({*target.source_domains, h.source_domain})
                 target.first_seen = min(target.first_seen, h.published_at)
@@ -652,17 +693,40 @@ class EntityResolver:
         ``extra_texts`` is the Phase-2 seam: verbatim entity STRINGS emitted by the News Analyst
         for unmatched clusters re-enter here under the same whole-word rule (the LLM never assigns
         a symbol). An extra text matching nothing is logged ``no_match``.
+
+        EXPLICIT EXCHANGE TOKENS (§2.7 amendment 2026-09-04) are honoured FIRST: a
+        ``[NSE:<SYMBOL>]`` token in the representative (or in an extra text) resolves to that
+        symbol directly — the exchange stated it, so no alias is needed and no guess is made — and
+        is then held to the SAME universe check as any alias match. The token is stripped before
+        alias matching so it can never be read as free text, while alias matching still runs on the
+        rest of the title (a filing that also names another company still resolves both). A token
+        contributes no ``entities`` row: it is not an alias, and the §5.5 suggestion loop must not
+        learn one from it.
         """
-        resolved, unresolved = self._match_aliases(c.representative)
+        rep_text = strip_exchange_tokens(c.representative)
+        token_symbols = exchange_tokens(c.representative)
+        resolved, unresolved = self._match_aliases(rep_text)
         for text in extra_texts:
-            r2, u2 = self._match_aliases(text)
-            if not r2 and not u2:
+            tokens = exchange_tokens(text)
+            r2, u2 = self._match_aliases(strip_exchange_tokens(text))
+            if not r2 and not u2 and not tokens:
                 unresolved.append(UnresolvedEntity(entity_text=text, reason="no_match"))
+            token_symbols += [s for s in tokens if s not in token_symbols]
             resolved += r2
             unresolved += u2
 
         entities: set[str] = set()
         symbols: set[str] = set()
+        for symbol in token_symbols:
+            if self._universe is not None and symbol not in self._universe:
+                # An exact exchange symbol is still not a licence to trade it (§2.7 step 3).
+                unresolved.append(
+                    UnresolvedEntity(
+                        entity_text=symbol, reason="out_of_universe", candidate_symbols=(symbol,)
+                    )
+                )
+            else:
+                symbols.add(symbol)
         for aliases_in, symbol in resolved:
             entities.update(aliases_in)
             if self._universe is not None and symbol not in self._universe:
@@ -680,8 +744,8 @@ class EntityResolver:
             cluster_id=c.cluster_id,
             entities=sorted(entities),
             symbols=sorted(symbols),
-            sectors=self._match_keywords(c.representative, self._sector_keywords),
-            themes=self._match_keywords(c.representative, self._theme_keywords),
+            sectors=self._match_keywords(rep_text, self._sector_keywords),
+            themes=self._match_keywords(rep_text, self._theme_keywords),
             unresolved=sorted(
                 set(unresolved), key=lambda u: (u.entity_text, u.reason, u.candidate_symbols)
             ),

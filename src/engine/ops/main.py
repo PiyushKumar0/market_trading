@@ -63,7 +63,7 @@ from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob, FilingsPitFre
 from engine.datafeeds.filings_results import FilingsResultsJob, FilingsResultsResult
 from engine.datafeeds.filings_shp import FilingsShpJob, FilingsShpResult
 from engine.datafeeds.ins_crossings import InsCrossingsJob, InsCrossingsResult
-from engine.datafeeds.news import Headline, NewsIngest
+from engine.datafeeds.news import NSE_ANN_KEY, Headline, NewsIngest
 from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
 from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
 from engine.features.engine import FeatureEngine
@@ -2032,6 +2032,12 @@ def _arm_live_jobs(
                           job_id=f"news_poll_{name}", guard=False)
     scheduler.add_job(_news_poll("gdelt"), trigger=IntervalTrigger(seconds=settings.news.gdelt_poll_s),
                       job_id="news_poll_gdelt", guard=False)
+    # The exchange-announcements feed (§2.7 amendment 2026-09-04) keeps its own cadence and its own
+    # off switch: disabled ⇒ the job is never armed (the poll key stays valid either way).
+    nse_ann = settings.news.feeds.nse_announcements
+    if nse_ann.enabled:
+        scheduler.add_job(_news_poll(NSE_ANN_KEY), trigger=IntervalTrigger(seconds=nse_ann.poll_s),
+                          job_id=f"news_poll_{NSE_ANN_KEY}", guard=False)
     if equity_tick is not None:
         # §7.1: platform equity persisted each minute + the halt ladder evaluated on every persist.
         scheduler.add_job(equity_tick, trigger=IntervalTrigger(seconds=60),

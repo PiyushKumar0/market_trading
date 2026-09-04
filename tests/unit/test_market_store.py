@@ -492,10 +492,15 @@ def test_settings_load_with_new_phase1_keys():
     # 2026-08-04 (persistent 429s at 30-min; 121 ConnectTimeouts at the old 10 s timeout).
     rss = s.news.feeds.rss
     # 2026-08-05 pool widening: 3 new DOMAINS (hbl/cnbctv18/ndtvprofit) — corroboration pool 2 → 5.
+    # 2026-09-04 coverage widening: business-standard re-probed live (its 08-05 WAF 403 is gone) ⇒ 6.
     assert {n: f.poll_s for n, f in rss.items()} == {
         "et": 300, "livemint_markets": 900, "livemint_companies": 900,
         "hbl_markets": 900, "hbl_companies": 900, "cnbctv18_market": 900, "ndtvprofit": 900,
+        "bs_markets": 900, "bs_companies": 900,
     }
+    # The exchange as a feed (§2.7 amendment 2026-09-04) — its own cadence and drop list.
+    ann = s.news.feeds.nse_announcements
+    assert (ann.enabled, ann.poll_s) == (True, 300) and "Trading Window" in ann.drop_subjects
     assert (s.news.gdelt_poll_s, s.news.request_timeout_s) == (3600, 30.0)
     assert s.news.backfill_lookback_h == 72 and s.news.gdelt_backfill_max_days == 90
     assert s.news.cluster_sim_threshold == 0.75 and rss["et"].url.startswith("https://")

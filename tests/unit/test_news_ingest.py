@@ -1,8 +1,16 @@
 """NewsIngest (§3.2.4 / §2.7 step 1 / §4.4 job 10): offline fixture parses of the config-driven RSS
-feed set + GDELT DOC 2.0 artlist, URL dedupe (within a batch, across feeds, across polls), tz-correctness
-(RFC-2822 / GDELT seendate → tz-aware IST; unparsable ⇒ Clock ingest time), the GDELT domain
-allowlist + timespan windows (routine vs §4.4 job-10 backfill), and E5 degradation (a dead feed
-contributes zero headlines and never raises)."""
+feed set + GDELT DOC 2.0 artlist + the NSE corporate-announcements feed, URL dedupe (within a batch,
+across feeds, across polls), tz-correctness (RFC-2822 / GDELT seendate / exchange timestamp →
+tz-aware IST; unparsable ⇒ Clock ingest time), the GDELT domain allowlist + timespan windows
+(routine vs §4.4 job-10 backfill), and E5 degradation (a dead feed contributes zero headlines and
+never raises).
+
+``fixtures/news/nse_announcements.json`` is a 7-row trim of the LIVE ``corporate-announcements?index=
+equities`` payload probed 2026-09-04 15:14 IST (same key set, rows verbatim) with four deliberate
+edits: UNITDSPR carries a "Trading Window" subject (the drop list's canonical case), ENIL has its
+attachment + ``sort_date`` blanked (URL fallback + timestamp ladder), HINDZINC carries an
+over-300-character body with unparsable timestamps (title cap + Clock fallback), and the last row has
+no ``symbol`` (unusable ⇒ skipped)."""
 
 from __future__ import annotations
 
@@ -15,8 +23,16 @@ import pytest
 from pydantic import ValidationError
 
 from engine.core.clock import IST
-from engine.core.config import NewsCfg
-from engine.datafeeds.news import GDELT_DOC_URL, Headline, NewsIngest
+from engine.core.config import NewsCfg, load_settings
+from engine.datafeeds.isin_map import NSE_ANNOUNCEMENTS_URL
+from engine.datafeeds.news import (
+    GDELT_DOC_URL,
+    NSE_ANN_FIELDS,
+    NSE_ANN_ITEM_URL,
+    NSE_ANN_KEY,
+    Headline,
+    NewsIngest,
+)
 from engine.marketdata.store import MarketStore
 from tests.conftest import FIXED_NOW
 
@@ -62,9 +78,10 @@ def _make_ingest(
     *,
     overrides: dict[str, httpx.Response | Exception] | None = None,
     record: list[httpx.Request] | None = None,
+    cfg: NewsCfg | None = None,
 ) -> tuple[NewsIngest, httpx.AsyncClient]:
     """Ingest wired to a MockTransport serving the fixture payloads (offline, convention 11)."""
-    cfg = NewsCfg()
+    cfg = cfg or NewsCfg()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if record is not None:
@@ -311,3 +328,172 @@ async def test_live_blog_page_titles_are_dropped_at_ingest(store, clock):
     assert not any(p in kept_title.lower() for p in patterns)
     async with client2:
         pass
+
+
+# --------------------------------------------------------------------------- NSE announcements (nse_ann)
+ANN_PAYLOAD = (FIXTURES / "nse_announcements.json").read_bytes()
+
+
+def _ann_ingest(store, clock, *, cfg: NewsCfg | None = None, record=None, response=None):
+    """Ingest whose ``corporate-announcements`` endpoint serves the captured payload."""
+    overrides = {NSE_ANNOUNCEMENTS_URL: response or httpx.Response(200, content=ANN_PAYLOAD)}
+    return _make_ingest(store, clock, overrides=overrides, record=record, cfg=cfg)
+
+
+def test_pinned_announcement_fields_are_present_in_the_captured_payload():
+    """The module pins the field names it reads against the live payload — the fixture is that
+    payload, so a silent NSE rename shows up here rather than as a mystery empty feed."""
+    rows = json.loads(ANN_PAYLOAD)
+    assert isinstance(rows, list) and rows
+    for field in NSE_ANN_FIELDS:
+        assert all(field in row for row in rows), field
+
+
+async def test_nse_announcements_become_token_prefixed_headlines(store, clock):
+    """Each announcement is an ordinary `news` row: an explicit `[NSE:<SYMBOL>]` token, the exchange
+    as the source domain (never the archives host the attachment lives on), the attachment as URL."""
+    ingest, client = _ann_ingest(store, clock)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+
+    by_symbol = {h.title.split("]")[0].removeprefix("[NSE:"): h for h in got}
+    assert set(by_symbol) == {"DHOOTTRANS", "VETO", "ENIL", "HINDZINC"}  # drops + no-symbol row gone
+    assert all(h.source_domain == "nseindia.com" for h in got)           # one corroborating domain
+    assert by_symbol["VETO"].title == (
+        "[NSE:VETO] Record Date: Veto Switchgears And Cables Limited has informed the Exchange "
+        "that Record date for the purpose of Dividend is 21-Sep-2026."   # whitespace-collapsed
+    )
+    assert by_symbol["DHOOTTRANS"].url == (
+        "https://nsearchives.nseindia.com/corporate/DTL_04092026151017_SE_Press_Release_04092026.pdf"
+    )
+    rows = store.get_news()
+    assert {r["url"] for r in rows} == {h.url for h in got}
+    assert all(r["untrusted"] for r in rows)                             # §2.4: forced TRUE, always
+
+
+async def test_nse_announcements_drop_subjects_are_filtered(store, clock):
+    """Administrative subjects are dropped on a case-insensitive SUBSTRING match of the item's
+    subject ("Copy of Newspaper Publication" matches the configured "Newspaper Publication")."""
+    ingest, client = _ann_ingest(store, clock)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    assert not any("SHANTIGOLD" in h.title for h in got)   # Copy of Newspaper Publication
+    assert not any("UNITDSPR" in h.title for h in got)     # Trading Window
+
+
+async def test_nse_announcements_empty_drop_list_drops_nothing(store, clock):
+    """The list is owner config, not code — emptying it keeps every administrative item."""
+    cfg = NewsCfg()
+    cfg.feeds.nse_announcements.drop_subjects = []
+    ingest, client = _ann_ingest(store, clock, cfg=cfg)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    assert {h.title.split("]")[0].removeprefix("[NSE:") for h in got} == {
+        "DHOOTTRANS", "VETO", "SHANTIGOLD", "UNITDSPR", "ENIL", "HINDZINC",
+    }
+
+
+async def test_nse_announcements_widened_drop_list_drops_more(store, clock):
+    cfg = NewsCfg()
+    cfg.feeds.nse_announcements.drop_subjects = ["credit rating"]
+    ingest, client = _ann_ingest(store, clock, cfg=cfg)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    symbols = {h.title.split("]")[0].removeprefix("[NSE:") for h in got}
+    assert "ENIL" not in symbols
+    assert {"DHOOTTRANS", "VETO", "SHANTIGOLD", "UNITDSPR", "HINDZINC"} == symbols
+
+
+async def test_nse_announcements_url_falls_back_to_the_sequence_id(store, clock):
+    """No attachment ⇒ a deterministic per-announcement URL built from ``seq_id`` — dedupe is
+    URL-based, so every item needs a stable unique key."""
+    ingest, client = _ann_ingest(store, clock)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    enil = next(h for h in got if "[NSE:ENIL]" in h.title)
+    assert enil.url == NSE_ANN_ITEM_URL.format(seq_id="106769725")
+    assert enil.source_domain == "nseindia.com"
+    # Neither an attachment nor a seq_id ⇒ no stable dedupe key exists ⇒ the row is skipped, never
+    # ingested under a key that would silently swallow every later keyless item.
+    assert not any("NOKEY" in h.title for h in got)
+    assert len({h.url for h in got}) == len(got)
+
+
+async def test_nse_announcements_published_at_is_the_exchange_timestamp(store, clock):
+    """IST exchange timestamp ladder: ``sort_date`` → ``exchdisstime`` → Clock ingest time."""
+    ingest, client = _ann_ingest(store, clock)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    by_symbol = {h.title.split("]")[0].removeprefix("[NSE:"): h for h in got}
+
+    assert all(h.published_at.utcoffset().total_seconds() == 5.5 * 3600 for h in got)
+    assert by_symbol["VETO"].published_at == datetime(2026, 9, 4, 15, 10, 18, tzinfo=IST)
+    # sort_date blank ⇒ the "04-Sep-2026 15:09:35" dissemination stamp.
+    assert by_symbol["ENIL"].published_at == datetime(2026, 9, 4, 15, 9, 35, tzinfo=IST)
+    # every stamp unparsable ⇒ ingest time, never naive.
+    assert by_symbol["HINDZINC"].published_at == FIXED_NOW
+
+
+async def test_nse_announcement_title_is_capped(store, clock):
+    ingest, client = _ann_ingest(store, clock)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    hindzinc = next(h for h in got if h.title.startswith("[NSE:HINDZINC]"))
+    assert len(hindzinc.title) == 300
+    assert hindzinc.title.startswith("[NSE:HINDZINC] Outcome of Board Meeting: Hindustan Zinc Limited")
+
+
+async def test_nse_announcements_fetch_primes_cookies_through_nse_get(store, clock):
+    """The endpoint is cookie-gated (an un-cookied /api GET returns a misleading 404, §A3), so the
+    feed must go through the repo's `nse_get` client — pinned by the homepage prime."""
+    record: list[httpx.Request] = []
+    ingest, client = _ann_ingest(store, clock, record=record)
+    async with client:
+        await ingest.poll(feeds=(NSE_ANN_KEY,))
+    assert [str(r.url) for r in record] == ["https://www.nseindia.com/", NSE_ANNOUNCEMENTS_URL]
+
+
+async def test_nse_ann_disabled_makes_no_request(store, clock):
+    """`enabled: false` is the owner's off switch — no fetch, but the key stays valid so a manual
+    or scheduled poll never turns a config toggle into a ValueError."""
+    cfg = NewsCfg()
+    cfg.feeds.nse_announcements.enabled = False
+    record: list[httpx.Request] = []
+    ingest, client = _ann_ingest(store, clock, cfg=cfg, record=record)
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    assert got == []
+    assert record == []
+
+
+async def test_nse_ann_dead_endpoint_degrades_to_zero_headlines(store, clock):
+    """E5: the announcements endpoint failing contributes nothing and never raises."""
+    ingest, client = _ann_ingest(store, clock, response=httpx.Response(500))
+    async with client:
+        got = await ingest.poll(feeds=(NSE_ANN_KEY,))
+    assert got == []
+
+    ingest, client = _ann_ingest(store, clock, response=httpx.Response(200, content=b"{not json"))
+    async with client:
+        assert await ingest.poll(feeds=(NSE_ANN_KEY,)) == []
+
+
+async def test_nse_ann_is_a_valid_poll_key_and_unknown_keys_still_rejected(store, clock):
+    ingest, client = _ann_ingest(store, clock)
+    async with client:
+        assert await ingest.poll(feeds=(NSE_ANN_KEY,)) != []
+        with pytest.raises(ValueError, match="unknown feed key"):
+            await ingest.poll(feeds=("nse_announcements",))
+
+
+def test_settings_yaml_carries_the_new_feed_block_and_business_standard():
+    """The shipped settings.yaml parses into the typed models (the block is owner config)."""
+    news = load_settings().news
+    ann = news.feeds.nse_announcements
+    assert ann.enabled is True
+    assert ann.poll_s == 300
+    assert {"Trading Window", "Book Closure", "Newspaper Publication"} <= set(ann.drop_subjects)
+    bs = {name: feed for name, feed in news.feeds.rss.items() if name.startswith("bs_")}
+    assert bs["bs_markets"].url == "https://www.business-standard.com/rss/markets-106.rss"
+    assert bs["bs_companies"].url == "https://www.business-standard.com/rss/companies-101.rss"
+    assert all(feed.poll_s == 900 for feed in bs.values())

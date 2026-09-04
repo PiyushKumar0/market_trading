@@ -375,3 +375,64 @@ def test_same_story_rereports_still_cluster_after_template_strip():
     ]
     for a, b in clean:
         assert similarity(clusterer_normalize(a), clusterer_normalize(b)) >= 0.75, (a, b)
+
+
+# ------------------------------------------ token-bearing representative (§2.7 amendment 2026-09-04)
+def _hl(hid: str, title: str, domain: str, minutes: int) -> Headline:
+    return Headline(
+        headline_id=hid,
+        title=title,
+        source_domain=domain,
+        url=f"https://{domain}/{hid}",
+        published_at=FIXED_NOW - timedelta(minutes=minutes),
+    )
+
+
+FILING = ("[NSE:HINDZINC] Outcome of Board Meeting: Hindustan Zinc Limited has informed the "
+          "Exchange that the Board approved a Letter of Intent for a zinc smelter acquisition")
+PRESS = ("Hindustan Zinc board approves Letter of Intent for a zinc smelter acquisition, "
+         "informs the Exchange")
+
+
+def test_token_bearing_headline_becomes_the_representative_on_join():
+    """A filing merged with its press coverage must stay resolvable: whichever member carries the
+    exchange token becomes the cluster's representative (the resolver only sees that string)."""
+    press = _hl("h-press", PRESS, "economictimes.indiatimes.com", 90)
+    filing = _hl("h-filing", FILING, "nseindia.com", 60)
+    assert similarity(clusterer_normalize(PRESS), clusterer_normalize(FILING)) >= 0.75
+
+    (c,) = HeadlineClusterer(sim_threshold=0.75).cluster([press, filing])
+    assert c.cluster_id == "c-h-press"                     # the press headline still OPENED it…
+    assert c.headline_ids == ["h-press", "h-filing"]
+    assert c.representative == FILING                      # …but the token-bearer represents it
+    assert c.source_domains == ["economictimes.indiatimes.com", "nseindia.com"]
+
+
+def test_plain_headline_never_displaces_a_token_representative():
+    filing = _hl("h-filing", FILING, "nseindia.com", 90)
+    press = _hl("h-press", PRESS, "economictimes.indiatimes.com", 60)
+    (c,) = HeadlineClusterer(sim_threshold=0.75).cluster([filing, press])
+    assert c.headline_ids == ["h-filing", "h-press"]
+    assert c.representative == FILING
+
+
+def test_second_token_headline_does_not_displace_the_first():
+    """Deterministic: the EARLIEST token-bearer (published_at, url order) keeps the seat."""
+    first = _hl("h-a", FILING, "nseindia.com", 90)
+    second = _hl("h-b", FILING + " (revised)", "nseindia.com", 60)
+    (c,) = HeadlineClusterer(sim_threshold=0.75).cluster([first, second])
+    assert c.headline_ids == ["h-a", "h-b"]
+    assert c.representative == FILING
+
+
+async def test_token_representative_promotion_reaches_the_store(store, clock):
+    """The promotion must be what gets PERSISTED — the resolver reads `news_clusters`."""
+    press = _hl("h-press", PRESS, "economictimes.indiatimes.com", 90)
+    filing = _hl("h-filing", FILING, "nseindia.com", 60)
+    for h in (press, filing):
+        store.insert_news([h.model_dump()])
+
+    clusterer = HeadlineClusterer(store, sim_threshold=0.75, max_event_age_days=2)
+    await clusterer.run([press, filing])
+    (row,) = store.get_news_clusters()
+    assert row["representative"] == FILING

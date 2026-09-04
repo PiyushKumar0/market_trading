@@ -118,7 +118,9 @@ news:
       # (both livemint feeds are ONE domain), so min_source_domains:2 required the exact ET∩LM
       # intersection. Three new DOMAINS below take the pool to five — "any 2 of 5" is realistic for
       # genuine stories, unchanged bar for a manipulator. Probed live 2026-08-05; rejected same day:
-      # financialexpress (malformed XML), zeebiz + business-standard (WAF 403), businesstoday (no dates).
+      # financialexpress (malformed XML), zeebiz + business-standard (WAF 403 — RE-PROBED LIVE
+      # 2026-09-04: the 403 no longer reproduces, so business-standard is ADOPTED below),
+      # businesstoday (no dates).
       hbl_markets:                                                                           # verified live 2026-08-05 (60 items, newest 34 min)
         url:    "https://www.thehindubusinessline.com/markets/feeder/default.rss"
         poll_s: 900
@@ -131,7 +133,33 @@ news:
       ndtvprofit:                                                                            # verified live 2026-08-05 (20 items, newest 63 min)
         url:    "https://feeds.feedburner.com/ndtvprofit-latest"
         poll_s: 900
+      # 2026-09-04 coverage widening (owner-directed "improve the coverage"): Business Standard is a
+      # sixth DOMAIN for the story-level corroboration count. The 2026-08-05 WAF 403 was re-probed
+      # live and does not reproduce.
+      bs_markets:                                                                            # verified live 2026-09-04 (HTTP 200, newest item <20 min)
+        url:    "https://www.business-standard.com/rss/markets-106.rss"
+        poll_s: 900
+      bs_companies:                                                                          # verified live 2026-09-04 (HTTP 200, 35 items, newest 35 min)
+        url:    "https://www.business-standard.com/rss/companies-101.rss"
+        poll_s: 900
     gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query [VERIFY Phase-1]
+    # The EXCHANGE as a feed (§2.7 amendment 2026-09-04): NSE corporate-announcements, fetched
+    # through the shared nse_http client. Items carry `symbol` natively, so each becomes a news row
+    # titled "[NSE:<SYMBOL>] <subject>: <text>" that EntityResolver resolves exactly (never an alias
+    # guess), with source_domain nseindia.com — ONE corroborating domain, never two. Coverage audit:
+    # only 47% of top-10 movers had any cluster naming them; UNITDSPR's Reg-30 disclosure and
+    # HINDZINC's LoI (~2 h before the press headline) were on this endpoint and in no press feed.
+    nse_announcements:
+      enabled: true                # owner off switch: false = no fetch and no scheduler job
+      poll_s: 300                  # the exchange disseminates all day; 5-min cadence (§2.7)
+      drop_subjects:               # case-insensitive SUBSTRING match on the item's subject (`desc`)
+        - "Trading Window"                          # routine PIT compliance window notices
+        - "Loss of Share Certificate"               # registrar administrivia
+        - "Compliances-Certificate"                 # periodic compliance certificates
+        - "Newspaper Publication"                   # catches NSE's "Copy of Newspaper Publication"
+        - "Analysts/Institutional Investor Meet"    # meeting schedules, not the outcome
+        - "Change in Registrar"
+        - "Book Closure"
   cluster_sim_threshold: 0.75    # §3.2.4 pinned clustering similarity [tunable, owner] — drives the
                                  # corroboration count, so owner-only (never in envelope.yaml)
   gdelt_poll_s: 3600             # GDELT DOC 2.0 poll cadence — 1800→3600 (2026-08-04: the 429s persisted

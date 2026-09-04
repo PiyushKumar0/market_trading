@@ -521,9 +521,29 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
                    ticker=object(), calendar=calendar, clock=clock)
 
     armed = {j.id for j in sched._sched.get_jobs()}
-    # One news_poll_<name> job per configured RSS feed, plus the GDELT job.
+    # One news_poll_<name> job per configured RSS feed, plus GDELT and the NSE announcements feed.
     assert {"bar_advance", "health_check", "feed_stats", "news_poll_gdelt"} <= armed
     assert {f"news_poll_{name}" for name in settings.news.feeds.rss} <= armed
+    ann = settings.news.feeds.nse_announcements
+    assert ann.enabled and "news_poll_nse_ann" in armed
+    trigger = str(next(j for j in sched._sched.get_jobs() if j.id == "news_poll_nse_ann").trigger)
+    assert str(timedelta(seconds=ann.poll_s)) in trigger   # its own cadence, not the RSS default
+
+
+def test_nse_announcements_job_is_not_armed_when_disabled(clock, calendar) -> None:
+    """`enabled: false` is the owner's off switch — the poll job must not exist at all."""
+    settings = load_settings()
+    settings.news.feeds.nse_announcements.enabled = False
+    sched = Scheduler(clock, calendar)
+
+    async def _resolve_news(_hs) -> None:
+        return None
+
+    _arm_live_jobs(sched, settings, bar_builder=None, health=None,
+                   news_ingest=None, resolve_news=_resolve_news,
+                   ticker=object(), calendar=calendar, clock=clock)
+
+    assert "news_poll_nse_ann" not in {j.id for j in sched._sched.get_jobs()}
 
 
 # --------------------------------------------------------------------------- brk20 feature-snapshot mint

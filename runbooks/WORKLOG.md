@@ -22,7 +22,22 @@
   (commit 6069dcc) + brief `runbooks/briefs/nse_announcements_feed_brief_2026-09-04.md`; implementation
   delegated to Opus (main tree; the worktree isolation refused a stale locked worktree, left in place
   while its holder pid lives). KPI: share of top-10 movers with a catalyst in corpus (47% baseline).
-- Engine restart: manual after the NSE-feed audit (the 17:50 cron was cancelled so the working tree
+- **NSE announcements feed + Business Standard RSS implemented (Opus, red-first, brief
+  `runbooks/briefs/nse_announcements_feed_brief_2026-09-04.md`):** `NewsIngest._fetch_nse_ann` (news.py:393)
+  via `nse_get` on the §2.8 ISIN job's endpoint; rows → `[NSE:<SYMBOL>] <desc>: <attchmntText>` with
+  `source_domain=nseindia.com`, exchange timestamps (`sort_date` → `exchdisstime` → `an_dt` → Clock),
+  attachment URL or a deterministic `seq_id` URL as the dedupe key; owner-editable `drop_subjects` on
+  `desc` only; `EXCHANGE_TOKEN_RE` + token resolution before alias matching under the same universe
+  check (news_pipeline.py:139/:706–729); token-bearing member promotes itself to cluster
+  representative (:409); scheduler job `news_poll_nse_ann` gated on `enabled` (main.py:2037–2040);
+  `NseAnnouncementsCfg` (config.py:161); settings block (settings.yaml:152–162) + `bs_markets`/
+  `bs_companies` (verified live 09-04); fixture `tests/unit/fixtures/news/nse_announcements.json` from
+  one live probe. Manager audit of every cited seam: clean. Tests: red 10 → green; touched modules 189
+  passed (re-run by me); full suite 2,157 (agent) and re-run as the deploy gate below. Known limits:
+  the endpoint returns the newest 20 rows per call (a 15:30 filing rush can exceed 20 in 5 min — a
+  paged/from-to variant is the lever); `news.drop_title_patterns` also applies to filing titles
+  (0/20 collisions live). KPI to watch: share of top-10 movers with a catalyst in corpus (47% baseline).
+- Engine restart: manual after the deploy gate (the 17:50 cron was cancelled so the working tree
   deploys clean).
 
 ## 2026-09-04 (14:03–14:4x, owner: "I have stopped the engine, continue; validate without bias") — `tdc` backtest RUN and REFUTED; movers attribution; engine stopped 14:04 by me, restart scheduled 15:36

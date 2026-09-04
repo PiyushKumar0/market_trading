@@ -158,6 +158,31 @@ class RssFeedCfg(BaseModel):
     poll_s: int = 900
 
 
+class NseAnnouncementsCfg(BaseModel):
+    """§2.7 (2026-09-04 amendment) exchange-announcements feed: NSE ``corporate-announcements``.
+
+    Its own cadence (the exchange disseminates all day, 300 s is the plan's pin) and its own
+    administrative-subject drop list — filings whose SUBJECT is routine compliance carry no event
+    content and would only burn scorer budget. ``drop_subjects`` is owner config exactly like
+    ``NewsCfg.drop_title_patterns``: a case-insensitive SUBSTRING match ("Newspaper Publication"
+    catches NSE's "Copy of Newspaper Publication"), deliberately conservative — a subject that is
+    merely LOW-value stays in, because a wrong drop is silent and permanent (the item never reaches
+    the corpus at all). ``enabled: false`` is the owner's off switch: no fetch, no scheduler job.
+    """
+
+    enabled: bool = True
+    poll_s: int = 300
+    drop_subjects: list[str] = Field(default_factory=lambda: [
+        "Trading Window",
+        "Loss of Share Certificate",
+        "Compliances-Certificate",
+        "Newspaper Publication",
+        "Analysts/Institutional Investor Meet",
+        "Change in Registrar",
+        "Book Closure",
+    ])
+
+
 class NewsFeedsCfg(BaseModel):
     """§3.2.4 ``NewsIngest`` feed set (§2.7 step 1). Headline-level only; bodies are never fetched (A3r).
 
@@ -183,8 +208,17 @@ class NewsFeedsCfg(BaseModel):
         "cnbctv18_market": RssFeedCfg(
             url="https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml", poll_s=900),
         "ndtvprofit": RssFeedCfg(url="https://feeds.feedburner.com/ndtvprofit-latest", poll_s=900),
+        # Business Standard re-enters 2026-09-04 (re-probed live: HTTP 200, 35 items each, newest
+        # 12 / 35 min old) — the 2026-08-05 rejection was a WAF 403 that no longer reproduces.
+        "bs_markets": RssFeedCfg(
+            url="https://www.business-standard.com/rss/markets-106.rss", poll_s=900),
+        "bs_companies": RssFeedCfg(
+            url="https://www.business-standard.com/rss/companies-101.rss", poll_s=900),
     })
     gdelt_doc_query: str = "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"
+    #: The exchange itself as a feed (§2.7 2026-09-04): filings carry ``symbol`` natively, so an
+    #: announcement is resolvable without the alias seed, and NSE counts as one corroborating domain.
+    nse_announcements: NseAnnouncementsCfg = Field(default_factory=NseAnnouncementsCfg)
 
 
 class NewsCfg(BaseModel):

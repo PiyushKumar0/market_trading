@@ -346,6 +346,88 @@ def test_extra_texts_reenter_the_same_rule_and_log_no_match():
     assert u.entity_text == "Totally Unknown Corp"
 
 
+# ------------------------------------------------- explicit exchange token (§2.7 amendment 2026-09-04)
+def test_exchange_token_resolves_directly_without_any_alias():
+    """An NSE filing carries its own symbol; the `[NSE:<SYM>]` token the ingest prefixes is an
+    EXACT identification, so it resolves without the alias seed ever having heard of the name."""
+    resolver = EntityResolver(universe={"UNITDSPR"})
+    rc = resolver.resolve(_cluster(
+        "[NSE:UNITDSPR] Updates: United Spirits Limited has informed the Exchange under Reg 30"
+    ))
+    assert rc.symbols == ["UNITDSPR"]
+    assert rc.unresolved == []
+
+
+def test_exchange_token_obeys_the_same_universe_check():
+    """The token is an exact symbol, NOT a licence to trade it — out-of-universe is recorded and
+    never attached, exactly as an alias match would be."""
+    resolver = EntityResolver(aliases={"infosys": "INFY"}, universe={"INFY"})
+    rc = resolver.resolve(_cluster("[NSE:PAYTM] Press Release: One 97 Communications on UPI volumes"))
+    assert rc.symbols == []
+    (u,) = rc.unresolved
+    assert u.reason == "out_of_universe"
+    assert u.entity_text == "PAYTM"
+    assert u.candidate_symbols == ("PAYTM",)
+    # universe unknown (pre-08:30 build) defers filtering here, same as the alias path.
+    assert EntityResolver(universe=None).resolve(
+        _cluster("[NSE:PAYTM] Press Release: One 97 Communications on UPI volumes")
+    ).symbols == ["PAYTM"]
+
+
+def test_exchange_token_is_stripped_before_alias_matching():
+    """The token text must never be matched as free-text: neither the "NSE" prefix nor the symbol
+    itself may fire an alias."""
+    resolver = EntityResolver(
+        aliases={"nse": "NSEIND", "unitdspr": "WRONGCO"},
+        universe={"UNITDSPR", "NSEIND", "WRONGCO"},
+    )
+    rc = resolver.resolve(_cluster("[NSE:UNITDSPR] Record Date: record date for dividend fixed"))
+    assert rc.symbols == ["UNITDSPR"]
+    assert rc.entities == []
+    assert rc.unresolved == []
+
+
+def test_alias_matching_still_runs_on_the_rest_of_a_token_headline():
+    resolver = EntityResolver(aliases={"infosys": "INFY"}, universe={"INFY", "UNITDSPR"})
+    rc = resolver.resolve(_cluster(
+        "[NSE:UNITDSPR] Press Release: Infosys signs a distribution deal with United Spirits"
+    ))
+    assert rc.symbols == ["INFY", "UNITDSPR"]
+    assert rc.entities == ["infosys"]
+
+
+def test_exchange_token_accepts_ampersand_and_hyphen_symbols():
+    resolver = EntityResolver(universe={"M&MFIN", "BAJAJ-AUTO"})
+    assert resolver.resolve(
+        _cluster("[NSE:M&MFIN] Allotment of Securities: NCD allotment intimation")
+    ).symbols == ["M&MFIN"]
+    assert resolver.resolve(
+        _cluster("[NSE:BAJAJ-AUTO] Press Release: monthly sales numbers")
+    ).symbols == ["BAJAJ-AUTO"]
+
+
+def test_plain_headlines_are_unchanged_by_the_token_rule():
+    resolver = EntityResolver(aliases={"infosys": "INFY"})
+    assert resolver.resolve(_cluster("Infosys wins large European banking deal")).symbols == ["INFY"]
+    # A bracketed prefix that is not an exchange token changes nothing.
+    assert resolver.resolve(_cluster("[Exclusive] Infosys wins European deal")).symbols == ["INFY"]
+    # Lowercase is not the pinned token shape (the ingest always writes the uppercase symbol).
+    rc = resolver.resolve(_cluster("[nse:paytm] Infosys wins European deal"))
+    assert rc.symbols == ["INFY"] and rc.unresolved == []
+
+
+def test_exchange_token_in_extra_texts_resolves_and_is_not_a_no_match():
+    """The clusterer's alternative seam (§2.7): a token-bearing MEMBER title handed in as an extra
+    text resolves the same way — and must not be logged as ``no_match``."""
+    resolver = EntityResolver(universe={"HINDZINC"})
+    rc = resolver.resolve(
+        _cluster("Zinc smelter stake buy reported by wire agencies"),
+        extra_texts=["[NSE:HINDZINC] Outcome of Board Meeting: Letter of Intent signed"],
+    )
+    assert rc.symbols == ["HINDZINC"]
+    assert rc.unresolved == []
+
+
 # --------------------------------------------------------------------------- store-wired run
 async def test_run_persists_tags_logs_unresolved_and_preserves_scores(store, clock):
     d = FIXED_NOW.date()
