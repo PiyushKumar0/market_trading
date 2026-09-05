@@ -163,6 +163,17 @@ this repair. Run with the engine idle (health pulses only in the log tail). Find
 #     AND position_id IN (SELECT position_id FROM positions WHERE state='OPEN')
 ```
 
+## Universe build outside the engine (2026-09-06) — e.g. the first build after an index change
+
+Engine OFF (single DuckDB writer); no Kite session needed (index list, margins, surveillance are public
+downloads; the F&O map hydrates from the stored `instruments_daily` snapshot). Replace-writes the day's
+`universe_daily` rows + `data/universe/index_cached.csv`; the scheduled 08:30 job on that date still runs
+if the engine is up and rebuilds the same rows (idempotent). Exit 1 = built but DEGRADED (read the log).
+
+```powershell
+.venv\Scripts\python.exe scripts\build_universe.py --date 2026-09-07
+```
+
 ## Bhavcopy archive backfill (2026-09-03) — full-market bars_1d + corp-action history, 2022-07 → 2026-07-12
 
 Engine must be OFF (single DuckDB writer); ~1,000 sessions at ~1-2 s each, checkpointed per date in

@@ -25,6 +25,18 @@
   08:30 job is calendar-guarded, so it skipped Saturday/Sunday and the 21:00 Saturday boot did not
   catch it up). `data/universe/index_cached.csv` does not exist yet; the committed seed has 499 EQ
   symbols. `sector_map` last ran 08-30 (its own cadence).
+- **Owner-directed "load the new data now" (01:4x):** `scripts/build_universe.py --date 2026-09-07`
+  (new, wired as `job_universe`: margins refresh → surveillance → instruments hydrated from the stored
+  snapshot → `UniverseBuilder.build`), run with the engine stopped 01:41:44 (idle, health pulses
+  only) → **first NIFTY 500 build in 42 s: index source=download, eligible 480, watchlist 200,
+  mis_candidates 164, extended 423, degraded=False**; `universe_daily` rows for 2026-09-07 written
+  (replace-write) and `data/universe/index_cached.csv` created. Engine restarted 01:42:30 →
+  `startup_complete` 01:43:00 NORMAL, `post_arm_jobs_complete` failed=[]. What this buys Monday:
+  the boot reads the NIFTY 500 watchlist from the 09-07 row from the first minute (ticker
+  subscriptions + warm-up set), and the first run of the new code path happened on a quiet Sunday;
+  the scheduled 08:30 build still fires (idempotent, ~1 min). What it does NOT buy: a late Monday
+  boot still pays the 09:15→boot 1m warm-up backfill (~15 min for 200 names) — that is the real
+  late-start cost and it cannot be pre-loaded. Data was already current through Friday's close.
 - **Pending for Phase 3 is unchanged in kind:** `src/engine/oms`, `src/engine/paper`, `tests/chaos`,
   `tests/replay`, `tests/property` all still 0 files; 21 commits unpushed on phase2; stash
   `context-daily-tail` (superseded by 334d992) and three untracked root files still present.
