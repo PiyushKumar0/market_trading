@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-06 (01:2x–02:xx, owner question "what is pending for the next phase?") — G2 re-measured; a false "lost session" finding made and RETRACTED
+
+- **G2 collector (read-only, 2026-07-29..09-06, 28 sessions):** digest-before-open 19/28 = 67.9%
+  (NOT MET; 09-02/03/04 all "AFTER" because the engine was booted at 09:3x and the post-boot digest
+  landed 1–7 min after the 09:50 window open — an operating-pattern miss, not code); News Analyst
+  schema-valid 99.9% (MET); recs delivered in time 41/41 (MET); owner-executed taken=2 closed=0
+  (NOT MET); sessions with ≥1 rec 8/28 (NOT MET — 08-26→09-04, eight consecutive trading days);
+  zero API orders (MET); budget $77.90/$550 MTD (MET); watchlist-precision and payload samples
+  still have no record (owner-manual). HDFCAMC and HINDZINC still OPEN (since 08-26/08-27), never
+  `/closed`.
+- **RETRACTED (my error, told to the owner and corrected here within the hour):** the first version
+  of this entry called 2026-09-05 a lost Friday session. **09-05 was a SATURDAY.** Every 09-04
+  (Friday) EOD job succeeded on schedule (`job_runs`: bhavcopy 18:00, daily_bars 18:06, filings
+  18:35–19:00, deals 20:30, features 20:45, backup 21:00, nightly_review 23:04), and 09-05 has no
+  rows because none were due. The laptop's Modern Standby 04:36→20:53 on the 5th and the nine
+  "run time was missed" APScheduler warnings at 09:47 concerned weekend polls only. The correct
+  residual observation: a machine that is in standby at session open would never get the pulse
+  that engages the in-session keep-awake, and the watchdog task cannot fire on a sleeping PC — a
+  weekday shape to guard against, not something that happened. The weekday check
+  (`(Get-Date).DayOfWeek`) goes before any "lost session" claim from now on.
+- **Data is current through Friday 09-04's close.** The only Monday-specific load is the first
+  NIFTY 500 `universe_daily` build (`universe_build` last ran 09-04 09:42 under NIFTY 200; the
+  08:30 job is calendar-guarded, so it skipped Saturday/Sunday and the 21:00 Saturday boot did not
+  catch it up). `data/universe/index_cached.csv` does not exist yet; the committed seed has 499 EQ
+  symbols. `sector_map` last ran 08-30 (its own cadence).
+- **Pending for Phase 3 is unchanged in kind:** `src/engine/oms`, `src/engine/paper`, `tests/chaos`,
+  `tests/replay`, `tests/property` all still 0 files; 21 commits unpushed on phase2; stash
+  `context-daily-tail` (superseded by 334d992) and three untracked root files still present.
+
 ## 2026-09-04 (16:3x–17:xx, owner-directed "extend the eligible universe to nifty 500") — O15 implemented; gate membership gap found and closed
 
 - **Decision recorded first** (plan §6.1 O15, commit 7bc900d): scope over the same-day evidence, with
