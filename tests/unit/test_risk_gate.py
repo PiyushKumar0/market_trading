@@ -1189,6 +1189,52 @@ def test_gate_source_reads_no_origination_tables() -> None:
     )
 
 
+def test_exiting_positions_do_not_occupy_position_or_sector_slots() -> None:
+    """O16 (owner-directed 2026-09-07): a position the platform has already told the owner to SELL
+    (an exit recommendation delivered within the last 3 days) is EXITING — it must not hold a
+    position-count or sector slot against a new BUY. Two through-the-stop CNC positions with 39
+    expired exit recommendations had the book at 2/2 for eleven sessions. Still one-per-symbol
+    (a BUY on an exiting name stays blocked) and still deployed cash; only the counts change."""
+    import json as _json
+    from datetime import datetime as _dt
+
+    now = _dt(2026, 9, 7, 12, 0, tzinfo=IST)
+    recs = [
+        {"payload": _json.dumps({"kind": "exit", "instrument": "HDFCAMC", "created_at": "2026-09-07T10:21:15+05:30"}), "human_action": "expired"},
+        {"payload": _json.dumps({"kind": "exit", "instrument": "HINDZINC", "created_at": "2026-09-05T14:43:00+05:30"}), "human_action": None},
+        {"payload": _json.dumps({"kind": "exit", "instrument": "OLDONE", "created_at": "2026-08-20T10:00:00+05:30"}), "human_action": "expired"},
+        {"payload": _json.dumps({"kind": "entry", "instrument": "RELIANCE", "created_at": "2026-09-07T10:30:00+05:30"}), "human_action": None},
+    ]
+    open_symbols = frozenset({"HDFCAMC", "HINDZINC", "OLDONE", "RELIANCE"})
+    exiting = gate_module._exiting_symbols(recs, open_symbols, now)
+    assert exiting == frozenset({"HDFCAMC", "HINDZINC"})      # recent exits only; the entry is not an exit
+
+    positions = [
+        {"symbol": "HDFCAMC", "product": "CNC"}, {"symbol": "HINDZINC", "product": "CNC"},
+        {"symbol": "OLDONE", "product": "CNC"}, {"symbol": "RELIANCE", "product": "MIS"},
+    ]
+    sector_of = {"HDFCAMC": "FINANCIAL_SERVICES", "HINDZINC": "METAL", "OLDONE": "METAL", "RELIANCE": "ENERGY"}
+    total, mis, cnc, sectors = gate_module._active_counts(
+        positions, exiting, sector_of, total=4, mis=1, cnc=3,
+        sector_counts={"FINANCIAL_SERVICES": 1, "METAL": 2, "ENERGY": 1},
+    )
+    assert (total, mis, cnc) == (2, 1, 1)
+    assert sectors == {"FINANCIAL_SERVICES": 0, "METAL": 1, "ENERGY": 1}
+
+
+
+def test_max_open_positions_ledger_names_the_exiting_exclusion(gate: RiskGate) -> None:
+    """The rule reads the already-reduced counts; its ledger line must say how many exiting
+    positions were left out, so a verdict is auditable against the raw book (O16)."""
+    verdict = gate.evaluate(
+        make_action(),
+        make_ctx(open_total=2, open_mis=1, exiting_symbols=frozenset({"HDFCAMC", "HINDZINC"})),
+    )
+    check = check_of(verdict, "max_open_positions")
+    assert check.passed
+    assert "2 exiting excluded" in check.value
+
+
 def test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist() -> None:
     """O15 (2026-09-04): with the eligible set at ~350–450 NIFTY 500 names and the tick watchlist
     capped at 200, ``universe_daily`` rows excluded for ``watchlist_cap`` ALONE are eligible and must

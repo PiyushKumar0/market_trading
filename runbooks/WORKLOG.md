@@ -1,5 +1,37 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-07 (10:4x–13:xx) — status; swing "missing link" investigation; O16 (exiting positions off the buy caps, caps 6/2/4, base ₹40,000)
+
+- **Status 10:42:** PC slept Sun 21:00 → Mon 10:12 (log gap; ticker silence 47,521 s on wake), owner
+  restart 10:13, login 10:16, window 10:30–12:50, NORMAL 10:24. First NIFTY 500 build 10:14:33: index
+  500, eligible 480, watchlist 200, extended 428. brk20 already originating tail names (NIACL, TEJASNET,
+  ACMESOLAR, WOCKPHARMA); declined-displacement fired twice (GLAND/INDIGO → DIVISLAB/BOSCHLTD). NSE
+  feed 4 polls / 43 filings; Telegram back (0 failures). 14 `news_resolve_timeout`: post-sleep scoring
+  backlog held the chain lock (news_analyst back-to-back 10:18–10:41) — self-cleared 10:41; design note:
+  scoring should not hold the resolve lock.
+- **Owner: "stocks doing well not recommended — find the missing link" (IFCI, MOREPENLAB, PCJEWELLER,
+  SHYAMMETL, WELCORP).** Membership: IFCI/SHYAMMETL eligible only since today; WELCORP ASM; MOREPENLAB
+  ASM + outside NIFTY 500; PCJEWELLER outside. None ever had a slot. **The link is the swing gate +
+  capacity:** last 15 sessions the analyst said `enter` 16× (brk20 11, rsi2 4, cat 1) → gate 14 rejects +
+  2 shrinks; the 2 shrinks are HDFCAMC/HINDZINC, now through their stops with **39 expired exit
+  recommendations**, holding CNC 2/2 since 08-27 (today CEIGALL declined 4× for capacity). Reject
+  reasons (verdict payloads): `per_trade_risk` 14/14 (2.5× gap mult × stop vs 2% of ₹20k = ₹400),
+  `min_viable_size` 9 (null-target legs "unverifiable"; tiny qty vs 2× breakeven), `entry_sanity_band`
+  5 (brk20 retest limits 3–5% below LTP vs 2% CNC band), capacity/sector 5, confidence 2. rsi2's 21
+  analyst timeouts were all on 08-24 (incident day) — not structural.
+- **Owner-directed O16 (three changes):** (a) "keep sell recommendations separate from the buy limits"
+  → `_exiting_symbols` / `_active_counts` (gate.py): OPEN positions with an exit rec delivered within
+  3 calendar days are excluded from `max_open_positions` and `per_sector_exposure` counts (still
+  one-per-symbol, still deployed cash; ledger line names the exclusion); tests
+  `test_exiting_positions_do_not_occupy_position_or_sector_slots`,
+  `test_max_open_positions_ledger_names_the_exiting_exclusion`; gate+pipeline+wiring 335 passed.
+  (b) "raise the cap to 4" → `max_open_positions` 6 total / 2 MIS / 4 CNC; (c) "increase budget to
+  40000" → `capital_base_inr` + `max_deployed_capital_inr` 40,000. (b)+(c) are protected-store edits:
+  applied tonight with the engine STOPPED (the gate re-verifies the file hash on reload — a live edit
+  would trip IntegrityError), then `seed_protected_config.py --reseed`, then restart. Plan §7.1 row +
+  O16 paragraph written. Evening cron 15:41 also carries the holdings-reconcile build and the
+  watchlist cap 300.
+
 ## 2026-09-06 (01:2x–02:xx, owner question "what is pending for the next phase?") — G2 re-measured; a false "lost session" finding made and RETRACTED
 
 - **G2 collector (read-only, 2026-07-29..09-06, 28 sessions):** digest-before-open 19/28 = 67.9%

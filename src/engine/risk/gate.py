@@ -276,6 +276,11 @@ class GateContext(BaseModel):
     open_total: int = 0
     open_mis: int = 0
     open_cnc: int = 0
+    #: Symbols of OPEN positions the platform has already told the owner to SELL (an exit
+    #: recommendation delivered within :data:`_EXITING_LOOKBACK_DAYS`) — EXCLUDED from
+    #: ``open_total``/``open_mis``/``open_cnc`` and ``open_sector_counts`` by the builder (O16,
+    #: owner-directed 2026-09-07). Still members of ``open_symbols`` (one position per symbol).
+    exiting_symbols: frozenset[str] = frozenset()
     open_symbols: frozenset[str] = frozenset()
     pending_rec_symbols: frozenset[str] = frozenset()   # unexpired, unconfirmed entry recs
     per_symbol_cnc_notional: Mapping[str, Decimal] = Field(default_factory=dict)
@@ -779,10 +784,12 @@ class RiskGate:
         leg_cap = mop.max_mis if intraday else mop.max_cnc
         leg_after = leg_open + pending + 1
         ok = total_after <= mop.total and leg_after <= leg_cap
+        exiting = len(ctx.exiting_symbols)
         led.add(
             "max_open_positions", ok,
             f"total {ctx.open_total}+{pending} pending+1 = {total_after}; "
-            f"{'MIS' if intraday else 'CNC'} {leg_open}+{pending}+1 = {leg_after}",
+            f"{'MIS' if intraday else 'CNC'} {leg_open}+{pending}+1 = {leg_after}"
+            + (f"; {exiting} exiting excluded (O16)" if exiting else ""),
             f"total <= {mop.total}; MIS <= {mop.max_mis}; CNC <= {mop.max_cnc}",
             f"{mop.total - total_after} total / {leg_cap - leg_after} leg",
         )
@@ -1156,6 +1163,74 @@ class RiskGate:
 
 
 # --------------------------------------------------------------------------- context assembly
+#: O16 (owner-directed 2026-09-07): an OPEN position with an exit recommendation delivered within
+#: this many calendar days is EXITING. Calendar days rather than sessions so a Friday exit still
+#: counts on Monday; the hourly position review re-issues an exit while a stop stays breached, so
+#: a genuinely exiting position never ages out of the window while it is still open.
+_EXITING_LOOKBACK_DAYS = 3
+
+
+def _exiting_symbols(
+    rec_rows: Sequence[Mapping[str, Any]], open_symbols: frozenset[str], now: datetime
+) -> frozenset[str]:
+    """Open symbols the platform has already told the owner to SELL (O16).
+
+    "Keep sell recommendations separate from the buy limits": until 2026-09-07 a position the
+    platform had recommended exiting kept occupying a position-count and a sector slot until the
+    owner actually sold — two through-the-stop CNC positions with 39 expired exit recommendations
+    held the book at 2/2 for eleven sessions and every swing entry was refused for capacity. A
+    delivered exit recommendation is the platform's own record that the position is no longer
+    wanted; from then on it holds no slot against a new BUY. It still blocks a new entry on its own
+    symbol and still counts as deployed cash — only the counts are relaxed.
+    """
+    out: set[str] = set()
+    for row in rec_rows:
+        try:
+            data = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError, KeyError):
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "exit":
+            continue
+        symbol = str(data.get("instrument") or "")
+        if symbol not in open_symbols:
+            continue
+        try:
+            created = datetime.fromisoformat(str(data.get("created_at") or ""))
+        except ValueError:
+            continue
+        if created.tzinfo is None:
+            continue                               # naive stamps are a bug upstream; never trust
+        if now - created <= timedelta(days=_EXITING_LOOKBACK_DAYS):
+            out.add(symbol)
+    return frozenset(out)
+
+
+def _active_counts(
+    positions: Sequence[Mapping[str, Any]],
+    exiting: frozenset[str],
+    sector_of: Mapping[str, str],
+    *,
+    total: int,
+    mis: int,
+    cnc: int,
+    sector_counts: Mapping[str, int],
+) -> tuple[int, int, int, dict[str, int]]:
+    """Position and sector counts with the EXITING positions taken out (O16), floored at zero."""
+    sectors = dict(sector_counts)
+    for row in positions:
+        symbol = str(row["symbol"])
+        if symbol not in exiting:
+            continue
+        total -= 1
+        if str(row["product"] or "").upper() == "MIS":
+            mis -= 1
+        else:
+            cnc -= 1
+        sector = sector_of.get(symbol, _UNCLASSIFIED)
+        sectors[sector] = max(0, sectors.get(sector, 0) - 1)
+    return max(0, total), max(0, mis), max(0, cnc), sectors
+
+
 #: The §3.2.4 focus-cap marker, duplicated from ``engine.universe.builder.EXCL_CAP`` for the same
 #: layering reason ``engine.marketdata.store`` duplicates it: the gate must not import the universe
 #: builder. A row excluded for the cap ALONE is eligible; any other reason, or the extended-leg
@@ -1290,6 +1365,15 @@ class GateContextBuilder:
             sector = sector_of.get(pending_symbol, _UNCLASSIFIED)
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
+        # O16 (2026-09-07): positions already recommended for EXIT hold no position-count or
+        # sector slot against a new BUY — see _exiting_symbols. open_symbols keeps them (one
+        # position per symbol) and deployed_capital keeps them (real cash).
+        exiting = _exiting_symbols(self._recommendations(), open_symbols, now)
+        open_total, open_mis, open_cnc, sector_counts = _active_counts(
+            positions, exiting, sector_of,
+            total=counts.total, mis=counts.mis, cnc=counts.cnc, sector_counts=sector_counts,
+        )
+
         return GateContext(
             now=now,
             mode=self._mode.mode(),
@@ -1303,10 +1387,11 @@ class GateContextBuilder:
             day_mtm_pct=day_mtm_pct,
             consecutive_losses=self._exposure.consecutive_losses(d),
             entry_recs_today=self._entry_recs_today(d),
-            open_total=counts.total,
-            open_mis=counts.mis,
-            open_cnc=counts.cnc,
+            open_total=open_total,
+            open_mis=open_mis,
+            open_cnc=open_cnc,
             open_symbols=open_symbols,
+            exiting_symbols=exiting,
             pending_rec_symbols=pending,
             per_symbol_cnc_notional={symbol: self._exposure.cnc_notional(symbol)},
             sector_of=sector_of,
