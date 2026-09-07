@@ -44,6 +44,24 @@
   The owner window (10:30–12:50) is closed, so no entry can originate today unless the owner reopens
   it (`/trade_window`, CNC entries allowed until 15:00). Evening cron now carries only the
   holdings-reconcile build + restart.
+- **Afternoon outcome:** owner reopened the window 15:16–15:30 (set 15:15:44) — past the 15:00 CNC
+  entry cutoff, so no entry could originate; 8 exit recs (HDFCAMC/HINDZINC) approved and expired; no
+  errors since the restart. Tomorrow is the first real test of O16.
+- **Holdings reconcile built (Opus, red-first; plan §3.6 paragraph, brief
+  `runbooks/briefs/holdings_reconcile_brief_2026-09-07.md`):** `src/engine/ops/holdings_reconcile.py`
+  (`run()` :142; held = quantity + t1_quantity summed per symbol :262; T+1 skip = sessions strictly
+  between open and today :195; once-per-position-per-day alert :243; entry rec id via the ledger, exit
+  id fallback :221; broker failure → `holdings_reconcile_failed` warning, never raises), catalog kind
+  `POSITION_NOT_IN_HOLDINGS` + renderer (catalog.py:122/:405, never-expire outbox set in telegram.py:192),
+  hourly `holdings_reconcile` job window-gated 09:20–15:30 on trading days (main.py:2117, tick :1385),
+  post-login ladder step `_step_holdings` non-load-bearing (post_login.py:366). Manager audit clean;
+  added `AND COALESCE(is_paper,0)=0` to the scope (agent's own recommendation — paper positions can
+  never be in real holdings). 16 new tests; holdings + post-login modules 28 passed; ruff clean.
+- **Miss caught by the agent's full-suite run:** 12 existing tests pinned the old ₹20,000 base and
+  3/2/2 caps (test_limits_engine, test_lifecycle_selftest, test_api_routes, test_telegram_commands,
+  7× test_risk_gate) — I committed the limits (d2a9077) without re-running the suite after the edit.
+  Fixture repair delegated (Sonnet), preferring values read from the loaded LimitTable; full suite
+  re-run before the evening restart (cron 18:52).
 
 ## 2026-09-06 (01:2x–02:xx, owner question "what is pending for the next phase?") — G2 re-measured; a false "lost session" finding made and RETRACTED
 

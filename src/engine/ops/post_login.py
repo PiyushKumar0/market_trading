@@ -25,7 +25,12 @@ startup steps:
                        FROZEN-for-entries through the lifecycle's own gate application
                        (:meth:`SessionLifecycle.reapply_warmup_gate` — never a direct risk-state bypass);
     (d) ticker       — start the feed with the subscription tokens — the SAME step-7 resume logic,
-                       shared via :func:`resume_ticker`.
+                       shared via :func:`resume_ticker`;
+    (e) holdings     — §3.6 holdings reconcile (2026-09-07). NOT a recovery step: it restores nothing
+                       and gates nothing. It runs here because a fresh token is the first moment the
+                       account can be read at all, and the owner's overnight sells are exactly what
+                       the morning needs to know. Last in the ladder, and its own failures are already
+                       swallowed by the job.
 
 Idempotent by construction: safe to fire on every login / daily token refresh — each step skips when
 its state is already good and says so in the summary. One ``post_login_recovery`` event is emitted with
@@ -56,6 +61,7 @@ from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.store import MarketStore
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
+from engine.ops.holdings_reconcile import HoldingsReconcileJob
 
 if TYPE_CHECKING:  # only for typing — lifecycle imports nothing from here, so no runtime cycle
     from engine.ops.lifecycle import SessionLifecycle
@@ -248,6 +254,7 @@ class PostLoginRecovery:
         vix_symbol: str,
         notify: Notify | None = None,
         alert: AlertCallback | None = None,
+        holdings_reconcile: HoldingsReconcileJob | None = None,
     ) -> None:
         self._instruments = instruments
         self._store = store
@@ -265,6 +272,7 @@ class PostLoginRecovery:
         self._vix_symbol = vix_symbol
         self._notify = notify
         self._alert = alert
+        self._holdings_reconcile = holdings_reconcile
 
     async def run(self) -> PostLoginRecoveryReport:
         """Fire the guarded four-step recovery and emit the summary. Never raises: this is a login
@@ -275,6 +283,7 @@ class PostLoginRecovery:
             await self._guard("backfill", self._step_backfill),
             await self._guard("warmup", self._step_warmup),
             await self._guard("ticker", self._step_ticker),
+            await self._guard("holdings", self._step_holdings),
         ]
         any_failed = any(s.status == "failed" for s in steps)
         report = PostLoginRecoveryReport(steps=steps, ok=not any_failed, any_failed=any_failed)
@@ -352,6 +361,23 @@ class PostLoginRecovery:
     async def _step_ticker(self) -> tuple[str, str]:
         status = await resume_ticker(self._session, self._kite, self._ticker, self._ticker_tokens)
         return (("ok" if status == "started" else "skipped"), status)
+
+    # ------------------------------------------------------------------ (e) holdings reconcile
+    async def _step_holdings(self) -> tuple[str, str]:
+        """§3.6 holdings reconcile — NON-load-bearing (see the module docstring): it never fails the
+        ladder. The job swallows its own broker errors and reports them as ``error``, which is
+        recorded here as a ``skipped`` step: "could not read the account" is not a recovery failure,
+        and marking it one would put a red step in every pre-login-token report."""
+        if self._holdings_reconcile is None:
+            return ("skipped", "not_wired")
+        result = await self._holdings_reconcile.run()
+        if result.error is not None:
+            return ("skipped", f"error={result.error[:120]}")
+        return (
+            "ok",
+            f"checked={result.checked} flagged={len(result.flagged)} "
+            f"skipped_young={result.skipped_young}",
+        )
 
     # ------------------------------------------------------------------ summary notify
     async def _emit_summary(self, report: PostLoginRecoveryReport) -> None:

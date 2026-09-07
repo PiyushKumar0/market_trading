@@ -119,6 +119,14 @@ class MessageKind(StrEnum):
     order call. Owner confirms via ``/taken`` (one tap) ⇒ ``origin='recommended'``; dismiss/expiry ⇒
     ``no_action``. Never auto-adopted."""
 
+    POSITION_NOT_IN_HOLDINGS = "position_not_in_holdings"
+    """The §3.6 holdings reconcile found a tracked OPEN CNC position that is ABSENT or SHORT in the
+    broker's holdings (owner-directed 2026-09-07): the owner almost certainly sold it and never sent
+    ``/closed``, so the platform is tracking — and blocking new buys on — a position that no longer
+    exists. One alert per position per trading day, naming the exact ``/closed <entry_rec_id> <price>``
+    reply. Alert-only: the platform never auto-closes a human-owned position (the exit price is the
+    owner's fact, §6.5) and never touches risk state on this signal."""
+
     RECONCILE_DRIFT = "reconcile_drift"
     """Nightly self-built-vs-official bar reconciliation drifted beyond thresholds (A13/§3.2.3:
     |Δvol|>``reconcile.vol_drift_pct`` or |Δclose|>``reconcile.close_drift_ticks`` on more than
@@ -391,6 +399,50 @@ def rec_fill_suspected(
             # /veto is the rec-dismiss command (§3.6); /reject resolves owner_approvals rows.
             [{"text": "✗ No action", "command": f"/veto {rec_id}"}],
         ],
+    )
+
+
+def position_not_in_holdings(
+    *,
+    symbol: str,
+    position_id: str,
+    tracked_qty: int,
+    held_qty: int,
+    entry_rec_id: str | None,
+) -> CatalogMessage:
+    """A tracked OPEN CNC position is absent/short in the broker's holdings (§3.6 reconcile).
+
+    The message exists to produce ONE owner action, so the body ends in the literal reply to type:
+    ``/closed <entry_rec_id> <price>``. ``entry_rec_id`` is the ENTRY recommendation id from the
+    learning ledger (``/closed`` accepts an exit rec's id too, but the entry is the id the ledger row
+    is keyed on); when the position has no ledger row at all the alert says so and names the
+    ``position_id`` instead — an un-actionable-but-explicit page beats silence, which is the
+    eleven-session limbo this check was built to end.
+
+    No ``reply_keyboard``: unlike ``REC_FILL_SUSPECTED``, the platform does not know the exit price —
+    it is the owner's fact (§6.5) — so a one-tap button would have to invent one.
+    """
+    reply = (
+        f"/closed {entry_rec_id} <price>" if entry_rec_id
+        else f"/closed <rec_id> <price> (no learning-ledger row for position {position_id})"
+    )
+    return CatalogMessage(
+        kind=MessageKind.POSITION_NOT_IN_HOLDINGS,
+        title=f"{symbol} tracked but not in holdings",
+        body=(
+            f"The platform still tracks {symbol} x{tracked_qty}, but your Kite holdings show "
+            f"{held_qty}. If you already sold it, report the exit so the ledger and the position "
+            f"caps match reality:\n{reply}\nprice = your actual exit price. "
+            f"(position {position_id}; if you still hold it, ignore this.)"
+        ),
+        severity="warning",
+        data={
+            "symbol": symbol,
+            "position_id": position_id,
+            "tracked_qty": tracked_qty,
+            "held_qty": held_qty,
+            "entry_rec_id": entry_rec_id,
+        },
     )
 
 

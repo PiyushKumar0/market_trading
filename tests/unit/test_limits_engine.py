@@ -43,10 +43,11 @@ def test_full_parse_of_real_limits_yaml(registered_store):
 
     assert isinstance(table, LimitTable)
     assert table.schema_version == 1
-    assert table.capital_base_inr == Decimal("20000")
+    # O16 2026-09-07: base 40000 / caps 6-2-4
+    assert table.capital_base_inr == Decimal("40000")
 
     # A representative sample across the block types (money, pct, int, bool, time, on_breach str).
-    assert table.limits.capital_cap.max_deployed_capital_inr == Decimal("20000")
+    assert table.limits.capital_cap.max_deployed_capital_inr == Decimal("40000")
     assert table.limits.capital_cap.on_breach == "reject_entry"
     assert table.limits.per_trade_risk.intraday_pct == 1.0
     assert table.limits.per_trade_risk.swing_position_pct == 2.0
@@ -59,9 +60,10 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.cumulative_floor.equity_pct_of_base == -15.0
     assert table.limits.consecutive_losses.max_per_session == 3
     assert table.limits.max_new_trades_day.count == 5
-    assert table.limits.max_open_positions.total == 3
+    # O16 2026-09-07: base 40000 / caps 6-2-4
+    assert table.limits.max_open_positions.total == 6
     assert table.limits.max_open_positions.max_mis == 2
-    assert table.limits.max_open_positions.max_cnc == 2
+    assert table.limits.max_open_positions.max_cnc == 4
     assert table.limits.per_stock_exposure.max_positions_per_symbol == 1
     assert table.limits.per_stock_exposure.cnc_notional_inr == Decimal("8000")
     assert table.limits.per_sector_exposure.max_positions_per_sector == 2

@@ -660,7 +660,8 @@ async def test_limits_renders_usage_against_the_protected_caps(clock, conn, expo
     assert f"open: 1/{table.limits.max_open_positions.total}" in text
     assert f"consecutive losses: 0/{table.limits.consecutive_losses.max_per_session}" in text
     assert f"trades today: 1/{table.limits.max_new_trades_day.count}" in text
-    assert "deployed capital: ₹12,250.00 / ₹20,000.00" in text
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — read the cap off the loaded table.
+    assert f"deployed capital: ₹12,250.00 / ₹{table.limits.capital_cap.max_deployed_capital_inr:,.2f}" in text
     assert "equity: ₹" in text and "day MTM: ₹" in text
     assert "{" not in text and "LimitTable" not in text
 

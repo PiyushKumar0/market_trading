@@ -306,17 +306,19 @@ CASES: tuple[Case, ...] = (
     Case("surveillance", "empty string is unflagged", "pass", True,
          ctx={"surveillance_flag": "  "}),
     # ---- capital / risk / leverage -----------------------------------------------------
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — max_deployed_capital_inr 20000 -> 40000, so every
+    # deployed_capital literal below is shifted by the same +20000 to keep sitting on the real cap.
     Case("capital_cap", "nothing deployed", "pass", True),
     Case("capital_cap", "cap exhausted", "fail", False,
-         ctx={"deployed_capital": Decimal("19999")}),
+         ctx={"deployed_capital": Decimal("39999")}),
     Case("capital_cap", "CNC landing exactly on the cap", "boundary", True, act=CNC,
-         ctx={"deployed_capital": Decimal("19000")}),
+         ctx={"deployed_capital": Decimal("39000")}),
     Case("capital_cap", "CNC one rupee over the cap", "fail", False, act=CNC,
-         ctx={"deployed_capital": Decimal("19001")}),
+         ctx={"deployed_capital": Decimal("39001")}),
     # WO-4 notional basis: the SAME deployment that lands exactly on the cap at the stated entry
     # breaches it once the live price the order would actually fill at is used.
     Case("capital_cap", "LTP past the limit tips the exact-cap case over", "fail", False, act=CNC,
-         ctx={"deployed_capital": Decimal("19000"), "ltp": Decimal("100.50")}),
+         ctx={"deployed_capital": Decimal("39000"), "ltp": Decimal("100.50")}),
     Case("per_trade_risk", "10 x Rs1 stop distance", "pass", True),
     Case("per_trade_risk", "300 units breaches the 1% budget", "fail", False,
          act={"quantity": 300}),
@@ -352,10 +354,12 @@ CASES: tuple[Case, ...] = (
     Case("max_new_trades_day", "cap reached", "fail", False, ctx={"entry_recs_today": 5}),
     Case("max_new_trades_day", "one slot left", "boundary", True, ctx={"entry_recs_today": 4}),
     # ---- open exposure -----------------------------------------------------------------
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — max_open_positions.total 3 -> 6 (max_mis unchanged
+    # at 2), so both the "reached" and "last slot" counts move to sit on the new total cap.
     Case("max_open_positions", "book empty", "pass", True),
-    Case("max_open_positions", "total cap reached", "fail", False, ctx={"open_total": 3}),
+    Case("max_open_positions", "total cap reached", "fail", False, ctx={"open_total": 6}),
     Case("max_open_positions", "last total slot", "boundary", True,
-         ctx={"open_total": 2, "open_mis": 1}),
+         ctx={"open_total": 5, "open_mis": 1}),
     Case("max_open_positions", "MIS leg full", "fail", False,
          ctx={"open_total": 2, "open_mis": 2}),
     Case("max_open_positions", "pending recs occupy slots", "fail", False,
@@ -591,7 +595,8 @@ def test_shrinkable_registry_covers_yaml_on_breach() -> None:
 def test_shrink_bound_by_capital_cap(gate: RiskGate) -> None:
     # MIS charged at FULL notional on BOTH sides (2026-07-28 review: the old notional/3x new-leg
     # basis mixed units against the tracker's notional-based deployed figure).
-    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("19700")))
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital shifted +20000 to keep Rs300 headroom.
+    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("39700")))
     assert verdict.verdict == "shrink"
     assert verdict.original_qty == 10
     assert verdict.approved_qty == 3          # Rs300 headroom / Rs100 full notional = 3
@@ -787,7 +792,8 @@ def test_ins_edge_matches_the_shipped_settings_value() -> None:
 
 
 def test_zero_headroom_rejects_without_shrinking(gate: RiskGate) -> None:
-    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("20000")))
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital at the new cap (was 20000).
+    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("40000")))
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
     assert any("nothing approvable" in r for r in verdict.reasons)
@@ -920,12 +926,13 @@ def test_sizing_reference_shrink_then_recheck_rejects(gate: RiskGate) -> None:
     """R1/C3 shrink-then-recheck through the WO-4 reference: the live price shrinks the capital-cap
     headroom, and ``min_viable_size`` — re-run at the SHRUNK size and the SAME live price — no
     longer clears costs, so the shrink ends in reject rather than a thinner recommendation."""
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital shifted +20000 to keep Rs300 headroom.
     action = make_action(target_price=SHRUNK_BOUNDARY_TARGET)  # exactly 2x breakeven at qty 3
-    stale = gate.evaluate(action, make_ctx(deployed_capital=Decimal("19700")))
+    stale = gate.evaluate(action, make_ctx(deployed_capital=Decimal("39700")))
     assert stale.verdict == "shrink" and stale.approved_qty == 3     # Rs300 headroom / Rs100
     assert check_of(stale, "min_viable_size").passed is True
 
-    moved = gate.evaluate(action, make_ctx(deployed_capital=Decimal("19700"),
+    moved = gate.evaluate(action, make_ctx(deployed_capital=Decimal("39700"),
                                            ltp=Decimal("100.50")))
     assert "max qty 2" in check_of(moved, "capital_cap").headroom   # Rs300 / Rs100.50 = 2, not 3
     assert check_of(moved, "min_viable_size").passed is False
@@ -1153,7 +1160,8 @@ def test_gate_verdict_json_round_trips(gate: RiskGate) -> None:
 
 
 def test_shrink_verdict_json_round_trips(gate: RiskGate) -> None:
-    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("19700")))
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital shifted +20000 to keep Rs300 headroom.
+    verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("39700")))
     restored = GateVerdict.model_validate_json(verdict.model_dump_json())
     assert restored.verdict == "shrink"
     assert restored.original_qty == 10 and restored.approved_qty == 3

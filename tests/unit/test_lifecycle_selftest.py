@@ -118,14 +118,15 @@ async def test_selftest_equity_ladder_applies_breached_rung_on_startup(conn, clo
     mode = ModeManager(conn, clock, None, calendar)
     kill = KillSwitch(conn, clock)
     latch = RiskStateLatch(conn, clock, mode)
-    # A closed platform position realizing −₹2,100 net ⇒ equity 17,900 ≤ 18,000 (−10% of 20k).
+    # O16 2026-09-07: base 40000 / caps 6-2-4
+    # A closed platform position realizing −₹4,100 net ⇒ equity 35,900 ≤ 36,000 (−10% of 40k).
     conn.execute(
         "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, state, origin,"
         " opened_at, closed_at, realized_pnl, costs) VALUES ('p1','AAA','BUY','MIS',10,'100','CLOSED',"
-        " 'platform', ?, ?, '-2100', '0')",
+        " 'platform', ?, ?, '-4100', '0')",
         (f"{clock.today().isoformat()}T09:30:00+05:30", f"{clock.today().isoformat()}T10:00:00+05:30"),
     )
-    exposure = ExposureTracker(conn, clock, Decimal("20000"))
+    exposure = ExposureTracker(conn, clock, Decimal("40000"))
 
     class _RealLimits:
         """LimitsEngine seam: parse the REAL repo limits.yaml (floor pcts) without the hash store."""
@@ -142,7 +143,7 @@ async def test_selftest_equity_ladder_applies_breached_rung_on_startup(conn, clo
     rep = await st.run(check_skew=False, include_freshness=False)
     by_name = {c.name: c for c in rep.checks}
     assert by_name["risk_counters_rebuild"].status.value == "PASS"
-    assert "day_mtm=-2100" in by_name["risk_counters_rebuild"].detail
+    assert "day_mtm=-4100" in by_name["risk_counters_rebuild"].detail
     assert by_name["equity_halt_ladder"].status.value == "WARN"
     assert "equity_floor_rung" in by_name["equity_halt_ladder"].detail
     assert mode.risk_state() == RiskState.CLOSE_ONLY       # applied, not merely reported

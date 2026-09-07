@@ -327,10 +327,12 @@ def test_risk_headroom_wired_with_exposure_and_caps(conn, clock, exposure, limit
     assert headroom["open_positions"] == {"total": 1, "mis": 1, "cnc": 0}
     assert headroom["consecutive_losses"] == 0
     assert headroom["deployed_capital"] == "1000"  # 10 * 100
-    assert headroom["caps"]["max_deployed_capital_inr"] == "20000"
-    assert headroom["caps"]["max_open_positions_total"] == 3
-    assert headroom["caps"]["max_open_positions_mis"] == 2
-    assert headroom["caps"]["consecutive_losses_max_per_session"] == 3
+    # O16 2026-09-07: base 40000 / caps 6-2-4 — read off the loaded table instead of pinning literals.
+    table = limits_engine.table()
+    assert headroom["caps"]["max_deployed_capital_inr"] == str(table.limits.capital_cap.max_deployed_capital_inr)
+    assert headroom["caps"]["max_open_positions_total"] == table.limits.max_open_positions.total
+    assert headroom["caps"]["max_open_positions_mis"] == table.limits.max_open_positions.max_mis
+    assert headroom["caps"]["consecutive_losses_max_per_session"] == table.limits.consecutive_losses.max_per_session
 
 
 def test_risk_headroom_wired_without_limits_engine_omits_caps(conn, clock, exposure) -> None:

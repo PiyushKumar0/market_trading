@@ -541,6 +541,45 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
     assert str(timedelta(seconds=ann.poll_s)) in trigger   # its own cadence, not the RSS default
 
 
+def test_holdings_reconcile_is_armed_hourly(clock, calendar) -> None:
+    """§3.6 holdings reconcile (2026-09-07): an hourly in-session tick. The cadence is the point —
+    the check answers "did the owner sell this?", which is worth asking a few times a session and
+    pointless to ask every minute."""
+    settings = load_settings()
+    sched = Scheduler(clock, calendar)
+
+    async def _resolve_news(_hs) -> None:
+        return None
+
+    async def _holdings_reconcile_tick() -> None:
+        return None
+
+    _arm_live_jobs(sched, settings, bar_builder=None, health=None,
+                   news_ingest=None, resolve_news=_resolve_news,
+                   ticker=object(), calendar=calendar, clock=clock,
+                   holdings_reconcile_tick=_holdings_reconcile_tick)
+
+    jobs = {j.id: j for j in sched._sched.get_jobs()}
+    assert "holdings_reconcile" in jobs
+    assert str(timedelta(seconds=3600)) in str(jobs["holdings_reconcile"].trigger)
+
+
+def test_holdings_reconcile_is_not_armed_without_a_broker(clock, calendar) -> None:
+    """No api_key ⇒ no KiteClient ⇒ nothing to reconcile against: the tick is simply absent (the
+    same posture as every other optional interval job)."""
+    settings = load_settings()
+    sched = Scheduler(clock, calendar)
+
+    async def _resolve_news(_hs) -> None:
+        return None
+
+    _arm_live_jobs(sched, settings, bar_builder=None, health=None,
+                   news_ingest=None, resolve_news=_resolve_news,
+                   ticker=object(), calendar=calendar, clock=clock)
+
+    assert "holdings_reconcile" not in {j.id for j in sched._sched.get_jobs()}
+
+
 def test_nse_announcements_job_is_not_armed_when_disabled(clock, calendar) -> None:
     """`enabled: false` is the owner's off switch — the poll job must not exist at all."""
     settings = load_settings()

@@ -186,6 +186,10 @@ CRITICAL_KINDS: frozenset[str] = frozenset(
     {
         MessageKind.RECOMMENDATION.value,
         MessageKind.REC_FILL_SUSPECTED.value,
+        # §3.6 holdings reconcile (2026-09-07): raised at most ONCE per position per trading day, so
+        # an expiry during an outage is not "one of twelve" — it is the whole day's only chance to
+        # ask the owner for the `/closed` the ledger has been missing for weeks.
+        MessageKind.POSITION_NOT_IN_HOLDINGS.value,
         MessageKind.LOGIN_PROMPT.value,
         MessageKind.KILL.value,
         MessageKind.WARMUP_FROZEN.value,

@@ -79,6 +79,7 @@ from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, login_prompt
 from engine.ops.health import HealthMonitor
 from engine.ops.heartbeat import HeartbeatWriter
+from engine.ops.holdings_reconcile import HoldingsReconcileJob, in_reconcile_window
 from engine.ops.jobs import (
     JOB_BACKUP,
     JOB_BHAVCOPY,
@@ -1254,6 +1255,14 @@ async def run() -> int:
         backfill_hook=backfill_hook, ticker_resume_hook=ticker_resume_hook, backup_hook=backup_hook,
     )
 
+    # --- §3.6 holdings reconcile (owner-directed 2026-09-07): the only answer to "is this tracked
+    #     position still IN the account?" until the §3.2.8 fill-side reconciler lands. Wired only when
+    #     a broker facade exists (no api_key ⇒ no holdings to read). Alert-only: it never writes state,
+    #     never touches the gate/risk/prescreen, and its failures are warnings. ---
+    holdings_reconcile = (
+        HoldingsReconcileJob(conn, kite, clock, calendar, notify) if kite is not None else None
+    )
+
     # --- §2.6 post-login RE-TRIGGER: a boot BEFORE the daily login is token-less, so the step-4/6/7
     #     broker-touching recovery no-ops and (until this fix) NOTHING re-ran it when the token arrived —
     #     the ticker never started (zero live 1m bars ever captured), warm-up stayed frozen. The
@@ -1265,6 +1274,7 @@ async def run() -> int:
         calendar=calendar, settings=settings, backfill=backfill, ticker=ticker, lifecycle=lifecycle,
         ticker_tokens=ticker_tokens, watchlist_symbols=watchlist_symbols,
         index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL, notify=notify, alert=alert,
+        holdings_reconcile=holdings_reconcile,
     )
     session.add_login_hook(post_login_recovery.run)
 
@@ -1368,6 +1378,17 @@ async def run() -> int:
             await _catchup_sweep_once(catch_up, latch, kill, clock, calendar)
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
+
+    # --- §3.6 holdings reconcile pulse (2026-09-07): hourly, in-session only. The job itself is
+    #     diagnostic and swallows its own broker failures; this wrapper only supplies the cadence and
+    #     the window, and swallows anything else so a reconcile can never take down the scheduler. ---
+    async def holdings_reconcile_tick() -> None:
+        if holdings_reconcile is None or not in_reconcile_window(clock.now(), calendar):
+            return
+        try:
+            await holdings_reconcile.run()
+        except Exception:  # noqa: BLE001 - a diagnostic must never take down the scheduler loop
+            _log.exception("holdings_reconcile_tick_failed")
 
     # --- on-demand scanner sweep (§3.2.5 addendum, owner-directed 2026-07-29): the answer to "what
     #     could I trade right now, and at what price would today's setups arm?" Runs when the trade
@@ -1712,7 +1733,10 @@ async def run() -> int:
                    ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
                    scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
                    warmup_refresh=warmup_refresh, catchup_sweep=catchup_sweep,
-                   window_sweep_tick=window_sweep_tick, forward_drain_tick=forward_drain_tick)
+                   window_sweep_tick=window_sweep_tick, forward_drain_tick=forward_drain_tick,
+                   holdings_reconcile_tick=(
+                       holdings_reconcile_tick if holdings_reconcile is not None else None
+                   ))
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -2005,7 +2029,7 @@ def _arm_live_jobs(
     news_ingest: NewsIngest, resolve_news,
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
     scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
-    window_sweep_tick=None, forward_drain_tick=None,
+    window_sweep_tick=None, forward_drain_tick=None, holdings_reconcile_tick=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -2090,6 +2114,11 @@ def _arm_live_jobs(
         # §5.2(a) — one-minute pulse; the pipeline's FORWARD_PACING_MIN cadence gates the drain.
         scheduler.add_job(forward_drain_tick, trigger=IntervalTrigger(seconds=60),
                           job_id="forward_drain_tick", guard=False)
+    if holdings_reconcile_tick is not None:
+        # §3.6 holdings reconcile (2026-09-07) — hourly; the tick self-gates on the trading day and
+        # the 09:20–15:30 window (holdings_reconcile.in_reconcile_window).
+        scheduler.add_job(holdings_reconcile_tick, trigger=IntervalTrigger(seconds=3600),
+                          job_id="holdings_reconcile", guard=False)
 
 
 # --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)
