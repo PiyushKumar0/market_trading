@@ -62,6 +62,19 @@
   7× test_risk_gate) — I committed the limits (d2a9077) without re-running the suite after the edit.
   Fixture repair delegated (Sonnet), preferring values read from the loaded LimitTable; full suite
   re-run before the evening restart (cron 18:52).
+- **Evening deploy (holdings reconcile + fixtures, commit 06b6860, full suite 2,183 re-run by me):**
+  the host slept again ~18:00 → 20:42 (zero log lines for two hours; 12 "missed by" warnings at
+  20:42:59; ticker respawn 20:47), so the 18:05 EOD jobs never ran. In-flight probe clean (0 busy
+  events) → `nssm stop` 20:49:59 → `start` → `holdings_reconcile` job scheduled 20:50:28, selftest
+  ok 20:50:34 (protected_store verified), `catch_up_complete` 20:53:08 replaying **10 missed jobs**
+  (earnings_calendar, corp_actions, filings_shp, bhavcopy, daily_bars, deals, filings_pit,
+  filings_pit_fresh, ins_crossings, filings_results — all 2026-09-07), `catchup_safety_jobs` cleared,
+  `startup_complete` 20:53:13, ticker 20:53:16, feed HEALTHY 20:53:17, post-arm jobs complete.
+  Tomorrow readiness: settings validated with `universe_max_watchlist=300` (applies at the 08:30 build;
+  expect a longer first warm-up while ~100 newly watched names backfill); holdings reconcile runs at the
+  first post-login recovery. **Ops note for the owner:** the PC slept Sunday 21:00→Monday 10:12 and
+  again Monday 18:00→20:42; each sleep skips the scheduled jobs (replayed at the next boot/sweep) and,
+  on a trading morning, costs the open — a power-plan/wake-timer fix, not an engine one.
 
 ## 2026-09-06 (01:2x–02:xx, owner question "what is pending for the next phase?") — G2 re-measured; a false "lost session" finding made and RETRACTED
 
