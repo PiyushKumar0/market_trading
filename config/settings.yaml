@@ -79,7 +79,7 @@ data:
   # ex-date open Rs 2358 (no raw jump); daily agrees (2332). So the backfill / bar-stitching job needs
   # NO re-adjustment of Kite minute history across ex-dates (A11). Recorded also in plan section 14 Q10.
   minute_candles_adjusted: true
-  universe_max_watchlist: 200             # active intraday watchlist cap [tunable] (A3 not the binding constraint)
+  universe_max_watchlist: 300            # active intraday watchlist cap [tunable] (A3 not the binding constraint)
                                           # 50 -> 100 owner-directed 2026-08-04 (BPCL, liquidity rank 96,
                                           # was structurally invisible); 100 -> 200 owner-directed 2026-08-20
                                           # (origination review: cap >= eligible set, watchlist_cap exclusion
@@ -90,7 +90,10 @@ data:
                                           # it is a separate, measured step (tick volume, bar building and
                                           # per-minute feature snapshots all scale with it). First boot after a
                                           # raise backfills 1m history for the newly watched symbols (A2
-                                          # throttled - longer warm-up that morning)
+                                          # throttled - longer warm-up that morning). 200 -> 300 owner-agreed
+                                          # 2026-09-07: first step of the staged raise toward the NIFTY 500
+                                          # eligible set; measure stalls / late ticks / snapshot time /
+                                          # warm-up on the next session before stepping to 400 and 480.
   min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
   backfill_daily_years: 2
   backfill_minute_years: 1

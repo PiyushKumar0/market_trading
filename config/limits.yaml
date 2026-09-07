@@ -10,33 +10,34 @@
 # `analyst_confidence_min` is owner-only (dashboard-suggested-then-owner-approved, §6.3/§5.5).
 # Everything else is non-learnable (R4).
 #
-# "MTM basis" = realized + open mark-to-market. Platform equity = ₹20,000 + Σ platform-attributed
-# realized net P&L − costs + open platform-position MTM (§7.1 preamble).
+# "MTM basis" = realized + open mark-to-market. Platform equity = ₹40,000 + Σ platform-attributed
+# realized net P&L − costs + open platform-position MTM (§7.1 preamble). Base ₹20,000 → ₹40,000 and
+# max_open_positions 3/2/2 → 6/2/4: owner-directed 2026-09-07 (O16), re-signed with the engine stopped.
 
 schema_version: 1
 
 # --- O1: the immutable capital anchor. Changeable ONLY via owner-confirmed protected-config flow. ---
-capital_base_inr: 20000          # ₹20,000 hard cap (O1); FLOOR anchor for all percentage halts
+capital_base_inr: 40000          # ₹40,000 hard cap (O1; 20,000 → 40,000 owner-directed 2026-09-07, O16); FLOOR anchor for all percentage halts
 
 limits:
   capital_cap:
-    # Deployed CAPITAL (margin for MIS, cash/notional for CNC) ≤ ₹20,000. Bounds deployed cash, NOT
-    # economic exposure (at 3× MIS, long exposure can reach ~₹40–60k; bounded by max_leverage). (O1)
-    max_deployed_capital_inr: 20000
+    # Deployed CAPITAL (margin for MIS, cash/notional for CNC) ≤ ₹40,000. Bounds deployed cash, NOT
+    # economic exposure (at 3× MIS, long exposure can reach ~₹80–120k; bounded by max_leverage). (O1)
+    max_deployed_capital_inr: 40000  # 20,000 → 40,000 owner-directed 2026-09-07 (O16)
     on_breach: reject_entry
 
   per_trade_risk:
-    intraday_pct: 1.0            # risk-at-stop ≤ 1.0% (₹200) intraday
-    swing_position_pct: 2.0      # ≤ 2.0% (₹400) swing/position — owner-confirmed 2026-07-07 (plan §7.1 aligned)
+    intraday_pct: 1.0            # risk-at-stop ≤ 1.0% (₹400 at the ₹40,000 base) intraday
+    swing_position_pct: 2.0      # ≤ 2.0% (₹800) swing/position — owner-confirmed 2026-07-07 (plan §7.1 aligned)
     overnight_gap_mult: 2.5      # overnight risk = qty × max(2.5×stop_distance, instrument daily band %) (R2)
     on_breach: shrink_else_reject
 
   daily_loss_soft:
-    day_mtm_pct: -5.0            # ≤ −5% (−₹1000) ⇒ FREEZE: no new entries rest of day, manage existing
+    day_mtm_pct: -5.0            # ≤ −5% (−₹2,000) ⇒ FREEZE: no new entries rest of day, manage existing
     on_breach: risk_state_frozen
 
   daily_loss_hard:
-    day_mtm_pct: -7.0            # ≤ −7% (−₹1,400) ⇒ flatten MIS now, keep CNC protected, CLOSE_ONLY, AUTO→RECOMMEND
+    day_mtm_pct: -7.0            # ≤ −7% (−₹2,800) ⇒ flatten MIS now, keep CNC protected, CLOSE_ONLY, AUTO→RECOMMEND
     on_breach: forced_downgrade
 
   weekly_drawdown:
@@ -45,11 +46,11 @@ limits:
     on_breach: forced_downgrade
 
   equity_floor_rung:
-    equity_pct_of_base: -10.0   # equity ≤ ₹18,000 ⇒ GO FLAT (exit ALL) + CLOSE_ONLY + AUTO→RECOMMEND; owner re-arm
+    equity_pct_of_base: -10.0   # equity ≤ ₹36,000 ⇒ GO FLAT (exit ALL) + CLOSE_ONLY + AUTO→RECOMMEND; owner re-arm
     on_breach: forced_exit_close_only
 
   cumulative_floor:
-    equity_pct_of_base: -15.0   # equity < ₹17,000 ⇒ kill sequence (§7.2) AND mode forced OFF; owner reset only
+    equity_pct_of_base: -15.0   # equity < ₹34,000 ⇒ kill sequence (§7.2) AND mode forced OFF; owner reset only
     on_breach: kill_forced_off
 
   consecutive_losses:
@@ -61,14 +62,17 @@ limits:
     on_breach: reject_entry
 
   max_open_positions:
-    total: 3
+    # O16 (owner-directed 2026-09-07): 3/2/2 → 6/2/4 ("raise the cap to 4"; total = MIS + CNC so each
+    # leg's cap is usable). Positions with an exit recommendation delivered within 3 days are EXITING
+    # and do not count here or in per_sector_exposure (gate.py `_exiting_symbols`; plan §7.1 row).
+    total: 6
     max_mis: 2
-    max_cnc: 2
+    max_cnc: 4
     on_breach: reject_entry
 
   per_stock_exposure:
     max_positions_per_symbol: 1
-    cnc_notional_inr: 8000      # ≤ ₹8,000/symbol (40%) (C4)
+    cnc_notional_inr: 8000      # ≤ ₹8,000/symbol (20% of the ₹40,000 base; deliberately unchanged 2026-09-07) (C4)
     on_breach: reject_or_shrink
 
   per_sector_exposure:
