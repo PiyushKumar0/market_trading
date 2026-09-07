@@ -29,8 +29,21 @@
   40000" → `capital_base_inr` + `max_deployed_capital_inr` 40,000. (b)+(c) are protected-store edits:
   applied tonight with the engine STOPPED (the gate re-verifies the file hash on reload — a live edit
   would trip IntegrityError), then `seed_protected_config.py --reseed`, then restart. Plan §7.1 row +
-  O16 paragraph written. Evening cron 15:41 also carries the holdings-reconcile build and the
-  watchlist cap 300.
+  O16 paragraph written.
+- **Owner: "update the engine right now and restart it."** Re-observed 12:55:02 (window closed 12:50,
+  last analyst call 12:50:05, nothing in flight) → `nssm stop` 12:55:12 → limits.yaml edited (base
+  40,000, deployed cap 40,000, caps 6/2/4, derived ₹ comments) + settings `universe_max_watchlist`
+  200 → 300 → both validated through the engine's loaders (`LimitTable` typed parse ok) →
+  `seed_protected_config.py --yes --reseed` (limits.yaml sig 8a9f762e…) → `start` 12:56:50 →
+  selftest 12:57:23 all green incl. `protected_store:limits.yaml` and `equity_halt_ladder (equity
+  40000.00)` → `catch_up_complete` 12:58:31, `startup_complete` 12:58:35, ticker 12:58:37, feed
+  HEALTHY 12:59:33 (one warm-up store stall), risk NORMAL (no freeze on this boot). Commits 5e4416a
+  (gate rule) + d2a9077 (limits/settings). Note: `risk_counters_rebuild` shows day_baseline 19,339.45
+  vs equity 40,000 → today's `day_mtm` reads +₹20,660 (the base jump, not P&L); harmless to the
+  negative-only halt rungs, resets with tomorrow's baseline — watch the nightly review's P&L line.
+  The owner window (10:30–12:50) is closed, so no entry can originate today unless the owner reopens
+  it (`/trade_window`, CNC entries allowed until 15:00). Evening cron now carries only the
+  holdings-reconcile build + restart.
 
 ## 2026-09-06 (01:2x–02:xx, owner question "what is pending for the next phase?") — G2 re-measured; a false "lost session" finding made and RETRACTED
 
