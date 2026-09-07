@@ -1,5 +1,17 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-08 (00:15–00:2x, owner: "can't the new universe be built now?") — offline build + restart
+
+- `scripts/build_universe.py --date 2026-09-08` with the engine stopped (00:16:16 → build 00:16:59 →
+  start): **NIFTY 500 (499) → eligible 481, watchlist 300, mis_candidates 208, extended 427, source
+  download, degraded=false.** Boot: `selftest_complete` ok 00:17:40, `catch_up_complete` 00:17:41,
+  `startup_complete` 00:17:44, ticker spawned/handshake with **302 tokens** (300 + NIFTY 50 + VIX) —
+  the 300-name watchlist is subscribed overnight, so the 08:30 build (idempotent replace-write with
+  the morning's fresh lists) should be a no-change and the open needs no resubscribe/backfill of new
+  names. Miss on my side: the in-flight probe (90 s of kite/compaction events) did not see the 22:30
+  `tick_compact` still running at 00:16 — the stop cancelled it (job exception at 00:16:17); the
+  post-arm/catch-up path re-runs it overnight (recovery is idempotent per partition). Verified below.
+
 ## 2026-09-07 (10:4x–13:xx) — status; swing "missing link" investigation; O16 (exiting positions off the buy caps, caps 6/2/4, base ₹40,000)
 
 - **Status 10:42:** PC slept Sun 21:00 → Mon 10:12 (log gap; ticker silence 47,521 s on wake), owner
