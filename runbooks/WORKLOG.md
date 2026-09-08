@@ -1,5 +1,38 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-09 (00:0x, owner: "trade for Monday has been done — what is the status now?") — G2 re-measured; ledger vs holdings discrepancy
+
+- **G2 collector (2026-07-29..09-09, 31 sessions):** digest-before-open 19/31 = **61.3%** (falling —
+  09-07 and 09-08 both booted after 10:00 because the PC slept: Sun 21:00→Mon 10:12, Mon 18:00→20:42,
+  Mon 23:0x→Tue 10:08, Tue 16:08→20:03, Tue 23:08→~00:00); schema-valid 99.9% (MET); delivered in time
+  57/57 (MET); **owner-executed taken=2 closed=0 (NOT MET — no `/taken` or `/closed` since 08-27; if a
+  trade was executed on Monday it is not in the ledger)**; sessions with ≥1 rec **10/31** (08-26→09-08,
+  ten consecutive trading days; 20 needed ⇒ ~09-22 at the earliest); zero API orders (MET); budget
+  $122.37/$550 MTD (MET); watchlist-precision + payload samples still unrecorded.
+- **Ledger vs holdings:** the 09-07 holdings reconcile (06b6860) reported on 09-08 10:11 and 11:08
+  **HDFCAMC tracked 3 / held 0 and HINDZINC tracked 7 / held 0** — both positions are gone from the
+  Kite holdings but still OPEN in `positions`, so the engine issued 8 exit recs for them on 09-07 and 7
+  on 09-08 (all expired), the two CNC slots stay charged, and their outcomes never reached the ledger.
+  They need `/closed <rec_id|ticker> <price>` (the sale price) — that also produces the first two
+  captured outcomes for G2 criterion 4.
+- **O16 first day (09-08):** verdicts 8 approve + 1 reject; the ONE entry recommendation of the two
+  sessions — **JINDALSTEL BUY qty 5, zone 1149.80–1172.80, stop 1090.50, ₹5,749 notional (`ins`
+  leg, gate approve, 10:27, valid to 15:30) — expired unactioned.** Monday: 0 entry recs (window
+  10:30–12:50 after a 10:13 boot; 4+4 exits). NIFTY 500 builds ran on both boots (09-07: 480 eligible
+  / 200 watchlist; 09-08: 481 / 300 after the O16 watchlist raise); hi52 `unadjusted_vetoes` 69 on
+  both days (the veto is live and backed).
+- **store_stalled paged for real on its first armed day (d2c5c8c):** 09-08 10:14:57 (ping unanswered
+  55 s, consecutive=2, during the in-session boot's ~300-name warm-up backfill; recovered 10:15:24
+  after 100 s) and 11:49:00 (74 s, mid-session, no boot in progress; recovered 11:49:xx). Both
+  delivered, both recovered once. The 11:48 one is a genuine mid-session stall of the WO-24 class —
+  worth a look at what held the store lock (features/compaction?) before it repeats.
+- **All 09-08 EOD jobs succeeded** (bhavcopy 20:08 … nightly_review 21:02, tick_compact 22:38) after
+  the 20:03 wake. Branch phase2 is in sync with origin (pushed by the owner/peer); the 09-07/09-08
+  sessions shipped O16 (5e4416a, d2a9077), holdings reconcile (06b6860), dashboard day folds (78827e3).
+- **Pending, in priority order:** (1) keep the PC awake / register the wake task — every late boot
+  costs the open and the digest criterion; (2) `/closed` the two phantom positions; (3) record any
+  executed rec with `/taken`; (4) the owner-manual samples; (5) Phase 3 build (unchanged: 0 files).
+
 ## 2026-09-08 (11:19–11:4x, owner: "date separation on recommendations / decision log; swap notifications and news") — dashboard day folds + panel order
 
 - **Owner-reported:** the recommendations card lists every delivery the route returns (latest 100)
