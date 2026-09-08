@@ -1,5 +1,30 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-08 (11:19–11:4x, owner: "date separation on recommendations / decision log; swap notifications and news") — dashboard day folds + panel order
+
+- **Owner-reported:** the recommendations card lists every delivery the route returns (latest 100)
+  with only a time-of-day, so cards from different sessions were indistinguishable and the list grows
+  without bound; the decision log has the same problem; notifications should sit above news/catalyst.
+- **Change (dashboard only, no engine code):** `ui.tsx` gained `istDay` / `todayIst` (Intl,
+  `Asia/Kolkata` — the browser's tz is irrelevant), `groupByDay` (newest day first, undated bucket
+  last, server order kept inside a day), `useDayFolds` (today open, earlier days folded; click
+  overrides are session-local; defaults re-derive each render so the midnight rollover moves the open
+  fold on the next poll) and the `DayFold` header button. Recommendations and decision log render one
+  fold per day — header = date · weekday · `today` chip · count, aside "N today · M shown", a
+  "no … today" line when today is empty; the decision log keeps a single sticky column header (one
+  `<tbody>` per day). `App.tsx`: NotificationsPanel now precedes NewsPanel (reverses 2026-08-21).
+- **Verified:** `npm run build` clean (tsc + vite, dist 11:28). Page driven in Chrome against the new
+  dev-only `dashboard/fixture_server.mjs` (dist + canned routes across today / −1 / −3 / −4 days, a
+  UTC-stamped row, an undated row): today's fold open in both ledgers, earlier days folded
+  newest-first, undated last; the `…T19:30:00Z` row folded under the correct IST day; the
+  delivered_at-null row folded under its payload `created_at` day; clicking 2026-09-07 expanded it and
+  the fold survived four 10 s polls (11:29:51 → 11:31:21); panel order … Live events → Notifications
+  → News/catalyst; console clean apart from the fixture's missing `/ws/live`. `NO_TODAY=1` run
+  (11:33): asides "0 today · 7 shown" / "0 today · 5 shown", "no recommendations today" / "no
+  decisions today" lines, every day folded, zero cards / rows rendered.
+- **Ops:** static rebuild only — the engine serves `dashboard/dist` from disk, so the change shows on
+  browser reload; no restart, engine untouched mid-session (window open).
+
 ## 2026-09-08 (00:15–00:2x, owner: "can't the new universe be built now?") — offline build + restart
 
 - `scripts/build_universe.py --date 2026-09-08` with the engine stopped (00:16:16 → build 00:16:59 →

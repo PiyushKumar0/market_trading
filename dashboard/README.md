@@ -37,8 +37,10 @@ the engine's 15 s `ping` keepalive is filtered out.
 **Panels.** Status header (mode / routing / risk_state, trade window, degrade tier, KILLED banner) ·
 Recommendations (thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action
 chip) · Positions · Decision log (proposal → verdict → cited rules) · Risk headroom · Agent budget ·
-Trade-window editor · Live events · News/catalyst watchlist (originating vs context + digest
-freshness).
+Trade-window editor · Live events · Notifications (the day's Telegram transcript) · News/catalyst
+watchlist (originating vs context + digest freshness). The two ledgers — recommendations and the
+decision log — are folded by IST day (`ui.tsx` `useDayFolds`): today's fold starts open, earlier
+days start folded and open on click (owner-directed 2026-09-08).
 
 **Owner writes** are limited to `POST /mode` (OFF / RECOMMEND) and `POST /config/trade_window`.
 Deliberately absent, and not an oversight: →AUTO and kill-switch reset are owner TWO-STEP
@@ -56,6 +58,14 @@ localStorage.setItem('mt_api_base', 'http://127.0.0.1:8400')
 
 Unset it (or leave it unset) and the page talks to its own origin — which is what happens when the
 engine serves `dist/`.
+
+## Fixture preview (no engine)
+
+`node fixture_server.mjs` (after `npm run build`) serves `dist/` on http://127.0.0.1:8499/ with canned
+rows for every read route, spread across several IST days — a UTC-stamped row and an undated one
+included — so the day folds and the panel order can be checked in a browser. Any token passes the
+gate; there is no `/ws/live`, so the events feed reads "closed". `NO_TODAY=1` drops today's ledger
+rows to show the "no … today" state. Dev-only: nothing from it is shipped.
 
 ## Tests
 

@@ -119,10 +119,10 @@ export default function App() {
         <BudgetPanel data={snapshot.budget} />
         <TradeWindowForm data={snapshot.tradeWindow} onSubmit={setTradeWindow} />
         <EventsPanel events={events} conn={conn} />
-        <NewsPanel data={snapshot.watchlist} />
-        {/* Last panel on purpose (owner-directed 2026-08-21: "at the bottom, below news/catalyst
-            watchlist") — the day's transcript is reference, read after the live state above it. */}
+        {/* Owner-directed 2026-09-08: notifications ABOVE the news/catalyst watchlist — reverses the
+            2026-08-21 order ("at the bottom, below news/catalyst watchlist"). */}
         <NotificationsPanel {...notifications} />
+        <NewsPanel data={snapshot.watchlist} />
       </div>
     </div>
   )

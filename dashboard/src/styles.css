@@ -288,6 +288,39 @@ ul.checklist {
   color: var(--fg-dim);
 }
 
+/* Day folds — the recommendations and decision-log ledgers split by IST day: today's fold starts
+   open, earlier days stay folded until clicked. The header is a real <button> so it folds from the
+   keyboard too. */
+button.day {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 8px;
+  margin: 0 0 6px;
+  background: var(--panel-2);
+}
+
+button.day .caret {
+  color: var(--muted);
+  width: 1em;
+}
+
+.day-group + .day-group {
+  margin-top: 8px;
+}
+
+/* Inside the decision-log table the fold header is a full-width row of its own. */
+tr.day td {
+  padding: 6px 0 4px;
+  border-bottom: none;
+}
+
+tr.day button.day {
+  margin: 0;
+}
+
 .events {
   font-size: 12px;
 }

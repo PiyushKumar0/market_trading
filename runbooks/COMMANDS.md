@@ -111,6 +111,9 @@ Coverage checks: see scratch patterns in WORKLOG entries (bars/filings min/max/c
 ```powershell
 # Dashboard build (served by the engine at / from dashboard/dist):
 cd dashboard; npm install; npm run build; cd ..
+# Dashboard preview WITHOUT the engine (dev only, 2026-09-08): dist + canned rows across several IST
+# days at http://127.0.0.1:8499/, any token passes; $env:NO_TODAY='1' drops today's ledger rows.
+cd dashboard; node fixture_server.mjs; cd ..
 # Phase-2 test slices:
 uv run pytest tests/unit/test_risk_gate.py tests/unit/test_reco_pipeline.py -q     # gate + pipeline
 uv run pytest tests/unit/test_budget_governor.py tests/unit/test_agent_harness.py -q  # LLM plumbing
