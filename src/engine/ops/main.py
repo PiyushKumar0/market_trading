@@ -949,8 +949,12 @@ async def run() -> int:
     async def score_news(*, force: bool = False) -> None:
         if scoring_job is None:
             return
-        async with news_chain_lock:
-            await scoring_job.run_batch(force=force)
+        # The batch takes the lock itself (see above) — nothing here may hold it: asyncio.Lock is
+        # not reentrant, so a wrapping `async with` would now deadlock on the first store hop.
+        # Both callers of this closure — job_news_chain's forced pre-open batch and the 300 s
+        # news_scoring_tick — are separate scheduler jobs and can overlap; run_batch single-flights
+        # itself on a lock it owns (the waiter re-reads an emptied queue), so no guard is needed here.
+        await scoring_job.run_batch(force=force, lock=news_chain_lock)
 
     async def job_news_chain() -> None:
         # §4.4 job 10 startup/catch-up: backfill → cluster → resolve (never entry-blocking, §2.7),

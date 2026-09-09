@@ -35,11 +35,43 @@ Spec ambiguities resolved here (documented for the integrator):
   inputs the plan wants from this seam.
 - A missing ``news_analyst`` entry in the roster is a construction-time error, not a runtime skip: a
   parked agent means the job should not have been wired at all.
+
+**Chain-lock discipline (2026-09-09, §2.6 hardening ii).** The caller may hand ``run_batch`` the
+``news_chain_lock`` that serialises the ``news_clusters`` read-modify-write against the per-feed
+polls. The lock is held for the STORE HOPS ONLY — the initial queue read and each chunk's write-back
+— never across the model call: held around the whole batch it also spanned one LLM await per chunk,
+and the polls (whose resolve deadline covers lock ACQUISITION) queued behind it (14
+``news_resolve_timeout`` on 2026-09-07, nine within one second). Shortening the hold reintroduces the
+interleaving the lock existed to prevent, so the write-back is CONDITIONAL: under the same hold the
+FULL unscored rows are re-read and each score is applied to the CURRENT row, never to the pre-LLM
+snapshot. Since the upsert overwrites every non-key column, that is what makes a poll merge landing
+during the model call (``source_domains``, ``first_seen``/``last_seen``, ``representative``,
+``symbols``/``sectors``/``themes``) SURVIVE the write-back rather than be silently reverted; an id
+that left the queue meanwhile — merged away, or scored by another batch — is skipped rather than
+re-created as a zombie row / clobbered with an older score (drops are logged). ``lock=None`` keeps
+the pre-change behaviour for callers that serialise themselves.
+
+**Accepted residual.** Chunks 2..N are still prompted from the BATCH's initial snapshot (the queue is
+read once, before the first chunk), so a poll merge that lands mid-batch — after its chunk's context
+was already built, before that chunk's write-back — yields a score computed without the merged
+headline. This is not a regression from the 2026-09-09 change: the whole-batch-hold predecessor had
+the identical property (a merge landing after the model saw the prompt is never re-scored; only a
+merge landing before write-back can be reverted, and CONDITIONAL write-back is precisely what stops
+that). The write-back's stale-skip count (surfaced as ``stale`` on ``news_scoring_batch`` and folded
+into ``remaining`` on ``news_scoring_chunk_failed``) makes this interleaving visible rather than
+silently absorbed into an over-counted queue.
+
+The batch is also SINGLE-FLIGHTED on a lock the job owns (``_run_lock``): the chain's forced pre-open
+batch and the 300 s scoring tick are distinct scheduler jobs, and with the chain lock no longer
+spanning the model call they would otherwise read the same queue and bill the same clusters twice. A
+queued batch waits rather than skipping — see :meth:`NewsScoringJob.run_batch`.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import datetime, time, timedelta
 from typing import Any
 
@@ -132,44 +164,74 @@ class NewsScoringJob:
         self._governor = governor
         self._clock = clock
         self._calendar = calendar
+        # SINGLE-FLIGHT (2026-09-09): see run_batch. Owned by the job, not the caller — the two
+        # callers are different scheduler jobs and share nothing else.
+        self._run_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ run
-    async def run_batch(self, *, force: bool = False) -> ScoringResult:
+    async def run_batch(
+        self, *, force: bool = False, lock: asyncio.Lock | None = None
+    ) -> ScoringResult:
         """Score the queued clusters (§5.4). ``force`` is the PRE-OPEN batch: it ignores both the
-        time gate and the ≥8/30-min trigger and scores everything unscored (§5.4 pre-open rule)."""
+        time gate and the ≥8/30-min trigger and scores everything unscored (§5.4 pre-open rule).
+
+        ``lock`` is the caller's news-chain lock (2026-09-09): taken for the queue read and for each
+        chunk's write-back, NEVER across the model call — see the module docstring. ``None`` = the
+        pre-change path: one queue read, unconditional write-back.
+
+        The whole body runs under the job's own ``_run_lock`` (2026-09-09): the chain's forced
+        pre-open batch and the 300 s ``scoring_tick`` are DISTINCT scheduler jobs, and now that the
+        chain lock is released across the model call nothing else keeps them apart — both would read
+        the same unscored queue and send the same clusters to the model twice. It WAITS rather than
+        skips: a batch queued behind another re-reads a queue the first one emptied and returns in a
+        single store read, whereas skipping would silently drop the tick's legitimate work whenever a
+        pre-open batch happened to be in flight (and a skip is indistinguishable from a scoring gap
+        downstream). Held OUTSIDE ``lock``, never inside: the chain lock's holders never take this
+        one, so the nesting order cannot cycle."""
+        async with self._run_lock:
+            return await self._run_batch(force=force, lock=lock)
+
+    async def _run_batch(self, *, force: bool, lock: asyncio.Lock | None) -> ScoringResult:
+        """One batch, already single-flighted by :meth:`run_batch`."""
         now = self._clock.now()
         if not force and not self._in_scoring_window(now):
             return ScoringResult(skipped_reason=SKIP_OUTSIDE_WINDOWS)
 
-        rows = await self._store.arun(self._store.get_news_clusters, scored=False)
-        clusters = [NewsCluster.from_row(row) for row in rows]
-        if not force and not self._batch_ready(clusters, now):
-            return ScoringResult(skipped_reason=SKIP_BATCH_THRESHOLD)
-        if not clusters:
-            return ScoringResult()      # empty queue: no governor decision, no SDK call, nothing to say
+        # One hold for the whole read side (queue + theme vocabulary + the gates that read them):
+        # everything in here is a store read or pure CPU, so the hold stays short.
+        async with _held(lock):
+            rows = await self._store.arun(self._store.get_news_clusters, scored=False)
+            clusters = [NewsCluster.from_row(row) for row in rows]
+            if not force and not self._batch_ready(clusters, now):
+                return ScoringResult(skipped_reason=SKIP_BATCH_THRESHOLD)
+            if not clusters:
+                return ScoringResult()  # empty queue: no governor decision, no SDK call, nothing to say
 
-        decision = self._governor.can_invoke(news_analyst.AGENT_ID, CALL_CLASS)
-        if not decision.allowed:
-            # Fail to ZERO (§2.7): the clusters stay unscored, so the digest excludes them and `cat`
-            # originates nothing. No alert here — CATALYST_* belongs to the digest.
-            _log.warning(
-                "news_scoring_blocked",
-                queued=len(clusters),
-                tier=decision.tier.value,
-                reason=decision.reason,
-            )
-            return ScoringResult(skipped_reason=SKIP_GOVERNOR)
+            decision = self._governor.can_invoke(news_analyst.AGENT_ID, CALL_CLASS)
+            if not decision.allowed:
+                # Fail to ZERO (§2.7): the clusters stay unscored, so the digest excludes them and
+                # `cat` originates nothing. No alert here — CATALYST_* belongs to the digest.
+                _log.warning(
+                    "news_scoring_blocked",
+                    queued=len(clusters),
+                    tier=decision.tier.value,
+                    reason=decision.reason,
+                )
+                return ScoringResult(skipped_reason=SKIP_GOVERNOR)
 
-        theme_vocabulary = [
-            row["theme"] for row in await self._store.arun(self._store.get_theme_map)
-        ]
+            theme_vocabulary = [
+                row["theme"] for row in await self._store.arun(self._store.get_theme_map)
+            ]
 
         scored = 0
         dropped: list[str] = []
+        stale_total = 0
         for chunk in _chunks(clusters, news_analyst.MAX_CLUSTERS_PER_CALL):
             context = self._assembler.for_news_batch(
                 [_prompt_row(c) for c in chunk], theme_vocabulary
             )
+            # OUTSIDE the lock (2026-09-09): one await per chunk, and the per-feed polls' resolve
+            # deadline covers lock acquisition — see the module docstring's 09-07 timeouts.
             result = await self._harness.run_single_shot(
                 self._def,
                 context,
@@ -179,24 +241,30 @@ class NewsScoringJob:
             )
             if not result.ok:
                 # Stop at the first failed chunk: the remaining clusters stay queued for the next
-                # cadence rather than being re-sent inside a run that is already failing (D7).
+                # cadence rather than being re-sent inside a run that is already failing (D7). Stale
+                # ids (merged/rescored away at an earlier chunk's write-back) are subtracted too: they
+                # already left the queue, so counting them as still-queued overstates this log's number.
                 _log.warning(
                     "news_scoring_chunk_failed",
                     reason=result.reason,
                     call_id=result.call_id,
                     scored_so_far=scored,
-                    remaining=len(clusters) - scored - len(dropped),
+                    remaining=len(clusters) - scored - len(dropped) - stale_total,
                 )
                 break
             scores, chunk_dropped = result.payload
             dropped.extend(chunk_dropped)
-            scored += await self._write_back(chunk, scores)
+            async with _held(lock):
+                written, stale = await self._write_back(chunk, scores, conditional=lock is not None)
+                scored += written
+                stale_total += stale
 
         _log.info(
             "news_scoring_batch",
             queued=len(clusters),
             scored=scored,
             dropped=len(dropped),
+            stale=stale_total,
             force=force,
             model=self._def.model,
         )
@@ -221,18 +289,45 @@ class NewsScoringJob:
 
     # ------------------------------------------------------------------ write-back (§3.2.4 purity)
     async def _write_back(
-        self, chunk: Sequence[NewsCluster], scores: Sequence[ClusterScore]
-    ) -> int:
-        """Persist one chunk's scores, matched by ``cluster_id``. Returns the rows written."""
-        by_id = {c.cluster_id: c for c in chunk}
+        self, chunk: Sequence[NewsCluster], scores: Sequence[ClusterScore], *, conditional: bool
+    ) -> tuple[int, int]:
+        """Persist one chunk's scores, matched by ``cluster_id``. Returns ``(written, stale)``: the
+        rows written and how many sent ids had already left the queue by write-back time (merged away
+        or scored by a rival batch) — the caller accumulates ``stale`` so its logs don't count an id
+        that is no longer queued as still-remaining (see ``_run_batch``'s ``stale_total``).
+
+        Called under the chain lock when the caller passed one; ``conditional`` then re-reads the
+        FULL unscored rows under that SAME hold (2026-09-09) and, for each id we actually sent,
+        applies the step-4 score columns onto the CURRENT cluster — never onto the pre-LLM snapshot.
+        Two things ride on that: an id no longer in the queue (a poll merged it away, or another
+        batch scored it) is skipped rather than resurrected as a zombie row / clobbered with an older
+        score, and — because the upsert overwrites every non-key column — a merge that landed during
+        the model call (``source_domains``, ``first_seen``/``last_seen``, ``representative``,
+        ``symbols``/``sectors``/``themes``) SURVIVES instead of being reverted. The chunk snapshot is
+        kept only as the "this id was sent" membership test. Volumes are tiny; the extra read is free.
+        """
+        sent = {c.cluster_id: c for c in chunk}
+        live: dict[str, NewsCluster] | None = None
+        if conditional:
+            live = {
+                row["cluster_id"]: NewsCluster.from_row(row)
+                for row in await self._store.arun(self._store.get_news_clusters, scored=False)
+            }
         now = self._clock.now()
         rows: list[dict[str, Any]] = []
+        stale: list[str] = []
         for score in scores:
-            cluster = by_id.get(score.cluster_id)
-            if cluster is None:
+            if score.cluster_id not in sent:
                 # A cluster_id we did not send: nothing to write it onto, and inventing a row would
                 # let the model create a cluster. Ignored, but never silently.
                 _log.warning("news_score_unknown_cluster", cluster_id=score.cluster_id)
+                continue
+            # The row the score is applied to is the FRESH one when we re-read (the snapshot only
+            # ever answers "did we send this id"); everything below — the resolve input, the symbol
+            # union, the sector/theme intersection — therefore reads the CURRENT step-2/3 columns.
+            cluster = sent[score.cluster_id] if live is None else live.get(score.cluster_id)
+            if cluster is None:
+                stale.append(score.cluster_id)
                 continue
             resolved = self._resolver.resolve(cluster, extra_texts=score.entities)
             await self._log_unmatched(cluster, score, resolved)
@@ -256,9 +351,12 @@ class NewsScoringJob:
                     }
                 ).to_row()
             )
+        if stale:
+            # Once per chunk, with the ids: a silent drop here would look like a scoring gap.
+            _log.warning("news_score_writeback_dropped", count=len(stale), cluster_ids=stale)
         if rows:
             await self._store.aupsert_news_clusters(rows)
-        return len(rows)
+        return len(rows), len(stale)
 
     async def _log_unmatched(
         self, cluster: NewsCluster, score: ClusterScore, resolved: Any
@@ -280,6 +378,16 @@ class NewsScoringJob:
                 cluster_id=cluster.cluster_id,
                 candidate_symbols=list(entry.candidate_symbols),
             )
+
+
+def _held(lock: asyncio.Lock | None) -> AbstractAsyncContextManager[Any]:
+    """``async with`` the chain lock when the caller passed one, a no-op otherwise (2026-09-09).
+
+    ``contextlib.nullcontext`` is an async context manager since 3.10 (verified on this 3.12.13
+    interpreter), so the two arms share one ``async with`` and the lock-free path stays allocation-
+    cheap. The lock is NOT reentrant: nothing inside a hold may take it again.
+    """
+    return nullcontext() if lock is None else lock
 
 
 def _chunks(clusters: Sequence[NewsCluster], size: int) -> list[Sequence[NewsCluster]]:

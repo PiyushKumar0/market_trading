@@ -9,6 +9,7 @@ is only meaningfully tested against the real ambiguity rules (§2.7 step 3).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import date, datetime, timedelta
@@ -159,9 +160,11 @@ def make_job(store, conn, resolver, scoring_clock):
     calendar = NSECalendar(CAL_DIR, scoring_clock, strict=False)
     assembler = ContextAssembler(store, conn, scoring_clock, calendar)
 
-    def _make(harness, governor=None) -> NewsScoringJob:
+    def _make(harness, governor=None, store_override=None) -> NewsScoringJob:
+        # ``store_override`` (2026-09-09) lets the lock tests wrap the real store in a probe; the
+        # assembler keeps the real one — only the job's own hops are under test.
         return NewsScoringJob(
-            store,
+            store_override if store_override is not None else store,
             resolver,
             assembler,
             harness,
@@ -481,3 +484,271 @@ async def test_scored_at_and_scorer_model_are_platform_stamped(store, make_job, 
     assert row["novelty"] == pytest.approx(0.25)
     assert row["event_type"] == "order_win"
     assert row["untrusted"] is True                  # §2.4: every LLM score stays untrusted evidence
+
+
+# -------------------------------------------------------- chain-lock hold (§2.6 hardening ii, 09-09)
+# The 2026-07-28 news_chain_lock serialises the news_clusters read-modify-write. Held around the
+# WHOLE batch it also spanned one LLM await per chunk, so the per-feed polls (whose resolve deadline
+# covers lock ACQUISITION) queued behind it — 14 news_resolve_timeout on 2026-09-07, nine inside one
+# second. These tests pin the new discipline: store hops under the lock, model calls outside it.
+class LockProbeStore:
+    """Delegates to the real store, recording ``lock.locked()`` at every store hop the job makes."""
+
+    def __init__(self, inner, lock) -> None:
+        self._inner = inner
+        self._lock = lock
+        self.reads: list[bool] = []                  # locked-state at each get_news_clusters hop
+        self.writes: list[bool] = []                 # ... at each write-back hop
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def arun(self, fn, /, *args, **kwargs):
+        name = getattr(fn, "__name__", "")
+        if name == "get_news_clusters":
+            self.reads.append(self._lock.locked())
+        elif name == "log_unresolved_entity":
+            self.writes.append(self._lock.locked())
+        return await self._inner.arun(fn, *args, **kwargs)
+
+    async def aupsert_news_clusters(self, rows):
+        self.writes.append(self._lock.locked())
+        return await self._inner.aupsert_news_clusters(rows)
+
+
+class LockProbeHarness(FakeHarness):
+    """Records the lock state during the model call and can mutate the store mid-call (a rival poll)."""
+
+    def __init__(self, lock, *, on_call=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._lock = lock
+        self._on_call = on_call
+        self.locked_during: list[bool] = []
+
+    async def run_single_shot(self, agent_def, context, validate, **kwargs) -> AgentResult:
+        self.locked_during.append(self._lock.locked())
+        if self._on_call is not None:
+            self._on_call()
+        return await super().run_single_shot(agent_def, context, validate, **kwargs)
+
+
+class LockGrabHarness(FakeHarness):
+    """A concurrent per-feed poll: every chunk's call tries to TAKE the chain lock while in flight."""
+
+    def __init__(self, lock, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._lock = lock
+        self.grabbed: list[int] = []
+        self.blocked: list[int] = []
+
+    async def run_single_shot(self, agent_def, context, validate, **kwargs) -> AgentResult:
+        chunk_no = len(self.calls)
+        try:
+            await asyncio.wait_for(self._lock.acquire(), 0.5)
+        except TimeoutError:
+            self.blocked.append(chunk_no)
+        else:
+            self.grabbed.append(chunk_no)
+            self._lock.release()
+        return await super().run_single_shot(agent_def, context, validate, **kwargs)
+
+
+async def test_the_lock_covers_the_store_hops_but_never_the_model_call(store, make_job, now_box):
+    seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
+    lock = asyncio.Lock()
+    probe = LockProbeStore(store, lock)
+    # An unmatchable entity string makes _log_unmatched fire, so the §5.5 unresolved-entity hop —
+    # the job's OTHER write, easy to leave outside the hold — is pinned under the lock too.
+    harness = LockProbeHarness(lock, overrides={"c-000": {"entities": ["Some Unknown Startup"]}})
+
+    result = await make_job(harness, store_override=probe).run_batch(lock=lock)
+
+    assert result.scored == 2
+    assert harness.locked_during == [False]          # the LLM await is OUTSIDE the hold
+    assert probe.reads == [True, True]               # initial queue read + the write-back re-read
+    assert probe.writes == [True, True]              # unresolved-entity log + upsert, both INSIDE
+    assert not lock.locked()                         # released on the way out
+
+
+async def test_a_cluster_deleted_mid_call_is_not_resurrected_by_the_write_back(
+    store, make_job, now_box, caplog
+):
+    """A poll merging a cluster away during the model call must not get a zombie row written back."""
+    base = now_box[0] - timedelta(minutes=45)
+    seed_cluster(store, "c-keep", first_seen=base)
+    seed_cluster(store, "c-gone", first_seen=base + timedelta(seconds=1))
+    lock = asyncio.Lock()
+    harness = LockProbeHarness(
+        lock,
+        # _execute: the pipeline's own merge path is not the subject here — only the row's absence is.
+        on_call=lambda: store._execute(
+            "DELETE FROM news_clusters WHERE cluster_id = ?", ["c-gone"]
+        ),
+    )
+
+    with caplog.at_level("INFO", logger="engine.ops.news_scoring"):
+        result = await make_job(harness).run_batch(lock=lock)
+
+    assert result.scored == 1
+    rows = rows_by_id(store)
+    assert set(rows) == {"c-keep"}                   # never re-created
+    assert rows["c-keep"]["scored_at"] is not None   # the survivor in the SAME chunk is written
+    (dropped,) = [r for r in caplog.records if r.getMessage() == "news_score_writeback_dropped"]
+    assert dropped.count == 1
+    assert list(dropped.cluster_ids) == ["c-gone"]
+
+
+async def test_a_cluster_rescored_mid_call_is_not_overwritten(store, make_job, now_box):
+    """Re-scored between the read and the write-back ⇒ no longer unscored ⇒ this batch skips it."""
+    base = now_box[0] - timedelta(minutes=45)
+    seed_cluster(store, "c-keep", first_seen=base)
+    seed_cluster(store, "c-rescored", first_seen=base + timedelta(seconds=1))
+    lock = asyncio.Lock()
+    harness = LockProbeHarness(
+        lock,
+        on_call=lambda: store._execute(
+            "UPDATE news_clusters SET scored_at = ?, scorer_model = ? WHERE cluster_id = ?",
+            [now_box[0], "rival-poll", "c-rescored"],
+        ),
+    )
+
+    result = await make_job(harness).run_batch(lock=lock)
+
+    rows = rows_by_id(store)
+    assert result.scored == 1
+    assert rows["c-rescored"]["scorer_model"] == "rival-poll"   # this batch did not clobber it
+    assert rows["c-keep"]["scorer_model"] == "haiku-4.5"
+
+
+async def test_a_poll_merge_during_the_model_call_survives_the_write_back(store, make_job, now_box):
+    """The score columns are applied to the CURRENT row, never to the pre-LLM snapshot (09-09).
+
+    The upsert overwrites every non-key column, so re-emitting the snapshot would REVERT whatever a
+    per-feed poll merged in while the model was thinking — precisely the clobber the chain lock
+    exists to prevent, reintroduced by shortening the hold.
+    """
+    base = now_box[0] - timedelta(minutes=45)
+    seed_cluster(store, "c-1", first_seen=base, domains=("economictimes.com",))
+    merged_at = base + timedelta(minutes=10)
+    lock = asyncio.Lock()
+    harness = LockProbeHarness(
+        lock,
+        overrides={"c-1": {"sectors": ["BANKS", "IT"], "themes": ["EV", "DEFENCE"]}},
+        # A rival poll merges a second source, a fresher last_seen, a new headline and the step-3
+        # tags it implies. _execute: the pipeline's own merge path is not the subject here.
+        on_call=lambda: store._execute(
+            "UPDATE news_clusters SET source_domains = ?, last_seen = ?, representative = ?, "
+            "symbols = ?, sectors = ?, themes = ? WHERE cluster_id = ?",
+            [
+                ["economictimes.com", "livemint.com"],
+                merged_at,
+                "Tata Motors bags large order from state utility",
+                ["TATAMOTORS"],
+                ["BANKS"],
+                ["EV"],
+                "c-1",
+            ],
+        ),
+    )
+
+    result = await make_job(harness).run_batch(lock=lock)
+
+    assert result.scored == 1
+    row = rows_by_id(store)["c-1"]
+    assert list(row["source_domains"]) == ["economictimes.com", "livemint.com"]
+    assert row["last_seen"] == merged_at
+    assert row["representative"].startswith("Tata Motors")
+    assert list(row["symbols"]) == ["TATAMOTORS"]    # the poll's resolved symbol is not reverted
+    assert list(row["sectors"]) == ["BANKS"]         # advisory ∩ the FRESH step-3 tags
+    assert list(row["themes"]) == ["EV"]
+    assert row["scored_at"] is not None              # ... and the step-4 columns still landed
+    assert row["scorer_model"] == "haiku-4.5"
+
+
+async def test_the_lock_is_free_during_every_chunk_of_a_multi_chunk_batch(store, make_job, now_box):
+    seed_many(store, 61, base=now_box[0] - timedelta(minutes=90))
+    lock = asyncio.Lock()
+    harness = LockGrabHarness(lock)
+
+    result = await make_job(harness).run_batch(lock=lock)
+
+    assert len(harness.calls) == 3
+    assert harness.grabbed == [0, 1, 2]              # a rival poll gets in between EVERY chunk
+    assert harness.blocked == []
+    assert result.scored == 61
+
+
+async def test_without_a_lock_the_batch_reads_the_queue_exactly_once(store, make_job, now_box):
+    """``lock=None`` is the pre-change path (existing callers/tests): no re-read, no conditional."""
+    seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
+    probe = LockProbeStore(store, asyncio.Lock())    # the lock is never handed to the job
+
+    result = await make_job(FakeHarness(), store_override=probe).run_batch()
+
+    assert result.scored == 2
+    assert probe.reads == [False]                    # one queue read, unlocked, exactly as before
+    assert probe.writes == [False]
+
+
+async def test_a_stale_skip_is_excluded_from_the_chunk_failure_remaining_count(
+    store, make_job, now_box, caplog
+):
+    """``remaining`` on ``news_scoring_chunk_failed`` must not count an id that already left the queue.
+
+    Mirrors ``test_a_cluster_deleted_mid_call_is_not_resurrected_by_the_write_back`` (the stale
+    mechanic: a cluster deleted during chunk 1's model call is skipped, not resurrected, at that
+    chunk's write-back) combined with ``test_a_failed_chunk_keeps_the_earlier_chunks_and_leaves_the_
+    rest_queued`` (chunk 2's model call fails). 61 clusters make three 30/30/1 chunks. Before the fix,
+    ``remaining = len(clusters) - scored - len(dropped)`` still counts the deleted id as queued
+    (61 - 29 - 0 = 32); the fix subtracts the stale count too (61 - 29 - 0 - 1 = 31), matching the
+    actually-still-queued chunk 2 (30) + chunk 3 (1).
+    """
+    base = now_box[0] - timedelta(minutes=90)
+    ids = seed_many(store, 61, base=base)
+    lock = asyncio.Lock()
+    harness = LockProbeHarness(
+        lock,
+        fail_after=1,                                 # chunk 1 succeeds, chunk 2 fails, chunk 3 unsent
+        # _execute: the pipeline's own merge path is not the subject here — only the row's absence is.
+        on_call=lambda: store._execute(
+            "DELETE FROM news_clusters WHERE cluster_id = ?", [ids[0]]
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="engine.ops.news_scoring"):
+        result = await make_job(harness).run_batch(lock=lock)
+
+    assert len(harness.calls) == 2                    # chunk 2 failed; chunk 3 was never attempted
+    assert result.scored == 29                        # chunk 1's 30 sent, minus the 1 stale-skipped
+    (failed_log,) = [r for r in caplog.records if r.getMessage() == "news_scoring_chunk_failed"]
+    assert failed_log.remaining == 31                 # NOT 32: the stale id is not still queued
+
+
+# ------------------------------------------------------ batch single-flight (§2.6 hardening ii, 09-09)
+async def test_two_concurrent_batches_send_each_cluster_to_the_model_exactly_once(
+    store, make_job, now_box
+):
+    """job_news_chain's forced batch and the 300 s scoring_tick are DISTINCT scheduler jobs (09-09).
+
+    Now that the chain lock is dropped across the model call, nothing else keeps them apart: both
+    would read the same unscored queue and bill the same clusters twice. The job's own run lock makes
+    the second WAIT, so it re-reads an emptied queue and returns cheaply. Both calls pass the SAME
+    ``news_chain_lock`` (as the two real scheduler jobs would), so this exercises the shipped
+    combination — chain lock + concurrent batches + conditional write-back — not just the run lock in
+    isolation.
+    """
+    ids = seed_many(store, 8, base=now_box[0] - timedelta(minutes=5))
+    harness = FakeHarness()
+    job = make_job(harness)
+    chain_lock = asyncio.Lock()
+
+    first, second = await asyncio.gather(
+        job.run_batch(force=True, lock=chain_lock), job.run_batch(force=True, lock=chain_lock)
+    )
+
+    sent = [cid for call in harness.calls for cid in call]
+    assert len(harness.calls) == 1                   # one batch reached the SDK, not two
+    assert sorted(sent) == ids                       # every cluster sent exactly once
+    assert first.scored + second.scored == 8
+    assert min(first.scored, second.scored) == 0     # the waiter found the queue emptied
+    assert all(r["scored_at"] is not None for r in rows_by_id(store).values())
