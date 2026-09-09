@@ -889,8 +889,9 @@ def run_study(
         "statistics of the signal population, unknowable at signal time."
     )
     notes.append(
-        "SURVIVORSHIP (bars): the symbol set is whatever bars_1d holds today. Delisted names are "
-        "absent, which biases every cell optimistically. Not correctable with stored data."
+        "SURVIVORSHIP (bars): the symbol set is whatever bars_1d holds. Since the 2026-09-03 archive "
+        "backfill it carries since-delisted names' history, but a name delisted inside the horizon "
+        "books no trade, so the bias is optimistic and only partly corrected."
     )
     notes.append(
         "The bottom-decile and top-minus-bottom numbers are the ACADEMIC reference only: NSE cash "

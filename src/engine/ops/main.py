@@ -1459,9 +1459,17 @@ async def run() -> int:
             ):
                 if row.get("ex_date") is not None:
                     ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
+            # Trailing structural corp actions (2026-09-09, the hi52 veto's premise): stored bars_1d
+            # is never re-adjusted across an ex-date, so a bonus/split/rights/demerger inside the
+            # 20-session window leaves a phantom pre-ex high for the breakout test to clear.
+            # 35 calendar days ≥ lookback+1 sessions with weekend/holiday margin.
+            brk20_unadjusted = hi52.unadjusted_history(
+                store.get_corp_actions(ex_from=today - timedelta(days=35), ex_to=yesterday)
+            )
             brk20_vetoes: dict[str, int] = {}
             brk20_raw = brk20.sweep_daily(
-                histories, today=today, ex_dates_by_symbol=ex_map, veto_counts=brk20_vetoes
+                histories, today=today, ex_dates_by_symbol=ex_map,
+                unadjusted_symbols=brk20_unadjusted, veto_counts=brk20_vetoes,
             )
             # WO-19 veto visibility (the `cat` line's discipline, §6.1): the stop-geometry floor
             # refuses candidates that used to ship, so a run where it eats everything must be
@@ -1474,6 +1482,7 @@ async def run() -> int:
                 candidates=len(brk20_raw),
                 gap_floor_vetoes=brk20_vetoes.get(brk20.VETO_GAP_FLOOR, 0),
                 floor_unavailable=brk20_vetoes.get(brk20.VETO_FLOOR_UNAVAILABLE, 0),
+                unadjusted_vetoes=brk20_vetoes.get(brk20.VETO_UNADJUSTED_HISTORY, 0),
             )
 
             # --- `ins` daily leg (§6.1 addendum, owner-directed 2026-08-17): the crossings last
@@ -1598,10 +1607,12 @@ async def run() -> int:
             )
 
             # --- `hi52` SHADOW leg (§3.2.4 extended-leg + §6.1 addendum, owner-directed 2026-09-01
-            #     after the JINDALSAW/movers review): 52-week-high-proximity FRESH-CROSSES over the
-            #     BATCH universe — criteria-passing non-index names included, the WELCORP/DYCL class
-            #     the index-scoped scanners structurally never see. Swing thesis (T+5..T+20, George
-            #     & Hwang drift; intraday capture is cost-refuted). C3 rejects every candidate
+            #     after the JINDALSAW/movers review): 52-week-high-proximity FRESH-CROSSES. Scoped to
+            #     the ELIGIBLE universe since 2026-09-09: the 09-03 full-market backtest measured the
+            #     edge as index-class only (extended names −0.26% net / 49% hit at T+20, n=13,922),
+            #     so the extended-name population is no longer originated (shadow clock restarts).
+            #     Swing thesis (T+5..T+20, George & Hwang drift; intraday capture is cost-refuted).
+            #     C3 rejects every candidate
             #     UNCONDITIONALLY (no_edge_shadow_strategies): ADMISSION is the shadow's validation
             #     population, pending the backtest + §8.6 owner gate. Placement is load-bearing
             #     (2026-09-01 review, two findings): the leg runs AFTER the actionable admit — its
@@ -1622,7 +1633,7 @@ async def run() -> int:
                 hi52_unadjusted = hi52.unadjusted_history(
                     store.get_corp_actions(ex_from=hi52_start, ex_to=yesterday)
                 )
-                for sym in store.get_batch_universe_symbols(today):
+                for sym in eligible:                       # the actionable legs' set (2026-09-09)
                     frame = store.get_bars_1d_frame(sym, hi52_start, yesterday)
                     if len(frame):
                         hi52_histories[sym] = [

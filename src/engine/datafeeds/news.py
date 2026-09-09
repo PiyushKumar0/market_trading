@@ -44,7 +44,7 @@ import html
 import json
 import math
 import xml.etree.ElementTree as ET
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -118,6 +118,14 @@ NSE_ANN_ITEM_URL = "https://www.nseindia.com/companies-listing/corporate-filings
 #: The exchange is ONE corroborating domain no matter which host serves the PDF (attachments live on
 #: ``nsearchives.nseindia.com``) — pinned, never derived from the item URL.
 NSE_ANN_DOMAIN = "nseindia.com"
+
+
+def nse_ann_url(d: date) -> str:
+    """The announcements endpoint for ONE day (probe 2026-09-09): the bare url answers its 20 newest
+    rows whatever the volume, while ``from_date/to_date`` (DD-MM-YYYY) returns the whole day — 745
+    rows for 08-09-2026 — so a poll asks for the clock's day and the store dedupes the overlap."""
+    stamp = d.strftime("%d-%m-%Y")
+    return f"{NSE_ANNOUNCEMENTS_URL}&from_date={stamp}&to_date={stamp}"
 
 #: Exchange timestamps, tried in this order. ``sort_date`` first because it is the only
 #: locale-INDEPENDENT form (``%b`` parsing follows LC_TIME); live they differ by ~1 s
@@ -402,7 +410,8 @@ class NewsIngest:
         parsable exchange timestamp ⇒ ingest time (Clock), never naive.
         """
         cfg = self._cfg.feeds.nse_announcements
-        resp = await nse_get(self._http, NSE_ANNOUNCEMENTS_URL, timeout=self._timeout)
+        url = nse_ann_url(self._clock.now().date())   # the whole day, not the 20 newest rows
+        resp = await nse_get(self._http, url, timeout=self._timeout)
         payload = json.loads(resp.content)
         rows = payload if isinstance(payload, list) else []
         if isinstance(payload, dict):  # tolerated envelope shapes (mirrors isin_map's parser)

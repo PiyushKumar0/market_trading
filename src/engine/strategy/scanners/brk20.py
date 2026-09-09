@@ -65,10 +65,11 @@ owner's decision; it carries no presumption of positive expectancy.
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 from statistics import median
-from typing import Mapping, NamedTuple, Sequence
+from typing import NamedTuple
 
 from ulid import ULID
 
@@ -100,6 +101,10 @@ FLOOR_PARAMS: dict[str, float] = {
 # undiagnosable). Named constants so the sweep call sites read the same keys scan_daily writes.
 VETO_GAP_FLOOR = "gap_floor"
 VETO_FLOOR_UNAVAILABLE = "floor_unavailable"
+# 2026-09-09: a structural corp action (bonus/split/rights/demerger) inside the window leaves the
+# stored series in two units — the caller computes the set (``hi52.unadjusted_history`` over
+# ``corp_actions``) and the sweep skips those symbols; the count keeps the tape readable.
+VETO_UNADJUSTED_HISTORY = "unadjusted_history"
 
 
 class DailyRow(NamedTuple):
@@ -244,15 +249,20 @@ def sweep_daily(
     today: date,
     ex_dates_by_symbol: Mapping[str, Sequence[date]] | None = None,
     params: Mapping[str, float] | None = None,
+    unadjusted_symbols: Collection[str] = (),
     veto_counts: dict[str, int] | None = None,
 ) -> list[SignalCandidate]:
     """Run :func:`scan_daily` over every symbol; deterministic order (§9.6): score desc, symbol asc.
 
-    ``veto_counts`` is threaded straight through — the caller owns the accumulator and reads the
-    WO-19 counts off it after the sweep returns (§6.1 observability)."""
+    ``unadjusted_symbols`` sit out (:data:`VETO_UNADJUSTED_HISTORY`); ``veto_counts`` is threaded
+    straight through — the caller owns the accumulator and reads the WO-19 counts off it after
+    the sweep returns (§6.1 observability)."""
     ex_map = ex_dates_by_symbol or {}
     out: list[SignalCandidate] = []
     for symbol in sorted(histories):
+        if symbol in unadjusted_symbols:
+            _bump(veto_counts, VETO_UNADJUSTED_HISTORY)
+            continue
         cand = scan_daily(
             symbol,
             histories[symbol],

@@ -147,6 +147,19 @@ def test_sweep_orders_by_score_desc_then_symbol():
     assert all(c.signal_id for c in out) and len({c.signal_id for c in out}) == 3
 
 
+def test_sweep_skips_unadjusted_history_symbols_and_counts_them():
+    """2026-09-09: stored bars_1d is never re-adjusted across an ex-date (the hi52 premise), so a
+    symbol with a structural corp action inside the window sits out — counted, never scanned, and
+    the clean symbol is unaffected."""
+    counts: dict[str, int] = {}
+    out = sweep_daily(
+        {"SPLITCO": _series_with_breakout(), "CLEAN": _series_with_breakout()},
+        today=TODAY, params=P, unadjusted_symbols={"SPLITCO"}, veto_counts=counts,
+    )
+    assert [c.symbol for c in out] == ["CLEAN"]
+    assert counts == {brk20.VETO_UNADJUSTED_HISTORY: 1}
+
+
 def test_default_params_are_the_envelope_defaults():
     assert brk20.DEFAULT_PARAMS == {
         "lookback_days": 20, "vol_mult": 1.2, "rr_target": 2.0, "ex_skip_days": 10,

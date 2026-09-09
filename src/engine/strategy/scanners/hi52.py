@@ -9,7 +9,9 @@ RECOMMEND. Wiring an edge, and with it RECOMMEND eligibility, is the §8.6 owner
 backtest + shadow validation, exactly as for ``cat``. This module does not touch either gate; it
 only originates.
 
-**Architecture — a pure batch rule over the BATCH universe, like ``brk20``.** It is deliberately NOT
+**Architecture — a pure batch rule over the ELIGIBLE universe, like ``brk20``** (scoped down from
+the batch universe on 2026-09-09: the 09-03 full-market backtest measured the edge as index-class
+only, extended names −0.26% net at T+20). It is deliberately NOT
 a :class:`~engine.strategy.scanners.base.Scanner`: the §3.2.5 scanner protocol is (1m bar,
 ScanContext)-driven and only watched symbols ever produce bars, but a swing-horizon 52wk-proximity
 read has nothing per-bar to key off. This module scans COMPLETED daily bars (bhavcopy-final

@@ -15,7 +15,7 @@ no ``symbol`` (unusable ⇒ skipped)."""
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
@@ -32,6 +32,7 @@ from engine.datafeeds.news import (
     NSE_ANN_KEY,
     Headline,
     NewsIngest,
+    nse_ann_url,
 )
 from engine.marketdata.store import MarketStore
 from tests.conftest import FIXED_NOW
@@ -335,9 +336,20 @@ ANN_PAYLOAD = (FIXTURES / "nse_announcements.json").read_bytes()
 
 
 def _ann_ingest(store, clock, *, cfg: NewsCfg | None = None, record=None, response=None):
-    """Ingest whose ``corporate-announcements`` endpoint serves the captured payload."""
-    overrides = {NSE_ANNOUNCEMENTS_URL: response or httpx.Response(200, content=ANN_PAYLOAD)}
+    """Ingest whose ``corporate-announcements`` endpoint serves the captured payload — keyed on the
+    DATE-RANGED url for the clock's day (2026-09-09): the bare endpoint caps at its 20 newest rows."""
+    url = nse_ann_url(clock.now().date())
+    overrides = {url: response or httpx.Response(200, content=ANN_PAYLOAD)}
     return _make_ingest(store, clock, overrides=overrides, record=record, cfg=cfg)
+
+
+def test_nse_announcements_url_is_date_ranged_for_the_day():
+    """Probe 2026-09-09: the bare endpoint answers its 20 newest rows regardless of volume, while
+    ``from_date/to_date`` (DD-MM-YYYY) returns the whole day (745 rows for 08-09-2026) — so a poll
+    asks for the clock's day and lets the store dedupe the overlap."""
+    assert nse_ann_url(date(2026, 9, 8)) == (
+        NSE_ANNOUNCEMENTS_URL + "&from_date=08-09-2026&to_date=08-09-2026"
+    )
 
 
 def test_pinned_announcement_fields_are_present_in_the_captured_payload():
@@ -450,7 +462,9 @@ async def test_nse_announcements_fetch_primes_cookies_through_nse_get(store, clo
     ingest, client = _ann_ingest(store, clock, record=record)
     async with client:
         await ingest.poll(feeds=(NSE_ANN_KEY,))
-    assert [str(r.url) for r in record] == ["https://www.nseindia.com/", NSE_ANNOUNCEMENTS_URL]
+    assert [str(r.url) for r in record] == [
+        "https://www.nseindia.com/", nse_ann_url(clock.now().date())
+    ]
 
 
 async def test_nse_ann_disabled_makes_no_request(store, clock):
