@@ -77,6 +77,7 @@ from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, login_prompt
+from engine.ops.early_hydration import EarlyHydration
 from engine.ops.health import HealthMonitor
 from engine.ops.heartbeat import HeartbeatWriter
 from engine.ops.holdings_reconcile import HoldingsReconcileJob, in_reconcile_window
@@ -217,6 +218,36 @@ POST_ARM_JOB_IDS: tuple[str, ...] = (
     JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_TICK_COMPACT,
 )
 
+#: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
+#: (~06:30, before session open) pulls forward from its 08:20–08:50 clock, in registry order. The
+#: owner travels at 08:15 and boots the PC 09:30–10:00 on most trading days, so on those days the
+#: whole chain fired after the trade window opened (G2 digest-before-open 61%); on the days they log
+#: in early this turns the login into the pre-open chain. Fired by ``EarlyHydration`` through
+#: ``CatchUpRunner.hydrate_ahead`` — the same ``job_runs`` watermarks a scheduled fire writes.
+#: Those watermarks do NOT silence the 08:20–08:50 fires (``_scheduled_runner`` stays unconditional —
+#: review reversed a draft that skipped them): results and exchange filings published 07:00–09:00 IST
+#: are the largest catalyst class, so on a day the PC stays awake the chain must run AGAIN — a fresher
+#: digest and plan, and a universe rebuilt behind the 08:15 instruments refresh instead of one pinned
+#: to a pre-08:00 dump. The watermark guards the SLEEP case: a PC that sleeps through the fire times
+#: and wakes at 09:30 finds the catch-up sweep satisfied and keeps the 06:30 run. The cost — a second
+#: pre-open plan message on an awake-PC early-login day — is accepted (§2.6 addendum).
+#: SLEEP-case residual: the wake-up sweep re-runs ``instruments`` (job id ``instruments``) because it
+#: is SAFETY_CRITICAL and due by 09:30, so the token map itself is fresh again — but ``universe_build``
+#: is RUN_LATEST and was already watermarked by the 06:30 ``hydrate_ahead`` run, so the sweep leaves it
+#: alone: the universe stays built on the 06:30 map for the rest of the day. Accepted: intraday token
+#: changes and F&O membership changes inside one trading day are rare, and the ticker's own
+#: subscription set is re-derived from the FRESH instruments map by the post-login recovery (``ticker``
+#: step) regardless of when the universe itself was last built.
+#: Deliberately EXCLUDED:
+#:   * ``instruments`` — Kite regenerates its instruments dump around 08:00 IST, so a 06:30 refresh
+#:     could pin a STALE map for the whole day. It is SAFETY_CRITICAL: the 08:15 fire or the boot
+#:     catch-up owns it, and both run/verify it before entries open.
+#:   * ``sector_map`` — Sunday-only cadence (never a trading day, so never an early-login morning).
+#:   * ``token_check`` — not a registry job at all (no watermark by design; see ``_arm_token_check``).
+EARLY_HYDRATION_JOB_IDS: tuple[str, ...] = (
+    JOB_SURVEILLANCE, JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER,
+)
+
 #: ROLLBACK FLAG (WO-15 risk note). ``False`` restores the pre-WO-15 firing point exactly: the boot
 #: catch-up pass runs the whole registry (``deferred`` empty ⇒ every scope is the full registry) and
 #: the post-arm one-shot becomes a no-op. Flip + restart; no other code path changes.
@@ -233,9 +264,35 @@ DEFER_POST_ARM_JOBS = True
 _IN_SESSION_START_IST = time(8, 45)
 _IN_SESSION_END_IST = time(15, 45)
 
+#: Last-resort session open for :func:`_session_open_ist` — NOT a second source of truth: it is the
+#: value ``NSECalendar.session`` itself defaults to when a year file declares no ``continuous`` span,
+#: used only when the calendar can answer nothing at all (and logged when it happens).
+_SESSION_OPEN_FALLBACK = time(9, 15)
+
 
 def _is_sunday(d: date) -> bool:
     return d.weekday() == 6   # §4.4 job 13 weekly cadence — fires Sunday, not a trading day
+
+
+def _session_open_ist(calendar: NSECalendar, clock: Clock) -> time:
+    """Today's continuous-session open (IST), from the calendar the rest of the engine reads (R6) —
+    the SAME source ``HealthMonitor._session_open`` uses, never a second hardcoded 09:15 (2026-09-09).
+
+    Boot may land on a weekend/holiday, so fall back to the next trading day's open; a calendar that
+    can answer neither (unverified horizon) leaves the engine with no session concept at all, and the
+    early-hydration hook it feeds is a pre-open optimisation — so log and take the calendar's own
+    documented default (``NSECalendar.session``) rather than failing the boot over it.
+    """
+    today = clock.today()
+    try:
+        day = today if calendar.is_trading_day(today) else calendar.next_trading_day(today)
+        session = calendar.session(day)
+        if session is not None:
+            return session.open.time()
+    except ValueError:  # no trading day within the calendar horizon (R6)
+        pass
+    _log.warning("session_open_unresolved", d=today.isoformat(), fallback=_SESSION_OPEN_FALLBACK.isoformat())
+    return _SESSION_OPEN_FALLBACK
 
 
 def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
@@ -922,6 +979,15 @@ async def run() -> int:
     # on independent intervals and the scorer writes whole cluster rows back — un-serialized, a poll
     # updating a cluster between the scorer's read and its write-back gets clobbered by the stale
     # snapshot (cluster assignment is also read-modify-write). Volumes are tiny; a lock is free.
+    # The invariant is that STORE read-modify-write, never the model call (2026-09-09, §2.6): held
+    # around the whole scoring batch the lock also spanned one LLM await per chunk, and the polls
+    # (whose resolve deadline covers lock ACQUISITION) queued behind it — 14 news_resolve_timeout on
+    # 2026-09-07 after a post-sleep backlog, nine of them inside one second at 10:12:40. The scorer
+    # now takes this same lock itself, for its read and each conditional write-back only: under the
+    # write-back hold it re-reads the CURRENT rows and applies the score columns to those, so a poll
+    # merge that landed during the model call survives (the upsert overwrites every non-key column,
+    # so re-emitting the pre-LLM snapshot would revert it) and an id that left the queue meanwhile is
+    # skipped, never resurrected.
     news_chain_lock = asyncio.Lock()
 
     async def resolve_news(headlines: list, *, alert_on_timeout: bool = False) -> None:
@@ -1287,6 +1353,25 @@ async def run() -> int:
         holdings_reconcile=holdings_reconcile,
     )
     session.add_login_hook(post_login_recovery.run)
+
+    # --- §2.6 EARLY HYDRATION (owner-directed 2026-09-09): the owner travels at 08:15 and boots the
+    #     PC 09:30–10:00, so the pre-open chain fired after the trade window opened and G2's
+    #     digest-before-open criterion fell to 61%. On the mornings they log in early (~06:30) that
+    #     login now IS the pre-open chain: surveillance → universe → news → digest → planner, run
+    #     ahead of their clock through the same catch-up watermarks.
+    #     Registration order buys NOTHING here: `SessionManager._fire_login_hooks` creates one task
+    #     per hook, so this hook and the recovery run CONCURRENTLY. What sequences them is the
+    #     recovery's own `completed` event, passed below — the chain wants the token map, backfill and
+    #     ticker it restores (bounded: a wedged recovery is logged and stepped over). The hook also
+    #     holds itself behind `scheduler.start()` (WO-15) via the event armed in the boot tail.
+    #     The session open is passed as a CALLABLE: this hook outlives the day it was built on. ---
+    scheduler_armed = asyncio.Event()
+    early_hydration = EarlyHydration(
+        catch_up, clock, calendar, scheduler_armed, EARLY_HYDRATION_JOB_IDS,
+        lambda: _session_open_ist(calendar, clock),
+        recovery_done=post_login_recovery.completed, notify=notify,
+    )
+    session.add_login_hook(early_hydration.on_login)
 
     # --- dashboard API ---
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
@@ -1857,7 +1942,9 @@ async def run() -> int:
     # WO-15 (i)+(iii): arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it
     # as a background task. engine_ready (below) must not wait on the news chain — a wedged chain now
     # costs the digest, not the whole scheduled day (2026-08-10). Its own 600 s resolve cap bounds it.
-    post_arm_task = start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar)
+    post_arm_task = start_scheduler_and_fire_post_arm(
+        scheduler, catch_up, clock, calendar, armed=scheduler_armed,
+    )
     if telegram is not None and report.needs_login and not login_prompt_sent:
         await notify(login_prompt(session.login_url()))
 
@@ -1936,7 +2023,8 @@ async def _catchup_sweep_once(catch_up: CatchUpRunner, latch, kill, clock: Clock
 
 
 def start_scheduler_and_fire_post_arm(
-    scheduler: Scheduler, catch_up: CatchUpRunner, clock: Clock, calendar: NSECalendar
+    scheduler: Scheduler, catch_up: CatchUpRunner, clock: Clock, calendar: NSECalendar,
+    *, armed: asyncio.Event,
 ) -> asyncio.Task | None:
     """Arm the scheduler, THEN fire the deferred one-shots behind it — never the other way round.
 
@@ -1954,9 +2042,15 @@ def start_scheduler_and_fire_post_arm(
 
     WO-21 (ii): :func:`post_arm_exclusions` decides, from the boot's own wall clock, which one-shots
     this boot must skip — today only the in-session ``tick_compact``.
+
+    ``armed`` (§2.6 early hydration, 2026-09-09) is the composition root's "the scheduler is up"
+    event that the early-login hook waits on, so its pre-open chain is held to the SAME firing-point
+    rule this function exists to enforce. REQUIRED, not optional: a caller that forgot it would park
+    every early login until the hook's own 15-minute timeout.
     """
     scheduler.start()
     if not (DEFER_POST_ARM_JOBS and POST_ARM_JOB_IDS):
+        armed.set()                     # nothing to dispatch — arming itself is the release point
         return None
     exclude = post_arm_exclusions(clock, calendar)
     fired = [j for j in POST_ARM_JOB_IDS if j not in exclude]
@@ -1975,7 +2069,13 @@ def start_scheduler_and_fire_post_arm(
             _log.exception("post_arm_jobs_failed")
 
     _log.info("post_arm_jobs_fired", jobs=fired, skipped=list(exclude))
-    return asyncio.create_task(_fire(), name="post_arm_catchup")
+    task = asyncio.create_task(_fire(), name="post_arm_catchup")
+    # §2.6 early hydration (2026-09-09): release the login hook only AFTER the one-shot is dispatched.
+    # Both are the same single-flighted CatchUpRunner: released first, the woken hook takes the pass
+    # lock and this one-shot degrades to a `skipped_in_flight` no-op — the deferred chain would then
+    # wait for its own 08:25 clock. Dispatched first, it holds the lock and the hook queues behind it.
+    armed.set()
+    return task
 
 
 async def cancel_post_arm(task: asyncio.Task | None) -> None:
@@ -2024,6 +2124,18 @@ def _arm_token_check(scheduler: Scheduler, job: TokenCheckJob) -> None:
 
 
 def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
+    """The live-scheduler wrapper: run the job, then record its ``job_runs`` watermark (§2.6).
+
+    The fire is UNCONDITIONAL even when today's watermark already exists — a 2026-09-09 draft skipped
+    it, and review reversed that: the skip pinned the 06:30 early-hydration digest/planner, and a
+    universe built on a pre-08:00 instruments dump, for the whole day. Results and exchange filings
+    published 07:00–09:00 IST are the largest catalyst class, so on a day the PC stays awake the
+    08:25/08:35/08:50 fires MUST still run (a fresher digest and plan; the universe rebuilt behind the
+    08:15 instruments refresh). The watermark ``CatchUpRunner.hydrate_ahead`` records guards only the
+    SLEEP case: a PC that sleeps through the fire times and wakes at 09:30 finds the catch-up sweep
+    satisfied and keeps the 06:30 run. A second pre-open plan message on an awake-PC early-login day
+    is the accepted, documented cost (§2.6 "Early-hydration addendum").
+    """
     async def _fire() -> None:
         today = clock.today()
         try:

@@ -43,6 +43,7 @@ the recovery share the exact same ladder) talks only to ``core`` + ``broker`` + 
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -233,6 +234,18 @@ class PostLoginRecovery:
     Registered via :meth:`SessionManager.add_login_hook`; :meth:`run` is the guarded four-step recovery
     fired fire-and-forget when a token becomes valid. Every step is guarded and logged individually —
     a step that raises marks itself failed and alerts, the others still run, and the loop never crashes.
+
+    :attr:`completed` is the §2.6 early-hydration handshake (2026-09-09).
+    :meth:`SessionManager._fire_login_hooks` creates ONE TASK PER HOOK, so registration order gives
+    :class:`~engine.ops.early_hydration.EarlyHydration` no ordering against this recovery at all — the
+    two run concurrently. This event is what sequences them: SET in ``__init__`` (an engine that never
+    runs a recovery must not park the chain), CLEARED at the top of :meth:`run` before its first
+    await, and SET again in a ``finally`` — a FAILED recovery releases the chain exactly like a clean
+    one, because the pre-open chain needs no Kite session and a stuck event would cost the digest.
+    DEPTH-COUNTED via ``_in_flight`` (2026-09-09 review): two overlapping logins fire two concurrent
+    ``run()`` tasks, and a bare Event would be SET by whichever finishes FIRST — releasing the chain
+    while the other is still mid-ladder. The event re-sets only once every in-flight ``run()`` has
+    reached its own ``finally``.
     """
 
     def __init__(
@@ -273,28 +286,50 @@ class PostLoginRecovery:
         self._notify = notify
         self._alert = alert
         self._holdings_reconcile = holdings_reconcile
+        #: "This recovery is not running" (§2.6 early hydration, 2026-09-09 — see the class docstring).
+        #: Starts SET so an engine that never fires a login hook blocks nothing. DEPTH-COUNTED
+        #: (2026-09-09 review): a bare Event is set by whichever ``run()`` finishes FIRST, which would
+        #: release the early-hydration chain while a SECOND overlapping login's recovery is still
+        #: mid-ladder — ``SessionManager._fire_login_hooks`` fires one task per hook per login, so two
+        #: logins landing close together really do overlap. ``_in_flight`` counts concurrent runs; the
+        #: event only sets again once the count returns to zero.
+        self.completed = asyncio.Event()
+        self.completed.set()
+        self._in_flight = 0
 
     async def run(self) -> PostLoginRecoveryReport:
         """Fire the guarded four-step recovery and emit the summary. Never raises: this is a login
         hook — a failure degrades + alerts, it must never propagate into the login path or the loop."""
-        _log.info("post_login_recovery_start", token_valid=self._session.token_valid())
-        steps = [
-            await self._guard("instruments", self._step_instruments),
-            await self._guard("backfill", self._step_backfill),
-            await self._guard("warmup", self._step_warmup),
-            await self._guard("ticker", self._step_ticker),
-            await self._guard("holdings", self._step_holdings),
-        ]
-        any_failed = any(s.status == "failed" for s in steps)
-        report = PostLoginRecoveryReport(steps=steps, ok=not any_failed, any_failed=any_failed)
-        _log.info(
-            "post_login_recovery",
-            ok=report.ok,
-            steps={s.name: s.status for s in steps},
-            detail={s.name: s.detail for s in steps},
-        )
-        await self._emit_summary(report)
-        return report
+        # Cleared BEFORE the first await (2026-09-09): the early-hydration hook is a sibling task
+        # dispatched in the same fan-out, so any await here is a chance for it to run and miss the
+        # ladder it depends on. Depth-counted (2026-09-09 review) so a SECOND overlapping ``run()``
+        # does not let the FIRST run's ``finally`` release the chain out from under it — the event is
+        # only re-set once every in-flight run (this one included) has reached its own ``finally``.
+        self._in_flight += 1
+        self.completed.clear()
+        try:
+            _log.info("post_login_recovery_start", token_valid=self._session.token_valid())
+            steps = [
+                await self._guard("instruments", self._step_instruments),
+                await self._guard("backfill", self._step_backfill),
+                await self._guard("warmup", self._step_warmup),
+                await self._guard("ticker", self._step_ticker),
+                await self._guard("holdings", self._step_holdings),
+            ]
+            any_failed = any(s.status == "failed" for s in steps)
+            report = PostLoginRecoveryReport(steps=steps, ok=not any_failed, any_failed=any_failed)
+            _log.info(
+                "post_login_recovery",
+                ok=report.ok,
+                steps={s.name: s.status for s in steps},
+                detail={s.name: s.detail for s in steps},
+            )
+            await self._emit_summary(report)
+            return report
+        finally:
+            self._in_flight -= 1
+            if self._in_flight == 0:
+                self.completed.set()
 
     async def _guard(
         self, name: str, fn: Callable[[], Awaitable[tuple[str, str]]]

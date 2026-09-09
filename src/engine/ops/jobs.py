@@ -27,13 +27,19 @@ same machinery under ``DEFERRED`` — same code, same watermarks, new firing poi
 (an unbounded news chain inside boot) starved every scheduled job for 8 h *including* the sweep that
 exists to self-heal; behind the armed scheduler the identical wedge costs only the digest. Passes
 are single-flight so the post-arm one-shot and the 30-min sweep can never replay a job twice.
+
+**Early hydration (§2.6 addendum, owner-directed 2026-09-09).** Every due-gate above treats today's
+job as not-missed until its fire-time passes — correct for a replay, and the reason a 06:30 login
+could not pull the pre-open chain forward on the days the owner boots before travelling.
+``hydrate_ahead`` is that one deliberate exception: named jobs, today, ahead of their clock, through
+the same watermarks/lock/verdict as a pass. The gates themselves are untouched.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
@@ -397,6 +403,99 @@ class CatchUpRunner:
             return CatchUpResult(skipped_in_flight=True)
         async with self._pass_lock:
             return await self._pass(off_since=off_since, scope=scope, exclude=exclude)
+
+    # ------------------------------------------------------------------ early hydration (§2.6, 2026-09-09)
+    async def hydrate_ahead(self, job_ids: Sequence[str], *, reason: str) -> dict[str, str]:
+        """Run the named jobs for TODAY *ahead of their fire-time*; returns ``{job_id: outcome}``.
+
+        Owner-directed 2026-09-09 ("Early-hydration addendum"): on most trading days the owner leaves
+        at 08:15 and boots the PC 09:30–10:00, so the pre-open chain fires after the trade window
+        opens (G2 digest-before-open 61%). No existing catch-up path can serve the ~06:30 login they
+        sometimes do: every due-gate here (``_missed_days``, ``_run_safety_critical``) treats today's
+        job as NOT missed until its fire-time has passed, which is exactly right for a replay and
+        exactly wrong for a deliberate early run. This is the deliberate one — the caller
+        (:class:`engine.ops.early_hydration.EarlyHydration`) names the jobs; nothing here decides.
+
+        Everything else is the catch-up machinery unchanged: the same class/order sequence a pass
+        uses, the same ``_job_result_ok`` verdict, the same ``job_runs`` watermarks. Those watermarks
+        make the SLEEP case a no-op: a PC that sleeps through 08:20–08:50 and wakes at 09:30 finds the
+        catch-up sweep satisfied and keeps the 06:30 run. On an AWAKE PC the scheduled fires run again
+        DELIBERATELY (``engine.ops.main._scheduled_runner`` is unconditional, by review reversal) — a
+        fresher digest and plan, and a universe rebuilt behind the 08:15 instruments refresh instead of
+        one pinned to a pre-08:00 dump; the second pre-open plan message this costs is the accepted
+        §2.6-addendum trade-off. A failed job records ``failed``, the siblings continue, and NO
+        freeze/notify fires: an early run that fails has cost the day nothing that the 08:20 fire and
+        the boot pass do not still own.
+
+        Runs under the single-flight pass lock, but WAITS for an in-flight pass rather than skipping
+        like a sweep does: a login is a one-shot opportunity, and after the wait the watermarks the
+        pass wrote make the overlap free (every job it ran reports ``already_run``).
+
+        Outcomes: ``ran`` | ``already_run`` (today's watermark exists) | ``failed``. A job whose
+        ``fire_day`` excludes today is skipped and absent from the result. A DATE_KEYED job id raises
+        :class:`ValueError` — those are per-missed-DAY replays with their own give-up ladder and have
+        no "ahead of today" meaning; naming one is a design error, not a runtime condition.
+        """
+        if not self.has_registry:
+            _log.info("early_hydration_no_registry", reason=reason)
+            return {}
+        wanted = set(job_ids)
+        by_id = {s.job_id: s for s in self._registry.specs()}  # type: ignore[union-attr]
+        date_keyed = sorted(
+            j for j in wanted if j in by_id and by_id[j].job_class is JobClass.DATE_KEYED
+        )
+        if date_keyed:
+            raise ValueError(
+                f"hydrate_ahead cannot run DATE_KEYED jobs {date_keyed} — they replay one run per "
+                "missed trading day (§2.6 step 5); early hydration is today's pre-open chain only"
+            )
+        unknown = sorted(wanted - set(by_id))
+        if unknown:
+            _log.warning("early_hydration_unknown_job_ids", job_ids=unknown, reason=reason)
+
+        started = self._clock.now()
+        today = self._clock.today()
+        if not self._calendar.is_trading_day(today):
+            _log.info("early_hydration_skipped_non_trading_day", d=today.isoformat(), reason=reason)
+            return {}
+
+        outcomes: dict[str, str] = {}
+        async with self._pass_lock:
+            for job_class in (JobClass.SAFETY_CRITICAL, JobClass.RUN_LATEST):
+                for spec in self._registry.specs(job_class):  # type: ignore[union-attr]
+                    if spec.job_id not in wanted:
+                        continue
+                    if not self._fires_on(spec, today):
+                        # A different cadence (e.g. the Sunday sector map) — today is not its day.
+                        _log.info("early_hydration_skipped_fire_day", job_id=spec.job_id)
+                        continue
+                    if self.was_run(spec.job_id, today):
+                        outcomes[spec.job_id] = "already_run"
+                        continue
+                    outcomes[spec.job_id] = await self._hydrate_one(spec, today, reason)
+        _log.info(
+            "early_hydration_pass", reason=reason, outcomes=outcomes,
+            elapsed_s=round((self._clock.now() - started).total_seconds(), 3),
+        )
+        return outcomes
+
+    async def _hydrate_one(self, spec: JobSpec, today: date, reason: str) -> str:
+        """One early-hydration run, with the ``_run_latest`` verdict semantics exactly (a degraded
+        ``ok=False`` return sinks the watermark like an exception does) and its never-raise contract:
+        a failure is this job's outcome alone, never the rest of the chain's."""
+        try:
+            outcome = await spec.run()  # type: ignore[call-arg]
+            if not _job_result_ok(outcome):
+                # degraded return = failure for the watermark; the job already alerted (E5)
+                _log.warning("early_hydration_degraded", job_id=spec.job_id, reason=reason)
+                self.record_run(spec.job_id, today, status="failed")
+                return "failed"
+            self.record_run(spec.job_id, today)
+            return "ran"
+        except Exception:  # noqa: BLE001 - one job's failure never blocks the rest of the chain
+            _log.exception("early_hydration_job_failed", job_id=spec.job_id, reason=reason)
+            self.record_run(spec.job_id, today, status="failed")
+            return "failed"
 
     async def _pass(
         self, *, off_since: datetime | None, scope: CatchUpScope, exclude: Collection[str] = ()

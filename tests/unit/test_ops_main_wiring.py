@@ -480,6 +480,36 @@ async def test_scheduled_runner_records_success_for_ok_true_result(conn, clock, 
     assert catch_up.was_run(JOB_BHAVCOPY, clock.today()) is True
 
 
+# ---------------------------------------- scheduled fire vs today's watermark (§2.6 early hydration)
+# Owner-directed 2026-09-09, after review REVERSED the first draft: the scheduled fire stays
+# UNCONDITIONAL. A draft skipped any job already watermarked for today, and that pinned the 06:30
+# digest/plan — and a universe built on a pre-08:00 instruments dump — for the whole day. Results and
+# exchange filings published 07:00–09:00 IST are the largest catalyst class, so on a day the PC stays
+# awake the 08:25/08:35/08:50 fires MUST run again (fresher digest and plan; the universe rebuilt
+# behind the 08:15 instruments refresh). The watermark ``hydrate_ahead`` records guards the SLEEP case
+# only — a PC that sleeps through the fire times and wakes at 09:30 finds the sweep satisfied and
+# keeps the 06:30 run. A second pre-open plan message on an awake-PC early-login day is accepted.
+
+
+@pytest.mark.asyncio
+async def test_scheduled_fire_runs_even_when_today_is_already_watermarked(
+    conn, clock, calendar
+) -> None:
+    ran: list[str] = []
+
+    async def run_it() -> None:
+        ran.append("planner")
+
+    catch_up = CatchUpRunner(conn, clock, calendar)
+    catch_up.record_run(JOB_PREOPEN_PLANNER, clock.today())      # e.g. an early-hydration pass ran it
+    spec = JobSpec(JOB_PREOPEN_PLANNER, JobClass.RUN_LATEST, time(8, 50), run_it, order=28)
+
+    await _scheduled_runner(spec, catch_up, clock)()
+
+    assert ran == ["planner"]                                    # a fresher plan, not a silenced fire
+    assert catch_up.was_run(JOB_PREOPEN_PLANNER, clock.today()) is True
+
+
 # --------------------------------------------------------------------------- scheduler arming (same registry)
 
 
@@ -1110,18 +1140,80 @@ def test_every_post_arm_job_is_a_registered_never_safety_critical_job() -> None:
     assert all(by_id[j].job_class is not JobClass.SAFETY_CRITICAL for j in POST_ARM_JOB_IDS)
 
 
+def test_early_hydration_set_is_the_real_pre_open_chain() -> None:
+    """§2.6 early hydration (2026-09-09): same typo risk as the deferred set — the hook selects BY id,
+    so a name that is not a registry job would silently hydrate nothing. Also pins the deliberate
+    exclusions: ``instruments`` (Kite regenerates its dump ~08:00, so a 06:30 refresh could pin a
+    stale map), the Sunday-only ``sector_map``, and DATE_KEYED jobs (``hydrate_ahead`` rejects them)."""
+    fns = _all_noop_fns()
+    fns[opsmain.JOB_CATALYST_DIGEST] = _noop
+    fns[opsmain.JOB_PREOPEN_PLANNER] = _noop
+    fns[opsmain.JOB_RECO_EXPIRE] = _noop
+    fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
+    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns).specs()}
+
+    assert set(opsmain.EARLY_HYDRATION_JOB_IDS) <= set(by_id)
+    assert all(
+        by_id[j].job_class is not JobClass.DATE_KEYED for j in opsmain.EARLY_HYDRATION_JOB_IDS
+    )
+    assert opsmain.JOB_INSTRUMENTS not in opsmain.EARLY_HYDRATION_JOB_IDS
+    assert JOB_SECTOR_MAP not in opsmain.EARLY_HYDRATION_JOB_IDS
+    assert "token_check" not in by_id                     # not a registry job at all (no watermark)
+
+
 @pytest.mark.asyncio
 async def test_scheduler_is_armed_before_the_deferred_chain_fires(conn, clock, calendar) -> None:
     events: list[str] = []
     catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events),
                              deferred=POST_ARM_JOB_IDS)
 
-    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+    task = start_scheduler_and_fire_post_arm(
+        _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
+    )
 
     assert events == ["scheduler_armed"]           # the chain has not even started yet
     await task
     assert events == ["scheduler_armed", "chain_started", "chain_finished"]
     assert catch_up.was_run(opsmain.JOB_NEWS_CHAIN, clock.today()) is True
+
+
+@pytest.mark.asyncio
+async def test_armed_event_is_set_after_the_one_shot_is_dispatched(conn, clock, calendar) -> None:
+    """§2.6 early hydration (2026-09-09): the login hook must never run the pre-open chain ahead of
+    ``scheduler.start()`` (the WO-15 firing-point rule), so it waits on this event — released AFTER
+    the post-arm one-shot is dispatched, not before. Released first, the woken hook wins the
+    single-flight pass lock and the one-shot degrades to a ``skipped_in_flight`` no-op (the deferred
+    chain would then only run at its own 08:25 clock). Dispatched first, the one-shot holds the lock
+    and the hook simply queues behind it and finds the watermark."""
+    events: list[str] = []
+    gate = asyncio.Event()
+    catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events, gate=gate),
+                             deferred=POST_ARM_JOB_IDS)
+    armed = asyncio.Event()
+    outcomes: dict[str, str] = {}
+
+    async def early_login() -> None:                 # the EarlyHydration hook's shape, in miniature
+        await armed.wait()
+        outcomes.update(
+            await catch_up.hydrate_ahead([opsmain.JOB_NEWS_CHAIN], reason="early_login")
+        )
+
+    hook = asyncio.create_task(early_login())
+    await asyncio.sleep(0)                           # parked on `armed`, exactly like a 06:30 login
+
+    task = start_scheduler_and_fire_post_arm(
+        _FakeScheduler(events), catch_up, clock, calendar, armed=armed,
+    )
+
+    assert armed.is_set() is True
+    assert events == ["scheduler_armed"]             # released at arming, not after the chain ran
+    await asyncio.sleep(0)                           # both wake, in dispatch order
+    gate.set()
+    await asyncio.wait_for(task, timeout=5)
+    await asyncio.wait_for(hook, timeout=5)
+
+    assert events == ["scheduler_armed", "chain_started", "chain_finished"]
+    assert outcomes == {opsmain.JOB_NEWS_CHAIN: "already_run"}   # the one-shot got the lock first
 
 
 @pytest.mark.asyncio
@@ -1137,7 +1229,9 @@ async def test_news_backlog_boot_reaches_engine_ready_in_load_bearing_time(conn,
 
     async def boot_tail() -> asyncio.Task | None:
         await catch_up.catch_up()                  # what SessionLifecycle.startup awaits (2.6 step 5)
-        task = start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar)
+        task = start_scheduler_and_fire_post_arm(
+            scheduler, catch_up, clock, calendar, armed=asyncio.Event(),
+        )
         events.append("engine_ready")
         return task
 
@@ -1161,7 +1255,9 @@ async def test_a_failing_post_arm_chain_records_a_failed_watermark_and_never_rai
     catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events, boom=True),
                              deferred=POST_ARM_JOB_IDS)
 
-    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+    task = start_scheduler_and_fire_post_arm(
+        _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
+    )
     await task                                     # a chain failure never escapes into the boot path
 
     assert task.exception() is None
@@ -1185,7 +1281,11 @@ async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, cal
     assert events == ["universe_build", "chain_started", "chain_finished"]
 
     scheduler = _FakeScheduler(events)
-    assert start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar) is None
+    armed = asyncio.Event()
+    assert start_scheduler_and_fire_post_arm(
+        scheduler, catch_up, clock, calendar, armed=armed,
+    ) is None
+    assert armed.is_set() is True                  # the login hook is released either way
     assert scheduler.started is True               # arming still happens, unconditionally
 
 
@@ -1236,7 +1336,9 @@ async def test_in_session_boot_skips_tick_compact_and_logs_it(conn, calendar, ca
     catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 14))
 
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
-        task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+        task = start_scheduler_and_fire_post_arm(
+            _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
+        )
     await task
 
     # The backlog (Mon 15th + Tue 16th) is real — the evening test below runs it — and NONE of it
@@ -1259,7 +1361,9 @@ async def test_evening_boot_still_fires_tick_compact(conn, calendar, caplog) -> 
     catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 14))
 
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
-        task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+        task = start_scheduler_and_fire_post_arm(
+            _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
+        )
     await task
 
     assert [e for e in events if e.startswith("compact")] == [
@@ -1278,7 +1382,9 @@ async def test_weekend_boot_in_the_clock_window_still_fires_tick_compact(conn, c
     events: list[str] = []
     catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 17))
 
-    await start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, clock, calendar)
+    await start_scheduler_and_fire_post_arm(
+        _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
+    )
 
     assert [e for e in events if e.startswith("compact")] == [
         "compact:2026-06-18", "compact:2026-06-19",
@@ -1565,7 +1671,9 @@ async def test_wedged_seeding_boot_still_arms_the_scheduler(conn, clock, calenda
 
     async def boot_tail() -> asyncio.Task | None:
         await seed_boot_snapshots(warmup_refresh, health_check, timeout_s=0.05)
-        task = start_scheduler_and_fire_post_arm(scheduler, catch_up, clock, calendar)
+        task = start_scheduler_and_fire_post_arm(
+            scheduler, catch_up, clock, calendar, armed=asyncio.Event(),
+        )
         events.append("engine_ready")
         return task
 

@@ -734,3 +734,165 @@ async def test_no_deferred_set_is_the_pre_wo15_behavior(conn, clock, calendar):
     calls.clear()
     post_arm = await runner.catch_up(scope=CatchUpScope.DEFERRED)
     assert calls == [] and post_arm.jobs_caught_up == []
+
+
+# ==================== early hydration (§2.6 "Early-hydration addendum", owner-directed 2026-09-09)
+# The owner travels at 08:15 and boots the PC 09:30–10:00, so the pre-open chain (surveillance 08:20,
+# news 08:25, universe 08:30, digest 08:35, planner 08:50) fired AFTER the trade window opened and the
+# G2 digest-before-open criterion fell to 61%. The due-gate in ``_missed_days``/``_run_safety_critical``
+# treats today's jobs as not-yet-due until their fire time, so no catch-up path can serve a 06:30
+# login: ``hydrate_ahead`` is that path — today's named jobs, ahead of their clock, same watermarks,
+# same single-flight pass lock, same ``_job_result_ok`` verdict. The due-gate itself stays untouched.
+
+EARLY = datetime(2026, 6, 17, 6, 30, tzinfo=IST)      # Wed 06:30 IST — the owner's early-login shape
+SAT_EARLY = datetime(2026, 6, 20, 6, 30, tzinfo=IST)  # Saturday, same hour — not a trading day
+
+
+def _early_clock(at: datetime = EARLY) -> Clock:
+    return Clock(time_source=Ticker(at))
+
+
+class _NotOk:
+    """A job that degrades WITHOUT raising (the bhavcopy/E5 shape): ``ok=False`` sinks the watermark."""
+
+    ok = False
+
+
+def _preopen_registry(calls: list) -> JobRegistry:
+    """The real pre-open chain's shape: one safety-critical job + the run-latest chain, plus a
+    date-keyed job that early hydration must never touch."""
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "surveillance", JobClass.SAFETY_CRITICAL, time(8, 20), order=20))
+    reg.register(_spec_recorder(calls, "news_chain", JobClass.RUN_LATEST, time(8, 25), order=20))
+    reg.register(_spec_recorder(calls, "universe_build", JobClass.RUN_LATEST, time(8, 30), order=10))
+    reg.register(_spec_recorder(calls, "preopen_planner", JobClass.RUN_LATEST, time(8, 50), order=28))
+    reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30)))
+    return reg
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_runs_todays_named_jobs_before_their_fire_time(conn, calendar, caplog):
+    """06:30 login on a trading day: every named job runs NOW (its 08:20–08:50 fire-time is hours
+    away) and records today's watermark, in the catch_up class/order sequence. Unnamed registry jobs
+    are untouched."""
+    calls: list = []
+    runner = CatchUpRunner(conn, _early_clock(), calendar, _preopen_registry(calls))
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.jobs"):
+        outcomes = await runner.hydrate_ahead(
+            ["universe_build", "news_chain", "surveillance"], reason="early_login",
+        )
+
+    # SAFETY_CRITICAL class first, then RUN_LATEST by ``order`` — the same sequence a pass uses, NOT
+    # the order the caller happened to name them in.
+    assert [j for j, _ in calls] == ["surveillance", "universe_build", "news_chain"]
+    assert outcomes == {"surveillance": "ran", "universe_build": "ran", "news_chain": "ran"}
+    assert all(runner.was_run(j, WED) for j in outcomes)
+    assert runner.was_run("preopen_planner", WED) is False   # never named => never run
+    assert runner.was_run("bhavcopy", WED) is False
+    passes = [r for r in caplog.records if r.getMessage() == "early_hydration_pass"]
+    assert len(passes) == 1                                  # exactly one summary line per pass
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_skips_a_job_already_run_today(conn, calendar):
+    """The watermark is the whole double-spend guard: a job the boot pass (or an earlier login)
+    already ran today is reported ``already_run`` and never re-run."""
+    calls: list = []
+    runner = CatchUpRunner(conn, _early_clock(), calendar, _preopen_registry(calls))
+    runner.record_run("universe_build", WED)
+
+    outcomes = await runner.hydrate_ahead(["universe_build", "news_chain"], reason="early_login")
+
+    assert outcomes == {"universe_build": "already_run", "news_chain": "ran"}
+    assert [j for j, _ in calls] == ["news_chain"]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_records_failed_and_keeps_running_the_siblings(conn, calendar):
+    """A failing job records a ``failed`` (retryable) watermark — so its own scheduled fire still runs
+    it — and the rest of the chain continues. An exception and a not-ok return are treated alike."""
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, "surveillance", JobClass.SAFETY_CRITICAL, time(8, 20),
+                                order=20, fail_on="always"))
+
+    async def degraded() -> _NotOk:
+        calls.append(("news_chain", None))
+        return _NotOk()
+
+    reg.register(JobSpec("news_chain", JobClass.RUN_LATEST, time(8, 25), degraded, order=20))
+    reg.register(_spec_recorder(calls, "universe_build", JobClass.RUN_LATEST, time(8, 30), order=10))
+    runner = CatchUpRunner(conn, _early_clock(), calendar, reg)
+
+    outcomes = await runner.hydrate_ahead(
+        ["surveillance", "news_chain", "universe_build"], reason="early_login",
+    )
+
+    assert outcomes == {"surveillance": "failed", "news_chain": "failed", "universe_build": "ran"}
+    assert [j for j, _ in calls] == ["universe_build", "news_chain"]   # the raiser never appended
+    for job_id in ("surveillance", "news_chain"):
+        row = conn.execute(
+            "SELECT status, last_success_at FROM job_runs WHERE job_id=? AND run_for_date=?",
+            (job_id, WED.isoformat()),
+        ).fetchone()
+        assert row["status"] == "failed" and row["last_success_at"] is None
+        assert runner.was_run(job_id, WED) is False       # retryable: the 08:20/08:25 fire still runs
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_does_nothing_on_a_non_trading_day(conn, calendar, caplog):
+    """A Saturday 06:30 login has no session to hydrate for (R6)."""
+    calls: list = []
+    runner = CatchUpRunner(conn, _early_clock(SAT_EARLY), calendar, _preopen_registry(calls))
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.jobs"):
+        outcomes = await runner.hydrate_ahead(["universe_build", "news_chain"], reason="early_login")
+
+    assert outcomes == {} and calls == []
+    assert [r for r in caplog.records if r.getMessage() == "early_hydration_skipped_non_trading_day"]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_rejects_a_date_keyed_job(conn, calendar):
+    """DATE_KEYED jobs are per-missed-day replays with their own give-up ladder; naming one here is a
+    DESIGN error (there is no 'ahead of today' day to key), so it raises rather than guessing."""
+    calls: list = []
+    runner = CatchUpRunner(conn, _early_clock(), calendar, _preopen_registry(calls))
+
+    with pytest.raises(ValueError, match="bhavcopy"):
+        await runner.hydrate_ahead(["universe_build", "bhavcopy"], reason="early_login")
+
+    assert calls == []                                   # rejected BEFORE anything ran
+    assert runner.was_run("universe_build", WED) is False
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_waits_for_an_in_flight_catch_up_pass(conn, calendar):
+    """Single-flight (WO-15 (ii)): watermarks cannot make a CONCURRENT pass safe — both would see the
+    same un-watermarked job. Unlike a sweep (a logged no-op), an early hydration QUEUES on the pass
+    lock, then finds the watermark the pass wrote and reports ``already_run``."""
+    calls: list = []
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_chain() -> None:
+        started.set()
+        await release.wait()
+        calls.append(("news_chain", None))
+
+    reg = JobRegistry()
+    reg.register(JobSpec("news_chain", JobClass.RUN_LATEST, time(8, 25), slow_chain, order=20))
+    runner = CatchUpRunner(conn, _early_clock(datetime(2026, 6, 17, 8, 40, tzinfo=IST)), calendar, reg)
+
+    in_flight = asyncio.create_task(runner.catch_up())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    hydrate = asyncio.create_task(runner.hydrate_ahead(["news_chain"], reason="early_login"))
+    await asyncio.sleep(0)
+    assert not hydrate.done()                            # queued on the lock, not a no-op
+
+    release.set()
+    await asyncio.wait_for(in_flight, timeout=5)
+    outcomes = await asyncio.wait_for(hydrate, timeout=5)
+
+    assert outcomes == {"news_chain": "already_run"}
+    assert [j for j, _ in calls] == ["news_chain"]       # ran exactly ONCE across both passes

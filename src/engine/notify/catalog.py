@@ -191,6 +191,13 @@ class MessageKind(StrEnum):
     (and freeze-lift once coverage is met), and ticker start — and reports the per-step outcome so a
     BACKGROUND recovery is never silent. Info severity unless a step failed (then warning)."""
 
+    EARLY_HYDRATION = "early_hydration"
+    """The §2.6 early-hydration pass ran (owner-directed 2026-09-09): an early Kite login (~06:30) on
+    a trading day pulled the pre-open chain — surveillance, universe, news chain, catalyst digest,
+    pre-open planner — forward from its 08:20–08:50 clock, so the digest exists before the window
+    opens on days the owner is travelling at 08:15. Carries the per-job outcome (ran / already run /
+    failed); info severity unless a job failed (then warning)."""
+
 
 class CatalogMessage(BaseModel):
     """A single rendered, typed owner notification consumed by ``TelegramBot.send`` (§3.2.11).
@@ -599,6 +606,35 @@ def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
         data={
             "steps": [{"name": n, "status": s, "detail": d} for n, s, d in steps],
             "any_failed": any_failed,
+        },
+    )
+
+
+def early_hydration(*, at: str, outcomes: list[tuple[str, str]]) -> CatalogMessage:
+    """Early-hydration summary (§2.6 addendum, 2026-09-09) — ONE owner line per early login.
+
+    ``at`` is the already-``Clock``-derived HH:MM of the login (this module never reads a clock);
+    ``outcomes`` is the ordered ``(job_id, outcome)`` list from ``CatchUpRunner.hydrate_ahead``,
+    outcome in {ran, already_run, failed}. Reads as "Early hydration 06:32: universe_build ran, ...
+    (surveillance already run)" — the owner's proof the day's digest exists before the window opens,
+    and, on a bad morning, which job did not make it. Warning severity iff something failed."""
+    ran = [j for j, o in outcomes if o == "ran"]
+    failed = [j for j, o in outcomes if o == "failed"]
+    already = [j for j, o in outcomes if o == "already_run"]
+    body = f"Early hydration {at}: " + (", ".join(f"{j} ran" for j in ran) or "nothing left to run")
+    if failed:
+        body += " - FAILED: " + ", ".join(failed)
+    if already:
+        body += f" ({', '.join(already)} already run)"
+    return CatalogMessage(
+        kind=MessageKind.EARLY_HYDRATION,
+        title="Early hydration" + (" (with failures)" if failed else ""),
+        body=body,
+        severity="warning" if failed else "info",
+        data={
+            "at": at,
+            "outcomes": [{"job_id": j, "outcome": o} for j, o in outcomes],
+            "ran": ran, "already_run": already, "failed": failed,
         },
     )
 

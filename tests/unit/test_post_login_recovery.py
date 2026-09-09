@@ -268,6 +268,115 @@ async def test_step_failure_isolated_others_still_run(market_store, clock, calen
     assert any("backfill" in msg for _sev, msg in alerts)
 
 
+# ------------------------------------ the ``completed`` gate (§2.6 early hydration, 2026-09-09)
+# Login hooks are fire-and-forget TASKS (``SessionManager._fire_login_hooks`` creates one task per
+# hook), so registration order gives the early-hydration chain NO ordering against this recovery.
+# This event is the real dependency: SET at construction (an engine that never runs a recovery must
+# not block the chain), CLEARED at the top of ``run`` before its first await, SET again in a
+# ``finally`` when the ladder ends — success or not.
+
+
+@pytest.mark.asyncio
+async def test_completed_is_cleared_during_the_run_and_set_afterwards(market_store, clock, calendar):
+    seen: list[bool] = []
+    holder: dict = {}
+
+    class _WatchingBackfill(FakeBackfill):
+        async def run(self, symbols, interval, start, end):
+            seen.append(holder["rec"].completed.is_set())
+            return await super().run(symbols, interval, start, end)
+
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    rec = _mk_recovery(
+        instruments=instruments, market_store=market_store, kite=None,
+        session=FakeSession(valid=True), backfill=_WatchingBackfill(), ticker=FakeTicker(),
+        lifecycle=FakeLifecycle(WarmupReapply(ready=True, lifted=True, outcome="ready_lifted")),
+        clock=clock, calendar=calendar,
+    )
+    holder["rec"] = rec
+
+    assert rec.completed.is_set() is True        # a never-run recovery must not park the chain
+    await rec.run()
+
+    assert seen == [False]                       # cleared for the whole ladder, not just the top
+    assert rec.completed.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_completed_is_set_even_when_a_step_raises(market_store, clock, calendar):
+    """A ``finally``, not a happy-path line: a recovery that FAILS still releases the early-hydration
+    chain — that chain needs no Kite session, and a permanently-cleared event would park it until its
+    own 15-min timeout on every bad morning."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    rec = _mk_recovery(
+        instruments=instruments, market_store=market_store,
+        kite=FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]),
+        session=FakeSession(valid=True), backfill=FakeBackfill(boom=True), ticker=FakeTicker(),
+        lifecycle=FakeLifecycle(
+            WarmupReapply(ready=True, lifted=False, outcome="ready_already_normal")
+        ),
+        clock=clock, calendar=calendar,
+    )
+
+    report = await rec.run()
+
+    assert report.any_failed is True
+    assert rec.completed.is_set() is True
+
+
+class _BlockingBackfill(FakeBackfill):
+    """Blocks the FIRST ``run`` call on an externally controlled gate; every later call passes
+    straight through — lets a test park one ``run()`` mid-ladder while a second overlaps it."""
+
+    def __init__(self, gate: asyncio.Event) -> None:
+        super().__init__()
+        self._gate = gate
+        self._blocked_once = False
+
+    async def run(self, symbols, interval, start, end):
+        if not self._blocked_once:
+            self._blocked_once = True
+            await self._gate.wait()
+        return await super().run(symbols, interval, start, end)
+
+
+@pytest.mark.asyncio
+async def test_completed_stays_clear_until_both_overlapping_runs_finish(market_store, clock, calendar):
+    """Depth-counted (2026-09-09 review): a bare Event set by whichever ``run()`` finishes FIRST would
+    release the early-hydration chain while a second overlapping login's recovery is still mid-ladder.
+    ``SessionManager._fire_login_hooks`` creates one task per hook per login, so two logins landing
+    close together really do fire two concurrent ``run()`` calls — this is not a hypothetical race."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    gate = asyncio.Event()
+    rec = _mk_recovery(
+        instruments=instruments, market_store=market_store,
+        kite=FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]),
+        session=FakeSession(valid=True), backfill=_BlockingBackfill(gate), ticker=FakeTicker(),
+        lifecycle=FakeLifecycle(WarmupReapply(ready=True, lifted=True, outcome="ready_lifted")),
+        clock=clock, calendar=calendar,
+    )
+
+    first = asyncio.create_task(rec.run())
+    await asyncio.sleep(0.05)                        # first run() is parked in its backfill step
+    assert rec.completed.is_set() is False
+
+    second = asyncio.create_task(rec.run())
+    second_report = await asyncio.wait_for(second, timeout=5)   # not blocked — finishes on its own
+    assert second_report.ok is True
+    # The SECOND run() finished, but the FIRST is still in flight (parked on the gate). A bare Event
+    # would have been SET by the second run's own ``finally`` already; depth-counted, it must stay
+    # clear until BOTH are done.
+    assert rec.completed.is_set() is False
+
+    gate.set()                                        # release the first run()'s backfill wait
+    first_report = await asyncio.wait_for(first, timeout=5)
+    assert first_report.ok is True
+    assert rec.completed.is_set() is True
+
+
 @pytest.mark.asyncio
 async def test_idempotent_second_fire_skips_already_good(market_store, clock, calendar):
     """Safe to fire on every login: the second fire skips instruments (a live dump exists) and the ticker
