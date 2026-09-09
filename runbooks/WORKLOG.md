@@ -1,5 +1,75 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-09 (owner: "work on the owner-decision tasks and engineering follow-ups as per your best understanding; early hydration when I log in at ~06:30") — inline batch shipped; delegated batch designed
+
+- **Owner decisions taken (delegated, "best understanding"):** hi52 origination restricted to the
+  ELIGIBLE universe (the 09-03 full-market backtest: index-class edge only; extended −0.26%/49% at
+  T+20) — shadow clock restarts 2026-09-10; hi52 **v2 pre-registered** in the plan (N=2; smooth
+  up_day_frac ≥0.55 ∧ max_day_move ≤0.07 over 20 sessions, trigger-day |move| ≤5%, index population;
+  thresholds fixed from the 09-03 medians). tdc thin cells: no action. WO-12 wake task: superseded
+  by early hydration (a laptop that is asleep cannot be woken by its own task).
+- **Inline batch (commit 6507fd7, tests green, ruff clean):** brk20 trailing corp-action veto
+  (35-calendar-day window, `unadjusted_vetoes` on `brk20_sweep`); hi52 scope; NSE announcements
+  polled per day (`from_date/to_date`, probe: 745 rows for 08-09 vs the bare endpoint's 20) —
+  the 20-row cap noted on 09-04 is gone; backtest survivorship caveat corrected. Hygiene: stash
+  `context-daily-tail` dropped (superseded by 334d992); AUDIT_PROMPT.md committed (8ec4c5f); the two
+  transcript scrapers stay untracked (owner's scratch).
+- **Store-stall 09-08 11:48 (evidence, sonnet reader + my read of `_flush_locked`):** the thread
+  dump is sequential and cannot name the holder (feature_snapshot INSERT vs tick-flush COPY, both
+  past the acquire line); `_lock` is already per-statement and `_tick_stage` is already TEMP, so no
+  structural fix is indicated — per-statement timing (`store_slow_statement` ≥5 s) ships instead so
+  the next stall names its statement. Backlog by day: 09-03 0 backlog events / 1 stall pulse,
+  **09-04 46 / 17** (watchlist 200), 09-08 14 / 7 (watchlist 300) — the class is intraday load,
+  NOT the O16 watchlist raise.
+- **Tick-lag 09-03 15:40 burst:** 14 ERROR/recovered pairs in 83 ms + 6 pages — Kite's connect-time
+  snapshot ticks (last-trade stamps ~15:31) inside the deliberately-watched 15:30–15:45 buffer flap
+  the single global episode. Design: a 30 s reconnect grace armed from the `feed.health` bus
+  (WARMING/HEALTHY transitions); no wire-schema change.
+- **News resolve lock:** `score_news` held `news_chain_lock` across every chunked LLM call → 14
+  `news_resolve_timeout` on 09-07 (9 in one second at 10:12:40). Design: same lock, hold only the
+  store read and a CONDITIONAL write-back (never re-create a merged-away cluster).
+- **Early hydration (SHIPPED 3452ad3):** `CatchUpRunner.hydrate_ahead` + an `EarlyHydration`
+  login hook (trading day, login before that day's session open, waits for `scheduler.start()`
+  and for `PostLoginRecovery.completed`, re-checks the open after the waits) runs surveillance →
+  universe → news chain → digest → planner ahead of their clock and records today's watermarks;
+  one owner summary line. **Design reversal during review:** the draft made `_scheduled_runner`
+  skip watermarked jobs — that pinned a 06:30 digest/plan and a pre-08:00 instruments map for the
+  whole day (07:00–09:00 filings are the largest catalyst class), so the scheduled fires stay
+  UNCONDITIONAL and the watermark guards the sleep case only (wake at 09:30 keeps the 06:30 run).
+  `instruments` excluded (Kite's dump refreshes ~08:00 IST); sleep-case residual recorded (universe
+  stays on the 06:30 map that day). Owner-visible: on an awake-PC early-login day a second
+  pre-open plan message arrives at 08:50.
+- **Delegated batch — three rounds, all reviewed:** round 1 (5 implementers + 10 two-lens
+  reviewers) found the two spec errors above plus: the conditional write-back re-emitting the
+  pre-LLM snapshot (a poll merge reverted — reproduced), no scoring single-flight (chain batch vs
+  5-min tick), the store telemetry logging under the re-entrant lock and splitting one read into
+  two events, the reconnect grace blind to in-child KiteTicker reconnects, the v2 report citing
+  N=1 and N=2 in one document. Round 2 (5 fixers + 10 reviewers) fixed those; round 3 (5 small
+  fixers) closed the residuals (reconnect signal made in-band via a `connect_seq` on the heartbeat
+  emitted BEFORE re-subscribe; five hand-rolled store holds instrumented; gate re-checked after the
+  waits; depth-counted recovery event; v2 note scoping + coupled gap thresholds). Full unit suite
+  **2222 passed** (3:52) + hi52 harness 32 passed; ruff clean on every touched file (one
+  pre-existing F401 in test_ops_main_wiring.py:1824 left alone). Commits: 47b33bc tick-lag grace +
+  connect_seq, dc73e28 news lock, 3452ad3 early hydration, 93d8bb0 store telemetry, 141a10f hi52
+  v2 harness. bar_reconcile failed 15:50:03 on a Kite `RemoteDisconnected` and the 16:15 sweep
+  re-ran it clean at 16:17:19 (self-healed as designed).
+- **Process miss, self-reported:** launched the 5-implementer workflow at **14:36 IST on a trading
+  day** on a stale clock assumption (the compaction summary said ~00:1x). Caught by a `Get-Date`
+  three minutes later, stopped before any file was touched; engine log shows no LLM pressure.
+  Rule re-affirmed: `Get-Date` immediately before any fan-out, not just before service actions.
+  At 14:44 the owner said "you can restart the engine and continue your work now" — taken as
+  their call on both counts (trade-off stated: the swarm shares the subscription window with
+  the analysts for the last ~45 min); the workflow relaunched 14:54.
+- **Deploy 6507fd7 (owner-authorized mid-session restart 14:44:49):** boot verified — token
+  valid 14:45:22, `startup_complete` 14:47:14, `engine_ready` 14:47:20, `boot_contract_ok`
+  14:52:21 (420 s). Boot-window noise, all self-healed: `store_stalled` 14:48:37 for 60 s during
+  the warm-up gap repair (the known post-boot class, same shape as 09-08 10:14); Telegram
+  `TimedOut` ×2 at 14:49 with `notification_retry_delivered` 14:50:28; one intraday_analyst
+  `schema_invalid` at 14:48:39 followed by a clean call at 14:48:57 and a delivered rec (a schema
+  retry, NOT the subscription limit). The window-open sweep did NOT re-fire (the window state is
+  sticky across a restart, so there is no INACTIVE→ACTIVE edge today): the brk20 veto and the
+  hi52 scope take effect at the 09-10 window open.
+
 ## 2026-09-09 (00:0x, owner: "trade for Monday has been done — what is the status now?") — G2 re-measured; ledger vs holdings discrepancy
 
 - **G2 collector (2026-07-29..09-09, 31 sessions):** digest-before-open 19/31 = **61.3%** (falling —

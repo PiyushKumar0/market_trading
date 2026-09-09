@@ -194,3 +194,12 @@ it is safe to interrupt and resume across evenings. Kite-official rows are never
 Then re-run `scripts\backtest_hi52.py` (engine still off) — and note the backtest must apply the same
 unadjusted-history veto the live sweep applies (`hi52.unadjusted_history` over `corp_actions`), which
 the corp-actions leg makes possible for the 2022→2026 population.
+
+## hi52 backtest registrations (2026-09-09) — v1 and the pre-registered v2, engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\backtest_hi52.py --out data\reports\backtest_hi52_<date>.json                     # v1 (default)
+.venv\Scripts\python.exe scripts\backtest_hi52.py --registration v2 --out data\reports\backtest_hi52_v2_<date>.json  # v2: smooth + no-gap + index population, N=2
+```
+v2 is a SEPARATE pre-registration (plan §6.1 hi52 addendum, thresholds fixed from the 09-03 medians),
+never a knob on v1: report the two side by side, never pooled; `fold_pass_min(2)` = 60% applies to v2.
