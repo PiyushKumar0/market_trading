@@ -506,6 +506,12 @@ async def run() -> int:
     # late-tick death spiral — the engine ran 20 min behind for two hours with nothing but INFO lines).
     bar_builder = BarBuilder(store, clock, bus, notify=notify)
     bus.subscribe("tick", bar_builder.on_tick_event)
+    # feed.health drives the 2026-09-03 reconnect grace: a WARMING/HEALTHY transition suspends the
+    # lag watchdog for 30 s so Kite's connect-time snapshot (one last-trade-stamped tick per
+    # subscribed instrument) cannot flap the single lag episode — 14 ERROR/recovered pairs in 83 ms
+    # and 6 owner pages on the 15:40:02 boot. Subscribed HERE, well before the ticker is spawned
+    # (step 7, ticker_resume_hook), so the boot's own transitions are never missed.
+    bus.subscribe("feed.health", bar_builder.on_feed_health)
 
     # Shared injected httpx client for every best-effort feed (convention 11 / E5). Owned here.
     # Default browser headers + split timeout (A3/A4): the bare python-httpx UA is tarpitted/blocked by

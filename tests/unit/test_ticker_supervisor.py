@@ -741,6 +741,242 @@ async def test_stale_recovers_on_a_heartbeat_frame_too(clock):
     assert sup.health().state == "HEALTHY"
 
 
+# ------------------------------------------- 3b. in-child KiteTicker reconnect (2026-09-09, §2.6 (i))
+# KiteTicker reconnects INSIDE the child (`reconnect=True`; ticker/main.py `TickerApp._on_connect`
+# re-subscribes and re-asserts FULL mode, so Kite re-delivers the connect-time snapshot with
+# last-trade stamps) while the child keeps heartbeating. The supervisor therefore sees NO state
+# transition and publishes nothing, so BarBuilder's reconnect grace never arms and the 2026-09-03
+# lag flap recurs.
+#
+# The signal is `connect_seq` (ticker/main.py `TickerApp._send_heartbeat`), a per-child counter bumped
+# at the TOP of `_on_connect` and shipped on a heartbeat emitted THERE, before `ws.subscribe` — so it
+# precedes the snapshot burst in the pipe. A CHANGE of that value (never the first value after a
+# spawn, which is the spawn's own WARMING->HEALTHY publish) is the reconnect, and it must publish
+# feed.health exactly once. The `ws_connected` False->True edge stays as the fallback for a heartbeat
+# that carries no `connect_seq`, and no frame may ever publish twice.
+def _hb(ws_connected: bool | None = None, connect_seq: int | None = None) -> dict:
+    """The child's heartbeat frame (ticker/main.py `TickerApp._send_heartbeat`).
+
+    `connect_seq` is the pinned reconnect field, `ws_connected` the fallback; both are optional on
+    the wire, so omitting them here reproduces the pre-2026-09-09 frame shape verbatim."""
+    frame: dict = {"type": "heartbeat", "seq": 1, "last_tick_age_s": 0.4}
+    if ws_connected is not None:
+        frame["ws_connected"] = ws_connected
+    if connect_seq is not None:
+        frame["connect_seq"] = connect_seq
+    return frame
+
+
+def _health_sink(bus: EventBus) -> list[str]:
+    states: list[str] = []
+
+    async def _h(fh) -> None:
+        states.append(fh.state)
+
+    bus.subscribe(FEED_HEALTH_TOPIC, _h)
+    return states
+
+
+@pytest.mark.asyncio
+async def test_in_child_reconnect_publishes_feed_health_on_the_ws_connected_edge(clock):
+    """True -> False -> True heartbeats: exactly ONE extra publish, on the False->True edge only.
+
+    The state never leaves HEALTHY (no transition exists for an in-child reconnect), so this edge is
+    the only evidence the engine gets that a connect-time snapshot is about to land."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "HEALTHY"
+
+    await sup._handle_frame(_hb(True))          # first frame reports connected — NOT an edge
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == []
+
+    await sup._handle_frame(_hb(False))         # the websocket dropped; child still heartbeating
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == []                          # no state transition, nothing to publish
+
+    await sup._handle_frame(_hb(True))          # reconnected inside the child -> publish
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == ["HEALTHY"]
+
+    await sup._handle_frame(_hb(True))          # steady state: never publish per heartbeat
+    await sup._handle_frame(_hb(True))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == ["HEALTHY"]
+    assert sup.health().state == "HEALTHY"       # the state machine itself is untouched
+
+
+@pytest.mark.asyncio
+async def test_the_first_heartbeat_after_spawn_publishes_exactly_once(clock):
+    """A fresh spawn's first heartbeat must keep publishing ONE event (WARMING->HEALTHY), not two.
+
+    `ws_connected` starts unknown (None) and the first frame reports True — that is a spawn, not a
+    reconnect, and the WARMING promotion already publishes the HEALTHY the grace needs."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "WARMING"
+    sup._started_at = clock.now()
+
+    await sup._handle_frame(_hb(True))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert states == ["HEALTHY"]
+    assert sup.health().state == "HEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeat_without_ws_connected_never_fabricates_an_edge(clock):
+    """An older/degenerate heartbeat frame with no `ws_connected` leaves the tracked value alone.
+
+    Absence is not a disconnect: treating a missing field as False would manufacture a reconnect
+    edge on the next normal heartbeat and arm the grace for nothing."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "HEALTHY"
+
+    await sup._handle_frame(_hb(False))
+    await sup._handle_frame(_hb(None))          # field absent — must not clear the tracked False
+    await sup._handle_frame(_hb(True))          # ... so this is still the reconnect edge
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert states == ["HEALTHY"]
+
+
+@pytest.mark.asyncio
+async def test_a_connect_seq_change_publishes_feed_health_exactly_once(clock, monkeypatch):
+    """1, 1, 2 — only the CHANGE is a reconnect (2026-09-09 review, gap (a)).
+
+    The `ws_connected` edge is only observable on the NEXT 1 s heartbeat, but Kite's connect-time
+    snapshot ticks land within ~50 ms of the child's re-subscribe, so the burst flaps BarBuilder's lag
+    episode before the grace can arm. `connect_seq` rides a heartbeat emitted inside `_on_connect`
+    itself, ahead of the subscribe — in-band and ordering-safe. Here: the first value seen is this
+    spawn's baseline, the repeat is steady state, and the bump is the reconnect."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "HEALTHY"
+
+    await sup._handle_frame(_hb(True, connect_seq=1))   # first value: baseline, not an edge
+    await sup._handle_frame(_hb(True, connect_seq=1))   # steady state
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == []
+
+    await sup._handle_frame(_hb(True, connect_seq=2))   # the in-child reconnect
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == ["HEALTHY"]
+
+    await sup._handle_frame(_hb(True, connect_seq=2))   # ... and never again on the same seq
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == ["HEALTHY"]
+    assert sup.health().state == "HEALTHY"              # the state machine itself is untouched
+
+    reconnects = [kw for (_lvl, ev, kw) in rec.calls if ev == "ticker_ws_reconnected"]
+    assert len(reconnects) == 1
+    assert reconnects[0]["seq"] == 2 and reconnects[0]["via"] == "connect_seq"
+
+
+@pytest.mark.asyncio
+async def test_a_connect_seq_change_fires_even_with_no_ws_connected_edge(clock):
+    """Gap (b): a sub-second drop (or an `on_error` path with no `on_close`) never produces a
+    `ws_connected=False` heartbeat, so the False->True edge sees nothing at all. `connect_seq` is
+    bumped by `_on_connect` regardless of how the drop was reported, so it still fires."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "HEALTHY"
+
+    await sup._handle_frame(_hb(True, connect_seq=4))   # baseline; ws_connected never goes False
+    await sup._handle_frame(_hb(True, connect_seq=5))   # reconnect visible ONLY in the seq
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert states == ["HEALTHY"]
+
+
+@pytest.mark.asyncio
+async def test_one_frame_that_recovers_stale_and_changes_seq_publishes_once(clock):
+    """A reconnect heartbeat landing on a STALE feed has TWO reasons to publish — `_mark_alive`'s
+    STALE->HEALTHY recovery and the seq edge — and must still emit exactly ONE `feed.health`.
+
+    Two events for one frame would arm BarBuilder's grace twice and make the bus lie about how many
+    transitions happened."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "HEALTHY"
+
+    await sup._handle_frame(_hb(True, connect_seq=7))   # baseline seq for this spawn
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert states == []
+
+    sup._state = "STALE"                                # ... then the feed went silent
+    await sup._handle_frame(_hb(True, connect_seq=8))   # recovery AND seq edge, one frame
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert states == ["HEALTHY"]
+    assert sup.health().state == "HEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_the_first_connect_seq_after_spawn_is_not_a_reconnect(clock):
+    """The child's `_on_connect` heartbeat is the FIRST frame of a fresh spawn, so its `connect_seq`
+    has no predecessor here: the WARMING->HEALTHY promotion is the one publish, not two."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "WARMING"
+    sup._started_at = clock.now()
+
+    await sup._handle_frame(_hb(True, connect_seq=1))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert states == ["HEALTHY"]
+    assert sup.health().state == "HEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_a_respawned_childs_first_seq_is_not_a_reconnect(clock):
+    """`_spawn_child` resets the tracked seq like every other per-spawn stamp.
+
+    A fresh child restarts its counter at 1, so a supervisor still holding the dead child's last seq
+    (say 6) would read 1 as a "change" and publish a phantom reconnect on top of the respawn's own
+    WARMING->HEALTHY."""
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus)
+    sup._state = "HEALTHY"
+
+    await sup._handle_frame(_hb(True, connect_seq=6))   # the dying child's last heartbeat
+    sup._reset_spawn_stamps()                           # what _spawn_child does for a fresh child
+    sup._state = "WARMING"
+    sup._started_at = clock.now()
+
+    await sup._handle_frame(_hb(True, connect_seq=1))   # new child, counter back at 1
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert states == ["HEALTHY"]                        # the promotion only — no phantom reconnect
+
+
 # ------------------------------------------------------------------ 4. stamping lives on the frame path
 @pytest.mark.asyncio
 async def test_every_frame_type_stamps_liveness_on_the_frame_path(clock):

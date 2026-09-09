@@ -64,7 +64,18 @@ Pinned behaviors (the plan is law):
     - *Watchdog:* processing lag (``clock.now() - newest exchange_ts``) past
       :data:`LAG_THRESHOLD_S` logs ERROR ``tick_processing_lagging`` (re-logged at most every
       :data:`LAG_LOG_INTERVAL_S`) and raises ONE owner alert per episode through the injected
-      ``notify`` sink; ``tick_processing_recovered`` (INFO) closes the episode.
+      ``notify`` sink; ``tick_processing_recovered`` (INFO) closes the episode. **Reconnect grace
+      (2026-09-03):** :meth:`BarBuilder.on_feed_health` (bus topic ``feed.health``) suspends the
+      watchdog for :data:`LAG_RECONNECT_GRACE_S` after a WARMING/HEALTHY transition, because Kite's
+      connect-time snapshot carries each instrument's LAST-TRADE stamp and flapped the single global
+      episode 14 times in 83 ms. Coverage extended 2026-09-09 to in-child KiteTicker reconnects (no
+      supervisor state transition) via the heartbeat's ``connect_seq`` — a per-connect counter the
+      child bumps and flushes BEFORE it re-subscribes, so the signal precedes the snapshot burst in
+      the frame stream; the ``ws_connected`` False→True edge remains only as its fallback.
+      **Honest bound (2026-09-09 review):** one (re)connect delays a genuine alarm by up to 30 s. A
+      feed that re-transitions FASTER than the grace lapses keeps re-arming it, so this watchdog can
+      be blind for part of such a loop — that loop is itself an alerting condition, owned by the
+      supervisor (``warming_timeout`` respawns, DEGRADED/HEALTHY cycles), not by this lag alarm.
     - *Only ``src='self'`` rows are amendable (WO-5):* once reconcile/backfill has made a row
       ``kite_official``/``gap_backfilled`` it is CANONICAL, and reconcile never revisits a
       checkpointed day — an amendment there would be a permanent, invisible rewrite of an official
@@ -139,6 +150,24 @@ LAG_THRESHOLD_S = 120
 #: Minimum seconds between two ``tick_processing_lagging`` ERROR lines inside ONE episode. The owner
 #: alert is sent once per episode regardless; this only paces the log.
 LAG_LOG_INTERVAL_S = 300
+
+#: Seconds after a feed-health transition into WARMING/HEALTHY during which processing lag is NOT
+#: evaluated (2026-09-03 15:40:02 reconnect-snapshot storm — see :meth:`BarBuilder.on_feed_health`).
+#: A module constant, not a knob: it only has to cover the connect-time snapshot burst, which lands
+#: in ONE batch within milliseconds of the connect (the 09-03 tape: 202 tokens, 14 flap pairs, 83 ms).
+#: 30 s is ~360x that burst and still a quarter of :data:`LAG_THRESHOLD_S`, so a real backlog that
+#: outlives ONE reconnect is reported up to 30 s later than before, not suppressed. The bound holds
+#: per (re)connect, not globally (2026-09-09 review): a feed re-transitioning faster than 30 s
+#: re-arms the grace before it lapses and this watchdog stays silent through that loop — deliberately,
+#: because a reconnect loop is the supervisor's alarm (``warming_timeout`` respawns, DEGRADED cycles,
+#: heartbeat-silence kill), and duplicating it here would page twice for one fault.
+LAG_RECONNECT_GRACE_S = 30
+
+#: ``FeedHealth.state`` values that arm the reconnect grace: the two states a (re)connect passes
+#: through, and the only two whose arrival implies a fresh ``kws.connect`` snapshot may follow.
+#: STOPPED / DEGRADED / STALE must never arm — a degraded or stale feed is exactly when the lag
+#: alarm has to stay live.
+_LAG_GRACE_ARMING_STATES = frozenset({"WARMING", "HEALTHY"})
 
 #: Buffer past session_close the lag watchdog keeps watching (the square-off/settlement tail) before
 #: treating a stale timestamp as a snapshot echo rather than a backlog (2026-08-26 23:21 false page —
@@ -280,6 +309,9 @@ class BarBuilder:
         self._lagging = False
         self._lag_logged_at: datetime | None = None
         self._pending_alert: CatalogMessage | None = None
+        # Reconnect grace deadline (2026-09-03): while set and in the future, _watch_lag does not
+        # evaluate. Armed by on_feed_health; cleared lazily by _watch_lag once it has passed.
+        self._lag_grace_until: datetime | None = None
 
         # --- feed_stats counters (R8 observability, §3.2.12): zero-cost increments on the hot path,
         #     drained + reset by stats_snapshot() for the periodic in-session feed_stats line. ---
@@ -651,6 +683,63 @@ class BarBuilder:
 
     # ------------------------------------------------------- processing-lag watchdog (WO-25a)
 
+    async def on_feed_health(self, event: Any) -> None:
+        """Arm the reconnect grace on a feed-health transition (bus topic ``feed.health``).
+
+        *2026-09-03 15:40:02.* A post-close boot spawned the ticker child; on ``kws.connect`` Kite
+        delivered ONE snapshot tick per subscribed instrument (202 tokens) carrying that instrument's
+        **last-trade** ``exchange_timestamp`` (~15:31), interleaved with near-fresh ticks (lag ~26 s).
+        :meth:`_watch_lag` keeps ONE global episode, so each stale tick re-opened it and the next
+        fresh tick closed it: 14 ERROR/``recovered`` pairs in 83 ms and 6 owner pages. Both 2026-08-26
+        guards are inert on that shape by construction — same day, and 15:30–15:45 is *deliberately*
+        watched (:data:`_LAG_WATCH_END_BUFFER`). Nothing on the wire marks a frame as a snapshot and
+        nothing is invented: the reconnect itself is the signal, and the supervisor already announces
+        it. So a transition into WARMING/HEALTHY suspends lag evaluation for
+        :data:`LAG_RECONNECT_GRACE_S` — the same WARMING-suppression the supervisor applies to its own
+        heartbeat-silence kill (§2.6). An episode already open is closed here rather than left to the
+        next tick, so its staged owner page is dropped before :meth:`on_tick_event` can dispatch it.
+
+        *Coverage (2026-09-09 review).* Transitions are not the only reconnect. KiteTicker reconnects
+        INSIDE the child (``reconnect=True``; ``ticker/main.py`` ``TickerApp._on_connect`` re-subscribes
+        and re-asserts FULL mode, so Kite re-delivers the same connect-time snapshot) while the child
+        keeps heartbeating — no supervisor state change, so nothing used to reach this handler and the
+        09-03 flap recurred for the commonest reconnect there is. The supervisor now also publishes
+        ``feed.health`` when the heartbeat's ``connect_seq`` CHANGES
+        (``ticker_supervisor._handle_frame``), which arrives here as a HEALTHY event and arms this
+        same grace. ``connect_seq`` is the child's per-connect counter, bumped at the top of
+        ``_on_connect`` and shipped on a heartbeat emitted THERE, before ``ws.subscribe``.
+
+        Both halves of that sentence close a residual the first cut left open. The signal is
+        *in-band*: it rides the frame stream the snapshot itself travels on, ahead of it, so the
+        grace is armed before the first snapshot tick can be evaluated — where the earlier
+        ``ws_connected`` False→True edge was only observable on the NEXT 1 s heartbeat, and Kite's
+        snapshot starts landing ~50 ms after the re-subscribe, i.e. the burst flapped this episode
+        before anything armed. And it is *unconditional on how the drop was reported*: the counter is
+        bumped by the RE-connect, so a sub-second drop or an ``on_error`` path with no ``on_close`` —
+        neither of which ever emits a ``ws_connected=False`` heartbeat, so neither shows an edge at
+        all — still reaches here. The ``ws_connected`` edge survives only as the fallback for a
+        heartbeat carrying no ``connect_seq``. One optional additive field on an existing frame; no
+        new frame type, no protocol bump, no state machine changed.
+
+        Honest bound, unchanged: one (re)connect delays a genuine alarm by up to 30 s, and a feed
+        reconnecting faster than the grace lapses keeps it armed — that loop is the supervisor's
+        alarm, not this one's.
+
+        Payload: ``TickerSupervisor._publish_health`` publishes ``self.health()`` — a
+        ``FeedHealth`` pydantic model (``ticker_supervisor.py`` :class:`FeedHealth`, built in
+        ``health()``) whose ``state`` is one of ``{"STOPPED","WARMING","HEALTHY","DEGRADED","STALE"}``.
+        ``state`` is the ONLY field read here, duck-typed rather than imported: ``marketdata`` does not
+        depend on ``broker`` (module docstring "Dependencies"), and an unexpected payload must degrade
+        to "no grace", never raise on the bus."""
+        state = getattr(event, "state", None)
+        if state not in _LAG_GRACE_ARMING_STATES:
+            return                              # STOPPED / DEGRADED / STALE keep the watchdog live
+        until = self._clock.now() + timedelta(seconds=LAG_RECONNECT_GRACE_S)
+        self._lag_grace_until = until
+        _log.info("tick_lag_watch_grace_armed", state=state, until=until.isoformat())
+        if self._lagging:
+            self._close_lag_episode("tick_lag_watch_reconnect_grace")
+
     def _watch_lag(self, now: datetime, ts: datetime) -> None:
         """Track ``now - newest exchange_ts`` and alarm past :data:`LAG_THRESHOLD_S`.
 
@@ -668,13 +757,30 @@ class BarBuilder:
         close, not the ordinary 15:45) — outside them an active episode is reset quietly, because the
         spiral this watchdog exists for can only grow while the exchange is producing ticks. Residual
         accepted: a holiday-morning reconnect echoing SAME-day stamps inside the window could still
-        page once; the calendar is deliberately not threaded in here for that rare case."""
+        page once; the calendar is deliberately not threaded in here for that rare case.
+
+        Third guard (2026-09-03 15:40:02 reconnect-snapshot storm): inside the grace armed by
+        :meth:`on_feed_health` nothing is evaluated at all — a connect-time snapshot is not
+        consumption lag, and the two are indistinguishable per-tick with no marker on the wire. The
+        deadline is cleared LAZILY here, on the first tick that outlives it, rather than by a timer:
+        the watchdog is a tick-path rule (an engine with no ticks pages nobody either way), so a
+        grace armed by a reconnect that then delivers nothing costs one comparison and no wake-up."""
         if ts.date() != now.date():
             return                              # previous-day snapshot echo — not consumption lag
         if not (self._session_open <= now.time() <= self._lag_watch_end):
             if self._lagging:
                 self._close_lag_episode("tick_lag_watch_suspended_out_of_session")
             return
+        grace_until = self._lag_grace_until
+        if grace_until is not None:
+            if now < grace_until:
+                # Belt-and-braces with on_feed_health's own close: EventBus.publish is
+                # fire-and-forget, so a tick task queued BEFORE the arming can still land here with
+                # an episode open (the two handlers race on the same loop).
+                if self._lagging:
+                    self._close_lag_episode("tick_lag_watch_reconnect_grace")
+                return
+            self._lag_grace_until = None        # lapsed — resume normal evaluation from this tick on
         lag_s = (now - ts).total_seconds()
         if lag_s >= LAG_THRESHOLD_S:
             if not self._lagging:

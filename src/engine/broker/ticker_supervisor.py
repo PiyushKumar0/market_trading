@@ -348,6 +348,13 @@ class TickerSupervisor:
         # THE liveness stamp (WO-26b): refreshed by EVERY frame on the frame path, so it can never be
         # starved separately from the data it guards. ``_last_heartbeat_at`` is now diagnostic only.
         self._last_frame_at = None  # type: ignore[var-annotated]
+        # In-child reconnect trackers (2026-09-09, §2.6 hardening (i)) — see :meth:`_handle_frame`.
+        # ``_last_connect_seq`` is THE signal: the child's per-connect counter off the heartbeat
+        # frame, a CHANGE of which is a reconnect. ``_last_ws_connected`` is the fallback for a
+        # heartbeat that carries no ``connect_seq``. ``None`` on both = nothing reported yet by this
+        # spawn; both are cleared per spawn by :meth:`_reset_spawn_stamps`.
+        self._last_connect_seq: int | None = None
+        self._last_ws_connected: bool | None = None
         self._started_at = None  # type: ignore[var-annotated]
         self._healthy_since = None  # type: ignore[var-annotated]  # entry into HEALTHY (tick-silence ref)
 
@@ -521,11 +528,7 @@ class TickerSupervisor:
         # in the process table; Phase 1 hands the token + initial subscription set here.
         await self._send_startup_handshake()
 
-        self._started_at = self._clock.now()
-        self._last_tick_at = None
-        self._last_heartbeat_at = None
-        self._last_frame_at = None
-        self._healthy_since = None
+        self._reset_spawn_stamps()
         self._set_state("WARMING")  # suppress false feed-stale alarms until first ticks (§2.6)
 
         self._monitor_task = asyncio.create_task(self._monitor_loop(), name="ticker-monitor-loop")
@@ -537,6 +540,28 @@ class TickerSupervisor:
             tcp=f"{self._settings.ticker.tcp_host}:{self._settings.ticker.tcp_port}",
             tokens=len(self._tokens),
         )
+
+    def _reset_spawn_stamps(self) -> None:
+        """Clear every per-spawn stamp so a fresh child is judged only on ITS OWN evidence (§2.6).
+
+        Named + extracted from :meth:`_spawn_child` (2026-09-09) because this is exactly the kind of
+        block a later field quietly forgets to join — and the two in-child reconnect trackers are
+        that kind of field. A new child has produced no frames yet, so the liveness/tick/heartbeat
+        stamps go to ``None``; ``_started_at`` re-stamps so every WARMING episode is timed afresh.
+
+        The reconnect trackers reset for a sharper reason: a fresh child restarts ``connect_seq`` at
+        1 and its link state is unknown again, so its FIRST heartbeat is a SPAWN — whose
+        WARMING→HEALTHY promotion already publishes — not a reconnect. Carrying the dead child's
+        values across would read that first frame as a seq CHANGE (or as the False→True edge left
+        over from the old link) and publish a phantom reconnect on top of the respawn's own event.
+        """
+        self._started_at = self._clock.now()
+        self._last_tick_at = None
+        self._last_heartbeat_at = None
+        self._last_frame_at = None
+        self._last_connect_seq = None
+        self._last_ws_connected = None
+        self._healthy_since = None
 
     async def _send_startup_handshake(self) -> None:
         """Deliver the credentials + initial subscriptions to the child over stdin (§2.4).
@@ -779,16 +804,71 @@ class TickerSupervisor:
         type dispatch. Putting the stamp here (rather than on the heartbeat branch alone) means
         liveness CANNOT be starved separately from the data it guards: whatever stalls the frame path
         stalls both, and whatever revives it revives both.
+
+        **In-child reconnect signal (2026-09-09, §2.6 hardening (i)).** KiteTicker reconnects INSIDE
+        the child (``reconnect=True``; ``ticker/main.py`` :meth:`~TickerApp._on_connect` re-subscribes
+        and re-asserts FULL mode, so Kite re-delivers its connect-time snapshot of last-trade stamps)
+        while the child keeps heartbeating. No supervisor state transition happens, so nothing was
+        published and ``BarBuilder``'s reconnect grace never armed — the 2026-09-03 lag flap recurs
+        for every in-child reconnect, including inside the watched 15:30–15:45 buffer.
+
+        The signal is ``connect_seq``: the child's per-connect counter, bumped at the TOP of
+        ``_on_connect`` and shipped on a heartbeat emitted THERE, before ``ws.subscribe`` — so it
+        precedes the snapshot ticks in the same ordered pipe rather than trailing them by up to a
+        full 1 s beat. A CHANGE of that value republishes health exactly once. Not the FIRST value of
+        a spawn (that frame is the spawn's own WARMING→HEALTHY publish), and not per heartbeat (that
+        would spam the bus and hold the grace open forever).
+
+        ``ws_connected``'s False→True edge remains as the FALLBACK, for a heartbeat carrying no
+        ``connect_seq`` at all. It is only a fallback because it is strictly weaker on two counts the
+        2026-09-09 review named: it is observable no earlier than the next 1 s heartbeat (too late —
+        Kite's snapshot lands ~50 ms after the re-subscribe), and a reconnect that never produced a
+        ``ws_connected=False`` heartbeat (sub-second drop; an ``on_error`` path with no ``on_close``)
+        shows no edge whatsoever.
+
+        **One frame, at most one publish.** :meth:`_mark_alive` may already have published a
+        STALE→HEALTHY recovery for this very frame, and the reconnect heartbeat that ends a silence
+        is exactly the frame where both fire — hence the ``published`` ledger threaded through here.
+        The state machine, its thresholds and the kill logic are deliberately untouched: this only
+        republishes what ``health()`` already says.
         """
-        await self._mark_alive()
+        published = await self._mark_alive()
         ftype = frame.get("type")
         if ftype == "heartbeat":
             self._last_heartbeat_at = self._clock.now()
+            # Pinned field names on the heartbeat frame: ``connect_seq`` (primary) and
+            # ``ws_connected`` (fallback) — ``ticker/main.py`` :meth:`~TickerApp._send_heartbeat`,
+            # both listed in that module's "heartbeat" wire-schema entry. Either being absent
+            # (older/degenerate frame) leaves its tracked value alone: absence is not a reconnect and
+            # not a disconnect, and treating it as one would fabricate an edge out of nothing.
+            connect_seq = frame.get("connect_seq")
+            ws_connected = frame.get("ws_connected")
+            seq_reconnect = (
+                connect_seq is not None
+                and self._last_connect_seq is not None
+                and connect_seq != self._last_connect_seq
+            )
+            if connect_seq is not None:
+                self._last_connect_seq = connect_seq
+            ws_reconnect = ws_connected is True and self._last_ws_connected is False
+            if ws_connected is not None:
+                self._last_ws_connected = bool(ws_connected)
             if self._state == "WARMING":
                 # First heartbeat proves the link + child are live: promote WARMING → HEALTHY (§2.6).
                 # The §7.1 warm-up ENTRY gate (ops.warmup) is separate — this is feed health only.
                 self._set_state("HEALTHY")
                 await self._publish_health()
+                published = True
+            elif seq_reconnect or (ws_reconnect and connect_seq is None):
+                _log.info(
+                    "ticker_ws_reconnected",
+                    state=self._state,
+                    seq=connect_seq,
+                    via="connect_seq" if seq_reconnect else "ws_connected",
+                )
+                if not published:
+                    await self._publish_health()
+                    published = True
         elif ftype == "tick":
             self._ticks_received += 1
             self._last_tick_at = self._clock.now()
@@ -815,8 +895,13 @@ class TickerSupervisor:
             _log.warning("ticker_unknown_frame", frame_type=str(ftype))
             self._drop("unknown_frame")
 
-    async def _mark_alive(self) -> None:
+    async def _mark_alive(self) -> bool:
         """Refresh liveness from an arriving frame and recover a STALE feed (WO-26b).
+
+        Returns **whether it published** a ``feed.health`` event for this frame, so
+        :meth:`_handle_frame` can honour one-publish-per-frame: the frame that ends a silence is
+        usually the reconnect heartbeat, i.e. the one frame where this recovery and the in-child
+        reconnect signal both fire (2026-09-09, §2.6 hardening (i)).
 
         Called from :meth:`_handle_frame` for every frame. Two jobs:
 
@@ -834,6 +919,8 @@ class TickerSupervisor:
             self._set_state("HEALTHY")
             _log.info("feed_stale_recovered", frames_resumed=True)
             await self._publish_health()
+            return True
+        return False
 
     def _parse_tick(self, frame: dict[str, Any]) -> Tick | None:
         """Wire tick frame → core ``Tick`` (symbol resolved via the injected resolver); None = drop."""

@@ -10,6 +10,11 @@ WO-25a adds the late-tick cost tests: an in-range late tick must touch NO store 
 2026-08-24 death spiral), an out-of-range one must still amend through the WO-5 CAS path, the log
 must be deduped per (symbol, minute) behind a per-wall-minute aggregate, and the processing-lag
 watchdog must fire once per episode and recover.
+
+The 2026-09-03 15:40:02 follow-up adds the reconnect grace: a feed-health transition into
+WARMING/HEALTHY must silence the lag watchdog for LAG_RECONNECT_GRACE_S so Kite's connect-time
+snapshot (one last-trade-stamped tick per subscribed instrument) cannot flap the single global
+episode — without disarming the watchdog for a genuine lag once the grace lapses.
 """
 
 from __future__ import annotations
@@ -21,11 +26,13 @@ from decimal import Decimal
 
 import pytest
 
+from engine.broker.ticker_supervisor import FeedHealth
 from engine.core.clock import IST, Clock
 from engine.core.types import Tick
 from engine.marketdata.bar_builder import (
     BAR_1M_TOPIC,
     LAG_LOG_INTERVAL_S,
+    LAG_RECONNECT_GRACE_S,
     LAG_THRESHOLD_S,
     RECENT_BARS_PER_SYMBOL,
     BarBuilder,
@@ -665,6 +672,212 @@ async def test_lag_watchdog_without_a_notify_sink_is_log_only(store, mclock, now
         now.set(at(10, 5, 0))
         await bb.on_tick_event(tick("R", at(10, 2, 0), "100.00", 1000))
     assert len(late_events(caplog, "tick_processing_lagging")) == 1
+
+
+# =================================================== 2026-09-03 15:40:02: reconnect-snapshot grace
+# A post-close boot spawned the ticker child; on kws.connect Kite delivered ONE snapshot tick per
+# subscribed instrument (202 tokens) carrying that instrument's LAST-TRADE exchange_timestamp
+# (~15:31), interleaved with near-fresh ticks (lag ~26 s). The watchdog keeps ONE global episode, so
+# each stale tick re-opened it and the next fresh tick closed it: 14 ERROR/recovered pairs in 83 ms
+# and 6 owner pages. Both 2026-08-26 guards were inert by construction (same day; 15:30-15:45 is
+# deliberately watched via _LAG_WATCH_END_BUFFER), and there is no snapshot marker on the wire — so
+# the grace is driven by the supervisor's feed.health transitions instead (IMPLEMENTATION_PLAN §2.6,
+# "Tick-lag reconnect grace").
+
+
+def _health(state: str) -> FeedHealth:
+    """The EXACT payload the supervisor publishes on ``feed.health``.
+
+    ``TickerSupervisor._publish_health`` publishes ``TickerSupervisor.health()`` — a
+    :class:`FeedHealth` whose ``state`` field is the transition the handler reads. Cited by method
+    name, not by line number (2026-09-09: the old ``:1184-1189`` pointer had already drifted ~30
+    lines and pointed at unrelated code). Constructed from the real model here rather than a stub so
+    a field rename breaks this test."""
+    return FeedHealth(last_tick_age_s=0.4, heartbeat_age_s=0.9, last_frame_age_s=0.4, state=state)
+
+
+async def test_reconnect_snapshot_storm_never_pages_during_the_grace(store, mclock, now, caplog):
+    """(a) The 09-03 shape end to end: grace armed by the HEALTHY transition at 15:40:02, then the
+    14 interleaved snapshot/fresh frames — zero ERROR lines, zero recoveries, zero pages."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+    boot = at(15, 40, 2)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(boot)
+        await bb.on_feed_health(_health("HEALTHY"))
+        armed = late_events(caplog, "tick_lag_watch_grace_armed")
+        assert len(armed) == 1 and armed[0].state == "HEALTHY"
+
+        # 14 frames inside 83 ms, alternating snapshot echo (last trade ~15:31) and near-fresh (26 s),
+        # each for a different instrument — exactly the interleave the tape shows.
+        for i in range(14):
+            wall = boot + dt.timedelta(milliseconds=6 * i)
+            now.set(wall)
+            stamp = at(15, 31, 10 + i) if i % 2 == 0 else wall - dt.timedelta(seconds=26)
+            await bb.on_tick_event(tick(f"S{i}", stamp, "100.00", 1000 + i))
+
+    assert late_events(caplog, "tick_processing_lagging") == []
+    assert late_events(caplog, "tick_processing_recovered") == []
+    assert sent == []
+    assert bb._lagging is False
+
+
+async def test_the_watchdog_is_live_again_once_the_grace_lapses(store, mclock, now, caplog):
+    """(b) The grace is a delay, not a disable: a genuine 130 s lag one second past
+    :data:`LAG_RECONNECT_GRACE_S` opens an episode and pages exactly once."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+    boot = at(15, 40, 2)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(boot)
+        await bb.on_feed_health(_health("HEALTHY"))
+
+        now.set(boot + dt.timedelta(seconds=LAG_RECONNECT_GRACE_S - 2))   # still inside the grace
+        await bb.on_tick_event(tick("A", at(15, 31, 0), "100.00", 1000))
+        assert late_events(caplog, "tick_processing_lagging") == []
+        assert sent == []
+
+        wall = boot + dt.timedelta(seconds=LAG_RECONNECT_GRACE_S + 1)     # grace lapsed
+        now.set(wall)
+        await bb.on_tick_event(tick("B", wall - dt.timedelta(seconds=130), "100.10", 1100))
+
+    errors = late_events(caplog, "tick_processing_lagging")
+    assert len(errors) == 1 and errors[0].lag_s == 130.0
+    assert len(sent) == 1
+
+
+async def test_a_warming_transition_mid_session_arms_the_grace(store, mclock, now, caplog):
+    """(c) A mid-session respawn publishes WARMING before it publishes HEALTHY, and its snapshot is
+    the same shape — so WARMING arms the grace too, and lapses on its own 30 s later."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(at(11, 47, 0))
+        await bb.on_feed_health(_health("WARMING"))
+        armed = late_events(caplog, "tick_lag_watch_grace_armed")
+        assert len(armed) == 1 and armed[0].state == "WARMING"
+
+        now.set(at(11, 47, 20))                                  # inside the grace
+        await bb.on_tick_event(tick("A", at(11, 40, 0), "100.00", 1000))
+        assert late_events(caplog, "tick_processing_lagging") == []
+        assert sent == []
+
+        now.set(at(11, 47, 31))                                  # 29 s later: grace lapsed
+        await bb.on_tick_event(tick("B", at(11, 40, 0), "100.10", 1100))
+
+    assert len(late_events(caplog, "tick_processing_lagging")) == 1
+    assert len(sent) == 1
+
+
+async def test_arming_closes_an_open_episode_quietly(store, mclock, now, caplog):
+    """(d) A reconnect while an episode is already open closes it with the grace reason — not with
+    ``tick_processing_recovered``, which would claim a recovery nothing observed."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        wall = at(11, 0, 0)
+        now.set(wall)
+        await bb.on_tick_event(
+            tick("R", wall - dt.timedelta(seconds=LAG_THRESHOLD_S + 30), "100.00", 1000)
+        )
+        assert len(late_events(caplog, "tick_processing_lagging")) == 1
+        assert len(sent) == 1
+        assert bb._lagging is True
+
+        now.set(at(11, 0, 5))
+        await bb.on_feed_health(_health("HEALTHY"))
+
+    closed = late_events(caplog, "tick_lag_watch_reconnect_grace")
+    assert len(closed) == 1 and closed[0].levelname == "INFO"
+    assert late_events(caplog, "tick_processing_recovered") == []
+    assert bb._lagging is False
+    assert len(sent) == 1                                   # the closed episode sends no new page
+
+
+@pytest.mark.parametrize("state", ["STOPPED", "DEGRADED", "STALE"])
+async def test_a_non_arming_feed_state_leaves_the_watchdog_live(store, mclock, now, caplog, state):
+    """(e) Only WARMING/HEALTHY arm. The other three states the supervisor publishes
+    (ticker_supervisor.py:260 — the closed ``FeedHealth.state`` set) are ignored, so a DEGRADED or
+    STALE feed cannot silence the lag alarm."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(at(11, 0, 0))
+        await bb.on_feed_health(_health(state))
+        assert late_events(caplog, "tick_lag_watch_grace_armed") == []
+
+        wall = at(11, 0, 10)
+        now.set(wall)
+        await bb.on_tick_event(
+            tick("R", wall - dt.timedelta(seconds=LAG_THRESHOLD_S + 30), "100.00", 1000)
+        )
+
+    assert len(late_events(caplog, "tick_processing_lagging")) == 1
+    assert len(sent) == 1
+
+
+async def test_an_in_child_reconnect_edge_arms_the_grace_mid_session(store, mclock, now, caplog):
+    """(f) The 2026-09-09 review case: KiteTicker reconnects INSIDE the child (reconnect=True) while
+    the child keeps heartbeating, so the supervisor's state never transitions — nothing was published
+    and this grace never armed for the commonest reconnect there is.
+
+    The supervisor now publishes on the heartbeat's ``ws_connected`` False->True edge
+    (ticker_supervisor.py `_handle_frame`, heartbeat branch), and the payload is the SAME
+    ``FeedHealth`` this handler already takes — HEALTHY, because an in-child reconnect leaves the
+    state machine in HEALTHY throughout. This is the end-to-end assertion at the BarBuilder end: a
+    mid-session (11:47) HEALTHY event arms the grace, and the interleaved snapshot/fresh burst that
+    follows pages nothing."""
+    sent = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
+    edge = at(11, 47, 0)
+
+    with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
+        now.set(edge)
+        await bb.on_feed_health(_health("HEALTHY"))          # what the ws_connected edge publishes
+        armed = late_events(caplog, "tick_lag_watch_grace_armed")
+        assert len(armed) == 1 and armed[0].state == "HEALTHY"
+
+        # Re-subscribe + FULL mode ⇒ Kite re-sends the connect-time snapshot: one last-trade-stamped
+        # tick per instrument (here ~11:31, well past LAG_THRESHOLD_S) interleaved with fresh ticks.
+        for i in range(14):
+            wall = edge + dt.timedelta(milliseconds=6 * i)
+            now.set(wall)
+            stamp = at(11, 31, 10 + i) if i % 2 == 0 else wall - dt.timedelta(seconds=2)
+            await bb.on_tick_event(tick(f"S{i}", stamp, "100.00", 1000 + i))
+
+    assert late_events(caplog, "tick_processing_lagging") == []
+    assert late_events(caplog, "tick_processing_recovered") == []
+    assert sent == []
+    assert bb._lagging is False
 
 
 def test_a_stale_minute_placeholder_never_evicts_a_real_cached_bar(store, mclock, now):

@@ -258,9 +258,75 @@ def test_heartbeat_carries_ws_state_and_tick_age():
     app._on_ticks(None, [_KITE_TICK])           # a tick flowed
     app._send_heartbeat()
     hb2 = pub.frames[-1]
-    assert hb2["seq"] == 2
+    # seq 3, not 2: `_on_connect` emits its own in-band heartbeat (the connect_seq carrier, below).
+    assert hb2["seq"] == 3
     assert hb2["ws_connected"] is True
     assert isinstance(hb2["last_tick_age_s"], float) and hb2["last_tick_age_s"] >= 0.0
+
+
+# ------------------------------------- in-child reconnect signal (2026-09-09, plan §2.6 hardening (i))
+def test_heartbeat_carries_the_connect_seq_and_it_bumps_on_every_connect():
+    """`connect_seq` is the engine's in-band reconnect signal: a per-child counter on EVERY heartbeat.
+
+    KiteTicker reconnects inside the child, so the supervisor sees no state transition; `ws_connected`
+    alone is not enough (a sub-second drop, or an `on_error` path with no `on_close`, never reports
+    False at all — this test's second reconnect). The counter is bumped by `_on_connect` regardless of
+    how the drop was reported."""
+    app = _app()
+    pub = _CollectingPublisher()
+    app._publisher = pub
+
+    app._send_heartbeat()
+    assert pub.frames[-1]["connect_seq"] == 0           # never connected yet
+
+    app._on_connect(_FakeKws(), None)                   # first connect: in-band frame carries seq 1
+    assert pub.frames[-1]["connect_seq"] == 1
+    app._send_heartbeat()
+    assert pub.frames[-1]["connect_seq"] == 1           # ... and rides every subsequent beat
+
+    app._on_close(None, 1006, "dropped")                # a reported drop
+    app._on_connect(_FakeKws(), None)
+    assert pub.frames[-1]["connect_seq"] == 2
+
+    app._on_connect(_FakeKws(), None)                   # a drop with NO on_close (gap (b))
+    assert pub.frames[-1]["connect_seq"] == 3
+
+
+def test_on_connect_emits_its_heartbeat_before_it_subscribes():
+    """ORDERING IS THE POINT. Kite delivers its connect-time snapshot within ~50 ms of the re-subscribe
+    — far inside the 1 s heartbeat cadence — so a reconnect signal published on the NEXT beat arrives
+    after the burst has already flapped BarBuilder's lag episode. Emitting the heartbeat at the top of
+    `_on_connect`, before `ws.subscribe`, puts the signal ahead of the snapshot ticks in the same
+    stdout pipe, which is ordered."""
+    order: list[str] = []
+
+    class _OrderedPublisher(_CollectingPublisher):
+        def send_frame(self, obj: dict) -> None:
+            order.append(f"frame:{obj.get('type')}")
+            super().send_frame(obj)
+
+    class _OrderedKws(_FakeKws):
+        def subscribe(self, tokens):
+            order.append("subscribe")
+            super().subscribe(tokens)
+
+        def set_mode(self, mode, tokens):
+            order.append("set_mode")
+            super().set_mode(mode, tokens)
+
+    app = _app(tokens=[408065, 884737])
+    pub = _OrderedPublisher()
+    app._publisher = pub
+    kws = _OrderedKws()
+
+    app._on_connect(kws, None)
+
+    assert order == ["frame:heartbeat", "subscribe", "set_mode"]
+    hb = pub.frames[0]
+    assert hb["connect_seq"] == 1
+    assert hb["ws_connected"] is True           # the flag is set BEFORE the frame is built, not after
+    assert kws.subscribed == [[408065, 884737]]
+    assert kws.modes == [("full", [408065, 884737])]
 
 
 # --------------------------------------------------------------------------- control plane
