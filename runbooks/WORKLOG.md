@@ -53,6 +53,21 @@
   connect_seq, dc73e28 news lock, 3452ad3 early hydration, 93d8bb0 store telemetry, 141a10f hi52
   v2 harness. bar_reconcile failed 15:50:03 on a Kite `RemoteDisconnected` and the 16:15 sweep
   re-ran it clean at 16:17:19 (self-healed as designed).
+- **hi52 v1/v2 backtests RUN 16:30:48–16:31:33 (engine off; 24 s + 21 s — the 25-min figure I had
+  in mind was the 09-03 archive backfill, not the harness):** same window 2020→2026-09-09, 3,205
+  symbols. v1 discrete 16,121 trades: geometry dead T+5/T+10, +0.10% at T+20; index cell T+20
+  +1.54%/56.4%. **v2 discrete 1,794 trades (vetoes smooth 11,405 / gap 813 / not_index 2,625):
+  viable at T+10 (+0.62%/54.0%) and T+20 (+1.71%/58.2%), CPCV promotable at T+10 (80%) and T+20
+  (86.7%) under N=2.** Reading recorded in the plan: the index restriction carries the edge; the
+  smooth/no-gap filters trim a third of the index population without raising the median (smooth
+  +1.48% vs jumpy +1.82% inside v2). §8.6 unchanged — shadow soak on the eligible population from
+  09-10 + owner sign-off before any RECOMMEND wiring. Reports: `data/reports/backtest_hi52_2026-09-09.json`,
+  `backtest_hi52_v2_2026-09-09.json`.
+- **Deploy 7b60046 (code 141a10f) at 16:32:13,** engine off 16:30:28→16:32:13 for the two runs, no
+  job in flight (next scheduled 18:05 daily_bars): boot verified — token valid 16:32:37,
+  `startup_complete` 16:34:33, `engine_ready` 16:34:38, zero ERROR lines. First early-hydration
+  morning = the next trading day the owner logs in before 09:15. 10 commits unpushed (push is the
+  owner's call at phase end).
 - **Process miss, self-reported:** launched the 5-implementer workflow at **14:36 IST on a trading
   day** on a stale clock assumption (the compaction summary said ~00:1x). Caught by a `Get-Date`
   three minutes later, stopped before any file was touched; engine log shows no LLM pressure.
