@@ -35,6 +35,7 @@ bt = importlib.util.module_from_spec(_spec)
 sys.modules["mt_backtest_hi52"] = bt
 _spec.loader.exec_module(bt)
 
+from engine.learning.validate import fold_pass_min  # noqa: E402
 from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 from engine.strategy.scanners import hi52  # noqa: E402
@@ -474,3 +475,347 @@ def test_corp_actions_coverage_is_reported_with_the_veto_counts(db_file, db_with
     assert "unadjusted-history vetoes: discrete 1 signals" in text
     assert "structural corp_actions rows=1" in text
     assert str(ACTION_EX) in text
+
+
+# ============================================================ 7. the v2 PRE-REGISTRATION (2026-09-09)
+# Four MORE engineered symbols, in their OWN database so the v1 fixtures above keep their exact
+# populations (n=3 everywhere). Each isolates ONE v2 signal-time filter, so the veto attribution the
+# assertions read is order-independent:
+#   SMOOTHIE - index member, smooth approach, no gap day        -> v1 and v2 both admit
+#   OUTSIDER - identical bars, NOT an index member              -> v2 not_index veto
+#   JUMPY    - index member, no gap day, one +17.5% mid-window jump -> v2 smooth veto
+#   GAPPY    - index member, smooth approach, +6.15% trigger day    -> v2 gap veto
+V2_FIRST_APPROACH_IDX = SIGNAL_IDX - 20        # 105: the first of the 21 rows diagnostics_for reads
+
+#: closes at indices 105..125. +0.75/session: up_day_frac 1.00, max_day_move 0.0094, gap 0.0080.
+SMOOTH_APPROACH = [f"{80.00 + 0.75 * k:.2f}" for k in range(21)]
+#: +0.50/session then a +6.15% trigger day: smooth (max_day_move 0.0615 <= 0.07) but a GAP day.
+GAP_APPROACH = [f"{80.00 + 0.50 * k:.2f}" for k in range(20)] + ["95.00"]
+#: one +17.5% jump mid-window: up_day_frac 0.10, max_day_move 0.175 - jumpy, but NOT a gap day.
+JUMP_APPROACH = ["80.00"] * 14 + ["94.00"] * 6 + ["95.00"]
+
+
+def _v2_symbol_bars(sym: str, approach: list[str]) -> list[DailyBar]:
+    """One v2 fixture symbol: a flat 80.00 prefix, ``approach`` as the closes at indices 105..125
+    (the 21 rows ``diagnostics_for``'s 20 pairs read), then a flat forward path.
+
+    Every high is pinned at 100.00, so the 252-session rolling high is exactly 100.00, prox =
+    close / 100.00, and the fresh cross lands on the 95.00 trigger close (prox 0.9500 from below).
+    Trigger volume 1500 vs the 1000 mean of the 20 sessions before it clears ``vol_mult`` 1.0.
+    """
+    assert len(approach) == 21
+    first = V2_FIRST_APPROACH_IDX
+    bars = [_flat(sym, i, "80.00", high="100.00") for i in range(first)]
+    bars += [_flat(sym, first + k, px, high="100.00") for k, px in enumerate(approach[:-1])]
+    bars.append(_bar(sym, SESSIONS[SIGNAL_IDX], o=approach[-2], h="100.00", lo=approach[-2],
+                     c=approach[-1], v=1500))
+    bars += [_flat(sym, i, approach[-1], high="100.00") for i in range(ENTRY_IDX, N_SESSIONS)]
+    return bars
+
+
+def _seed_bars(path: Path, parquet: Path, clock, bars: list[DailyBar]) -> Path:
+    """A temp market.duckdb seeded with arbitrary bars, CLOSED so the study can attach read-only."""
+    store = MarketStore(path, parquet, clock).open()
+    try:
+        store.upsert_bars_1d(bars)
+    finally:
+        store.close()
+    return path
+
+
+@pytest.fixture
+def v2_db(tmp_path, clock) -> Path:
+    return _seed_bars(
+        tmp_path / "market_v2.duckdb", tmp_path / "parquet_v2", clock,
+        _v2_symbol_bars("SMOOTHIE", SMOOTH_APPROACH)
+        + _v2_symbol_bars("OUTSIDER", SMOOTH_APPROACH)
+        + _v2_symbol_bars("JUMPY", JUMP_APPROACH)
+        + _v2_symbol_bars("GAPPY", GAP_APPROACH),
+    )
+
+
+@pytest.fixture
+def v2_index_csv(tmp_path) -> Path:
+    """CURRENT-membership proxy for the v2 fixtures: OUTSIDER is the only extended name."""
+    p = tmp_path / "index_v2.csv"
+    p.write_text(
+        "Company Name,Industry,Symbol,Series,ISIN Code\n"
+        "Smoothie Ltd,Misc,SMOOTHIE,EQ,INE000000002\n"
+        "Jumpy Ltd,Misc,JUMPY,EQ,INE000000003\n"
+        "Gappy Ltd,Misc,GAPPY,EQ,INE000000004\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _run_reg(db: Path, index_csv: Path, registration: str):
+    conn = bt.open_readonly(db)
+    try:
+        return bt.run_study(
+            conn,
+            start=SESSIONS[0],
+            end=SESSIONS[-1],
+            cost_model=CostModel.from_config(),
+            nifty200_csv=index_csv,
+            db_path=db,
+            registration=registration,
+        )
+    finally:
+        conn.close()
+
+
+def _discrete_symbols(trades) -> set:
+    return {t.symbol for t in trades[bt.CONSTRUCT_DISCRETE]}
+
+
+def test_v2_rejects_a_jumpy_approach_that_v1_accepts(v2_db, v2_index_csv):
+    """JUMPY clears every v1 test (fresh cross, volume, no ex-date) and dies on the smooth filter."""
+    _doc1, tr1 = _run_reg(v2_db, v2_index_csv, "v1")
+    doc2, tr2 = _run_reg(v2_db, v2_index_csv, "v2")
+    assert _discrete_symbols(tr1) == {"SMOOTHIE", "OUTSIDER", "JUMPY", "GAPPY"}
+    assert "JUMPY" not in _discrete_symbols(tr2)
+    assert doc2["v2_vetoes"]["smooth"] == 1
+    # the veto is the DIAGNOSTIC field, not a re-derivation: JUMPY's own measured max_day_move is
+    # the number the filter refused (0.175 > 0.07), and its up_day_frac is under 0.55 as well.
+    jumpy = next(t for t in tr1[bt.CONSTRUCT_DISCRETE] if t.symbol == "JUMPY")
+    assert jumpy.max_day_move > bt.V2_SMOOTH_MAX_DAY_MOVE_MAX
+    assert jumpy.up_day_frac < bt.V2_SMOOTH_UP_FRAC_MIN
+    assert not jumpy.gap_day                       # NOT rejected for the gap reason
+
+
+def test_v2_rejects_a_trigger_day_move_above_the_gap_threshold(v2_db, v2_index_csv):
+    """GAPPY is smooth (max_day_move 0.0615 <= 0.07) and an index member; only its +6.15% trigger
+    day kills it, and that is the SAME move the descriptive gap A/B split flags."""
+    _doc1, tr1 = _run_reg(v2_db, v2_index_csv, "v1")
+    doc2, tr2 = _run_reg(v2_db, v2_index_csv, "v2")
+    gappy = next(t for t in tr1[bt.CONSTRUCT_DISCRETE] if t.symbol == "GAPPY")
+    assert gappy.gap_day                                        # v1 flags it descriptively
+    assert gappy.up_day_frac >= bt.V2_SMOOTH_UP_FRAC_MIN
+    assert gappy.max_day_move <= bt.V2_SMOOTH_MAX_DAY_MOVE_MAX  # so the smooth filter is NOT why
+    assert "GAPPY" not in _discrete_symbols(tr2)
+    assert doc2["v2_vetoes"]["gap"] == 1
+
+
+def test_v2_population_is_index_members_only(v2_db, v2_index_csv):
+    """OUTSIDER has SMOOTHIE's exact bars and is absent from v2 for one reason: it is not indexed."""
+    _doc1, tr1 = _run_reg(v2_db, v2_index_csv, "v1")
+    doc2, tr2 = _run_reg(v2_db, v2_index_csv, "v2")
+    assert "OUTSIDER" in _discrete_symbols(tr1)
+    assert _discrete_symbols(tr2) == {"SMOOTHIE"}                # the only survivor of all three
+    assert doc2["v2_vetoes"] == {"smooth": 1, "gap": 1, "not_index": 1, "total": 3}
+    assert doc2["meta"]["n_discrete_signals_fired"] == 4         # the RAW fresh-cross count, both regs
+    text = bt.render_text(doc2)
+    assert "v2 vetoes" in text and "not_index 1" in text
+    assert "pre-registered before this run" in text
+
+
+def test_trial_count_for_and_the_deflation_it_feeds(v2_db, v2_index_csv):
+    """N=2 (v1+v2) is cited in the meta AND in every CPCV block a v2 run prints."""
+    assert bt.trial_count_for("v1") == 1
+    assert bt.trial_count_for("v2") == 2
+    doc2, _tr2 = _run_reg(v2_db, v2_index_csv, "v2")
+    assert doc2["meta"]["registration"] == "v2"
+    assert doc2["meta"]["trial_count_n"] == 2
+    assert doc2["meta"]["fold_pass_min"] == fold_pass_min(2)
+    cpcv = doc2["constructs"][bt.CONSTRUCT_DISCRETE]["cpcv"]["20"]
+    assert cpcv["trial_count_n"] == 2
+    assert cpcv["fold_pass_min"] == fold_pass_min(2)
+    text = bt.render_text(doc2)
+    assert "registration    : v2" in text
+
+
+def test_v1_default_never_consults_the_v2_constants(v2_db, v2_index_csv, monkeypatch):
+    """Absurd v2 thresholds must not move a v1 run by one trade: v1 is a separate registration."""
+    doc, trades = _run_reg(v2_db, v2_index_csv, "v1")
+    baseline = sorted((t.symbol, t.signal_date, t.entry_px) for t in trades[bt.CONSTRUCT_DISCRETE])
+    assert doc["meta"]["registration"] == "v1"
+    assert doc["meta"]["trial_count_n"] == 1
+    assert "v2_vetoes" not in doc                     # no v2 block on a v1 run
+
+    monkeypatch.setattr(bt, "V2_SMOOTH_UP_FRAC_MIN", 99.0)
+    monkeypatch.setattr(bt, "V2_SMOOTH_MAX_DAY_MOVE_MAX", -1.0)
+    monkeypatch.setattr(bt, "V2_GAP_MAX", -1.0)
+    doc_after, trades_after = _run_reg(v2_db, v2_index_csv, "v1")
+    after = sorted((t.symbol, t.signal_date, t.entry_px) for t in trades_after[bt.CONSTRUCT_DISCRETE])
+    assert after == baseline
+    assert "v2_vetoes" not in doc_after
+    assert doc_after["constructs"] == doc["constructs"]
+
+    # and the same absurd constants DO bite a v2 run - proving the test patched the live names
+    doc_v2, trades_v2 = _run_reg(v2_db, v2_index_csv, "v2")
+    assert trades_v2[bt.CONSTRUCT_DISCRETE] == []
+    assert doc_v2["v2_vetoes"]["smooth"] == 4
+
+
+def test_cli_registration_flag_defaults_to_v1_and_accepts_v2(v2_db, v2_index_csv, tmp_path):
+    out = tmp_path / "results" / "hi52_v2.json"
+    rc = bt.main([
+        "--db", str(v2_db), "--out", str(out),
+        "--start", str(SESSIONS[0]), "--end", str(SESSIONS[-1]),
+        "--nifty200-csv", str(v2_index_csv), "--registration", "v2",
+    ])
+    assert rc == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["meta"]["registration"] == "v2"
+    assert doc["meta"]["trial_count_n"] == 2
+    assert doc["v2_vetoes"]["total"] == 3
+    assert bt.build_parser().parse_args([]).registration == "v1"
+
+
+# ==================================================== 8. REPORT HONESTY under v2 (punch list 2026-09-09)
+# A v2 report that still prints v1's "N=1" boilerplate, or lets a reader compare a v2 split cell with
+# the v1 cell of the same name, is a DISHONEST report even when every number in it is arithmetically
+# right. These lock the three places that honesty lives.
+
+#: The v1 sweep note, verbatim as it has read since the original pre-registration. Asserted as an
+#: EXACT string: making the note registration-aware must not move one byte of the v1 rendering.
+V1_SWEEP_NOTE = (
+    "NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N=1 "
+    "(fold_pass_min = 60%)."
+)
+
+
+def test_v1_sweep_note_is_byte_identical_to_the_original(v2_db, v2_index_csv):
+    doc, _tr = _run_reg(v2_db, v2_index_csv, "v1")
+    assert V1_SWEEP_NOTE in doc["notes"]
+
+
+def test_v2_notes_never_cite_the_v1_trial_count(v2_db, v2_index_csv):
+    """The sweep note is registration-aware: a v2 report cites N=2 and says N=1 nowhere at all."""
+    doc, _tr = _run_reg(v2_db, v2_index_csv, "v2")
+    notes = doc["notes"]
+    assert not any("N=1" in n for n in notes), [n for n in notes if "N=1" in n]
+    assert any("N=2" in n for n in notes)
+    sweep = [n for n in notes if n.startswith("NO PARAMETER SWEEP")]
+    assert sweep == [
+        "NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N=2 "
+        f"(fold_pass_min = {fold_pass_min(2):.0%})."
+    ]
+
+
+def test_v2_declares_which_split_cells_are_empty_by_construction(v2_db, v2_index_csv):
+    """v2's own filters define two cells away and pre-filter the third; the report must say so."""
+    doc2, _tr2 = _run_reg(v2_db, v2_index_csv, "v2")
+    matching = [n for n in doc2["notes"] if "EMPTY BY CONSTRUCTION UNDER v2" in n]
+    assert len(matching) == 1
+    note = matching[0]
+    assert bt.CELL_EXTENDED in note and bt.CELL_GAP_ONLY in note
+    assert "already smooth-filtered" in note.lower()
+    assert "comparable with the v1 cell of the same name" in note
+    # residual #1 (2026-09-09): the claim is scoped to the discrete construct by NAME - the rank
+    # blocks below use the same cell names but are declared v1, unchanged, in the same note.
+    assert bt.CONSTRUCT_DISCRETE in note
+    assert "v1 cells, UNCHANGED" in note
+    assert bt.CONSTRUCT_RANK_TOP in note and bt.CONSTRUCT_RANK_BOTTOM in note
+    # and it is v2-only: a v1 report carries no such claim
+    doc1, _tr1 = _run_reg(v2_db, v2_index_csv, "v1")
+    assert not any("EMPTY BY CONSTRUCTION UNDER v2" in n for n in doc1["notes"])
+    # the cells really are empty under v2 (the note is a description, not a disclaimer)
+    cells = doc2["constructs"][bt.CONSTRUCT_DISCRETE]["cells"]
+    assert cells[bt.CELL_EXTENDED]["n_trades"] == 0
+    assert cells[bt.CELL_GAP_ONLY]["n_trades"] == 0
+    # the rank blocks' SAME-NAMED cells are genuinely v1: v2_admits never touches rank signals, so
+    # neither rank construct's population is empty the way the discrete one is.
+    for rank_construct in (bt.CONSTRUCT_RANK_TOP, bt.CONSTRUCT_RANK_BOTTOM):
+        rank_cells = doc2["constructs"][rank_construct]["cells"]
+        doc1_rank_cells = doc1["constructs"][rank_construct]["cells"]
+        assert rank_cells == doc1_rank_cells
+
+
+def test_v2_veto_line_documents_the_gap_count_containment(v2_db, v2_index_csv):
+    """`gap` cannot count a trigger move above the smooth cap - that books as `smooth` first."""
+    doc2, _tr2 = _run_reg(v2_db, v2_index_csv, "v2")
+    text = bt.render_text(doc2)
+    assert "max_day_move includes the trigger day" in text
+    assert f"({bt.V2_GAP_MAX}, {bt.V2_SMOOTH_MAX_DAY_MOVE_MAX}]" in text
+    assert "admission decision is unaffected" in text
+
+
+# ==================================================== 9. THRESHOLD COUPLING + ROUNDING (residuals #2/#3, 2026-09-09)
+# Punch-list residuals #2 and #3: V2_GAP_MAX must not drift from GAP_DAY_PCT, and signal_diag's
+# gap_move must read the trigger day's own move exactly as hi52.diagnostics_for's max_day_move does
+# (both rounded to the same 4 dp), or the "gap tally counts only trigger moves in
+# (V2_GAP_MAX, V2_SMOOTH_MAX_DAY_MOVE_MAX]" claim quietly stops being true.
+
+def test_v2_gap_max_is_coupled_to_the_v1_gap_day_threshold():
+    """V2_GAP_MAX is DERIVED from GAP_DAY_PCT (not a second "0.05" literal), so the two thresholds
+    cannot silently drift apart - the "gap_days_only is empty by construction under v2" report note
+    depends on this exact equality holding.
+    """
+    assert bt.V2_GAP_MAX == bt.GAP_DAY_PCT / 100.0
+    assert abs(bt.V2_GAP_MAX * 100.0 - bt.GAP_DAY_PCT) < 1e-12
+
+
+def _diag_series(sym: str, trigger_move: float) -> bt.Series:
+    """A 22-row synthetic series that bypasses the DB/bars machinery entirely - this probes
+    ``signal_diag``/``v2_admits``/``measure`` directly, not the fresh-cross scan.
+
+    Indices 0-20 are the 21-row window ``diagnostics_for`` reads (20 pairs), engineered so exactly
+    11 of the 20 are "up" (10 tiny +1.0 nudges on a ~100,000 base, plus the trigger pair itself) -
+    ``up_day_frac`` lands at EXACTLY 0.55, the v2 smooth threshold, so only max_day_move/gap_move
+    decide what this test probes. Index 20 is the trigger day, whose OWN move is ``trigger_move``
+    (raw, unrounded) and by construction the window's biggest mover by a wide margin. Index 21 is a
+    filler row so ``measure`` has an entry (open) and a T+1 exit (close); its price is irrelevant to
+    every assertion that reads it.
+    """
+    closes = [100_000.0]
+    for j in range(19):
+        closes.append(closes[-1] + (1.0 if j % 2 == 0 else 0.0))
+    closes.append(closes[-1] * (1.0 + trigger_move))   # index 20: the trigger day
+    closes.append(closes[-1])                          # index 21: entry/exit filler row only
+    dates = SESSIONS[: len(closes)]
+    rows = [bt.DailyRow(high=c, close=c, volume=1000.0, open=c) for c in closes]
+    return bt.Series(
+        sym, dates, list(closes), list(closes), list(closes), list(closes),
+        [1000.0] * len(closes), rows,
+    )
+
+
+def test_gap_move_rounds_to_the_same_4dp_as_max_day_move_at_the_smooth_boundary():
+    """A trigger move of 0.070049 rounds to 0.0700 - the exact V2_SMOOTH_MAX_DAY_MOVE_MAX boundary.
+
+    Before the fix, ``hi52.diagnostics_for`` handed back ``max_day_move`` ALREADY rounded to 0.0700
+    (src/engine/strategy/scanners/hi52.py:198) while ``signal_diag``'s own ``gap_move`` stayed raw at
+    0.070049 - the SAME physical number (the trigger day is the window's biggest mover) disagreeing
+    by a rounding artefact. ``signal_diag`` now rounds ``gap_move`` the same way, so the two read
+    bit-identically and every filter that reads either one books the signal the same way.
+    """
+    series = _diag_series("ROUNDBOUNDARY", 0.070049)
+    i = 20                                     # the trigger day; index 21 is the entry/exit filler
+    params = bt.PRE_REGISTERED_PARAMS
+
+    d = bt.signal_diag(series, i, params)
+    assert d.max_day_move == pytest.approx(0.0700, abs=1e-12)
+    assert d.gap_move == pytest.approx(0.0700, abs=1e-12)
+    assert d.gap_move == d.max_day_move             # bit-identical, not merely close
+    assert d.up_day_frac == pytest.approx(0.55)      # exactly at the OTHER v2 boundary too
+
+    veto_counts: dict[str, int] = {}
+    admitted = bt.v2_admits(series, i, params, index_members=set(), veto_counts=veto_counts)
+    assert admitted is False
+    # PASSED the smooth check (0.0700 <= 0.07) first: if gap_move had stayed raw at 0.070049 while
+    # max_day_move read rounded, this signal would still land here (0.070049 > 0.05 either way), but
+    # the two diagnostics would disagree on what "the trigger day's move" even is.
+    assert veto_counts == {bt.V2_VETO_GAP: 1}
+
+    t = bt.measure(
+        series, i, construct=bt.CONSTRUCT_DISCRETE, prox=0.99, score=0.99, cost_pct=0.0,
+        index_members=set(), params=params, horizons=(1,),
+    )
+    assert t is not None
+    # v1's own GAP_DAY_PCT comparison (scripts/backtest_hi52.py:678) agrees: both filters book this
+    # signal as a gap, off the SAME rounded number.
+    assert t.gap_day is True
+    assert t.max_day_move == pytest.approx(0.0700)
+
+
+def test_v1_gap_day_cell_unaffected_by_the_gap_move_rounding_for_existing_fixtures(study):
+    """None of WINNER/GAPPER/SPIKER sits near the 5% GAP_DAY_PCT boundary at 4dp resolution, so the
+    v1 gap_day classification (scripts/backtest_hi52.py:678) is exactly what it was before
+    signal_diag started rounding gap_move.
+    """
+    _doc, trades = study
+    by_symbol = _by_symbol(trades)
+    assert by_symbol["WINNER"].gap_day is False    # +2.13% raw and rounded - nowhere near 5%
+    assert by_symbol["GAPPER"].gap_day is True     # +6.67% raw and rounded - nowhere near 5%
+    assert by_symbol["SPIKER"].gap_day is True     # +10.00% exactly - no rounding ambiguity at all

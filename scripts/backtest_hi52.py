@@ -18,6 +18,21 @@ and ``fold_pass_min(1) = 60%``. Adding a knob that changes the signal definition
 convert N=1 into N=k and invalidate every deflated number this script prints — if the rule is to be
 re-parameterised, that is a NEW pre-registration, not a flag on this one.
 
+**v2 IS THAT NEW PRE-REGISTRATION (2026-09-09) — A SECOND REGISTRATION, NOT A KNOB ON v1.**
+``--registration v2`` selects a SEPARATELY pre-registered rule: v1's parameters unchanged, PLUS
+three signal-time filters whose thresholds were FIXED on 2026-09-09, from the 2026-09-03
+full-sample medians, and written into this file (:data:`V2_SMOOTH_UP_FRAC_MIN` 0.55,
+:data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` 0.07, :data:`V2_GAP_MAX` 0.05) BEFORE the run that measures
+them — smooth approach AND no gap day AND index members only (IMPLEMENTATION_PLAN §6.1 ``hi52``
+addendum, "Decided 2026-09-09"). Nothing here selects between v1 and v2, nothing pools them and
+nothing max-picks them: they are reported side by side. But v2 IS a second trial of the same
+family, so the honest count becomes **N = 2** (:func:`trial_count_for`) and a v2 run cites
+``fold_pass_min(2)`` to the §6.4 machinery. The v1 path is untouched: under ``--registration v1``
+(the default) not one v2 constant is read, and the measured population, every split cell and every
+CPCV number are exactly what they were before this flag existed — the only v1 output difference is
+that the meta/header now names the registration. The RANK construct is NOT part of v2: it stays
+the v1 construct under both registrations and is labelled so in the notes.
+
 The two reported constructs are NOT two trials of one hypothesis: they are the two DIFFERENT
 constructs the plan block names (the platform's discrete trigger, and the George & Hwang academic
 continuous rank), each reported separately and never pooled or max-picked.
@@ -184,8 +199,75 @@ PRE_REGISTERED_PARAMS: dict[str, float] = dict(DEFAULT_PARAMS)
 #: docstring). Not a knob.
 TRIAL_COUNT_N = 1
 
-HORIZONS: tuple[int, ...] = (5, 10, 20)          # trading sessions
+#: v1's news-gap threshold, in PERCENT — v1's native unit (the A/B split, the JSON meta field and the
+#: gap_day cell all read it this way). Defined ABOVE the v2 block below so :data:`V2_GAP_MAX` can be
+#: DERIVED from it instead of duplicated as a second literal — see that constant's own comment.
 GAP_DAY_PCT = 5.0                                 # |close/prev_close - 1| > 5% on the trigger day
+
+# --------------------------------------------------------------------- v2 registration (2026-09-09)
+REGISTRATION_V1 = "v1"
+REGISTRATION_V2 = "v2"
+REGISTRATIONS: tuple[str, ...] = (REGISTRATION_V1, REGISTRATION_V2)
+
+#: v2's three signal-time thresholds. FIXED 2026-09-09 from the 2026-09-03 full-sample medians and
+#: written here BEFORE the run that measures them (plan §6.1 addendum) — they are knowable at signal
+#: time going forward, which is exactly what the DESCRIPTIVE median-based smooth/jumpy cut is not.
+V2_SMOOTH_UP_FRAC_MIN = 0.55        # up_day_frac over the 20 completed sessions ending at y
+V2_SMOOTH_MAX_DAY_MOVE_MAX = 0.07   # max |close/prev - 1| over the same 20 sessions
+#: |close(y)/close(y-1) - 1| on the trigger session itself, as a FRACTION. DERIVED from
+#: :data:`GAP_DAY_PCT` (v1's own threshold, in percent) rather than a second "0.05" literal: the
+#: "gap_days_only is empty by construction under v2" report note (two screens down) is true only
+#: because a v2-admitted signal's gap_move can never clear v1's gap_day bar, which requires this
+#: exact equality — see ``test_v2_gap_max_is_coupled_to_the_v1_gap_day_threshold``.
+V2_GAP_MAX = GAP_DAY_PCT / 100.0
+
+#: v2 reject reasons. A signal failing several is counted ONCE, against the FIRST reason in this
+#: order (the order the plan states the filters in), so the three counts partition the rejects and
+#: ``total`` is the number of v1 signals v2 dropped — never a sum of overlapping tallies.
+V2_VETO_SMOOTH = "smooth"
+V2_VETO_GAP = "gap"
+V2_VETO_NOT_INDEX = "not_index"
+V2_VETO_REASONS: tuple[str, ...] = (V2_VETO_SMOOTH, V2_VETO_GAP, V2_VETO_NOT_INDEX)
+
+# VETO-COUNT CONTAINMENT (2026-09-09). ``max_day_move`` is taken over the 20 completed sessions
+# ENDING AT the trigger day, so it INCLUDES the trigger move itself, and :func:`signal_diag` rounds
+# ``gap_move`` to the SAME 4 dp :func:`hi52.diagnostics_for` rounds ``max_day_move`` to
+# (src/engine/strategy/scanners/hi52.py:198) — the two diagnostics read the trigger day's own move
+# bit-for-bit identically, so the band below is EXACT, not approximate. A trigger move larger than
+# :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` is therefore already a smooth failure, and first-match ordering
+# books it as ``smooth``; :data:`V2_VETO_GAP` can only ever count trigger moves in the EXACT half-open
+# band (:data:`V2_GAP_MAX`, :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX`]. A gap_move that could not be computed
+# at all (``nan`` — no prior close) is NOT in that band but still books as ``gap``: it fails the
+# ``gap_move <= V2_GAP_MAX`` check exactly like an out-of-band move does. Read the ``gap`` tally as
+# "gaps in that band, plus any non-computable gap", NEVER as "every gap-day reject" — the big gaps are
+# in the ``smooth`` tally.
+# This is a REPORTING artefact of the counting order only: the ADMISSION decision is unaffected,
+# because the three filters are ANDed and a signal failing any of them is rejected either way.
+
+#: The pre-registration stamp every v2 report carries, verbatim.
+V2_PREREGISTRATION_NOTE = (
+    "v2 thresholds fixed 2026-09-09 from the 09-03 full-sample medians (plan section 6.1 addendum); "
+    "pre-registered before this run"
+)
+
+
+def trial_count_for(registration: str) -> int:
+    """Honest trial count for ``registration``: v1 = 1, v2 = 2 (v1 + v2 of the same family).
+
+    v2 does not replace v1's count — it ADDS to it, so a v2 run is deflated at ``fold_pass_min(2)``
+    while a v1 run keeps citing :data:`TRIAL_COUNT_N`. Unknown names raise rather than defaulting:
+    silently citing N=1 for an unregistered variant is the exact failure this discipline exists to
+    prevent.
+    """
+    counts = {REGISTRATION_V1: TRIAL_COUNT_N, REGISTRATION_V2: TRIAL_COUNT_N + 1}
+    try:
+        return counts[registration]
+    except KeyError:
+        raise ValueError(
+            f"unknown registration {registration!r}; expected one of {list(REGISTRATIONS)}"
+        ) from None
+
+HORIZONS: tuple[int, ...] = (5, 10, 20)          # trading sessions
 REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size (§6.4/§7.1)
 PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS (overnight holds)
 RANK_TOP_DECILE = 0.10
@@ -517,6 +599,77 @@ def month_end_indices(dates: Sequence[date]) -> list[int]:
 
 
 # =============================================================================== measurement
+@dataclass(frozen=True)
+class SignalDiag:
+    """The per-signal path diagnostics, computed ONCE per signal.
+
+    This exists so v2's signal-time filters are DEFINITIONALLY IDENTICAL to the fields the
+    descriptive smooth/jumpy cut and the gap A/B split read: both consume this object, neither
+    re-derives the arithmetic. ``up_day_frac``/``max_day_move`` come straight from the live rule's
+    own ``hi52.diagnostics_for`` (rounding included); ``gap_move`` is the trigger session's
+    ``|close(y)/close(y-1) - 1|`` as a FRACTION, rounded to the SAME 4 dp ``max_day_move`` is (the A/B
+    split reads it in percent). Any of them is ``nan`` when the underlying read is impossible.
+    """
+
+    up_day_frac: float
+    max_day_move: float
+    gap_move: float
+
+
+def signal_diag(series: Series, i: int, params: dict[str, float]) -> SignalDiag:
+    """:class:`SignalDiag` for the signal at index ``i`` (see that class for why it is factored)."""
+    diag = diagnostics_for(_window(series, i, int(params["lookback_sessions"])), params=params)
+    prev_close = float(series.close[i - 1]) if i >= 1 else float("nan")
+    cur_close = float(series.close[i])
+    # Rounded to the SAME 4 dp hi52.diagnostics_for rounds max_day_move to
+    # (src/engine/strategy/scanners/hi52.py:198): when the trigger day is the window's own biggest
+    # mover, gap_move and max_day_move are the SAME physical number and must read identically, or the
+    # VETO-COUNT CONTAINMENT band above documents two diagnostics that quietly disagree.
+    gap_move = (
+        round(abs(cur_close / prev_close - 1.0), 4)
+        if math.isfinite(prev_close) and prev_close > 0.0
+        else float("nan")
+    )
+    return SignalDiag(
+        up_day_frac=float(diag.up_day_frac) if diag is not None else float("nan"),
+        max_day_move=float(diag.max_day_move) if diag is not None else float("nan"),
+        gap_move=gap_move,
+    )
+
+
+def v2_admits(
+    series: Series,
+    i: int,
+    params: dict[str, float],
+    *,
+    index_members: set[str],
+    veto_counts: dict[str, int] | None = None,
+) -> bool:
+    """Whether the v2 registration admits the v1 signal at ``i`` (2026-09-09 pre-registration).
+
+    Three fixed signal-time filters, evaluated in the plan's own order and counted FIRST-MATCH so
+    the reasons partition the rejects (see :data:`V2_VETO_REASONS`). A diagnostic that could not be
+    computed (``nan``) is a REJECT, never a pass: v2's claim is that the filters were satisfied at
+    signal time, and an unknowable value did not satisfy them.
+    """
+    d = signal_diag(series, i, params)
+    if not (
+        math.isfinite(d.up_day_frac)
+        and math.isfinite(d.max_day_move)
+        and d.up_day_frac >= V2_SMOOTH_UP_FRAC_MIN
+        and d.max_day_move <= V2_SMOOTH_MAX_DAY_MOVE_MAX
+    ):
+        _bump(veto_counts, V2_VETO_SMOOTH)
+        return False
+    if not (math.isfinite(d.gap_move) and d.gap_move <= V2_GAP_MAX):
+        _bump(veto_counts, V2_VETO_GAP)
+        return False
+    if series.symbol.upper() not in index_members:
+        _bump(veto_counts, V2_VETO_NOT_INDEX)
+        return False
+    return True
+
+
 def measure(
     series: Series,
     i: int,
@@ -540,14 +693,8 @@ def measure(
     entry = float(series.open[i + 1])
     if not math.isfinite(entry) or entry <= 0.0:
         return None
-    prev_close = float(series.close[i - 1]) if i >= 1 else float("nan")
-    cur_close = float(series.close[i])
-    gap_day = bool(
-        math.isfinite(prev_close)
-        and prev_close > 0.0
-        and abs(cur_close / prev_close - 1.0) * 100.0 > GAP_DAY_PCT
-    )
-    diag = diagnostics_for(_window(series, i, int(params["lookback_sessions"])), params=params)
+    d = signal_diag(series, i, params)
+    gap_day = bool(math.isfinite(d.gap_move) and d.gap_move * 100.0 > GAP_DAY_PCT)
     trade = Trade(
         symbol=series.symbol,
         construct=construct,
@@ -556,8 +703,8 @@ def measure(
         entry_px=entry,
         prox=float(prox),
         score=score,
-        up_day_frac=float(diag.up_day_frac) if diag is not None else float("nan"),
-        max_day_move=float(diag.max_day_move) if diag is not None else float("nan"),
+        up_day_frac=d.up_day_frac,
+        max_day_move=d.max_day_move,
         gap_day=gap_day,
         in_index_proxy=series.symbol.upper() in index_members,
     )
@@ -697,12 +844,18 @@ def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date],
     return days, vals
 
 
-def cpcv_report(trades: Sequence[Trade], horizon: int, cost_pct: float) -> dict[str, Any]:
+def cpcv_report(
+    trades: Sequence[Trade], horizon: int, cost_pct: float, trial_count: int = TRIAL_COUNT_N
+) -> dict[str, Any]:
     """CPCV + the §6.4/WO-3 deflated promotion decision for one construct at one horizon.
 
     Purge and embargo are the HORIZON, not the §6.4 default 5: at horizon N a signal's trade overlaps
     the next N sessions of signals, so a 5-observation purge leaks a T+20 trade straight across the
     fold boundary.
+
+    ``trial_count`` is :func:`trial_count_for` the run's registration (2026-09-09): it is the N the
+    deflation machinery is told about, so a v2 run reports every construct against
+    ``fold_pass_min(2)``.
     """
     days, vals = daily_net_series(trades, horizon)
     n_obs = int(vals.size)
@@ -733,7 +886,7 @@ def cpcv_report(trades: Sequence[Trade], horizon: int, cost_pct: float) -> dict[
     passing = [f["expectancy_pct_per_day"] for f in folds if f["passed"]]
     median_passing = float(np.median(passing)) if passing else None
     promotable, reasons = promotion_decision(
-        TRIAL_COUNT_N,
+        trial_count,
         pass_fraction,
         median_passing_expectancy_pct=median_passing,
         cost_floor_pct=cost_pct,
@@ -746,8 +899,8 @@ def cpcv_report(trades: Sequence[Trade], horizon: int, cost_pct: float) -> dict[
         "last_day": str(days[-1]) if days else None,
         "purge_obs": horizon,
         "embargo_obs": horizon,
-        "trial_count_n": TRIAL_COUNT_N,
-        "fold_pass_min": fold_pass_min(TRIAL_COUNT_N),
+        "trial_count_n": trial_count,
+        "fold_pass_min": fold_pass_min(trial_count),
         "n_splits": len(folds),
         "fold_pass_fraction": None if pass_fraction is None else round(pass_fraction, 4),
         "median_passing_expectancy_pct_per_day": None if median_passing is None else round(median_passing, 6),
@@ -772,6 +925,7 @@ def run_study(
     db_path: Path | None = None,
     verify_prefilter: int = 0,
     params: dict[str, float] | None = None,
+    registration: str = REGISTRATION_V1,
 ) -> tuple[dict[str, Any], dict[str, list[Trade]]]:
     """Run both constructs end to end.
 
@@ -779,7 +933,13 @@ def run_study(
     report's input; the per-trade lists are deliberately NOT embedded in it (a full-market run books
     tens of thousands of trades) but are returned so callers and tests can assert on individual
     fills without re-deriving them.
+
+    ``registration`` selects which PRE-REGISTERED rule is measured (see the module docstring).
+    ``v1`` is the original and takes no v2 code path whatsoever; ``v2`` additionally applies
+    :func:`v2_admits` to every discrete signal and cites N=2. The rank constructs are the v1
+    construct under both.
     """
+    trial_count = trial_count_for(registration)   # also the registration-name validation
     p = dict(params or PRE_REGISTERED_PARAMS)
     cost_pct = float(cost_model.breakeven_pct(notional, PRODUCT))
     fees_pct = float(cost_model.fee_breakeven_pct(notional, PRODUCT))
@@ -801,6 +961,7 @@ def run_study(
     discrete: list[Trade] = []
     n_signals_discrete = 0
     discrete_vetoes: dict[str, int] = {}
+    v2_vetoes: dict[str, int] = {}
     verify_left = int(verify_prefilter)
     verify_checked = 0
     for sym in sorted(series_by_symbol):
@@ -818,6 +979,15 @@ def run_study(
             verify_left -= 1
             verify_checked += 1
         n_signals_discrete += len(sigs)
+        if registration == REGISTRATION_V2:
+            # AFTER the fired count and AFTER --verify-prefilter (which checks the v1 signal set):
+            # `n_discrete_signals_fired` stays the RAW fresh-cross count under both registrations,
+            # and the v2 vetoes below are what explains the difference from it.
+            sigs = [
+                (i, score)
+                for i, score in sigs
+                if v2_admits(s, i, p, index_members=index_members, veto_counts=v2_vetoes)
+            ]
         for i, score in sigs:
             prox_hi = _proximity(_window(s, i, int(p["lookback_sessions"])), lookback=int(p["lookback_sessions"]))
             t = measure(
@@ -898,10 +1068,67 @@ def run_study(
         "equities cannot be shorted overnight (CNC), so the short leg is NOT executable here and no "
         "borrow cost is modelled for it."
     )
+    # WHY registration-aware (2026-09-09): hard-coding "N=1" here contradicted the v2 note three
+    # lines below, which cites N=2 — one report asserting both counts. The f-string reads the SAME
+    # trial_count the CPCV blocks are deflated at, so the note cannot drift from the machinery. At
+    # trial_count = 1 it renders byte-for-byte the string this note has always been (plan §6.4).
     notes.append(
-        "NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N=1 "
-        "(fold_pass_min = 60%)."
+        f"NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N={trial_count} "
+        f"(fold_pass_min = {fold_pass_min(trial_count):.0%})."
     )
+    if registration == REGISTRATION_V2:
+        notes.append(
+            "REGISTRATION v2 (a SECOND pre-registration, not a knob on v1): v1's rule and parameters "
+            f"PLUS three signal-time filters - up_day_frac >= {V2_SMOOTH_UP_FRAC_MIN} AND "
+            f"max_day_move <= {V2_SMOOTH_MAX_DAY_MOVE_MAX} over the 20 completed sessions ending at "
+            f"y, |close(y)/close(y-1) - 1| <= {V2_GAP_MAX}, and index members only. "
+            + V2_PREREGISTRATION_NOTE
+            + f". Trial count is therefore N=2 (v1+v2), fold_pass_min = "
+            f"{fold_pass_min(trial_count):.0%}; v1 and v2 are reported side by side, never pooled "
+            "and never max-picked."
+        )
+        notes.append(
+            "v2's smooth/gap filters read the SAME per-signal diagnostics the descriptive "
+            "smooth/jumpy cut and the gap A/B split read (one signal_diag computation), so they are "
+            "definitionally identical to those fields. The DIFFERENCE is that v2's thresholds are "
+            "fixed constants knowable at signal time, where the descriptive cut's are full-sample "
+            "medians and are not."
+        )
+        notes.append(
+            "v2's index-only population inherits the survivorship-tainted membership proxy above: "
+            "the restriction is applied with CURRENT membership, so v2's measured population is not "
+            "the population a live v2 could have originated on historical dates."
+        )
+        # WHY (2026-09-09): the split cells are printed under the SAME names in a v1 and a v2 report,
+        # which invites the one comparison v2 cannot support — v2's filters are the split criteria,
+        # so two cells are defined away and a third is drawn over a pre-filtered population. Naming
+        # that in the report is cheaper than a reader silently reading n=0 as an absent edge. SCOPED
+        # to the discrete construct: v2_admits filters CONSTRUCT_DISCRETE signals only (see the
+        # for-loop above that applies it) — the rank blocks below never call it, so their same-named
+        # cells stay v1's cells, unchanged.
+        notes.append(
+            f"TWO SPLIT CELLS ARE EMPTY BY CONSTRUCTION UNDER v2, FOR {CONSTRUCT_DISCRETE} ONLY: "
+            f"{CELL_EXTENDED} and {CELL_GAP_ONLY} are defined away, inside that construct, by v2's "
+            "own admission filters (index members only; no trigger move above the gap threshold), "
+            f"so their n=0 there is arithmetic, not evidence of anything. And the "
+            f"{CELL_SMOOTH}/{CELL_JUMPY} median cut inside {CONSTRUCT_DISCRETE} is taken over an "
+            f"ALREADY smooth-filtered population, so its {CELL_JUMPY} cell holds the least-smooth "
+            "survivors of a smooth population, not the jumpy names the v1 cell measures. None of "
+            f"the {CONSTRUCT_DISCRETE} cells above is comparable with the v1 cell of the same name. "
+            f"The {CONSTRUCT_RANK_TOP}/{CONSTRUCT_RANK_BOTTOM} blocks' cells of these SAME names are "
+            "the v1 cells, UNCHANGED: rank signals never pass through v2_admits, so their "
+            f"{CELL_EXTENDED}/{CELL_GAP_ONLY}/{CELL_JUMPY} cells hold exactly what a v1 report would."
+        )
+        notes.append(
+            "THE RANK CONSTRUCTS ARE v1: v2 registers the discrete fresh cross only, so "
+            f"{CONSTRUCT_RANK_TOP}/{CONSTRUCT_RANK_BOTTOM} carry their v1 definition unchanged in a "
+            "v2 run - only the cited trial count differs."
+        )
+        if not index_members:
+            notes.append(
+                "v2 POPULATION IS EMPTY BY CONSTRUCTION: the index membership list is unavailable, "
+                "so every signal was vetoed not_index. The v2 cells below are n=0, not a result."
+            )
     notes.append(
         "UNADJUSTED-HISTORY VETO mirrors the live sweep: a symbol carrying a "
         + "/".join(sorted(UNADJUSTED_KINDS))
@@ -925,7 +1152,9 @@ def run_study(
             "n_sessions": len(all_dates),
             "params": p,
             "params_match_live_defaults": p == dict(DEFAULT_PARAMS),
-            "trial_count_n": TRIAL_COUNT_N,
+            "registration": registration,
+            "trial_count_n": trial_count,
+            "fold_pass_min": fold_pass_min(trial_count),
             "parameter_sweep_run": False,
             "horizons_sessions": list(HORIZONS),
             "entry_convention": "next session's OPEN after the signal session (no same-bar fill)",
@@ -952,6 +1181,18 @@ def run_study(
         "constructs": {},
         "notes": notes,
     }
+    if registration == REGISTRATION_V2:
+        # v2-only keys: a v1 document is exactly the document it was before this flag existed,
+        # except for the two meta fields that name its registration.
+        doc["v2_filters"] = {
+            "smooth_up_day_frac_min": V2_SMOOTH_UP_FRAC_MIN,
+            "smooth_max_day_move_max": V2_SMOOTH_MAX_DAY_MOVE_MAX,
+            "gap_max_abs_close_change": V2_GAP_MAX,
+            "population": "index members only (the survivorship-tainted CURRENT-membership proxy)",
+            "pre_registration": V2_PREREGISTRATION_NOTE,
+        }
+        doc["v2_vetoes"] = {r: v2_vetoes.get(r, 0) for r in V2_VETO_REASONS}
+        doc["v2_vetoes"]["total"] = sum(doc["v2_vetoes"].values())
 
     for construct, trades in (
         (CONSTRUCT_DISCRETE, discrete),
@@ -969,7 +1210,7 @@ def run_study(
                 "rule": "smooth iff up_day_frac >= median AND max_day_move <= median (population medians)",
             },
             "cells": {name: cell_stats(cell) for name, cell in cells.items()},
-            "cpcv": {str(k): cpcv_report(trades, k, cost_pct) for k in HORIZONS},
+            "cpcv": {str(k): cpcv_report(trades, k, cost_pct, trial_count) for k in HORIZONS},
         }
 
     # Long-short spread (academic reference; short leg not executable — see notes).
@@ -1027,6 +1268,29 @@ def render_text(doc: dict[str, Any]) -> str:
     add(f"params          : {json.dumps(m['params'], sort_keys=True)}")
     add(f"params == live  : {m['params_match_live_defaults']}   "
         f"(sweep run: {m['parameter_sweep_run']}, trial count N={m['trial_count_n']})")
+    # The registration line is printed for BOTH registrations - a report that does not say which
+    # pre-registration produced it is the ambiguity this block exists to remove.
+    add(f"registration    : {m['registration']}   "
+        f"(trial_count_n = {m['trial_count_n']}, fold_pass_min = {m['fold_pass_min']:.0%})")
+    filters = doc.get("v2_filters")
+    if filters:
+        add(f"v2 filters      : up_day_frac >= {filters['smooth_up_day_frac_min']} AND "
+            f"max_day_move <= {filters['smooth_max_day_move_max']} (20 sessions ending y); "
+            f"|close(y)/close(y-1) - 1| <= {filters['gap_max_abs_close_change']}; "
+            f"{filters['population']}")
+        add(f"v2 note         : {filters['pre_registration']}")
+        v2v = doc["v2_vetoes"]
+        add(f"v2 vetoes       : smooth {v2v['smooth']}, gap {v2v['gap']}, "
+            f"not_index {v2v['not_index']}   (total {v2v['total']} of "
+            f"{m['n_discrete_signals_fired']} v1 fresh crosses; first-match, so the reasons "
+            "partition the rejects)")
+        # The containment the V2_VETO_* constants document, restated where the counts are READ. The
+        # band is EXACT (not merely typical) because signal_diag rounds gap_move to hi52's own 4 dp.
+        add(f"                  containment: max_day_move includes the trigger day, so any trigger "
+            f"move > {filters['smooth_max_day_move_max']} books as smooth and gap counts only "
+            f"trigger moves in ({filters['gap_max_abs_close_change']}, "
+            f"{filters['smooth_max_day_move_max']}]; the filters are ANDed, so the admission "
+            "decision is unaffected. A non-computable gap_move (nan) also books as gap.")
     add(f"entry           : {m['entry_convention']}")
     add(f"exit            : {m['exit_convention']}")
     add(f"sizing          : {m['sizing']}")
@@ -1098,7 +1362,8 @@ def render_text(doc: dict[str, Any]) -> str:
 
     # ------------------------------------------------------------------ CPCV / deflation
     add("-" * 96)
-    add("STEP 3 - CPCV + DEFLATED PROMOTION DECISION (one pre-registered param set, N=1)")
+    add(f"STEP 3 - CPCV + DEFLATED PROMOTION DECISION (pre-registration {m['registration']}, "
+        f"N={m['trial_count_n']})")
     add("-" * 96)
     for construct, block in doc["constructs"].items():
         add(f"[{construct}]")
@@ -1160,6 +1425,12 @@ def build_parser() -> argparse.ArgumentParser:
     # otherwise derive it from the first option string and silently orphan ``args.nifty200_csv``.
     ap.add_argument("--index-csv", "--nifty200-csv", type=Path, default=None, dest="nifty200_csv",
                     help="override the CURRENT index-membership CSV used by the index/extended split")
+    # NOT a parameter knob (which would turn N=1 into N=k silently): it SELECTS which of the two
+    # separately pre-registered rules is measured, and the trial count moves with it.
+    ap.add_argument("--registration", choices=list(REGISTRATIONS), default=REGISTRATION_V1,
+                    help="which PRE-REGISTERED rule to measure: v1 (the 2026-09-01 registration, "
+                         "default) or v2 (2026-09-09: v1 plus the fixed smooth/no-gap/index-only "
+                         "signal-time filters; trial count N=2)")
     ap.add_argument("--verify-prefilter", type=int, default=0, metavar="K",
                     help="brute-force every eligible day for the first K symbols and abort on any "
                          "disagreement with the vectorized prefilter")
@@ -1193,6 +1464,7 @@ def main(argv: list[str] | None = None) -> int:
             nifty200_csv=args.nifty200_csv,
             db_path=db_path,
             verify_prefilter=args.verify_prefilter,
+            registration=args.registration,
         )
     except ValueError as exc:
         print(f"backtest_hi52: {exc}", file=sys.stderr)
