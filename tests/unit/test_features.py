@@ -611,20 +611,30 @@ def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, 
 class _StatementSpy:
     """Census of every DuckDB statement the store issues while the spy is installed.
 
-    Wraps ``MarketStore._execute`` — the single funnel ``_fetchall`` / ``_fetch_dicts`` and the
-    simple writes all pass through — rather than individual read methods, so a read introduced by
-    some future helper cannot slip past these assertions the way a per-method spy would let it.
+    Wraps ``MarketStore._execute_locked`` — the single funnel ``_execute``, ``_fetchall``,
+    ``_fetch_dicts`` and the simple writes all pass through — rather than individual read methods, so
+    a read introduced by some future helper cannot slip past these assertions the way a per-method spy
+    would let it. It was ``_execute`` until 2026-09-09, when the §2.6 slow-statement telemetry moved
+    the read helpers onto the silent ``_execute_locked`` (one ``_lock`` hold must log exactly one
+    note, and nesting the logging ``_execute`` inside a hold logged two).
+
+    Census effect of that move: the READ census is unchanged — every read that reached ``_execute``
+    reaches ``_execute_locked``, one level down the same funnel. The WRITE census is WIDER: the
+    telemetry also routed ``_bulk_write``'s ``INSERT … SELECT`` and ``_flush_locked``'s per-partition
+    ``COPY`` through ``_execute_locked``, and both used to call ``con.execute`` directly and so were
+    invisible to the old ``_execute`` spy. The WO-27 assertions below are read-budget assertions, so
+    they are unaffected; a future write-count assertion must expect bulk writes and tick flushes too.
     """
 
     def __init__(self, store, monkeypatch) -> None:      # noqa: ANN001 - test helper
         self.sql: list[str] = []
-        original = store._execute
+        original = store._execute_locked
 
-        def spy(sql, *args, **kwargs):                   # noqa: ANN001, ANN202 - passthrough recorder
+        def spy(con, sql, *args, **kwargs):              # noqa: ANN001, ANN202 - passthrough recorder
             self.sql.append(" ".join(str(sql).split()))
-            return original(sql, *args, **kwargs)
+            return original(con, sql, *args, **kwargs)
 
-        monkeypatch.setattr(store, "_execute", spy)
+        monkeypatch.setattr(store, "_execute_locked", spy)
 
     @property
     def reads(self) -> list[str]:

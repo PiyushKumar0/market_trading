@@ -6,6 +6,8 @@ settings keys + notify-catalog messages."""
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import threading
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
@@ -16,6 +18,7 @@ from pydantic import ValidationError
 from engine.core.clock import Clock
 from engine.core.config import load_settings
 from engine.core.types import Bar, Tick
+from engine.marketdata import store as store_module
 from engine.marketdata.store import (
     AMEND_APPLIED,
     AMEND_FOREIGN_SRC,
@@ -259,6 +262,178 @@ def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
     assert back[0].avg_price == Decimal("2338.1234")
     assert back[0].exchange_ts == ts and back[0].exchange_ts.tzinfo is not None
     assert store.get_ticks("RELIANCE", date(2020, 1, 1)) == []
+
+
+# --------------------------------------------------------------------------- slow-statement telemetry
+def _slow_events(caplog) -> list:
+    """The ``store_slow_statement`` records captured so far (§2.6 hardening (iii))."""
+    return [r for r in caplog.records if r.getMessage() == "store_slow_statement"]
+
+
+def test_slow_statement_default_threshold_is_5s():
+    """The plan pins the threshold at 5 s (§2.6 hardening (iii)); the telemetry tests below force it
+    to 0.0/1e9 to be deterministic, so the shipped default needs its own assertion."""
+    assert store_module._SLOW_STATEMENT_S == 5.0
+
+
+def test_slow_statement_one_event_per_lock_hold(store, clock, monkeypatch, caplog):
+    """§2.6 'Store slow-statement telemetry' (WO-24b follow-up): the 2026-09-08 11:47 stall's
+    thread-by-thread dump could not tell whether a feature_snapshot INSERT (_execute) or a tick-flush
+    COPY (_flush_locked) held ``_lock`` for 59 s. Every ``_lock`` hold is now timed and a hold >=
+    _SLOW_STATEMENT_S logs ``store_slow_statement``.
+
+    2026-09-09 review: ``_lock`` is an RLock and the read helpers used to call the LOGGING ``_execute``
+    from inside their own hold, so one read emitted TWO events under identical labels while the hold
+    was still held, and each phase was timed separately (a 3 s execute + 2.5 s fetch went unreported).
+    One hold, ONE event — asserted by count, not by 'any'."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    ts = clock.now()
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.insert_bars_1m([_bar(ts.replace(second=0, microsecond=0))])
+
+        caplog.clear()                                   # (a) point read through _fetchall
+        store.get_bars_1m("RELIANCE", ts - timedelta(days=1), ts + timedelta(days=1))
+        fetchall_events = _slow_events(caplog)
+
+        caplog.clear()                                   # (b) dict read through _fetch_dicts
+        store.get_universe_daily(clock.today())
+        fetch_dicts_events = _slow_events(caplog)
+
+        caplog.clear()                                   # (c) small write through _upsert_rows
+        store.upsert_sector_map(
+            clock.today(),
+            [{"symbol": "RELIANCE", "sector": "Energy"}, {"symbol": "TCS", "sector": "IT"}],
+        )
+        upsert_events = _slow_events(caplog)
+
+    assert len(fetchall_events) == 1, [r.label for r in fetchall_events]
+    assert fetchall_events[0].label.startswith("SELECT symbol, ts_minute")
+    assert len(fetch_dicts_events) == 1, [r.label for r in fetch_dicts_events]
+    assert fetch_dicts_events[0].label.startswith("SELECT * FROM universe_daily")
+    assert [r.label for r in upsert_events] == ["upsert_rows:sector_map:2"]
+
+    for r in fetchall_events + fetch_dicts_events + upsert_events:
+        assert isinstance(r.elapsed_s, float) and r.elapsed_s >= 0.0
+        # "thread" collides with logging.LogRecord's own reserved attribute, so _safe_extra (§log.py)
+        # stores our field as "thread_" on the record -- the warning() call itself still passes "thread".
+        assert r.thread_ == threading.current_thread().name
+        assert not hasattr(r, "failed")                  # the statement returned — no failure marker
+
+
+def test_slow_statement_reports_a_statement_that_raises(store, monkeypatch, caplog):
+    """A hold that ends in an exception is exactly the one worth naming (a 30 s batch that then rolls
+    back starved every other caller for 30 s), so elapsed is captured in a ``finally`` and the note is
+    emitted after the release either way, with ``failed=True``. Re-raise semantics are unchanged."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        with pytest.raises(duckdb.Error):
+            store._execute("SELECT * FROM no_such_table_wo24b")
+    events = _slow_events(caplog)
+    assert len(events) == 1, [r.label for r in events]
+    assert events[0].label.startswith("SELECT * FROM no_such_table_wo24b")
+    assert events[0].failed is True
+
+
+def test_slow_statement_flush_paths_and_silence_below_threshold(store, clock, monkeypatch, caplog):
+    """The tick-flush pair (``_bulk_write`` stage load + per-partition ``copy_ticks`` COPY) names
+    itself, and nothing is logged below the threshold. The silence phase uses a 1e9 s sentinel rather
+    than the real 5.0: on a slow volume a genuine multi-second flush would otherwise make this flap."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    ts = clock.now()
+    store.buffer_tick(_tick(ts))
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.flush_ticks()
+    labels = [r.label for r in _slow_events(caplog)]
+    assert "copy_ticks:RELIANCE" in labels                                   # _flush_locked partition COPY
+    assert any(lbl.startswith("bulk_write:_tick_stage:") for lbl in labels)  # _bulk_write stage load
+
+    caplog.clear()
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 1e9)              # nothing can qualify
+    store.buffer_tick(_tick(ts))
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.get_bars_1m("RELIANCE", ts - timedelta(days=1), ts + timedelta(days=1))
+        store.get_universe_daily(clock.today())
+        store.flush_ticks()
+    assert _slow_events(caplog) == []
+
+
+def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypatch, caplog):
+    """The statement helpers were instrumented first; the 2026-09-09 review found the coverage claim
+    overstated, because five methods take their OWN ``with self._lock:`` and run SQL inside it —
+    ``amend_bar_1m_extremes`` (live late-tick path), the ``_tick_stage`` DELETE at the head of a
+    flush, ``insert_news``, ``set_news_cluster`` and ``compact_tick_partitions``. Each is ONE hold
+    (``insert_news`` and ``compact_tick_partitions`` loop MANY statements inside one acquisition), so
+    each must emit exactly ONE event naming the hold — not one per statement, and not none at all."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    ts = clock.now().replace(second=0, microsecond=0)
+    store.insert_bars_1m([_bar(ts)])
+    today = clock.today()
+
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        caplog.clear()                                   # (a) amend: SELECT + UPDATE + BEGIN/COMMIT
+        assert store.amend_bar_1m_extremes("RELIANCE", ts, Decimal("2345.00")) == AMEND_APPLIED
+        amend = [r.label for r in _slow_events(caplog)]
+
+        caplog.clear()                                   # (b) insert_news: 2 rows, one hold
+        store.insert_news([
+            {"title": "a", "source_domain": "et.com", "url": "https://e/a", "published_at": ts},
+            {"title": "b", "source_domain": "et.com", "url": "https://e/b", "published_at": ts},
+        ])
+        news = [r.label for r in _slow_events(caplog)]
+
+        hids = [h["headline_id"] for h in store.get_news(unclustered_only=True)]
+        caplog.clear()                                   # (c) set_news_cluster: executemany, one hold
+        store.set_news_cluster(hids, "01CLUSTER")
+        cluster = [r.label for r in _slow_events(caplog)]
+
+        store.buffer_tick(_tick(ts))
+        caplog.clear()                                   # (d) the stage wipe that opens every flush
+        store.flush_ticks()
+        flush = [r.label for r in _slow_events(caplog)]
+
+        store.buffer_tick(_tick(ts + timedelta(seconds=1), vol=7))
+        store.flush_ticks()                              # a 2nd partition file, so compaction runs
+        caplog.clear()                                   # (e) compact: whole per-symbol COPY loop
+        store.compact_tick_partitions(today)
+        compact = [r.label for r in _slow_events(caplog)]
+
+    # One combined assertion so an uninstrumented hold shows up as a gap in the WHOLE census rather
+    # than short-circuiting on whichever site happens to be checked first.
+    assert {
+        "amend": amend,
+        "insert_news": news,
+        "set_news_cluster": cluster,
+        "flush_stage_delete": flush.count("flush_stage_delete"),
+        "compact": compact,                                     # ONE event, not one per symbol
+    } == {
+        "amend": ["amend_bar_1m:RELIANCE"],
+        "insert_news": ["insert_news:2"],
+        "set_news_cluster": ["set_news_cluster:2"],
+        "flush_stage_delete": 1,
+        "compact": [f"compact_ticks:{today.isoformat()}"],
+    }
+    assert "copy_ticks:RELIANCE" in flush                                    # the pre-existing pair
+    assert any(lbl.startswith("bulk_write:_tick_stage:") for lbl in flush)   # still one event each
+
+
+def test_slow_statement_hand_rolled_holds_are_silent_below_threshold(store, clock, monkeypatch, caplog):
+    """The other half of the contract for the five holds above: below the threshold they say nothing.
+    The sentinel is 1e9 s rather than the real 5.0 so a slow CI volume cannot make this flap."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 1e9)
+    ts = clock.now().replace(second=0, microsecond=0)
+    store.insert_bars_1m([_bar(ts)])
+    store.buffer_tick(_tick(ts))
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.amend_bar_1m_extremes("RELIANCE", ts, Decimal("2345.00"))
+        store.insert_news(
+            [{"title": "a", "source_domain": "et.com", "url": "https://e/a", "published_at": ts}]
+        )
+        store.set_news_cluster([h["headline_id"] for h in store.get_news()], "01CLUSTER")
+        store.flush_ticks()
+        store.buffer_tick(_tick(ts + timedelta(seconds=1), vol=7))
+        store.flush_ticks()
+        store.compact_tick_partitions(clock.today())
+    assert _slow_events(caplog) == []
 
 
 def test_tick_autoflush_on_batch_size(tmp_path, clock):

@@ -45,6 +45,7 @@ import asyncio
 import functools
 import shutil
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -89,6 +90,26 @@ _FLUSH_SKIP_LOG_EVERY_S = 60.0
 #: (seconds). It is the one caller that must not skip — the connection is about to go — but shutdown
 #: must not hang on a wedged flush either, so the wait is bounded and the give-up is logged.
 _CLOSE_FLUSH_WAIT_S = 15.0
+
+#: Slow-statement telemetry threshold (seconds), §2.6 "Store slow-statement telemetry" (WO-24b
+#: follow-up). The 2026-09-08 11:47 mid-session stall's thread dump (store_stall_stacks) is taken
+#: sequentially and could not tell whether a feature_snapshot INSERT (``_execute``) or a tick-flush
+#: partition COPY (``_flush_locked``) was the statement actually holding ``_lock`` for 59 s. Timed
+#: (see :func:`_note_slow_statement`): every hold taken by the statement helpers —
+#: :meth:`MarketStore._execute`, :meth:`MarketStore._fetchall`, :meth:`MarketStore._fetch_dicts`,
+#: :meth:`MarketStore._bulk_write`, :meth:`MarketStore._upsert_rows` and the per-partition COPY in
+#: :meth:`MarketStore._flush_locked` — PLUS the hand-rolled holds that run SQL of their own:
+#: :meth:`MarketStore.amend_bar_1m_extremes`, the ``_tick_stage`` DELETE at the head of
+#: :meth:`MarketStore._flush_locked`, :meth:`MarketStore.insert_news`,
+#: :meth:`MarketStore.set_news_cluster` and :meth:`MarketStore.compact_tick_partitions`.
+#: :meth:`MarketStore.init_schema` is the ONE hold left
+#: deliberately untimed (with the :meth:`MarketStore.open` hold that wraps it) — boot-only DDL that no
+#: trading-session caller can ever be queued behind, so a slow hold there has no victim to name.
+#: :meth:`MarketStore.ping` is not a site either: it IS the wedge detector (a ``SELECT 1`` that does
+#: not return is the signal), so timing it would only re-report what the health monitor already sees.
+#: A single hold at or above this threshold logs ``store_slow_statement`` so the NEXT stall names its
+#: statement without needing a lucky thread dump.
+_SLOW_STATEMENT_S = 5.0
 
 # ---------------------------------------------------------------------- retention (§4.5, plan-pinned)
 TICKS_RETENTION_DAYS = 30          # raw tick Parquet — enough to calibrate the fill model (R9)
@@ -669,6 +690,42 @@ def _ist(value: Any) -> Any:
     return value
 
 
+def _note_slow_statement(label: str, elapsed: float, *, failed: bool = False) -> None:
+    """Log ``store_slow_statement`` (§2.6 hardening (iii), WO-24b follow-up) when ONE ``_lock`` hold
+    lasted ``elapsed`` >= :data:`_SLOW_STATEMENT_S` seconds — so the next mid-session stall names the
+    statement the thread dump could not.
+
+    Contract for every instrumented site (2026-09-09 review): take ``t0`` right AFTER acquiring
+    ``_lock``, compute ``elapsed`` in a ``finally`` right BEFORE releasing it — so a statement that
+    RAISES after a long hold is reported too, with ``failed=True`` — and call this AFTER the ``with
+    self._lock:`` block, where the WARNING can no longer add to the hold it is reporting. One hold
+    must emit exactly ONE event: that is why the read helpers run their statement through
+    :meth:`MarketStore._execute_locked` (silent) instead of nesting :meth:`MarketStore._execute`,
+    which used to log twice per read under identical labels and never timed the fetch phase at all.
+
+    HONEST EXCEPTION: ``_lock`` is an ``RLock``, and a few methods call an instrumented helper from
+    INSIDE their own hold — the delete-then-insert rewrites (:meth:`MarketStore.replace_universe_daily_index_markers`,
+    :meth:`MarketStore.replace_catalyst_watchlist`), the ``_execute``-based frame reads and the
+    Parquet exports. Those notes DO fire while the outer hold is still held, and such a hold emits
+    one event per inner statement rather than one for the hold. At least one of them IS a
+    trading-session path (2026-09-09 review corrected the earlier "none of these runs in-session"
+    claim): :meth:`MarketStore.get_bars_1d_frame` wraps a logging ``_execute``, and the risk gate's
+    co-movement rule reads it live, once per open position per candidate
+    (``src/engine/risk/gate.py`` ~1547). Accepted anyway, not plumbed around: the nested note only
+    fires when the inner statement ALREADY took >= 5 s, and one WARNING costs milliseconds beside
+    that — it cannot meaningfully lengthen the hold it is reporting."""
+    if elapsed < _SLOW_STATEMENT_S:
+        return
+    fields: dict[str, Any] = {
+        "label": label,
+        "elapsed_s": round(elapsed, 3),
+        "thread": threading.current_thread().name,
+    }
+    if failed:
+        fields["failed"] = True        # the hold ended in an exception — the statement never returned
+    _log.warning("store_slow_statement", **fields)
+
+
 def _norm_scrip_code(raw: Any) -> str:
     """Normalize a BSE scrip code (int/str, possibly ``'500325.0'``) to a bare-int string; ``''`` for
     blank/None (§2.8 fresh-insider reverse lookup). Keeps a non-numeric code as its stripped self."""
@@ -967,20 +1024,74 @@ class MarketStore:
             raise RuntimeError("MarketStore is not open — call open() first")
         return self._con
 
+    def _execute_locked(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        sql: str,
+        params: Sequence[Any] | None = None,
+    ) -> tuple[duckdb.DuckDBPyConnection, float]:
+        """Run ONE statement on ``con`` and return ``(cursor, elapsed_s)``. Deliberately SILENT: the
+        caller is already inside its ``with self._lock:`` block, so it — not this helper — decides
+        what the hold's single :func:`_note_slow_statement` says and emits it after the release
+        (2026-09-09 review: nesting the logging :meth:`_execute` inside a hold logged twice per read
+        under identical labels and left the fetch phase untimed)."""
+        t0 = time.perf_counter()
+        cur = con.execute(sql, params) if params is not None else con.execute(sql)
+        return cur, time.perf_counter() - t0
+
     def _execute(self, sql: str, params: Sequence[Any] | None = None) -> duckdb.DuckDBPyConnection:
-        with self._lock:
-            con = self._require_con()
-            return con.execute(sql, params) if params is not None else con.execute(sql)
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    result, elapsed = self._execute_locked(self._require_con(), sql, params)
+                    failed = False
+                finally:
+                    if failed:      # raised: _execute_locked never handed back its measurement
+                        elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(sql[:80], elapsed, failed=failed)
+        return result
 
     def _fetchall(self, sql: str, params: Sequence[Any] | None = None) -> list[tuple]:
-        with self._lock:
-            return self._execute(sql, params).fetchall()
+        # The WHOLE hold is one measurement (execute + fetch): a 5 s read split 3 s/2.5 s across the
+        # two phases went unreported when each phase was timed on its own (2026-09-09 review).
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    cur, _ = self._execute_locked(self._require_con(), sql, params)
+                    rows = cur.fetchall()
+                    failed = False
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(sql[:80], elapsed, failed=failed)
+        return rows
 
     def _fetch_dicts(self, sql: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
-        with self._lock:
-            cur = self._execute(sql, params)
-            cols = [d[0] for d in cur.description]
-            return [{c: _ist(v) for c, v in zip(cols, row, strict=True)} for row in cur.fetchall()]
+        # As _fetchall, and the per-row dict/_ist conversion counts too — it runs under the hold.
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    cur, _ = self._execute_locked(self._require_con(), sql, params)
+                    cols = [d[0] for d in cur.description]
+                    out = [
+                        {c: _ist(v) for c, v in zip(cols, row, strict=True)} for row in cur.fetchall()
+                    ]
+                    failed = False
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(sql[:80], elapsed, failed=failed)
+        return out
 
     #: Row count at which _upsert_rows switches from executemany (~128 rows/s) to the vectorized
     #: _bulk_write path (2026-07-21). In practice only instruments_daily (~113k rows/day) crosses it.
@@ -1024,13 +1135,30 @@ class MarketStore:
             dtype=object,
         )
         view = "_mt_bulk_stage"
-        with self._lock:
-            con = self._require_con()
-            con.register(view, df)
-            try:
-                con.execute(f"INSERT INTO {table} ({collist}) SELECT {collist} FROM {view} {conflict}")
-            finally:
-                con.unregister(view)
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                # t0 is the FIRST thing inside the hold and elapsed is taken around the whole
+                # register/insert/unregister trio (2026-09-09 review): register materializes the frame
+                # as a DuckDB view and unregister tears it down, both under _lock — timing only the
+                # INSERT under-reported the hold every other caller actually waited on.
+                t0 = time.perf_counter()
+                try:
+                    con = self._require_con()
+                    con.register(view, df)
+                    try:
+                        self._execute_locked(
+                            con,
+                            f"INSERT INTO {table} ({collist}) SELECT {collist} FROM {view} {conflict}",
+                        )
+                        failed = False
+                    finally:
+                        con.unregister(view)
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(f"bulk_write:{table}:{len(rows)}", elapsed, failed=failed)
 
     def _upsert_rows(self, table: str, rows: Sequence[dict[str, Any]]) -> int:
         """Generic pinned-column upsert: unknown keys are a hard error; missing keys insert NULL."""
@@ -1079,21 +1207,33 @@ class MarketStore:
         placeholders = ", ".join("?" for _ in cols)
         collist = ", ".join(f'"{c}"' for c in cols)
         sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) {conflict}"
-        with self._lock:
-            con = self._require_con()
-            # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
-            # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
-            # exactly the regime tokens were lost and every later boot hydrated a broken MAX(d) day).
-            # Autocommit applies per statement; one explicit transaction makes the batch all-or-nothing —
-            # a killed process leaves the PRIOR complete snapshot, never a torn one. BaseException so a
-            # KeyboardInterrupt/CancelledError mid-batch also rolls back and keeps the connection usable.
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.executemany(sql, [[row.get(c) for c in cols] for row in rows])
-            except BaseException:
-                con.execute("ROLLBACK")
-                raise
-            con.execute("COMMIT")
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()      # first thing inside the hold — see _bulk_write
+                con = self._require_con()
+                # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
+                # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
+                # exactly the regime tokens were lost and every later boot hydrated a broken MAX(d) day).
+                # Autocommit applies per statement; one explicit transaction makes the batch all-or-nothing —
+                # a killed process leaves the PRIOR complete snapshot, never a torn one. BaseException so a
+                # KeyboardInterrupt/CancelledError mid-batch also rolls back and keeps the connection usable.
+                try:
+                    con.execute("BEGIN TRANSACTION")
+                    try:
+                        con.executemany(sql, [[row.get(c) for c in cols] for row in rows])
+                    except BaseException:
+                        con.execute("ROLLBACK")
+                        raise
+                    con.execute("COMMIT")
+                    failed = False
+                finally:
+                    # The whole transaction is the hold (2026-09-09 review): a batch that rolls back
+                    # after 30 s starved every other caller for 30 s and must still name itself.
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(f"upsert_rows:{table}:{len(rows)}", elapsed, failed=failed)
         return len(rows)
 
     # ================================================================== bars_1m (§3.2.3, A13/A14)
@@ -1155,18 +1295,32 @@ class MarketStore:
 
         Lock note: this holds ``_lock`` across 2-3 statements (µs-scale point reads/writes on the PK),
         marginally longer than the one-statement discipline of the flush path — the cost of atomicity.
+        The whole transaction is therefore ONE timed hold (§2.6 hardening (iii), 2026-09-09): a 2-3
+        statement hold that stalls starves every other store caller exactly like a one-statement one.
+        This runs on the LIVE late-tick path, so the instrumentation is deliberately the cheap shape —
+        two ``perf_counter`` reads and one f-string per amendment, nothing allocated per statement.
         """
-        with self._lock:
-            con = self._require_con()
-            con.execute("BEGIN TRANSACTION")
-            try:
-                outcome = self._amend_bar_1m_locked(con, symbol, minute, value, require_src)
-            except BaseException:
-                # Mirrors _upsert_rows: a KeyboardInterrupt/CancelledError mid-amendment must leave
-                # no open transaction behind (the connection stays usable for every other caller).
-                con.execute("ROLLBACK")
-                raise
-            con.execute("COMMIT")
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    con = self._require_con()
+                    con.execute("BEGIN TRANSACTION")
+                    try:
+                        outcome = self._amend_bar_1m_locked(con, symbol, minute, value, require_src)
+                    except BaseException:
+                        # Mirrors _upsert_rows: a KeyboardInterrupt/CancelledError mid-amendment must
+                        # leave no open transaction behind (the connection stays usable for everyone).
+                        con.execute("ROLLBACK")
+                        raise
+                    con.execute("COMMIT")
+                    failed = False
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(f"amend_bar_1m:{symbol}", elapsed, failed=failed)
         return outcome
 
     def _amend_bar_1m_locked(
@@ -1506,28 +1660,53 @@ class MarketStore:
         """
         inserted = 0
         now = self._clock.now()
-        with self._lock:
-            con = self._require_con()
-            for row in rows:
-                hid = row.get("headline_id") or str(ULID())
-                cur = con.execute(
-                    "INSERT INTO news (headline_id, title, source_domain, url, published_at, cluster_id, "
-                    "untrusted, ingested_at) "
-                    "SELECT ?,?,?,?,?,?,TRUE,? WHERE NOT EXISTS (SELECT 1 FROM news WHERE url = ?)",
-                    [hid, row["title"], row["source_domain"], row["url"], row["published_at"],
-                     row.get("cluster_id"), now, row["url"]],
-                )
-                inserted += cur.fetchone()[0]
+        # ONE hold spans the whole row loop, so the note names the batch, not a statement (§2.6
+        # hardening (iii), 2026-09-09): a backfill of hundreds of headlines is row-at-a-time INSERT
+        # under a single _lock acquisition — the batch IS the hold every other caller waits behind.
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    con = self._require_con()
+                    for row in rows:
+                        hid = row.get("headline_id") or str(ULID())
+                        cur = con.execute(
+                            "INSERT INTO news (headline_id, title, source_domain, url, published_at, "
+                            "cluster_id, untrusted, ingested_at) "
+                            "SELECT ?,?,?,?,?,?,TRUE,? WHERE NOT EXISTS (SELECT 1 FROM news WHERE url = ?)",
+                            [hid, row["title"], row["source_domain"], row["url"], row["published_at"],
+                             row.get("cluster_id"), now, row["url"]],
+                        )
+                        inserted += cur.fetchone()[0]
+                    failed = False
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(f"insert_news:{len(rows)}", elapsed, failed=failed)
         return inserted
 
     def set_news_cluster(self, headline_ids: Sequence[str], cluster_id: str) -> None:
         """Assign headlines to a cluster (§2.7 step 2 output)."""
-        with self._lock:
-            con = self._require_con()
-            con.executemany(
-                "UPDATE news SET cluster_id = ? WHERE headline_id = ?",
-                [[cluster_id, hid] for hid in headline_ids],
-            )
+        # executemany binds row-at-a-time, so the hold scales with the cluster's size — one note for
+        # the whole hold (§2.6 hardening (iii), 2026-09-09).
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    con = self._require_con()
+                    con.executemany(
+                        "UPDATE news SET cluster_id = ? WHERE headline_id = ?",
+                        [[cluster_id, hid] for hid in headline_ids],
+                    )
+                    failed = False
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(f"set_news_cluster:{len(headline_ids)}", elapsed, failed=failed)
 
     def get_news(
         self, *, published_after: datetime | None = None, unclustered_only: bool = False
@@ -1950,10 +2129,23 @@ class MarketStore:
         group_keys = sorted(
             {(t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) for t in batch}
         )
-        with self._lock:
-            closed = self._con is None
-            if not closed:
-                self._con.execute("DELETE FROM _tick_stage")
+        # The stage wipe is its own _lock hold and its own note (§2.6 hardening (iii), 2026-09-09):
+        # on a big backlog the DELETE is not free, and it runs BEFORE the bulk_write/copy_ticks pair,
+        # so leaving it untimed would have blamed the next statement for its share of a stall.
+        stage_elapsed = 0.0
+        stage_failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    closed = self._con is None
+                    if not closed:
+                        self._con.execute("DELETE FROM _tick_stage")
+                    stage_failed = False
+                finally:
+                    stage_elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement("flush_stage_delete", stage_elapsed, failed=stage_failed)
         if closed:
             # Orphaned late flush after close() (shutdown edge): restage rather than crash a
             # background worker; nothing can write these post-close — the loss is explicit.
@@ -1967,13 +2159,24 @@ class MarketStore:
         written: list[Path] = []
         for d, symbol in group_keys:
             out = self._tick_partition_dir(d, symbol) / f"{ULID()!s}.parquet"
-            with self._lock:
-                self._require_con().execute(
-                    "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
-                    "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
-                    f"TO '{out.as_posix()}' (FORMAT PARQUET)",
-                    [symbol, d],
-                )
+            elapsed = 0.0
+            failed = True
+            try:
+                with self._lock:
+                    t0 = time.perf_counter()
+                    try:
+                        self._execute_locked(
+                            self._require_con(),
+                            "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
+                            "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
+                            f"TO '{out.as_posix()}' (FORMAT PARQUET)",
+                            [symbol, d],
+                        )
+                        failed = False
+                    finally:
+                        elapsed = time.perf_counter() - t0
+            finally:
+                _note_slow_statement(f"copy_ticks:{symbol}", elapsed, failed=failed)
             written.append(out)
         _log.info("ticks_flushed", ticks=len(batch), files=len(written))
         return written
@@ -1999,21 +2202,35 @@ class MarketStore:
         if not day_dir.exists():
             return []
         compacted: list[Path] = []
-        with self._lock:
-            con = self._require_con()
-            for sym_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
-                files = sorted(sym_dir.glob("*.parquet"))
-                if len(files) <= 1:
-                    continue
-                out = sym_dir / f"compact-{ULID()!s}.parquet"
-                con.execute(
-                    f"COPY (SELECT * FROM read_parquet(?) ORDER BY exchange_ts) TO '{out.as_posix()}' "
-                    "(FORMAT PARQUET)",
-                    [(sym_dir / "*.parquet").as_posix()],
-                )
-                for f in files:
-                    f.unlink()
-                compacted.append(out)
+        # ONE hold spans the whole per-symbol loop — ~200 COPYs plus their unlinks under a single
+        # _lock acquisition — so it gets ONE note for the whole hold (§2.6 hardening (iii),
+        # 2026-09-09), which is the number a stalled caller experienced. Per-symbol notes would say
+        # "everything was fast" about a hold that lasted minutes.
+        elapsed = 0.0
+        failed = True
+        try:
+            with self._lock:
+                t0 = time.perf_counter()
+                try:
+                    con = self._require_con()
+                    for sym_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
+                        files = sorted(sym_dir.glob("*.parquet"))
+                        if len(files) <= 1:
+                            continue
+                        out = sym_dir / f"compact-{ULID()!s}.parquet"
+                        con.execute(
+                            f"COPY (SELECT * FROM read_parquet(?) ORDER BY exchange_ts) "
+                            f"TO '{out.as_posix()}' (FORMAT PARQUET)",
+                            [(sym_dir / "*.parquet").as_posix()],
+                        )
+                        for f in files:
+                            f.unlink()
+                        compacted.append(out)
+                    failed = False
+                finally:
+                    elapsed = time.perf_counter() - t0
+        finally:
+            _note_slow_statement(f"compact_ticks:{d.isoformat()}", elapsed, failed=failed)
         return compacted
 
     # ================================================================== retention (§4.5)
