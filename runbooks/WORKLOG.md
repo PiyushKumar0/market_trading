@@ -22,7 +22,42 @@
   cap, no session-boundary lapse; Replay: the day sort was not total (≈28 tied groups per
   symbol-day differing in bid/ask), the postback seam matched nothing the broker exposes, the whole
   day materialised twice (~17 GB for 8×10⁶ ticks), an `async run()` with no await. Decisions
-  ratified in the plan §8.4 addendum. Fix round with re-reviews launches at 15:31.
+  ratified in the plan §8.4 addendum. Fix round with re-reviews scheduled for 15:31; the owner
+  asked why wait, heard the shared-subscription trade-off (12 Opus agents ≈ 1.7M tokens inside
+  the session window, the 09-03 blackout shape) and said "run it now" — launched 11:0x with a
+  monitor on the engine's LLM-failure count. **Outcome:** the session limit tripped ~12:10 (reset
+  14:00); the engine's analyst calls failed from 12:13 (83 `agent_call_failed` by 13:57, the 09-03
+  shape) and two replay reviewers died on the limit; the owner said "ignore engine issues due to
+  claude session limit". Round 2 (4 fixers + 6 surviving reviews) closed the round-1 majors and
+  found: a BLOCKER (the calibrator wrote the per-symbol half-spread as a fraction, the fill model
+  reads a percent — every fallback fill charged 1/100th of the spread), the fitted k for the open
+  bucket 15× below the uncalibrated default (estimator zero-inflated; policy set: a calibration may
+  only tighten), a zero-session run overwriting the YAML with defaults, the modify-intent gate too
+  narrow, the A13 rule missing the minute-boundary case, and the real-broker golden test being
+  thread-timing dependent. Round 3 launched 14:1x on the same authorisation.
+- **Round 3 (12/12 agents):** replay PASSED both lenses (scripted-action seam makes replay actions
+  a function of the stream — six runs incl. three under CPU hogs, one digest; per-slice yields;
+  RELIANCE symbol-day 9.1–10.4 s warm); calibration and PaperBroker closed their majors; the OMS
+  property suite went RED (the new terminal guard on `correlate` vs the driver) and two OMS
+  semantics gaps remained (a stale-but-grown frame still reverted amended fields via the fill door;
+  `record_noop` accepted an unannotated accretion self-edge). **Taken inline (Fable, attempt cap):**
+  `apply_update` splits the two decisions (fill lands, stale fields ride the event as
+  `fields_reported`), `transition` gained an `annotations` pass-through, `record_noop` requires a
+  `NOOP_FLAGS` annotation, the property driver pins that `correlate` refuses terminal orders and
+  that no generated frame ever yields an `illegal_transition` no-op — 197 OMS tests green across
+  four Hypothesis seeds. Round 4 (2 fixers + 2 reviews) on the PaperBroker guard gaps and the
+  consumer half-tick floor launched 15:0x — **both PASSED** (minors: the "failed" latch made
+  conditional and a stale docstring fixed inline; the YAML header now states the half-tick floor).
+- **Final gate + artefacts:** unit suite minus the tranche files 2452 passed (9:18), property +
+  replay 33 passed, paper/calibration 134, OMS 197, ruff clean over every touched file. Calibration
+  regenerated 15:23 (22 compacted sessions, 5 skipped `not_compacted`, 150 s): all three buckets
+  ship the consumer defaults (basis `degenerate`; open p75 0.0673 / p90 0.3065 recorded), 200
+  per-symbol half-spread medians in PERCENT (p50 0.0127 %), and the report states that 57 of 200
+  names sit below the 2-tick fallback at the Rs 1000 reference — the evidence behind the half-tick
+  consumer floor. **No engine restart needed** for this tranche (nothing is wired into the live
+  path; the `OrderUpdateFrame` move is a re-export) — it deploys with the next idle restart.
+  Attempt accounting per the revision gate: 4 delegated rounds per work order (the cap), with the
+  OMS semantics closed by Fable inline at the cap.
 - **First session on yesterday's code (verified from the log, 09-10):** boot 09:06:34 after the
   overnight sleep; `brk20_sweep` 09:32:35 scanned=480 cands=6 gap_floor_vetoes=5 unadjusted=0 and
   `hi52_sweep` 09:33:15 scanned=480 cands=6 unadjusted_vetoes=31 (eligible scope + both vetoes live);

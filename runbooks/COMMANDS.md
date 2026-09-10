@@ -195,6 +195,24 @@ Then re-run `scripts\backtest_hi52.py` (engine still off) — and note the backt
 unadjusted-history veto the live sweep applies (`hi52.unadjusted_history` over `corp_actions`), which
 the corp-actions leg makes possible for the 2022→2026 population.
 
+## Phase 3 foundation (2026-09-10) — replay a recorded day / recalibrate the paper fill model
+
+Both read the tick Parquet archive with their OWN in-memory DuckDB and never open `market.duckdb`,
+so they are safe beside the live engine (I/O-modest; prefer compacted days).
+
+```powershell
+# Replay one recorded symbol-day through the real BarBuilder (scratch store, ULID-masked digest):
+.venv\Scripts\python.exe scripts\replay_day.py --day 2026-09-09 --symbols RELIANCE [--out report.json]
+# Recalibrate config\fill_model.yaml (bounded, compacted sessions only; exit 3 = nothing read, file untouched):
+.venv\Scripts\python.exe scripts\calibrate_fill_model.py --parquet-root data\parquet --out config\fill_model.yaml --report data\reports\fill_model_calibration_<date> --compacted-only [--days N --symbols-per-day N]
+# Phase-3 test tiers:
+.venv\Scripts\python.exe -m pytest tests\unit\test_oms_state.py tests\unit\test_oms_store.py tests\property -q   # OMS core + 9.2 properties
+.venv\Scripts\python.exe -m pytest tests\unit\test_paper_broker.py tests\unit\test_fill_model.py tests\unit\test_broker_surface.py -q
+.venv\Scripts\python.exe -m pytest tests\replay -q                                                              # ~2 min, golden day
+```
+Policy pins (plan §3.2.9 / §8.4 addendum): a calibration may only tighten the fill model; the
+calibrated half-spread is a PERCENT of mid floored at half a tick in the consumer.
+
 ## hi52 backtest registrations (2026-09-09) — v1 and the pre-registered v2, engine OFF
 
 ```powershell
