@@ -85,11 +85,17 @@ from pathlib import Path
 from typing import Any
 
 import msgpack
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import Settings
+
+# WO-P3-2 fix round, 2026-09-10 (§8.4 addendum): the order-postback wire contract moved to
+# ``engine.core.contracts`` because TWO brokers emit it (this supervisor for live orders,
+# ``engine.paper.broker`` for simulated ones) and ``engine.paper`` depends on ``core`` alone
+# (§3.2.9). Re-exported here under the SAME names so every existing importer is unaffected.
+from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.types import Tick
@@ -104,8 +110,6 @@ _log = get_logger("engine.broker.ticker_supervisor")
 FEED_HEALTH_TOPIC = "feed.health"
 #: Canonical event bus topic for parsed live ticks (§3.2.1) — consumed by ``BarBuilder`` (§3.2.3).
 TICK_TOPIC = "tick"
-#: Canonical event bus topic for broker order postbacks (§3.2.1, A3) — drives the OMS (§3.5.1).
-ORDER_UPDATE_TOPIC = "order.update"
 
 #: Length prefix on every frame: 4-byte big-endian unsigned int (mirror of ticker/main.py).
 _LEN_PREFIX = struct.Struct(">I")
@@ -144,16 +148,6 @@ class _ImplausibleTimestamp(ValueError):
     generic parse-error handler so this working-as-designed drop gets its own reason/counter
     (``implausible_timestamp``) and skips the ERROR-level traceback — the WARNING already fired
     inside :func:`_wire_timestamp` (WO-24e, 2026-08-21)."""
-
-
-class OrderUpdateFrame(BaseModel):
-    """A verbatim Kite order postback (A3) as forwarded by the mt-ticker child.
-
-    ``data`` is the raw ``on_order_update`` payload, untouched — the OMS correlates it against
-    platform orders on the broker's own field names (§3.5.1). Published on ``order.update``.
-    """
-
-    data: dict[str, Any] = Field(default_factory=dict)
 
 
 def _wire_decimal(value: Any) -> Decimal | None:

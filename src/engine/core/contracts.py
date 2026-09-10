@@ -1,5 +1,5 @@
 """Tier-1 <-> Tier-2 data contracts (R1): the action-object union (§3.3), GateVerdict (§3.4),
-Recommendation (§3.6).
+Recommendation (§3.6), and the broker order-postback wire contract (§3.2.1/§3.5.1).
 
 Placed in ``engine.core`` (not ``engine.intelligence``) so ``engine.risk`` / ``engine.oms`` can
 construct and consume these — ``GateVerdict`` above all — WITHOUT importing ``engine.intelligence``.
@@ -195,3 +195,28 @@ class Recommendation(BaseModel):
     gate: GateVerdict                   # verdict + per-rule headroom ship in payload (R1)
     cost: CostBreakdown                 # this trade's specific breakeven math (C3)
     manual_checklist: list[str]         # B7/R3 protective-order checklist for the human
+
+
+# ------------------------------------------------------------------- order postback wire (§3.5.1)
+# WO-P3-2 fix round, 2026-09-10 (§8.4 addendum). WHY this lives in ``core`` and not in
+# ``engine.broker.ticker_supervisor``, where it was defined until now: it is a WIRE CONTRACT, and
+# TWO brokers emit it — the mt-ticker child forwards Kite's ``on_order_update`` payload for live
+# orders, and ``engine.paper.broker.PaperBroker`` publishes the identical shape for simulated ones,
+# so live and paper share ONE OMS parser (§3.5.1). Leaving it in ``engine.broker`` forced
+# ``engine.paper`` to import the live-broker package, contradicting §3.2.9's "depends on ``core``"
+# and dragging the pykiteconnect import chain into the paper tier. ``ticker_supervisor`` re-exports
+# both names unchanged, so every existing importer keeps working.
+
+#: Canonical event bus topic for broker order postbacks (§3.2.1, A3) — drives the OMS (§3.5.1).
+ORDER_UPDATE_TOPIC = "order.update"
+
+
+class OrderUpdateFrame(BaseModel):
+    """A verbatim Kite order postback (A3), as forwarded by the mt-ticker child or emitted by the
+    PaperBroker.
+
+    ``data`` is the raw ``on_order_update`` payload, untouched — the OMS correlates it against
+    platform orders on the broker's own field names (§3.5.1). Published on ``order.update``.
+    """
+
+    data: dict[str, Any] = Field(default_factory=dict)
