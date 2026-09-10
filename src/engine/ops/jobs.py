@@ -405,8 +405,16 @@ class CatchUpRunner:
             return await self._pass(off_since=off_since, scope=scope, exclude=exclude)
 
     # ------------------------------------------------------------------ early hydration (§2.6, 2026-09-09)
-    async def hydrate_ahead(self, job_ids: Sequence[str], *, reason: str) -> dict[str, str]:
+    async def hydrate_ahead(
+        self, job_ids: Sequence[str], *, reason: str, not_after: time | None = None,
+    ) -> dict[str, str]:
         """Run the named jobs for TODAY *ahead of their fire-time*; returns ``{job_id: outcome}``.
+
+        ``not_after`` (2026-09-10, from the first live morning): the boundary past which the chain
+        is simply DUE and the boot pass / 30-min sweep own it — the session open. It is re-checked
+        AFTER the pass lock is acquired, because the wait can be long: a 09:06 login queued 36 min
+        behind the post-arm one-shot draining an overnight news backlog and ran at 09:44, in-session.
+        A late acquisition is a logged skip (``early_hydration_skipped_not_after``), never a run.
 
         Owner-directed 2026-09-09 ("Early-hydration addendum"): on most trading days the owner leaves
         at 08:15 and boots the PC 09:30–10:00, so the pre-open chain fires after the trade window
@@ -461,6 +469,14 @@ class CatchUpRunner:
 
         outcomes: dict[str, str] = {}
         async with self._pass_lock:
+            acquired = self._clock.now()
+            if not_after is not None and acquired.time() >= not_after:
+                _log.info(
+                    "early_hydration_skipped_not_after", reason=reason,
+                    not_after=not_after.isoformat(), acquired_at=acquired.isoformat(),
+                    waited_s=round((acquired - started).total_seconds(), 3),
+                )
+                return {}
             for job_class in (JobClass.SAFETY_CRITICAL, JobClass.RUN_LATEST):
                 for spec in self._registry.specs(job_class):  # type: ignore[union-attr]
                     if spec.job_id not in wanted:

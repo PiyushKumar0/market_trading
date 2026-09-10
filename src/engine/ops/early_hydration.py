@@ -164,7 +164,12 @@ class EarlyHydration:
                 session_open=session_open.isoformat(),
             )
             return
-        outcomes = await self._catch_up.hydrate_ahead(self._job_ids, reason="early_login")
+        # The runner re-checks the open once it actually HOLDS the pass lock (2026-09-10: a 09:06
+        # login queued 36 min behind the post-arm one-shot and ran in-session) — the gates above
+        # cannot see that wait.
+        outcomes = await self._catch_up.hydrate_ahead(
+            self._job_ids, reason="early_login", not_after=session_open,
+        )
         _log.info("early_hydration_done", outcomes=outcomes, at=run_now.strftime("%H:%M"))
         await self._emit_summary(run_now.strftime("%H:%M"), outcomes)
 

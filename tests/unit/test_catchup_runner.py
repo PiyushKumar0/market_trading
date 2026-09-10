@@ -896,3 +896,71 @@ async def test_hydrate_ahead_waits_for_an_in_flight_catch_up_pass(conn, calendar
 
     assert outcomes == {"news_chain": "already_run"}
     assert [j for j, _ in calls] == ["news_chain"]       # ran exactly ONCE across both passes
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_skips_when_the_lock_frees_past_not_after(conn, calendar, caplog):
+    """Live 2026-09-10 09:06 login: the hook passed its open gate, then queued 36 minutes on the pass
+    lock behind the post-arm one-shot draining an overnight news backlog, and ran in-session at 09:44.
+    From the open on the boot pass / sweep own the chain, so the boundary is re-checked once the lock
+    is actually held — a late acquisition is a logged skip, never a run."""
+    calls: list = []
+    started, release = asyncio.Event(), asyncio.Event()
+    holder = [datetime(2026, 6, 17, 9, 6, tzinfo=IST)]
+
+    async def slow_chain() -> None:
+        started.set()
+        await release.wait()
+        calls.append(("news_chain", None))
+
+    reg = JobRegistry()
+    reg.register(JobSpec("news_chain", JobClass.RUN_LATEST, time(8, 25), slow_chain, order=20))
+    reg.register(_spec_recorder(calls, "preopen_planner", JobClass.RUN_LATEST, time(8, 50), order=28))
+    runner = CatchUpRunner(conn, Clock(time_source=lambda: holder[0]), calendar, reg)
+
+    in_flight = asyncio.create_task(runner.catch_up())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    with caplog.at_level(logging.INFO, logger="engine.ops.jobs"):
+        hydrate = asyncio.create_task(runner.hydrate_ahead(
+            ["news_chain", "preopen_planner"], reason="early_login", not_after=time(9, 15),
+        ))
+        await asyncio.sleep(0)
+        holder[0] = datetime(2026, 6, 17, 9, 44, tzinfo=IST)   # the lock frees past the open
+        release.set()
+        await asyncio.wait_for(in_flight, timeout=5)
+        outcomes = await asyncio.wait_for(hydrate, timeout=5)
+
+    assert outcomes == {}
+    assert [j for j, _ in calls] == ["news_chain", "preopen_planner"]   # the PASS ran them, once
+    skipped = [r for r in caplog.records if r.getMessage() == "early_hydration_skipped_not_after"]
+    assert len(skipped) == 1
+
+
+@pytest.mark.asyncio
+async def test_hydrate_ahead_runs_when_the_lock_frees_before_not_after(conn, calendar):
+    """The control: the same queue, but the lock frees while the open is still ahead — the pass's
+    watermark makes the overlap free (``already_run``), nothing is skipped."""
+    calls: list = []
+    started, release = asyncio.Event(), asyncio.Event()
+    holder = [datetime(2026, 6, 17, 8, 40, tzinfo=IST)]
+
+    async def slow_chain() -> None:
+        started.set()
+        await release.wait()
+        calls.append(("news_chain", None))
+
+    reg = JobRegistry()
+    reg.register(JobSpec("news_chain", JobClass.RUN_LATEST, time(8, 25), slow_chain, order=20))
+    runner = CatchUpRunner(conn, Clock(time_source=lambda: holder[0]), calendar, reg)
+
+    in_flight = asyncio.create_task(runner.catch_up())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    hydrate = asyncio.create_task(
+        runner.hydrate_ahead(["news_chain"], reason="early_login", not_after=time(9, 15))
+    )
+    await asyncio.sleep(0)
+    holder[0] = datetime(2026, 6, 17, 8, 50, tzinfo=IST)
+    release.set()
+    await asyncio.wait_for(in_flight, timeout=5)
+
+    assert await asyncio.wait_for(hydrate, timeout=5) == {"news_chain": "already_run"}

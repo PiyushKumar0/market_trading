@@ -1821,7 +1821,7 @@ async def test_reconcile_catchup_freeze_branching() -> None:
     """2026-09-02 review: the sweep-path catchup_safety_jobs symmetry, extracted testable. Failures
     latch; a clean pass clears ONLY an active latch (no no-op clear churn); a skipped single-flight
     pass and a killed engine leave the latch alone."""
-    from engine.core.enums import Actor, RiskState
+    from engine.core.enums import RiskState
     from engine.ops.jobs import CatchUpResult
     from engine.ops.main import _reconcile_catchup_freeze
 

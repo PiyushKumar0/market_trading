@@ -1,5 +1,48 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-10 (owner: "work on the tasks that are doable right now, with proper validation … the end goal of this service") — Phase 3 foundation tranche
+
+- **Decomposition recorded** in the plan §8.4 (2026-09-10 addendum): WO-P3-1 OMS core, WO-P3-2
+  PaperBroker v1, WO-P3-3 ReplayHarness v1, WO-P3-4 fill-model calibration = the tranche buildable
+  before G2 (Tier-3 code RECOMMEND never reaches — §8.3's zero-API-orders constraint untouched);
+  WO-P3-5 AUTO(paper) routing and WO-P3-6 the R3 managers gated on G2 + owner sign-off. Evidence
+  base: three sonnet readers (plan spec, code seams, test infra) — KiteClient's order/GTT surface is
+  duck-typed (no Protocol), the state.db orders/order_events/positions/gtts tables already exist,
+  every Phase-3 hook is a documented `None` seam, the tick archive holds 26 sessions
+  (2026-08-05→09-09, ~300 symbols/day, L1 bid/ask on every tick), and `MarketStore.get_ticks` reads
+  through the locked DuckDB connection — so the replay and the calibration read Parquet with their
+  own in-memory DuckDB and never open `market.duckdb`.
+- **Build round (01:25 launch, 4 Opus builders + 8 two-lens reviewers):** all four builders green
+  on their own tests (OMS 110 incl. 2 Hypothesis properties; PaperBroker 71; replay 16 + a real
+  RELIANCE symbol-day replayed twice to a byte-identical digest; calibration 10). Six reviews
+  returned `fix_needed` with real defects — OMS: a replayed OPEN frame moved CANCEL_PENDING back to
+  ACKED, a qty-modified SL-M's own fill raised, tautological table tests, the property generator
+  never started uncorrelated; PaperBroker: participation cap per tick (probe 101–130 % of a
+  minute's tape), GTT legs validated only at fire time inside `on_tick`, a volume reset removed the
+  cap, no session-boundary lapse; Replay: the day sort was not total (≈28 tied groups per
+  symbol-day differing in bid/ask), the postback seam matched nothing the broker exposes, the whole
+  day materialised twice (~17 GB for 8×10⁶ ticks), an `async run()` with no await. Decisions
+  ratified in the plan §8.4 addendum. Fix round with re-reviews launches at 15:31.
+- **First session on yesterday's code (verified from the log, 09-10):** boot 09:06:34 after the
+  overnight sleep; `brk20_sweep` 09:32:35 scanned=480 cands=6 gap_floor_vetoes=5 unadjusted=0 and
+  `hi52_sweep` 09:33:15 scanned=480 cands=6 unadjusted_vetoes=31 (eligible scope + both vetoes live);
+  `tick_lag_watch_grace_armed` on each of four ticker respawns 09:07–09:21 (a real in-session lag
+  pair at 09:18:48 during the boot backfill paged once, correctly); the per-day announcements poll
+  returned the day's rows from 00:02; `store_slow_statement` named the boot-window holders —
+  `bulk_write:instruments_daily:101427` 16.0 s, `copy_ticks:NH` 16.0 s, `upsert_rows:sentiment_agg`
+  7.1 s, `SELECT * FROM instruments_daily` 6.3 s — the 09:17/09:18 `store_stalled` pulses now have
+  named statements. **Early hydration ran once, wrongly late:** the owner logged in 09:06:51 (before
+  the open, gate passed), the hook waited for arming (09:08:04), then `hydrate_ahead` queued 36 min
+  on the pass lock behind the post-arm one-shot draining the overnight news backlog and ran at
+  09:44:20 in-session (every job `already_run`, harmless). Fixed inline, red-first: `hydrate_ahead`
+  takes `not_after` (the session open) and re-checks it once the lock is HELD
+  (`early_hydration_skipped_not_after`); 129 tests green across the three touched files. Deploys
+  at the next idle restart.
+- **Process note, self-reported:** the build round was launched at 01:25 (idle window) but the PC
+  slept; the last three agents resumed with the box at ~09:48 and were still running inside the
+  session when I checked at 10:49 — stopped immediately (no engine LLM errors seen). A workflow
+  that can outlive the idle window must be bounded to end before 09:15 or be stopped by a guard.
+
 ## 2026-09-09 (owner: "work on the owner-decision tasks and engineering follow-ups as per your best understanding; early hydration when I log in at ~06:30") — inline batch shipped; delegated batch designed
 
 - **Owner decisions taken (delegated, "best understanding"):** hi52 origination restricted to the

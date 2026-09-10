@@ -60,11 +60,15 @@ class _FakeCatchUp:
 
     def __init__(self, outcomes: dict[str, str] | None = None, *, boom: bool = False) -> None:
         self.calls: list[tuple[tuple[str, ...], str]] = []
+        self.not_afters: list[time | None] = []
         self._outcomes = outcomes or {}
         self._boom = boom
 
-    async def hydrate_ahead(self, job_ids: Sequence[str], *, reason: str) -> dict[str, str]:
+    async def hydrate_ahead(
+        self, job_ids: Sequence[str], *, reason: str, not_after: time | None = None,
+    ) -> dict[str, str]:
         self.calls.append((tuple(job_ids), reason))
+        self.not_afters.append(not_after)
         if self._boom:
             raise RuntimeError("hydrate blew up")
         return dict(self._outcomes)
@@ -94,6 +98,20 @@ async def test_early_login_hydrates_once_the_scheduler_is_armed(calendar) -> Non
     armed.set()
     await asyncio.wait_for(task, timeout=5)
     assert catch_up.calls == [(JOB_IDS, "early_login")]
+
+
+@pytest.mark.asyncio
+async def test_the_session_open_is_handed_to_the_runner_as_not_after(calendar) -> None:
+    """2026-09-10 09:06 login: the hook's own gates passed, then ``hydrate_ahead`` queued 36 minutes
+    on the pass lock and ran in-session. The runner re-checks the boundary once it holds the lock,
+    so the hook must hand it the day's open."""
+    catch_up = _FakeCatchUp({"universe_build": "ran"})
+    armed = asyncio.Event()
+    armed.set()
+
+    await _hook(catch_up, calendar, at=EARLY, armed=armed, session_open=time(9, 15)).on_login()
+
+    assert catch_up.not_afters == [time(9, 15)]
 
 
 @pytest.mark.asyncio
