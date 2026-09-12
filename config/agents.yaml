@@ -9,9 +9,15 @@
 schema_version: 1
 
 llm:
-  # Raised 120→550 (owner 2026-08-18: actual SDK bandwidth is ~5x the previous self-imposed cap;
-  # this ledger figure is a governor proxy, not real spend — billing is subscription-limit based).
-  monthly_credit_usd: 550
+  # WEEKLY, not monthly (owner-directed 2026-09-12): the Agent SDK draws on the subscription's weekly
+  # quota, so the governor's period must be that week or it measures the wrong thing in both directions.
+  # This ledger figure is a governor proxy, not real spend — billing is subscription-limit based.
+  weekly_credit_usd: 200
+  # The subscription's quota window. Wall-clock, NOT calendar-aware: a Thursday holiday still resets it.
+  # reset_time_ist MUST stay quoted — unquoted 14:00 is the sexagesimal int 840 under YAML 1.1.
+  quota_window:
+    reset_weekday: thursday
+    reset_time_ist: "14:00"
   # Pay-as-you-go overflow default OFF (D6). If owner enables, this hard monthly cap applies.
   overflow_enabled: false
   overflow_cap_usd: 25
@@ -33,29 +39,31 @@ model_pricing_usd_per_mtok:
   opus-5:   { input: 5,  output: 25 }
   fable-5:    { input: 10, output: 50 }
 
-# Monthly allocation per agent [tunable] (§5.6; worksheet §11.2). Sum = $455 + $95 reserve = $550.
-# Rebalanced 2026-07-06 for the news layer (§2.7 owner decision, §14 Q16): intraday 45→42,
-# weekly 15→12, sentiment/news 8→14. The catalyst digest is deterministic — $0.
-# Rebalanced 2026-08-11 (owner: raise the forward cap): intraday 42→52 funds prescreen_cap_per_day
-# 6→12 (~$0.115/measured signal call ⇒ +6/day ≈ +$14.5/month), taken from weekly_researcher 15→5 —
-# that agent is enabled:false until Phase 5 (§8.7); re-fund it at enablement.
-# Rebalanced 2026-08-18 (owner: bandwidth ~5x; Opus for decision roles, Sonnet replaces Haiku):
-# intraday 52→280 funds opus-5 @ prescreen 48/day (~$0.19/call ⇒ ~$192/mo at full utilization,
-# + heartbeat/position-event headroom); news 20→80 funds sonnet-5 (~3x haiku rates); preopen
-# 10→30 funds opus-5; nightly 26→30 stays sonnet (owner same day: its output is human-gated —
-# see the agent's comment). Allocations are set deliberately loose so the degrade ladder trips
-# only on genuine runaway spend, not on normal operation near a tight cap.
+# WEEKLY allocation per agent [tunable] (§5.6) — one Thursday-14:00-IST quota window. Sum = $200.
+# Re-based 2026-09-12 (owner-directed) from the retired monthly split. Sized at ~2x the peak OBSERVED
+# week: the 09-03 window billed $103.13 total (intraday $42.78, news $54.58, preopen $3.66, nightly
+# $1.98); the four prior weeks ran $45-76. 2x keeps a normal week nowhere near the ladder while a
+# genuine runaway still trips it, and the whole $200 sits inside the ~5x real bandwidth headroom the
+# owner stated 2026-08-18. The ledger dollar remains a governor PROXY — billing is the subscription's
+# weekly quota, not a credit balance (D6), so these numbers gate cadence, never money.
+# news_analyst 80 (monthly) → 90 (weekly) is the fix for the actual 08-28/09-09 failure: it was
+# spending $38-55 per WEEK against a $80 MONTH, tripping DG1 and holding the forward cap at 4/day.
+# weekly_researcher stays token (enabled:false until Phase 5, §8.7) — re-fund it at enablement.
+# The catalyst digest is deterministic — $0.
 budget_allocations_usd:
-  intraday_analyst: 280
-  nightly_reviewer: 30
-  weekly_researcher: 5
-  news_analyst: 80
-  preopen_planner: 30
-  reserve: 125
+  intraday_analyst: 90
+  news_analyst: 90
+  preopen_planner: 8
+  nightly_reviewer: 5
+  weekly_researcher: 2
+  reserve: 5
 
 # Degrade ladder trip points (§5.6) — cache-aware; shrink context before switching models (D8).
+# agent_alloc_pct no longer moves the PLATFORM tier (2026-09-12): it degrades only that agent's own
+# cadence knobs. degraded_forward_cap_frac replaces the flat cap of 4 — that constant was written
+# against a base of 6 and became a 92% cut once the base went to 48.
 degrade_ladder:
-  DG1: { pro_rata_pct: 110, agent_alloc_pct: 85 }
+  DG1: { pro_rata_pct: 110, agent_alloc_pct: 85, degraded_forward_cap_frac: 0.67 }
   DG2: { pro_rata_pct: 125, global_alloc_pct: 85 }
   DG3: { global_alloc_pct: 95 }
   # DG4 = credit exhausted / SDK billing errors => zero SDK calls (== LLM-unavailable safe state, D7)

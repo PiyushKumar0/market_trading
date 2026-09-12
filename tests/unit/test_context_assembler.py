@@ -25,6 +25,7 @@ from engine.core.config import config_dir
 from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
 from engine.intelligence.context import BAR_TAIL, ContextAssembler
+from engine.intelligence.schemas import EXIT_REASON_CODES
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.strategy.types import RawLevels, SignalCandidate
 
@@ -419,6 +420,32 @@ def test_position_event_context_states_the_output_restriction(assembler):
     assert "event: stop_proximity" in v
     assert "detail: price within 0.4 ATR of stop" in v
     assert "last price: 1391.05 at 10:04" in v
+
+
+def test_position_event_context_names_the_closed_exit_codes(assembler):
+    """2026-09-03 to 09-10: 47 of 47 position-event exits failed validation on the first attempt
+    because the five contract codes appeared in NO prompt — the only place the model ever saw them
+    was the pydantic error the harness echoes on retry. They are named in the VOLATILE block: this
+    is per-call context for the one trigger that can exit, and the system prompt stays byte-stable
+    (D8). The list is derived from the contract, so it cannot drift from what the parser accepts."""
+    ctx = assembler.for_position_event(
+        {"position_id": "pos-9"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399"
+    )
+    v = ctx.volatile_block
+    assert "an exit MUST carry exit_reason" in v
+    for code in EXIT_REASON_CODES:
+        assert code in v, code
+    assert "reasoning in thesis" in v
+    assert "exit_reason" not in ctx.system_prompt and "exit_reason" not in ctx.stable_block
+
+
+def test_exit_codes_are_named_only_where_an_exit_is_legal(assembler, store):
+    """The codes belong to trigger (b). A heartbeat cannot exit and a signal-candidate call is an
+    entry decision — adding the line there would be dead prompt bytes on every call of the day."""
+    seed_bars(store)
+    assert "exit_reason" not in assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
+    hb = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none")
+    assert "exit_reason" not in hb.volatile_block
 
 
 def test_heartbeat_context_forbids_entries(assembler):

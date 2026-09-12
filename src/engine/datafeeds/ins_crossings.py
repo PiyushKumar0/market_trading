@@ -28,6 +28,15 @@ logs ``ins_crossings_run`` with the day's fresh-feed row counts alongside the cr
 indistinguishable from a "0 crossings" line alone. That was the 2026-08-04 news-corpus lesson; it is
 not being re-learned here.
 
+Rows are not the only starvation shape (2026-09-12). The feed can deliver rows every day and still
+cover a handful of ISSUERS: the 09-10 run saw 22 symbols with filings across a 480-name eligible
+universe (4.6%) where the NSE corpus the edge was measured on carried 1,565. ``ins_crossings_run``
+therefore also carries ``coverage_pct`` (:func:`coverage_percent`), and a run under
+:data:`COVERAGE_WARN_PCT` raises ``ins_feed_coverage_low`` — the row-count warning above fires only
+on ZERO rows and was silent through the whole episode. ``coverage_pct`` measures the 120-day CORPUS,
+not today's feed (a PIT backfill of ~70-day-old rows can widen it with the live feed unchanged), so
+both lines also carry ``fresh_symbols_in_universe``: the issuers the live BSE feed reached on ``d``.
+
 DELIBERATE APPROXIMATION, STATED
 --------------------------------
 :func:`~engine.datafeeds.insider_crossings.insider_cluster_events` starts ``armed=True`` at
@@ -65,6 +74,13 @@ _log = get_logger("engine.datafeeds.ins_crossings")
 #: 10-SESSION trailing window (that part needs ~3 weeks); the rest buys margin on the re-arm
 #: path-dependence documented in the module docstring.
 LOOKBACK_DAYS = 120
+
+#: ISSUER-coverage floor, in percent of the eligible universe, under which the run warns
+#: ``ins_feed_coverage_low``. 10% is not a measured optimum — it is the round number that sits an
+#: order of magnitude above the 09-10 reading (22/480 = 4.6%) and well below the ~1,565-issuer NSE
+#: corpus the edge was measured on, so it fires on today's starvation and would stop firing only on
+#: a materially wider feed. Raise it when the feed is fixed, never to quieten the line.
+COVERAGE_WARN_PCT = 10.0
 
 
 class InsCrossingsResult(BaseModel):
@@ -162,6 +178,14 @@ class InsCrossingsJob:
         fresh_in_universe = [
             row for row in fresh_today if str(row.get("symbol") or "").upper() in eligible
         ]
+        # ISSUERS the live feed reached today, apart from the ROWS it delivered. `by_symbol` below
+        # counts the 120-day CORPUS, which includes the ~70-day-embargoed NSE PIT rows: a PIT
+        # backfill can widen `coverage_pct` past the alarm threshold while today's live feed still
+        # reaches the same handful of issuers. Logging both keeps "the corpus is wide" readable
+        # apart from "today's feed reached N issuers" even when the alarm has gone quiet.
+        fresh_symbols_in_universe = len({
+            str(row.get("symbol") or "").upper() for row in fresh_in_universe
+        })
 
         pending: list[dict[str, Any]] = []
         missing_bar = 0
@@ -210,14 +234,17 @@ class InsCrossingsJob:
         # THE starvation-visibility line (plan §6.1): fresh-feed row counts next to crossings found.
         # Zero crossings with zero fresh rows = the feed is starved. Zero crossings with healthy fresh
         # rows = a genuinely quiet day. One log line has to be able to tell those apart.
+        coverage_pct = coverage_percent(len(by_symbol), len(eligible))
         _log.info(
             "ins_crossings_run",
             d=d.isoformat(),
             for_session=for_session.isoformat(),
             universe=len(eligible),
             symbols_with_filings=len(by_symbol),
+            coverage_pct=coverage_pct,
             fresh_rows_today=len(fresh_today),
             fresh_rows_in_universe=len(fresh_in_universe),
+            fresh_symbols_in_universe=fresh_symbols_in_universe,
             crossings=len(pending),
             written=written,
             symbols_missing_bar=missing_bar,
@@ -225,6 +252,23 @@ class InsCrossingsJob:
         )
         if not fresh_today:
             _log.warning("ins_crossings_fresh_feed_empty", d=d.isoformat())
+        # The SECOND starvation shape, invisible until 2026-09-12: the feed delivers rows every day
+        # (so `fresh_feed_empty` never fires) but from a handful of ISSUERS — the 09-10 run saw 22
+        # symbols across a 480-name eligible universe, 4.6%, where the NSE corpus the edge was
+        # measured on carried 1,565. A rule that can only see 4.6% of the universe is not quiet, it is
+        # blind, and the two are indistinguishable from a crossings=0 line.
+        # KNOWN LIMIT of the threshold metric: its numerator is the 120-day corpus, so a single NSE
+        # PIT backfill (rows broadcast ~70 days ago, inside the window) can lift `coverage_pct` past
+        # the threshold and silence this line while the LIVE feed still reaches ~22 issuers a day.
+        # `fresh_symbols_in_universe` rides along so the warning — and the run line above, which is
+        # what is left once the warning goes quiet — still names today's live issuer count.
+        if coverage_pct < COVERAGE_WARN_PCT:
+            _log.warning(
+                "ins_feed_coverage_low", d=d.isoformat(),
+                symbols_with_filings=len(by_symbol), universe=len(eligible),
+                fresh_symbols_in_universe=fresh_symbols_in_universe,
+                coverage_pct=coverage_pct, threshold_pct=COVERAGE_WARN_PCT,
+            )
         return result
 
     def _persist(self, for_session: date, pending: list[dict[str, Any]]) -> int:
@@ -271,6 +315,17 @@ class InsCrossingsJob:
             rows,
         )
         return len(rows)
+
+
+def coverage_percent(symbols_with_filings: int, universe: int) -> float:
+    """Share of the eligible universe the filings feed reached, to one decimal (0.0 on no universe).
+
+    ONE definition, used by the run log, the warning test and the ``--once`` print: two call sites
+    rounding independently would let the logged number and the alarm threshold disagree at the edge.
+    """
+    if universe <= 0:
+        return 0.0
+    return round(100.0 * symbols_with_filings / universe, 1)
 
 
 def _broadcast_date(row: dict[str, Any]) -> date | None:
@@ -321,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"ins_crossings d={result.d} ok={result.ok} for_session={result.for_session} "
         f"universe={result.universe_symbols} symbols_with_filings={result.symbols_with_filings} "
+        f"coverage_pct={coverage_percent(result.symbols_with_filings, result.universe_symbols)} "
         f"fresh_rows_today={result.fresh_rows_today} (in_universe={result.fresh_rows_in_universe}) "
         f"crossings={result.crossings_found} written={result.rows_written} "
         f"missing_bar={result.symbols_missing_bar}"

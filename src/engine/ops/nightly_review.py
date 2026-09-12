@@ -350,7 +350,9 @@ class FunnelSummary:
     by_strategy: tuple[StrategyFunnel, ...] = field(default=())
 
     def lines(self) -> list[str]:
-        if not self.published:
+        # A day with fires but no publications (every firing strategy parked, 2026-09-12) still
+        # renders the breakdown: "nothing published" is reserved for a day nothing fired on either.
+        if not self.published and not self.raw:
             return ["  nothing published today"]
         verdicts = " ".join(f"{k}={v}" for k, v in sorted(self.verdicts.items())) or _NONE
         raw = _UNMEASURED if self.raw is None else str(self.raw)
@@ -472,6 +474,15 @@ def build_funnel_summary(
     # Persisted first, in-process second (2026-08-21): the table is the only source that survives a
     # restart, and the review runs at 22:35 — hours after any bounce the day happened to take.
     raw_map = read_funnel_raw_counts(conn, d) or dict(raw_by_strategy or {})
+    # A strategy that FIRED but never reached the journal still gets its row (2026-09-12): a parked
+    # strategy (``max_per_strategy_day`` 0, `orb` from this date) is refused before any slot is
+    # charged, so it has raw fires and no ``prescreen_day_slots`` row at all. Deriving the row set
+    # from the journal alone dropped it from the per-strategy lines while its fires stayed inside
+    # the aggregate ``raw`` — a headline that could not be reconciled against its own breakdown.
+    for sid in sorted(raw_map):
+        if sid not in published:
+            published[sid] = []
+            strategies.append(sid)
     slices = tuple(
         StrategyFunnel(
             strategy_id=sid,

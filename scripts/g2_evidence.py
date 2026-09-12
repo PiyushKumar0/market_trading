@@ -25,13 +25,15 @@ SOURCES (stated again in the printed output, per criterion):
 * analyst validity    -> ``agent_calls`` (one row per SDK call, retries included)
 * recommendations     -> ``recommendations`` (delivered_at, human_action, payload JSON)
 * platform orders     -> ``orders`` (broker-side confirmation stays owner-manual)
-* budget              -> ``budget_ledger`` vs ``config/agents.yaml: budget_allocations_usd``
+* budget              -> ``budget_ledger`` over ONE quota window (Thu 14:00 IST reset, §5.6) vs
+                         ``config/agents.yaml: budget_allocations_usd``, which are WEEKLY dollars
 * trading sessions    -> ``config/calendar/<year>.yaml`` holidays + weekday rule
 
 Usage::
 
     .venv\\Scripts\\python.exe scripts\\g2_evidence.py
     .venv\\Scripts\\python.exe scripts\\g2_evidence.py --from 2026-07-29 --to 2026-08-13
+    .venv\\Scripts\\python.exe scripts\\g2_evidence.py --window 2026-09-03   # an earlier quota week
     .venv\\Scripts\\python.exe scripts\\g2_evidence.py --json data/reports/g2_evidence.json
 """
 
@@ -58,6 +60,13 @@ BAR_TAKEN_MIN = 5            # owner has executed >=5 recommendations manually
 BAR_SESSIONS_MIN = 20        # "4 weeks of daily recommendations" ~ 20 trading sessions
 
 MET, NOT_MET, NA = "MET", "NOT-MET", "N-A"
+
+# §5.6 quota window (owner-directed 2026-09-12): the budget period is the SUBSCRIPTION's week, not the
+# calendar month. These are fallbacks only — the live anchor is read out of config/agents.yaml below.
+WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6}
+DEFAULT_RESET_WEEKDAY = "thursday"
+DEFAULT_RESET_TIME = "14:00"
 
 
 # --------------------------------------------------------------------------- helpers
@@ -307,18 +316,32 @@ def criterion_orders(conn) -> dict[str, Any]:
 
 
 def load_budget_config() -> dict[str, Any]:
-    """``budget_allocations_usd`` + ``llm.monthly_credit_usd`` from config/agents.yaml (line scan)."""
+    """``budget_allocations_usd`` + ``llm.weekly_credit_usd`` + ``llm.quota_window`` (line scan).
+
+    Weekly since 2026-09-12: the governor's period is the subscription's Thu-14:00-IST quota window,
+    so the allocations below are ONE WEEK's dollars and only a one-week numerator may be divided by
+    them. The anchor is read from the same file the engine reads rather than hardcoded — an owner who
+    moves the reset must not leave this report measuring the previous boundary.
+    """
     path = REPO / "config" / "agents.yaml"
     allocations: dict[str, float] = {}
     credit = None
+    anchor_weekday, anchor_time = DEFAULT_RESET_WEEKDAY, DEFAULT_RESET_TIME
     if not path.exists():
-        return {"allocations": allocations, "monthly_credit_usd": credit, "path": str(path),
+        return {"allocations": allocations, "weekly_credit_usd": credit, "path": str(path),
+                "reset_weekday": anchor_weekday, "reset_time_ist": anchor_time,
                 "error": "config/agents.yaml not found"}
     in_block = False
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        m = re.match(r"^\s{2}monthly_credit_usd:\s*([0-9.]+)", line)
+        m = re.match(r"^\s{2}weekly_credit_usd:\s*([0-9.]+)", line)
         if m:
             credit = float(m.group(1))
+        m = re.match(r"^\s+reset_weekday:\s*\"?([A-Za-z]+)\"?", line)
+        if m and m.group(1).strip().lower() in WEEKDAYS:
+            anchor_weekday = m.group(1).strip().lower()
+        m = re.match(r"^\s+reset_time_ist:\s*\"?(\d{1,2}:\d{2})\"?", line)
+        if m:
+            anchor_time = m.group(1)
         if re.match(r"^budget_allocations_usd:\s*$", line):
             in_block = True
             continue
@@ -328,17 +351,49 @@ def load_budget_config() -> dict[str, Any]:
                 allocations[m.group(1)] = float(m.group(2))
             elif line.strip() and not line.startswith((" ", "\t", "#")):
                 in_block = False
-    return {"allocations": allocations, "monthly_credit_usd": credit, "path": str(path)}
+    return {"allocations": allocations, "weekly_credit_usd": credit, "path": str(path),
+            "reset_weekday": anchor_weekday, "reset_time_ist": anchor_time}
 
 
-def criterion_budget(conn, month: str) -> dict[str, Any]:
-    """C5: month-to-date ledger spend per agent vs allocation + the single console-diff total."""
+def quota_window(at: datetime, weekday: str, hhmm: str) -> tuple[str, datetime, datetime]:
+    """``(key, start, end)`` of the subscription quota window containing ``at`` (aware IST).
+
+    Mirrors ``engine.intelligence.governor._window_key`` / ``_window_bounds`` — reimplemented rather
+    than imported because this tool stays stdlib-only (module docstring). Wall-clock and calendar-
+    blind: the subscription refills at the anchor whether or not the NSE is open. Keep the two in
+    step; the governor's unit suite is the authority on the boundary semantics.
+    """
+    reset = parse_hhmm(hhmm) or time(14, 0)
+    idx = WEEKDAYS[weekday]
+    # Normalise first, exactly as the governor does: the key is an IST date, so a UTC-stamped caller
+    # would otherwise key the wrong week. A naive stamp is refused rather than read as system-local.
+    if at.tzinfo is None:
+        raise ValueError("quota_window: `at` must be tz-aware (the quota window is IST)")
+    at = at.astimezone(IST)
+    start_date = at.date() - timedelta(days=(at.weekday() - idx) % 7)
+    if start_date == at.date() and at.timetz().replace(tzinfo=None) < reset:
+        start_date -= timedelta(days=7)      # reset-day MORNING still belongs to the window that ends
+    start = datetime.combine(start_date, reset, tzinfo=IST)
+    return start_date.isoformat(), start, start + timedelta(days=7)
+
+
+def criterion_budget(conn, at: datetime) -> dict[str, Any]:
+    """C5: ledger spend per agent for the QUOTA WEEK containing ``at``, vs the weekly allocation.
+
+    Window-keyed since 2026-09-12, not month-keyed: ``budget_allocations_usd`` became one week's
+    dollars with the governor, and dividing a month-to-date numerator by a one-week denominator
+    printed ~4x every percentage in this table — the exact false 'over allocation' signal the weekly
+    re-scope exists to retire. The range is the same half-open ``at`` compare the governor runs
+    (``budget_ledger.at`` is IST ISO-8601 with a fixed +05:30 offset, so it sorts lexicographically).
+    """
     cfg = load_budget_config()
+    key, start, end = quota_window(at, cfg["reset_weekday"], cfg["reset_time_ist"])
+    lo, hi = start.isoformat(), end.isoformat()
     spend: dict[str, dict[str, Any]] = {}
     total = 0.0
     for agent_id, n, cost in conn.execute(
         "SELECT agent_id, COUNT(*), SUM(CAST(cost_usd AS REAL)) FROM budget_ledger "
-        "WHERE month=? GROUP BY agent_id ORDER BY agent_id", (month,)
+        "WHERE at >= ? AND at < ? GROUP BY agent_id ORDER BY agent_id", (lo, hi)
     ):
         c = float(cost or 0.0)
         total += c
@@ -352,12 +407,13 @@ def criterion_budget(conn, month: str) -> dict[str, Any]:
         rec["alloc_usd"] = alloc
         rec["pct_of_alloc"] = pct(int(round(rec["spend_usd"] * 1e6)), int(round(alloc * 1e6))) \
             if alloc else None
-    months = [r[0] for r in conn.execute(
-        "SELECT DISTINCT month FROM budget_ledger ORDER BY month")]
-    return {"month": month, "per_agent": spend, "total_usd": total,
-            "allocations": cfg["allocations"], "monthly_credit_usd": cfg["monthly_credit_usd"],
+    span = conn.execute("SELECT MIN(at), MAX(at), COUNT(*) FROM budget_ledger").fetchone()
+    return {"window": key, "window_start": lo, "window_end": hi,
+            "per_agent": spend, "total_usd": total,
+            "allocations": cfg["allocations"], "weekly_credit_usd": cfg["weekly_credit_usd"],
+            "reset_weekday": cfg["reset_weekday"], "reset_time_ist": cfg["reset_time_ist"],
             "alloc_sum_usd": sum(cfg["allocations"].values()) or None,
-            "ledger_months": months}
+            "ledger_span": {"first_row": span[0], "last_row": span[1], "rows_total": span[2]}}
 
 
 # --------------------------------------------------------------------------- rendering
@@ -419,8 +475,8 @@ def render(res: dict[str, Any]) -> str:
          f"events={orders['order_events']}",
          "0 rows; broker book owner-audited",
          MET if orders["live_order_rows"] == 0 else NOT_MET],
-        ["7", f"Budget MTD {bud['month']} (D6, re-scoped 2026-08-13)",
-         f"total ${bud['total_usd']:.2f} vs alloc ${bud['alloc_sum_usd'] or 0:.0f}",
+        ["7", f"Budget: quota week from {bud['window']} (D6, weekly 2026-09-12)",
+         f"total ${bud['total_usd']:.2f} vs weekly alloc ${bud['alloc_sum_usd'] or 0:.0f}",
          "ledger arithmetic + within self-imposed alloc",
          MET if bud["alloc_sum_usd"] and bud["total_usd"] <= bud["alloc_sum_usd"] else NA],
         ["8", "Watchlist-precision reviews (2 weekly)", "[owner-manual]",
@@ -449,7 +505,8 @@ def render(res: dict[str, Any]) -> str:
     L.append("")
 
     L.append("-" * 100)
-    L.append(f"C5/C7 detail - budget ledger month-to-date ({bud['month']})")
+    L.append(f"C5/C7 detail - budget ledger, QUOTA WEEK {bud['window_start'][:16]} .. "
+             f"{bud['window_end'][:16]} IST (window key {bud['window']})")
     L.append("-" * 100)
     brows = []
     for agent in sorted(bud["per_agent"]):
@@ -468,8 +525,12 @@ def render(res: dict[str, Any]) -> str:
     L.append("     paused the credit change) - there is NO console dollar figure to reconcile against.")
     L.append("     The dollar ledger above is the platform's SELF-IMPOSED budget (DG ladder input);")
     L.append("     the check is ledger arithmetic + staying within the self-imposed allocations.")
-    L.append(f"  Self-imposed monthly budget configured: ${bud['monthly_credit_usd']}. "
-             f"Ledger months present: {', '.join(bud['ledger_months'])}.")
+    L.append(f"  Self-imposed WEEKLY budget configured: ${bud['weekly_credit_usd']} "
+             f"(reset {bud['reset_weekday']} {bud['reset_time_ist']} IST). Both the numerator and the "
+             f"denominator above are ONE quota week - never compare this table with a month figure. "
+             f"Ledger all-time: {bud['ledger_span']['rows_total']} rows, "
+             f"{(bud['ledger_span']['first_row'] or '?')[:19]} .. "
+             f"{(bud['ledger_span']['last_row'] or '?')[:19]}.")
     L.append("")
 
     L.append("-" * 100)
@@ -517,11 +578,16 @@ def render(res: dict[str, Any]) -> str:
     L.append("C6 orders       : orders / order_events tables. This proves the PLATFORM placed nothing;")
     L.append("                  the 'broker order book empty' half of 8.3 is an owner-manual Kite")
     L.append("                  Console audit - the engine cannot evidence its own absence there.")
-    L.append("C5/C7 budget    : budget_ledger(month) vs config/agents.yaml budget_allocations_usd.")
+    L.append("C5/C7 budget    : budget_ledger(at) over ONE quota window vs config/agents.yaml")
+    L.append("                  budget_allocations_usd, which are WEEKLY dollars since 2026-09-12.")
     L.append("                  Allocations include a 'reserve' line that no agent spends against.")
     L.append("                  D6 re-scoped 2026-08-13: SDK usage bills against subscription weekly")
     L.append("                  usage limits, not a monthly credit - no console dollar reconciliation")
     L.append("                  exists; the bar is ledger arithmetic + self-imposed allocation adherence.")
+    L.append("                  The window is the governor's own (Thu 14:00 IST reset, wall-clock): use")
+    L.append("                  --window YYYY-MM-DD (a reset Thursday) to report an earlier week; the")
+    L.append("                  default is the week containing --to. Spend outside it is NOT in scope,")
+    L.append("                  so this block never sums to a month and must not be read as one.")
     L.append("Sessions        : " + " | ".join(meta["calendar_notes"]))
     L.append("")
     return "\n".join(L)
@@ -541,8 +607,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--to", dest="date_to", default=today.isoformat(),
                     help="range end, YYYY-MM-DD (default today)")
     ap.add_argument("--db", default=str(REPO / "data" / "state.db"), help="path to state.db")
-    ap.add_argument("--month", default=None,
-                    help="budget month key YYYY-MM (default: the month of --to)")
+    ap.add_argument("--window", default=None,
+                    help="budget quota-window key YYYY-MM-DD, the window's start Thursday "
+                         "(default: the window containing --to)")
     ap.add_argument("--json", dest="json_path", default=None,
                     help="also dump the raw numbers to this JSON path (default: off)")
     args = ap.parse_args(argv)
@@ -550,7 +617,18 @@ def main(argv: list[str] | None = None) -> int:
     d_from, d_to = date.fromisoformat(args.date_from), date.fromisoformat(args.date_to)
     if d_to < d_from:
         ap.error("--to is before --from")
-    month = args.month or d_to.strftime("%Y-%m")
+    # The budget block reports ONE quota window (§5.6), keyed off an instant, not a date range: the
+    # live window for a --to of today or later, otherwise the window that contained that evening. An
+    # explicit --window is taken at its own 14:00 reset, which is inside the window it names.
+    budget_at = min(datetime.now(IST), datetime.combine(d_to, time(23, 59, 59), tzinfo=IST))
+    if args.window:
+        anchor = load_budget_config()
+        w = date.fromisoformat(args.window)
+        if w.weekday() != WEEKDAYS[anchor["reset_weekday"]]:
+            ap.error(f"--window {args.window} is a {w.strftime('%A')}; the quota window starts on "
+                     f"{anchor['reset_weekday'].capitalize()} {anchor['reset_time_ist']} IST")
+        budget_at = datetime.combine(w, parse_hhmm(anchor["reset_time_ist"]) or time(14, 0),
+                                     tzinfo=IST)
 
     db = Path(args.db).resolve()
     if not db.exists():
@@ -582,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
             "schema": criterion_schema(conn, d_from, d_to),
             "recommendations": criterion_recs(conn, d_from, d_to),
             "orders": criterion_orders(conn),
-            "budget": criterion_budget(conn, month),
+            "budget": criterion_budget(conn, budget_at),
         }
     finally:
         conn.close()

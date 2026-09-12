@@ -43,12 +43,13 @@ from engine.ops.pipeline import (
     ATR_PERIOD,
     FORWARD_PACING_MIN,
     POSITION_EVENT_DEBOUNCE_MIN,
+    QUANTILE_BANDS,
     TTL_INTRADAY_MIN,
     RecommendationBook,
     RecommendationPipeline,
 )
 from engine.risk.exposure import ExposureTracker
-from engine.risk.gate import GateContext, RiskGate
+from engine.risk.gate import GateContext, RiskGate, _exiting_symbols
 from engine.risk.limits import LimitTable
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import wilder_atr
@@ -351,7 +352,7 @@ async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandid
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
     mode=None, kill=None, notify=None, assembler=None, rearm=None, funnel_raw=None,
-    claim_slot=None, take_displaced=None, decline=None,
+    claim_slot=None, take_displaced=None, decline=None, ltp_fn=None,
     admission_mode="ranked", forward_drain_mode="paced",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
@@ -371,7 +372,7 @@ def make_pipeline(
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
         funnel_raw=funnel_raw, claim_slot=claim_slot, take_displaced=take_displaced,
-        decline=decline,
+        decline=decline, ltp_fn=ltp_fn,
         admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
     )
     return pipeline, parts
@@ -1132,6 +1133,13 @@ async def test_stop_proximity_fires_once_then_debounces(
     assert len(harness.calls) == 1
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
 
+    # Past the debounce the hour-cadence no longer blocks the event. Since WO-D2 the SECOND gate on
+    # this path is the repeat-exit screen, so the position also has to have changed for the analyst
+    # to be worth calling — the owner tightened the stop on a long (99 -> 99.5) here. The unchanged
+    # case (a second identical exit recommendation, suppressed) is
+    # ``test_repeat_exit_is_skipped_until_the_stop_changes`` below.
+    conn.execute("UPDATE positions SET stop='99.5' WHERE position_id=?", (position_id,))
+    conn.commit()
     ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
     await pipeline.on_bar(near)
     assert len(harness.calls) == 2
@@ -1176,6 +1184,433 @@ async def test_aged_position_exit_is_deterministic(
     proposal = json.loads(conn.execute("SELECT payload FROM proposals").fetchone()[0])
     assert proposal["reason"] == "time_stop" and proposal["agent_id"] == "platform"
     assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
+
+
+# =========================================================================== WO-D2: exit hygiene
+# 2026-09-11 forensics: two positions the owner sold outside the ledger on 08-26 stayed OPEN until
+# 09-11 and produced 68 exit recommendations (6-10 a day), 182 position-event analyst calls and 11
+# day plans that reasoned about their "overnight risk". The month's one genuine ins entry
+# (JINDALSTEL, 09-08) arrived as notification 2 of 8 that day; the other seven were those repeats.
+#
+# _run_position_event is the single convergence point of every position-event ENTRY POINT -- today
+# only on_bar (trigger b) reaches it -- so both screens are pinned through the public on_bar path.
+EXIT_JSON: dict[str, Any] = {
+    "action": "exit", "exit_type": "MARKET", "reason": "risk_event", "confidence": 0.9,
+    "thesis": "Price is inside half an ATR of the stop; the breakout thesis is failing.",
+}
+
+
+def _exit_json(position_id: str) -> dict[str, Any]:
+    return {**EXIT_JSON, "position_id": position_id}
+
+
+def _observe_holding(conn, position_id: str, d: date, *, tracked: int = 10, held: int = 0) -> None:
+    """One §3.6 ``holdings_observations`` row - what the hourly reconcile writes (migration 0013)."""
+    conn.execute(
+        "INSERT INTO holdings_observations (position_id, d, tracked_qty, held_qty, observed_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (position_id, d.isoformat(), tracked, held, f"{d.isoformat()}T10:05:00+05:30"),
+    )
+    conn.commit()
+
+
+def _near_bar() -> Bar:
+    """0.5 x ATR(1.00) = 0.50; stop 99 => anything at or below 99.50 is "near"."""
+    return Bar(symbol=SYMBOL, ts_minute=NOW, open=Decimal("99.4"), high=Decimal("99.5"),
+               low=Decimal("99.3"), close=Decimal("99.40"), volume=100)
+
+
+def _exit_pipeline(conn, pclock, calendar, book, limit_table, cost_model, harness, position_id):
+    return make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock),
+        ctx=passing_ctx(positions_known=frozenset({position_id})),
+        limits=StubLimits(limit_table), store=FakeStore(bars=_flat_bars()),
+    )
+
+
+async def test_position_sold_outside_the_ledger_never_reaches_the_analyst(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """Screen (a): two consecutive broker observations show the position unheld => no analyst call,
+    no exit recommendation, and NO governor decision either (the screen runs before admission).
+
+    The platform cannot recommend an exit from a position that does not exist. The owner is still
+    told - once a day by the §3.6 reconcile alert, and every morning by the day plan's "sold outside
+    the ledger" block - and ``/closed`` is what ends it."""
+    position_id = _open_position(conn, pclock)
+    _observe_holding(conn, position_id, TODAY - timedelta(days=1))
+    _observe_holding(conn, position_id, TODAY)
+    harness = FakeHarness()                      # ANY call raises: the screen must come first
+    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
+    pipeline, parts = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await pipeline.on_bar(_near_bar())
+        ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+        await pipeline.on_bar(_near_bar())
+
+    assert harness.calls == []
+    assert parts["governor"].calls == []
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+    assert parts["notify"].messages == []
+    # Logged ONCE per position per day: twelve hourly ticks must leave one line, not twelve.
+    skipped = log_events(caplog, "position_event_skipped_sold_outside_ledger")
+    assert len(skipped) == 1
+    assert skipped[0].position_id == position_id and skipped[0].symbol == SYMBOL
+
+
+async def test_one_short_observation_day_does_not_silence_the_exit_path(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The asymmetry that makes screen (a) safe: ONE short reading (a settlement edge, a truncated
+    holdings payload) is not evidence of a sale, so the exit recommendation still fires."""
+    position_id = _open_position(conn, pclock)
+    _observe_holding(conn, position_id, TODAY)
+    harness = FakeHarness(_exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+
+
+async def test_a_position_back_in_holdings_is_managed_again_the_same_day(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The reconcile REWRITES today's observation hourly (last write of the day wins), so the screen
+    is re-decided on every event: the 13:00 pulse that finds the position held must un-silence it
+    immediately, which a per-day cached missing set could not do."""
+    position_id = _open_position(conn, pclock)
+    _observe_holding(conn, position_id, TODAY - timedelta(days=1))
+    _observe_holding(conn, position_id, TODAY)
+    harness = FakeHarness(_exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    await pipeline.on_bar(_near_bar())
+    assert harness.calls == []
+
+    conn.execute("UPDATE holdings_observations SET held_qty=10 WHERE position_id=? AND d=?",
+                 (position_id, TODAY.isoformat()))
+    conn.commit()
+    ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+
+
+async def test_a_partial_holding_is_short_but_still_gets_its_exit_recommendation(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """Screen (a) means "the broker holds NONE of it", not "the broker is short".
+
+    The §3.6 journal's wide predicate is ``held < tracked``, which also catches a partial exit the
+    owner never reported. Those 3 remaining shares are real exposure with a real stop, so withholding
+    every exit recommendation from them would turn a diagnostic into a hole in the only protective
+    output RECOMMEND mode has. The owner still hears about the mismatch - the §3.6 alert and the day
+    plan's block both use the wide reading - but the exit path keeps running."""
+    position_id = _open_position(conn, pclock, style="swing")
+    _observe_holding(conn, position_id, TODAY - timedelta(days=1), tracked=10, held=3)
+    _observe_holding(conn, position_id, TODAY, tracked=10, held=3)
+    harness = FakeHarness(_exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+    assert log_events(caplog, "position_event_skipped_sold_outside_ledger") == []
+
+
+async def test_a_position_that_only_reaches_zero_today_is_not_silenced_yet(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The two-day rule applies to the ZERO run in its own right. Held 3 yesterday and 0 today means
+    the position only became "gone" on one observation - the same single reading the whole design
+    refuses to act on, because a truncated holdings payload looks exactly like this."""
+    position_id = _open_position(conn, pclock, style="swing")
+    _observe_holding(conn, position_id, TODAY - timedelta(days=1), tracked=10, held=3)
+    _observe_holding(conn, position_id, TODAY, tracked=10, held=0)
+    harness = FakeHarness(_exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+
+
+async def test_repeat_exit_is_skipped_until_the_stop_changes(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """Screen (b): today's exit recommendation already says everything this event would say, so the
+    second one is not sent. A MOVED STOP is new information and passes - the screen compares the
+    delivered payload against the position row, not a bare "seen today" flag.
+
+    A SWING/CNC position at in-session times, which is the shape the 2026-09-11 incident actually
+    had (HDFCAMC and HINDZINC were CNC): a swing exit is stamped valid to the session close, so the
+    day's first recommendation is still a live instruction when the next breach arrives. The intraday
+    case, where the 20-minute TTL kills the instruction before the 60-minute debounce lets the next
+    event through, is ``test_an_expired_exit_no_longer_suppresses_the_next_event``."""
+    position_id = _open_position(conn, pclock, style="swing")
+    harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, parts = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await pipeline.on_bar(_near_bar())
+        assert len(harness.calls) == 1
+
+        ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+        await pipeline.on_bar(_near_bar())                 # same stop, same qty => nothing new
+        assert len(harness.calls) == 1
+        assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+        repeat = log_events(caplog, "position_event_skipped_repeat_exit")
+        assert len(repeat) == 1 and repeat[0].position_id == position_id
+
+        # The owner tightened the stop on a long (99 -> 99.5): a new fact, a new recommendation.
+        conn.execute("UPDATE positions SET stop='99.5' WHERE position_id=?", (position_id,))
+        conn.commit()
+        ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+        await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 2
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 2
+    assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
+
+
+async def test_a_changed_quantity_also_passes_the_repeat_screen(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """A partial exit the owner reported changes what "close the position" means, so the day's
+    second exit recommendation is a different instruction and must be delivered. Swing/CNC and both
+    events inside the session, so the qty comparison is the ONLY thing that can let the second
+    recommendation through."""
+    position_id = _open_position(conn, pclock, style="swing")
+    harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    await pipeline.on_bar(_near_bar())
+    conn.execute("UPDATE positions SET qty=4 WHERE position_id=?", (position_id,))
+    conn.commit()
+    ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 2
+    payloads = [
+        json.loads(r[0]) for r in
+        conn.execute("SELECT payload FROM recommendations ORDER BY delivered_at").fetchall()
+    ]
+    assert [p["qty"] for p in payloads] == [10, 4]
+
+
+async def test_an_expired_exit_no_longer_suppresses_the_next_event(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """Screen (b) suppresses a repeat only while the earlier exit is STILL AN INSTRUCTION.
+
+    An INTRADAY (MIS) exit is stamped ``now + TTL_INTRADAY_MIN`` (20 minutes) while the position-event
+    debounce is 60, so the day's first exit recommendation is always dead by the time the next breach
+    is allowed through. Suppressing on "delivered today" alone would leave an owner whose MIS stop
+    stayed breached all session with exactly one exit instruction, one that left ``/pending`` twenty
+    minutes after it arrived - the platform's only protective output in RECOMMEND mode, silently
+    withheld for five more hours. A swing exit is valid to the session close and is unaffected."""
+    position_id = _open_position(conn, pclock, style="intraday")
+    harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    await pipeline.on_bar(_near_bar())
+    first = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
+    assert first["valid_until"] == (ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)).isoformat()
+
+    # 61 minutes on: the debounce releases, and the 11:20 instruction is 41 minutes dead.
+    ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 2
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 2
+
+
+async def test_an_exit_the_owner_actioned_still_suppresses_the_repeat(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The other half of "still an instruction": ``taken``/``dismissed``/``closed`` mean the owner
+    ENGAGED with the message. Re-sending it is exactly the noise WO-D2 removes, so an actioned
+    recommendation suppresses the repeat even once its TTL has passed."""
+    position_id = _open_position(conn, pclock, style="intraday")
+    harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    await pipeline.on_bar(_near_bar())
+    conn.execute("UPDATE recommendations SET human_action='dismissed'")
+    conn.commit()
+
+    ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+
+
+async def test_exactly_one_exit_per_session_while_the_stop_stays_breached(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """THE constraint on screen (b). It is scoped to the DAY, so a position sitting through its stop
+    still produces one exit recommendation every session - which is what keeps it inside
+    ``gate._exiting_symbols``'s three-calendar-day window (gate.py:1166-1205) and therefore off the
+    §7.1 position and sector caps. A screen scoped to the position's lifetime would let the O16
+    relaxation lapse and re-block every new swing entry for capacity, which is the 2026-09-07 bug
+    this must not re-introduce.
+
+    Swing/CNC, the shape the two 08-26 positions actually had: its exit is valid to the session
+    close, so "one per session" is the day-scoped screen doing the work and not a lapsed TTL. The
+    ``_exiting_symbols`` assertion is read at the TOP of sessions 2 and 3 - BEFORE that day's own
+    recommendation exists - because that is the only moment where a lapse could show: read straight
+    after a rec is created it would pass on a zero-age rec no matter how short the window was."""
+    position_id = _open_position(conn, pclock, style="swing")
+    harness = FakeHarness(*(_exit_json(position_id) for _ in range(3)))
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+    sessions = [date(2026, 6, 17), date(2026, 6, 18), date(2026, 6, 19)]   # Wed / Thu / Fri
+
+    def _exiting() -> frozenset[str]:
+        rows = conn.execute("SELECT payload, human_action FROM recommendations").fetchall()
+        return _exiting_symbols(rows, frozenset({SYMBOL}), pclock.now())
+
+    for n, session in enumerate(sessions, start=1):
+        ticker.at = datetime(session.year, session.month, session.day, 11, 0, tzinfo=IST)
+        if n > 1:
+            # Yesterday's recommendation, one calendar day old and alone, still carries the O16
+            # relaxation into this morning. This is the assertion a lifetime-scoped screen fails.
+            assert _exiting() == frozenset({SYMBOL}), f"session {session}: O16 window lapsed"
+
+        await pipeline.on_bar(_near_bar())
+        assert len(harness.calls) == n, f"session {session}: expected one analyst call"
+
+        ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
+        await pipeline.on_bar(_near_bar())                 # the day's second breach: suppressed
+        assert len(harness.calls) == n
+        assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == n
+        assert _exiting() == frozenset({SYMBOL})
+
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 3
+
+
+async def test_an_unreadable_repeat_exit_query_still_lets_the_event_through(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D7 fail-to-zero on screen (b)'s read. The query exists only to WITHHOLD the one protective
+    output RECOMMEND mode has, so a database that cannot answer it must not get to decide: the event
+    runs. Raising instead would be worse than wrong — ``on_bar`` awaits this inside its per-position
+    loop, so one unreadable row would abandon every OTHER position on the same bar."""
+    position_id = _open_position(conn, pclock, style="swing")
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+    conn.execute("DROP TABLE learning_ledger")             # the join in _delivered_exit_today
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+    assert len(log_events(caplog, "delivered_exit_read_failed")) == 1
+
+
+async def test_a_sold_outside_the_ledger_position_ages_out_of_the_O16_window(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """THE KNOWN COST of screen (a), pinned here rather than discovered live (WO-D2 open question 1).
+
+    Screen (b) leaves one exit recommendation per session standing, which is exactly what keeps a
+    breached position inside ``gate._exiting_symbols``'s three-calendar-day window. Screen (a)
+    delivers NO exit recommendation at all, so three calendar days after the last one the position
+    stops reading as "exiting" and starts counting against the §7.1 ``max_open_positions`` /
+    ``per_sector_exposure`` caps again - capacity the owner no longer really has, until the ``/closed``
+    reply lands or the §7.1 ``max_holding`` sweep starts issuing its daily deterministic exit (which
+    re-enters the window: ``test_the_max_holding_sweep_is_not_gated_by_the_position_event_screens``).
+
+    It is a CAPACITY cost, never a risk one - the caps get tighter, not looser - and the alternative
+    inside WO-D2's file scope was worse: teaching the gate this predicate would relax a §7.1 limit on
+    the strength of a broker heuristic, and ``risk/gate.py`` is outside the work order. The skip logs
+    the consequence at WARNING (``position_event_skipped_sold_outside_ledger``), and this test is the
+    other half of that record: a change in either direction has to come past it."""
+    position_id = _open_position(conn, pclock, style="swing")
+    harness = FakeHarness(_exit_json(position_id))         # exactly ONE canned verdict: a second
+    ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)   # analyst call would raise
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, harness, position_id
+    )
+
+    def _exiting() -> frozenset[str]:
+        rows = conn.execute("SELECT payload, human_action FROM recommendations").fetchall()
+        return _exiting_symbols(rows, frozenset({SYMBOL}), pclock.now())
+
+    await pipeline.on_bar(_near_bar())                     # Wed: the last exit rec there will be
+    assert len(harness.calls) == 1 and _exiting() == frozenset({SYMBOL})
+
+    # The owner sells outside the ledger; Thu and Fri both journal the broker holding NOTHING.
+    _observe_holding(conn, position_id, date(2026, 6, 18))
+    _observe_holding(conn, position_id, date(2026, 6, 19))
+    ticker.at = datetime(2026, 6, 19, 11, 0, tzinfo=IST)
+    await pipeline.on_bar(_near_bar())
+    assert len(harness.calls) == 1                         # screen (a): no call, no recommendation
+    assert _exiting() == frozenset({SYMBOL})               # Wednesday's rec still carries the window
+
+    # Monday, five calendar days after the only exit recommendation this position will ever get.
+    ticker.at = datetime(2026, 6, 22, 11, 0, tzinfo=IST)
+    await pipeline.on_bar(_near_bar())
+
+    assert len(harness.calls) == 1
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+    assert _exiting() == frozenset()      # ⇒ it occupies a §7.1 position/sector slot again
+
+
+async def test_the_max_holding_sweep_is_not_gated_by_the_position_event_screens(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """§7.1 ``max_holding`` is a DETERMINISTIC platform decision, not a position event: it spends no
+    analyst call and it is the backstop that keeps a stale position from living forever. The WO-D2
+    screens sit on the analyst path only and must not reach it."""
+    opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)
+    position_id = _open_position(conn, pclock, style="swing", opened_at=opened, stop="95")
+    _observe_holding(conn, position_id, TODAY - timedelta(days=1))
+    _observe_holding(conn, position_id, TODAY)
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, FakeHarness(), position_id
+    )
+
+    assert await pipeline.check_aged_positions(TODAY) == 1
 
 
 # =========================================================================== trigger (c) â€” heartbeat
@@ -1274,8 +1709,14 @@ async def test_forward_queue_selects_by_per_strategy_quantile_not_raw_score(
 ):
     """WO-1 (ii): at an analyst slot the queue picks the highest per-strategy score QUANTILE, not
     the highest raw score - scores are comparable within a strategy and meaningless across them.
-    Here rsi2's only candidate (0.30) is the top of rsi2's day and orb's 0.95 is the top of orb's;
-    the tie inside the top quantile band falls back to fired_at, so the earlier one goes first."""
+    Here rsi2's 0.30 is the top of rsi2's measured day and orb's 0.95 is the top of orb's; the tie
+    inside the top quantile band falls back to fired_at and then to arrival order, so the earlier
+    one goes first even though its raw score is a third of its rival's.
+
+    Both strategies need a MEASURED day for that comparison to mean anything: since D1 (d) a
+    population below :data:`MIN_RANK_POPULATION` lands in the middle band instead of the top, so the
+    singleton rsi2 this test used to rely on no longer wins by arithmetic (see the 09-10 inversion
+    test below)."""
     gov = TunableGovernor(0)               # no slots yet: everything queues, nothing is lost
     harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
     pipeline, parts = make_pipeline(
@@ -1283,6 +1724,8 @@ async def test_forward_queue_selects_by_per_strategy_quantile_not_raw_score(
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
         limits=StubLimits(limit_table), governor=gov,
     )
+    await publish_candidate(pipeline,
+        candidate(symbol="HDFCBANK", strategy_id="rsi2", signal_id="R0", score=0.10))
     await publish_candidate(pipeline,
         candidate(symbol="INFY", strategy_id="rsi2", signal_id="R1", score=0.30))
     await publish_candidate(pipeline,
@@ -1631,18 +2074,26 @@ async def test_the_drain_re_checks_the_window_it_was_queued_under(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
     """A queued candidate is dispatched LATER than it arrived, so every entry-path gate has to be
-    re-asked at the drain: the window can have closed since (Â§1.4 item 11 / Â§7.1 trade_window). A
-    closed gate leaves the queue untouched â€” it never re-arms, exactly like the cap (2026-07-29)."""
+    re-asked at the drain: the window can have closed since (1.4 item 11 / 7.1 trade_window). No
+    analyst call is made and the forward cap is untouched.
+
+    Since D1 (b) the CLOSED-window branch also flushes: unlike mode/FROZEN/kill, no later tick can
+    ever drain what is queued, so the entry leaves with its 3.2.5 admission slot handed back rather
+    than sitting in a dead queue for the rest of the process (see the window-close test below)."""
+    rearmed: list[tuple[str, str]] = []
     pipeline, _, harness, _ = paced_pipeline(
-        conn, pclock, calendar, book, limit_table, cost_model, cap=12)
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
     await pipeline.on_signal_candidate(
         candidate(symbol="TCS", strategy_id="orb", signal_id="INWINDOW", score=0.9))
 
     ticker.at = datetime(2026, 6, 17, 10, 31, tzinfo=IST)       # seeded window is 10:00-10:30
     assert await pipeline.drain_forward_queue() is False
     assert harness.calls == []
-    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["INWINDOW"]
+    assert pipeline._forwarded_count == 0
     assert forward_journal(conn)[("TCS", "orb")] == 0
+    assert pipeline._pending_forwards == []                     # flushed, not stranded
+    assert rearmed == [("TCS", "orb")]
 
 
 async def test_immediate_mode_is_the_rollback_to_the_inline_drain(
@@ -1763,7 +2214,9 @@ async def test_a_blown_up_evaluation_is_requeued_at_the_FRONT_and_retried_next_t
 
     "Front" is the load-bearing word and this fixture proves it rather than assuming it. BOOM is
     re-queued first; a HIGHER-scoring rival then arrives and would win the ranked selection outright
-    (its per-strategy quantile band is 4 against BOOM's 2). The re-queued candidate still goes first,
+    (orb's day is [0.9, 0.9, 0.99] by then - see the D1 (d) tests for why the first candidate of the
+    day appears twice - which puts RIVAL in band 4 against BOOM's 3, above ``MIN_RANK_POPULATION``
+    so the floor does not flatten the two together). The re-queued candidate still goes first,
     because it already won a slot once and is owed the answer that slot bought.
     """
     pipeline, parts, harness = flaky_pipeline(
@@ -1793,10 +2246,12 @@ async def test_a_blown_up_evaluation_is_requeued_at_the_FRONT_and_retried_next_t
     assert len(harness.calls) == 1
     assert parts["assembler"].contexts[-1].stable_block == "stable BOOM"
     assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["RIVAL"]
-    # Journalling semantics are UNCHANGED: forwarded counts ATTEMPTS against the Â§5.2(a) cap
-    # (2026-07-29), so the retry is a second real charge -- not a refund, not a silent freebie.
-    assert forward_journal(conn)[("TCS", "orb")] == 2
-    assert pipeline._forwarded_count == 2
+    # D1 (c) changed the arithmetic here, not the principle: the re-queue REFUNDS the charge the
+    # blown-up attempt made, because the front entry it enqueues is charged again when it is
+    # re-drained. One candidate, one net charge -- previously two, which at the DG1+ cap of 4 spent
+    # half the day on one symbol that was never evaluated.
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+    assert pipeline._forwarded_count == 1
 
 
 async def test_a_second_failure_is_lost_loudly_and_never_re_queued_again(
@@ -2328,6 +2783,35 @@ async def test_a_queue_overflow_hands_back_the_admission_slot_it_drops(
     assert slot_evaluated(conn)[("CCC", "orb")] == 1
 
 
+async def test_a_queue_overflow_hands_back_a_front_entry_too(
+    conn, pclock, calendar, book, limit_table, cost_model, monkeypatch, caplog
+):
+    """The third exit that used to EXCLUDE a WO-20d ``front`` entry, made to agree with D1 (c).
+
+    The exclusion's premise was "a forward was already charged for this entry, so its slot stays
+    spent". The re-queue refunds that charge now, so an evicted front entry holds no charge, has no
+    ``agent_calls`` row and no verdict - the exact ``evaluated=1, forwarded=0`` orphan signature
+    D1 (a) exists to eliminate. ``_forward_key`` still makes a front entry the LAST thing a full
+    queue drops (it is the only entry known to be mid-retry); this is about what happens when it is
+    dropped anyway."""
+    monkeypatch.setattr(pipeline_module, "MAX_PENDING_FORWARDS", 1)
+    rearmed: list[tuple[str, str]] = []
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    pipeline._enqueue_forward(orb_candidate("AAA", 0.90), front=True)
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        pipeline._enqueue_forward(orb_candidate("BBB", 0.50), front=True)
+
+    over = log_events(caplog, "forward_queue_overflow")
+    assert len(over) == 1 and over[0].front is True
+    assert [p.candidate.symbol for p in pipeline._pending_forwards] == ["AAA"]
+    assert rearmed == [("BBB", "orb")]
+
+
 async def test_a_front_entry_kept_in_the_queue_is_not_re_armed(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
@@ -2382,3 +2866,649 @@ async def test_expired_then_taken_then_closed_records_the_real_outcome(
     ).fetchone()
     assert row["outcome_label"] == "win"                      # the real outcome, not no_action
     assert row["net_pnl"] is not None
+
+
+# ============================== D1 (2026-09-12): a slot is spent only by something that was looked at
+def insert_slot(conn, symbol: str, strategy_id: str, *, evaluated: int, forwarded: int,
+                unsizeable: int = 0, d=TODAY, score: float = 0.5) -> None:
+    """Write a day-slot journal row straight into the DB - the state a RESTART actually inherits."""
+    conn.execute(
+        "INSERT INTO prescreen_day_slots "
+        "(d, symbol, strategy_id, published_at, evaluated, score, forwarded, unsizeable) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (d.isoformat(), symbol, strategy_id, NOW.isoformat(), evaluated, score, forwarded,
+         unsizeable),
+    )
+
+
+async def test_a_restart_re_arms_only_the_forward_queue_orphans(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D1 (a), in the shape it actually happened (verified 2026-09-11).
+
+    ``_roll_forward_day`` clears the pending queue and rehydrates only the COUNTER, and the owner
+    restarts the engine 2-3 times per session - so every restart dropped the queue while the journal
+    rows kept ``evaluated=1, forwarded=0``. The pairs stayed deduped for the rest of the day and
+    nothing ever looked at them: ~70 admitted candidates burned since 08-17, 210 of 520 slots
+    all-time never forwarded. The boot sweep hands exactly those rows back, and nothing else.
+    """
+    insert_slot(conn, "TCS", "orb", evaluated=1, forwarded=0)            # THE ORPHAN
+    insert_slot(conn, "INFY", "orb", evaluated=1, forwarded=1)           # really evaluated
+    insert_slot(conn, "WIPRO", "mom", evaluated=1, forwarded=0, unsizeable=1)   # nothing to wait for
+    insert_slot(conn, "SBIN", "rsi2", evaluated=0, forwarded=0)          # already re-armed
+
+    rearmed: list[tuple[str, str]] = []
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        # The arriving candidate is journalled BEFORE the day roll, so its own row looks exactly
+        # like an orphan - the in_flight exclusion is what keeps the sweep off the candidate it is
+        # admitting.
+        await pipeline.on_signal_candidate(
+            candidate(symbol="ITC", strategy_id="orb", signal_id="ARRIVAL", score=0.9))
+
+    assert rearmed == [("TCS", "orb")]
+    slots = slot_evaluated(conn)
+    assert slots[("TCS", "orb")] == 0                        # handed back
+    assert slots[("INFY", "orb")] == 1                       # forwarded: really evaluated
+    assert slots[("WIPRO", "mom")] == 1                      # unsizeable: nothing waits for it
+    assert slots[("SBIN", "rsi2")] == 0                      # untouched, already 0
+    assert slots[("ITC", "orb")] == 1                        # the in-flight candidate keeps its slot
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["ARRIVAL"]
+    assert pipeline._forwarded_count == 1                    # hydrated from INFY, not reset
+    assert harness.calls == []
+
+    events = log_events(caplog, "forward_queue_orphans_rearmed")
+    assert len(events) == 1
+    assert events[0].count == 1 and events[0].pairs == ["TCS/orb"]
+
+
+async def test_the_orphan_sweep_runs_once_per_day_not_once_per_candidate(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """The sweep rides the day ROLL, so a second candidate in the same session must not re-arm the
+    pair the first one just spent - that would undo every admission the day makes."""
+    insert_slot(conn, "TCS", "orb", evaluated=1, forwarded=0)
+    rearmed: list[tuple[str, str]] = []
+    pipeline, _, _, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await pipeline.on_signal_candidate(
+            candidate(symbol="ITC", strategy_id="orb", signal_id="FIRST", score=0.9))
+        await pipeline.on_signal_candidate(
+            candidate(symbol="SBIN", strategy_id="orb", signal_id="SECOND", score=0.8))
+
+    assert rearmed == [("TCS", "orb")]                       # once, on the roll - not per candidate
+    assert len(log_events(caplog, "forward_queue_orphans_rearmed")) == 1
+    assert slot_evaluated(conn)[("ITC", "orb")] == 1
+    assert slot_evaluated(conn)[("SBIN", "orb")] == 1
+
+
+async def test_the_orphan_sweep_reaches_a_day_where_no_candidate_ever_arrives(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
+):
+    """The sweep rides the day roll, and the roll has to reach a RESTART, not just a publication.
+
+    The orphaned pairs are exactly the ones the pre-screen's boot rehydration keeps deduped, so they
+    cannot publish themselves - and on a thin day nothing else does either. Hung off
+    ``on_signal_candidate`` alone the sweep would then never run and the slots would stay burned, the
+    very drought D1 (a) is aimed at. ``drain_forward_queue`` is the 60 s tick that always fires."""
+    insert_slot(conn, "BHEL", "hi52", evaluated=1, forwarded=0, score=0.9705)
+    insert_slot(conn, "INFY", "brk20", evaluated=1, forwarded=1)
+    rearmed: list[tuple[str, str]] = []
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is False  # empty queue: no candidate, ever
+    assert rearmed == [("BHEL", "hi52")]
+    assert slot_evaluated(conn)[("BHEL", "hi52")] == 0
+    assert slot_evaluated(conn)[("INFY", "brk20")] == 1       # forwarded: really evaluated
+    assert harness.calls == []
+    assert len(log_events(caplog, "forward_queue_orphans_rearmed")) == 1
+
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is False      # still once per DAY, not per tick
+    assert rearmed == [("BHEL", "hi52")]
+
+
+async def test_the_window_closing_flushes_the_queue_once_and_hands_the_slots_back(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
+):
+    """D1 (b): six candidates were stranded at 12:26 on 2026-09-10, the best of them the hi52 BHEL
+    at 0.9705.
+
+    ``_drain_one_forward`` returned on a closed window without touching the queue, and
+    ``_expire_forwards`` only ever runs inside ``_take_forward_slot`` - which that early return never
+    reaches. So a candidate queued near the close neither forwarded nor expired: it sat in a dead
+    queue holding a day slot nothing would ever look at. A ``front`` entry (a WO-20d retry) goes with
+    the rest: since D1 (c) the re-queue REFUNDS its forward charge, so leaving it behind would strand
+    the one entry whose journal row is already the ``evaluated=1, forwarded=0`` orphan signature.
+    """
+    rearmed: list[tuple[str, str]] = []
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="SMALL", score=0.30))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="BHEL", strategy_id="hi52", signal_id="BEST", score=0.9705))
+    pipeline._enqueue_forward(
+        candidate(symbol="INFY", strategy_id="orb", signal_id="RETRY", score=0.5), front=True)
+
+    ticker.at = datetime(2026, 6, 17, 12, 26, tzinfo=IST)   # the seeded window closed at 10:30
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is False
+    assert harness.calls == []
+    assert pipeline._forwarded_count == 0                    # a flush costs no analyst slot
+    assert sorted(rearmed) == [("BHEL", "hi52"), ("INFY", "orb"), ("TCS", "orb")]
+    assert pipeline._pending_forwards == []
+
+    closed = log_events(caplog, "forward_queue_window_closed")
+    assert len(closed) == 1
+    assert closed[0].count == 3 and closed[0].best_score == pytest.approx(0.9705)
+    assert sorted(closed[0].pairs) == ["BHEL/hi52", "INFY/orb", "TCS/orb"]
+    assert closed[0].front == 1
+    assert closed[0].closed_at == datetime(2026, 6, 17, 10, 30, tzinfo=IST).isoformat()
+
+    # ONCE per close: an entry that reaches the queue again under the SAME closed window is not
+    # re-announced and not re-flushed - that is what the latch is for.
+    caplog.clear()
+    pipeline._enqueue_forward(
+        candidate(symbol="LT", strategy_id="orb", signal_id="LATE", score=0.20))
+    ticker.at = datetime(2026, 6, 17, 12, 29, tzinfo=IST)
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is False
+    assert log_events(caplog, "forward_queue_window_closed") == []
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["LATE"]
+    assert len(rearmed) == 3
+
+    # ...but a window the owner RE-OPENS is a NEW close, not the latched one. ``trade_window`` re-reads
+    # the sticky trade_window_state row on every call (3.2.7), and on 2026-08-18 the owner really did
+    # move a window mid-session. Keyed on the day, the flush would stay disabled for the rest of that
+    # day and the second window's queue would be stranded exactly as before D1 (b) - silently, since
+    # the one log line had already been emitted.
+    conn.execute(
+        "INSERT INTO trade_window_state (id, start_ist, end_ist, squareoff_buffer_min) "
+        "VALUES (1, '12:30', '14:00', 0)")
+    ticker.at = datetime(2026, 6, 17, 13, 0, tzinfo=IST)     # inside the re-opened window
+    await pipeline.on_signal_candidate(
+        candidate(symbol="SBIN", strategy_id="orb", signal_id="SECOND_WINDOW", score=0.40))
+
+    ticker.at = datetime(2026, 6, 17, 14, 1, tzinfo=IST)     # and past ITS close
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.drain_forward_queue() is False
+    reclosed = log_events(caplog, "forward_queue_window_closed")
+    assert len(reclosed) == 1
+    assert sorted(reclosed[0].pairs) == ["LT/orb", "SBIN/orb"]
+    assert reclosed[0].closed_at == datetime(2026, 6, 17, 14, 0, tzinfo=IST).isoformat()
+    assert pipeline._pending_forwards == []
+    assert ("SBIN", "orb") in rearmed and ("LT", "orb") in rearmed
+
+
+async def test_a_window_that_has_not_opened_yet_leaves_the_queue_alone(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """The flush is for a window BEHIND us. Before the open the queue is still live and a later tick
+    will drain it - dropping it there would burn the slot the open is about to use."""
+    rearmed: list[tuple[str, str]] = []
+    pipeline, _, _, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
+    pipeline._roll_forward_day(TODAY)                      # the day roll CLEARS the queue; seed after
+    pipeline._enqueue_forward(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="EARLY", score=0.9))
+
+    ticker.at = datetime(2026, 6, 17, 9, 45, tzinfo=IST)    # before the seeded 10:00 open
+    assert await pipeline.drain_forward_queue() is False
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["EARLY"]
+    assert rearmed == []
+
+
+async def test_an_analyst_infrastructure_failure_refunds_the_forward_charge(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D1 (c): ``_take_forward_slot`` charges the cap and journals the forward BEFORE the call, so a
+    timeout or an SDK death spent a slot on a call that produced no verdict, no ``agent_calls`` row
+    and no proposal - 110 charges burned that way, and at the DG1+ cap of 4 one timeout is a quarter
+    of the day. The admission slot was already refunded on this path (2026-07-29); the analyst quota
+    now follows it, one unit, for the same reason: nothing evaluated it."""
+    rearmed: list[tuple[str, str]] = []
+    harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await publish_candidate(
+            pipeline, candidate(symbol="TCS", strategy_id="orb", signal_id="DEAD", score=0.9))
+
+    assert rearmed == [("TCS", "orb")]                       # the 2026-07-29 admission re-arm
+    assert pipeline._forwarded_count == 0                    # and now the 5.2(a) charge too
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+    refunds = log_events(caplog, "forward_cap_refunded")
+    assert len(refunds) == 1 and refunds[0].reason == "timeout"
+
+
+async def test_a_governor_block_is_policy_and_refunds_nothing(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """The other half of D1 (c). A governor block is a deliberate budget decision, not an outage:
+    it re-arms nothing (2026-07-29) and refunds nothing, or a blocked window would hand the day's
+    whole quota back and hammer the admission gate the moment the block lifts."""
+    rearmed: list[tuple[str, str]] = []
+    harness = FakeHarness(AgentResult.Failed("governor_blocked", "DG4", call_id="01CALL"))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await publish_candidate(
+            pipeline, candidate(symbol="TCS", strategy_id="orb", signal_id="BLOCKED", score=0.9))
+
+    assert rearmed == []
+    assert pipeline._forwarded_count == 1                    # the charge stands
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+    assert log_events(caplog, "forward_cap_refunded") == []
+
+
+async def test_a_refund_can_never_drive_either_counter_negative(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """A restart loses the in-memory count but not the journal row, so a refund can legitimately
+    meet a 0 on one side and a stale value on the other. Both are floored: a negative forward count
+    would hand the day free analyst calls.
+
+    Two DIFFERENT signal_ids for the same pair, which is the live shape - a re-armed pair
+    re-publishes with a freshly minted ULID - and the shape that still drives the floor twice now
+    that a repeat refund of the SAME charge is memoed away (see the idempotency test below)."""
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+    )
+    insert_slot(conn, "TCS", "orb", evaluated=1, forwarded=0)
+
+    pipeline._refund_forward(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="NEVER_CHARGED", score=0.9),
+        TODAY, reason="test")
+    pipeline._refund_forward(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="NEVER_CHARGED_EITHER", score=0.9),
+        TODAY, reason="test")
+    assert pipeline._forwarded_count == 0
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+
+
+async def test_a_refunded_front_entry_hands_its_admission_slot_back_when_it_ages_out(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """The D1 (c) refund and the WO-20d ``front`` exclusions had to be made to agree.
+
+    Every front exclusion (TTL expiry, queue overflow, the window-close flush) rested on "a forward
+    was already charged for this entry, so its slot stays spent". The refund makes that false: a
+    re-queued entry carries no charge. Live shape - an ``orb`` candidate is drained, the transport
+    blows up, the guard refunds and re-queues it at the FRONT, and then the warm-up freeze re-arms
+    (the 2026-08-28 freeze ran 57 minutes) so no tick reaches ``_take_forward_slot`` before the
+    entry's 20-minute TTL. It then aged out with ``evaluated=1, forwarded=0``, zero ``agent_calls``
+    rows and no verdict: the exact orphan signature D1 (a) exists to eliminate, and one the
+    same-process day can never sweep, because the sweep runs only on a day CHANGE."""
+    rearmed: list[tuple[str, str]] = []
+    harness = FlakyHarness(RuntimeError, 1, dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="BOOM", score=0.9))
+    assert await pipeline.drain_forward_queue() is True
+    assert pipeline._pending_forwards[0].front is True
+    assert forward_journal(conn)[("TCS", "orb")] == 0        # refunded: it bought no verdict
+    assert slot_evaluated(conn)[("TCS", "orb")] == 1         # ...and still holds the admission slot
+    assert rearmed == []
+
+    ticker.at = NOW + timedelta(minutes=TTL_INTRADAY_MIN + 1)   # 10:26, still inside the window
+    assert await pipeline.drain_forward_queue() is False
+    assert harness.attempts == 1                             # the retry never got a tick
+    assert pipeline._pending_forwards == []
+    assert rearmed == [("TCS", "orb")]                       # never evaluated by anything => back
+    assert slot_evaluated(conn)[("TCS", "orb")] == 0
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+
+
+async def test_a_raising_owner_alert_never_refunds_the_same_charge_twice(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """The refund is ONE unit per charge, and the alert is the seam that could double it.
+
+    ``_evaluate_forward`` runs inside ``_evaluate_forward_guarded``'s try, so an owner-notify seam
+    that raises after the refund lands in ``_handle_forward_failure``, which refunds AGAIN for the
+    front re-queue it makes - two units undone for one charge, and the re-queued entry is then
+    charged a third time when it drains. Ordering the alert BEFORE the refund is what makes the
+    arithmetic exact."""
+    async def exploding_alert(trigger, result):
+        raise RuntimeError("notify seam died")
+
+    harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+    )
+    pipeline._alert_agent_failed = exploding_alert
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await publish_candidate(
+            pipeline, candidate(symbol="TCS", strategy_id="orb", signal_id="DEAD", score=0.9))
+
+    refunds = log_events(caplog, "forward_cap_refunded")
+    assert len(refunds) == 1 and refunds[0].reason == "requeued_RuntimeError"
+    assert pipeline._forwarded_count == 0
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["DEAD"]
+
+
+async def test_one_charge_is_refunded_once_and_a_new_charge_is_refundable_again(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D1 (d): the refund is memoed per CHARGE, not merely ordered around the one seam that could
+    double it.
+
+    Ordering the alert first fixes the known double; the memo fixes the CLASS. Anything that raises
+    between the refund and ``_evaluate_forward``'s return lands in ``_handle_forward_failure``,
+    which refunds again for the re-queue it makes - and two units undone for one charge hands the
+    day an analyst call the 5.2(a) cap never granted, the one direction of D1 (c) that is not
+    conservative (over-charging is safe, under-charging is a budget breach).
+
+    The memo is per charge and not per candidate-day: ``_take_forward_slot`` clears it when it
+    charges the same candidate again, because the WO-20d front retry really does make a SECOND
+    charge, and that one is really refundable. Anything else would silently re-open the burn D1 (c)
+    exists to close."""
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+    )
+    cand = candidate(symbol="TCS", strategy_id="orb", signal_id="CHARGED", score=0.9)
+    pipeline._roll_forward_day(TODAY)                        # the roll clears the queue; seed after
+    pipeline._enqueue_forward(cand)
+    assert pipeline._take_forward_slot(12) is cand           # the charge, as the drain makes it
+    assert pipeline._forwarded_count == 1
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        pipeline._refund_forward(cand, TODAY, reason="timeout")
+        pipeline._refund_forward(cand, TODAY, reason="requeued_RuntimeError")
+    assert pipeline._forwarded_count == 0                    # ONE unit back, not two
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+    assert len(log_events(caplog, "forward_cap_refunded")) == 1
+    skipped = log_events(caplog, "forward_cap_refund_skipped")
+    assert len(skipped) == 1 and skipped[0].reason == "requeued_RuntimeError"
+
+    # The WO-20d retry drains the same candidate again: a new charge, refundable on its own terms.
+    caplog.clear()
+    pipeline._enqueue_forward(cand, front=True)
+    assert pipeline._take_forward_slot(12) is cand
+    assert pipeline._forwarded_count == 1
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        pipeline._refund_forward(cand, TODAY, reason="timeout")
+    assert pipeline._forwarded_count == 0
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+    assert len(log_events(caplog, "forward_cap_refunded")) == 1
+
+    # ...and the memo is per DAY, like every other piece of forward state.
+    pipeline._roll_forward_day(TODAY + timedelta(days=1))
+    assert pipeline._refunded_forwards == set()
+
+
+def test_a_strategy_with_an_unmeasured_day_lands_in_the_middle_band(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """D1 (d): an UNMEASURED population is not a TOP one.
+
+    The SINGLETON is the live shape, not the empty set: ``on_signal_candidate`` appends the arriving
+    score to ``_day_scores`` one line before it enqueues, so a strategy's first candidate of the day
+    is ranked against a population of exactly itself - quantile 1/1 = 1.0, the top band, by
+    arithmetic rather than by standing. ``MIN_RANK_POPULATION`` is the floor that removes it, and it
+    covers the empty case a journal-hydrated day can present as well.
+
+    Two observations are not a measured day either, which is why the floor is 3 and not 2: a
+    two-element CDF can only return 0.5 or 1.0, so the second candidate of a strategy's day would
+    still take the TOP band by out-scoring exactly one rival."""
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+    )
+    assert pipeline._day_scores == {}
+    assert pipeline._quantile_band(candidate(strategy_id="orb", score=0.99)) == QUANTILE_BANDS // 2
+
+    pipeline._day_scores["orb"] = [0.99]                      # the singleton: itself, and nothing else
+    assert pipeline._quantile_band(candidate(strategy_id="orb", score=0.99)) == QUANTILE_BANDS // 2
+
+    pipeline._day_scores["orb"] = [0.10, 0.99]                # one rival beaten is not a distribution
+    assert pipeline._quantile_band(candidate(strategy_id="orb", score=0.99)) == QUANTILE_BANDS // 2
+    assert pipeline._quantile_band(candidate(strategy_id="orb", score=0.10)) == QUANTILE_BANDS // 2
+
+    # A MEASURED population still ranks exactly as before - only the unrankable case moved.
+    pipeline._day_scores["hi52"] = [0.1, 0.2, 0.3, 0.9705]
+    assert pipeline._quantile_band(candidate(strategy_id="hi52", score=0.9705)) == QUANTILE_BANDS - 1
+    assert pipeline._quantile_band(candidate(strategy_id="hi52", score=0.05)) == 0
+    pipeline._day_scores["cat"] = [0.1, 0.2, 0.3]             # exactly at the floor: ranked, not flat
+    assert pipeline._quantile_band(candidate(strategy_id="cat", score=0.3)) == QUANTILE_BANDS - 1
+    assert pipeline._quantile_band(candidate(strategy_id="cat", score=0.1)) == 1
+
+
+async def test_a_lone_late_candidate_no_longer_outranks_a_measured_day(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """THE 2026-09-10 INVERSION, driven through the real admission and selection path.
+
+    A lone late ``orb`` candidate took band 4 on the strength of its own score being the only one in
+    its population, tied with the genuinely top-of-its-day ``hi52`` BHEL at 0.9705, and won the tie
+    on arrival order. The analyst spent the slot on the 0.12. Asserting through
+    ``_quantile_band`` alone cannot tell the fixed code from the broken code here - only which
+    candidate the harness actually SEES can."""
+    pipeline, parts, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=1)
+
+    # The lone orb arrives FIRST, so under the old rule it also won the band-4 tie-break.
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TATASTEEL", strategy_id="orb", signal_id="LONE_ORB", score=0.12))
+    for symbol, signal_id, score in (("SBIN", "HI52_LOW", 0.62), ("LT", "HI52_MID", 0.71),
+                                     ("BHEL", "HI52_BEST", 0.9705)):
+        await pipeline.on_signal_candidate(
+            candidate(symbol=symbol, strategy_id="hi52", signal_id=signal_id, score=score))
+
+    # The orb "population of one" is really TWO here, and the difference is why the floor is 3:
+    # ``_journal_slot`` writes the arriving row BEFORE ``_roll_forward_day`` hydrates the day's
+    # scores from the journal, so the day's very first candidate is counted once by the hydration
+    # and once by the append below it. A floor of 2 would have read that as a measured day and
+    # handed LONE_ORB the top band all over again.
+    assert pipeline._day_scores["orb"] == [0.12, 0.12]
+    assert len(pipeline._day_scores["hi52"]) == 3                             # a really measured day
+    assert pipeline._quantile_band(
+        candidate(strategy_id="orb", score=0.12)) == QUANTILE_BANDS // 2      # was QUANTILE_BANDS - 1
+    assert pipeline._quantile_band(
+        candidate(strategy_id="hi52", score=0.9705)) == QUANTILE_BANDS - 1
+    assert await pipeline._drain_one_forward() is True
+    assert parts["assembler"].contexts[-1].stable_block == "stable HI52_BEST"
+    assert len(harness.calls) == 1
+    assert forward_journal(conn)[("BHEL", "hi52")] == 1
+    assert forward_journal(conn)[("TATASTEEL", "orb")] == 0
+    assert "LONE_ORB" in [p.candidate.signal_id for p in pipeline._pending_forwards]
+
+
+# ------------------------------------------------------ D1 (e): the brk20 LIMIT-at-level band screen
+def brk20_candidate(entry: str, stop: str, **overrides: Any) -> SignalCandidate:
+    """A ``brk20`` swing candidate: a LIMIT pinned to the 20-day breakout LEVEL, product CNC."""
+    base: dict[str, Any] = {
+        "symbol": "TCS", "strategy_id": "brk20", "style": "swing", "signal_id": "BRK",
+        "raw_levels": RawLevels(entry=Decimal(entry), stop=Decimal(stop), target=None),
+        "score": 0.9,
+    }
+    return candidate(**{**base, **overrides})
+
+
+def band_pipeline(conn, pclock, calendar, book, limit_table, cost_model, ltp):
+    """A paced pipeline with the D1 (e) LTP seam wired; ``probe`` records every symbol it asked for.
+
+    ``ltp`` may be a mutable one-element list, so a test can walk the price between drains."""
+    probe: list[str] = []
+    rearmed: list[tuple[str, str]] = []
+
+    def ltp_fn(symbol: str):
+        probe.append(symbol)
+        return ltp[0] if isinstance(ltp, list) else ltp
+
+    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True, ltp_fn=ltp_fn,
+    )
+    return pipeline, harness, probe, rearmed
+
+
+async def test_a_brk20_level_outside_the_entry_band_never_spends_an_analyst_slot(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D1 (e): 6 of 15 brk20 proposals died on the gate's ``entry_sanity_band``, each after spending
+    an analyst slot. The level is pinned to the 20-day breakout price, so a candidate that waits in
+    the paced queue while the price walks away from it is a GUARANTEED reject - deterministic, and
+    knowable before the call.
+
+    A DEFERRAL, not a drop. The deviation is a live reading and the band screen is a proxy for the
+    gate's rule (the gate bands the analyst's proposal, this bands the scanner's level), so a
+    momentary excursion must not end the candidate's day - and it would: brk20 originates only from
+    ``run_scan_sweep``, so a pair re-armed out of the queue has nothing to re-publish it. The entry
+    stays queued at its own TTL, un-charged and unclaimed, and is re-tested at the next drain."""
+    # CNC band is 2.0%; |100 - 97| / 97 = 3.09%.
+    ltp = [Decimal("97")]
+    pipeline, harness, probe, rearmed = band_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, ltp)
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, brk20_candidate("100", "98"))
+
+    assert harness.calls == []
+    assert pipeline._forwarded_count == 0                    # the slot was never charged
+    assert forward_journal(conn)[("TCS", "brk20")] == 0
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["BRK"]
+    assert rearmed == []                                     # still queued, so its slot is still its
+    assert slot_evaluated(conn)[("TCS", "brk20")] == 1
+    assert probe == ["TCS"]
+    skipped = log_events(caplog, "forward_skipped_outside_band")
+    assert len(skipped) == 1
+    assert (skipped[0].symbol, skipped[0].entry, skipped[0].ltp) == ("TCS", "100", "97")
+    assert skipped[0].band == "2.0"
+
+    # The price comes back inside the band and the very next drain forwards it - which is the whole
+    # reason the entry was kept rather than handed back.
+    ltp[0] = Decimal("99")                                   # |100 - 99| / 99 = 1.01% <= 2.0%
+    assert await pipeline._drain_one_forward() is True
+    assert len(harness.calls) == 1
+    assert pipeline._forwarded_count == 1
+    assert forward_journal(conn)[("TCS", "brk20")] == 1
+    assert pipeline._pending_forwards == []
+
+
+async def test_a_brk20_level_exactly_on_the_band_edge_is_forwarded(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """The gate's rule is ``dev <= band``, so the edge is a PASS - the screen mirrors it exactly
+    rather than approximating it, or it would drop candidates the gate would have approved."""
+    # |102 - 100| / 100 = 2.00% == the CNC band.
+    pipeline, harness, probe, rearmed = band_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, Decimal("100"))
+    await publish_candidate(pipeline, brk20_candidate("102", "100"))
+
+    assert len(harness.calls) == 1                           # forwarded, not skipped
+    assert pipeline._forwarded_count == 1
+    assert forward_journal(conn)[("TCS", "brk20")] == 1
+    assert rearmed == []
+    assert probe == ["TCS"]
+
+
+async def test_an_unknown_ltp_forwards_the_brk20_candidate_unchanged(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """Fails OPEN in every unknown (D7). No tick for the symbol means "we cannot say this is a
+    guaranteed reject", and the direction for that is to forward it and let the gate decide."""
+    pipeline, harness, probe, rearmed = band_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, None)
+    await publish_candidate(pipeline, brk20_candidate("100", "98"))
+
+    assert len(harness.calls) == 1
+    assert pipeline._forwarded_count == 1
+    assert forward_journal(conn)[("TCS", "brk20")] == 1
+    assert rearmed == []
+    assert probe == ["TCS"]
+
+
+async def test_an_unwired_ltp_seam_forwards_the_brk20_candidate_unchanged(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """``ltp_fn`` unwired is the pre-2026-09-12 behaviour byte for byte - the screen is opt-in."""
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12),
+    )
+    await publish_candidate(pipeline, brk20_candidate("100", "98"))
+    assert len(harness.calls) == 1
+    assert forward_journal(conn)[("TCS", "brk20")] == 1
+
+
+async def test_a_price_relative_strategy_is_never_band_screened(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """Scoped to the LIMIT-at-level legs only. An ``orb`` entry tracks the live price, so the same
+    screen there would drop candidates on a stale tick rather than on a structural mismatch - this
+    one deviates 3.09% against the 1.0% MIS band and is still forwarded, and the LTP seam is never
+    even asked."""
+    pipeline, harness, probe, rearmed = band_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, Decimal("97"))
+    await publish_candidate(
+        pipeline, candidate(symbol="TCS", strategy_id="orb", signal_id="ORB", score=0.9))
+
+    assert len(harness.calls) == 1
+    assert pipeline._forwarded_count == 1
+    assert forward_journal(conn)[("TCS", "orb")] == 1
+    assert rearmed == []
+    assert probe == []                                       # not in BAND_SKIP_STRATEGIES
+
+
+async def test_a_raising_ltp_seam_forwards_the_brk20_candidate_and_warns(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """A broken seam is the same undecidable case as a missing tick: it warns and forwards. A screen
+    that could withhold evaluations whenever its own inputs broke would be a silent kill switch on
+    the whole brk20 leg."""
+    def ltp_fn(symbol: str):
+        raise RuntimeError("tick cache exploded")
+
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12), ltp_fn=ltp_fn,
+    )
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, brk20_candidate("100", "98"))
+
+    assert len(harness.calls) == 1
+    assert forward_journal(conn)[("TCS", "brk20")] == 1
+    failed = log_events(caplog, "forward_band_screen_failed")
+    assert len(failed) == 1 and failed[0].symbol == "TCS"

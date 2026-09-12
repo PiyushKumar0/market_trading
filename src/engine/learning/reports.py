@@ -37,8 +37,30 @@ def _pct(value: float | None, dp: int = 3) -> str:
     return "—" if value is None else f"{value:+.{dp}f}%"
 
 
+def _num(value: float | None, dp: int = 2) -> str:
+    """A plain (unsigned) number — holding durations are counts, never signed returns."""
+    return "—" if value is None else f"{value:.{dp}f}"
+
+
 def _slug_ts(generated_at) -> str:
     return generated_at.strftime("%Y%m%dT%H%M%S")
+
+
+def _margin_floor_txt(report: ValidationReport) -> str:
+    """The WO-3 floor with the DENOMINATOR it was taken at — the horizon is a protocol choice
+    (20 sessions for a swing leg, the §7.1 120 for a positional one), so a report that printed only
+    the resulting %/day would not be reproducible from the artifact alone."""
+    if report.margin_floor_pct_per_day is None:
+        return "not evaluated (no round-trip cost floor supplied — fail-closed, see Reasons)"
+    denom = (
+        ""
+        if report.margin_floor_days is None or report.cost_floor_pct is None
+        else (
+            f" (= round-trip cost floor {report.cost_floor_pct:.4f}% / "
+            f"{report.margin_floor_days} sessions)"
+        )
+    )
+    return f"{report.margin_floor_pct_per_day:.5f}%/day{denom}"
 
 
 # --------------------------------------------------------------------------- validation report
@@ -82,7 +104,73 @@ def render_markdown(report: ValidationReport) -> str:
     lines.append(f"- **Cited trial count N**: {n_txt}")
     lines.append(f"- **Required CPCV fold-pass (`fold_pass_min(N)`)**: {bar_txt}")
     lines.append(f"- **Observed CPCV fold-pass fraction**: {frac_txt}")
+    lines.append(f"- **Margin floor (WO-3)**: {_margin_floor_txt(report)}")
+    lines.append(
+        "- **Observed median passing-split expectancy**: "
+        + (
+            "no passing splits"
+            if report.cpcv_median_passing_expectancy_pct is None
+            else f"{report.cpcv_median_passing_expectancy_pct:+.5f}%/day"
+        )
+    )
     lines.append("")
+
+    # ---- R2 realized-hold cells (REPORTING ONLY, 2026-09-12) ---------------------------------
+    # The bar above is quoted at a CAP (20 swing / 120 positional). These rows re-base the same
+    # round-trip floor on the horizon this run was actually held for, so "passes the floor" can
+    # never be read as comfortable without the reader seeing at what horizon.
+    if report.realized_hold_cells:
+        lines.append("### Margin floor at the MEASURED holding period (reporting only, R2)")
+        lines.append("")
+        lines.append(
+            f"Not part of the promotion rule — the verdict above stands on the registered "
+            f"{report.margin_floor_days}-session denominator. Headroom = observed median "
+            "passing-split expectancy ÷ that cell's floor."
+        )
+        lines.append("")
+        lines.append("| horizon | sessions | margin floor | headroom |")
+        lines.append("|:--------|---------:|-------------:|---------:|")
+        for c in report.realized_hold_cells:
+            head = "—" if c.headroom_x is None else f"{c.headroom_x:.2f}×"
+            lines.append(
+                f"| {c.label} | {c.hold_sessions:.2f} | "
+                f"{c.margin_floor_pct_per_day:.5f}%/day | {head} |"
+            )
+        lines.append("")
+    if report.realized_hold is not None and report.realized_hold.n_trades:
+        h = report.realized_hold
+        lines.append("### Holding period + open-trade split (reporting only, R2)")
+        lines.append("")
+        lines.append(
+            f"- Trades: {h.n_trades}  ·  closed: {h.n_closed}  ·  **still open at the window "
+            f"edge: {h.n_open}**"
+        )
+        lines.append(
+            f"- Per-trade net return — ALL trades (sweep headline, and the ranking statistic): "
+            f"{_pct(h.expectancy_per_trade_pct, 4)}  ·  CLOSED round trips only: "
+            f"{_pct(h.expectancy_per_trade_closed_pct, 4)}"
+        )
+        lines.append(
+            f"- Holding sessions, all trades — mean {_num(h.mean_sessions)} · median "
+            f"{_num(h.median_sessions)} · p90 {_num(h.p90_sessions)}"
+        )
+        lines.append(
+            f"- Holding sessions, closed only — mean {_num(h.mean_sessions_closed)} · median "
+            f"{_num(h.median_sessions_closed)} · p90 {_num(h.p90_sessions_closed)}"
+        )
+        lines.append(
+            "- An OPEN trade contributes its AGE at the window edge, not a realized hold, and its "
+            "return is unrealized mark-to-market with no exit leg paid."
+        )
+        lines.append("")
+    if report.population_is_survivorship_tainted_proxy:
+        lines.append(
+            "> **SURVIVORSHIP: the population is a tainted proxy** — a present-day symbol list "
+            "applied backwards (no point-in-time index membership is stored anywhere in this "
+            "platform). Every LEVEL above is biased HIGH by an unmeasurable amount; comparisons "
+            "against other runs on the same list are unaffected."
+        )
+        lines.append("")
 
     # ---- summary stats ----------------------------------------------------------------------
     lines.append("## Cost-adjusted summary")
@@ -190,6 +278,53 @@ def render_sweep_markdown(report: SweepReport) -> str:
     )
     lines.append(f"- Best params (by expectancy): {report.best_params}")
     lines.append("")
+
+    # ---- R2 (2026-09-12): what the winning config's trades actually looked like --------------
+    # The per-config table below reports one per-trade expectancy and no horizon at all, which is
+    # how a run could be promoted against a floor spread over 120 sessions without anyone knowing
+    # the median trade was held for 33 — and without the reader seeing that some of those "trades"
+    # were still open. Both go here, for the config the run selected.
+    best_stat = next(
+        (s for s in report.stats if report.best_params is not None and s.params == report.best_params),
+        None,
+    )
+    if best_stat is not None and best_stat.n_trades:
+        unit = report.bar_unit
+        lines.append("## Winning config — holding period + open-trade split (R2, reporting only)")
+        lines.append("")
+        lines.append(
+            f"- Trades: {best_stat.n_trades}  ·  closed: {best_stat.n_closed}  ·  **still open at "
+            f"the window edge: {best_stat.n_open}**"
+        )
+        lines.append(
+            f"- Per-trade net return — ALL trades (the headline, and the statistic this winner was "
+            f"ranked on): {_pct(best_stat.expectancy_pct, 4)}  ·  CLOSED round trips only: "
+            f"{_pct(best_stat.expectancy_closed_pct, 4)}"
+        )
+        lines.append(
+            f"- Holding {unit}s, all trades — mean {_num(best_stat.hold_bars_mean)} · median "
+            f"{_num(best_stat.hold_bars_median)} · p90 {_num(best_stat.hold_bars_p90)}"
+        )
+        lines.append(
+            f"- Holding {unit}s, closed only — mean {_num(best_stat.hold_bars_mean_closed)} · "
+            f"median {_num(best_stat.hold_bars_median_closed)} · p90 "
+            f"{_num(best_stat.hold_bars_p90_closed)}"
+        )
+        lines.append(
+            "- An OPEN trade's duration is its AGE at the window edge, not a realized hold, and "
+            "its return is unrealized mark-to-market with no exit leg paid. Every configuration's "
+            "own figures are in the JSON artifact."
+        )
+        lines.append("")
+    if report.population_is_survivorship_tainted_proxy:
+        lines.append(
+            "> **SURVIVORSHIP: the population is a tainted proxy** — a present-day symbol list "
+            "applied backwards (no point-in-time index membership is stored anywhere in this "
+            "platform). Every LEVEL below is biased HIGH by an unmeasurable amount; comparisons "
+            "against other runs on the same list are unaffected."
+        )
+        lines.append("")
+
     lines.append("## Per-configuration stats")
     lines.append("")
     lines.append("| params | trades | win% | expectancy | total | Sharpe | maxDD |")

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 from datetime import date, datetime, time, timedelta
 
 import httpx
@@ -26,6 +27,8 @@ from engine.broker.instruments import InstrumentStore
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
+from engine.core.enums import Actor, Mode, RiskState
+from engine.core.types import TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob
 from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult
@@ -47,11 +50,23 @@ from engine.ops.jobs import (
     JobSpec,
 )
 from engine.ops.main import (
+    _FULL_SWEEP_TRIGGERS,
+    _SWEEP_IN_FLIGHT_REPLY,
     PHASE1_JOB_IDS,
     POST_ARM_JOB_IDS,
     _arm_live_jobs,
     _arm_registry_jobs,
+    _consume_ins_pending,
+    _freeze_lift_skip_reason,
+    _freeze_lift_sweep,
+    _hi52_shadow_leg,
+    _ins_rows_to_consume,
+    _read_ins_pending,
+    _roll_batch_ticks,
     _scheduled_runner,
+    _single_flight_sweep,
+    _sweep_window_active,
+    _ticker_tokens,
     boot_contract_watchdog,
     build_job_registry,
     cancel_post_arm,
@@ -60,6 +75,8 @@ from engine.ops.main import (
     start_scheduler_and_fire_post_arm,
 )
 from engine.ops.scheduler import Scheduler
+from engine.risk.events import RiskStateChanged
+from engine.strategy.scanners import ins
 from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
 
 
@@ -1923,3 +1940,595 @@ async def test_catchup_sweep_vetoes_tick_compact_in_session(calendar) -> None:
     cu = FakeCatchUp()
     await _catchup_sweep_once(cu, FakeLatch(), FakeKill(), _clock_at(_WEEKEND_MIDDAY), calendar)
     assert cu.calls[0]["exclude"] == ()
+
+
+# ------------------------------------------------- freeze-lift re-sweep + batch ticks (2026-09-11)
+#: Inside the session AND inside the window below; 2026-06-17 is a real trading day (conftest).
+_IN_WINDOW = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
+_WINDOW = TradeWindow(start=time(9, 20), end=time(15, 0))
+
+
+class _FakeMode:
+    """The two ``ModeManager`` seams the sweep predicate reads (§3.2.7 window + O2 mode)."""
+
+    def __init__(self, *, window: TradeWindow | None = _WINDOW, mode_: Mode = Mode.RECOMMEND) -> None:
+        self._window, self._mode = window, mode_
+
+    def get_trade_window(self) -> TradeWindow | None:
+        return self._window
+
+    def mode(self) -> Mode:
+        return self._mode
+
+
+def _lift(old: RiskState = RiskState.FROZEN, new: RiskState = RiskState.NORMAL) -> RiskStateChanged:
+    return RiskStateChanged(old_state=old, new_state=new, actor=Actor.RISK_GATE,
+                            reason="warm-up coverage met", at=_IN_WINDOW)
+
+
+def _sweep_state(*, started_at: datetime | None = None, published_at: datetime | None = None,
+                 done_at: datetime | None = None, frozen: bool = False) -> dict:
+    """A ``_last_sweep`` record with the three phase marks ``run_scan_sweep`` stamps: start (past the
+    session check), publication (where the risk state is read) and completion."""
+    return {"started_at": started_at, "published_at": published_at, "done_at": done_at,
+            "published": 0, "pending": 0, "frozen": frozen}
+
+
+def _finished(at: datetime, *, frozen: bool = False) -> dict:
+    """A sweep that ran to completion at ``at`` — all three marks on that instant."""
+    return _sweep_state(started_at=at, published_at=at, done_at=at, frozen=frozen)
+
+
+class _Sweeps:
+    """``run_scan_sweep`` stand-in that stamps ``_last_sweep`` exactly as the real one does — start
+    mark first, then the publication mark carrying the risk state, then completion."""
+
+    def __init__(self, clock: Clock, last_sweep: dict, *, raises: bool = False,
+                 frozen: bool = False) -> None:
+        self.calls: list[str] = []
+        self._clock, self._last_sweep, self._raises, self._frozen = clock, last_sweep, raises, frozen
+
+    async def __call__(self, trigger: str) -> str:
+        self.calls.append(trigger)
+        self._last_sweep["started_at"] = self._clock.now()
+        if self._raises:
+            raise RuntimeError("duckdb stall")     # …leaving the start mark standing, as the real one does
+        self._last_sweep.update(published_at=self._clock.now(), frozen=self._frozen)
+        self._last_sweep.update(done_at=self._clock.now(), published=2, pending=3)
+        return "body"
+
+
+@pytest.mark.parametrize(
+    ("when", "mode_kw", "expected"),
+    [
+        (_IN_WINDOW, {}, True),
+        (_IN_WINDOW, {"mode_": Mode.AUTO}, True),
+        (_IN_WINDOW, {"mode_": Mode.OFF}, False),                      # OFF never originates
+        (_IN_WINDOW, {"window": None}, False),                         # no window seeded yet
+        (datetime(2026, 6, 17, 9, 16, tzinfo=IST), {}, False),         # session open, window shut
+        (datetime(2026, 6, 17, 15, 10, tzinfo=IST), {}, False),        # window ended
+        (datetime(2026, 6, 17, 15, 45, tzinfo=IST), {"window": TradeWindow(start=time(9, 20), end=time(23, 0))}, False),  # session closed
+        (_WEEKEND_MIDDAY, {}, False),                                  # no session at all
+        # All four bounds are INCLUSIVE, and every one of them is a plausible instant: the window tick
+        # and the warm-up refresh ride 60 s timers armed at the same boot, so a lift lands ON the
+        # second boundary often enough that an off-by-one `<` would silently refuse the day's re-sweep.
+        (datetime(2026, 6, 17, 9, 15, tzinfo=IST),
+         {"window": TradeWindow(start=time(9, 15), end=time(15, 0))}, True),      # == session open
+        (datetime(2026, 6, 17, 15, 30, tzinfo=IST),
+         {"window": TradeWindow(start=time(9, 20), end=time(15, 30))}, True),     # == session close
+        (datetime(2026, 6, 17, 9, 20, tzinfo=IST), {}, True),                     # == window start
+        (datetime(2026, 6, 17, 15, 0, tzinfo=IST), {}, True),                     # == window end
+    ],
+)
+def test_sweep_window_predicate(calendar, when: datetime, mode_kw: dict, expected: bool) -> None:
+    """ONE predicate for the window edge and the freeze-lift subscriber — the 2026-09-11 finding was
+    that the edge's own test omitted risk_state; a second, drifting copy is how that repeats."""
+    assert _sweep_window_active(when, calendar, _FakeMode(**mode_kw)) is expected
+
+
+async def test_freeze_lift_sweeps_on_the_frozen_to_normal_edge(calendar) -> None:
+    """08-28/08-31/09-04: the window-open sweep landed inside a boot warm-up freeze, the pipeline
+    re-armed every batch pair and nothing re-published them — batch rules have no next bar."""
+    last_sweep = _sweep_state()
+    clock = _clock_at(_IN_WINDOW)
+    sweeps = _Sweeps(clock, last_sweep)
+    state: dict = {"fired": None}
+
+    await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, state, last_sweep,
+                             ready=lambda: True)
+
+    assert sweeps.calls == ["freeze_lift"]
+    assert state["fired"] == (_IN_WINDOW.date(), 10, 5)
+
+
+async def test_freeze_lift_does_not_sweep_before_the_boot_completes(calendar, caplog) -> None:
+    """The RECOVERY publishes lifts of its own — the self-test's ``clear_stale_daily`` (step 1c) and
+    step 5's ``catchup_safety_jobs`` clear — ahead of step 4's data-gap backfill, step 5's daily_bars
+    catch-up, step 6's warm-up gate and step 7's ticker resume. A sweep there reads a daily history
+    still missing the last session(s) and charges those pairs through ``prescreen.admit``, deduping
+    the real window-open sweep out of exactly them. Nothing is lost by waiting: no sweep has run yet,
+    so there is nothing to redo."""
+    last_sweep = _sweep_state()
+    clock = _clock_at(_IN_WINDOW)
+    sweeps = _Sweeps(clock, last_sweep)
+    state: dict = {"fired": None}
+    ready = {"engine": False}               # the boot contract's own flag, seen through the closure
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, state, last_sweep,
+                                 ready=lambda: ready["engine"])
+
+    assert sweeps.calls == []
+    assert state["fired"] is None          # the minute is NOT claimed — a later lift may still sweep
+    skips = [r for r in caplog.records if r.getMessage() == "freeze_lift_sweep_skipped"]
+    assert [r.reason for r in skips] == ["boot_in_progress"]
+
+    # …and the SAME event once the boot has completed does sweep.
+    ready["engine"] = True
+    await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, state, last_sweep,
+                             ready=lambda: ready["engine"])
+    assert sweeps.calls == ["freeze_lift"]
+
+    # The flag the composition root feeds it is the boot contract's own, and it is raised only AFTER
+    # the boot's last blocking step (seed_boot_snapshots) — the subscriber is armed long before that.
+    src = inspect.getsource(opsmain.run)
+    assert 'ready=lambda: bool(boot_state["engine_ready"])' in src
+    assert src.index("await seed_boot_snapshots(") \
+        < src.index('boot_state["engine_ready"] = True')
+    assert src.index("bus.subscribe(TOPIC_RISK_STATE, _on_risk_state_sweep)") \
+        < src.index("await seed_boot_snapshots(")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (RiskState.NORMAL, RiskState.FROZEN),       # the freeze itself: nothing to re-publish
+        (RiskState.FROZEN, RiskState.CLOSE_ONLY),   # still no entries
+        (RiskState.FROZEN, RiskState.KILLED),
+        (RiskState.NORMAL, RiskState.NORMAL),       # not an edge
+    ],
+)
+async def test_freeze_lift_ignores_every_non_lift_transition(calendar, old, new) -> None:
+    last_sweep = _sweep_state()
+    clock = _clock_at(_IN_WINDOW)
+    sweeps = _Sweeps(clock, last_sweep)
+
+    await _freeze_lift_sweep(_lift(old, new), clock, calendar, _FakeMode(), sweeps,
+                             {"fired": None}, last_sweep, ready=lambda: True)
+
+    assert sweeps.calls == []
+
+
+@pytest.mark.parametrize(
+    ("when", "mode_kw"),
+    [
+        (datetime(2026, 6, 17, 8, 40, tzinfo=IST), {}),      # pre-open lift (the 08-31 shape)
+        (datetime(2026, 6, 17, 15, 40, tzinfo=IST), {}),     # after the close
+        (_WEEKEND_MIDDAY, {}),
+        (_IN_WINDOW, {"mode_": Mode.OFF}),
+    ],
+)
+async def test_freeze_lift_does_not_sweep_outside_the_window(calendar, when, mode_kw) -> None:
+    """A sweep out of the window spends unrefundable day slots on candidates the pipeline is
+    guaranteed to drop (the 2026-08-18 batch-window finding)."""
+    last_sweep = _sweep_state()
+    clock = _clock_at(when)
+    sweeps = _Sweeps(clock, last_sweep)
+
+    await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(**mode_kw), sweeps,
+                             {"fired": None}, last_sweep, ready=lambda: True)
+
+    assert sweeps.calls == []
+
+
+async def test_freeze_lift_debounces_the_minute_and_a_just_finished_sweep(calendar) -> None:
+    """A latch resolving several causes publishes one NORMAL transition per cause, and a lift can
+    land on the heels of the window-open sweep it interrupted."""
+    now = {"t": _IN_WINDOW}
+    clock = Clock(time_source=lambda: now["t"])
+    last_sweep = _sweep_state()
+    sweeps = _Sweeps(clock, last_sweep)
+    state: dict = {"fired": None}
+
+    async def lift() -> None:
+        await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, state, last_sweep,
+                                 ready=lambda: True)
+
+    await lift()
+    await lift()                                   # same minute -> one sweep
+    assert sweeps.calls == ["freeze_lift"]
+
+    now["t"] = _IN_WINDOW + timedelta(seconds=90)  # new minute, but the sweep just finished
+    await lift()
+    assert sweeps.calls == ["freeze_lift"]
+
+    now["t"] = _IN_WINDOW + timedelta(minutes=3)   # gap cleared -> a second lift may re-sweep
+    await lift()
+    assert sweeps.calls == ["freeze_lift", "freeze_lift"]
+
+
+def test_freeze_lift_skip_reasons_are_named() -> None:
+    """The skip must be readable in the log — "nothing happened" is what made 09-04 take a day to
+    diagnose."""
+    assert _freeze_lift_skip_reason(_IN_WINDOW, (_IN_WINDOW.date(), 10, 5), _sweep_state()) == \
+        "already_swept_this_minute"
+    assert _freeze_lift_skip_reason(
+        _IN_WINDOW, None, _sweep_state(started_at=_IN_WINDOW - timedelta(seconds=5)), in_flight=True,
+    ) == "sweep_in_flight_pre_publication"    # it will publish under the state this lift established
+    # Lock held, no phase mark yet (between `acquire` and the first stamp): still pre-publication.
+    assert _freeze_lift_skip_reason(_IN_WINDOW, None, _sweep_state(), in_flight=True) \
+        == "sweep_in_flight_pre_publication"
+    # A sweep that has ALREADY published — into the freeze this lift just cleared — is the one to
+    # redo, running or not: it is why the lift exists.
+    assert _freeze_lift_skip_reason(
+        _IN_WINDOW, None,
+        _sweep_state(started_at=_IN_WINDOW - timedelta(seconds=5),
+                     published_at=_IN_WINDOW - timedelta(seconds=1), frozen=True),
+        in_flight=True,
+    ) is None
+    # A sweep that DIED mid-flight leaves its start mark standing with no `done_at`; "running" is the
+    # LOCK, never an inference from the marks, so the stale mark cannot latch the lift shut (the
+    # 2026-09-01 set-without-clear lesson, 2026-09-12 review).
+    assert _freeze_lift_skip_reason(
+        _IN_WINDOW, None,
+        _sweep_state(started_at=_IN_WINDOW - timedelta(minutes=30)), in_flight=False,
+    ) is None
+    assert _freeze_lift_skip_reason(_IN_WINDOW, None, _finished(_IN_WINDOW - timedelta(seconds=119))) \
+        == "sweep_finished_under_2min_ago"
+    assert _freeze_lift_skip_reason(_IN_WINDOW, None, _finished(_IN_WINDOW - timedelta(minutes=2))) \
+        is None
+    # Yesterday's last sweep and yesterday's fired-minute never suppress today's first lift.
+    assert _freeze_lift_skip_reason(_IN_WINDOW, (date(2026, 6, 16), 10, 5), _sweep_state()) is None
+    assert _freeze_lift_skip_reason(_IN_WINDOW, None, _finished(_IN_WINDOW - timedelta(days=1))) \
+        is None
+
+
+async def test_a_lift_seconds_after_a_frozen_sweep_still_re_sweeps(calendar) -> None:
+    """THE boot shape: the window-edge tick and the warm-up refresh both ride 60 s timers armed at
+    the same boot, so the window_open sweep that published into the freeze and the lift that clears
+    it land inside the same two minutes. Debouncing against that sweep would re-lose the day."""
+    now = {"t": _IN_WINDOW}
+    clock = Clock(time_source=lambda: now["t"])
+    last_sweep = _sweep_state()
+    frozen_sweep = _Sweeps(clock, last_sweep, frozen=True)
+
+    await frozen_sweep("window_open")                      # published into the freeze -> re-armed
+    now["t"] = _IN_WINDOW + timedelta(seconds=20)
+    sweeps = _Sweeps(clock, last_sweep)
+    await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, {"fired": None},
+                             last_sweep, ready=lambda: True)
+
+    assert sweeps.calls == ["freeze_lift"]
+    # …and the same gap after a sweep that published while NORMAL is a plain no-op.
+    assert _freeze_lift_skip_reason(
+        _IN_WINDOW + timedelta(seconds=20), None, _finished(_IN_WINDOW),
+    ) == "sweep_finished_under_2min_ago"
+
+
+async def test_freeze_lift_survives_a_failing_sweep(calendar, caplog) -> None:
+    """A sweep failure must never break the risk-state fan-out (the other subscribers are the owner's
+    alert and the dashboard relay)."""
+    last_sweep = _sweep_state()
+    clock = _clock_at(_IN_WINDOW)
+    sweeps = _Sweeps(clock, last_sweep, raises=True)
+    state: dict = {"fired": None}
+
+    with caplog.at_level(logging.ERROR, logger="engine.ops.main"):
+        await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, state, last_sweep,
+                                 ready=lambda: True)
+
+    assert sweeps.calls == ["freeze_lift"]
+    assert state["fired"] is not None                    # claimed: no same-minute retry storm
+    assert "freeze_lift_sweep_failed" in caplog.text
+
+
+async def test_a_sweep_that_raises_does_not_latch_the_lift_shut(calendar) -> None:
+    """2026-09-12 review: the in-flight test is the single-flight LOCK, which `async with` releases
+    on every exit path. A sweep that raised stamped `started_at` and never `done_at`; deriving
+    "running" from those marks would have read the lift as in-flight for a whole grace period."""
+    lock = asyncio.Lock()
+    last_sweep = _sweep_state()
+    now = {"t": _IN_WINDOW}
+    clock = Clock(time_source=lambda: now["t"])
+
+    async def dying_sweep(trigger: str) -> str:
+        last_sweep["started_at"] = clock.now()           # phase mark 1, then death: no done_at
+        raise RuntimeError("duckdb stall")
+
+    with pytest.raises(RuntimeError):
+        await _single_flight_sweep(lock, dying_sweep, "window_open")
+    assert not lock.locked()
+
+    now["t"] = _IN_WINDOW + timedelta(minutes=3)         # past the minute + 2-minute debounces
+    sweeps = _Sweeps(clock, last_sweep)
+    await _freeze_lift_sweep(_lift(), clock, calendar, _FakeMode(), sweeps, {"fired": None},
+                             last_sweep, ready=lambda: True, in_flight=lock.locked)
+    assert sweeps.calls == ["freeze_lift"]               # the stale start mark did not latch it
+
+
+class _FakeHi52Store:
+    """The two ``MarketStore`` reads the hi52 leg makes. Frames come back EMPTY: what is under test
+    here is the trigger BRANCH — hi52's own rule has its own tests (tests/unit/test_scanners.py)."""
+
+    def __init__(self) -> None:
+        self.frames: list[tuple[str, date, date]] = []
+        self.corp_actions: list[tuple[date, date]] = []
+
+    def get_corp_actions(self, *, ex_from: date, ex_to: date) -> list:
+        self.corp_actions.append((ex_from, ex_to))
+        return []
+
+    def get_bars_1d_frame(self, symbol: str, start: date, end: date) -> list:
+        self.frames.append((symbol, start, end))
+        return []
+
+
+class _RecordingPrescreen:
+    """Records the hi52 leg's OWN ``prescreen.admit`` — the sweep's SECOND admit call, the one that
+    lets shadow candidates take leftover day-cap capacity only."""
+
+    def __init__(self) -> None:
+        self.admits: list[tuple[list, date, bool]] = []
+
+    def admit(self, candidates, today: date, *, in_window: bool) -> list:
+        self.admits.append((list(candidates), today, in_window))
+        return []
+
+
+def _hi52_branch(trigger: str, *, in_window: bool = True) -> tuple:
+    """Everything the hi52 leg does, observably: what it admitted, which histories it read, which
+    corp-action window it asked for, and the second admit's arguments."""
+    store, prescreen = _FakeHi52Store(), _RecordingPrescreen()
+    admitted = _hi52_shadow_leg(
+        store, prescreen, object(), trigger=trigger, eligible=["RELIANCE", "TCS"],
+        today=_IN_WINDOW.date(), yesterday=_IN_WINDOW.date() - timedelta(days=1),
+        ex_map={}, in_window=in_window,
+    )
+    return admitted, store.frames, store.corp_actions, prescreen.admits
+
+
+def test_freeze_lift_takes_every_window_open_branch() -> None:
+    """``freeze_lift`` IS the window_open sweep, re-run because a freeze swallowed the first one, so
+    the hi52 leftover-capacity second admit — the ONLY trigger-keyed branch — must fire for it too.
+    Asserted on the admit itself (2026-09-11 review: a source pin passes for any new branch spelled a
+    different way)."""
+    window_open = _hi52_branch("window_open")
+    assert _hi52_branch("freeze_lift") == window_open     # byte-for-byte the same work
+    _, frames, corp_actions, admits = window_open
+    assert admits == [([], _IN_WINDOW.date(), True)]      # the SECOND admit ran, carrying the window
+    assert [f[0] for f in frames] == ["RELIANCE", "TCS"]  # over the ELIGIBLE set (2026-09-09)
+    assert corp_actions == [(_IN_WINDOW.date() - timedelta(days=400),
+                             _IN_WINDOW.date() - timedelta(days=1))]
+    # /scan_now stays cheap: no second admit, no ~480×400-session history read.
+    assert _hi52_branch("scan_now") == ([], [], [], [])
+    # The window verdict is CARRIED into the admit, never re-derived inside the leg.
+    assert _hi52_branch("freeze_lift", in_window=False)[3] == [([], _IN_WINDOW.date(), False)]
+
+    assert _FULL_SWEEP_TRIGGERS == {"window_open", "freeze_lift"}
+    assert "scan_now" not in _FULL_SWEEP_TRIGGERS        # the owner's cadence stays cheap
+    # …and no OTHER branch may key on the trigger. Any new comparison inside run() — `== "window_open"`,
+    # `!= "freeze_lift"`, a dict dispatch spelled `in (...)` — fails this, which is the drift the work
+    # order asked to be made impossible.
+    src = inspect.getsource(opsmain.run)
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert re.findall(r"\btrigger\s*(?:[!=]=|(?:not )?in\b)\s*\S+", code) == \
+        ['trigger != "scan_now":']
+    assert not re.search(r"\btrigger\s*\.", code)        # …nor a `trigger.startswith(...)` dispatch
+    # Both fire sites resolve the SAME predicate, and the lift is actually subscribed.
+    assert "active = _sweep_window_active(clock.now(), calendar, mode)" in src
+    assert "bus.subscribe(TOPIC_RISK_STATE, _on_risk_state_sweep)" in src
+    assert 'await sweep("freeze_lift")' in inspect.getsource(_freeze_lift_sweep)
+    # The debounce qualifier is fed from the real publication-time risk state, not a constant.
+    assert "_published_frozen = mode.risk_state() != RiskState.NORMAL" in src
+    assert "frozen=_published_frozen" in src
+
+
+async def test_a_second_trigger_is_skipped_while_a_sweep_is_in_flight(caplog) -> None:
+    """Single-flight (2026-09-11 review): the window edge and the warm-up refresh ride 60 s timers
+    armed by the same scheduler.start(), so a lift and the sweep it interrupts fire in the same tick.
+    A sweep is two passes over the eligible universe's daily history, each taking MarketStore._lock —
+    two at once is the WO-25c contention profile that wedged an 11-hour boot."""
+    lock = asyncio.Lock()
+    running, release = asyncio.Event(), asyncio.Event()
+    calls: list[str] = []
+
+    async def body(trigger: str) -> str:
+        calls.append(trigger)
+        running.set()
+        await release.wait()
+        return f"{trigger} body"
+
+    first = asyncio.create_task(_single_flight_sweep(lock, body, "window_open"))
+    await running.wait()
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        assert await _single_flight_sweep(lock, body, "scan_now") == _SWEEP_IN_FLIGHT_REPLY
+    assert calls == ["window_open"]                       # the body never ran a second time
+    skipped = [r for r in caplog.records if r.getMessage() == "scan_sweep_skipped_in_flight"]
+    assert [r.trigger for r in skipped] == ["scan_now"]
+
+    release.set()
+    assert await first == "window_open body"
+    # …and the guard is released, not latched: the next trigger runs normally.
+    assert await _single_flight_sweep(lock, body, "window_open") == "window_open body"
+    assert calls == ["window_open", "window_open"]
+
+
+async def test_the_freeze_lift_queues_behind_an_in_flight_sweep_instead_of_being_dropped(
+    caplog,
+) -> None:
+    """The lift is the day's ONLY re-publication of the batch legs, and a sweep that is still running
+    can already have published its whole batch INTO the freeze this lift just cleared. Dropping it
+    there would re-lose the day; `_freeze_lift_skip_reason` has already skipped the in-flight case
+    where nothing is lost (the running sweep has not published yet)."""
+    lock = asyncio.Lock()
+    running, release = asyncio.Event(), asyncio.Event()
+    calls: list[str] = []
+
+    async def body(trigger: str) -> str:
+        calls.append(trigger)
+        running.set()
+        await release.wait()
+        return f"{trigger} body"
+
+    first = asyncio.create_task(_single_flight_sweep(lock, body, "window_open"))
+    await running.wait()
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        queued = asyncio.create_task(_single_flight_sweep(lock, body, "freeze_lift", queue=True))
+        await asyncio.sleep(0)                            # a chance to run, which it must not take
+    assert calls == ["window_open"]                       # waiting, NOT dropped and NOT concurrent
+    # …and the wait is NAMED: a lift that silently sat out a slow sweep is unreadable in the log.
+    waits = [r for r in caplog.records if r.getMessage() == "scan_sweep_queued_behind_in_flight"]
+    assert [r.trigger for r in waits] == ["freeze_lift"]
+    assert not [r for r in caplog.records if r.getMessage() == "scan_sweep_skipped_in_flight"]
+
+    release.set()
+    assert await first == "window_open body"
+    assert await queued == "freeze_lift body"
+    assert calls == ["window_open", "freeze_lift"]        # sequential, never overlapping
+
+
+def test_every_sweep_trigger_goes_through_the_single_flight_entry_point() -> None:
+    """One lock, one entry point: the window edge, the owner's /scan_now and the lift all resolve it,
+    and the lift is the only one that waits instead of being skipped."""
+    src = inspect.getsource(opsmain.run)
+    assert "_sweep_lock = asyncio.Lock()" in src
+    assert "return await _single_flight_sweep(_sweep_lock, _scan_sweep, trigger," in src
+    assert "queue=queue_behind_in_flight)" in src
+    assert "return await run_scan_sweep(trigger, queue_behind_in_flight=True)" in src
+    assert src.count("queue_behind_in_flight=True") == 1          # ONLY the lift queues
+    # The lift's in-flight test is the lock itself, never the phase marks (2026-09-12 review).
+    assert "in_flight=_sweep_lock.locked" in src
+    assert 'await run_scan_sweep("window_open")' in src           # window edge: plain skip…
+    # …but the once-per-day edge is GIVEN BACK when the skip happens, so the next 60 s tick re-fires
+    # it. An owner /scan_now in flight is not a substitute: it skips the once-per-session hi52 leg.
+    assert 'if await run_scan_sweep("window_open") == _SWEEP_IN_FLIGHT_REPLY:' in src
+    assert '_window_active["was"] = False' in src
+    assert "telegram.set_scan_sweep_fn(run_scan_sweep)" in src    # /scan_now: plain skip
+    assert "_lift_scan_sweep, _freeze_lift" in src                # the lift gets the queueing call
+
+
+def test_ticker_tokens_carry_todays_batch_symbols_until_the_day_rolls() -> None:
+    """The §7.1 gate's only price source is the tick cache, and brk20/hi52/ins/cat originate over the
+    ELIGIBLE set — 27 of 84 brk20 slots and 1 of 16 hi52 slots reached the gate with ltp=None and
+    failed closed (2026-09-11). Exercises the PRODUCTION composition (`ticker_tokens` delegates to it
+    verbatim), roll included, rather than re-assembling the same list here."""
+    tokens = {"RELIANCE": 1, "TCS": 2, "BPCL": 3, "NIFTY 50": 99, "INDIA VIX": 98}
+    state: dict = {"day": None, "symbols": set()}
+    day = date(2026, 6, 17)
+
+    def subscription(today: date) -> list[int]:
+        return _ticker_tokens(watchlist=["RELIANCE", "TCS"], held=["RELIANCE"], batch_state=state,
+                              today=today, token_for_symbol=tokens.get)
+
+    assert subscription(day) == [1, 2, 99, 98]           # nothing admitted yet: watchlist + index/VIX
+    _roll_batch_ticks(state, day).update(["BPCL", "RELIANCE", "DELISTED"])   # DELISTED: no token
+    # BPCL joins; RELIANCE (watchlist AND held AND batch) is not duplicated; an untokened symbol drops.
+    assert subscription(day) == [1, 2, 3, 99, 98]
+    # Day rolls: yesterday's admissions are not today's universe. The roll lives INSIDE the function
+    # under test, so losing it fails here instead of growing the subscription every session.
+    assert subscription(day + timedelta(days=1)) == [1, 2, 99, 98]
+    assert state["symbols"] == set()
+
+
+def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set() -> None:
+    """CONSTRAINT: ``warmup_gate.set_symbols`` stays on ``watchlist_symbols()``. A batch symbol in the
+    warm-up coverage set means one missing bar on a name nobody trades FREEZES entries — the exact
+    failure this work order exists to stop."""
+    src = inspect.getsource(opsmain.run)
+    assert src.count("set_symbols(") == 1
+    assert "warmup_gate.set_symbols(watchlist_symbols())" in src
+    assert "symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL" in src   # WarmupGate at boot
+    # …while the FEED does carry them, after watchlist + held, on every sweep.
+    assert "watchlist=watchlist_symbols(), held=held_symbols(), batch_state=_batch_ticks," in src
+    assert "today=clock.today(), token_for_symbol=instruments.token_for_symbol," in src
+    assert src.count("await ticker.update_subscriptions(ticker_tokens())") == 2  # job_universe + sweep
+
+
+# --- the `ins` leg's once-only bound: the one batch leg a re-sweep cannot re-derive -------------
+def _seed_ins_pending(conn, today: date, symbol: str = "RELIANCE") -> None:
+    conn.execute(
+        "INSERT INTO ins_pending (for_session, symbol, crossing_session, trailing_value, "
+        "contributing_filings_n, reference_close, consumed, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+        (today.isoformat(), symbol, (today - timedelta(days=1)).isoformat(), "25000000",
+         3, "1200.00", today.isoformat()),
+    )
+
+
+def _sweep_ins_once(conn, today: date, *, in_window: bool, published_frozen: bool) -> list:
+    """One sweep's `ins` leg, in the production order: READ in the worker, DECIDE at publication."""
+    rows = _read_ins_pending(conn, today)
+    candidates = ins.sweep_crossings(rows)
+    _consume_ins_pending(
+        conn, today,
+        _ins_rows_to_consume([c.symbol for c in rows], in_window=in_window,
+                             published_frozen=published_frozen),
+        now=datetime(today.year, today.month, today.day, 10, 5, tzinfo=IST),
+    )
+    return candidates
+
+
+def test_a_sweep_that_publishes_into_a_freeze_leaves_the_crossings_pending(conn) -> None:
+    """The 09-04 shape: the window_open sweep published its batch INTO a boot warm-up freeze, the
+    pipeline re-armed every pair — and for brk20/hi52/cat the freeze-lift re-sweep re-derives them
+    from stored bars. `ins` cannot: the EOD job decided the event and the row's consumed flag is
+    PERSISTED, so consuming it under a freeze loses the day's crossing for good. insider_net_buy is
+    the only cost-clearing edge in the stack."""
+    today = date(2026, 6, 17)
+    _seed_ins_pending(conn, today)
+
+    # Sweep 1 — published into a standing freeze: the candidate is re-armed, so nothing is consumed.
+    assert [c.symbol for c in _sweep_ins_once(conn, today, in_window=True, published_frozen=True)] \
+        == ["RELIANCE"]
+    assert [c.symbol for c in _read_ins_pending(conn, today)] == ["RELIANCE"]
+
+    # Sweep 2 — the freeze-lift re-sweep: the SAME crossing originates again, now under NORMAL, and
+    # THIS publication is the evaluation, so the row is consumed.
+    assert [c.symbol for c in _sweep_ins_once(conn, today, in_window=True, published_frozen=False)] \
+        == ["RELIANCE"]
+    assert _read_ins_pending(conn, today) == []
+
+    # Sweep 3 — a later in-window sweep re-offers nothing: the bound is once-only and restart-safe.
+    assert _sweep_ins_once(conn, today, in_window=True, published_frozen=False) == []
+    row = conn.execute(
+        "SELECT consumed, consumed_at FROM ins_pending WHERE for_session = ? AND symbol = ?",
+        (today.isoformat(), "RELIANCE"),
+    ).fetchone()
+    assert row["consumed"] == 1 and row["consumed_at"] is not None   # audit trail, never deleted
+
+
+def test_an_out_of_window_sweep_also_leaves_the_crossings_pending(conn) -> None:
+    """The 2026-08-18 carve-out this extends: a WINDOW refusal is not an evaluation either, so an
+    out-of-window /scan_now must leave the day's crossings for the next in-window sweep."""
+    today = date(2026, 6, 17)
+    _seed_ins_pending(conn, today)
+    _sweep_ins_once(conn, today, in_window=False, published_frozen=False)
+    assert [c.symbol for c in _read_ins_pending(conn, today)] == ["RELIANCE"]
+
+
+@pytest.mark.parametrize(
+    ("in_window", "published_frozen", "expected"),
+    [
+        (True, False, ["AAA", "BBB"]),   # evaluated: consume EVERY row read, admitted or suppressed
+        (True, True, []),                # published into a freeze: re-armed, nothing was decided
+        (False, False, []),              # window refusal: never evaluated (2026-08-18)
+        (False, True, []),
+    ],
+)
+def test_ins_rows_are_consumed_only_when_the_publication_could_be_evaluated(
+    in_window: bool, published_frozen: bool, expected: list[str],
+) -> None:
+    assert _ins_rows_to_consume(["AAA", "BBB"], in_window=in_window,
+                                published_frozen=published_frozen) == expected
+
+
+def test_the_sweep_decides_the_ins_consume_at_publication_from_the_real_risk_state() -> None:
+    """ONE read of the risk state serves both the freeze-lift debounce and the consume decision — if
+    they disagreed, a sweep could be debounced away as "already done" after destroying the rows it
+    was meant to re-publish."""
+    src = inspect.getsource(opsmain.run)
+    assert "_published_frozen = mode.risk_state() != RiskState.NORMAL" in src
+    assert src.count("_published_frozen = ") == 1        # ONE read of the state…
+    assert "frozen=_published_frozen" in src             # …consumed by the freeze-lift debounce…
+    assert "published_frozen=_published_frozen)" in src  # …and by the consume decision
+    assert "_ins_rows_to_consume(ins_read, in_window=batch_in_window," in src

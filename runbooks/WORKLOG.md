@@ -1,5 +1,61 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-11/12 (owner: verify the external drought audit → "Proceed with the suggested changes"; weekly quota governor) — recommendation-drought tranche
+
+- **Verification of the 2026-09-10 external diagnostic** (`runbooks/audit_verification_2026-09-11.md`,
+  refutation workflow `wf_0dbf2a35-c61`, 10 refuters + critic): the audit's counts held (71 recs = 68
+  repeat exits + 3 entries; 0 intraday ever), its causes were mostly overstated or stale (band sole
+  cause 3/15 brk20; sizing sole cause 1/23; sentiment rail fixed 09-04; the 97.4% no_action framing
+  counted heartbeats and position calls; prompt/confidence remedies rejected). What it missed and we
+  measured: the governor's DG1 per-agent trip (news_analyst $79.23 of a monthly $80) cut the forward
+  cap 48→4 on 09-10 for the rest of the month; exit outputs failed schema on 100% of first attempts
+  since 09-03 (`reason` free-text on the wire vs the five-code Literal); batch legs re-armed into
+  boot-time freezes were never re-published (08-28, 08-31, 09-04 lost whole); the forward queue died
+  with every owner restart (~70 candidates); ins is fed by a 22-issuer BSE feed; orb took 44% of
+  forwards for 0 enters; rsi2 is regime-gated since 08-28 (NIFTY 50 < 50-DMA). Reviewer rebuttal
+  re-derived: rsi2's "80% CPCV" is the July report superseded 08-14; shorts are not disabled (orb
+  emits SELL; §1.4.9 gates AUTO); intraday mean reversion was tested (WO-10b, aborted).
+- **Owner 2026-09-12: the SDK bills the subscription's WEEKLY quota, reset Thursday 14:00 IST** —
+  governor re-keyed on that window (below); monthly framing retired.
+- **Build (engine stopped 00:53 Sat, weekend idle; workflow `wf_2d635b12-214`, 25 agents, then
+  `wf_9eb3af02-0c6` after the session limit killed three fixers and the D2 builder at ~01:47):**
+  WO-A weekly governor (window key = start-Thursday date, spend by `budget_ledger.at` range + index
+  0012, half-session boundary Thursdays, UNMEASURABLE pace = None skips the pace rungs, DG1 on pace
+  only, per-agent >85% degrades that agent alone, degraded cap 0.67×base, DG4 latch per window;
+  /budget API + Telegram + BudgetPanel + g2_evidence on the window; plan §5.6/§11.2/T6). WO-B
+  `exit_reason` enum on the wire + sanitizer mapping + codes named in the position-event context.
+  WO-C freeze-lift sweep (engine_ready gate, single-flight lock, lift queues behind an in-flight
+  sweep, ins consumed only under NORMAL) + admitted batch symbols in the ticker set. WO-D1 forward
+  queue: orphan re-arm on boot roll, window-close flush per window END, cap refund memoed per
+  candidate, front entries re-armed, MIN_RANK_POPULATION 3, brk20 band screen deferring (ltp_fn).
+  WO-D2 exit hygiene: `holdings_observations` (0013), two-session missing predicate with
+  `require_zero`, position-event screens (sold-outside-ledger; one exit per session), day-plan
+  "sold outside the ledger" block. WO-E orb parked (`orb: 0` = admit nothing), `ins_feed_coverage_low`,
+  `rsi2_regime_blocked`. Every WO: two adversarial reviews + one fix round.
+- **Taken inline (Fable, revision-gate escalations):** nightly funnel keeps a row for a strategy that
+  fired but never published (E's second miss); the lift's in-flight test is `_sweep_lock.locked`,
+  never a phase-mark inference with a grace latch (C's second miss — a raising sweep never stamps
+  `done_at`); brk20 report wording: the matched "price effect" cell is price-AND-timing for fills at
+  delay ≥ 2 (R1's second miss; artifacts regenerated, decision unchanged); Kite `collateral_quantity`
+  counts as held (D2's second miss — a fully pledged position read held 0 and would have silenced its
+  own exits); gate excludes positions the broker shows empty on two sessions from the position/sector
+  counts via `missing_holdings_fn` (D2's accepted gap: no exit rec ⇒ aged out of `_exiting_symbols`
+  ⇒ re-took a slot). Dashboard dist rebuilt after A's re-review.
+- **Research (evidence only):** R1 `scripts/backtest_brk20.py` (pre-registered): V1 next-open dead at
+  T+5/T+10, +0.63% at T+20; V2-5 limit-at-level 59% fill, T+10 +0.05%, T+20 +0.92%, wins the
+  registered rule; matched cohorts show mostly selection. R2 trend at `--margin-floor-days 120`:
+  passes the cap floor (3.9×) but 1.07× at the realized median hold (33 sessions) and FAILS (0.72×)
+  in the 2024→2026-09 cell; three sweep-mechanics biases (close-only daily stops, uncharged stop
+  slippage, open trades in expectancy) pre-registered as a follow-up WO. Not promotion candidates.
+- **Verification:** per-WO suites green after fixes; full unit suite on the settled tree **2831 passed,
+  4 warnings, 6m08s** (an earlier run showed 22 failures in the wiring module that were my own
+  mid-run edits to main.py landing under it — the module passed 219/219 in isolation and the clean
+  re-run was green). ruff: only
+  pre-existing findings remain (app.py ×4, g2_evidence B007, two B905 and one F401 at HEAD).
+- **Config applied on this restart:** agents.yaml weekly credit $200 (intraday 90 / news 90 /
+  preopen 8 / nightly 5 / researcher 2 / reserve 5; ~2× the peak week of 09-03) + quota_window;
+  settings.yaml `orb: 0`. Migrations 0012/0013 apply at boot.
+
 ## 2026-09-10 (owner: "work on the tasks that are doable right now, with proper validation … the end goal of this service") — Phase 3 foundation tranche
 
 - **Decomposition recorded** in the plan §8.4 (2026-09-10 addendum): WO-P3-1 OMS core, WO-P3-2

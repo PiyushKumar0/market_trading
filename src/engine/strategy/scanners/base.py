@@ -2,7 +2,12 @@
 
 A ``Scanner`` is a PURE function of ``(bar, ScanContext, params)``: no Clock, no I/O, no mutable
 state — same inputs ⇒ same candidates (§9.6 determinism, modulo the platform-minted ``signal_id``
-ULID). Anything a scanner needs beyond the bar arrives via :class:`~engine.strategy.types.ScanContext`
+ULID). ONE carve-out (2026-09-12): LOG-ONLY state that cannot reach the returned candidates — a
+once-per-session latch so a shut filter says so without one line per bar per symbol. It must be
+keyed on ``bar.ts_minute.date()``, never a Clock, so a replay logs once per replayed session too;
+:attr:`~engine.strategy.scanners.rsi2.Rsi2Scanner._regime_logged_on` is the pattern to copy. State
+that a ``scan``/``pending`` RESULT depends on is still forbidden outright.
+Anything a scanner needs beyond the bar arrives via :class:`~engine.strategy.types.ScanContext`
 (assembled by the pre-screen's context provider); missing/thin context means FAIL TO ZERO (return
 ``[]``), never raise — thin data is a warm-up condition (§7.1 ``warmup_ready``), not an error.
 

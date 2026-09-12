@@ -16,7 +16,7 @@ tests assert behaviour against the shipped table, never against numbers duplicat
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from itertools import product
 from pathlib import Path
@@ -1229,6 +1229,46 @@ def test_exiting_positions_do_not_occupy_position_or_sector_slots() -> None:
     assert (total, mis, cnc) == (2, 1, 1)
     assert sectors == {"FINANCIAL_SERVICES": 0, "METAL": 1, "ENERGY": 1}
 
+
+def test_positions_the_broker_no_longer_holds_are_excluded_from_the_counts() -> None:
+    """WO-D2 (2026-09-12): a position the holdings journal shows EMPTY on two consecutive sessions
+    gets no further exit recommendations (the position-event screen is quiet on it), so it would
+    age out of ``_exiting_symbols``'s 3-day window and re-take a slot — the O16 shape with the sign
+    reversed. It is excluded on the journal itself. Scope is the same as EXITING: counts only; the
+    symbol still blocks a fresh BUY on itself and deployed cash is untouched."""
+    positions = [
+        {"position_id": "pos-gone", "symbol": "HDFCAMC", "product": "CNC"},
+        {"position_id": "pos-live", "symbol": "HINDZINC", "product": "CNC"},
+        {"position_id": "pos-mis", "symbol": "RELIANCE", "product": "MIS"},
+    ]
+    assert gate_module._gone_symbols(positions, set()) == frozenset()
+    assert gate_module._gone_symbols(positions, {"pos-gone", "not-a-position"}) == frozenset({"HDFCAMC"})
+
+    # Union with the exiting set is what build() does: a gone position and a recently-exited one
+    # both leave the counts; the live position keeps its slot.
+    exiting = frozenset({"RELIANCE"}) | gate_module._gone_symbols(positions, {"pos-gone"})
+    sector_of = {"HDFCAMC": "FINANCIAL_SERVICES", "HINDZINC": "METAL", "RELIANCE": "ENERGY"}
+    total, mis, cnc, sectors = gate_module._active_counts(
+        positions, exiting, sector_of, total=3, mis=1, cnc=2,
+        sector_counts={"FINANCIAL_SERVICES": 1, "METAL": 1, "ENERGY": 1},
+    )
+    assert (total, mis, cnc) == (1, 0, 1)
+    assert sectors == {"FINANCIAL_SERVICES": 0, "METAL": 1, "ENERGY": 0}
+
+
+def test_a_failing_holdings_journal_read_excludes_nothing() -> None:
+    """The seam fails CLOSED for a count: a journal error must never widen a cap."""
+    from engine.risk.gate import GateContextBuilder
+
+    builder = GateContextBuilder.__new__(GateContextBuilder)
+    builder._missing_holdings_fn = None
+    assert builder._missing_holdings() == ()
+
+    def boom(_d):
+        raise RuntimeError("journal unreadable")
+    builder._missing_holdings_fn = boom
+    builder._clock = type("C", (), {"today": staticmethod(lambda: date(2026, 9, 12))})()
+    assert builder._missing_holdings() == ()
 
 
 def test_max_open_positions_ledger_names_the_exiting_exclusion(gate: RiskGate) -> None:

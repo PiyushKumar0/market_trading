@@ -30,7 +30,10 @@ Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-
   ``unavailable`` only when the universe build never ran for ``d`` (zero rows at all); an empty
   EXCLUSION set with rows present is a real "no changes today" zero.
 - **open positions** — the ``positions`` table, ``state='OPEN'``. Zero open positions is routine
-  platform state, not an outage: renders "none", never "unavailable".
+  platform state, not an outage: renders "none", never "unavailable". Since WO-D2 a position the
+  §3.6 holdings journal has seen UNHELD on two consecutive observation days is excluded from this
+  line and rendered in its own "SOLD OUTSIDE THE LEDGER" block instead — the plan must not reason
+  about the overnight risk of a position the owner already sold (eleven plans did, 08-26 → 09-11).
 - **yesterday_review_summary** — latest ``nightly_reviews.payload["summary"]``, else "none" (the
   nightly reviewer is a later Phase-2 wave; an empty table is the normal state today).
 
@@ -62,6 +65,13 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
 from engine.marketdata.store import MarketStore
+from engine.ops.holdings_reconcile import (
+    MISSING_SESSIONS,
+    MissingHolding,
+    entry_rec_id,
+    missing_holdings_observations,
+    positions_missing_from_holdings,
+)
 from engine.ops.jobs import AdvisoryOutcome
 from engine.strategy.scanners import brk20
 
@@ -74,6 +84,28 @@ CALL_CLASS = "schedule"
 _UNAVAILABLE = "unavailable"
 MOVERS_TOP_N = 10
 SECTOR_TOP_N = 5
+
+#: Heading for the WO-D2 "sold outside the ledger" block. The whole positions summary is rendered as
+#: ONE prompt item by the assembler, so this line is the only thing separating the two groups inside
+#: it — it must read as a header AND state that what follows is not the overnight book, because the
+#: failure it was written for is a planner folding those names back into its risk paragraph (eleven
+#: consecutive day plans did, 08-26 → 09-11).
+#:
+#: It says "contradict", not "holds none of these": this block uses the journal's WIDE predicate
+#: (``held < tracked``), so a partial exit the owner never reported lands here too, and each line
+#: states the quantity the broker actually showed. Claiming zero over a line that says 3 would be the
+#: same class of error in the other direction — which is also why the heading points the model at the
+#: per-line broker quantity as the real exposure rather than telling it these names carry none. "The
+#: tracked size is fiction" is true of every line here; "there is nothing there" is true only of the
+#: ones whose line says 0, and a plan that writes off three genuinely-held shares as no exposure is
+#: the same understatement of overnight risk this block exists to remove.
+_SOLD_OUTSIDE_HEADING = (
+    "SOLD OUTSIDE THE LEDGER - the broker's holdings CONTRADICT these tracked positions, so their "
+    "tracked size is fiction and they are deliberately excluded from the open positions and "
+    "overnight risk above. Never treat the tracked size as exposure: the only exposure that exists "
+    "on these names is the quantity the broker actually showed, stated on each line (usually zero). "
+    "The one action on them is to get them reported:"
+)
 
 _GAP_SCAN_LINE = (
     "not computed: no trustworthy pre-open price source (A14 - indicative pre-open prices are "
@@ -159,7 +191,7 @@ class PreopenPlannerJob:
             watchlist_lines=self._watchlist_lines(d),
             earnings_today=self._earnings_lines(d),
             surveillance_changes=self._surveillance_lines(d),
-            open_positions_summary=self._positions_summary(),
+            open_positions_summary=self._positions_summary(d),
             yesterday_review_summary=self._yesterday_review_summary(),
             platform_health=self._platform_health_line(d),
         )
@@ -342,18 +374,81 @@ class PreopenPlannerJob:
         return lines or ["none"]
 
     # ------------------------------------------------------------------ open positions + overnight risk
-    def _positions_summary(self) -> str:
-        """Open platform/recommended/external positions — whatever the ``positions`` table carries.
-        Zero open positions is routine, not an outage: "none", never "unavailable"."""
+    def _positions_summary(self, d: date) -> str:
+        """Open positions for the overnight-risk line, MINUS the ones the broker no longer holds.
+
+        Zero open positions is routine, not an outage: "none", never "unavailable".
+
+        WO-D2 (2026-09-12). Two positions the owner sold outside the ledger on 08-26 were still
+        rendered as open — and reasoned about as overnight risk — in eleven consecutive day plans.
+        A position with two consecutive short broker observations (§3.6 journal,
+        :func:`~engine.ops.holdings_reconcile.positions_missing_from_holdings`) is therefore pulled
+        OUT of this line and re-stated underneath it as its own block, naming the exact ``/closed``
+        reply that ends the ambiguity. The planner then reasons about the book the owner actually
+        holds, and the one thing it is asked to do about the others is get them reported.
+
+        Two reads of the same journal (the set, then the per-position streak/quantities the block
+        prints) on a job that runs once a day — the alternative is re-deriving the platform's
+        "missing" threshold here, where it would be free to drift away from the position-event path's.
+        An unreadable journal (a database that has not taken migration 0013 yet, a locked file)
+        degrades to the pre-WO-D2 rendering — every open position on the risk line — because the
+        planner may never raise (§2.7: its death must not block the scanner path).
+        """
         rows = self._conn.execute(
-            "SELECT symbol, side, qty, avg_entry, stop, product FROM positions WHERE state='OPEN'"
+            "SELECT position_id, symbol, side, qty, avg_entry, stop, product "
+            "FROM positions WHERE state='OPEN'"
         ).fetchall()
         if not rows:
             return "none"
-        return "; ".join(
+        try:
+            missing = positions_missing_from_holdings(self._conn, d)
+            observations = missing_holdings_observations(self._conn, d) if missing else {}
+        except sqlite3.Error as exc:
+            _log.warning("preopen_holdings_journal_unreadable", d=d.isoformat(),
+                         error_type=type(exc).__name__, error=str(exc)[:200])
+            missing, observations = set(), {}
+        held = [r for r in rows if str(r["position_id"]) not in missing]
+        sold = [r for r in rows if str(r["position_id"]) in missing]
+        summary = "; ".join(
             f"{r['symbol']} {r['side']} {r['qty']} @ {r['avg_entry']} "
             f"({r['product'] or '?'}, stop {r['stop']})"
-            for r in rows
+            for r in held
+        ) or "none"
+        if not sold:
+            return summary
+        # The assembler renders this whole string as ONE prompt item ("open positions and overnight
+        # risk: ...", intelligence/context.py). Without a heading of its own the sold block is just
+        # unlabelled continuation lines UNDER that label, and a planner reading it can fold them back
+        # into exactly the overnight-risk reasoning WO-D2 removes them from — the per-line marker
+        # alone was carrying the distinction. The heading is the separator, and it states the
+        # negative ("not open risk") before the model reaches the position lines.
+        return "\n".join(
+            [summary, _SOLD_OUTSIDE_HEADING, *(self._sold_outside_line(r, observations) for r in sold)]
+        )
+
+    def _sold_outside_line(self, row: Any, observations: Mapping[str, MissingHolding]) -> str:
+        """One "sold outside the ledger" line: what the platform tracks, what the broker showed, and
+        the literal reply that settles it — the same ``entry_rec_id`` the §3.6 alert names.
+
+        ``held_qty`` is the quantity the LATEST observation actually saw, not a hardcoded zero: a
+        partial exit reads short with a non-zero holding, and the plan must not assert a number the
+        journal never recorded. A position that is in the missing set but (impossibly, absent a
+        concurrent write between the two reads) has no observation falls back to the threshold that
+        put it there.
+        """
+        position_id = str(row["position_id"])
+        seen = observations.get(position_id)
+        sessions = seen.sessions if seen is not None else MISSING_SESSIONS
+        held_qty = seen.held_qty if seen is not None else 0
+        rec_id = entry_rec_id(self._conn, position_id)
+        reply = (
+            f"/closed {rec_id} <price>" if rec_id
+            else f"/closed <rec_id> <price> (no learning-ledger row for position {position_id})"
+        )
+        return (
+            f"{row['symbol']} {row['side']} {row['qty']} @ {row['avg_entry']} "
+            f"({row['product'] or '?'}) - SOLD OUTSIDE THE LEDGER (broker holdings show {held_qty} "
+            f"on {sessions} sessions): reply {reply}"
         )
 
     # ------------------------------------------------------------------ yesterday's review (§5.5)

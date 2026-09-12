@@ -28,7 +28,10 @@ from engine.learning.sweep import (  # noqa: E402
     REFERENCE_NOTIONAL_DEFAULT,
     SweepRunner,
     _Frames,
+    _hold_stats,
     _Signals,
+    _trade_hold_bars,
+    _trade_split_stats,
     build_param_grid,
 )
 from engine.learning.validate import ParamSet, ValidationPipeline  # noqa: E402
@@ -249,3 +252,112 @@ def test_sizing_uses_the_reference_notional_the_fee_is_calibrated_at():
     r_small = runner._portfolio(frames, _fill_signals(frames), fee).returns()[_SYM].to_numpy()
     r_big = big._portfolio(frames, _fill_signals(frames), fee).returns()[_SYM].to_numpy()
     assert np.allclose(r_small, r_big)
+
+
+# --------------------------------------------------------------- R2 holding period + open trades
+# 2026-09-12: the WO-3 margin floor's denominator is a HORIZON, and no sweep artifact recorded the
+# horizon a strategy was actually held for — so a floor spread over a 120-session §7.1 CAP could be
+# quoted as "3.9x headroom" while the median trade was held 33 sessions (1.07x). These pin the
+# measurement itself: bars between fill rows, NaN-safe stats, and the open/closed split of the same
+# trade records ``expectancy_pct`` is averaged over.
+
+
+def test_hold_bars_counts_rows_between_the_entry_and_exit_FILLS():
+    """The hold is exit ROW − entry ROW, so weekends/holidays the market never traded are not counted.
+
+    The WO-2 frame fills the entry on row ``_ENTRY_SIGNAL_ROW + 1`` and the exit on
+    ``_EXIT_SIGNAL_ROW + 1``; the hold is the distance between those two, not between the signals.
+    """
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    runner = SweepRunner(None, CostModel.from_config(), clock)
+    frames = _fill_frames()
+
+    trades = runner._portfolio(frames, _fill_signals(frames), 0.0).trades.records_readable
+    bars = _trade_hold_bars(trades, frames.close.index)
+
+    assert len(bars) == 1
+    assert bars[0] == float(_EXIT_SIGNAL_ROW - _ENTRY_SIGNAL_ROW) == 2.0
+    assert _hold_stats(bars) == (2.0, 2.0, 2.0)
+
+
+def test_an_open_trade_contributes_its_AGE_at_the_window_edge_not_a_realized_hold():
+    """A position still open at the last bar has NOT paid an exit leg — its duration is an age.
+
+    Reported all the same (the distribution the headline expectancy averages over includes it), but
+    reported BESIDE the closed-only figures so the two can never be confused.
+    """
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    runner = SweepRunner(None, CostModel.from_config(), clock)
+    frames = _fill_frames()
+    entries = pd.DataFrame(False, index=frames.close.index, columns=frames.close.columns)
+    entries.iloc[_ENTRY_SIGNAL_ROW, 0] = True
+    never_exits = pd.DataFrame(False, index=frames.close.index, columns=frames.close.columns)
+
+    trades = runner._portfolio(
+        frames, _Signals(entries=entries, exits=never_exits), 0.0
+    ).trades.records_readable
+
+    assert len(trades) == 1
+    assert trades["Status"].astype(str).str.lower().iloc[0] == "open"
+    bars = _trade_hold_bars(trades, frames.close.index)
+    # entry filled on row _ENTRY_SIGNAL_ROW + 1; the open trade is marked at the LAST row
+    assert bars[0] == float(len(_FILL_CLOSE) - 1 - (_ENTRY_SIGNAL_ROW + 1))
+
+
+def test_hold_stats_are_total_on_empty_and_nan_inputs():
+    """A reporting path must never be able to fail a validation run (§9.6 pure/total)."""
+    assert _hold_stats(np.zeros(0, dtype="float64")) == (None, None, None)
+    assert _hold_stats(np.array([np.nan, np.nan])) == (None, None, None)
+    assert _hold_stats(np.array([np.nan, 4.0, 10.0]))[:2] == (7.0, 7.0)
+
+
+def test_sweep_report_carries_the_holding_distribution_and_the_open_closed_split(store):
+    """Every scored config records its own holding distribution + open/closed split in the JSON."""
+    start, end = _seed_daily(store)
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    runner = SweepRunner(store, CostModel.from_config(), clock)
+
+    report = runner.run(
+        "mom", start, end, symbols=["AAA", "BBB"],
+        param_grid=[{"top_n": 1.0, "rebalance_days": 10.0}],
+    )
+
+    assert report.bar_unit == "session"                            # daily frames ⇒ bars ARE sessions
+    assert report.population_is_survivorship_tainted_proxy is True  # no PIT membership is stored
+    assert any("SURVIVORSHIP" in n for n in report.notes)
+    assert any("STOPS ARE EVALUATED ON THE CLOSE" in n for n in report.notes)
+    stat = report.stats[0]
+    assert stat.n_trades > 0
+    assert stat.n_closed + stat.n_open == stat.n_trades
+    assert stat.hold_bars_mean is not None and stat.hold_bars_mean >= 0.0
+    assert stat.hold_bars_median is not None
+    assert stat.hold_bars_p90 is not None
+    if stat.n_closed:
+        assert stat.expectancy_closed_pct is not None
+        assert stat.hold_bars_median_closed is not None
+    # the headline expectancy is UNCHANGED by any of this (it still averages ALL trades)
+    tr = runner._backtest("mom", runner._frames["mom"], dict(stat.params), runner._fee["mom"])
+    assert stat.expectancy_pct == pytest.approx(
+        float(tr.trades.records_readable["Return"].astype(float).mean() * 100.0)
+    )
+
+
+def test_hold_stats_degrade_instead_of_taking_the_sweep_down():
+    """A reporting-only read of vectorbt's column names must never fail a multi-minute sweep."""
+    idx = pd.bdate_range("2024-01-01", periods=4)
+    # a records_readable shape this code does not anticipate (no Status column)
+    trades = pd.DataFrame({"Return": [0.1], "Entry Timestamp": [idx[0]], "Exit Timestamp": [idx[2]]})
+    n_closed, n_open, exp_closed, hold_all, hold_closed = _trade_split_stats(
+        trades, trades["Return"], idx
+    )
+    assert (n_closed, n_open, exp_closed) == (0, 0, None)
+    assert hold_all == hold_closed == (None, None, None)
+
+    # a duplicated bar timestamp would make index.get_indexer raise
+    dup = pd.DatetimeIndex([idx[0], idx[0], idx[1], idx[2]])
+    ok = pd.DataFrame(
+        {"Return": [0.1], "Entry Timestamp": [idx[0]], "Exit Timestamp": [idx[2]],
+         "Status": ["Closed"]}
+    )
+    assert np.isnan(_trade_hold_bars(ok, dup)).all()
+    assert _hold_stats(_trade_hold_bars(ok, dup)) == (None, None, None)

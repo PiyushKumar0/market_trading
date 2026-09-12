@@ -55,3 +55,11 @@ def test_sweep_message_nothing_to_trade_is_explicit():
     msg = scan_sweep(trigger="scan_now", live=[], pending=[], suppressed_today=0)
     assert "Nothing to trade right now" in msg.body
     assert msg.title == "Scan sweep: nothing to trade right now"
+
+
+def test_freeze_lift_trigger_is_carried_in_the_audit_data():
+    """The 2026-09-11 freeze-lift re-sweep: the owner sees the same message for a re-sweep as for the
+    window-open sweep it replaces, and ``data.trigger`` is what tells the two apart after the fact."""
+    msg = scan_sweep(trigger="freeze_lift", live=LIVE, pending=[], suppressed_today=3)
+    assert msg.data["trigger"] == "freeze_lift"
+    assert "1 candidate(s) qualify" in msg.body

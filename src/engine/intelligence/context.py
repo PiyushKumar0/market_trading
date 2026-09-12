@@ -45,6 +45,7 @@ from engine.core.clock import IST, Clock
 from engine.core.log import get_logger
 from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
+from engine.intelligence.schemas import EXIT_REASON_CODES
 from engine.marketdata.store import MarketStore
 from engine.strategy import contracts
 from engine.strategy.indicators import vwap
@@ -233,6 +234,10 @@ class ContextAssembler:
         The restriction is enforced twice: stated here in the prompt so the model does not waste a
         call, and structurally downstream where an entry from this trigger is dropped (R3). Prompt
         text is not a control — it is the polite half of a rule the gate enforces regardless.
+
+        The exit codes are named here, in VOLATILE, and not in the byte-stable system prompt (D8):
+        they are per-call context for the one trigger that can emit an exit. Before 2026-09-11 they
+        appeared in no prompt at all, so 47 of 47 exits since 09-03 failed validation on attempt 1.
         """
         d = self._clock.today()
         parts = [
@@ -240,6 +245,9 @@ class ContextAssembler:
             "RULES FOR THIS CALL: this is a position event on an OPEN position. You may emit only an "
             "exit, a modify-stop, or no_action. A new entry is not a legal answer here and will be "
             "discarded.",
+            "EXIT CODES: an exit MUST carry exit_reason, exactly one of "
+            + ", ".join(EXIT_REASON_CODES)
+            + ". The code is the classification only; put the falsifiable reasoning in thesis.",
             f"position: {_json(dict(position_row))}",
             f"event: {event_kind}",
             f"detail: {detail}",

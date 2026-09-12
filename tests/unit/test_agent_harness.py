@@ -380,7 +380,7 @@ async def test_single_shot_ok_persists_call_and_meters_budget(defs, gov, clock, 
     assert ledger["agent_id"] == "intraday_analyst"
     assert ledger["model"] == "sonnet-4.6"
     assert (ledger["in_tokens"], ledger["out_tokens"], ledger["cache_read"]) == (1200, 300, 7000)
-    assert gov.month_spend() == gov.price("sonnet-4.6", result.usage)
+    assert gov.window_spend() == gov.price("sonnet-4.6", result.usage)
 
 
 async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov, clock, conn) -> None:

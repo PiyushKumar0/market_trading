@@ -689,11 +689,50 @@ async def test_budget_reports_spend_pace_tier_and_per_agent_split(clock, governo
 
     await bot._cmd_budget(_Update(msg), _Ctx())
     text = msg.sent[0]
-    assert "month spend: $2.5000" in text
-    assert "pro-rata to date:" in text and "tier: DG" in text
+    assert "window spend: $2.5000" in text
+    # The owner must be able to see WHICH quota week the figure covers (§5.6, 2026-09-12).
+    assert "window: 2026-06-11 14:00 → 2026-06-18 14:00 IST" in text
+    assert "pro-rata to date:" in text and "tier: DG" in text and "forward cap:" in text
     assert "per agent (spend / allocation):" in text
     assert "weekly_researcher: $2.5000 /" in text
     assert "{" not in text
+
+
+@pytest.mark.asyncio
+async def test_budget_lists_an_agent_that_billed_without_an_allocation(clock, governor, msg):
+    """`sdk_smoke` bills against no allocation. Split off `allocations()` alone it would be inside
+    `window spend` and in none of the per-agent lines, so the two halves of the reply contradict."""
+    from engine.intelligence.governor import TokenUsage
+
+    await governor.record("sdk_smoke", "haiku-4.5", TokenUsage(in_tokens=200_000, out_tokens=0))
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, governor=governor)
+
+    await bot._cmd_budget(_Update(msg), _Ctx())
+    assert "sdk_smoke: $0.2000 / (unallocated)" in msg.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_budget_names_an_unmeasurable_pace_instead_of_printing_zero(conn, msg):
+    """Thu 2026-01-15 is an NSE holiday AND a reset Thursday, so at 14:01 the window has zero elapsed
+    sessions and `pro_rata_to_date` is None (not 0). The reply must say so — `_usd(None)` would raise
+    and take the whole /budget command down, and a rendered `$0.0000` would read as 'you are already
+    infinitely over pace' at the exact moment the pace rungs are switched off."""
+    from datetime import datetime
+
+    from engine.core.clock import IST, Clock
+
+    frozen = Clock(time_source=lambda: datetime(2026, 1, 15, 14, 1, tzinfo=IST))
+    gov = BudgetGovernor(
+        conn, frozen, NSECalendar(config_dir() / "calendar", frozen, strict=False),
+        load_yaml(config_dir() / "agents.yaml"),
+    )
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=frozen, governor=gov)
+
+    await bot._cmd_budget(_Update(msg), _Ctx())
+    text = msg.sent[0]
+    assert "pro-rata to date: unmeasurable" in text
+    assert "window: 2026-01-15 14:00 → 2026-01-22 14:00 IST" in text
+    assert "tier: DG0" in text
 
 
 # --------------------------------------------------------------------------- entries pause / re-arm
@@ -1041,8 +1080,8 @@ async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, m
          MessageKind.MODE_CHANGE, "warning", ("AUTO → RECOMMEND", "risk_gate", "daily_loss_hard")),
         (catalog.risk_state_change("NORMAL", "FROZEN", "rejection_storm: 3 rejects/60s"),
          MessageKind.RISK_STATE_CHANGE, "warning", ("NORMAL → FROZEN", "rejection_storm")),
-        (catalog.budget_tier("DG0", "DG1", Decimal("42.5")), MessageKind.BUDGET_WARNING, "warning",
-         ("DG0 → DG1", "$42.5")),
+        (catalog.budget_tier("DG0", "DG1", Decimal("42.5"), "2026-06-11"), MessageKind.BUDGET_WARNING,
+         "warning", ("DG0 → DG1", "$42.5", "week from 2026-06-11 14:00 IST")),
         (catalog.kill_state(killed=True, reason="cumulative_floor", actor="risk_gate"),
          MessageKind.KILL, "critical", ("KILL SWITCH ENGAGED", "cumulative_floor")),
         (catalog.trade_window_changed(start="09:30", end="10:00", buffer_min=5, actor="owner"),
@@ -1062,7 +1101,7 @@ def test_catalog_helpers_render_clean_owner_text(message, kind, severity, fragme
 
 def test_budget_tier_reuses_the_existing_budget_kind():
     """One event, one kind: a second kind for the ladder would fork the notification audit log."""
-    assert catalog.budget_tier("DG1", "DG2", Decimal("60")).kind == MessageKind.BUDGET_WARNING
+    assert catalog.budget_tier("DG1", "DG2", Decimal("60"), "2026-06-11").kind == MessageKind.BUDGET_WARNING
 
 
 # --------------------------------------------------------------------------- outbound bus alerts (R8)
@@ -1091,7 +1130,8 @@ async def test_attach_bus_publishes_every_control_plane_alert(wired_bot, bus, cl
     await bus.apublish(TOPIC_TRADE_WINDOW, TradeWindowChanged(
         start_ist="09:30", end_ist="10:00", squareoff_buffer_min=5, actor=Actor.OWNER, at=now))
     await bus.apublish(TOPIC_BUDGET_STATE, BudgetStateChanged(
-        old_tier=DegradeTier.DG0, new_tier=DegradeTier.DG1, month_spend_usd=Decimal("42.5"), at=now))
+        old_tier=DegradeTier.DG0, new_tier=DegradeTier.DG1, window_key="2026-06-11",
+        window_spend_usd=Decimal("42.5"), at=now))
 
     texts = [text for _chat, text in sender.sent]
     assert len(texts) == 5

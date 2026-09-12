@@ -58,8 +58,9 @@ WHAT MAKES THIS SAFE, in the four places it could have gone wrong:
    per binding cap — a strategy's own ``max_per_strategy_day``, and ``max_candidates_per_day`` for
    the day as a whole. Both are needed: displacement also fires on a full DAY cap, so a per-strategy
    budget alone would let N strategies each spend theirs against the one day cap. Together they bound
-   admissions at ≤ 2× cap per strategy (``orb``: ≤ 14) AND ≤ 2× the day cap overall, with no new
-   owner knob to get out of sync with the caps they are derived from.
+   admissions at ≤ 2× cap per strategy (``orb``: ≤ 14 — 0 while orb is parked, 2026-09-12; the bound
+   is 2× whatever the cap says) AND ≤ 2× the day cap overall, with no new owner knob to get out of
+   sync with the caps they are derived from.
 3. *The §2.7 ref set only grows.* A candidate carrying a ``catalyst_ref`` is never evicted, so
    ``_catalyst_refs`` never shrinks and the anti-manipulation cap cannot be churned. An arrival that
    carries one still faces that cap on its own after winning the displacement.
@@ -79,8 +80,8 @@ now a saturation-free squash (``scanners/orb.py`` — scores discriminate, so th
 something), and the cap-release schedule below stops the window-open burst from spending the whole
 day's sub-cap in its first minute.
 
-Cap release schedule (owner-directed 2026-09-02)
-------------------------------------------------
+Cap release schedule (owner-directed 2026-09-02; INERT for ``orb`` while it is parked, 2026-09-12)
+--------------------------------------------------------------------------------------------------
 ``cap_release_schedule`` (constructor / ``strategy.prescreen`` config) lists CUMULATIVE per-strategy
 sub-cap tranches by IST time-of-day, e.g. ``orb: {"10:00": 3, "11:30": 5, "13:00": 7}``: at most 3
 orb pairs may charge before 11:30, 5 before 13:00, 7 after — so midday/afternoon fires are
@@ -94,7 +95,9 @@ replay determinism holds by construction. Unscheduled strategies and an absent c
 byte the prior behaviour; tranche values must be non-decreasing (a shrinking tranche would demand
 the cap decrement path the spam bound forbids). The tranche instant is the candidate's ENTRY time
 (``ts_minute + 1m`` — the file-wide boundary convention), and the per-strategy displacement budget
-derives from the RELEASED tranche, not the flat cap (both 2026-09-02 review findings).
+derives from the RELEASED tranche, not the flat cap (both 2026-09-02 review findings). The ``orb``
+schedule shipped in ``settings.yaml`` is INERT while ``orb`` is parked — ``min(0, tranche) = 0``, and
+the park gate refuses before ``_cap_for`` is ever consulted — and is kept for the re-enable only.
 
 Known, accepted limits of the pair of fixes (2026-09-02 review, documented rather than redesigned):
 an incumbent scoring ≥ (1 − margin) — under orb's squash, a ≥27×-median-volume print — can never be
@@ -127,6 +130,21 @@ same spam bound. The pipeline's own window check (``engine.ops.pipeline.on_signa
 unchanged and remains the authoritative gate: it reads the live Clock, this reads bar time, and at a
 window edge they can disagree by up to one minute. That is intended defence in depth — this gate
 exists to protect the day's BUDGET, not to decide tradability.
+
+Park gate (owner-directed 2026-09-12)
+-------------------------------------
+A per-strategy ``max_per_strategy_day`` of **0** parks that strategy: it admits nothing, at any hour,
+and — like the window gate — charges nothing. It is the FIRST gate on the accept spine (ahead of the
+window, which is per pair; the park is per strategy), so every raw fire of a parked strategy lands in
+exactly one counter, ``suppressed_disabled``, instead of splitting across ``suppressed_window`` and
+``suppressed_cap`` — a parked strategy and a starved one must not read the same in the funnel. The
+sole exception is a pair already in ``_seen`` (a mid-session park after :meth:`hydrate` restored the
+morning's publications): those fall through to ``suppressed_dedupe``, because their slot was spent
+before the park existed. One ``prescreen_strategy_disabled`` INFO per strategy per day carries the
+fact; the counter carries the volume. :meth:`sweep` also drops a parked strategy's
+:meth:`Scanner.pending` arm levels — they can never arm, and that message is owner-facing.
+``default: 0`` stays a ValueError (see :meth:`_parse_caps`): parking every strategy at once is a
+kill-switch decision, not a cap edit. ``orb`` is parked; the re-enable is a plan §8.6 decision.
 
 Async surface (§3.2 convention 4): ``handle_bar`` is the ``"bar.1m"`` bus handler — it offloads the
 pandas-heavy scan to a worker thread (the loop is never blocked, §2.2) and awaits publication.
@@ -266,6 +284,9 @@ class SignalPreScreen:
         ``{strategy_id: cap}`` = per-strategy values, with the reserved key ``"default"`` binding
         every strategy that has no line of its own (WO-1 (iii): owner knob, NOT learner-movable —
         §6.3). The mapping form is what structurally prevents one strategy taking the whole day.
+        A per-strategy ``0`` PARKS that strategy: its candidates are refused before any slot is
+        charged, counted under ``suppressed_disabled`` and logged once a day as
+        ``prescreen_strategy_disabled`` (2026-09-12, ``orb``). ``default: 0`` is a ValueError.
     admission_mode:
         ``"ranked"`` (default) = score-descending admission within a batch; ``"arrival"`` = the
         pre-WO-1 order. The rollback knob named in WO-1's risk note, nothing else.
@@ -400,12 +421,25 @@ class SignalPreScreen:
         self._suppressed_window: dict[str, int] = {}
         #: Strategies already logged as window-refused today (one INFO per strategy per day).
         self._window_logged: set[str] = set()
+        #: Candidates refused because their strategy is PARKED — its own ``max_per_strategy_day``
+        #: line is 0 (2026-09-12, ``orb``). Apart from ``_suppressed_cap`` for the same reason
+        #: ``_suppressed_window`` is: no slot is charged, so this is a configured OFF switch, and a
+        #: funnel that folded it into the cap counter would read a parked strategy as starvation.
+        self._suppressed_disabled: dict[str, int] = {}
+        #: Strategies already logged as parked today (one INFO per strategy per day).
+        self._disabled_logged: set[str] = set()
 
     @staticmethod
     def _parse_caps(
         spec: int | Mapping[str, int] | None,
     ) -> tuple[int | None, dict[str, int]]:
-        """Normalise the ``max_per_strategy_day`` scalar/mapping/None into (default, overrides)."""
+        """Normalise the ``max_per_strategy_day`` scalar/mapping/None into (default, overrides).
+
+        A PER-STRATEGY ``0`` is legal and means PARKED — admit nothing for that strategy today
+        (2026-09-12, ``orb``). ``default: 0`` and the scalar form stay a ValueError: those bind every
+        strategy without a line of its own, so a typo there would park the whole platform silently,
+        and stopping origination platform-wide is a kill-switch decision, not a cap edit.
+        """
         if spec is None:
             return None, {}
         if isinstance(spec, Mapping):
@@ -415,8 +449,9 @@ class SignalPreScreen:
                 if value is None:                     # a blank YAML line means "no cap here"
                     continue
                 cap = int(value)
-                if cap < 1:
-                    raise ValueError(f"max_per_strategy_day[{key!r}] must be >= 1, got {cap}")
+                floor = 1 if str(key) == DEFAULT_CAP_KEY else 0
+                if cap < floor:
+                    raise ValueError(f"max_per_strategy_day[{key!r}] must be >= {floor}, got {cap}")
                 if str(key) == DEFAULT_CAP_KEY:
                     default_cap = cap
                 else:
@@ -683,16 +718,24 @@ class SignalPreScreen:
         the same split :meth:`handle_bar` uses), which keeps ``sweep`` loop-agnostic and safe to
         run in a worker thread. Additionally collects every scanner's :meth:`Scanner.pending` arm
         levels, skipping (symbol, strategy) pairs that already published today (their day slot is
-        spent). The caller turns the pair into the owner verdict message."""
+        spent) and every PARKED strategy (2026-09-12). The caller turns the pair into the owner
+        verdict message."""
         accepted: list[SignalCandidate] = []
         pending: list[PendingSetup] = []
+        # A parked strategy's arm levels are not "not yet triggered" — they can NEVER trigger, since
+        # `_admit_one_locked` refuses every candidate it produces. The `seen` skip below cannot cover
+        # them: a parked pair is refused before `_seen.add`, so it is never seen and would keep
+        # rendering under "would arm at:" in the one surface the owner reads intraday. Snapshotted
+        # once (caps are constructor-fixed) under the lock that owns them.
+        with self._lock:
+            parked = {sid for sid, cap in self._strategy_caps.items() if cap == 0}
         for bar in bars:
             accepted.extend(self._scan(bar))
             ctx = self._context_provider(bar)
             with self._lock:
                 seen = set(self._seen)
             for scanner in self._scanners:
-                if (bar.symbol, scanner.strategy_id) in seen:
+                if scanner.strategy_id in parked or (bar.symbol, scanner.strategy_id) in seen:
                     continue
                 try:
                     pending.extend(scanner.pending(bar, ctx))
@@ -749,6 +792,7 @@ class SignalPreScreen:
                 "suppressed_cap": dict(self._suppressed_cap),
                 "suppressed_dedupe": dict(self._suppressed_dedupe),
                 "suppressed_window": dict(self._suppressed_window),
+                "suppressed_disabled": dict(self._suppressed_disabled),
             }
 
     def raw_counts(self, d: date) -> dict[str, int]:
@@ -783,6 +827,8 @@ class SignalPreScreen:
             self._suppressed_dedupe.clear()
             self._suppressed_window.clear()
             self._window_logged.clear()
+            self._suppressed_disabled.clear()
+            self._disabled_logged.clear()
             self._load_raw_counts_locked(day)
 
     def _load_raw_counts_locked(self, day: date) -> None:
@@ -1012,12 +1058,40 @@ class SignalPreScreen:
         self, cand: SignalCandidate, *, in_window: bool = True, batch_floor: int | None = None,
         at: datetime | None = None,
     ) -> bool:
-        """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): window, dedupe, caps,
-        telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
+        """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): park, window, dedupe,
+        caps, telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
         key = (cand.symbol, cand.strategy_id)
-        # Trade-window gate FIRST (2026-08-18, module docstring): "the window is shut" is a statement
-        # about the clock that precedes any per-pair reasoning, and refusing here is the only point at
-        # which a doomed candidate can be stopped BEFORE it charges an unrefundable day slot.
+        # PARKED gate, ahead of everything including the window (2026-09-12): a per-strategy cap of 0
+        # says this strategy admits nothing today at any hour, which is a strictly stronger refusal
+        # than "the window is shut" and, like it, charges no slot. Placing it first also makes the
+        # funnel unambiguous — every raw fire of a parked strategy lands in exactly one counter
+        # instead of splitting between `suppressed_window` and `suppressed_cap`. The cap arithmetic
+        # below would refuse these too, but as `prescreen_cap_suppressed`: indistinguishable in the
+        # funnel from a strategy that ran out of room, which is the reading this exists to prevent.
+        # An ALREADY-SEEN pair is the one exception and falls through to the dedupe counter below:
+        # on the day a park ships mid-session, `hydrate` restores pairs that published under the old
+        # cap, and their re-fires cost the park nothing — the slot is spent and the analyst has
+        # already looked. Counting them here would report the park as refusing work it never saw.
+        if self._strategy_caps.get(cand.strategy_id) == 0 and key not in self._seen:
+            self._suppressed_disabled[cand.strategy_id] = (
+                self._suppressed_disabled.get(cand.strategy_id, 0) + 1
+            )
+            # Once per strategy per day, for the same reason `prescreen_out_of_window` is: orb alone
+            # fired 883 times on 2026-08-18 and a per-candidate line would bury the log.
+            if cand.strategy_id not in self._disabled_logged:
+                self._disabled_logged.add(cand.strategy_id)
+                _log.info(
+                    "prescreen_strategy_disabled", symbol=cand.symbol,
+                    strategy_id=cand.strategy_id, score=cand.score,
+                    max_per_strategy_day=0,
+                    reason="strategy parked by config (max_per_strategy_day 0) — no slot charged",
+                )
+            return False
+        # Trade-window gate ahead of all PER-PAIR reasoning (2026-08-18, module docstring; the park
+        # above is the only thing before it, and it is per STRATEGY): "the window is shut" is a
+        # statement about the clock that precedes any per-pair reasoning, and refusing here is the
+        # only point at which a doomed candidate can be stopped BEFORE it charges an unrefundable
+        # day slot.
         if not in_window:
             self._suppressed_window[cand.strategy_id] = (
                 self._suppressed_window.get(cand.strategy_id, 0) + 1

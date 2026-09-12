@@ -24,6 +24,7 @@ from engine.intelligence.schemas import (
     ACTION_MODELS,
     CheckResult,
     EnterAction,
+    ExitAction,
     GateVerdict,
     action_proposal_json_schema,
     parse_and_stamp,
@@ -460,3 +461,200 @@ def test_guidance_schema_does_not_advertise_a_thesis_cap() -> None:
     props = intraday_guidance_json_schema()["properties"]
     assert "maxLength" not in props["thesis"]
     assert "maxLength" not in props["reason"] and "maxLength" not in props["regime_note"]
+
+
+# ------------------------------------------------- exit-reason enum (2026-09-11, WO-B)
+# ``reason`` is advertised as free text (it is no_action's prose field) while ExitAction declares it a
+# CLOSED Literal, so EVERY position-event exit died literal_error on attempt 1 — 47 of 47 since
+# 2026-09-03, 85 rows from 08-27, 10 lost terminally before the retry started echoing the pydantic
+# error. The codes now travel under their own advertised key and the sanitizer renames it.
+
+#: The real 2026-09-10 failing payload: prose ``reason`` beside a thesis, plus the entry-identity and
+#: regime extras the flat schema advertises for every action.
+EXIT_2026_09_10 = {
+    "action": "exit",
+    "thesis": (
+        "HDFCAMC swing long is six sessions past its stated horizon and the brk20 level it broke out "
+        "from has been lost on closing basis; the reward basis is spent and what is left is pure "
+        "overnight risk into a negative-breadth tape."
+    ),
+    "confidence": 0.72,
+    "position_id": "pos-hdfcamc-1",
+    "exit_type": "MARKET",
+    "reason": "Holding horizon exceeded and the breakout level has failed on a closing basis.",
+    "tradingsymbol": "HDFCAMC",
+    "side": "SELL",
+    "quantity": 3,
+    "style": "swing",
+    "regime_note": "breadth negative, NIFTY below its 50-DMA",
+}
+
+
+def test_exit_reason_code_maps_onto_the_contract_literal() -> None:
+    """The 09-10 shape WITH a code parses: the code becomes ``reason`` and the thesis survives."""
+    from engine.intelligence.schemas import parse_intraday
+
+    model = parse_intraday({**EXIT_2026_09_10, "exit_reason": "risk_event"}, **STAMP)
+    assert isinstance(model, ExitAction)
+    assert model.reason == "risk_event"
+    assert model.thesis == EXIT_2026_09_10["thesis"]     # prose reasoning preserved, not displaced
+    assert model.position_id == "pos-hdfcamc-1"
+    assert model.exit_type == "MARKET"
+    assert "exit_reason" not in model.model_dump()       # advertised-but-foreign ⇒ dropped
+    _enter_no_action_stamp(model)
+
+
+def test_exit_with_a_code_and_no_reason_key_at_all_parses() -> None:
+    """The steady state the prompt now asks for: code in ``exit_reason``, reasoning in ``thesis``,
+    no ``reason`` key at all. Nothing to displace, so nothing is moved."""
+    from engine.intelligence.schemas import parse_intraday
+
+    raw = {k: v for k, v in EXIT_2026_09_10.items() if k != "reason"}
+    model = parse_intraday({**raw, "exit_reason": "target_neared"}, **STAMP)
+    assert model.reason == "target_neared"
+    assert model.thesis == EXIT_2026_09_10["thesis"]
+
+
+def test_exit_without_exit_reason_still_fails_exactly_as_today() -> None:
+    """DOCUMENTED, not fixed: absent the code, prose in ``reason`` is never guessed into one (R1).
+    This is the live 09-10 failure, reproduced — one literal_error at exit.reason, nothing else."""
+    from engine.intelligence.schemas import parse_intraday
+
+    with pytest.raises(ValidationError) as err:
+        parse_intraday(EXIT_2026_09_10, **STAMP)
+    errors = err.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "literal_error"
+    assert errors[0]["loc"][-1] == "reason"
+
+
+def test_out_of_enum_exit_reason_is_dropped_not_interpreted() -> None:
+    """A confabulated code is not mapped, nor does it become a foreign key: it is dropped like any
+    other advertised extra and the payload dies on ``reason`` exactly as the code-less one does."""
+    from engine.intelligence.schemas import parse_intraday
+
+    with pytest.raises(ValidationError) as err:
+        parse_intraday({**EXIT_2026_09_10, "exit_reason": "horizon_expired"}, **STAMP)
+    errors = err.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "literal_error"
+    assert errors[0]["loc"][-1] == "reason"
+
+
+def test_displaced_prose_becomes_the_thesis_only_when_there_is_none() -> None:
+    """The code takes ``reason`` over; the prose it evicts is worth keeping only where no thesis
+    would be overwritten. With a thesis present the prose is dropped (asserted above)."""
+    from engine.intelligence.schemas import parse_intraday
+
+    no_thesis = {k: v for k, v in EXIT_2026_09_10.items() if k != "thesis"}
+    model = parse_intraday({**no_thesis, "exit_reason": "time_stop"}, **STAMP)
+    assert model.reason == "time_stop"
+    assert model.thesis == EXIT_2026_09_10["reason"]
+
+    blank = parse_intraday({**EXIT_2026_09_10, "thesis": "   ", "exit_reason": "time_stop"}, **STAMP)
+    assert blank.thesis == EXIT_2026_09_10["reason"]
+
+
+def test_displaced_prose_that_is_itself_a_code_is_not_promoted_to_thesis() -> None:
+    """A model that answers the codes twice (``reason`` == ``exit_reason``) has written no prose —
+    promoting the bare code into ``thesis`` would manufacture reasoning that does not exist."""
+    from engine.intelligence.schemas import parse_intraday
+
+    raw = {k: v for k, v in EXIT_2026_09_10.items() if k != "thesis"}
+    with pytest.raises(ValidationError) as err:
+        parse_intraday({**raw, "reason": "risk_event", "exit_reason": "risk_event"}, **STAMP)
+    assert [e["type"] for e in err.value.errors()] == ["missing"]    # thesis missing, not faked
+
+
+def test_enter_carrying_exit_reason_drops_it_and_parses() -> None:
+    """``exit_reason`` is advertised for every action, so a valid ``enter`` may carry it. For any
+    action but ``exit`` it is a foreign key the existing drop removes — the mapping is exit-only."""
+    from engine.intelligence.schemas import parse_intraday
+
+    model = parse_intraday({**RAW_BY_ACTION["enter"], "exit_reason": "risk_event"}, **STAMP)
+    assert isinstance(model, EnterAction)
+    assert model.tradingsymbol == "RELIANCE"
+    assert "exit_reason" not in model.model_dump()
+    _enter_no_action_stamp(model)
+
+
+def test_no_action_carrying_exit_reason_drops_it_and_keeps_its_prose() -> None:
+    """The riskiest mis-wiring: a no_action's ``reason`` IS its free prose and must never be
+    overwritten by a stray code."""
+    from engine.intelligence.schemas import NoActionOutput, parse_intraday
+
+    out = parse_intraday(
+        {
+            "action": "no_action",
+            "reason": "position is within tolerance; no adjustment warranted",
+            "exit_reason": "risk_event",
+        },
+        **STAMP,
+    )
+    assert isinstance(out, NoActionOutput)
+    assert out.reason == "position is within tolerance; no adjustment warranted"
+
+
+def test_guidance_exit_reason_enum_equals_the_contract_literal() -> None:
+    """The wire enum is DERIVED from ExitAction's Literal, so editing one side alone is impossible;
+    this fails the moment someone retypes either. The five codes are pinned explicitly as well —
+    the sanitizer's rename and the position-event prompt share this vocabulary, so growing it is a
+    three-place decision, not a one-line edit."""
+    from typing import get_args
+
+    from engine.core.contracts import ExitAction as ContractExitAction
+    from engine.intelligence.schemas import EXIT_REASON_CODES, intraday_guidance_json_schema
+
+    literal = get_args(ContractExitAction.model_fields["reason"].annotation)
+    prop = intraday_guidance_json_schema()["properties"]["exit_reason"]
+    assert tuple(prop["enum"]) == literal == tuple(EXIT_REASON_CODES)
+    assert prop["type"] == "string"
+    assert set(literal) == {
+        "thesis_invalidated", "target_neared", "risk_event", "time_stop", "other",
+    }
+
+
+def test_exit_reason_mapping_is_logged_and_the_key_is_dropped(caplog) -> None:
+    """The rename must stay VISIBLE (same discipline as guidance_extras_dropped), and the dropped
+    line proves ``exit_reason`` really leaves the payload rather than reaching the union."""
+    import logging
+
+    from engine.intelligence.schemas import parse_intraday
+
+    with caplog.at_level(logging.INFO, logger="engine.intelligence.schemas"):
+        parse_intraday({**EXIT_2026_09_10, "exit_reason": "risk_event"}, **STAMP)
+
+    mapped = [r for r in caplog.records if r.getMessage() == "guidance_exit_reason_mapped"]
+    assert len(mapped) == 1
+    assert mapped[0].code == "risk_event"
+    assert mapped[0].prose_to_thesis is False
+    dropped = [r for r in caplog.records if r.getMessage() == "guidance_extras_dropped"]
+    assert len(dropped) == 1
+    assert "exit_reason" in dropped[0].dropped
+
+
+def test_exit_without_a_code_logs_no_mapping(caplog) -> None:
+    """No code ⇒ no rename and no log line: the sanitizer is silent on the path it does not touch."""
+    import logging
+
+    from engine.intelligence.schemas import parse_intraday
+
+    with caplog.at_level(logging.INFO, logger="engine.intelligence.schemas"):
+        with pytest.raises(ValidationError):
+            parse_intraday(EXIT_2026_09_10, **STAMP)
+        parse_intraday(RAW_BY_ACTION["exit"], **STAMP)
+    assert not [r for r in caplog.records if r.getMessage() == "guidance_exit_reason_mapped"]
+
+
+def test_mapped_exit_survives_the_json_string_path_and_the_prose_clamp() -> None:
+    """The harness hands parse_output raw JSON TEXT, and a displaced prose ``reason`` is subject to
+    the same 600-char thesis clamp as any advertised prose — the rename runs before the clamp."""
+    from engine.intelligence.schemas import parse_intraday
+
+    long_prose = "Holding horizon exceeded. " + ("level lost and breadth hostile " * 30)
+    assert len(long_prose) > 600
+    raw = {k: v for k, v in EXIT_2026_09_10.items() if k != "thesis"}
+    text = json.dumps({**raw, "reason": long_prose, "exit_reason": "thesis_invalidated"})
+    model = parse_intraday(text, **STAMP)
+    assert model.reason == "thesis_invalidated"
+    assert model.thesis == long_prose[:600]

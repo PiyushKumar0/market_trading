@@ -50,8 +50,17 @@ $syms = ((Get-Content data\reports\orb_sweep_20260712T033313.json | ConvertFrom-
 uv run python scripts\backtest.py all --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
 # one strategy, finer grid:
 uv run python scripts\backtest.py rsi2 --grid-density medium --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
+# positional leg measured against ITS holding cap (R2, 2026-09-12) — WO-3 floor = cost_floor/120:
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
 ```
 Reports → `data/reports/<strat>_<ts>.md` (+ sweep). ORB leg ≈ 90 min on the full 498-session window.
+`--margin-floor-days` defaults to 20 (the §7.1 swing cap); set it per-leg, never on an `all` run — the
+value used is printed in the validation report's "Multiple-testing discipline" block.
+Since 2026-09-12 (R2) both reports also carry the leg's MEASURED holding period — mean/median/p90
+sessions, closed-only beside all-trades, the open-trade count, and the same round-trip floor re-based
+on each of those horizons with its headroom multiple. Read the verdict against those rows: the
+registered denominator is a §7.1 CAP, so the floor at the cap is the loosest bar the horizon allows.
+Reporting only — the promotion rule is unchanged.
 
 ## Event study (§2.7 proxy + §2.8.4 filings legs)
 
@@ -121,6 +130,13 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
 ```
 - RECOMMEND flow needs: mode RECOMMEND (`/mode RECOMMEND`), valid trade window, warm-up ready,
   and the Claude OAuth token present (else the LLM tier is disabled and only scanners run).
+- **Budget window is the subscription's QUOTA WEEK (2026-09-12):** Thursday 14:00 IST → next Thursday
+  14:00 IST (`llm.quota_window` in agents.yaml; `weekly_credit_usd` + weekly per-agent allocations).
+  `/budget` (Telegram or `GET /budget`) prints the window key (the start Thursday's date), the
+  window spend per agent vs allocation, the tier and the live forward cap. DG1 trips on PACE only;
+  an agent past 85% of its own allocation degrades only itself (cap = 0.67 × base), at 100% it is
+  hard-stopped. A change to agents.yaml applies on the next engine boot — validate with the loader
+  one-liner above first. The month column in `budget_ledger` is written but read by nothing.
 - Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
 
 ## News-feed health (2026-08-04, after the MC-retirement remediation)
@@ -221,3 +237,37 @@ calibrated half-spread is a PERCENT of mid floored at half a tick in the consume
 ```
 v2 is a SEPARATE pre-registration (plan §6.1 hi52 addendum, thresholds fixed from the 09-03 medians),
 never a knob on v1: report the two side by side, never pooled; `fold_pass_min(2)` = 60% applies to v2.
+
+## brk20 entry-mechanism backtest (R1, 2026-09-12) — three registered entry variants, engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\backtest_brk20.py --out data\reports\backtest_brk20_<date>.json --verify-window 25
+```
+Writes the `.md` report beside the JSON, same stem. `--verify-window K` re-scans the first K symbols
+with the full row prefix and aborts on any disagreement with the bounded scan window — cheap, so run
+it. The population is the CURRENT eligible universe read from `universe_daily` and applied backwards
+(survivorship-tainted proxy); an empty `universe_daily` is a refusal, not a degraded run. `--symbols`
+OVERRIDES that population and stamps the document as a smoke run — never quote a `--symbols` run as
+the registered study. Trial count is fixed at N=3 (V1 next-open, V2 limit-at-H20 within 3 and within
+5 sessions); there is deliberately no fill-window or rule-parameter flag, because one would turn N=3
+into N=k silently.
+
+Re-run 2026-09-12 12:02 with the audit corrections (same command, same data, every headline number
+reproduced to 4 dp). What the artifacts now carry, and how to read them:
+
+- **The three variants share a SIGNAL population but NOT a trade set** (8,292 / 4,230 / 4,898 trades):
+  a V2 limit fills only when price returns to the level. Every pooled V1-vs-V2 number is therefore a
+  comparison PER FILLED TRADE across two different event sets. The old "one shared population … same
+  event set" line is gone from the report; do not reintroduce it.
+- **STEP 3B / `matched_cohorts`** is the decomposition that makes the mechanisms comparable: V1
+  re-quoted on exactly the cohort each V2 variant filled (the entry **PRICE** effect) and on the
+  cohort it never filled (the **SELECTION** effect), with n, median/mean gross and net and hit rate
+  per horizon per cell, plus the same split per margin tercile. Descriptive, not a fourth trial.
+- **Every cell prints its own fill rate** (`n_signals_in_cell` / `fill_rate_in_cell`). An "in every
+  margin tercile" claim is only readable off `v2_beats_matched_v1_in_every_margin_tercile`, never off
+  the unmatched pooled rows.
+- **Reported promotability is CPCV AND geometry** (2026-09-12 amendment): a cell that passes the
+  mean-based CPCV gate while its MEDIAN net is ≤ 0 prints `GATES DISAGREE` and reads NOT promotable.
+  Both decision-rule outcomes are printed — the registered gate (`decision`) and the tightened one
+  (`decision_under_tightened_reporting_rule`) — with an explicit "does the tightening change the
+  registered outcome?" line. On the 2026-09-12 run it does not.

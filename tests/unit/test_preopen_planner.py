@@ -25,7 +25,7 @@ from engine.intelligence.harness import AgentResult, load_agent_defs
 from engine.intelligence.schemas import DayPlan, DayPlanFocus
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.ops.jobs import AdvisoryOutcome
-from engine.ops.preopen_planner import CALL_CLASS, PreopenPlannerJob
+from engine.ops.preopen_planner import _SOLD_OUTSIDE_HEADING, CALL_CLASS, PreopenPlannerJob
 
 # conftest's frozen clock: Wed 2026-06-17 10:05 IST — a real trading day.
 TODAY = date(2026, 6, 17)
@@ -340,3 +340,141 @@ def test_construction_rejects_a_roster_missing_the_planner(store, conn, assemble
     governor = FakeGovernor(allowed=True)
     with pytest.raises(KeyError):
         _job(store, conn, assembler, harness, {}, governor, clock, calendar)
+
+
+# ------------------------------------------------- WO-D2: positions the owner sold outside the ledger
+# 2026-09-11: HDFCAMC and HINDZINC were sold on 08-26 and stayed OPEN until 09-11. Eleven consecutive
+# day plans therefore reasoned about the "overnight risk" of two positions that did not exist, while
+# the one thing that would have ended it -- a /closed reply -- was never put in front of the owner
+# where he reads the morning plan.
+def _position(conn, position_id: str, symbol: str, qty: int = 7, *, stop: str = "95") -> None:
+    conn.execute(
+        "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, stop, "
+        "state, origin, opened_at) VALUES (?, ?, 'BUY', 'swing', 'CNC', ?, '100', ?, 'OPEN', "
+        "'recommended', '2026-06-10T10:00:00+05:30')",
+        (position_id, symbol, qty, stop),
+    )
+    conn.commit()
+
+
+def _observe(conn, position_id: str, d: date, *, tracked: int = 7, held: int = 0) -> None:
+    conn.execute(
+        "INSERT INTO holdings_observations (position_id, d, tracked_qty, held_qty, observed_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (position_id, d.isoformat(), tracked, held, f"{d.isoformat()}T10:05:00+05:30"),
+    )
+    conn.commit()
+
+
+def _ledger(conn, entry_id: str, position_id: str, rec_id: str) -> None:
+    conn.execute(
+        "INSERT INTO learning_ledger (entry_id, position_id, rec_id, entry_px, created_at) "
+        "VALUES (?, ?, ?, '100', '2026-06-10T10:00:00+05:30')",
+        (entry_id, position_id, rec_id),
+    )
+    conn.commit()
+
+
+async def _volatile(store, conn, assembler, agent_defs, clock, calendar) -> str:
+    harness = FakeHarness(AgentResult.Ok(call_id="cD2", payload=_plan()))
+    job = _job(store, conn, assembler, harness, agent_defs, FakeGovernor(allowed=True), clock, calendar)
+    assert await job.run(TODAY) is AdvisoryOutcome.RAN
+    return harness.calls[0]["context"].volatile_block
+
+
+async def test_sold_outside_the_ledger_gets_its_own_block_and_leaves_the_risk_line(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """The whole fix: the sold position is OUT of the overnight-risk line the planner reasons over,
+    and IN a block that names the exact reply that ends it. The genuinely held position is untouched."""
+    _position(conn, "pos-held", "RELIANCE", 3, stop="90")
+    _position(conn, "pos-sold", "HDFCAMC", 7)
+    _ledger(conn, "led-1", "pos-sold", "REC-ENTRY-1")
+    _observe(conn, "pos-sold", PRIOR)
+    _observe(conn, "pos-sold", TODAY)
+
+    volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
+
+    lines = volatile.split("\n")
+    risk_line = next(
+        ln for ln in lines if ln.startswith("open positions and overnight risk:")
+    )
+    assert risk_line == "open positions and overnight risk: RELIANCE BUY 3 @ 100 (CNC, stop 90)"
+    assert "HDFCAMC" not in risk_line
+    assert (
+        "HDFCAMC BUY 7 @ 100 (CNC) - SOLD OUTSIDE THE LEDGER (broker holdings show 0 on 2 "
+        "sessions): reply /closed REC-ENTRY-1 <price>"
+    ) in volatile
+
+    # The assembler renders the whole summary as ONE prompt item, so a per-line marker alone leaves
+    # the sold position as an unlabelled continuation line UNDER "open positions and overnight risk:"
+    # - which is precisely the section it has to be out of, and which a planner can still fold into
+    # its risk paragraph. A heading of its own is what separates the two groups.
+    heading_at = lines.index(_SOLD_OUTSIDE_HEADING)
+    assert heading_at == lines.index(risk_line) + 1              # immediately after the held block
+    assert lines[heading_at + 1].startswith("HDFCAMC")           # ... and before the sold ones
+    assert "NOT overnight risk" not in risk_line
+    assert "excluded from the open positions and overnight risk above" in _SOLD_OUTSIDE_HEADING
+
+
+async def test_the_only_open_position_being_sold_leaves_the_risk_line_empty(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """The live 09-11 shape: every tracked position had been sold. The risk line must then read
+    "none" -- a plan that lists them as open risk is what produced eleven wrong mornings."""
+    _position(conn, "pos-sold", "HINDZINC", 5)
+    _observe(conn, "pos-sold", PRIOR, tracked=5)
+    _observe(conn, "pos-sold", TODAY, tracked=5)
+
+    volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
+
+    assert "open positions and overnight risk: none" in volatile
+    assert "HINDZINC BUY 5 @ 100 (CNC) - SOLD OUTSIDE THE LEDGER" in volatile
+
+
+async def test_one_short_observation_day_keeps_the_position_on_the_risk_line(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """Same two-day rule as the position-event screen: a single short reading is not evidence of a
+    sale, and dropping a live position off the overnight-risk line is the expensive error."""
+    _position(conn, "pos-maybe", "TITAN", 4)
+    _observe(conn, "pos-maybe", TODAY, tracked=4)
+
+    volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
+
+    assert "open positions and overnight risk: TITAN BUY 4 @ 100 (CNC, stop 95)" in volatile
+    assert "SOLD OUTSIDE THE LEDGER" not in volatile
+
+
+async def test_a_partial_holding_states_what_the_broker_actually_showed(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """Held 3 of 7 on both days is still an unreported exit, but the block says 3 rather than 0 --
+    the plan must not assert a quantity the journal never observed."""
+    _position(conn, "pos-part", "HDFCAMC", 7)
+    _ledger(conn, "led-2", "pos-part", "REC-ENTRY-2")
+    _observe(conn, "pos-part", PRIOR, held=3)
+    _observe(conn, "pos-part", TODAY, held=3)
+
+    volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
+
+    assert "broker holdings show 3 on 2 sessions" in volatile
+    # ... and the heading has to stay true of THIS line too. Those three shares are real overnight
+    # exposure: the heading may void the TRACKED size (7) and must point the planner at the quantity
+    # the line states, never tell it the name carries no exposure at all.
+    assert "Never treat the tracked size as exposure" in _SOLD_OUTSIDE_HEADING
+    assert "the quantity the broker actually showed, stated on each line" in _SOLD_OUTSIDE_HEADING
+
+
+async def test_a_sold_position_with_no_ledger_row_still_gets_an_actionable_line(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """No ledger row => no rec id to type. The block says so and names the position id, exactly as
+    the §3.6 alert does: an explicit un-actionable line beats a silent omission."""
+    _position(conn, "pos-orphan", "HINDZINC", 5)
+    _observe(conn, "pos-orphan", PRIOR, tracked=5)
+    _observe(conn, "pos-orphan", TODAY, tracked=5)
+
+    volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
+
+    assert "no learning-ledger row for position pos-orphan" in volatile

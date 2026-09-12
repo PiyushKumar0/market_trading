@@ -300,7 +300,7 @@ MET / NOT-MET / N-A column plus the per-session digest detail and the budget tab
 
 ```
 .venv\Scripts\python.exe scripts\g2_evidence.py [--from 2026-07-29] [--to YYYY-MM-DD]
-                                                [--month YYYY-MM] [--json data\reports\g2_evidence.json]
+                                                [--window YYYY-MM-DD] [--json data\reports\g2_evidence.json]
 ```
 
 It opens `data/state.db` **read-only** (`file:…?mode=ro`) and never touches `data/market.duckdb`, so
@@ -339,9 +339,12 @@ bars are judged against owner-set state (the trade window) that moved during the
       owner clarification 2026-08-13: SDK usage bills against the Claude subscription's **weekly
       usage limits** (Anthropic's June-15 notice paused the credit change), so there is no console
       dollar figure to reconcile. The check is now: `scripts/g2_evidence.py` criterion 7 —
-      ledger arithmetic sane and month-to-date spend within the **self-imposed** allocations in
-      `config/agents.yaml` (the DG-ladder input); `[owner-manual]` — subscription usage-limit
-      headroom not under pressure during the soak.
+      ledger arithmetic sane and **quota-week**-to-date spend within the **self-imposed** allocations
+      in `config/agents.yaml` (the DG-ladder input); `[owner-manual]` — subscription usage-limit
+      headroom not under pressure during the soak. Both halves of that ratio have been one *week*
+      since 2026-09-12 (§5.6: the governor's period is the subscription's Thu-14:00-IST quota window
+      and `budget_allocations_usd` are weekly dollars) — `--window YYYY-MM-DD` reports an earlier
+      week; never read criterion 7 against a month total.
 - [ ] **Zero API orders:** "zero API orders placed (**broker order book empty of platform orders** —
       audited)". Evidence: `scripts/g2_evidence.py` criterion 6 proves the platform side
       (`orders` / `order_events` empty); `[owner-manual]` — the broker-side audit in Kite Console

@@ -32,6 +32,7 @@ from engine.learning.validate import (
     MARGIN_FLOOR_DAYS,
     CPCVFold,
     ParamSet,
+    RealizedHold,
     ValidationPipeline,
     ValidationReport,
     WalkForwardFold,
@@ -39,6 +40,7 @@ from engine.learning.validate import (
     fold_pass_min,
     margin_floor_pct_per_day,
     promotion_decision,
+    realized_hold_floor_cells,
     walk_forward_splits,
     winner_stability,
 )
@@ -394,6 +396,56 @@ def test_report_artifacts_carry_the_wo3_flag_and_margin_floor(clock, tmp_path):
     assert data["cpcv_median_passing_expectancy_pct"] == pytest.approx(1.0)
 
 
+def _positional_margin_series() -> pd.Series:
+    """The recorded 2026-08-14 ``trend`` shape: passing splits ≈ 0.01%/day — BELOW the 20-session
+    floor (0.01596), ABOVE the 120-session one (0.00266)."""
+    idx = [date(2024, 1, 1) + timedelta(days=i) for i in range(40)]
+    return pd.Series([0.0001] * 20 + [-0.01] * 20, index=idx, dtype="float64")
+
+
+def _positional_pipeline(clock, *, margin_floor_days, reports_dir=None) -> ValidationPipeline:
+    return ValidationPipeline(
+        returns_provider=lambda sid, params: _positional_margin_series(),
+        clock=clock,
+        splitter=_FixedSplitter(),
+        cost_floor_provider=lambda _sid: CNC_COST_FLOOR_PCT,
+        reports_dir=reports_dir,
+        margin_floor_days=margin_floor_days,
+    )
+
+
+def test_report_records_the_margin_floor_denominator_it_used(clock, tmp_path):
+    """R2 (2026-09-12): the floor's DENOMINATOR is a protocol choice (20 sessions for a swing leg,
+    the §7.1 120 for a positional one), so %/day alone does not make the artifact reproducible —
+    the report must carry and PRINT the days. Same returns, two denominators, opposite verdicts."""
+    ps = ParamSet(strategy_id="trend", params={}, trial_count_n=9)
+
+    swing = _positional_pipeline(clock, margin_floor_days=MARGIN_FLOOR_DAYS)
+    r20 = swing.validate_sync("trend", ps)
+    assert r20.margin_floor_days == 20
+    assert r20.cpcv_median_passing_expectancy_pct == pytest.approx(0.01)
+    assert r20.promotable is False
+    assert any("20 sessions" in reason for reason in r20.reasons)
+
+    positional = _positional_pipeline(clock, margin_floor_days=120, reports_dir=tmp_path)
+    r120 = positional.validate_sync("trend", ps)
+    assert r120.margin_floor_days == 120
+    assert r120.margin_floor_pct_per_day == pytest.approx(CNC_COST_FLOOR_PCT / 120)
+    assert r120.promotable is True
+
+    md = (tmp_path / f"trend_{r120.generated_at:%Y%m%dT%H%M%S}.md").read_text(encoding="utf-8")
+    assert "/ 120 sessions" in md
+    data = json.loads((tmp_path / f"trend_{r120.generated_at:%Y%m%dT%H%M%S}.json").read_text(encoding="utf-8"))
+    assert data["margin_floor_days"] == 120
+
+
+def test_default_margin_floor_days_is_recorded_unchanged(clock):
+    report = _pipeline(clock).validate_sync(
+        "rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10)
+    )
+    assert report.margin_floor_days == MARGIN_FLOOR_DAYS == 20
+
+
 def test_pipeline_rejects_strategy_id_mismatch(clock):
     pipe = _pipeline(clock)
     with pytest.raises(ValueError):
@@ -470,3 +522,132 @@ def test_cpcv_purge_embargo_no_overlap():
             assert train_set.isdisjoint(forbidden)
         # and train/test never overlap at all
         assert train_set.isdisjoint(set(int(x) for x in test_sorted))
+
+
+# ================================================== R2 (2026-09-12) realized-hold reporting cells
+#
+# The WO-3 floor is cost_floor / <sessions>, and the denominator is a HORIZON. Both registered
+# values are §7.1 CAPS (20 swing / 120 positional), and a CAP is an upper bound on the hold: the
+# 2026-09-12 trend run passed at 3.89x the 120-session floor while its median trade was held 33
+# sessions, where the same edge clears by 1.07x. These cells put the measured horizon in the
+# artifact. They are REPORTING ONLY and the assertions below pin that: the verdict must not move.
+
+
+def _hold(**kw) -> RealizedHold:
+    base = dict(
+        n_trades=303, n_closed=273, n_open=30,
+        expectancy_per_trade_pct=3.626, expectancy_per_trade_closed_pct=1.841,
+        mean_sessions=48.64, median_sessions=33.0, p90_sessions=121.0,
+        mean_sessions_closed=45.05, median_sessions_closed=31.0, p90_sessions_closed=111.2,
+    )
+    base.update(kw)
+    return RealizedHold(**base)
+
+
+def test_realized_hold_cells_rebase_the_same_cost_floor_on_the_measured_horizon():
+    cells = realized_hold_floor_cells(_hold(), CNC_COST_FLOOR_PCT, 0.010342)
+    by_label = {c.label: c for c in cells}
+    assert len(cells) == 4
+    median_all = by_label["realized MEDIAN hold (all trades)"]
+    mean_all = by_label["realized MEAN hold (all trades)"]
+    # identical arithmetic to margin_floor_pct_per_day, only the denominator changes
+    assert median_all.margin_floor_pct_per_day == pytest.approx(CNC_COST_FLOOR_PCT / 33.0)
+    assert median_all.margin_floor_pct_per_day == pytest.approx(
+        margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=33)
+    )
+    # and the headroom the manager reads the verdict against: ~1.07x at the median, ~1.6x at the mean
+    assert median_all.headroom_x == pytest.approx(1.07, abs=0.01)
+    assert mean_all.headroom_x == pytest.approx(1.58, abs=0.01)
+    # vs 3.89x at the 120-session §7.1 CAP the run was registered at
+    assert 0.010342 / margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=120) == (
+        pytest.approx(3.89, abs=0.01)
+    )
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"median_sessions": 0.0, "mean_sessions": 0.0},      # cost_floor/0 is not a per-day bar
+        {"median_sessions": -3.0, "mean_sessions": -3.0},    # never observed; must not produce a cell
+        {"median_sessions": None, "mean_sessions": None},    # no trades scored
+    ],
+)
+def test_realized_hold_cells_skip_a_hold_that_cannot_denominate_a_floor(kw):
+    cells = realized_hold_floor_cells(_hold(**kw), CNC_COST_FLOOR_PCT, 0.01)
+    assert [c.label for c in cells] == [
+        "realized MEDIAN hold (closed trades only)",
+        "realized MEAN hold (closed trades only)",
+    ]
+
+
+def test_realized_hold_cells_are_total_on_missing_inputs():
+    """A reporting path must never raise inside a validation run."""
+    assert realized_hold_floor_cells(None, CNC_COST_FLOOR_PCT, 0.01) == []
+    assert realized_hold_floor_cells(_hold(), None, 0.01) == []
+    # no passing splits ⇒ cells still render, headroom is simply unknown
+    cells = realized_hold_floor_cells(_hold(), CNC_COST_FLOOR_PCT, None)
+    assert cells and all(c.headroom_x is None for c in cells)
+
+
+def test_realized_hold_never_changes_the_promotion_verdict(clock):
+    """The whole point: the bar stays at the REGISTERED denominator, however the hold came out.
+
+    A verdict that moved with a horizon measured on the same run it is judging would make the
+    promotion threshold a function of the result.
+    """
+    def _report(**extra):
+        pipe = ValidationPipeline(
+            returns_provider=lambda sid, params: _tiny_margin_series(),
+            clock=clock,
+            splitter=_FixedSplitter(),
+            cost_floor_provider=lambda _sid: CNC_COST_FLOOR_PCT,
+        )
+        return pipe.validate_sync(
+            "rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10, **extra)
+        )
+
+    bare = _report()
+    # a hold so short the floor at it is astronomically high, and one so long it is near zero
+    short = _report(realized_hold=_hold(median_sessions=1.0, mean_sessions=1.0))
+    forever = _report(realized_hold=_hold(median_sessions=5000.0, mean_sessions=5000.0))
+
+    assert bare.promotable is short.promotable is forever.promotable is False
+    assert short.reasons == forever.reasons == bare.reasons
+    assert short.margin_floor_pct_per_day == forever.margin_floor_pct_per_day == pytest.approx(
+        0.01596
+    )
+    assert short.margin_floor_days == forever.margin_floor_days == MARGIN_FLOOR_DAYS
+    assert bare.realized_hold is None and bare.realized_hold_cells == []
+    assert forever.realized_hold_cells, "the cells are still recorded, just never consulted"
+
+
+def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_caveat(clock, tmp_path):
+    pipe = ValidationPipeline(
+        returns_provider=lambda sid, params: _returns_series(),
+        clock=clock,
+        splitter=_FixedSplitter(),
+        cost_floor_provider=lambda _sid: CNC_COST_FLOOR_PCT,
+        reports_dir=tmp_path,
+        margin_floor_days=120,
+    )
+    report = pipe.validate_sync(
+        "trend",
+        ParamSet(
+            strategy_id="trend", params={}, trial_count_n=9,
+            realized_hold=_hold(), population_is_survivorship_tainted_proxy=True,
+        ),
+    )
+    md = reports.render_markdown(report)
+
+    assert "MEASURED holding period" in md
+    assert "realized MEDIAN hold (all trades)" in md
+    assert "still open at the window edge: 30" in md
+    assert "SURVIVORSHIP" in md
+    assert "120 sessions" in md          # the registered denominator is still what the verdict used
+    # and it all travels in the machine-readable artifact, not only the prose
+    art = reports.write_report(report, tmp_path)
+    data = json.loads(art.json.read_text(encoding="utf-8"))
+    assert data["population_is_survivorship_tainted_proxy"] is True
+    assert data["realized_hold"]["median_sessions"] == 33.0
+    assert data["realized_hold"]["n_open"] == 30
+    assert len(data["realized_hold_cells"]) == 4

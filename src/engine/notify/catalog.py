@@ -701,20 +701,27 @@ def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -
     )
 
 
-def budget_tier(old: str, new: str, month_spend: Decimal) -> CatalogMessage:
+def budget_tier(old: str, new: str, window_spend: Decimal, window_key: str) -> CatalogMessage:
     """The §5.6 degrade ladder moved a rung (§10.3 ``BUDGET_TIER(DGn)``).
 
     Reuses :data:`MessageKind.BUDGET_WARNING` — the ladder IS the budget warning; a second kind for the
-    same event would fork the audit log (R8)."""
+    same event would fork the audit log (R8). The window is named in the prose: the period is the
+    subscription's Thursday-14:00-IST quota week, so "$103" alone reads as a month figure to the owner."""
     return CatalogMessage(
         kind=MessageKind.BUDGET_WARNING,
         title=f"Budget tier {old} → {new}",
         body=(
-            f"LLM/API degrade ladder moved {old} → {new} (month spend ${month_spend}). "
+            f"LLM/API degrade ladder moved {old} → {new} (window spend ${window_spend}, "
+            f"week from {window_key} 14:00 IST). "
             "Capabilities change per the §5.6 ladder; /budget shows the per-agent split."
         ),
         severity="warning",
-        data={"old_tier": old, "new_tier": new, "month_spend_usd": str(month_spend)},
+        data={
+            "old_tier": old,
+            "new_tier": new,
+            "window_key": window_key,
+            "window_spend_usd": str(window_spend),
+        },
     )
 
 

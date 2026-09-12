@@ -310,6 +310,86 @@ def test_rsi2_insufficient_history_fails_to_zero():
     assert Rsi2Scanner().scan(bar, ctx) == []
 
 
+# --------------------------------------------------- regime visibility (owner-directed 2026-09-12)
+# NIFTY 50 sat under its 50-DMA every session from 08-27 and rsi2 produced nothing from 08-28, with
+# no line anywhere saying which leg was shut: "the filter is working" and "the scanner is broken"
+# were indistinguishable from the log for two weeks.
+
+# Close below its own (still rising) 50-DMA — the live shape since 08-27.
+BELOW_DMA_INDEX = [*UPTREND_INDEX[:-1], Decimal("120")]
+
+
+def _regime_records(caplog) -> list:
+    return [r for r in caplog.records if r.getMessage() == "rsi2_regime_blocked"]
+
+
+def test_rsi2_regime_block_logs_the_failing_leg(caplog):
+    good_stock = _dailies([*RSI2_RISING, 196.5])
+    with caplog.at_level("INFO"):
+        assert Rsi2Scanner().scan(
+            _swing_bar("194.50"), ScanContext(daily_bars=good_stock,
+                                              index_daily_closes=BELOW_DMA_INDEX)
+        ) == []
+    rec = _regime_records(caplog)[-1]
+    assert rec.blocked_leg == "close_below_sma50"
+    assert rec.rising is True                    # the 50-DMA is still rising; the CLOSE is the leg
+    assert rec.index_close == 120.0
+    assert rec.sma50 > rec.index_close
+    assert rec.d == DAY.isoformat()
+
+
+def test_rsi2_regime_block_names_the_rising_leg_when_that_is_what_failed(caplog):
+    good_stock = _dailies([*RSI2_RISING, 196.5])
+    with caplog.at_level("INFO"):
+        assert Rsi2Scanner().scan(
+            _swing_bar("194.50"), ScanContext(daily_bars=good_stock,
+                                              index_daily_closes=FALLING_DMA_INDEX)
+        ) == []
+    rec = _regime_records(caplog)[-1]
+    assert rec.blocked_leg == "sma50_not_rising"  # close 160 IS above the 50-DMA; the slope is not
+    assert rec.rising is False
+
+
+def test_rsi2_regime_block_logs_once_per_session(caplog):
+    """``scan`` runs on every 1m bar of every watchlist symbol — ~80,000 calls a session. One line a
+    session, and the day guard must RELEASE on the next session (a latch with no symmetric clear is
+    the 2026-09-01 freeze lesson)."""
+    scanner = Rsi2Scanner()                       # one instance, as the integrator builds it
+    ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=BELOW_DMA_INDEX)
+    with caplog.at_level("INFO"):
+        for mm in range(5):
+            bar = Bar(symbol="TCS", ts_minute=_dt(10, mm), open=Decimal("194.50"),
+                      high=Decimal("194.50"), low=Decimal("194.50"), close=Decimal("194.50"),
+                      volume=1000)
+            assert scanner.scan(bar, ctx) == []
+        assert len(_regime_records(caplog)) == 1
+        # ...and a bar from the NEXT session logs again.
+        next_day = Bar(symbol="TCS", ts_minute=datetime(2026, 6, 18, 10, 0, tzinfo=IST),
+                       open=Decimal("194.50"), high=Decimal("194.50"), low=Decimal("194.50"),
+                       close=Decimal("194.50"), volume=1000)
+        assert scanner.scan(next_day, ctx) == []
+    recs = _regime_records(caplog)
+    assert [r.d for r in recs] == [DAY.isoformat(), "2026-06-18"]
+
+
+def test_rsi2_passing_regime_logs_nothing(caplog):
+    """The line names a SHUT filter. A passing regime that produces a candidate must stay silent, or
+    the signal it exists to carry is buried on every normal session."""
+    ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX)
+    with caplog.at_level("INFO"):
+        assert len(Rsi2Scanner().scan(_swing_bar("194.50"), ctx)) == 1
+    assert _regime_records(caplog) == []
+
+
+def test_rsi2_warmup_shortfall_is_not_a_regime_block(caplog):
+    """Too few index closes is a warm-up condition (§7.1), not a shut regime — the filter was never
+    evaluated, so naming a failing leg would be an invention."""
+    ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX[:69])
+    with caplog.at_level("INFO"):
+        assert Rsi2Scanner().scan(_swing_bar("194.50"), ctx) == []
+    assert _regime_records(caplog) == []
+
+
 # ============================================================================ trend (§6.1 row 3)
 #
 # 150 dailies (WO-11 floor, F10) with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-

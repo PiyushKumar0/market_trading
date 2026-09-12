@@ -383,18 +383,34 @@ def create_app(
 
     @app.get("/budget")
     async def budget(_: Owner) -> dict[str, Any]:
-        """SDK-call budget governor state: degrade tier + month-spend per agent + allocations (§5.6)."""
+        """SDK-call budget governor state for the live quota WEEK (§5.6): the window's bounds, its
+        spend per agent against the weekly allocations, the degrade tier, and the forward cap the tier
+        is currently imposing (the one number the owner otherwise has to infer from the tier).
+
+        The per-agent split spans the UNION of the allocated agents and the ones that actually billed
+        this window, so the rows always add up to ``window_spend_usd``: an agent with spend but no
+        allocation (``sdk_smoke``) would otherwise sit inside the headline and nowhere in the split."""
         governor = app.state.governor
         if governor is None:
             return {"budget": {}, "degrade_tier": None}
+        window = governor.window_key()
+        start, end = governor.window_bounds(window)
         allocations = {agent: str(usd) for agent, usd in governor.allocations().items()}
+        agents = sorted(set(allocations) | set(governor.window_agents(window)))
         return {
             "budget": {
-                "month_spend_usd": str(governor.month_spend()),
-                "per_agent_spend_usd": {agent: str(governor.agent_spend(agent)) for agent in allocations},
+                "window_key": window,
+                "window_start": start.isoformat(),
+                "window_end": end.isoformat(),
+                "window_spend_usd": str(governor.window_spend(window)),
+                "credit_usd": str(governor.credit()),
+                "per_agent_spend_usd": {
+                    agent: str(governor.agent_spend(agent, window)) for agent in agents
+                },
                 "allocations_usd": allocations,
+                "forward_cap": governor.prescreen_forward_cap(),
             },
-            "degrade_tier": governor.degrade_tier().value,
+            "degrade_tier": governor.degrade_tier(window).value,
         }
 
     @app.get("/news/watchlist")

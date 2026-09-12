@@ -154,6 +154,26 @@ class ParamSetStat(BaseModel):
     sharpe: float | None                   # annualized (252) Sharpe of the daily series
     max_drawdown_pct: float | None         # positive magnitude
 
+    # --- R2 (2026-09-12) REPORTING-ONLY additions. Nothing below changes ``expectancy_pct``, the
+    # --- :meth:`SweepRunner._rank_best` ranking statistic, or any promotion rule; they exist so a
+    # --- per-trade number can be READ correctly and so the WO-3 margin floor can be quoted at the
+    # --- horizon the strategy was actually held for instead of only at a §7.1 cap.
+    #: Open/closed split of the trades ``expectancy_pct`` averages. vectorbt's per-trade ``Return``
+    #: includes STILL-OPEN positions at their unrealized mark-to-market, so a window that ends on a
+    #: run of winners inflates the headline (and, through ``_rank_best``, the winner selection).
+    n_closed: int = 0
+    n_open: int = 0
+    expectancy_closed_pct: float | None = None   # mean per-trade net return over CLOSED trades only, %
+    #: Realized holding period in BARS — sessions for the daily baselines, 1-minute bars for ``orb``
+    #: (:attr:`SweepReport.bar_unit` names the unit). An OPEN trade contributes its AGE at the window
+    #: edge, not a realized hold, which is why the closed-only figures are reported beside them.
+    hold_bars_mean: float | None = None
+    hold_bars_median: float | None = None
+    hold_bars_p90: float | None = None
+    hold_bars_mean_closed: float | None = None
+    hold_bars_median_closed: float | None = None
+    hold_bars_p90_closed: float | None = None
+
 
 class SweepReport(BaseModel):
     """Output of one strategy sweep. ``trial_count_n`` = grid cardinality (§6.4 step 1)."""
@@ -175,6 +195,14 @@ class SweepReport(BaseModel):
     slippage_per_leg_pct: float = 0.0      # = spread_pct/2, charged by vectorbt on EVERY order
     cost_floor_pct: float = 0.0            # round-trip friction at the reference notional (fees+spread)
     fill_mechanics: str = "next_bar_open"  # WO-2; "same_bar_close" was the pre-2026-08-13 defect
+    #: What one bar of ``ParamSetStat.hold_bars_*`` IS — "session" for the daily baselines, "1m bar"
+    #: for ``orb``. Recorded so a holding number in the JSON is never read in the wrong unit.
+    bar_unit: str = "session"
+    #: R2 (2026-09-12): this platform stores NO point-in-time index membership, so EVERY universe a
+    #: caller can pass is a present-day list applied backwards — survivorship-tainted and optimistic
+    #: in LEVEL (comparisons between runs sharing one list are unaffected). There is deliberately no
+    #: code path that sets this False: it would be a claim the platform cannot currently support.
+    population_is_survivorship_tainted_proxy: bool = True
     stats: list[ParamSetStat]
     best_params: dict[str, float] | None   # ranked by expectancy_pct then total_return_pct
     notes: list[str] = Field(default_factory=list)
@@ -409,6 +437,7 @@ class SweepRunner:
             slippage_per_leg_pct=round(self._slippage_per_leg() * 100.0, 6),
             cost_floor_pct=round(self._cost_floor_pct(strategy_id), 6),
             fill_mechanics=FILL_MECHANICS,
+            bar_unit="1m bar" if frames.intraday else "session",
             stats=stats,
             best_params=best,
             notes=notes,
@@ -490,10 +519,19 @@ class SweepRunner:
         n = int(len(trades))
         win_rate: float | None = None
         expectancy: float | None = None
+        # R2 (2026-09-12) reporting-only: the open/closed split and the realized holding
+        # distribution of the SAME trade records ``expectancy_pct`` is averaged over.
+        n_closed = n_open = 0
+        expectancy_closed: float | None = None
+        hold_all: tuple[float | None, float | None, float | None] = (None, None, None)
+        hold_closed: tuple[float | None, float | None, float | None] = (None, None, None)
         if n:
             tr_ret = trades["Return"].astype(float)
             win_rate = float((tr_ret > 0.0).mean())
             expectancy = float(tr_ret.mean() * 100.0)
+            n_closed, n_open, expectancy_closed, hold_all, hold_closed = _trade_split_stats(
+                trades, tr_ret, frames.close.index
+            )
         total, max_dd = _equity_stats(daily)
         return ParamSetStat(
             params=dict(params),
@@ -503,6 +541,15 @@ class SweepRunner:
             total_return_pct=total,
             sharpe=_sharpe(daily),
             max_drawdown_pct=max_dd,
+            n_closed=n_closed,
+            n_open=n_open,
+            expectancy_closed_pct=expectancy_closed,
+            hold_bars_mean=hold_all[0],
+            hold_bars_median=hold_all[1],
+            hold_bars_p90=hold_all[2],
+            hold_bars_mean_closed=hold_closed[0],
+            hold_bars_median_closed=hold_closed[1],
+            hold_bars_p90_closed=hold_closed[2],
         )
 
     @staticmethod
@@ -541,7 +588,12 @@ class SweepRunner:
             f"Costs — spread (WO-2): vectorbt slippage {self._slippage_per_leg() * 100:.4f}% per leg "
             f"= half the measured quoted spread {float(self._cost_model.spread_pct):.3f}% "
             "(config/costs.yaml spread_pct), so a round trip pays the full spread ON TOP of the "
-            "fees. Provenance: NIFTY200 median quoted spread 0.0180% over 48 symbol-days (24 symbols "
+            "fees — EXCEPT on a STOP-driven exit, which vectorbt fills at the stop price with "
+            "slippage zeroed (its `stop_exit_price` default), i.e. that leg pays the fee but not "
+            "the half-spread and the round trip is ~1 bp cheaper than the floor quoted below. "
+            "Disclosed, NOT corrected here: it is item (ii) of the plan §6.4 2026-09-12 "
+            "sweep-mechanics work order, and it biases results in the STRATEGY's favour. "
+            "Provenance: NIFTY200 median quoted spread 0.0180% over 48 symbol-days (24 symbols "
             "× sessions 2026-08-11/12), per-tier 0.0135/0.0180/0.0219%, p75 0.0303% — "
             "IMPROVEMENT_SPEC.md Part III. The prior sweeps charged ZERO spread and zero slippage. "
             f"Full round-trip friction at the reference notional: "
@@ -551,8 +603,39 @@ class SweepRunner:
             "live per-trade notional) — previously ₹100,000 against a fee calibrated at ₹20,000. "
             "Each symbol runs one all-in position; equity compounds within a symbol, so later "
             "positions drift from the reference size.",
+            "SURVIVORSHIP (R2, 2026-09-12) — REAL, UNCORRECTED, OPTIMISTIC, and it applies to every "
+            "LEVEL in this report. The universe is whatever symbol list the caller passed, and this "
+            "platform stores NO point-in-time index membership anywhere, so the list can only be a "
+            "PRESENT-DAY snapshot applied BACKWARDS: a name that entered the index after a big run "
+            "reads as eligible throughout that run, and a name delisted inside the window is simply "
+            "absent. Per-trade expectancy and total return are therefore biased HIGH by an amount "
+            "this platform cannot measure. What survives intact is the COMPARISON between runs that "
+            "share the same list (same taint, same direction). The JSON carries the same warning as "
+            "`population_is_survivorship_tainted_proxy: true`.",
+            "HOLDING PERIOD + OPEN TRADES (R2, 2026-09-12, reporting only). Each row's "
+            "`hold_bars_*` fields are the realized holding distribution in "
+            f"{'1-minute bars' if frames.intraday else 'SESSIONS'} (mean/median/p90, all trades and "
+            "closed-only), and `n_open`/`expectancy_closed_pct` split the headline `expectancy_pct`. "
+            "They matter because vectorbt's per-trade `Return` averages STILL-OPEN positions at "
+            "their unrealized mark-to-market alongside closed round trips — a window ending on a run "
+            "of winners inflates the headline (and, through the ranking, the winner selection). "
+            "NOTHING here changes `expectancy_pct` or which config wins; see the plan §6.4 "
+            "2026-09-12 sweep-mechanics work order for the fix that will.",
             "Long-only (Phase-1 §1.4.9 shorts gate); per-symbol equal-weight, no §7.1 portfolio "
             "limits (gate/paper layer, Phase 2/3).",
+        ]
+        if not frames.intraday:
+            notes.append(
+                "STOPS ARE EVALUATED ON THE CLOSE, not intrabar (R2 disclosure, 2026-09-12). This "
+                "sweep passes `high`/`low` to vectorbt ONLY for the intraday (`orb`) frames, so for "
+                "the daily baselines vectorbt substitutes the close for open/high/low and every "
+                "stop/trail is therefore a CLOSE-BELOW-LEVEL rule filled at that same close — "
+                "looser than the live resting broker stop, which an intrabar breach triggers. "
+                "Disclosed, NOT corrected here: it is item (i) of the plan §6.4 2026-09-12 "
+                "sweep-mechanics work order, and it biases results in the STRATEGY's favour "
+                "(fewer stop-outs).",
+            )
+        notes += [
             "Vectorbt-vectorized only (§8.2); the event-driven ReplayHarness re-validates in Phase 3.",
         ]
         if strategy_id == "orb":
@@ -1020,6 +1103,70 @@ def _equity_stats(daily: pd.Series) -> tuple[float | None, float | None]:
     total = float(eq.iloc[-1] - 1.0) * 100.0
     dd = float(-(eq / eq.cummax() - 1.0).min()) * 100.0
     return total, dd
+
+
+def _trade_split_stats(
+    trades: pd.DataFrame, tr_ret: pd.Series, index: pd.Index
+) -> tuple[
+    int,
+    int,
+    float | None,
+    tuple[float | None, float | None, float | None],
+    tuple[float | None, float | None, float | None],
+]:
+    """R2 reporting block for one config: ``(n_closed, n_open, expectancy_closed_pct, all, closed)``.
+
+    TOTAL BY CONSTRUCTION. This is a reporting-only addition to a job that takes minutes over 200
+    symbols, and it reads two vectorbt ``records_readable`` columns whose names are a property of the
+    installed vectorbt, not of this code. A column rename or an index shape this function did not
+    anticipate must degrade to "no holding figures" — never take the sweep, and never the promotion
+    verdict computed from it, down with it. The failure is logged, not swallowed silently.
+    """
+    none3: tuple[float | None, float | None, float | None] = (None, None, None)
+    try:
+        closed = trades["Status"].astype(str).str.lower().to_numpy() == "closed"
+        n_closed = int(closed.sum())
+        n_open = int(len(trades)) - n_closed
+        expectancy_closed = (
+            float(tr_ret.to_numpy()[closed].mean() * 100.0) if n_closed else None
+        )
+        bars = _trade_hold_bars(trades, index)
+        return n_closed, n_open, expectancy_closed, _hold_stats(bars), _hold_stats(bars[closed])
+    except Exception as exc:                          # noqa: BLE001 — reported, never raised
+        _log.warning("sweep_hold_stats_unavailable", error=str(exc))
+        return 0, 0, None, none3, none3
+
+
+def _trade_hold_bars(trades: pd.DataFrame, index: pd.Index) -> np.ndarray:
+    """Holding duration of every trade in BARS: exit row position − entry row position (R2).
+
+    ``records_readable`` carries TIMESTAMPS, not row positions, so the frame index is what converts
+    them back to a count of bars — calendar arithmetic would count weekends and holidays the market
+    never traded. An OPEN trade's ``Exit Timestamp`` is the frame's LAST bar, so its value is the
+    position's age at the window edge rather than a realized hold (hence the closed-only figures
+    reported beside it). Rows whose timestamps are not in ``index`` (never observed — defensive
+    against a future vectorbt returning a resampled stamp) score ``NaN`` and are dropped by
+    :func:`_hold_stats` rather than silently counted as a same-bar round trip. Pure (§9.6).
+    """
+    if trades.empty:
+        return np.zeros(0, dtype="float64")
+    if not index.is_unique:
+        # ``get_indexer`` raises on a non-unique index. A duplicated bar timestamp is a data defect
+        # the sweep has bigger problems with than its holding figures — report nothing, don't raise.
+        return np.full(len(trades), np.nan)
+    entry = index.get_indexer(pd.DatetimeIndex(trades["Entry Timestamp"]))
+    exit_ = index.get_indexer(pd.DatetimeIndex(trades["Exit Timestamp"]))
+    bars = (exit_ - entry).astype("float64")
+    bars[(entry < 0) | (exit_ < 0)] = np.nan
+    return bars
+
+
+def _hold_stats(bars: np.ndarray) -> tuple[float | None, float | None, float | None]:
+    """``(mean, median, p90)`` of a holding-duration array, ignoring NaNs. Empty ⇒ all ``None``."""
+    vals = bars[np.isfinite(bars)]
+    if vals.size == 0:
+        return None, None, None
+    return float(vals.mean()), float(np.median(vals)), float(np.percentile(vals, 90))
 
 
 def _sharpe(daily: pd.Series) -> float | None:

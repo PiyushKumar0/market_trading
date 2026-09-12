@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -1165,9 +1165,31 @@ class RiskGate:
 # --------------------------------------------------------------------------- context assembly
 #: O16 (owner-directed 2026-09-07): an OPEN position with an exit recommendation delivered within
 #: this many calendar days is EXITING. Calendar days rather than sessions so a Friday exit still
-#: counts on Monday; the hourly position review re-issues an exit while a stop stays breached, so
-#: a genuinely exiting position never ages out of the window while it is still open.
+#: counts on Monday; the position review re-issues an exit once per session while a stop stays
+#: breached (one per session since 2026-09-12, WO-D2), so a genuinely exiting position never ages
+#: out of the window while it is still open. A position the broker no longer holds produces no exit
+#: at all and is excluded on the holdings journal instead — see :func:`_gone_symbols`.
 _EXITING_LOOKBACK_DAYS = 3
+
+
+def _gone_symbols(positions: Sequence[Mapping[str, Any]], missing_ids: Collection[str]) -> frozenset[str]:
+    """Open symbols whose position the BROKER has shown empty on two consecutive sessions (WO-D2).
+
+    The §3.6 holdings journal (``positions_missing_from_holdings(..., require_zero=True)``) says the
+    owner sold these outside the ledger; the position-event path therefore stops recommending an
+    exit from them, and without an exit recommendation :func:`_exiting_symbols` would drop them
+    after three calendar days — putting a position that does not exist back on the §7.1 position
+    and sector counts, the O16 shape with the sign reversed (caps tighter, not looser). Excluding
+    them on the journal itself keeps the counts honest until the owner's ``/closed`` ends the row.
+    Same scope as EXITING: counts only — the symbol still blocks a fresh BUY on itself (the ledger
+    row is OPEN until the owner says otherwise) and deployed cash is untouched.
+    """
+    ids = set(missing_ids)
+    if not ids:
+        return frozenset()
+    return frozenset(
+        str(row["symbol"]) for row in positions if str(row["position_id"] or "") in ids
+    )
 
 
 def _exiting_symbols(
@@ -1303,6 +1325,7 @@ class GateContextBuilder:
         conn: sqlite3.Connection | None = None,
         nifty50_fn: Callable[[str], bool] | None = None,
         expiry_day_fn: Callable[[date], bool] | None = None,
+        missing_holdings_fn: Callable[[date], Collection[str]] | None = None,
         index_symbol: str = "NIFTY 50",
         corr_lookback_sessions: int = 20,
     ) -> None:
@@ -1323,6 +1346,10 @@ class GateContextBuilder:
         self._conn = conn if conn is not None else getattr(exposure, "_conn", None)
         self._nifty50_fn = nifty50_fn
         self._expiry_day_fn = expiry_day_fn
+        # WO-D2 (2026-09-12): position ids the §3.6 holdings journal shows EMPTY on two consecutive
+        # sessions. Injected rather than imported — the risk layer does not import engine.ops — and
+        # unwired ⇒ nothing is ever "gone", which is the pre-D2 behaviour.
+        self._missing_holdings_fn = missing_holdings_fn
         self._index_symbol = index_symbol
         self._corr_n = int(corr_lookback_sessions)
 
@@ -1369,6 +1396,11 @@ class GateContextBuilder:
         # sector slot against a new BUY — see _exiting_symbols. open_symbols keeps them (one
         # position per symbol) and deployed_capital keeps them (real cash).
         exiting = _exiting_symbols(self._recommendations(), open_symbols, now)
+        # WO-D2 (2026-09-12): a position the broker has shown EMPTY on two consecutive sessions gets
+        # no exit recommendation any more, so it would age out of the window above and re-take a
+        # slot — it is excluded on the holdings journal instead (see _gone_symbols). A failing
+        # journal read excludes nothing: the conservative direction for a count is to keep it.
+        exiting = exiting | _gone_symbols(positions, self._missing_holdings())
         open_total, open_mis, open_cnc, sector_counts = _active_counts(
             positions, exiting, sector_of,
             total=counts.total, mis=counts.mis, cnc=counts.cnc, sector_counts=sector_counts,
@@ -1433,6 +1465,17 @@ class GateContextBuilder:
         if self._conn is None:
             return []
         return list(self._conn.execute(sql, tuple(params)).fetchall())
+
+    def _missing_holdings(self) -> Collection[str]:
+        """Position ids the holdings journal shows empty on two sessions (WO-D2); ``()`` unwired
+        or on any failure — the seam must never turn a journal error into a widened cap."""
+        if self._missing_holdings_fn is None:
+            return ()
+        try:
+            return set(self._missing_holdings_fn(self._clock.today()))
+        except Exception as exc:  # noqa: BLE001 - a diagnostic read never changes a count
+            _log.warning("gate_missing_holdings_read_failed", error=str(exc))
+            return ()
 
     def _open_positions(self) -> list[sqlite3.Row]:
         """Open PLATFORM positions (O5 excludes the owner's own ``external`` trades)."""

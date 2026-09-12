@@ -90,7 +90,10 @@ CHAMPION_MAX_DD_MULT = 1.25            # §6.4 step 2: max DD ≤ 1.25× champio
 #:     20-session holding period lands exactly on 0.01596 %/day; anything better clears it.
 #: Intraday strategies (``orb``) round-trip far more often than once per 20 sessions, so for them
 #: this floor is a LOWER bound rather than the true bar — honest, and the sweep's own C3 cost gate
-#: plus the fold-pass rule carry that case. Overridable per call, never silently.
+#: plus the fold-pass rule carry that case. The mirror case is ``trend``: a POSITIONAL leg whose
+#: §7.1 cap is ``max_holding.position_trading_days`` = 120, so the 20 overstates its per-day bar by
+#: 6× — the denominator must be the horizon the strategy is actually held for (pre-registered
+#: 2026-09-12, plan §6.4 step 2). Overridable per call, never silently.
 MARGIN_FLOOR_DAYS = 20
 
 #: The sweep sizing the cost floor is quoted at when the caller supplies none (WO-2 (iii)).
@@ -114,6 +117,54 @@ def fold_pass_min(n: int) -> float:
 
 
 # --------------------------------------------------------------------------- models
+class RealizedHold(BaseModel):
+    """The sweep's MEASURED holding distribution + open/closed trade split for one config (R2).
+
+    **Reporting only — nothing here reaches :func:`promotion_decision`.** It exists because the WO-3
+    margin floor's denominator is a *horizon*, and until 2026-09-12 no artifact recorded the horizon
+    a strategy was actually held for: the 20 is the §7.1 swing cap and the 120 the positional one,
+    both CAPS. A floor quoted at a cap that the backtest never enforced can read 4× more comfortable
+    than the same floor at the realized median hold — so the measured numbers travel with the
+    verdict, in the same JSON, and :func:`realized_hold_floor_cells` re-bases the floor on them.
+
+    Durations are in SESSIONS. The caller must not build one from an intraday sweep, whose
+    ``hold_bars_*`` are 1-minute bars (``SweepReport.bar_unit`` says which).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    n_trades: int
+    n_closed: int
+    n_open: int
+    #: The sweep's headline per-trade net return (ALL trades, incl. open ones at their unrealized
+    #: mark-to-market) and the same figure over CLOSED round trips only.
+    expectancy_per_trade_pct: float | None = None
+    expectancy_per_trade_closed_pct: float | None = None
+    mean_sessions: float | None = None
+    median_sessions: float | None = None
+    p90_sessions: float | None = None
+    mean_sessions_closed: float | None = None
+    median_sessions_closed: float | None = None
+    p90_sessions_closed: float | None = None
+
+
+class MarginFloorCell(BaseModel):
+    """The WO-3 floor re-based on ONE measured holding period (R2, 2026-09-12) — REPORTING ONLY.
+
+    ``headroom_x`` is the observed median passing-split expectancy divided by this cell's floor: the
+    multiple by which the edge clears the bar at THIS horizon. The promotion verdict continues to be
+    decided at the registered denominator alone — these cells never enter it, by design, because
+    moving a promotion threshold onto a statistic measured from the same run that is being judged
+    would make the bar a function of the result.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    label: str
+    hold_sessions: float
+    margin_floor_pct_per_day: float
+    headroom_x: float | None = None
+
 class ParamSet(BaseModel):
     """A candidate parameter set entering validation (§3.2.10 / §6.4 step 1).
 
@@ -137,6 +188,12 @@ class ParamSet(BaseModel):
     grid_density: str | None = None
     adjacent_density: str | None = None
     adjacent_winner: dict[str, float] | None = None
+    #: R2 (2026-09-12) REPORTING-ONLY inputs — the measured holding distribution behind these
+    #: returns, and whether the population is a survivorship-tainted proxy. Both are rendered and
+    #: persisted; NEITHER is an input to :func:`promotion_decision`.
+    realized_hold: RealizedHold | None = None
+    population_is_survivorship_tainted_proxy: bool | None = None
+
 
 
 class WalkForwardFold(BaseModel):
@@ -259,6 +316,17 @@ class ValidationReport(BaseModel):
     cpcv_median_passing_expectancy_pct: float | None = None
     cost_floor_pct: float | None = None
     margin_floor_pct_per_day: float | None = None
+    #: The denominator the floor was taken at, in sessions (:data:`MARGIN_FLOOR_DAYS` unless the
+    #: caller overrode it — a positional leg's §7.1 holding cap is 120, not the swing 20). Recorded
+    #: so the artifact alone reproduces the floor; None only on reports built before this field.
+    margin_floor_days: int | None = None
+    #: R2 (2026-09-12) REPORTING-ONLY block: the measured holding distribution behind these returns,
+    #: the same WO-3 floor re-based on it, and whether the population is a survivorship-tainted
+    #: proxy. None of it feeds :func:`promotion_decision` — it exists so a reader of the verdict can
+    #: see the horizon and the population the verdict was earned on without re-running anything.
+    realized_hold: RealizedHold | None = None
+    realized_hold_cells: list[MarginFloorCell] = Field(default_factory=list)
+    population_is_survivorship_tainted_proxy: bool | None = None
     #: WO-3 winner-stability FLAG (never part of the promotion rule).
     winner_stability: WinnerStability | None = None
     promotable: bool
@@ -354,6 +422,59 @@ def margin_floor_pct_per_day(
     if margin_floor_days < 1:
         raise ValueError(f"margin_floor_days must be >= 1, got {margin_floor_days}")
     return float(cost_floor_pct) / float(margin_floor_days)
+
+
+#: The four REPORTING-ONLY horizons :func:`realized_hold_floor_cells` re-bases the floor on, as
+#: ``(label, RealizedHold attribute)``. All-trades first because that is the distribution the
+#: headline per-trade expectancy is averaged over; closed-only beside it because an open trade
+#: contributes its AGE at the window edge, not a realized hold.
+_REALIZED_HOLD_CELLS: tuple[tuple[str, str], ...] = (
+    ("realized MEDIAN hold (all trades)", "median_sessions"),
+    ("realized MEAN hold (all trades)", "mean_sessions"),
+    ("realized MEDIAN hold (closed trades only)", "median_sessions_closed"),
+    ("realized MEAN hold (closed trades only)", "mean_sessions_closed"),
+)
+
+
+def realized_hold_floor_cells(
+    realized_hold: RealizedHold | None,
+    cost_floor_pct: float | None,
+    median_passing_expectancy_pct: float | None,
+) -> list[MarginFloorCell]:
+    """The WO-3 floor re-based on each MEASURED holding period (R2, 2026-09-12) — REPORTING ONLY.
+
+    Same arithmetic as :func:`margin_floor_pct_per_day` (``cost_floor / sessions``), same round-trip
+    floor, only the denominator changes: a CAP (20 swing / 120 positional) is an upper bound on the
+    hold, so a floor taken at the cap is the LOOSEST bar the horizon can justify, and the realized
+    median is the one a reader should weigh the verdict against. ``headroom_x`` is the observed
+    median passing-split expectancy over the cell's floor.
+
+    Pure and total (§9.6): missing inputs and non-positive holds yield fewer cells, never an
+    exception — this is a reporting path and must not be able to fail a validation run. A zero or
+    negative hold is skipped because ``cost_floor / 0`` is not a per-day bar at all.
+    """
+    if realized_hold is None or cost_floor_pct is None:
+        return []
+    cells: list[MarginFloorCell] = []
+    for label, attr in _REALIZED_HOLD_CELLS:
+        sessions = getattr(realized_hold, attr, None)
+        if sessions is None or not np.isfinite(sessions) or float(sessions) <= 0.0:
+            continue
+        floor = float(cost_floor_pct) / float(sessions)
+        headroom = (
+            None
+            if median_passing_expectancy_pct is None or floor <= 0.0
+            else float(median_passing_expectancy_pct) / floor
+        )
+        cells.append(
+            MarginFloorCell(
+                label=label,
+                hold_sessions=float(sessions),
+                margin_floor_pct_per_day=floor,
+                headroom_x=headroom,
+            )
+        )
+    return cells
 
 
 def promotion_decision(
@@ -596,6 +717,10 @@ class ValidationPipeline:
             cost_floor_pct=cost_floor,
             margin_floor_days=self._margin_floor_days,
         )
+        # R2 (2026-09-12) reporting-only block. Built AFTER promotion_decision above and fed into
+        # nothing but the artifact: the verdict must stay a function of the registered denominator,
+        # never of a horizon measured on the same run it is judging.
+        hold_cells = realized_hold_floor_cells(params.realized_hold, cost_floor, median_passing)
         notes = [stability.note()]
         if floor is not None:
             notes.append(
@@ -605,6 +730,17 @@ class ValidationPipeline:
                 f"sessions). Observed: "
                 + ("no passing splits" if median_passing is None else f"{median_passing:.5f}%/day")
                 + "."
+            )
+        notes.extend(self._realized_hold_notes(params.realized_hold, hold_cells))
+        if params.population_is_survivorship_tainted_proxy:
+            notes.append(
+                "SURVIVORSHIP (R2, 2026-09-12): the population behind these returns is a "
+                "survivorship-tainted proxy — a present-day symbol list applied BACKWARDS, because "
+                "this platform stores no point-in-time index membership. Every LEVEL quoted here "
+                "(expectancy, total return, the sweep's per-trade figures) is biased HIGH by an "
+                "amount that cannot be measured from what is stored; comparisons against other runs "
+                "on the SAME list are unaffected. Carried in the JSON as "
+                "`population_is_survivorship_tainted_proxy: true`."
             )
         return ValidationReport(
             strategy_id=strategy_id,
@@ -624,6 +760,12 @@ class ValidationPipeline:
             cpcv_median_passing_expectancy_pct=median_passing,
             cost_floor_pct=cost_floor,
             margin_floor_pct_per_day=floor,
+            margin_floor_days=self._margin_floor_days,
+            realized_hold=params.realized_hold,
+            realized_hold_cells=hold_cells,
+            population_is_survivorship_tainted_proxy=(
+                params.population_is_survivorship_tainted_proxy
+            ),
             winner_stability=stability,
             promotable=promotable,
             reasons=reasons,
@@ -631,6 +773,51 @@ class ValidationPipeline:
             notes=notes,
             generated_at=self._clock.now(),
         )
+
+    def _realized_hold_notes(
+        self, hold: RealizedHold | None, cells: Sequence[MarginFloorCell]
+    ) -> list[str]:
+        """R2 reporting-only notes: the measured hold, the re-based floors, open-vs-closed trades.
+
+        Rendered into the md artifact so a reader who only ever sees the report gets the two facts
+        that decide how comfortable the verdict actually is — the horizon the floor was quoted at
+        versus the one the strategy was held for, and how much of the headline per-trade number is
+        unrealized mark-to-market on positions that never paid an exit leg.
+        """
+        if hold is None:
+            return []
+        notes: list[str] = []
+        if cells:
+            rebased = "; ".join(
+                f"{c.label} {c.hold_sessions:.2f} sessions => {c.margin_floor_pct_per_day:.5f}%/day"
+                + ("" if c.headroom_x is None else f" ({c.headroom_x:.2f}x headroom)")
+                for c in cells
+            )
+            notes.append(
+                "Margin floor at the MEASURED holding period (R2, 2026-09-12) — REPORTING ONLY: the "
+                f"verdict above is decided at the registered {self._margin_floor_days}-session "
+                "denominator and nothing here moves it. A denominator is a HORIZON, and 20 (swing) "
+                "and 120 (positional) are §7.1 CAPS, so a floor quoted at a cap is the loosest bar "
+                f"the horizon can justify. Re-based on this run's own trades: {rebased}."
+            )
+        if hold.n_trades:
+            all_txt = (
+                "—" if hold.expectancy_per_trade_pct is None
+                else f"{hold.expectancy_per_trade_pct:+.4f}%"
+            )
+            closed_txt = (
+                "—" if hold.expectancy_per_trade_closed_pct is None
+                else f"{hold.expectancy_per_trade_closed_pct:+.4f}%"
+            )
+            notes.append(
+                f"Per-trade expectancy, open/closed split (R2, reporting only): {hold.n_trades} "
+                f"trades = {hold.n_closed} closed + {hold.n_open} still OPEN at the window edge. "
+                f"Mean net return per trade over ALL trades {all_txt} (the sweep headline, and the "
+                f"statistic the grid winner was ranked on) vs {closed_txt} over CLOSED round trips "
+                "only. An open trade contributes unrealized mark-to-market and has not paid an exit "
+                "leg, so where the two differ the headline is the more optimistic of the pair."
+            )
+        return notes
 
     def _walk_forward(self, dates: list[date], values: np.ndarray) -> list[WalkForwardFold]:
         splits = walk_forward_splits(

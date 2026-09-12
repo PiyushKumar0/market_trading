@@ -1398,23 +1398,35 @@ class TelegramBot:
         await _reply(update, "\n".join(lines))
 
     async def _cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Month-to-date LLM spend vs the per-agent allocations + the active §5.6 degrade tier."""
+        """Quota-week-to-date LLM spend vs the per-agent allocations + the active §5.6 degrade tier."""
         if self._governor is None:
             await _reply(update, "/budget: budget governor not wired.")
             return
         gov = self._governor
         credit = gov.credit()
+        window = gov.window_key()
+        start, end = gov.window_bounds(window)
         allocations: dict[str, Any] = gov.allocations()
+        # `None` is UNMEASURABLE, not zero (governor.pro_rata_to_date): rendering it as $0.0000 would
+        # tell the owner the window is 100% over pace at the exact moment the pace rungs are off.
+        pace = gov.pro_rata_to_date(window)
         lines = [
-            f"month spend: {_usd(gov.month_spend())}" + (f" / {_usd(credit)} credit" if credit else ""),
-            f"pro-rata to date: {_usd(gov.pro_rata_to_date())} (trading days, R6)",
-            f"tier: {gov.degrade_tier().value}",
+            f"window: {start:%Y-%m-%d %H:%M} → {end:%Y-%m-%d %H:%M} IST",
+            f"window spend: {_usd(gov.window_spend(window))}"
+            + (f" / {_usd(credit)} credit" if credit else ""),
+            f"pro-rata to date: {_usd(pace)} (trading sessions, R6)" if pace is not None
+            else "pro-rata to date: unmeasurable — no trading session elapsed yet (pace rungs off, R6)",
+            f"tier: {gov.degrade_tier(window).value} · forward cap: {gov.prescreen_forward_cap()}",
         ]
-        if allocations:
+        # Union of allocated agents and the ones that actually billed: an agent with spend but no
+        # allocation is inside `window spend` above, so it gets a line or the split contradicts it.
+        agents = sorted(set(allocations) | set(gov.window_agents(window)))
+        if agents:
             lines.append("per agent (spend / allocation):")
             lines += [
-                f"  {agent}: {_usd(gov.agent_spend(agent))} / {_usd(alloc)}"
-                for agent, alloc in sorted(allocations.items())
+                f"  {agent}: {_usd(gov.agent_spend(agent, window))} / "
+                + (_usd(allocations[agent]) if agent in allocations else "(unallocated)")
+                for agent in agents
             ]
         _log.info("telegram_cmd_budget")
         await _reply(update, "\n".join(lines))
@@ -1586,7 +1598,9 @@ class TelegramBot:
 
     async def _on_budget_state(self, event: BudgetStateChanged) -> None:
         await self.send(
-            catalog.budget_tier(event.old_tier.value, event.new_tier.value, event.month_spend_usd)
+            catalog.budget_tier(
+                event.old_tier.value, event.new_tier.value, event.window_spend_usd, event.window_key
+            )
         )
 
 
@@ -1654,7 +1668,7 @@ def _inr(value: Any) -> str:
 
 def _usd(value: Any) -> str:
     """Render a USD budget amount. Four places: per-call LLM costs are fractions of a cent, and a
-    2-decimal render would report a real month's early spend as ``$0.00``."""
+    2-decimal render would report a real quota week's early spend as ``$0.00``."""
     return f"${Decimal(value):,.4f}"
 
 

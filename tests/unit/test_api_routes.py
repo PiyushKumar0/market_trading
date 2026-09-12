@@ -352,11 +352,41 @@ async def test_budget_wired_per_agent_and_degrade_tier(conn, clock, governor) ->
     assert body["degrade_tier"] == "DG0"
     # Compare as Decimal, not string: the governor's own Decimal formatting (trailing zeros) is not
     # this route's contract to pin down.
-    assert Decimal(body["budget"]["month_spend_usd"]) == Decimal("1")
+    assert Decimal(body["budget"]["window_spend_usd"]) == Decimal("1")
     assert Decimal(body["budget"]["per_agent_spend_usd"]["weekly_researcher"]) == Decimal("1")
     # Amount-AGNOSTIC vs the owner-tunable agents.yaml (2026-08-03 rebalance lesson): the route's
     # contract is that it serves the GOVERNOR's allocation, not any particular dollar figure.
     assert Decimal(body["budget"]["allocations_usd"]["weekly_researcher"]) == governor.allocations()["weekly_researcher"]
+    # The quota WINDOW, not a month (§5.6, 2026-09-12): the owner surface must say WHICH week the
+    # spend belongs to, and the cap the tier is currently imposing.
+    assert body["budget"]["window_key"] == governor.window_key()
+    start, end = governor.window_bounds()
+    assert (body["budget"]["window_start"], body["budget"]["window_end"]) == (
+        start.isoformat(), end.isoformat()
+    )
+    assert Decimal(body["budget"]["credit_usd"]) == governor.credit()
+    assert body["budget"]["forward_cap"] == governor.prescreen_forward_cap()
+
+
+async def test_budget_per_agent_split_shows_an_agent_that_billed_without_an_allocation(
+    conn, clock, governor
+) -> None:
+    """The split spans the UNION of allocated agents and the ones that billed. `sdk_smoke` exists in
+    the live ledger with spend and no `budget_allocations_usd` entry: keyed off allocations alone it
+    would sit inside `window_spend_usd` and in no row, so the panel's bars would not add up to the
+    total printed above them."""
+    await governor.record("sdk_smoke", "haiku-4.5", TokenUsage(in_tokens=200_000, out_tokens=0))
+    await governor.record("weekly_researcher", "haiku-4.5", TokenUsage(in_tokens=1_000_000, out_tokens=0))
+    body = _client(conn=conn, clock=clock, governor=governor).get("/budget", headers=AUTH).json()
+
+    per_agent = body["budget"]["per_agent_spend_usd"]
+    assert "sdk_smoke" not in body["budget"]["allocations_usd"]   # unallocated by construction
+    assert Decimal(per_agent["sdk_smoke"]) == Decimal("0.2")
+    # Every allocated agent keeps a row even at zero spend, and the rows reconcile to the headline.
+    assert set(body["budget"]["allocations_usd"]) <= set(per_agent)
+    assert sum((Decimal(v) for v in per_agent.values()), Decimal(0)) == Decimal(
+        body["budget"]["window_spend_usd"]
+    )
 
 
 # --------------------------------------------------------------------------- config/params (GET + POST)

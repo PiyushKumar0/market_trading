@@ -356,6 +356,104 @@ def test_empty_fresh_feed_raises_the_starvation_warning(conn, calendar, caplog):
     assert "ins_crossings_fresh_feed_empty" in caplog.text
 
 
+def _coverage_store(symbols_with_filings: int, universe_size: int) -> _FakeStore:
+    """A universe of ``universe_size`` names of which the first ``symbols_with_filings`` filed inside
+    the window. Closes are deliberately empty: coverage is about who FILED, and a symbol with no run-
+    day bar still counts (it is `symbols_missing_bar`, a different starvation)."""
+    universe = [f"S{i:04d}" for i in range(universe_size)]
+    filings = [
+        _buy(SESSIONS[-1], 1_000_000, symbol=sym) for sym in universe[:symbols_with_filings]
+    ]
+    return _FakeStore(universe=universe, filings=filings, closes={})
+
+
+def _record(caplog, event: str):
+    """The single LogRecord for ``event`` (structured fields ride as record attributes, R8)."""
+    hits = [r for r in caplog.records if r.getMessage() == event]
+    assert len(hits) == 1, [r.getMessage() for r in caplog.records]
+    return hits[0]
+
+
+def test_run_line_carries_issuer_coverage(conn, calendar, caplog):
+    """The SECOND starvation shape (2026-09-12): rows arrive daily so `fresh_feed_empty` never fires,
+    but from a handful of ISSUERS. The 09-10 run: 22 symbols with filings over a 480-name eligible
+    universe — 4.6%, against the ~1,565-issuer NSE corpus the edge was measured on."""
+    store = _coverage_store(22, 480)
+    with caplog.at_level("INFO"):
+        result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
+
+    assert result.ok is True
+    run = _record(caplog, "ins_crossings_run")
+    assert (run.universe, run.symbols_with_filings) == (480, 22)
+    assert run.coverage_pct == 4.6                         # one decimal, 22/480 = 4.583…
+
+
+def test_coverage_warning_fires_below_ten_percent_and_not_at_it(conn, calendar, caplog):
+    """The threshold is strict: 9.9% warns, 10.0% does not. Pinned at the boundary because a feed
+    that drifts to exactly the floor must not silently stop alarming."""
+    with caplog.at_level("INFO"):
+        _run(InsCrossingsJob(_coverage_store(99, 1000), conn, _FrozenClock(), calendar,
+                             threshold_inr=THRESHOLD))
+    low = _record(caplog, "ins_feed_coverage_low")
+    assert (low.coverage_pct, low.symbols_with_filings, low.universe) == (9.9, 99, 1000)
+    assert low.levelname == "WARNING"
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        _run(InsCrossingsJob(_coverage_store(100, 1000), conn, _FrozenClock(), calendar,
+                             threshold_inr=THRESHOLD))
+    assert "ins_feed_coverage_low" not in caplog.text
+    assert _record(caplog, "ins_crossings_run").coverage_pct == 10.0
+
+
+def test_coverage_warning_is_once_per_run_not_per_symbol(conn, calendar, caplog):
+    """One line per run: the EOD job walks the whole universe, and a per-symbol warning would bury
+    the log exactly as the pre-screen's cap line did."""
+    with caplog.at_level("INFO"):
+        _run(InsCrossingsJob(_coverage_store(1, 480), conn, _FrozenClock(), calendar,
+                             threshold_inr=THRESHOLD))
+    assert caplog.text.count("ins_feed_coverage_low") == 1
+
+
+def test_coverage_percent_helper_handles_the_no_universe_day():
+    """``ok=False`` days carry ``universe_symbols=0``; the ``--once`` print formats them through the
+    same helper, so a zero universe must be 0.0, never a ZeroDivisionError."""
+    from engine.datafeeds.ins_crossings import coverage_percent
+
+    assert coverage_percent(0, 0) == 0.0
+    assert coverage_percent(22, 480) == 4.6
+    assert coverage_percent(1000, 1000) == 100.0
+
+
+def test_the_run_line_names_todays_live_issuers_apart_from_the_corpus(conn, calendar, caplog):
+    """``coverage_pct``'s numerator is the 120-day CORPUS, which includes the ~70-day-embargoed NSE
+    PIT rows. One PIT backfill can therefore lift it past the threshold and SILENCE
+    ``ins_feed_coverage_low`` while the live BSE feed still reaches a handful of issuers.
+    ``fresh_symbols_in_universe`` is what survives that: the issuers broadcast ON the run day."""
+    universe = [f"S{i:04d}" for i in range(480)]
+    backfill = [                                           # bare ids => NSE source (row_source)
+        _buy(SESSIONS[0], 1_000_000, symbol=sym, ident=f"pit-{sym}") for sym in universe[:100]
+    ]
+    live = [_buy(RUN_DAY, 1_000_000, symbol=sym) for sym in universe[100:105]]
+    store = _FakeStore(universe=universe, filings=[*backfill, *live], closes={})
+    with caplog.at_level("INFO"):
+        _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
+
+    run = _record(caplog, "ins_crossings_run")
+    assert (run.symbols_with_filings, run.coverage_pct) == (105, 21.9)
+    assert "ins_feed_coverage_low" not in caplog.text       # the corpus alone clears the threshold
+    assert run.fresh_symbols_in_universe == 5               # ...and the live feed reached 5 issuers
+
+
+def test_the_coverage_warning_carries_the_live_issuer_count_too(conn, calendar, caplog):
+    """When the alarm DOES fire it must name both numerators, or reading it requires the run line."""
+    with caplog.at_level("INFO"):
+        _run(InsCrossingsJob(_coverage_store(22, 480), conn, _FrozenClock(), calendar,
+                             threshold_inr=THRESHOLD))
+    low = _record(caplog, "ins_feed_coverage_low")
+    assert (low.symbols_with_filings, low.fresh_symbols_in_universe) == (22, 22)
+
+
 # =========================================================================== morning admission
 def test_admission_reads_builds_and_consumes_exactly_once(conn, calendar):
     """The restart-safe once-only bound: ``_read_ins_pending`` sees a row once, and after

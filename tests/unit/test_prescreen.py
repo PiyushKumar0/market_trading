@@ -501,7 +501,128 @@ def test_an_orb_flood_cannot_starve_rsi2():
 
 def test_per_strategy_cap_mapping_validation():
     with pytest.raises(ValueError):
-        _prescreen(max_per_strategy_day={"orb": 0})
+        _prescreen(max_per_strategy_day={"orb": -1})
+    # `default: 0` binds every strategy without a line of its own, so a typo there would park the
+    # whole platform — that stays a constructor error while a per-strategy 0 is now legal.
+    with pytest.raises(ValueError):
+        _prescreen(max_per_strategy_day={"default": 0, "orb": 1})
+
+
+# ================================================== parked strategies (orb, owner-directed 2026-09-12)
+def test_parked_strategy_admits_nothing_and_charges_no_slot(caplog):
+    """``max_per_strategy_day`` 0 for ONE strategy = admit nothing today. The refusal must land on
+    its own counter (not ``suppressed_cap``, which reads as starvation) and must not spend a day
+    slot the other strategies could use."""
+    ps = _prescreen(
+        [_multi_stub("orb", {"A": 0.9, "B": 0.8}), _multi_stub("rsi2", {"C": 0.7})],
+        max_candidates_per_day=48,
+        max_per_strategy_day={"default": 16, "orb": 0},
+    )
+    with caplog.at_level("INFO"):
+        out = ps.on_bar(_bar(symbol="DRIVER"))
+        ps.on_bar(_bar(symbol="DRIVER2", mm=1))          # a second bar: the log must not repeat
+
+    assert [c.strategy_id for c in out] == ["rsi2"]      # orb's two, top-ranked, still refused
+    counters = ps.funnel_counters()
+    assert counters["raw"]["orb"] == 4                   # raw still counts what the scanner produced
+    assert counters["published"].get("orb") is None
+    assert counters["suppressed_disabled"]["orb"] == 4
+    assert counters["suppressed_cap"].get("orb") is None
+    assert counters["suppressed_dedupe"].get("orb") is None
+    assert caplog.text.count("prescreen_strategy_disabled") == 1
+
+
+def test_parked_strategy_logs_again_on_the_next_day():
+    """Once per strategy per DAY: the day roll must clear both the counter and the log latch, or the
+    §7.1 catchup_safety_jobs lesson (a latch with no symmetric clear) repeats in the log path."""
+    from datetime import date as _date
+    ps = _prescreen([_stub("orb")], max_per_strategy_day={"default": 16, "orb": 0})
+    ps.on_bar(_bar(symbol="AAA", day=17))
+    assert ps.funnel_counters()["suppressed_disabled"] == {"orb": 1}
+    ps.on_bar(_bar(symbol="AAA", day=18))
+    counters = ps.funnel_counters()
+    assert counters["d"] == _date(2026, 6, 18)
+    assert counters["suppressed_disabled"] == {"orb": 1}  # rolled, not accumulated
+
+
+def test_parked_strategy_is_refused_ahead_of_the_window_gate():
+    """A parked strategy admits nothing at ANY hour, so the refusal is attributed to the park rather
+    than split across ``suppressed_window`` depending on when the bar fired."""
+    def shut(bar):  # noqa: ANN001, ANN202 - test stub provider
+        return ScanContext(
+            trade_window=_window(bar.ts_minute.day, start=(14, 0), end=(15, 30)),
+            session_open=datetime(2026, 6, bar.ts_minute.day, 9, 15, tzinfo=IST),
+        )
+
+    ps = _prescreen([_stub("orb")], context_provider=shut,
+                    max_per_strategy_day={"default": 16, "orb": 0})
+    assert ps.on_bar(_bar(symbol="AAA", hh=10)) == []
+    counters = ps.funnel_counters()
+    assert counters["suppressed_disabled"] == {"orb": 1}
+    assert counters["suppressed_window"] == {}
+
+
+def test_parked_strategy_binds_the_batch_admit_path_too():
+    """``admit`` (the `ins`/`cat`/`hi52` batch spine) shares ``_admit_one_locked``, so parking binds
+    it without a second enforcement site — the property that makes the park a single switch."""
+    from datetime import date as _date
+    ps = _prescreen([], max_per_strategy_day={"default": 16, "orb": 0})
+    assert ps.admit([_orb_cand("AAA", 0.9)], _date(2026, 6, 17)) == []
+    assert ps.funnel_counters()["suppressed_disabled"] == {"orb": 1}
+
+
+def test_unparked_strategies_are_untouched_by_a_park():
+    """The park is per strategy: an absent line still falls through to ``default``, and ``None``
+    (the replay/backtest construction) is still no cap at all."""
+    ps = _prescreen([_multi_stub("mom", {"A": 0.9, "B": 0.8, "C": 0.7})],
+                    max_candidates_per_day=48, max_per_strategy_day={"default": 2, "orb": 0})
+    assert len(ps.on_bar(_bar(symbol="DRIVER"))) == 2
+    assert ps.funnel_counters()["suppressed_disabled"] == {}
+
+
+def test_parked_strategy_contributes_no_pending_arm_levels():
+    """The sweep verdict is the one surface the owner reads intraday, and a parked strategy's arm
+    levels are not "not yet triggered" — they can never trigger. The published-pair skip cannot mute
+    them either: the park gate refuses BEFORE ``_seen.add``, so a parked pair is never seen and would
+    keep rendering under "would arm at:" for a strategy that refuses every one of those candidates.
+    """
+    ps = _prescreen([_pending_stub("orb"), _pending_stub("rsi2")],
+                    max_per_strategy_day={"default": 16, "orb": 0})
+    accepted, pending = ps.sweep([_bar(symbol="AAA"), _bar(symbol="BBB", mm=1)])
+    assert accepted == []
+    assert [(p.symbol, p.strategy_id) for p in pending] == [("AAA", "rsi2"), ("BBB", "rsi2")]
+    # Still true on a SECOND sweep: the park is a standing refusal, not a once-seen latch.
+    _, pending2 = ps.sweep([_bar(symbol="AAA", mm=2)])
+    assert [(p.symbol, p.strategy_id) for p in pending2] == [("AAA", "rsi2")]
+
+
+def test_a_mid_session_park_leaves_restored_pairs_on_the_dedupe_counter():
+    """Deploy-day shape: orb published under the old cap, the engine restarts with ``orb: 0``, and
+    :meth:`hydrate` restores those pairs. Their re-fires cost the park NOTHING — the slot was already
+    spent and the analyst already looked — so they stay ``suppressed_dedupe``; only a pair the park
+    genuinely refused belongs on ``suppressed_disabled``."""
+    from datetime import date as _date
+
+    ps = _prescreen([_stub("orb")], max_per_strategy_day={"default": 16, "orb": 0})
+    ps.hydrate(_date(2026, 6, 17), seen=[("AAA", "orb")], charged=[("AAA", "orb")])
+    assert ps.on_bar(_bar(symbol="AAA")) == []
+    assert ps.on_bar(_bar(symbol="BBB", mm=1)) == []
+    counters = ps.funnel_counters()
+    assert counters["suppressed_dedupe"] == {"orb": 1}     # restored pair: already evaluated
+    assert counters["suppressed_disabled"] == {"orb": 1}   # BBB: refused by the park itself
+
+
+def test_shipped_settings_park_orb():
+    """``config/settings.yaml`` ships ``orb: 0`` (owner-directed 2026-09-12 after the 09-11 audit:
+    101 of 229 analyst forwards since 08-17 produced zero entry proposals, and the three intraday
+    price-only families were refuted at retail cost). Re-enabling is a plan §8.6 decision, so this
+    assertion is the tripwire on an accidental un-park."""
+    from engine.core.config import load_settings
+
+    caps = load_settings().strategy.prescreen.max_per_strategy_day
+    assert isinstance(caps, dict)
+    assert caps["orb"] == 0
+    assert caps["default"] >= 1                          # the park is orb's alone
 
 
 def test_scalar_per_strategy_cap_still_works():
@@ -1146,6 +1267,7 @@ def _orb_cand(symbol: str, score: float = 0.6):
 
 def _at(hh: int, mm: int):
     from datetime import datetime
+
     from engine.core.clock import IST
     return datetime(2026, 9, 3, hh, mm, tzinfo=IST)
 
@@ -1190,8 +1312,9 @@ def test_cap_schedule_unscheduled_paths_use_flat_cap() -> None:
 def test_cap_schedule_is_capped_by_the_flat_cap_and_validated() -> None:
     """The schedule can never RAISE the flat cap (effective = min(flat, scheduled)); a
     non-monotone or malformed schedule is a constructor error, not a silent behavior."""
-    import pytest as _pytest
     from datetime import date as _date
+
+    import pytest as _pytest
 
     ps = _sched_prescreen(
         max_per_strategy_day={"orb": 4},

@@ -166,11 +166,19 @@ export interface HeadroomResponse {
 }
 
 // --------------------------------------------------------------------------- GET /budget
-/** `{}` when `governor` is unwired. Spend/allocation are USD strings (§5.6). */
+/**
+ * `{}` when `governor` is unwired. Spend/allocation are USD strings (§5.6). The period is the
+ * subscription's quota WEEK (Thu 14:00 IST → Thu 14:00 IST), keyed by its start Thursday.
+ */
 export interface BudgetBody {
-  month_spend_usd?: string
+  window_key?: string
+  window_start?: string // ISO-8601 +05:30
+  window_end?: string // ISO-8601 +05:30, exclusive
+  window_spend_usd?: string
+  credit_usd?: string
   per_agent_spend_usd?: Record<string, string>
   allocations_usd?: Record<string, string>
+  forward_cap?: number
 }
 
 export interface BudgetResponse {

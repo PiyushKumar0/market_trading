@@ -114,13 +114,69 @@ if (NO_TODAY) {
   decisions = decisions.filter((d) => dayOf(d.created_at) !== today)
 }
 
+// The governor's quota week (§5.6): Thursday 14:00 IST → Thursday 14:00 IST, keyed by its START
+// Thursday. Mirrors engine.intelligence.governor._window_key — wall-clock and calendar-blind, and the
+// reset-day MORNING still belongs to the window that ends. Computed live so the BudgetPanel chips show
+// a plausible current week on any dev box rather than a frozen date.
+const THURSDAY = 4 // Date#getUTCDay
+function quotaWindow(at = new Date()) {
+  const day = istDay(at)
+  // hourCycle h23, not hour12:false: some ICU builds render midnight as "24:00" under en-GB, which
+  // would compare ABOVE "14:00" and put the small hours of a Thursday in the wrong week.
+  const hhmm = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(at)
+  // Noon IST is the same calendar date in UTC, so getUTCDay() of it is that IST date's weekday.
+  const dow = new Date(`${day}T12:00:00+05:30`).getUTCDay()
+  let back = (dow - THURSDAY + 7) % 7
+  if (back === 0 && hhmm < '14:00') back = 7
+  const start = shift(day, -back)
+  return { key: start, start: `${start}T14:00:00+05:30`, end: `${shift(start, 7)}T14:00:00+05:30` }
+}
+
+// Mid-week spend against the shipped weekly allocations, with `sdk_smoke` billing WITHOUT an
+// allocation on purpose: the union row is the thing GET /budget added, so the fixture has to exercise
+// it (the rows must add up to window_spend_usd, 81.6487).
+const win = quotaWindow()
+const budgetFixture = {
+  budget: {
+    window_key: win.key,
+    window_start: win.start,
+    window_end: win.end,
+    window_spend_usd: '81.6487',
+    credit_usd: '200',
+    per_agent_spend_usd: {
+      intraday_analyst: '31.4062',
+      news_analyst: '44.8125',
+      preopen_planner: '3.2500',
+      nightly_reviewer: '1.9800',
+      weekly_researcher: '0',
+      reserve: '0',
+      sdk_smoke: '0.2000',
+    },
+    allocations_usd: {
+      intraday_analyst: '90',
+      news_analyst: '90',
+      preopen_planner: '8',
+      nightly_reviewer: '5',
+      weekly_researcher: '2',
+      reserve: '5',
+    },
+    forward_cap: 48,
+  },
+  degrade_tier: 'DG0',
+}
+
 const routes = {
   '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: 'NORMAL' },
   '/positions': { positions: [], as_of: new Date().toISOString() },
   '/decisions': { decisions },
   '/recommendations': { recommendations },
   '/risk/headroom': { headroom: {} },
-  '/budget': { budget: {}, degrade_tier: 'DG0' },
+  '/budget': budgetFixture,
   '/config/trade_window': { trade_window: { start: '09:30', end: '15:00', squareoff_buffer_min: 10 } },
   '/news/watchlist': {
     d: today,

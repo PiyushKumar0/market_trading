@@ -33,6 +33,12 @@ Conventions that are load-bearing here:
   highest per-strategy score QUANTILE waiting (``_forward_key``), and the counter that bounds those
   slots lives in the day-slot journal so a mid-day restart resumes the day's quota instead of
   refilling it. Rollback: ``admission_mode="arrival"``.
+* **A slot is spent only by something that was actually looked at** (D1, 2026-09-11). The queue
+  itself is process memory and a restart still drops it — but every exit that leaves a candidate
+  unjudged now hands its §3.2.5 admission slot back: a restart (``_rearm_forward_orphans``), the
+  window closing under a queued candidate (``_flush_forwards_at_window_close``), and a level-pinned
+  candidate whose level walked outside the entry-sanity band (``_outside_entry_band``). An analyst
+  call that returned no verdict also gives back its §5.2(a) forward charge (``_refund_forward``).
 * **The queue is drained on a CADENCE, not on arrival** (§5.2(a), 2026-08-14). An arriving candidate
   only ever enqueues; :meth:`RecommendationPipeline.drain_forward_queue` — pulsed from the scheduler
   — spends at most one slot every ``FORWARD_PACING_MIN`` minutes on the best pending candidate.
@@ -86,6 +92,7 @@ from engine.intelligence.schemas import (
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.notify.episodes import AlertEpisodes
+from engine.ops.holdings_reconcile import positions_missing_from_holdings
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
 from engine.strategy.types import SignalCandidate
@@ -148,11 +155,30 @@ FORWARD_MODES = ("ranked", "arrival")
 #: its middling ones. A finer grid would spuriously rank a 0.71 above a 0.69 across strategies.
 QUANTILE_BANDS = 5
 
+#: Smallest score population that can RANK a candidate at all (D1 (d), 2026-09-11). The empirical
+#: CDF of a ONE-element population can only return 1.0: the strategy's first candidate of the day is
+#: measured against itself and takes the TOP band by arithmetic rather than by standing (live
+#: 2026-09-10). A TWO-element one is barely better — the CDF can only say 0.5 or 1.0, so the second
+#: candidate of the day still reaches the top band by out-scoring exactly one other observation, and
+#: one comparison is not a distribution. Three is the smallest population where "top band" means the
+#: candidate stood above more than one rival, so it is the floor. Below it,
+#: :meth:`RecommendationPipeline._quantile_band` returns the MIDDLE band instead — which also covers
+#: the EMPTY population a journal-hydrated day can present.
+MIN_RANK_POPULATION = 3
+
 #: Hard ceiling on the pending-forward queue. The §3.2.5 publication cap (settings
 #: ``max_candidates_per_day`` — 48 since 2026-08-18, was 20) already bounds it below this; the
 #: ceiling exists so a misconfigured publication cap cannot turn a refused-candidate pointer list
 #: into unbounded process memory.
 MAX_PENDING_FORWARDS = 100
+
+#: Strategies whose proposal is a LIMIT pinned to a structural LEVEL rather than to the live price,
+#: so a candidate that waits in the queue while the price walks away from that level is a guaranteed
+#: ``entry_sanity_band`` gate reject (D1 (e), 2026-09-11: 6 of 15 ``brk20`` proposals died there and
+#: each one had already spent an analyst slot). Only these strategies are band-screened at the
+#: forward slot — a price-relative leg's entry tracks the LTP, so the same screen there would drop
+#: candidates the gate would have approved.
+BAND_SKIP_STRATEGIES = frozenset({"brk20"})
 
 #: §5.2(a) forward-DRAIN trigger modes (2026-08-14). ``paced`` = the queue is drained on a fixed
 #: cadence by :meth:`RecommendationPipeline.drain_forward_queue`; ``immediate`` = the pre-2026-08-14
@@ -633,6 +659,7 @@ class RecommendationPipeline:
         claim_slot: Callable[[str, str], bool] | None = None,
         take_displaced: Callable[[], Sequence[tuple[str, str]]] | None = None,
         decline: Callable[[str, str], bool] | None = None,
+        ltp_fn: Callable[[str], Decimal | None] | None = None,
         admission_mode: str = "ranked",
         forward_drain_mode: str = "paced",
     ) -> None:
@@ -679,10 +706,20 @@ class RecommendationPipeline:
         #: (symbol, strategy_id) -> the analyst RAN and said no_action, so the pair is displaceable
         #: again (2026-09-04; wired to SignalPreScreen.decline). Not a re-arm: the slot stays spent.
         self._decline = decline
+        #: symbol -> live LTP (wired to the tick cache in ``engine.ops.main``). Read ONLY by the
+        #: D1 (e) band screen in :meth:`_take_forward_slot`; unwired ⇒ no screen, which is the
+        #: pre-2026-09-12 behaviour. Never a gate input: the gate reads its own LTP from GateContext.
+        self._ltp_fn = ltp_fn
         self._funnel_raw_day: date | None = None
         self._funnel_raw_flushed: dict[str, int] = {}
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
         self._last_position_event: dict[str, datetime] = {}
+        #: WO-D2: position_id -> the trading date its "sold outside the ledger" skip was last logged
+        #: on. The SKIP itself is re-decided from the §3.6 journal on every event (a position that
+        #: reappears in holdings must resume producing events the same hour); only the log line is
+        #: deduped, so twelve hourly ticks leave one line per position instead of twelve. In-process
+        #: like every other memo here — a restart logs it once more, which is the harmless side.
+        self._sold_outside_logged: dict[str, date] = {}
         #: Owner-alert cadence for "Intraday analyst unavailable", per ``(agent, reason)`` (WO-25b).
         #: One alert per failure meant one alert per heartbeat for as long as the SDK stayed down —
         #: those repeats were a large share of the 203-deep notification backlog on 2026-08-24. The
@@ -708,6 +745,24 @@ class RecommendationPipeline:
         #: retry to ONE per candidate per day; rolled with the rest of the forward state in
         #: :meth:`_roll_forward_day`, so it can never outlive the queue it refers to.
         self._requeued_forwards: set[str] = set()
+        #: D1 (d): signal_ids whose §5.2(a) forward charge has already been handed back, so ONE
+        #: charge can never be undone twice (:meth:`_refund_forward`). Rolled with the day like
+        #: ``_requeued_forwards``, and DISCARDED the moment :meth:`_take_forward_slot` charges the
+        #: same candidate again — the memo is "this charge is already refunded", not "this candidate
+        #: has had its one refund of the day", so a re-drained front entry can still be refunded for
+        #: the second charge it makes.
+        self._refunded_forwards: set[str] = set()
+        #: D1 (b): which window CLOSE has already been flushed, keyed on the window's END rather
+        #: than on the day. ``NSECalendar.trade_window`` re-reads the owner's sticky
+        #: ``trade_window_state`` row on every call (§3.2.7 runtime setter), so a window the owner
+        #: moves or re-opens after a close (live 2026-08-18: 10:00–10:30 widened to 10:10–15:30
+        #: at 09:57) is a NEW close that has to flush again — a day-keyed latch would disable the
+        #: flush for the rest of that day and strand the second window's queue silently.
+        #: ``_window_close_flushed_day`` is the sibling latch for a day with NO window at all, where
+        #: there is no end timestamp to key on. Both are stamped rather than bools because the flush
+        #: fires on the path that RETURNS BEFORE :meth:`_roll_forward_day`.
+        self._window_close_flushed_at: datetime | None = None
+        self._window_close_flushed_day: date | None = None
         #: WO-24c: proposal_ids the orphan sweep has already alerted on, plus the day that set
         #: belongs to and when the sweep last read the DB. Rolled daily by :meth:`_roll_orphan_day`
         #: exactly like ``_requeued_forwards`` — a per-PROCESS memo, so a restart re-alerts a
@@ -783,9 +838,12 @@ class RecommendationPipeline:
         """Charge one analyst forward to ``candidate``'s day slot (WO-1 (iv)).
 
         A COUNTER, not a flag: a pair re-armed after an analyst INFRASTRUCTURE failure (2026-07-29)
-        can legitimately be forwarded again, and every attempt is real spend against the §5.2(a)
-        cap. Upserts rather than updates so a lost publish-journal row cannot silently swallow the
-        forward record. Journal failure degrades to in-memory-only counting, never blocks the call.
+        can legitimately be forwarded again, and every attempt that produced a VERDICT is real spend
+        against the §5.2(a) cap. Since D1 (c) an attempt that produced none is undone one unit at a
+        time by :meth:`_refund_forward` — which is why the column has to stay a counter and why the
+        undo is an arithmetic decrement rather than a flag flip. Upserts rather than updates so a
+        lost publish-journal row cannot silently swallow the forward record. Journal failure degrades
+        to in-memory-only counting, never blocks the call.
         """
         try:
             self._conn.execute(
@@ -827,17 +885,82 @@ class RecommendationPipeline:
                          strategy_id=candidate.strategy_id, error=str(exc))
 
     # ------------------------------------------------------------------ §5.2(a) forward queue (WO-1)
-    def _roll_forward_day(self, d: date) -> None:
+    def _roll_forward_day(self, d: date, *, in_flight: tuple[str, str] | None = None) -> None:
         """Roll the forward-cap day, hydrating the counter and the score population from the
-        journal. Called on every candidate; the DB read happens once per day change (and therefore
-        exactly once after a restart)."""
+        journal, then hand back every ORPHANED admission slot the journal still holds. Called on
+        every candidate AND on every :meth:`drain_forward_queue` tick — the second caller is what
+        makes the sweep reach a restart on a day where no candidate ever publishes (the pre-screen's
+        boot rehydration keeps the orphaned pairs deduped, so they cannot publish themselves). The
+        DB read happens once per day change, and therefore exactly once after a restart.
+
+        THE ORPHAN RE-ARM (D1 (a), 2026-09-11). This method clears ``_pending_forwards`` and
+        rehydrates only the COUNTER, and the owner restarts the engine 2–3 times per session: every
+        restart silently dropped the queue while the journal rows kept ``evaluated=1, forwarded=0``,
+        so the pairs stayed deduped for the rest of the day and nothing ever looked at them. ~70
+        admitted candidates burned that way since 08-17; 210 of 520 slots all-time were never
+        forwarded. Those rows are the same never-evaluated fact :meth:`_expire_forwards` refunds —
+        published, no analyst call, no ``agent_calls`` row, no verdict — so they re-arm on exactly
+        the 2026-07-29 rule.
+
+        Safe because of WHERE it runs: a roll happens once per day change, and at that instant the
+        in-memory queue is empty by construction — on a fresh process it has never been filled, and
+        on an in-process day change the ``_pending_forwards.clear()`` below empties it before the
+        sweep reads. So no row this sweep re-arms can still be held by a live queue pointer (and the
+        entries that clear DOES drop belong to the PREVIOUS day, whose rows this query never
+        matches). The ONE exception is ``in_flight``: the caller in
+        :meth:`on_signal_candidate` journals the arriving candidate BEFORE it rolls the day, so that
+        pair's row is already ``evaluated=1, forwarded=0`` and would otherwise be re-armed out from
+        under the candidate currently being admitted.
+
+        ``unsizeable=1`` rows are excluded: nothing is waiting for them today (no stop, or no
+        affordable quantity at this stop), so re-arming would only re-publish a guaranteed drop.
+        """
         if self._forwarded_day == d:
             return
         self._forwarded_day = d
         self._pending_forwards.clear()
         self._forward_seq = 0
         self._requeued_forwards.clear()          # WO-20d: the retry budget is per DAY, like the queue
+        self._refunded_forwards.clear()          # D1 (d): so is the refunded-charge memo
+        self._window_close_flushed_at = None     # D1 (b): one flush per window CLOSE, never per
+        self._window_close_flushed_day = None    #         process — both latches roll with the day
         self._forwarded_count, self._day_scores = self._hydrate_forward_state(d)
+        self._rearm_forward_orphans(d, in_flight)
+
+    def _rearm_forward_orphans(self, d: date, in_flight: tuple[str, str] | None) -> None:
+        """Re-arm every ``evaluated=1, forwarded=0, unsizeable=0`` pair for ``d`` (D1 (a)).
+
+        THE PREDICATE IS WIDER THAN THE INTENT, KNOWINGLY (D1 (e), 2026-09-12). Those three columns
+        cannot tell "nobody ever looked at it" from "refused by budget policy": a candidate dropped
+        at arrival by a GOVERNOR BLOCK leaves the same row, and :meth:`on_signal_candidate`
+        deliberately does not re-arm that one (a re-publishing backlog would hammer the admission
+        gate the moment the block lifts). This sweep re-arms it anyway, and that is accepted as
+        BOUNDED: it runs once per day change, so at the owner's 2–3 restarts a session a
+        governor-blocked pair can re-publish 2–3 extra times a day — not a loop — and by restart
+        time the block has usually lifted, which makes the re-publish the right outcome rather than
+        a wasted one. Separating the two states needs a "refused by policy" marker the journal schema
+        does not have; adding one is a schema change, not a predicate change.
+
+        Never raises: an unreadable journal costs the re-arm, never the trigger path (D7).
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT symbol, strategy_id FROM prescreen_day_slots "
+                "WHERE d=? AND evaluated=1 AND forwarded=0 AND unsizeable=0",
+                (d.isoformat(),),
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - a journal read never blocks the trigger path
+            _log.warning("day_slot_journal_failed", op="forward_orphans", d=d.isoformat(),
+                         error=str(exc))
+            return
+        pairs = [(str(r["symbol"]), str(r["strategy_id"])) for r in rows]
+        pairs = [p for p in pairs if p != in_flight]
+        if not pairs:
+            return
+        for symbol, strategy_id in pairs:
+            self._rearm_slot_pair(symbol, strategy_id)
+        _log.info("forward_queue_orphans_rearmed", d=d.isoformat(), count=len(pairs),
+                  pairs=[f"{sym}/{sid}" for sym, sid in pairs])
 
     def _hydrate_forward_state(self, d: date) -> tuple[int, dict[str, list[float]]]:
         """(forwarded-so-far, per-strategy score population) for ``d``, read from the journal."""
@@ -868,10 +991,28 @@ class RecommendationPipeline:
         so raw scores must never be compared across strategies. The empirical CDF of that
         strategy's own day is comparable — it says "top of what this strategy produced today",
         which means the same thing for every strategy.
+
+        AN UNMEASURED POPULATION IS NOT A TOP ONE (D1 (d), 2026-09-11). THE MECHANISM, named
+        precisely, because the obvious reading of it is wrong: the population is never EMPTY at
+        ranking time. :meth:`on_signal_candidate` appends the arriving score to ``_day_scores`` one
+        line before it enqueues (and a day roll rehydrates the scores and clears the queue in the
+        same breath), so every queued entry is ranked against a population that already contains at
+        least its own score. A strategy's first candidate of the day was therefore ranked against
+        ``[own score]`` — ``quantile = 1/1 = 1.0``, band ``QUANTILE_BANDS - 1``: the candidate
+        measured against itself. That, not an empty set, is how a lone late ``orb`` candidate took
+        band 4 on 2026-09-10 and outranked a ``hi52`` BHEL at 0.9705 that was genuinely the top of
+        its own measured day.
+
+        :data:`MIN_RANK_POPULATION` is the floor that closes it, and it is checked against the
+        population the caller actually presents — own score included — so the singleton and the
+        two-element cases it was written for are the ones it catches, with the empty case subsumed.
+        Below the floor the honest standing is the MIDDLE band: a first arrival still competes on
+        ``fired_at`` and still beats anything ranked below the middle, it just no longer wins by
+        arithmetic against a measured population.
         """
         population = self._day_scores.get(candidate.strategy_id) or []
-        if not population:
-            return QUANTILE_BANDS - 1        # first of its strategy today ⇒ top of its own day
+        if len(population) < MIN_RANK_POPULATION:
+            return QUANTILE_BANDS // 2       # nothing to rank against ⇒ the middle, not the top
         score = float(candidate.score)
         quantile = sum(1 for s in population if s <= score) / len(population)
         return min(QUANTILE_BANDS - 1, int(quantile * QUANTILE_BANDS))
@@ -910,8 +1051,10 @@ class RecommendationPipeline:
 
         An overflow eviction re-arms the dropped candidate's §3.2.5 admission slot on exactly the
         rule :meth:`_expire_forwards` documents: an entry that leaves this queue without passing
-        through :meth:`_take_forward_slot` was never evaluated by anything, so its slot is not spent
-        — except for a ``front`` entry, for which a forward was already charged.
+        through :meth:`_take_forward_slot` was never evaluated by anything, so its slot is not spent.
+        Since D1 (c) that includes a ``front`` entry: the re-queue REFUNDS the forward charge its
+        blown-up attempt made, so a front entry carries no charge either and the old exclusion would
+        leave exactly the ``evaluated=1, forwarded=0`` orphan D1 (a) exists to prevent.
         """
         now = self._clock.now()
         self._forward_seq += 1
@@ -930,9 +1073,8 @@ class RecommendationPipeline:
             _log.warning("forward_queue_overflow", dropped=worst.candidate.signal_id,
                          symbol=worst.candidate.symbol,
                          strategy_id=worst.candidate.strategy_id, limit=MAX_PENDING_FORWARDS,
-                         rearmed=not worst.front)
-            if not worst.front:
-                self._rearm_slot(worst.candidate)
+                         front=worst.front)
+            self._rearm_slot(worst.candidate)
 
     def _expire_forwards(self, now: datetime) -> None:
         """Drop queued candidates past their own §5.2 TTL horizon, handing the §3.2.5 day slot back
@@ -941,7 +1083,8 @@ class RecommendationPipeline:
         THE BUG this replaced. The old rationale here was "expiry does NOT re-arm its day slot — the
         forward cap has never re-armed (2026-07-29: the analyst quota is spent on real evaluations)",
         and it is factually wrong about this case. It conflates two different counters. The §5.2(a)
-        forward CAP is indeed never refunded — but a TTL expiry never CHARGED one: entries leave this
+        forward cap is refunded only for a charge that bought no verdict (:meth:`_refund_forward`,
+        D1 (c)) — and a TTL expiry never CHARGED one at all: entries leave this
         queue through :meth:`_take_forward_slot`, which pops an entry *before* it journals a forward,
         so anything still queued has had no analyst call, no ``agent_calls`` row and no gate verdict.
         Nobody judged it. That is exactly the never-evaluated case
@@ -954,10 +1097,17 @@ class RecommendationPipeline:
         nothing had looked at.
 
         Scope, deliberately narrow: this refunds the §3.2.5 ADMISSION slot only. The §5.2(a) forward
-        cap and ``_forwarded_count`` are untouched, and a ``front`` entry — the WO-20d re-queue of an
-        evaluation that blew up mid-call — is EXCLUDED: a forward was already charged for it and the
-        analyst call was at least attempted, so by the 2026-07-29 test it is an evaluated candidate
-        and its slot stays spent.
+        cap and ``_forwarded_count`` are untouched.
+
+        A ``front`` entry — the WO-20d re-queue of an evaluation that blew up mid-call — used to be
+        EXCLUDED, on the premise that a forward had already been charged for it. Since D1 (c) that
+        premise is false: :meth:`_handle_forward_failure` REFUNDS the charge before it re-queues,
+        because the front entry is charged again when it is re-drained. So a front entry that ages
+        out now holds no charge, has no ``agent_calls`` row and no verdict, and leaving its
+        admission slot spent produced exactly the ``evaluated=1, forwarded=0`` orphan signature
+        D1 (a) exists to eliminate — one the same-process day can never sweep, since the orphan
+        sweep runs only on a day change. It re-arms like every other never-evaluated exit. (The
+        WO-20d LOST branch keeps its charge and never re-queues, so nothing here reaches it.)
         """
         live: list[_PendingForward] = []
         for stale in self._pending_forwards:
@@ -967,10 +1117,48 @@ class RecommendationPipeline:
             _log.info("forward_queue_expired", signal_id=stale.candidate.signal_id,
                       symbol=stale.candidate.symbol, strategy_id=stale.candidate.strategy_id,
                       score=stale.candidate.score, queued_at=stale.fired_at.isoformat(),
-                      rearmed=not stale.front)
-            if not stale.front:
-                self._rearm_slot(stale.candidate)
+                      front=stale.front)
+            self._rearm_slot(stale.candidate)
         self._pending_forwards = live
+
+    def _flush_forwards_at_window_close(self, d: date, closed_at: datetime | None) -> None:
+        """Hand the §3.2.5 admission slot back to everything the CLOSED window stranded (D1 (b)).
+
+        THE STRANDING. :meth:`_drain_one_forward` returns on a closed window without touching the
+        queue, and :meth:`_expire_forwards` only ever runs inside :meth:`_take_forward_slot` — which
+        that early return never reaches. A candidate queued near the close therefore neither
+        forwards nor expires: it sits in a dead queue until the process ends, holding a day slot
+        nothing will ever look at. Live 2026-09-10: six entries stranded at 12:26, including the
+        ``hi52`` BHEL candidate at 0.9705, the day's best.
+
+        Same never-evaluated accounting as :meth:`_expire_forwards`, ``front`` entries included and
+        for the same D1 (c) reason: a WO-20d retry carries no forward charge any more, so leaving it
+        in a dead queue would strand it exactly as this method exists to prevent.
+
+        Once per CLOSE, not once per day: ``closed_at`` is the window end this flush answers, and a
+        window the owner moves or re-opens later in the session (§3.2.7) presents a different end and
+        flushes again. ``closed_at=None`` is the no-window day, latched on the date instead.
+        """
+        if not self._pending_forwards:
+            return
+        if closed_at is None:
+            if self._window_close_flushed_day == d:
+                return
+        elif self._window_close_flushed_at == closed_at:
+            return
+        dropped = list(self._pending_forwards)
+        if closed_at is None:
+            self._window_close_flushed_day = d
+        else:
+            self._window_close_flushed_at = closed_at
+        self._pending_forwards = []
+        for entry in dropped:
+            self._rearm_slot(entry.candidate)
+        _log.warning("forward_queue_window_closed", d=d.isoformat(), count=len(dropped),
+                     closed_at=None if closed_at is None else closed_at.isoformat(),
+                     best_score=max(float(p.candidate.score) for p in dropped),
+                     pairs=[f"{p.candidate.symbol}/{p.candidate.strategy_id}" for p in dropped],
+                     front=sum(1 for p in dropped if p.front))
 
     def _apply_displacements(self) -> None:
         """Act on the §3.2.5 admission slots the pre-screen re-assigned (2026-08-27).
@@ -986,9 +1174,10 @@ class RecommendationPipeline:
         and this sweep. A displaced entry that somehow survives both is still harmless — its TTL
         expiry re-arms it exactly as before.
 
-        ``front`` entries (WO-20d retries) are skipped defensively: a forward was already charged for
-        one, so the pre-screen marked it evaluated at :meth:`_take_forward_slot` and could not have
-        chosen it — but the queue is the thing that would be corrupted if that ever stopped holding.
+        ``front`` entries (WO-20d retries) are skipped defensively: the pre-screen marked the pair
+        EVALUATED at :meth:`_take_forward_slot`'s claim (the D1 (c) refund gives back the forward
+        charge, not that mark), so it could not have chosen one as a displacement victim — but the
+        queue is the thing that would be corrupted if that ever stopped holding.
         A pair RETAINED by that skip is not re-armed either: the two walks below have to agree, or
         the retained entry would keep its queue pointer while its slot was handed back as free.
 
@@ -1044,31 +1233,104 @@ class RecommendationPipeline:
         The claim runs under the PRE-SCREEN's lock, which is what makes it atomic against the
         displacement decision itself: claim-then-displace leaves the pair evaluated and undisplaceable,
         displace-then-claim returns ``False`` here. Neither order can produce two spends.
+
+        The D1 (e) band screen runs BEFORE the claim and DEFERS rather than drops: a level-pinned
+        candidate whose level has already walked outside the §7.1 ``entry_sanity_band`` is a
+        guaranteed gate reject, so it must not spend an analyst slot at THIS tick — but the level is
+        a live reading that can come back inside the band minutes later, and ``brk20`` originates
+        only from :meth:`run_scan_sweep`, so a candidate re-armed out of the queue has nothing to
+        re-publish it for the rest of the day. It therefore stays queued (its own TTL is still its
+        exit) and the loop moves to the next-best. Screening before the claim keeps it displaceable
+        while it waits: :meth:`SignalPreScreen.claim_slot` marks a pair permanently evaluated, which
+        is a promise only a candidate actually being dispatched may make.
         """
         self._expire_forwards(self._clock.now())
         if cap is not None and self._forwarded_count >= int(cap):
             return None
-        while self._pending_forwards:
-            if self._forward_mode == "arrival":
-                # WO-20d: the front flag outranks arrival order here too — the rollback mode must not
-                # quietly lose the re-queue guarantee.
-                entry = min(self._pending_forwards,
-                            key=lambda p: (0 if p.front else 1, p.fired_at, p.seq))
-            else:
-                entry = min(self._pending_forwards, key=self._forward_key)
-            self._pending_forwards.remove(entry)
-            if not self._claim_forward_slot(entry.candidate):
-                _log.info("forward_slot_displaced", signal_id=entry.candidate.signal_id,
-                          symbol=entry.candidate.symbol,
-                          strategy_id=entry.candidate.strategy_id, score=entry.candidate.score,
-                          reason="admission slot was reassigned to a better candidate (§3.2.5)")
-                self._rearm_slot(entry.candidate)
-                continue
-            self._forwarded_count += 1
-            if self._forwarded_day is not None:
-                self._journal_forward(entry.candidate, self._forwarded_day)
-            return entry.candidate
-        return None
+        deferred: list[_PendingForward] = []
+        try:
+            while self._pending_forwards:
+                if self._forward_mode == "arrival":
+                    # WO-20d: the front flag outranks arrival order here too — the rollback mode must
+                    # not quietly lose the re-queue guarantee.
+                    entry = min(self._pending_forwards,
+                                key=lambda p: (0 if p.front else 1, p.fired_at, p.seq))
+                else:
+                    entry = min(self._pending_forwards, key=self._forward_key)
+                self._pending_forwards.remove(entry)
+                if self._outside_entry_band(entry.candidate):
+                    deferred.append(entry)
+                    continue
+                if not self._claim_forward_slot(entry.candidate):
+                    _log.info("forward_slot_displaced", signal_id=entry.candidate.signal_id,
+                              symbol=entry.candidate.symbol,
+                              strategy_id=entry.candidate.strategy_id, score=entry.candidate.score,
+                              reason="admission slot was reassigned to a better candidate (§3.2.5)")
+                    self._rearm_slot(entry.candidate)
+                    continue
+                self._forwarded_count += 1
+                # A NEW charge re-opens the D1 (d) refund for this signal_id: the memo says "the
+                # charge that was made is already refunded", and this is a different charge (the
+                # WO-20d front retry is the one candidate that can be charged twice in a day).
+                self._refunded_forwards.discard(entry.candidate.signal_id)
+                if self._forwarded_day is not None:
+                    self._journal_forward(entry.candidate, self._forwarded_day)
+                return entry.candidate
+            return None
+        finally:
+            # Every exit puts the band-skipped entries back, including the one that returns a
+            # candidate: a deferral is "not this tick", never "off the queue".
+            self._pending_forwards.extend(deferred)
+
+    def _outside_entry_band(self, candidate: SignalCandidate) -> bool:
+        """True when ``candidate``'s entry level is already outside the §7.1 ``entry_sanity_band``
+        against the live LTP — a guaranteed gate reject that must not cost an analyst slot (D1 (e)).
+
+        Scoped to :data:`BAND_SKIP_STRATEGIES` (the LIMIT-at-level legs). Live 2026-09-11: 6 of 15
+        ``brk20`` proposals died on ``entry_sanity_band``, every one of them after spending a slot
+        at a degraded cap where four slots is the whole day.
+
+        Fails OPEN in every unknown: no ``ltp_fn``, no tick for the symbol, a non-positive LTP, an
+        unreadable limit table or a raising seam all mean "we cannot say this is a guaranteed
+        reject", and the D7 direction for that is to forward it and let the gate decide.
+
+        A PROXY for :meth:`~engine.risk.gate.RiskGate._rule_entry_sanity_band`, not a copy of it. The
+        deviation formula, the per-product band and the ``dev <= band`` edge (so ``dev == band`` is a
+        PASS) are the rule's, byte for byte. Two inputs are not, both in the skip direction: the gate
+        bands the ANALYST's ``action.entry_price`` while this bands the SCANNER's ``raw_levels.entry``
+        (nothing pins the two together — the structural-coherence guard checks identity fields, not
+        price), and the gate exempts ``entry_type == "MARKET"`` outright while this has no such
+        exemption. The assumption that makes the proxy sound is the one that defines
+        :data:`BAND_SKIP_STRATEGIES`: a LIMIT-at-level leg's proposal restates the level. That is why
+        the caller DEFERS a skipped candidate instead of dropping it — a proxy may cost a tick, never
+        the day.
+        """
+        if self._ltp_fn is None or candidate.strategy_id not in BAND_SKIP_STRATEGIES:
+            return False
+        # One try over the whole computation: a seam that raises, a limit store that will not verify
+        # and an LTP that will not convert are the same fact — the screen cannot decide, so it does
+        # not get to withhold the evaluation.
+        try:
+            raw_ltp = self._ltp_fn(candidate.symbol)
+            if raw_ltp is None:
+                return False
+            ltp = _dec(raw_ltp)
+            if ltp <= 0:
+                return False
+            band = _dec(self._entry_band_pct(_product_of(candidate.style)))
+            entry = _dec(candidate.raw_levels.entry)
+            dev = abs(entry - ltp) / ltp * _HUNDRED
+        except Exception as exc:  # noqa: BLE001 - an undecidable band never withholds an evaluation
+            _log.warning("forward_band_screen_failed", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
+            return False
+        if dev <= band:
+            return False
+        _log.info("forward_skipped_outside_band", signal_id=candidate.signal_id,
+                  symbol=candidate.symbol, strategy_id=candidate.strategy_id,
+                  entry=str(entry), ltp=str(ltp),
+                  dev=str(dev.quantize(_PAISA, rounding=ROUND_HALF_UP)), band=str(band))
+        return True
 
     def _claim_forward_slot(self, candidate: SignalCandidate) -> bool:
         """Ask the pre-screen to commit this pair's admission slot. Unwired ⇒ ``True`` (the
@@ -1271,7 +1533,16 @@ class RecommendationPipeline:
         :meth:`_flush_funnel_raw`. The WO-24c orphan sweep rides the same tick on the same terms
         (see :meth:`_sweep_orphans_if_due`): both are watchdogs on the funnel, and a funnel that has
         stopped moving is exactly when they have to still run.
+
+        The day ROLL rides this tick too (D1 (a)). :meth:`_roll_forward_day`'s other two callers are
+        an arriving candidate and the drain below, and neither reaches a fresh process that has no
+        candidates: the drain returns on an empty queue and the pre-screen's boot rehydration keeps
+        the orphaned pairs deduped, so nothing publishes them. The boot orphan re-arm would then
+        wait for a pair the dedupe has NOT swallowed — on a thin day, forever. This tick always
+        runs, so the once-per-day sweep always happens. It is also the roll that fires on a day
+        where no candidate ever arrives.
         """
+        self._roll_forward_day(self._clock.today())
         self._flush_funnel_raw()
         # 2026-08-27: settle reassigned admission slots here too. The batch admission path
         # (``run_scan_sweep`` → ``prescreen.admit``) can displace without any candidate reaching
@@ -1300,7 +1571,13 @@ class RecommendationPipeline:
         re-arms nothing AT THAT MOMENT — a queued candidate is a REFUSED one we kept a pointer to,
         and its only exit is its own TTL. Since 2026-08-27 that exit DOES hand the §3.2.5 admission
         slot back (:meth:`_expire_forwards`), because a candidate that ages out unseen was never
-        evaluated; the §5.2(a) forward cap still never re-arms (2026-07-29).
+        evaluated; the §5.2(a) forward cap is given back only where a charge bought no verdict at all
+        (:meth:`_refund_forward`, D1 (c)), never for a real evaluation.
+
+        The one gate that is NOT "come back next tick" is the window having CLOSED for the day
+        (D1 (b)): no later tick can ever drain what is queued, so that branch flushes the queue once
+        (:meth:`_flush_forwards_at_window_close`) instead of stranding it. Mode / FROZEN / kill keep
+        the queue untouched exactly as before — those lift, a closed window does not.
         """
         if not self._pending_forwards:
             return False
@@ -1312,8 +1589,19 @@ class RecommendationPipeline:
             return False
         d = self._clock.today()
         window = self._window(d)
-        if window is None or not (window[0] <= self._clock.now() <= window[1]):
+        now = self._clock.now()
+        if window is None:
+            # No window at all for ``d`` — a non-trading day the queue survived into. Latched on the
+            # date, because there is no window end to key the flush on.
+            self._flush_forwards_at_window_close(d, None)
             return False
+        if now > window[1]:
+            # The window is behind us: nothing queued can be drained again under THIS window. The
+            # owner can still re-open one later in the session, which is a different close.
+            self._flush_forwards_at_window_close(d, window[1])
+            return False
+        if now < window[0]:
+            return False                 # not open YET: the queue is still live, leave it alone
         self._roll_forward_day(d)
         decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
         if not decision.allowed:
@@ -1365,10 +1653,13 @@ class RecommendationPipeline:
           a reason a third attempt will not fix, and a self-refilling queue would spend the day's
           whole analyst cap on one broken symbol.
 
-        Journalling is deliberately untouched. The forward was already charged by
-        :meth:`_take_forward_slot` and STAYS charged — ``_journal_forward`` counts attempts, not
-        successes (2026-07-29), and a retry is a second real attempt against the §5.2(a) cap. A lost
-        candidate is never marked evaluated by any path here.
+        Journalling is no longer untouched (D1 (c), 2026-09-11). The RE-QUEUE branch refunds the
+        charge :meth:`_take_forward_slot` made, because the front entry it enqueues will be drained
+        again and charged AGAIN — without the refund one candidate that blew up mid-call costs two
+        slots out of a cap that is four a day at DG1+. The LOST branch does not refund: nothing will
+        charge for that candidate again, and WO-20d's reading still holds for the attempt that ends
+        there — one candidate, one net charge. A lost candidate is never marked evaluated by any
+        path here.
 
         This guard wraps the DRAIN only. ``immediate`` mode (the WO-1 rollback, where an arriving
         candidate evaluates itself inline on the bus handler) is out of scope: the incident is a
@@ -1377,12 +1668,14 @@ class RecommendationPipeline:
         try:
             await self._evaluate_forward(candidate, d)
         except asyncio.CancelledError:
-            self._handle_forward_failure(candidate, "CancelledError")
+            self._handle_forward_failure(candidate, "CancelledError", d)
             raise                                # shutdown cancellation always propagates
         except Exception as exc:                 # noqa: BLE001 - the tick must outlive one candidate
-            self._handle_forward_failure(candidate, type(exc).__name__)
+            self._handle_forward_failure(candidate, type(exc).__name__, d)
 
-    def _handle_forward_failure(self, candidate: SignalCandidate, error_class: str) -> None:
+    def _handle_forward_failure(
+        self, candidate: SignalCandidate, error_class: str, d: date
+    ) -> None:
         """Re-queue once, then let it go loudly (WO-20d). Never raises: it is the failure path."""
         fields = {
             "signal_id": candidate.signal_id,
@@ -1394,8 +1687,54 @@ class RecommendationPipeline:
             _log.error("forward_evaluation_lost", **fields)
             return
         self._requeued_forwards.add(candidate.signal_id)
+        self._refund_forward(candidate, d, reason=f"requeued_{error_class}")
         self._enqueue_forward(candidate, front=True)
         _log.warning("forward_evaluation_requeued", queued=len(self._pending_forwards), **fields)
+
+    def _refund_forward(self, candidate: SignalCandidate, d: date, *, reason: str) -> None:
+        """Give back the one §5.2(a) forward charge :meth:`_take_forward_slot` made (D1 (c)).
+
+        THE BURN (2026-09-11). The charge and the journal row are written BEFORE the analyst call,
+        so an infrastructure failure — timeout, SDK death, transport cancellation — spent a slot on
+        a call that produced no verdict, no ``agent_calls`` row and no proposal: 110 charges burned
+        that way. At the DG1+ cap of four, one timeout is a quarter of the day. The §3.2.5 admission
+        slot was already refunded on this path (2026-07-29); this is the sibling refund for the
+        analyst quota, and it is scoped to the same fact — NOTHING EVALUATED IT. A governor block, a
+        no_action verdict and a gate rejection are all real outcomes and never reach here.
+
+        Exactly one unit, floored at zero on both counters: the in-memory count can legitimately be
+        0 when a restart lost the increment the journal still holds, and the journal column is a
+        COUNTER of attempts (:meth:`_journal_forward`) that must never go negative. Never raises —
+        a failed refund leaves the cap conservative (over-charged), which is the safe side.
+
+        ONE REFUND PER CHARGE, enforced here rather than by the call order (D1 (d), 2026-09-12).
+        Two call sites can fire for the same charge: :meth:`_evaluate_forward`'s failure branch, and
+        :meth:`_handle_forward_failure` when anything in that branch raises on the way out (the
+        owner-notify seam is the live candidate). Refunding twice for one charge hands the day an
+        analyst call the §5.2(a) cap did not grant — the one direction of this change that is not
+        conservative — so the signal_id is memoed and the repeat is a logged no-op. The memo is
+        cleared when :meth:`_take_forward_slot` charges the same candidate again, so the WO-20d
+        retry's second charge is still refundable.
+        """
+        if candidate.signal_id in self._refunded_forwards:
+            _log.info("forward_cap_refund_skipped", signal_id=candidate.signal_id,
+                      symbol=candidate.symbol, strategy_id=candidate.strategy_id, reason=reason,
+                      forwarded=self._forwarded_count)
+            return
+        self._refunded_forwards.add(candidate.signal_id)
+        self._forwarded_count = max(0, self._forwarded_count - 1)
+        try:
+            self._conn.execute(
+                "UPDATE prescreen_day_slots SET forwarded = MAX(forwarded - 1, 0) "
+                "WHERE d=? AND symbol=? AND strategy_id=?",
+                (d.isoformat(), candidate.symbol, candidate.strategy_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("day_slot_journal_failed", op="refund_forward", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
+        _log.info("forward_cap_refunded", signal_id=candidate.signal_id, symbol=candidate.symbol,
+                  strategy_id=candidate.strategy_id, reason=reason,
+                  forwarded=self._forwarded_count)
 
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
@@ -1464,7 +1803,9 @@ class RecommendationPipeline:
                       entry=str(candidate.raw_levels.entry), stop=str(candidate.raw_levels.stop),
                       budget=str(self._risk_budget_inr(candidate)))
             return
-        self._roll_forward_day(d)
+        # ``in_flight``: _journal_slot above already wrote THIS pair as evaluated=1/forwarded=0, so
+        # without the exclusion the boot orphan sweep would re-arm the candidate it is admitting.
+        self._roll_forward_day(d, in_flight=(candidate.symbol, candidate.strategy_id))
         decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
         if not decision.allowed:
             # A budget block is deliberate policy, not a missed slot: the candidate is neither
@@ -1544,11 +1885,24 @@ class RecommendationPipeline:
         if not result.ok:
             # Analyst INFRASTRUCTURE failure: the candidate was never evaluated, so hand its
             # once-per-day publication back (owner-directed 2026-07-29 — six candidates burned by a
-            # broken analyst could not re-publish in the repaired window). governor_blocked is a
-            # deliberate budget policy, not an outage — re-arming would hammer the admission gate.
+            # broken analyst could not re-publish in the repaired window) AND give back the §5.2(a)
+            # forward charge _take_forward_slot made before the call (D1 (c), 2026-09-11 — 110
+            # charges burned on calls that produced no verdict). governor_blocked is a deliberate
+            # budget policy, not an outage: it re-arms nothing and refunds nothing, because the slot
+            # the governor refused was never spent in the first place.
+            #
+            # The alert goes FIRST so that the refund is made exactly once. This whole method runs
+            # inside :meth:`_evaluate_forward_guarded`'s try, and an owner-notify seam that raises
+            # would otherwise land in :meth:`_handle_forward_failure`, which refunds again for the
+            # re-queue it makes — two units undone for one charge, and the day would then make one
+            # analyst call more than the cap allows. Since D1 (d) the ordering is belt to
+            # :meth:`_refund_forward`'s braces: the charge is memoed by signal_id, so a raise from
+            # ANY statement between the refund and the return (not just this one) still costs the
+            # cap exactly one unit.
+            await self._alert_agent_failed("signal_candidate", result)
             if result.reason != "governor_blocked":
                 self._rearm_slot(candidate)
-            await self._alert_agent_failed("signal_candidate", result)
+                self._refund_forward(candidate, d, reason=str(result.reason or "agent_failed"))
             return
         self._note_agent_ok()
         payload = result.payload
@@ -1851,7 +2205,178 @@ class RecommendationPipeline:
             distance = -distance
         return distance <= STOP_PROXIMITY_ATR_MULT * atr
 
+    # ------------------------------------------------------------------ WO-D2: exit hygiene screens
+    def _skip_position_event(self, position: sqlite3.Row) -> bool:
+        """True when a §5.2(b) event on ``position`` could only repeat something already said.
+
+        THE 2026-09-11 finding: two positions the owner sold outside the ledger on 08-26 stayed OPEN
+        to 09-11 and cost 182 position-event analyst calls and 68 exit recommendations — 6 to 10 a
+        day, every one of them the same sentence about the same two names. On 09-08 the month's one
+        genuine ins entry (JINDALSTEL) arrived as notification 2 of 8; the other seven were those
+        repeats. Both screens below are about that noise, and NEITHER relaxes a risk rule:
+
+        (a) **sold outside the ledger** — two consecutive broker observations showing the position is
+            not held AT ALL (§3.6 journal, ``require_zero=True``). The platform cannot recommend an
+            exit from a position that does not exist; the owner is still told about it, once a day,
+            by the reconcile's own alert and by the day plan's "sold outside the ledger" block, both
+            of which name the ``/closed`` reply that ends it. Logged once per position per day so the
+            log carries the fact without re-stating it every hour.
+
+            ``require_zero`` is load-bearing and not a detail: the journal's wide predicate is
+            ``held < tracked``, which also catches a PARTIAL exit (held 3 of a tracked 7) — a
+            position that still carries real exposure and still needs its stop watched — so only
+            "the broker holds nothing" may buy silence here. (Shares pledged for margin count as
+            held via Kite's ``collateral_quantity``, so a pledge never reaches either predicate.)
+            The day plan keeps the wide reading — it TELLS the owner rather than going quiet. A
+            position that IS gone stops producing exit recommendations, so the gate excludes it from
+            the position/sector counts on the same journal (``GateContextBuilder``'s
+            ``missing_holdings_fn``) rather than through ``_exiting_symbols``'s 3-day window.
+
+        (b) **repeat exit** — an exit recommendation for this position was already delivered today,
+            is STILL LIVE, and the position row's stop and qty are unchanged since. The first exit of
+            every session still fires: this screen is scoped to the day, so a stop that stays
+            breached still produces exactly one exit recommendation per session, which is what keeps
+            the position inside ``gate._exiting_symbols``'s three-calendar-day window and therefore
+            off the §7.1 position/sector counts. A moved stop or a changed quantity is NEW
+            information and passes, and so does an earlier exit that has EXPIRED unactioned — see
+            :meth:`_delivered_exit_today`.
+
+        Both screens suppress the whole event, which on (b) also costs a possible ``ModifyStopAction``
+        (the other R3 output a position event may return). That is intended rather than overlooked:
+        (b) only holds while a LIVE "close the whole position at market" instruction the owner has
+        not acted on is already standing, and a full exit dominates a tighter stop on the same
+        position — there is nothing a tighten protects that closing does not. The moment that exit
+        expires, is dismissed, or stops describing the row, the adjust path is available again.
+        """
+        position_id = str(position["position_id"])
+        today = self._clock.today()
+        missing = self._sold_outside_ledger(today)
+        if position_id in missing:
+            if self._sold_outside_logged.get(position_id) != today:
+                self._sold_outside_logged[position_id] = today
+                # KNOWN INTERACTION, deliberately logged rather than silently absorbed: with no exit
+                # recommendation being delivered, this position ages out of ``gate._exiting_symbols``
+                # (a 3-calendar-day window over DELIVERED exit recs, gate.py:1170) about three days
+                # from now, and then starts counting against §7.1 ``max_open_positions`` /
+                # ``per_sector_exposure`` again until the owner replies /closed or the §7.1
+                # ``max_holding`` sweep begins issuing its deterministic daily exit. That is a
+                # CAPACITY cost, never a risk one (the caps get tighter, not looser) — and teaching
+                # the gate this predicate would relax a §7.1 limit on the strength of a broker
+                # heuristic, which is an owner decision, not this screen's to make. WO-D2 open
+                # question 1.
+                _log.warning(
+                    "position_event_skipped_sold_outside_ledger",
+                    position_id=position_id, symbol=str(position["symbol"] or ""),
+                    effect="no analyst call and no exit recommendation while the broker holds none "
+                           "of it; reply /closed to settle the ledger. After ~3 days with no "
+                           "delivered exit rec it re-enters the O16 position/sector counts.",
+                )
+            return True
+        repeated = self._delivered_exit_today(position, today)
+        if repeated is not None:
+            _log.info(
+                "position_event_skipped_repeat_exit",
+                position_id=position_id, symbol=str(position["symbol"] or ""),
+                rec_id=repeated, stop=str(position["stop"] or ""), qty=int(position["qty"] or 0),
+            )
+            return True
+        return False
+
+    def _sold_outside_ledger(self, today: date) -> set[str]:
+        """§3.6 journal read (:func:`positions_missing_from_holdings`), never cached for the day.
+
+        ``require_zero=True``: on THIS path the answer buys silence on a risk-reducing output, so
+        only "the broker holds nothing on every day of the run" qualifies. A partial exit or a
+        pledged holding reads short but still has exposure to protect (see :meth:`_skip_position_event`).
+
+        The hourly reconcile REWRITES today's observation (last write of the day wins), so a position
+        that comes back into holdings at 13:00 must stop being skipped at 13:00 — a day-keyed cache
+        would hold the morning's answer until midnight. A read failure degrades to "nothing is
+        missing" (D7 fail-to-zero): an unreadable journal must never silence the exit path.
+        """
+        try:
+            return positions_missing_from_holdings(self._conn, today, require_zero=True)
+        except sqlite3.Error as exc:
+            _log.warning("sold_outside_ledger_read_failed", error_type=type(exc).__name__,
+                         error=str(exc)[:200])
+            return set()
+
+    def _delivered_exit_today(self, position: sqlite3.Row, today: date) -> str | None:
+        """``rec_id`` of today's latest exit recommendation for ``position`` if it STILL STANDS.
+
+        "Still stands" is two conditions, and both are needed:
+
+        1. **It still describes the position.** The delivered payload's ``stop`` and ``qty`` equal
+           the position row's current ones. Those two are the whole content of an exit recommendation
+           (:meth:`_manage_recommendation` copies both straight off the row), so identical values
+           mean an identical message.
+        2. **It is still an instruction the owner can act on.** An exit that the §3.6 TTL sweep has
+           already expired (``human_action='expired'``, or ``valid_until`` passed and the sweep has
+           simply not run yet) said its piece and is gone from ``/pending``; suppressing the next
+           event on its strength would leave an intraday position whose stop stayed breached all
+           session with ONE exit instruction that died 20 minutes after it arrived
+           (``TTL_INTRADAY_MIN``). A swing/position exit is stamped to the session close, so this
+           changes nothing there — it restores the intraday cadence only. ``taken``/``dismissed``/
+           ``closed`` DO suppress: the owner engaged with the message, and repeating it is the noise
+           WO-D2 exists to remove.
+
+        Only the MOST RECENT exit of the day is judged: an older matching one behind a newer
+        differing one is history, not a repeat.
+
+        ``delivered_at`` is bounded as a lexicographic ISO-8601 range, the convention every other
+        day-scoped read here uses; a NULL ``delivered_at`` falls outside it and is ignored.
+        """
+        position_id = str(position["position_id"])
+        try:
+            rows = self._conn.execute(
+                "SELECT r.rec_id AS rec_id, r.payload AS payload, r.human_action AS human_action "
+                "FROM recommendations r "
+                "JOIN learning_ledger l ON l.rec_id = r.rec_id "
+                "WHERE l.position_id = ? AND r.delivered_at >= ? AND r.delivered_at < ? "
+                "ORDER BY r.delivered_at DESC",
+                (position_id, today.isoformat(), (today + timedelta(days=1)).isoformat()),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            # D7 fail-to-zero, and the same posture as :meth:`_sold_outside_ledger`: this read exists
+            # only to WITHHOLD a risk-reducing output, so a database that cannot answer it must not
+            # decide the question. Raising here would also abandon every remaining position on this
+            # bar — ``on_bar`` awaits this inside its per-position loop.
+            _log.warning("delivered_exit_read_failed", position_id=position_id,
+                         error_type=type(exc).__name__, error=str(exc)[:200])
+            return None
+        now = self._clock.now()
+        for row in rows:
+            try:
+                data = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or data.get("kind") != "exit":
+                continue
+            action = str(row["human_action"] or "") or None
+            if action == "expired" or (
+                action is None and recommendation_expired(data.get("valid_until"), now)
+            ):
+                return None                  # nothing live was said today: say it again
+            try:
+                same = (
+                    int(data.get("qty") or 0) == int(position["qty"] or 0)
+                    and _dec(data.get("stop")) == _dec(position["stop"])
+                )
+            except (TypeError, ValueError, ArithmeticError):
+                # An unparseable payload cannot prove the message would be identical, so it does not
+                # suppress one. This screen fails OPEN: the exit recommendation is the safe side.
+                return None
+            return str(row["rec_id"]) if same else None
+        return None
+
     async def _run_position_event(self, position: sqlite3.Row, ltp: Decimal, atr: Decimal) -> None:
+        # WO-D2 exit hygiene. THE one place every position-event entry point converges on, so the two
+        # "this call would tell the owner nothing new" screens live HERE rather than in :meth:`on_bar`
+        # — a later scheduled/hourly position review that reaches this method inherits them for free.
+        # Both run BEFORE the governor admission so a suppressed event costs neither an analyst call
+        # nor a §5.6 budget decision.
+        if self._skip_position_event(position):
+            return
         decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "position_event")
         if not decision.allowed:
             _log.warning("position_event_governor_blocked", position_id=position["position_id"],
@@ -2532,11 +3057,13 @@ class RecommendationPipeline:
 __all__ = [
     "ATR_BAR_TAIL",
     "ATR_PERIOD",
+    "BAND_SKIP_STRATEGIES",
     "FORWARD_DRAIN_MODES",
     "FORWARD_MODES",
     "FORWARD_PACING_MIN",
     "INTRADAY_AGENT_ID",
     "MAX_PENDING_FORWARDS",
+    "MIN_RANK_POPULATION",
     "QUANTILE_BANDS",
     "PLATFORM_AGENT_ID",
     "POSITION_EVENT_DEBOUNCE_MIN",

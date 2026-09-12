@@ -3,7 +3,7 @@
 
     python scripts/backtest.py <orb|rsi2|trend|mom|all> --from 2024-01-01 --to 2025-12-31 \
         [--grid-density coarse|medium|fine] [--symbols RELIANCE,TCS] [--index-symbol "NIFTY 50"] \
-        [--reports-dir data/reports]
+        [--reports-dir data/reports] [--margin-floor-days 20]
 
 For each strategy it: (1) runs the vectorbt sweep over the §6.3 envelope grid — the sweep reports the
 **trial count N** (every configuration evaluated, §6.4 step 1); (2) picks the best config by
@@ -38,7 +38,12 @@ from engine.core.log import configure_logging, get_logger  # noqa: E402
 from engine.core.migrations import apply_migrations  # noqa: E402
 from engine.learning import reports  # noqa: E402
 from engine.learning.sweep import PRICE_BASELINES, SweepRunner, load_envelope  # noqa: E402
-from engine.learning.validate import ParamSet, ValidationPipeline  # noqa: E402
+from engine.learning.validate import (  # noqa: E402
+    MARGIN_FLOOR_DAYS,
+    ParamSet,
+    RealizedHold,
+    ValidationPipeline,
+)
 from engine.marketdata.store import MarketStore  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 
@@ -65,6 +70,18 @@ def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 
+def _positive_days(s: str) -> int:
+    """argparse type for ``--margin-floor-days`` — the floor's denominator in SESSIONS.
+
+    Rejected at parse time rather than deep inside ``margin_floor_pct_per_day`` (which raises on
+    < 1): a zero would otherwise surface as a divide-by-zero traceback after a multi-minute sweep.
+    """
+    days = int(s)
+    if days < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1 session, got {days}")
+    return days
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Phase-1 sweep + validate + report (§8.2).")
     parser.add_argument("strategy", choices=(*PRICE_BASELINES, "all"))
@@ -81,6 +98,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--reports-dir", default=None, help="default: <data_dir>/reports")
+    parser.add_argument(
+        "--margin-floor-days",
+        type=_positive_days,
+        default=MARGIN_FLOOR_DAYS,
+        help=(
+            "sessions the WO-3 margin floor spreads ONE round trip over: the bar is "
+            f"cost_floor/<days> per day (default: {MARGIN_FLOOR_DAYS}, the 7.1 swing holding cap). "
+            "Set it to the leg's real holding cap -- e.g. 120 for the positional trend leg "
+            "(limits.yaml max_holding.position_trading_days) -- or the floor overstates what the "
+            "strategy must earn per day. The value used is printed in the validation report"
+        ),
+    )
     parser.add_argument(
         "--no-adjacent", action="store_true",
         help=(
@@ -107,18 +136,52 @@ def _resolve_symbols(store: MarketStore, end: date, *, lookback: int = 60) -> li
     return []
 
 
+def _best_stat(sweep, params: dict[str, float]):
+    """The ``ParamSetStat`` row for ``params`` in ``sweep`` (``None`` when the grid never scored it)."""
+    return next((s for s in sweep.stats if s.params == params), None)
+
+
 def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None]:
-    for s in sweep.stats:
-        if s.params == params:
-            return {
-                "n_trades": float(s.n_trades),
-                "win_rate": s.win_rate,
-                "sweep_expectancy_pct": s.expectancy_pct,
-                "sweep_total_return_pct": s.total_return_pct,
-                "sweep_sharpe": s.sharpe,
-                "sweep_max_drawdown_pct": s.max_drawdown_pct,
-            }
-    return {}
+    s = _best_stat(sweep, params)
+    if s is None:
+        return {}
+    return {
+        "n_trades": float(s.n_trades),
+        "win_rate": s.win_rate,
+        "sweep_expectancy_pct": s.expectancy_pct,
+        # R2: the same mean over CLOSED round trips only, so the headline (which averages open
+        # positions at their unrealized mark-to-market) is never read alone.
+        "sweep_expectancy_closed_pct": s.expectancy_closed_pct,
+        "sweep_total_return_pct": s.total_return_pct,
+        "sweep_sharpe": s.sharpe,
+        "sweep_max_drawdown_pct": s.max_drawdown_pct,
+    }
+
+
+def _realized_hold(sweep, params: dict[str, float]) -> RealizedHold | None:
+    """R2 (2026-09-12): the winning config's MEASURED holding distribution, in SESSIONS.
+
+    Returns ``None`` for an intraday sweep (``orb``), whose ``hold_bars_*`` are 1-minute bars — the
+    WO-3 floor's denominator is sessions, and re-labelling 1m bars as sessions would produce a floor
+    ~375× too strict and a headroom multiple to match. ``None`` also when the config scored no
+    trades: there is no realized horizon to report, and the reporting cells are simply omitted.
+    """
+    s = _best_stat(sweep, params)
+    if s is None or not s.n_trades or sweep.bar_unit != "session":
+        return None
+    return RealizedHold(
+        n_trades=s.n_trades,
+        n_closed=s.n_closed,
+        n_open=s.n_open,
+        expectancy_per_trade_pct=s.expectancy_pct,
+        expectancy_per_trade_closed_pct=s.expectancy_closed_pct,
+        mean_sessions=s.hold_bars_mean,
+        median_sessions=s.hold_bars_median,
+        p90_sessions=s.hold_bars_p90,
+        mean_sessions_closed=s.hold_bars_mean_closed,
+        median_sessions_closed=s.hold_bars_median_closed,
+        p90_sessions_closed=s.hold_bars_p90_closed,
+    )
 
 
 def _adjacent_winner(
@@ -207,6 +270,11 @@ def _run_one(
         grid_density=sweep.grid_density,              # WO-3 winner-stability: this run's density
         adjacent_density=adjacent_density,            # None for orb / a non-adjacent density (WO-3)
         adjacent_winner=adjacent_winner,
+        # R2 (2026-09-12), REPORTING ONLY — neither reaches the promotion rule:
+        realized_hold=_realized_hold(sweep, best),    # the horizon the floor should be read against
+        population_is_survivorship_tainted_proxy=(    # a present-day list applied backwards
+            sweep.population_is_survivorship_tainted_proxy
+        ),
     )
     report = pipeline.validate_sync(strategy_id, params)
     val_art = reports.write_report(report, reports_dir)
@@ -219,10 +287,30 @@ def _run_one(
         else f"{report.cpcv_fold_pass_fraction:.1%}"
     )
     bar = "n/a" if report.fold_pass_min is None else f"{report.fold_pass_min:.0%}"
+    floor = (
+        "n/a"
+        if report.margin_floor_pct_per_day is None
+        else f"{report.margin_floor_pct_per_day:.5f}%/day over {report.margin_floor_days}d"
+    )
     print(
         f"[{strategy_id}] N={sweep.trial_count_n} best={best}"
-        f" expectancy={exp} CPCV_pass={frac}/{bar} -> {verdict}"
+        f" expectancy={exp} CPCV_pass={frac}/{bar} margin_floor={floor} -> {verdict}"
     )
+    # R2: the verdict line above quotes the floor at the REGISTERED denominator. Print the measured
+    # horizon and the floor re-based on it right underneath, so the operator cannot read a pass at a
+    # 120-session cap as comfortable without seeing what the median trade was actually held for.
+    hold = report.realized_hold
+    if hold is not None and hold.median_sessions is not None and hold.mean_sessions is not None:
+        print(
+            f"    realized hold: median {hold.median_sessions:.1f} / mean "
+            f"{hold.mean_sessions:.1f} sessions over {hold.n_trades} trades "
+            f"({hold.n_open} still open)"
+        )
+        for c in report.realized_hold_cells:
+            head = "" if c.headroom_x is None else f" ({c.headroom_x:.2f}x headroom)"
+            print(
+                f"      floor at {c.label}: {c.margin_floor_pct_per_day:.5f}%/day{head}"
+            )
     print(f"    sweep:  {sweep_art.markdown}")
     print(f"    report: {val_art.markdown}")
     if not report.promotable:
@@ -236,6 +324,15 @@ def main(argv: list[str] | None = None) -> int:
     # Empty ``--index-symbol ""`` is the explicit opt-out (all-regime); anything else (incl. the
     # canonical default) engages the pinned rsi2 regime filter.
     index_symbol = args.index_symbol or None
+    # The denominator is PER-LEG (a leg's own holding cap); one value applied across `all` hands the
+    # short-horizon baselines a floor scaled to somebody else's horizon, which only ever LOOSENS it.
+    if args.strategy == "all" and args.margin_floor_days != MARGIN_FLOOR_DAYS:
+        print(
+            f"WARNING: --margin-floor-days {args.margin_floor_days} applies to EVERY strategy in "
+            "this 'all' run, including the intraday/swing legs whose holding cap is shorter -- "
+            "their margin floor is loosened accordingly. Run one strategy per horizon instead.",
+            file=sys.stderr,
+        )
 
     settings = load_settings()
     clock = Clock()
@@ -279,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
             clock=clock,
             conn=conn,
             reports_dir=reports_dir,
+            margin_floor_days=args.margin_floor_days,
         )
         targets = list(PRICE_BASELINES) if args.strategy == "all" else [args.strategy]
         for strat in targets:

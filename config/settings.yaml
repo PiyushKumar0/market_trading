@@ -289,7 +289,9 @@ strategy:
     # 2026-08-11 it took 55% of the day's publications purely by firing first.
     # Rescaled with the day cap 2026-08-18 (20→48). The sub-caps SUM to 63 > 48, same shape as
     # before the rescale (36 > 20): the day cap is the aggregate bound, these decide the MIX.
-    # orb is deliberately NOT scaled with the rest — two independent reasons:
+    # HISTORICAL (superseded 2026-09-12 by orb: 0 below — kept because it is the reasoning that set
+    # the 7 the park replaces, and it returns with the strategy if orb is ever re-enabled).
+    # orb was deliberately NOT scaled with the rest — two independent reasons:
     #   (i) drain physics: orb is the only intraday-style scanner, so its queued candidates carry
     #       TTL_INTRADAY_MIN (20 min) against FORWARD_PACING_MIN (3 min) — a simultaneous burst of
     #       N can drain at most ~7 before TTL expiry, and expiry never re-arms the day slot. A cap
@@ -300,7 +302,14 @@ strategy:
     #        emission order. Until that is diagnosed, more orb slots just buy first-come noise.
     max_per_strategy_day:
       default: 16
-      orb: 7
+      orb: 0                     # parked 2026-09-12 (owner-directed after the 09-11 audit): 101 of
+                                 # 229 analyst forwards since 08-17 with zero entry proposals; three
+                                 # intraday price-only families refuted at retail cost (ORB 0/15 CPCV
+                                 # twice, tdc 09-04, candle battery 09-04); re-enable only behind a
+                                 # pre-registered intraday hypothesis that clears the cost floor
+                                 # (plan §8.6). 0 = admit nothing, charge no slot, one
+                                 # prescreen_strategy_disabled line a day, and no arm levels in the
+                                 # sweep verdict (a parked strategy can never arm).
       rsi2: 16
       trend: 10
       mom: 8
@@ -329,6 +338,8 @@ strategy:
         "11:30": 5               # IST bar time; effective cap = min(max_per_strategy_day, tranche).
         "13:00": 7               # Paired with the same-day orb score de-saturation so displacement
                                  # discriminates WITHIN a tranche. Absent/removed = flat caps (rollback).
+                                 # INERT while orb is parked (min(0, tranche) = 0, and the park gate
+                                 # refuses before the schedule is read); kept for the re-enable.
     # How much better a later candidate must score to take a full cap's admission slot from an
     # unevaluated (or, since 2026-09-04, declined) incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
     # same reason as max_per_strategy_day above: it decides which candidates get evaluated at all].

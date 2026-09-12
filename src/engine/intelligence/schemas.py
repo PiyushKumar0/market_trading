@@ -33,7 +33,7 @@ Three locked conventions (Phase-0 deliverables, §8.1):
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -61,6 +61,7 @@ _log = get_logger("engine.intelligence.schemas")
 __all__ = [
     "ACTION_MODELS",
     "CLUSTER_EVENT_TYPES",
+    "EXIT_REASON_CODES",
     "STRUCTURED_OUTPUT_NOTES",
     "ActionBase",
     "ActionProposal",
@@ -105,6 +106,13 @@ STRUCTURED_OUTPUT_NOTES = {
     "temporal_fields_platform_stamped": ["valid_until"],
     "identity_fields_platform_stamped": ["proposal_id", "agent_id", "inputs_digest"],
 }
+
+#: The CLOSED exit reasons, DERIVED from :class:`ExitAction`'s own ``Literal`` — never retyped, so the
+#: wire schema, the sanitizer and the position-event context cannot drift from the contract. The flat
+#: guidance schema advertises them under ``exit_reason`` because ``reason`` there is ``no_action``'s
+#: free prose (2026-09-03..09-10: 47 of 47 first-attempt exits died ``literal_error`` at ``exit.reason``
+#: because the only place the model ever saw these codes was the pydantic error echoed on retry).
+EXIT_REASON_CODES: tuple[str, ...] = get_args(ExitAction.model_fields["reason"].annotation)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -224,7 +232,7 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
             # _sanitize_guidance_extras is the converging mechanism.
             "thesis": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "reason": {"type": "string"},        # no_action free text; exit uses its closed reasons
+            "reason": {"type": "string"},        # no_action free text; an exit's code is exit_reason
             "regime_note": {"type": "string"},
             # EnterAction
             "tradingsymbol": {"type": "string"},
@@ -243,6 +251,11 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
             "position_id": {"type": "string"},
             "exit_type": {"type": "string", "enum": ["MARKET", "LIMIT"]},
             "limit_price": {"type": "string"},
+            # The exit's CLOSED reason gets its OWN key: ``reason`` above is no_action's free prose and
+            # a flat merge cannot be two shapes at once. _sanitize_guidance_extras maps this onto
+            # ExitAction.reason before the union validates. A member enum is safe here — only
+            # oneOf/anyOf unions disengage the runtime's structured output (2026-07-29).
+            "exit_reason": {"type": "string", "enum": list(EXIT_REASON_CODES)},
             "new_stop": {"type": "string"},
             "new_target": {"type": "string"},
             "order_id": {"type": "string"},
@@ -293,6 +306,16 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     silently altering a number or id would corrupt semantics, R1); a field the guidance never
     advertised, or whose target declares no cap, is untouched.
 
+    **Exit reasons (2026-09-11):** ``reason`` on the wire is ``no_action``'s free prose, but
+    :class:`ExitAction` declares it a CLOSED ``Literal``, so every exit died ``literal_error`` on
+    attempt 1 — 47 of 47 since 2026-09-03, converging only because the harness echoes the pydantic
+    error (the one place the model ever saw the codes), and 10 exits were lost outright before that.
+    The schema now advertises those codes as :data:`EXIT_REASON_CODES` under ``exit_reason``; on an
+    ``exit`` a valid code is MOVED onto ``reason`` (``guidance_exit_reason_mapped``) and the displaced
+    prose becomes the ``thesis`` only when there is none to lose. That is a RENAME of an in-enum
+    value, never an interpretation: an absent or out-of-enum ``exit_reason`` leaves ``reason``
+    untouched and the payload fails exactly as it does today — prose is never guessed into a code (R1).
+
     A ``str`` payload is JSON-decoded first; anything that is not a JSON object (bad JSON, a list, a
     scalar) is returned verbatim so the caller's original validation path produces the original error.
     """
@@ -310,6 +333,24 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     target = NoActionOutput if action == "no_action" else ACTION_MODELS.get(action)
     if target is None:
         return payload                      # unrecognised action ⇒ sanitize nothing, fail as today
+    if action == "exit":
+        code = payload.get("exit_reason")
+        if isinstance(code, str) and code in EXIT_REASON_CODES:
+            prose = payload.get("reason")
+            thesis = payload.get("thesis")
+            # The prose is only WORTH keeping if it is prose (a bare code carries nothing the code
+            # does not) and only SAFE to keep where no thesis would be overwritten.
+            to_thesis = (
+                isinstance(prose, str)
+                and prose.strip() != ""
+                and prose not in EXIT_REASON_CODES
+                and not (isinstance(thesis, str) and thesis.strip())
+            )
+            payload = {**payload, "reason": code}
+            if to_thesis:
+                payload["thesis"] = prose
+            _log.info("guidance_exit_reason_mapped", code=code, prose_to_thesis=to_thesis)
+        # exit_reason itself is advertised-but-foreign to every model, so the drop below removes it.
     advertised = set(intraday_guidance_json_schema()["properties"]) - {"action"}
     droppable = advertised - set(target.model_fields)
     dropped = sorted(key for key in payload if key in droppable)

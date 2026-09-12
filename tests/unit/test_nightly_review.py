@@ -614,6 +614,42 @@ def test_funnel_raw_falls_back_to_the_in_process_counter_for_an_unflushed_day(co
     assert build_funnel_summary(conn, D).raw is None               # neither source ⇒ unmeasured
 
 
+def test_funnel_keeps_a_row_for_a_parked_strategy_that_fired_but_never_published(conn) -> None:
+    """2026-09-12: `orb` is parked (``max_per_strategy_day`` 0) — the pre-screen refuses it before
+    any slot is charged, so it has raw fires and NO day-slot row. Its fires must still appear as
+    their own line, or the aggregate ``raw`` headline cannot be reconciled with the breakdown."""
+    conn.execute(
+        "INSERT INTO prescreen_day_slots "
+        "(d, symbol, strategy_id, published_at, evaluated, score, forwarded) "
+        "VALUES (?, 'SBIN', 'rsi2', ?, 1, 0.40, 1)",
+        (D.isoformat(), f"{D.isoformat()}T10:00:00+05:30"),
+    )
+    seed_raw_counts(conn, orb=4090, rsi2=6)
+    summary = build_funnel_summary(conn, D)
+
+    assert summary.raw == 4096
+    assert summary.published == 1
+    by_sid = {s.strategy_id: s for s in summary.by_strategy}
+    assert (by_sid["orb"].raw, by_sid["orb"].published, by_sid["orb"].forwarded) == (4090, 0, 0)
+    assert by_sid["orb"].published_scores == ()
+    assert by_sid["orb"].best_unforwarded_score is None
+    assert [s.strategy_id for s in summary.by_strategy] == ["rsi2", "orb"]   # journal order, then raw-only
+    assert "  - orb: raw 4090 published 0 forwarded 0 unsizeable 0" in "\n".join(summary.lines())
+    assert summary.log_fields()["raw_by_strategy"] == {"rsi2": 6, "orb": 4090}
+
+
+def test_funnel_renders_a_day_where_everything_that_fired_was_parked(conn) -> None:
+    """Fires with zero publications is a real, reportable day (the whole intraday leg parked), not
+    'nothing published today' — that phrase stays reserved for a day nothing fired on either."""
+    seed_raw_counts(conn, orb=1200)
+    summary = build_funnel_summary(conn, D)
+    assert (summary.raw, summary.published) == (1200, 0)
+    text = "\n".join(summary.lines())
+    assert "nothing published today" not in text
+    assert "raw 1200 -> published 0 -> forwarded 0" in text
+    assert "  - orb: raw 1200 published 0 forwarded 0" in text
+
+
 @pytest.mark.asyncio
 async def test_the_eod_funnel_line_reads_the_table_after_a_mid_day_restart(
     conn, gov, clock, calendar
