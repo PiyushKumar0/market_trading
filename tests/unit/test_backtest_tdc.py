@@ -42,7 +42,7 @@ _spec.loader.exec_module(bt)
 
 from engine.core.clock import IST  # noqa: E402
 from engine.core.types import Bar  # noqa: E402
-from engine.marketdata.store import MarketStore  # noqa: E402
+from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 
 N_SESSIONS = 30
@@ -180,6 +180,38 @@ def _tape() -> list[Bar]:
     return bars
 
 
+# --------------------------------------------------------------------------- the DAILY tape (R3)
+#: Constant per-symbol daily bars, so every true range is the plain high-low, Wilder ATR(14) IS that
+#: range and ATR% is exact: WINNER 2.00/101.00 = 1.9802%, STOPPER 5.00/102.00 = 4.9020%.
+DAILY_OHLC: dict[str, tuple[float, float, float]] = {      # symbol -> (high, low, close)
+    "WINNER": (102.0, 100.0, 101.0),
+    "STOPPER": (105.0, 100.0, 102.0),
+}
+WINNER_ATR_PCT = 2.0 / 101.0 * 100.0
+STOPPER_ATR_PCT = 5.0 / 102.0 * 100.0
+
+
+def _daily_bar(sym: str, d: date, high: float, low: float, close: float) -> DailyBar:
+    return DailyBar(
+        symbol=sym, d=d, open=Decimal(str(round(close, 2))), high=Decimal(str(round(high, 2))),
+        low=Decimal(str(round(low, 2))), close=Decimal(str(round(close, 2))), volume=1000,
+        src="kite_official",
+    )
+
+
+def _daily_tape() -> list[DailyBar]:
+    """One daily bar per prior session, plus a deliberately absurd SIGNAL-DAY bar.
+
+    The signal day's own daily bar is 100.00 wide; it is strictly AFTER the ATR window, so if the
+    window ever reached it WINNER's ATR% would read ~66 instead of ~1.98.
+    """
+    bars: list[DailyBar] = []
+    for sym, (high, low, close) in DAILY_OHLC.items():
+        bars += [_daily_bar(sym, d, high, low, close) for d in SESSIONS[:-1]]
+        bars.append(_daily_bar(sym, SIGNAL_DAY, 200.0, 100.0, 150.0))
+    return bars
+
+
 @pytest.fixture(scope="module")
 def db_file(tmp_path_factory, module_clock) -> Path:
     """A temp market.duckdb holding the synthetic tape, CLOSED so the study can attach read-only."""
@@ -190,6 +222,7 @@ def db_file(tmp_path_factory, module_clock) -> Path:
         tape = _tape()
         for i in range(0, len(tape), 20000):
             store.insert_bars_1m(tape[i: i + 20000])
+        store.upsert_bars_1d(_daily_tape())
     finally:
         store.close()
     return path
@@ -606,3 +639,117 @@ def test_refuses_a_locked_database_file(db_file, tmp_path, module_clock, capsys)
     err = capsys.readouterr().err
     assert "REFUSING TO RUN" in err and "cannot open read-only" in err and "mt-engine" in err
     assert not (tmp_path / "y.json").exists()
+
+
+# ============================================================ 9. the ATR% tercile split (R3)
+def _ladder(n: int = 15, step: float = 3.0, half_range: float = 1.0):
+    """``n`` daily sessions before ``SIGNAL_DAY`` whose closes climb by ``step``.
+
+    Every TR after the first is the gap term ``step + half_range``; the first bar of the ATR WINDOW
+    has no prior close inside the window, so its TR is the plain high-low ``2 * half_range``. With
+    the default 15 sessions the window is the last 14, so session 0 is read by nothing.
+    """
+    days = _sessions(n, SESSIONS[0])
+    closes = [100.0 + step * i for i in range(n)]
+    return (days, [c + half_range for c in closes], [c - half_range for c in closes], closes)
+
+
+def test_atr14_is_the_mean_true_range_of_the_14_sessions_strictly_before_the_signal_day():
+    """TRs by hand: one plain high-low of 2.00 then thirteen gap TRs of 4.00 -> ATR = 54/14."""
+    days, highs, lows, closes = _ladder()
+    expected = ((2.0 + 13 * 4.0) / 14.0) / closes[-1] * 100.0
+    assert closes[-1] == 142.0
+    assert bt.atr_pct_at((days, highs, lows, closes), SIGNAL_DAY, lookback=14) == pytest.approx(
+        expected, abs=1e-12
+    )
+    # PINNED READING: the window is EXACTLY 14 sessions, so the 15th session back is read by nothing.
+    assert bt.atr_pct_at((days[1:], highs[1:], lows[1:], closes[1:]), SIGNAL_DAY,
+                         lookback=14) == pytest.approx(expected, abs=1e-12)
+    # and a bar ON the signal day cannot move it by a basis point
+    assert bt.atr_pct_at(([*days, SIGNAL_DAY], [*highs, 200.0], [*lows, 1.0], [*closes, 100.0]),
+                         SIGNAL_DAY, lookback=14) == pytest.approx(expected, abs=1e-12)
+
+
+def test_atr_needs_a_full_lookback_of_prior_sessions_and_a_positive_prior_close():
+    days, highs, lows, closes = _ladder(n=13)
+    assert bt.atr_pct_at((days, highs, lows, closes), SIGNAL_DAY, lookback=14) is None
+    assert bt.atr_pct_at(None, SIGNAL_DAY, lookback=14) is None
+    days, highs, lows, closes = _ladder()
+    assert bt.atr_pct_at((days, highs, lows, [*closes[:-1], 0.0]), SIGNAL_DAY, lookback=14) is None
+
+
+def test_tercile_cuts_and_assignment_partition_the_population():
+    """Six values 1..6: the exclusive quantiles land in (2,3) and (4,5), so the cells are 2/2/2."""
+    vals = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    cuts = bt.atr_tercile_cuts(vals)
+    assert 2.0 <= cuts[0] < 3.0 and 4.0 <= cuts[1] < 5.0
+    assert [bt.atr_tercile_of(v, cuts) for v in vals] == [
+        bt.SPLIT_ATR_LOW, bt.SPLIT_ATR_LOW, bt.SPLIT_ATR_MID,
+        bt.SPLIT_ATR_MID, bt.SPLIT_ATR_HIGH, bt.SPLIT_ATR_HIGH,
+    ]
+    assert bt.atr_tercile_cuts([1.0, 2.0]) is None                    # fewer than three: no cut
+    assert bt.atr_tercile_of(3.0, None) is None                       # and nothing is classified
+    assert bt.atr_tercile_of(None, cuts) is None
+    assert bt.atr_tercile_of(float("nan"), cuts) is None
+
+
+def test_stamp_atr_terciles_labels_every_trade_and_keeps_the_unclassified_ones():
+    mk = lambda sym: bt.Trade(  # noqa: E731
+        variant="H1", symbol=sym, d=SIGNAL_DAY, entry_px=100.0, exit_px=100.0,
+        exit_reason="squareoff_1515", gross_pct=0.0, cost_pct=0.0, net_pct=0.0,
+        rs_pct=1.0, rvol=2.0, index_ret_pct=0.5, index_is_real=True, breadth=0.2,
+        catalyst_at_T=False, catalyst_split_covered=False,
+    )
+    trades = [mk(s) for s in ("A", "B", "C", "D", "E")]
+    atr = {
+        ("A", SIGNAL_DAY): 1.0, ("B", SIGNAL_DAY): 2.0, ("C", SIGNAL_DAY): 3.0,
+        ("D", SIGNAL_DAY): 9.0, ("E", SIGNAL_DAY): None,
+    }
+    block = bt.stamp_atr_terciles([trades], atr)
+    assert block["n_symbol_days"] == 5 and block["n_symbol_days_without_atr"] == 1
+    assert [t.atr_cell for t in trades[:4]] == [
+        bt.SPLIT_ATR_LOW, bt.SPLIT_ATR_MID, bt.SPLIT_ATR_MID, bt.SPLIT_ATR_HIGH
+    ]
+    assert trades[4].atr_cell is None and trades[4].atr_pct is None
+    assert sum(block["n_trades_by_cell"].values()) == len(trades)
+    cells = bt.split_cells(trades, bt.PARAMS)
+    assert sum(len(cells[c]) for c in bt.ATR_REPORT_CELLS) == len(cells[bt.SPLIT_ALL])
+
+
+def test_the_study_stamps_each_trade_with_its_daily_atr_pct_from_bars_1d(study):
+    """End to end: bars_1d is read, and the signal day's own 100-wide daily bar is not in the window."""
+    doc, trades = study
+    booked = _trades(trades, "H1")
+    assert booked["WINNER"].atr_pct == pytest.approx(WINNER_ATR_PCT, abs=1e-9)
+    assert booked["STOPPER"].atr_pct == pytest.approx(STOPPER_ATR_PCT, abs=1e-9)
+    ab = doc["coverage"]["atr_pct_tercile_split"]
+    assert ab["source_table"] == "bars_1d" and ab["descriptive_not_tradeable"] is True
+    # only WINNER and STOPPER carry daily bars; the robustness variants reach a symbol that has none,
+    # and it is COUNTED rather than silently dropped.
+    assert ab["n_symbol_days_with_atr"] == 2
+    assert ab["n_symbol_days_without_atr"] == ab["n_symbol_days"] - 2 >= 1
+    # two known values is fewer than three, so NO cut exists: every trade stays unclassified and
+    # NOTHING is dropped - the residue cell is what keeps the four cells a partition.
+    assert ab["cuts"] is None
+    assert all(t.atr_cell is None for v in trades.values() for t in v)
+    assert ab["n_trades_by_cell"][bt.SPLIT_ATR_UNCLASSIFIED] == sum(len(v) for v in trades.values())
+
+
+def test_the_four_atr_cells_partition_every_variants_trades(study):
+    doc, _trades = study
+    for block in doc["results"].values():
+        total = block["splits"][bt.SPLIT_ALL]["n"]
+        assert sum(block["splits"][c]["n"] for c in bt.ATR_REPORT_CELLS) == total
+
+
+def test_the_report_prints_the_atr_block_with_gross_and_labels_it_descriptive(study):
+    doc, _trades = study
+    text = bt.render_text(doc)
+    assert text.isascii()                                             # the Windows console is cp1252
+    assert "STEP 2B - ATR% TERCILE SPLIT" in text
+    assert text.index("STEP 2B") < text.index("STEP 3 - PROMOTABLE")
+    assert all(cell in text for cell in bt.ATR_REPORT_CELLS)
+    assert any("DESCRIPTIVE, NOT TRADEABLE" in n for n in doc["notes"])
+    assert any("ATR% SURVIVORSHIP" in n for n in doc["notes"])
+    s = doc["results"]["H1"]["splits"][bt.SPLIT_ALL]
+    assert s["median_gross_pct"] is not None and s["median_net_pct"] is not None

@@ -23,13 +23,14 @@ login), which is exactly the §2.6 posture. The Tier-1 harness / OMS / live rout
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sqlite3
 import threading
 import time as time_module  # `time` itself is datetime.time here (below) — WO-25c needs monotonic()
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
@@ -45,13 +46,14 @@ from engine.broker.session import SessionManager
 from engine.broker.ticker_supervisor import TickerSupervisor
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
-from engine.core.config import config_dir, load_settings, load_yaml
+from engine.core.config import Settings, config_dir, load_settings, load_yaml
 from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import configure_logging, get_logger
 from engine.core.migrations import apply_migrations
 from engine.core.protected_store import IntegrityError, ProtectedStore
+from engine.core.recommendations import parse_valid_until
 from engine.core.secrets import DASHBOARD_TOKEN, KITE_API_KEY, TELEGRAM_BOT_TOKEN, Secrets
 from engine.core.types import TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
@@ -144,7 +146,9 @@ from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
 from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
+from engine.strategy.retest import RestingLevelBook
 from engine.strategy.scanners import brk20, build_enabled_scanners, cat, cat_reversal, hi52, ins
+from engine.strategy.types import SignalCandidate
 from engine.universe.builder import UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
 from engine.universe.surveillance import SurveillanceIngest
@@ -648,7 +652,11 @@ async def run() -> int:
     # §2.8 corporate-filings feeds (data-only in stage 1; never entry-blocking, E5). filings_results
     # reuses the earnings provider's historical leg (run_range) for board-meeting dates.
     filings_pit = FilingsPitJob(store, clock, http, notify=notify)
-    filings_pit_fresh = FilingsPitFreshJob(store, clock, http, notify=notify)
+    # settings: filings_pit_fresh rebuilds its scrip->symbol map every run from the cached
+    # index-constituents CSV (symbol->ISIN) + the BSE bulk master (ISIN->scrip). Without it the map
+    # is whatever the last manual isin_map backfill left, which is how the §6.1 `ins` feed ended up
+    # reaching 199 of 480 eligible issuers (plan §2.8, 2026-09-12).
+    filings_pit_fresh = FilingsPitFreshJob(store, clock, http, settings=settings, notify=notify)
     filings_results = FilingsResultsJob(store, clock, http, earnings=earnings, notify=notify)
     filings_shp = FilingsShpJob(store, clock, http, notify=notify)
     # §6.1 `ins` (2026-08-17): EOD insider net-buy crossing detection over the SAME validated crossing
@@ -694,15 +702,10 @@ async def run() -> int:
     cost_model = CostModel.from_config(instruments=instruments, edge_multiple_min=_edge_multiple_min())
     gate = RiskGate(
         limits_engine, cost_model, clock,
-        # §6.1 `ins` (2026-08-17): the C3 edge check derives the expected move from the proposal's
-        # TARGET, and `ins` has none by design (its exit is the §7.1 20-td time cap, and the drift it
-        # captures was MEASURED, not predicted). Rather than invent a target to feed the arithmetic,
-        # the strategy registers its validated T+20 NET drift (WO-16: +1.5797%, owner-set in
-        # settings.yaml, never learner-movable). Used ONLY when target_price is None; every other
-        # strategy and every targetless proposal without a registered edge behaves exactly as before.
-        strategy_expected_edge_pct={
-            ins.STRATEGY_ID: Decimal(str(settings.ins.expected_edge_pct)),
-        },
+        # The per-strategy C3 edge registrations — see :func:`_strategy_expected_edge_pct`, which is
+        # this map and is module-level so BOTH halves of the hi52 promotion are assertable without
+        # booting an engine (a wiring that only exists inside build_engine silently disappears).
+        strategy_expected_edge_pct=_strategy_expected_edge_pct(settings),
         # §2.7 news SHADOWS: C3 rejects these unconditionally, before target_price is even read, so
         # "signals are a measurement, never a recommendation" is ENFORCED at Tier 2 rather than
         # inferred from a missing expected_edge_pct (see risk/gate.py _SHADOW_NO_EDGE for why, and
@@ -821,6 +824,46 @@ async def run() -> int:
     # mid-session restarts) or re-sends already-evaluated candidates.
     _hydrate_prescreen(conn, prescreen, clock.today())
     bus.subscribe("bar.1m", prescreen.handle_bar)
+
+    # --- `brk20` RETEST re-arm (WO-R, 2026-09-12). The 09-12 pre-registered entry-mechanism backtest
+    #     selected `V2_limit_at_H20_N5` — a limit resting at the broken level for up to five sessions
+    #     — while the live rule publishes that level exactly ONCE (the unregistered, unmeasured N=1).
+    #     This book is the durable half (migration 0014, so a mid-session reboot cannot silently turn
+    #     the multi-session mechanism back into a single-session one); `forward_drain_tick` below is
+    #     the minute pulse that re-offers a rested level the moment the price is back inside the band.
+    #     It widens nothing: same levels, same band, same caps, same gate (see retest.py).
+    retest_book = RestingLevelBook(conn, calendar, clock,
+                                   sessions=settings.brk20.retest_sessions)
+    #: What the DAY's sweep knows that the retest tick must respect: the eligible population brk20
+    #: originates over and the A12 ex-date horizon, both already read by `_collect_and_scan` (so the
+    #: minute pulse pays nothing for them). `day` doubles as the retest's readiness flag — see
+    #: `sweep_ready` in `forward_drain_tick`.
+    _retest_state: dict[str, Any] = {
+        "day": None, "eligible": frozenset(), "ex_skip": frozenset(), "unadjusted": frozenset(),
+    }
+
+    def _retest_limits() -> tuple[float, float]:
+        """The two §7.1 numbers the retest enforces — the CNC ``entry_sanity_band`` and
+        ``stale_data_guard.max_tick_age_s`` — read TOGETHER at the ENFORCEMENT site from ONE
+        hash-verified load (the ``catalyst_cap_fn`` convention above). Never constructor numbers, so
+        an owner tightening either tightens the retest with it, and never two loads that could
+        straddle an owner edit. A raise here (unverifiable store) propagates as the exception
+        `_retest_republish` turns into "re-offer nothing this tick"."""
+        lim = limits_engine.load().limits
+        return (float(lim.entry_sanity_band.cnc_pct), float(lim.stale_data_guard.max_tick_age_s))
+
+    def _retest_skip(symbols: list[str]) -> dict[str, str]:
+        """Which of today's due resting symbols must NOT be re-offered (see `_retest_skip_reasons`).
+
+        Called at most once per tick and only when a row is actually in the window, so the two small
+        SQLite reads never touch the ordinary minute. A raise offers nothing this tick."""
+        return _retest_skip_reasons(
+            symbols,
+            eligible=_retest_state["eligible"], ex_skip=_retest_state["ex_skip"],
+            unadjusted=_retest_state["unadjusted"],
+            held=set(held_symbols()),
+            pending=_pending_entry_rec_symbols(conn, clock.now()),
+        )
 
     # 2026-08-18: the scan context day-caches `trade_window` (per PROCESS per date), so an owner
     # change mid-session was invisible to every scanner until the next restart. ModeManager has
@@ -1457,6 +1500,39 @@ async def run() -> int:
     async def forward_drain_tick() -> None:
         if pipeline is None:
             return
+        # --- WO-R `brk20` RETEST re-arm, on this same 60 s pulse. Placed BEFORE the drain so a level
+        #     that came back inside the band during this minute can be chosen by this very tick's
+        #     forward slot instead of waiting for the next one. Its own try/except and its own
+        #     module-level body: a retest failure must cost neither the drain nor the scheduler (D7),
+        #     and `_retest_republish` is testable on its candidates rather than on a source string.
+        #     The window predicate is `_retest_active`: the sweep's own `_sweep_window_active` plus
+        #     the states in which the pipeline is certain to drop the publication (FROZEN, killed)
+        #     and "a sweep is running" — the retest has no freeze-lift path to redo an offer that
+        #     was dropped, and its once-a-day offer bound is spent at offer time (2026-09-12 review).
+        #     OFF-LOOP (`asyncio.to_thread`), like every other caller of these two seams: the body
+        #     takes `SignalPreScreen._lock` and then mints a feature snapshot under
+        #     `MarketStore._lock` — `prescreen.handle_bar` and `_collect_and_scan` are both threaded
+        #     for exactly that reason, and a store lock held 59 s by a partition COPY (store.py) or
+        #     ~14 minutes by the 2026-08-21 stall would otherwise freeze the WHOLE loop: the tick
+        #     cache, the §2.2 heartbeat, the kill path, Telegram and every APScheduler job.
+        #     `sweep_ready` is the day's admission having happened: until today's IN-WINDOW sweep has
+        #     published, the retest holds off so a fresh crossing of a resting symbol always wins the
+        #     pre-screen's `(symbol, strategy)` dedupe over a level broken days ago — and so
+        #     `_retest_skip` is reading TODAY's eligible set and ex-date horizon rather than an empty
+        #     (or yesterday's) one. Fails to zero: a day whose sweep never published re-offers
+        #     nothing, which is the pre-WO-R behaviour.
+        try:
+            for cand in await asyncio.to_thread(
+                _retest_republish,
+                retest_book, prescreen, features,
+                active=_retest_active(clock.now(), calendar, mode, kill, _sweep_lock),
+                sweep_ready=_retest_state["day"] == clock.today(),
+                ltp_fn=mark_price, tick_age_fn=tick_age_s, limits_fn=_retest_limits,
+                skip_fn=_retest_skip, today=clock.today(),
+            ):
+                await bus.apublish("signal.candidate", cand)
+        except Exception:  # noqa: BLE001 - a retest failure must never cost the drain below it
+            _log.exception("brk20_retest_tick_failed")
         try:
             await pipeline.drain_forward_queue()
         except Exception:  # noqa: BLE001 - a drain failure must never take down the scheduler loop
@@ -1577,8 +1653,9 @@ async def run() -> int:
             # 2026-09-01 refactor: the eligibility predicate lives in ONE place now
             # (store.get_universe_eligible_symbols) — this was one of three inline duplicates of the
             # strict reasons==['watchlist_cap'] equality that the batch-universe addendum would have
-            # silently missed. Semantics unchanged: brk20/ins stay on the ELIGIBLE (gate-approvable)
-            # set; only the shadow hi52 leg below scans the wider batch universe.
+            # silently missed. Every batch leg reads this ONE set: hi52 was the last on the wider
+            # batch universe and came back to it on 2026-09-09, before the 09-12 promotion made the
+            # eligible population part of its registered rule.
             eligible = store.get_universe_eligible_symbols(today)
             histories: dict[str, list[brk20.DailyRow]] = {}
             hist_start = today - timedelta(days=70)   # comfortably ≥ lookback+2 sessions
@@ -1704,6 +1781,16 @@ async def run() -> int:
                     },
                 )
 
+            # The once-per-session `hi52` leg — the only trigger-keyed branch in the sweep. A
+            # module-level function (2026-09-11 review) so "freeze_lift takes the same branch as
+            # window_open" is assertable on its candidates rather than on a source string. Called
+            # HERE, before the admission below, because since the 2026-09-12 promotion its
+            # candidates are part of that ONE ranked batch (see the leg's own docstring).
+            hi52_raw = _hi52_daily_leg(
+                store, trigger=trigger, eligible=eligible, today=today,
+                yesterday=yesterday, ex_map=ex_map,
+            )
+
             # --- ONE ranked admission across all three batch legs (2026-08-18). Until now brk20,
             #     ins and cat each made their OWN prescreen.admit call, and WO-1's ranking orders
             #     only WITHIN one batch — so the legs were effectively first-come, in source order,
@@ -1716,12 +1803,18 @@ async def run() -> int:
             #     Snapshot mint stays AFTER admit (dedupe/caps first — a suppressed candidate never
             #     spends a snapshot write); without it the analyst's Rule 6 refuses every batch
             #     candidate unseen.
+            #     `hi52` joined this batch on 2026-09-12 (§8.6 promotion): a rule that can reach
+            #     RECOMMEND must contest the same slots as every other actionable leg, and its own
+            #     per-strategy cap (3) is what bounds it.
+            #     ADMISSION is that one ranked call; PUBLICATION order is a second, separable
+            #     consequence of its result and `_publication_order` owns it (see that function for
+            #     why a promoted hi52 must not inherit the front of the queue).
             batch = _attach_feature_snapshots(
                 features,
-                prescreen.admit(
-                    brk20_raw + ins_raw + cat_raw + cat_rev_raw, today,
+                _publication_order(prescreen.admit(
+                    brk20_raw + ins_raw + cat_raw + cat_rev_raw + hi52_raw, today,
                     in_window=batch_in_window,
-                ),
+                )),
             )
             # THE starvation-visibility line (the `ins` convention, §6.1): sustained zeros must be
             # readable as "the news layer went quiet" vs "rows arrived and the rule/caps declined
@@ -1743,27 +1836,48 @@ async def run() -> int:
                 in_window=batch_in_window,
             )
 
-            # The once-per-session `hi52` shadow leg and its SECOND admit — the only trigger-keyed
-            # branch in the sweep. A module-level function (2026-09-11 review) so "freeze_lift takes
-            # the same branch as window_open" is assertable on the admit itself rather than on a
-            # source string.
-            hi52_admitted = _hi52_shadow_leg(
-                store, prescreen, features, trigger=trigger, eligible=eligible, today=today,
-                yesterday=yesterday, ex_map=ex_map, in_window=batch_in_window,
-            )
-
             # Third element = the BATCH legs' admitted symbols (brk20/ins/cat/cat_reversal/hi52), the
             # ones with no 1m bar and therefore no guaranteed tick. The bar-driven `accepted` are
             # watchlist symbols the feed already carries. Fourth = every `ins_pending` row this sweep
             # READ; whether it may be consumed is decided at publication (_ins_rows_to_consume).
+            #
+            # WO-R: the resting brk20 levels ride the SAME list. `_batch_ticks` rolls at midnight, so
+            # without this a level admitted on day 1 has no tick on days 2-5 and `RestingLevelBook
+            # .due` — which bands against the LIVE price — could never offer it again. That would
+            # kill the retest silently for the sub-cap symbols brk20 exists to catch, the same hole
+            # the 2026-09-11 forensics found at the gate (27 of 84 brk20 slots, ltp=None).
+            #
+            # Fifth = the two NARROWINGS the retest tick re-applies to a level broken days ago, both
+            # already read here so the 60 s pulse pays nothing for them: today's ELIGIBLE population
+            # (`brk20` originates over it, and a name that churned out mid-window would otherwise
+            # keep originating outside the registered scope) and the A12 ex-date veto over brk20's
+            # OWN `ex_skip_days` horizon (`bars_1d` is never re-adjusted, so a stored level is a
+            # pre-ex price the tape stops quoting — `brk20.scan_daily` refuses such a symbol on the
+            # crossing day and the re-offer must refuse it on the retest day for the same reason).
+            _brk20_ex_horizon = today + timedelta(days=int(brk20.DEFAULT_PARAMS["ex_skip_days"]))
+            retest_ctx = {
+                "eligible": frozenset(eligible),
+                "ex_skip": frozenset(
+                    sym for sym, dates in ex_map.items()
+                    if any(today <= xd <= _brk20_ex_horizon for xd in dates)
+                ),
+                # The BACKWARD-looking half of the corporate-action veto (2026-09-12 review): the
+                # sweep skips a symbol whose bars_1d holds two units after a structural ex-date
+                # inside the 35-day lookback; a stored level is a pre-ex price on the same series,
+                # so the re-offer must refuse it too — `ex_skip` above looks forward only.
+                "unadjusted": frozenset(brk20_unadjusted),
+            }
             return (
-                accepted + batch + hi52_admitted,
+                accepted + batch,
                 pendings,
-                [c.symbol for c in (*batch, *hi52_admitted)],
+                [c.symbol for c in batch] + retest_book.resting_symbols(today),
                 [c.symbol for c in ins_pending],
+                retest_ctx,
             )
 
-        accepted, pendings, batch_symbols, ins_read = await asyncio.to_thread(_collect_and_scan)
+        accepted, pendings, batch_symbols, ins_read, retest_ctx = await asyncio.to_thread(
+            _collect_and_scan
+        )
         # Point the feed at today's batch admissions BEFORE publishing them (2026-09-11): the §7.1
         # gate reads the tick cache and nothing else, and the pipeline's analyst hop is the only
         # window in which a first tick can arrive. Guarded exactly like the job_universe resubscribe
@@ -1786,13 +1900,38 @@ async def run() -> int:
         _published_frozen = mode.risk_state() != RiskState.NORMAL
         _last_sweep.update(published_at=clock.now(), frozen=_published_frozen)
         # The §6.1 once-only bound, applied at the moment the rows' fate is decided rather than back
-        # in the worker (2026-09-11 review): between the two sits the hi52 leg's ~480×400-session read.
+        # in the worker (2026-09-11 review): the whole worker — since 2026-09-12 the hi52 leg's
+        # ~480×400-session read included — sits between the rows' READ and this decision.
         _consume_ins_pending(
             conn, now.date(),
             _ins_rows_to_consume(ins_read, in_window=batch_in_window,
                                  published_frozen=_published_frozen),
             now=now,
         )
+        # WO-R (2026-09-12): every ADMITTED brk20 level starts RESTING here, so the next
+        # `retest_sessions` sessions can re-offer it when the price comes back to it — the
+        # `V2_limit_at_H20_N5` mechanism the pre-registered entry backtest selected. ADMITTED, never
+        # raw: the pre-screen has already decided which levels are worth judgement, and resting a
+        # capped-out fire would re-offer tomorrow what the caps refused today (`accepted` is the
+        # bar-driven candidates plus the post-admit `batch`, and no bar-driven rule is brk20).
+        # On the LOOP THREAD, beside `_consume_ins_pending` and for the same reason: this connection
+        # is `isolation_level=None` with `check_same_thread=False` because the engine serialises its
+        # writes on this thread (§4.1). A bare INSERT issued from the sweep WORKER while the loop is
+        # between BEGIN and COMMIT in `core.db.transaction` joins that transaction and dies with its
+        # ROLLBACK — silently, since `record` has already returned True and logged. The level would
+        # then never be re-offered while the log said it was resting for five sessions.
+        for _cand in accepted:
+            if _cand.strategy_id == brk20.STRATEGY_ID:
+                retest_book.record(_cand)
+        # …and the retest tick is armed for today only by an IN-WINDOW sweep — the one that can
+        # actually admit a fresh crossing. Pre-open `/scan_now` admits nothing (in_window False), so
+        # arming on it would let the minute pulse publish a days-old level into the pre-screen's
+        # `(symbol, strategy)` dedupe moments before the window-open sweep's fresh cross of the same
+        # symbol, which would then be dropped as a duplicate and never journalled.
+        if batch_in_window:
+            _retest_state.update(day=today, eligible=retest_ctx["eligible"],
+                                 ex_skip=retest_ctx["ex_skip"],
+                                 unadjusted=retest_ctx["unadjusted"])
         for cand in accepted:
             await bus.apublish("signal.candidate", cand)
 
@@ -2791,13 +2930,48 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: analyst-volunteered ``target_price`` defeats that argument for ``cat`` exactly as it would have
 #: for ``cat_reversal``. Zero ``cat`` recommendations have ever been delivered (queried live), so
 #: this closes a real but not-yet-exploited hole rather than fixing an incident.
-#: 2026-09-01 (§3.2.4/§6.1 addendum): ``hi52`` joins at birth — a 52wk-high-proximity swing shadow
-#: over the BATCH universe with no measured edge until its backtest + §8.6 owner gate. Its shadow
-#: status is doubly load-bearing: beyond the no-edge rule, most of its candidates are non-included
-#: (extended-leg) symbols the gate could never approve anyway.
+#: ``hi52`` joined at birth 2026-09-01 (§3.2.4/§6.1 addendum) and LEFT 2026-09-12 — the §8.6 record
+#: is the plan's "hi52 v2 promotion" addendum. Promoted as a FORWARD TEST, not as a validated edge:
+#: the v2 backtest is CPCV-promotable (T+20 median net +1.71%, fold pass 86.7% under N=2) but its
+#: edge lives in an index cell labelled by CURRENT membership applied backwards, so RECOMMEND mode
+#: IS the soak and it ships with a mechanical kill rule (``scripts/hi52_forward_verdict.py``:
+#: n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit rate < 50%) ⇒ DEMOTE). DEMOTION IS THIS
+#: LINE: re-add ``hi52.STRATEGY_ID`` here and delete ``hi52.expected_edge_pct`` from settings.yaml —
+#: both, since either alone leaves a half-promoted rule (the shadow set wins a contradiction, but a
+#: dangling edge key reads as a live registration). BOTH edits are real edits: ``Hi52Cfg
+#: .expected_edge_pct`` defaults to ``None``, so deleting the settings key un-registers the edge in
+#: ``build_engine`` above rather than falling back to a value hidden in code.
 NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
-    {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID, hi52.STRATEGY_ID}
+    {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID}
 )
+
+
+def _strategy_expected_edge_pct(settings: Settings) -> dict[str, Decimal]:
+    """The §7.1 C3 per-strategy edge registrations the gate is built with — the OTHER half of the
+    promotion state above, extracted so both halves are assertable without booting an engine.
+
+    §6.1 ``ins`` (2026-08-17): the C3 edge check derives the expected move from the proposal's
+    TARGET, and ``ins`` has none by design (its exit is the §7.1 20-td time cap, and the drift it
+    captures was MEASURED, not predicted). Rather than invent a target to feed the arithmetic, the
+    strategy registers its validated T+20 NET drift (WO-16, owner-set in ``settings.yaml``, never
+    learner-movable). Used ONLY when ``target_price`` is None; every other strategy and every
+    targetless proposal without a registered edge behaves exactly as before.
+
+    §8.6 ``hi52`` (2026-09-12): registered on the SAME seam for the same reason — its exit is the
+    §7.1 20-session time cap and its drift was MEASURED, not predicted to a level, so it ships
+    ``target=None`` and the gate has no levels to derive an edge from. Its number is a FORWARD-TEST
+    edge, not a validated one (``settings.yaml`` carries the derivation and the kill rule).
+    CONDITIONAL on the key being PRESENT, unlike ``ins``'s: ``Hi52Cfg.expected_edge_pct`` defaults to
+    ``None`` precisely so that deleting the ``settings.yaml`` key — step 2 of the kill criterion —
+    actually demotes. Registering it unconditionally off a model default would make that edit a
+    no-op and leave the gate consuming an edge from a number ``settings.yaml`` does not show. A
+    targetless proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject, so the
+    absence fails closed.
+    """
+    edges = {ins.STRATEGY_ID: Decimal(str(settings.ins.expected_edge_pct))}
+    if settings.hi52.expected_edge_pct is not None:
+        edges[hi52.STRATEGY_ID] = Decimal(str(settings.hi52.expected_edge_pct))
+    return edges
 
 #: Strategies whose candidates can carry a ``catalyst_ref`` — the §2.7 news-originated legs. Read at
 #: ONE place: :func:`_hydrate_prescreen`, which uses it to rebuild the
@@ -2807,8 +2981,8 @@ NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
 #: from here still faces the cap while it runs; it only loses budget continuity over a boot.
 CATALYST_STRATEGY_IDS: frozenset[str] = frozenset({cat.STRATEGY_ID, cat_reversal.STRATEGY_ID})
 
-#: Sweep triggers that ALSO run the once-per-session legs (today: ``hi52``'s leftover-capacity second
-#: admit). ``freeze_lift`` is a ``window_open`` sweep re-run because a freeze swallowed the first one,
+#: Sweep triggers that ALSO run the once-per-session legs (today: ``hi52``'s ~480-symbol × 400-session
+#: daily read). ``freeze_lift`` is a ``window_open`` sweep re-run because a freeze swallowed the first one,
 #: so it must take every ``window_open`` branch — keying those branches on this set rather than on the
 #: literal is what stops the two triggers drifting apart. ``scan_now`` stays out: its cadence is the
 #: owner's, and the legs read completed sessions only. Module-level so the membership is assertable
@@ -2904,6 +3078,26 @@ def _sweep_window_active(now: datetime, calendar: NSECalendar, mode: ModeManager
         and session_day.open <= now <= session_day.close
         and window.start <= now.time() <= window.end
         and mode.mode() in (Mode.RECOMMEND, Mode.AUTO)
+    )
+
+
+def _retest_active(now: datetime, calendar: NSECalendar, mode: ModeManager, kill: KillSwitch,
+                   sweep_lock: asyncio.Lock) -> bool:
+    """May the brk20 RETEST re-offer a level at ``now``? (2026-09-12 review of WO-R.)
+
+    The sweep's window predicate, AND the states in which the pipeline is certain to DROP the
+    publication: ``risk_state != NORMAL`` and the kill switch (``pipeline.on_signal_candidate``
+    re-arms the pair on either). The sweep may publish into a freeze because the freeze-lift sweep
+    re-publishes it afterwards; the retest has no lift path, and its once-a-day offer bound is spent
+    at OFFER time — so an offer into a freeze would silence that level for the rest of the day. It
+    also waits while a sweep is RUNNING (``sweep_lock.locked()``, the same signal the freeze lift
+    reads): a pair that sweep re-armed has an open ``(symbol, strategy)`` dedupe slot, and a
+    days-old level must not take it ahead of today's fresh crossing of the same symbol."""
+    return (
+        _sweep_window_active(now, calendar, mode)
+        and mode.risk_state() == RiskState.NORMAL
+        and not kill.is_killed()
+        and not sweep_lock.locked()
     )
 
 
@@ -3026,30 +3220,75 @@ async def _freeze_lift_sweep(evt, clock: Clock, calendar: NSECalendar, mode: Mod
               pending=last_sweep.get("pending", 0) if swept else 0)
 
 
-def _hi52_shadow_leg(store: MarketStore, prescreen: SignalPreScreen, features: FeatureEngine, *,
-                     trigger: str, eligible: Sequence[str], today: date, yesterday: date,
-                     ex_map: Mapping[str, list[date]], in_window: bool) -> list:
-    """The `hi52` SHADOW leg (§3.2.4 extended-leg + §6.1 addendum, owner-directed 2026-09-01 after the
-    JINDALSAW/movers review): 52-week-high-proximity FRESH-CROSSES, and the sweep's SECOND
-    ``prescreen.admit``.
+#: PUBLICATION order of the batch legs (2026-09-12 review decision), by strategy id. Module-level
+#: so the property is assertable without booting the engine. This is the order the legs are
+#: CONCATENATED in for the ranked admit — publication simply stops depending on the sort that
+#: allocates the caps. A strategy not listed here publishes after the listed ones, in admit order.
+_PUBLICATION_LEG_ORDER: tuple[str, ...] = (
+    brk20.STRATEGY_ID, ins.STRATEGY_ID, cat.STRATEGY_ID, cat_reversal.STRATEGY_ID, hi52.STRATEGY_ID,
+)
+
+
+def _publication_order(admitted: list) -> list:
+    """PUBLICATION order for one batch admission: LEG order (:data:`_PUBLICATION_LEG_ORDER`), and
+    inside one leg the order ``SignalPreScreen.admit`` returned (its own score-descending rank).
+
+    ADMISSION and PUBLICATION are two separable consequences of one ranked list, and only the first
+    one ``prescreen._rank`` reasons about ("a batch competes for the shared daily cap, and the
+    per-strategy sub-caps — not this sort — are what bound one strategy's share"). The second is
+    ``fired_at``: ``bus.apublish`` order stamps it, and ``pipeline._forward_key`` breaks ties INSIDE
+    a per-strategy quantile band by ``fired_at`` ASCENDING — so whoever publishes first wins the
+    scarce analyst slot among candidates of comparable standing, which under
+    ``MIN_RANK_POPULATION`` = 3 is every strategy's first two candidates of the day (all in the
+    middle band).
+
+    The raw scores that sort that ranked list are NOT comparable across strategies: ``hi52`` scores
+    ``prox`` in [0.95, 1.0], ``ins`` ~0.5 at a bare ₹1cr crossing, ``brk20`` ~0.5-0.6 — which is
+    exactly why the forward slot ranks by per-strategy QUANTILE and not by raw score. Letting that
+    same cross-strategy sort also stamp ``fired_at`` would smuggle the incomparable scale back in
+    through the tie-break: folding hi52 into the ranked batch (the §8.6 promotion) put an
+    UNVALIDATED forward test at the head of the publication queue every morning and handed it those
+    ties against the platform's only validated leg, under a DG1-degraded forward cap (4/day, run at
+    cap all of 2026-09-10). Publishing in LEG order removes the whole class: no strategy's score
+    SCALE can buy it queue priority, and the fixed order is a stated, auditable precedence — the
+    actionable legs by seniority, the 2026-09-12 forward test last — rather than an emergent
+    property of three unrelated scoring formulas.
+
+    ``sorted`` is stable, so within each leg the admit order (score descending) is untouched, and
+    §9.6 replay determinism is unaffected — the key reads only ``strategy_id``, never a clock.
+    """
+    rank = {sid: i for i, sid in enumerate(_PUBLICATION_LEG_ORDER)}
+    return sorted(admitted, key=lambda c: rank.get(c.strategy_id, len(rank)))
+
+
+def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str], today: date,
+                    yesterday: date, ex_map: Mapping[str, list[date]]) -> list:
+    """The `hi52` v2 daily leg (§6.1/§8.6): 52-week-high-proximity FRESH-CROSSES over COMPLETED daily
+    sessions. Returns RAW candidates for the sweep's ONE ranked batch admission.
 
     Scoped to the ELIGIBLE universe since 2026-09-09: the 09-03 full-market backtest measured the edge
     as index-class only (extended names −0.26% net / 49% hit at T+20, n=13,922), so the extended-name
-    population is no longer originated (shadow clock restarts). Swing thesis (T+5..T+20, George &
-    Hwang drift; intraday capture is cost-refuted). C3 rejects every candidate UNCONDITIONALLY
-    (no_edge_shadow_strategies): ADMISSION is the shadow's validation population, pending the backtest
-    + §8.6 owner gate.
+    population is no longer originated. Swing thesis (T+5..T+20, George & Hwang drift; intraday
+    capture is cost-refuted).
 
-    Placement in the sweep is load-bearing (2026-09-01 review, two findings): the leg runs AFTER the
-    actionable admit — its ~480-symbol × 400-day history fetch never delays the admission race (the
-    08-18 94 ms lesson), and its own SECOND admit call means shadow candidates whose scores cluster in
-    [0.95, 1] take LEFTOVER day-cap capacity only, never an actionable leg's slot.
+    PROMOTED 2026-09-12 (plan §8.6 addendum): until then this was a shadow whose own SECOND
+    ``prescreen.admit`` ran AFTER the actionable one, so candidates scoring in [0.95, 1] could only
+    take LEFTOVER day-cap capacity. A promoted rule cannot keep that seat — its candidates now go
+    into the SAME concatenated batch as brk20/ins/cat/cat_reversal and are ranked against them under
+    the ordinary per-strategy cap (``max_per_strategy_day.hi52`` = 3, unchanged). The 08-18 fairness
+    lesson that motivated the second admit is served by that single ranked admit, which is what it
+    was built for; what the merge costs is LATENCY — this leg's ~480-symbol × 400-session history
+    read now sits BEFORE the batch admit instead of after it. The bar-driven ``prescreen.sweep`` at
+    the top of the worker is untouched and still admits first. What the merge deliberately does NOT
+    buy hi52 is the front of the PUBLICATION queue: :func:`_publication_order` keeps it last, so the
+    forward-slot ``fired_at`` tie-break stays where it was before the promotion.
 
     Session-cadence triggers only (``_FULL_SWEEP_TRIGGERS``): the signal derives from COMPLETED
     sessions, so one scan per session is its natural cadence and /scan_now stays cheap. ``freeze_lift``
     is IN that set — it is the window_open sweep re-run because a freeze swallowed the first one
     (2026-09-11), so excluding it would lose the leg for the day exactly as the swallowed sweep did.
-    Extracted from the sweep body so THAT is testable on the admit rather than on a source string."""
+    Extracted from the sweep body so THAT is testable on the candidates rather than on a source
+    string."""
     if trigger not in _FULL_SWEEP_TRIGGERS:
         return []
     hi52_histories: dict[str, list[brk20.DailyRow]] = {}
@@ -3075,18 +3314,36 @@ def _hi52_shadow_leg(store: MarketStore, prescreen: SignalPreScreen, features: F
         hi52_histories, today=today, ex_dates_by_symbol=ex_map,
         unadjusted_symbols=hi52_unadjusted, veto_counts=hi52_vetoes,
     )
-    hi52_admitted = _attach_feature_snapshots(
-        features, prescreen.admit(hi52_raw, today, in_window=in_window),
-    )
+    # The v2 GATE's own inputs, per SURVIVING candidate. The aggregate veto counts say how much flow
+    # the filters ate; they say nothing about the shape of the population that PASSED, and the
+    # pre-registered 20- and 40-signal reviews ask exactly that — was the live smooth distribution
+    # the 09-09 study's? Nothing else records it: these two numbers have no place on SignalCandidate
+    # (§3.2.5 field set) and no row of their own. Computed off the SAME rows and the SAME helper the
+    # gate used, and only for candidates (a handful), so the per-symbol cost discipline holds.
+    candidate_diag = {}
+    for cand in hi52_raw:
+        diag = hi52.diagnostics_for(hi52_histories.get(cand.symbol, ()))
+        if diag is not None:
+            candidate_diag[cand.symbol] = {
+                "up_day_frac": diag.up_day_frac, "max_day_move": diag.max_day_move,
+            }
+    # ORIGINATION-stage counts (the brk20/cat convention): candidates + vetoes reconcile against
+    # symbols_scanned on one line, and what the §3.2.5 caps then do with the survivors is the
+    # prescreen's own logging — no `admitted` here any more, because this leg no longer admits.
+    # The v2 filters are the two counts that can eat a whole day's flow (the 09-09 v2 run dropped
+    # 12,218 of its 16,663 discrete signals on them — smooth 11,405 + gap 813), so a quiet tape must
+    # be readable as their decision.
     _log.info(
         "hi52_sweep", d=today.isoformat(), trigger=trigger,
         symbols_scanned=len(hi52_histories),
         candidates=len(hi52_raw),
-        admitted=len(hi52_admitted),
         ex_date_vetoes=hi52_vetoes.get(hi52.VETO_EX_DATE_SKIP, 0),
         unadjusted_vetoes=hi52_vetoes.get(hi52.VETO_UNADJUSTED_HISTORY, 0),
+        smooth_vetoes=hi52_vetoes.get(hi52.VETO_SMOOTH, 0),
+        gap_vetoes=hi52_vetoes.get(hi52.VETO_GAP, 0),
+        candidate_diag=candidate_diag,
     )
-    return hi52_admitted
+    return hi52_raw
 
 
 def _watchlist_rows_for_symbols(rows: list, symbols: set[str]) -> list:
@@ -3183,6 +3440,175 @@ def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list
             sid = None
         out.append(c.model_copy(update={"features_snapshot_id": sid}))
     return out
+
+
+# --------------------------------------------------------------------- brk20 RETEST re-arm (WO-R)
+def _pending_entry_rec_symbols(conn: sqlite3.Connection, now: datetime) -> set[str]:
+    """Symbols carrying an UNEXPIRED, UNACTIONED entry recommendation — the gate's own
+    ``GateContext.pending_rec_symbols`` set, read here because the retest must refuse what the gate
+    would refuse (``per_stock_exposure: already held or pending`` is a HARD reason, uncurable by
+    shrinking) BEFORE the slot and the analyst call are spent rather than after.
+
+    Shares ``core.recommendations.parse_valid_until`` with the gate rather than re-deriving expiry:
+    an absent/naive/unparseable ``valid_until`` stays EXCLUDED, exactly as it does there. An
+    unreadable row is skipped, not fatal — this is a narrowing, and the caller's screen is what fails
+    to zero if the whole read raises."""
+    out: set[str] = set()
+    # The actioned rows are dropped in SQL because this runs on a 60 s pulse and `recommendations`
+    # only grows; the Python guard below stays, and the predicates MATCH — the gate's test is
+    # truthiness, so an empty-string action is "not actioned" on both sides.
+    rows = conn.execute(
+        "SELECT payload, human_action FROM recommendations "
+        "WHERE human_action IS NULL OR human_action = ''"
+    ).fetchall()
+    for row in rows:
+        if row["human_action"]:
+            continue                    # taken / expired / dismissed / closed ⇒ not pending
+        try:
+            data = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "entry":
+            continue
+        valid_until = parse_valid_until(data.get("valid_until"))
+        if valid_until is not None and valid_until > now and data.get("instrument"):
+            out.add(str(data["instrument"]))
+    return out
+
+
+def _retest_skip_reasons(
+    symbols: Sequence[str], *,
+    eligible: Collection[str], ex_skip: Collection[str],
+    held: Collection[str], pending: Collection[str],
+    unadjusted: Collection[str] = (),
+) -> dict[str, str]:
+    """``{symbol: reason}`` for every due resting level that must NOT be re-offered today.
+
+    Five narrowings, none of which the book can know on its own, in the order their reasons are
+    reported (a symbol can qualify under several; the first is the one logged):
+
+    * **held** — a position is open on it. The mechanism the backtest measured books ONE trade per
+      signal; re-offering here spends a §3.2.5 day slot and one of the day's analyst calls on a
+      proposal ``gate._rule_per_stock_exposure`` is certain to hard-reject.
+    * **pending** — an unexpired, unactioned entry recommendation already sits on it: the same gate
+      reason, and the owner is already looking at this trade.
+    * **ex_skip** — a known ex-date inside brk20's own A12 horizon. ``bars_1d`` is never re-adjusted,
+      so the stored level is a pre-ex price; ``brk20.scan_daily`` refuses such a symbol on the
+      crossing day and a re-offer must refuse it on the retest day for the same reason.
+    * **unadjusted** — the BACKWARD half of the same veto (2026-09-12 review): a structural ex-date
+      (bonus/split/rights/demerger) already inside the 35-day lookback, the set the sweep feeds to
+      ``brk20.sweep_daily(unadjusted_symbols=...)``. ``ex_skip`` looks forward from today only, so an
+      ex-date that passed BETWEEN the crossing and the retest would otherwise re-offer a pre-ex
+      level as a limit ABOVE the adjusted tape.
+    * **not eligible** — the symbol has left the eligible universe since the crossing (liquidity or
+      index churn). ``brk20``'s registered origination scope IS that population; a level may not
+      outlive it just because it was journalled while the symbol was still in.
+
+    An EMPTY ``eligible`` would skip everything, which is why the caller only arms the retest once
+    today's in-window sweep has published the set (`sweep_ready`)."""
+    out: dict[str, str] = {}
+    for sym in symbols:
+        if sym in held:
+            out[sym] = "already held — §7.1 per_stock_exposure is a HARD reject"
+        elif sym in pending:
+            out[sym] = "an unexpired, unactioned entry recommendation is already pending"
+        elif sym in ex_skip:
+            out[sym] = "a known ex-date inside brk20's A12 horizon (the stored level is pre-ex)"
+        elif sym in unadjusted:
+            out[sym] = "a structural ex-date inside the 35-day lookback (stored history is in two units)"
+        elif sym not in eligible:
+            out[sym] = "no longer in today's eligible universe (brk20's origination scope)"
+    return out
+
+
+def _retest_republish(
+    retest_book: RestingLevelBook,
+    prescreen: SignalPreScreen,
+    features: FeatureEngine,
+    *,
+    active: bool,
+    sweep_ready: bool,
+    ltp_fn: Callable[[str], Decimal | None],
+    tick_age_fn: Callable[[str], float | None],
+    limits_fn: Callable[[], tuple[float, float]],
+    skip_fn: Callable[[list[str]], Mapping[str, str]],
+    today: date,
+) -> list[SignalCandidate]:
+    """One 60 s retest tick: expire, find the levels back inside the band, admit them.
+
+    SYNCHRONOUS AND OFF-LOOP. ``prescreen.admit`` takes ``SignalPreScreen._lock`` and the post-admit
+    mint takes ``MarketStore._lock``; the caller runs this whole body through ``asyncio.to_thread``,
+    as ``prescreen.handle_bar`` and ``_collect_and_scan`` do, because either lock can be held for
+    tens of seconds (a partition COPY) and the event loop owns the tick cache, the §2.2 heartbeat and
+    the kill path.
+
+    The book's three operations are TOTAL (a journal failure logs and yields nothing), and an
+    unreadable band returns early; what can still raise is ``prescreen.admit`` itself, which
+    propagates to the drain tick's own guard — logged there, with the drain still running after it.
+    Nothing in this function may take the scheduler loop down.
+
+    The `brk20` levels admitted over the last ``retest_sessions`` sessions rest in
+    ``brk20_resting_levels`` (migration 0014); this is the pulse that re-offers one the moment its
+    price returns to it — the ``V2_limit_at_H20_N5`` mechanism the 2026-09-12 pre-registered
+    entry-mechanism backtest selected over both market-on-confirmation and the shipped single-session
+    publication (see ``engine.strategy.retest``).
+
+    ``active`` is the caller's ``_sweep_window_active`` verdict — a live session, inside the owner
+    trade window, in a mode that originates. INACTIVE does nothing at all, not even the expiry sweep:
+    outside the window there is no live LTP worth banding against and nothing may spend a §3.2.5 day
+    slot, and expiry is idempotent housekeeping that the next in-window tick performs anyway (``due``
+    re-tests the window itself, so a day with no in-window tick re-offers nothing it should not).
+
+    ADMISSION is ``prescreen.admit`` — the SAME call, the same day cap, the same per-strategy cap and
+    the same same-day ``(symbol, strategy)`` dedupe the sweep faces. ``in_window=True`` is a
+    statement of ``active``, not a bypass of anything: the pre-screen is Clock-free by design and the
+    caller owns the window verdict (see ``SignalPreScreen.admit``). The ``features_snapshot_id`` is
+    minted AFTER that admit by the sweep's own ``_attach_feature_snapshots``, so a candidate the caps
+    suppress never spends a snapshot write — and a candidate with a null id is structurally
+    un-recommendable (intraday.py Rule 6), which is why it cannot simply be left off.
+
+    ``sweep_ready`` is "today's IN-WINDOW sweep has published". Until it has, this tick only expires:
+    the day's ranked admission must reach ``prescreen.admit`` FIRST, or a level broken days ago can
+    take the ``(symbol, strategy)`` dedupe slot moments before the same symbol's fresh crossing —
+    which would then be dropped as a duplicate and, being un-admitted, never journalled either, so
+    the book would carry the stale geometry for the rest of the window. It is also what guarantees
+    ``skip_fn`` reads TODAY's eligible set and ex-date horizon rather than an empty one.
+
+    A band that cannot be read (an unverifiable limits store) re-offers NOTHING: the band is the only
+    thing standing between this mechanism and re-publishing a level the gate is certain to reject, so
+    an unreadable one fails to zero rather than to a constant (§2.4 item 1 — limits are read at the
+    enforcement site or not used). ``max_tick_age_s`` rides the SAME load: the trigger price must be
+    as fresh as the gate will demand of it.
+
+    ``brk20_retest_republished`` is emitted here, per candidate ``prescreen.admit`` ACCEPTED, off the
+    ``offers`` detail the book fills in place. The book's own line is ``brk20_retest_offered``, so
+    the two stages of the funnel are separately greppable (WO-9) instead of a re-publication count
+    that includes everything the caps suppressed.
+    """
+    if not active:
+        return []
+    retest_book.expire(today)
+    if not sweep_ready:
+        return []
+    try:
+        band_pct, max_tick_age_s = limits_fn()
+    except Exception as exc:  # noqa: BLE001 - an unreadable band re-offers nothing (D7, §2.4)
+        _log.warning("brk20_retest_band_unreadable", d=today.isoformat(), error=str(exc))
+        return []
+    offers: dict[str, dict[str, str]] = {}
+    due = retest_book.due(ltp_fn, band_pct, today, tick_age_fn=tick_age_fn,
+                          max_tick_age_s=max_tick_age_s, skip_fn=skip_fn, offers=offers)
+    if not due:
+        return []
+    published = _attach_feature_snapshots(features, prescreen.admit(due, today, in_window=True))
+    for cand in published:
+        _log.info("brk20_retest_republished", signal_id=cand.signal_id,
+                  **offers.get(cand.signal_id, {"symbol": cand.symbol}))
+    _log.info("brk20_retest_tick", d=today.isoformat(), band_pct=band_pct,
+              max_tick_age_s=max_tick_age_s,
+              due=len(due), published=len(published),
+              symbols=[c.symbol for c in published])
+    return published
 
 
 # --------------------------------------------------------------------------- retention (§4.5)

@@ -1611,7 +1611,9 @@ class MarketStore:
         """The BATCH universe for ``d`` (§3.2.4 extended-leg addendum, 2026-09-01): the eligible set
         (see :meth:`get_universe_eligible_symbols`) PLUS criteria-passing NON-index symbols persisted
         with the extended-leg marker alone. This is the widest rule-passing scan set — news
-        resolver/digest shadow, pre-open breakout advisory, and shadow batch scanners (hi52).
+        resolver/digest shadow and the pre-open breakout advisory. NO scanner reads it today: ``hi52``
+        read it at birth (2026-09-01), was scoped back to the eligible set 2026-09-10 and PROMOTED
+        out of shadow 2026-09-12 (plan §8.6).
         NEVER feed it to anything RECOMMEND-capable: the risk gate approves ``included`` rows only,
         so an actionable strategy scanning this set would originate un-approvable candidates.
 

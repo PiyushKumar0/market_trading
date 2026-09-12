@@ -358,6 +358,72 @@ class InsCfg(BaseModel):
                                           # from levels — see risk/gate.py `_rule_min_viable_size`)
 
 
+class Hi52Cfg(BaseModel):
+    """§6.1/§8.6 ``hi52`` (52wk-high-proximity swing, v2) knobs — OWNER-ONLY, never learnable.
+
+    Only the edge lives here. The rule's own parameters — including v2's three signal-time filter
+    thresholds — stay in ``hi52.DEFAULT_PARAMS`` where the pre-registration froze them; splitting
+    them across two files would give the same threshold two homes and one of them would drift.
+
+    Promoted out of shadow 2026-09-12 as a FORWARD TEST with a written kill rule (plan §8.6
+    addendum): the v2 backtest is CPCV-promotable but its edge sits in a survivorship-tainted index
+    population, so RECOMMEND mode IS the soak. Demotion = delete the ``hi52.expected_edge_pct`` key
+    from ``settings.yaml`` and re-add the id to ``ops.main.NO_EDGE_SHADOW_STRATEGIES``.
+
+    THE DEFAULT IS ``None``, AND THAT IS THE DEMOTION PATH WORKING (2026-09-12 review). ``cat`` and
+    ``cat_reversal`` enforce their shadow property by having no ``expected_edge_pct`` FIELD at all,
+    so absence means absence; ``hi52`` needs the field (it is promoted) but needs the same property,
+    because the kill criterion's step 2 is "delete the key from ``settings.yaml``" and ANY numeric
+    pydantic default would make that edit a NO-OP — the gate would keep consuming that edge from a
+    number no reader of ``settings.yaml`` can see. ``None`` instead: the composition root
+    (``ops.main._strategy_expected_edge_pct``) registers ``hi52`` in ``strategy_expected_edge_pct``
+    only when the key is present, and a targetless proposal with no registered edge is the gate's
+    ordinary ``_NO_TARGET`` reject (fail-closed).
+    """
+
+    #: ``None`` = NOT registered (the pre-promotion and post-demotion state). The live value lives in
+    #: ``settings.yaml`` — one home, owner-visible — with its derivation; the learner never moves it.
+    #:
+    #: DERIVATION (one formula, one home in code: ``scripts/hi52_forward_verdict.py``
+    #: ``registered_edge_pct()``, which a unit test pins against the shipped settings value so the
+    #: registered edge and the kill criterion's cost floor cannot drift apart)::
+    #:
+    #:     edge = measured T+20 median GROSS − CostModel.breakeven_pct(N, "CNC")
+    #:     N    = equity × per_trade_risk.swing_position_pct/100
+    #:            ÷ (per_trade_risk.overnight_gap_mult × hi52 stop_pct/100)
+    #:
+    #: ``N`` is the §7.1 cap on a swing position's notional — implied by the sizing rule, never a
+    #: round number chosen by hand: equity/7.5 at a 2% swing budget, a 2.5× overnight gap multiplier
+    #: and hi52's 6% stop (₹5,333 at the ₹40,000 base, ₹5,234 at the 2026-09-11 equity, ₹4,800 at
+    #: the ``equity_floor_rung`` — the smallest equity the risk table still lets a position be
+    #: opened at). The floor RISES as the book shrinks, so the registration is derived at that worst
+    #: permitted book: 2.0336 − 0.5619 = 1.4717 ⇒ **1.47**, rounded DOWN.
+    expected_edge_pct: float | None = None
+
+
+class Brk20Cfg(BaseModel):
+    """§6.1 ``brk20`` operational knobs — OWNER-ONLY, never learnable.
+
+    The RULE's parameters (``lookback_days``, ``vol_mult``, ``rr_target``, ``ex_skip_days``) live in
+    ``brk20.DEFAULT_PARAMS`` (the §6.3 learnable envelope) and the WO-19 stop-geometry floor lives in
+    ``brk20.FLOOR_PARAMS`` (owner-only by construction). This block holds neither: it holds the ENTRY
+    MECHANISM the 2026-09-12 pre-registered backtest selected, which is a property of how the level
+    is OFFERED rather than of how it is derived.
+
+    Modelled here rather than left to pydantic's default extra-ignore for the reason ``FilingsCfg``
+    states: an unmodelled ``brk20:`` block in settings.yaml is silently dropped, and the owner would
+    be reading a knob that governs nothing.
+    """
+
+    #: Retest window in TRADING sessions after the crossing session (``retest.RestingLevelBook``).
+    #: 5 = the backtest's ``V2_limit_at_H20_N5``, the variant its pre-registered decision rule
+    #: returned. NEVER learnable: this number IS the registered mechanism — N=1 (what shipped before
+    #: WO-R) and N=3 were both measured and both lost, and every other N was never run at all, so a
+    #: learner moving it would be selecting an entry mechanism no study measured. 0 or less is
+    #: clamped to 1 by the book (a disabled mechanism is a code change, not a silent config value).
+    retest_sessions: int = 5
+
+
 class PrescreenCfg(BaseModel):
     """§6.3/§3.2.5 ``SignalPreScreen`` caps (owner-tunable). Deduped candidate origination limits;
     the gate/envelope layer owns per-parameter bounds — these are coarse per-day throttles."""
@@ -497,6 +563,8 @@ class Settings(BaseModel):
     cat_reversal: CatReversalCfg = Field(default_factory=CatReversalCfg)
     filings: FilingsCfg = Field(default_factory=FilingsCfg)
     ins: InsCfg = Field(default_factory=InsCfg)
+    hi52: Hi52Cfg = Field(default_factory=Hi52Cfg)
+    brk20: Brk20Cfg = Field(default_factory=Brk20Cfg)
     strategy: StrategyCfg = Field(default_factory=StrategyCfg)
     reconcile: ReconcileCfg = Field(default_factory=ReconcileCfg)
     backfill: BackfillCfg = Field(default_factory=BackfillCfg)

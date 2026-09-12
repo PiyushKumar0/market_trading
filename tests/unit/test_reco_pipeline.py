@@ -1080,12 +1080,14 @@ async def test_expire_stale_labels_non_fills_and_is_idempotent(conn, book, cost_
 
 
 # =========================================================================== trigger (b) + max_holding
-def _open_position(conn, clock, *, style="intraday", opened_at=None, stop="99", side="BUY") -> str:
+def _open_position(
+    conn, clock, *, style="intraday", opened_at=None, stop="99", side="BUY", symbol=SYMBOL
+) -> str:
     position_id = str(ULID())
     conn.execute(
         "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, stop, "
         "state, origin, opened_at) VALUES (?, ?, ?, ?, ?, 10, '100', ?, 'OPEN', 'recommended', ?)",
-        (position_id, SYMBOL, side, style, "MIS" if style == "intraday" else "CNC", stop,
+        (position_id, symbol, side, style, "MIS" if style == "intraday" else "CNC", stop,
          (opened_at or clock.now()).isoformat()),
     )
     return position_id
@@ -1611,6 +1613,111 @@ async def test_the_max_holding_sweep_is_not_gated_by_the_position_event_screens(
     )
 
     assert await pipeline.check_aged_positions(TODAY) == 1
+
+
+# ------------------------------------ the open-positions line the analyst reasons over (WO-D2 residue)
+def _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model):
+    """A pipeline built only to render context lines — ``FakeHarness()`` raises on any analyst call."""
+    return make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), store=FakeStore(bars=_flat_bars()),
+    )[0]
+
+
+def test_a_position_sold_outside_the_ledger_leaves_the_open_positions_line(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """The §5.2 analyst and the heartbeat see the book the OWNER holds, not the platform's fiction.
+
+    The position-event screen already refuses to spend a call on a position the §3.6 journal reads
+    empty on two sessions, but this line still counted it as open — which is how two 08-26 positions
+    stayed in the intraday context for eleven sessions. It moves to a trailing line naming the
+    evidence and the reply that settles it, and comes out of the counts above.
+
+    The §7.1 headroom line is asserted UNCHANGED in the same breath: those positions still occupy
+    ``max_open_positions`` until ``/closed`` lands, and the gate was deliberately not taught this
+    predicate. The two lines disagreeing is the ambiguity, stated."""
+    _open_position(conn, pclock, style="intraday")                        # MIS, still held
+    gone = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")  # CNC, broker holds none
+    _observe_holding(conn, gone, TODAY - timedelta(days=1))
+    _observe_holding(conn, gone, TODAY)
+    pipeline = _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+
+    lines = pipeline._positions_summary().splitlines()
+
+    assert lines[0] == "1 open (MIS 1, CNC 0)"        # the CNC one is out of the counts...
+    assert len(lines) == 2 and "HDFCAMC" not in lines[0]
+    assert lines[1] == (                              # ...and named underneath instead
+        "sold outside the ledger (broker holds 0 on 2 sessions, awaiting /closed): HDFCAMC"
+    )
+    # The gate's own headroom still counts BOTH: this line was not allowed to relax a §7.1 limit.
+    assert pipeline._headroom_lines(TODAY)[0].startswith("open positions 2/")
+
+
+def test_a_held_position_renders_exactly_as_it_did_before(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """No journal rows at all (a fresh position, an engine that was down, a broker erring all week)
+    ⇒ the pre-WO-D2 rendering, with no trailing line to explain away."""
+    _open_position(conn, pclock, style="intraday")
+    _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
+    pipeline = _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+
+    assert pipeline._positions_summary() == "2 open (MIS 1, CNC 1)"
+
+
+def test_a_partial_holding_stays_in_the_open_positions_line(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """``require_zero=True``, the same reading the exit screen uses: held 3 of a tracked 10 is an
+    unreported PARTIAL exit, and those 3 shares are real exposure the analyst must still reason
+    about. Only "the broker held nothing on every day of the run" leaves the book."""
+    partial = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
+    _observe_holding(conn, partial, TODAY - timedelta(days=1), tracked=10, held=3)
+    _observe_holding(conn, partial, TODAY, tracked=10, held=3)
+    pipeline = _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+
+    assert pipeline._positions_summary() == "1 open (MIS 0, CNC 1)"
+
+
+def test_the_whole_book_sold_outside_the_ledger_reads_none_open(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """The 08-26 shape itself: the counts must say "none open" rather than go negative or keep a
+    phantom, and the trailing line carries every name. ``sessions`` is the SHORTEST zero-run among
+    them (3 and 2 here), so the line never claims evidence one of its names does not have."""
+    old = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
+    new = _open_position(conn, pclock, style="swing", symbol="HINDZINC")
+    for day in (TODAY - timedelta(days=2), TODAY - timedelta(days=1), TODAY):
+        _observe_holding(conn, old, day)
+    _observe_holding(conn, new, TODAY - timedelta(days=1))
+    _observe_holding(conn, new, TODAY)
+    pipeline = _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+
+    assert pipeline._positions_summary() == (
+        "none open\nsold outside the ledger (broker holds 0 on 2 sessions, awaiting /closed): "
+        "HDFCAMC, HINDZINC"
+    )
+
+
+def test_an_unreadable_holdings_journal_leaves_the_plain_counts(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """D7 fail-to-zero on a context line: a database that cannot answer the journal question degrades
+    to the pre-WO-D2 rendering — it never raises into the analyst path and never edits the book."""
+    gone = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
+    _observe_holding(conn, gone, TODAY - timedelta(days=1))
+    _observe_holding(conn, gone, TODAY)
+    pipeline = _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    assert pipeline._positions_summary().splitlines()[0] == "none open"   # the feature is live...
+
+    conn.execute("DROP TABLE holdings_observations")
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert pipeline._positions_summary() == "1 open (MIS 0, CNC 1)"
+
+    assert len(log_events(caplog, "sold_outside_ledger_read_failed")) == 1
 
 
 # =========================================================================== trigger (c) â€” heartbeat

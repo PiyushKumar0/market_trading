@@ -237,6 +237,39 @@ calibrated half-spread is a PERCENT of mid floored at half a tick in the consume
 ```
 v2 is a SEPARATE pre-registration (plan §6.1 hi52 addendum, thresholds fixed from the 09-03 medians),
 never a knob on v1: report the two side by side, never pooled; `fold_pass_min(2)` = 60% applies to v2.
+Since the 2026-09-12 promotion the v1 path scans `hi52.V1_PARAMS` (the live defaults with the three
+v2 thresholds neutralized) — v1 stays reproducible while the LIVE rule gates on them.
+
+## hi52 forward-test verdict (2026-09-12 promotion) — the kill criterion, engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\hi52_forward_verdict.py                                        # as of today
+.venv\Scripts\python.exe scripts\hi52_forward_verdict.py --as-of 2026-10-31 --json data\reports\hi52_forward_<date>.json
+.venv\Scripts\python.exe scripts\hi52_forward_verdict.py --notional 8000                        # what-if only: prints OVERRIDE
+```
+Read-only against `state.db` + `market.duckdb`; ALWAYS exits 0 (the VERDICT line carries the answer,
+`UNAVAILABLE` if a store could not be read — a running engine holds the DuckDB lock). Population =
+every published `hi52` signal from 2026-09-14; entry = the OPEN of the journal day itself (= the
+backtest's anchor: the journal day is the session after the trigger, so this measures the same
+quantity the registered edge was measured as — the live fill lands later that morning, so realized
+results trail the metric by that intraday drift), exit = the close of the k-th SESSION of the hold
+(entry session first), net of one CNC round trip at the §7.1-SIZED notional
+(`swing_position_pct` / (`overnight_gap_mult` × the 6% stop) = equity/7.5, taken at the SMALLEST
+`equity_snapshots` reading in the window — ₹5,234 ⇒ 0.54% at the 2026-09-11 equity, and a
+drawn-down snapshot anywhere in the window gives a smaller notional and a HIGHER floor, which can
+only make DEMOTE easier; `--equity` overrides the equity and `--notional` skips the derivation
+outright and prints OVERRIDE, and the derivation prints with the verdict either way, so check which
+notional and floor it used before quoting a number). T+5 and T+10 print as DIAGNOSTICS and are
+labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.47) comes
+from the SAME derivation in this script (`registered_edge_pct()`, charged at the `equity_floor_rung`
+book) and a unit test pins the two together, so re-deriving by hand is never necessary.
+The 2026-09-14 boundary is an
+ASSUMPTION about the deploy date, printed as such — pass `--from` if the tranche shipped later. **Rule: DEMOTE if n ≥ 20 AND
+(median net at T+20 ≤ 0 OR hit rate at T+20 < 50%); HOLD otherwise; INSUFFICIENT below 20.** Run it
+at 20 and at 40 signals (plan §8.6 "hi52 KILL CRITERION"). A DEMOTE is two edits in one commit:
+re-add `hi52` to `NO_EDGE_SHADOW_STRATEGIES` **and** delete `hi52.expected_edge_pct` from
+`settings.yaml`. First-20-signal outcomes are validation, not income — nothing else moves in
+response to them.
 
 ## brk20 entry-mechanism backtest (R1, 2026-09-12) — three registered entry variants, engine OFF
 

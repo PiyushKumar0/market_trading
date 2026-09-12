@@ -39,6 +39,7 @@ from engine.datafeeds.isin_map import (
     parse_announcements_isin,
     parse_constituents_isin,
     parse_peersmartsearch,
+    parse_scrip_master,
     scrip_for_isin,
 )
 from engine.marketdata.store import MarketStore
@@ -501,6 +502,31 @@ def test_parse_constituents_isin_keeps_isin_column():
 def test_parse_announcements_isin_fallback():
     payload = [{"symbol": "KTKBANK", "sm_isin": "INE614B01018"}, {"symbol": "", "sm_isin": "X"}]
     assert parse_announcements_isin(payload) == {"KTKBANK": "INE614B01018"}
+
+
+def test_parse_scrip_master_bulk_isin_to_scrip():
+    """The 2026-09-12 bulk layer: a BARE LIST of scrip dicts -> {isin: code}, defensively."""
+    payload = [
+        {"SCRIP_CD": "500002", "Scrip_Name": "ABB India Ltd", "ISIN_NUMBER": "INE117A01022"},
+        {"SCRIP_CD": "500325", "ISIN_NUMBER": "INE002A01018"},
+        {"SCRIP_CD": "", "ISIN_NUMBER": "INE999X01011"},          # no code -> dropped
+        {"SCRIP_CD": "500999", "ISIN_NUMBER": ""},                # no ISIN -> dropped
+        "not-a-row",                                              # not a dict -> dropped
+    ]
+    assert parse_scrip_master(payload) == {
+        "INE117A01022": "500002", "INE002A01018": "500325",
+    }
+
+
+def test_parse_scrip_master_first_code_per_isin_wins_and_tolerates_a_wrapper():
+    """No ISIN in the probe capture carried two codes, so the tie-break is a determinism guarantee.
+    A ``Table``-wrapped body is tolerated in case BSE ever wraps this endpoint like its siblings."""
+    rows = [
+        {"scrip_cd": "500325", "isin_number": "INE002A01018"},
+        {"scrip_cd": "600325", "isin_number": "INE002A01018"},
+    ]
+    assert parse_scrip_master({"Table": rows}) == {"INE002A01018": "500325"}
+    assert parse_scrip_master({}) == {} and parse_scrip_master(None) == {}
 
 
 def test_parse_peersmartsearch_and_scrip_lookup():

@@ -47,6 +47,29 @@ def test_the_ins_contract_carries_its_three_load_bearing_clauses():
     assert "EXPECTED entry population" in text
 
 
+def test_the_hi52_contract_carries_the_clauses_the_promotion_rests_on():
+    """`hi52` left SHADOW on 2026-09-12 as a FORWARD TEST (plan §8.6), and three clauses in its
+    frame are what make that honest rather than a quiet upgrade.
+
+    (1) It ships ``target=None`` by design — the drift was measured over the 20-session horizon,
+    never predicted to a level — so the gate consumes the registered edge and a missing target is
+    not a decline ground. (2) Approach shape is not one either: the rule ITSELF now gates on the
+    smooth-approach and no-gap-day filters, and the 09-09 backtest measured that judging shape a
+    second time adds nothing. (3) The decline grounds are therefore stated EXHAUSTIVELY, the `ins`
+    shape — the funnel autopsy's E3/E4 class is an open door on any leg that leaves them implicit.
+    And the evidence status must say FORWARD TEST: neither validated nor shadow.
+    """
+    text = STRATEGY_CONTRACTS["hi52"]
+    assert "target=None BY DESIGN" in text
+    assert "never invent one" in text
+    assert "approach shape is NOT a decline ground" in text
+    assert "valid decline grounds, exhaustively" in text
+    assert "FORWARD TEST" in text
+    # The pre-promotion frame's two claims are FALSE now and must not survive a later merge.
+    assert "cannot become a recommendation" not in text
+    assert "outside the gate-approvable watchlist" not in text
+
+
 def test_an_unregistered_strategy_id_gets_the_explicit_unknown_frame():
     """Total, never raising, and never silently empty: an unknown id is a deployment defect and the
     analyst is told so rather than left to infer a frame."""

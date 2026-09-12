@@ -15,9 +15,16 @@ layers, cheapest/most-authoritative first:
    required lookup. Resolved once and cached; only symbols still missing a code are queried, ≥1.5 s
    apart (§2.8). BSE 404s masquerade as 200 + ``error_Bse.html`` ⇒ funnel through
    :func:`engine.core.bse_http.bse_get` (JSON-parse health check).
+4. **BSE BULK scrip master via ``ListofScripData/w``** (:data:`BSE_SCRIP_MASTER_URL`, added
+   2026-09-12 — plan §2.8 sourcing table). The SAME ISIN→scrip-code relation as layer 3 for the whole
+   Active-Equity list in ONE request, so a whole-universe map is one call rather than ~500 paced ones.
+   Parsed by :func:`parse_scrip_master`; consumed by the §2.8 fresh-insider feed, which rebuilds its
+   scrip→symbol resolution map from it every run instead of depending on a one-shot backfill.
 
-Not a scheduled job (the backfill seed / an owner refresh invokes it). Defensive throughout; a failed
-network layer degrades to fewer mappings, never raises.
+This module's JOB is not scheduled (the backfill seed / an owner refresh invokes it) — which is
+exactly why layer 4 exists as a standalone parser: a map that only a manual run refreshes goes stale
+the moment the universe changes (it did: 200 symbols mapped 2026-07-17, 480 eligible after O15).
+Defensive throughout; a failed network layer degrades to fewer mappings, never raises.
 """
 
 from __future__ import annotations
@@ -50,6 +57,17 @@ NSE_ANNOUNCEMENTS_URL = "https://www.nseindia.com/api/corporate-announcements?in
 
 #: BSE ISIN→scrip-code resolver (returns HTML ``<li>`` rows, not JSON). [VERIFY Phase-1].
 BSE_PEER_SEARCH_URL = "https://api.bseindia.com/BseIndiaAPI/api/PeerSmartSearch/w?Type=SS&text={text}"
+
+#: BSE BULK scrip master — the whole Active-Equity list (``SCRIP_CD`` + ``ISIN_NUMBER``) in ONE
+#: request. Probe-verified 2026-09-12: 5,004 rows / 5,003 distinct ISINs, no ISIN carrying two
+#: different codes, and every one of the 199 ``PeerSmartSearch`` codes already in ``symbol_isin``
+#: reproduced EXACTLY (0 disagreements) — so this is the same relation as layer 3, in bulk. Same
+#: host and same ``bse_get`` hardening as the per-symbol resolver: no new trust surface, only a
+#: shape that makes a whole-universe refresh affordable.
+BSE_SCRIP_MASTER_URL = (
+    "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w"
+    "?Group=&Scripcode=&industry=&segment=Equity&status=Active"
+)
 
 #: BSE per-request spacing (§2.8: ≥1.5 s observed safe). Module indirection so tests skip the wait.
 _BSE_SPACING_S = 1.5
@@ -126,6 +144,32 @@ def parse_announcements_isin(payload: Any) -> dict[str, str]:
         isin = str(keys.get("sm_isin") or keys.get("isin") or "").strip().upper()
         if symbol and isin and symbol not in out:
             out[symbol] = isin
+    return out
+
+
+def parse_scrip_master(payload: Any) -> dict[str, str]:
+    """BSE bulk scrip master → ``{isin: bse_scrip_code}`` (defensive; probe-verified field names).
+
+    The capture is a BARE LIST of scrip dicts (no ``Table`` envelope); the usual wrapper keys are
+    still tolerated in case BSE wraps it later. A row missing either an ISIN or a code is dropped,
+    and the FIRST code seen for an ISIN wins — in the 2026-09-12 capture no ISIN carried two
+    different codes, so the tie-break is a determinism guarantee rather than a real choice.
+    """
+    rows: list[Any] = payload if isinstance(payload, list) else []
+    if isinstance(payload, dict):
+        for key in ("Table", "data", "rows", "records"):
+            if isinstance(payload.get(key), list):
+                rows = payload[key]
+                break
+    out: dict[str, str] = {}
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        keys = {str(k).lower(): v for k, v in raw.items()}
+        isin = str(keys.get("isin_number") or keys.get("isin") or "").strip().upper()
+        code = str(keys.get("scrip_cd") or keys.get("scripcode") or "").strip()
+        if isin and code and isin not in out:
+            out[isin] = code
     return out
 
 

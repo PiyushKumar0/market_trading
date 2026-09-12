@@ -402,7 +402,12 @@ class PostLoginRecovery:
         """§3.6 holdings reconcile — NON-load-bearing (see the module docstring): it never fails the
         ladder. The job swallows its own broker errors and reports them as ``error``, which is
         recorded here as a ``skipped`` step: "could not read the account" is not a recovery failure,
-        and marking it one would put a red step in every pre-login-token report."""
+        and marking it one would put a red step in every pre-login-token report.
+
+        ``observed`` (WO-D2) is the §3.6 journal rows this run actually wrote: ``checked`` on a
+        trading day, 0 on any other (this ladder calls ``run`` unconditionally — only the hourly tick
+        is window-gated) and 0 when the journal write itself failed and was swallowed. Reporting it
+        says whether the "sold outside the ledger" evidence grew, which ``checked`` alone cannot."""
         if self._holdings_reconcile is None:
             return ("skipped", "not_wired")
         result = await self._holdings_reconcile.run()
@@ -411,7 +416,7 @@ class PostLoginRecovery:
         return (
             "ok",
             f"checked={result.checked} flagged={len(result.flagged)} "
-            f"skipped_young={result.skipped_young}",
+            f"skipped_young={result.skipped_young} observed={result.observed}",
         )
 
     # ------------------------------------------------------------------ summary notify

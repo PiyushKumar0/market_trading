@@ -190,9 +190,20 @@ def _cost_pct() -> float:
 
 # ============================================================ 0. pre-registration discipline
 def test_one_pre_registered_param_set_no_sweep():
-    """N=1 and the params ARE the live shadow rule's frozen defaults — no sweep, no drift."""
+    """N=1 and the params ARE the live rule's frozen v1 defaults — no sweep, no drift.
+
+    ``V1_PARAMS``, not ``DEFAULT_PARAMS``, since the 2026-09-12 promotion made the three v2 filter
+    thresholds GATING in the live rule: the v1 registration must keep scanning the rule as
+    registered, and ``V1_PARAMS`` is exactly the live defaults with those three neutralized. Every
+    v1 parameter still tracks the live rule, which is the drift this assertion exists to catch."""
     assert bt.TRIAL_COUNT_N == 1
-    assert bt.PRE_REGISTERED_PARAMS == dict(hi52.DEFAULT_PARAMS)
+    assert bt.PRE_REGISTERED_PARAMS == dict(hi52.V1_PARAMS)
+    assert {k: v for k, v in bt.PRE_REGISTERED_PARAMS.items() if k not in hi52.V2_FILTER_PARAMS} == \
+        {k: v for k, v in hi52.DEFAULT_PARAMS.items() if k not in hi52.V2_FILTER_PARAMS}
+    # …and the v2 constants registered here are the ones the LIVE rule now gates on.
+    assert bt.V2_SMOOTH_UP_FRAC_MIN == hi52.DEFAULT_PARAMS["smooth_up_day_frac_min"]
+    assert bt.V2_SMOOTH_MAX_DAY_MOVE_MAX == hi52.DEFAULT_PARAMS["smooth_max_day_move"]
+    assert bt.V2_GAP_MAX == hi52.DEFAULT_PARAMS["gap_day_max"]
     assert bt.PRE_REGISTERED_PARAMS["proximity_min"] == 0.95
     assert bt.PRE_REGISTERED_PARAMS["lookback_sessions"] == 252
     assert bt.PRE_REGISTERED_PARAMS["vol_mult"] == 1.0

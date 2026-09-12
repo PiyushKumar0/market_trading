@@ -256,6 +256,68 @@ ins:
                                # adjudicates per candidate; small notionals may be shrunk or rejected,
                                # and that is the gate doing its job.
 
+# §6.1/§8.6 `hi52` — 52wk-high-proximity swing v2, PROMOTED out of shadow 2026-09-12 as a FORWARD
+# TEST with a written kill rule (plan §8.6 addendum; `scripts/hi52_forward_verdict.py` is the
+# verdict). The rule's own parameters (incl. v2's smooth/gap thresholds) live in
+# hi52.DEFAULT_PARAMS where the 09-09 pre-registration froze them — only the edge is config.
+hi52:
+  expected_edge_pct: 1.47      # the C3 edge basis for a targetless proposal, the `ins` seam. NOT a
+                               # net-drift transcription: DERIVED, and by ONE formula that lives in
+                               # code — scripts/hi52_forward_verdict.py `registered_edge_pct()`,
+                               # which a unit test pins against THIS key, so the two cannot drift.
+                               #   edge = measured T+20 median GROSS - CostModel.breakeven_pct(N)
+                               #   N    = equity x per_trade_risk.swing_position_pct/100
+                               #          / (per_trade_risk.overnight_gap_mult x stop_pct/100)
+                               # GROSS = +2.0336% (v2 discrete run 2026-09-09, n=1,794 —
+                               # data/reports/backtest_hi52_v2_2026-09-09.json, geometry block).
+                               # N is not chosen, it is implied by §7.1 sizing: a swing position is
+                               # capped at 2.0% of equity charged at 2.5x the stop distance, and
+                               # hi52's stop is 6%, so N <= equity x 2% / (2.5 x 6%) = equity/7.5 —
+                               # Rs 5,333 at the Rs 40,000 base, Rs 5,234 at the 2026-09-11 equity
+                               # Rs 39,256.65, Rs 4,800 at the equity_floor_rung (Rs 36,000, the
+                               # SMALLEST equity the risk table still lets a position be opened at:
+                               # below it the platform goes flat + CLOSE_ONLY). The floor RISES as
+                               # the book shrinks (0.5303% / 0.5357% / 0.5619%), and this key is a
+                               # constant read for months, so it is derived at the WORST permitted
+                               # book rather than at today's: 2.0336 - 0.5619 = 1.4717 => 1.47,
+                               # ROUNDED DOWN (rounding an edge up is the one direction that buys a
+                               # candidate a C3 pass it did not earn). Deliberately NOT the
+                               # backtest's own +1.71% net: it charged 0.3192% at a Rs 20,000
+                               # reference size this book never trades. OWNER-SET, NEVER
+                               # learner-movable (the `ins` pattern): this number is what the §7.1
+                               # C3 check multiplies against the cost floor, so a learner allowed to
+                               # raise it could buy any candidate a pass. DEMOTION under the kill
+                               # rule is TWO edits in one owner-visible commit, both or neither:
+                               # (1) re-add hi52.STRATEGY_ID to ops.main.NO_EDGE_SHADOW_STRATEGIES
+                               # and (2) DELETE this key. Either alone leaves a half-promoted rule.
+                               # Edit (2) BITES: Hi52Cfg.expected_edge_pct defaults to None, so an
+                               # absent key un-registers the edge instead of falling back to a
+                               # number in code.
+
+# §6.1 `brk20` — the ENTRY MECHANISM, not the rule. The rule's own parameters live in
+# brk20.DEFAULT_PARAMS (the §6.3 learnable envelope) and the WO-19 stop-geometry floor in
+# brk20.FLOOR_PARAMS (owner-only by construction); this block holds only how long the broken level
+# is offered for.
+brk20:
+  retest_sessions: 5           # TRADING sessions after the crossing session during which the broken
+                               # level may be RE-PUBLISHED when the live price comes back inside the
+                               # §7.1 entry_sanity_band (src/engine/strategy/retest.py, migration
+                               # 0014). 5 = `V2_limit_at_H20_N5`, the variant the 2026-09-12
+                               # pre-registered entry-mechanism backtest returned under its own
+                               # decision rule (median net +0.0513% at T+10 — the only variant
+                               # geometry-viable there — and +0.9168% at T+20; CPCV fold pass
+                               # 73.3%/80.0%; fill rate 59.1%). What SHIPPED before WO-R was N=1:
+                               # the level published once, on the crossing session, fill rate 31.4%
+                               # off the registered delay histogram and no measured return at all.
+                               # OWNER-ONLY and NEVER learnable: this number IS the registered
+                               # mechanism — N=1 and N=3 were both measured and both lost, and every
+                               # other N was never run, so a learner moving it would be selecting an
+                               # entry mechanism no study measured. It buys `brk20` no expectancy
+                               # presumption (the study chose between two mechanisms; it promoted no
+                               # rule, on a survivorship-tainted eligible-universe proxy), no new
+                               # entry price, no widened band and no new admission capacity — every
+                               # re-publication faces the same prescreen caps and the same §7.1 gate.
+
 # §3.2.5 pre-screen candidate-origination throttles (owner-tunable). Scanner PARAMETERS live in the
 # learner-writable envelope_state (R4), never here — these are coarse per-day caps only.
 strategy:
@@ -328,10 +390,18 @@ strategy:
                                  # news-originated entry ceiling stays 2/day with this strategy added.
                                  # Reversal rows are a strict SUBSET of originating rows, so the real
                                  # flow is well under `cat`'s; 2 is a ceiling, not an expectation.
-      hi52: 3                    # §3.2.4/§6.1 hi52 shadow (2026-09-01): 52wk-high-proximity fresh-
-                                 # crosses over the BATCH universe. Fresh-cross-only keeps natural
-                                 # flow to a handful/day; 3 caps analyst spend on a cluster day.
-                                 # Shadow: C3 rejects all — admission = validation population only.
+      hi52: 3                    # §6.1/§8.6 hi52 v2 (promoted 2026-09-12): 52wk-high-proximity
+                                 # fresh-crosses over the ELIGIBLE universe. Fresh-cross-only plus
+                                 # the v2 smooth/gap filters keeps natural flow to a handful/day; 3
+                                 # caps analyst spend on a cluster day. UNCHANGED by the promotion
+                                 # deliberately — the forward test measures the rule, not a wider
+                                 # tap, and these candidates now take REAL slots in the one ranked
+                                 # batch admission (scores ~0.95-1.0 rank above brk20's ~0.5-0.6,
+                                 # so this cap is what bounds the displacement they can do). It does
+                                 # NOT get publication priority with them: ops.main
+                                 # ._publication_order keeps hi52 last in the batch, so the analyst
+                                 # forward slot's fired_at tie-break still goes to the validated
+                                 # legs exactly as it did before the promotion.
     cap_release_schedule:        # Owner-directed 2026-09-02 (3rd straight session of window-open cap
       orb:                       # lockout: 08-27 KALYANKJIL 1.0@12:49, 09-01 PERSISTENT/HCLTECH/INFY,
         "10:00": 3               # 09-02 IDEA/VMM/OIL all 1.0, all refused). Cumulative tranches by

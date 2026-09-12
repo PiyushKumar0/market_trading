@@ -37,6 +37,13 @@ on ZERO rows and was silent through the whole episode. ``coverage_pct`` measures
 not today's feed (a PIT backfill of ~70-day-old rows can widen it with the live feed unchanged), so
 both lines also carry ``fresh_symbols_in_universe``: the issuers the live BSE feed reached on ``d``.
 
+This alarm does NOT own the feed's own resolution stage. Widening the corpus lifts ``coverage_pct``
+above the floor and silences this line permanently, so a later collapse of
+``filings_pit_fresh``'s scrip→symbol map would be invisible here: that job raises its own
+``filings_pit_fresh_scrip_map_degraded`` warning and a latched owner alert (plan §2.8.5). Keep the
+two alarms distinct — this one answers "how much of the universe has filings at all", that one
+answers "can we still resolve the rows we fetched".
+
 DELIBERATE APPROXIMATION, STATED
 --------------------------------
 :func:`~engine.datafeeds.insider_crossings.insider_cluster_events` starts ``armed=True`` at

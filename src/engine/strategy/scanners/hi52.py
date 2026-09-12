@@ -1,13 +1,22 @@
-"""``hi52`` — 52-week-high-proximity continuation, SHADOW (owner-directed 2026-09-01 design).
+"""``hi52`` — 52-week-high-proximity continuation, v2, a FORWARD TEST (promoted 2026-09-12).
 
-No expected edge is registered for this rule — measuring one is the entire point of the shadow,
-identically to ``cat`` (§2.7/WO-18): there is no ``hi52.expected_edge_pct`` anywhere (not in
-``settings.yaml``, not in the gate's ``strategy_expected_edge_pct`` map), so the §7.1 C3 cost check
-has no edge basis and FAIL-CLOSED-REJECTS every ``hi52`` candidate — the funnel still journals the
-signal as its validation population and the analyst still writes its thesis, but nothing reaches
-RECOMMEND. Wiring an edge, and with it RECOMMEND eligibility, is the §8.6 owner gate, contingent on
-backtest + shadow validation, exactly as for ``cat``. This module does not touch either gate; it
-only originates.
+Promoted out of SHADOW on 2026-09-12 (plan §8.6 addendum; owner-directed "proceed with the changes
+you deem will improve the engine's performance"). ``settings.yaml`` registers
+``hi52.expected_edge_pct`` and the composition root feeds it to the gate's
+``strategy_expected_edge_pct`` map exactly as it does ``ins``'s, so the §7.1 C3 cost check now has
+an edge basis and a candidate can reach RECOMMEND. The promotion is NOT a claim of a validated
+edge: the v2 backtest is CPCV-promotable (1,794 trades, T+20 median net +1.71% / 58.2% hit, fold
+pass 86.7% under N=2) but its edge lives in the INDEX cell of a survivorship-tainted population
+proxy, so **RECOMMEND mode IS the forward soak** and it carries a written kill rule —
+``scripts/hi52_forward_verdict.py`` measures the promoted population and DEMOTE is mechanical
+(n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit rate < 50%)). Demotion re-adds the id to
+``ops.main.NO_EDGE_SHADOW_STRATEGIES`` and removes the settings key. This module does not touch
+either gate; it only originates.
+
+**v2 IS the rule as of the promotion**: the three signal-time filters pre-registered on 2026-09-09
+(smooth approach, no gap day, eligible population) are GATING here, where until 09-12 the first two
+were diagnostics only. Their thresholds are the registered ones, frozen in :data:`DEFAULT_PARAMS`
+and owner-only — never learnable, never retuned without a new pre-registration.
 
 **Architecture — a pure batch rule over the ELIGIBLE universe, like ``brk20``** (scoped down from
 the batch universe on 2026-09-09: the 09-03 full-market backtest measured the edge as index-class
@@ -24,9 +33,11 @@ predictor than conventional price momentum: the high acts as an anchor investors
 a FRESH crossing into the high-proximity band tends to keep drifting over a multi-week (T+5..T+20)
 horizon. The Frog-in-the-Pan hypothesis (Da, Gurun & Warachka) refines this further: GRADUAL,
 continuous information diffusion is under-reacted to more than a single salient jump, so a smooth
-climb into new highs should drift further than a spiky one. This rule ORIGINATES on the proximity
-crossing alone (PINNED, below); the path-smoothness read is carried as a DIAGNOSTIC for that later
-analysis and never gates a candidate.
+climb into new highs should drift further than a spiky one. The v2 registration turns that second
+reading into part of the trigger (PINNED, below): the path-smoothness read GATES since 2026-09-12,
+through the same :func:`diagnostics_for` the study reads, and the surviving candidates' own values
+ride the composition root's ``hi52_sweep`` log line so the promoted population's smooth distribution
+stays checkable against the 09-09 study at the 20- and 40-signal reviews.
 
 PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
 
@@ -39,7 +50,26 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   (symbol, strategy) day-dedupe) — AND VOLUME confirmation, ``volume(y) >= vol_mult × mean(volume of
   the 20 sessions immediately before y)`` (``vol_mult = 1.0`` is the neutral default; applied
   unconditionally, never skipped, because ``min_sessions`` already guarantees at least 20 prior rows)
-  — AND no known ex-date within ``ex_skip_days`` CALENDAR days of ``today``.
+  — AND no known ex-date within ``ex_skip_days`` CALENDAR days of ``today`` — AND the two v2
+  signal-time filters below.
+* v2 filters (PRE-REGISTERED 2026-09-09, GATING since the 2026-09-12 promotion; thresholds fixed
+  from the 09-03 full-sample medians BEFORE the run that measured them, so they are knowable at
+  signal time): SMOOTH APPROACH — ``up_day_frac >= smooth_up_day_frac_min`` (0.55) AND
+  ``max_day_move <= smooth_max_day_move`` (0.07) over the 20 completed sessions ending at ``y``,
+  both read from :func:`diagnostics_for` so the live gate and the study consume ONE definition;
+  NO GAP DAY — the trigger session's own ``|close(y)/close(y-1) - 1| <= gap_day_max`` (0.05),
+  rounded to the same 4 dp ``max_day_move`` is rounded to (when the trigger day is the window's
+  biggest mover the two are the SAME physical number and must read identically). Counted as
+  :data:`VETO_SMOOTH` / :data:`VETO_GAP`, evaluated in the registration's own order and FIRST-MATCH,
+  so the two counts partition the v2 rejects exactly as ``scripts/backtest_hi52.py`` tallies them —
+  a trigger move above ``smooth_max_day_move`` books as ``smooth``, never as ``gap``. A diagnostic
+  that cannot be computed at all is a REFUSAL, never a pass: the rule's claim is that the filters
+  were SATISFIED at signal time, and an unknowable value did not satisfy them. A filter NEUTRALIZED
+  to an infinite ceiling (:data:`V1_PARAMS`, the backtest's v1 path only) is not in the registration
+  at all and so refuses nothing — an absent filter and an unfailable one are different things.
+* The third v2 filter — population = the eligible (index) universe — is NOT enforced here: the
+  composition root has fed this sweep the eligible set since 2026-09-10 (§3.2.4), and a scanner that
+  re-derived universe membership from its own rows would be a second, drifting definition of it.
 * The ex-date skip mirrors ``brk20``'s A12 calendar-horizon check, with one deliberate difference:
   it is COUNTED here as :data:`VETO_EX_DATE_SKIP`. ``brk20`` itself does NOT count its own ex-date
   refusal (only its WO-19 stop-geometry-floor vetoes are counted, on the theory that an ordinary
@@ -57,29 +87,39 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   reference. ``stop = round_to_tick(entry × (1 − stop_pct/100))``, default **6%** — a disaster stop
   sized the same way as ``cat``'s (§7.1 ``per_trade_risk.overnight_gap_mult`` applies to a swing
   entry). ``target = None``: no ATR/RR level is fabricated onto an unvalidated shadow rule — identical
-  reasoning to ``cat``. Degenerate tick-rounding (``stop >= entry``) emits nothing, as for
-  ``brk20``/``cat``.
-* Score = ``prox``, clamped to ``[0, 1]``: the proximity margin is the strength signal. Scores are
-  only ever compared WITHIN a strategy (§5.2(a) per-strategy score quantile), so this scale need not
-  agree with any other scanner's.
+  reasoning to ``cat``. That reasoning SURVIVES the promotion inverted: the drift this rule captures
+  was MEASURED over a fixed horizon, never predicted to a level, so the gate consumes the REGISTERED
+  edge (``settings.hi52.expected_edge_pct``, the `ins` seam) instead of an invented target.
+  Degenerate tick-rounding (``stop >= entry``) emits nothing, as for ``brk20``/``cat``.
+* Score = ``prox``, clamped to ``[0, 1]``: the proximity margin is the strength signal. The scale
+  does not agree with any other scanner's and is not meant to — cross-strategy STANDING is read as a
+  per-strategy quantile at the analyst forward slot (§5.2(a), ``pipeline._quantile_band``). The one
+  place a raw score IS compared across strategies is ``prescreen._rank`` inside one batch admission,
+  where (its own docstring) the per-strategy sub-caps and not the sort are what bound a strategy's
+  share of the day; the ordering consequence of a high scale there is handled at the composition
+  root (``ops.main._publication_order``), not by rescaling here. Rescaling is therefore NOT free:
+  it would move this rule's own quantile history and its place in that batch sort.
 * Exit is TIME, not price, exactly as for ``cat``: ``hold_sessions`` (= the §7.1 swing ``max_holding``
   cap) is carried in :data:`DEFAULT_PARAMS` purely as documentation of the intended cap — the
   EXISTING max-holding machinery (``RecommendationPipeline.check_aged_positions``) is the exit path,
   and no exit code lives here, mirroring ``cat.DEFAULT_PARAMS["hold_sessions"]`` exactly.
-* Diagnostics (Frog-in-the-Pan path-smoothness — DIAGNOSTIC ONLY, never gates a candidate):
+* Diagnostics (Frog-in-the-Pan path-smoothness — the v2 GATE's own inputs since 2026-09-12, and
+  logged per surviving candidate by the composition root's ``hi52_sweep`` line):
   ``up_day_frac`` = fraction of the last 20 sessions with ``close > prev close``; ``max_day_move`` =
   the largest single-session ``|close/prev − 1|`` over the same 20 sessions. **Not attached to**
   :class:`~engine.strategy.types.SignalCandidate` — that type's own docstring pins it to EXACTLY its
   §3.2.5 field set (no metadata/notes field exists there, and neither ``brk20`` nor ``cat`` attach
   one), and ``engine/strategy/types.py`` is outside this module's edit scope. They are exposed
   instead through the standalone :func:`diagnostics_for` helper, computable on the same rows
-  :func:`scan_daily` scans, so the eventual Frog-in-the-Pan analysis (and this module's own tests)
-  can read them without a schema change. :func:`scan_daily` does not call it internally — nothing
-  pays for a statistic today's arithmetic doesn't need (the same "don't cost every universe symbol
-  for an unused stat" discipline ``brk20`` applies to its own gap-floor median).
+  :func:`scan_daily` scans, so the Frog-in-the-Pan analysis (and this module's own tests) can read
+  them without a schema change. :func:`scan_daily` now calls it — the v2 smooth filter IS these two
+  numbers, and it is called only AFTER every v1 test has passed, so the "don't cost every universe
+  symbol for an unused stat" discipline still holds: the cost is paid per CANDIDATE, not per symbol.
 
-Evidence caveat rides along (§6.1, identical framing to ``cat``): this rule ORIGINATES candidates for
-Tier-1 judgement and the owner's decision; it carries no presumption of positive expectancy.
+Evidence caveat rides along (§6.1): the forward test is the measurement. The v2 edge was measured on
+a population labelled by CURRENT index membership applied backwards — a survivorship-tainted proxy
+(09-03 and 09-09 runs both carry the label) — so a live candidate carries the registered edge for
+the gate's arithmetic and no presumption of expectancy for the analyst's judgement.
 """
 
 from __future__ import annotations
@@ -97,7 +137,7 @@ from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 
 STRATEGY_ID = "hi52"
 
-DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped learnable envelope, frozen for the shadow window
+DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped envelope, frozen for the forward-test window
     "proximity_min": 0.95,
     "lookback_sessions": 252,
     "min_sessions": 126,
@@ -105,11 +145,52 @@ DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped learnable envelope, frozen
     "ex_skip_days": 10,
     "hold_sessions": 20,          # documentation only — see module docstring; not read below
     "stop_pct": 6.0,
+    # v2 signal-time filters (pre-registered 2026-09-09, gating since the 2026-09-12 promotion).
+    # OWNER-ONLY and NEVER learnable — not now, not when §6.3 learning lands: these three numbers
+    # DEFINE the measured v2 population, so moving one re-opens multiplicity, invalidates the
+    # backtest that justified the promotion and restarts the forward clock. A change here is a NEW
+    # pre-registration, never a tuning.
+    "smooth_up_day_frac_min": 0.55,
+    "smooth_max_day_move": 0.07,
+    "gap_day_max": 0.05,
+}
+
+#: The v2 filter keys, as one set: what :data:`V1_PARAMS` neutralizes and what the owner-only rule
+#: above applies to. Named so a caller never has to re-list the three literals.
+V2_FILTER_PARAMS: frozenset[str] = frozenset(
+    {"smooth_up_day_frac_min", "smooth_max_day_move", "gap_day_max"}
+)
+
+#: The v1 (pre-2026-09-12) parameter set: :data:`DEFAULT_PARAMS` with the v2 filters NEUTRALIZED
+#: (a floor nothing can fail, ceilings nothing finite can exceed) rather than removed — every key
+#: must stay present, because :func:`scan_daily` merges over :data:`DEFAULT_PARAMS` and a deleted key
+#: would simply come back at its gating value.
+#:
+#: ONE caller: ``scripts/backtest_hi52.py``'s ``--registration v1`` path, whose whole point is to
+#: reproduce the 2026-09-03/09-09 v1 numbers on the rule AS REGISTERED THEN. Without this the
+#: promotion would silently convert that registration into v2 and make N=1 unreproducible. It is not
+#: a live operating mode: nothing in ``engine.ops`` reads it. The neutralization is EXACT, including
+#: the fail-closed refusals: an infinite ceiling turns its filter off outright rather than making it
+#: unfailable, so a row v1 emitted is not now dropped as a non-computable gap (see :func:`scan_daily`).
+#: That relaxation is reachable ONLY through an infinite threshold, which no live params set.
+V1_PARAMS: dict[str, float] = {
+    **DEFAULT_PARAMS,
+    "smooth_up_day_frac_min": 0.0,
+    "smooth_max_day_move": math.inf,
+    "gap_day_max": math.inf,
 }
 
 #: Veto class surfaced through the optional accumulator (§6.1 observability). See the module
 #: docstring for why hi52 counts this where brk20 does not.
 VETO_EX_DATE_SKIP = "ex_date_skip"
+
+#: v2 filter vetoes (2026-09-12), counted FIRST-MATCH in the registration's own order so the two
+#: partition the v2 rejects — the same counting ``scripts/backtest_hi52.py`` does, so a live count
+#: and a study count mean the same thing. Read :data:`VETO_GAP` as "trigger moves in the half-open
+#: band (``gap_day_max``, ``smooth_max_day_move``], plus any non-computable gap": a bigger trigger
+#: move already failed the smooth ceiling and books as :data:`VETO_SMOOTH`.
+VETO_SMOOTH = "smooth"
+VETO_GAP = "gap"
 
 #: Corp-action kinds that RESCALE the price series: after a bonus/split/rights/demerger ex-date every
 #: earlier bar is in a different unit. Neither ``bars_1d`` source re-adjusts STORED history — Kite
@@ -127,8 +208,10 @@ def unadjusted_history(corp_rows: Iterable[Mapping[str, Any]]) -> frozenset[str]
 
 
 class Diagnostics(NamedTuple):
-    """Frog-in-the-Pan path-smoothness read on the SAME rows :func:`scan_daily` gates on — DIAGNOSTIC
-    ONLY, never a gating input (see the module docstring)."""
+    """Frog-in-the-Pan path-smoothness read on the SAME rows :func:`scan_daily` gates on.
+
+    ``up_day_frac``/``max_day_move`` ARE the v2 smooth filter's inputs since the 2026-09-12
+    promotion (the module docstring's PINNED rule); ``prox``/``high_52wk`` stay reporting fields."""
 
     prox: float
     high_52wk: float
@@ -169,6 +252,10 @@ def diagnostics_for(
     arithmetic :func:`scan_daily` uses, exposed because :class:`SignalCandidate` has no field to carry
     it on (see the module docstring). ``None`` on the same degenerate input that would make the
     proximity read itself impossible; never raises.
+
+    The ONE definition of ``up_day_frac``/``max_day_move``: :func:`scan_daily`'s v2 smooth filter,
+    ``scripts/backtest_hi52.py``'s ``signal_diag`` and the journalled diagnostics all call THIS, so
+    the live gate and the study that justified it can never drift apart.
     """
     p = {**DEFAULT_PARAMS, **(params or {})}
     lookback = int(p["lookback_sessions"])
@@ -212,12 +299,13 @@ def scan_daily(
 
     ``rows[-1]`` must be the last COMPLETED session (never today's forming bar). Fails to ``None`` on
     thin history, sub-threshold proximity, a stale (non-fresh) crossing, unconfirmed volume, ex-date
-    proximity, or degenerate tick-rounded levels — never raises on ordinary OR malformed data (§3.2.5
-    fail-to-zero posture).
+    proximity, a v2 filter refusal, or degenerate tick-rounded levels — never raises on ordinary OR
+    malformed data (§3.2.5 fail-to-zero posture).
 
-    ``veto_counts``, when supplied, is incremented in place with :data:`VETO_EX_DATE_SKIP`; the other
-    refusals above are this rule's ordinary silence and are not counted (see the module docstring for
-    why the ex-date class alone is counted here).
+    ``veto_counts``, when supplied, is incremented in place with :data:`VETO_EX_DATE_SKIP`,
+    :data:`VETO_SMOOTH` or :data:`VETO_GAP`; the other refusals above are this rule's ordinary
+    silence and are not counted (see the module docstring for why the ex-date class alone is counted
+    here).
     """
     p = {**DEFAULT_PARAMS, **(params or {})}
     min_sessions = int(p["min_sessions"])
@@ -255,6 +343,40 @@ def scan_daily(
     horizon = today + timedelta(days=int(p["ex_skip_days"]))
     if any(today <= xd <= horizon for xd in upcoming_ex_dates):
         _bump(veto_counts, VETO_EX_DATE_SKIP)
+        return None
+
+    # ---- v2 signal-time filters (pre-registered 2026-09-09, GATING since 2026-09-12). Placed AFTER
+    #      every v1 test and BEFORE the levels, so the order matches `backtest_hi52.v2_admits`
+    #      applying them to a v1 signal: a candidate the ex-date horizon already refused never
+    #      reaches these counters. Smooth first, then gap, first-match (see VETO_GAP's note).
+    diag = diagnostics_for(rows, params=p)
+    if diag is None or not (
+        math.isfinite(diag.up_day_frac)
+        and math.isfinite(diag.max_day_move)
+        and diag.up_day_frac >= float(p["smooth_up_day_frac_min"])
+        and diag.max_day_move <= float(p["smooth_max_day_move"])
+    ):
+        _bump(veto_counts, VETO_SMOOTH)
+        return None
+    # The trigger session's OWN move, rounded to the 4 dp `diagnostics_for` rounds max_day_move to:
+    # when y is the window's biggest mover the two ARE the same physical number. rows[-2] exists —
+    # min_sessions >= 2 is enforced above — and a zero/non-finite prior close cannot divide.
+    # An INFINITE `gap_day_max` turns the filter OFF rather than making it unfailable: the fail-closed
+    # refusal below is the claim "the filter was SATISFIED at signal time", and a filter that is not
+    # in the registration has nothing to satisfy. V1_PARAMS is the only caller that sets it, and this
+    # is what makes that neutralization exact — otherwise a symbol whose close(y-1) is 0/NaN (a
+    # suspended session, which the archive contains) would be dropped and booked VETO_GAP on a v1
+    # re-run that never looked at rows[-2], silently changing the population behind the N=1 numbers.
+    # The LIVE default (0.05) is finite, so the live rule is unchanged and still fails closed.
+    gap_max = float(p["gap_day_max"])
+    prev_close = rows[-2].close
+    gap_move = (
+        round(abs(rows[-1].close / prev_close - 1.0), 4)
+        if math.isfinite(prev_close) and prev_close > 0.0
+        else math.nan
+    )
+    if math.isfinite(gap_max) and not (math.isfinite(gap_move) and gap_move <= gap_max):
+        _bump(veto_counts, VETO_GAP)
         return None
 
     # ---- levels: entry is the trigger session's OWN close (no "broken level" to retest here);

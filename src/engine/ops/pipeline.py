@@ -92,7 +92,11 @@ from engine.intelligence.schemas import (
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.notify.episodes import AlertEpisodes
-from engine.ops.holdings_reconcile import positions_missing_from_holdings
+from engine.ops.holdings_reconcile import (
+    MISSING_SESSIONS,
+    missing_holdings_observations,
+    positions_missing_from_holdings,
+)
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
 from engine.strategy.types import SignalCandidate
@@ -2956,10 +2960,72 @@ class RecommendationPipeline:
         ]
 
     def _positions_summary(self) -> str:
+        """Open-position line for the §5.2 signal and heartbeat contexts, MINUS the positions the
+        broker no longer holds (WO-D2 residue, 2026-09-12).
+
+        The position-event screen already stops spending analyst calls on a position the §3.6 journal
+        reads EMPTY on two sessions (:meth:`_sold_outside_ledger`), but this line still counted it as
+        open — the same two 08-26 positions the day plan carried for eleven sessions — so the analyst
+        reasoned about a book the owner does not hold. They come OUT of the counts and are re-stated
+        on a trailing line naming what the broker showed and the reply that ends it.
+
+        Same predicate as the screen, ``require_zero=True``: only "the broker held NOTHING on every
+        day of the run" leaves the book. A partial exit reads short but still has exposure the
+        analyst must reason about, so it stays in the counts.
+
+        The §7.1 headroom lines above this one (:meth:`_headroom_lines`) deliberately still COUNT
+        these positions: they occupy ``max_open_positions`` until the owner replies ``/closed``, and
+        the gate was not taught this predicate (see :meth:`_skip_position_event`). The two disagreeing
+        is the ambiguity itself, stated rather than hidden.
+
+        ``sessions`` is the SHORTEST zero-run among the named positions, so the line never claims more
+        evidence than every name on it has; the assembler stamps "(as of HH:MM)" onto the last line it
+        is given (``intelligence/context.py``), and both reads happen at that instant.
+
+        D7: every read here degrades to the pre-WO-D2 rendering (the plain counts). A context line on
+        the analyst path may never raise, and an unreadable journal must not edit the book.
+        """
         counts = self._exposure.open_position_counts()
-        if counts.total == 0:
-            return "none open"
-        return f"{counts.total} open (MIS {counts.mis}, CNC {counts.cnc})"
+        today = self._clock.today()
+        gone = self._sold_outside_ledger(today)               # D7-guarded, never cached for the day
+        rows: list[sqlite3.Row] = []
+        sessions: list[int] = []
+        if gone:
+            try:
+                # The origin scope MUST match the counter being adjusted (``ExposureTracker``'s
+                # platform-origin open rows): a position outside it was never in ``counts``, so
+                # subtracting it would understate the book.
+                rows = [
+                    row for row in self._conn.execute(
+                        "SELECT position_id, symbol, product FROM positions "
+                        "WHERE state='OPEN' AND origin IN ('platform','recommended')"
+                    ).fetchall()
+                    if str(row["position_id"]) in gone
+                ]
+                # Second read of the same journal, like the §5.3 planner's: the alternative is
+                # re-deriving the platform's "missing" threshold here, free to drift from the screen's.
+                # A position absent from it (a concurrent reconcile write between the two reads) simply
+                # does not contribute a streak — see the ``default`` below.
+                observations = missing_holdings_observations(self._conn, today)
+                sessions = [
+                    observations[str(row["position_id"])].zero_sessions
+                    for row in rows if str(row["position_id"]) in observations
+                ]
+            except sqlite3.Error as exc:
+                _log.warning("positions_summary_sold_outside_read_failed",
+                             error_type=type(exc).__name__, error=str(exc)[:200])
+                rows = []
+        total = max(counts.total - len(rows), 0)
+        mis = max(counts.mis - sum(1 for r in rows if str(r["product"] or "").upper() == "MIS"), 0)
+        cnc = max(counts.cnc - sum(1 for r in rows if str(r["product"] or "").upper() == "CNC"), 0)
+        main = "none open" if total == 0 else f"{total} open (MIS {mis}, CNC {cnc})"
+        if not rows:
+            return main
+        symbols = ", ".join(sorted({str(r["symbol"] or "?") for r in rows}))
+        return (
+            f"{main}\nsold outside the ledger (broker holds 0 on "
+            f"{min(sessions, default=MISSING_SESSIONS)} sessions, awaiting /closed): {symbols}"
+        )
 
     def _sector_exposure_line(self, d: date) -> str:
         sector_of = self._sector_of(d)

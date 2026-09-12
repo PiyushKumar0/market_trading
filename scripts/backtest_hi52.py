@@ -9,9 +9,11 @@ the engine idle.
 PRE-REGISTRATION / MULTIPLICITY DISCIPLINE — READ FIRST
 ===============================================================================================
 **NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** Exactly ONE parameter
-set is evaluated — :data:`PRE_REGISTERED_PARAMS`, byte-identical to the shadow rule's frozen
-``hi52.DEFAULT_PARAMS`` (``proximity_min`` 0.95, ``lookback_sessions`` 252, ``min_sessions`` 126,
-``vol_mult`` 1.0, ``ex_skip_days`` 10, ``stop_pct`` 6.0). There is no grid, no ``--proximity-min``
+set is evaluated — :data:`PRE_REGISTERED_PARAMS`, byte-identical to the live rule's frozen
+``hi52.V1_PARAMS`` (``proximity_min`` 0.95, ``lookback_sessions`` 252, ``min_sessions`` 126,
+``vol_mult`` 1.0, ``ex_skip_days`` 10, ``stop_pct`` 6.0 — ``DEFAULT_PARAMS`` with the v2 filters
+neutralized, which is what those defaults WERE until the 2026-09-12 promotion made them gating;
+see that constant). There is no grid, no ``--proximity-min``
 flag, no optimizer and no "best of" selection anywhere in this module: the trial count cited to the
 §6.4 deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`), which is the honest count,
 and ``fold_pass_min(1) = 60%``. Adding a knob that changes the signal definition would silently
@@ -178,6 +180,7 @@ from engine.learning.validate import (  # noqa: E402
 )
 from engine.strategy.cost_model import CostModel  # noqa: E402
 from engine.strategy.scanners.brk20 import DailyRow  # noqa: E402
+from engine.strategy.scanners import hi52  # noqa: E402
 from engine.strategy.scanners.hi52 import (  # noqa: E402
     DEFAULT_PARAMS,
     STRATEGY_ID,
@@ -191,9 +194,15 @@ from engine.strategy.scanners.hi52 import (  # noqa: E402
 from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 # =============================================================================== pinned constants
-#: The ONE pre-registered parameter set. Frozen copy of the shadow rule's own DEFAULT_PARAMS; the
-#: assertion below makes a silent drift between this study and the live rule impossible.
-PRE_REGISTERED_PARAMS: dict[str, float] = dict(DEFAULT_PARAMS)
+#: The ONE pre-registered parameter set — the v1 REGISTRATION's parameters, which both registrations
+#: scan with (v2 is v1 plus the three filters :func:`v2_admits` applies on top, never a re-scan).
+#:
+#: ``hi52.V1_PARAMS``, not ``DEFAULT_PARAMS``, since the 2026-09-12 promotion: the live rule's
+#: defaults now carry the v2 filter thresholds as GATING values, so scanning with them would make
+#: ``--registration v1`` silently measure v2 and the N=1 registration unreproducible. ``V1_PARAMS``
+#: is exactly ``DEFAULT_PARAMS`` with those three neutralized; every v1 parameter still tracks the
+#: live rule, so the drift guard this constant exists for is unchanged.
+PRE_REGISTERED_PARAMS: dict[str, float] = dict(hi52.V1_PARAMS)
 
 #: Trial count cited to the §6.4 deflation machinery. ONE parameter set, no sweep (see the module
 #: docstring). Not a knob.
@@ -212,6 +221,11 @@ REGISTRATIONS: tuple[str, ...] = (REGISTRATION_V1, REGISTRATION_V2)
 #: v2's three signal-time thresholds. FIXED 2026-09-09 from the 2026-09-03 full-sample medians and
 #: written here BEFORE the run that measures them (plan §6.1 addendum) — they are knowable at signal
 #: time going forward, which is exactly what the DESCRIPTIVE median-based smooth/jumpy cut is not.
+#: Kept as LITERALS, never derived from ``hi52.DEFAULT_PARAMS``: this is the historical registration
+#: record, and a future retune of the live rule must break the coupling test rather than silently
+#: rewrite what was registered on 09-09. Since 2026-09-12 the live rule gates on the same three
+#: numbers (``DEFAULT_PARAMS["smooth_up_day_frac_min"]``/``["smooth_max_day_move"]``/
+#: ``["gap_day_max"]``), so v2 runs measure the rule the engine now trades.
 V2_SMOOTH_UP_FRAC_MIN = 0.55        # up_day_frac over the 20 completed sessions ending at y
 V2_SMOOTH_MAX_DAY_MOVE_MAX = 0.07   # max |close/prev - 1| over the same 20 sessions
 #: |close(y)/close(y-1) - 1| on the trigger session itself, as a FRACTION. DERIVED from
@@ -1151,7 +1165,12 @@ def run_study(
             "n_symbols": len(series_by_symbol),
             "n_sessions": len(all_dates),
             "params": p,
-            "params_match_live_defaults": p == dict(DEFAULT_PARAMS),
+            # "live" = the v1 registration's own reference set (hi52.V1_PARAMS). Since the
+            # 2026-09-12 promotion DEFAULT_PARAMS also carries the v2 filter thresholds as gating
+            # values, which no run of this script scans with — comparing against them would report
+            # False for every honest run and say nothing about drift in the v1 parameters.
+            "params_match_live_defaults": p == dict(hi52.V1_PARAMS),
+            "live_v2_filter_params": {k: DEFAULT_PARAMS[k] for k in sorted(hi52.V2_FILTER_PARAMS)},
             "registration": registration,
             "trial_count_n": trial_count,
             "fold_pass_min": fold_pass_min(trial_count),

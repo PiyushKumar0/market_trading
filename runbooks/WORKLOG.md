@@ -1,5 +1,71 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-12 evening (owner: "Proceed with the rest of the recommended changes that you deem will improve the engine's performance") — tranche 2: hi52 promoted as a forward test, brk20 retest re-arm, insider-feed coverage, intraday fade/ATR refutations
+
+- **Scope decided by the manager under the owner's blanket authorisation:** hi52 v2 promotion (with a
+  written kill rule — the owner had asked "will it yield better results?"; answer: yes in expectation,
+  modest ₹, survivorship-tainted backtest, so promotion IS the forward soak), the brk20 multi-session
+  retest re-arm the 09-12 backtest selected (V2-5), the insider-feed issuer starvation (diagnose, fix if
+  local), two exit-hygiene residues, and the two intraday hypotheses the reviewer raised (ATR-conditioned
+  population; short/fade side) as pre-registered backtests. Deliberately NOT done: sizing caps (owner
+  risk decision, protected store), per-class warmup scoping (plan change; the freeze-lift sweep already
+  recovers the batch legs), the vectorbt sweep-mechanics fix (research infra, pre-registered as its own WO).
+- **Build (engine stopped 17:47 Sat; workflow `wf_08611cfe-523`, 17 agents, then `wf_156b3f23-5b8` after
+  the session limit killed H's fixer and R's builder at ~21:2x; reset 21:30):**
+  **WO-H hi52 v2 promoted** — the v2 filters (smooth approach, no gap day) now GATE in `hi52.scan_daily`
+  (owner-only thresholds, `VETO_SMOOTH`/`VETO_GAP` on the sweep line); `hi52.expected_edge_pct: 1.47`
+  registered on the ins seam by ONE derivation that lives in code (`scripts/hi52_forward_verdict.py
+  registered_edge_pct()`: measured T+20 median GROSS 2.0336 − CostModel round trip at the §7.1-sized
+  notional `equity × 2% / (2.5 × 6%)` ≈ ₹4.8–5.3k ⇒ 0.56% ⇒ 1.47 rounded DOWN); `Hi52Cfg.expected_edge_pct`
+  is `float | None = None` so DELETING the key really un-registers it (demotion = re-add to
+  `NO_EDGE_SHADOW_STRATEGIES` + delete the key, stated in all four homes); hi52 joins the ONE ranked batch
+  admission (cap allocation) and the batch is PUBLISHED in leg order (brk20, ins, cat, cat_reversal, hi52)
+  so cross-strategy raw scores never set the forward queue's fired_at tie-break; `_HI52` contract rewritten
+  (approach shape is NOT a decline ground; decline grounds mirror ins; FORWARD TEST, survivorship stated);
+  kill rule in the plan §8.6 addendum and mechanical in `scripts/hi52_forward_verdict.py` (population from
+  2026-09-14, entry = open of the journal day d, exits close(d+k−1), DEMOTE if n ≥ 20 and (T+20 median net
+  ≤ 0 or hit < 50%); T+5 printed as a diagnostic only). Two reviews + fix + re-review PASS (246 tests).
+  **WO-R brk20 retest re-arm** — migration 0014 `brk20_resting_levels`; `strategy/retest.py`
+  `RestingLevelBook` (record on ADMISSION, idempotent per (symbol, signal_d); expires after 5 trading
+  sessions; `due()` re-offers a level whose live price is back inside the CNC band, once per symbol per
+  day, with a fresh signal_id and the original levels/score); wired on the 60 s drain tick OFF-LOOP
+  (`asyncio.to_thread` — the body takes the prescreen lock then the store lock), only after today's
+  in-window sweep has published (`sweep_ready`), with a not-offerable screen (held / pending entry rec /
+  A12 ex-date / no longer eligible) and a fresh-tick test (`stale_data_guard.max_tick_age_s`); resting
+  symbols join the ticker subscription set. Reviews found a blocker (on-loop lock hold) + 2 majors (no
+  one-trade-per-level screen; unbounded tick age), fixed; re-review left one major (the offer bound spent
+  before admission ⇒ an offer into a boot-time freeze silenced the level for the day) — **taken inline
+  (Fable, second miss):** `_retest_active` = sweep window AND risk NORMAL AND not killed AND no sweep in
+  flight; plus the BACKWARD half of the corp-action veto (`brk20_unadjusted` → `unadjusted` skip reason).
+  **WO-I insider-feed coverage** — cause was LOCAL: `symbol_isin` had 200 rows (as_of 07-17) vs 480 eligible
+  since O15, no refresh job ⇒ 281 issuers unmappable, their rows dropped at resolution. Fix: per-run scrip
+  map = stored ∪ (index CSV ⋈ BSE bulk master `ListofScripData/w`), stored-wins, per-stage funnel on the
+  run line; NSE `corporates-pit` confirmed stale UPSTREAM (05-02) and `filings_pit`'s whole-table watermark
+  recorded as the reason a revived route could not backfill. Two reviews + fix; re-review left 2 majors —
+  **taken inline (Fable, second miss):** coverage FLOOR (`MAP_COVERAGE_FLOOR_PCT` 0.90 with a 5-name
+  NSE-only allowance) instead of a presence bit, an empty master body takes the 15-min cooldown and is
+  NOT memoised for the day, NaN considerations read as no value, duplicate-ISIN constituents counted apart
+  from `shadowed` (85 tests green).
+  **WO-X** `_positions_summary` excludes journal-gone positions (trailing "sold outside the ledger" line);
+  post-login report carries the observed count. PASS.
+  **R3 (pre-registered, RUN):** daily-ATR% tercile split on the tdc and candle harnesses — the rebuttal is
+  partly real on GROSS (tdc H1 top tercile +0.082% vs +0.035% pooled; B +0.103%) and REFUTED on NET in every
+  cell (top tercile costs 0.182% vs 0.151% — high-ATR names are the cheap ones; best cell −0.10% net,
+  t −1.65, CPCV 13%); candles show no gross gradient at all. Audit PASS.
+  **R4 (pre-registered, RUN):** short/fade side — F1 failed-breakout fade n=5,491 gross +0.050% vs cost
+  0.153% (net −0.103%, t −7.5, CPCV 0/15); F2 gap fade n=1,819 gross +0.026% vs 0.178%; every split
+  negative; the only positive n≥200 cell (F2 held to 15:15 on a rising tape, +0.15%, t 1.94) fails the
+  registered t > 2 bar and is a split of a reporting-only variant. The fade is real and one third of its
+  toll, exactly as the breakout was. Audit PASS. Intraday now has FIVE refuted families.
+- **Verification:** per-WO suites green; full unit suite on the settled tree **2984 passed, 4 warnings,
+  4m48s** (2026-09-13 00:0x). ruff across every modified file: only the five findings that exist at
+  HEAD (three B905 in hi52.py/test_hi52.py, two pre-existing F401). Live
+  wiring check: shadow set {cat, cat_reversal}; edge map {ins 1.58, hi52 1.47}; leg order
+  (brk20, ins, cat, cat_reversal, hi52); `settings.brk20.retest_sessions` 5.
+- **Config applied on this restart:** settings.yaml `hi52.expected_edge_pct: 1.47`, `brk20.retest_sessions:
+  5`; migration 0014 at boot. Kill-rule review: run `scripts/hi52_forward_verdict.py` at 20 and 40 promoted
+  signals (first review ~mid-October at 1–2 signals/week).
+
 ## 2026-09-11/12 (owner: verify the external drought audit → "Proceed with the suggested changes"; weekly quota governor) — recommendation-drought tranche
 
 - **Verification of the 2026-09-10 external diagnostic** (`runbooks/audit_verification_2026-09-11.md`,

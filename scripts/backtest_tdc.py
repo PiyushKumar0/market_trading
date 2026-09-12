@@ -103,6 +103,26 @@ the subset of sessions where the true index series was used - the proxy's effect
 comparing the two, and no number in this report depends on the reader trusting the proxy.
 
 ===============================================================================================
+ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12 - REPORTING ONLY, selects nothing, wires nothing)
+===============================================================================================
+The 2026-09-11 rebuttal argued that intraday alpha lives in high-beta / high-ATR names and that
+every refuted intraday family was measured on the POOLED NIFTY 200/500 universe. That claim is
+answered here as a SPLIT of the SAME registered result, never as a new rule: no parameter moved, no
+variant was added, no trade was added or removed, and no cell is selected.
+
+* **The statistic.** Wilder ATR(:data:`PARAMS`\\ ``["atr_lookback_sessions"]`` = 14) of DAILY bars
+  over the 14 completed sessions STRICTLY BEFORE the signal day, divided by the close of the last of
+  those sessions, in percent. ``bars_1d`` is read for this and for nothing else in the study.
+* **The cut.** Terciles of the full measured population, taken ONCE over the DISTINCT measured
+  ``(symbol, signal day)`` pairs so a symbol-day sits in the same cell under every variant and the
+  cells compare populations rather than cuts (``scripts/backtest_brk20.py``'s margin-tercile posture,
+  verbatim in force).
+* **DESCRIPTIVE, NOT TRADEABLE.** The cuts are full-sample statistics of the measured population and
+  were unknowable at signal time - exactly the caveat ``hi52`` carries for its smooth/jumpy cut. A
+  symbol-day with fewer than 14 prior daily sessions is labelled ``atr_pct_unclassified`` and kept,
+  never dropped, so the four ATR cells sum to the measured population exactly.
+
+===============================================================================================
 DATA ACCESS
 ===============================================================================================
 Read-only, always (``duckdb.connect(..., read_only=True)``): ``MarketStore.open()`` runs schema DDL
@@ -125,7 +145,7 @@ import statistics
 import sys
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -149,6 +169,7 @@ from engine.core.config import config_dir, repo_root  # noqa: E402
 from engine.learning.validate import cpcv_splits  # noqa: E402
 from engine.marketdata.reconcile import DEFAULT_TICK_SIZE  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
+from engine.strategy.indicators import wilder_atr  # noqa: E402
 
 # ================================================================================================
 # THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from IMPLEMENTATION_PLAN.md, the `tdc`
@@ -181,6 +202,7 @@ PARAMS: dict[str, Any] = {
     # --- splits
     "breadth_trend_day_min": 0.5,      # share of eligible universe above its OR high at T
     "sector_confirm_min_others": 2,    # variant C: OTHER same-sector passers required
+    "atr_lookback_sessions": 14,       # R3 split: DAILY sessions strictly before the signal day
     # --- the plan's promotion rule (a boolean, not a recommendation)
     "promote_min_n": 200,
     "promote_min_t": 2.0,
@@ -220,6 +242,26 @@ SPLIT_REAL_INDEX = "real_nifty50_index_only"
 SPLIT_PLAN_WINDOW = "plan_window_2025_07_10_onward"
 SPLIT_CATALYST_TRUE = "catalyst_at_T_true"
 SPLIT_CATALYST_FALSE = "catalyst_at_T_false"
+SPLIT_ATR_HIGH = "atr_pct_tercile_high"
+SPLIT_ATR_MID = "atr_pct_tercile_mid"
+SPLIT_ATR_LOW = "atr_pct_tercile_low"
+SPLIT_ATR_UNCLASSIFIED = "atr_pct_unclassified"
+
+#: The three ATR% tercile cells, high first (the rebuttal's claim is about the TOP tercile).
+ATR_TERCILE_CELLS: tuple[str, str, str] = (SPLIT_ATR_HIGH, SPLIT_ATR_MID, SPLIT_ATR_LOW)
+#: Those three plus the residue, which is what makes the four cells a partition of the population.
+ATR_REPORT_CELLS: tuple[str, ...] = (*ATR_TERCILE_CELLS, SPLIT_ATR_UNCLASSIFIED)
+
+ATR_SPLIT_DEFINITION = (
+    "Wilder ATR(14) of DAILY bars over the 14 completed sessions STRICTLY BEFORE the signal day, "
+    "divided by the close of the last of those sessions, in percent; terciles cut on the full "
+    "measured population (DESCRIPTIVE, full-sample statistics - unknowable at signal time)"
+)
+
+#: Calendar days of daily-bar warm-up pulled before the first measured signal day. 14 SESSIONS span
+#: at most ~25 calendar days even across a holiday cluster, so this is a wide margin that still keeps
+#: the bars_1d pull to the measured symbols.
+ATR_DAILY_WARMUP_DAYS = 120
 
 #: The plan text's stated 1m floor. The store actually holds 1m bars from 2023-07-17; this date is
 #: kept only so the plan's literal window is reported as its own split cell.
@@ -253,6 +295,10 @@ class Trade:
     catalyst_at_T: bool
     catalyst_split_covered: bool
     sector: str | None = None
+    #: R3 split, stamped AFTER the trade exists (see :func:`stamp_atr_terciles`) - the daily ATR% of
+    #: the sessions before the signal day, and the tercile cell it falls in (None = unclassified).
+    atr_pct: float | None = None
+    atr_cell: str | None = None
 
 
 @dataclass
@@ -559,6 +605,144 @@ def coverage_by_year(conn: duckdb.DuckDBPyConnection, index_symbol: str) -> list
     ]
 
 
+# =============================================================================== daily ATR% split
+def load_daily_ohlc(
+    conn: duckdb.DuckDBPyConnection,
+    symbols: Sequence[str],
+    lo: date,
+    hi: date,
+) -> dict[str, tuple[list[date], list[float], list[float], list[float]]]:
+    """``symbol -> (sessions ascending, high, low, close)`` from ``bars_1d`` over ``[lo, hi]``.
+
+    A separate DAILY relation, loaded only to LABEL each measured symbol-day with the volatility of
+    the sessions before it: no signal, no fill and no cost in this study reads it. Only the measured
+    symbols are fetched. A missing or empty ``bars_1d`` yields an empty map, which sends every trade
+    to the unclassified cell rather than sinking an offline study.
+    """
+    if not symbols:
+        return {}
+    conn.register("tdc_atr_syms", pd.DataFrame({"symbol": sorted(set(symbols))}))
+    try:
+        frame = conn.execute(
+            """
+            SELECT b.symbol AS symbol, b.d AS d, b.high::DOUBLE AS h, b.low::DOUBLE AS l,
+                   b."close"::DOUBLE AS c
+            FROM bars_1d b JOIN tdc_atr_syms s ON s.symbol = b.symbol
+            WHERE b.d >= ? AND b.d <= ?
+            ORDER BY 1, 2
+            """,
+            [lo, hi],
+        ).df()
+    except Exception:  # noqa: BLE001 - a missing bars_1d must not sink an offline study
+        return {}
+    finally:
+        conn.unregister("tdc_atr_syms")
+    out: dict[str, tuple[list[date], list[float], list[float], list[float]]] = {}
+    for sym, grp in frame.groupby("symbol", sort=False):
+        out[str(sym)] = (
+            [x.date() if hasattr(x, "date") else x for x in grp["d"]],
+            grp["h"].astype(float).tolist(),
+            grp["l"].astype(float).tolist(),
+            grp["c"].astype(float).tolist(),
+        )
+    return out
+
+
+def atr_pct_at(
+    daily: tuple[list[date], list[float], list[float], list[float]] | None,
+    d: date,
+    *,
+    lookback: int,
+) -> float | None:
+    """Wilder ATR(``lookback``) over the daily sessions STRICTLY BEFORE ``d``, as a percent of the
+    close of the last of them - or ``None`` when the symbol has fewer than ``lookback`` prior ones.
+
+    LOOK-AHEAD: ``bisect_left`` on the ascending session list lands ON ``d`` when the symbol traded
+    that day, so the window ends at the session before it and the signal day's own range and close
+    are never in the number. Because the window is EXACTLY ``lookback`` sessions the repo's
+    :func:`wilder_atr` is still at its SMA seed, so the value is the mean of those sessions' true
+    ranges. PINNED READING: the earliest bar in the window has no prior close INSIDE it, so its true
+    range is the plain high-low of ``engine.strategy.indicators._true_range``; reaching one session
+    further back to give that bar a gap-aware TR was not computed, so no selection between the two
+    readings took place.
+    """
+    if daily is None:
+        return None
+    days, highs, lows, closes = daily
+    i = bisect_left(days, d)
+    if i < lookback:
+        return None
+    prior_close = float(closes[i - 1])
+    if not math.isfinite(prior_close) or prior_close <= 0.0:
+        return None
+    atr = float(wilder_atr(highs[i - lookback:i], lows[i - lookback:i], closes[i - lookback:i],
+                           lookback).iloc[-1])
+    if not math.isfinite(atr):
+        return None
+    return atr / prior_close * 100.0
+
+
+def atr_tercile_cuts(values: Iterable[float | None]) -> tuple[float, float] | None:
+    """The two cuts of the ATR% tercile split, or ``None`` when fewer than three values are known."""
+    vals = sorted(v for v in values if v is not None and math.isfinite(v))
+    if len(vals) < 3:
+        return None
+    c1, c2 = statistics.quantiles(vals, n=3)
+    return float(c1), float(c2)
+
+
+def atr_tercile_of(atr_pct: float | None, cuts: tuple[float, float] | None) -> str | None:
+    """Which tercile cell ``atr_pct`` falls in. ``<= c1`` low, ``<= c2`` mid, else high - a partition
+    by construction, so the three cells plus the unclassified residue sum to the population."""
+    if cuts is None or atr_pct is None or not math.isfinite(atr_pct):
+        return None
+    c1, c2 = cuts
+    if atr_pct <= c1:
+        return SPLIT_ATR_LOW
+    if atr_pct <= c2:
+        return SPLIT_ATR_MID
+    return SPLIT_ATR_HIGH
+
+
+def stamp_atr_terciles(
+    groups: Iterable[Sequence[Trade]],
+    atr_by_pair: Mapping[tuple[str, date], float | None],
+) -> dict[str, Any]:
+    """Stamp every trade with its symbol-day ATR% and tercile cell; return the split's provenance.
+
+    The cuts are taken ONCE over the DISTINCT measured ``(symbol, signal day)`` pairs, so a
+    symbol-day sits in the same cell under every variant and the cells compare populations rather
+    than cuts. They are full-sample statistics of the measured population, so the split is
+    DESCRIPTIVE - a live rule could not have known them at signal time.
+    """
+    batches = [list(g) for g in groups]
+    pairs = sorted({(t.symbol, t.d) for g in batches for t in g})
+    cuts = atr_tercile_cuts(atr_by_pair.get(p) for p in pairs)
+    counts: dict[str, int] = dict.fromkeys(ATR_REPORT_CELLS, 0)
+    for g in batches:
+        for t in g:
+            t.atr_pct = atr_by_pair.get((t.symbol, t.d))
+            t.atr_cell = atr_tercile_of(t.atr_pct, cuts)
+            counts[t.atr_cell or SPLIT_ATR_UNCLASSIFIED] += 1
+    known = [
+        v for v in (atr_by_pair.get(p) for p in pairs) if v is not None and math.isfinite(v)
+    ]
+    return {
+        "definition": ATR_SPLIT_DEFINITION,
+        "source_table": "bars_1d",
+        "cut_population": "distinct measured (symbol, signal day) pairs",
+        "n_symbol_days": len(pairs),
+        "n_symbol_days_with_atr": len(known),
+        "n_symbol_days_without_atr": len(pairs) - len(known),
+        "cuts": None if cuts is None else [round(cuts[0], 4), round(cuts[1], 4)],
+        "atr_pct_min": round(min(known), 4) if known else None,
+        "atr_pct_median": round(statistics.median(known), 4) if known else None,
+        "atr_pct_max": round(max(known), 4) if known else None,
+        "n_trades_by_cell": counts,
+        "descriptive_not_tradeable": True,
+    }
+
+
 # =============================================================================== rel_volume_tod
 def rvol_medians(
     cumvol: dict[str, dict[date, float]],
@@ -784,13 +968,14 @@ def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
     n = len(net)
     base: dict[str, Any] = {
         "n": n, "mean_net_pct": None, "median_net_pct": None, "win_rate": None,
-        "t_stat": None, "mean_gross_pct": None, "mean_cost_pct": None,
+        "t_stat": None, "mean_gross_pct": None, "median_gross_pct": None, "mean_cost_pct": None,
     }
     if n:
         base["mean_net_pct"] = round(statistics.fmean(net), 4)
         base["median_net_pct"] = round(statistics.median(net), 4)
         base["win_rate"] = round(sum(1 for v in net if v > 0) / n, 4)
         base["mean_gross_pct"] = round(statistics.fmean([t.gross_pct for t in trades]), 4)
+        base["median_gross_pct"] = round(statistics.median([t.gross_pct for t in trades]), 4)
         base["mean_cost_pct"] = round(statistics.fmean([t.cost_pct for t in trades]), 4)
         if n >= 2:
             sd = statistics.stdev(net)
@@ -808,10 +993,14 @@ def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
 
 
 def split_cells(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, list[Trade]]:
-    """Every mandatory split, as named cells. The pooled number is never the only number."""
+    """Every mandatory split, as named cells. The pooled number is never the only number.
+
+    The four ATR% cells (R3, 2026-09-12) are a PARTITION of the same trades: the three terciles plus
+    the symbol-days whose ATR% is not computable, so their counts sum to ``SPLIT_ALL`` exactly.
+    """
     b = float(params["breadth_trend_day_min"])
     cat = [t for t in trades if t.catalyst_split_covered]
-    return {
+    cells = {
         SPLIT_ALL: list(trades),
         SPLIT_INDEX_UP: [t for t in trades if t.index_ret_pct >= 0.0],
         SPLIT_INDEX_DOWN: [t for t in trades if t.index_ret_pct < 0.0],
@@ -822,6 +1011,10 @@ def split_cells(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, li
         SPLIT_CATALYST_TRUE: [t for t in cat if t.catalyst_at_T],
         SPLIT_CATALYST_FALSE: [t for t in cat if not t.catalyst_at_T],
     }
+    for name in ATR_TERCILE_CELLS:
+        cells[name] = [t for t in trades if t.atr_cell == name]
+    cells[SPLIT_ATR_UNCLASSIFIED] = [t for t in trades if t.atr_cell is None]
+    return cells
 
 
 # =============================================================================== the study
@@ -1051,6 +1244,26 @@ def run_study(
                 },
             }
 
+    # ---------------------------------------------------------------- the ATR% tercile split (R3)
+    # Runs AFTER every variant's trades exist and changes none of them: it only labels each trade
+    # with the daily volatility of the sessions BEFORE its signal day. bars_1d is read here and
+    # nowhere else in this study.
+    atr_lookback = int(base["atr_lookback_sessions"])
+    measured_pairs = sorted({(t.symbol, t.d) for v in trades_by_variant.values() for t in v})
+    daily_ohlc = (
+        load_daily_ohlc(
+            conn,
+            [s for s, _ in measured_pairs],
+            min(d for _, d in measured_pairs) - timedelta(days=ATR_DAILY_WARMUP_DAYS),
+            max(d for _, d in measured_pairs),
+        )
+        if measured_pairs else {}
+    )
+    atr_by_pair: dict[tuple[str, date], float | None] = {
+        (s, d): atr_pct_at(daily_ohlc.get(s), d, lookback=atr_lookback) for s, d in measured_pairs
+    }
+    atr_block = stamp_atr_terciles(trades_by_variant.values(), atr_by_pair)
+
     # ---------------------------------------------------------------- notes / caveats
     notes.append(
         "NO PARAMETER SWEEP was run and no variant was selected: PARAMS is one dict, VARIANTS is a "
@@ -1081,6 +1294,23 @@ def run_study(
     notes.append(
         "SURVIVORSHIP: the symbol set is whatever bars_1m holds today (~200 names); names that left "
         "the index or delisted are absent, which biases every cell optimistically."
+    )
+    notes.append(
+        "ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12) IS DESCRIPTIVE, NOT TRADEABLE: "
+        + ATR_SPLIT_DEFINITION
+        + ". It SPLITS the registered result and adds nothing to it - no parameter moved, no variant "
+        "was added, no trade was added or removed and no cell is selected, so it is not a new trial. "
+        f"{atr_block['n_symbol_days_without_atr']} of {atr_block['n_symbol_days']} measured "
+        f"symbol-days lack {atr_lookback} prior daily sessions in bars_1d and sit in "
+        f"'{SPLIT_ATR_UNCLASSIFIED}' rather than being dropped, so the four ATR cells sum to "
+        f"'{SPLIT_ALL}' exactly."
+    )
+    notes.append(
+        "ATR% SURVIVORSHIP runs the SAME way as the price survivorship above and one way further: "
+        "the terciles are cut over the names bars_1m holds TODAY under today's index membership "
+        "applied backwards, so the high-ATR cell holds the SURVIVING high-volatility names, not the "
+        "high-volatility names of the time. A name whose volatility took it out of the universe is "
+        "not in the population at all."
     )
     notes.append(
         "T-STAT OVERSTATES INDEPENDENCE: up to 5 picks share each session and each regime, so the "
@@ -1159,6 +1389,7 @@ def run_study(
                 "last": str(max(real_index_dates)) if real_index_dates else None,
             },
             "catalyst_sources": cat_cov,
+            "atr_pct_tercile_split": atr_block,
         },
         "diagnostics": diagnostics,
         "results": {},
@@ -1294,6 +1525,34 @@ def render_text(doc: dict[str, Any]) -> str:
             share = s["cpcv"]["positive_share"]
             sh = "-" if share is None else f"{share * 100:.0f}%"
             add(f"  {name:<9} | {cell:<30} | {s['n']:>5} | {_f(s['mean_net_pct'], 9)} | "
+                f"{_f(s['median_net_pct'], 9)} | {win:>6} | {_f(s['t_stat'], 7, 2)} | {sh:>5} | "
+                f"{str(s['promotable'])}")
+        add("  " + "-" * 114)
+    add("")
+
+    ab = doc["coverage"]["atr_pct_tercile_split"]
+    add("-" * 118)
+    add("STEP 2B - ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12; DESCRIPTIVE, full-sample cuts)")
+    add("-" * 118)
+    add(f"  definition : {ab['definition']}")
+    add(f"  cuts       : {ab['cuts']}   population: {ab['n_symbol_days']} measured symbol-days, "
+        f"{ab['n_symbol_days_without_atr']} without {m['params']['atr_lookback_sessions']} prior "
+        f"daily sessions")
+    add(f"  ATR% spread: min {ab['atr_pct_min']} / median {ab['atr_pct_median']} / "
+        f"max {ab['atr_pct_max']}")
+    add("")
+    add("  variant   | ATR cell                 |     n | mean gross% |  med gross% | mean net% |"
+        "  med net% |   win% |  t-stat | CPCV+ | promotable")
+    add("  ----------+--------------------------+-------+-------------+-------------+-----------+"
+        "-----------+--------+---------+-------+-----------")
+    for name in doc["results"]:
+        for cell in ATR_REPORT_CELLS:
+            s = doc["results"][name]["splits"][cell]
+            win = "-" if s["win_rate"] is None else f"{s['win_rate'] * 100:.1f}"
+            share = s["cpcv"]["positive_share"]
+            sh = "-" if share is None else f"{share * 100:.0f}%"
+            add(f"  {name:<9} | {cell:<24} | {s['n']:>5} | {_f(s['mean_gross_pct'], 11)} | "
+                f"{_f(s['median_gross_pct'], 11)} | {_f(s['mean_net_pct'], 9)} | "
                 f"{_f(s['median_net_pct'], 9)} | {win:>6} | {_f(s['t_stat'], 7, 2)} | {sh:>5} | "
                 f"{str(s['promotable'])}")
         add("  " + "-" * 114)

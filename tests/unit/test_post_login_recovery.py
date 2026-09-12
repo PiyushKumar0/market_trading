@@ -25,6 +25,7 @@ from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_settings
 from engine.core.enums import Actor, RiskState
 from engine.marketdata.store import MarketStore
+from engine.ops.holdings_reconcile import HoldingsReconcileResult
 from engine.ops.lifecycle import WarmupReapply
 from engine.ops.post_login import PostLoginRecovery, resume_ticker
 from engine.ops.warmup import WarmupStatus
@@ -122,7 +123,7 @@ class _FakeGate:
 
 def _mk_recovery(
     *, instruments, market_store, kite, session, backfill, ticker, lifecycle, clock, calendar,
-    watch=("RELIANCE",), notify=None, alert=None,
+    watch=("RELIANCE",), notify=None, alert=None, holdings_reconcile=None,
 ) -> PostLoginRecovery:
     def ticker_tokens() -> list[int]:
         out = []
@@ -137,6 +138,7 @@ def _mk_recovery(
         calendar=calendar, settings=load_settings(), backfill=backfill, ticker=ticker,
         lifecycle=lifecycle, ticker_tokens=ticker_tokens, watchlist_symbols=lambda: list(watch),
         index_symbol="NIFTY 50", vix_symbol="INDIA VIX", notify=notify, alert=alert,
+        holdings_reconcile=holdings_reconcile,
     )
 
 
@@ -266,6 +268,53 @@ async def test_step_failure_isolated_others_still_run(market_store, clock, calen
     assert by["ticker"].status == "ok" and ticker.started is not None   # ran AFTER the failed backfill
     assert report.any_failed is True and report.ok is False
     assert any("backfill" in msg for _sev, msg in alerts)
+
+
+class _FakeHoldingsReconcile:
+    """Duck-typed ``HoldingsReconcileJob.run`` surface — the step only reads the result."""
+
+    def __init__(self, result: HoldingsReconcileResult) -> None:
+        self._result = result
+        self.calls = 0
+
+    async def run(self) -> HoldingsReconcileResult:
+        self.calls += 1
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_holdings_step_reports_how_many_observations_were_journalled(
+    market_store, clock, calendar
+):
+    """WO-D2 residue: ``observed`` is how many §3.6 journal rows the run actually WROTE, and this
+    ladder calls the job unconditionally — only the hourly tick is window-gated. So checked=3 with
+    observed=0 is a non-trading-day boot that grew no "sold outside the ledger" evidence, which
+    ``checked`` alone cannot say."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+
+    async def _holdings_step(result: HoldingsReconcileResult):
+        job = _FakeHoldingsReconcile(result)
+        rec = _mk_recovery(
+            instruments=instruments, market_store=market_store, kite=None,
+            session=FakeSession(valid=True), backfill=FakeBackfill(), ticker=FakeTicker(),
+            lifecycle=FakeLifecycle(WarmupReapply(ready=True, lifted=True, outcome="ready_lifted")),
+            clock=clock, calendar=calendar, holdings_reconcile=job,
+        )
+        report = await rec.run()
+        assert job.calls == 1                      # last in the ladder, and it ran
+        return {s.name: s for s in report.steps}["holdings"]
+
+    journalled = await _holdings_step(
+        HoldingsReconcileResult(checked=3, flagged=["pos-1"], skipped_young=1, observed=3)
+    )
+    assert journalled.status == "ok"
+    assert journalled.detail == "checked=3 flagged=1 skipped_young=1 observed=3"
+
+    weekend = await _holdings_step(
+        HoldingsReconcileResult(checked=3, flagged=[], skipped_young=0, observed=0)
+    )
+    assert weekend.status == "ok" and weekend.detail == "checked=3 flagged=0 skipped_young=0 observed=0"
 
 
 # ------------------------------------ the ``completed`` gate (§2.6 early hydration, 2026-09-09)
