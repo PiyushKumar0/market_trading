@@ -51,6 +51,11 @@
   old empty state. The vectorbt claims behind the M correction were read in
   `.venv/.../vectorbt/portfolio/nb.py` (stop check ~2025–2034 precedes the ratchet ~2046–2051), not
   taken from the reviewer. `config/limits.yaml` untouched (loader parses gap 2.5 / cap 8000).
+- **Deploy:** committed as `c60a527` (31 files); clock re-observed 12:57 Sun (no session);
+  `Start-Service mt-engine` 12:57, boot verified from the log — self-test all PASS incl.
+  `protected_store:limits.yaml` / `envelope.yaml`, `startup_report` NORMAL / nothing frozen,
+  `engine_ready` 12:58:12, no ERROR/CRITICAL; `warmup_intraday_ready` logged once as a first
+  observation with no owner notice (Sunday: no session, the new day-scoped memo behaving as designed).
 - **Config applied on this restart:** none beyond code; O17 awaits the owner's reseed.
 
 ## 2026-09-12 evening (owner: "Proceed with the rest of the recommended changes that you deem will improve the engine's performance") — tranche 2: hi52 promoted as a forward test, brk20 retest re-arm, insider-feed coverage, intraday fade/ATR refutations
