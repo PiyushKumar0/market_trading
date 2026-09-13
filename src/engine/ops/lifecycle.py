@@ -24,8 +24,10 @@ Phase-1 shape of the §2.6 sequence (steps that are OMS/broker-side land in Phas
 5. Missed-job catch-up — :class:`engine.ops.jobs.CatchUpRunner` (per-job ``job_runs`` watermarks,
    §2.6 step 5 classes); safety-critical failures ⇒ FROZEN-for-entries.
 6. Cold-start warm-up gate (§7.1 ``warmup_ready``/``regime_data_ready``) — the injected
-   :class:`~engine.ops.warmup.WarmupGate` answers; this class applies the consequence: FROZEN via
-   the risk-state setter + ``WARMUP_FROZEN`` alert. Never trade on thin data.
+   :class:`~engine.ops.warmup.WarmupGate` answers; this class applies the consequence PER COVERAGE
+   CLASS (2026-09-13 plan change): a DAILY or REGIME shortfall is FROZEN via the risk-state setter +
+   ``WARMUP_FROZEN`` alert, an INTRADAY-only shortfall is logged and left to the per-candidate rules
+   (risk gate + pre-screen) — the daily-bar legs read no 1-minute bar. Never trade on thin data.
 7. Re-arm schedules + resume the ticker (WARMING — feed-stale alarms suppressed, §3.2.12) and send
    the startup/recovery report.
 
@@ -41,7 +43,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -62,6 +64,7 @@ from engine.ops.jobs import (  # noqa: F401  (CatchUpRunner re-exported: §3.2.1
     CatchUpRunner,
 )
 from engine.ops.selftest import SelfTest, SelfTestReport
+from engine.ops.warmup import CLASS_INTRADAY, blocker_class, classify_blockers
 
 _log = get_logger("engine.ops.lifecycle")
 
@@ -72,6 +75,31 @@ LifecycleNotify = Callable[[CatalogMessage], Awaitable[None]]   # typed process-
 #: Unclean boots within ``lifecycle.crashloop_window_s`` before ENGINE_STARTED coalesces into one
 #: ENGINE_CRASHLOOP (§2.2 — spec-silent threshold, resolved here: 3rd fast respawn trips the alarm).
 CRASHLOOP_MIN_BOOTS = 3
+
+
+#: A not-ready warm-up answer that rendered NO blocker at all. The shipped gate cannot produce it
+#: (``status()`` sets ``ready = not blockers``), but the gate seam is duck-typed, and a shortfall
+#: nobody attributed must not read as "intraday-only" and skip the freeze — it is normalised into a
+#: rendered blocker so it classifies UNKNOWN and travels the fail-closed path like any other.
+_UNATTRIBUTED_BLOCKER = "warmup not ready — no blocker rendered"
+
+
+def _freezes_entries(blockers: Sequence[str]) -> bool:
+    """Does this shortfall still drive the GLOBAL FROZEN-for-entries (§2.6 step 6, narrowed
+    2026-09-13)? True for every class except INTRADAY — daily, regime, and any blocker whose class
+    cannot be told from its rendering (unattributable coverage freezes, R6). False ⇒ the shortfall is
+    intraday-only and the risk state is not this gate's business."""
+    if not blockers:
+        return True                    # not ready for a reason nobody named ⇒ never the open side
+    return any(blocker_class(b) != CLASS_INTRADAY for b in blockers)
+
+
+def _rendered_blockers(status) -> list[str]:
+    """The not-ready blocker lines to act on. ``None`` status = the gate RAISED (coverage could not
+    be verified); an empty list = it answered not-ready without saying why. Both are unattributable
+    and both freeze — the class scoping may only ever narrow a shortfall it can NAME."""
+    blockers = list(status.blockers) if status is not None else ["warmup check failed"]
+    return blockers or [_UNATTRIBUTED_BLOCKER]
 
 
 class SingleInstanceError(RuntimeError):
@@ -100,6 +128,10 @@ class StartupReport(BaseModel):
     jobs_failed: list[str] = Field(default_factory=list)
     warmup_blockers: list[str] = Field(default_factory=list)
     warmup_young_excluded: list[str] = Field(default_factory=list)  # young listings off the lookback gate
+    #: Warm-up COVERAGE CLASSES short at boot, sorted (``intraday``/``daily``/``regime``/``unknown``).
+    #: Only daily/regime/unknown freeze entries (2026-09-13); the field says which class was short
+    #: whether or not it froze, so "entries are open with intraday coverage short" is never silent.
+    warmup_classes_short: list[str] = Field(default_factory=list)
     deferred_steps: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -107,14 +139,20 @@ class StartupReport(BaseModel):
 class WarmupReapply(BaseModel):
     """Outcome of a post-login :meth:`SessionLifecycle.reapply_warmup_gate` (§2.6 cold-start RE-TRIGGER).
 
-    ``outcome`` is one of ``deferred`` (no gate wired), ``frozen`` (coverage still short — re-frozen),
-    or ``ready_<why>`` where ``why`` ∈ {``lifted`` (freeze cleared), ``already_normal``, ``kill_held``,
-    ``latched`` (CLOSE_ONLY/KILLED — owner re-arm only), ``other_freeze`` (a non-warm-up precondition
-    still stands)}."""
+    ``outcome`` is one of ``deferred`` (no gate wired), ``frozen`` (a freezing class still short —
+    re-frozen), ``ready_<why>`` (every class covered), or ``intraday_short_<why>`` (2026-09-13: the
+    freezing classes are covered and the freeze is resolved, with the INTRADAY class still short —
+    intraday candidates keep being refused per-candidate). ``why`` ∈ {``lifted`` (freeze cleared),
+    ``already_normal``, ``kill_held``, ``latched`` (CLOSE_ONLY/KILLED — owner re-arm only),
+    ``other_freeze`` (a non-warm-up precondition still stands)}.
+
+    ``ready`` keeps the whole-gate meaning (no blockers in ANY class), so an intraday-short lift
+    reports ``ready=False, lifted=True`` — never "ready" with coverage missing."""
 
     ready: bool
     blockers: list[str] = Field(default_factory=list)
     young_excluded: list[str] = Field(default_factory=list)
+    classes_short: list[str] = Field(default_factory=list)   # sorted coverage classes still short
     froze: bool = False
     lifted: bool = False
     outcome: str = ""
@@ -514,9 +552,15 @@ class SessionLifecycle:
 
     # ----------------------------------------------------------------- warm-up gate (§2.6 step 6)
     async def _apply_warmup_gate(self, report: StartupReport) -> None:
-        """§2.6 step 6 (startup): FREEZE-when-not-ready. Startup never LIFTS here — the other startup
-        steps own their own freezes, so the composite FROZEN must stand while any reason holds; the
-        reopen once coverage is met is the post-login re-trigger's job (:meth:`reapply_warmup_gate`)."""
+        """§2.6 step 6 (startup): FREEZE-when-not-ready, per coverage class. Startup never LIFTS here
+        — the other startup steps own their own freezes, so the composite FROZEN must stand while any
+        reason holds; the reopen once coverage is met is the post-login re-trigger's job
+        (:meth:`reapply_warmup_gate`).
+
+        2026-09-13 plan change (§2.6 step-6 addendum): only the DAILY and REGIME classes (plus any
+        UNATTRIBUTABLE blocker) freeze entries. An INTRADAY-only shortfall — one symbol's minute hole,
+        a market-wide one-bar gap after a reconnect — used to freeze brk20/hi52/ins/cat, which read
+        completed daily bars only; it is now logged and left to the per-candidate rules."""
         if self._warmup_gate is None:
             report.deferred_steps.append("warmup_gate")
             _log.info("startup_step_deferred", step="warmup_gate")
@@ -528,10 +572,21 @@ class SessionLifecycle:
         if status is not None and status.ready:
             report.notes.append("warmup_ready")
             return
-        blockers = list(status.blockers) if status is not None else ["warmup check failed"]
-        report.frozen_reasons.append("warmup_ready")
+        blockers = _rendered_blockers(status)
         report.warmup_blockers = blockers
-        await self._freeze_for_warmup(blockers)
+        report.warmup_classes_short = sorted(classify_blockers(blockers))
+        if _freezes_entries(blockers):
+            report.frozen_reasons.append("warmup_ready")
+            await self._freeze_for_warmup(blockers)
+            return
+        # INTRADAY-only: no risk-state consequence and no WARMUP_FROZEN page (nothing froze), but
+        # never silent — ``warmup_classes_short`` rides the OWNER's STARTUP_REPORT body (see
+        # :meth:`_emit_report`), not only this log, because a session trading on incomplete minute
+        # coverage with `frozen: none` is exactly the silence the step-5 addendum was written against.
+        # The gate and the pre-screen refuse intraday candidates one by one.
+        report.notes.append("warmup_intraday_not_ready")
+        _log.warning("warmup_intraday_not_ready", blockers=blockers, frozen=False,
+                     note="daily + regime coverage met — entries stay open for the daily-bar legs")
 
     async def _warmup_gate_status(self):
         """Query the injected warm-up gate; a raise means coverage cannot be VERIFIED ⇒ treated as
@@ -544,36 +599,52 @@ class SessionLifecycle:
 
     async def _freeze_for_warmup(self, blockers: list[str]) -> bool:
         """Never trade on thin data: FROZEN-for-entries via the risk-state setter + WARMUP_FROZEN alert
-        (§2.6 step 6). Shared by startup step 6 and the post-login reapply. Entries reopen only once
-        coverage is met (the gate is re-checked before entries open). Returns True if this call
-        transitioned the state to FROZEN (it was not already)."""
+        (§2.6 step 6). Shared by startup step 6 and the post-login reapply, and called ONLY when a
+        freezing class (daily/regime/unattributable) is short — the caller owns that decision. Entries
+        reopen only once coverage is met (the gate is re-checked before entries open). Returns True if
+        this call transitioned the state to FROZEN (it was not already)."""
         froze = False
         if not self._kill.is_killed():
             before = self._mode.risk_state()
             await self._freeze("warmup_ready", "warmup_ready")
             froze = before != RiskState.FROZEN and self._mode.risk_state() == RiskState.FROZEN
-        await self._notify_safe(catalog.warmup_frozen(blockers=blockers), "warmup_frozen")
+        # The class summary leads the alert (its own field, never smuggled into ``blockers``): which
+        # coverage class froze entries is the first thing the owner needs, and an intraday line riding
+        # along in the same freeze must not read as the cause.
+        await self._notify_safe(
+            catalog.warmup_frozen(blockers=blockers, classes=sorted(classify_blockers(blockers))),
+            "warmup_frozen",
+        )
         return froze
 
     async def reapply_warmup_gate(self) -> WarmupReapply:
         """Post-login re-evaluation of the §2.6 step-6 warm-up gate — the RE-TRIGGER half of the
         cold-start-family fix. Uses the SAME injected :class:`~engine.ops.warmup.WarmupGate` and the
-        SAME risk-state seam as startup (never a direct bypass): FREEZE while coverage is still short,
-        and LIFT the warm-up FROZEN-for-entries once coverage is met — conservatively (see
-        :meth:`_maybe_lift_warmup_freeze`). Called by
+        SAME risk-state seam as startup (never a direct bypass): FREEZE while a FREEZING class (daily /
+        regime / unattributable) is still short, and LIFT the warm-up FROZEN-for-entries once those
+        classes are covered — conservatively (see :meth:`_maybe_lift_warmup_freeze`), and since
+        2026-09-13 even with the INTRADAY class still short. Called by
         :class:`~engine.ops.post_login.PostLoginRecovery`."""
         if self._warmup_gate is None:
             _log.info("warmup_reapply_deferred", reason="no warmup gate wired")
             return WarmupReapply(ready=False, outcome="deferred")
         status = await self._warmup_gate_status()
         young = list(getattr(status, "young_excluded", []) or [])
-        if status is not None and status.ready:
+        ready = bool(status is not None and status.ready)
+        blockers = [] if ready else _rendered_blockers(status)
+        classes = sorted(classify_blockers(blockers))
+        # 2026-09-13: the LIFT is owed to the freezing classes alone — an intraday hole must not hold
+        # the daily-bar legs frozen for the rest of the session (09-04 11:09, 09-09 14:47). The
+        # intraday blockers still ride the result, so post-login detail keeps naming them.
+        if ready or not _freezes_entries(blockers):
             lifted, why = await self._maybe_lift_warmup_freeze()
-            return WarmupReapply(ready=True, young_excluded=young, lifted=lifted, outcome=f"ready_{why}")
-        blockers = list(status.blockers) if status is not None else ["warmup check failed"]
+            outcome = f"ready_{why}" if ready else f"intraday_short_{why}"
+            return WarmupReapply(ready=ready, blockers=blockers, young_excluded=young,
+                                 classes_short=classes, lifted=lifted, outcome=outcome)
         froze = await self._freeze_for_warmup(blockers)
         return WarmupReapply(
-            ready=False, blockers=blockers, young_excluded=young, froze=froze, outcome="frozen"
+            ready=False, blockers=blockers, young_excluded=young, classes_short=classes,
+            froze=froze, outcome="frozen",
         )
 
     async def _maybe_lift_warmup_freeze(self) -> tuple[bool, str]:
@@ -638,6 +709,7 @@ class SessionLifecycle:
             crash_recovered=report.crash_recovered, off_duration_s=report.off_duration_s,
             jobs_caught_up=report.jobs_caught_up, jobs_failed=report.jobs_failed,
             frozen=report.frozen_reasons, warmup_blockers=report.warmup_blockers,
+            warmup_classes_short=report.warmup_classes_short,
             warmup_young_excluded=report.warmup_young_excluded,
             deferred=report.deferred_steps,
         )
@@ -648,6 +720,11 @@ class SessionLifecycle:
             needs_login=report.needs_login, integrity_ok=report.integrity_ok,
             crash_recovered=report.crash_recovered, prior_state=report.prior_state,
             frozen_reasons=report.frozen_reasons, deferred_steps=report.deferred_steps,
+            # 2026-09-13: an INTRADAY-only shortfall adds NO ``frozen:`` reason and sends no
+            # WARMUP_FROZEN page, so without this line the owner's only boot-time notice that the
+            # session runs on incomplete minute coverage would be a structured log they never see.
+            warmup_classes_short=report.warmup_classes_short,
+            warmup_blockers=report.warmup_blockers,
         )
         # Prefer the typed notification sink so the owner gets a clean STARTUP_REPORT; fall back to
         # the raw alert string only if no notify sink is wired (message carries its own severity).

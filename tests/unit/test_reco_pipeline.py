@@ -23,6 +23,7 @@ import random
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -352,7 +353,7 @@ async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandid
 def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
     mode=None, kill=None, notify=None, assembler=None, rearm=None, funnel_raw=None,
-    claim_slot=None, take_displaced=None, decline=None, ltp_fn=None,
+    claim_slot=None, take_displaced=None, decline=None, ltp_fn=None, warmup_status_fn=None,
     admission_mode="ranked", forward_drain_mode="paced",
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
@@ -372,7 +373,7 @@ def make_pipeline(
         parts["mode"], parts["kill"], parts["governor"], parts["exposure"], limits,
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
         funnel_raw=funnel_raw, claim_slot=claim_slot, take_displaced=take_displaced,
-        decline=decline, ltp_fn=ltp_fn,
+        decline=decline, ltp_fn=ltp_fn, warmup_status_fn=warmup_status_fn,
         admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
     )
     return pipeline, parts
@@ -596,6 +597,72 @@ async def test_never_evaluated_drops_rearm_the_slot(
     assert len(rearmed) == 1                                  # mode OFF â†’ slot back
 
 
+async def test_intraday_warmup_shortfall_rearms_without_spending_an_analyst_call(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-09-13 per-class warm-up (§2.6 step-6 addendum). The risk state no longer freezes on an
+    intraday-only coverage hole, so the refusal is per candidate — and it happens BEFORE the analyst
+    call, because the gate would reject the proposal on ``warmup_ready`` after the call was spent.
+    The day slot goes back (never evaluated; a minute hole heals mid-session), and the daily-class
+    candidate riding the SAME snapshot is forwarded: the whole point of the change."""
+    from engine.ops.warmup import WarmupStatus
+
+    intraday_hole = WarmupStatus(ready=False, blockers=["orb:RELIANCE bars 113/114"])
+    rearmed: list[tuple[str, str]] = []
+
+    harness = FakeHarness()          # asserts if called: the analyst must not be reached at all
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), warmup_status_fn=lambda: intraday_hole,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    cand = candidate()
+    await publish_candidate(pipeline, cand)
+    assert harness.calls == []
+    assert rearmed == [(cand.symbol, cand.strategy_id)]
+
+    # Same snapshot, same tick: the swing leg reads completed daily bars and is NOT this screen's
+    # business, so it reaches the analyst.
+    rearmed.clear()
+    swing_harness = FakeHarness(dict(NO_ACTION_JSON))
+    swing_pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=swing_harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), warmup_status_fn=lambda: intraday_hole,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    await publish_candidate(swing_pipeline, candidate(style="swing", strategy_id="brk20"))
+    assert len(swing_harness.calls) == 1
+    assert rearmed == []
+
+
+async def test_intraday_warmup_screen_is_silent_when_it_cannot_answer(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The screen is a cost optimisation, never the enforcement (the GATE fails closed on the same
+    snapshot), so every case it cannot answer fails OPEN — one wasted analyst call at worst, never a
+    lost candidate. Unwired seam, a status with no per-class answer, a raising seam, and a covered
+    intraday class all let the candidate through."""
+    from engine.ops.warmup import WarmupStatus
+
+    def boom():
+        raise RuntimeError("snapshot holder went away")
+
+    for status_fn in (None,
+                      lambda: SimpleNamespace(ready=False, blockers=["orb:RELIANCE bars 1/50"]),
+                      boom,
+                      lambda: WarmupStatus(ready=True)):
+        harness = FakeHarness(dict(NO_ACTION_JSON))
+        pipeline, _ = make_pipeline(
+            conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+            gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+            limits=StubLimits(limit_table), warmup_status_fn=status_fn,
+        )
+        await publish_candidate(pipeline, candidate())
+        assert len(harness.calls) == 1, status_fn
+
+
 async def test_day_slot_journal_and_rehydration_round_trip(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
@@ -686,6 +753,158 @@ async def test_swing_max_qty_charges_the_overnight_gap_mult_like_the_gate(
     assert pipeline._max_qty_by_risk(swing) == expected_swing
     assert pipeline._max_qty_by_risk(intraday) == expected_intraday
     assert gap > 1 and expected_swing < expected_intraday
+
+
+def _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model):
+    """A pipeline built for _ttl arithmetic only — no harness call is made by any of these."""
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+    )
+    return pipeline
+
+
+def _horizon_calendar(tmp_path: Path, pclock: Clock, conn) -> NSECalendar:
+    """A calendar whose verified horizon the TEST owns: 2026 and nothing else.
+
+    The fallback branch is reached by running off the END of the loaded calendars, and pointing that
+    probe at the repo's ``config/calendar`` would make these tests fail the routine December morning
+    someone adds ``2027.yaml``. Copying one year into ``tmp_path`` keeps the trigger condition
+    permanent and local."""
+    (tmp_path / "2026.yaml").write_text(
+        (CALENDAR_DIR / "2026.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return NSECalendar(tmp_path, pclock, sqlite_conn=conn)
+
+
+async def test_ttl_swing_entry_is_the_next_trading_session_close_across_a_weekend(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """WO-V (2026-09-13): a swing/position ENTRY rec used to die at today's 15:30 -- the month's only
+    ins entry (JINDALSTEL, 2026-09-08) expired unactioned that same afternoon, and an ins crossing is
+    consumed once. _ttl(entry=True) now names the close of the NEXT trading session, using the real
+    config/calendar data the pipeline is wired to: Friday 2026-06-19 to Monday 2026-06-22, the
+    weekend skipped."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
+    assert pipeline._ttl("swing", entry=True) == datetime(2026, 6, 22, 15, 30, tzinfo=IST)
+
+
+async def test_ttl_swing_entry_is_the_next_trading_session_close_across_a_holiday(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """Same rule, a holiday instead of a weekend: Monday 2026-03-02 to Wednesday 2026-03-04, with
+    Tuesday 2026-03-03 (Holi, config/calendar/2026.yaml) skipped."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 3, 2, 10, 5, tzinfo=IST)               # Monday, a trading day
+    assert pipeline._ttl("swing", entry=True) == datetime(2026, 3, 4, 15, 30, tzinfo=IST)
+
+
+async def test_ttl_position_entry_gets_the_same_next_session_close_as_swing(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """"position" is treated identically to "swing" in _ttl -- both are simply "not intraday"."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
+    assert pipeline._ttl("position", entry=True) == datetime(2026, 6, 22, 15, 30, tzinfo=IST)
+
+
+async def test_ttl_entry_walks_past_a_muhurat_special_session(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """The "next trading session" the owner can actually act in. NSECalendar counts the Diwali
+    muhurat as a trading day (it is one), so the raw next session after Friday 2026-11-06 is the
+    SUNDAY special session, ~1h long and carried in config/calendar/2026.yaml as an unverified
+    placeholder time -- an entry stamped to it would be dead before Monday opened, which is the one
+    Friday a year where WO-V's second session is worth the most. The probes below pin the calendar
+    fact the rule is reacting to, so this test says why it exists if the calendar ever changes."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    assert calendar.next_trading_day(date(2026, 11, 6)) == date(2026, 11, 8)
+    assert calendar.session(date(2026, 11, 8)).is_muhurat
+
+    ticker.at = datetime(2026, 11, 6, 10, 5, tzinfo=IST)              # Friday, a trading day
+    assert pipeline._ttl("swing", entry=True) == datetime(2026, 11, 9, 15, 30, tzinfo=IST)
+
+
+async def test_ttl_intraday_is_unchanged_by_the_next_session_rule(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """WO-V touches only swing/position. An intraday entry still expires TTL_INTRADAY_MIN minutes out
+    even when minted five minutes before a Friday close, where a next-session lookup would otherwise
+    put valid_until three days out."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 6, 19, 15, 25, tzinfo=IST)             # 5 minutes before Friday close
+    assert pipeline._ttl("intraday", entry=True) == ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
+    assert pipeline._ttl("intraday") == ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
+
+
+async def test_ttl_without_entry_keeps_todays_close_for_exits_and_the_forward_queue(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """WO-V is scoped to ENTRY recommendations, and _ttl is keyed on style, so the scope lives in the
+    ``entry=`` flag: an exit, a stop adjust and the §5.2(a) forward-queue horizon all keep TODAY's
+    close. WO-D2's one-exit-per-session cadence depends on it (``_delivered_exit_today`` screens
+    today's deliveries only), and the forward queue is a within-day structure."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
+    assert pipeline._ttl("swing") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
+    assert pipeline._ttl("position") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
+
+
+async def test_a_swing_exit_recommendation_is_still_stamped_to_todays_close(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """The same scope line end to end, on the delivered payload rather than the seam. Two live exit
+    recs naming two different stops for one position is what a shared two-session TTL would put in
+    front of the owner, because the WO-D2 repeat screen is bounded by today's ``delivered_at``."""
+    position_id = _open_position(conn, pclock, style="swing")
+    ticker.at = datetime(2026, 6, 19, 11, 0, tzinfo=IST)              # Friday, a trading day
+    pipeline, _ = _exit_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model,
+        FakeHarness(_exit_json(position_id)), position_id,
+    )
+
+    await pipeline.on_bar(_near_bar())
+
+    payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()["payload"])
+    assert payload["kind"] == "exit"
+    assert payload["valid_until"] == datetime(2026, 6, 19, 15, 30, tzinfo=IST).isoformat()
+
+
+async def test_ttl_entry_falls_back_to_todays_close_past_the_calendar_horizon(
+    conn, pclock, ticker, book, limit_table, cost_model, tmp_path, caplog
+):
+    """Past the loaded calendar's verified horizon (R6) there is no KNOWN next session, so the entry
+    TTL degrades to the one session the calendar can still vouch for -- and says so, because a
+    silent degradation makes every swing entry one session shorter with nothing in the log."""
+    calendar = _horizon_calendar(tmp_path, pclock, conn)
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 12, 31, 10, 5, tzinfo=IST)             # last day this calendar knows
+    with pytest.raises(ValueError):
+        calendar.next_trading_day(date(2026, 12, 31))
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert pipeline._ttl("swing", entry=True) == datetime(2026, 12, 31, 15, 30, tzinfo=IST)
+
+    assert len(log_events(caplog, "next_trading_session_unresolved")) == 1
+
+
+async def test_ttl_never_mints_an_already_dead_stamp(
+    conn, pclock, ticker, book, limit_table, cost_model, tmp_path
+):
+    """The floor WO-V must not cost. ``on_bar`` is never window-gated, so a stop-proximity event in
+    the 15:30-15:45 settlement buffer reaches _ttl after the close -- and on the horizon day the
+    entry branch lands on TODAY's session too. A ``valid_until`` at or before now is rejected by the
+    gate's own envelope check (``_rule_proposal_stale``, "expired/unstamped proposal - fail
+    closed"), so a dead stamp would silently swallow a risk-reducing exit the owner should have
+    seen; both branches fall back to the intraday TTL instead."""
+    calendar = _horizon_calendar(tmp_path, pclock, conn)
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 12, 31, 15, 40, tzinfo=IST)            # past the 15:30 close
+    floor = ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
+    assert pipeline._ttl("swing", entry=True) == floor
+    assert pipeline._ttl("swing") == floor
 
 
 async def test_stopless_candidate_never_reaches_the_analyst(
@@ -965,6 +1184,64 @@ async def test_an_expired_recommendation_still_accepts_the_owners_taken(
     )
     with pytest.raises(ValueError, match="already 'dismissed'"):
         await book.take(rec.rec_id, 3, Decimal("101.50"))
+
+
+async def test_a_gapped_fill_is_recorded_and_the_stop_risk_drift_is_called_out(
+    conn, ticker, pclock, book, cost_model, caplog
+):
+    """WO-V's second accepted cost, made visible where it lands — and judged on the gate's OWN basis
+    (re-review 2026-09-13). A swing entry rec stays actionable into the NEXT session and nothing
+    re-gates at capture: the position row is written with the RECOMMENDATION's stop. But the gate
+    sized that swing on overnight_gap_mult x the stop distance (_rule_per_trade_risk), so a fill
+    anywhere inside that allowance carries stop risk the per_trade_risk verdict ALREADY approved and
+    is silent; the call-out fires only once the approved budget is genuinely exceeded. The fill is
+    recorded regardless — the owner is the authority on what they executed and an untracked live
+    position is the worse failure — and the drift is said in the reply and at WARNING in the log.
+    A fill anywhere INSIDE the delivered zone is never called out; a fill on the WRONG SIDE of the
+    stop is called out unconditionally. Zone 1000-1020, stop 940: planned 80/share; gap 2.5 ⇒ 200."""
+    gated = RecommendationBook(conn, pclock, cost_model, overnight_gap_mult_fn=lambda: Decimal("2.5"))
+
+    def swing_rec():
+        return make_rec(
+            cost_model, style="swing", product="CNC", entry_zone=(Decimal("1000"), Decimal("1020")),
+            stop=Decimal("940"), targets=[Decimal("1100")], qty=13, notional=Decimal("13000"),
+        )
+
+    # 1080: 140/share = 1.75x planned — INSIDE the 2.5x overnight-gap allowance the verdict sized on.
+    inside_gap = swing_rec()
+    gated.deliver(inside_gap, ledger_fields=dict(LEDGER_FIELDS))
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert "CHECK" not in await gated.take(inside_gap.rec_id, 13, Decimal("1080"))
+    assert log_events(caplog, "recommendation_taken_off_zone") == []
+
+    # 1150: 210/share > the 200 approved — 13 x 210 = ₹2,730 of stop risk against ₹2,600 approved.
+    gapped = swing_rec()
+    gated.deliver(gapped, ledger_fields=dict(LEDGER_FIELDS))
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        summary = await gated.take(gapped.rec_id, 13, Decimal("1150"))
+    assert "recorded" in summary and "CHECK THE SIZE" in summary
+    assert "2730.00" in summary and "2600.00" in summary and "2.5x" in summary
+    assert len(log_events(caplog, "recommendation_taken_off_zone")) == 1
+    position = conn.execute("SELECT * FROM positions WHERE avg_entry='1150'").fetchone()
+    assert position["stop"] == "940"   # copied verbatim
+
+    # Wrong side: a BUY filled at or below its stop — the gap went THROUGH the stop.
+    through = swing_rec()
+    gated.deliver(through, ledger_fields=dict(LEDGER_FIELDS))
+    summary = await gated.take(through.rec_id, 13, Decimal("930"))
+    assert "recorded" in summary and "WRONG SIDE" in summary and "CHECK THE SIZE" not in summary
+
+    # Inside the delivered zone: never called out.
+    inside = swing_rec()
+    gated.deliver(inside, ledger_fields=dict(LEDGER_FIELDS))
+    assert "CHECK" not in await gated.take(inside.rec_id, 13, Decimal("1020"))
+
+    # A book wired WITHOUT the limits seam keeps the 1.25x fallback: 1080 (1.75x) IS called out there,
+    # against the plain zone-edge distance, with no gap multiple quoted.
+    fallback = swing_rec()
+    book.deliver(fallback, ledger_fields=dict(LEDGER_FIELDS))
+    summary = await book.take(fallback.rec_id, 13, Decimal("1080"))
+    assert "CHECK THE SIZE" in summary and "1820.00" in summary and "2.5x" not in summary
 
 
 # =========================================================================== the ledger matrix (Â§3.6)
@@ -1957,7 +2234,7 @@ async def test_queued_candidate_expires_instead_of_going_stale(
 
 # ============================================== 2026-08-14: the PACED drain (the WO-1 ranking's teeth)
 def paced_pipeline(conn, pclock, calendar, book, limit_table, cost_model, *, cap, results=6,
-                   rearm=None, prescreen=None):
+                   rearm=None, prescreen=None, warmup_status_fn=None):
     """A ranked+paced pipeline whose forward cap the test can move, with canned analyst declines.
 
     ``prescreen`` wires the whole §3.2.5 admission seam at once (2026-08-27) — the ``rearm`` callback
@@ -1973,6 +2250,7 @@ def paced_pipeline(conn, pclock, calendar, book, limit_table, cost_model, *, cap
         rearm=rearm if prescreen is None else prescreen.rearm,
         claim_slot=None if prescreen is None else prescreen.claim_slot,
         take_displaced=None if prescreen is None else prescreen.take_displaced,
+        warmup_status_fn=warmup_status_fn,
     )
     return pipeline, parts, harness, gov
 
@@ -2044,6 +2322,71 @@ async def test_the_drain_spends_one_slot_per_pacing_interval(
     assert await pipeline.drain_forward_queue() is True
     assert len(harness.calls) == 3
     assert pipeline._pending_forwards == []
+
+
+async def test_an_intraday_hole_that_opens_after_a_candidate_is_queued_costs_no_analyst_call(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """2026-09-13 per-class warm-up, at the OTHER commit point. The arrival screen cannot see this:
+    under the default paced drain the candidate is queued while coverage is complete and dispatched
+    minutes later — and a reconnect can open a market-wide one-bar hole in between (09-09 14:47).
+    Since that no longer freezes the risk state, the drain would pass mode/risk/kill/window/governor,
+    claim the §3.2.5 admission slot and spend a §5.2(a) forward slot on a call the gate then rejects
+    on ``warmup_ready`` — a charge that bought a verdict, so D1 (c) refunds nothing.
+
+    The screen therefore runs at :meth:`_take_forward_slot`, in the D1 (e) band screen's idiom:
+    DEFER, never drop. ``orb`` publishes once a day, so re-arming it out of the queue would silence
+    the level for the session; coverage heals mid-session and the queued candidate is still there."""
+    from engine.ops.warmup import WarmupStatus
+
+    snapshot = {"status": WarmupStatus(ready=True)}
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        warmup_status_fn=lambda: snapshot["status"])
+
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="QUEUED", score=0.9))
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["QUEUED"]
+
+    snapshot["status"] = WarmupStatus(ready=False, blockers=["orb:TCS bars 113/114"])
+    assert await pipeline.drain_forward_queue() is False
+    assert harness.calls == []                                   # no analyst call was spent
+    assert pipeline._forwarded_count == 0                        # and no §5.2(a) slot charged
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["QUEUED"]
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+
+    snapshot["status"] = WarmupStatus(ready=True)                # the 60 s gap repair lands
+    ticker.at = NOW + timedelta(minutes=FORWARD_PACING_MIN)
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 1
+    assert pipeline._pending_forwards == []
+
+
+async def test_a_daily_class_candidate_drains_through_an_intraday_hole(
+    conn, pclock, calendar, book, limit_table, ticker, cost_model
+):
+    """The whole point of the change, at the drain: the same snapshot that defers the intraday leg
+    lets the swing leg through — it reads completed daily bars and no 1-minute bar at all."""
+    from engine.ops.warmup import WarmupStatus
+
+    snapshot = {"status": WarmupStatus(ready=True)}
+    pipeline, _, harness, _ = paced_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, cap=12,
+        warmup_status_fn=lambda: snapshot["status"])
+
+    await pipeline.on_signal_candidate(
+        candidate(symbol="TCS", strategy_id="orb", signal_id="INTRA", score=0.9))
+    await pipeline.on_signal_candidate(
+        candidate(symbol="INFY", strategy_id="brk20", style="swing", signal_id="SWING", score=0.5))
+    snapshot["status"] = WarmupStatus(ready=False, blockers=["orb:TCS bars 113/114"])
+
+    # INTRA has the higher score and is picked first; it DEFERS, and the loop takes the next-best in
+    # the SAME tick rather than stalling the whole pacing interval on a guaranteed reject.
+    assert await pipeline.drain_forward_queue() is True
+    assert len(harness.calls) == 1
+    assert forward_journal(conn)[("INFY", "brk20")] == 1
+    assert forward_journal(conn)[("TCS", "orb")] == 0
+    assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["INTRA"]
 
 
 async def test_the_drain_stops_at_the_forward_cap_and_keeps_the_rest_queued(

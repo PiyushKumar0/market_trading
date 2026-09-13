@@ -11,8 +11,11 @@ structurally-verified Table/Table1 envelope with [VERIFY Phase-1] field aliases.
 
 from __future__ import annotations
 
+import importlib.util
 import json
-from datetime import date, datetime
+import logging
+import sys
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,7 +28,9 @@ from engine.datafeeds import filings_pit as fpit
 from engine.datafeeds import filings_results as fres
 from engine.datafeeds import filings_shp as fshp
 from engine.datafeeds.earnings_calendar import EarningsCalendarJob
+from engine.datafeeds.filings_events import SOURCE_NSE
 from engine.datafeeds.filings_pit import FilingsPitJob, insider_id, parse_pit, pit_url
+from engine.datafeeds.filings_pit_fresh import BSE_ID_PREFIX, BSE_SOURCE
 from engine.datafeeds.filings_results import FilingsResultsJob, parse_results
 from engine.datafeeds.filings_shp import (
     FilingsShpJob,
@@ -42,7 +47,7 @@ from engine.datafeeds.isin_map import (
     parse_scrip_master,
     scrip_for_isin,
 )
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import _INSIDER_SOURCE_PREDICATE, MarketStore
 from tests.conftest import FIXED_NOW
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -74,6 +79,7 @@ def _no_waits(monkeypatch):
 
     monkeypatch.setattr("engine.core.nse_http._sleep", _instant)
     monkeypatch.setattr("engine.core.bse_http._sleep", _instant)
+    monkeypatch.setattr("engine.datafeeds.filings_pit._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.filings_shp._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.isin_map._sleep", _instant)
 
@@ -256,6 +262,177 @@ async def test_filings_pit_window_keys_off_watermark(store, clock):
     await job.run(D)
     pit_calls = [u for u in seen if "corporates-pit" in u]
     assert pit_calls and "from_date=10-06-2026" in pit_calls[0] and "to_date=17-06-2026" in pit_calls[0]
+
+
+def test_store_insider_source_predicate_matches_the_feeds_tags():
+    # The store cannot import a datafeed (every datafeed imports the store), so its source predicate
+    # duplicates the writers' tags — the pair is asserted here, as for _EXCL_CAP in the store.
+    assert set(_INSIDER_SOURCE_PREDICATE) == {SOURCE_NSE, BSE_SOURCE}
+    assert _INSIDER_SOURCE_PREDICATE[BSE_SOURCE] == f"id LIKE '{BSE_ID_PREFIX}%'"
+    assert _INSIDER_SOURCE_PREDICATE[SOURCE_NSE] == f"id NOT LIKE '{BSE_ID_PREFIX}%'"
+    assert fpit.NSE_SOURCE == SOURCE_NSE
+
+
+async def test_latest_insider_broadcast_partitions_by_id_prefix(store):
+    # §2.8.5 (2026-09-13): insider_trades has no source column — the id prefix IS the partition.
+    # Timestamps mirror the live store on 2026-09-12: NSE ceiling 2026-05-02 16:46, BSE writing today.
+    nse_dt = datetime(2026, 5, 2, 16, 46, tzinfo=IST)
+    bse_dt = datetime(2026, 6, 17, 19, 3, tzinfo=IST)
+    assert store.latest_insider_broadcast(SOURCE_NSE) is None        # empty table: no invented row
+    store.upsert_insider_trades([{"id": f"{BSE_ID_PREFIX}{'b' * 60}", "symbol": "JSWSTEEL",
+                                  "broadcast_dt": bse_dt}])
+    assert store.latest_insider_broadcast(SOURCE_NSE) is None        # BSE-only store: NSE has no rows
+    assert store.latest_insider_broadcast(BSE_SOURCE) == bse_dt
+    store.upsert_insider_trades([{"id": "a" * 64, "symbol": "RELTD", "broadcast_dt": nse_dt}])
+    assert store.latest_insider_broadcast(SOURCE_NSE) == nse_dt      # today's BSE row cannot move it
+    assert store.latest_insider_broadcast(BSE_SOURCE) == bse_dt
+    assert store.latest_insider_broadcast() == bse_dt                # None = the whole-table reading
+    assert store.latest_insider_broadcast("NSE") == nse_dt           # tag normalized, not re-spelled
+    assert await store.alatest_insider_broadcast(source=SOURCE_NSE) == nse_dt
+    with pytest.raises(ValueError):                                  # never a silent whole-table read
+        store.latest_insider_broadcast("sebi")
+
+
+def empty_pit() -> httpx.Response:
+    """A FRESH empty PIT response per call — the job now issues several per run."""
+    return httpx.Response(200, json={"data": []})
+
+
+def pit_row(broadcast: str, symbol: str = "RELIANCE") -> dict:
+    return {"symbol": symbol, "acqName": "A N Other", "date": broadcast,
+            "tdpTransactionType": "Buy", "secAcq": "100", "secVal": "250000"}
+
+
+def pit_spans(seen: list[str]) -> list[tuple[date, date]]:
+    """``(from_date, to_date)`` of every corporates-pit request, in call order."""
+    out: list[tuple[date, date]] = []
+    for url in seen:
+        if "corporates-pit" not in url:
+            continue
+        params = httpx.URL(url).params
+        out.append((datetime.strptime(params["from_date"], "%d-%m-%Y").date(),
+                    datetime.strptime(params["to_date"], "%d-%m-%Y").date()))
+    return out
+
+
+def test_pit_window_unit_matches_the_backfill_that_walks_the_same_endpoint():
+    # filings_pit.PIT_WINDOW_DAYS/_windows duplicate scripts/backfill_filings (a src module cannot
+    # import scripts/), and BOTH drive pit_url/parse_pit. A drift makes the daily job ask for a span
+    # the repo has never walked — the shape whose only failure mode (a silent truncation to the
+    # newest slice) leaves an unreachable hole with no warning.
+    path = Path(__file__).resolve().parents[2] / "scripts" / "backfill_filings.py"
+    spec = importlib.util.spec_from_file_location("_backfill_filings_under_test", path)
+    bf = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bf
+    spec.loader.exec_module(bf)
+    assert fpit.PIT_WINDOW_DAYS == bf._NSE_WINDOW_DAYS
+    frm, to = date(2026, 1, 1), date(2026, 4, 30)
+    assert fpit._windows(frm, to) == bf._windows(frm, to)
+    assert fpit._windows(to, frm) == []                       # inverted span: zero requests, no wrap
+    # The floor is expressed in whole requests: N INCLUSIVE chunks reach N*unit - 1 days behind d.
+    assert fpit.MAX_WINDOW_DAYS == fpit.PIT_WINDOW_DAYS * fpit.MAX_WINDOWS_PER_RUN - 1
+
+
+async def test_filings_pit_window_ignores_the_bse_watermark(store, clock):
+    # The regression §2.8.5 records: a BSE fresh row stamped the run day pinned the whole-table
+    # watermark to today and collapsed this job's window to [d-1, d].
+    store.upsert_insider_trades([
+        {"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 5, 2, 16, 46, tzinfo=IST)},
+        {"id": f"{BSE_ID_PREFIX}seed", "symbol": "Y",
+         "broadcast_dt": datetime(2026, 6, 17, 19, 3, tzinfo=IST)},
+    ])
+    seen: list[str] = []
+    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": empty_pit}, seen))
+    result = await job.run(D)
+    # 02-05 -> 17-06 is 46 days: two contiguous <=31-day requests, not one 46-day one.
+    assert pit_spans(seen) == [(date(2026, 5, 2), date(2026, 6, 1)), (date(2026, 6, 2), D)]
+    assert result.ok is True and result.frm == date(2026, 5, 2) and result.to == D
+
+
+async def test_filings_pit_window_floored_and_chunked(store, clock, caplog):
+    # A watermark older than the floor becomes neither ONE wide request nor an unbounded number of
+    # them: exactly MAX_WINDOWS_PER_RUN chunks of <=PIT_WINDOW_DAYS (§2.8.5).
+    store.upsert_insider_trades(
+        [{"id": "ancient", "symbol": "X", "broadcast_dt": datetime(2024, 1, 5, 10, 0, tzinfo=IST)}]
+    )
+    seen: list[str] = []
+    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": empty_pit}, seen))
+    floor = D - timedelta(days=fpit.MAX_WINDOW_DAYS)
+    with caplog.at_level(logging.INFO, logger="engine.datafeeds.filings_pit"):
+        result = await job.run(D)
+        spans = pit_spans(seen)
+        assert len(spans) == fpit.MAX_WINDOWS_PER_RUN
+        assert spans[0][0] == floor and spans[-1][1] == D
+        assert all((to - frm).days < fpit.PIT_WINDOW_DAYS for frm, to in spans)
+        assert [f for f, _ in spans[1:]] == [t + timedelta(days=1) for _, t in spans[:-1]]  # no gap
+        assert result.ok is True and result.frm == floor and result.to == D
+        clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
+        assert [r.levelname for r in clamps] == ["WARNING"]
+        assert clamps[0].uncovered_days == (floor - date(2024, 1, 5)).days
+        # LATCHED: the condition holds for as long as the route stays dead, and a boot catch-up
+        # replays one run per missed day through this instance — warn on the transition only.
+        await job.run(D)
+        clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
+        assert [r.levelname for r in clamps] == ["WARNING", "INFO"]
+        # Symmetric clear (2026-09-01): a watermark back inside the floor stops the line AND re-arms
+        # it, so the next time the floor bites the owner hears about it.
+        store.upsert_insider_trades(
+            [{"id": "recent", "symbol": "X", "broadcast_dt": datetime(2026, 6, 10, 18, 0, tzinfo=IST)}]
+        )
+        await job.run(D)
+        await job.run(date(2027, 6, 17))          # same watermark, a run day that is outside again
+        clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
+        assert [r.levelname for r in clamps] == ["WARNING", "INFO", "WARNING"]
+
+
+async def test_filings_pit_stops_at_the_first_failing_window(store, clock):
+    # A chunked run that dies part-way must leave the watermark INSIDE the covered prefix, so the
+    # next run re-opens AT the hole rather than stepping over it (§2.8.5).
+    store.upsert_insider_trades(
+        [{"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 5, 2, 16, 46, tzinfo=IST)}]
+    )
+    calls = {"n": 0}
+
+    def flaky_pit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"data": [pit_row("10-May-2026 11:00:00")]})
+        raise httpx.ConnectError("upstream gone")
+
+    msgs, sink = collect_alerts()
+    seen: list[str] = []
+    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": flaky_pit}, seen), notify=sink)
+    result = await job.run(D)
+    spans = pit_spans(seen)
+    assert spans[0] == (date(2026, 5, 2), date(2026, 6, 1))   # window 1 served, upserted
+    assert set(spans[1:]) == {(date(2026, 6, 2), D)}          # window 2 retried by nse_get, then out
+    assert result.ok is False and result.degraded is True     # never raises (E5)
+    assert result.rows_parsed == 1 and result.rows_written == 1  # the partial ingest is durable
+    assert msgs and msgs[0].data["job_id"] == "filings_pit"
+    # The watermark sits behind the hole, not past it: the retry re-opens at 10-05, inside window 2.
+    assert store.latest_insider_broadcast(SOURCE_NSE) == datetime(2026, 5, 10, 11, 0, tzinfo=IST)
+    seen.clear()
+    await FilingsPitJob(store, clock, routed_client({"corporates-pit": empty_pit}, seen)).run(D)
+    assert pit_spans(seen)[0] == (date(2026, 5, 10), date(2026, 6, 9))
+
+
+async def test_filings_pit_degrades_when_the_watermark_read_raises(store, clock, monkeypatch):
+    # E5: the watermark read is INSIDE the guard. An unknown source tag RAISES by design
+    # (store.latest_insider_broadcast), and a raise that escaped run() would bypass its per-day
+    # alert dedup and its degraded result — the owner would never hear the feed stopped.
+    async def boom(*_a, **_kw):
+        raise ValueError("unknown insider source 'nse_pit'")
+
+    monkeypatch.setattr(store, "alatest_insider_broadcast", boom)
+    msgs, sink = collect_alerts()
+    seen: list[str] = []
+    result = await FilingsPitJob(
+        store, clock, routed_client({"corporates-pit": empty_pit}, seen), notify=sink
+    ).run(D)
+    assert result.ok is False and result.degraded is True and result.reason.startswith("ValueError")
+    assert result.frm == D and result.to == D and result.rows_written == 0
+    assert pit_spans(seen) == []                              # nothing was fetched
+    assert msgs and msgs[0].data["job_id"] == "filings_pit"   # and the owner IS told
 
 
 async def test_filings_pit_failure_degrades_and_warns(store, clock):

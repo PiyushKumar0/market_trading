@@ -20,6 +20,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from itertools import product
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import pytest
@@ -1254,6 +1255,172 @@ def test_positions_the_broker_no_longer_holds_are_excluded_from_the_counts() -> 
     )
     assert (total, mis, cnc) == (1, 0, 1)
     assert sectors == {"FINANCIAL_SERVICES": 0, "METAL": 1, "ENERGY": 0}
+
+
+def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> None:
+    """2026-09-13 (§2.6 step-6 addendum): ``warmup_ready`` stopped being one flat answer. The builder
+    asks the SAME snapshot for the class the candidate's style reads — ``intraday`` ⇒ today's
+    1-minute coverage, ``swing``/``position`` ⇒ the completed daily sessions — exactly as
+    ``regime_data_ready`` has always been its own class. An unknown style takes the DAILY class:
+    the broader one, which is also the one that still gates the risk state."""
+    from engine.ops.warmup import WarmupStatus
+    from engine.risk.gate import GateContextBuilder
+
+    builder = GateContextBuilder.__new__(GateContextBuilder)
+
+    # The 2026-09-04 11:09 shape: one symbol's minute hole, every daily lookback covered.
+    builder._warmup_status_fn = lambda: WarmupStatus(
+        ready=False, blockers=["orb:COROMANDEL bars 113/114"]
+    )
+    assert builder._warmup_ready("intraday") is False
+    assert builder._warmup_ready("swing") is True
+    assert builder._warmup_ready("position") is True
+    assert builder._warmup_ready("unheard-of") is True     # daily class, and daily is covered
+    assert builder._regime_ready() is True                 # untouched by this change
+
+    # The mirror image: daily short, minute bars complete. The intraday leg may still be judged.
+    builder._warmup_status_fn = lambda: WarmupStatus(
+        ready=False, blockers=["rsi2/trend/mom:RELIANCE daily bars 3/200"]
+    )
+    assert builder._warmup_ready("intraday") is True
+    assert builder._warmup_ready("swing") is False
+
+    # Fail-closed seams, both unchanged in spirit: no snapshot function at all, and a snapshot with
+    # no per-class answer (an older or duck-typed one) falling back to the flat `ready`.
+    builder._warmup_status_fn = None
+    assert builder._warmup_ready("swing") is False
+    builder._warmup_status_fn = lambda: SimpleNamespace(ready=True, blockers=[])
+    assert builder._warmup_ready("swing") is True
+    builder._warmup_status_fn = lambda: SimpleNamespace(ready=False, blockers=["orb:X 1/50"])
+    assert builder._warmup_ready("intraday") is False
+    assert builder._warmup_ready("swing") is False         # no class answer ⇒ the flat, stricter one
+
+
+def test_the_two_warmup_class_names_are_the_same_strings_on_both_sides_of_the_tier_line() -> None:
+    """``engine.risk.gate`` (Tier 2) spells the class names rather than importing
+    ``engine.ops.warmup``, exactly as ``_regime_ready`` string-matches the ``"regime:"`` prefix. A
+    deliberate duplication gets a test asserting the pair (the plan's per-SOURCE-watermark idiom),
+    because nothing else would catch a drift: each half is built from its own module's constant, so a
+    rename would leave every test green while ``ready_for`` answered False for EVERY swing candidate
+    (fail-closed, and therefore a silent origination stop rather than a crash). Tests may import both
+    tiers even though the gate may not."""
+    from engine.ops import warmup as warmup_module
+
+    assert (gate_module.WARMUP_CLASS_INTRADAY, gate_module.WARMUP_CLASS_DAILY) == (
+        warmup_module.CLASS_INTRADAY, warmup_module.CLASS_DAILY,
+    )
+
+
+def _stub_context_builder(limit_table: LimitTable, clock: Clock, warmup_status_fn):
+    """A :class:`GateContextBuilder` with every seam but the warm-up one stubbed out.
+
+    ``build`` is the only place ``style`` becomes ``warmup_ready``/``warmup_class``, and the two
+    lines that do it are otherwise untested end to end: ``_warmup_ready`` is tested directly and the
+    rule is tested against hand-built contexts, so a wrong argument at the build site (``side`` for
+    ``style``, a stale flat read) would leave every other test green while live intraday proposals
+    hit the class-mismatch branch forever.
+    """
+    from engine.risk.exposure import OpenCounts
+    from engine.risk.gate import GateContextBuilder
+
+    async def _none(*_a, **_k):
+        return None
+
+    async def _false(*_a, **_k):
+        return False
+
+    builder = GateContextBuilder.__new__(GateContextBuilder)
+    builder._limits = _StubLimits(limit_table)
+    builder._clock = clock
+    builder._calendar = SimpleNamespace(session=lambda _d: None)
+    builder._instruments = SimpleNamespace(is_fno=lambda _s: False)
+    builder._exposure = SimpleNamespace(
+        open_position_counts=lambda: OpenCounts(total=0, mis=0, cnc=0),
+        day_mtm=lambda _d: Decimal("0"),
+        per_sector_open=lambda _m: {},
+        equity=lambda: Decimal("20000"),
+        consecutive_losses=lambda _d: 0,
+        cnc_notional=lambda _s: Decimal("0"),
+        deployed_capital=lambda: Decimal("0"),
+    )
+    builder._mode = SimpleNamespace(
+        mode=lambda: Mode.RECOMMEND,
+        risk_state=lambda: RiskState.NORMAL,
+        get_trade_window=lambda: None,
+    )
+    builder._kill = SimpleNamespace(is_killed=lambda: False)
+    builder._open_positions = lambda: []
+    builder._orders = lambda: []
+    builder._recommendations = lambda: []
+    builder._missing_holdings = lambda: ()
+    builder._sector_map = lambda _d: {}
+    builder._pending_entry_rec_symbols = lambda _now: frozenset()
+    builder._entry_recs_today = lambda _d: 0
+    builder._universe_row = _none
+    builder._surveillance_flag = _none
+    builder._results_day = _false
+    builder._max_corr = _none
+    builder._warmup_status_fn = warmup_status_fn
+    for seam in ("_ltp_fn", "_tick_age_fn", "_margins_fn", "_clock_skew_ok_fn",
+                 "_degrade_tier_fn", "_nifty50_fn", "_expiry_day_fn"):
+        setattr(builder, seam, None)
+    builder._index_symbol = "NIFTY 50"
+    builder._corr_n = 20
+    return builder
+
+
+@pytest.mark.asyncio
+async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
+    limit_table: LimitTable, gate_clock: Clock
+) -> None:
+    """End to end through ``build``: ONE mixed-blocker snapshot, two styles, two answers — and the
+    class the builder judged is pinned into the context it returns."""
+    from engine.ops.warmup import WarmupStatus
+
+    mixed = WarmupStatus(ready=False, blockers=["orb:COROMANDEL bars 113/114"])
+    builder = _stub_context_builder(limit_table, gate_clock, lambda: mixed)
+
+    intraday_ctx = await builder.build(SYMBOL, "BUY", "intraday", NOW.date())
+    swing_ctx = await builder.build(SYMBOL, "BUY", "swing", NOW.date())
+    assert (intraday_ctx.warmup_class, intraday_ctx.warmup_ready) == ("intraday", False)
+    assert (swing_ctx.warmup_class, swing_ctx.warmup_ready) == ("daily", True)
+
+    # The mirror image, so neither answer is a constant.
+    daily_short = WarmupStatus(ready=False, blockers=["rsi2/trend/mom:RELIANCE daily bars 3/200"])
+    builder = _stub_context_builder(limit_table, gate_clock, lambda: daily_short)
+    assert (await builder.build(SYMBOL, "BUY", "intraday", NOW.date())).warmup_ready is True
+    assert (await builder.build(SYMBOL, "BUY", "swing", NOW.date())).warmup_ready is False
+
+
+def test_warmup_rule_is_judged_per_style_and_fails_closed_on_a_class_mismatch(gate: RiskGate) -> None:
+    """The rule half of the same change. A context pins WHICH class it judged, so:
+
+    * an intraday proposal against an intraday-class context reads that class's answer;
+    * a swing proposal against a daily-class context reads that one;
+    * a proposal evaluated against the OTHER class's context has no answer to its question and
+      fails closed rather than borrowing one (a context is reusable per symbol, and nothing may
+      turn that reuse into a warm-up pass the builder never granted);
+    * an unclassified context (hand-built, or a pre-2026-09-13 one) keeps the flat answer.
+    """
+    intraday_cold = make_ctx(warmup_ready=False, warmup_class="intraday")
+    assert not check_of(gate.evaluate(make_action(), intraday_cold), "warmup_ready").passed
+
+    daily_warm = make_ctx(warmup_ready=True, warmup_class="daily")
+    swing = make_action(style="swing", target_price=Decimal("110"))
+    swing_check = check_of(gate.evaluate(swing, daily_warm), "warmup_ready")
+    assert swing_check.passed
+    assert "daily class" in swing_check.value and "daily-class feature lookbacks" in swing_check.limit
+
+    # Class mismatch in BOTH directions — the ready flag is True in each and neither passes.
+    mismatched = check_of(gate.evaluate(make_action(), daily_warm), "warmup_ready")
+    assert not mismatched.passed
+    assert "context judged the daily class" in mismatched.headroom
+    intraday_warm = make_ctx(warmup_ready=True, warmup_class="intraday")
+    assert not check_of(gate.evaluate(swing, intraday_warm), "warmup_ready").passed
+
+    # Unclassified: the flat answer, no class check (the CASES table's baseline context).
+    assert check_of(gate.evaluate(make_action(), make_ctx()), "warmup_ready").passed
+    assert not check_of(gate.evaluate(swing, make_ctx(warmup_ready=False)), "warmup_ready").passed
 
 
 def test_a_failing_holdings_journal_read_excludes_nothing() -> None:

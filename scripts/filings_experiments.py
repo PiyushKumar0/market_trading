@@ -290,10 +290,22 @@ def _year_sort_key(label: str) -> tuple[int, int]:
 
 # =========================================================================== vbt run + trade extraction
 def _run_portfolio(frames, sig, *, init_cash: float = 100_000.0):
-    """ONE vbt Portfolio.from_signals with mechanics IDENTICAL to sweep.SweepRunner._backtest, except
-    fees=0.0 so ``pf.trades.records_readable['Return']`` is the pure GROSS per-trade return (net is
-    then gross - one CostModel round trip, applied uniformly; see the module report). The per-side fee
-    still feeds the ORB C3 cost floor via the signal builder -- only the vbt fee drag is zeroed here."""
+    """ONE vbt Portfolio.from_signals producing the pure GROSS per-trade return in
+    ``pf.trades.records_readable['Return']`` (net is then gross - one CostModel round trip, applied
+    uniformly; see the module report). The per-side fee still feeds the ORB C3 cost floor via the
+    signal builder -- only the vbt fee drag is zeroed here.
+
+    NOT the same mechanics as ``sweep.SweepRunner._portfolio`` -- it is a GROSS harness and differs
+    deliberately, so do not re-derive one from the other. What it does NOT do: no ``price=`` open
+    frame and no signal shift (fills land on the signal bar's own CLOSE, not the next bar's open --
+    WO-2); no ``slippage``; no ``stop_entry_price='fillprice'`` (stops anchor at vectorbt's default
+    close, not at the fill); no ``stop_exit_price='stopmarket'`` (a stop exit is priced at the level
+    with slippage zeroed -- immaterial at slippage 0.0); and ``high``/``low`` still go in for
+    INTRADAY frames only while ``open`` is never passed at all, so vectorbt substitutes the close
+    for whichever OHLC legs are missing and a daily stop here is both decided and filled on the
+    close (WO-M item (i) fixed that in the sweep, deliberately not here -- this harness measures a
+    GROSS event-study return, and its numbers are never quoted as sweep-comparable). Costs are
+    applied OUTSIDE this function by construction."""
     import vectorbt as vbt  # function-level: engine._preload native import-order guard
 
     kwargs: dict = dict(

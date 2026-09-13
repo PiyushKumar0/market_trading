@@ -22,7 +22,11 @@ bt = importlib.util.module_from_spec(_spec)
 sys.modules["mt_backtest"] = bt
 _spec.loader.exec_module(bt)
 
-from engine.learning.sweep import ParamSetStat, SweepReport  # noqa: E402 - after the loose-script shim above
+from engine.learning.sweep import (  # noqa: E402 - after the loose-script shim above
+    MECHANICS_STAMP,
+    ParamSetStat,
+    SweepReport,
+)
 from engine.learning.validate import MARGIN_FLOOR_DAYS  # noqa: E402
 
 _BASE_ARGV = ["rsi2", "--from", "2024-01-01", "--to", "2025-12-31"]
@@ -321,9 +325,12 @@ def test_all_run_with_a_non_default_denominator_warns(tmp_path, monkeypatch, cap
 
 def _stat(strategy_params: dict[str, float], **kw) -> ParamSetStat:
     base = dict(
-        params=strategy_params, n_trades=303, win_rate=0.3729, expectancy_pct=3.626,
+        # WO-M: expectancy_pct IS the closed-trade mean; the all-trades figure rides beside it, and
+        # the win rate is reported on both populations so the pair never mixes bases.
+        params=strategy_params, n_trades=303, win_rate=0.3729, expectancy_pct=1.841,
         total_return_pct=5.026, sharpe=0.98, max_drawdown_pct=3.24,
-        n_closed=273, n_open=30, expectancy_closed_pct=1.841,
+        n_closed=273, n_open=30, expectancy_closed_pct=1.841, expectancy_all_pct=3.626,
+        win_rate_closed=0.4176,
         hold_bars_mean=48.64, hold_bars_median=33.0, hold_bars_p90=121.0,
         hold_bars_mean_closed=45.05, hold_bars_median_closed=31.0, hold_bars_p90_closed=111.2,
     )
@@ -347,6 +354,7 @@ def _sweep_with_stats(strategy_id: str = "trend", **report_kw) -> SweepReport:
         cost_floor_pct=0.3192,
         stats=[_stat(winner), _stat({"adx_min": 30.0, "trail_atr_mult": 1.5}, n_trades=0)],
         best_params=winner,
+        mechanics=MECHANICS_STAMP,
         generated_at=datetime(2026, 9, 12, 1, 6, 53),
     )
     kw.update(report_kw)
@@ -356,9 +364,16 @@ def _sweep_with_stats(strategy_id: str = "trend", **report_kw) -> SweepReport:
 def test_sweep_stats_dict_carries_the_closed_only_expectancy_beside_the_headline():
     sweep = _sweep_with_stats()
     d = bt._sweep_stats_dict(sweep, sweep.best_params)
-    assert d["sweep_expectancy_pct"] == 3.626            # ALL trades, incl. the 30 still open
-    assert d["sweep_expectancy_closed_pct"] == 1.841     # CLOSED round trips only
-    assert d["n_trades"] == 303.0
+    # WO-M: every per-trade key NAMES its population. This dict is persisted verbatim into
+    # param_sets.validation_report, so the two keys whose MEANING would otherwise have silently
+    # changed on 2026-09-13 (all-trades -> closed-only) under an unchanged name are RETIRED, not
+    # redefined: a query spanning both sides of the fix must never compare two statistics as one.
+    assert "sweep_expectancy_pct" not in d
+    assert "win_rate" not in d
+    assert d["sweep_expectancy_closed_pct"] == 1.841   # CLOSED round trips only (the ranked one)
+    assert d["sweep_expectancy_all_pct"] == 3.626      # ALL trades, incl. the 30 still open
+    assert d["win_rate_closed"] == 0.4176 and d["win_rate_all"] == 0.3729
+    assert d["n_trades"] == 303.0 and d["n_closed"] == 273.0
 
 
 def test_realized_hold_maps_the_winning_configs_measured_sessions():
@@ -368,6 +383,7 @@ def test_realized_hold_maps_the_winning_configs_measured_sessions():
     assert (hold.n_trades, hold.n_closed, hold.n_open) == (303, 273, 30)
     assert hold.median_sessions == 33.0 and hold.mean_sessions == 48.64
     assert hold.median_sessions_closed == 31.0 and hold.p90_sessions_closed == 111.2
+    # RealizedHold's field meanings are unchanged by WO-M: _pct is ALL trades, _closed_pct closed.
     assert hold.expectancy_per_trade_pct == 3.626
     assert hold.expectancy_per_trade_closed_pct == 1.841
 
@@ -406,3 +422,37 @@ def test_run_one_threads_the_hold_and_the_survivorship_flag_into_the_validated_p
     assert ps.realized_hold.median_sessions == 33.0
     # the platform stores no point-in-time index membership, so this can only be True today
     assert ps.population_is_survivorship_tainted_proxy is True
+    # WO-M: the sweep's mechanics stamp reaches the validated ParamSet, so the verdict artifact
+    # names the mechanics its returns were produced under instead of leaving it to the reader.
+    assert ps.sweep_mechanics == MECHANICS_STAMP
+    assert ps.params_are_grid_winner is True
+
+
+def test_a_grid_that_ranked_nothing_validates_the_defaults_but_never_looks_like_a_winner(
+    tmp_path, monkeypatch, capsys
+):
+    """WO-M item (iii) made an unrankable config drop OUT of the ranking, so a window shorter than
+    the strategy's realized hold (or a vectorbt schema change that makes every open/closed split
+    unreadable) can leave ``best_params`` None. The CLI still validates the Section 6.3 defaults —
+    that is the long-standing fallback and nothing here gates on it — but a defaults verdict must be
+    impossible to mistake for a swept one, on the console line AND in the persisted ParamSet."""
+    _stub_report_writers(monkeypatch, tmp_path)
+
+    class _NoWinnerRunner:
+        def run(self, strategy_id, start, end, *, symbols, grid_density):  # noqa: ANN001, ANN201
+            return _sweep_with_stats(strategy_id, best_params=None)
+
+    pipeline = _FakePipeline()
+    bt._run_one(
+        "trend", _NoWinnerRunner(), pipeline, tmp_path,
+        start=date(2026, 6, 1), end=date(2026, 9, 12), symbols=["TCS"],
+        grid_density="coarse", run_adjacent=False,
+    )
+    ps = pipeline.received[0]
+    assert ps.params_are_grid_winner is False
+    assert ps.params == bt._default_params("trend")          # the envelope defaults, not a winner
+
+    out = capsys.readouterr()
+    assert "WARNING: the grid selected NO winner" in out.err
+    assert "DEFAULTS(no grid winner)=" in out.out
+    assert " best=" not in out.out                            # never the grid-winner rendering

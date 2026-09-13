@@ -8,6 +8,10 @@ Also home to the WO-2 (2026-08-13) **fill-mechanics regression test**: a synthet
 same-bar-close and next-bar-open fills differ MATERIALLY, pinning that the sweep produces the
 next-open number. That defect (``price=None`` ⇒ vectorbt's ``np.inf`` ⇒ the signal bar's own close)
 invalidated every sweep/CPCV report generated before 2026-08-13.
+
+And home to the **WO-M sweep-mechanics regression tests** (2026-09-13, plan §6.4): intrabar daily
+stops, the half-spread on a stop exit, the closed-trade ranking statistic, and the report stamp that
+tells a pre-fix artifact from a post-fix one.
 """
 
 from __future__ import annotations
@@ -24,8 +28,14 @@ from engine.core.clock import IST, Clock
 pytest.importorskip("vectorbt")
 pytest.importorskip("skfolio")
 
+from engine.learning import reports  # noqa: E402
 from engine.learning.sweep import (  # noqa: E402
+    EXPECTANCY_BASIS,
+    MECHANICS_STAMP,
     REFERENCE_NOTIONAL_DEFAULT,
+    STOP_EVALUATION,
+    STOP_EXIT_PRICE,
+    ParamSetStat,
     SweepRunner,
     _Frames,
     _hold_stats,
@@ -325,7 +335,7 @@ def test_sweep_report_carries_the_holding_distribution_and_the_open_closed_split
     assert report.bar_unit == "session"                            # daily frames ⇒ bars ARE sessions
     assert report.population_is_survivorship_tainted_proxy is True  # no PIT membership is stored
     assert any("SURVIVORSHIP" in n for n in report.notes)
-    assert any("STOPS ARE EVALUATED ON THE CLOSE" in n for n in report.notes)
+    assert any("STOPS ARE EVALUATED INTRABAR" in n for n in report.notes)
     stat = report.stats[0]
     assert stat.n_trades > 0
     assert stat.n_closed + stat.n_open == stat.n_trades
@@ -335,11 +345,23 @@ def test_sweep_report_carries_the_holding_distribution_and_the_open_closed_split
     if stat.n_closed:
         assert stat.expectancy_closed_pct is not None
         assert stat.hold_bars_median_closed is not None
-    # the headline expectancy is UNCHANGED by any of this (it still averages ALL trades)
+    # WO-M (iii): the headline IS the closed-trade mean; the all-trades mean rides beside it
     tr = runner._backtest("mom", runner._frames["mom"], dict(stat.params), runner._fee["mom"])
+    records = tr.trades.records_readable
+    all_returns = records["Return"].astype(float)
+    closed = records["Status"].astype(str).str.lower().to_numpy() == "closed"
+    assert stat.expectancy_all_pct == pytest.approx(float(all_returns.mean() * 100.0))
+    assert stat.expectancy_pct == stat.expectancy_closed_pct
     assert stat.expectancy_pct == pytest.approx(
-        float(tr.trades.records_readable["Return"].astype(float).mean() * 100.0)
+        float(all_returns.to_numpy()[closed].mean() * 100.0)
     )
+    # and the win rate is reported on BOTH populations, so the promotion table never pairs a
+    # mark-to-market hit rate with a realized per-trade mean
+    assert stat.win_rate == pytest.approx(float((all_returns > 0.0).mean()))
+    if stat.n_closed:
+        assert stat.win_rate_closed == pytest.approx(
+            float((all_returns.to_numpy()[closed] > 0.0).mean())
+        )
 
 
 def test_hold_stats_degrade_instead_of_taking_the_sweep_down():
@@ -347,10 +369,10 @@ def test_hold_stats_degrade_instead_of_taking_the_sweep_down():
     idx = pd.bdate_range("2024-01-01", periods=4)
     # a records_readable shape this code does not anticipate (no Status column)
     trades = pd.DataFrame({"Return": [0.1], "Entry Timestamp": [idx[0]], "Exit Timestamp": [idx[2]]})
-    n_closed, n_open, exp_closed, hold_all, hold_closed = _trade_split_stats(
+    n_closed, n_open, exp_closed, win_closed, hold_all, hold_closed = _trade_split_stats(
         trades, trades["Return"], idx
     )
-    assert (n_closed, n_open, exp_closed) == (0, 0, None)
+    assert (n_closed, n_open, exp_closed, win_closed) == (0, 0, None, None)
     assert hold_all == hold_closed == (None, None, None)
 
     # a duplicated bar timestamp would make index.get_indexer raise
@@ -361,3 +383,188 @@ def test_hold_stats_degrade_instead_of_taking_the_sweep_down():
     )
     assert np.isnan(_trade_hold_bars(ok, dup)).all()
     assert _hold_stats(_trade_hold_bars(ok, dup)) == (None, None, None)
+
+
+# ------------------------------------------------- WO-M sweep mechanics (2026-09-13, plan §6.4)
+# Three defects, all biasing the same way (the strategy's): daily stops decided on the CLOSE, stop
+# exits paying no spread, and open positions inside the ranked per-trade expectancy. These pin each
+# fix against the behaviour it replaced, and the stamp that tells a pre-fix artifact from a post-fix
+# one.
+
+#: A path whose LOW breaches the stop on row 3 while every CLOSE stays at 100 — the exact cell the
+#: close-evaluated mechanics could not see.
+_STOP_LOW = [100.0, 100.0, 100.0, 90.0, 100.0, 100.0]
+_SL_FRAC = 0.05          # 5% below the entry FILL (stop_entry_price='fillprice')
+
+
+def _stop_frames(*, intrabar: bool) -> _Frames:
+    """The WO-2 fill frame with one intrabar dip. ``intrabar=False`` reproduces the pre-WO-M input
+    vectorbt saw for a daily sweep: no open/high/low ⇒ the close substituted for all three."""
+    idx = pd.bdate_range("2024-01-01", periods=len(_FILL_CLOSE))
+    close = pd.DataFrame({_SYM: _FILL_CLOSE}, index=idx)
+    low = pd.DataFrame({_SYM: _STOP_LOW}, index=idx) if intrabar else close.copy()
+    high = close.copy()
+    return _Frames(
+        close=close,
+        high=high,
+        low=low,
+        open=pd.DataFrame({_SYM: _FILL_CLOSE}, index=idx),
+        volume=pd.DataFrame({_SYM: [1000.0] * len(_FILL_CLOSE)}, index=idx),
+        intraday=False,
+        auction_open=None,
+    )
+
+
+def _stop_signals(frames: _Frames) -> _Signals:
+    entries = pd.DataFrame(False, index=frames.close.index, columns=frames.close.columns)
+    entries.iloc[_ENTRY_SIGNAL_ROW, 0] = True
+    stops = pd.DataFrame(np.nan, index=frames.close.index, columns=frames.close.columns)
+    stops.iloc[_ENTRY_SIGNAL_ROW, 0] = _SL_FRAC          # travels with its entry to the fill row
+    return _Signals(
+        entries=entries,
+        exits=pd.DataFrame(False, index=frames.close.index, columns=frames.close.columns),
+        sl_stop=stops,
+    )
+
+
+def test_a_daily_stop_fires_on_an_INTRABAR_breach_not_only_on_a_close_through_it():
+    """WO-M (i): high/low go to vectorbt for daily frames too, so a stop behaves like the live
+    resting broker stop. Pre-fix (high=low=close) the same bar's 90.0 low is invisible and the
+    position simply survives — strictly fewer stop-outs, in the strategy's favour."""
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    runner = SweepRunner(None, CostModel.from_config(), clock)
+
+    frames = _stop_frames(intrabar=True)
+    trades = runner._portfolio(frames, _stop_signals(frames), 0.0).trades.records_readable
+    assert len(trades) == 1
+    assert trades["Status"].astype(str).str.lower().iloc[0] == "closed"
+    assert pd.Timestamp(trades["Exit Timestamp"].iloc[0]) == frames.close.index[3]
+
+    close_only = _stop_frames(intrabar=False)
+    survived = runner._portfolio(
+        close_only, _stop_signals(close_only), 0.0
+    ).trades.records_readable
+    assert survived["Status"].astype(str).str.lower().iloc[0] == "open"
+
+
+def _ohlc_frames(o: list[float], h: list[float], low: list[float], c: list[float]) -> _Frames:
+    idx = pd.bdate_range("2024-01-01", periods=len(c))
+    return _Frames(
+        close=pd.DataFrame({_SYM: c}, index=idx),
+        high=pd.DataFrame({_SYM: h}, index=idx),
+        low=pd.DataFrame({_SYM: low}, index=idx),
+        open=pd.DataFrame({_SYM: o}, index=idx),
+        volume=pd.DataFrame({_SYM: [1000.0] * len(c)}, index=idx),
+        intraday=False,
+        auction_open=None,
+    )
+
+
+def test_a_daily_stop_fills_at_the_LEVEL_when_the_bar_closes_through_it_and_at_the_OPEN_on_a_gap():
+    """WO-M (i) is the WHOLE bar, not just high/low: vectorbt substitutes the close for any OHLC leg
+    it is not handed, and ``get_stop_price_nb`` tests the OPEN before the low/high range. With the
+    close standing in for the open, every bar closing through the stop booked the exit at that close
+    — 88.0 here instead of the ~95.0 level a resting broker stop would have filled at. Supplying the
+    real open restores both halves of that stop's behaviour: trade through it ⇒ fill at the LEVEL,
+    gap through it ⇒ fill at the gapped OPEN."""
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    cost_model = CostModel.from_config()
+    runner = SweepRunner(None, cost_model, clock)
+    half_spread = float(cost_model.half_spread_pct) / 100.0
+
+    def _exit_price(frames: _Frames) -> tuple[float, float]:
+        trade = runner._portfolio(frames, _stop_signals(frames), 0.0).trades.records_readable.iloc[0]
+        entry_px = float(trade["Avg Entry Price"])
+        return entry_px * (1.0 - _SL_FRAC), float(trade["Avg Exit Price"])
+
+    # row 3 OPENS above the stop and CLOSES far through it — a resting stop fills at the level.
+    through = _ohlc_frames(
+        [100.0, 100.0, 100.0, 99.0, 100.0, 100.0], [100.0, 100.0, 100.0, 99.0, 100.0, 100.0],
+        [100.0, 100.0, 100.0, 88.0, 100.0, 100.0], [100.0, 100.0, 100.0, 88.0, 100.0, 100.0],
+    )
+    level, exit_px = _exit_price(through)
+    assert exit_px == pytest.approx(level * (1.0 - half_spread))
+    assert exit_px > 90.0                      # the pre-fix answer was the 88.0 close
+
+    # row 3 GAPS open below the stop — a resting stop cannot fill at the level, only at the open.
+    gap = _ohlc_frames(
+        [100.0, 100.0, 100.0, 90.0, 100.0, 100.0], [100.0, 100.0, 100.0, 92.0, 100.0, 100.0],
+        [100.0, 100.0, 100.0, 88.0, 100.0, 100.0], [100.0, 100.0, 100.0, 91.0, 100.0, 100.0],
+    )
+    level_gap, exit_gap = _exit_price(gap)
+    assert exit_gap == pytest.approx(90.0 * (1.0 - half_spread))
+    assert exit_gap < level_gap                # worse than the level, which is what a gap costs
+
+
+def test_a_stop_exit_pays_the_same_half_spread_as_every_other_exit():
+    """WO-M (ii): stop_exit_price='stopmarket' fills AT the stop level and applies the per-leg
+    slippage; vectorbt's 'stoplimit' default returned the level with slippage zeroed, so a
+    stop-exited round trip paid the fee but not the spread (~1 bp cheap, the strategy's way)."""
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    cost_model = CostModel.from_config()
+    runner = SweepRunner(None, cost_model, clock)
+    half_spread = float(cost_model.half_spread_pct) / 100.0
+    assert half_spread > 0.0, "a zero measured spread would make this test vacuous"
+
+    frames = _stop_frames(intrabar=True)
+    trade = runner._portfolio(frames, _stop_signals(frames), 0.0).trades.records_readable.iloc[0]
+
+    entry_px = float(trade["Avg Entry Price"])
+    stop_level = entry_px * (1.0 - _SL_FRAC)            # anchored at the FILL, not a bar's close
+    exit_px = float(trade["Avg Exit Price"])
+    assert exit_px == pytest.approx(stop_level * (1.0 - half_spread))
+    assert exit_px < stop_level                          # the zero-slippage default filled AT it
+    assert stop_level - exit_px == pytest.approx(stop_level * half_spread)
+
+
+def _rank_stat(label: float, *, closed: float | None, all_trades: float, n_closed: int = 5):
+    return ParamSetStat(
+        params={"axis": label},
+        n_trades=n_closed + 5,
+        win_rate=0.5,
+        expectancy_pct=closed,
+        total_return_pct=1.0,
+        sharpe=0.5,
+        max_drawdown_pct=2.0,
+        n_closed=n_closed,
+        n_open=5,
+        expectancy_closed_pct=closed,
+        expectancy_all_pct=all_trades,
+    )
+
+
+def test_the_grid_winner_is_ranked_on_closed_round_trips_not_on_open_marks():
+    """WO-M (iii): the ranking statistic is the closed-trade mean, so a config whose lead comes from
+    unrealized marks on positions the window never closed cannot win — and a config that closed
+    NOTHING is not rankable at all (never ranked on its marks as a fallback)."""
+    marks_only = _rank_stat(1.0, closed=0.5, all_trades=9.0)     # pre-WO-M this one wins
+    realized = _rank_stat(2.0, closed=2.0, all_trades=1.0)
+    nothing_closed = _rank_stat(3.0, closed=None, all_trades=99.0, n_closed=0)
+
+    assert SweepRunner._rank_best([marks_only, realized, nothing_closed]) == {"axis": 2.0}
+    assert SweepRunner._rank_best([nothing_closed]) is None
+
+
+def test_every_sweep_report_stamps_the_three_mechanics_settings(store):
+    """The stamp is how a pre-fix number and a post-fix number are told apart — in the artifact, in
+    the JSON, and in the notes, never only in a chat reply."""
+    start, end = _seed_daily(store)
+    clock = Clock(time_source=lambda: FIXED_NOW)
+    runner = SweepRunner(store, CostModel.from_config(), clock)
+
+    report = runner.run(
+        "mom", start, end, symbols=["AAA", "BBB"],
+        param_grid=[{"top_n": 1.0, "rebalance_days": 10.0}],
+    )
+
+    assert report.mechanics == MECHANICS_STAMP
+    for setting in (STOP_EVALUATION, STOP_EXIT_PRICE, EXPECTANCY_BASIS):
+        assert setting in report.mechanics
+    assert any(MECHANICS_STAMP in n for n in report.notes)
+    md = reports.render_sweep_markdown(report)
+    assert MECHANICS_STAMP in md
+    assert "expectancy (CLOSED)" in md
+    # a report built without the stamp (any artifact written before 2026-09-13) says so in words
+    assert "PRE-2026-09-13" in reports.render_sweep_markdown(
+        report.model_copy(update={"mechanics": ""})
+    )

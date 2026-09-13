@@ -62,6 +62,45 @@ on each of those horizons with its headroom multiple. Read the verdict against t
 registered denominator is a §7.1 CAP, so the floor at the cap is the loosest bar the horizon allows.
 Reporting only — the promotion rule is unchanged.
 
+**Sweep mechanics (WO-M, 2026-09-13).** Every sweep artifact now carries a one-line `Mechanics:`
+stamp — `stops=intrabar_ohlc · stop_exit_price=stopmarket · expectancy=closed_trades_only ·
+fills=next_bar_open` — and a validation artifact carries the same stamp **when its returns came out
+of the sweep**. Read the absence of a stamp differently on the two:
+
+- **A sweep artifact** (`*_sweep_*.md/json`) with no stamp, or the words `PRE-2026-09-13
+  (unstamped)`, came off the pre-fix mechanics — daily stops decided on the close and filled there,
+  stop exits charged no spread, and open positions inside the ranked per-trade expectancy, all three
+  in the strategy's favour. Its numbers are **not** comparable term-by-term with a stamped one and
+  must never be pooled with them. `SweepRunner` always stamps, so on this side absence *is* pre-fix.
+- **A validation artifact** (`<strat>_<ts>.md/json`) with no `Sweep mechanics:` line means "pre-fix
+  sweep **or** no sweep at all" — `ValidationPipeline` also validates return series that never went
+  through `SweepRunner` (the event-study harnesses, e.g. `scripts\validate_insider.py`, build their
+  own series and charge their own fills/costs, so none of the three sweep settings applies to them).
+  Never read an unstamped verdict as an assertion that the three pre-fix biases are in it; check
+  whether a `*_sweep_*` artifact of the same run exists before concluding anything.
+
+A verdict whose params the grid never ranked carries a **THESE PARAMS ARE NOT A GRID WINNER** banner
+(and `params_are_grid_winner: false` in the JSON) — that is the §6.3 envelope DEFAULTS being
+validated because no config closed a round trip; it is not a swept result. The `expectancy (CLOSED)`
+column is the ranked/promotion statistic; `expectancy (all)` is the pre-fix headline, kept beside it,
+and `win% (CLOSED)` is over the same round trips as `expectancy (CLOSED)`. In the persisted
+`param_sets.validation_report`, the pre-fix key names `sweep_expectancy_pct` and `win_rate` are
+RETIRED rather than redefined — a query for them returns pre-2026-09-13 rows only; the post-fix rows
+carry `sweep_expectancy_closed_pct` / `sweep_expectancy_all_pct` / `win_rate_closed` / `win_rate_all`.
+The re-run that produced the post-fix record (engine Stopped; the CLI applies migrations and writes
+`param_sets` rows, its normal path):
+
+```powershell
+# trend cell A at both denominators, then cell B (reporting-only, NEVER pooled with A):
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 20
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2026-09-12 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
+# the two swing legs at their documented defaults, for the record:
+uv run python scripts\backtest.py rsi2 --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
+uv run python scripts\backtest.py mom  --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
+```
+`orb` is deliberately NOT re-run: it is parked (plan §6.1, 0/15 twice) and its leg costs ≈ 90 min.
+
 ## Event study (§2.7 proxy + §2.8.4 filings legs)
 
 ```powershell
@@ -84,6 +123,17 @@ uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --sk
 
 ```powershell
 uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citing the directive>"
+```
+
+The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Pending as of 2026-09-13:
+
+```powershell
+# O17 sizing caps (plan §7.1 O17): overnight_gap_mult 2.5 -> 2.0, cnc_notional_inr 8000 -> 12000.
+Stop-Service mt-engine
+git apply runbooks\briefs\o17_limits_2026-09-13.patch          # or edit the two values by hand
+.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "O17 2026-09-13 owner-applied"
+Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
 ```
 
 ## Tests / verification

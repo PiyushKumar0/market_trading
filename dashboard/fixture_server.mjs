@@ -74,6 +74,11 @@ let recommendations = [
   rec('r-y1', d1, '13:00:19', 'HDFCAMC', 'SELL', 'exit', 'expired'),
   rec('r-y2', d1, '13:00:12', 'HINDZINC', 'SELL', 'exit', 'expired'),
   rec('r-y3', d1, '10:02:00', 'CEIGALL', 'BUY', 'enter', 'dismissed'),
+  // WO-V (2026-09-13): a swing ENTRY delivered YESTERDAY, still pending, valid to TOMORROW's close —
+  // yesterday's fold must start open and the `valid till` chip must carry the date.
+  rec('r-live', d1, '14:47:00', 'JINDALSTEL', 'BUY', 'entry', null, {
+    valid_until: `${shift(today, 1)}T15:30:00+05:30`,
+  }),
   // UTC stamp late on d(-4) UTC = early d(-3) IST: must fold under d(-3).
   { ...rec('r-utc', d3, '01:00:00', 'UTCCHECK', 'BUY', 'enter', 'expired'), delivered_at: `${d4}T19:30:00Z` },
   rec('r-old', d4, '11:11:11', 'OLDNAME', 'BUY', 'enter', 'taken'),

@@ -147,11 +147,18 @@ def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None
         return {}
     return {
         "n_trades": float(s.n_trades),
-        "win_rate": s.win_rate,
-        "sweep_expectancy_pct": s.expectancy_pct,
-        # R2: the same mean over CLOSED round trips only, so the headline (which averages open
-        # positions at their unrealized mark-to-market) is never read alone.
+        "n_closed": float(s.n_closed),
+        # WO-M (iii): every per-trade key here NAMES its population. This dict is persisted verbatim
+        # into ``param_sets.validation_report``, where a query spans rows written on both sides of
+        # 2026-09-13 — so the pre-fix keys ``win_rate`` and ``sweep_expectancy_pct``, whose meaning
+        # would have silently changed from all-trades to closed-only under the same name, are RETIRED
+        # rather than redefined. A query for a retired key returns the pre-fix rows only, which is
+        # unambiguous; a redefined one would have compared two different statistics as if they were
+        # one. The mechanics stamp lives in a sibling field a SQL/JSON comparison would not read.
+        "win_rate_closed": s.win_rate_closed,
+        "win_rate_all": s.win_rate,
         "sweep_expectancy_closed_pct": s.expectancy_closed_pct,
+        "sweep_expectancy_all_pct": s.expectancy_all_pct,
         "sweep_total_return_pct": s.total_return_pct,
         "sweep_sharpe": s.sharpe,
         "sweep_max_drawdown_pct": s.max_drawdown_pct,
@@ -173,7 +180,10 @@ def _realized_hold(sweep, params: dict[str, float]) -> RealizedHold | None:
         n_trades=s.n_trades,
         n_closed=s.n_closed,
         n_open=s.n_open,
-        expectancy_per_trade_pct=s.expectancy_pct,
+        # RealizedHold keeps its field meanings: ``_pct`` is the ALL-trades mean, ``_closed_pct``
+        # the closed-only one. WO-M changed which of the two the sweep ranks on (the closed one),
+        # not what either field holds — so the report can label both correctly.
+        expectancy_per_trade_pct=s.expectancy_all_pct,
         expectancy_per_trade_closed_pct=s.expectancy_closed_pct,
         mean_sessions=s.hold_bars_mean,
         median_sessions=s.hold_bars_median,
@@ -256,7 +266,22 @@ def _run_one(
             file=sys.stderr,
         )
 
+    # The grid can rank NOTHING: since WO-M item (iii) a config that closed no round trip inside the
+    # window is excluded rather than ranked on its unrealized marks, so a window shorter than the
+    # strategy's realized hold — or any vectorbt schema change that makes every open/closed split
+    # unreadable — leaves ``best_params`` None. Falling back to the §6.3 defaults keeps the run
+    # producing a verdict, but that verdict is about the DEFAULT config, not about a swept winner,
+    # and the console line plus the artifact must both say so. ASCII only (cp1252 console).
+    grid_selected_winner = sweep.best_params is not None
     best = sweep.best_params or _default_params(strategy_id)
+    if not grid_selected_winner:
+        print(
+            f"[{strategy_id}] WARNING: the grid selected NO winner -- all {sweep.trial_count_n} "
+            "configs closed no round trip inside the window (or their open/closed split was "
+            "unreadable), so none was rankable. Validating the Section 6.3 envelope DEFAULTS "
+            f"{best} instead; the verdict below is NOT a swept result and the report says so.",
+            file=sys.stderr,
+        )
     adjacent_density, adjacent_winner = _adjacent_winner(
         strategy_id, runner, start=start, end=end, symbols=symbols,
         grid_density=grid_density, run_adjacent=run_adjacent,
@@ -275,6 +300,11 @@ def _run_one(
         population_is_survivorship_tainted_proxy=(    # a present-day list applied backwards
             sweep.population_is_survivorship_tainted_proxy
         ),
+        # WO-M (2026-09-13): the sweep's mechanics stamp travels into the validation artifact, so a
+        # verdict is never read beside one produced under the pre-fix mechanics.
+        sweep_mechanics=sweep.mechanics,
+        # ... and so does whether these params were RANKED or merely defaulted to (see above).
+        params_are_grid_winner=grid_selected_winner,
     )
     report = pipeline.validate_sync(strategy_id, params)
     val_art = reports.write_report(report, reports_dir)
@@ -292,8 +322,11 @@ def _run_one(
         if report.margin_floor_pct_per_day is None
         else f"{report.margin_floor_pct_per_day:.5f}%/day over {report.margin_floor_days}d"
     )
+    # The params label distinguishes a ranked winner from the defaults fallback ON THE VERDICT LINE
+    # itself: this line is what gets pasted into a report, and the stderr warning above may not be.
+    label = "best" if grid_selected_winner else "DEFAULTS(no grid winner)"
     print(
-        f"[{strategy_id}] N={sweep.trial_count_n} best={best}"
+        f"[{strategy_id}] N={sweep.trial_count_n} {label}={best}"
         f" expectancy={exp} CPCV_pass={frac}/{bar} margin_floor={floor} -> {verdict}"
     )
     # R2: the verdict line above quotes the floor at the REGISTERED denominator. Print the measured
@@ -311,6 +344,8 @@ def _run_one(
             print(
                 f"      floor at {c.label}: {c.margin_floor_pct_per_day:.5f}%/day{head}"
             )
+    # ASCII-safe: the stamp's separators are printed by the artifacts, not by this console line.
+    print(f"    mechanics: {sweep.mechanics.replace(' · ', ' | ').replace(' — ', ' - ')}")
     print(f"    sweep:  {sweep_art.markdown}")
     print(f"    report: {val_art.markdown}")
     if not report.promotable:

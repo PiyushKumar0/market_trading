@@ -404,6 +404,9 @@ class _LedgerRec:
     qty: int
     kind: str
     delivered_at: str | None
+    #: WO-V (2026-09-13): a swing/position ENTRY lives to the NEXT session's close, so a live row can
+    #: be from an earlier day and the listing must be able to say so.
+    valid_until: str | None = None
 
 
 class TelegramBot:
@@ -1198,6 +1201,7 @@ class TelegramBot:
                     qty=_parse_int(str(data.get("qty") or 0)) or 0,
                     kind=str(data.get("kind") or "entry"),
                     delivered_at=row["delivered_at"],
+                    valid_until=str(data["valid_until"]) if data.get("valid_until") else None,
                 )
             )
         return recs
@@ -1720,17 +1724,29 @@ def _rec_line(rec: _LedgerRec) -> str:
     """One ledger row as owner prose, carrying the FULL ``rec_id``.
 
     The id is the tiebreak handle the owner types back when the ticker is ambiguous, and a truncated
-    id is not a handle — this is the one place the internal id is deliberately shown."""
-    return (
-        f"  {rec.instrument} {rec.side} x{rec.qty} · delivered {_hhmm(rec.delivered_at)} · "
-        f"id {rec.rec_id}"
-    )
+    id is not a handle — this is the one place the internal id is deliberately shown.
+
+    A bare ``HH:MM`` was unambiguous only while every live row was delivered TODAY — the invariant
+    WO-V (2026-09-13) deleted: a swing/position entry now lives to the NEXT session's close. When the
+    delivery and the expiry fall on different IST days both stamps carry their day, so a Friday rec
+    read on Monday says so; a same-day row renders exactly as before."""
+    delivered, valid = _parse_iso(rec.delivered_at), _parse_iso(rec.valid_until)
+    if delivered is not None and valid is not None and delivered.date() != valid.date():
+        when = f"delivered {_day_hhmm(delivered)} · valid till {_day_hhmm(valid)}"
+    else:
+        when = f"delivered {_hhmm(rec.delivered_at)}"
+    return f"  {rec.instrument} {rec.side} x{rec.qty} · {when} · id {rec.rec_id}"
 
 
 def _hhmm(raw: str | None) -> str:
     """A journalled IST timestamp as ``HH:MM`` for the owner; ``?`` when it cannot be read."""
     stamp = _parse_iso(raw)
     return stamp.strftime("%H:%M") if stamp is not None else "?"
+
+
+def _day_hhmm(stamp: datetime) -> str:
+    """``Fri 11 Sep 14:47`` — the day-bearing form of :func:`_hhmm` for a row that outlives its day."""
+    return stamp.strftime("%a %d %b %H:%M")
 
 
 def _rec_lines(recs: list[_LedgerRec]) -> list[str]:

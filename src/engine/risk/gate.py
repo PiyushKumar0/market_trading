@@ -79,6 +79,21 @@ _log = get_logger("engine.risk.gate")
 
 Verdict = Literal["approve", "shrink", "reject", "owner_approval_required"]
 
+#: The two warm-up COVERAGE CLASSES an ENTER proposal can be judged on (2026-09-13 §2.6 step-6
+#: addendum). Spelled here rather than imported: Tier 2 never imports ``engine.ops`` — the warm-up
+#: status arrives duck-typed through ``warmup_status_fn``, exactly like the ``"regime:"`` blocker
+#: prefix :meth:`GateContextBuilder._regime_ready` has always matched on. Keep identical to
+#: ``engine.ops.warmup.CLASS_INTRADAY`` / ``CLASS_DAILY``.
+WARMUP_CLASS_INTRADAY = "intraday"
+WARMUP_CLASS_DAILY = "daily"
+
+
+def _warmup_class_of(style: str) -> str:
+    """Which warm-up class a candidate of ``style`` is judged on. Only ``intraday`` reads 1-minute
+    coverage; ``swing``/``position`` — and any unknown style, conservatively the broader class that
+    still gates the risk state — read the completed daily sessions."""
+    return WARMUP_CLASS_INTRADAY if style == WARMUP_CLASS_INTRADAY else WARMUP_CLASS_DAILY
+
 #: EXACTLY the ``rule_id``s :meth:`RiskGate.evaluate` emits for an ``enter`` proposal, in audit order
 #: (§3.4: every rule evaluated, pass or fail). §9.1 asserts set-equality against this tuple so adding
 #: a limit without a gate check — or a check without a documented id — fails loudly.
@@ -307,7 +322,14 @@ class GateContext(BaseModel):
     is_nifty50: bool = False
 
     # -- readiness gates (fail-closed defaults) --------------------------------------------
+    #: ``warmup_ready`` is answered for the candidate's own COVERAGE CLASS since 2026-09-13
+    #: (``intraday`` style ⇒ today's 1-minute bars; every other style ⇒ completed daily sessions),
+    #: exactly as ``regime_ready`` has always been its own class. ``warmup_class`` records WHICH
+    #: class the builder judged, so the ledger can name it and an enter proposal evaluated against a
+    #: context built for the other class fails closed instead of reading the wrong answer. ``None`` =
+    #: unclassified (a hand-built or pre-2026-09-13 context) ⇒ the flat answer, no class check.
     warmup_ready: bool = False
+    warmup_class: str | None = None
     regime_ready: bool = False
     clock_skew_ok: bool = False
 
@@ -442,7 +464,7 @@ class RiskGate:
         self._rule_co_movement(led, ctx, lim)
         self._rule_max_leverage(led, ctx, lim, notional_ref, qty, intraday)
         self._rule_stale_data(led, ctx, lim)
-        self._rule_readiness(led, ctx)
+        self._rule_readiness(led, ctx, intraday)
         self._rule_entry_sanity_band(led, action, ctx, lim, intraday)
         self._rule_circuit_proximity(led, lim)
         self._rule_order_surface(led)
@@ -897,10 +919,20 @@ class RiskGate:
             "fresh" if ok else "no feed / stale feed ⇒ no entry (never blocks exits, R3)",
         )
 
-    def _rule_readiness(self, led: _Ledger, ctx: GateContext) -> None:
-        led.add("warmup_ready", ctx.warmup_ready, str(ctx.warmup_ready),
-                "contiguous bars cover every feature lookback (§2.6)",
-                "warm" if ctx.warmup_ready else "FROZEN for entries until coverage")
+    def _rule_readiness(self, led: _Ledger, ctx: GateContext, intraday: bool) -> None:
+        # Per-CLASS since 2026-09-13 (§2.6 step-6 addendum): an intraday proposal is judged on the
+        # intraday minute-bar coverage, a swing/position one on the completed daily sessions. A
+        # context built for the OTHER class cannot answer this proposal's question, so it fails
+        # closed rather than borrowing the answer (the class the builder judged is pinned in ctx).
+        want = WARMUP_CLASS_INTRADAY if intraday else WARMUP_CLASS_DAILY
+        matched = ctx.warmup_class is None or ctx.warmup_class == want
+        warm = ctx.warmup_ready and matched
+        led.add("warmup_ready", warm,
+                f"{ctx.warmup_ready} ({ctx.warmup_class or 'unclassified'} class)",
+                f"contiguous bars cover the {want}-class feature lookbacks (§2.6)",
+                "warm" if warm
+                else (f"{want} coverage short ⇒ no {want} entry" if matched
+                      else f"context judged the {ctx.warmup_class} class — no {want} answer"))
         led.add("regime_data_ready", ctx.regime_ready, str(ctx.regime_ready),
                 "NIFTY 50 + India VIX history present for the regime lookbacks",
                 "ready" if ctx.regime_ready else "regime-dependent entries FROZEN")
@@ -1296,7 +1328,9 @@ class GateContextBuilder:
         fails CLOSED (no LTP ⇒ unpriceable ⇒ reject; no tick age ⇒ ``stale_data_guard`` fails).
     warmup_status_fn:
         Returns a :class:`~engine.ops.warmup.WarmupStatus`; duck-typed to avoid importing the
-        composition root from Tier 2. Unwired ⇒ not ready (fail closed).
+        composition root from Tier 2. Read per COVERAGE CLASS through its ``ready_for`` (2026-09-13),
+        with the flat ``ready`` as the fallback for a status that has none. Unwired ⇒ not ready
+        (fail closed).
     clock_skew_ok_fn:
         Unwired ⇒ ``False`` — an unverifiable clock is never treated as "skew is fine" (R6).
     conn:
@@ -1357,13 +1391,17 @@ class GateContextBuilder:
     async def build(self, symbol: str, side: str, style: str, d: date) -> GateContext:
         """Resolve every gate input for a candidate ``(symbol, side, style)`` on session ``d``.
 
-        ``side``/``style`` are part of the pinned seam but do NOT change the assembly: the context is
-        a bag of facts and the per-style branches (MIS vs CNC caps, windows, leverage) live in the
-        RULES, so one context can be evaluated against any proposal for that symbol. They are kept in
-        the signature so a future style-scoped source (per-stock MIS leverage, Phase 3) has a home
-        without a call-site change.
+        ``side`` is part of the pinned seam but does NOT change the assembly: the context is a bag of
+        facts and the per-side/per-style branches (MIS vs CNC caps, windows, leverage) live in the
+        RULES, so one context can be evaluated against any proposal for that symbol.
+
+        ``style`` is the ONE exception since 2026-09-13: warm-up coverage is answered per class
+        (§2.6 step-6 addendum), so an intraday candidate is judged on today's 1-minute coverage and a
+        swing/position one on the completed daily sessions. The class judged is pinned into the
+        context (``warmup_class``) — a context is still a bag of facts, but this fact now says which
+        question it answered.
         """
-        del side, style          # documented above: assembly is style-agnostic in Phase 2
+        del side                 # documented above: assembly is side-agnostic
         table = self._limits.load()
         now = self._clock.now()
 
@@ -1440,7 +1478,8 @@ class GateContextBuilder:
             results_day_today=await self._results_day(symbol, d),
             expiry_day=self._expiry_day_fn(d) if self._expiry_day_fn else False,
             is_nifty50=self._nifty50_fn(symbol) if self._nifty50_fn else False,
-            warmup_ready=self._warmup_ready(),
+            warmup_ready=self._warmup_ready(style),
+            warmup_class=_warmup_class_of(style),
             regime_ready=self._regime_ready(),
             clock_skew_ok=self._clock_skew_ok_fn() if self._clock_skew_ok_fn else False,
             available_margin=self._margins_fn() if self._margins_fn else None,
@@ -1555,10 +1594,17 @@ class GateContextBuilder:
         return {str(r["symbol"]): str(r["sector"]) for r in rows if r.get("sector")}
 
     # ------------------------------------------------------------------ readiness seams
-    def _warmup_ready(self) -> bool:
+    def _warmup_ready(self, style: str) -> bool:
+        """Warm-up readiness for the candidate's COVERAGE CLASS (2026-09-13). A status without
+        ``ready_for`` (a fake, an older snapshot) falls back to the flat ``ready`` — the
+        pre-2026-09-13 answer, never looser than the per-class one."""
         if self._warmup_status_fn is None:
             return False
-        return bool(getattr(self._warmup_status_fn(), "ready", False))
+        status = self._warmup_status_fn()
+        ready_for = getattr(status, "ready_for", None)
+        if ready_for is None:
+            return bool(getattr(status, "ready", False))
+        return bool(ready_for(_warmup_class_of(style)))
 
     def _regime_ready(self) -> bool:
         """Regime readiness is the ``regime:`` slice of the warm-up blockers (§7.1

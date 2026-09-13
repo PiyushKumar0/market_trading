@@ -21,6 +21,7 @@ import logging
 import re
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -1385,7 +1386,10 @@ async def test_warmup_refresh_lifts_freeze_without_a_login_event(conn, clock, ca
         def __init__(self):
             self.ready = False
         async def status(self):
-            return WarmupStatus(ready=self.ready, blockers=[] if self.ready else ["orb:AAA bars 165/182"])
+            # A DAILY-class blocker: since 2026-09-13 only the freezing classes hold the risk state,
+            # so "still short => stays frozen" has to be short in a class that still freezes.
+            return WarmupStatus(ready=self.ready,
+                                blockers=[] if self.ready else ["rsi2/trend/mom:AAA daily bars 3/200"])
 
     gate = TogglingGate()
     st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
@@ -1409,6 +1413,168 @@ async def test_warmup_refresh_lifts_freeze_without_a_login_event(conn, clock, ca
     await refresh_and_lift_warmup(gate, holder, mode, lifecycle)
     assert holder["status"].ready is True
     assert mode.risk_state() == RiskState.NORMAL                       # lifted with NO login event
+
+
+@pytest.mark.asyncio
+async def test_warmup_refresh_lifts_with_only_the_intraday_class_short(conn, clock, calendar, tmp_path):
+    """2026-09-13 per-class scoping, the 60 s cadence half: the lift is owed to DAILY ∪ REGIME. The
+    market-wide one-bar hole a reconnect leaves (09-09 14:47) must not hold the daily-bar legs frozen
+    for the rest of the session, and the intraday class's readiness is logged ONCE PER TRANSITION —
+    not on each of the ~375 ticks a session-long hole would see."""
+    from engine.core.enums import Actor, RiskState
+    from engine.core.protected_store import ProtectedStore
+    from engine.core.types import TradeWindow
+    from engine.ops.lifecycle import SessionLifecycle
+    from engine.ops.main import _log_intraday_class_transition, refresh_and_lift_warmup
+    from engine.ops.selftest import SelfTest
+    from engine.ops.warmup import WarmupStatus
+    from engine.risk.causes import RiskStateLatch
+    from engine.risk.kill import KillSwitch
+    from engine.risk.mode import ModeManager
+    from tests.unit.test_lifecycle_selftest import OWNER_OK, REQUIRED_AT_STARTUP, FakeSecrets, FakeSettings
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "limits.yaml").write_text("schema_version: 1\nlimits: {}\n", encoding="utf-8")
+    (cfg / "envelope.yaml").write_text("schema_version: 1\nparameters: {}\n", encoding="utf-8")
+    pstore = ProtectedStore(cfg, conn, clock)
+    pstore.register_initial("limits.yaml", OWNER_OK)
+    pstore.register_initial("envelope.yaml", OWNER_OK)
+
+    mode = ModeManager(conn, clock, None, calendar)
+    kill = KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mode)
+    mode.seed_trade_window_if_absent(TradeWindow(
+        start=FakeSettings._TW.start_ist, end=FakeSettings._TW.end_ist, squareoff_buffer_min=5,
+    ))
+
+    class IntradayHoleGate:
+        async def status(self):
+            return WarmupStatus(ready=False, blockers=["orb:AAA bars 165/182", "orb:BBB bars 165/182"])
+
+    gate = IntradayHoleGate()
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=pstore, kill_switch=kill, mode_manager=mode)
+    lifecycle = SessionLifecycle(
+        conn=conn, clock=clock, calendar=calendar, settings=FakeSettings(),
+        mode_manager=mode, kill_switch=kill, self_test=st, catch_up=None,
+        warmup_gate=gate, latch=latch, build_version="test-0",
+    )
+    await latch.set_cause("warmup_ready", RiskState.FROZEN, "daily bars short", Actor.RISK_GATE)
+    assert mode.risk_state() == RiskState.FROZEN
+
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity, message):
+        alerts.append((severity, message))
+
+    holder: dict = {"status": None}
+    await refresh_and_lift_warmup(gate, holder, mode, lifecycle, alert=alert)
+    assert holder["status"].ready is False                 # coverage IS still missing...
+    assert mode.risk_state() == RiskState.NORMAL           # ...but not in a class that freezes
+    assert holder["intraday_short"] is True
+    # The class reaches neither the risk state nor a WARMUP_FROZEN page any more, so a hole that
+    # opens MID-SESSION has to reach the owner from here or not at all.
+    assert len(alerts) == 1 and alerts[0][0] == "warning"
+    assert "INTRADAY coverage short" in alerts[0][1] and "orb:AAA bars 165/182" in alerts[0][1]
+    assert "NOT frozen" in alerts[0][1]
+
+    # The memo is per TRANSITION: a second tick on the same standing shortfall says nothing, and a
+    # heal flips it back so the recovery is visible too.
+    assert _log_intraday_class_transition(holder, holder["status"]) is None
+    assert holder["intraday_short"] is True
+    severity, message = _log_intraday_class_transition(holder, WarmupStatus(ready=True))
+    assert holder["intraday_short"] is False
+    assert severity == "info" and "restored" in message
+    await refresh_and_lift_warmup(gate, holder, mode, lifecycle, alert=alert)   # short again
+    assert [s for s, _m in alerts] == ["warning", "warning"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_observation_of_a_ready_intraday_class_pages_nobody() -> None:
+    """The transition memo starts UNSET, so every clean boot's first refresh is a transition. It
+    must not read as a recovery: "coverage restored" on a boot that was never short is the noise
+    that teaches an owner to ignore the line that matters."""
+    from engine.ops.main import _log_intraday_class_transition
+    from engine.ops.warmup import WarmupStatus
+
+    holder: dict = {}
+    assert _log_intraday_class_transition(holder, WarmupStatus(ready=True)) is None
+    assert holder["intraday_short"] is False
+    # A first observation of a SHORT class IS a notice — the owner learns it on the tick, not only
+    # from a boot report that may be hours old.
+    holder = {}
+    notice = _log_intraday_class_transition(
+        holder, WarmupStatus(ready=False, blockers=["orb:AAA bars 1/50"])
+    )
+    assert notice is not None and notice[0] == "warning"
+
+    # A duck-typed status with no per-class answer is not a transition at all (nothing to say).
+    assert _log_intraday_class_transition({}, SimpleNamespace(ready=False, blockers=[])) is None
+
+
+def test_the_intraday_notice_is_silent_while_a_freezing_class_holds_entries_frozen() -> None:
+    """Re-review 2026-09-13: with the DAILY (or regime / unattributable) class ALSO short, lifecycle
+    step 6 DID freeze and WARMUP_FROZEN owns that state — a 60 s notice saying "entries are NOT
+    frozen" would state the opposite of the live risk state. Nothing is said and the memo is left
+    alone, so the intraday shortfall is reported on the first tick after the freeze lifts, when the
+    wording is true. The mirror holds: intraday healing under a standing freeze is no "restored"."""
+    from engine.ops.main import _log_intraday_class_transition
+    from engine.ops.warmup import DAILY_STRATEGY_SCOPE, WarmupStatus
+
+    daily_short = f"{DAILY_STRATEGY_SCOPE}:AAA daily bars 199/200"
+    holder: dict = {}
+    mixed = WarmupStatus(ready=False, blockers=[daily_short, "orb:AAA bars 3/5"])
+    assert _log_intraday_class_transition(holder, mixed) is None
+    assert "intraday_short" not in holder
+    # An unattributable blocker holds EVERY class down (fail closed): the same silence.
+    unknown = WarmupStatus(ready=False, blockers=["warmup check failed", "orb:AAA bars 3/5"])
+    assert _log_intraday_class_transition(holder, unknown) is None
+    assert "intraday_short" not in holder
+    # The daily class heals while intraday is still short: NOW the notice is true, and it is sent.
+    notice = _log_intraday_class_transition(
+        holder, WarmupStatus(ready=False, blockers=["orb:AAA bars 3/5"])
+    )
+    assert notice is not None and notice[0] == "warning"
+    assert "NOT frozen by warm-up" in notice[1] and "orb:AAA bars 3/5" in notice[1]
+    assert holder["intraday_short"] is True
+    # Intraday heals but the daily class is short again: entries are frozen — no "restored".
+    frozen_again = WarmupStatus(ready=False, blockers=[daily_short])
+    assert _log_intraday_class_transition(holder, frozen_again) is None
+    assert holder["intraday_short"] is True
+
+
+def test_the_intraday_transition_memo_is_scoped_to_the_ist_day() -> None:
+    """The intraday class reads trivially READY whenever there is no session (before the open, a
+    non-trading day), so a memo that survived midnight would manufacture "coverage restored" out of
+    the rollover. Given ``today`` the memo resets on a new day: the first reading of the day is a
+    first observation (never a recovery), and a real heal after a real hole still is one."""
+    from datetime import date as _date
+
+    from engine.ops.main import _log_intraday_class_transition
+    from engine.ops.warmup import WarmupStatus
+
+    holder: dict = {}
+    short = WarmupStatus(ready=False, blockers=["orb:AAA bars 3/5"])
+    assert _log_intraday_class_transition(holder, short, today=_date(2026, 9, 11)) is not None
+    assert holder["intraday_short"] is True and holder["intraday_short_day"] == _date(2026, 9, 11)
+    # Midnight: the trivially-ready reading on the new day is a first observation, not a recovery.
+    assert _log_intraday_class_transition(holder, WarmupStatus(ready=True), today=_date(2026, 9, 12)) is None
+    assert holder["intraday_short"] is False and holder["intraday_short_day"] == _date(2026, 9, 12)
+    # Same day, a real hole then a real heal: the recovery IS reported.
+    assert _log_intraday_class_transition(holder, short, today=_date(2026, 9, 12)) is not None
+    notice = _log_intraday_class_transition(holder, WarmupStatus(ready=True), today=_date(2026, 9, 12))
+    assert notice is not None and notice[0] == "info" and "restored" in notice[1]
+
+
+def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context() -> None:
+    """CONSTRAINT (2026-09-13): the pre-screen's intraday-warm-up refusal and the gate's
+    ``warmup_ready`` verdict must be the SAME fact, or the pre-screen would re-arm candidates the
+    gate would have approved (or spend analyst calls the gate then rejects). ONE snapshot function
+    is wired to both seams in the composition root."""
+    src = inspect.getsource(opsmain.run)
+    assert src.count("warmup_status_fn=warmup_status_snapshot,") == 2   # ctx_builder + pipeline
+    assert "def warmup_status_snapshot() -> WarmupStatus:" in src
 
 
 # =========================================================================== WO-15 boot ordering

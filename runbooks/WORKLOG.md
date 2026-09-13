@@ -1,5 +1,58 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-13 (owner: "Implement all of the pending changes") — tranche 3: warm-up scoping, per-source watermark, sweep mechanics, two-session validity; O17 sizing caps prepared
+
+- **Pending list executed** (from the 09-11 report and the 09-12 recaps): per-class warm-up scoping
+  (plan change), the NSE per-source insider watermark, the pre-registered vectorbt sweep-mechanics
+  fix with its re-runs, two-session validity for swing entries, and the sizing caps. Deliberately not
+  done: `holdings_observations` retention (a few KB a year) — noted, not built.
+- **Sizing caps (O17) — PREPARED, NOT APPLIED.** I edited `config/limits.yaml` (gap mult 2.5→2.0,
+  per-stock ₹8k→₹12k) and ran the re-sign; the auto-mode classifier refused
+  `seed_protected_config.py --reseed` (shared-resource write), and the flow is owner-only by design
+  (R4). An unsigned edit on disk would fail the next boot's integrity self-test, so I restored the
+  signed file (verified: loader parses gap 2.5 / cap 8000), saved the change as
+  `runbooks/briefs/o17_limits_2026-09-13.patch` (`git apply --check` clean), wrote the decision and
+  arithmetic as plan §7.1 O17 (DECIDED, PENDING), and put the three owner steps in COMMANDS.md.
+  Lesson recorded in memory: prepare protected-store edits, never leave one unsigned.
+- **Build (engine stopped 01:22 Sun; workflow `wf_545b6008-303` lost W/N/M builders and both V
+  reviewers to the session limit at ~01:40; `wf_a47bc5bd-0f0` from 02:31 finished W/N/M on the
+  partial tree and reviewed V; 19 agents, done 12:20):** N passed after one fix round (the
+  builder's single 180-day clamped request became the repo's proven ≤31-day chunking, and the plan's
+  false "no PIT backfill entry point" sentence now names `scripts/backfill_filings.py`). W, M and V
+  each survived their fix round with one re-review major — a second miss at Opus — so I fixed those
+  inline: **W** — the 60 s intraday notice asserted "entries are NOT frozen" unconditionally; it is
+  now silent while a freezing class (daily/regime/unattributable) is also short (WARMUP_FROZEN owns
+  that state), is computed AFTER the lift it describes, and its memo is scoped to the IST day so the
+  midnight rollover cannot manufacture a "coverage restored" (two new tests). **M** — the fixer had
+  re-run all five cells 11:53–11:58 on the completed item (i) and corrected the record (cell B is
+  PROMOTABLE at 66.7% / +0.000741%/day, not negative as the 03:11 pass said; cell A@120 passes exactly
+  on the 60% bar with all nine configs negative per closed trade; verdict unchanged — `trend` is not
+  a promotion candidate), but its residue bullet called the within-bar path "inert on all three
+  legs", which is false for `trend` (`sl_trail=True`: vectorbt checks the trail against the prior
+  bar's high-water and only then ratchets with the current high — verified in `portfolio/nb.py`);
+  the plan, `STOP_EVALUATION`'s docstring and the modelling notes now disclose that, the arming-from-
+  the-bar-after-the-fill residue, and that the decomposition's intermediate rows came from a
+  throwaway script. **V** — the fixer had restored the never-mint-a-dead-TTL floor and scoped the
+  extension to `entry=True`; the re-review showed the "no consumer needs a change" claim was false for
+  both surfaces the owner browses (bare HH:MM everywhere), so the Telegram listing now carries the
+  day on both stamps when a row outlives its day and the dashboard's `valid till` chip carries its
+  date with a live day's fold starting open; and the new `/taken` drift check fired at 1.25× the stop
+  distance when the gate had sized the swing on 2.5× (`overnight_gap_mult`) — it now reads that
+  multiplier through a `RecommendationBook` seam wired from the hash-verified limits, fires only past
+  the approved budget, calls out a fill on the wrong side of the stop unconditionally, and the
+  registered costs name the notional-side verdicts and every `pending_rec_symbols` consumer.
+- **Verification:** full unit suite on the settled tree **3036 passed** (6 m 11 s, `--tb=short`,
+  engine Stopped); the six files touched by the inline fixes re-run first (440 passed); ruff clean
+  on every file touched today (only the pre-existing HEAD findings remain elsewhere); dashboard
+  `tsc -b && vite build` clean, then the BUILT bundle checked through `fixture_server.mjs` in an
+  isolated chrome-devtools context on two ports — default: yesterday's fold starts OPEN because it
+  holds the live JINDALSTEL card whose `valid till` chip reads `2026-09-14 15:30:00`; `NO_TODAY=1`:
+  the panel says "no deliveries today · 1 still actionable from an earlier session" instead of the
+  old empty state. The vectorbt claims behind the M correction were read in
+  `.venv/.../vectorbt/portfolio/nb.py` (stop check ~2025–2034 precedes the ratchet ~2046–2051), not
+  taken from the reviewer. `config/limits.yaml` untouched (loader parses gap 2.5 / cap 8000).
+- **Config applied on this restart:** none beyond code; O17 awaits the owner's reseed.
+
 ## 2026-09-12 evening (owner: "Proceed with the rest of the recommended changes that you deem will improve the engine's performance") — tranche 2: hi52 promoted as a forward test, brk20 retest re-arm, insider-feed coverage, intraday fade/ATR refutations
 
 - **Scope decided by the manager under the owner's blanket authorisation:** hi52 v2 promotion (with a

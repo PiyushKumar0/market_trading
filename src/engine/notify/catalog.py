@@ -297,30 +297,48 @@ def startup_report(
     prior_state: str,
     frozen_reasons: list[str],
     deferred_steps: list[str],
+    warmup_classes_short: list[str] | None = None,
+    warmup_blockers: list[str] | None = None,
 ) -> CatalogMessage:
     """The every-startup recovery & catch-up report (§2.6 step 7 / STARTUP_REPORT).
 
     Critical when the book is frozen on an integrity failure, the kill switch is engaged, or the
     prior run crashed; otherwise info. The owner sees a compact status line plus the frozen/deferred
     reasons — the full structured report is preserved in ``data`` (and the ``startup_report`` log),
-    never dumped as a raw dict into the prose (R8)."""
+    never dumped as a raw dict into the prose (R8).
+
+    ``warmup_classes_short`` renders its own line because since the 2026-09-13 per-class scoping
+    (§2.6 step-6 addendum) a short warm-up class no longer implies a ``frozen:`` entry: an INTRADAY
+    shortfall refuses intraday candidates per candidate and sends no ``WARMUP_FROZEN`` page, so this
+    line is the owner's ONLY boot-time notice that the session is running on incomplete coverage."""
     lead = f"⚠ crash-recovered (prior state {prior_state}) — " if crash_recovered else ""
     frozen = ", ".join(frozen_reasons) if frozen_reasons else "none"
     deferred = ", ".join(deferred_steps) if deferred_steps else "none"
+    classes = list(warmup_classes_short or [])
+    blockers = list(warmup_blockers or [])
+    warm_line = ""
+    if classes:
+        # The first few blockers only: a market-wide minute hole renders one line per watch symbol,
+        # and the whole list is in ``data`` + the structured log for anyone who needs it.
+        shown = ", ".join(blockers[:3])
+        more = f", +{len(blockers) - 3} more" if len(blockers) > 3 else ""
+        detail = f" ({shown}{more})" if shown else ""
+        warm_line = f"\nwarm-up short: {', '.join(classes)}{detail}"
     return CatalogMessage(
         kind=MessageKind.STARTUP_REPORT,
         title="Startup recovery complete",
         body=(
             f"{lead}mode={mode} · risk={risk_state} · killed={killed} · "
             f"login_needed={needs_login} · integrity_ok={integrity_ok}\n"
-            f"frozen: {frozen}\ndeferred: {deferred}"
+            f"frozen: {frozen}\ndeferred: {deferred}{warm_line}"
         ),
         severity="critical" if (killed or not integrity_ok or crash_recovered) else "info",
         data={
             "mode": mode, "risk_state": risk_state, "killed": killed, "needs_login": needs_login,
             "integrity_ok": integrity_ok, "crash_recovered": crash_recovered,
             "prior_state": prior_state, "frozen_reasons": frozen_reasons,
-            "deferred_steps": deferred_steps,
+            "deferred_steps": deferred_steps, "warmup_classes_short": classes,
+            "warmup_blockers": blockers,
         },
     )
 
@@ -525,21 +543,29 @@ def backfill_report(
     )
 
 
-def warmup_frozen(*, blockers: list[str]) -> CatalogMessage:
+def warmup_frozen(*, blockers: list[str], classes: list[str] | None = None) -> CatalogMessage:
     """Entries FROZEN by the cold-start warm-up gate (§2.6 step 6 / §7.1 ``warmup_ready``).
 
     Each blocker is a rendered "scope: have/need" line (e.g. ``"orb:RELIANCE bars 12/30"``) — the
     strategies/symbols whose feature lookbacks lack contiguous bar coverage. Entries reopen
-    automatically once coverage is met; risk-reducing actions were never gated (R3)."""
+    automatically once coverage is met; risk-reducing actions were never gated (R3).
+
+    ``classes`` are the coverage classes short (2026-09-13, §2.6 step-6 addendum). It LEADS the body
+    and travels in ``data`` beside the blockers rather than inside them: which class froze entries is
+    the first thing the owner needs, an intraday line riding along in the same freeze must not read
+    as the cause, and every element of ``blockers`` stays a rendered "scope: have/need" line for the
+    consumers that parse it."""
+    lead = f"classes short: {', '.join(classes)} — entries FROZEN\n" if classes else ""
     return CatalogMessage(
         kind=MessageKind.WARMUP_FROZEN,
         title="Warm-up incomplete — entries frozen",
         body=(
+            f"{lead}"
             "Insufficient contiguous bar coverage for feature lookbacks (never trade on thin data):\n"
             + "\n".join(f"• {b}" for b in blockers)
         ),
         severity="warning",
-        data={"blockers": blockers},
+        data={"blockers": blockers, "classes": list(classes or [])},
     )
 
 

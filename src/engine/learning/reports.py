@@ -71,6 +71,16 @@ def render_markdown(report: ValidationReport) -> str:
     lines.append("")
     lines.append(f"_Generated {report.generated_at.isoformat()} · param_set `{report.param_set_id}`_")
     lines.append("")
+    # WO-M (2026-09-13): the sweep-mechanics stamp travels with the VERDICT too — a verdict is only
+    # comparable to another verdict produced the same way. Emitted ONLY when the ParamSet carries a
+    # stamp: this pipeline also validates returns that never came out of SweepRunner at all (the
+    # event-study harnesses build their own series and charge their own fills/costs), and printing
+    # "PRE-2026-09-13 (unstamped)" on one of those would assert three sweep biases it cannot have.
+    # Absence is the tell here, exactly as it is on the SweepReport side — with the difference that
+    # on THIS side absence means "pre-fix sweep OR no sweep", which COMMANDS.md says in words.
+    if report.sweep_mechanics:
+        lines.append(f"_Sweep mechanics: `{report.sweep_mechanics}`_")
+        lines.append("")
 
     # ---- verdict banner (first, always) -----------------------------------------------------
     if report.promotable:
@@ -82,6 +92,18 @@ def render_markdown(report: ValidationReport) -> str:
         for r in report.reasons:
             lines.append(f"- {r}")
     lines.append("")
+
+    # ---- defaults-fallback banner ------------------------------------------------------------
+    # A verdict on params the grid never ranked must not render like a verdict on a grid winner.
+    # Sits with the verdict, above every other statistic, because it changes what ALL of them mean.
+    if report.params_are_grid_winner is False:
+        lines.append(
+            "> **THESE PARAMS ARE NOT A GRID WINNER.** The sweep ranked no configuration (none "
+            "closed a round trip inside the window, or the open/closed split was unreadable), so "
+            "the §6.3 envelope DEFAULTS were validated instead. The trial count, sweep context and "
+            "winner-stability flag below describe a grid that selected nothing."
+        )
+        lines.append("")
 
     # ---- honest negative-expectancy banner (C9) ---------------------------------------------
     if report.expectancy_pct is not None and report.expectancy_pct < 0.0:
@@ -146,9 +168,9 @@ def render_markdown(report: ValidationReport) -> str:
             f"edge: {h.n_open}**"
         )
         lines.append(
-            f"- Per-trade net return — ALL trades (sweep headline, and the ranking statistic): "
-            f"{_pct(h.expectancy_per_trade_pct, 4)}  ·  CLOSED round trips only: "
-            f"{_pct(h.expectancy_per_trade_closed_pct, 4)}"
+            f"- Per-trade net return — CLOSED round trips only (the sweep headline and ranking "
+            f"statistic since WO-M): {_pct(h.expectancy_per_trade_closed_pct, 4)}  ·  ALL trades "
+            f"incl. open marks (reporting only): {_pct(h.expectancy_per_trade_pct, 4)}"
         )
         lines.append(
             f"- Holding sessions, all trades — mean {_num(h.mean_sessions)} · median "
@@ -276,14 +298,19 @@ def render_sweep_markdown(report: SweepReport) -> str:
         f"- Reference notional: ₹{report.reference_notional}  ·  modelled per-side fee: "
         f"{report.per_side_fee_pct:.4f}%"
     )
-    lines.append(f"- Best params (by expectancy): {report.best_params}")
+    lines.append(f"- Best params (by CLOSED-trade expectancy): {report.best_params}")
+    # WO-M (2026-09-13): the one-line mechanics stamp. A sweep number is only meaningful with the
+    # three settings it was produced under, and a pre-fix artifact carries no stamp at all — which
+    # is how the two are told apart.
+    lines.append(f"- **Mechanics**: `{report.mechanics or 'PRE-2026-09-13 (unstamped)'}`")
     lines.append("")
 
     # ---- R2 (2026-09-12): what the winning config's trades actually looked like --------------
     # The per-config table below reports one per-trade expectancy and no horizon at all, which is
     # how a run could be promoted against a floor spread over 120 sessions without anyone knowing
     # the median trade was held for 33 — and without the reader seeing that some of those "trades"
-    # were still open. Both go here, for the config the run selected.
+    # were still open. Both go here, for the config the run selected. Since WO-M the headline is
+    # the CLOSED-trade figure and the all-trades one is what is reported beside it.
     best_stat = next(
         (s for s in report.stats if report.best_params is not None and s.params == report.best_params),
         None,
@@ -297,9 +324,15 @@ def render_sweep_markdown(report: SweepReport) -> str:
             f"the window edge: {best_stat.n_open}**"
         )
         lines.append(
-            f"- Per-trade net return — ALL trades (the headline, and the statistic this winner was "
-            f"ranked on): {_pct(best_stat.expectancy_pct, 4)}  ·  CLOSED round trips only: "
-            f"{_pct(best_stat.expectancy_closed_pct, 4)}"
+            f"- Per-trade net return — CLOSED round trips only (the headline, and the statistic "
+            f"this winner was ranked on, WO-M): {_pct(best_stat.expectancy_pct, 4)}  ·  ALL trades "
+            f"incl. open marks (reporting only): {_pct(best_stat.expectancy_all_pct, 4)}"
+        )
+        win_c = "—" if best_stat.win_rate_closed is None else f"{best_stat.win_rate_closed:.1%}"
+        win_a = "—" if best_stat.win_rate is None else f"{best_stat.win_rate:.1%}"
+        lines.append(
+            f"- Win rate — CLOSED round trips (same population as the headline above): {win_c}  ·  "
+            f"ALL trades incl. open marks: {win_a}"
         )
         lines.append(
             f"- Holding {unit}s, all trades — mean {_num(best_stat.hold_bars_mean)} · median "
@@ -327,17 +360,39 @@ def render_sweep_markdown(report: SweepReport) -> str:
 
     lines.append("## Per-configuration stats")
     lines.append("")
-    lines.append("| params | trades | win% | expectancy | total | Sharpe | maxDD |")
-    lines.append("|:-------|-------:|-----:|-----------:|------:|-------:|------:|")
+    lines.append(
+        "| params | trades | closed | win% (CLOSED) | win% (all) | expectancy (CLOSED) | "
+        "expectancy (all) | total | Sharpe | maxDD |"
+    )
+    lines.append(
+        "|:-------|-------:|-------:|--------------:|-----------:|--------------------:|"
+        "-----------------:|------:|-------:|------:|"
+    )
     for s in report.stats:
         params = ", ".join(f"{k}={s.params[k]}" for k in sorted(s.params))
         win = "—" if s.win_rate is None else f"{s.win_rate:.0%}"
+        # WO-M follow-up: the closed-only win rate sits FIRST, beside the closed-only expectancy it
+        # shares a population with — quoting "win rate X%, expectancy Y%" off this row must not mix
+        # a mark-to-market hit rate with a realized per-trade mean.
+        win_closed = "—" if s.win_rate_closed is None else f"{s.win_rate_closed:.0%}"
         sharpe = "—" if s.sharpe is None else f"{s.sharpe:.2f}"
         mdd = "—" if s.max_drawdown_pct is None else f"{s.max_drawdown_pct:.2f}%"
         lines.append(
-            f"| {params} | {s.n_trades} | {win} | {_pct(s.expectancy_pct, 4)} | "
+            f"| {params} | {s.n_trades} | {s.n_closed} | {win_closed} | {win} | "
+            f"{_pct(s.expectancy_pct, 4)} | {_pct(s.expectancy_all_pct, 4)} | "
             f"{_pct(s.total_return_pct)} | {sharpe} | {mdd} |"
         )
+    lines.append("")
+    # WO-M (iii): the ranked column is the CLOSED one; the all-trades column is the pre-fix
+    # headline, kept visible so the size of that bias is readable per config instead of asserted.
+    lines.append(
+        "_`expectancy (CLOSED)` is the ranked/promotion statistic (mean net return over round trips "
+        "that closed inside the window); `expectancy (all)` adds positions still open at the window "
+        "edge at unrealized mark-to-market with no exit leg paid — the pre-2026-09-13 headline. "
+        "`win% (CLOSED)` is over the SAME round trips as `expectancy (CLOSED)`; `win% (all)` counts "
+        "every trade, open ones included. Neither win rate is a promotion input. A `—` in the "
+        "CLOSED columns means the config closed no round trip, so it was not rankable._"
+    )
     lines.append("")
     if report.notes:
         lines.append("## Notes / documented approximations")

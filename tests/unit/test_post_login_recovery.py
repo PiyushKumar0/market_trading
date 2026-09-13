@@ -512,12 +512,13 @@ async def test_day_backfill_end_clamps_to_yesterday_until_session_close(clock, c
 @pytest.mark.asyncio
 async def test_reapply_lifts_warmup_freeze_when_ready(conn, clock, temp_config, monkeypatch):
     """§2.6 step-6 reopen: after a warm-up freeze, once coverage is met the reapply lifts FROZEN→NORMAL
-    through the SAME risk-state seam startup uses (never a bypass)."""
+    through the SAME risk-state seam startup uses (never a bypass). The boot blocker is a DAILY-class
+    one since 2026-09-13 — only the freezing classes reach the risk state at all."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, store, lifecycle = _build(conn, clock, temp_config)
     store.register_initial("limits.yaml", OWNER_OK)
     store.register_initial("envelope.yaml", OWNER_OK)
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["orb:RELIANCE bars 3/50"])
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["rsi2/trend/mom:RELIANCE daily bars 3/200"])
     await lifecycle.startup(check_skew=False)
     assert mode.risk_state() == RiskState.FROZEN
 
@@ -533,7 +534,7 @@ async def test_reapply_holds_lift_when_another_freeze_stands(conn, clock, temp_c
     respected — the warm-up reopen must never clear a warranted freeze."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)   # protected store NOT registered
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["orb:X 1/50"])
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["regime:INDIA VIX daily bars 4/20"])
     await lifecycle.startup(check_skew=False)
     assert mode.risk_state() == RiskState.FROZEN
 
@@ -559,8 +560,32 @@ async def test_reapply_does_not_lift_when_killed(conn, clock, temp_config, monke
 
 @pytest.mark.asyncio
 async def test_reapply_freezes_entries_when_not_ready(conn, clock, temp_config, monkeypatch):
-    """Coverage still short on re-evaluation ⇒ FROZEN-for-entries + a WARMUP_FROZEN alert (same as
-    startup step 6): never trade on thin data."""
+    """A FREEZING class still short on re-evaluation ⇒ FROZEN-for-entries + a WARMUP_FROZEN alert
+    (same as startup step 6): never trade on thin data."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    sent = []
+
+    async def notify(m):
+        sent.append(m)
+
+    mode, _kill, store, lifecycle = _build(conn, clock, temp_config, notify=notify)
+    store.register_initial("limits.yaml", OWNER_OK)
+    store.register_initial("envelope.yaml", OWNER_OK)
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["regime:NIFTY 50 daily bars 0/200"])
+    assert mode.risk_state() == RiskState.NORMAL
+
+    res = await lifecycle.reapply_warmup_gate()
+    assert res.ready is False and res.outcome == "frozen" and res.froze is True
+    assert res.classes_short == ["regime"]
+    assert mode.risk_state() == RiskState.FROZEN
+    assert any(str(m.kind) == "warmup_frozen" for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_reapply_never_freezes_on_an_intraday_only_shortfall(conn, clock, temp_config, monkeypatch):
+    """2026-09-13 plan change, the post-login half: a login recovery re-applying the gate must not
+    re-impose the global freeze for a minute hole. The state stays NORMAL, no WARMUP_FROZEN page is
+    sent, and the outcome still names the class so the recovery report is not silent."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -574,6 +599,8 @@ async def test_reapply_freezes_entries_when_not_ready(conn, clock, temp_config, 
     assert mode.risk_state() == RiskState.NORMAL
 
     res = await lifecycle.reapply_warmup_gate()
-    assert res.ready is False and res.outcome == "frozen" and res.froze is True
-    assert mode.risk_state() == RiskState.FROZEN
-    assert any(str(m.kind) == "warmup_frozen" for m in sent)
+    assert res.ready is False and res.froze is False
+    assert res.outcome == "intraday_short_already_normal"
+    assert res.classes_short == ["intraday"] and res.blockers == ["orb:Y 2/50"]
+    assert mode.risk_state() == RiskState.NORMAL
+    assert not any(str(m.kind) == "warmup_frozen" for m in sent)

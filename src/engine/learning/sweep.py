@@ -76,6 +76,25 @@ event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in 
   cadence. The A12 ex-date skip and ``flagged_instrument_days`` suppression are live/Phase-3
   concerns (the sweep runs on corp-action-adjusted bars, A11) — noted honestly, never silently
   dropped.
+
+SWEEP MECHANICS — **WO-M (2026-09-13, plan §6.4 sweep-mechanics work order)**, three settings that
+every report now stamps (:data:`MECHANICS_STAMP`) because all three moved the numbers and all three
+previously moved them the SAME way, in the strategy's favour:
+
+1. the bar's full ``open``/``high``/``low`` are passed to vectorbt for DAILY frames too, so a stop is
+   decided **intrabar** (the live resting broker stop's behaviour) instead of on a close through the
+   level, AND filled where a resting stop would fill — at the gapped open when the bar opens through
+   the level, else at the level itself. ``open`` is part of item (i), not an extra: vectorbt
+   substitutes the close for any OHLC leg it is not given, and ``get_stop_price_nb`` tests the open
+   FIRST, so a fabricated ``open`` makes every bar that closes through the stop fill at that close;
+2. ``stop_exit_price='stopmarket'`` charges a stop exit the same per-leg half-spread as every other
+   exit (vectorbt's ``stoplimit`` default zeroes slippage on stop fills);
+3. :attr:`ParamSetStat.expectancy_pct` — the RANKED per-trade statistic — averages **closed round
+   trips only**; the all-trades figure (which marks still-open positions at unrealized value and
+   pays no exit leg on them) is reported beside it as ``expectancy_all_pct``.
+
+Every sweep/CPCV number produced before 2026-09-13 is on the pre-fix mechanics and is not
+comparable term-by-term with one produced after; the stamp is how the two are told apart.
 """
 
 from __future__ import annotations
@@ -139,6 +158,49 @@ _TRADING_DAYS_Y = 252
 #: WO-2 (i): what every report's ``fill_mechanics`` field and modelling note declare.
 FILL_MECHANICS = "next_bar_open"
 
+# --- WO-M sweep mechanics (2026-09-13, plan §6.4 sweep-mechanics work order). The three settings
+# --- the work order registered, as named constants so the report stamp and the code cannot drift.
+#: (i) stops are decided against the bar's OWN OHLC (``open``/``high``/``low`` are passed to vectorbt
+#: for DAILY frames too, not only intraday), so an intrabar breach stops out — the live resting
+#: broker stop's behaviour — and it fills where that stop would fill: at the OPEN when the bar gaps
+#: through the level, else at the level. Before 2026-09-13 the daily frames passed none of the three
+#: and vectorbt substituted the close for all of them, so a stop could only fire on a CLOSE through
+#: it (fewer stop-outs). ``open`` matters for the FILL as much as ``high``/``low`` do for the hit:
+#: ``get_stop_price_nb`` returns the open whenever the open is already through the level, so an
+#: ``open`` silently substituted by the close books every close-through-the-stop bar at that close
+#: rather than at the level (pessimistic on an ``sl_stop`` leg, optimistic on a ``tp_stop`` one).
+#: Two within-bar residues REMAIN, both in the strategy's favour, both unmeasured (WO-M re-review,
+#: 2026-09-13): (a) a TRAILING stop is checked against the PRIOR bar's high-water and only then
+#: ratcheted with the current bar's high (``portfolio/nb.py`` ~2025-2051: ``get_stop_price_nb``
+#: first, ``if _high > sl_curr_price: sl_curr_price = _high`` after), so a bar that makes a new high
+#: and gives back more than the trail inside the same session does NOT stop out where a live resting
+#: trail would — this touches ``trend`` (``sl_trail=True``), not ``rsi2``/``mom``; (b) the stop is
+#: armed from the bar AFTER the fill (the ``use_stops`` block runs before the bar's order and the
+#: current stop is still NaN on the entry bar), so the entry bar's own low is never tested —
+#: immaterial at ``trend``'s 4×ATR, potentially material on ``orb``.
+STOP_EVALUATION = "intrabar_ohlc"
+#: (ii) ``StopExitPrice.StopMarket`` — the installed vectorbt (1.0.0) resolves a stop fill in
+#: ``portfolio/nb.py resolve_stop_price_and_slippage_nb``: ``StopLimit`` (its default) returns
+#: ``(stop_price, 0.0)`` — slippage ZEROED, so a stop-exited round trip paid the fee but not the
+#: half-spread; ``StopMarket`` returns ``(stop_price, slippage)`` — the stop LEVEL is still the
+#: reference price (unlike ``Close``, which would also move WHERE the fill happens) and the per-leg
+#: half-spread is charged exactly as on every other exit. That is the one configuration that fixes
+#: the cost without changing the fill level, so it is the one registered here.
+STOP_EXIT_PRICE = "stopmarket"
+#: (iii) the headline/ranked per-trade expectancy averages CLOSED round trips only. Trades still
+#: open at the window edge carry unrealized mark-to-market and have paid no exit leg; the all-trades
+#: figure is reported beside it as ``ParamSetStat.expectancy_all_pct``.
+EXPECTANCY_BASIS = "closed_trades_only"
+
+#: One line naming all three, stamped into every sweep report (and threaded into the validation
+#: report) so a number produced before 2026-09-13 and one produced after can never be read as the
+#: same measurement. All three pre-fix settings biased results in the STRATEGY's favour.
+MECHANICS_STAMP = (
+    f"stops={STOP_EVALUATION} · stop_exit_price={STOP_EXIT_PRICE} (half-spread charged on stop "
+    f"exits) · expectancy={EXPECTANCY_BASIS} (all-trades figure reported beside it) · "
+    f"fills={FILL_MECHANICS} — WO-M 2026-09-13"
+)
+
 
 # --------------------------------------------------------------------------- report models
 class ParamSetStat(BaseModel):
@@ -148,22 +210,41 @@ class ParamSetStat(BaseModel):
 
     params: dict[str, float]
     n_trades: int
-    win_rate: float | None                 # fraction of trades with net return > 0
-    expectancy_pct: float | None           # mean per-trade net return, %
+    win_rate: float | None                 # fraction of ALL trades with net return > 0 (see below)
+    #: Mean per-trade net return over CLOSED round trips only, % (WO-M (iii), 2026-09-13) — THE
+    #: ranking statistic (:meth:`SweepRunner._rank_best`) and the per-trade figure the promotion
+    #: packet quotes. ``None`` when the config closed no round trip (nothing realized to average)
+    #: or when the open/closed split could not be read — in both cases the config is NOT rankable,
+    #: deliberately: the all-trades number must never silently stand in for it.
+    #: Before 2026-09-13 this field averaged ALL trades, open ones included at their unrealized
+    #: mark-to-market — see ``expectancy_all_pct``, which is now that number, reported beside it.
+    expectancy_pct: float | None
     total_return_pct: float | None         # compounded net return of the equal-weight daily series, %
     sharpe: float | None                   # annualized (252) Sharpe of the daily series
     max_drawdown_pct: float | None         # positive magnitude
 
-    # --- R2 (2026-09-12) REPORTING-ONLY additions. Nothing below changes ``expectancy_pct``, the
-    # --- :meth:`SweepRunner._rank_best` ranking statistic, or any promotion rule; they exist so a
-    # --- per-trade number can be READ correctly and so the WO-3 margin floor can be quoted at the
-    # --- horizon the strategy was actually held for instead of only at a §7.1 cap.
-    #: Open/closed split of the trades ``expectancy_pct`` averages. vectorbt's per-trade ``Return``
-    #: includes STILL-OPEN positions at their unrealized mark-to-market, so a window that ends on a
-    #: run of winners inflates the headline (and, through ``_rank_best``, the winner selection).
+    # --- R2 (2026-09-12) reporting additions; WO-M (2026-09-13) promoted the closed-only figure
+    # --- above to BE ``expectancy_pct``. What stays reporting-only: the holding distribution, the
+    # --- open/closed counts, and ``expectancy_all_pct`` — so the WO-3 margin floor can be quoted at
+    # --- the horizon the strategy was actually held for instead of only at a §7.1 cap, and so the
+    # --- pre-2026-09-13 headline remains readable beside the one that replaced it.
+    #: Open/closed split of the trades. vectorbt's per-trade ``Return`` includes STILL-OPEN
+    #: positions at their unrealized mark-to-market, so a window that ends on a run of winners
+    #: inflates ``expectancy_all_pct``; ``expectancy_pct`` excludes them (WO-M (iii)).
     n_closed: int = 0
     n_open: int = 0
-    expectancy_closed_pct: float | None = None   # mean per-trade net return over CLOSED trades only, %
+    #: Mean per-trade net return over CLOSED trades only, % — the SAME number as ``expectancy_pct``
+    #: since WO-M, kept because it names its basis in the JSON and every consumer written between
+    #: 2026-09-12 and the fix reads it.
+    expectancy_closed_pct: float | None = None
+    #: Mean per-trade net return over ALL trades, % — the pre-WO-M headline, kept as the figure
+    #: reported BESIDE ``expectancy_pct``. Reporting only: it ranks nothing and promotes nothing.
+    expectancy_all_pct: float | None = None
+    #: Fraction of CLOSED round trips with net return > 0 — the same population ``expectancy_pct``
+    #: is computed over, so the two headline per-trade statistics of a promotion table share a
+    #: basis. ``win_rate`` above stays on ALL trades (still-open positions counted at their
+    #: unrealized mark); both are reported, neither is a promotion input.
+    win_rate_closed: float | None = None
     #: Realized holding period in BARS — sessions for the daily baselines, 1-minute bars for ``orb``
     #: (:attr:`SweepReport.bar_unit` names the unit). An OPEN trade contributes its AGE at the window
     #: edge, not a realized hold, which is why the closed-only figures are reported beside them.
@@ -195,6 +276,10 @@ class SweepReport(BaseModel):
     slippage_per_leg_pct: float = 0.0      # = spread_pct/2, charged by vectorbt on EVERY order
     cost_floor_pct: float = 0.0            # round-trip friction at the reference notional (fees+spread)
     fill_mechanics: str = "next_bar_open"  # WO-2; "same_bar_close" was the pre-2026-08-13 defect
+    #: WO-M (2026-09-13): the one-line stamp of the three sweep-mechanics settings
+    #: (:data:`MECHANICS_STAMP`). Absent/"" on any artifact written before the fix — which is
+    #: exactly how a pre-fix report is told apart from a post-fix one.
+    mechanics: str = ""
     #: What one bar of ``ParamSetStat.hold_bars_*`` IS — "session" for the daily baselines, "1m bar"
     #: for ``orb``. Recorded so a holding number in the JSON is never read in the wrong unit.
     bar_unit: str = "session"
@@ -204,7 +289,7 @@ class SweepReport(BaseModel):
     #: code path that sets this False: it would be a claim the platform cannot currently support.
     population_is_survivorship_tainted_proxy: bool = True
     stats: list[ParamSetStat]
-    best_params: dict[str, float] | None   # ranked by expectancy_pct then total_return_pct
+    best_params: dict[str, float] | None   # ranked by CLOSED-trade expectancy_pct, then total return
     notes: list[str] = Field(default_factory=list)
     generated_at: datetime
 
@@ -418,6 +503,18 @@ class SweepRunner:
             notes.append("NO BARS for the requested symbols/window — every config scored zero trades.")
         for params in grid:
             stats.append(self._score(strategy_id, frames, params, fee))
+        # WO-M (iii): a config that traded but closed no round trip — or whose open/closed split
+        # could not be read (``_trade_split_stats`` degrades rather than raising) — has no realized
+        # per-trade expectancy and is excluded from the ranking. Say so in the artifact; a silently
+        # smaller candidate set is how a grid winner stops meaning what the reader thinks it means.
+        unrankable = sum(1 for s in stats if s.n_trades > 0 and s.expectancy_pct is None)
+        if unrankable:
+            notes.append(
+                f"{unrankable} of {len(stats)} configs scored trades but NO closed round trip (or "
+                "an unreadable open/closed split), so they carry no closed-trade expectancy and "
+                "were excluded from the winner ranking (WO-M item (iii)) — never ranked on their "
+                "unrealized marks instead."
+            )
 
         best = self._rank_best(stats)
         d_start, d_end = self._data_span(frames)
@@ -437,6 +534,7 @@ class SweepRunner:
             slippage_per_leg_pct=round(self._slippage_per_leg() * 100.0, 6),
             cost_floor_pct=round(self._cost_floor_pct(strategy_id), 6),
             fill_mechanics=FILL_MECHANICS,
+            mechanics=MECHANICS_STAMP,
             bar_unit="1m bar" if frames.intraday else "session",
             stats=stats,
             best_params=best,
@@ -518,32 +616,39 @@ class SweepRunner:
         trades = pf.trades.records_readable
         n = int(len(trades))
         win_rate: float | None = None
-        expectancy: float | None = None
-        # R2 (2026-09-12) reporting-only: the open/closed split and the realized holding
-        # distribution of the SAME trade records ``expectancy_pct`` is averaged over.
+        expectancy_all: float | None = None
+        # R2 (2026-09-12): the open/closed split and the realized holding distribution of the trade
+        # records. WO-M (iii, 2026-09-13): the CLOSED-only mean IS ``expectancy_pct`` now — a still
+        # -open position is unrealized and has paid no exit leg, so it cannot sit inside the
+        # statistic the grid winner is ranked on. A config with no closed round trip (or whose split
+        # could not be read) scores ``None`` and drops out of the ranking rather than falling back
+        # to the all-trades number.
         n_closed = n_open = 0
         expectancy_closed: float | None = None
+        win_rate_closed: float | None = None
         hold_all: tuple[float | None, float | None, float | None] = (None, None, None)
         hold_closed: tuple[float | None, float | None, float | None] = (None, None, None)
         if n:
             tr_ret = trades["Return"].astype(float)
-            win_rate = float((tr_ret > 0.0).mean())
-            expectancy = float(tr_ret.mean() * 100.0)
-            n_closed, n_open, expectancy_closed, hold_all, hold_closed = _trade_split_stats(
-                trades, tr_ret, frames.close.index
-            )
+            win_rate = float((tr_ret > 0.0).mean())      # ALL trades: unchanged, not a promotion input
+            expectancy_all = float(tr_ret.mean() * 100.0)
+            (
+                n_closed, n_open, expectancy_closed, win_rate_closed, hold_all, hold_closed,
+            ) = _trade_split_stats(trades, tr_ret, frames.close.index)
         total, max_dd = _equity_stats(daily)
         return ParamSetStat(
             params=dict(params),
             n_trades=n,
             win_rate=win_rate,
-            expectancy_pct=expectancy,
+            expectancy_pct=expectancy_closed,
             total_return_pct=total,
             sharpe=_sharpe(daily),
             max_drawdown_pct=max_dd,
             n_closed=n_closed,
             n_open=n_open,
             expectancy_closed_pct=expectancy_closed,
+            expectancy_all_pct=expectancy_all,
+            win_rate_closed=win_rate_closed,
             hold_bars_mean=hold_all[0],
             hold_bars_median=hold_all[1],
             hold_bars_p90=hold_all[2],
@@ -554,7 +659,16 @@ class SweepRunner:
 
     @staticmethod
     def _rank_best(stats: Sequence[ParamSetStat]) -> dict[str, float] | None:
-        traded = [s for s in stats if s.n_trades > 0 and s.expectancy_pct is not None]
+        """Grid winner by CLOSED-trade expectancy (WO-M (iii)), then total return, then shallowest DD.
+
+        A config that opened positions but closed NO round trip inside the window has no realized
+        per-trade expectancy, so it is not rankable — it is excluded rather than ranked on its
+        unrealized marks, and an all-``None`` grid returns ``None`` (the CLI then validates the
+        §6.3 default config, as it already does for an empty frame — flagging it on the console line
+        and on the ``ParamSet`` as ``params_are_grid_winner=False``, because a defaults verdict must
+        never render like a swept one).
+        """
+        traded = [s for s in stats if s.n_closed > 0 and s.expectancy_pct is not None]
         if not traded:
             return None
         best = max(
@@ -573,6 +687,11 @@ class SweepRunner:
     def _modelling_notes(self, strategy_id: str, frames: _Frames) -> list[str]:
         bar = "1m bar" if frames.intraday else "session"
         notes = [
+            f"MECHANICS (WO-M, 2026-09-13): {MECHANICS_STAMP}. The three settings named there are "
+            "the plan §6.4 sweep-mechanics work order's items (i)-(iii); before 2026-09-13 they "
+            "were close-evaluated stops, a stop exit that paid no spread, and a per-trade "
+            "expectancy that averaged still-open positions — all three biased the strategy's way, "
+            "so a number from a pre-fix report is not comparable term-by-term with one here.",
             f"FILLS: NEXT-{bar.upper()} OPEN (WO-2, 2026-08-13). Signals are computed on {bar} t's "
             f"completed values; entries AND exits are shifted one {bar} forward and filled at "
             f"{bar} t+1's OPEN (vectorbt price=open frame, signals shifted +1). The prior mechanics "
@@ -588,11 +707,13 @@ class SweepRunner:
             f"Costs — spread (WO-2): vectorbt slippage {self._slippage_per_leg() * 100:.4f}% per leg "
             f"= half the measured quoted spread {float(self._cost_model.spread_pct):.3f}% "
             "(config/costs.yaml spread_pct), so a round trip pays the full spread ON TOP of the "
-            "fees — EXCEPT on a STOP-driven exit, which vectorbt fills at the stop price with "
-            "slippage zeroed (its `stop_exit_price` default), i.e. that leg pays the fee but not "
-            "the half-spread and the round trip is ~1 bp cheaper than the floor quoted below. "
-            "Disclosed, NOT corrected here: it is item (ii) of the plan §6.4 2026-09-12 "
-            "sweep-mechanics work order, and it biases results in the STRATEGY's favour. "
+            "fees — INCLUDING a STOP- or TARGET-driven exit since WO-M (2026-09-13): "
+            f"stop_exit_price='{STOP_EXIT_PRICE}' fills at the sl_stop/tp_stop LEVEL and applies "
+            "the same per-leg slippage, where vectorbt's 'stoplimit' default returned that level "
+            "with slippage ZEROED and such a round trip paid ~1 bp less than the floor quoted here "
+            "(item (ii) of the plan §6.4 sweep-mechanics work order; it biased results in the "
+            "STRATEGY's favour). The setting is one knob for both legs — `orb`'s `rr_target` exits "
+            "are charged the half-spread by the same change, which only ever tightens costs. "
             "Provenance: NIFTY200 median quoted spread 0.0180% over 48 symbol-days (24 symbols "
             "× sessions 2026-08-11/12), per-tier 0.0135/0.0180/0.0219%, p75 0.0303% — "
             "IMPROVEMENT_SPEC.md Part III. The prior sweeps charged ZERO spread and zero slippage. "
@@ -612,29 +733,43 @@ class SweepRunner:
             "this platform cannot measure. What survives intact is the COMPARISON between runs that "
             "share the same list (same taint, same direction). The JSON carries the same warning as "
             "`population_is_survivorship_tainted_proxy: true`.",
+            "EXPECTANCY BASIS: CLOSED ROUND TRIPS ONLY (WO-M item (iii), 2026-09-13). "
+            "`expectancy_pct` — the headline AND the statistic the grid winner is ranked on — is "
+            "the mean net return over trades that actually closed inside the window; a config that "
+            "closed none is not rankable. `expectancy_all_pct` is the same mean over ALL trades, "
+            "reported beside it: that is the pre-2026-09-13 headline, and it averages STILL-OPEN "
+            "positions at unrealized mark-to-market with no exit leg paid, so a window ending on a "
+            "run of winners inflated both the number and the winner selection. `win_rate` keeps its "
+            "ALL-trades meaning and `win_rate_closed` is reported beside it on the SAME population "
+            "as `expectancy_pct`, so the two per-trade figures a promotion packet quotes together "
+            "never mix bases; neither win rate is a promotion input.",
             "HOLDING PERIOD + OPEN TRADES (R2, 2026-09-12, reporting only). Each row's "
             "`hold_bars_*` fields are the realized holding distribution in "
             f"{'1-minute bars' if frames.intraday else 'SESSIONS'} (mean/median/p90, all trades and "
-            "closed-only), and `n_open`/`expectancy_closed_pct` split the headline `expectancy_pct`. "
-            "They matter because vectorbt's per-trade `Return` averages STILL-OPEN positions at "
-            "their unrealized mark-to-market alongside closed round trips — a window ending on a run "
-            "of winners inflates the headline (and, through the ranking, the winner selection). "
-            "NOTHING here changes `expectancy_pct` or which config wins; see the plan §6.4 "
-            "2026-09-12 sweep-mechanics work order for the fix that will.",
+            "closed-only), and `n_open`/`n_closed` split the trade count. An OPEN trade contributes "
+            "its AGE at the window edge, not a realized hold, which is why the closed-only figures "
+            "are reported beside them.",
             "Long-only (Phase-1 §1.4.9 shorts gate); per-symbol equal-weight, no §7.1 portfolio "
             "limits (gate/paper layer, Phase 2/3).",
         ]
-        if not frames.intraday:
-            notes.append(
-                "STOPS ARE EVALUATED ON THE CLOSE, not intrabar (R2 disclosure, 2026-09-12). This "
-                "sweep passes `high`/`low` to vectorbt ONLY for the intraday (`orb`) frames, so for "
-                "the daily baselines vectorbt substitutes the close for open/high/low and every "
-                "stop/trail is therefore a CLOSE-BELOW-LEVEL rule filled at that same close — "
-                "looser than the live resting broker stop, which an intrabar breach triggers. "
-                "Disclosed, NOT corrected here: it is item (i) of the plan §6.4 2026-09-12 "
-                "sweep-mechanics work order, and it biases results in the STRATEGY's favour "
-                "(fewer stop-outs).",
-            )
+        notes.append(
+            "STOPS ARE EVALUATED INTRABAR (WO-M item (i), 2026-09-13): the bar's OWN `open`, `high` "
+            f"and `low` are passed to vectorbt for these {bar} frames, so a stop/target fires on an "
+            "intrabar breach of the level, a trailing stop ratchets on HIGHS (AFTER the bar has been "
+            "checked against the PRIOR bar's high-water — a same-bar new-high-then-reversal beyond "
+            "the trail does not stop out, where a live resting trail would; strategy's favour, "
+            "unmeasured), the stop is armed from the bar AFTER the fill (the entry bar's own low is "
+            "never tested; strategy's favour), and the fill lands where a live resting broker "
+            "stop's would from that bar on — at the OPEN when the bar gaps through the "
+            "level, at the LEVEL when it trades through intrabar. Until 2026-09-13 the daily "
+            "baselines passed none of the three: vectorbt substitutes the close for every OHLC leg "
+            "it is not given, so a stop could only fire on a CLOSE through the level (strictly "
+            "fewer stop-outs, in the strategy's favour). `open` is part of the same item because "
+            "`get_stop_price_nb` tests the open BEFORE the low/high range — with the close standing "
+            "in for it, every bar closing through an `sl_stop` booked the exit at that close rather "
+            "than at the level (pessimistic), and every bar closing through a `tp_stop` booked it "
+            "at that close rather than at the target (optimistic).",
+        )
         notes += [
             "Vectorbt-vectorized only (§8.2); the event-driven ReplayHarness re-validates in Phase 3.",
         ]
@@ -725,6 +860,12 @@ class SweepRunner:
             # stops are fractions OF THE PRICE PAID; with next-open fills the signal bar's close is
             # no longer that price, so anchor them at the fill (vectorbt's default is "close").
             stop_entry_price="fillprice",
+            # WO-M (ii): a stop exit pays the half-spread like every other exit. vectorbt's default
+            # ``stoplimit`` returns (stop_price, 0.0) — fee charged, slippage ZEROED;
+            # ``stopmarket`` returns (stop_price, slippage), keeping the stop LEVEL as the fill
+            # reference while charging the per-leg half-spread (portfolio/nb.py
+            # resolve_stop_price_and_slippage_nb).
+            stop_exit_price=STOP_EXIT_PRICE,
             freq="1min" if frames.intraday else "1D",
         )
         if sig.sl_stop is not None:
@@ -733,9 +874,18 @@ class SweepRunner:
             kwargs["tp_stop"] = _shift_stop_frame(sig.tp_stop, session_codes=session)
         if sig.sl_trail:
             kwargs["sl_trail"] = True
-        if frames.intraday:
-            kwargs["high"] = frames.high
-            kwargs["low"] = frames.low
+        # WO-M (i): the bar's OWN open/high/low go in for DAILY frames too (they were intraday-only),
+        # so a stop/trail is decided against the bar's range — an intrabar breach stops out, and a
+        # trail ratchets on highs. vectorbt substitutes the CLOSE for any of the three it is not
+        # given (portfolio/nb.py: `if np.isnan(_open): _open = _close`), and `get_stop_price_nb`
+        # returns the open whenever the open is already through the level BEFORE it checks the
+        # low/high range — so `open` decides the stop FILL exactly as high/low decide the HIT, and
+        # omitting it books every close-through-the-stop bar at that close instead of at the level.
+        # All three together are the live resting stop: gap through it ⇒ fill at the open, trade
+        # through it ⇒ fill at the level.
+        kwargs["open"] = frames.open
+        kwargs["high"] = frames.high
+        kwargs["low"] = frames.low
         return vbt.Portfolio.from_signals(**kwargs)
 
     @staticmethod
@@ -1111,30 +1261,43 @@ def _trade_split_stats(
     int,
     int,
     float | None,
+    float | None,
     tuple[float | None, float | None, float | None],
     tuple[float | None, float | None, float | None],
 ]:
-    """R2 reporting block for one config: ``(n_closed, n_open, expectancy_closed_pct, all, closed)``.
+    """R2 reporting block for one config:
+    ``(n_closed, n_open, expectancy_closed_pct, win_rate_closed, hold_all, hold_closed)``.
 
-    TOTAL BY CONSTRUCTION. This is a reporting-only addition to a job that takes minutes over 200
-    symbols, and it reads two vectorbt ``records_readable`` columns whose names are a property of the
-    installed vectorbt, not of this code. A column rename or an index shape this function did not
-    anticipate must degrade to "no holding figures" — never take the sweep, and never the promotion
-    verdict computed from it, down with it. The failure is logged, not swallowed silently.
+    TOTAL BY CONSTRUCTION. It reads two vectorbt ``records_readable`` columns whose names are a
+    property of the installed vectorbt, not of this code. A column rename or an index shape this
+    function did not anticipate must degrade — never take the sweep, and never the promotion verdict
+    computed from it, down with it. The failure is logged, not swallowed silently.
+
+    Since WO-M (2026-09-13) the degraded return is no longer merely "no holding figures": ``None``
+    here is also ``ParamSetStat.expectancy_pct``, so the config drops OUT of the grid ranking
+    (:meth:`SweepRunner._rank_best`) instead of being ranked on an all-trades mean that includes
+    unrealized marks. That is the fail-closed direction on purpose — an unreadable split must not
+    silently restore the statistic item (iii) removed — and :meth:`SweepRunner.run` counts the
+    excluded configs into the report's notes so the shrunken candidate set is never invisible.
     """
     none3: tuple[float | None, float | None, float | None] = (None, None, None)
     try:
         closed = trades["Status"].astype(str).str.lower().to_numpy() == "closed"
         n_closed = int(closed.sum())
         n_open = int(len(trades)) - n_closed
-        expectancy_closed = (
-            float(tr_ret.to_numpy()[closed].mean() * 100.0) if n_closed else None
-        )
+        ret_closed = tr_ret.to_numpy()[closed]
+        expectancy_closed = float(ret_closed.mean() * 100.0) if n_closed else None
+        # Same population as ``expectancy_closed`` on purpose: the two per-trade statistics a
+        # promotion packet quotes together must not be computed over different trade sets.
+        win_rate_closed = float((ret_closed > 0.0).mean()) if n_closed else None
         bars = _trade_hold_bars(trades, index)
-        return n_closed, n_open, expectancy_closed, _hold_stats(bars), _hold_stats(bars[closed])
+        return (
+            n_closed, n_open, expectancy_closed, win_rate_closed,
+            _hold_stats(bars), _hold_stats(bars[closed]),
+        )
     except Exception as exc:                          # noqa: BLE001 — reported, never raised
         _log.warning("sweep_hold_stats_unavailable", error=str(exc))
-        return 0, 0, None, none3, none3
+        return 0, 0, None, None, none3, none3
 
 
 def _trade_hold_bars(trades: pd.DataFrame, index: pd.Index) -> np.ndarray:
@@ -1181,10 +1344,14 @@ def _sharpe(daily: pd.Series) -> float | None:
 
 __all__ = [
     "DENSITY_POINTS",
+    "EXPECTANCY_BASIS",
     "FILL_MECHANICS",
+    "MECHANICS_STAMP",
     "PRICE_BASELINES",
     "PRODUCT_BY_STRATEGY",
     "REFERENCE_NOTIONAL_DEFAULT",
+    "STOP_EVALUATION",
+    "STOP_EXIT_PRICE",
     "ParamSetStat",
     "SweepReport",
     "SweepRunner",

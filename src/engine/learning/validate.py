@@ -136,8 +136,11 @@ class RealizedHold(BaseModel):
     n_trades: int
     n_closed: int
     n_open: int
-    #: The sweep's headline per-trade net return (ALL trades, incl. open ones at their unrealized
-    #: mark-to-market) and the same figure over CLOSED round trips only.
+    #: The sweep's per-trade net return over ALL trades (incl. open ones at their unrealized
+    #: mark-to-market, no exit leg paid) and the same figure over CLOSED round trips only. Since
+    #: WO-M (2026-09-13) the CLOSED one is the sweep's headline and the statistic the grid winner
+    #: was ranked on; the all-trades one is reported beside it. Field MEANINGS are unchanged — only
+    #: which of the two the sweep promotes.
     expectancy_per_trade_pct: float | None = None
     expectancy_per_trade_closed_pct: float | None = None
     mean_sessions: float | None = None
@@ -193,7 +196,19 @@ class ParamSet(BaseModel):
     #: persisted; NEITHER is an input to :func:`promotion_decision`.
     realized_hold: RealizedHold | None = None
     population_is_survivorship_tainted_proxy: bool | None = None
-
+    #: WO-M (2026-09-13): the sweep's one-line mechanics stamp (``SweepReport.mechanics``), carried
+    #: into the validation artifact so a verdict names the mechanics its returns were produced
+    #: under. ``None`` ⇒ pre-fix (or a caller that ran no sweep); never an input to the promotion
+    #: rule, which is decided by the CPCV folds and the margin floor exactly as before.
+    sweep_mechanics: str | None = None
+    #: False when ``params`` are NOT a grid winner — the sweep ranked nothing (every config closed no
+    #: round trip, or the open/closed split was unreadable for all of them) and the caller fell back
+    #: to the §6.3 envelope DEFAULTS. WO-M item (iii) widened that path: an unrankable config is now
+    #: excluded instead of ranked on its unrealized marks, so a window shorter than the strategy's
+    #: realized hold can leave the whole grid unrankable. REPORTING ONLY — it does not gate the
+    #: verdict (that would be an unregistered promotion-rule change); it exists so a defaults
+    #: verdict can never RENDER as a grid-winner verdict. ``None`` ⇒ the caller ran no sweep.
+    params_are_grid_winner: bool | None = None
 
 
 class WalkForwardFold(BaseModel):
@@ -327,6 +342,15 @@ class ValidationReport(BaseModel):
     realized_hold: RealizedHold | None = None
     realized_hold_cells: list[MarginFloorCell] = Field(default_factory=list)
     population_is_survivorship_tainted_proxy: bool | None = None
+    #: WO-M (2026-09-13) sweep-mechanics stamp (``SweepReport.mechanics``) — reporting only, so a
+    #: verdict is never compared with one produced under different sweep mechanics. ``None`` ⇒ the
+    #: returns came from a pre-fix sweep or from a provider that stamps nothing.
+    sweep_mechanics: str | None = None
+    #: ``ParamSet.params_are_grid_winner`` mirrored onto the verdict: False ⇒ these params are the
+    #: §6.3 envelope DEFAULTS substituted because the grid ranked NO config, not a sweep winner.
+    #: Reporting only (it moves no threshold), but it is rendered as a banner and named in the notes
+    #: so such a verdict never reads like one the grid selected.
+    params_are_grid_winner: bool | None = None
     #: WO-3 winner-stability FLAG (never part of the promotion rule).
     winner_stability: WinnerStability | None = None
     promotable: bool
@@ -732,6 +756,19 @@ class ValidationPipeline:
                 + "."
             )
         notes.extend(self._realized_hold_notes(params.realized_hold, hold_cells))
+        if params.params_are_grid_winner is False:
+            # Reporting only — deliberately NOT a promotion gate: gating on it would move the §6.4
+            # rule, which no work order registers. What it must never do is render silently, because
+            # every other field here (the cited N, the sweep context, the stability flag) describes
+            # a grid the winner did not come out of.
+            notes.append(
+                "PARAMS ARE NOT A GRID WINNER: the sweep ranked NO configuration (every config "
+                "closed no round trip inside the window, or its open/closed split was unreadable), "
+                "so these params are the §6.3 envelope DEFAULTS substituted by the caller. The "
+                "cited trial count N, the sweep context and the winner-stability flag below all "
+                "describe a grid that selected nothing — read this verdict as a validation of the "
+                "DEFAULT config at this window, never as a swept result."
+            )
         if params.population_is_survivorship_tainted_proxy:
             notes.append(
                 "SURVIVORSHIP (R2, 2026-09-12): the population behind these returns is a "
@@ -766,6 +803,8 @@ class ValidationPipeline:
             population_is_survivorship_tainted_proxy=(
                 params.population_is_survivorship_tainted_proxy
             ),
+            sweep_mechanics=params.sweep_mechanics,
+            params_are_grid_winner=params.params_are_grid_winner,
             winner_stability=stability,
             promotable=promotable,
             reasons=reasons,
@@ -810,12 +849,13 @@ class ValidationPipeline:
                 else f"{hold.expectancy_per_trade_closed_pct:+.4f}%"
             )
             notes.append(
-                f"Per-trade expectancy, open/closed split (R2, reporting only): {hold.n_trades} "
-                f"trades = {hold.n_closed} closed + {hold.n_open} still OPEN at the window edge. "
-                f"Mean net return per trade over ALL trades {all_txt} (the sweep headline, and the "
-                f"statistic the grid winner was ranked on) vs {closed_txt} over CLOSED round trips "
-                "only. An open trade contributes unrealized mark-to-market and has not paid an exit "
-                "leg, so where the two differ the headline is the more optimistic of the pair."
+                f"Per-trade expectancy, open/closed split: {hold.n_trades} trades = "
+                f"{hold.n_closed} closed + {hold.n_open} still OPEN at the window edge. Mean net "
+                f"return per trade over CLOSED round trips {closed_txt} — since WO-M "
+                "(2026-09-13) that is the sweep headline AND the statistic the grid winner was "
+                f"ranked on — vs {all_txt} over ALL trades, reported beside it. An open trade "
+                "contributes unrealized mark-to-market and has not paid an exit leg, so where the "
+                "two differ the all-trades figure is the more optimistic of the pair."
             )
         return notes
 

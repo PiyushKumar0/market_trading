@@ -660,6 +660,18 @@ _EXCL_INDEX = "not_in_index"
 #: permanent widening: it can be dropped once no retained universe_daily day predates 2026-09-05.
 _EXCL_INDEX_LEGACY = "not_nifty200"
 
+# Duplicated from ``engine.datafeeds.filings_pit_fresh.BSE_ID_PREFIX``: this module CANNOT import
+# that one (every datafeed imports the store — a store->datafeeds import would cycle). Must stay
+# equal to it; ``tests/unit/test_filings_feeds.py`` asserts the pair matches. NSE corporates-pit
+# rows carry the bare content hash, BSE fresh-feed rows the tagged one, so the id prefix IS the
+# source partition of ``insider_trades`` (§2.8.5) — no source column exists. A THIRD source must add
+# its tag here AND be excluded from the 'nse' predicate: bare-id means NSE only while 'bse:' is the
+# only tag (verified 2026-09-13 on the live store: 44,187 bare / 405 'bse:' / no other prefix).
+_INSIDER_SOURCE_PREDICATE = {
+    "nse": "id NOT LIKE 'bse:%'",
+    "bse": "id LIKE 'bse:%'",
+}
+
 _TICK_STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _tick_stage (
         instrument_token BIGINT,
@@ -1931,9 +1943,29 @@ class MarketStore:
             params.append(broadcast_to)
         return self._fetch_dicts(sql + " ORDER BY broadcast_dt, id", params)
 
-    def latest_insider_broadcast(self) -> datetime | None:
-        """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark (§2.8)."""
-        row = self._fetchall("SELECT max(broadcast_dt) FROM insider_trades")[0]
+    def latest_insider_broadcast(self, source: str | None = None) -> datetime | None:
+        """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark (§2.8).
+
+        ``source`` selects the partition by id tag (§2.8.5, 2026-09-13): ``'nse'`` = the bare-id
+        ``corporates-pit`` rows, ``'bse'`` = the ``bse:``-prefixed fresh-feed rows, ``None`` = the
+        whole table (the pre-2026-09-13 reading, kept for callers that want "any insider row").
+        Only ``'nse'`` has a production caller: ``filings_pit_fresh`` windows on DATES, never on
+        a watermark, so ``'bse'`` is the symmetric reading kept for a future one.
+        WHOLE-TABLE IS WRONG FOR A PER-JOB WINDOW: the BSE feed writes same-day rows, which pins the
+        NSE job's window to ``[d-1, d]`` and leaves a revived NSE route unable to reopen its own gap.
+        An unknown tag RAISES rather than falling back to the whole table — a silent fallback is
+        exactly that bug again.
+        """
+        sql = "SELECT max(broadcast_dt) FROM insider_trades"
+        if source is not None:
+            predicate = _INSIDER_SOURCE_PREDICATE.get(source.strip().lower())
+            if predicate is None:
+                raise ValueError(
+                    f"unknown insider source {source!r} "
+                    f"(expected one of {sorted(_INSIDER_SOURCE_PREDICATE)} or None)"
+                )
+            sql += f" WHERE {predicate}"
+        row = self._fetchall(sql)[0]
         return _ist(row[0]) if row[0] is not None else None
 
     def upsert_shp_quarterly(self, rows: Sequence[dict[str, Any]]) -> int:
@@ -2359,8 +2391,8 @@ class MarketStore:
     #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop).
     #     2026-09-02 review: these five predate WO-26a and were missed by its to_thread→_off
     #     migration — the last shared-executor path into the store, now closed. ---
-    async def alatest_insider_broadcast(self) -> datetime | None:
-        return await self._off(self.latest_insider_broadcast)
+    async def alatest_insider_broadcast(self, source: str | None = None) -> datetime | None:
+        return await self._off(self.latest_insider_broadcast, source)
 
     async def alatest_shp_broadcast(self) -> datetime | None:
         return await self._off(self.latest_shp_broadcast)

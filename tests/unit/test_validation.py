@@ -28,6 +28,10 @@ import pytest
 
 from engine.core.clock import IST, Clock
 from engine.learning import reports
+
+# sweep.py's module top level is stdlib + pandas/numpy only (vectorbt is imported function-level),
+# so the stamp constant is reachable from this pure tier without pulling the heavy deps in.
+from engine.learning.sweep import MECHANICS_STAMP
 from engine.learning.validate import (
     MARGIN_FLOOR_DAYS,
     CPCVFold,
@@ -642,6 +646,8 @@ def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_cavea
     assert "MEASURED holding period" in md
     assert "realized MEDIAN hold (all trades)" in md
     assert "still open at the window edge: 30" in md
+    # WO-M: closed-only is the headline/ranked figure; all-trades is what is reported beside it
+    assert "CLOSED round trips only (the sweep headline and ranking statistic" in md
     assert "SURVIVORSHIP" in md
     assert "120 sessions" in md          # the registered denominator is still what the verdict used
     # and it all travels in the machine-readable artifact, not only the prose
@@ -651,3 +657,77 @@ def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_cavea
     assert data["realized_hold"]["median_sessions"] == 33.0
     assert data["realized_hold"]["n_open"] == 30
     assert len(data["realized_hold_cells"]) == 4
+
+
+def test_the_sweep_mechanics_stamp_travels_with_the_verdict_and_never_moves_it(clock, tmp_path):
+    """WO-M (2026-09-13): a verdict is only comparable with one produced under the same sweep
+    mechanics, so the stamp is rendered and persisted with the report — and, like every other R2/WO-M
+    reporting field, it is not an input to the promotion rule."""
+    def _report(**extra):
+        pipe = ValidationPipeline(
+            returns_provider=lambda sid, params: _tiny_margin_series(),
+            clock=clock,
+            splitter=_FixedSplitter(),
+            cost_floor_provider=lambda _sid: CNC_COST_FLOOR_PCT,
+            reports_dir=tmp_path,
+        )
+        return pipe.validate_sync(
+            "rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10, **extra)
+        )
+
+    stamped = _report(sweep_mechanics=MECHANICS_STAMP)
+    unstamped = _report()
+
+    assert stamped.sweep_mechanics == MECHANICS_STAMP
+    assert unstamped.sweep_mechanics is None
+    assert stamped.promotable is unstamped.promotable
+    assert stamped.reasons == unstamped.reasons
+
+    assert MECHANICS_STAMP in reports.render_markdown(stamped)
+    # An UNSTAMPED verdict must claim NOTHING about sweep mechanics. This pipeline also validates
+    # returns that never came out of SweepRunner (the event-study harnesses build their own series
+    # and charge their own fills/costs — scripts/validate_insider.py is one), and stamping those
+    # "PRE-2026-09-13" would assert three sweep biases they structurally cannot have. Absence is
+    # the tell; COMMANDS.md says what absence means on a verdict artifact.
+    unstamped_md = reports.render_markdown(unstamped)
+    assert "PRE-2026-09-13" not in unstamped_md
+    assert "Sweep mechanics" not in unstamped_md
+    art = reports.write_report(stamped, tmp_path)
+    assert json.loads(art.json.read_text(encoding="utf-8"))["sweep_mechanics"] == MECHANICS_STAMP
+
+
+def test_a_defaults_fallback_verdict_is_flagged_everywhere_and_still_moves_no_threshold(
+    clock, tmp_path
+):
+    """WO-M follow-up: ``_rank_best`` can now return None for a whole grid (nothing closed a round
+    trip), and the CLI then validates the §6.3 envelope DEFAULTS. That verdict must not RENDER like
+    a grid-winner verdict — banner, note, and JSON — while changing no threshold, because gating on
+    it would move the §6.4 promotion rule and no work order registers that."""
+    def _report(**extra):
+        pipe = ValidationPipeline(
+            returns_provider=lambda sid, params: _tiny_margin_series(),
+            clock=clock,
+            splitter=_FixedSplitter(),
+            cost_floor_provider=lambda _sid: CNC_COST_FLOOR_PCT,
+            reports_dir=tmp_path,
+        )
+        return pipe.validate_sync(
+            "rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10, **extra)
+        )
+
+    defaulted = _report(params_are_grid_winner=False)
+    ranked = _report(params_are_grid_winner=True)
+
+    # reporting only: the verdict and every reason are identical either way
+    assert defaulted.promotable is ranked.promotable
+    assert defaulted.reasons == ranked.reasons
+
+    md = reports.render_markdown(defaulted)
+    assert "THESE PARAMS ARE NOT A GRID WINNER" in md
+    assert any("PARAMS ARE NOT A GRID WINNER" in n for n in defaulted.notes)
+    ranked_md = reports.render_markdown(ranked)
+    assert "NOT A GRID WINNER" not in ranked_md
+    assert not any("NOT A GRID WINNER" in n for n in ranked.notes)
+
+    art = reports.write_report(defaulted, tmp_path)
+    assert json.loads(art.json.read_text(encoding="utf-8"))["params_are_grid_winner"] is False

@@ -7,7 +7,10 @@
  *
  * Cards are split by the IST day they were delivered on (owner-reported 2026-09-08: the route
  * returns every delivery it keeps, and cards from different sessions carried only a time-of-day).
- * Today's fold starts open; earlier days start folded and open on click.
+ * Today's fold starts open; earlier days start folded and open on click — EXCEPT a day still holding
+ * a LIVE recommendation (pending, `valid_until` ahead), which starts open too: since WO-V (2026-09-13)
+ * a swing/position entry is valid to the NEXT session's close, so an actionable card can sit under
+ * yesterday's date. For the same reason the `valid till` chip carries its date when that is not today.
  *
  * Gate reasons come from the recommendation's own embedded verdict (§3.6 `gate`) — never from
  * `/decisions`: a different proposal's verdict is never this card's provenance.
@@ -26,6 +29,21 @@ import {
   toneFor,
   useDayFolds,
 } from './ui'
+
+/** A pending row whose `valid_until` is still ahead: actionable NOW, whichever day delivered it. */
+function isLive(row: RecommendationRow, now: number): boolean {
+  const until = row.recommendation?.valid_until
+  if (row.human_action || !until) return false
+  const at = new Date(until).getTime()
+  return !Number.isNaN(at) && at > now
+}
+
+/** "HH:MM:SS" for a same-day expiry, "YYYY-MM-DD HH:MM:SS" when the expiry is on another IST day —
+ *  a bare time was unambiguous only while every live recommendation was delivered today. */
+function validTill(iso: string): string {
+  const day = istDay(iso)
+  return day && day !== todayIst() ? `${day} ${hhmmss(iso)}` : hhmmss(iso)
+}
 
 function RecommendationCard({ row }: { row: RecommendationRow }) {
   const rec = row.recommendation
@@ -65,7 +83,7 @@ function RecommendationCard({ row }: { row: RecommendationRow }) {
         <Chip k="notional" v={dash(rec?.notional)} />
         <Chip k="conf" v={rec?.confidence != null ? rec.confidence.toFixed(2) : '—'} />
         {row.human_fill_price ? <Chip k="fill" v={row.human_fill_price} /> : null}
-        {rec?.valid_until ? <Chip k="valid till" v={hhmmss(rec.valid_until)} /> : null}
+        {rec?.valid_until ? <Chip k="valid till" v={validTill(rec.valid_until)} /> : null}
       </div>
 
       <div className="thesis">{rec?.thesis ?? ''}</div>
@@ -88,12 +106,16 @@ function RecommendationCard({ row }: { row: RecommendationRow }) {
 }
 
 export function RecommendationsPanel({ rows }: { rows: RecommendationRow[] }) {
-  const folds = useDayFolds()
   // `delivered_at` is the ledger's own stamp; the payload's `created_at` only stands in for a row
   // journalled before its delivery completed.
-  const days = groupByDay(rows, (row) => istDay(row.delivered_at ?? row.recommendation?.created_at))
+  const dayOf = (row: RecommendationRow) => istDay(row.delivered_at ?? row.recommendation?.created_at)
+  const days = groupByDay(rows, dayOf)
   const today = todayIst()
+  const now = Date.now()
+  const liveDays = new Set(days.filter((g) => g.rows.some((row) => isLive(row, now))).map((g) => g.day))
+  const folds = useDayFolds((day) => liveDays.has(day))
   const todayCount = days.find((g) => g.day === today)?.rows.length ?? 0
+  const liveEarlier = rows.filter((row) => isLive(row, now) && dayOf(row) !== today).length
 
   return (
     <Panel
@@ -105,7 +127,12 @@ export function RecommendationsPanel({ rows }: { rows: RecommendationRow[] }) {
         <Empty what="recommendations" />
       ) : (
         <>
-          {todayCount === 0 ? <Empty what="recommendations today" /> : null}
+          {todayCount === 0 && liveEarlier === 0 ? <Empty what="recommendations today" /> : null}
+          {todayCount === 0 && liveEarlier > 0 ? (
+            <div className="dim">
+              no deliveries today · {liveEarlier} still actionable from an earlier session
+            </div>
+          ) : null}
           {days.map((g) => (
             <div className="day-group" key={g.day || 'undated'}>
               <DayFold

@@ -27,6 +27,13 @@ the window to warm up (backfill already attempted at step 4 and coverage still s
 simply keeps answering not-ready — entries stay FROZEN and the owner is alerted; they reopen only
 once coverage is met.
 
+Every blocker carries its CLASS in its rendered prefix (:func:`blocker_class`): ``orb:`` ⇒ intraday
+1-minute coverage, ``rsi2/trend/mom:`` ⇒ completed daily sessions, ``regime:`` ⇒ NIFTY 50 / India
+VIX history. Since the 2026-09-13 plan change (§2.6 step 6 addendum) the consequence is per class:
+the DAILY and REGIME classes still drive the global FROZEN-for-entries, while an INTRADAY-only
+shortfall refuses intraday candidates per-candidate (risk gate + pre-screen) instead of freezing the
+daily-bar legs that never read a 1-minute bar. ``ready`` keeps its old meaning — no blockers at all.
+
 All store scans go through the ``MarketStore`` async wrappers (executor-offloaded — the loop is
 never blocked past the §2.2 heartbeat budget).
 """
@@ -36,7 +43,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
@@ -48,6 +55,48 @@ _log = get_logger("engine.ops.warmup")
 #: §6.1 daily-lookback strategies sharing the 200-session bars_1d requirement (200-DMA bound).
 DAILY_STRATEGY_SCOPE = "rsi2/trend/mom"
 
+#: The three warm-up COVERAGE CLASSES (2026-09-13 plan change). A class is a property of the missing
+#: DATA, not of a strategy: ``intraday`` = today's 1-minute bars, ``daily`` = completed daily
+#: sessions, ``regime`` = index/VIX daily history.
+CLASS_INTRADAY = "intraday"
+CLASS_DAILY = "daily"
+CLASS_REGIME = "regime"
+#: A blocker whose scope prefix matches no class — a synthesized fail-closed sentinel (the
+#: composition root's "unrefreshed" snapshot, the lifecycle's "warmup check failed") or a future
+#: scope whose rendering was not classified here. Coverage that cannot be ATTRIBUTED blocks EVERY
+#: class (R6: what cannot be verified is treated as missing), so a new scope fails safe by default.
+CLASS_UNKNOWN = "unknown"
+
+_REAL_CLASSES = (CLASS_INTRADAY, CLASS_DAILY, CLASS_REGIME)
+
+#: Rendered-prefix ⇒ class. The prefix IS the class label: ``_missing_intraday`` renders ``orb:``,
+#: ``_classify_daily`` renders the scope it is called with (``DAILY_STRATEGY_SCOPE`` or ``regime``).
+#: Classification therefore reads a fact, never a guess — a new scope must be added here AND to the
+#: §7.1 rows, or it falls to :data:`CLASS_UNKNOWN` and blocks everything.
+_CLASS_BY_PREFIX: tuple[tuple[str, str], ...] = (
+    ("orb:", CLASS_INTRADAY),
+    (f"{DAILY_STRATEGY_SCOPE}:", CLASS_DAILY),
+    ("regime:", CLASS_REGIME),
+)
+
+
+def blocker_class(blocker: str) -> str:
+    """The coverage class of one rendered blocker line (:data:`CLASS_UNKNOWN` when unattributable)."""
+    text = str(blocker)
+    for prefix, cls in _CLASS_BY_PREFIX:
+        if text.startswith(prefix):
+            return cls
+    return CLASS_UNKNOWN
+
+
+def classify_blockers(blockers: Sequence[str]) -> dict[str, list[str]]:
+    """Bucket rendered blocker lines by :func:`blocker_class`, order preserved. Empty classes are
+    absent from the mapping (a caller asks with ``.get(cls)``, never by membership)."""
+    out: dict[str, list[str]] = {}
+    for blocker in blockers:
+        out.setdefault(blocker_class(blocker), []).append(str(blocker))
+    return out
+
 
 class WarmupStatus(BaseModel):
     ready: bool
@@ -57,6 +106,26 @@ class WarmupStatus(BaseModel):
     #: 200-session gate, so gating on them freezes entries forever) but surfaced here for the operator
     #: as "symbol(have/need)". A shortfall WITH gaps is a real blocker, not a young listing.
     young_excluded: list[str] = Field(default_factory=list)
+    #: ``blockers`` bucketed by class. DERIVED on every construction rather than passed in, so every
+    #: construction site — this gate, the composition root's fail-closed sentinel, tests, a duck-typed
+    #: fake — answers per class consistently and none can hand out a stale or absent bucketing.
+    blockers_by_class: dict[str, list[str]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _derive_classes(self) -> WarmupStatus:
+        self.blockers_by_class = classify_blockers(self.blockers)
+        return self
+
+    def ready_for(self, cls: str) -> bool:
+        """Is the ``cls`` coverage class satisfied? Fail-closed in three directions: an UNKNOWN-class
+        blocker (unattributable coverage) holds every class down, a not-ready status carrying no
+        blockers at all is unattributable in the same way, and an unrecognised ``cls`` is never
+        "ready". ``ready`` (no blockers anywhere) stays the whole-gate answer."""
+        if cls not in _REAL_CLASSES:
+            return False
+        if not self.ready and not self.blockers:
+            return False
+        return not self.blockers_by_class.get(cls) and not self.blockers_by_class.get(CLASS_UNKNOWN)
 
 
 class WarmupGate:
@@ -147,7 +216,8 @@ class WarmupGate:
         if y:
             young.append(y)
         if blockers:
-            _log.warning("warmup_not_ready", blockers=blockers, young_excluded=young)
+            _log.warning("warmup_not_ready", blockers=blockers, young_excluded=young,
+                         classes=sorted(classify_blockers(blockers)))
         return blockers, young
 
     # ------------------------------------------------------------------ intraday (orb, today 09:15+)

@@ -173,13 +173,18 @@ export function groupByDay<T>(rows: T[], dayOf: (row: T) => string): DayGroup<T>
 
 /** Fold state for a panel split by day: today's IST day starts open, every earlier day starts
  *  folded, and a click overrides that for the rest of the page session. The default is re-derived on
- *  every render, so the midnight rollover moves the open fold to the new day on the next poll. */
-export function useDayFolds(): { isOpen: (day: string) => boolean; toggle: (day: string) => void } {
+ *  every render, so the midnight rollover moves the open fold to the new day on the next poll.
+ *  `alsoOpen` widens the default for a panel whose rows can outlive their day (a recommendation
+ *  valid into the next session, WO-V 2026-09-13): such a day starts open too, and a click still folds it. */
+export function useDayFolds(
+  alsoOpen?: (day: string) => boolean,
+): { isOpen: (day: string) => boolean; toggle: (day: string) => void } {
   const [overrides, setOverrides] = useState<Partial<Record<string, boolean>>>({})
   const today = todayIst()
-  const isOpen = (day: string) => overrides[day] ?? day === today
+  const byDefault = (day: string) => day === today || (alsoOpen?.(day) ?? false)
+  const isOpen = (day: string) => overrides[day] ?? byDefault(day)
   const toggle = (day: string) =>
-    setOverrides((prev) => ({ ...prev, [day]: !(prev[day] ?? day === today) }))
+    setOverrides((prev) => ({ ...prev, [day]: !(prev[day] ?? byDefault(day)) }))
   return { isOpen, toggle }
 }
 

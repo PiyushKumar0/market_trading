@@ -97,6 +97,7 @@ from engine.ops.holdings_reconcile import (
     missing_holdings_observations,
     positions_missing_from_holdings,
 )
+from engine.ops.warmup import CLASS_INTRADAY
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
 from engine.strategy.types import SignalCandidate
@@ -113,9 +114,23 @@ INTRADAY_AGENT_ID = "intraday_analyst"
 #: Distinct from the analyst id so the ledger can separate model decisions from platform decisions.
 PLATFORM_AGENT_ID = "platform"
 
-#: Entry-recommendation TTL for an intraday candidate, minutes [tunable]. Swing/position entries stay
-#: valid to the session close instead (see :meth:`RecommendationPipeline._ttl`).
+#: Entry-recommendation TTL for an intraday candidate, minutes [tunable]. A swing/position ENTRY
+#: stays valid to the NEXT trading session's close instead (WO-V, 2026-09-13), and every other
+#: swing/position recommendation to today's (see :meth:`RecommendationPipeline._ttl`).
 TTL_INTRADAY_MIN = 20
+
+#: ``/taken`` says so when the fill carries more stop risk than the §7.1 ``per_trade_risk`` verdict
+#: approved. WO-V let an entry rec live across an overnight gap while its zone, stop and qty stay the
+#: PRIOR session's and nothing re-gates at capture (:meth:`RecommendationBook.take`). The gate sizes a
+#: swing/position on ``overnight_gap_mult`` × the stop distance (``_rule_per_trade_risk``), so for
+#: those styles the basis IS that number, read from the hash-verified limits through the book's
+#: ``overnight_gap_mult_fn`` seam, and the call-out fires only once the approved budget is actually
+#: exceeded — a fill inside the gap allowance is a fill the verdict already covered. This constant is
+#: the FALLBACK materiality threshold (× the zone-edge-to-stop distance) for an intraday fill, whose
+#: verdict carries no gap allowance, and for a book wired without the seam. A WARNING, never a
+#: refusal: a position the owner really opened must be tracked (§3.6), and an untracked one is the
+#: worse failure. Not a limit — this decides nothing.
+TAKEN_STOP_RISK_WARN_MULT = Decimal("1.25")
 
 #: §5.2 trigger (b) stop-proximity: fire when the LTP is within this many ATR(14,1m) of the stop.
 STOP_PROXIMITY_ATR_MULT = Decimal("0.5")
@@ -354,11 +369,16 @@ class RecommendationBook:
     is the whole integration.
     """
 
-    def __init__(self, conn: sqlite3.Connection, clock: Clock, cost_model: CostModel) -> None:
+    def __init__(self, conn: sqlite3.Connection, clock: Clock, cost_model: CostModel, *,
+                 overnight_gap_mult_fn: Callable[[], Any] | None = None) -> None:
         self._conn = conn
         self._clock = clock
         self._costs = cost_model
         self._ledger_cols: frozenset[str] | None = None
+        #: The §7.1 ``per_trade_risk.overnight_gap_mult`` the gate sized swing/position entries on,
+        #: read at call time from the hash-verified limits (WO-V re-review, 2026-09-13). Unwired ⇒
+        #: the ``/taken`` drift check falls back to :data:`TAKEN_STOP_RISK_WARN_MULT`.
+        self._overnight_gap_mult_fn = overnight_gap_mult_fn
 
     @property
     def cost_model(self) -> CostModel:
@@ -408,6 +428,15 @@ class RecommendationBook:
         """``/taken <rec_id> <qty> <price>`` — create the ``origin='recommended'`` position (§3.6).
 
         The platform never adopts a position as ``recommended`` without this owner confirmation.
+
+        Nothing here re-gates the fill, and since WO-V (2026-09-13) a swing/position entry rec stays
+        actionable into the NEXT session, so the reported price can be a gap away from the zone the
+        §7.1 ``entry_sanity_band`` and ``per_trade_risk`` verdicts were computed on. The fill is
+        recorded regardless — the owner is the authority on what they executed, and a live position
+        the ledger does not know about is the worse failure — but a fill whose distance to the
+        recommendation's stop exceeds the sized-for distance by :data:`TAKEN_STOP_RISK_WARN_MULT` is
+        said out loud in the reply and at WARNING in the log, because the ``stop`` written on the
+        position row below is the recommendation's, not one re-derived from this price.
         """
         if qty <= 0:
             raise ValueError(f"qty must be positive, got {qty}")
@@ -462,10 +491,40 @@ class RecommendationBook:
             )
         _log.warning("recommendation_taken", rec_id=rec_id, position_id=position_id, qty=qty,
                      price=str(price))
-        return (
+        summary = (
             f"recorded {data.get('side')} {data.get('instrument')} x{qty} @ {price} "
             f"(position {position_id}). The protective orders are yours to place — the platform "
             "places none in RECOMMEND (B7)."
+        )
+        drift = self._stop_risk_drift(data, price)
+        if drift is None:
+            return summary
+        planned, approved, actual, gap, wrong_side = drift
+        _log.warning(
+            "recommendation_taken_off_zone", rec_id=rec_id, position_id=position_id,
+            price=str(price), stop=str(data.get("stop")), qty=qty,
+            planned_unit_risk=str(planned), approved_unit_risk=str(approved),
+            actual_unit_risk=str(actual), overnight_gap_mult=None if gap is None else str(gap),
+            stop_wrong_side=wrong_side, entry_zone=data.get("entry_zone"), style=data.get("style"),
+        )
+        if wrong_side:
+            return summary + (
+                f" CHECK THE STOP: {price} is on the WRONG SIDE of the recommended stop "
+                f"{data.get('stop')} for a {data.get('side')} — that stop would trigger at once. The "
+                "position is recorded with the recommendation's stop verbatim; re-place the "
+                "protective order before anything else. Nothing re-gated at capture."
+            )
+        allowance = (
+            f"{gap}x the {_money(planned)} zone-edge-to-stop distance, the §7.1 overnight-gap allowance"
+            if gap is not None else f"the {_money(planned)} zone-edge-to-stop distance"
+        )
+        return summary + (
+            f" CHECK THE SIZE: {price} is {_money(actual)} from the recommended stop "
+            f"{data.get('stop')}, against the {_money(approved)} per share the size was approved on "
+            f"({allowance}) — about ₹{_money(Decimal(qty) * actual)} of stop risk on {qty} shares "
+            f"versus ₹{_money(Decimal(qty) * approved)} approved. The zone, the stop and the size are "
+            "the ones the gate stood behind when the recommendation was priced; nothing re-gated at "
+            "capture."
         )
 
     # ------------------------------------------------------------------ owner reports the close
@@ -629,6 +688,63 @@ class RecommendationBook:
             return None
         return int((now - opened).total_seconds() // 60)
 
+    def _overnight_gap_mult(self) -> Decimal | None:
+        """The gate's ``overnight_gap_mult`` through the seam, or None (unwired / unreadable / ≤ 0).
+        This drives a message, never a decision, so a failed read degrades to the fallback."""
+        if self._overnight_gap_mult_fn is None:
+            return None
+        try:
+            gap = _dec(self._overnight_gap_mult_fn())
+        except Exception:  # noqa: BLE001 - a limits read failing here must not fail the fill capture
+            _log.exception("taken_gap_mult_unreadable")
+            return None
+        return gap if gap > 0 else None
+
+    def _stop_risk_drift(
+        self, data: Mapping[str, Any], price: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal | None, bool] | None:
+        """``(planned, approved, actual, gap, wrong_side)`` when a ``/taken`` fill drifted, else None.
+
+        ``planned`` is the widest stop distance the delivered ``entry_zone`` could have produced (the
+        zone edge FURTHEST from the stop), so a fill anywhere inside the band the gate explicitly
+        stood behind — :meth:`RecommendationPipeline.build_recommendation` — is never called out;
+        ``approved`` is the per-share stop distance the ``per_trade_risk`` verdict actually budgeted:
+        for a swing/position that is ``overnight_gap_mult`` × planned (``_rule_per_trade_risk`` sizes
+        ``qty = budget / (gap × unit_risk)``), read through the book's seam and returned as ``gap``;
+        for an intraday fill, or a book wired without the seam, it is ``planned`` itself and ``gap`` is
+        None. ``actual`` is the distance at the reported fill.
+
+        Fires in two cases. **Wrong side** (``wrong_side=True``): a BUY filled at or below the stop, a
+        SELL at or above it — the gap went THROUGH the stop, the distance is meaningless and the check
+        is unconditional. **Drift**: ``actual`` exceeds ``approved`` when the gap is known (the budget
+        the verdict approved is genuinely exceeded — a fill inside the gap allowance is one the
+        verdict already covered), or :data:`TAKEN_STOP_RISK_WARN_MULT` × planned on the fallback (an
+        ordinary slip against a limit price is not news). None whenever the payload cannot be read:
+        this drives a message, never a decision, so an unreadable payload stays silent.
+        """
+        zone = data.get("entry_zone")
+        if not isinstance(zone, (list, tuple)) or len(zone) != 2 or data.get("stop") in (None, ""):
+            return None
+        try:
+            stop = _dec(data.get("stop"))
+            planned = max(abs(_dec(zone[0]) - stop), abs(_dec(zone[1]) - stop))
+            actual = abs(price - stop)
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if planned <= 0:
+            return None
+        side = str(data.get("side") or "").upper()
+        if (side == "BUY" and price <= stop) or (side == "SELL" and price >= stop):
+            return planned, planned, actual, None, True
+        gap = self._overnight_gap_mult() if str(data.get("style") or "intraday") != "intraday" else None
+        if gap is not None:
+            approved, threshold = planned * gap, planned * gap
+        else:
+            approved, threshold = planned, planned * TAKEN_STOP_RISK_WARN_MULT
+        if actual <= threshold:
+            return None
+        return planned, approved, actual, gap, False
+
 
 # =========================================================================== the pipeline (§5.2)
 class RecommendationPipeline:
@@ -664,6 +780,7 @@ class RecommendationPipeline:
         take_displaced: Callable[[], Sequence[tuple[str, str]]] | None = None,
         decline: Callable[[str, str], bool] | None = None,
         ltp_fn: Callable[[str], Decimal | None] | None = None,
+        warmup_status_fn: Callable[[], Any] | None = None,
         admission_mode: str = "ranked",
         forward_drain_mode: str = "paced",
     ) -> None:
@@ -714,6 +831,18 @@ class RecommendationPipeline:
         #: D1 (e) band screen in :meth:`_take_forward_slot`; unwired ⇒ no screen, which is the
         #: pre-2026-09-12 behaviour. Never a gate input: the gate reads its own LTP from GateContext.
         self._ltp_fn = ltp_fn
+        #: The §2.6 warm-up snapshot the GATE reads (wired to the same ``warmup_status_snapshot`` in
+        #: ``engine.ops.main``), consulted per COVERAGE CLASS (2026-09-13) at both analyst-call commit
+        #: points (:meth:`on_signal_candidate` and :meth:`_take_forward_slot`), to keep an intraday
+        #: candidate the gate would refuse for intraday coverage from spending one; unwired ⇒ no
+        #: screen, which is the pre-2026-09-13 behaviour. Never a gate input: the gate reads the
+        #: snapshot itself.
+        self._warmup_status_fn = warmup_status_fn
+        #: (symbol, strategy_id, commit point) keys whose intraday warm-up refusal is already logged
+        #: today, plus the day that set belongs to — one line per key per day, not one per publication
+        #: (or, at the forward slot, one per drain tick).
+        self._intraday_warmup_logged: set[tuple[str, str, str]] = set()
+        self._intraday_warmup_logged_day: date | None = None
         self._funnel_raw_day: date | None = None
         self._funnel_raw_flushed: dict[str, int] = {}
         #: position_id -> when its last §5.2(b) event fired (in-process debounce).
@@ -1238,15 +1367,17 @@ class RecommendationPipeline:
         displacement decision itself: claim-then-displace leaves the pair evaluated and undisplaceable,
         displace-then-claim returns ``False`` here. Neither order can produce two spends.
 
-        The D1 (e) band screen runs BEFORE the claim and DEFERS rather than drops: a level-pinned
-        candidate whose level has already walked outside the §7.1 ``entry_sanity_band`` is a
-        guaranteed gate reject, so it must not spend an analyst slot at THIS tick — but the level is
-        a live reading that can come back inside the band minutes later, and ``brk20`` originates
-        only from :meth:`run_scan_sweep`, so a candidate re-armed out of the queue has nothing to
-        re-publish it for the rest of the day. It therefore stays queued (its own TTL is still its
-        exit) and the loop moves to the next-best. Screening before the claim keeps it displaceable
-        while it waits: :meth:`SignalPreScreen.claim_slot` marks a pair permanently evaluated, which
-        is a promise only a candidate actually being dispatched may make.
+        TWO guaranteed-reject screens run BEFORE the claim and DEFER rather than drop — the D1 (e)
+        entry band (a level-pinned candidate whose level has walked outside the §7.1
+        ``entry_sanity_band``) and, since 2026-09-13, the intraday warm-up class
+        (:meth:`_intraday_warmup_short`; the arrival screen cannot cover a candidate queued while
+        coverage was complete, and the risk state no longer freezes on an intraday hole). Both are
+        live readings that can come back true minutes later, and ``brk20``/``orb`` re-publish at most
+        once a day, so a candidate re-armed out of the queue has nothing to re-publish it for the
+        rest of the day. It therefore stays queued (its own TTL is still its exit) and the loop moves
+        to the next-best. Screening before the claim keeps it displaceable while it waits:
+        :meth:`SignalPreScreen.claim_slot` marks a pair permanently evaluated, which is a promise
+        only a candidate actually being dispatched may make.
         """
         self._expire_forwards(self._clock.now())
         if cap is not None and self._forwarded_count >= int(cap):
@@ -1262,7 +1393,8 @@ class RecommendationPipeline:
                 else:
                     entry = min(self._pending_forwards, key=self._forward_key)
                 self._pending_forwards.remove(entry)
-                if self._outside_entry_band(entry.candidate):
+                if (self._outside_entry_band(entry.candidate)
+                        or self._intraday_warmup_short(entry.candidate, at="forward_slot")):
                     deferred.append(entry)
                     continue
                 if not self._claim_forward_slot(entry.candidate):
@@ -1282,7 +1414,7 @@ class RecommendationPipeline:
                 return entry.candidate
             return None
         finally:
-            # Every exit puts the band-skipped entries back, including the one that returns a
+            # Every exit puts the screened-out entries back, including the one that returns a
             # candidate: a deferral is "not this tick", never "off the queue".
             self._pending_forwards.extend(deferred)
 
@@ -1578,6 +1710,10 @@ class RecommendationPipeline:
         evaluated; the §5.2(a) forward cap is given back only where a charge bought no verdict at all
         (:meth:`_refund_forward`, D1 (c)), never for a real evaluation.
 
+        Two of those re-checks are per CANDIDATE rather than per tick, so they live at the commit
+        point instead of here: the D1 (e) entry band and the 2026-09-13 intraday warm-up class, both
+        in :meth:`_take_forward_slot`, which defers the screened entry and takes the next-best.
+
         The one gate that is NOT "come back next tick" is the window having CLOSED for the day
         (D1 (b)): no later tick can ever drain what is queued, so that branch flushes the queue once
         (:meth:`_flush_forwards_at_window_close`) instead of stranding it. Mode / FROZEN / kill keep
@@ -1740,6 +1876,51 @@ class RecommendationPipeline:
                   strategy_id=candidate.strategy_id, reason=reason,
                   forwarded=self._forwarded_count)
 
+    def _intraday_warmup_short(self, candidate: SignalCandidate, *, at: str) -> bool:
+        """Is this an INTRADAY-style candidate facing a short intraday warm-up class right now?
+
+        Reads the SAME snapshot the gate context reads (§2.6 step 6, per-class since 2026-09-13), so
+        the pre-screen answer and the gate's ``warmup_ready`` verdict can never disagree — the point
+        is only to learn it before the analyst call rather than after. Daily-class candidates are not
+        this screen's business: they never read a 1-minute bar. An unwired seam, a status with no
+        per-class answer, or a failing read ⇒ False: the screen is a cost optimisation, and the GATE
+        remains the enforcement (it fails closed on the same snapshot), so failing open here costs at
+        most one analyst call and can never let an entry through.
+
+        Asked at BOTH commit points, because coverage is a live reading and the two are minutes to
+        hours apart: ``at="arrival"`` (:meth:`on_signal_candidate`, where the answer re-arms the day
+        slot) and ``at="forward_slot"`` (:meth:`_take_forward_slot`, the paced drain's commit point,
+        where it defers the queued entry instead — the hole that opens after a candidate is queued is
+        exactly the 2026-09-09 14:47 reconnect shape, and under the default paced drain the arrival
+        screen never saw it)."""
+        if self._warmup_status_fn is None or candidate.style != "intraday":
+            return False
+        try:
+            status = self._warmup_status_fn()
+            ready_for = getattr(status, "ready_for", None)
+            short = ready_for is not None and not ready_for(CLASS_INTRADAY)
+        except Exception as exc:  # noqa: BLE001 - the gate still enforces; never lose the candidate
+            _log.warning("warmup_snapshot_read_failed", symbol=candidate.symbol, error=str(exc))
+            return False
+        if not short:
+            return False
+        # One line per (symbol, strategy, commit point) per DAY: a market-wide hole fires this on
+        # every publication of every watch symbol, and the fact worth reading is which pairs were
+        # refused where, not how often the drain retried them.
+        today = self._clock.today()
+        if self._intraday_warmup_logged_day != today:
+            self._intraday_warmup_logged_day = today
+            self._intraday_warmup_logged.clear()
+        key = (candidate.symbol, candidate.strategy_id, at)
+        if key not in self._intraday_warmup_logged:
+            self._intraday_warmup_logged.add(key)
+            _log.info("signal_candidate_intraday_warmup", signal_id=candidate.signal_id,
+                      symbol=candidate.symbol, strategy_id=candidate.strategy_id, at=at,
+                      blockers=list(getattr(status, "blockers_by_class", {}).get(CLASS_INTRADAY, []))[:4],
+                      note="intraday coverage short — no analyst call (§2.6 step 6); re-armed at "
+                           "arrival, left queued at the forward slot")
+        return True
+
     # ================================================================== trigger (a): entries
     async def on_signal_candidate(self, candidate: SignalCandidate) -> None:
         """§5.2 trigger (a). Also usable directly as a ``signal.candidate`` bus handler.
@@ -1776,6 +1957,14 @@ class RecommendationPipeline:
             self._rearm_slot(candidate)
             return
         if self._kill.is_killed():
+            self._rearm_slot(candidate)
+            return
+        if self._intraday_warmup_short(candidate, at="arrival"):
+            # 2026-09-13 per-class warm-up: the risk state no longer freezes on an intraday-only
+            # coverage hole, so the refusal has to happen per candidate — and it happens HERE, ahead
+            # of the analyst call, because the gate would reject this proposal on `warmup_ready`
+            # after the call was already spent. Never-evaluated ⇒ the day slot goes back: coverage
+            # heals mid-session (the 60 s gap repair) and the candidate must be able to re-publish.
             self._rearm_slot(candidate)
             return
         d = self._clock.today()
@@ -1876,7 +2065,9 @@ class RecommendationPipeline:
             sector_exposure_line=self._sector_exposure_line(d),
         )
         proposal_id = str(ULID())
-        valid_until = self._ttl(candidate.style)
+        # ENTRY evaluation (§5.2 trigger (a)): this is the stamp the delivered entry recommendation
+        # actually carries — :meth:`build_recommendation` only falls back to its own (WO-V).
+        valid_until = self._ttl(candidate.style, entry=True)
         result = await self._harness.run_single_shot(
             self._agent_def(),
             actx,
@@ -2125,7 +2316,7 @@ class RecommendationPipeline:
         return Recommendation(
             rec_id=str(ULID()),
             created_at=self._clock.now(),
-            valid_until=action.valid_until or self._ttl(action.style),
+            valid_until=action.valid_until or self._ttl(action.style, entry=True),
             kind="entry",
             instrument=action.tradingsymbol,
             side=action.side,
@@ -2319,8 +2510,9 @@ class RecommendationPipeline:
            simply not run yet) said its piece and is gone from ``/pending``; suppressing the next
            event on its strength would leave an intraday position whose stop stayed breached all
            session with ONE exit instruction that died 20 minutes after it arrived
-           (``TTL_INTRADAY_MIN``). A swing/position exit is stamped to the session close, so this
-           changes nothing there — it restores the intraday cadence only. ``taken``/``dismissed``/
+           (``TTL_INTRADAY_MIN``). A swing/position exit is stamped to TODAY's session close — WO-V
+           extended only ENTRY recs to the next session's, precisely so this cadence keeps holding —
+           so this changes nothing there; it restores the intraday cadence only. ``taken``/``dismissed``/
            ``closed`` DO suppress: the owner engaged with the message, and repeating it is the noise
            WO-D2 exists to remove.
 
@@ -2393,6 +2585,8 @@ class RecommendationPipeline:
         )
         proposal_id = str(ULID())
         style = str(position["style"] or "intraday")
+        # A position event may only yield an exit or a stop tighten, so this stamp keeps TODAY's
+        # close (no ``entry=``): WO-D2's one-exit-per-session cadence needs yesterday's to be dead.
         valid_until = self._ttl(style)
         result = await self._harness.run_single_shot(
             self._agent_def(),
@@ -2733,20 +2927,88 @@ class RecommendationPipeline:
         band = self._limits.load().limits.entry_sanity_band
         return band.mis_pct if product == "MIS" else band.cnc_pct
 
-    def _ttl(self, style: str) -> datetime:
+    def _ttl(self, style: str, *, entry: bool = False) -> datetime:
         """Platform-stamped ``valid_until`` (§3.2 — the model never emits a time).
 
-        Intraday: ``now + TTL_INTRADAY_MIN`` — a breakout read goes stale in minutes. Swing/position:
-        today's session close, because the decision is about the day, not the minute; past the close
-        (or on a non-trading day) it falls back to the intraday TTL rather than minting a dead one.
+        Intraday: ``now + TTL_INTRADAY_MIN`` — a breakout read goes stale in minutes.
+
+        Swing/position ENTRY (``entry=True``; WO-V, 2026-09-13): the close of the NEXT trading
+        session after today, not today's own. Today's close expired the month's only ``ins`` entry
+        (JINDALSTEL, 2026-09-08) unactioned that same afternoon, and an ``ins`` crossing is consumed
+        once, so a day the owner did not look was a lost signal rather than a deferred one.
+
+        Every OTHER swing/position stamp keeps today's close, exactly as before WO-V: an exit or a
+        stop adjust is priced off the position's CURRENT stop and qty, and WO-D2's one-exit-per-
+        session cadence rests on yesterday's exit being dead this morning
+        (:meth:`_delivered_exit_today` screens today's deliveries only) — a shared two-session TTL
+        would leave two live exit recs naming two different stops in front of the owner. The §5.2(a)
+        forward queue keeps it too: that horizon is a within-day one.
+
+        **Accepted costs of the entry extension**, registered rather than discovered:
+
+        * an unactioned entry rec holds its symbol in ``GateContext.pending_rec_symbols`` for up to
+          two sessions instead of one, and EVERY consumer of that set doubles its window with it: the
+          gate's position-count leg, its hard one-position-per-symbol leg, the per-sector counts
+          (``_rule_per_sector_exposure``), the co-movement set (``_rule_co_movement``), and the WO-R
+          brk20 retest re-arm's own ``_pending_entry_rec_symbols`` screen in ``engine.ops.main``;
+        * the rec stays ACTIONABLE across an overnight gap while its ``entry_zone``, ``stop``, ``qty``
+          and every gate verdict behind them — ``entry_sanity_band``, ``per_trade_risk`` on the stop
+          side, ``per_stock_exposure`` / ``capital_cap`` on the notional side — are the PRIOR
+          session's, and nothing re-gates at capture. :meth:`RecommendationBook.take` covers the STOP
+          side only: it says so when the fill's stop distance exceeds what the ``per_trade_risk``
+          verdict approved (the gate's own ``overnight_gap_mult`` × the zone-edge distance) or lands
+          on the wrong side of the stop; the notional side is unwatched at capture.
+
+        Two consumers HAD to change, because a bare time-of-day was unambiguous only while every live
+        rec was same-day: the Telegram listing (``notify.telegram._rec_line`` carries the day on both
+        stamps when delivery and expiry fall on different days) and the dashboard card/fold (the
+        ``valid till`` chip carries the date when it is not today, and a day group holding a live rec
+        starts open instead of reading "no recommendations today"). ``expire_stale`` and the gate's
+        pending screen read the stamped ``valid_until`` off the payload and needed nothing.
+
+        Calendar-aware via the pipeline's ``NSECalendar`` seam (see :meth:`_next_actionable_session`
+        for the muhurat and horizon rules). Past the horizon, or on a day whose own session has
+        already closed, it never mints an ALREADY-DEAD TTL — the gate fails a proposal closed on
+        ``valid_until <= now`` (``_rule_proposal_stale``), so a dead stamp would silently drop a
+        risk-reducing exit the owner should have seen.
         """
         now = self._clock.now()
         if style == "intraday":
             return now + timedelta(minutes=TTL_INTRADAY_MIN)
-        session = self._calendar.session(self._clock.today())
+        today = self._clock.today()
+        target_day = self._next_actionable_session(today) if entry else today
+        session = self._calendar.session(target_day)
         if session is None or session.close <= now:
             return now + timedelta(minutes=TTL_INTRADAY_MIN)
         return session.close
+
+    def _next_actionable_session(self, today: date) -> date:
+        """The next trading day the owner could realistically place the order in (WO-V).
+
+        A muhurat special session is walked past: it is ~1h on a weekend evening, and this calendar
+        carries its times as an unverified placeholder, so stamping an entry to it would hand the
+        owner a "second session" they cannot use and kill the rec before the following morning
+        (2026-11-06 ⇒ Monday 2026-11-09, not the Sunday muhurat). Shortened sessions are real
+        sessions and are kept.
+
+        Answers ``today`` when the calendar has no KNOWN next session — past its verified horizon
+        (R6) the honest answer is not a guessed date — which :meth:`_ttl` then treats exactly as it
+        did before WO-V. Logged at WARNING, like ``main._session_open_ist``'s own unresolved case: a
+        horizon crossing silently shortens every entry TTL otherwise.
+        """
+        probe = today
+        for _ in range(4):                 # bounded: muhurat days never fall on consecutive dates
+            try:
+                probe = self._calendar.next_trading_day(probe)
+            except ValueError:
+                _log.warning("next_trading_session_unresolved", day=today.isoformat(),
+                             note="no known next session past the calendar horizon (R6) — entry "
+                                  "TTL falls back to today's close")
+                return today
+            session = self._calendar.session(probe)
+            if session is None or not session.is_muhurat:
+                return probe
+        return today
 
     def _window(self, d: date) -> tuple[datetime, datetime] | None:
         try:
