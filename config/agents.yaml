@@ -76,13 +76,17 @@ degrade_ladder:
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
   intraday_analyst:
-    model: opus-5             # sonnet→opus 2026-08-18 (owner: Opus for decision roles; entry decisions
-                              # are the platform's core judgment point; Phase-2 RECOMMEND mode, so the
-                              # extra latency is not order-critical)
+    model: sonnet-5           # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
+                              # (Opus for decision roles; entry decisions are the platform's core
+                              # judgment point). Phase-2 is RECOMMEND mode, so neither latency nor
+                              # tier is order-critical, and the deterministic gates still do the
+                              # quality filtering ahead of this call.
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1200
-    timeout_s: 180             # 120→180 with the opus switch: keep ~3x measured-duration headroom
+    timeout_s: 180             # 120→180 at the 08-18 opus switch; KEPT on the way back down — a call
+                               # that completes is billed anyway, so headroom costs nothing and a
+                               # cut-off one wastes the spend (same reasoning as the news_analyst key)
     triggers: [signal_candidate, position_event, heartbeat]   # (a)+(c) window-gated; (b) whenever up (§5.2)
     heartbeat_min: 20          # [tunable]; window-bounded (§5.6)
     prescreen_cap_per_day: 48  # [tunable] 6→12 (owner 2026-08-11: the cap, not signal quality, was
@@ -91,12 +95,12 @@ agents:
                                # with the deterministic gates still doing the quality filtering)
 
   preopen_planner:
-    model: opus-5             # sonnet→opus 2026-08-18 (owner: Opus for decision roles; one call/day,
-                              # cost delta trivial)
+    model: sonnet-5           # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
+                              # (Opus for decision roles; one call/day, cost delta trivial)
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 2000
-    timeout_s: 240             # 180→240 with the opus switch
+    timeout_s: 240             # 180→240 at the 08-18 opus switch; kept (headroom is free, see above)
     triggers: [schedule]
     schedule_ist: "08:50"
 
@@ -141,7 +145,9 @@ agents:
 
   weekly_researcher:
     enabled: false             # Phase 5 (§8.7); not loadable until its §5.5 read-only MCP allowlist is wired
-    model: opus-5           # weekly deep review (D9); realistically ~$1/agentic run (D4)
+    model: sonnet-5         # opus→sonnet 2026-09-15 (owner-directed; roster-wide). D9 specified Opus
+                            # for the weekly deep review — revisit at the §8.7 Phase-5 enablement,
+                            # when this agent actually runs and its output quality can be judged.
     shape: agentic
     tools_enabled: true
     max_turns: 20
