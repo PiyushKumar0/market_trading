@@ -1,5 +1,43 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-16 (owner: "Fix the 1st issue") — newcomer DAILY-history repair shipped (fdd4d83); roster opus→sonnet committed (90becc7); engine restarted 16:42 IST, boot verified
+
+- **Context — the 2026-09-15 freeze.** Engine crashed ~01:14 (8h51m outage, missed the open), booted
+  10:06; the catch-up `universe_build` added OLAELEC/ACUTAAS/ANANDRATHI at 10:09:45 and the newcomer
+  fill wrote only session minutes. OLAELEC carried a 57-session `bars_1d` hole (2025-09-09..2025-12-01),
+  6 sessions of it inside the 200-window ⇒ `rsi2/trend/mom:OLAELEC daily bars 193/200` ⇒ DAILY class
+  ⇒ FROZEN-for-entries 10:09:51 → 22:13:54. Not a young listing (listed 2024-08-09). The engine also
+  wedged at 16:06 (six hours of log silence, every evening job skipped, forced stop at 21:58). The
+  owner's `backfill.py` run wrote nothing (`market.duckdb` mtime stayed 15:26 — exit-2 lock error while
+  the engine was up); I re-ran `run --interval day --from 2025-09-09 --to 2025-12-01 --symbols OLAELEC`
+  with the engine stopped (57 bars, 0 failed ⇒ 200/200, zero gaps since listing), restarted 22:06;
+  catch-up replayed the missed evening (`daily_bars:2026-09-15` included); the 22:13:41
+  `boot_incomplete` CRITICAL was a false alarm (437 s boot, `engine_ready` at 22:13:55).
+- **Fix (commit fdd4d83, Sonnet build under my spec, audited on pointers + my own re-run).**
+  `BackfillJob.daily_gap(symbols, sessions)`: coverage checked from the store FIRST (covered symbol =
+  zero Kite requests, `skipped_covered`), writes filtered to the missing dates via
+  `_write_candles(only_dates=…)` so a `src='bhavcopy'` row is never clobbered, NOT checkpointed (a
+  monotonic checkpoint skips exactly these backward holes). `WarmupGate.daily_window()` and module
+  `recent_sessions()` make the repair and the gate share one window definition. `job_universe` fills
+  newcomers' daily history at ANY hour (the minute fill keeps its mid-session guard, fail-closed).
+  `regime_and_warmup_backfill` (boot + post-login) gained a whole-watchlist daily leg. Tests: 5 new
+  `daily_gap` cases (incl. the bhavcopy row surviving), window helpers, post-login leg, a source-level
+  pin that the daily fill sits outside `clock.now() > session.open`. ruff clean; `tests/unit`
+  **3046 passed** (5:01).
+- **Roster (commit 90becc7).** `opus-5 → sonnet-5` on intraday_analyst, preopen_planner,
+  weekly_researcher (owner-directed 09-15); timeouts kept. Live since the 09-15 22:06 boot.
+- **Deploy.** `Restart-Service mt-engine` 16:42:20 (post-close, no job in flight; stop again needed
+  `stop_forced`). `engine_boot` 16:42:38, token valid, `agent_roster PASS (4 defs)`,
+  **`daily_gap_done symbols=300 sessions=200 bars_written=0 skipped_covered=298 failed=0`** at
+  16:42:57 (the 2 fetched = young listings ICICIAMC/MEESHO, no pre-listing candles), `catch_up_complete`
+  16:44:38 (nothing missed), `scheduler_started` + `engine_ready` **16:45:00** (142 s). Risk state
+  NORMAL, no active causes. The 18:00/18:05 evening jobs fire from the new process.
+- **Still open (memory: warmup-newcomer-daily-gap):** the 420 s `boot_incomplete` watchdog false-alarms
+  after a large catch-up and its hint says "restart" — check for `engine_ready` first; the recurring
+  store/event-loop stall (3 in 2 days, every stop since ends `stop_forced`) is undiagnosed and is
+  what actually caused the day. `agents.yaml` still prices `sonnet-5` at $3/$15 (current $2/$10) — the
+  governor over-estimates spend ~50% now that every agent bills at that key; owner re-sizing call.
+
 ## 2026-09-13 (owner: "Implement all of the pending changes") — tranche 3: warm-up scoping, per-source watermark, sweep mechanics, two-session validity; O17 sizing caps prepared
 
 - **Pending list executed** (from the 09-11 report and the 09-12 recaps): per-class warm-up scoping
