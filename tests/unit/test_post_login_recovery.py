@@ -31,6 +31,7 @@ from engine.ops.post_login import PostLoginRecovery, resume_ticker
 from engine.ops.warmup import WarmupStatus
 from tests.unit.test_instruments import INDIA_VIX_ROW, NIFTY50_ROW, RELIANCE_ROW, FakeKite
 from tests.unit.test_lifecycle_selftest import OWNER_OK, _build
+from tests.unit.test_warmup_gate import RECENT_5
 
 
 # --------------------------------------------------------------------------- fixtures / fakes
@@ -91,6 +92,7 @@ class FakeBackfill:
         self.boom = boom
         self.run_calls: list[tuple[list[str], str]] = []
         self.gap_calls: list[list[str]] = []
+        self.daily_gap_calls: list[tuple[list[str], list]] = []
 
     async def run(self, symbols, interval, start, end):
         if self.boom:
@@ -101,6 +103,10 @@ class FakeBackfill:
     async def warmup_gap(self, symbols, frm, to):
         self.gap_calls.append(list(symbols))
         return SimpleNamespace(bars_written=len(list(symbols)) * 5)
+
+    async def daily_gap(self, symbols, sessions):
+        self.daily_gap_calls.append((list(symbols), list(sessions)))
+        return SimpleNamespace(bars_written=len(list(symbols)) * 3, skipped_covered=0, failed=[])
 
 
 class FakeLifecycle:
@@ -506,6 +512,25 @@ async def test_day_backfill_end_clamps_to_yesterday_until_session_close(clock, c
                                      lambda: [], "NIFTY 50", "INDIA VIX")
     *_rest, end2 = bf2.run_calls[0]
     assert end2 == _dt.date(2026, 6, 17)
+
+
+@pytest.mark.asyncio
+async def test_backfill_step_repairs_watchlist_daily_window(clock, calendar):
+    """2026-09-15: a boot onto a watchlist whose members have bars_1d holes had nothing to repair the
+    DAILY class — the daily_gap leg fetches exactly the gate's own window (``daily_lookback_sessions``
+    forwarded from the gate's ``daily_window()``) for the whole watchlist, alongside (not instead of)
+    the regime `run` leg and the mid-session minute `warmup_gap` leg."""
+    from engine.ops.post_login import regime_and_warmup_backfill
+
+    bf = FakeBackfill()
+    written = await regime_and_warmup_backfill(
+        bf, clock, calendar, load_settings(), lambda: ["RELIANCE", "TCS"], "NIFTY 50", "INDIA VIX",
+        daily_lookback_sessions=5,
+    )
+    assert bf.daily_gap_calls == [(["RELIANCE", "TCS"], RECENT_5)]
+    assert written["watchlist_daily_gap_bars"] == 6
+    assert bf.run_calls                                     # the regime `run` leg still happened
+    assert bf.gap_calls == [["RELIANCE", "TCS"]]             # mid-session clock ⇒ minute leg still runs
 
 
 # --------------------------------------------------------------------------- warm-up gate reapply / lift

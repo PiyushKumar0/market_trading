@@ -63,6 +63,7 @@ from engine.marketdata.store import MarketStore
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
 from engine.ops.holdings_reconcile import HoldingsReconcileJob
+from engine.ops.warmup import DAILY_LOOKBACK_SESSIONS, recent_sessions
 
 if TYPE_CHECKING:  # only for typing — lifecycle imports nothing from here, so no runtime cycle
     from engine.ops.lifecycle import SessionLifecycle
@@ -187,11 +188,15 @@ async def regime_and_warmup_backfill(
     watchlist_symbols: Callable[[], list[str]],
     index_symbol: str,
     vix_symbol: str,
+    *,
+    daily_lookback_sessions: int = DAILY_LOOKBACK_SESSIONS,
 ) -> dict[str, int]:
     """§2.6 step 4: warm the regime daily history (NIFTY 50 / India VIX — checkpointed, cheap on
-    re-runs) and gap-fill today's intraday minute bars for the watchlist from official candles so
-    warm-up never needs live ticks. Extracted so startup and the post-login re-trigger issue the
-    IDENTICAL calls. Returns bars written per leg (``{"regime_daily_bars", "warmup_gap_bars"}``)."""
+    re-runs), repair the watchlist's daily lookback (the warm-up gate's own window — coverage-checked
+    per symbol, so a healthy watchlist costs zero Kite requests), and gap-fill today's intraday minute
+    bars for the watchlist from official candles so warm-up never needs live ticks. Extracted so
+    startup and the post-login re-trigger issue the IDENTICAL calls. Returns bars written per leg
+    (``{"regime_daily_bars", "watchlist_daily_gap_bars", "warmup_gap_bars"}``)."""
     today = clock.today()
     session = calendar.session(today)
     # The day-interval end is clamped to YESTERDAY until today's session has closed: an intraday
@@ -206,8 +211,18 @@ async def regime_and_warmup_backfill(
         [index_symbol, vix_symbol], "day",
         today - timedelta(days=365 * settings.data.backfill_daily_years), day_end,
     )
-    written = {"regime_daily_bars": day_report.bars_written, "warmup_gap_bars": 0}
+    written = {"regime_daily_bars": day_report.bars_written, "watchlist_daily_gap_bars": 0, "warmup_gap_bars": 0}
     watch = watchlist_symbols()
+    # 2026-09-15: repair the WATCHLIST's daily lookback too (the gate's exact window) — a boot onto a
+    # universe whose members have bars_1d holes froze the DAILY class with nothing to lift it. Coverage
+    # is checked per symbol from the store first, so a healthy watchlist costs zero Kite requests.
+    if watch:
+        sessions = recent_sessions(calendar, today, daily_lookback_sessions)
+        if sessions is None:
+            _log.warning("watchlist_daily_gap_skipped", reason="calendar_horizon")
+        else:
+            daily_report = await backfill.daily_gap(watch, sessions)
+            written["watchlist_daily_gap_bars"] = daily_report.bars_written
     if session is not None and watch:
         gap_report = await backfill.warmup_gap(watch, session.open, clock.now())
         written["warmup_gap_bars"] = gap_report.bars_written

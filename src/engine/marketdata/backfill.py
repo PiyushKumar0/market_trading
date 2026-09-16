@@ -74,6 +74,8 @@ class BackfillReport(BaseModel):
     fetched: list[BackfillSpan] = Field(default_factory=list)
     failed: list[BackfillSpan] = Field(default_factory=list)
     bars_written: int = 0
+    #: Symbols that needed no request at all — every requested session was already present.
+    skipped_covered: int = 0
 
 
 def _candle_field(candle: Any, name: str) -> Any:
@@ -338,6 +340,114 @@ class BackfillJob:
         )
         return report
 
+    # ------------------------------------------------------------------ §2.6 step 6 residue: daily gap
+
+    async def daily_gap(self, symbols: Sequence[str], sessions: Sequence[date]) -> BackfillReport:
+        """Fill missing ``bars_1d`` rows for ``symbols`` on exactly ``sessions`` — the warm-up gate's
+        own daily window (:meth:`engine.ops.warmup.WarmupGate.daily_window`), newest-first or any
+        order — from official Kite day candles (2026-09-15: OLAELEC entered the watchlist with a
+        57-session hole in ``bars_1d`` that the minute-only newcomer fill never touched, freezing the
+        DAILY class for 12 hours).
+
+        Coverage is checked from the store FIRST, per symbol, with NO network call: a symbol already
+        holding every requested session costs nothing (``report.skipped_covered``). Written rows are
+        filtered to exactly the missing dates (:meth:`_write_candles`'s ``only_dates``) so a covered
+        session's existing row — which may be a ``src='bhavcopy'`` cross-check row — is never
+        clobbered with ``kite_official``.
+
+        NOT checkpointed: every caller recomputes coverage from the store on each call, so a fill is
+        idempotent and self-healing by construction. A monotonic checkpoint would skip exactly the
+        BACKWARD holes this repairs — the 2026-09-15 OLAELEC hole was 2025-09-09..2025-12-01, entirely
+        behind where a would-be checkpoint would already sit (2026-09-11).
+        """
+        report = BackfillReport(interval="day")
+        sessions = list(sessions)
+        if not sessions:
+            _log.info("daily_gap_no_sessions")
+            return report
+        oldest, newest = min(sessions), max(sessions)
+        symbols = list(symbols)
+        chunk_days = self._chunk_days("day")
+        for i, symbol in enumerate(symbols):
+            report.requested.append(
+                BackfillSpan(symbol=symbol, frm=oldest.isoformat(), to=newest.isoformat())
+            )
+            present = {b.d for b in await self._store.aget_bars_1d(symbol, oldest, newest)}
+            missing = {d for d in sessions if d not in present}
+            if not missing:
+                report.skipped_covered += 1
+                continue      # fully covered — nothing to fill, no Kite request at all
+            token = self._token_for_symbol(symbol)
+            if token is None:
+                report.failed.append(
+                    BackfillSpan(
+                        symbol=symbol, frm=oldest.isoformat(), to=newest.isoformat(),
+                        error="unknown_instrument_token",
+                    )
+                )
+                _log.warning("daily_gap_unknown_token", symbol=symbol)
+                continue
+            written = 0
+            failed = False
+            aborted = False
+            cur = oldest
+            while cur <= newest:
+                chunk_end = min(cur + timedelta(days=chunk_days - 1), newest)
+                try:
+                    candles = await self._kite.historical(
+                        token,
+                        self._clock.combine(cur, time(0, 0)),
+                        self._clock.combine(chunk_end, time(23, 59, 59)),
+                        "day",
+                    )
+                    written += await self._write_candles(
+                        symbol, "day", candles, src="kite_official", only_dates=missing
+                    )
+                except Exception as exc:  # noqa: BLE001 - a symbol's gap failure never blocks others
+                    report.failed.append(
+                        BackfillSpan(
+                            symbol=symbol, frm=cur.isoformat(), to=chunk_end.isoformat(),
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                    )
+                    if isinstance(exc, TokenException):
+                        # Same rationale as run()/warmup_gap: a rejected token fails every subsequent
+                        # call identically — abort the whole fill rather than hammering the broker
+                        # once per remaining symbol.
+                        for rem in symbols[i + 1:]:
+                            report.failed.append(
+                                BackfillSpan(
+                                    symbol=rem, frm=oldest.isoformat(), to=newest.isoformat(),
+                                    error="aborted_token_rejected",
+                                )
+                            )
+                        _log.warning(
+                            "daily_gap_aborted_token_rejected",
+                            symbols_remaining=len(symbols) - i - 1,
+                        )
+                        aborted = True
+                    else:
+                        _log.warning("daily_gap_chunk_failed", symbol=symbol, error=str(exc))
+                    failed = True
+                    break
+                cur = chunk_end + timedelta(days=1)
+            if not failed:
+                report.fetched.append(
+                    BackfillSpan(
+                        symbol=symbol, frm=oldest.isoformat(), to=newest.isoformat(), bars=written
+                    )
+                )
+                report.bars_written += written
+            if aborted:
+                break
+        _log.info(
+            "daily_gap_done", symbols=len(symbols), sessions=len(sessions),
+            oldest=oldest.isoformat(), newest=newest.isoformat(),
+            bars_written=report.bars_written, skipped_covered=report.skipped_covered,
+            failed=len(report.failed),
+        )
+        return report
+
     # ------------------------------------------------------------------ internals
 
     def _chunk_days(self, interval: str) -> int:
@@ -357,14 +467,22 @@ class BackfillJob:
         frm: datetime | None = None,
         to: datetime | None = None,
         only_minutes: set | None = None,
+        only_dates: set[date] | None = None,
     ) -> int:
         """Write fetched candles (as-is, A11) to bars_1d / bars_1m; optional ``[frm, to)`` filter.
 
         ``only_minutes`` (minute interval only): write ONLY candles whose ts is in the set — the
-        warmup-gap fill-gaps-never-overwrite contract (2026-07-23; see :meth:`warmup_gap`)."""
+        warmup-gap fill-gaps-never-overwrite contract (2026-07-23; see :meth:`warmup_gap`).
+
+        ``only_dates`` (day interval only): write ONLY candles on those dates — the daily gap fill's
+        fill-gaps-never-overwrite contract (bars_1d rows may be ``src='bhavcopy'`` cross-check rows;
+        a gap fill must not clobber them with ``kite_official``)."""
         if not candles:
             return 0
         if interval == "day":
+            day_candles = candles
+            if only_dates is not None:
+                day_candles = [c for c in candles if _candle_ts(c).date() in only_dates]
             rows = [
                 DailyBar(
                     symbol=symbol, d=_candle_ts(c).date(),
@@ -372,7 +490,7 @@ class BackfillJob:
                     low=_dec(_candle_field(c, "low")), close=_dec(_candle_field(c, "close")),
                     volume=int(_candle_field(c, "volume")), src="kite_official",
                 )
-                for c in candles
+                for c in day_candles
             ]
             return await self._store.aupsert_bars_1d(rows)
         bar_src: BarSrc = "gap_backfilled" if src == "gap_backfilled" else "kite_official"

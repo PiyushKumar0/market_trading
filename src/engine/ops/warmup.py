@@ -55,6 +55,9 @@ _log = get_logger("engine.ops.warmup")
 #: §6.1 daily-lookback strategies sharing the 200-session bars_1d requirement (200-DMA bound).
 DAILY_STRATEGY_SCOPE = "rsi2/trend/mom"
 
+#: Deepest daily feature lookback (200-DMA, §6.2) — the gate's default daily coverage window.
+DAILY_LOOKBACK_SESSIONS = 200
+
 #: The three warm-up COVERAGE CLASSES (2026-09-13 plan change). A class is a property of the missing
 #: DATA, not of a strategy: ``intraday`` = today's 1-minute bars, ``daily`` = completed daily
 #: sessions, ``regime`` = index/VIX daily history.
@@ -96,6 +99,23 @@ def classify_blockers(blockers: Sequence[str]) -> dict[str, list[str]]:
     for blocker in blockers:
         out.setdefault(blocker_class(blocker), []).append(str(blocker))
     return out
+
+
+def recent_sessions(calendar: NSECalendar, today: date, n: int) -> list[date] | None:
+    """The most recent ``n`` completed trading sessions strictly before ``today``, DESCENDING
+    (``[0]`` newest). None if the loaded calendars cannot supply ``n`` sessions (bounded walk).
+    Module-level so the daily gap-fill (backfill.daily_gap callers) and the gate share ONE
+    definition of the window — a fill that disagrees with the gate about which sessions count
+    can never clear the gate's blocker."""
+    days: list[date] = []
+    probe = today - timedelta(days=1)
+    for _ in range(n * 3 + 90):   # bounded: weekends+holidays inflate ~n*1.5; never loop forever
+        if len(days) >= n:
+            break
+        if calendar.is_trading_day(probe):
+            days.append(probe)
+        probe -= timedelta(days=1)
+    return days if len(days) >= n else None
 
 
 class WarmupStatus(BaseModel):
@@ -156,7 +176,7 @@ class WarmupGate:
         daily_symbols: Sequence[str] | None = None,
         index_symbol: str = "NIFTY 50",
         vix_symbol: str = "INDIA VIX",
-        daily_lookback_sessions: int = 200,
+        daily_lookback_sessions: int = DAILY_LOOKBACK_SESSIONS,
         vix_lookback_sessions: int = 20,
     ) -> None:
         self._store = store
@@ -271,12 +291,9 @@ class WarmupGate:
     def _recent_sessions(self, n: int) -> list[date] | None:
         """The most recent ``n`` completed trading sessions strictly before today, DESCENDING
         (``[0]`` newest). None if the loaded calendars cannot supply ``n`` sessions (bounded walk)."""
-        days: list[date] = []
-        probe = self._clock.today() - timedelta(days=1)
-        for _ in range(n * 3 + 90):   # bounded: weekends+holidays inflate ~n*1.5; never loop forever
-            if len(days) >= n:
-                break
-            if self._calendar.is_trading_day(probe):
-                days.append(probe)
-            probe -= timedelta(days=1)
-        return days if len(days) >= n else None
+        return recent_sessions(self._calendar, self._clock.today(), n)
+
+    def daily_window(self) -> list[date] | None:
+        """The gate's own daily coverage window (see :func:`recent_sessions`) — callers that repair
+        daily coverage fetch exactly these sessions, so the repair and the check can never disagree."""
+        return self._recent_sessions(self._daily_n)

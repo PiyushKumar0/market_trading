@@ -3068,6 +3068,19 @@ def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set() -> Non
     assert src.count("await ticker.update_subscriptions(ticker_tokens())") == 2  # job_universe + sweep
 
 
+def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour() -> None:
+    """2026-09-15: OLAELEC entered the watchlist at 10:09 with a 57-session hole in bars_1d and froze
+    the DAILY class for 12 h — the minute-only newcomer fill (mid-session-gated) never touched daily
+    history. The daily-history repair must run for every newcomer regardless of time of day (pre-open
+    builds included — daily history is historical), so it must NOT be nested inside the mid-session
+    ``clock.now() > session.open`` guard that still gates the minute fill."""
+    body = _wrapper_body(inspect.getsource(opsmain.run), "job_universe")
+    assert "backfill.daily_gap(added, sessions)" in body
+    assert "warmup_gate.daily_window()" in body
+    assert body.index("backfill.daily_gap(") < body.index("clock.now() > session.open")
+    assert "backfill.warmup_gap(added, session.open, clock.now())" in body   # minute fill retained
+
+
 # --- the `ins` leg's once-only bound: the one batch leg a re-sweep cannot re-derive -------------
 def _seed_ins_pending(conn, today: date, symbol: str = "RELIANCE") -> None:
     conn.execute(

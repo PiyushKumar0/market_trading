@@ -24,7 +24,7 @@ from engine.marketdata.backfill import (
     KITE_MINUTE_CHUNK_DAYS,
     BackfillJob,
 )
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import DailyBar, MarketStore
 
 TOKENS = {"RELIANCE": 408065, "TCS": 2953217}
 
@@ -335,3 +335,107 @@ async def test_warmup_gap_failure_isolated_per_symbol(store, clock, conn):
     assert len(report.failed) == 1 and report.failed[0].symbol == "RELIANCE"
     assert len(report.fetched) == 1 and report.fetched[0].symbol == "TCS"
     assert report.bars_written == 1
+
+
+# ------------------------------------------------------------------ 2026-09-15: daily_gap (WarmupGate
+# daily window repair — OLAELEC entered the watchlist with a 57-session bars_1d hole and froze the
+# DAILY class for 12 h; the minute-only newcomer fill never touched daily history at all).
+DAILY_SESSIONS_5 = [
+    dt.date(2026, 6, 10), dt.date(2026, 6, 11), dt.date(2026, 6, 12),
+    dt.date(2026, 6, 13), dt.date(2026, 6, 14),
+]
+
+
+def five_session_day_candles(token, frm, to, interval):
+    """One candle per session in DAILY_SESSIONS_5 — the whole 5-day span fits one chunk (« 2000-day
+    cap), so a single request returns candles for every requested date regardless of frm/to."""
+    return [
+        {"date": dt.datetime(d.year, d.month, d.day, tzinfo=IST), "open": 10.0, "high": 12.0,
+         "low": 9.0, "close": 50.0 + i, "volume": 100 + i}
+        for i, d in enumerate(DAILY_SESSIONS_5)
+    ]
+
+
+async def test_daily_gap_fills_only_missing_sessions_and_never_overwrites(store, clock, conn):
+    # 3 of 5 sessions already present — one a bhavcopy cross-check row that a gap fill must not touch.
+    store.upsert_bars_1d([
+        DailyBar(symbol="RELIANCE", d=DAILY_SESSIONS_5[0], open=Decimal("1"), high=Decimal("1"),
+                 low=Decimal("1"), close=Decimal("999"), volume=1, src="bhavcopy"),
+        DailyBar(symbol="RELIANCE", d=DAILY_SESSIONS_5[1], open=Decimal("1"), high=Decimal("1"),
+                 low=Decimal("1"), close=Decimal("2"), volume=1, src="kite_official"),
+        DailyBar(symbol="RELIANCE", d=DAILY_SESSIONS_5[2], open=Decimal("1"), high=Decimal("1"),
+                 low=Decimal("1"), close=Decimal("3"), volume=1, src="kite_official"),
+    ])
+    kite = FakeKite(five_session_day_candles)
+    job = _job(store, kite, clock, conn)
+
+    report = await job.daily_gap(["RELIANCE"], DAILY_SESSIONS_5)
+
+    assert len(kite.calls) == 1 and kite.calls[0][3] == "day"
+    assert report.bars_written == 2
+    assert report.skipped_covered == 0
+    assert report.interval == "day"
+
+    rows = store.get_bars_1d("RELIANCE", DAILY_SESSIONS_5[0], DAILY_SESSIONS_5[-1])
+    by_d = {r.d: r for r in rows}
+    assert by_d[DAILY_SESSIONS_5[0]].close == Decimal("999")     # bhavcopy row UNCHANGED
+    assert by_d[DAILY_SESSIONS_5[0]].src == "bhavcopy"
+    assert by_d[DAILY_SESSIONS_5[3]].src == "kite_official"      # the two newly-filled rows
+    assert by_d[DAILY_SESSIONS_5[4]].src == "kite_official"
+
+    n = conn.execute("SELECT COUNT(*) AS n FROM backfill_checkpoints").fetchone()["n"]
+    assert n == 0                                                 # NOT checkpointed
+
+
+async def test_daily_gap_skips_covered_symbol_with_no_request(store, clock, conn):
+    store.upsert_bars_1d([
+        DailyBar(symbol="TCS", d=d, open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                 close=Decimal("1"), volume=1, src="kite_official")
+        for d in DAILY_SESSIONS_5
+    ])
+    kite = FakeKite(five_session_day_candles)
+    job = _job(store, kite, clock, conn)
+
+    report = await job.daily_gap(["TCS"], DAILY_SESSIONS_5)
+
+    assert kite.calls == []                # fully covered — no Kite request at all
+    assert report.skipped_covered == 1
+    assert report.fetched == []
+    assert report.bars_written == 0
+
+
+async def test_daily_gap_failure_isolated_per_symbol(store, clock, conn):
+    kite = FakeKite(five_session_day_candles, fail_on_call={0})   # RELIANCE's fetch fails
+    job = _job(store, kite, clock, conn)
+
+    report = await job.daily_gap(["RELIANCE", "TCS"], DAILY_SESSIONS_5)
+
+    assert len(report.failed) == 1 and report.failed[0].symbol == "RELIANCE"
+    assert "RuntimeError" in report.failed[0].error
+    assert len(report.fetched) == 1 and report.fetched[0].symbol == "TCS"
+
+
+async def test_daily_gap_aborts_whole_run_on_token_rejection(store, clock, conn):
+    kite = _TokenKite()
+    job = _job(store, kite, clock, conn)
+
+    report = await job.daily_gap(["RELIANCE", "TCS", "INFY"], DAILY_SESSIONS_5)
+
+    assert len(kite.calls) == 1                              # aborted after the first symbol's fetch
+    assert len(report.failed) == 3
+    by_symbol = {s.symbol: s.error for s in report.failed}
+    assert "TokenException" in by_symbol["RELIANCE"]
+    assert by_symbol["TCS"] == "aborted_token_rejected"
+    assert by_symbol["INFY"] == "aborted_token_rejected"
+    assert report.fetched == []
+
+
+async def test_daily_gap_empty_sessions_is_a_noop(store, clock, conn):
+    kite = FakeKite(five_session_day_candles)
+    job = _job(store, kite, clock, conn)
+
+    report = await job.daily_gap(["RELIANCE"], [])
+
+    assert kite.calls == []
+    assert report.requested == [] and report.fetched == [] and report.failed == []
+    assert report.bars_written == 0 and report.skipped_covered == 0

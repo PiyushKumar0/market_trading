@@ -1044,9 +1044,25 @@ async def run() -> int:
         # Symbols ENTERING the watchlist mid-session have no session bars yet, and the boot/post-login
         # gap fill ran against the PREVIOUS set (2026-07-29: SWIGGY/TITAN entered 15 s after the fill
         # and their 09:15→09:53 hole kept warm-up FROZEN all day). Fill the newcomers' minutes now —
-        # the gate is already watching them. Pre-open builds skip this (nothing missed yet).
+        # the gate is already watching them. Pre-open builds skip this (nothing missed yet). This is
+        # ONE of two newcomer repairs — the daily-history fill below is the other, and runs regardless
+        # of time of day.
         added = [s for s in watchlist_symbols() if s not in before]
         session = calendar.session(clock.today())
+        # 2026-09-15: a newcomer's DAILY history was never repaired by anything — OLAELEC joined at
+        # 10:09 with a 57-session hole in bars_1d and the DAILY class froze every entry for 12 h. Fill
+        # the gate's exact window for the newcomers first; the minute fill below stays mid-session-only.
+        if added and backfill is not None:
+            sessions = warmup_gate.daily_window()
+            if sessions is None:
+                _log.warning("universe_added_daily_fill_skipped", symbols=added, reason="calendar_horizon")
+            else:
+                try:
+                    daily = await backfill.daily_gap(added, sessions)
+                    _log.info("universe_added_daily_filled", symbols=added, bars=daily.bars_written,
+                              skipped_covered=daily.skipped_covered, failed=len(daily.failed))
+                except Exception:  # noqa: BLE001 - a failed fill leaves the gate blocking (fail closed), never fails the job
+                    _log.exception("universe_added_daily_fill_failed", symbols=added)
         if added and backfill is not None and session is not None and clock.now() > session.open:
             try:
                 gap = await backfill.warmup_gap(added, session.open, clock.now())

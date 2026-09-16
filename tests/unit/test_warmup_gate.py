@@ -21,6 +21,7 @@ from engine.ops.warmup import (
     WarmupGate,
     WarmupStatus,
     blocker_class,
+    recent_sessions,
 )
 from tests.conftest import FIXED_NOW
 from tests.unit.test_lifecycle_selftest import OWNER_OK, _build
@@ -78,6 +79,23 @@ def _fill_ready(store):
     store.daily["RELIANCE"] = list(RECENT_5)
     store.daily["NIFTY 50"] = list(RECENT_5)
     store.daily["INDIA VIX"] = list(RECENT_5[:3])
+
+
+# --------------------------------------------------------------------- daily window (2026-09-15:
+# the daily_gap repair fetches exactly this window — it must be the SAME window the gate checks, or
+# a fill that disagrees with the gate can never clear its blocker).
+def test_daily_window_is_the_gates_own_lookback(clock):
+    assert _gate(store=FakeStore(), clock=clock).daily_window() == RECENT_5
+
+
+def test_recent_sessions_matches_the_gate_window(clock):
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
+    assert recent_sessions(calendar, clock.today(), 5) == RECENT_5
+
+
+def test_recent_sessions_returns_none_when_calendar_cannot_enumerate(clock):
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
+    assert recent_sessions(calendar, clock.today(), 100_000) is None
 
 
 @pytest.mark.asyncio
