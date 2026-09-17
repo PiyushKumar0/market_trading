@@ -35,7 +35,11 @@ llm:
 # Standard per-MTok rates (USD), D4 — the governor prices ledger usage from these (no balance API, D6).
 model_pricing_usd_per_mtok:
   haiku-4.5:  { input: 1,  output: 5 }
-  sonnet-5: { input: 3,  output: 15 }
+  sonnet-5: { input: 2,  output: 10 }   # 3/15 → 2/10 (owner-directed 2026-09-18; Anthropic first-party
+                                        # Sonnet 5 rate). Every enabled agent bills at this key since the
+                                        # 09-15 roster move, so the governor's proxy was ~50% high; the
+                                        # $200 weekly allocations were sized at the old rate — re-base
+                                        # them if the ladder now trips too late for comfort.
   opus-5:   { input: 5,  output: 25 }
   fable-5:    { input: 10, output: 50 }
 
