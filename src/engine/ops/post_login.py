@@ -21,7 +21,9 @@ startup steps:
     (b) backfill     — regime daily history (NIFTY 50 / India VIX) + intraday warm-up-gap fill for the
                        watchlist — the SAME calls startup makes, shared via
                        :func:`regime_and_warmup_backfill`;
-    (c) warm-up      — re-evaluate the §2.6 step-6 gate and, once coverage is met, LIFT the warm-up
+    (c) warm-up      — re-evaluate the §2.6 step-6 gate and, once the FREEZING classes (REGIME /
+                       unattributable — since 2026-09-17 an INTRADAY or DAILY shortfall is refused
+                       per SYMBOL at the gate instead) are covered, LIFT the warm-up
                        FROZEN-for-entries through the lifecycle's own gate application
                        (:meth:`SessionLifecycle.reapply_warmup_gate` — never a direct risk-state bypass);
     (d) ticker       — start the feed with the subscription tokens — the SAME step-7 resume logic,

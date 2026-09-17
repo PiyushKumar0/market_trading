@@ -97,7 +97,7 @@ from engine.ops.holdings_reconcile import (
     missing_holdings_observations,
     positions_missing_from_holdings,
 )
-from engine.ops.warmup import CLASS_INTRADAY
+from engine.ops.warmup import CLASS_INTRADAY, blocker_symbol
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
 from engine.strategy.types import SignalCandidate
@@ -1879,6 +1879,9 @@ class RecommendationPipeline:
     def _intraday_warmup_short(self, candidate: SignalCandidate, *, at: str) -> bool:
         """Is this an INTRADAY-style candidate facing a short intraday warm-up class right now?
 
+        The answer is PER SYMBOL (2026-09-17): only a hole attributed to THIS candidate's symbol —
+        or one attributable to no symbol at all — refuses it.
+
         Reads the SAME snapshot the gate context reads (§2.6 step 6, per-class since 2026-09-13), so
         the pre-screen answer and the gate's ``warmup_ready`` verdict can never disagree — the point
         is only to learn it before the analyst call rather than after. Daily-class candidates are not
@@ -1898,7 +1901,7 @@ class RecommendationPipeline:
         try:
             status = self._warmup_status_fn()
             ready_for = getattr(status, "ready_for", None)
-            short = ready_for is not None and not ready_for(CLASS_INTRADAY)
+            short = ready_for is not None and not ready_for(CLASS_INTRADAY, candidate.symbol)
         except Exception as exc:  # noqa: BLE001 - the gate still enforces; never lose the candidate
             _log.warning("warmup_snapshot_read_failed", symbol=candidate.symbol, error=str(exc))
             return False
@@ -1914,11 +1917,16 @@ class RecommendationPipeline:
         key = (candidate.symbol, candidate.strategy_id, at)
         if key not in self._intraday_warmup_logged:
             self._intraday_warmup_logged.add(key)
+            # The lines that actually refused THIS symbol (2026-09-17). Nothing attributed to it ⇒
+            # the refusal came from an unattributable line, so the class's own first few are what
+            # there is to show.
+            lines = list(getattr(status, "blockers_by_class", {}).get(CLASS_INTRADAY, []))
+            mine = [b for b in lines if blocker_symbol(b) == candidate.symbol]
             _log.info("signal_candidate_intraday_warmup", signal_id=candidate.signal_id,
                       symbol=candidate.symbol, strategy_id=candidate.strategy_id, at=at,
-                      blockers=list(getattr(status, "blockers_by_class", {}).get(CLASS_INTRADAY, []))[:4],
-                      note="intraday coverage short — no analyst call (§2.6 step 6); re-armed at "
-                           "arrival, left queued at the forward slot")
+                      blockers=mine or lines[:4],
+                      note="intraday coverage short for this symbol — no analyst call (§2.6 step "
+                           "6); re-armed at arrival, left queued at the forward slot")
         return True
 
     # ================================================================== trigger (a): entries

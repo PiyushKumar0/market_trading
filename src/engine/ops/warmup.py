@@ -29,10 +29,12 @@ once coverage is met.
 
 Every blocker carries its CLASS in its rendered prefix (:func:`blocker_class`): ``orb:`` ⇒ intraday
 1-minute coverage, ``rsi2/trend/mom:`` ⇒ completed daily sessions, ``regime:`` ⇒ NIFTY 50 / India
-VIX history. Since the 2026-09-13 plan change (§2.6 step 6 addendum) the consequence is per class:
-the DAILY and REGIME classes still drive the global FROZEN-for-entries, while an INTRADAY-only
-shortfall refuses intraday candidates per-candidate (risk gate + pre-screen) instead of freezing the
-daily-bar legs that never read a 1-minute bar. ``ready`` keeps its old meaning — no blockers at all.
+VIX history — and its SYMBOL in the rest of the line (:func:`blocker_symbol`). Since the 2026-09-13
+plan change the consequence is per class, and since the 2026-09-17 one (§2.6 step-6 addenda) it is
+also per SYMBOL: only the REGIME class (NIFTY 50 / India VIX — every candidate depends on them) and
+an UNATTRIBUTABLE blocker drive the global FROZEN-for-entries, while an INTRADAY or DAILY shortfall
+refuses THAT SYMBOL's candidates per-candidate (risk gate + pre-screen) instead of taking the whole
+book down for one symbol's coverage hole. ``ready`` keeps its old meaning — no blockers at all.
 
 All store scans go through the ``MarketStore`` async wrappers (executor-offloaded — the loop is
 never blocked past the §2.2 heartbeat budget).
@@ -40,6 +42,7 @@ never blocked past the §2.2 heartbeat budget).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import date, timedelta
 
@@ -92,6 +95,26 @@ def blocker_class(blocker: str) -> str:
     return CLASS_UNKNOWN
 
 
+#: The SYMBOL inside a rendered blocker line. Anchored over EXACTLY the three renderings
+#: :meth:`WarmupGate._evaluate` produces — ``orb:{sym} bars {have}/{need}``,
+#: ``{scope}:{sym} daily bars {have}/{n}`` and ``{scope}:{sym} calendar horizon < {n} sessions`` —
+#: so the lazy symbol group plus the anchored suffix recover names that themselves contain spaces,
+#: ``&`` or ``-`` (``NIFTY 50``, ``INDIA VIX``, ``M&M``, ``GVT&D``, ``BAJAJ-AUTO``). Anything else
+#: is UNATTRIBUTABLE by construction (None), never a guessed symbol.
+_BLOCKER_SYMBOL_RE = re.compile(
+    r"^(?P<scope>orb|" + re.escape(DAILY_STRATEGY_SCOPE) + r"|regime):"
+    r"(?P<sym>.+?) (?:daily bars \d+/\d+|bars \d+/\d+|calendar horizon < \d+ sessions)$"
+)
+
+
+def blocker_symbol(blocker: str) -> str | None:
+    """The SYMBOL one rendered blocker line is attributed to, or None when the line cannot be
+    attributed to any symbol. A None is the fail-closed case everywhere it is consumed: a shortfall
+    nobody can pin on a symbol refuses EVERY symbol in its class (R6)."""
+    m = _BLOCKER_SYMBOL_RE.match(str(blocker))
+    return m.group("sym") if m is not None else None
+
+
 def classify_blockers(blockers: Sequence[str]) -> dict[str, list[str]]:
     """Bucket rendered blocker lines by :func:`blocker_class`, order preserved. Empty classes are
     absent from the mapping (a caller asks with ``.get(cls)``, never by membership)."""
@@ -136,16 +159,45 @@ class WarmupStatus(BaseModel):
         self.blockers_by_class = classify_blockers(self.blockers)
         return self
 
-    def ready_for(self, cls: str) -> bool:
-        """Is the ``cls`` coverage class satisfied? Fail-closed in three directions: an UNKNOWN-class
-        blocker (unattributable coverage) holds every class down, a not-ready status carrying no
-        blockers at all is unattributable in the same way, and an unrecognised ``cls`` is never
-        "ready". ``ready`` (no blockers anywhere) stays the whole-gate answer."""
+    def ready_for(self, cls: str, symbol: str | None = None) -> bool:
+        """Is the ``cls`` coverage class satisfied — for the whole book, or for one SYMBOL?
+
+        ``symbol=None`` keeps the CLASS-WIDE meaning (False if ANY symbol is short in ``cls``); it is
+        what the freeze / lift / owner-notice code asks, because those answer a global question.
+        With a ``symbol`` the answer is per-symbol (owner-directed 2026-09-17): False iff a blocker
+        line in this class is attributed to THAT symbol, or cannot be attributed to any symbol. One
+        symbol's coverage hole must never refuse every candidate of its class — the 2026-09-16 13:36
+        PTCIL tradeless minute took the whole intraday book down from 13:37 to the close.
+
+        Fail-closed in four directions: an UNKNOWN-class blocker (unattributable coverage) holds
+        every class and every symbol down, a not-ready status carrying no blockers at all is
+        unattributable in the same way, a blocker in this class whose symbol cannot be parsed holds
+        every symbol in the class down, and an unrecognised ``cls`` is never "ready". ``ready`` (no
+        blockers anywhere) stays the whole-gate answer."""
         if cls not in _REAL_CLASSES:
             return False
         if not self.ready and not self.blockers:
             return False
-        return not self.blockers_by_class.get(cls) and not self.blockers_by_class.get(CLASS_UNKNOWN)
+        if self.blockers_by_class.get(CLASS_UNKNOWN):
+            return False
+        lines = self.blockers_by_class.get(cls) or []
+        if not lines:
+            return True
+        if symbol is None:
+            return False
+        want = str(symbol)
+        return not any(blocker_symbol(line) in (None, want) for line in lines)
+
+    def short_symbols(self, cls: str) -> list[str]:
+        """The symbols ``cls``'s blockers are attributed to — order preserved, de-duplicated, and
+        unattributable lines omitted (they are not a symbol; :meth:`ready_for` handles them). Feeds
+        the owner's per-class transition notice, which counts SYMBOLS rather than blocker lines."""
+        out: list[str] = []
+        for line in self.blockers_by_class.get(cls) or []:
+            sym = blocker_symbol(line)
+            if sym is not None and sym not in out:
+                out.append(sym)
+        return out
 
 
 class WarmupGate:

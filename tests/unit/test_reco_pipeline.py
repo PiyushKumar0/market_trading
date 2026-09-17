@@ -604,10 +604,13 @@ async def test_intraday_warmup_shortfall_rearms_without_spending_an_analyst_call
     intraday-only coverage hole, so the refusal is per candidate — and it happens BEFORE the analyst
     call, because the gate would reject the proposal on ``warmup_ready`` after the call was spent.
     The day slot goes back (never evaluated; a minute hole heals mid-session), and the daily-class
-    candidate riding the SAME snapshot is forwarded: the whole point of the change."""
+    candidate riding the SAME snapshot is forwarded: the whole point of the change.
+
+    The hole is attributed to the candidate's OWN symbol, because since 2026-09-17 that is what the
+    screen asks (see the sibling test for another symbol's hole)."""
     from engine.ops.warmup import WarmupStatus
 
-    intraday_hole = WarmupStatus(ready=False, blockers=["orb:RELIANCE bars 113/114"])
+    intraday_hole = WarmupStatus(ready=False, blockers=[f"orb:{SYMBOL} bars 113/114"])
     rearmed: list[tuple[str, str]] = []
 
     harness = FakeHarness()          # asserts if called: the analyst must not be reached at all
@@ -635,6 +638,46 @@ async def test_intraday_warmup_shortfall_rearms_without_spending_an_analyst_call
     await publish_candidate(swing_pipeline, candidate(style="swing", strategy_id="brk20"))
     assert len(swing_harness.calls) == 1
     assert rearmed == []
+
+
+async def test_another_symbols_intraday_hole_does_not_rearm_this_candidate(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model
+):
+    """2026-09-17 per-SYMBOL readiness. ``ready_for`` was CLASS-WIDE, so ONE symbol's hole refused
+    every intraday candidate in the book: on 2026-09-16 PTCIL printed no trade at 13:36 (Kite
+    publishes no candle for a tradeless minute — the bar is unfillable, not late) and
+    ``orb:PTCIL bars 374/375`` refused everything from 13:37 to the close. The screen now asks about
+    the candidate's own symbol, so this candidate reaches the analyst."""
+    from engine.ops.warmup import WarmupStatus
+
+    other_hole = WarmupStatus(ready=False, blockers=["orb:PTCIL bars 374/375"])
+    rearmed: list[tuple[str, str]] = []
+
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), warmup_status_fn=lambda: other_hole,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    await publish_candidate(pipeline, candidate())
+    assert len(harness.calls) == 1
+    assert rearmed == []
+
+    # …and a line in the same class that attributes to NO symbol still refuses everyone (R6).
+    unattributable = WarmupStatus(ready=False, blockers=["orb:?? garbage"])
+    rearmed.clear()
+    closed = FakeHarness()          # asserts if called
+    pipeline_closed, _ = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=closed,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), warmup_status_fn=lambda: unattributable,
+        rearm=lambda sym, sid: rearmed.append((sym, sid)) or True,
+    )
+    cand = candidate()
+    await publish_candidate(pipeline_closed, cand)
+    assert closed.calls == []
+    assert rearmed == [(cand.symbol, cand.strategy_id)]
 
 
 async def test_intraday_warmup_screen_is_silent_when_it_cannot_answer(

@@ -39,6 +39,7 @@ from engine.core.enums import Actor
 from engine.core.log import get_logger
 from engine.core.protected_store import PROTECTED_NAMES, ProtectedStore
 from engine.core.secrets import Secrets
+from engine.ops.warmup import CLASS_REGIME, CLASS_UNKNOWN
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 
@@ -292,6 +293,17 @@ class SelfTest:
                              detail="today-dated safety-critical jobs fresh (instruments/surveillance/earnings)")
 
     async def _check_warmup_ready(self) -> SelfTestCheck:
+        """§7.1 ``warmup_ready`` as a self-test line — split per coverage class on 2026-09-17 (the
+        residue the 2026-09-13 addendum registered).
+
+        A raise still FAILs implying FROZEN (coverage that cannot be verified is missing, R6), and a
+        fully-ready gate still PASSes. In between, the check now follows the same rule as the
+        lifecycle: only a REGIME shortfall (or an unattributable blocker, which ``ready_for`` folds
+        into every class) is a GLOBAL condition and implies FROZEN; an INTRADAY or DAILY shortfall is
+        per-symbol and refused at the gate, so it is a WARN that implies nothing — a self-test that
+        re-imposed the global freeze here would undo the addendum the moment a standalone ``run()``
+        or a dashboard/CLI ``selftest`` endpoint was wired. A status with no ``ready_for`` keeps
+        today's FAIL+FROZEN (the flat fallback is never looser than the per-class answer)."""
         if self._warmup_gate is None:
             return self._stub(
                 "warmup_ready", "no WarmupGate wired — integrator passes engine.ops.warmup.WarmupGate (§2.6)"
@@ -306,11 +318,29 @@ class SelfTest:
         if status.ready:
             return SelfTestCheck(name="warmup_ready", status=CheckStatus.PASS,
                                  detail="contiguous coverage satisfies every strategy lookback (§7.1)")
+        ready_for = getattr(status, "ready_for", None)
+        if ready_for is None:
+            return SelfTestCheck(
+                name="warmup_ready",
+                status=CheckStatus.FAIL,
+                detail="insufficient contiguous coverage: " + "; ".join(status.blockers[:6]),
+                implies=Implies.FROZEN,
+            )
+        if not ready_for(CLASS_REGIME):
+            by_class = getattr(status, "blockers_by_class", {}) or {}
+            global_lines = list(by_class.get(CLASS_REGIME, [])) + list(by_class.get(CLASS_UNKNOWN, []))
+            return SelfTestCheck(
+                name="warmup_ready",
+                status=CheckStatus.FAIL,
+                detail="insufficient contiguous coverage: " + "; ".join(
+                    (global_lines or status.blockers)[:6]),
+                implies=Implies.FROZEN,
+            )
         return SelfTestCheck(
             name="warmup_ready",
-            status=CheckStatus.FAIL,
-            detail="insufficient contiguous coverage: " + "; ".join(status.blockers[:6]),
-            implies=Implies.FROZEN,
+            status=CheckStatus.WARN,
+            detail="per-symbol coverage short: " + "; ".join(status.blockers[:6]),
+            implies=Implies.NONE,
         )
 
     @staticmethod

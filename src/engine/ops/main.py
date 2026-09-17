@@ -2563,102 +2563,151 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
     lifted them, because no login event fires on such a boot. Runs on the 60 s
     ``warmup_status_refresh`` cadence; ``reapply_warmup_gate`` resolves through the cause latch
     (never a blanket NORMAL write) and is a no-op unless the state is FROZEN with the FREEZING
-    classes (daily ∪ regime ∪ unattributable) covered — since 2026-09-13 the lift is owed to those
-    alone, so a still-short INTRADAY class no longer blocks it.
+    classes (regime ∪ unattributable) covered — since 2026-09-13 the lift is owed to those alone,
+    and since 2026-09-17 the DAILY class joined INTRADAY on the non-freezing side, so neither one
+    blocks it.
 
-    ``alert`` is the owner channel for the INTRADAY class's transitions (best-effort, once per
-    transition): that class reaches neither the risk state nor a WARMUP_FROZEN page any more, so a
-    hole that opens MID-SESSION — the 2026-09-09 14:47 reconnect — would otherwise be visible only
-    in the structured log. Unwired ⇒ log-only. ``clock`` scopes the transition memo to the IST day
-    (unwired ⇒ per-process, the pre-2026-09-13 memo).
+    ``alert`` is the owner channel for the NON-FREEZING classes' transitions (best-effort, once per
+    transition, one notice per class): neither reaches the risk state nor a WARMUP_FROZEN page any
+    more, so a hole that opens MID-SESSION — the 2026-09-09 14:47 reconnect, the 2026-09-16 13:36
+    PTCIL tradeless minute — would otherwise be visible only in the structured log, and a
+    market-wide DAILY hole would page nobody at all. Unwired ⇒ log-only. ``clock`` scopes the
+    transition memos to the IST day (unwired ⇒ per-process, the pre-2026-09-13 memo).
     """
     status = await refresh_warmup_snapshot(warmup_gate, warmup_holder)
     if status is None:
         return
-    # 2026-09-13 (per-CLASS scoping): the lift is owed to the DAILY ∪ REGIME classes, not to a flat
-    # ``ready``. An intraday hole — one symbol at 11:09, or the market-wide one-bar hole a reconnect
-    # leaves — no longer holds the daily-bar legs frozen for the session; the gate and the pre-screen
-    # refuse intraday candidates on their own, per candidate.
-    if _daily_regime_ready(status) and mode.risk_state() == RiskState.FROZEN:
+    # 2026-09-13/2026-09-17 (per-CLASS then per-SYMBOL scoping): the lift is owed to the REGIME class
+    # (plus unattributable blockers), not to a flat ``ready``. One symbol's intraday hole — 11:09 on
+    # 09-04, the market-wide one-bar hole a reconnect leaves, PTCIL's tradeless 13:36 — or one
+    # symbol's daily hole (OLAELEC on 09-15) no longer holds the book frozen for the session; the
+    # gate and the pre-screen refuse the short symbols on their own, per candidate.
+    if _freezing_classes_ready(status) and mode.risk_state() == RiskState.FROZEN:
         try:
             await lifecycle.reapply_warmup_gate()
         except Exception:  # noqa: BLE001 - a failed lift retries on the next 60s tick
             _log.exception("warmup_freeze_lift_failed")
-    # The intraday notice comes AFTER the lift so that "entries are NOT frozen by warm-up" is said of
+    # The class notices come AFTER the lift so that "entries are NOT frozen by warm-up" is said of
     # the state the owner is now in, not of the one a few lines above.
     today = clock.today() if clock is not None else None
-    notice = _log_intraday_class_transition(warmup_holder, status, today=today)
-    if notice is not None and alert is not None:
+    for cls in (CLASS_INTRADAY, CLASS_DAILY):
+        notice = _log_class_transition(warmup_holder, status, cls, today=today)
+        if notice is None or alert is None:
+            continue
         try:
             await alert(notice[0], notice[1])
         except Exception:  # noqa: BLE001 - the owner notice is best-effort
-            _log.exception("warmup_intraday_alert_failed")
+            _log.exception("warmup_class_alert_failed", cls=cls)
 
 
-def _daily_regime_ready(status) -> bool:
-    """Are both FREEZING coverage classes satisfied? Duck-typed like every other gate seam here: a
-    status without ``ready_for`` (a fake, or an older snapshot) falls back to the flat ``ready``,
-    which is the pre-2026-09-13 behaviour and never looser than it."""
+def _freezing_classes_ready(status) -> bool:
+    """Are the FREEZING coverage classes satisfied? Since 2026-09-17 that is REGIME alone — an
+    unattributable blocker is handled INSIDE ``ready_for`` (it holds every class down), so asking
+    for REGIME asks for both. Duck-typed like every other gate seam here: a status without
+    ``ready_for`` (a fake, or an older snapshot) falls back to the flat ``ready``, which is the
+    pre-2026-09-13 behaviour and never looser than it."""
     ready_for = getattr(status, "ready_for", None)
     if ready_for is None:
         return bool(getattr(status, "ready", False))
-    return bool(ready_for(CLASS_DAILY)) and bool(ready_for(CLASS_REGIME))
+    return bool(ready_for(CLASS_REGIME))
 
 
-def _log_intraday_class_transition(warmup_holder: dict, status, *, today=None) -> tuple[str, str] | None:
-    """Log the INTRADAY class's readiness ONCE PER TRANSITION and return the owner notice to send,
-    as ``(severity, message)``, or None when there is nothing new to say.
+#: Per-class wording for :func:`_log_class_transition` (the INTRADAY text is verbatim what the
+#: 2026-09-13 tranche shipped). ``{detail}`` is the parenthesised sample; ``{n}`` the symbol count.
+_CLASS_NOTICE_SHORT = {
+    CLASS_INTRADAY: ("warm-up: INTRADAY coverage short{detail} — intraday candidates are "
+                     "refused one by one; entries are NOT frozen by warm-up and the daily-bar legs "
+                     "are unaffected (§2.6 step-6 addendum)"),
+    CLASS_DAILY: ("warm-up: DAILY coverage short for {n} symbol(s){detail} — swing/position "
+                  "candidates for those symbols are refused one by one; entries are NOT frozen by "
+                  "warm-up (§2.6 step-6 addendum, per-symbol since 2026-09-17)"),
+}
+_CLASS_NOTICE_RESTORED = {
+    CLASS_INTRADAY: "warm-up: INTRADAY coverage restored — intraday candidates are accepted again",
+    CLASS_DAILY: "warm-up: DAILY coverage restored — swing/position candidates are accepted again",
+}
 
-    This runs on the 60 s cadence, and an intraday hole that survives the session would otherwise
-    print the same line ~375 times. The memo lives in the snapshot holder, so it is per-process (a
-    restart logs the standing state once more, which is the harmless side); with ``today`` it is
-    also per IST DAY — the intraday class reads trivially "ready" whenever there is no session yet
-    (``WarmupGate._missing_intraday`` returns nothing before the open and on a non-trading day), so
-    a memo that survived the midnight rollover would manufacture a "coverage restored" that no repair
-    produced.
 
-    **Only the intraday class is judged here.** While a FREEZING class (daily ∪ regime ∪ unattributable)
+def _sample_detail(items: list[str]) -> str:
+    """``" (A, B, C, +k more)"`` from the first three items; ``""`` for an empty list — "(…)" with
+    nothing in it reads as a formatting bug rather than as coverage."""
+    if not items:
+        return ""
+    more = f", +{len(items) - 3} more" if len(items) > 3 else ""
+    return f" ({', '.join(items[:3])}{more})"
+
+
+def _log_class_transition(warmup_holder: dict, status, cls: str, *, today=None) -> tuple[str, str] | None:
+    """Log ONE non-freezing class's readiness ONCE PER TRANSITION and return the owner notice to
+    send, as ``(severity, message)``, or None when there is nothing new to say.
+
+    Generalised from the intraday-only notice on 2026-09-17, when the DAILY class stopped freezing
+    entries and therefore stopped paging the owner through ``WARMUP_FROZEN``: a market-wide daily
+    hole (the nightly ``daily_bars`` job failed) must still reach a human, and this notice plus the
+    STARTUP_REPORT ``warm-up short:`` line are now the two signals that carry it.
+
+    This runs on the 60 s cadence, and a hole that survives the session would otherwise print the
+    same line ~375 times. The memos (``{cls}_short`` / ``{cls}_short_day``) live in the snapshot
+    holder, so they are per-process (a restart logs the standing state once more, which is the
+    harmless side); with ``today`` they are also per IST DAY — the intraday class reads trivially
+    "ready" whenever there is no session yet (``WarmupGate._missing_intraday`` returns nothing before
+    the open and on a non-trading day), so a memo that survived the midnight rollover would
+    manufacture a "coverage restored" that no repair produced.
+
+    **Only non-freezing classes are judged here.** While a FREEZING class (regime ∪ unattributable)
     is short, entries ARE frozen and ``WARMUP_FROZEN`` owns that state — a notice saying "entries are
     NOT frozen" in that state would be the opposite of the truth, so nothing is said and the memo is
-    left alone; the intraday shortfall is reported on the first tick after the freeze lifts, when the
-    wording is true. (``ready_for(intraday)`` is False in that compound state too, because an
-    unknown-class blocker holds every class down.)
+    left alone; the shortfall is reported on the first tick after the freeze lifts, when the wording
+    is true. (``ready_for(cls)`` is False in that compound state too, because an unknown-class
+    blocker holds every class down.)
 
-    The FIRST observation of a ready intraday class is a transition for the log but NOT a notice:
-    there is nothing to recover from, and every clean boot would page "coverage restored". A first
-    observation of a SHORT one is a notice — the owner needs that on the tick it is learned, not only
-    from the boot report."""
+    The FIRST observation of a ready class is a transition for the log but NOT a notice: there is
+    nothing to recover from, and every clean boot would page "coverage restored". A first observation
+    of a SHORT one is a notice — the owner needs that on the tick it is learned, not only from the
+    boot report."""
     ready_for = getattr(status, "ready_for", None)
     if ready_for is None:
         return None
-    if not _daily_regime_ready(status):
+    if not _freezing_classes_ready(status):
         return None
-    if today is not None and warmup_holder.get("intraday_short_day") != today:
-        warmup_holder["intraday_short_day"] = today
-        warmup_holder.pop("intraday_short", None)
-    short = not ready_for(CLASS_INTRADAY)
-    seen = warmup_holder.get("intraday_short")
+    memo, day_memo = f"{cls}_short", f"{cls}_short_day"
+    if today is not None and warmup_holder.get(day_memo) != today:
+        warmup_holder[day_memo] = today
+        warmup_holder.pop(memo, None)
+    short = not ready_for(cls)
+    seen = warmup_holder.get(memo)
     if seen is short:
         return None
-    warmup_holder["intraday_short"] = short
-    # With the freezing classes covered, whatever holds intraday down is the intraday bucket itself.
+    warmup_holder[memo] = short
+    # With the freezing classes covered, whatever holds this class down is its own bucket.
     by_class = getattr(status, "blockers_by_class", {}) or {}
-    blockers = list(by_class.get(CLASS_INTRADAY, []))
+    blockers = list(by_class.get(cls, []))
+    short_symbols_fn = getattr(status, "short_symbols", None)
+    symbols = list(short_symbols_fn(cls)) if short_symbols_fn is not None else []
     if short:
-        _log.warning("warmup_intraday_not_ready", blockers=blockers[:8], count=len(blockers),
-                     note="intraday candidates refused per-candidate; warm-up freezes nothing for this")
         # A status that says short without rendering a blocker still gets a notice — the owner needs
-        # the state, and "(…)" with nothing in it reads as a formatting bug rather than as coverage.
-        more = f", +{len(blockers) - 3} more" if len(blockers) > 3 else ""
-        detail = f" ({', '.join(blockers[:3])}{more})" if blockers else ""
-        return ("warning",
-                f"warm-up: INTRADAY coverage short{detail} — intraday candidates are "
-                "refused one by one; entries are NOT frozen by warm-up and the daily-bar legs are "
-                "unaffected (§2.6 step-6 addendum)")
-    _log.info("warmup_intraday_ready")
+        # the state.
+        if cls == CLASS_DAILY:
+            _log.warning("warmup_daily_not_ready", symbols=symbols[:8], count=len(symbols),
+                         note="swing/position candidates refused per symbol; warm-up freezes "
+                              "nothing for this")
+            detail = _sample_detail(symbols)
+        else:
+            _log.warning(f"warmup_{cls}_not_ready", blockers=blockers[:8], count=len(blockers),
+                         note="intraday candidates refused per-candidate; warm-up freezes nothing "
+                              "for this")
+            detail = _sample_detail(blockers)
+        return ("warning", _CLASS_NOTICE_SHORT[cls].format(detail=detail, n=len(symbols)))
+    _log.info(f"warmup_{cls}_ready")
     if seen is None:
         return None
-    return ("info", "warm-up: INTRADAY coverage restored — intraday candidates are accepted again")
+    return ("info", _CLASS_NOTICE_RESTORED[cls])
+
+
+def _log_intraday_class_transition(warmup_holder: dict, status, *, today=None) -> tuple[str, str] | None:
+    """The INTRADAY class's transition notice — a thin wrapper kept as the name the 2026-09-13
+    tranche's tests and callers use. See :func:`_log_class_transition`."""
+    return _log_class_transition(warmup_holder, status, CLASS_INTRADAY, today=today)
 
 
 # --------------------------------------------------------------------------- bounded news resolve (§2.7/E5)

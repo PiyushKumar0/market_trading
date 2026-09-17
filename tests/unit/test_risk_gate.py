@@ -1262,7 +1262,11 @@ def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> Non
     asks the SAME snapshot for the class the candidate's style reads — ``intraday`` ⇒ today's
     1-minute coverage, ``swing``/``position`` ⇒ the completed daily sessions — exactly as
     ``regime_data_ready`` has always been its own class. An unknown style takes the DAILY class:
-    the broader one, which is also the one that still gates the risk state."""
+    the broader one, which is also the one that still gates the risk state.
+
+    2026-09-17 (per-SYMBOL addendum): within that class the answer is narrowed to the candidate's
+    own SYMBOL, so COROMANDEL's minute hole refuses COROMANDEL and nobody else — PTCIL's tradeless
+    13:36 on 2026-09-16 refused every intraday candidate in the book until the close."""
     from engine.ops.warmup import WarmupStatus
     from engine.risk.gate import GateContextBuilder
 
@@ -1272,28 +1276,39 @@ def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> Non
     builder._warmup_status_fn = lambda: WarmupStatus(
         ready=False, blockers=["orb:COROMANDEL bars 113/114"]
     )
-    assert builder._warmup_ready("intraday") is False
-    assert builder._warmup_ready("swing") is True
-    assert builder._warmup_ready("position") is True
-    assert builder._warmup_ready("unheard-of") is True     # daily class, and daily is covered
+    assert builder._warmup_ready("intraday", "COROMANDEL") is False
+    assert builder._warmup_ready("intraday", "RELIANCE") is True    # per SYMBOL since 2026-09-17
+    assert builder._warmup_ready("swing", "COROMANDEL") is True
+    assert builder._warmup_ready("position", "COROMANDEL") is True
+    assert builder._warmup_ready("unheard-of", "COROMANDEL") is True  # daily class, daily covered
     assert builder._regime_ready() is True                 # untouched by this change
 
-    # The mirror image: daily short, minute bars complete. The intraday leg may still be judged.
+    # The mirror image: daily short, minute bars complete. The intraday leg may still be judged, and
+    # so may every OTHER symbol's daily leg.
     builder._warmup_status_fn = lambda: WarmupStatus(
         ready=False, blockers=["rsi2/trend/mom:RELIANCE daily bars 3/200"]
     )
-    assert builder._warmup_ready("intraday") is True
-    assert builder._warmup_ready("swing") is False
+    assert builder._warmup_ready("intraday", "RELIANCE") is True
+    assert builder._warmup_ready("swing", "RELIANCE") is False
+    assert builder._warmup_ready("swing", "COROMANDEL") is True
 
     # Fail-closed seams, both unchanged in spirit: no snapshot function at all, and a snapshot with
     # no per-class answer (an older or duck-typed one) falling back to the flat `ready`.
     builder._warmup_status_fn = None
-    assert builder._warmup_ready("swing") is False
+    assert builder._warmup_ready("swing", "RELIANCE") is False
     builder._warmup_status_fn = lambda: SimpleNamespace(ready=True, blockers=[])
-    assert builder._warmup_ready("swing") is True
+    assert builder._warmup_ready("swing", "RELIANCE") is True
     builder._warmup_status_fn = lambda: SimpleNamespace(ready=False, blockers=["orb:X 1/50"])
-    assert builder._warmup_ready("intraday") is False
-    assert builder._warmup_ready("swing") is False         # no class answer ⇒ the flat, stricter one
+    assert builder._warmup_ready("intraday", "RELIANCE") is False
+    assert builder._warmup_ready("swing", "RELIANCE") is False   # no class answer ⇒ the flat one
+
+    # …and the third fail-closed direction, now per symbol: a line in the class that attributes to
+    # NO symbol refuses every symbol in that class (R6).
+    builder._warmup_status_fn = lambda: WarmupStatus(
+        ready=False, blockers=["orb:?? garbage"]
+    )
+    assert builder._warmup_ready("intraday", "RELIANCE") is False
+    assert builder._warmup_ready("swing", "RELIANCE") is True
 
 
 def test_the_two_warmup_class_names_are_the_same_strings_on_both_sides_of_the_tier_line() -> None:
@@ -1374,10 +1389,13 @@ async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
     limit_table: LimitTable, gate_clock: Clock
 ) -> None:
     """End to end through ``build``: ONE mixed-blocker snapshot, two styles, two answers — and the
-    class the builder judged is pinned into the context it returns."""
+    class the builder judged is pinned into the context it returns. Since 2026-09-17 ``build`` must
+    also pass the proposal's own SYMBOL, so a snapshot naming a DIFFERENT symbol leaves this one
+    ready (the argument-passing bug this test exists to catch is now two arguments wide)."""
     from engine.ops.warmup import WarmupStatus
 
-    mixed = WarmupStatus(ready=False, blockers=["orb:COROMANDEL bars 113/114"])
+    assert SYMBOL != "COROMANDEL"
+    mixed = WarmupStatus(ready=False, blockers=[f"orb:{SYMBOL} bars 113/114"])
     builder = _stub_context_builder(limit_table, gate_clock, lambda: mixed)
 
     intraday_ctx = await builder.build(SYMBOL, "BUY", "intraday", NOW.date())
@@ -1385,11 +1403,21 @@ async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
     assert (intraday_ctx.warmup_class, intraday_ctx.warmup_ready) == ("intraday", False)
     assert (swing_ctx.warmup_class, swing_ctx.warmup_ready) == ("daily", True)
 
-    # The mirror image, so neither answer is a constant.
-    daily_short = WarmupStatus(ready=False, blockers=["rsi2/trend/mom:RELIANCE daily bars 3/200"])
+    # ANOTHER symbol's minute hole leaves this symbol's intraday leg ready — the 2026-09-16 PTCIL
+    # shape, where one tradeless minute refused the whole book.
+    other = WarmupStatus(ready=False, blockers=["orb:COROMANDEL bars 113/114"])
+    builder = _stub_context_builder(limit_table, gate_clock, lambda: other)
+    assert (await builder.build(SYMBOL, "BUY", "intraday", NOW.date())).warmup_ready is True
+
+    # The mirror image, so neither answer is a constant — and the same per-symbol split on daily.
+    daily_short = WarmupStatus(ready=False, blockers=[f"rsi2/trend/mom:{SYMBOL} daily bars 3/200"])
     builder = _stub_context_builder(limit_table, gate_clock, lambda: daily_short)
     assert (await builder.build(SYMBOL, "BUY", "intraday", NOW.date())).warmup_ready is True
     assert (await builder.build(SYMBOL, "BUY", "swing", NOW.date())).warmup_ready is False
+
+    other_daily = WarmupStatus(ready=False, blockers=["rsi2/trend/mom:COROMANDEL daily bars 3/200"])
+    builder = _stub_context_builder(limit_table, gate_clock, lambda: other_daily)
+    assert (await builder.build(SYMBOL, "BUY", "swing", NOW.date())).warmup_ready is True
 
 
 def test_warmup_rule_is_judged_per_style_and_fails_closed_on_a_class_mismatch(gate: RiskGate) -> None:

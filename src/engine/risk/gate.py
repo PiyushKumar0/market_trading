@@ -1328,9 +1328,9 @@ class GateContextBuilder:
         fails CLOSED (no LTP ⇒ unpriceable ⇒ reject; no tick age ⇒ ``stale_data_guard`` fails).
     warmup_status_fn:
         Returns a :class:`~engine.ops.warmup.WarmupStatus`; duck-typed to avoid importing the
-        composition root from Tier 2. Read per COVERAGE CLASS through its ``ready_for`` (2026-09-13),
-        with the flat ``ready`` as the fallback for a status that has none. Unwired ⇒ not ready
-        (fail closed).
+        composition root from Tier 2. Read per COVERAGE CLASS **and per SYMBOL** through its
+        ``ready_for(cls, symbol)`` (2026-09-13 / 2026-09-17), with the flat ``ready`` as the fallback
+        for a status that has none. Unwired ⇒ not ready (fail closed).
     clock_skew_ok_fn:
         Unwired ⇒ ``False`` — an unverifiable clock is never treated as "skew is fine" (R6).
     conn:
@@ -1397,9 +1397,10 @@ class GateContextBuilder:
 
         ``style`` is the ONE exception since 2026-09-13: warm-up coverage is answered per class
         (§2.6 step-6 addendum), so an intraday candidate is judged on today's 1-minute coverage and a
-        swing/position one on the completed daily sessions. The class judged is pinned into the
-        context (``warmup_class``) — a context is still a bag of facts, but this fact now says which
-        question it answered.
+        swing/position one on the completed daily sessions — and since 2026-09-17 the answer is
+        narrowed further to this ``symbol``, so one symbol's hole never refuses the rest of its
+        class. The class judged is pinned into the context (``warmup_class``) — a context is still a
+        bag of facts, but this fact now says which question it answered.
         """
         del side                 # documented above: assembly is side-agnostic
         table = self._limits.load()
@@ -1478,7 +1479,7 @@ class GateContextBuilder:
             results_day_today=await self._results_day(symbol, d),
             expiry_day=self._expiry_day_fn(d) if self._expiry_day_fn else False,
             is_nifty50=self._nifty50_fn(symbol) if self._nifty50_fn else False,
-            warmup_ready=self._warmup_ready(style),
+            warmup_ready=self._warmup_ready(style, symbol),
             warmup_class=_warmup_class_of(style),
             regime_ready=self._regime_ready(),
             clock_skew_ok=self._clock_skew_ok_fn() if self._clock_skew_ok_fn else False,
@@ -1594,17 +1595,19 @@ class GateContextBuilder:
         return {str(r["symbol"]): str(r["sector"]) for r in rows if r.get("sector")}
 
     # ------------------------------------------------------------------ readiness seams
-    def _warmup_ready(self, style: str) -> bool:
-        """Warm-up readiness for the candidate's COVERAGE CLASS (2026-09-13). A status without
-        ``ready_for`` (a fake, an older snapshot) falls back to the flat ``ready`` — the
-        pre-2026-09-13 answer, never looser than the per-class one."""
+    def _warmup_ready(self, style: str, symbol: str) -> bool:
+        """Warm-up readiness for the candidate's COVERAGE CLASS (2026-09-13) **and SYMBOL**
+        (2026-09-17): one symbol's coverage hole refuses that symbol's candidates, never the whole
+        class's — PTCIL's tradeless 13:36 on 2026-09-16 refused every intraday candidate in the book
+        until the close. A status without ``ready_for`` (a fake, an older snapshot) falls back to the
+        flat ``ready`` — the pre-2026-09-13 answer, never looser than the per-class one."""
         if self._warmup_status_fn is None:
             return False
         status = self._warmup_status_fn()
         ready_for = getattr(status, "ready_for", None)
         if ready_for is None:
             return bool(getattr(status, "ready", False))
-        return bool(ready_for(_warmup_class_of(style)))
+        return bool(ready_for(_warmup_class_of(style), symbol))
 
     def _regime_ready(self) -> bool:
         """Regime readiness is the ``regime:`` slice of the warm-up blockers (§7.1
