@@ -1,5 +1,49 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-17 (owner: "Fix the 1st issue and make the readiness per symbol. This is present in other gates as well, not only in intra-day") — per-SYMBOL warm-up readiness shipped (709eb5e); only REGIME/unattributable freeze now; engine restarted 18:50 IST, boot verified
+
+- **Diagnosis (owner report 09-16 22:36: "getting blocked on intraday warmup", `orb:PTCIL bars
+  374/375`).** From the tick archive, PTCIL printed no trade at 13:36 on 09-16 — the ONE in-session
+  minute RELIANCE traded and PTCIL did not; the blocker first appeared 13:37:38 as `261/262`, one
+  minute later. A tradeless minute has no Kite candle, so it is unfillable (the 16:44 and 22:36 fills
+  fetched and wrote 0 bars); the 3/day self-heal budget was already spent on morning transients
+  (`warmup_gap_repair_exhausted` 13:37:39, one second after the real hole). Same shape MRF 09-15
+  (12:06/12:18/13:16/13:34), MRF 09-10 (10:42), SHYAMMETL 09-09 (14:29) — thin, high-priced names.
+  Entries were NOT frozen (risk state NORMAL; ORB parked, today's 14 candidates all `swing`), but
+  `ready_for(cls)` was CLASS-WIDE and both per-candidate consumers asked it per candidate, so one
+  symbol's hole refused every intraday candidate in the book — and the DAILY class, being a freezing
+  class, had done worse on 09-15 (OLAELEC `193/200` ⇒ 12-hour global freeze).
+- **Change (commit 709eb5e; Opus build under my spec — 13 files, audited on pointers, semantics
+  probed on the live blocker strings, my own ruff + targeted re-run).** `WarmupStatus.ready_for(cls,
+  symbol=None)` — class-wide meaning kept for the freeze/lift/notice code; with a symbol, False iff a
+  line in that class is attributed to it or cannot be attributed to any symbol (fail closed).
+  `blocker_symbol(line)` is an anchored regex over exactly the three `_evaluate` renderings (`M&M`,
+  `BAJAJ-AUTO`, `GVT&D`, `NIFTY 50` verified). `_freezes_entries` ⇒ REGIME + unattributable only
+  (`_FREEZING_CLASSES`); DAILY joins INTRADAY on the per-symbol side; lift predicate
+  `_freezing_classes_ready` = `ready_for(REGIME)`. Gate `_warmup_ready(style, symbol)`; pipeline
+  pre-screen per symbol; `reapply_warmup_gate` outcome `intraday_short_` → `short_`. Owner notice
+  generalised to INTRADAY + DAILY (`_log_class_transition`, symbol count + first three, silent while a
+  freezing class holds). Startup step 6 appends `warmup_<cls>_not_ready` per short non-freezing class
+  + one `warmup_short_not_frozen` line. `SelfTest._check_warmup_ready` (the 09-13 registered residue)
+  split: FAIL+FROZEN only on raise / no `ready_for` / REGIME-or-unattributable; per-symbol ⇒ WARN.
+  Plan: §2.6 step 6, a dated per-SYMBOL addendum after the 09-13 one, the FROZEN cause list, §7.1
+  `warmup_ready` row. 13 existing tests re-pointed (each classified "encoded old semantics" vs
+  "invariant, adapted" in the build report), 8 added. ruff clean; `tests/unit` **3055 passed** (8:11).
+- **Registered risk (in the plan):** a market-wide daily hole no longer pages `WARMUP_FROZEN`; the
+  DAILY transition notice ("short for N symbol(s)") and the STARTUP_REPORT `warm-up short:` line carry
+  it, and every swing/position candidate is still refused per symbol — missed origination, never an
+  entry on thin data. **Not done:** a tradeless minute still counts as a hole (the symbol stays refused
+  for that session); synthesising zero-volume bars / upstream-confirmed-empty minutes, and not
+  charging the repair budget for the just-closed-minute transient, are separate decisions.
+- **Deploy.** `Restart-Service` 18:50:45 (bhavcopy 18:00, daily_bars 18:07, filings_pit 18:35 all
+  complete; nothing in flight; next job 19:00). `engine_boot` 18:51:09, token valid, `agent_roster
+  PASS (4 defs)`, `daily_gap_done symbols=300 skipped_covered=298 failed=0` (window 2025-11-25 →
+  2026-09-16), **`warmup_short_not_frozen classes=["intraday"]`** naming DEEPAKNTR 374/375, KIMS
+  370/375, PTCIL 372/375 (three tradeless-minute names today — each now refuses only itself),
+  `warmup_intraday_not_ready count=3` once, `scheduler_started` + `engine_ready` **18:53:39** (150 s).
+  Risk state NORMAL, no active causes. The stop again ended in `stop_forced` (memory:
+  warmup-newcomer-daily-gap item 3 — store/event-loop stall, still undiagnosed).
+
 ## 2026-09-16 (owner: "Fix the 1st issue") — newcomer DAILY-history repair shipped (fdd4d83); roster opus→sonnet committed (90becc7); engine restarted 16:42 IST, boot verified
 
 - **Context — the 2026-09-15 freeze.** Engine crashed ~01:14 (8h51m outage, missed the open), booted
