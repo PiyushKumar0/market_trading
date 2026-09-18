@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-18 (owner: "Fix point 1 and 3" → "Apply the fix and validate them") — upstream-confirmed no-trade minutes (b342240) + sonnet-5 pricing (4eac3c3); engine restarted 15:33 IST, boot verified; live-validated on DEEPAKNTR at 13:17 — under a boot I did not perform
+
+- **Point 3 (4eac3c3).** `agents.yaml` `sonnet-5` 3/15 → 2/10 per MTok (Anthropic first-party rate;
+  every enabled agent bills at this key since 09-15, so the governor's proxy ran ~50% high).
+  Allocations left at the $200 sizing done at the old rate — the ladder now trips later; owner re-base
+  if wanted. Parses; `test_agent_defs` + `test_budget_governor` 95 passed. Read at boot.
+- **Point 1 (b342240) — design.** Not synthetic bars: `bars_1m.src` is a `CHECK` baked into the
+  4.9 GB table. A fact table `bars_1m_no_trade(symbol, ts_minute, confirmed_at, src='kite_empty')`
+  (CREATE IF NOT EXISTS) is written ONLY by `BackfillJob.warmup_gap(confirm_until=…)` under four
+  guards — (A) Kite returned candles for the span, (B) Kite published a LATER candle for the symbol
+  (`m < max(returned)`: a truncated day is an outage, not quiet), (C) `m < min(confirm_until,
+  now−2min)` with callers clamping to `session.close`, (D) the minute is not missing for
+  ≥ `max(3, ceil(0.05·answered))` swept symbols (correlated ⇒ feed gap ⇒ WARNING, never confirmed);
+  a token-abort discards pending. `MarketStore.coverage_gaps` unions the table in. Feature inputs are
+  unchanged by construction — no `bars_1m` row is ever written; only the gate's verdict changes.
+  Repair budget: `_GAP_REPAIR_MAX_REQUESTS_PER_DAY = 900` (3 sweeps × 300) replaces 3 attempts/day.
+  Opus build under my spec, audited on every pointer; ruff clean; targeted 263 / full 3066 passed.
+  Whether thin names belong in intraday at all is an eligibility question — left to that layer.
+- **What actually happened overnight (recorded because it matters).** My first launch of this build
+  (00:30) was interrupted by the harness mid-run; the agent had already landed D1/D3/D4 and a
+  single-phase D2 (guards A+C only) in the working tree. At **01:39** the engine received a
+  `stop_requested` → `stop_forced` that I did not issue, stayed down 7.5 h, and **booted at 09:09:07**
+  (`off_duration_s 26987`, `engine_ready` 09:10:49 — four minutes before the open) by a start I did
+  not perform. That boot loaded the un-audited partial tree and ran it for the whole session. The
+  second launch (14:14 — my error: I batched `Get-Date` with the fan-out, so a build ran in-session;
+  memory updated) audited the partial work and completed guards B and D. Lesson: **the working tree
+  is the live deploy surface** — anything else that boots the engine ships whatever is on disk.
+- **Live validation (positive) — DEEPAKNTR, on the partial tree.** 13:12:34 `orb:DEEPAKNTR bars
+  236/237` (a quiet minute at ~13:10); 13:12:44 the repair scanned only (hole inside the 2-minute
+  trim, free); **13:17:46 `warmup_gap_done … no_trade_confirmed=1`** + `warmup_gap_repair attempt=2
+  fetched=1 requests=1 requests_today=1` — one Kite request, the day's candles came back minus that
+  minute, confirmed; **13:18:33 `warmup_intraday_ready`**. Guards B and D would both have passed (a
+  later candle existed; one symbol). Yesterday the same symbol stayed `374/375` until the close.
+- **Live validation (negative) — the audited code.** `Restart-Service` 15:33:07 (closed, nothing in
+  flight, next job 15:45). `engine_boot` 15:33:24, `market_store_opened` 15:33:44, token valid,
+  `agent_roster PASS (4 defs)`, `daily_gap_done skipped_covered=298 failed=0`; the boot minute leg
+  15:35:51 `warmup_gap_done symbols=300 to=15:34:06 bars_written=0 no_trade_confirmed=0
+  no_trade_correlated_skipped=0 failed=0` — the 13:17 row was already in the table so the minute was
+  no longer a gap (no re-fetch, live), and the `session.close` clamp kept the 15:30–15:34 post-close
+  minutes out (300 symbols × 4 minutes would otherwise have hit guard D). `scheduler_started` +
+  `engine_ready` **15:36:17** (173 s). Risk state NORMAL, no active causes. Stop again `stop_forced`.
+- **Still open:** the store/event-loop stall (every stop this week `stop_forced`; the 01:39 stop is
+  unexplained); who/what boots the engine at 09:09 and from which tree — an owner decision on pinning
+  the service to a commit rather than the dev working tree.
+
 ## 2026-09-17 (owner: "Fix the 1st issue and make the readiness per symbol. This is present in other gates as well, not only in intra-day") — per-SYMBOL warm-up readiness shipped (709eb5e); only REGIME/unattributable freeze now; engine restarted 18:50 IST, boot verified
 
 - **Diagnosis (owner report 09-16 22:36: "getting blocked on intraday warmup", `orb:PTCIL bars
