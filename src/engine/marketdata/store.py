@@ -138,6 +138,8 @@ class DailyBar(BaseModel):
 _SCHEMA: tuple[str, ...] = (
     # bars_1m — OHLCV from cumulative-volume deltas (A13); src provenance; auction_open on the
     # 09:15 row only (A14). PK (symbol, ts_minute) so reconcile can upsert official rows (§4.4 job 2).
+    # A minute in which nothing traded has NO row here and never gets one (no tick to build from, no
+    # Kite candle to fetch) — its "the exchange saw nothing" evidence lives in bars_1m_no_trade below.
     """
     CREATE TABLE IF NOT EXISTS bars_1m (
         symbol       TEXT NOT NULL,
@@ -149,6 +151,21 @@ _SCHEMA: tuple[str, ...] = (
         volume       BIGINT NOT NULL,
         src          TEXT NOT NULL CHECK (src IN ('self','kite_official','gap_backfilled')),
         auction_open DECIMAL(12,2),
+        PRIMARY KEY (symbol, ts_minute)
+    )
+    """,
+    # bars_1m_no_trade — UPSTREAM-CONFIRMED no-trade minutes (2026-09-18): Kite returned the day's
+    # candles for the span but none for this minute, which the store also lacks, so the exchange
+    # observed "nothing traded" and no bar can ever exist. Written ONLY by BackfillJob.warmup_gap
+    # (src='kite_empty'); coverage_gaps counts these minutes as covered so a thin symbol (PTCIL,
+    # MRF) is no longer refused all session for a hole nothing can fill. Never a synthetic price —
+    # bars_1m is untouched. Tiny (a few rows per thin symbol per day), kept indefinitely.
+    """
+    CREATE TABLE IF NOT EXISTS bars_1m_no_trade (
+        symbol       TEXT NOT NULL,
+        ts_minute    TIMESTAMPTZ NOT NULL,
+        confirmed_at TIMESTAMPTZ NOT NULL,
+        src          TEXT NOT NULL CHECK (src IN ('kite_empty')),
         PRIMARY KEY (symbol, ts_minute)
     )
     """,
@@ -523,7 +540,7 @@ _SCHEMA: tuple[str, ...] = (
 
 #: All §4.3 DuckDB tables created by :meth:`MarketStore.init_schema` (kept in lockstep with tests).
 EXPECTED_TABLES: frozenset[str] = frozenset({
-    "bars_1m", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
+    "bars_1m", "bars_1m_no_trade", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
     "universe_daily", "features_daily", "feature_snapshots", "news", "news_clusters",
     "entity_aliases", "unresolved_entities", "theme_map", "sentiment_agg", "catalyst_watchlist",
     "calendar", "corp_actions", "earnings_calendar", "flagged_instrument_days", "sector_map",
@@ -1427,12 +1444,48 @@ class MarketStore:
         row = self._fetchall("SELECT max(ts_minute) FROM bars_1m WHERE symbol = ?", [symbol])[0]
         return _ist(row[0]) if row[0] is not None else None
 
+    def mark_no_trade(
+        self, symbol: str, minutes: Sequence[datetime], *, confirmed_at: datetime
+    ) -> int:
+        """Record ``minutes`` as UPSTREAM-CONFIRMED no-trade minutes for ``symbol`` (2026-09-18).
+
+        The ONLY writer is :meth:`engine.marketdata.backfill.BackfillJob.warmup_gap`, and only for a
+        minute Kite could have published and did not (see its contract). ``ON CONFLICT DO NOTHING``:
+        the first confirmation is the record — a re-confirmation must never rewrite ``confirmed_at``.
+        Returns the number of rows handed to the write (an empty ``minutes`` issues no statement).
+        """
+        rows = [
+            [symbol, m.astimezone(IST).replace(second=0, microsecond=0), confirmed_at, "kite_empty"]
+            for m in minutes
+        ]
+        if not rows:
+            return 0
+        self._bulk_write(
+            "bars_1m_no_trade",
+            ("symbol", "ts_minute", "confirmed_at", "src"),
+            rows,
+            pk=("symbol", "ts_minute"),
+            conflict="ON CONFLICT (symbol, ts_minute) DO NOTHING",
+        )
+        return len(rows)
+
+    def no_trade_minutes(self, symbol: str, start: datetime, end: datetime) -> set[datetime]:
+        """Confirmed no-trade minutes for ``symbol`` with ``start <= ts_minute < end`` (tz-aware IST)."""
+        rows = self._fetchall(
+            "SELECT ts_minute FROM bars_1m_no_trade WHERE symbol = ? AND ts_minute >= ? "
+            "AND ts_minute < ?",
+            [symbol, start.astimezone(IST), end.astimezone(IST)],
+        )
+        return {_ist(r[0]) for r in rows}
+
     def coverage_gaps(self, symbol: str, start: datetime, end: datetime) -> list[datetime]:
         """Missing minute-starts in ``[start, end)`` for ``symbol`` (§2.6 step 6 / §7.1 ``warmup_ready``).
 
         Expects a WITHIN-SESSION range (the caller clamps to session minutes via ``NSECalendar``);
         every whole minute in the range is expected to have a bar. Returns the missing minutes
-        ascending — empty list ⇒ contiguous coverage.
+        ascending — empty list ⇒ contiguous coverage. An UPSTREAM-CONFIRMED no-trade minute
+        (``bars_1m_no_trade``) counts as COVERED — the exchange traded nothing in it, so there is no
+        bar to have (2026-09-18: a thin symbol's tradeless minute is an observation, not a hole).
         """
         start = start.astimezone(IST).replace(second=0, microsecond=0)
         end = end.astimezone(IST)
@@ -1447,7 +1500,7 @@ class MarketStore:
             "SELECT ts_minute FROM bars_1m WHERE symbol = ? AND ts_minute >= ? AND ts_minute < ?",
             [symbol, start, end],
         )
-        present = {_ist(r[0]) for r in rows}
+        present = {_ist(r[0]) for r in rows} | self.no_trade_minutes(symbol, start, end)
         return [m for m in expected if m not in present]
 
     def has_contiguous_coverage(self, symbol: str, start: datetime, end: datetime) -> bool:
@@ -2332,6 +2385,16 @@ class MarketStore:
 
     async def alast_bar_time(self, symbol: str) -> datetime | None:
         return await self._off(self.last_bar_time, symbol)
+
+    async def amark_no_trade(
+        self, symbol: str, minutes: Sequence[datetime], *, confirmed_at: datetime
+    ) -> int:
+        return await self._off(self.mark_no_trade, symbol, minutes, confirmed_at=confirmed_at)
+
+    async def ano_trade_minutes(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> set[datetime]:
+        return await self._off(self.no_trade_minutes, symbol, start, end)
 
     async def acoverage_gaps(self, symbol: str, start: datetime, end: datetime) -> list[datetime]:
         return await self._off(self.coverage_gaps, symbol, start, end)

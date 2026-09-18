@@ -226,7 +226,13 @@ async def regime_and_warmup_backfill(
             daily_report = await backfill.daily_gap(watch, sessions)
             written["watchlist_daily_gap_bars"] = daily_report.bars_written
     if session is not None and watch:
-        gap_report = await backfill.warmup_gap(watch, session.open, clock.now())
+        # ``confirm_until`` clamped to session.close (2026-09-18): a post-close boot must not mark
+        # every after-hours minute no-trade — the §2.6 gate clamps to the close, so those were never
+        # holes. The −2 min keeps a minute Kite has not published yet out of the confirmation.
+        gap_report = await backfill.warmup_gap(
+            watch, session.open, clock.now(),
+            confirm_until=min(session.close, clock.now() - timedelta(minutes=2)),
+        )
         written["warmup_gap_bars"] = gap_report.bars_written
     return written
 

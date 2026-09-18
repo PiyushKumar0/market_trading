@@ -337,6 +337,224 @@ async def test_warmup_gap_failure_isolated_per_symbol(store, clock, conn):
     assert report.bars_written == 1
 
 
+# ------------------------- 2026-09-18: upstream-confirmed no-trade minutes (bars_1m_no_trade) ----
+# A thin, high-priced symbol (PTCIL 13:36 on 09-16; DEEPAKNTR 374/375 on 09-17) has minutes in which
+# NOTHING trades: no tick ⇒ no self-built bar, and Kite publishes no candle for a tradeless minute ⇒
+# the gap fill fetches the day and writes nothing. The minute was a permanent hole that refused the
+# symbol for the whole session. ``confirm_until`` lets warmup_gap record it as an OBSERVATION instead,
+# under four guards. The conftest clock is 2026-06-17 10:05 IST, so gaps are built well before it.
+NOW = dt.datetime(2026, 6, 17, 10, 5, tzinfo=IST)          # == tests.conftest.FIXED_NOW
+FOUR_TOKENS = {"PTCIL": 1, "MRF": 2, "SHYAMMETL": 3, "KIMS": 4}
+
+
+def _job_tokens(store, kite, clock, conn, tokens) -> BackfillJob:
+    """A job over an explicit tradingsymbol → token map (the guard-D sweep needs four symbols)."""
+    return BackfillJob(store, kite, clock, Settings(), conn, lambda s: tokens.get(s))
+
+
+def _candles(minutes, *, extra=()):
+    """Kite-shaped minute candles at exactly ``minutes`` (+ any ``extra``, e.g. a later one)."""
+    return [
+        {"date": m, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10}
+        for m in (*minutes, *extra)
+    ]
+
+
+def _minutes(base, *offsets):
+    return [base + dt.timedelta(minutes=o) for o in offsets]
+
+
+async def test_warmup_gap_confirms_upstream_empty_minutes(store, clock, conn):
+    """The PTCIL case end to end: Kite returns the day's candles for the symbol and a LATER one, but
+    none for 09:57 — which the store also lacks. That minute is upstream-confirmed no-trade, so it is
+    recorded in bars_1m_no_trade (never as a bar) and coverage_gaps then reads clean."""
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)          # 09:55..09:59, ends 6 min before "now"
+    quiet = base + dt.timedelta(minutes=2)                  # 09:57 — nothing traded
+    traded = _minutes(base, 0, 1, 3, 4)
+    kite = FakeKite(lambda *_a: _candles(traded, extra=_minutes(base, 5)))   # + a LATER candle
+    job = _job_tokens(store, kite, clock, conn, {"PTCIL": 1})
+
+    report = await job.warmup_gap(["PTCIL"], frm, to, confirm_until=to)
+
+    assert report.bars_written == 4                         # only the four in-span candles
+    assert report.no_trade_confirmed == 1
+    assert report.no_trade_correlated_skipped == 0
+    assert not report.failed
+    # No synthetic bar: bars_1m holds the four real minutes and nothing at 09:57.
+    assert [b.ts_minute for b in store.get_bars_1m("PTCIL", frm, to)] == traded
+    assert store.no_trade_minutes("PTCIL", frm, to) == {quiet}
+    # …and §2.6 now sees contiguous coverage — the symbol is no longer refused all session.
+    assert store.coverage_gaps("PTCIL", frm, to) == []
+    assert store.has_contiguous_coverage("PTCIL", frm, to) is True
+
+
+async def test_warmup_gap_guard_b_needs_a_later_kite_candle(store, clock, conn):
+    """Guard B: the missing minute must be BEFORE the symbol's last returned candle. Here it is the
+    last minute Kite could have returned, so a Kite-side truncation and a tradeless minute look
+    identical — leave the hole; the next pass will have a later candle to prove the feed got there."""
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)
+    tail = base + dt.timedelta(minutes=4)                   # 09:59 — the LAST minute in the span
+    kite = FakeKite(lambda *_a: _candles(_minutes(base, 0, 1, 2, 3)))        # nothing after 09:58
+    job = _job_tokens(store, kite, clock, conn, {"PTCIL": 1})
+
+    report = await job.warmup_gap(["PTCIL"], frm, to, confirm_until=to)
+
+    assert report.bars_written == 4
+    assert report.no_trade_confirmed == 0
+    assert store.no_trade_minutes("PTCIL", frm, to) == set()
+    assert store.coverage_gaps("PTCIL", frm, to) == [tail]  # still a hole, deliberately
+
+
+async def test_warmup_gap_guard_c_never_confirms_a_minute_kite_may_not_have_published_yet(
+    store, clock, conn
+):
+    """Guard C: the cutoff is ``min(confirm_until, now − 2 min)``. 10:04 is one minute old — Kite may
+    simply not have published it yet — so it stays a hole even though a 10:05 candle exists (guard B
+    passes). The older 10:01 miss, the control, IS confirmed: only the cutoff separates them."""
+    base = dt.datetime(2026, 6, 17, 10, 0, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=6)          # 10:00..10:05, now == 10:05
+    too_new = base + dt.timedelta(minutes=4)                # 10:04 — inside now − 2 min
+    old_miss = base + dt.timedelta(minutes=1)               # 10:01 — safely published
+    kite = FakeKite(lambda *_a: _candles(_minutes(base, 0, 2, 3, 5)))
+    job = _job_tokens(store, kite, clock, conn, {"PTCIL": 1})
+
+    report = await job.warmup_gap(["PTCIL"], frm, to, confirm_until=NOW)
+
+    assert report.no_trade_confirmed == 1
+    assert store.no_trade_minutes("PTCIL", frm, to) == {old_miss}
+    assert store.coverage_gaps("PTCIL", frm, to) == [too_new]
+
+
+async def test_warmup_gap_guard_a_confirms_nothing_when_kite_returns_no_candles(store, clock, conn):
+    """Guard A: if Kite answered with NOTHING for the span, a broker outage and a genuinely dead
+    symbol are indistinguishable. Confirm nothing — every minute stays a hole."""
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)
+    kite = FakeKite()                                       # returns [] for every request
+    job = _job_tokens(store, kite, clock, conn, {"PTCIL": 1})
+
+    report = await job.warmup_gap(["PTCIL"], frm, to, confirm_until=to)
+
+    assert len(kite.calls) == 1 and report.bars_written == 0
+    assert report.no_trade_confirmed == 0 and report.no_trade_correlated_skipped == 0
+    assert store.no_trade_minutes("PTCIL", frm, to) == set()
+    assert len(store.coverage_gaps("PTCIL", frm, to)) == 5
+
+
+async def test_warmup_gap_guard_d_skips_correlated_misses(store, clock, conn):
+    """Guard D: thin symbols go quiet INDEPENDENTLY. The same minute missing across
+    ``max(3, ceil(5% of answered))`` of the swept symbols is a FEED gap, not four coincidences — it is
+    dropped for every symbol and counted, never confirmed. One symbol missing it alone is confirmed."""
+    syms = list(FOUR_TOKENS)
+
+    # (a) ALL FOUR miss 09:57 ⇒ 4 >= max(3, ceil(0.05*4)) = 3 ⇒ correlated ⇒ nothing confirmed.
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)
+    quiet = base + dt.timedelta(minutes=2)
+    kite = FakeKite(lambda *_a: _candles(_minutes(base, 0, 1, 3, 4)))
+    report = await _job_tokens(store, kite, clock, conn, FOUR_TOKENS).warmup_gap(
+        syms, frm, to, confirm_until=to
+    )
+    assert report.no_trade_confirmed == 0
+    assert report.no_trade_correlated_skipped == 4          # one (symbol, minute) drop per symbol
+    for s in syms:
+        assert store.no_trade_minutes(s, frm, to) == set()
+        assert store.coverage_gaps(s, frm, to) == [quiet]
+
+    # (b) Same sweep, a fresh window in which only PTCIL is quiet at 09:42 ⇒ 1 < 3 ⇒ confirmed.
+    base2 = dt.datetime(2026, 6, 17, 9, 40, tzinfo=IST)
+    frm2, to2 = base2, base2 + dt.timedelta(minutes=5)
+    lone = base2 + dt.timedelta(minutes=2)
+    full = _minutes(base2, 0, 1, 2, 3, 4)
+
+    def per_symbol(token, _frm, _to, _interval):
+        if token == FOUR_TOKENS["PTCIL"]:
+            return _candles([m for m in full if m != lone])
+        return _candles(full)
+
+    kite2 = FakeKite(per_symbol)
+    report2 = await _job_tokens(store, kite2, clock, conn, FOUR_TOKENS).warmup_gap(
+        syms, frm2, to2, confirm_until=to2
+    )
+    assert report2.no_trade_confirmed == 1
+    assert report2.no_trade_correlated_skipped == 0
+    assert store.no_trade_minutes("PTCIL", frm2, to2) == {lone}
+    assert store.coverage_gaps("PTCIL", frm2, to2) == []
+    assert all(store.coverage_gaps(s, frm2, to2) == [] for s in syms)
+
+
+async def test_warmup_gap_confirms_nothing_without_confirm_until(store, clock, conn):
+    """The legacy default is untouched: no ``confirm_until`` ⇒ no confirmation, no table row, and the
+    tradeless minute stays a coverage hole exactly as before 2026-09-18."""
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)
+    quiet = base + dt.timedelta(minutes=2)
+    kite = FakeKite(lambda *_a: _candles(_minutes(base, 0, 1, 3, 4)))
+    job = _job_tokens(store, kite, clock, conn, {"PTCIL": 1})
+
+    report = await job.warmup_gap(["PTCIL"], frm, to)
+
+    assert report.bars_written == 4
+    assert report.no_trade_confirmed == 0 and report.no_trade_correlated_skipped == 0
+    assert store.no_trade_minutes("PTCIL", frm, to) == set()
+    assert store.coverage_gaps("PTCIL", frm, to) == [quiet]
+
+
+async def test_confirmed_minutes_are_not_refetched(store, clock, conn):
+    """The confirmation is spent ONCE: coverage_gaps now reads clean for the healed symbol, so the
+    next warmup_gap's per-symbol gap check skips it before any network call (the same
+    fill-gaps-only contract that makes a fully-covered symbol free)."""
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)
+    kite = FakeKite(lambda *_a: _candles(_minutes(base, 0, 1, 3, 4)))
+    job = _job_tokens(store, kite, clock, conn, {"PTCIL": 1})
+    assert (await job.warmup_gap(["PTCIL"], frm, to, confirm_until=to)).no_trade_confirmed == 1
+    assert len(kite.calls) == 1
+
+    kite2 = FakeKite(lambda *_a: _candles(_minutes(base, 0, 1, 3, 4)))
+    report2 = await _job_tokens(store, kite2, clock, conn, {"PTCIL": 1}).warmup_gap(
+        ["PTCIL"], frm, to, confirm_until=to
+    )
+    assert kite2.calls == []                                # ZERO broker requests
+    assert report2.bars_written == 0 and report2.no_trade_confirmed == 0
+    assert report2.fetched == []
+
+
+class _LateTokenKite(_TokenKite):
+    """Answers the FIRST symbol (leaving it a real confirmation candidate), then dies like its
+    parent — the shape that proves the abort discards work already staged in phase 1."""
+
+    def __init__(self, candles_fn) -> None:
+        super().__init__()
+        self._candles_fn = candles_fn
+
+    async def historical(self, token, frm, to, interval):
+        if not self.calls:
+            self.calls.append((token, frm, to, interval))
+            return self._candles_fn(token, frm, to, interval)
+        return await super().historical(token, frm, to, interval)
+
+
+async def test_warmup_gap_token_abort_discards_pending_confirmations(store, clock, conn):
+    """A token rejection aborts the sweep mid-way, so ``answered`` is not the denominator guard D was
+    calibrated on. PTCIL was processed first and HAD a candidate — phase 2 still confirms nothing."""
+    base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
+    frm, to = base, base + dt.timedelta(minutes=5)
+    quiet = base + dt.timedelta(minutes=2)
+    kite = _LateTokenKite(lambda *_a: _candles(_minutes(base, 0, 1, 3, 4)))
+    job = _job_tokens(store, kite, clock, conn, FOUR_TOKENS)
+
+    report = await job.warmup_gap(list(FOUR_TOKENS), frm, to, confirm_until=to)
+
+    assert len(kite.calls) == 2                             # PTCIL answered, MRF rejected, then abort
+    assert report.no_trade_confirmed == 0 and report.no_trade_correlated_skipped == 0
+    assert store.no_trade_minutes("PTCIL", frm, to) == set()
+    assert store.coverage_gaps("PTCIL", frm, to) == [quiet]  # the hole survives the abort
+    assert report.bars_written == 4                          # PTCIL's real bars still landed
+
+
 # ------------------------------------------------------------------ 2026-09-15: daily_gap (WarmupGate
 # daily window repair — OLAELEC entered the watchlist with a 57-session bars_1d hole and froze the
 # DAILY class for 12 h; the minute-only newcomer fill never touched daily history at all).

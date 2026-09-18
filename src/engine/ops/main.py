@@ -1065,7 +1065,10 @@ async def run() -> int:
                     _log.exception("universe_added_daily_fill_failed", symbols=added)
         if added and backfill is not None and session is not None and clock.now() > session.open:
             try:
-                gap = await backfill.warmup_gap(added, session.open, clock.now())
+                gap = await backfill.warmup_gap(
+                    added, session.open, clock.now(),
+                    confirm_until=min(session.close, clock.now() - timedelta(minutes=2)),
+                )
                 _log.info("universe_added_gap_filled", symbols=added, bars=gap.bars_written)
             except Exception:  # noqa: BLE001 - a failed fill leaves the gate blocking (fail closed), never fails the job
                 _log.exception("universe_added_gap_fill_failed", symbols=added)
@@ -1584,7 +1587,8 @@ async def run() -> int:
         if status is not None and backfill is not None:
             await maybe_repair_warmup_gaps(
                 status, _gap_repair_state, clock=clock, calendar=calendar,
-                repair=lambda frm, to: backfill.warmup_gap(watchlist_symbols(), frm, to),
+                repair=lambda frm, to: backfill.warmup_gap(watchlist_symbols(), frm, to,
+                                                           confirm_until=to),
                 token_valid=session.token_valid,
             )
 
@@ -2918,21 +2922,29 @@ async def boot_contract_watchdog(
 
 
 # --------------------------------------------------------------------------- warm-up gap self-repair
-#: One repair attempt per this window, at most _GAP_REPAIR_MAX_PER_DAY broker-touching attempts per
-#: session day: a hole the fill cannot close (no candle upstream — zero-trade minute, halt) will
-#: never close by retrying harder, so broker spend must be capped; local-only scans are free.
+#: One repair attempt per this window, and at most _GAP_REPAIR_MAX_REQUESTS_PER_DAY Kite REQUESTS
+#: per session day: a hole the fill cannot close will never close by retrying harder, so broker
+#: spend must be capped; local-only scans are free. 900 = 3 sweeps x a 300-symbol watchlist — the
+#: spend the old 3-ATTEMPT cap allowed, now spent where the holes are: one thin symbol's
+#: confirmation is one request, not a sweep (2026-09-18; see maybe_repair_warmup_gaps).
 _GAP_REPAIR_COOLDOWN_S = 300
-_GAP_REPAIR_MAX_PER_DAY = 3
+_GAP_REPAIR_MAX_REQUESTS_PER_DAY = 900
+
+
+def _is_intraday_gap_blocker(blocker: str) -> bool:
+    """One blocker line of the intraday minute-bars shape (``orb:<sym> bars have/need``)."""
+    return blocker.startswith("orb:") and " bars " in blocker
 
 
 def _has_intraday_gap_blockers(blockers: list[str]) -> bool:
     """The intraday minute-bars blocker shape (``orb:<sym> bars have/need``) — the only class the
     warmup_gap re-backfill can heal; daily-bars blockers belong to the daily_bars job/catchup_sweep."""
-    return any(b.startswith("orb:") and " bars " in b for b in blockers)
+    return any(_is_intraday_gap_blocker(b) for b in blockers)
 
 
 async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repair,
-                                   token_valid=None) -> bool:
+                                   token_valid=None,
+                                   max_requests_per_day: int = _GAP_REPAIR_MAX_REQUESTS_PER_DAY) -> bool:
     """Re-trigger the §2.6 warm-up gap backfill when intraday coverage holes persist (2026-08-06:
     a login-lagged boot left the 11:24 bar missing in ALL 100 symbols — ``bars 146/147`` with one
     permanent gap, warm-up could never lift, and only a manual restart re-ran the fill).
@@ -2943,11 +2955,22 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
     ``to`` is trimmed 2 minutes back from ``now`` so the repair never touches minutes the live
     bar builder still owns (the 2026-07-23 provenance-clobber class) and a transient
     just-closed-minute deficit sees ZERO gaps — the fill's per-symbol gap check then skips every
-    symbol without a broker call. The :data:`_GAP_REPAIR_MAX_PER_DAY` budget is charged only on
-    attempts with actual broker activity (bars written or failed spans); no-op scans are free and
-    only paced by :data:`_GAP_REPAIR_COOLDOWN_S`. Returns True iff a repair fired (productive or
-    not); the NEXT 60 s ``warmup_status_refresh`` tick observes healed coverage and lifts through
-    the normal path — this function never lifts anything itself."""
+    symbol without a broker call.
+
+    The budget is denominated in KITE REQUESTS, not attempts (2026-09-18). It exists to bound BROKER
+    SPEND, and an attempt is not a unit of spend: on 2026-09-16 three PRODUCTIVE market-wide repairs
+    (10:06, 10:11, 12:50) — each sweeping the whole ~300-symbol watchlist — spent the day's three
+    attempts before the real single-symbol hole appeared at 13:37, and ``warmup_gap_repair_exhausted``
+    fired one second later. :data:`_GAP_REPAIR_MAX_REQUESTS_PER_DAY` is the same spend those three
+    sweeps cost, now spent where the holes are: one thin symbol's confirmation is ONE request.
+    Charging: each completed per-symbol span is one Kite request for its minute interval (spans are
+    ≤60 days, so one span is one call) and a broker-failure span also cost a request; a RAISING
+    repair charges ``max(1, intraday blockers)`` because we cannot know how far it got (spend-safe);
+    ``unknown_instrument_token`` spans (recorded pre-network) and pure local scans are free and only
+    paced by :data:`_GAP_REPAIR_COOLDOWN_S`. ``state["attempts"]`` counts every fired attempt for the
+    logs and bounds nothing. Returns True iff a repair fired (productive or not); the NEXT 60 s
+    ``warmup_status_refresh`` tick observes healed coverage and lifts through the normal path — this
+    function never lifts anything itself."""
     if status.ready or repair is None or not _has_intraday_gap_blockers(status.blockers):
         return False
     now = clock.now()
@@ -2956,7 +2979,8 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
     if session is None or not (session.open <= now <= session.close):
         return False
     if state.get("day") != today:
-        state.update(day=today, count=0, last=None, exhausted_logged=False, no_token_logged=False)
+        state.update(day=today, requests=0, attempts=0, last=None, exhausted_logged=False,
+                     no_token_logged=False)
     if token_valid is not None and not token_valid():
         if not state.get("no_token_logged"):
             _log.warning("warmup_gap_repair_skipped_no_token", blockers=len(status.blockers))
@@ -2966,10 +2990,10 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
     to = now.replace(second=0, microsecond=0) - timedelta(minutes=2)
     if to <= session.open:
         return False                       # session too young to have a repairable window yet
-    if state["count"] >= _GAP_REPAIR_MAX_PER_DAY:
+    if state["requests"] >= max_requests_per_day:
         if not state.get("exhausted_logged"):
-            _log.warning("warmup_gap_repair_exhausted", attempts=state["count"],
-                         blockers=len(status.blockers))
+            _log.warning("warmup_gap_repair_exhausted", requests=state["requests"],
+                         attempts=state["attempts"], blockers=len(status.blockers))
             state["exhausted_logged"] = True
         return False
     if state.get("last") is not None and (now - state["last"]).total_seconds() < _GAP_REPAIR_COOLDOWN_S:
@@ -2978,12 +3002,17 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
     try:
         report = await repair(session.open, to)
     except Exception:  # noqa: BLE001 - a failed repair leaves the gate blocking (fail closed); the cooldown paces retries
-        state["count"] += 1                # spend-safe: an erroring attempt still consumes budget
-        _log.exception("warmup_gap_repair_failed", attempt=state["count"])
+        # Spend-safe: an erroring attempt got an unknown distance into its sweep, so it is charged
+        # one request per symbol it could have touched (never less than one).
+        charged = max(1, sum(1 for b in status.blockers if _is_intraday_gap_blocker(b)))
+        state["attempts"] += 1
+        state["requests"] += charged
+        _log.exception("warmup_gap_repair_failed", attempt=state["attempts"], requests=charged,
+                       requests_today=state["requests"])
         return True
-    # Budget charges on BROKER SPEND, not on bars landed (review round 2): ``fetched`` is non-empty
-    # iff ≥1 real historical call completed — an UNFILLABLE hole (no candle upstream) then still
-    # consumes budget instead of resweeping the broker every cooldown all session. Real broker
+    # Budget charges on BROKER SPEND, not on bars landed (review round 2): each ``fetched`` span is
+    # one completed historical call — an UNFILLABLE hole (no candle upstream) is charged exactly like
+    # a productive one instead of resweeping the broker every cooldown all session. Real broker
     # failures also charge (spend-safe); ``unknown_instrument_token`` spans are recorded pre-network
     # (a broken instruments map — post-login's repair, not ours) and are deliberately free.
     fetched = getattr(report, "fetched", ()) or ()
@@ -2991,11 +3020,14 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
         f for f in (getattr(report, "failed", ()) or ())
         if getattr(f, "error", "") != "unknown_instrument_token"
     ]
-    if fetched or broker_failures:
-        state["count"] += 1
-        _log.warning("warmup_gap_repair", attempt=state["count"],
+    requests = len(fetched) + len(broker_failures)
+    state["attempts"] += 1
+    if requests:
+        state["requests"] += requests
+        _log.warning("warmup_gap_repair", attempt=state["attempts"],
                      bars_written=getattr(report, "bars_written", 0), fetched=len(fetched),
-                     failed=len(broker_failures), blockers=len(status.blockers))
+                     failed=len(broker_failures), requests=requests,
+                     requests_today=state["requests"], blockers=len(status.blockers))
     else:
         # No broker call happened: zero gaps in the trimmed window (the just-closed-minute
         # transient) or instruments-map misses only. Free — paced by the cooldown alone.

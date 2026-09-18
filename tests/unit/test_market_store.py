@@ -42,7 +42,7 @@ from tests.conftest import FIXED_NOW
 # The complete Â§4.3 DuckDB table inventory. Adding a table to the schema without adding it here fails
 # CI and vice-versa (the same lockstep guard as test_migrations for SQLite).
 PLAN_TABLES = {
-    "bars_1m", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
+    "bars_1m", "bars_1m_no_trade", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
     "universe_daily", "features_daily", "feature_snapshots", "news", "news_clusters",
     "entity_aliases", "unresolved_entities", "theme_map", "sentiment_agg", "catalyst_watchlist",
     "calendar", "corp_actions", "earnings_calendar", "flagged_instrument_days", "sector_map",
@@ -223,6 +223,46 @@ def test_last_bar_time_and_coverage_gap_check(store, clock):
     assert store.has_contiguous_coverage("RELIANCE", start, end) is False  # Â§2.6 step-6 warm-up gate
     store.insert_bars_1m([_bar(start + timedelta(minutes=2))])
     assert store.has_contiguous_coverage("RELIANCE", start, end) is True
+
+
+def test_no_trade_minutes_count_as_covered(store, clock):
+    """2026-09-18: a minute in which NOTHING traded has no bar and never will — no tick to build
+    from, no Kite candle to fetch (PTCIL 13:36 on 09-16 refused the symbol for the whole session).
+    An UPSTREAM-CONFIRMED no-trade minute is an observation, not a hole: ``coverage_gaps`` unions
+    ``bars_1m_no_trade`` into the present set, and no synthetic bar is ever written."""
+    start = clock.combine(clock.today(), time(13, 30))
+    end = start + timedelta(minutes=5)
+    traded = [start, start + timedelta(minutes=1), start + timedelta(minutes=4)]
+    tradeless = [start + timedelta(minutes=2), start + timedelta(minutes=3)]
+    store.insert_bars_1m([_bar(m) for m in traded])
+    assert store.coverage_gaps("RELIANCE", start, end) == tradeless
+
+    assert store.mark_no_trade("RELIANCE", tradeless, confirmed_at=FIXED_NOW) == 2
+    assert store.coverage_gaps("RELIANCE", start, end) == []
+    assert store.has_contiguous_coverage("RELIANCE", start, end) is True
+    # …and NOT by inventing a price: bars_1m still holds only the three real bars.
+    assert len(store.get_bars_1m("RELIANCE", start, end)) == 3
+
+    # The read is range-scoped and symbol-scoped, exactly like the bars_1m half.
+    assert store.no_trade_minutes("RELIANCE", start, end) == set(tradeless)
+    assert store.no_trade_minutes("RELIANCE", start, start + timedelta(minutes=3)) == {tradeless[0]}
+    assert store.no_trade_minutes("RELIANCE", end, end + timedelta(minutes=10)) == set()
+    assert store.no_trade_minutes("TCS", start, end) == set()
+    assert store.coverage_gaps("TCS", start, end) != []          # another symbol keeps its holes
+
+    # Re-confirming the same minutes is a no-op (PK conflict ignored — the first record stands).
+    assert store.mark_no_trade("RELIANCE", tradeless, confirmed_at=FIXED_NOW + timedelta(hours=1)) == 2
+    assert store.no_trade_minutes("RELIANCE", start, end) == set(tradeless)
+    rows = store._fetchall(
+        "SELECT confirmed_at, src FROM bars_1m_no_trade WHERE symbol = ? ORDER BY ts_minute",
+        ["RELIANCE"],
+    )
+    assert len(rows) == 2
+    assert {r[1] for r in rows} == {"kite_empty"}
+    assert all(r[0].astimezone(FIXED_NOW.tzinfo) == FIXED_NOW for r in rows)   # never rewritten
+
+    # Nothing to mark ⇒ no statement, no row.
+    assert store.mark_no_trade("RELIANCE", [], confirmed_at=FIXED_NOW) == 0
 
 
 # --------------------------------------------------------------------------- bars_1d
@@ -699,6 +739,10 @@ async def test_async_wrappers_offload_sync_core(store, clock):
     assert got[0].open == Decimal("2338.55")
     assert await store.alast_bar_time("RELIANCE") == minute
     assert await store.ahas_contiguous_coverage("RELIANCE", minute, minute + timedelta(minutes=1))
+    quiet = minute + timedelta(minutes=1)
+    assert await store.amark_no_trade("RELIANCE", [quiet], confirmed_at=FIXED_NOW) == 1
+    assert await store.ano_trade_minutes("RELIANCE", quiet, quiet + timedelta(minutes=1)) == {quiet}
+    assert await store.acoverage_gaps("RELIANCE", minute, quiet + timedelta(minutes=1)) == []
     assert await store.arun(store.table_names) >= PLAN_TABLES
 
 

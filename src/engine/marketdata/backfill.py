@@ -17,6 +17,9 @@ Provenance (§4.3 ``bars_1m.src``):
     * :meth:`run` writes ``src='kite_official'`` (canonical historical rows; §4.4 jobs 2/3).
     * :meth:`warmup_gap` writes ``src='gap_backfilled'`` — the §2.6 offline-span fill, which the
       nightly reconcile EXCLUDES from its drift denominator (they are not self-built bars).
+    * :meth:`warmup_gap` with ``confirm_until`` ALSO writes ``bars_1m_no_trade`` rows (2026-09-18) —
+      upstream-confirmed tradeless minutes, which are evidence and not bars: no price is synthesized
+      and ``bars_1m`` is never touched by that path. See the method's contract.
 
 Dependencies: ``core`` + ``broker`` (§3.2.3). The SQLite checkpoint table lives in ``state.db``
 (§4.2); the bars land in DuckDB via the single-writer :class:`MarketStore`.
@@ -24,6 +27,7 @@ Dependencies: ``core`` + ``broker`` (§3.2.3). The SQLite checkpoint table lives
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta
@@ -76,6 +80,13 @@ class BackfillReport(BaseModel):
     bars_written: int = 0
     #: Symbols that needed no request at all — every requested session was already present.
     skipped_covered: int = 0
+    #: Minutes recorded in ``bars_1m_no_trade`` by :meth:`BackfillJob.warmup_gap` — upstream-confirmed
+    #: tradeless minutes, NOT bars (2026-09-18).
+    no_trade_confirmed: int = 0
+    #: (symbol, minute) confirmations DROPPED by the correlation guard: the same minute was missing
+    #: across enough of the swept symbols to be a feed/vendor gap rather than thin symbols going
+    #: quiet together, so it is left a hole (2026-09-18).
+    no_trade_correlated_skipped: int = 0
 
 
 def _candle_field(candle: Any, name: str) -> Any:
@@ -249,7 +260,12 @@ class BackfillJob:
     # ------------------------------------------------------------------ §2.6 step 4: warm-up gap
 
     async def warmup_gap(
-        self, symbols: Sequence[str], frm: datetime, to: datetime
+        self,
+        symbols: Sequence[str],
+        frm: datetime,
+        to: datetime,
+        *,
+        confirm_until: datetime | None = None,
     ) -> BackfillReport:
         """Fill the ``[frm, to)`` minute-bar gap from official candles (§2.6 step 4 / §4.4 job 1).
 
@@ -258,12 +274,64 @@ class BackfillJob:
         Rows are written ``src='gap_backfilled'`` (§4.3): an offline-span fill that the nightly
         reconcile EXCLUDES from its drift denominator (§2.6). Candles are already corp-action
         adjusted (A11) — written as fetched. NOT checkpointed: every startup computes its own gap.
+
+        ``confirm_until`` (2026-09-18) turns this job into the one place that can close an UNFILLABLE
+        hole. A thin, high-priced symbol (PTCIL, MRF, SHYAMMETL, KIMS, DEEPAKNTR) has minutes in
+        which nothing trades: no tick ⇒ the bar builder writes no bar, and Kite publishes no candle
+        for a tradeless minute ⇒ this fill fetches the day and writes nothing. The minute is a
+        permanent hole and §2.6 refused the symbol for the whole session (09-16 PTCIL 13:36; 09-17
+        DEEPAKNTR 374/375). It is not missing data — it is an observation the exchange made — so when
+        ``confirm_until`` is set, a still-missing minute that Kite DID NOT return, for a symbol whose
+        fetch completed, is recorded in ``bars_1m_no_trade`` (:meth:`MarketStore.mark_no_trade`) and
+        :meth:`MarketStore.coverage_gaps` counts it covered.
+
+        UPSTREAM-CONFIRMED ONLY — never a synthetic bar, never an invented price. ``bars_1m`` is
+        untouched by this path (its ``src`` CHECK constraint is not widened; no new ``src`` value),
+        so every feature input is unchanged by construction: only the §2.6 gate's verdict moves.
+
+        Confirmation runs in TWO PHASES because the last guard is a cross-symbol one. Phase 1, inside
+        the per-symbol loop, only COLLECTS candidates (no write); phase 2, after the loop, applies the
+        correlation guard and writes. A minute must clear all four guards to be confirmed:
+
+        * **A — Kite answered.** The symbol's ``returned`` set (every in-span minute Kite published,
+          across chunks) must be NON-EMPTY. If Kite returned no candles at all for the span, a broker
+          outage and a genuinely dead symbol are indistinguishable — confirm nothing, leave the hole.
+        * **B — Kite reached past the minute.** ``m < max(returned)``. A Kite-side outage that
+          truncates a symbol's day at 13:00 must not let 13:01→cutoff be confirmed wholesale; a
+          tradeless minute at the very END of the window simply waits for the next pass, which will
+          have a later candle to prove the feed got there.
+        * **C — published.** ``m < min(confirm_until, now - 2 min)``: a minute Kite has simply not
+          published YET must never be confirmed. The −2 min is belt-and-braces over the caller's trim.
+        * **D — uncorrelated.** Across the symbols that answered, a minute missing for
+          ``max(3, ceil(0.05 × answered))`` or more of them is a FEED gap, not thin symbols going
+          quiet together — it is dropped for every symbol and counted in
+          ``report.no_trade_correlated_skipped``.
+
+        A token-rejection abort discards the whole pending set: the sweep stopped early, so the
+        correlation denominator is not the one the guard was calibrated on. Confirm nothing.
+
+        Because ``coverage_gaps`` then subtracts confirmed minutes, the NEXT ``warmup_gap`` sees no
+        gap for that symbol and makes NO Kite request at all — the confirmation is spent once.
+
+        ``confirm_until=None`` (the default) is the pre-2026-09-18 behaviour exactly: nothing is
+        confirmed and no ``bars_1m_no_trade`` row is written.
         """
         frm = frm.astimezone(IST)
         to = to.astimezone(IST)
         report = BackfillReport(interval="minute")
         chunk_days = self._chunk_days("minute")
         symbols = list(symbols)
+        # Phase-1 accumulators (see the contract above). ``cutoff`` is taken ONCE, before the sweep:
+        # an earlier cutoff is the conservative one, and a long sweep must not confirm later minutes
+        # for the symbols it happens to reach last.
+        cutoff: datetime | None = (
+            None if confirm_until is None
+            else min(confirm_until.astimezone(IST), self._clock.now().astimezone(IST)
+                     - timedelta(minutes=2))
+        )
+        pending: dict[str, list[datetime]] = {}
+        answered = 0                        # symbols Kite returned ≥1 candle for — guard D's denominator
+        aborted = False
         for i, symbol in enumerate(symbols):
             report.requested.append(
                 BackfillSpan(symbol=symbol, frm=frm.isoformat(), to=to.isoformat())
@@ -288,12 +356,13 @@ class BackfillJob:
                 continue      # fully covered — nothing to fill, nothing to touch
             written = 0
             failed = False
-            aborted = False
+            returned: set[datetime] = set()      # every in-span minute Kite DID publish (all chunks)
             cur = frm
             while cur < to:
                 chunk_to = min(cur + timedelta(days=chunk_days), to)
                 try:
                     candles = await self._kite.historical(token, cur, chunk_to, "minute")
+                    returned.update(ts for ts in map(_candle_ts, candles) if frm <= ts < to)
                     written += await self._write_candles(
                         symbol, "minute", candles, src="gap_backfilled", frm=frm, to=to,
                         only_minutes=gap_minutes,
@@ -332,11 +401,60 @@ class BackfillJob:
                     BackfillSpan(symbol=symbol, frm=frm.isoformat(), to=to.isoformat(), bars=written)
                 )
                 report.bars_written += written
+                # PHASE 1 — collect only. Guard A (Kite answered for this span) gates both the
+                # candidates and the correlation denominator; guard B (a LATER candle proves the
+                # feed reached past the minute) and guard C (the cutoff) filter the candidates.
+                if cutoff is not None and returned:
+                    answered += 1
+                    latest = max(returned)
+                    candidates = [
+                        m for m in gap_minutes
+                        if m not in returned and m < latest and m < cutoff
+                    ]
+                    if candidates:
+                        pending[symbol] = candidates
             if aborted:
                 break
+        # PHASE 2 — guard D and the writes. An aborted sweep confirms NOTHING: it stopped early, so
+        # ``answered`` is not the denominator the correlation guard was calibrated on (conservative).
+        if pending and not aborted:
+            miss_count: dict[datetime, int] = {}
+            for mins in pending.values():
+                for m in mins:
+                    miss_count[m] = miss_count.get(m, 0) + 1
+            threshold = max(3, math.ceil(0.05 * answered))
+            correlated = {m for m, n in miss_count.items() if n >= threshold}
+            if correlated:
+                dropped = 0
+                affected = 0
+                for sym, mins in list(pending.items()):
+                    keep = [m for m in mins if m not in correlated]
+                    if len(keep) != len(mins):
+                        affected += 1
+                        dropped += len(mins) - len(keep)
+                    if keep:
+                        pending[sym] = keep
+                    else:
+                        del pending[sym]
+                report.no_trade_correlated_skipped += dropped
+                _log.warning(
+                    "warmup_gap_no_trade_correlated",
+                    minutes=[m.isoformat() for m in sorted(correlated)[:6]],
+                    count=len(correlated), symbols_affected=affected, threshold=threshold,
+                )
+            for sym, mins in pending.items():
+                confirmed = sorted(mins)
+                await self._store.amark_no_trade(sym, confirmed, confirmed_at=self._clock.now())
+                report.no_trade_confirmed += len(confirmed)
+                _log.info(
+                    "warmup_gap_no_trade_confirmed", symbol=sym, count=len(confirmed),
+                    minutes=[m.isoformat() for m in confirmed[:4]],
+                )
         _log.info(
             "warmup_gap_done", symbols=len(symbols), frm=frm.isoformat(), to=to.isoformat(),
-            bars_written=report.bars_written, failed=len(report.failed),
+            bars_written=report.bars_written, no_trade_confirmed=report.no_trade_confirmed,
+            no_trade_correlated_skipped=report.no_trade_correlated_skipped,
+            failed=len(report.failed),
         )
         return report
 

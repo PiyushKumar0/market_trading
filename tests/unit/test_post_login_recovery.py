@@ -92,6 +92,7 @@ class FakeBackfill:
         self.boom = boom
         self.run_calls: list[tuple[list[str], str]] = []
         self.gap_calls: list[list[str]] = []
+        self.gap_confirm_until: list = []
         self.daily_gap_calls: list[tuple[list[str], list]] = []
 
     async def run(self, symbols, interval, start, end):
@@ -100,8 +101,9 @@ class FakeBackfill:
         self.run_calls.append((list(symbols), interval, start, end))
         return SimpleNamespace(bars_written=len(list(symbols)) * 10)
 
-    async def warmup_gap(self, symbols, frm, to):
+    async def warmup_gap(self, symbols, frm, to, *, confirm_until=None):
         self.gap_calls.append(list(symbols))
+        self.gap_confirm_until.append(confirm_until)
         return SimpleNamespace(bars_written=len(list(symbols)) * 5)
 
     async def daily_gap(self, symbols, sessions):
@@ -531,6 +533,35 @@ async def test_backfill_step_repairs_watchlist_daily_window(clock, calendar):
     assert written["watchlist_daily_gap_bars"] == 6
     assert bf.run_calls                                     # the regime `run` leg still happened
     assert bf.gap_calls == [["RELIANCE", "TCS"]]             # mid-session clock ⇒ minute leg still runs
+
+
+@pytest.mark.asyncio
+async def test_backfill_minute_leg_confirms_upstream_empty_minutes_clamped_to_close(clock, calendar):
+    """2026-09-18: the boot minute leg passes ``confirm_until`` so a tradeless minute (PTCIL 13:36 on
+    09-16) can be confirmed no-trade instead of holding the symbol out all session. It is clamped to
+    ``min(session.close, now − 2 min)``: the −2 min keeps a minute Kite has not published yet out of
+    the confirmation, and the session.close clamp keeps a POST-CLOSE boot from marking after-hours
+    minutes (the §2.6 gate clamps to the close — those were never holes)."""
+    import datetime as _dt
+
+    from engine.core.clock import IST, Clock
+    from engine.ops.post_login import regime_and_warmup_backfill
+
+    # Mid-session (conftest clock is 2026-06-17 10:05 IST): now − 2 min is the binding term.
+    bf = FakeBackfill()
+    await regime_and_warmup_backfill(bf, clock, calendar, load_settings(),
+                                     lambda: ["RELIANCE"], "NIFTY 50", "INDIA VIX")
+    session = calendar.session(clock.today())
+    assert bf.gap_confirm_until == [min(session.close, clock.now() - _dt.timedelta(minutes=2))]
+    assert bf.gap_confirm_until[0] == clock.now() - _dt.timedelta(minutes=2) < session.close
+
+    # Post-close boot: session.close is the binding term — no after-hours minute is ever confirmed.
+    evening = Clock(time_source=lambda: _dt.datetime(2026, 6, 17, 19, 0, tzinfo=IST))
+    cal2 = NSECalendar(config_dir() / "calendar", evening, strict=False)
+    bf2 = FakeBackfill()
+    await regime_and_warmup_backfill(bf2, evening, cal2, load_settings(),
+                                     lambda: ["RELIANCE"], "NIFTY 50", "INDIA VIX")
+    assert bf2.gap_confirm_until == [cal2.session(evening.today()).close]
 
 
 # --------------------------------------------------------------------------- warm-up gate reapply / lift

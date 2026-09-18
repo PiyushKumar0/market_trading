@@ -1142,8 +1142,9 @@ async def test_boot_phase_ticks_run_survive_errors_and_cancel_cleanly() -> None:
 # --------------------------------------------------------------------------- warm-up gap self-repair
 def _repair_setup(now, *, fetched=1, bars_written=120, failed=()):
     """Stub clock (mutable now), the REAL calendar, a not-ready orb-gap status, and a recorder
-    whose repair returns a BackfillReport-shaped result. Budget charges on BROKER SPEND:
-    ``fetched`` spans (completed historical calls) or non-``unknown_instrument_token`` failures."""
+    whose repair returns a BackfillReport-shaped result. Budget charges on BROKER SPEND, counted in
+    KITE REQUESTS (2026-09-18): one per ``fetched`` span (a completed per-symbol historical call)
+    plus one per non-``unknown_instrument_token`` failure span."""
     from types import SimpleNamespace
 
     holder = {"now": now}
@@ -1165,52 +1166,82 @@ def _repair_setup(now, *, fetched=1, bars_written=120, failed=()):
 @pytest.mark.asyncio
 async def test_warmup_gap_repair_fires_trimmed_and_budget_charges_on_activity(calendar) -> None:
     """2026-08-06 seam hole + review round: the 60 s refresh re-triggers the gap backfill itself —
-    in-session only, ``to`` trimmed 2 min back (the live builder owns the tail minutes), one
-    attempt per cooldown window, and the 3/day budget charges only on PRODUCTIVE attempts."""
+    in-session only, ``to`` trimmed 2 min back (the live builder owns the tail minutes), one attempt
+    per cooldown window, and the per-day budget charges only on attempts with BROKER SPEND — counted
+    in Kite REQUESTS since 2026-09-18 (one per completed per-symbol span), so a one-symbol repair
+    costs one request while a full-watchlist sweep costs one per symbol."""
     from datetime import datetime as _dt
     from datetime import timedelta as _td
 
     from engine.core.clock import IST
-    from engine.ops.main import maybe_repair_warmup_gaps
+    from engine.ops.main import _GAP_REPAIR_MAX_REQUESTS_PER_DAY, maybe_repair_warmup_gaps
+
+    assert _GAP_REPAIR_MAX_REQUESTS_PER_DAY == 900       # 3 sweeps x a 300-symbol watchlist
 
     now = _dt(2026, 6, 17, 10, 5, 33, tzinfo=IST)             # Wed, in-session, mid-minute
-    holder, clock, status, calls, repair = _repair_setup(now)
+    holder, clock, status, calls, repair = _repair_setup(now)   # one-symbol span ⇒ 1 request/attempt
     state: dict = {}
 
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=repair)
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=repair, max_requests_per_day=3)
     assert len(calls) == 1
     frm, to = calls[0]
     assert frm.hour == 9 and frm.minute == 15
     assert to == now.replace(second=0, microsecond=0) - _td(minutes=2)   # builder-owned tail excluded
-    assert state["count"] == 1                                 # productive (bars_written>0) ⇒ charged
+    assert state["requests"] == 1 and state["attempts"] == 1   # one completed span ⇒ one request
 
     # Within the cooldown: no second attempt (paced even when the first was productive).
     holder["now"] = now + _td(minutes=2)
-    assert not await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=repair)
+    assert not await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                              repair=repair, max_requests_per_day=3)
     assert len(calls) == 1
 
-    # Past the cooldown: retries, up to the per-day budget of 3 PRODUCTIVE attempts.
+    # Past the cooldown: retries, until the day's REQUEST budget is spent.
     holder["now"] = now + _td(minutes=6)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=repair)
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=repair, max_requests_per_day=3)
     holder["now"] = now + _td(minutes=12)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=repair)
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=repair, max_requests_per_day=3)
     holder["now"] = now + _td(minutes=18)
-    assert not await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=repair)
-    assert len(calls) == 3 and state["count"] == 3             # capped: retrying harder can't close an unfetchable hole
+    assert not await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                              repair=repair, max_requests_per_day=3)
+    # Capped: retrying harder can't close an unfetchable hole.
+    assert len(calls) == 3 and state["requests"] == 3 and state["attempts"] == 3
 
     # A NEW session day resets the budget.
     holder["now"] = _dt(2026, 6, 18, 9, 30, tzinfo=IST)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=repair)
-    assert len(calls) == 4 and state["count"] == 1
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=repair, max_requests_per_day=3)
+    assert len(calls) == 4 and state["requests"] == 1 and state["attempts"] == 1
+
+    # 2026-09-16, the reason the unit changed: a market-wide sweep charges PER SYMBOL, so three of
+    # them spend the real 900/day budget — and a single thin symbol's repair after them costs 1,
+    # where the old 3-ATTEMPT cap had already refused it (exhausted at 13:37:01, one second after
+    # the one-symbol hole appeared).
+    sweep_state: dict = {}
+    for i in range(3):
+        _, sweep_clock, _, sweep_calls, sweep = _repair_setup(holder["now"] + _td(minutes=6 * i),
+                                                              fetched=300)
+        assert await maybe_repair_warmup_gaps(status, sweep_state, clock=sweep_clock,
+                                              calendar=calendar, repair=sweep)
+        assert len(sweep_calls) == 1
+    assert sweep_state["requests"] == 900 and sweep_state["attempts"] == 3
+    _, thin_clock, _, thin_calls, thin = _repair_setup(holder["now"] + _td(minutes=24))
+    assert not await maybe_repair_warmup_gaps(status, sweep_state, clock=thin_clock,
+                                              calendar=calendar, repair=thin)
+    assert thin_calls == []                                     # 900 spent — exhausted, as designed
 
 
 @pytest.mark.asyncio
 async def test_warmup_gap_repair_budget_charges_on_broker_spend_only(calendar) -> None:
-    """Review round 2: the budget predicate is BROKER SPEND. Free: pure local scans (transient
-    just-closed-minute deficit ⇒ zero gaps in the trimmed window ⇒ no historical call) and
-    ``unknown_instrument_token`` spans (recorded pre-network — the instruments map is post-login's
-    repair). Charged: completed fetches EVEN WITH ZERO BARS LANDED (the unfillable-hole sweep must
-    not retry uncapped all session), real broker failures, and raising repairs (spend-safe)."""
+    """Review round 2: the budget predicate is BROKER SPEND, in Kite REQUESTS (2026-09-18). Free:
+    pure local scans (transient just-closed-minute deficit ⇒ zero gaps in the trimmed window ⇒ no
+    historical call) and ``unknown_instrument_token`` spans (recorded pre-network — the instruments
+    map is post-login's repair). Charged one request per span: completed fetches EVEN WITH ZERO BARS
+    LANDED (the unfillable-hole sweep must not retry uncapped all session — one request is one
+    request) and real broker failures; a raising repair charges one per intraday blocker it could
+    have swept, never less than one (spend-safe: we do not know how far it got)."""
     from datetime import datetime as _dt
     from datetime import timedelta as _td
 
@@ -1220,39 +1251,52 @@ async def test_warmup_gap_repair_budget_charges_on_broker_spend_only(calendar) -
     now = _dt(2026, 6, 17, 10, 5, 33, tzinfo=IST)
     holder, clock, status, calls, scan_only = _repair_setup(now, fetched=0, bars_written=0)
     state: dict = {}
+    budget = {"max_requests_per_day": 5}                       # small enough that exhaustion is reachable
 
     # Pure local scans: fire (True) every cooldown window, never charge.
     for i in range(3):
         holder["now"] = now + _td(minutes=6 * i)
-        assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=scan_only)
-    assert len(calls) == 3 and state["count"] == 0
+        assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                              repair=scan_only, **budget)
+    assert len(calls) == 3 and state["requests"] == 0 and state["attempts"] == 3
 
     # Instruments-map misses only (pre-network): free — the budget survives until the map heals.
     _, _, _, calls_ut, unknown_token = _repair_setup(now, fetched=0, bars_written=0,
                                                      failed=("unknown_instrument_token",))
     holder["now"] = now + _td(minutes=20)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=unknown_token)
-    assert len(calls_ut) == 1 and state["count"] == 0
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=unknown_token, **budget)
+    assert len(calls_ut) == 1 and state["requests"] == 0
 
-    # A repair that raises: swallowed, returns True, charges.
+    # A repair that raises: swallowed, returns True, charges one request per intraday blocker (2).
     async def boom(frm, to):
         raise RuntimeError("kite down")
 
     holder["now"] = now + _td(minutes=26)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=boom)
-    assert state["count"] == 1
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=boom, **budget)
+    assert len(status.blockers) == 2 and state["requests"] == 2
 
-    # Real broker failure spans: charged.
+    # Real broker failure spans: charged one request each.
     _, _, _, calls_f, broker_fail = _repair_setup(now, fetched=0, bars_written=0, failed=("ReadTimeout",))
     holder["now"] = now + _td(minutes=32)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=broker_fail)
-    assert len(calls_f) == 1 and state["count"] == 2
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=broker_fail, **budget)
+    assert len(calls_f) == 1 and state["requests"] == 3
 
     # The UNFILLABLE hole (fetch completed, zero bars landed): charged — the case the cap exists for.
     _, _, _, calls_u, unfillable = _repair_setup(now, fetched=2, bars_written=0)
     holder["now"] = now + _td(minutes=38)
-    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar, repair=unfillable)
-    assert len(calls_u) == 1 and state["count"] == 3
+    assert await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                          repair=unfillable, **budget)
+    assert len(calls_u) == 1 and state["requests"] == 5        # two spans ⇒ two requests
+
+    # The day's requests are now spent: the next window is refused, and nothing reaches the broker.
+    _, _, _, calls_x, after = _repair_setup(now, fetched=1)
+    holder["now"] = now + _td(minutes=44)
+    assert not await maybe_repair_warmup_gaps(status, state, clock=clock, calendar=calendar,
+                                              repair=after, **budget)
+    assert calls_x == [] and state["requests"] == 5
 
 
 @pytest.mark.asyncio
@@ -1274,7 +1318,7 @@ async def test_warmup_gap_repair_guards_token_session_shape_all_leave_budget_unt
     # Invalid token: skipped, uncharged — the budget survives until login (2026-08-06 shape).
     assert not await maybe_repair_warmup_gaps(
         gappy, state, clock=clock, calendar=calendar, repair=repair, token_valid=lambda: False)
-    assert calls == [] and state.get("count", 0) == 0
+    assert calls == [] and state.get("requests", 0) == 0
     # Token comes back: the same state fires immediately (no cooldown was consumed).
     assert await maybe_repair_warmup_gaps(
         gappy, state, clock=clock, calendar=calendar, repair=repair, token_valid=lambda: True)
@@ -1293,7 +1337,8 @@ async def test_warmup_gap_repair_guards_token_session_shape_all_leave_budget_unt
     assert not await maybe_repair_warmup_gaps(gappy, rejected_state, clock=clock, calendar=calendar, repair=repair)
     # Every rejection left the budget untouched (the day-roll may initialize the dict, never spend).
     assert len(calls) == 1
-    assert rejected_state.get("count", 0) == 0 and rejected_state.get("last") is None
+    assert rejected_state.get("requests", 0) == 0 and rejected_state.get("attempts", 0) == 0
+    assert rejected_state.get("last") is None
 
 
 # --------------------------------------------------------------------------- login API bind confirmation
@@ -3210,7 +3255,20 @@ def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour() -> None:
     assert "backfill.daily_gap(added, sessions)" in body
     assert "warmup_gate.daily_window()" in body
     assert body.index("backfill.daily_gap(") < body.index("clock.now() > session.open")
-    assert "backfill.warmup_gap(added, session.open, clock.now())" in body   # minute fill retained
+    assert "backfill.warmup_gap(" in body                                    # minute fill retained
+    assert "added, session.open, clock.now()," in body
+    # 2026-09-18: the newcomer minute fill CONFIRMS upstream-empty minutes too, clamped to the
+    # session close so a post-close build never marks after-hours minutes no-trade.
+    assert "confirm_until=min(session.close, clock.now() - timedelta(minutes=2))" in body
+
+
+def test_warmup_refresh_repair_confirms_upstream_empty_minutes() -> None:
+    """2026-09-18: the 60 s self-heal is the path that closes a tradeless-minute hole (PTCIL 13:36
+    on 09-16). Its repair lambda must pass ``confirm_until=to`` — ``to`` is already ``now − 2 min``
+    and in-session, so a minute Kite has not published yet can never be confirmed."""
+    src = inspect.getsource(opsmain.run)
+    assert "backfill.warmup_gap(watchlist_symbols(), frm, to," in src
+    assert "confirm_until=to)" in src
 
 
 # --- the `ins` leg's once-only bound: the one batch leg a re-sweep cannot re-derive -------------
