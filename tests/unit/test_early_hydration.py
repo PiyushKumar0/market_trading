@@ -348,3 +348,58 @@ async def test_a_failing_hydration_never_escapes_the_login_hook(calendar, caplog
 
     assert catch_up.calls == [(JOB_IDS, "early_login")]
     assert [r for r in caplog.records if r.getMessage() == "early_hydration_failed"]
+
+
+# ------------------------------------------------- the boot trigger (2026-09-21)
+# 2026-09-16: the engine booted 06:58 with no Kite login until 10:04, the PC slept 08:00-10:00 through
+# the scheduled 08:20-08:50 fires, and the catalyst digest landed 10:18, after the open. ``on_boot``
+# runs the identical chain once at process boot, under the same gates as an early login.
+
+
+@pytest.mark.asyncio
+async def test_on_boot_hydrates_once_the_scheduler_is_armed(calendar) -> None:
+    """A boot before the open runs the pre-open chain — but only behind an armed scheduler (WO-15),
+    so it WAITS while the boot is still coming up, same as an early login."""
+    catch_up = _FakeCatchUp({"universe_build": "ran"})
+    armed = asyncio.Event()
+    hook = _hook(catch_up, calendar, at=EARLY, armed=armed)
+    task = asyncio.create_task(hook.on_boot())
+
+    await asyncio.sleep(0)
+    assert catch_up.calls == []                      # blocked on arming, never ahead of it
+
+    armed.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert catch_up.calls == [(JOB_IDS, "early_boot")]
+    assert catch_up.not_afters == [time(9, 15)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", [LATE, AT_OPEN])
+async def test_on_boot_at_or_after_session_open_is_a_no_op(calendar, caplog, when) -> None:
+    """From session open on, every named job is DUE — a boot after the open must defer to the boot
+    pass / 30-min sweep exactly like a late login."""
+    catch_up = _FakeCatchUp()
+    armed = asyncio.Event()
+    armed.set()
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.early_hydration"):
+        await _hook(catch_up, calendar, at=when, armed=armed).on_boot()
+
+    assert catch_up.calls == []
+    assert [r for r in caplog.records if r.getMessage() == "early_hydration_skipped_session_open"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_hydration_never_escapes_the_boot_hook(calendar, caplog) -> None:
+    """The boot task is a fire-and-forget ``asyncio.create_task`` too: a raise here must never
+    propagate into the boot path, same guard shape as ``on_login``."""
+    catch_up = _FakeCatchUp(boom=True)
+    armed = asyncio.Event()
+    armed.set()
+
+    with caplog.at_level(logging.INFO, logger="engine.ops.early_hydration"):
+        await _hook(catch_up, calendar, at=EARLY, armed=armed).on_boot()   # must not raise
+
+    assert catch_up.calls == [(JOB_IDS, "early_boot")]
+    assert [r for r in caplog.records if r.getMessage() == "early_hydration_failed"]

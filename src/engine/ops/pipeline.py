@@ -2159,6 +2159,17 @@ class RecommendationPipeline:
                 ))
                 return
 
+        # 2026-09-21: sonnet-5 analyst LIMIT proposals have arrived with entry_price null since
+        # 2026-09-16 (7/13), and the gate rejected each one unpriced though the scanner's own level
+        # was already pre-screened at the forward slot — default from it rather than drop the row.
+        if payload.action == "enter" and payload.entry_type == "LIMIT" and payload.entry_price is None:
+            level = candidate.raw_levels.entry      # RawLevels.entry is never None (types.py)
+            payload = EnterAction.model_validate({**payload.model_dump(), "entry_price": level})
+            _log.info(
+                "enter_limit_price_defaulted", signal_id=candidate.signal_id,
+                symbol=candidate.symbol, strategy_id=candidate.strategy_id, entry_price=str(level),
+            )
+
         try:
             verdict, gate_ctx = await self._gate_and_persist(
                 payload, candidate.symbol, str(getattr(payload, "side", candidate.side)),

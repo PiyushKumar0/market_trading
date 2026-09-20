@@ -332,6 +332,18 @@ def test_sector_and_theme_tags_use_the_same_whole_word_rule():
     assert rc.themes == []
 
 
+def test_sector_keywords_exclude_industry_derived_buckets():
+    """sector_map's NSE-Industry fallback (2026-09-21) mints buckets like CAPITAL_GOODS, SERVICES
+    and DIVERSIFIED so the §7.1 exposure caps and the sector features see a real group — but the
+    news keyword vocabulary stays restricted to the ten index sector names: "services" or
+    "diversified" as a headline keyword would false-tag a large share of the corpus."""
+    resolver = EntityResolver(
+        sector_map={"A": "CAPITAL_GOODS", "B": "IT", "C": "UNCLASSIFIED"},
+    )
+    assert set(resolver._sector_keywords) == {"it"}
+    assert resolver.resolve(_cluster("Capital goods orders jump as IT hiring slows")).sectors == ["IT"]
+
+
 # --------------------------------------------------------------------------- Phase-2 seam
 def test_extra_texts_reenter_the_same_rule_and_log_no_match():
     """News-Analyst-emitted entity STRINGS re-enter this resolver — the LLM never assigns a symbol."""

@@ -3,8 +3,19 @@
 ``sector_map`` is the DETERMINISTIC source for the §7.1 ``per_sector_exposure`` gate input and the
 §2.7 sector fan-out — the Kite instruments dump carries no sector field, so sector membership comes
 from the NSE sectoral-index constituent lists (Bank, IT, Pharma, FMCG, Auto, Metal, Energy, Realty,
-PSU Bank, Financial Services). A symbol in no list maps to sector ``UNCLASSIFIED`` (capped at 1 open
-position by the gate [conservative], §4.4 job 13).
+PSU Bank, Financial Services). Classification is a four-rung ladder, each rung a pure supplement to
+the one above it (``mapping.setdefault`` throughout): index scrape (first-wins over the pinned
+:data:`SECTOR_SOURCES` order) → owner overrides (``config/sector_overrides.yaml``) → the NSE
+**Industry** label carried by the universe index CSV (:func:`parse_industry_csv` /
+:func:`industry_sector`, 2026-09-21: under the NIFTY 500 eligible universe the ten sectoral indices
+claim only ~170 names, and on 2026-09-16/17 one pending UNCLASSIFIED recommendation blocked four
+other candidates for its whole two-session validity) → ``UNCLASSIFIED`` (capped at 1 open position
+by the gate [conservative], §4.4 job 13).
+
+Industry-derived buckets (``CAPITAL_GOODS``, ``SERVICES``, ``DIVERSIFIED``, …) exist ONLY for the
+§7.1 exposure caps and the sector features. They never enter the §2.7 news keyword vocabulary, which
+stays restricted to the ten index sector names (:data:`SECTOR_SOURCES`) — a keyword "services" or
+"diversified" would false-tag headlines wholesale.
 
 Classification is FIRST-WINS over the pinned :data:`SECTOR_SOURCES` order (most-specific first:
 PSU Bank ⊂ Bank ⊂ Financial Services) so a symbol in overlapping indices lands in exactly one
@@ -38,7 +49,8 @@ from __future__ import annotations
 import csv
 import io
 import json
-from collections.abc import Awaitable, Callable, Iterable
+import re
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -74,6 +86,31 @@ SECTOR_SOURCES: tuple[tuple[str, str], ...] = (
     ("REALTY", "https://archives.nseindia.com/content/indices/ind_niftyrealtylist.csv"),
 )
 
+#: NSE **Industry** labels (the second column of every constituents CSV, incl. the universe index
+#: list) that map onto an index-backed sector name from :data:`SECTOR_SOURCES` — so the industry
+#: fallback reuses the real bucket instead of minting a near-duplicate one next to it. Labels with
+#: no index behind them (Capital Goods, Services, Diversified, …) are normalised by
+#: :func:`industry_sector` instead. Lookup is on the stripped, lower-cased label.
+#: NOTE: Power and Oil Gas & Consumable Fuels BOTH fold into ENERGY — that is the composition of the
+#: real Nifty Energy index (oil & gas + power utilities), not a shortcut.
+INDUSTRY_SECTOR_ALIASES: dict[str, str] = {
+    "Financial Services": "FINANCIAL_SERVICES",
+    "Information Technology": "IT",
+    "Healthcare": "PHARMA",
+    "Fast Moving Consumer Goods": "FMCG",
+    "Automobile and Auto Components": "AUTO",
+    "Metals & Mining": "METAL",
+    "Power": "ENERGY",
+    "Oil Gas & Consumable Fuels": "ENERGY",
+    "Realty": "REALTY",
+}
+
+_INDUSTRY_ALIAS_LOOKUP: dict[str, str] = {
+    label.strip().lower(): sector for label, sector in INDUSTRY_SECTOR_ALIASES.items()
+}
+
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
+
 _NSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0 Safari/537.36",
@@ -96,18 +133,42 @@ class SectorMapResult(BaseModel):
     degraded_sources: tuple[str, ...] = ()
     rows_written: int = 0
     classified: int = 0
+    #: Symbols the NSE-Industry fallback classified this run (subset of ``classified``) — they
+    #: would have been ``UNCLASSIFIED`` before 2026-09-21.
+    industry_classified: int = 0
     unclassified: int = 0
     themes_written: int = 0
     reason: str | None = None
 
 
-def parse_constituents_csv(text: str) -> list[str]:
-    """Symbols from an NSE index-constituents CSV (``Company Name,Industry,Symbol,Series,ISIN``).
+def industry_sector(label: str) -> str:
+    """One NSE ``Industry`` label → the sector bucket the industry fallback would assign.
+
+    :data:`INDUSTRY_SECTOR_ALIASES` first (case-insensitive on the stripped label) so a label with
+    a real index behind it lands in that index's bucket; otherwise the label itself, upper-cased
+    with every run of non-alphanumerics collapsed to ``_`` ("Capital Goods" → ``CAPITAL_GOODS``,
+    "Media Entertainment & Publication" → ``MEDIA_ENTERTAINMENT_PUBLICATION``). A blank label (or
+    one with no alphanumerics at all) returns ``""`` = no classification, NOT a phantom bucket.
+    """
+    stripped = (label or "").strip()
+    if not stripped:
+        return ""
+    alias = _INDUSTRY_ALIAS_LOOKUP.get(stripped.lower())
+    if alias is not None:
+        return alias
+    return _NON_ALNUM_RE.sub("_", stripped).strip("_").upper()
+
+
+def _iter_constituent_rows(text: str, *, extra_columns: Sequence[str] = ()) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """Shared row walk for the two constituents-CSV parsers (``Company Name,Industry,Symbol,Series,
+    ISIN``) — the comment-skip / case-insensitive column lookup / EQ filter live here ONCE.
 
     Defensive (E5), same conventions as the index parser in ``engine.universe.builder`` (kept
     local — no universe→datafeeds import edge): ``#`` comment lines skipped, ``Symbol`` column
-    located case-insensitively, a ``Series`` column (if present) filters to EQ. Order-preserving,
-    de-duplicated, uppercased.
+    located case-insensitively, a ``Series`` column (if present) filters to EQ. Yields
+    ``(SYMBOL, (extra column values, stripped, in the requested order))`` for every non-blank
+    symbol, in file order and NOT de-duplicated (each caller de-dupes as it wants). A requested
+    column missing from the header raises :class:`ValueError`, exactly like ``Symbol``.
     """
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     reader = csv.DictReader(io.StringIO("\n".join(lines)))
@@ -115,18 +176,49 @@ def parse_constituents_csv(text: str) -> list[str]:
     sym_col = norm.get("symbol")
     if sym_col is None:
         raise ValueError(f"no Symbol column in constituents CSV: {reader.fieldnames}")
+    wanted: list[str] = []
+    for column in extra_columns:
+        col = norm.get(column.strip().lower())
+        if col is None:
+            raise ValueError(f"no {column} column in constituents CSV: {reader.fieldnames}")
+        wanted.append(col)
     series_col = norm.get("series")
-    out: list[str] = []
-    seen: set[str] = set()
     for row in reader:
         if series_col is not None:
             series = (row.get(series_col) or "").strip().upper()
             if series and series != "EQ":
                 continue
         symbol = (row.get(sym_col) or "").strip().upper()
-        if symbol and symbol not in seen:
+        if symbol:
+            yield symbol, tuple((row.get(col) or "").strip() for col in wanted)
+
+
+def parse_constituents_csv(text: str) -> list[str]:
+    """Symbols from an NSE index-constituents CSV (``Company Name,Industry,Symbol,Series,ISIN``).
+
+    Order-preserving, de-duplicated, uppercased; see :func:`_iter_constituent_rows` for the
+    defensive parsing conventions.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for symbol, _ in _iter_constituent_rows(text):
+        if symbol not in seen:
             seen.add(symbol)
             out.append(symbol)
+    return out
+
+
+def parse_industry_csv(text: str) -> dict[str, str]:
+    """``{SYMBOL: raw NSE Industry label}`` from the same CSV shape — the industry-fallback input.
+
+    Labels are returned VERBATIM (only stripped); :func:`industry_sector` does the bucket mapping,
+    so the two concerns stay separable and testable. Same defensive conventions as
+    :func:`parse_constituents_csv`; first occurrence of a symbol wins. A CSV with no ``Industry``
+    column raises :class:`ValueError`, like the ``Symbol`` case.
+    """
+    out: dict[str, str] = {}
+    for symbol, (industry,) in _iter_constituent_rows(text, extra_columns=("Industry",)):
+        out.setdefault(symbol, industry)
     return out
 
 
@@ -203,6 +295,12 @@ class SectorMapJob:
     overrides_path:
         The owner-curated sector-override YAML; defaults to ``config/sector_overrides.yaml``
         under the configured config dir.
+    industry_paths:
+        Candidate universe index CSVs carrying NSE's ``Industry`` column, in preference order
+        (runtime cache first, committed seed last) — the third rung of the classification ladder.
+        The FIRST readable one is used; none readable ⇒ no fallback this run (E5 supplement, logged
+        ``sector_industry_source_unavailable``, no owner alert — the ladder still ends in
+        ``UNCLASSIFIED``). Empty (the default) disables the rung entirely.
     notify:
         Optional owner-alert sink; degraded sources / a skipped snapshot alert through it.
     """
@@ -216,6 +314,7 @@ class SectorMapJob:
         *,
         themes_path: str | Path | None = None,
         overrides_path: str | Path | None = None,
+        industry_paths: Sequence[str | Path] = (),
         notify: NotifySink | None = None,
         request_timeout_s: float = 20.0,
     ) -> None:
@@ -227,6 +326,7 @@ class SectorMapJob:
         self._overrides_path = (
             Path(overrides_path) if overrides_path is not None else config_dir() / "sector_overrides.yaml"
         )
+        self._industry_paths = tuple(Path(p) for p in industry_paths)
         self._notify = notify
         self._timeout = float(request_timeout_s)
         #: Per-``d`` (as_of) alert dedup (2026-08-13, mirrors bhavcopy): guards all THREE alert sites
@@ -317,6 +417,19 @@ class SectorMapJob:
         for symbol, sector in overrides.items():
             mapping.setdefault(symbol, sector)
 
+        # Third rung: NSE's own Industry label for everything the ten indices and the owner
+        # overrides left unclaimed (see the module docstring for the ladder + the 2026-09-21
+        # evidence). setdefault again — index and override classification always win.
+        industry_classified = 0
+        if self._industry_paths:
+            before = len(mapping)
+            for symbol, label in self._load_industries().items():
+                sector = industry_sector(label)
+                key = symbol.strip().upper()
+                if sector and key:
+                    mapping.setdefault(key, sector)
+            industry_classified = len(mapping) - before
+
         extra = sorted(
             {str(s).strip().upper() for s in (universe_symbols or []) if str(s).strip()} - set(mapping)
         )
@@ -344,6 +457,7 @@ class SectorMapJob:
             degraded=degraded,
             themes=themes_written,
             overrides=len(overrides),
+            industry_classified=industry_classified,
         )
         return SectorMapResult(
             as_of=d,
@@ -352,6 +466,7 @@ class SectorMapJob:
             degraded_sources=tuple(degraded),
             rows_written=written,
             classified=len(mapping),
+            industry_classified=industry_classified,
             unclassified=len(extra),
             themes_written=themes_written,
         )
@@ -417,6 +532,35 @@ class SectorMapJob:
             data={"job_id": "sector_map", "unknown_sectors": unknown},
         )
         return {sym: sector for sym, sector in overrides.items() if sector in valid_sectors}
+
+    # ------------------------------------------------------------------ industry fallback (3rd rung)
+    def _load_industries(self) -> dict[str, str]:
+        """``{SYMBOL: Industry label}`` from the FIRST readable :attr:`_industry_paths` entry.
+
+        E5 supplement, weaker than the override rung: a missing/unparseable/empty candidate is
+        logged and the next one tried; none usable degrades to "no industry fallback this run"
+        (``sector_industry_source_unavailable``) with NO owner alert — the symbols simply stay
+        ``UNCLASSIFIED``, which is exactly the pre-2026-09-21 behaviour, not a new failure.
+        """
+        tried: list[str] = []
+        for path in self._industry_paths:
+            tried.append(str(path))
+            try:
+                if not path.exists():
+                    continue
+                labels = parse_industry_csv(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001 - E5: try the next candidate, never raise
+                _log.warning(
+                    "sector_industry_source_unreadable",
+                    path=str(path),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            if labels:
+                _log.info("sector_industry_source", path=str(path), symbols=len(labels))
+                return labels
+        _log.warning("sector_industry_source_unavailable", paths=tried)
+        return {}
 
     # ------------------------------------------------------------------ cache (frozen fallback, E5)
     def _load_cache(self) -> dict[str, dict[str, Any]]:

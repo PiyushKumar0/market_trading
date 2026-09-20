@@ -706,7 +706,7 @@ class RiskGate:
         headroom = cap - ctx.deployed_capital
         if notional_ref is None:
             led.cap("capital_cap", 0)
-            led.add("capital_cap", False, "unpriceable (MARKET with no LTP)",
+            led.add("capital_cap", False, "unpriceable (no entry reference)",
                     f"deployed <= {_q(cap)}", "fail closed", shrinkable=True)
             return
         # Phase 2 charges MIS at FULL notional on BOTH sides of the inequality — matching
@@ -740,7 +740,7 @@ class RiskGate:
         budget = pct / _HUNDRED * ctx.equity
         if risk_ref is None:
             led.cap("per_trade_risk", 0)
-            led.add("per_trade_risk", False, "unpriceable (MARKET with no LTP)",
+            led.add("per_trade_risk", False, "unpriceable (no entry reference)",
                     f"qty x unit risk <= {_q(budget)}", "fail closed — unpriceable risk",
                     shrinkable=True)
             return
@@ -889,7 +889,7 @@ class RiskGate:
         max_exposure = capx * ctx.equity
         if notional_ref is None:
             led.cap("max_leverage", 0)
-            led.add("max_leverage", False, "unpriceable (MARKET with no LTP)",
+            led.add("max_leverage", False, "unpriceable (no entry reference)",
                     f"exposure <= {capx}x equity", "fail closed", shrinkable=True)
             return
         qty_max = _floor_div(max_exposure, notional_ref)
@@ -948,7 +948,11 @@ class RiskGate:
             led.add("entry_sanity_band", True, "MARKET (no limit price to band-check)",
                     f"LIMIT within +/-{band}% of LTP", "not applicable")
             return
-        if ctx.ltp is None or ctx.ltp <= 0 or action.entry_price is None:
+        if action.entry_price is None:
+            led.add("entry_sanity_band", False, "LIMIT with no entry price",
+                    f"within +/-{band}% of LTP", "fail closed")
+            return
+        if ctx.ltp is None or ctx.ltp <= 0:
             led.add("entry_sanity_band", False, "LIMIT with no usable LTP",
                     f"within +/-{band}% of LTP", "fail closed")
             return

@@ -1,10 +1,12 @@
 """SectorMapJob (§4.4 job 13, R1/E5): first-wins sector classification over the pinned source
-order (PSU Bank before Bank before Financial Services), UNCLASSIFIED for unclaimed universe
-symbols, the per-source frozen-fallback + alert path, keep-previous-snapshot when nothing
-classifies, verbatim ``theme_map`` seed refresh, and the never-raise guarantee."""
+order (PSU Bank before Bank before Financial Services), the owner-override and NSE-Industry
+supplement rungs (2026-09-21) beneath it, UNCLASSIFIED for whatever none of them claims, the
+per-source frozen-fallback + alert path, keep-previous-snapshot when nothing classifies, verbatim
+``theme_map`` seed refresh, and the never-raise guarantee."""
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -14,12 +16,15 @@ import pytest
 from engine.core.config import repo_root
 from engine.datafeeds import sector_map as sm
 from engine.datafeeds.sector_map import (
+    INDUSTRY_SECTOR_ALIASES,
     SECTOR_SOURCES,
     UNCLASSIFIED,
     SectorMapJob,
+    industry_sector,
     load_sector_overrides,
     load_theme_seed,
     parse_constituents_csv,
+    parse_industry_csv,
 )
 from engine.marketdata.store import MarketStore
 from tests.conftest import FIXED_NOW
@@ -72,6 +77,16 @@ OVERRIDES_YAML = (
     "  FINANCIAL_SERVICES: [HDFCAMC, ICICIAMC]\n"
 )
 
+#: Universe index CSV shape (``Company Name,Industry,Symbol,Series,ISIN Code``) carrying NSE's
+#: Industry column — the third classification rung's input (data/universe/index_cached.csv).
+INDUSTRY_CSV = (
+    "# NIFTY 500 constituents (runtime cache)\n"
+    "Company Name,Industry,Symbol,Series,ISIN Code\n"
+    "Acme Labs Ltd.,Healthcare,ACMELAB,EQ,INE000A01001\n"          # aliased onto the PHARMA index
+    "Bolt Engineering Ltd.,Capital Goods,BOLTENG,EQ,INE000A01002\n"  # no index ⇒ normalised bucket
+    "Drift Corp Ltd.,Consumer Services,DRIFTBE,BE,INE000A01003\n"    # non-EQ series dropped
+)
+
 
 @pytest.fixture
 def store(tmp_path, clock):
@@ -108,7 +123,7 @@ def failing_client() -> httpx.AsyncClient:
 
 def make_job(
     tmp_path, store, clock, client, *, cache_name="sector_lists.json", themes=THEMES_YAML,
-    overrides=OVERRIDES_YAML_EMPTY, notify=None,
+    overrides=OVERRIDES_YAML_EMPTY, industry_paths=(), notify=None,
 ) -> SectorMapJob:
     themes_path = tmp_path / "themes.yaml"
     if themes is not None and not themes_path.exists():
@@ -118,8 +133,14 @@ def make_job(
         overrides_path.write_text(overrides, encoding="utf-8")
     return SectorMapJob(
         store, clock, client, tmp_path / cache_name, themes_path=themes_path,
-        overrides_path=overrides_path, notify=notify,
+        overrides_path=overrides_path, industry_paths=industry_paths, notify=notify,
     )
+
+
+def write_industry_csv(tmp_path, text: str, name="index_cached.csv") -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 # --------------------------------------------------------------------------- happy path (R1)
@@ -386,7 +407,116 @@ def test_committed_sector_overrides_loads_and_contains_amc_seed():
     assert overrides["ICICIAMC"] == "FINANCIAL_SERVICES"
 
 
+# --------------------------------------------------------------------------- industry fallback (3rd rung)
+async def test_industry_label_classifies_symbols_no_index_or_override_claims(tmp_path, store, clock):
+    """2026-09-21: under the NIFTY 500 universe the ten sectoral indices claim ~170 names, so the
+    rest fell into the single UNCLASSIFIED bucket the gate caps at 1 open position. NSE's Industry
+    column classifies them instead — aliased onto a real index bucket where one exists
+    (Healthcare → PHARMA), else normalised (Capital Goods → CAPITAL_GOODS)."""
+    path = write_industry_csv(tmp_path, INDUSTRY_CSV)
+    job = make_job(tmp_path, store, clock, make_client(), industry_paths=(path,))
+    result = await job.run(D, universe_symbols=["ACMELAB", "BOLTENG", "DRIFTBE", "RELIANCE"])
+
+    assert result.ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["ACMELAB"] == "PHARMA"                   # INDUSTRY_SECTOR_ALIASES hit
+    assert rows["BOLTENG"] == "CAPITAL_GOODS"            # normalised label, no index behind it
+    assert result.industry_classified == 2
+    assert rows["DRIFTBE"] == UNCLASSIFIED               # non-EQ row never reaches the fallback
+    assert rows["RELIANCE"] == UNCLASSIFIED              # not in the CSV at all — ladder still ends here
+    assert result.unclassified == 2                      # DRIFTBE + RELIANCE only
+
+
+async def test_industry_never_overrides_an_index_or_an_override_classification(tmp_path, store, clock):
+    """The fallback is the THIRD rung: ``mapping.setdefault`` after both the index scrape and the
+    owner overrides, so a mislabelled Industry column can never move a symbol a real index (SBIN =
+    PSU_BANK) or the owner (HDFCAMC = FINANCIAL_SERVICES) already placed."""
+    path = write_industry_csv(
+        tmp_path,
+        "Company Name,Industry,Symbol,Series,ISIN Code\n"
+        "State Bank,Capital Goods,SBIN,EQ,\n"            # conflicts with the real PSU_BANK scrape
+        "HDFC AMC,Capital Goods,HDFCAMC,EQ,\n"           # conflicts with the owner override
+        "New Co,Capital Goods,NEWCO,EQ,\n",              # unclaimed — the only one the rung adds
+    )
+    job = make_job(
+        tmp_path, store, clock, make_client(), overrides=OVERRIDES_YAML, industry_paths=(path,)
+    )
+    result = await job.run(D, universe_symbols=["SBIN", "HDFCAMC", "NEWCO"])
+
+    assert result.ok is True
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["SBIN"] == "PSU_BANK"                    # index scrape wins
+    assert rows["HDFCAMC"] == "FINANCIAL_SERVICES"       # owner override wins
+    assert rows["NEWCO"] == "CAPITAL_GOODS"
+    assert result.industry_classified == 1               # NEWCO only
+
+
+async def test_no_readable_industry_source_degrades_silently_to_unclassified(tmp_path, store, clock, caplog):
+    """E5 supplement, weaker than the override rung: a missing path and a path whose CSV has no
+    Industry column are both just "no fallback this run" — the run stays ok, nothing raises, the
+    symbol keeps the pre-2026-09-21 UNCLASSIFIED behaviour, and NO owner alert fires (the log line
+    ``sector_industry_source_unavailable`` is the whole signal)."""
+    broken = write_industry_csv(
+        tmp_path, "Company Name,Symbol,Series\nA Co,AAA,EQ\n", name="no_industry.csv"
+    )
+    msgs, sink = collect_alerts()
+    job = make_job(
+        tmp_path, store, clock, make_client(), notify=sink,
+        industry_paths=(tmp_path / "does_not_exist.csv", broken),
+    )
+    with caplog.at_level(logging.WARNING, logger="engine.datafeeds.sector_map"):
+        result = await job.run(D, universe_symbols=["AAA"])
+
+    assert result.ok is True and result.industry_classified == 0
+    rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
+    assert rows["AAA"] == UNCLASSIFIED
+    assert msgs == []                                    # E5 supplement: logged, never alerted
+    events = [r.getMessage() for r in caplog.records]
+    assert "sector_industry_source_unavailable" in events
+    assert "sector_industry_source_unreadable" in events  # the no-Industry-column candidate
+
+
 # --------------------------------------------------------------------------- parsers / seeds
+def test_industry_sector_aliases_and_normalises():
+    """Aliases fold a label onto its real index bucket; everything else becomes a normalised
+    bucket. A blank label is NO classification ("" — never a phantom bucket)."""
+    assert industry_sector("Healthcare") == "PHARMA"
+    assert industry_sector("  financial services  ") == "FINANCIAL_SERVICES"   # strip + case-insensitive
+    assert industry_sector("Power") == "ENERGY"
+    assert industry_sector("Oil Gas & Consumable Fuels") == "ENERGY"           # both fold to ENERGY
+    assert industry_sector("Capital Goods") == "CAPITAL_GOODS"
+    assert industry_sector("Media Entertainment & Publication") == "MEDIA_ENTERTAINMENT_PUBLICATION"
+    assert industry_sector("Fast Moving Consumer Goods") == "FMCG"
+    assert industry_sector("") == "" and industry_sector("   ") == "" and industry_sector("&&") == ""
+
+
+def test_industry_aliases_only_name_real_index_sectors():
+    """An alias target outside SECTOR_SOURCES would be a phantom bucket per_sector_exposure never
+    groups on — the same rule _load_overrides enforces for the owner file."""
+    known = {sector for sector, _ in SECTOR_SOURCES}
+    assert set(INDUSTRY_SECTOR_ALIASES.values()) <= known
+
+
+def test_parse_industry_csv_defensive():
+    text = (
+        "# frozen-copy note\n"
+        "Company Name,INDUSTRY,SYMBOL,Series,ISIN Code\n"   # columns located case-insensitively
+        "A Co,Healthcare,AAA,EQ,\n"
+        "B Co,Capital Goods,BBB,BE,\n"                      # non-EQ series dropped
+        "A Co dup,Power,AAA,EQ,\n"                          # first occurrence wins
+        "C Co, Capital Goods ,ccc,EQ,\n"                    # label stripped, symbol uppercased
+        "D Co,,DDD,EQ,\n"                                   # blank label kept verbatim here
+    )
+    assert parse_industry_csv(text) == {
+        "AAA": "Healthcare", "CCC": "Capital Goods", "DDD": "",
+    }
+    with pytest.raises(ValueError):                          # no Industry column
+        parse_industry_csv("Company Name,Symbol\nA Co,AAA\n")
+    with pytest.raises(ValueError):                          # no Symbol column either
+        parse_industry_csv("Company Name,Industry\nA Co,Healthcare\n")
+
+
+
 def test_parse_constituents_csv_defensive():
     text = (
         "# frozen-copy note\n"

@@ -923,6 +923,18 @@ def test_entry_sanity_band_still_judges_the_STATED_entry(gate: RiskGate) -> None
     assert sizing_refs_of(verdict) == (Decimal("102.00"), Decimal("102.00"))
 
 
+def test_entry_sanity_band_distinguishes_no_price_from_no_ltp(gate: RiskGate) -> None:
+    """2026-09-21: a LIMIT with no ``entry_price`` at all (the pipeline default only fills this from
+    the candidate's own level when one exists) is a different failure than a live-LTP outage — the
+    owner-facing message must say which one happened instead of always blaming a missing LTP."""
+    action = make_action(entry_price=None)          # ctx LTP (100) is present and valid
+    verdict = gate.evaluate(action, make_ctx())
+    band = check_of(verdict, "entry_sanity_band")
+    assert band.passed is False
+    assert band.value == "LIMIT with no entry price"
+    assert verdict.verdict == "reject"
+
+
 def test_sizing_reference_shrink_then_recheck_rejects(gate: RiskGate) -> None:
     """R1/C3 shrink-then-recheck through the WO-4 reference: the live price shrinks the capital-cap
     headroom, and ``min_viable_size`` — re-run at the SHRUNK size and the SAME live price — no

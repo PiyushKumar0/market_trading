@@ -35,6 +35,12 @@ table:
 A second login the same day needs no latch: every watermark is already set, so every job reports
 ``already_run`` and the pass is free. Nothing here ever raises — a login hook that throws would break
 the login path itself.
+
+Boot trigger (2026-09-21): a login is not the only gap. On 2026-09-16 the engine booted 06:58 with no
+Kite login until 10:04, the PC slept 08:00-10:00 through the scheduled 08:20-08:50 fires, and the
+catalyst digest landed 10:18, after the trade window opened. :meth:`EarlyHydration.on_boot` now runs
+the identical chain once at process boot, under the same gates as an early login — the watermarks it
+leaves behind make a later login free.
 """
 
 from __future__ import annotations
@@ -110,15 +116,23 @@ class EarlyHydration:
         """The login hook. Guarded exactly like :class:`PostLoginRecovery`'s steps: a failure here is
         logged and dropped — it must never propagate into ``complete_login`` or the event loop."""
         try:
-            await self._hydrate()
+            await self._hydrate("early_login")
         except Exception:  # noqa: BLE001 - a login hook degrades + logs, never breaks the login path
-            _log.exception("early_hydration_failed")
+            _log.exception("early_hydration_failed", reason="early_login")
 
-    async def _hydrate(self) -> None:
+    async def on_boot(self) -> None:
+        """The boot hook (2026-09-21): a boot on a trading day before the open runs the same chain a
+        login would, under the same gates — a login that never comes must not cost the digest."""
+        try:
+            await self._hydrate("early_boot")
+        except Exception:  # noqa: BLE001 - a boot task degrades + logs, never breaks the boot path
+            _log.exception("early_hydration_failed", reason="early_boot")
+
+    async def _hydrate(self, reason: str) -> None:
         now = self._clock.now()
         today = now.date()
         if not self._calendar.is_trading_day(today):
-            _log.info("early_hydration_skipped_non_trading_day", d=today.isoformat())
+            _log.info("early_hydration_skipped_non_trading_day", d=today.isoformat(), reason=reason)
             return
         session_open = self._session_open()          # resolved per login, never frozen at boot
         if now.time() >= session_open:
@@ -126,7 +140,7 @@ class EarlyHydration:
             # jobs, and a second path over the same watermarks buys nothing but a race.
             _log.info(
                 "early_hydration_skipped_session_open",
-                now=now.isoformat(), session_open=session_open.isoformat(),
+                now=now.isoformat(), session_open=session_open.isoformat(), reason=reason,
             )
             return
         try:
@@ -161,16 +175,16 @@ class EarlyHydration:
             _log.info(
                 "early_hydration_skipped_session_open_after_wait",
                 login_at=now.isoformat(), run_at=run_now.isoformat(),
-                session_open=session_open.isoformat(),
+                session_open=session_open.isoformat(), reason=reason,
             )
             return
         # The runner re-checks the open once it actually HOLDS the pass lock (2026-09-10: a 09:06
         # login queued 36 min behind the post-arm one-shot and ran in-session) — the gates above
         # cannot see that wait.
         outcomes = await self._catch_up.hydrate_ahead(
-            self._job_ids, reason="early_login", not_after=session_open,
+            self._job_ids, reason=reason, not_after=session_open,
         )
-        _log.info("early_hydration_done", outcomes=outcomes, at=run_now.strftime("%H:%M"))
+        _log.info("early_hydration_done", outcomes=outcomes, at=run_now.strftime("%H:%M"), reason=reason)
         await self._emit_summary(run_now.strftime("%H:%M"), outcomes)
 
     async def _emit_summary(self, at: str, outcomes: dict[str, str]) -> None:

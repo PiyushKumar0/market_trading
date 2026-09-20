@@ -77,6 +77,7 @@ from engine.core.config import CatCfg, config_dir, load_yaml
 from engine.core.log import get_logger
 from engine.core.protected_store import ProtectedStore
 from engine.datafeeds.news import Headline
+from engine.datafeeds.sector_map import SECTOR_SOURCES
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.strategy.indicators import wilder_atr
 
@@ -115,6 +116,12 @@ ALIAS_STOPLIST: frozenset[str] = frozenset({
 
 #: Sector label that must never become a keyword tag (§4.4 job 13 fallback bucket).
 _UNCLASSIFIED = "UNCLASSIFIED"
+
+#: The ten NSE sectoral-index sector names — the ONLY sector labels allowed into the keyword
+#: vocabulary. sector_map's industry fallback (2026-09-21) also mints buckets like CAPITAL_GOODS,
+#: SERVICES and DIVERSIFIED for the exposure caps and sector features; as headline keywords those
+#: generic words would false-tag wholesale ("services", "diversified"), so they are filtered out.
+_INDEX_SECTORS: frozenset[str] = frozenset(sector for sector, _ in SECTOR_SOURCES)
 
 #: The pinned §4.3 ``news_clusters`` columns (mirrors MarketStore._TABLE_SPEC — unknown keys are a
 #: hard error there, so this tuple is validated on every upsert).
@@ -520,10 +527,15 @@ class EntityResolver:
         self._aliases = {a: frozenset(s) for a, s in merged.items()}
 
     def set_sector_map(self, sector_map: Mapping[str, str]) -> None:
-        """Sector keywords = the distinct sector NAMES (whole-word phrase rule), minus UNCLASSIFIED."""
+        """Sector keywords = the distinct INDEX sector NAMES (whole-word phrase rule).
+
+        UNCLASSIFIED and every industry-derived bucket are excluded: those buckets exist for the
+        §7.1 exposure caps and the sector features, never as headline keywords — "services" or
+        "diversified" as a keyword would false-tag a large share of the corpus.
+        """
         kw: dict[str, set[str]] = {}
         for sector in sector_map.values():
-            if sector == _UNCLASSIFIED:
+            if sector == _UNCLASSIFIED or sector.strip().upper() not in _INDEX_SECTORS:
                 continue
             norm = " ".join(title_tokens(sector))
             if norm:

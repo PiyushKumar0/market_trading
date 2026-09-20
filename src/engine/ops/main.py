@@ -46,7 +46,7 @@ from engine.broker.session import SessionManager
 from engine.broker.ticker_supervisor import TickerSupervisor
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
-from engine.core.config import Settings, config_dir, load_settings, load_yaml
+from engine.core.config import Settings, config_dir, load_settings, load_yaml, repo_root
 from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
@@ -672,7 +672,18 @@ async def run() -> int:
     ins_crossings = InsCrossingsJob(
         store, conn, clock, calendar, threshold_inr=settings.ins.threshold_inr
     )
-    sector_map = SectorMapJob(store, clock, http, data_dir / "datafeeds" / "sector_lists.json", notify=notify)
+    # industry_paths: the third classification rung (2026-09-21) — NSE's Industry column for every
+    # NIFTY 500 name the ten sectoral indices and config/sector_overrides.yaml leave unclaimed.
+    # Runtime cache first (UniverseBuilder refreshes it daily), committed seed as the fallback;
+    # both resolved the same way UniverseBuilder resolves them (settings.universe.index_seed_path
+    # is repo-root-relative, and `/` on an absolute value keeps that value).
+    sector_map = SectorMapJob(
+        store, clock, http, data_dir / "datafeeds" / "sector_lists.json", notify=notify,
+        industry_paths=(
+            data_dir / "universe" / "index_cached.csv",
+            repo_root() / settings.universe.index_seed_path,
+        ),
+    )
 
     # --- news pipeline data side (§2.7 steps 1-3) ---
     news_ingest = NewsIngest(settings.news, store, clock, http)
@@ -2202,6 +2213,9 @@ async def run() -> int:
     post_arm_task = start_scheduler_and_fire_post_arm(
         scheduler, catch_up, clock, calendar, armed=scheduler_armed,
     )
+    # §2.6 EARLY HYDRATION boot trigger (2026-09-21): a boot on a trading day before the open hydrates
+    # under the same gates as an early login — the watermarks it leaves make a later login free.
+    early_hydration_task = asyncio.create_task(early_hydration.on_boot(), name="early_hydration_boot")
     if telegram is not None and report.needs_login and not login_prompt_sent:
         await notify(login_prompt(session.login_url()))
 
@@ -2219,6 +2233,7 @@ async def run() -> int:
     # for an engine that is deliberately shutting down.
     scheduler.shutdown()                      # no new job fires can race the teardown
     await cancel_post_arm(post_arm_task)      # a still-running post-arm one-shot never blocks a stop
+    await cancel_post_arm(early_hydration_task)  # a still-running boot hydration never blocks a stop
     if _freeze_lift_tasks:
         # …nor a detached freeze-lift re-sweep. WAIT it out first (a sweep is seconds): the task parks
         # in `asyncio.to_thread`, and cancelling the TASK does not stop the worker THREAD — it would

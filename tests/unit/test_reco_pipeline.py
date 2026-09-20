@@ -480,6 +480,41 @@ async def test_happy_path_writes_the_full_provenance_chain(
     assert "checklist" in rendered and "SL-M at 99" in rendered and "square off by" in rendered
 
 
+async def test_missing_limit_entry_price_defaults_from_the_candidates_level(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    """2026-09-21 evidence: 7 of 13 sonnet-5 LIMIT proposals since 09-16 arrived with entry_price
+    null, and the gate rejected every one on a band check that could not see a price even though the
+    scanner's own (pre-screened) level was sitting right there in ``candidate.raw_levels.entry``. The
+    pipeline now fills the gap instead of dropping the proposal. Sibling of
+    ``test_happy_path_writes_the_full_provenance_chain`` with ``entry_price`` stripped from the
+    analyst payload.
+    """
+    harness = FakeHarness(dict(ENTER_JSON, entry_price=None))
+    pipeline, parts = make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
+        limits=StubLimits(limit_table),
+    )
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, candidate())
+
+    proposal = conn.execute("SELECT * FROM proposals").fetchone()
+    verdict = conn.execute("SELECT * FROM verdicts").fetchone()
+    assert proposal is not None, "the proposal must still be persisted, not dropped"
+
+    payload = json.loads(proposal["payload"])
+    # Same string form a STATED price gets: DecimalStr serialises via str(Decimal(...)), and the
+    # happy-path sibling's stated "100" normalises to the identical string (compare the two forms).
+    assert payload["entry_price"] == str(Decimal(ENTER_JSON["entry_price"])) == "100"
+
+    verdict_payload = json.loads(verdict["payload"])
+    band = next(c for c in verdict_payload["checks"] if c["rule_id"] == "entry_sanity_band")
+    assert band["passed"] is True, band   # not failed on entry_sanity_band once the price is filled
+
+    assert len(log_events(caplog, "enter_limit_price_defaulted")) == 1
+
+
 @pytest.mark.parametrize(
     ("label", "kwargs"),
     [
