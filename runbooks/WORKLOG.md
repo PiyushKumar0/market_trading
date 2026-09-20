@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-21 (owner: "Start working on the recommended fixes. Validate them … do not over-optimise"; pre-open keep-awake explicitly excluded) — boot-time early hydration, LIMIT price default, sector-map industry fallback (ccea311); engine restarted 02:38 IST, boot verified, boot hydration observed live
+
+- **Fix 1 — early hydration also fires at boot (`EarlyHydration.on_boot`).** Evidence 09-16: engine
+  booted 06:58, no Kite login before the open, PC asleep ~08:00–10:00 (health_check cadence → 0,
+  "Run time of job … was missed" bursts on wake), digest 10:18 vs a 10:15 window. Hydration was a
+  login-only hook, so a boot without a login hydrated nothing. Now dispatched once at boot right after
+  the post-arm one-shot (same gates: trading day, before open, armed, recovery done; same watermarks;
+  cancelled at shutdown). Plan §2.6 addendum sentence. Pre-open keep-awake NOT built — owner: the
+  laptop is inactive while travelling in the morning, so it is not the lever.
+- **Fix 2 — LIMIT proposals without a price were being rejected as "no usable LTP".** Diagnosis: the
+  gate reads LTP and tick-age from ONE cache (`last_ticks`, main.py `mark_price`/`tick_age_s`) and the
+  tick-age guard passed on every such reject, so the LTP was not the problem. `proposals` rows: 7 of 13
+  LIMIT proposals since 09-16 (sonnet-5 intraday analyst) carried `entry_price=null` (TATAINVEST, PWL×2,
+  PAYTM, BHEL, YESBANK, BLUESTARCO); `EnterAction.entry_price` is Optional with only a comment saying
+  "required if LIMIT". The pipeline now defaults it to `candidate.raw_levels.entry` (already
+  band-screened at the forward slot) and logs `enter_limit_price_defaulted`; `entry_sanity_band`
+  distinguishes "no entry price" from "no usable LTP", and the priced rules say "unpriceable (no entry
+  reference)" instead of blaming MARKET. That the default is what the analyst means: PAYTM 09-17 09:42
+  entry=null vs 09-18 09:49 entry=1758.90 with identical stop/target.
+- **Fix 3 — sector map classifies from NSE's Industry column.** Under NIFTY 500 the ten sectoral
+  indices covered ~170 names: 750 of 913 snapshot rows were UNCLASSIFIED (cap 1; pending recs count),
+  so ACMESOLAR (09-16 10:35, pending two sessions) blocked AEGISVOPAK, PWL, PAYTM and ECLERX. New rung
+  after index scrape + overrides: the Industry label from `data/universe/index_cached.csv` (seed
+  fallback), aliased onto the index names where natural (Healthcare→PHARMA, Power/Oil Gas→ENERGY, …),
+  else a normalised bucket (CAPITAL_GOODS, CHEMICALS, …). The news keyword vocabulary stays the ten
+  index names (`set_sector_map` filter) so SERVICES/DIVERSIFIED never tag headlines. Today's snapshot
+  rebuilt offline with `scripts/run_sector_map.py` (new; engine stopped): 926 rows, UNCLASSIFIED
+  750→426 (the remainder = extended non-index names, never gate-approvable), industry_classified=337.
+  Plan §4.4 job 13 sentence; COMMANDS.md entry.
+- **Deliberately not done: digest ahead of the news-backlog drain on late boots.** The honest version
+  is faster/parallel LLM scoring of the backlog (a digest run before the drain is empty, and the G2
+  collector records the later run anyway). Observed live on this boot: `engine_ready` 02:39:06,
+  universe 02:39:43, then one news-analyst batch every ~90 s — 19 batches for the weekend backlog —
+  `catalyst_digest` **03:14:27** (2,891 clusters, 1 originating / 177 context), `preopen_planner_ran`
+  03:16:19, `early_hydration_pass reason=early_boot` all five jobs `ran` 03:16:19: **boot → digest
+  36 min.** On a 09:30 boot that latency IS the C1 miss; the cheap lever is the owner's window offset
+  after boot (≥ 30–40 min), or parallel news scoring if he wants it engineered.
+- **Rec-rate note (from the 09-18 assessment):** 8–10 recs/day → ~1/session after 09-11 is orb being
+  parked on 09-12, not the 09-15 roster change — brk20/hi52 confidence ≈ 0.55 under opus-5 and sonnet-5
+  alike (proposals table) against the owner-only 0.55 floor.
+- **Validation.** Sonnet/Opus builds under my specs, audited on pointers (one dead guard removed);
+  `tests/unit` **3079 passed** (6:04); ruff clean. `Stop-Service` 02:37:11 (idle; stop again
+  `stop_forced` — still open), sector rebuild 02:37, `Start-Service` 02:38, `engine_boot` 02:38:24,
+  token valid, selftest complete, `engine_ready` **02:39:06** (42 s). Commit ccea311 + this note.
+
 ## 2026-09-18 (owner: "Fix point 1 and 3" → "Apply the fix and validate them") — upstream-confirmed no-trade minutes (b342240) + sonnet-5 pricing (4eac3c3); engine restarted 15:33 IST, boot verified; live-validated on DEEPAKNTR at 13:17 — under a boot I did not perform
 
 - **Point 3 (4eac3c3).** `agents.yaml` `sonnet-5` 3/15 → 2/10 per MTok (Anthropic first-party rate;

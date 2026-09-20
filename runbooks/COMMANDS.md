@@ -354,3 +354,18 @@ reproduced to 4 dp). What the artifacts now carry, and how to read them:
   Both decision-rule outcomes are printed — the registered gate (`decision`) and the tightened one
   (`decision_under_tightened_reporting_rule`) — with an explicit "does the tightening change the
   registered outcome?" line. On the 2026-09-12 run it does not.
+
+## Sector map rebuild outside the engine (2026-09-21) - after a classification change, engine OFF
+
+The `sector_map` job is Sunday-only, so a new override or a classifier change (the 2026-09-21
+NSE-Industry fallback) otherwise waits a week. Same `SectorMapJob` the engine wires, same store.
+
+```powershell
+Stop-Service mt-engine                                   # single-writer DuckDB
+.venv\Scripts\python.exe scripts\run_sector_map.py       # as_of today; prints the bucket counts
+Start-Service mt-engine
+```
+
+First run 2026-09-21 02:37 IST: batch universe 910 (as of 09-18), snapshot 913 -> 926 rows,
+UNCLASSIFIED 750 -> 426 (the remainder = extended non-index names, never gate-approvable),
+`industry_classified=337`. `--dry-run` reports the current snapshot without writing.
