@@ -114,14 +114,13 @@ INTRADAY_AGENT_ID = "intraday_analyst"
 #: Distinct from the analyst id so the ledger can separate model decisions from platform decisions.
 PLATFORM_AGENT_ID = "platform"
 
-#: Entry-recommendation TTL for an intraday candidate, minutes [tunable]. A swing/position ENTRY
-#: stays valid to the NEXT trading session's close instead (WO-V, 2026-09-13), and every other
-#: swing/position recommendation to today's (see :meth:`RecommendationPipeline._ttl`).
+#: Entry-recommendation TTL for an intraday candidate, minutes [tunable]. Every swing/position
+#: recommendation is stamped to today's session close (see :meth:`RecommendationPipeline._ttl`).
 TTL_INTRADAY_MIN = 20
 
 #: ``/taken`` says so when the fill carries more stop risk than the §7.1 ``per_trade_risk`` verdict
-#: approved. WO-V let an entry rec live across an overnight gap while its zone, stop and qty stay the
-#: PRIOR session's and nothing re-gates at capture (:meth:`RecommendationBook.take`). The gate sizes a
+#: approved. ``take`` never gates on ``valid_until``, so a rec can be confirmed the morning after it
+#: expired while its zone, stop and qty stay the PRIOR session's (:meth:`RecommendationBook.take`). The gate sizes a
 #: swing/position on ``overnight_gap_mult`` × the stop distance (``_rule_per_trade_risk``), so for
 #: those styles the basis IS that number, read from the hash-verified limits through the book's
 #: ``overnight_gap_mult_fn`` seam, and the call-out fires only once the approved budget is actually
@@ -429,8 +428,8 @@ class RecommendationBook:
 
         The platform never adopts a position as ``recommended`` without this owner confirmation.
 
-        Nothing here re-gates the fill, and since WO-V (2026-09-13) a swing/position entry rec stays
-        actionable into the NEXT session, so the reported price can be a gap away from the zone the
+        Nothing here re-gates the fill, and ``take`` accepts an already-expired rec (the owner may
+        confirm the morning after), so the reported price can be a gap away from the zone the
         §7.1 ``entry_sanity_band`` and ``per_trade_risk`` verdicts were computed on. The fill is
         recorded regardless — the owner is the authority on what they executed, and a live position
         the ledger does not know about is the worse failure — but a fill whose distance to the
@@ -2075,7 +2074,7 @@ class RecommendationPipeline:
         proposal_id = str(ULID())
         # ENTRY evaluation (§5.2 trigger (a)): this is the stamp the delivered entry recommendation
         # actually carries — :meth:`build_recommendation` only falls back to its own (WO-V).
-        valid_until = self._ttl(candidate.style, entry=True)
+        valid_until = self._ttl(candidate.style)
         result = await self._harness.run_single_shot(
             self._agent_def(),
             actx,
@@ -2335,7 +2334,7 @@ class RecommendationPipeline:
         return Recommendation(
             rec_id=str(ULID()),
             created_at=self._clock.now(),
-            valid_until=action.valid_until or self._ttl(action.style, entry=True),
+            valid_until=action.valid_until or self._ttl(action.style),
             kind="entry",
             instrument=action.tradingsymbol,
             side=action.side,
@@ -2529,9 +2528,8 @@ class RecommendationPipeline:
            simply not run yet) said its piece and is gone from ``/pending``; suppressing the next
            event on its strength would leave an intraday position whose stop stayed breached all
            session with ONE exit instruction that died 20 minutes after it arrived
-           (``TTL_INTRADAY_MIN``). A swing/position exit is stamped to TODAY's session close — WO-V
-           extended only ENTRY recs to the next session's, precisely so this cadence keeps holding —
-           so this changes nothing there; it restores the intraday cadence only. ``taken``/``dismissed``/
+           (``TTL_INTRADAY_MIN``). A swing/position exit is stamped to TODAY's session close, so
+           this changes nothing there; it restores the intraday cadence only. ``taken``/``dismissed``/
            ``closed`` DO suppress: the owner engaged with the message, and repeating it is the noise
            WO-D2 exists to remove.
 
@@ -2946,88 +2944,29 @@ class RecommendationPipeline:
         band = self._limits.load().limits.entry_sanity_band
         return band.mis_pct if product == "MIS" else band.cnc_pct
 
-    def _ttl(self, style: str, *, entry: bool = False) -> datetime:
+    def _ttl(self, style: str) -> datetime:
         """Platform-stamped ``valid_until`` (§3.2 — the model never emits a time).
 
-        Intraday: ``now + TTL_INTRADAY_MIN`` — a breakout read goes stale in minutes.
+        Intraday: ``now + TTL_INTRADAY_MIN``. Swing/position, including entries: TODAY's session
+        close — the 2026-09-13 next-session entry TTL (WO-V) was withdrawn on 2026-09-23 by owner
+        directive ("trade recommendations should close automatically and free the gate count at the
+        end of the day if no trade decision were made"): an undecided entry rec now expires at the
+        close and frees the gate's pending count that same evening. Evidence: on 2026-09-21/22 four
+        untaken pending entry recs held the CNC ``max_open_positions`` cap of 4 across two sessions,
+        killing 12 of 19 gate verdicts.
 
-        Swing/position ENTRY (``entry=True``; WO-V, 2026-09-13): the close of the NEXT trading
-        session after today, not today's own. Today's close expired the month's only ``ins`` entry
-        (JINDALSTEL, 2026-09-08) unactioned that same afternoon, and an ``ins`` crossing is consumed
-        once, so a day the owner did not look was a lost signal rather than a deferred one.
-
-        Every OTHER swing/position stamp keeps today's close, exactly as before WO-V: an exit or a
-        stop adjust is priced off the position's CURRENT stop and qty, and WO-D2's one-exit-per-
-        session cadence rests on yesterday's exit being dead this morning
-        (:meth:`_delivered_exit_today` screens today's deliveries only) — a shared two-session TTL
-        would leave two live exit recs naming two different stops in front of the owner. The §5.2(a)
-        forward queue keeps it too: that horizon is a within-day one.
-
-        **Accepted costs of the entry extension**, registered rather than discovered:
-
-        * an unactioned entry rec holds its symbol in ``GateContext.pending_rec_symbols`` for up to
-          two sessions instead of one, and EVERY consumer of that set doubles its window with it: the
-          gate's position-count leg, its hard one-position-per-symbol leg, the per-sector counts
-          (``_rule_per_sector_exposure``), the co-movement set (``_rule_co_movement``), and the WO-R
-          brk20 retest re-arm's own ``_pending_entry_rec_symbols`` screen in ``engine.ops.main``;
-        * the rec stays ACTIONABLE across an overnight gap while its ``entry_zone``, ``stop``, ``qty``
-          and every gate verdict behind them — ``entry_sanity_band``, ``per_trade_risk`` on the stop
-          side, ``per_stock_exposure`` / ``capital_cap`` on the notional side — are the PRIOR
-          session's, and nothing re-gates at capture. :meth:`RecommendationBook.take` covers the STOP
-          side only: it says so when the fill's stop distance exceeds what the ``per_trade_risk``
-          verdict approved (the gate's own ``overnight_gap_mult`` × the zone-edge distance) or lands
-          on the wrong side of the stop; the notional side is unwatched at capture.
-
-        Two consumers HAD to change, because a bare time-of-day was unambiguous only while every live
-        rec was same-day: the Telegram listing (``notify.telegram._rec_line`` carries the day on both
-        stamps when delivery and expiry fall on different days) and the dashboard card/fold (the
-        ``valid till`` chip carries the date when it is not today, and a day group holding a live rec
-        starts open instead of reading "no recommendations today"). ``expire_stale`` and the gate's
-        pending screen read the stamped ``valid_until`` off the payload and needed nothing.
-
-        Calendar-aware via the pipeline's ``NSECalendar`` seam (see :meth:`_next_actionable_session`
-        for the muhurat and horizon rules). Past the horizon, or on a day whose own session has
-        already closed, it never mints an ALREADY-DEAD TTL — the gate fails a proposal closed on
-        ``valid_until <= now`` (``_rule_proposal_stale``), so a dead stamp would silently drop a
+        Never mints an ALREADY-DEAD TTL: on a day whose own session has already closed it falls back
+        to ``now + TTL_INTRADAY_MIN`` instead, because the gate fails a proposal closed on
+        ``valid_until <= now`` (``_rule_proposal_stale``) and a dead stamp would silently drop a
         risk-reducing exit the owner should have seen.
         """
         now = self._clock.now()
         if style == "intraday":
             return now + timedelta(minutes=TTL_INTRADAY_MIN)
-        today = self._clock.today()
-        target_day = self._next_actionable_session(today) if entry else today
-        session = self._calendar.session(target_day)
+        session = self._calendar.session(self._clock.today())
         if session is None or session.close <= now:
             return now + timedelta(minutes=TTL_INTRADAY_MIN)
         return session.close
-
-    def _next_actionable_session(self, today: date) -> date:
-        """The next trading day the owner could realistically place the order in (WO-V).
-
-        A muhurat special session is walked past: it is ~1h on a weekend evening, and this calendar
-        carries its times as an unverified placeholder, so stamping an entry to it would hand the
-        owner a "second session" they cannot use and kill the rec before the following morning
-        (2026-11-06 ⇒ Monday 2026-11-09, not the Sunday muhurat). Shortened sessions are real
-        sessions and are kept.
-
-        Answers ``today`` when the calendar has no KNOWN next session — past its verified horizon
-        (R6) the honest answer is not a guessed date — which :meth:`_ttl` then treats exactly as it
-        did before WO-V. Logged at WARNING, like ``main._session_open_ist``'s own unresolved case: a
-        horizon crossing silently shortens every entry TTL otherwise.
-        """
-        probe = today
-        for _ in range(4):                 # bounded: muhurat days never fall on consecutive dates
-            try:
-                probe = self._calendar.next_trading_day(probe)
-            except ValueError:
-                _log.warning("next_trading_session_unresolved", day=today.isoformat(),
-                             note="no known next session past the calendar horizon (R6) — entry "
-                                  "TTL falls back to today's close")
-                return today
-            session = self._calendar.session(probe)
-            if session is None or not session.is_muhurat:
-                return probe
-        return today
 
     def _window(self, d: date) -> tuple[datetime, datetime] | None:
         try:

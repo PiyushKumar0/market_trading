@@ -856,76 +856,40 @@ def _horizon_calendar(tmp_path: Path, pclock: Clock, conn) -> NSECalendar:
     return NSECalendar(tmp_path, pclock, sqlite_conn=conn)
 
 
-async def test_ttl_swing_entry_is_the_next_trading_session_close_across_a_weekend(
+async def test_ttl_intraday_is_now_plus_ttl_minutes(
     conn, pclock, ticker, calendar, book, limit_table, cost_model
 ):
-    """WO-V (2026-09-13): a swing/position ENTRY rec used to die at today's 15:30 -- the month's only
-    ins entry (JINDALSTEL, 2026-09-08) expired unactioned that same afternoon, and an ins crossing is
-    consumed once. _ttl(entry=True) now names the close of the NEXT trading session, using the real
-    config/calendar data the pipeline is wired to: Friday 2026-06-19 to Monday 2026-06-22, the
-    weekend skipped."""
-    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
-    ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
-    assert pipeline._ttl("swing", entry=True) == datetime(2026, 6, 22, 15, 30, tzinfo=IST)
-
-
-async def test_ttl_swing_entry_is_the_next_trading_session_close_across_a_holiday(
-    conn, pclock, ticker, calendar, book, limit_table, cost_model
-):
-    """Same rule, a holiday instead of a weekend: Monday 2026-03-02 to Wednesday 2026-03-04, with
-    Tuesday 2026-03-03 (Holi, config/calendar/2026.yaml) skipped."""
-    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
-    ticker.at = datetime(2026, 3, 2, 10, 5, tzinfo=IST)               # Monday, a trading day
-    assert pipeline._ttl("swing", entry=True) == datetime(2026, 3, 4, 15, 30, tzinfo=IST)
-
-
-async def test_ttl_position_entry_gets_the_same_next_session_close_as_swing(
-    conn, pclock, ticker, calendar, book, limit_table, cost_model
-):
-    """"position" is treated identically to "swing" in _ttl -- both are simply "not intraday"."""
-    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
-    ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
-    assert pipeline._ttl("position", entry=True) == datetime(2026, 6, 22, 15, 30, tzinfo=IST)
-
-
-async def test_ttl_entry_walks_past_a_muhurat_special_session(
-    conn, pclock, ticker, calendar, book, limit_table, cost_model
-):
-    """The "next trading session" the owner can actually act in. NSECalendar counts the Diwali
-    muhurat as a trading day (it is one), so the raw next session after Friday 2026-11-06 is the
-    SUNDAY special session, ~1h long and carried in config/calendar/2026.yaml as an unverified
-    placeholder time -- an entry stamped to it would be dead before Monday opened, which is the one
-    Friday a year where WO-V's second session is worth the most. The probes below pin the calendar
-    fact the rule is reacting to, so this test says why it exists if the calendar ever changes."""
-    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
-    assert calendar.next_trading_day(date(2026, 11, 6)) == date(2026, 11, 8)
-    assert calendar.session(date(2026, 11, 8)).is_muhurat
-
-    ticker.at = datetime(2026, 11, 6, 10, 5, tzinfo=IST)              # Friday, a trading day
-    assert pipeline._ttl("swing", entry=True) == datetime(2026, 11, 9, 15, 30, tzinfo=IST)
-
-
-async def test_ttl_intraday_is_unchanged_by_the_next_session_rule(
-    conn, pclock, ticker, calendar, book, limit_table, cost_model
-):
-    """WO-V touches only swing/position. An intraday entry still expires TTL_INTRADAY_MIN minutes out
-    even when minted five minutes before a Friday close, where a next-session lookup would otherwise
-    put valid_until three days out."""
+    """Intraday is the only style _ttl treats specially: TTL_INTRADAY_MIN minutes from now, even five
+    minutes before a Friday close where the swing/position branch would otherwise land on today's own
+    15:30."""
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 6, 19, 15, 25, tzinfo=IST)             # 5 minutes before Friday close
-    assert pipeline._ttl("intraday", entry=True) == ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
     assert pipeline._ttl("intraday") == ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
 
 
-async def test_ttl_without_entry_keeps_todays_close_for_exits_and_the_forward_queue(
+async def test_ttl_swing_and_position_are_todays_close(
     conn, pclock, ticker, calendar, book, limit_table, cost_model
 ):
-    """WO-V is scoped to ENTRY recommendations, and _ttl is keyed on style, so the scope lives in the
-    ``entry=`` flag: an exit, a stop adjust and the §5.2(a) forward-queue horizon all keep TODAY's
-    close. WO-D2's one-exit-per-session cadence depends on it (``_delivered_exit_today`` screens
-    today's deliveries only), and the forward queue is a within-day structure."""
+    """_ttl is keyed on style alone: an entry, an exit, a stop adjust and the §5.2(a) forward-queue
+    horizon all keep TODAY's close. WO-D2's one-exit-per-session cadence depends on it
+    (``_delivered_exit_today`` screens today's deliveries only), and the forward queue is a
+    within-day structure."""
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
+    assert pipeline._ttl("swing") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
+    assert pipeline._ttl("position") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
+
+
+async def test_ttl_entry_expires_the_same_session_per_2026_09_23_owner_directive(
+    conn, pclock, ticker, calendar, book, limit_table, cost_model
+):
+    """2026-09-23 owner directive: "trade recommendations should close automatically and free the
+    gate count at the end of the day if no trade decision were made." This withdraws the 2026-09-13
+    (WO-V) next-session entry TTL -- on 2026-09-21/22 four untaken pending entry recs held the CNC
+    ``max_open_positions`` cap of 4 across two sessions, killing 12 of 19 gate verdicts. An entry's
+    TTL is TODAY's session close, the same as every other swing/position stamp."""
+    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    ticker.at = datetime(2026, 6, 19, 10, 20, tzinfo=IST)             # Friday, a trading day
     assert pipeline._ttl("swing") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
     assert pipeline._ttl("position") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
 
@@ -950,38 +914,18 @@ async def test_a_swing_exit_recommendation_is_still_stamped_to_todays_close(
     assert payload["valid_until"] == datetime(2026, 6, 19, 15, 30, tzinfo=IST).isoformat()
 
 
-async def test_ttl_entry_falls_back_to_todays_close_past_the_calendar_horizon(
-    conn, pclock, ticker, book, limit_table, cost_model, tmp_path, caplog
-):
-    """Past the loaded calendar's verified horizon (R6) there is no KNOWN next session, so the entry
-    TTL degrades to the one session the calendar can still vouch for -- and says so, because a
-    silent degradation makes every swing entry one session shorter with nothing in the log."""
-    calendar = _horizon_calendar(tmp_path, pclock, conn)
-    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
-    ticker.at = datetime(2026, 12, 31, 10, 5, tzinfo=IST)             # last day this calendar knows
-    with pytest.raises(ValueError):
-        calendar.next_trading_day(date(2026, 12, 31))
-
-    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
-        assert pipeline._ttl("swing", entry=True) == datetime(2026, 12, 31, 15, 30, tzinfo=IST)
-
-    assert len(log_events(caplog, "next_trading_session_unresolved")) == 1
-
-
 async def test_ttl_never_mints_an_already_dead_stamp(
     conn, pclock, ticker, book, limit_table, cost_model, tmp_path
 ):
-    """The floor WO-V must not cost. ``on_bar`` is never window-gated, so a stop-proximity event in
-    the 15:30-15:45 settlement buffer reaches _ttl after the close -- and on the horizon day the
-    entry branch lands on TODAY's session too. A ``valid_until`` at or before now is rejected by the
-    gate's own envelope check (``_rule_proposal_stale``, "expired/unstamped proposal - fail
-    closed"), so a dead stamp would silently swallow a risk-reducing exit the owner should have
-    seen; both branches fall back to the intraday TTL instead."""
+    """``on_bar`` is never window-gated, so a stop-proximity event in the 15:30-15:45 settlement
+    buffer can reach _ttl after today's close has already passed. A ``valid_until`` at or before now
+    is rejected by the gate's own envelope check (``_rule_proposal_stale``, "expired/unstamped
+    proposal - fail closed"), so a dead stamp would silently swallow a risk-reducing exit the owner
+    should have seen; _ttl falls back to the intraday TTL instead."""
     calendar = _horizon_calendar(tmp_path, pclock, conn)
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 12, 31, 15, 40, tzinfo=IST)            # past the 15:30 close
     floor = ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
-    assert pipeline._ttl("swing", entry=True) == floor
     assert pipeline._ttl("swing") == floor
 
 
@@ -1267,9 +1211,10 @@ async def test_an_expired_recommendation_still_accepts_the_owners_taken(
 async def test_a_gapped_fill_is_recorded_and_the_stop_risk_drift_is_called_out(
     conn, ticker, pclock, book, cost_model, caplog
 ):
-    """WO-V's second accepted cost, made visible where it lands — and judged on the gate's OWN basis
-    (re-review 2026-09-13). A swing entry rec stays actionable into the NEXT session and nothing
-    re-gates at capture: the position row is written with the RECOMMENDATION's stop. But the gate
+    """The overnight-gap drift check, made visible where it lands — and judged on the gate's OWN
+    basis (re-review 2026-09-13). ``take`` never gates on ``valid_until`` (a swing rec can be
+    confirmed the morning after its TTL expired at yesterday's close), and nothing re-gates at
+    capture: the position row is written with the RECOMMENDATION's stop. But the gate
     sized that swing on overnight_gap_mult x the stop distance (_rule_per_trade_risk), so a fill
     anywhere inside that allowance carries stop risk the per_trade_risk verdict ALREADY approved and
     is silent; the call-out fires only once the approved budget is genuinely exceeded. The fill is
