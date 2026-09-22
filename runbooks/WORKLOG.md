@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-23 (owner: "Trade recommendations should close automatically and free the gate count at the end of the day if no trade decision were made") — entry TTL back to today's close, WO-V withdrawn (b7d174d); engine restarted 01:33 IST, boot verified
+
+- **Status check first (owner: "today's trade has been completed, check status", 09-22 session).**
+  Fixes from 09-21 verified live: 8 LIMIT proposals priced from the scanner level over two sessions
+  (`enter_limit_price_defaulted`: EIHOTEL, BEML, MOTHERSON, DALBHARAT, PFOCUS, YESBANK, USHAMART,
+  PVRINOX), 0 sector/UNCLASSIFIED rejects in 19 verdicts, digest before the window on 09-21 (03:14 vs
+  09:30) and 09-22 (09:58 vs 10:05; boot 09:43 after the token expired at 09:41 ahead of the owner's
+  login). Delivered: SYRMA, KPIL, SPLPETRO (09-21), PFOCUS (09-22); owner took none. Dominant reject
+  became `max_open_positions` (12 of 19): the gate counts unexpired unactioned entry recs as open, the
+  CNC cap is 4, and WO-V's two-session validity kept the prior day's four untaken recs pending
+  ("total 0+4 pending+1 = 5 … CNC <= 4"). Health: five forced stops in two days, `store_stalled`
+  ×5, `boot_seed_timeout` on the 09-22 09:43 boot, an 85-line Kite connectivity burst 09-21 09:55.
+- **Change (b7d174d; Sonnet build under my spec, audited; stale comments fixed by me).**
+  `RecommendationPipeline._ttl`: swing/position = TODAY's session close for every kind including
+  entries; the `entry` switch and `_next_actionable_session` (muhurat walk, horizon fallback) removed;
+  the never-dead-stamp floor kept. `expire_stale` (15:45) and the gate's pending screen read the
+  stamped `valid_until` and needed nothing; Telegram/dashboard date-aware rendering and
+  `RecommendationBook.take`'s overnight drift check stay (generic). Tests: five WO-V TTL cases
+  deleted, three adapted, one added. Plan: the WO-V paragraph carries the dated withdrawal, with the
+  accepted loss named (a consumed-once `ins` signal the owner did not look at that day).
+- **Validation.** `tests/unit` 3074 passed + 1 failed on a 13-minute loaded run —
+  `test_single_instance…kernel_releases`, a subprocess-spawn test; passes alone in 73 s (flaky under
+  load, unrelated). ruff clean. Restart 01:32 (idle; stop clean in 4 s this time), `engine_boot`
+  01:33:08, token valid, selftest 01:33:50, `daily_gap_done` 01:35:30, `catch_up_complete` 01:37:47,
+  `engine_ready` **01:37:57**. Boot hydration for 09-23 runs behind the post-arm one-shot as on 09-21.
+- **Effect from today:** PFOCUS (stamped 09-22, valid to 09-23 15:30) is the last two-session rec;
+  every entry rec delivered from now on expires at 15:30 and frees its CNC slot the same evening.
+
 ## 2026-09-21 (owner: "Start working on the recommended fixes. Validate them … do not over-optimise"; pre-open keep-awake explicitly excluded) — boot-time early hydration, LIMIT price default, sector-map industry fallback (ccea311); engine restarted 02:38 IST, boot verified, boot hydration observed live
 
 - **Fix 1 — early hydration also fires at boot (`EarlyHydration.on_boot`).** Evidence 09-16: engine
