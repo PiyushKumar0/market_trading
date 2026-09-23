@@ -1,5 +1,51 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 04:3x — G2 criterion 8: watchlist-precision review, two weekly samples (performed by Claude on owner request "Can't you perform this check on your own?"; OWNER ADOPTION PENDING — the plan names the owner as reviewer)
+
+Source: every `catalyst_watchlist` row with grade `originating` since 09-07, joined to its `news_clusters` headlines
+(read-only DuckDB while the engine was stopped by the owner at 04:06). Question per event: is this a genuine,
+company-specific, material catalyst for THIS symbol? Size calls use my approximate knowledge of company scale
+(not checked against filings). Week of 09-14..09-18 produced ZERO originating rows (the digest ran daily,
+159–226 context rows), so it cannot serve as a sample.
+
+**Week 1 — 09-07..09-11: 9 rows, 5 distinct events → 2/5 events clearly valid (40%; 4/9 rows).**
+- ✅ CEIGALL (09-07, 09-08) — ₹5,300 cr REC power-transmission LoI, larger than a year's revenue.
+- ✅ ADANIENT (09-09, 09-10) — Adani Airports raises $1 bn primary equity (BlackRock, Temasek); stock +6%.
+- ⚠ IIFL (09-08, 09-09) — "Blackstone eyes up to 20%", "Fairfax may exit": unconfirmed sources report,
+  and the direction is ambiguous (an exit is an overhang).
+- ❌ ADANIPOWER (09-08) — LoI for GVK's 330 MW hydro plant: small next to the company's fleet. The NSE-filing
+  cluster scored 0.85 on its wording ("Successful Resolution Applicant"); the press cluster scored 0.4.
+- ❌ PFIZER (09-08, 09-09) — WRONG COMPANY: the seller is Pfizer **Inc** (US parent); the buyer Novartis India
+  (NOVARTIND, `not_in_index`) is who the deal matters to. Resolver alias `pfizer` → PFIZER; direction "long" unsupported.
+
+**Week 2 — 09-21..09-24: 10 rows, 8 distinct events → 6/8 events clearly valid (75%; 8/10 rows).**
+- ✅ BEML (09-21) — ₹5,400 cr NHSRCL high-speed-rail order.
+- ✅ ENGINERSIN (09-23, 09-24) — ₹4,300 cr Dangote Kenya refinery contract. One of its five clusters is spurious
+  (see resolver finding 1) but the row stands.
+- ✅ PERSISTENT (09-23, 09-24) — Nagarro takeover successful, 83.25% stake (transformational acquisition).
+- ✅ BDL (09-24) — ₹811 cr MoD contract.
+- ✅ OSWALPUMPS (09-24) — ₹273–297 cr Telangana rooftop-solar order.
+- ✅ SKIPPER (09-24) — ₹797 cr T&D orders.
+- ⚠ EUROPRATIK (09-24) — 56% controlling stake in Fabwood Solutions; no deal size in any headline, so
+  materiality cannot be judged.
+- ❌ DALBHARAT (09-22) — WRONG COMPANY: the filings are Himadri's (`[NSE:HSCL]`) scheme with Dalmia Bharat
+  **Refractories**; alias `dalmia bharat` → DALBHARAT matched the prefix of the other company's name.
+
+**Verdict:** precision 40% → 75% week-on-week. Every miss is one of three kinds, and all but one are upstream of
+the model:
+1. **Resolver: generic seeded alias.** `engineers` → ENGINERSIN (seed) attached a GPTINFRA filing ("Alcon
+   Builders **and Engineers** … L1 in ₹21 cr order") to ENGINERSIN.
+2. **Resolver: wrong group or parent entity.** `dalmia bharat` (DALBHARAT) matched "Dalmia Bharat
+   Refractories". `pfizer` (PFIZER) matched "Pfizer Inc".
+3. **Model: over-scoring filing wording.** Exchange-filing wording scored as company-transforming regardless
+   of relative size (ADANIPOWER).
+
+Owner: adopt this as the two G2 weekly samples, or re-judge any row. Candidate fixes (none applied):
+- stoplist the generic stripped alias `engineers`;
+- curate the longer names (`dalmia bharat refractories`, `pfizer inc`) onto non-tradeable entries, so span
+  subsumption refuses them instead of attaching them to the cement or India-listed company;
+- in the news-analyst rubric, score materiality relative to company size.
+
 ## 2026-09-24 early morning (owner: "Proceed with the suggested changes. Validate them") — CD-3 + CD-5 fixed (47af14c); O17 applied by owner (e148a4e); first clean stop since 09-02; engine restarted 03:39, ready 03:40:39
 
 - **Owner steps observed.** O17 combined patch applied + reseeded ~03:04 (selftest
