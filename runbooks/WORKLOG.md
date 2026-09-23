@@ -1,5 +1,34 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 early morning (owner: "Proceed with the suggested changes. Validate them") — CD-3 + CD-5 fixed (47af14c); O17 applied by owner (e148a4e); first clean stop since 09-02; engine restarted 03:39, ready 03:40:39
+
+- **Owner steps observed.** O17 combined patch applied + reseeded ~03:04 (selftest
+  `protected_store:limits.yaml` PASS); the working tree matched the patch exactly
+  (`git apply --reverse --check` clean) and was committed as e148a4e. NSSM `AppStopMethodConsole`
+  = 30000; the owner's 03:03 stop was still cut at +1.31 s because NSSM reads it at service start.
+- **CD-3 (chaos case 16).** Safety-critical catch-up only checked TODAY's fire-time, so a missed
+  18:30 `earnings_calendar` run was never replayed (live: no run recorded for 09-22) and an evening
+  failure held FROZEN through the next session. `CatchUpRunner._governing_day`: verify the latest
+  fire at or before the next entries-open moment — the previous evening's for an EOD job; a pre-open
+  job (instruments 08:15) stays with the scheduler, so pre-login/weekend boots never re-run and page.
+  Freeze-notify dedup keyed (job, run_for), pruned by age (two jobs failing for different governing
+  days would otherwise re-alert every sweep). Behaviour note: an NSE event-calendar outage now
+  freezes entries until a 30-min retry succeeds — the plan's safety-critical rule, previously
+  unenforced for this job in the morning.
+- **CD-5 (chaos case 21).** Model entity strings reached the resolver unchecked. Measured first on
+  26,133 live entities (1,371 calls): 99.2% verbatim once HTML-unescaped — without unescaping,
+  `L&amp;T`/`M&amp;M` headlines would have lost L&T/M&M; the rest are macro terms plus entities
+  attached to the WRONG cluster of a batch (KKR on "SBI Q1 Preview"). `_write_back` now drops strings
+  not found whole-word in the headline the model was shown (logged `news_entities_not_in_headline`).
+  Accepted loss: expansions like "Vi" → Vodafone Idea (contract is verbatim; §5.5 alias loop).
+- **Validation.** New tests seen failing on the old code (4 catch-up cases; 3 injection variants),
+  passing now. Unit+property+replay 1349 + 1777 passed; chaos 59 passed / 21 skipped / 5 xfailed
+  (CD-1/2/4/6/7 still pinned); ruff clean. Plan §2.6 step 5 and §2.7 step 3: one clause each.
+- **Deploy + live drill (case 15) PASS.** Stop 03:39:53 → backup + `shutdown` 03:39:59, STOPPED,
+  `last_clean_stop_at` 03:39:59 (first since 09-02) → `engine_ready` 03:40:39, `crash_recovered:
+  false`, NORMAL; boot verified Wed's earnings watermark (no re-run) and left Thu's 08:15 instruments
+  to the scheduler.
+
 ## 2026-09-23 evening (owner: "implement the suggested fix [stop handler]. Also implement Failure drills … and New position caps (O17)") — stop-signal grace (f4667f3), NSSM stop-grace config (bb5fe12), chaos suite + CHAOS_DRILLS.md (a4ab744), O17 combined patch prepared; engine restarted twice, running since 21:33
 
 - **G2 re-measured 20:00 (`scripts/g2_evidence.py`, 40 sessions):** still NOT met — C1 digest-before-window
