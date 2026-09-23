@@ -1,5 +1,21 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 04:4x — revenue/profit sources probed (owner: "Is there a way to obtain revenue and profit records?"); results-filings feed found starved
+
+- **Real figures are obtainable (probed live, read-only):**
+  - the XBRL links already stored in `results_filings` (tags `RevenueFromOperations`,
+    `ProfitLossForPeriod`, in ₹);
+  - NSE `results-comparision?symbol=` (in ₹ lakh).
+  Both give BDL Q3 FY25 revenue ₹832.1 cr and PAT ₹147.1 cr, and the two agree exactly.
+- **Both stop at the Dec-2024 quarter.** Current results are filed as "Integrated Filing- Financial" (our
+  news store: TEMPSENS, quarter ended 30-Jun-2026). The endpoint for that format is not identified yet.
+- **The `filings_results` job starves silently:**
+  - it records success daily, but has written 5 rows since the July seed;
+  - max `period_end` is 2024-12-31, and `revenue`/`pat` are NULL in every row (§2.8.4 stage 2 unbuilt);
+  - its own query for 01-08..23-09-2026 returns 3 old-period rows.
+- **Consequence:** the News Analyst's materiality rubric ("order ≥10% of annual revenue") has no revenue
+  input, so its scores rest on model memory. Nothing fixed yet; it needs the owner's decision.
+
 ## 2026-09-24 04:3x — G2 criterion 8: watchlist-precision review, two weekly samples (performed by Claude on owner request "Can't you perform this check on your own?"; OWNER ADOPTION PENDING — the plan names the owner as reviewer)
 
 Source: every `catalyst_watchlist` row with grade `originating` since 09-07, joined to its `news_clusters` headlines
