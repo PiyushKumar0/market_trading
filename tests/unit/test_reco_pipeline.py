@@ -830,7 +830,14 @@ async def test_swing_max_qty_charges_the_overnight_gap_mult_like_the_gate(
     )
     assert pipeline._max_qty_by_risk(swing) == expected_swing
     assert pipeline._max_qty_by_risk(intraday) == expected_intraday
-    assert gap > 1 and expected_swing < expected_intraday
+    # Non-vacuous: the gap IS charged — the swing quote sits strictly below the same swing budget
+    # over the RAW stop distance (the 08-26 bug's number). Deliberately not compared with the
+    # intraday quote: that ordering held only while swing_pct/gap (2%/2.5) < intraday_pct (1%); at
+    # O17's 2.0x the two coincide (2%/2.0 == 1%), so equal quotes there prove nothing either way.
+    ungapped_swing = int(
+        (Decimal(str(ptr.swing_position_pct)) / 100 * equity) / (entry - stop)
+    )
+    assert gap > 1 and expected_swing < ungapped_swing
 
 
 def _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model):

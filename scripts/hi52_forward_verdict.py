@@ -151,11 +151,11 @@ DIAGNOSTIC_HORIZONS: tuple[int, ...] = tuple(k for k in HORIZONS if k != VERDICT
 MIN_SIGNALS = 20
 
 #: §7.1 ``per_trade_risk`` inputs of the notional derivation, as ``config/limits.yaml`` carries them
-#: on 2026-09-12. FALLBACKS only: :func:`load_sizing_limits` reads the live file, so an owner change
+#: after O17. FALLBACKS only: :func:`load_sizing_limits` reads the live file, so an owner change
 #: to either number moves this script's cost floor without a code edit; these values are what it
 #: charges when that file cannot be read (a report never fails on a missing input, it states it).
 SWING_POSITION_PCT = Decimal("2.0")
-OVERNIGHT_GAP_MULT = Decimal("2.5")
+OVERNIGHT_GAP_MULT = Decimal("2.0")
 
 #: Equity the notional is derived at when ``state.db`` shows no usable snapshot in the window — the
 #: live reading at the promotion (``equity_snapshots``, 2026-09-11 13:00 IST). Overridable with
@@ -236,11 +236,11 @@ def registered_edge_pct(limits_path: Path | None = None) -> Decimal:
     The equity is the **``equity_floor_rung``**, not today's book: ``capital_base_inr`` × (1 +
     ``equity_pct_of_base``/100) = ₹36,000, the smallest equity the risk table lets a new position be
     opened at. A registered edge is a constant in a protected config file, read on every candidate
-    for months; the cost floor it must clear RISES as the book shrinks (₹5,333 ⇒ 0.5303% at the
-    ₹40,000 base, ₹5,234 ⇒ 0.5357% at the 09-11 equity, ₹4,800 ⇒ 0.5619% at the rung). Deriving it
-    at the largest permitted book would register the edge that flatters the rule at exactly the
-    moment the book is smallest — the drawdown — so it is derived at the worst one instead:
-    2.0336 − 0.5619 = 1.4717 ⇒ **1.47**.
+    for months; the cost floor it must clear RISES as the book shrinks. Deriving it at the largest
+    permitted book would register the edge that flatters the rule at exactly the moment the book is
+    smallest — the drawdown — so it is derived at the worst one instead. Under O17 (2.0× gap mult):
+    ₹6,000 ⇒ 0.4982% at the rung, 2.0336 − 0.4982 = 1.5354 ⇒ **1.53** (pre-O17 at 2.5×: ₹4,800 ⇒
+    0.5619%, 1.47).
 
     This function IS the derivation; ``settings.yaml`` carries only its output, and
     ``tests/unit/test_hi52_forward_verdict.py`` pins the two together so they cannot drift apart.

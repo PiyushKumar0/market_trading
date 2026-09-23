@@ -233,13 +233,18 @@ filings:
 #   * The survivorship / index-membership bound is uncorrectable with stored data.
 ins:
   stop_pct: 5.0                # DISASTER stop, a deliberate deviation from the stopless validated
-                               # design: §7.1 sizing needs a risk distance, so one must exist. Set to
-                               # the WIDEST economically viable point (corrected 2026-08-17): the
-                               # §7.1 overnight_gap_mult (2.5×) charges every swing unit 2.5× its
-                               # stop distance, so notional ≈ ₹400/(2.5×stop%) and the DP flat charge
-                               # makes WIDER stops WORSE — measured edge multiples: 4%→2.52× PASS,
-                               # 5%→2.19× PASS, 6%→1.90× REJECT. Only [4-5] of the future [4-8]
-                               # envelope range is viable at current capital/costs (plan §6.1).
+                               # design: §7.1 sizing needs a risk distance, so one must exist. Set
+                               # 2026-08-17 to the then-WIDEST economically viable point: the §7.1
+                               # overnight_gap_mult charges every swing unit 2.0× its stop distance
+                               # (O17; 2.5× when set), so at the ₹20,000 equity these were measured
+                               # on notional ≈ ₹400/(2.0×stop%) (₹400/(2.5×stop%)), and the DP flat
+                               # charge makes WIDER stops WORSE — measured edge multiples (real gate
+                               # + CostModel, ins edge 1.58): 4%→2.88× PASS (2.52×), 5%→2.52× PASS
+                               # (2.19×), 6%→2.23× PASS (1.90× REJECT), 7%→1.9991× REJECT (1.68×),
+                               # 8%→1.84× REJECT (1.57×). So [4-6] of the future [4-8] envelope
+                               # range is viable at that capital ([4-5] pre-O17); at the ₹40,000
+                               # base (O16) all of [4-8] clears. O17 did not change this value —
+                               # re-choosing it is a separate owner decision (plan §6.1).
   hold_sessions: 20            # = the §7.1 max_holding swing cap (limits.yaml swing_trading_days: 20)
                                # = exactly the validated T+20 horizon, so the EXISTING max-holding
                                # machinery IS the exit path. No new exit code exists for `ins`.
@@ -261,7 +266,7 @@ ins:
 # verdict). The rule's own parameters (incl. v2's smooth/gap thresholds) live in
 # hi52.DEFAULT_PARAMS where the 09-09 pre-registration froze them — only the edge is config.
 hi52:
-  expected_edge_pct: 1.47      # the C3 edge basis for a targetless proposal, the `ins` seam. NOT a
+  expected_edge_pct: 1.53      # the C3 edge basis for a targetless proposal, the `ins` seam. NOT a
                                # net-drift transcription: DERIVED, and by ONE formula that lives in
                                # code — scripts/hi52_forward_verdict.py `registered_edge_pct()`,
                                # which a unit test pins against THIS key, so the two cannot drift.
@@ -271,15 +276,16 @@ hi52:
                                # GROSS = +2.0336% (v2 discrete run 2026-09-09, n=1,794 —
                                # data/reports/backtest_hi52_v2_2026-09-09.json, geometry block).
                                # N is not chosen, it is implied by §7.1 sizing: a swing position is
-                               # capped at 2.0% of equity charged at 2.5x the stop distance, and
-                               # hi52's stop is 6%, so N <= equity x 2% / (2.5 x 6%) = equity/7.5 —
-                               # Rs 5,333 at the Rs 40,000 base, Rs 5,234 at the 2026-09-11 equity
-                               # Rs 39,256.65, Rs 4,800 at the equity_floor_rung (Rs 36,000, the
+                               # capped at 2.0% of equity charged at 2.0x the stop distance (O17;
+                               # 2.5x before it), and hi52's stop is 6%, so
+                               # N <= equity x 2% / (2.0 x 6%) = equity/6 — Rs 6,000 at the
+                               # equity_floor_rung (Rs 36,000, the
                                # SMALLEST equity the risk table still lets a position be opened at:
                                # below it the platform goes flat + CLOSE_ONLY). The floor RISES as
-                               # the book shrinks (0.5303% / 0.5357% / 0.5619%), and this key is a
+                               # the book shrinks, and this key is a
                                # constant read for months, so it is derived at the WORST permitted
-                               # book rather than at today's: 2.0336 - 0.5619 = 1.4717 => 1.47,
+                               # book rather than at today's: 2.0336 - 0.4982 = 1.5354 => 1.53
+                               # (pre-O17 at 2.5x: Rs 4,800, 2.0336 - 0.5619 = 1.4717 => 1.47),
                                # ROUNDED DOWN (rounding an edge up is the one direction that buys a
                                # candidate a C3 pass it did not earn). Deliberately NOT the
                                # backtest's own +1.71% net: it charged 0.3192% at a Rs 20,000

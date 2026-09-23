@@ -344,13 +344,13 @@ def test_the_registered_edge_is_this_script_s_derivation():
     from engine.core.config import load_settings
 
     derived = fv.registered_edge_pct()
-    assert derived == Decimal("1.47")
+    assert derived == Decimal("1.53")                                   # O17: 2.0x gap mult
     assert Decimal(str(load_settings().hi52.expected_edge_pct)) == derived
     # …and it IS gross-minus-floor, rounded DOWN: rounding an edge UP is the one direction that can
     # buy a candidate a C3 pass it did not earn.
-    floor = fv.cost_floor_pct(Decimal("4800"))
-    assert floor == pytest.approx(Decimal("0.561875"), abs=Decimal("1e-6"))
-    assert fv.MEASURED_T20_MEDIAN_GROSS_PCT - floor > derived          # 1.4717 -> 1.47
+    floor = fv.cost_floor_pct(Decimal("6000"))                          # Rs 36,000 x 2% / (2.0 x 6%)
+    assert floor == pytest.approx(Decimal("0.498167"), abs=Decimal("1e-6"))
+    assert fv.MEASURED_T20_MEDIAN_GROSS_PCT - floor > derived          # 1.5354 -> 1.53
     assert fv.MEASURED_T20_MEDIAN_GROSS_PCT - floor - derived < Decimal("0.01")
 
 
@@ -387,7 +387,8 @@ def test_the_notional_override_is_shouted_not_whispered(tmp_path):
     # …and the derived path says nothing of the sort, and names the equity it used.
     cost2, sizing2 = fv.resolve_cost_floor(
         limits_path=_LIMITS, equity_override=Decimal("36000"), min_equity=None)
-    assert sizing2["override"] is False and Decimal(sizing2["notional_inr"]) == Decimal("4800")
+    # Rs 36,000 x 2% / (2.0 x 6%) = Rs 6,000 (O17; Rs 4,800 at the pre-O17 2.5x)
+    assert sizing2["override"] is False and Decimal(sizing2["notional_inr"]) == Decimal("6000")
     assert cost2 > cost                                   # the real floor is HIGHER than ₹8,000's
     assert "[OVERRIDE]" not in fv.render(_report(*_population(20, t20_close=103.0)))
 

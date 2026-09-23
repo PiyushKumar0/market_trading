@@ -3090,8 +3090,10 @@ def test_the_hi52_promotion_is_one_state_in_both_of_its_halves() -> None:
     live = load_settings()
     assert live.hi52.expected_edge_pct is not None
     # …asserted on the MAP the composition root actually hands the gate, not on a source string.
+    # hi52 1.53 = registered_edge_pct() under O17's 2.0x gap mult (1.47 at 2.5x) — the derivation is
+    # pinned in tests/unit/test_hi52_forward_verdict.py; this pins the WIRING of its output.
     assert _strategy_expected_edge_pct(live) == {
-        ins.STRATEGY_ID: Decimal("1.58"), hi52.STRATEGY_ID: Decimal("1.47"),
+        ins.STRATEGY_ID: Decimal("1.58"), hi52.STRATEGY_ID: Decimal("1.53"),
     }
     # …while the shadows it left behind stay shadows.
     assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal"}

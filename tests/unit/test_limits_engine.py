@@ -51,7 +51,7 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.capital_cap.on_breach == "reject_entry"
     assert table.limits.per_trade_risk.intraday_pct == 1.0
     assert table.limits.per_trade_risk.swing_position_pct == 2.0
-    assert table.limits.per_trade_risk.overnight_gap_mult == 2.5
+    assert table.limits.per_trade_risk.overnight_gap_mult == 2.0   # O17
     assert table.limits.daily_loss_soft.day_mtm_pct == -5.0
     assert table.limits.daily_loss_hard.day_mtm_pct == -7.0
     assert table.limits.weekly_drawdown.rolling_sessions == 5
@@ -65,7 +65,7 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.max_open_positions.max_mis == 2
     assert table.limits.max_open_positions.max_cnc == 4
     assert table.limits.per_stock_exposure.max_positions_per_symbol == 1
-    assert table.limits.per_stock_exposure.cnc_notional_inr == Decimal("8000")
+    assert table.limits.per_stock_exposure.cnc_notional_inr == Decimal("12000")   # O17
     assert table.limits.per_sector_exposure.max_positions_per_sector == 2
     assert table.limits.per_sector_exposure.unclassified_cap == 1
     assert table.limits.co_movement_cap.corr_max == 0.7

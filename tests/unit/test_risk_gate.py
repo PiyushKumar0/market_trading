@@ -219,7 +219,8 @@ SHRUNK_BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 3, "MIS", Decim
 #: A real §6.1 `ins` proposal (2026-08-17): CNC swing, long-only, entry on the pre-open reference,
 #: stop a flat 6% below it, and NO target — the exit is the §7.1 20-td time cap. qty 66 is what the
 #: shipped table actually allows: 2% swing risk on ₹20,000 = ₹400 budget / a ₹6 stop distance = 66
-#: units (₹6,600 notional, inside the ₹8,000/symbol CNC cap) — the plan's "≈ ₹6.7k notional" sizing.
+#: units (₹6,600 notional, inside the ₹12,000/symbol CNC cap — ₹8,000 before O17) — the plan's
+#: "≈ ₹6.7k notional" sizing.
 INS_ACTION: dict[str, Any] = {
     "style": "swing",
     "entry_type": "LIMIT",
@@ -370,10 +371,12 @@ CASES: tuple[Case, ...] = (
          ctx={"open_symbols": frozenset({SYMBOL})}),
     Case("per_stock_exposure", "pending rec in the symbol", "fail", False,
          ctx={"pending_rec_symbols": frozenset({SYMBOL})}),
+    # O17 2026-09-23: cnc_notional_inr 8000 -> 12000, so both existing-notional literals move +4000
+    # to keep sitting on / Rs500 over the cap with the baseline Rs1,000 ask (11000 + 1000 = 12000).
     Case("per_stock_exposure", "CNC notional exactly on the cap", "boundary", True, act=CNC,
-         ctx={"per_symbol_cnc_notional": {SYMBOL: Decimal("7000")}}),
+         ctx={"per_symbol_cnc_notional": {SYMBOL: Decimal("11000")}}),
     Case("per_stock_exposure", "CNC notional over the cap", "fail", False, act=CNC,
-         ctx={"per_symbol_cnc_notional": {SYMBOL: Decimal("7500")}}),
+         ctx={"per_symbol_cnc_notional": {SYMBOL: Decimal("11500")}}),
     Case("per_sector_exposure", "sector empty", "pass", True),
     Case("per_sector_exposure", "sector cap reached", "fail", False,
          ctx={"open_sector_counts": {"ENERGY": 2}}),
@@ -442,12 +445,12 @@ CASES: tuple[Case, ...] = (
          "fail", False, act={"target_price": BOUNDARY_TARGET}, ctx={"ltp": Decimal("100.50")}),
     # §6.1 `ins` (2026-08-17): targetless BY DESIGN (the exit is the §7.1 20-td time cap), so the C3
     # edge comes from the strategy's pre-registered measured drift instead of from a fabricated level.
-    # The registered edge IS consumed (see the value string) — and at the SHIPPED 6% stop it still
-    # falls short of the 2x floor. That is the OPEN BLOCKER pinned in
-    # ``test_ins_at_the_shipped_6pct_stop_is_structurally_rejected`` below; this case asserts the
-    # live arithmetic, not the outcome anyone wanted.
-    Case("min_viable_size", "ins: registered edge consumed but 6% stop sizes below the cost floor",
-         "fail", False, act=INS_ACTION),
+    # The registered edge IS consumed (see the value string) — and at a wide enough stop it still
+    # falls short of the 2x floor, because the wider stop shrinks the position. Pinned in
+    # ``test_ins_at_a_wide_8pct_stop_is_structurally_rejected`` below; this case asserts the live
+    # arithmetic. (Pre-O17 at 2.5x the 6% stop already failed here; at 2.0x it clears, so 8%.)
+    Case("min_viable_size", "ins: registered edge consumed but 8% stop sizes below the cost floor",
+         "fail", False, act={**INS_ACTION, "stop_price": Decimal("92")}),
     # A 4% stop DOES clear — the same shape, sized larger, so the mechanism itself is sound.
     Case("min_viable_size", "ins: registered edge clears costs at a 4% stop", "pass", True,
          act={**INS_ACTION, "stop_price": Decimal("96"), "quantity": 40}),
@@ -617,12 +620,13 @@ def test_shrink_bound_by_per_trade_risk(gate: RiskGate) -> None:
 
 
 def test_shrink_bound_by_per_stock_exposure_cnc_notional(gate: RiskGate) -> None:
+    # O17 2026-09-23: cap 8000 -> 12000, existing notional 7500 -> 11500 to keep Rs500 of headroom.
     verdict = gate.evaluate(
         make_action(style="swing", target_price=Decimal("110")),
-        make_ctx(per_symbol_cnc_notional={SYMBOL: Decimal("7500")}),
+        make_ctx(per_symbol_cnc_notional={SYMBOL: Decimal("11500")}),
     )
     assert verdict.verdict == "shrink"
-    assert verdict.approved_qty == 5          # Rs500 of the Rs8,000/symbol CNC cap left
+    assert verdict.approved_qty == 5          # Rs500 of the Rs12,000/symbol CNC cap left / Rs100
     assert check_of(verdict, "per_stock_exposure").passed is False
     assert check_of(verdict, "min_viable_size").passed is True
 
@@ -651,74 +655,83 @@ def test_shrink_to_sub_viable_size_rejects_mis(gate: RiskGate) -> None:
 
 def test_shrink_to_sub_viable_size_rejects_cnc(gate: RiskGate) -> None:
     """The DP charge makes a small delivery clip structurally sub-viable (C4)."""
+    # O17 2026-09-23: cap 8000 -> 12000, existing notional 7500 -> 11500 so the CNC cap still SHRINKS
+    # the ask to 5 units (Rs500 headroom) before the recheck; at 7500 the ask no longer breached the
+    # cap and the reject came from the full-size check, bypassing the shrink path this test pins.
     verdict = gate.evaluate(
         make_action(style="swing"),
-        make_ctx(per_symbol_cnc_notional={SYMBOL: Decimal("7500")}),
+        make_ctx(per_symbol_cnc_notional={SYMBOL: Decimal("11500")}),
     )
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
+    assert check_of(verdict, "per_stock_exposure").passed is False    # the shrink leg WAS taken…
+    assert verdict.cost is not None and verdict.cost.notional == Decimal("500.00")  # …re-checked at 5
     assert check_of(verdict, "min_viable_size").passed is False
 
 
 # --------------------------------------------------------------------------- §6.1 `ins` (2026-08-17)
-def test_ins_at_the_shipped_6pct_stop_is_structurally_rejected(gate: RiskGate) -> None:
-    """**OPEN BLOCKER, pinned deliberately (found 2026-08-17 building this leg).**
+def test_ins_at_a_wide_8pct_stop_is_structurally_rejected(gate: RiskGate) -> None:
+    """A registered edge buys no pass at a stop that sizes the position below the cost floor.
 
     The §6.1 `ins` addendum sizes the leg as "2% swing risk / 6% stop ≈ ₹6.7k notional ⇒ CNC
     round-trip ≈ 0.53% ⇒ edge multiple ≈ 3x". That arithmetic omits §7.1 ``per_trade_risk``'s
-    ``overnight_gap_mult``: for a swing/overnight position the gate charges **2.5 x the stop
-    distance** per unit (``gate.py`` ``_rule_per_trade_risk``), not the stop distance itself. So:
+    ``overnight_gap_mult``: for a swing/overnight position the gate charges **2.0 x the stop
+    distance** per unit (O17; 2.5x before it — ``gate.py`` ``_rule_per_trade_risk``), not the stop
+    distance itself. At 8%, the top of the ``stop_pct`` [4-8] envelope, on this file's ₹20,000 equity:
 
-        unit risk   = 2.5 x ₹6.00        = ₹15.00      (not ₹6.00)
+        unit risk   = 2.0 x ₹8.00        = ₹16.00      (not ₹8.00)
         budget      = 2% x ₹20,000       = ₹400
-        approved    = floor(400 / 15)    = 26 units    (not 66)
-        notional    = 26 x ₹100          = ₹2,600      (not ₹6,600)
-        breakeven   = CNC round trip @ ₹2,600          = 0.832692%   (not ~0.53%)
-        edge mult   = 1.58 / 0.832692    = 1.8975x  <  2.0x  ⇒ REJECT
+        approved    = floor(400 / 16)    = 25 units    (not 50)
+        notional    = 25 x ₹100          = ₹2,500      (not ₹5,000)
+        breakeven   = CNC round trip @ ₹2,500          = 0.856400%
+        edge mult   = 1.58 / 0.856400    = 1.8449x  <  2.0x  ⇒ REJECT
 
-    At the ₹20,000 capital base every `ins` candidate therefore hard-rejects at C3 with the shipped
-    6% stop. This test asserts what the code ACTUALLY does; it is not an endorsement. Resolving it is
-    an owner decision (see the sibling test for which stops do clear) — the numbers are pinned here so
-    the blocker cannot be forgotten or silently "fixed" by moving a risk limit."""
-    verdict = gate.evaluate(make_action(**INS_ACTION), make_ctx())
+    History: found 2026-08-17 building this leg and pinned as an OPEN BLOCKER at the scanner-default
+    6% stop — at 2.5x that sized to 26 units / ₹2,600 / 0.832692% breakeven / 1.8975x REJECT, and the
+    shipped ``ins.stop_pct`` was cut to 5% the same day. O17's 2.0x moves 6% to 33 units / 2.2330x
+    PASS, so the pinned case moved to 8% (7% is 1.9991x — a reject by 0.0009x, too thin to pin). At
+    the ₹40,000 base (O16) no stop in [4-8] rejects. This test asserts what the code ACTUALLY does;
+    the numbers are pinned so the geometry cannot be silently "fixed" by moving a risk limit."""
+    verdict = gate.evaluate(make_action(**{**INS_ACTION, "stop_price": Decimal("92")}), make_ctx())
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
 
     # The per_trade_risk cap is what shrank it, and it says why in its own words.
     ptr = check_of(verdict, "per_trade_risk")
-    assert "2.5x stop distance" in ptr.value
+    assert "2.0x stop distance" in ptr.value               # O17 (was 2.5x)
 
     cost = verdict.cost
     assert cost is not None
-    assert cost.notional == Decimal("2600.00")             # 26 units, not the plan's 66
+    assert cost.notional == Decimal("2500.00")             # 25 units = floor(400 / (2.0 x 8.00))
     assert cost.expected_edge_pct == INS_EDGE_PCT          # the registered edge WAS consumed
-    assert cost.breakeven_pct == Decimal("0.832692")
-    assert cost.edge_multiple == Decimal("1.8975")
+    assert cost.breakeven_pct == Decimal("0.856400")
+    assert cost.edge_multiple == Decimal("1.8449")         # 1.58 / 0.856400
     assert cost.edge_multiple < Decimal("2.0")
     assert "pre-registered measured edge" in check_of(verdict, "min_viable_size").value
 
 
 def test_ins_clears_the_cost_floor_at_a_4pct_stop(gate: RiskGate) -> None:
-    """The mechanism is sound — only the shipped 6% default is out of reach. Sweeping the `ins`
-    envelope [4-8] against the SHIPPED cost surface, with the 2.5x overnight multiplier applied:
+    """The mechanism is sound — only the wide end of the envelope is out of reach. Sweeping the `ins`
+    envelope [4-8] against the SHIPPED cost surface at ₹20,000 equity, with the 2.0x overnight
+    multiplier applied (O17; the pre-O17 2.5x result in parentheses):
 
-        4% stop -> 40 units, ₹4,000 notional, 0.626250% breakeven -> 2.5230x  PASS
-        5% stop -> 32 units, ₹3,200 notional, 0.722188% breakeven -> 2.1878x  PASS
-        6% stop -> 26 units, ₹2,600 notional, 0.832692% breakeven -> 1.8975x  REJECT (shipped)
-        7% stop -> 22 units, ₹2,200 notional, 0.940000% breakeven -> 1.6809x  REJECT
-        8% stop -> 20 units, ₹2,000 notional, 1.009000% breakeven -> 1.5659x  REJECT
+        4% stop -> 50 units, ₹5,000 notional, 0.549400% breakeven -> 2.8759x  PASS   (2.5230x)
+        5% stop -> 40 units, ₹4,000 notional, 0.626250% breakeven -> 2.5230x  PASS   (2.1878x)
+        6% stop -> 33 units, ₹3,300 notional, 0.707576% breakeven -> 2.2330x  PASS   (1.8975x REJECT)
+        7% stop -> 28 units, ₹2,800 notional, 0.790357% breakeven -> 1.9991x  REJECT (1.6809x)
+        8% stop -> 25 units, ₹2,500 notional, 0.856400% breakeven -> 1.8449x  REJECT (1.5659x)
 
     A WIDER stop makes it worse, not better: it shrinks the position, and the CNC DP flat charge is
     a bigger fraction of a smaller notional. The whole viable band is the bottom of the envelope."""
     verdict = gate.evaluate(
-        make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 40}), make_ctx()
+        make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 50}), make_ctx()
     )
     assert verdict.verdict == "approve", verdict.reasons
-    assert verdict.approved_qty == 40                      # 400 budget / (2.5 x 4.00) = 40
+    assert verdict.approved_qty == 50                      # 400 budget / (2.0 x 4.00) = 50
     assert verdict.cost is not None
-    assert verdict.cost.notional == Decimal("4000.00")
+    assert verdict.cost.notional == Decimal("5000.00")
     assert verdict.cost.expected_edge_pct == INS_EDGE_PCT
-    assert verdict.cost.edge_multiple == Decimal("2.5230")
+    assert verdict.cost.edge_multiple == Decimal("2.8759")  # 1.58 / 0.549400
 
 
 def test_ins_targetless_shape_is_levels_coherent(gate: RiskGate) -> None:
@@ -730,18 +743,21 @@ def test_ins_targetless_shape_is_levels_coherent(gate: RiskGate) -> None:
 
 def test_ins_stop_still_binds_per_trade_risk(gate: RiskGate) -> None:
     """The 6% stop is a REAL risk distance, not a formality: it caps the position at the overnight
-    risk budget exactly as for any other swing. (The cap here is 26 units — see the blocker test —
-    and the proposal is then rejected at C3, so the verdict is reject rather than shrink.)"""
+    risk budget exactly as for any other swing. The cap here is floor(₹400 / (2.0 x ₹6.00)) = 33
+    units (O17), which clears C3 at 2.2330x, so the over-ask SHRINKS to it. (Pre-O17 at 2.5x the cap
+    was 26 units, which then failed C3 — the verdict was reject; that geometry is now pinned at 8% in
+    the blocker test.)"""
     verdict = gate.evaluate(make_action(**{**INS_ACTION, "quantity": 200}), make_ctx())
     ptr = check_of(verdict, "per_trade_risk")
     assert ptr.passed is False
-    assert "max qty 26" in ptr.headroom
-    # ...and at a stop the cost floor accepts, the same over-ask SHRINKS cleanly instead of rejecting.
+    assert "max qty 33" in ptr.headroom                    # 400 budget / (2.0 x 6.00) = 33.3 -> 33
+    assert verdict.verdict == "shrink" and verdict.approved_qty == 33
+    # ...and a tighter stop binds proportionally later: the same over-ask at 4% shrinks to more units.
     ok = gate.evaluate(
         make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 200}), make_ctx()
     )
     assert ok.verdict == "shrink"
-    assert ok.approved_qty == 40
+    assert ok.approved_qty == 50                           # 400 budget / (2.0 x 4.00) = 50
 
 
 def test_ins_measured_edge_is_opt_in_not_a_weakening_of_c3(
