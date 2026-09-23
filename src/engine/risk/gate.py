@@ -58,7 +58,7 @@ from engine.core.contracts import (
 )
 from engine.core.enums import Mode, RiskState
 from engine.core.log import get_logger
-from engine.core.recommendations import parse_valid_until
+from engine.core.recommendations import pending_entry_symbols
 from engine.core.types import TradeWindow
 from engine.risk.limits import LimitTable
 
@@ -1556,22 +1556,11 @@ class GateContextBuilder:
     def _pending_entry_rec_symbols(self, now: datetime) -> frozenset[str]:
         """Unexpired, UNCONFIRMED entry recommendations — they still occupy position slots.
 
-        Shares ``core.recommendations.parse_valid_until`` with the expiry predicate rather than
-        negating it: an absent/naive/unparseable ``valid_until`` must stay excluded here (not flip to
-        "pending" the way negating ``recommendation_expired`` would), so this reads the parsed instant
-        directly and applies its own ``> now`` (still-in-the-future) comparison.
+        Delegates to :func:`engine.core.recommendations.pending_entry_symbols`, shared with the
+        brk20 retest re-arm screen (``ops.main``), which must refuse what this gate would refuse
+        before spending a slot and an analyst call — see that function's docstring for the predicate.
         """
-        out: set[str] = set()
-        for row in self._recommendations():
-            if row["human_action"]:
-                continue                       # taken / expired / dismissed / closed ⇒ not pending
-            data = self._payload(row)
-            if data.get("kind") != "entry":
-                continue
-            valid_until = parse_valid_until(data.get("valid_until"))
-            if valid_until is not None and valid_until > now and data.get("instrument"):
-                out.add(str(data["instrument"]))
-        return frozenset(out)
+        return pending_entry_symbols(self._recommendations(), now)
 
     # ------------------------------------------------------------------ store reads (executor)
     async def _universe_row(self, symbol: str, d: date) -> dict[str, Any] | None:

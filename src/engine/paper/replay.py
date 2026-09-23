@@ -403,7 +403,6 @@ class _BufferedBarStore:
         self._on_bars = on_bars
         self._batch = batch
         self._pending: list[Bar] = []
-        self.store_writes = 0                   # round trips actually paid (observability only)
 
     def __getattr__(self, name: str) -> Any:
         # __dict__ lookup, not self._store: an attribute touched before __init__ finished would
@@ -422,7 +421,6 @@ class _BufferedBarStore:
         if not self._pending:
             return
         self._store.insert_bars_1m(self._pending)
-        self.store_writes += 1
         self._pending.clear()
 
 

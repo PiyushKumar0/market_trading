@@ -679,10 +679,7 @@ class PaperBroker:
                 f"order {order_id} is already triggered and cannot be cancelled "
                 "(SL-M past its trigger is on its way to market, §3.2.8)"
             )
-        order.cancelled_qty = order.remaining      # the residual; filled_qty is PRESERVED (§3.5.1)
-        order.status = "CANCELLED"
-        order.status_message = "paper: cancelled by client"
-        self._unrest(order)
+        self._terminate(order, "CANCELLED", "paper: cancelled by client")
         self._postback(order, self._clock.now())
         return order.order_id
 
@@ -700,6 +697,18 @@ class PaperBroker:
         resting = self._state(order.tradingsymbol).resting
         if order.order_id in resting:
             resting.remove(order.order_id)
+
+    def _terminate(self, order: _Order, status: str, message: str) -> None:
+        """Move ``order`` to a terminal state with its residual cancelled: ``cancelled_qty`` absorbs
+        ``order.remaining`` while ``filled_qty`` is PRESERVED (§3.5.1) — the shape every terminal
+        transition that can leave quantity outstanding needs (client cancel, an internal-error
+        reject that already has fills, end-of-day lapse). Callers still run their own
+        postback/publish (and logging) after this returns; :meth:`_unrest` is the one common step
+        folded in here."""
+        order.cancelled_qty = order.remaining
+        order.status = status
+        order.status_message = message
+        self._unrest(order)
 
     async def orders(self) -> list:
         """The whole paper orderbook (resting AND terminal rows), in the postback shape — so the
@@ -1048,10 +1057,8 @@ class PaperBroker:
           The partial-cancel is the shape §3.5.1 already has for exactly this.
         * nothing filled → **REJECTED**, the ordinary "this order never became anything" ending.
         """
-        order.cancelled_qty = order.remaining
-        order.status = "CANCELLED" if order.filled_qty > 0 else "REJECTED"
-        order.status_message = "paper: internal error"
-        self._unrest(order)
+        status = "CANCELLED" if order.filled_qty > 0 else "REJECTED"
+        self._terminate(order, status, "paper: internal error")
         self._publish_guarded(order, at)
 
     def _lapse_all(self, session_date: date, at: datetime) -> None:
@@ -1087,10 +1094,7 @@ class PaperBroker:
                     continue
                 if order.placed_at.date() >= session_date:
                     continue                  # placed today: not a leftover from the last session
-                order.cancelled_qty = order.remaining
-                order.status = "CANCELLED"
-                order.status_message = "paper: lapsed at session close"
-                self._unrest(order)
+                self._terminate(order, "CANCELLED", "paper: lapsed at session close")
                 self._publish_guarded(order, at)
                 _log.info(
                     "paper.order.lapsed",

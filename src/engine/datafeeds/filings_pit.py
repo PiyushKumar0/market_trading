@@ -51,13 +51,14 @@ _log = get_logger("engine.datafeeds.filings_pit")
 NSE_PIT_URL = "https://www.nseindia.com/api/corporates-pit"
 
 #: This job's source tag in ``insider_trades`` — the bare-id rows (``filings_pit_fresh`` writes the
-#: ``bse:``-tagged ones). Equal to ``filings_events.SOURCE_NSE``, which cannot be imported here
-#: (filings_events -> filings_pit_fresh -> filings_pit would cycle); a test asserts the pair.
+#: ``bse:``-tagged ones). Canonical: ``filings_events.SOURCE_NSE`` imports this directly — filings_events
+#: already depends on this module transitively (filings_events -> filings_pit_fresh -> filings_pit), so
+#: a direct import adds no new edge and cannot cycle.
 NSE_SOURCE = "nse"
 
 #: Widest span (days) ONE request asks for — the unit ``scripts/backfill_filings.py`` already walks
-#: this SAME endpoint in (``_NSE_WINDOW_DAYS``, §2.8 observed safe; a src module cannot import
-#: scripts/, so the number is duplicated, not shared). NSE has never been observed to REFUSE a wider
+#: this SAME endpoint in (imported there as ``_NSE_WINDOW_DAYS``, §2.8 observed safe; scripts/ can
+#: import src/, so the value is shared, not duplicated). NSE has never been observed to REFUSE a wider
 #: window — the 2026-09-12 probe answered 01-05 → 12-09 (134 days) and its 3 rows came from the START
 #: of that span, which argues against truncation without proving it — but a silent truncation to the
 #: newest slice would lift the watermark past rows never served, and that hole has no alarm: the
@@ -76,10 +77,11 @@ PIT_WINDOW_DAYS = 31
 MAX_WINDOWS_PER_RUN = 6
 MAX_WINDOW_DAYS = PIT_WINDOW_DAYS * MAX_WINDOWS_PER_RUN - 1
 
-#: ≥1.5 s between consecutive requests to the cookie-gated www host (§2.8 observed safe, the same
-#: pacing ``backfill_filings._PACE_S`` walks these windows with). ``_sleep`` is a module-level
-#: indirection so tests observe the pacing without waiting (the ``engine.core.nse_http`` idiom).
-_PACE_S = 1.5
+#: ≥1.5 s between consecutive requests to the cookie-gated www host (§2.8 observed safe). Public:
+#: ``scripts/backfill_filings.py`` imports it (with :func:`pit_windows` and :data:`PIT_WINDOW_DAYS`)
+#: to walk the same endpoint. ``_sleep`` is a module-level indirection so tests observe the pacing
+#: without waiting (the ``engine.core.nse_http`` idiom).
+PIT_PACE_S = 1.5
 _sleep = asyncio.sleep
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
@@ -93,12 +95,12 @@ def pit_url(frm: date, to: date, *, symbol: str | None = None) -> str:
     return url
 
 
-def _windows(frm: date, to: date, span_days: int = PIT_WINDOW_DAYS) -> list[tuple[date, date]]:
+def pit_windows(frm: date, to: date, span_days: int = PIT_WINDOW_DAYS) -> list[tuple[date, date]]:
     """Ascending ≤``span_days`` windows covering ``[frm, to]`` inclusive (empty if ``frm > to``).
 
-    Duplicated from ``scripts/backfill_filings._windows`` — a src module cannot import scripts/, the
-    same constraint under which ``NSE_SOURCE`` duplicates ``filings_events.SOURCE_NSE``. The two walk
-    the SAME endpoint in the same unit, so a change to one is a change to both.
+    Canonical implementation — ``scripts/backfill_filings.py`` imports this rather than keeping its
+    own copy (scripts/ can import src/; the reverse cannot, which is why this lives here and not
+    there). The two walk the SAME endpoint in the same unit, so a change here is a change for both.
     """
     out: list[tuple[date, date]] = []
     cur = frm
@@ -135,6 +137,10 @@ def _rows_of(payload: Any) -> list[dict[str, Any]]:
 
 
 def _clean(raw: Any) -> str:
+    """Stringify + strip. Deliberately treats every falsy raw value (``None``, ``0``, ``""``, ``False``)
+    as missing — NOT the same as ``filings_pit_fresh``'s own ``_clean``, which preserves a numeric ``0``
+    (BSE's ``secVal='0'`` is a real zero-consideration value there); the two must not be merged without
+    an explicit data decision on whether the NSE feed's numeric fields can legitimately carry a bare 0."""
     return str(raw or "").strip()
 
 
@@ -164,9 +170,14 @@ def _dec(raw: Any) -> Decimal | None:
     if not s or s in ("-", "NA"):
         return None
     try:
-        return Decimal(s)
+        v = Decimal(s)
     except InvalidOperation:
         return None
+    # A bare ``NaN`` (or ``Infinity``) token survives ``json.loads`` and constructs a Decimal fine,
+    # but every ORDERING comparison on it raises InvalidOperation (int(Decimal('Infinity')) raises
+    # OverflowError) — a raise that :func:`_int` and any downstream `v <= 0` would take out of the E5
+    # guard. Non-finite is "no consideration" (folded in from filings_pit_fresh, 2026-09-23).
+    return v if v.is_finite() else None
 
 
 def _int(raw: Any) -> int | None:
@@ -176,7 +187,7 @@ def _int(raw: Any) -> int | None:
 
 def _flt(raw: Any) -> float | None:
     s = _clean(raw).replace(",", "")
-    if not s or s == "-":
+    if not s or s in ("-", "NA"):
         return None
     try:
         return float(s)
@@ -295,7 +306,7 @@ class FilingsPitJob:
         """Window start: the NSE watermark, capped at ``d`` then floored at ``d - MAX_WINDOW_DAYS``.
 
         The CAP is what keeps a catch-up replaying an OLD day from inverting the window when stored
-        rows run ahead of ``d`` — :func:`_windows` yields NOTHING for an inverted span, which would
+        rows run ahead of ``d`` — :func:`pit_windows` yields NOTHING for an inverted span, which would
         green that day's watermark on zero requests. The FLOOR bounds the run's request count.
         """
         frm = min(watermark.date(), d) if watermark is not None else d
@@ -329,9 +340,9 @@ class FilingsPitJob:
         try:
             watermark = await self._store.alatest_insider_broadcast(source=NSE_SOURCE)
             frm = self._window_start(watermark, d)
-            for win in _windows(frm, d):
+            for win in pit_windows(frm, d):
                 if windows:
-                    await _sleep(_PACE_S)  # never burst the cookie-gated www host (§2.8)
+                    await _sleep(PIT_PACE_S)  # never burst the cookie-gated www host (§2.8)
                 resp = await nse_get(self._http, pit_url(*win), timeout=self._timeout)
                 rows = parse_pit(json.loads(resp.content))
                 windows += 1

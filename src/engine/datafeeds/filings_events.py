@@ -38,6 +38,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from engine.datafeeds.filings_pit import NSE_SOURCE as SOURCE_NSE
 from engine.datafeeds.filings_pit_fresh import BSE_ID_PREFIX, BSE_SOURCE
 
 # --- the ONE definition of the validated crossing rule (promoted 2026-08-17, §6.1 `ins`) -------------
@@ -47,8 +48,6 @@ from engine.datafeeds.insider_crossings import (
     insider_cluster_events,
     is_open_market_buy,
 )
-
-SOURCE_NSE = "nse"
 
 
 def row_source(row: dict[str, Any]) -> str:

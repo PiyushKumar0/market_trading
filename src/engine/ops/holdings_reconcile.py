@@ -251,7 +251,7 @@ class HoldingsReconcileJob:
             flagged.append(position_id)
             # Named ``rec_id`` rather than ``entry_rec_id``: since WO-D2 the latter is a MODULE-LEVEL
             # function, and a local of that name would shadow it for the whole of this method.
-            rec_id = self._entry_rec_id(position_id)
+            rec_id = entry_rec_id(self._conn, position_id)
             _log.warning(
                 "position_not_in_holdings",
                 symbol=symbol,
@@ -338,12 +338,6 @@ class HoldingsReconcileJob:
                     return False        # old enough — stop counting
             probe += timedelta(days=1)
         return sessions < self._min_age_sessions
-
-    # ------------------------------------------------------------------ the /closed id
-    def _entry_rec_id(self, position_id: str) -> str | None:
-        """This job's view of :func:`entry_rec_id` — kept as a method so the alert path reads as one
-        object, while the §5.3 pre-open planner renders the SAME id from the module-level function."""
-        return entry_rec_id(self._conn, position_id)
 
     # ------------------------------------------------------------------ one alert per day
     async def _maybe_alert(
@@ -483,31 +477,36 @@ def positions_missing_from_holdings(
     sessions: int = MISSING_SESSIONS,
     lookback_days: int = MISSING_LOOKBACK_DAYS,
     require_zero: bool = False,
-) -> set[str]:
-    """Position ids whose ``sessions`` most recent observation days inside the lookback ALL read short.
+) -> dict[str, MissingHolding]:
+    """``position_id -> MissingHolding`` for every position whose ``sessions`` most recent observation
+    days inside the lookback ALL read short.
 
-    The platform's "the owner sold this outside the ledger" predicate (WO-D2). Two days rather than
-    one because a single short reading has innocent explanations (a settlement edge, a symbol rename,
-    a truncated holdings payload) and the consequences here are all forms of going quiet about a
-    position — silence about a position that really is open is the expensive error.
+    The platform's "the owner sold this outside the ledger" predicate (WO-D2) — a filtered VIEW of
+    :func:`missing_holdings_observations`, returning the same :class:`MissingHolding` values so a
+    caller that needs the streak/quantities behind the filter (the §5.2 positions summary, the §5.3
+    day-plan block) never has to read the journal a second time to get them. Two days rather than one because
+    a single short reading has innocent explanations (a settlement edge, a symbol rename, a truncated
+    holdings payload) and the consequences here are all forms of going quiet about a position —
+    silence about a position that really is open is the expensive error.
 
     ``require_zero=True`` narrows "short" to "the broker holds NOTHING" on every day of the run
-    (:attr:`MissingHolding.zero_sessions`). Callers whose consequence is INFORMATION — the §3.6
-    owner alert, the §5.3 day-plan block — want the wide reading: held 3 of a tracked 7 is a real
+    (:attr:`MissingHolding.zero_sessions`). A caller whose consequence is INFORMATION — the §5.3
+    day-plan block (the §3.6 alert applies its own held-vs-tracked check and never calls this) —
+    wants the wide reading: held 3 of a tracked 7 is a real
     unreported exit and the owner should hear about it. The caller whose consequence is SILENCE ON A
     RISK-REDUCING PATH — the §5.2(b) position-event screen — must use the narrow one, because a
     position with residual exposure (a partial exit) still needs its stop watched. Withholding an
     exit recommendation from a position that exists is the failure mode this flag exists to prevent.
     (A holding pledged for margin is counted as held via ``collateral_quantity`` and never enters
-    this set at all.)
+    this dict at all.)
 
-    ``sessions < 1`` returns the empty set rather than "everything": a mis-configured 0 must not
+    ``sessions < 1`` returns the empty dict rather than "everything": a mis-configured 0 must not
     silence the platform about every position it tracks.
     """
     if sessions < 1:
-        return set()
+        return {}
     return {
-        position_id
+        position_id: missing
         for position_id, missing in missing_holdings_observations(
             conn, today, lookback_days=lookback_days
         ).items()

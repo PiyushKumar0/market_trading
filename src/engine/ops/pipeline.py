@@ -92,11 +92,7 @@ from engine.intelligence.schemas import (
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.notify.episodes import AlertEpisodes
-from engine.ops.holdings_reconcile import (
-    MISSING_SESSIONS,
-    missing_holdings_observations,
-    positions_missing_from_holdings,
-)
+from engine.ops.holdings_reconcile import MissingHolding, positions_missing_from_holdings
 from engine.ops.warmup import CLASS_INTRADAY, blocker_symbol
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
@@ -2467,22 +2463,16 @@ class RecommendationPipeline:
         if position_id in missing:
             if self._sold_outside_logged.get(position_id) != today:
                 self._sold_outside_logged[position_id] = today
-                # KNOWN INTERACTION, deliberately logged rather than silently absorbed: with no exit
-                # recommendation being delivered, this position ages out of ``gate._exiting_symbols``
-                # (a 3-calendar-day window over DELIVERED exit recs, gate.py:1170) about three days
-                # from now, and then starts counting against §7.1 ``max_open_positions`` /
-                # ``per_sector_exposure`` again until the owner replies /closed or the §7.1
-                # ``max_holding`` sweep begins issuing its deterministic daily exit. That is a
-                # CAPACITY cost, never a risk one (the caps get tighter, not looser) — and teaching
-                # the gate this predicate would relax a §7.1 limit on the strength of a broker
-                # heuristic, which is an owner decision, not this screen's to make. WO-D2 open
-                # question 1.
+                # Logged once a day rather than silently absorbed. Going quiet costs no capacity: the
+                # gate leaves this position out of the §7.1 position/sector counts on the SAME journal
+                # predicate (``GateContextBuilder``'s ``missing_holdings_fn``, also require_zero=True,
+                # WO-D2), so the owner's /closed is the only thing left to settle.
                 _log.warning(
                     "position_event_skipped_sold_outside_ledger",
                     position_id=position_id, symbol=str(position["symbol"] or ""),
                     effect="no analyst call and no exit recommendation while the broker holds none "
-                           "of it; reply /closed to settle the ledger. After ~3 days with no "
-                           "delivered exit rec it re-enters the O16 position/sector counts.",
+                           "of it; reply /closed to settle the ledger. The gate already leaves it "
+                           "out of the O16 position/sector counts.",
                 )
             return True
         repeated = self._delivered_exit_today(position, today)
@@ -2495,7 +2485,7 @@ class RecommendationPipeline:
             return True
         return False
 
-    def _sold_outside_ledger(self, today: date) -> set[str]:
+    def _sold_outside_ledger(self, today: date) -> dict[str, MissingHolding]:
         """§3.6 journal read (:func:`positions_missing_from_holdings`), never cached for the day.
 
         ``require_zero=True``: on THIS path the answer buys silence on a risk-reducing output, so
@@ -2512,7 +2502,7 @@ class RecommendationPipeline:
         except sqlite3.Error as exc:
             _log.warning("sold_outside_ledger_read_failed", error_type=type(exc).__name__,
                          error=str(exc)[:200])
-            return set()
+            return {}
 
     def _delivered_exit_today(self, position: sqlite3.Row, today: date) -> str | None:
         """``rec_id`` of today's latest exit recommendation for ``position`` if it STILL STANDS.
@@ -3194,13 +3184,16 @@ class RecommendationPipeline:
         analyst must reason about, so it stays in the counts.
 
         The §7.1 headroom lines above this one (:meth:`_headroom_lines`) deliberately still COUNT
-        these positions: they occupy ``max_open_positions`` until the owner replies ``/closed``, and
-        the gate was not taught this predicate (see :meth:`_skip_position_event`). The two disagreeing
-        is the ambiguity itself, stated rather than hidden.
+        these positions: that line reads ``ExposureTracker.open_position_counts()`` directly, the
+        raw count with no journal adjustment. The gate's OWN admission math is no longer in that
+        position — since WO-D2 (2026-09-12) it excludes the same journal's positions from
+        ``max_open_positions``/``per_sector_exposure`` too (``GateContextBuilder``'s
+        ``missing_holdings_fn``, see :meth:`_skip_position_event`) — so the disagreement left is
+        between this raw headroom line and everything else, stated rather than hidden.
 
         ``sessions`` is the SHORTEST zero-run among the named positions, so the line never claims more
         evidence than every name on it has; the assembler stamps "(as of HH:MM)" onto the last line it
-        is given (``intelligence/context.py``), and both reads happen at that instant.
+        is given (``intelligence/context.py``), and the one journal read happens at that instant.
 
         D7: every read here degrades to the pre-WO-D2 rendering (the plain counts). A context line on
         the analyst path may never raise, and an unreadable journal must not edit the book.
@@ -3209,7 +3202,6 @@ class RecommendationPipeline:
         today = self._clock.today()
         gone = self._sold_outside_ledger(today)               # D7-guarded, never cached for the day
         rows: list[sqlite3.Row] = []
-        sessions: list[int] = []
         if gone:
             try:
                 # The origin scope MUST match the counter being adjusted (``ExposureTracker``'s
@@ -3222,15 +3214,6 @@ class RecommendationPipeline:
                     ).fetchall()
                     if str(row["position_id"]) in gone
                 ]
-                # Second read of the same journal, like the §5.3 planner's: the alternative is
-                # re-deriving the platform's "missing" threshold here, free to drift from the screen's.
-                # A position absent from it (a concurrent reconcile write between the two reads) simply
-                # does not contribute a streak — see the ``default`` below.
-                observations = missing_holdings_observations(self._conn, today)
-                sessions = [
-                    observations[str(row["position_id"])].zero_sessions
-                    for row in rows if str(row["position_id"]) in observations
-                ]
             except sqlite3.Error as exc:
                 _log.warning("positions_summary_sold_outside_read_failed",
                              error_type=type(exc).__name__, error=str(exc)[:200])
@@ -3242,9 +3225,12 @@ class RecommendationPipeline:
         if not rows:
             return main
         symbols = ", ".join(sorted({str(r["symbol"] or "?") for r in rows}))
+        # ``gone`` is the SAME dict that selected ``rows`` above (one journal read), so every
+        # row's position id is guaranteed a key here.
+        sessions = [gone[str(r["position_id"])].zero_sessions for r in rows]
         return (
             f"{main}\nsold outside the ledger (broker holds 0 on "
-            f"{min(sessions, default=MISSING_SESSIONS)} sessions, awaiting /closed): {symbols}"
+            f"{min(sessions)} sessions, awaiting /closed): {symbols}"
         )
 
     def _sector_exposure_line(self, d: date) -> str:

@@ -267,10 +267,11 @@ async def test_filings_pit_window_keys_off_watermark(store, clock):
 def test_store_insider_source_predicate_matches_the_feeds_tags():
     # The store cannot import a datafeed (every datafeed imports the store), so its source predicate
     # duplicates the writers' tags — the pair is asserted here, as for _EXCL_CAP in the store.
+    # (fpit.NSE_SOURCE == SOURCE_NSE is no longer asserted here: filings_events.SOURCE_NSE is now an
+    # import of fpit.NSE_SOURCE, not a copy — 2026-09-23 dedup — so the two can never drift apart.)
     assert set(_INSIDER_SOURCE_PREDICATE) == {SOURCE_NSE, BSE_SOURCE}
     assert _INSIDER_SOURCE_PREDICATE[BSE_SOURCE] == f"id LIKE '{BSE_ID_PREFIX}%'"
     assert _INSIDER_SOURCE_PREDICATE[SOURCE_NSE] == f"id NOT LIKE '{BSE_ID_PREFIX}%'"
-    assert fpit.NSE_SOURCE == SOURCE_NSE
 
 
 async def test_latest_insider_broadcast_partitions_by_id_prefix(store):
@@ -316,19 +317,22 @@ def pit_spans(seen: list[str]) -> list[tuple[date, date]]:
 
 
 def test_pit_window_unit_matches_the_backfill_that_walks_the_same_endpoint():
-    # filings_pit.PIT_WINDOW_DAYS/_windows duplicate scripts/backfill_filings (a src module cannot
-    # import scripts/), and BOTH drive pit_url/parse_pit. A drift makes the daily job ask for a span
-    # the repo has never walked — the shape whose only failure mode (a silent truncation to the
-    # newest slice) leaves an unreachable hole with no warning.
+    # scripts/backfill_filings walks the SAME endpoint as the daily job and imports filings_pit's
+    # PIT_WINDOW_DAYS / pit_windows / PIT_PACE_S rather than keeping copies (2026-09-23). A local copy
+    # creeping back would let the two drift, so the daily job asks for a span the repo has never
+    # walked — the shape whose only failure mode (a silent truncation to the newest slice) leaves an
+    # unreachable hole with no warning.
     path = Path(__file__).resolve().parents[2] / "scripts" / "backfill_filings.py"
     spec = importlib.util.spec_from_file_location("_backfill_filings_under_test", path)
     bf = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = bf
     spec.loader.exec_module(bf)
-    assert fpit.PIT_WINDOW_DAYS == bf._NSE_WINDOW_DAYS
+    assert bf._NSE_WINDOW_DAYS == fpit.PIT_WINDOW_DAYS
+    assert bf._windows is fpit.pit_windows
+    assert bf._PACE_S == fpit.PIT_PACE_S
     frm, to = date(2026, 1, 1), date(2026, 4, 30)
-    assert fpit._windows(frm, to) == bf._windows(frm, to)
-    assert fpit._windows(to, frm) == []                       # inverted span: zero requests, no wrap
+    assert fpit.pit_windows(to, frm) == []                    # inverted span: zero requests, no wrap
+    assert fpit.pit_windows(frm, to)[0][0] == frm and fpit.pit_windows(frm, to)[-1][1] == to
     # The floor is expressed in whole requests: N INCLUSIVE chunks reach N*unit - 1 days behind d.
     assert fpit.MAX_WINDOW_DAYS == fpit.PIT_WINDOW_DAYS * fpit.MAX_WINDOWS_PER_RUN - 1
 

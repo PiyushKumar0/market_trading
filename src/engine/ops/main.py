@@ -23,7 +23,6 @@ login), which is exactly the §2.6 posture. The Tier-1 harness / OMS / live rout
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -53,7 +52,7 @@ from engine.core.eventbus import EventBus
 from engine.core.log import configure_logging, get_logger
 from engine.core.migrations import apply_migrations
 from engine.core.protected_store import IntegrityError, ProtectedStore
-from engine.core.recommendations import parse_valid_until
+from engine.core.recommendations import pending_entry_symbols
 from engine.core.secrets import DASHBOARD_TOKEN, KITE_API_KEY, TELEGRAM_BOT_TOKEN, Secrets
 from engine.core.types import TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
@@ -3660,37 +3659,22 @@ def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list
 
 
 # --------------------------------------------------------------------- brk20 RETEST re-arm (WO-R)
-def _pending_entry_rec_symbols(conn: sqlite3.Connection, now: datetime) -> set[str]:
+def _pending_entry_rec_symbols(conn: sqlite3.Connection, now: datetime) -> frozenset[str]:
     """Symbols carrying an UNEXPIRED, UNACTIONED entry recommendation — the gate's own
     ``GateContext.pending_rec_symbols`` set, read here because the retest must refuse what the gate
     would refuse (``per_stock_exposure: already held or pending`` is a HARD reason, uncurable by
     shrinking) BEFORE the slot and the analyst call are spent rather than after.
 
-    Shares ``core.recommendations.parse_valid_until`` with the gate rather than re-deriving expiry:
-    an absent/naive/unparseable ``valid_until`` stays EXCLUDED, exactly as it does there. An
-    unreadable row is skipped, not fatal — this is a narrowing, and the caller's screen is what fails
-    to zero if the whole read raises."""
-    out: set[str] = set()
-    # The actioned rows are dropped in SQL because this runs on a 60 s pulse and `recommendations`
-    # only grows; the Python guard below stays, and the predicates MATCH — the gate's test is
-    # truthiness, so an empty-string action is "not actioned" on both sides.
+    The actioned rows are dropped in SQL because this runs on a 60 s pulse and `recommendations`
+    only grows; :func:`engine.core.recommendations.pending_entry_symbols` re-applies the same guard
+    in Python (its truthiness test matches this SQL, so an empty-string action is "not actioned" on
+    both sides) so the two callers can never disagree when one of them does not pre-filter.
+    """
     rows = conn.execute(
         "SELECT payload, human_action FROM recommendations "
         "WHERE human_action IS NULL OR human_action = ''"
     ).fetchall()
-    for row in rows:
-        if row["human_action"]:
-            continue                    # taken / expired / dismissed / closed ⇒ not pending
-        try:
-            data = json.loads(row["payload"] or "{}")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(data, dict) or data.get("kind") != "entry":
-            continue
-        valid_until = parse_valid_until(data.get("valid_until"))
-        if valid_until is not None and valid_until > now and data.get("instrument"):
-            out.add(str(data["instrument"]))
-    return out
+    return pending_entry_symbols(rows, now)
 
 
 def _retest_skip_reasons(

@@ -456,14 +456,14 @@ def test_one_missing_day_is_not_enough(conn) -> None:
     payload) and the consequence is SILENCE about a live position - so one day never qualifies."""
     _observe(conn, "pos-m1", TODAY, tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
 
 
 def test_two_consecutive_missing_days_qualify(conn) -> None:
     _observe(conn, "pos-m2", YESTERDAY, tracked=7, held=0)
     _observe(conn, "pos-m2", TODAY, tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-m2"}
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-m2"}
 
 
 def test_a_partial_holding_counts_as_short(conn) -> None:
@@ -472,7 +472,7 @@ def test_a_partial_holding_counts_as_short(conn) -> None:
     _observe(conn, "pos-m3", YESTERDAY, tracked=7, held=3)
     _observe(conn, "pos-m3", TODAY, tracked=7, held=3)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-m3"}
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-m3"}
     seen = missing_holdings_observations(conn, TODAY)["pos-m3"]
     assert (seen.sessions, seen.tracked_qty, seen.held_qty, seen.d) == (2, 7, 3, TODAY.isoformat())
 
@@ -484,7 +484,7 @@ def test_a_recovered_holding_leaves_the_set_immediately(conn) -> None:
     _observe(conn, "pos-m4", YESTERDAY, tracked=7, held=0)
     _observe(conn, "pos-m4", TODAY, tracked=7, held=7)
 
-    assert positions_missing_from_holdings(conn, TODAY) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
     assert "pos-m4" not in missing_holdings_observations(conn, TODAY)
 
 
@@ -494,9 +494,9 @@ def test_observations_older_than_the_lookback_do_not_qualify(conn) -> None:
     _observe(conn, "pos-m5", TODAY - timedelta(days=14), tracked=7, held=0)
     _observe(conn, "pos-m5", TODAY - timedelta(days=13), tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
     # Inside a wide enough lookback the same rows DO qualify - the window is the only difference.
-    assert positions_missing_from_holdings(conn, TODAY, lookback_days=30) == {"pos-m5"}
+    assert set(positions_missing_from_holdings(conn, TODAY, lookback_days=30)) == {"pos-m5"}
 
 
 def test_a_gap_inside_the_lookback_still_qualifies_on_the_two_most_recent_days(conn) -> None:
@@ -505,7 +505,7 @@ def test_a_gap_inside_the_lookback_still_qualifies_on_the_two_most_recent_days(c
     _observe(conn, "pos-m6", TODAY - timedelta(days=5), tracked=7, held=0)
     _observe(conn, "pos-m6", TODAY, tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-m6"}
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-m6"}
 
 
 def test_future_dated_observations_are_ignored(conn) -> None:
@@ -513,12 +513,12 @@ def test_future_dated_observations_are_ignored(conn) -> None:
     _observe(conn, "pos-m7", TODAY, tracked=7, held=0)
     _observe(conn, "pos-m7", TODAY + timedelta(days=1), tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
 
 
 def test_a_position_with_no_observations_is_never_missing(conn) -> None:
     """The load-bearing asymmetry: no evidence => the platform keeps managing the position."""
-    assert positions_missing_from_holdings(conn, TODAY) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
 
 
 def test_zero_sessions_cannot_silence_everything(conn) -> None:
@@ -527,7 +527,7 @@ def test_zero_sessions_cannot_silence_everything(conn) -> None:
     _observe(conn, "pos-m8", YESTERDAY, tracked=7, held=0)
     _observe(conn, "pos-m8", TODAY, tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY, sessions=0) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY, sessions=0)) == set()
 
 
 @pytest.mark.asyncio
@@ -537,10 +537,10 @@ async def test_the_job_feeds_its_own_missing_set_across_two_sessions(conn) -> No
     _position(conn, "pos-m9", "HDFCAMC", 7)
 
     await _job(conn, _FakeKite([]), at=datetime(2026, 6, 16, 10, 5, tzinfo=IST), notify=_Sink()).run()
-    assert positions_missing_from_holdings(conn, YESTERDAY) == set()
+    assert set(positions_missing_from_holdings(conn, YESTERDAY)) == set()
 
     await _job(conn, _FakeKite([]), notify=_Sink()).run()
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-m9"}
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-m9"}
 
 
 # ================================================== WO-D2 fix: "short" and "gone" are not the same
@@ -552,8 +552,8 @@ def test_a_partial_holding_is_short_but_not_gone(conn) -> None:
     _observe(conn, "pos-part", YESTERDAY, tracked=7, held=3)
     _observe(conn, "pos-part", TODAY, tracked=7, held=3)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-part"}
-    assert positions_missing_from_holdings(conn, TODAY, require_zero=True) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-part"}
+    assert set(positions_missing_from_holdings(conn, TODAY, require_zero=True)) == set()
     seen = missing_holdings_observations(conn, TODAY)["pos-part"]
     assert (seen.sessions, seen.zero_sessions) == (2, 0)
 
@@ -566,9 +566,9 @@ def test_a_partial_exit_reads_short_forever_but_is_never_gone(conn) -> None:
     for n in range(5):
         _observe(conn, "pos-partial", TODAY - timedelta(days=4 - n), tracked=7, held=2)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-partial"}
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-partial"}
     assert missing_holdings_observations(conn, TODAY)["pos-partial"].sessions == 5
-    assert positions_missing_from_holdings(conn, TODAY, require_zero=True) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY, require_zero=True)) == set()
 
 
 def test_pledged_shares_count_as_held() -> None:
@@ -595,7 +595,7 @@ async def test_a_fully_pledged_position_is_not_flagged(conn) -> None:
 
     assert result.checked == 1
     assert result.flagged == []
-    assert positions_missing_from_holdings(conn, TODAY) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
 
 
 def test_the_zero_run_is_a_prefix_and_needs_its_own_two_days(conn) -> None:
@@ -605,14 +605,14 @@ def test_the_zero_run_is_a_prefix_and_needs_its_own_two_days(conn) -> None:
     _observe(conn, "pos-drain", YESTERDAY, tracked=7, held=3)
     _observe(conn, "pos-drain", TODAY, tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-drain"}
-    assert positions_missing_from_holdings(conn, TODAY, require_zero=True) == set()
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-drain"}
+    assert set(positions_missing_from_holdings(conn, TODAY, require_zero=True)) == set()
     seen = missing_holdings_observations(conn, TODAY)["pos-drain"]
     assert (seen.sessions, seen.zero_sessions) == (2, 1)
 
     _observe(conn, "pos-drain", TODAY + timedelta(days=1), tracked=7, held=0)
     tomorrow = TODAY + timedelta(days=1)
-    assert positions_missing_from_holdings(conn, tomorrow, require_zero=True) == {"pos-drain"}
+    assert set(positions_missing_from_holdings(conn, tomorrow, require_zero=True)) == {"pos-drain"}
 
 
 def test_two_zero_days_are_gone_under_both_readings(conn) -> None:
@@ -621,8 +621,8 @@ def test_two_zero_days_are_gone_under_both_readings(conn) -> None:
     _observe(conn, "pos-gone", YESTERDAY, tracked=7, held=0)
     _observe(conn, "pos-gone", TODAY, tracked=7, held=0)
 
-    assert positions_missing_from_holdings(conn, TODAY) == {"pos-gone"}
-    assert positions_missing_from_holdings(conn, TODAY, require_zero=True) == {"pos-gone"}
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-gone"}
+    assert set(positions_missing_from_holdings(conn, TODAY, require_zero=True)) == {"pos-gone"}
     assert missing_holdings_observations(conn, TODAY)["pos-gone"].zero_sessions == 2
 
 
@@ -690,12 +690,12 @@ async def test_a_weekend_boot_cannot_complete_a_two_session_streak(conn) -> None
     await _job(conn, _FakeKite([]), at=saturday, notify=_Sink()).run()
 
     assert [r[1] for r in _observations(conn)] == ["2026-06-19"]
-    assert positions_missing_from_holdings(conn, monday) == set()
+    assert set(positions_missing_from_holdings(conn, monday)) == set()
 
 
 def test_entry_rec_id_is_the_one_lookup_both_surfaces_use(conn) -> None:
     """The 3.6 alert and the day plan's "sold outside the ledger" block must name the SAME id -
-    they now share this function (the job's method delegates to it)."""
+    they share this function (``HoldingsReconcileJob.run`` calls it directly)."""
     _position(conn, "pos-m10", "HDFCAMC", 7)
     _ledger(conn, "led-exit", "pos-m10", "REC-EXIT", entry_px=None,
             created_at="2026-06-09T10:00:00+05:30")

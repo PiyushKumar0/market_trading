@@ -51,7 +51,10 @@ from engine.core.log import configure_logging, get_logger  # noqa: E402
 from engine.core.migrations import apply_migrations  # noqa: E402
 from engine.core.nse_http import nse_get  # noqa: E402
 from engine.datafeeds.earnings_calendar import event_calendar_range_url, parse_event_calendar  # noqa: E402
+from engine.datafeeds.filings_pit import PIT_PACE_S as _PACE_S  # noqa: E402
+from engine.datafeeds.filings_pit import PIT_WINDOW_DAYS as _NSE_WINDOW_DAYS  # noqa: E402
 from engine.datafeeds.filings_pit import parse_pit, pit_url  # noqa: E402
+from engine.datafeeds.filings_pit import pit_windows as _windows  # noqa: E402
 from engine.datafeeds.filings_results import parse_results, results_url  # noqa: E402
 from engine.datafeeds.filings_shp import (  # noqa: E402
     BSE_SHP_DETAIL_URL,
@@ -65,9 +68,9 @@ from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 _log = get_logger("scripts.backfill_filings")
 
-#: ≥1.5 s between requests (§2.8, observed safe). NSE windows are ≤31 days apiece.
-_PACE_S = 1.5
-_NSE_WINDOW_DAYS = 31
+#: ``_PACE_S`` / ``_NSE_WINDOW_DAYS`` / ``_windows`` are local aliases of filings_pit's public
+#: ``PIT_PACE_S`` / ``PIT_WINDOW_DAYS`` / ``pit_windows`` — this script walks the SAME endpoint in the
+#: same unit (§2.8), so filings_pit is the one canonical copy.
 _SEED_YEARS = 3
 
 
@@ -129,17 +132,6 @@ def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str
 
 
 # --------------------------------------------------------------------------- windows + checkpoints
-def _windows(frm: date, to: date, span_days: int = _NSE_WINDOW_DAYS) -> list[tuple[date, date]]:
-    """Ascending ≤``span_days`` windows covering ``[frm, to]`` inclusive."""
-    out: list[tuple[date, date]] = []
-    cur = frm
-    while cur <= to:
-        end = min(cur + timedelta(days=span_days - 1), to)
-        out.append((cur, end))
-        cur = end + timedelta(days=1)
-    return out
-
-
 def _cp_done(conn: sqlite3.Connection, feed: str, unit: str) -> bool:
     row = conn.execute(
         "SELECT through_date FROM filings_backfill_checkpoints WHERE feed=? AND unit=?", (feed, unit)

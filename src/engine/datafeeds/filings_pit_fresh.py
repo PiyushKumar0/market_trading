@@ -192,6 +192,10 @@ def bse_insider_id(
 
 # --------------------------------------------------------------------------- defensive helpers
 def _clean(raw: Any) -> str:
+    """Deliberately NOT ``filings_pit``'s ``_clean`` (2026-09-23: kept separate, not merged — see that
+    module's docstring): this one treats a raw value that is present but falsy (``is not None``, not
+    truthiness) as real, because BSE's ``secVal='0'`` is a genuine zero-consideration value, not
+    "missing"."""
     return str(raw if raw is not None else "").strip()
 
 
@@ -233,6 +237,9 @@ def _dec(raw: Any) -> Decimal | None:
 
 
 def _int(raw: Any) -> int | None:
+    """Independent of :func:`engine.datafeeds.filings_pit._int` (which delegates to the Decimal-based
+    ``_dec``): ``Fld_SecurityNo`` is parsed via ``float`` first so a share count BSE serves as a
+    float-formatted string (``'1000.0'``) still resolves, matching this feed's other numeric fields."""
     s = _clean(raw).replace(",", "")
     if not s or s in ("-", "NA"):
         return None
@@ -318,7 +325,9 @@ class ScripMap:
     master that parsed to a truncated few hundred pairs both leave the feed at the pre-2026-09-12
     coverage, and only the first of those is ``not master``. ``cause`` names WHICH leg (a key of
     :data:`_MAP_CAUSE_DETAIL`, ``""`` when healthy) — the legs live on different hosts with
-    different fixes, and a zero count alone cannot tell them apart.
+    different fixes, and a zero count alone cannot tell them apart. ``degraded`` is DERIVED
+    (``bool(cause)``, 2026-09-23): every construction site already set them in lockstep, so the field
+    was pure redundancy that could in principle drift from ``cause``.
     """
 
     by_scrip: dict[str, str]
@@ -328,10 +337,13 @@ class ScripMap:
     symbols: int
     unresolved: int
     shadowed: int
-    degraded: bool
     cause: str = ""
     covered: int = 0
     duplicate_isin: int = 0
+
+    @property
+    def degraded(self) -> bool:
+        return bool(self.cause)
 
 
 @dataclass(frozen=True)
@@ -686,7 +698,7 @@ class FilingsPitFreshJob:
                 _log.warning("filings_pit_fresh_constituents_missing")
                 return ScripMap(
                     by_scrip=dict(stored), stored_codes=len(stored), master_rows=0, added_codes=0,
-                    symbols=0, unresolved=0, shadowed=0, degraded=True, cause=leg,
+                    symbols=0, unresolved=0, shadowed=0, cause=leg,
                 )
             leg = "bulk_master"
             master = await self._bulk_master()
@@ -699,7 +711,7 @@ class FilingsPitFreshJob:
             )
             return ScripMap(
                 by_scrip=dict(stored), stored_codes=len(stored), master_rows=0, added_codes=0,
-                symbols=len(isin_by_symbol), unresolved=0, shadowed=0, degraded=True, cause=leg,
+                symbols=len(isin_by_symbol), unresolved=0, shadowed=0, cause=leg,
             )
 
         by_scrip = dict(stored)
@@ -748,7 +760,7 @@ class FilingsPitFreshJob:
         return ScripMap(
             by_scrip=by_scrip, stored_codes=len(stored), master_rows=len(master), added_codes=added,
             symbols=len(isin_by_symbol), unresolved=unresolved, shadowed=shadowed,
-            degraded=bool(cause), cause=cause, covered=covered, duplicate_isin=duplicate_isin,
+            cause=cause, covered=covered, duplicate_isin=duplicate_isin,
         )
 
     async def _bulk_master(self) -> dict[str, str]:

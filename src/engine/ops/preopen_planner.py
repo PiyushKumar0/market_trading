@@ -66,10 +66,8 @@ from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
 from engine.marketdata.store import MarketStore
 from engine.ops.holdings_reconcile import (
-    MISSING_SESSIONS,
     MissingHolding,
     entry_rec_id,
-    missing_holdings_observations,
     positions_missing_from_holdings,
 )
 from engine.ops.jobs import AdvisoryOutcome
@@ -387,12 +385,13 @@ class PreopenPlannerJob:
         reply that ends the ambiguity. The planner then reasons about the book the owner actually
         holds, and the one thing it is asked to do about the others is get them reported.
 
-        Two reads of the same journal (the set, then the per-position streak/quantities the block
-        prints) on a job that runs once a day — the alternative is re-deriving the platform's
-        "missing" threshold here, where it would be free to drift away from the position-event path's.
-        An unreadable journal (a database that has not taken migration 0013 yet, a locked file)
-        degrades to the pre-WO-D2 rendering — every open position on the risk line — because the
-        planner may never raise (§2.7: its death must not block the scanner path).
+        One read of the journal: :func:`positions_missing_from_holdings` returns the
+        ``position_id -> MissingHolding`` mapping directly, so the per-position streak/quantities the
+        block prints come from the SAME dict that decided which positions leave the risk line — no
+        second query, and no "missing position" case to fall back on. An unreadable journal (a
+        database that has not taken migration 0013 yet, a locked file) degrades to the pre-WO-D2
+        rendering — every open position on the risk line — because the planner may never raise (§2.7:
+        its death must not block the scanner path).
         """
         rows = self._conn.execute(
             "SELECT position_id, symbol, side, qty, avg_entry, stop, product "
@@ -402,11 +401,10 @@ class PreopenPlannerJob:
             return "none"
         try:
             missing = positions_missing_from_holdings(self._conn, d)
-            observations = missing_holdings_observations(self._conn, d) if missing else {}
         except sqlite3.Error as exc:
             _log.warning("preopen_holdings_journal_unreadable", d=d.isoformat(),
                          error_type=type(exc).__name__, error=str(exc)[:200])
-            missing, observations = set(), {}
+            missing = {}
         held = [r for r in rows if str(r["position_id"]) not in missing]
         sold = [r for r in rows if str(r["position_id"]) in missing]
         summary = "; ".join(
@@ -423,23 +421,22 @@ class PreopenPlannerJob:
         # alone was carrying the distinction. The heading is the separator, and it states the
         # negative ("not open risk") before the model reaches the position lines.
         return "\n".join(
-            [summary, _SOLD_OUTSIDE_HEADING, *(self._sold_outside_line(r, observations) for r in sold)]
+            [summary, _SOLD_OUTSIDE_HEADING, *(self._sold_outside_line(r, missing) for r in sold)]
         )
 
-    def _sold_outside_line(self, row: Any, observations: Mapping[str, MissingHolding]) -> str:
+    def _sold_outside_line(self, row: Any, missing: Mapping[str, MissingHolding]) -> str:
         """One "sold outside the ledger" line: what the platform tracks, what the broker showed, and
         the literal reply that settles it — the same ``entry_rec_id`` the §3.6 alert names.
 
         ``held_qty`` is the quantity the LATEST observation actually saw, not a hardcoded zero: a
         partial exit reads short with a non-zero holding, and the plan must not assert a number the
-        journal never recorded. A position that is in the missing set but (impossibly, absent a
-        concurrent write between the two reads) has no observation falls back to the threshold that
-        put it there.
+        journal never recorded. ``missing`` is the SAME dict :meth:`_positions_summary` used to select
+        ``row`` as sold, so ``row``'s position id is always a key here.
         """
         position_id = str(row["position_id"])
-        seen = observations.get(position_id)
-        sessions = seen.sessions if seen is not None else MISSING_SESSIONS
-        held_qty = seen.held_qty if seen is not None else 0
+        seen = missing[position_id]
+        sessions = seen.sessions
+        held_qty = seen.held_qty
         rec_id = entry_rec_id(self._conn, position_id)
         reply = (
             f"/closed {rec_id} <price>" if rec_id

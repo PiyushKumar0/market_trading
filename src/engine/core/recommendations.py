@@ -10,6 +10,8 @@ would be a real layering violation, not just an awkward import. ``core`` sits be
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -47,3 +49,38 @@ def recommendation_expired(valid_until: Any, now: datetime) -> bool:
     """
     parsed = parse_valid_until(valid_until)
     return parsed is not None and parsed < now
+
+
+def pending_entry_symbols(rows: Iterable[Mapping[str, Any]], now: datetime) -> frozenset[str]:
+    """Symbols carrying an UNEXPIRED, UNACTIONED entry recommendation (§3.6).
+
+    ``rows`` are ``recommendations`` table rows (anything supporting ``row["payload"]`` /
+    ``row["human_action"]`` — a ``sqlite3.Row`` in practice). Shared by two callers that must agree
+    exactly: the gate's own ``GateContext.pending_rec_symbols`` (``risk.gate``, for the O16
+    sector/correlation-room math) and the brk20 retest re-arm screen (``ops.main``), which must
+    refuse what the gate would refuse (``per_stock_exposure: already held or pending`` is a HARD
+    reason, uncurable by shrinking) BEFORE a §3.2.5 day slot and an analyst call are spent rather
+    than after.
+
+    A row with ANY ``human_action`` (taken / expired / dismissed / closed) is skipped here
+    regardless of whether the caller's own SQL already narrowed to unactioned rows — one caller
+    pre-filters in SQL (a 60 s pulse against a table that only grows), the other does not, and the
+    guard living here too means the two can never disagree on that point. Shares
+    :func:`parse_valid_until` with the expiry predicate rather than negating it: an
+    absent/naive/unparseable ``valid_until`` stays EXCLUDED here, exactly as it does there —
+    negating :func:`recommendation_expired` would silently flip such a row to "pending".
+    """
+    out: set[str] = set()
+    for row in rows:
+        if row["human_action"]:
+            continue                       # taken / expired / dismissed / closed ⇒ not pending
+        try:
+            data = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "entry":
+            continue
+        valid_until = parse_valid_until(data.get("valid_until"))
+        if valid_until is not None and valid_until > now and data.get("instrument"):
+            out.add(str(data["instrument"]))
+    return frozenset(out)

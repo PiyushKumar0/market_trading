@@ -678,15 +678,17 @@ async def test_the_lock_is_free_during_every_chunk_of_a_multi_chunk_batch(store,
     assert result.scored == 61
 
 
-async def test_without_a_lock_the_batch_reads_the_queue_exactly_once(store, make_job, now_box):
-    """``lock=None`` is the pre-change path (existing callers/tests): no re-read, no conditional."""
+async def test_without_a_lock_the_batch_still_does_the_conditional_reread(store, make_job, now_box):
+    """``lock=None`` is no longer a distinct code path (2026-09-23): the job owns a private lock for
+    the run and the write-back's conditional re-read always happens, so the queue is read TWICE (the
+    initial read, then the write-back's re-read) even with no caller-supplied lock."""
     seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
     probe = LockProbeStore(store, asyncio.Lock())    # the lock is never handed to the job
 
     result = await make_job(FakeHarness(), store_override=probe).run_batch()
 
     assert result.scored == 2
-    assert probe.reads == [False]                    # one queue read, unlocked, exactly as before
+    assert probe.reads == [False, False]             # initial read + the write-back's conditional reread
     assert probe.writes == [False]
 
 

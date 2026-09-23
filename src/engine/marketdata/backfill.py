@@ -106,6 +106,26 @@ def _dec(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+def _abort_remaining(
+    report: BackfillReport,
+    remaining: Sequence[str],
+    frm: str,
+    to: str,
+    event: str,
+    **log_fields: Any,
+) -> None:
+    """Common tail of a ``TokenException`` catch in :meth:`BackfillJob.run`/``warmup_gap``/``daily_gap``
+    (2026-07-21): a rejected token fails every subsequent historical call identically, so instead of
+    hammering the broker (and warning) once per remaining symbol, mark every un-attempted ``symbol``
+    ``aborted_token_rejected`` in one pass and log once. ``frm``/``to`` are the caller's already-
+    ``isoformat()``-ed WHOLE requested span (not the failed chunk) — every remaining symbol is
+    reported as never having been attempted at all. Callers set their own ``aborted`` flag and
+    break their own loops (the three have different loop shapes)."""
+    for rem in remaining:
+        report.failed.append(BackfillSpan(symbol=rem, frm=frm, to=to, error="aborted_token_rejected"))
+    _log.warning(event, symbols_remaining=len(remaining), **log_fields)
+
+
 class BackfillJob:
     """Chunked, checkpointed, resumable official-candle backfill (§3.2.3, A2/A11).
 
@@ -210,17 +230,9 @@ class BackfillJob:
                         # on_token_rejected circuit breaker has already frozen entries; the
                         # un-attempted symbols are reported failed so the caller sees the full
                         # picture and the resume (via PostLoginRecovery) refills them.
-                        remaining = symbols[i + 1:]
-                        for rem in remaining:
-                            report.failed.append(
-                                BackfillSpan(
-                                    symbol=rem, frm=start.isoformat(), to=end.isoformat(),
-                                    error="aborted_token_rejected",
-                                )
-                            )
-                        _log.warning(
+                        _abort_remaining(
+                            report, symbols[i + 1:], start.isoformat(), end.isoformat(),
                             "backfill_aborted_token_rejected", interval=interval,
-                            symbols_remaining=len(remaining),
                         )
                         aborted = True
                         break
@@ -379,16 +391,9 @@ class BackfillJob:
                         # whole warm-up fill (the circuit breaker already froze entries) rather than
                         # retry per remaining symbol. Un-attempted symbols reported failed; the
                         # post-login re-trigger recomputes and refills the gap once the token is good.
-                        for rem in symbols[i + 1:]:
-                            report.failed.append(
-                                BackfillSpan(
-                                    symbol=rem, frm=frm.isoformat(), to=to.isoformat(),
-                                    error="aborted_token_rejected",
-                                )
-                            )
-                        _log.warning(
+                        _abort_remaining(
+                            report, symbols[i + 1:], frm.isoformat(), to.isoformat(),
                             "warmup_gap_aborted_token_rejected",
-                            symbols_remaining=len(symbols) - i - 1,
                         )
                         aborted = True
                     else:
@@ -532,16 +537,9 @@ class BackfillJob:
                         # Same rationale as run()/warmup_gap: a rejected token fails every subsequent
                         # call identically — abort the whole fill rather than hammering the broker
                         # once per remaining symbol.
-                        for rem in symbols[i + 1:]:
-                            report.failed.append(
-                                BackfillSpan(
-                                    symbol=rem, frm=oldest.isoformat(), to=newest.isoformat(),
-                                    error="aborted_token_rejected",
-                                )
-                            )
-                        _log.warning(
+                        _abort_remaining(
+                            report, symbols[i + 1:], oldest.isoformat(), newest.isoformat(),
                             "daily_gap_aborted_token_rejected",
-                            symbols_remaining=len(symbols) - i - 1,
                         )
                         aborted = True
                     else:

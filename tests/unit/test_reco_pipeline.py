@@ -1935,9 +1935,10 @@ def test_a_position_sold_outside_the_ledger_leaves_the_open_positions_line(
     stayed in the intraday context for eleven sessions. It moves to a trailing line naming the
     evidence and the reply that settles it, and comes out of the counts above.
 
-    The §7.1 headroom line is asserted UNCHANGED in the same breath: those positions still occupy
-    ``max_open_positions`` until ``/closed`` lands, and the gate was deliberately not taught this
-    predicate. The two lines disagreeing is the ambiguity, stated."""
+    The §7.1 headroom line is asserted UNCHANGED in the same breath: it reads the raw
+    ``ExposureTracker.open_position_counts()``, so those positions still show there until
+    ``/closed`` lands, even though the gate's own admission count has excluded them since WO-D2
+    (2026-09-12, ``missing_holdings_fn``). The two lines disagreeing is the ambiguity, stated."""
     _open_position(conn, pclock, style="intraday")                        # MIS, still held
     gone = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")  # CNC, broker holds none
     _observe_holding(conn, gone, TODAY - timedelta(days=1))
