@@ -72,6 +72,7 @@ asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "needs_heavy_deps: requires pykiteconnect/claude-agent-sdk/vectorbt/skfolio/river (smoke-test tier)",
+    "chaos: plan §9.4 chaos suite (tests/chaos) — run weekly and before every phase gate: pytest -m chaos",
 ]
 
 [tool.ruff]
