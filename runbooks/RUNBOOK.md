@@ -55,10 +55,12 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
 - **Stop:** stop the NSSM service (or Ctrl-C). **First Ctrl-C = graceful** (honoured at the next safe
   point, even mid-startup); **a second Ctrl-C more than 10 s after the first = forced hard exit**
   (2026-07-21 fix — state stays RUNNING so the next boot crash-recovers; positions stay broker-protected,
-  R3). Repeats inside those 10 s are logged `stop_signal_repeat_ignored` and ignored (2026-09-23: one
-  `nssm stop` delivers the console Ctrl-C more than once, which forced every stop 09-02..09-23 and
-  skipped the clean-stop commit). A clean stop is confirmed by `engine_lifecycle.last_clean_stop_at`
-  moving to the stop time and no `stop_forced` line in `engine.log`. A wedged internal worker can
+  R3). Repeats inside those 10 s are logged `stop_signal_repeat_ignored` and ignored. **NSSM must give
+  the engine time to stop:** `AppStopMethodConsole` = 30000 ms (set by `nssm_install.ps1`). At NSSM's
+  1500 ms default it closes the console window after 1.5 s (a SIGBREAK repeat at +1.3 s) and Windows
+  terminates the process mid-backup, so every stop 09-02..09-23 was recorded as a crash. A clean stop
+  is confirmed by `engine_lifecycle.state = STOPPED` with `last_clean_stop_at` at the stop time, and no
+  `stop_forced` line in `engine.log`. A wedged internal worker can
   no longer leave a zombie process holding the lock. The shutdown guard (§2.6) will, from Phase 3,
   flatten an open MIS before window-end / verify CNC GTTs / cancel working entries — never leaving the
   PC dead with an unprotected position or a resting entry order.
