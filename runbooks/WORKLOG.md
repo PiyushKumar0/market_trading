@@ -1,5 +1,41 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 05:00–05:30 — results data integrated (owner: "Probe and find sources to integrate this data, then work into making our system work correctly"); 221d43c; live listing backfilled with the engine stopped (owner stop 04:06)
+
+- **Source found by capturing NSE's own page traffic:**
+  - `api/integrated-filing-results?type=Integrated Filing- Financials` holds 26.8k filings from the
+    Mar-2025 quarter on (the old endpoint ends at Dec-2024);
+  - it pages up to 500 rows and filters by broadcast date;
+  - each row links an XBRL file. Revenue/PAT tags were verified per taxonomy (INDAS, NBFC_INDAS,
+    NONINDAS, BANKING, LI, GI).
+- **Owner decision (asked):** hold both the News Analyst's use of real revenue and the three
+  resolver-alias fixes until the `cat` v2 shadow verdict (~mid-Oct), because both change the frozen
+  shadow population. Recorded in the plan §2.8 addendum.
+- **Built:**
+  - Integrated Filing leg in `filings_results`;
+  - staleness alarm (newest period >150 days ⇒ degraded + alert) — the guard that was missing for
+    18 months;
+  - new `results_line_items` job (19:30, post-arm, ≤300 paced XBRL fetches, quarterly revenue + PAT,
+    consolidated preferred);
+  - `line_items_at` column with a legacy migration;
+  - listing re-upserts that never blank parsed values;
+  - backfill `--skip-integrated` leg.
+  Consumers are not wired.
+- **Validation:**
+  - Built in a scratch worktree, then cherry-picked, so the live tree never held partial code.
+  - Tests on verbatim NSE fixtures; mutation checks on the preserve rule and quarter selection.
+  - Full suite green: 3199 passed / 21 skipped / 5 xfailed.
+  - On a 5.5 GB COPY of the live DuckDB with real NSE: migration applied, Jul–Sep listing 4,158
+    filings, revenue/PAT correct for 8 issuers across taxonomies.
+- **Live:**
+  - `backfill_filings.py seed --from 2025-01-01 --skip-pit --skip-results --skip-shp`: 21 windows,
+    23,779 filings, 0 failed, 151 s.
+  - `results_filings` 24,747 → 48,467 rows; newest period 2024-12-31 → 2026-06-30.
+  - News-universe coverage per quarter: 855–905 of 917.
+  - Line items: 0/≈4,400 attempted; they fill nightly (~15 runs).
+  - The engine stays stopped (owner's 04:06 stop); the migration also runs at its next boot, as a
+    no-op, since the backfill already applied it.
+
 ## 2026-09-24 04:4x — revenue/profit sources probed (owner: "Is there a way to obtain revenue and profit records?"); results-filings feed found starved
 
 - **Real figures are obtainable (probed live, read-only):**

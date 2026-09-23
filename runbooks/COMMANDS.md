@@ -126,6 +126,10 @@ uv run python scripts\backfill.py seed --skip-daily --minute-years 3 --reset-che
 # filings (public NSE/BSE APIs, no Kite needed; checkpointed/resumable; SHP leg ≈ 3.5 h):
 uv run python scripts\backfill_filings.py seed --from 2023-07-01
 uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --skip-results --redo-shp
+# Integrated Filing results listing only (every result since the Mar-2025 quarter; ~2.5 min, engine OFF).
+# Run 2026-09-24 from 2025-01-01: 23,779 filings. Quarterly revenue/PAT then fill nightly via the
+# results_line_items job (19:30, <=300 XBRL fetches per run) — no backfill command needed for them.
+uv run python scripts\backfill_filings.py seed --from 2025-01-01 --skip-pit --skip-results --skip-shp
 ```
 
 ## Protected config (after ANY owner-directed edit to limits.yaml / envelope.yaml)
