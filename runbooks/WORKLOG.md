@@ -1,5 +1,42 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-23 evening (owner: "implement the suggested fix [stop handler]. Also implement Failure drills … and New position caps (O17)") — stop-signal grace (f4667f3), NSSM stop-grace config (bb5fe12), chaos suite + CHAOS_DRILLS.md (a4ab744), O17 combined patch prepared; engine restarted twice, running since 21:33
+
+- **G2 re-measured 20:00 (`scripts/g2_evidence.py`, 40 sessions):** still NOT met — C1 digest-before-window
+  27/40 = 67.5% (8/10 = 80% since 09-09), C4 owner-executed 0 taken / 2 closed, C5 18/40 rec-sessions.
+  C2/C3/C6/C7 met. `phase2` fully pushed (241 ahead of main).
+- **Forced stops, diagnosed.** Every stop since 09-02 logged `stop_forced` 0.85–1.4 s after
+  `stop_requested`, mid shutdown-backup, so `last_clean_stop_at` stayed 2026-09-02 and every boot ran
+  crash recovery. Not a store stall. f4667f3: the stop handler ignores repeat signals for 10 s and logs
+  `signum`. Live drill 21:29 on f4667f3 (case 15): repeat ignored (`signum 21` = SIGBREAK at +1.33 s)
+  but the process still died at STOPPING — NSSM `AppStopMethodConsole` is 1500 ms; it then closes the
+  console (CTRL_CLOSE_EVENT) and Windows terminates the engine. bb5fe12: `nssm_install.ps1` sets 30000.
+  **Owner action:** `nssm set mt-engine AppStopMethodConsole 30000` from an elevated shell (COMMANDS.md
+  "Service logs"); this session's shell is not elevated (`OpenService(): Access is denied`). Re-drill
+  case 15 afterwards.
+- **Engine ops.** Stop 20:18 (old code, forced as expected) → start requested ~20:19 but it sat in a
+  permission prompt until 21:23 (PC in Modern Standby 20:34–21:08) → `engine_ready` 21:29:18
+  (crash-recovered, caught up backup/deals/features_daily/nightly_review for 09-23) → drill stop 21:29:46
+  → `engine_ready` 21:33:13, NORMAL, integrity ok.
+- **Chaos suite (a4ab744; three Opus builds under my spec, audited: pointers for CD-1/2/3/5 opened and
+  confirmed, full suite re-run by me).** `pytest -m chaos`: 56 passed, 21 skipped, 9 xfailed, ~90 s.
+  Every §9.4 case has a file or a Phase-3 placeholder. Seven product defects pinned as strict xfails,
+  none fixed: CD-3 missed EOD `earnings_calendar` never caught up (jobs.py:370/595; high), CD-5
+  model-emitted entity strings resolved into symbols (news_scoring.py:336/345; high), CD-1 feed STALE
+  never latches FROZEN, CD-2 warm-up lift clears a skew freeze, CD-4 stale digest sends no
+  CATALYST_DISABLED, CD-6/7 teardown drain + wedged flush. `runbooks/CHAOS_DRILLS.md` holds the map,
+  the defects, Phase-2 live-drill steps, the §10.6 soak schedule and the evidence log.
+- **O17 NOT applied — owner step.** The classifier refused `git apply` on the live `config/limits.yaml`
+  (Modify Shared Resources) even with the explicit directive; limits.yaml untouched, signed file intact.
+  Built the full change in a scratch worktree instead: limits + hi52 `expected_edge_pct` 1.47 → 1.53
+  (derived: floor-rung notional ₹6,000, cost floor 0.4982%) + ins stop comment (at 2.0× on ₹20k: 4/5/6%
+  pass 2.88/2.52/2.23×, 7/8% reject) + 8 tests that encoded 2.5×/₹8k + plan O17 status. Full unit suite
+  in the worktree: 3076 passed (Opus build, audited; 476 touched-file tests re-run by me). Exported as
+  `runbooks/briefs/o17_combined_2026-09-23.patch`; `git apply --check` clean on HEAD. Owner steps in
+  COMMANDS.md "Protected config".
+- **Also:** `.gitignore`'s `secrets.*` matched `src/engine/core/secrets.py` (key names only), so it was
+  never committed and a fresh clone could not import `engine`; un-ignored and added (bb5fe12).
+
 ## 2026-09-23 (owner: "Trade recommendations should close automatically and free the gate count at the end of the day if no trade decision were made") — entry TTL back to today's close, WO-V withdrawn (b7d174d); engine restarted 01:33 IST, boot verified
 
 - **Status check first (owner: "today's trade has been completed, check status", 09-22 session).**

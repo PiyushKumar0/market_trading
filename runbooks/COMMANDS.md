@@ -37,6 +37,15 @@ Get-WinEvent -ProviderName nssm -MaxEvents 20 | Format-Table TimeCreated, Messag
 scripts\nssm_install.ps1 -Action status                # service config incl. ObjectName + log paths
 ```
 
+**Stop grace (2026-09-23, owner, ELEVATED shell, once):** NSSM's 1.5 s default console wait kills the
+engine mid-shutdown, so every stop records as a crash. Give it 30 s, then verify with a stop/start
+(runbooks/CHAOS_DRILLS.md §3, case 15):
+
+```powershell
+nssm set mt-engine AppStopMethodConsole 30000
+nssm get mt-engine AppStopMethodConsole                  # want: 30000
+```
+
 ## Universe symbol list (the canonical 200-name set for historical runs)
 
 ```powershell
@@ -126,14 +135,21 @@ uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citi
 ```
 
 The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
-the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Pending as of 2026-09-13:
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Pending as of 2026-09-23:
 
 ```powershell
 # O17 sizing caps (plan §7.1 O17): overnight_gap_mult 2.5 -> 2.0, cnc_notional_inr 8000 -> 12000.
+# ONE combined patch (supersedes o17_limits_2026-09-13.patch): limits.yaml + the knock-ons that must
+# land in the same boot — hi52.expected_edge_pct 1.47 -> 1.53 (derived from the gap mult, pinned by a
+# test), the ins stop comment, hi52_forward_verdict fallbacks, 8 tests that encode limit arithmetic,
+# and the plan's O17 status. Full unit suite green on it in a scratch worktree (3076 passed, 09-23).
+# Run outside 09:15-15:30, from the repo root, with a clean `git status`.
 Stop-Service mt-engine
-git apply runbooks\briefs\o17_limits_2026-09-13.patch          # or edit the two values by hand
-.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "O17 2026-09-13 owner-applied"
+git apply --check runbooks\briefs\o17_combined_2026-09-23.patch   # must print nothing
+git apply runbooks\briefs\o17_combined_2026-09-23.patch
+.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "O17 2026-09-23 owner-applied"
 Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
+git add -u; git commit -m "O17 applied (owner): combined patch + reseed"
 ```
 
 ## Tests / verification
