@@ -53,8 +53,12 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
   If the holder is a wedged boot, the watchdog force-kills it and the lock frees itself on process
   death (never delete `engine.lock` by hand; the lock lives in the kernel, not the file).
 - **Stop:** stop the NSSM service (or Ctrl-C). **First Ctrl-C = graceful** (honoured at the next safe
-  point, even mid-startup); **second Ctrl-C = forced hard exit** (2026-07-21 fix — state stays RUNNING
-  so the next boot crash-recovers; positions stay broker-protected, R3). A wedged internal worker can
+  point, even mid-startup); **a second Ctrl-C more than 10 s after the first = forced hard exit**
+  (2026-07-21 fix — state stays RUNNING so the next boot crash-recovers; positions stay broker-protected,
+  R3). Repeats inside those 10 s are logged `stop_signal_repeat_ignored` and ignored (2026-09-23: one
+  `nssm stop` delivers the console Ctrl-C more than once, which forced every stop 09-02..09-23 and
+  skipped the clean-stop commit). A clean stop is confirmed by `engine_lifecycle.last_clean_stop_at`
+  moving to the stop time and no `stop_forced` line in `engine.log`. A wedged internal worker can
   no longer leave a zombie process holding the lock. The shutdown guard (§2.6) will, from Phase 3,
   flatten an open MIS before window-end / verify CNC GTTs / cancel working entries — never leaving the
   PC dead with an unprotected position or a resting entry order.

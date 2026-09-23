@@ -3982,8 +3982,12 @@ async def _stop_api(task) -> None:
         _log.exception("api_server_task_failed")
 
 
+_REPEAT_SIGNAL_GRACE_S = 10.0
+
+
 def _make_stop_handler(
     loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event, force_exit: Callable[[int], object],
+    *, monotonic: Callable[[], float] = time_module.monotonic,
 ) -> Callable[..., None]:
     """Build the COUNTED stop handler shared across every registered signal (extracted so the two-press
     semantics are unit-testable WITHOUT raising real signals — the returned handler is called directly).
@@ -3996,18 +4000,26 @@ def _make_stop_handler(
     * FIRST signal: graceful — wake the idle ``await stop_event.wait()`` via
       :meth:`loop.call_soon_threadsafe` (the ``signal.signal`` fallback runs in the main thread OUTSIDE
       the loop callback context on Windows, so the threadsafe hand-off is the correct wake-up; the loop
-      is captured at install time). Honoured at the next safe point; a second Ctrl-C forces exit.
-    * SECOND (and later) signal: hard exit. State stays RUNNING (never committed STOPPED) so the next
-      boot runs crash recovery — that is BY DESIGN; R3 protection is broker-resident, not process-local.
+      is captured at install time). Honoured at the next safe point.
+    * REPEATS within ``_REPEAT_SIGNAL_GRACE_S`` of the first: logged and ignored. A single ``nssm stop``
+      delivers the console Ctrl-C more than once (2026-09-02..23: every stop logged ``stop_forced``
+      0.85-1.4 s after ``stop_requested``, mid shutdown-backup, so the clean stop was never committed).
+    * A signal AFTER the grace window: hard exit (the owner's deliberate second Ctrl-C for a wedged
+      stop). State stays RUNNING (never committed STOPPED) so the next boot runs crash recovery — that is
+      BY DESIGN; R3 protection is broker-resident, not process-local.
     """
-    state = {"count": 0}
+    state: dict[str, float | int] = {"count": 0, "first_at": 0.0}
 
-    def _handler(*_args: object) -> None:
+    def _handler(*args: object) -> None:
         state["count"] += 1
+        signum = args[0] if args else None
         if state["count"] == 1:
+            state["first_at"] = monotonic()
             _log.warning(
                 "stop_requested",
-                hint="graceful stop — honoured at the next safe point; a second Ctrl-C forces exit",
+                signum=signum,
+                hint=f"graceful stop — honoured at the next safe point; a Ctrl-C more than "
+                f"{_REPEAT_SIGNAL_GRACE_S:.0f} s later forces exit",
             )
             try:
                 loop.call_soon_threadsafe(stop_event.set)
@@ -4017,10 +4029,18 @@ def _make_stop_handler(
                 # wake — swallow so the "never raises" contract holds; _hard_exit is already imminent.
                 pass
             return
+        since_first = monotonic() - state["first_at"]
+        if since_first < _REPEAT_SIGNAL_GRACE_S:
+            _log.warning(
+                "stop_signal_repeat_ignored",
+                count=state["count"], signum=signum, since_first_s=round(since_first, 3),
+            )
+            return
         _log.critical(
             "stop_forced",
-            hint="second signal — engine exits hard; state stays RUNNING so the next boot runs crash "
-            "recovery (R3 protection is broker-resident)",
+            count=state["count"], signum=signum, since_first_s=round(since_first, 3),
+            hint="repeat signal past the grace window — engine exits hard; state stays RUNNING so the "
+            "next boot runs crash recovery (R3 protection is broker-resident)",
         )
         try:
             logging.shutdown()
