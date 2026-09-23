@@ -8,8 +8,8 @@ owns the fetch). Point-in-time throughout (§2.8 rule i): every row keyed on its
 timestamp, never the period label.
 
     python scripts/backfill_filings.py seed [--from YYYY-MM-DD] [--symbols CSV]
-                                             [--skip-pit] [--skip-results] [--skip-shp]
-                                             [--config-dir DIR]
+                                             [--skip-pit] [--skip-results] [--skip-integrated]
+                                             [--skip-shp] [--config-dir DIR]
 
 Default ``--from`` is 3 years back; ``--to`` is always today. NSE endpoints (PIT, results,
 event-calendar) are walked in ≤31-day windows; BSE SHP is a per-symbol quarter loop. Every request is
@@ -55,7 +55,7 @@ from engine.datafeeds.filings_pit import PIT_PACE_S as _PACE_S  # noqa: E402
 from engine.datafeeds.filings_pit import PIT_WINDOW_DAYS as _NSE_WINDOW_DAYS  # noqa: E402
 from engine.datafeeds.filings_pit import parse_pit, pit_url  # noqa: E402
 from engine.datafeeds.filings_pit import pit_windows as _windows  # noqa: E402
-from engine.datafeeds.filings_results import parse_results, results_url  # noqa: E402
+from engine.datafeeds.filings_results import fetch_integrated_results, parse_results, results_url  # noqa: E402
 from engine.datafeeds.filings_shp import (  # noqa: E402
     BSE_SHP_DETAIL_URL,
     BSE_SHP_QUARTER_INDEX_URL,
@@ -91,6 +91,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols", default=None, help="comma-separated universe override (uppercased)")
     parser.add_argument("--skip-pit", action="store_true", help="skip the insider-trades (PIT) leg")
     parser.add_argument("--skip-results", action="store_true", help="skip the results + event-calendar leg")
+    parser.add_argument(
+        "--skip-integrated", action="store_true",
+        help="skip the Integrated Filing (Financials) listing leg (every result since the Mar-2025 quarter)",
+    )
     parser.add_argument("--skip-shp", action="store_true", help="skip the SHP + pledge leg (BSE)")
     parser.add_argument(
         "--redo-shp", action="store_true",
@@ -152,8 +156,9 @@ def _cp_set(conn: sqlite3.Connection, feed: str, unit: str, through: str, now: s
 async def _seed_nse_windowed(
     conn, store, http, clock, feed: str, frm: date, to: date, summary: dict,
 ) -> None:
-    """Walk PIT or results over ≤31-day windows (checkpoint per window). event-calendar rides the
-    same window as the results leg (its historical board-meeting dates → earnings_calendar)."""
+    """Walk PIT, results or integrated filings over ≤31-day windows (checkpoint per window).
+    event-calendar rides the same window as the results leg (its historical board-meeting dates →
+    earnings_calendar)."""
     for w_frm, w_to in _windows(frm, to):
         unit = f"{w_frm.isoformat()}..{w_to.isoformat()}"
         if _cp_done(conn, feed, unit):
@@ -164,6 +169,9 @@ async def _seed_nse_windowed(
                 resp = await nse_get(http, pit_url(w_frm, w_to), timeout=20.0)
                 rows = parse_pit(json.loads(resp.content))
                 written = await store.arun(store.upsert_insider_trades, rows)
+            elif feed == "integrated":
+                rows = await fetch_integrated_results(http, w_frm, w_to, timeout=20.0)
+                written = await store.arun(store.upsert_results_filings, rows)
             else:  # results (+ event calendar)
                 resp = await nse_get(http, results_url(w_frm, w_to), timeout=20.0)
                 rows = parse_results(json.loads(resp.content))
@@ -234,6 +242,7 @@ def _new_summary() -> dict:
     return {
         "pit": {"windows": 0, "written": 0, "skipped": 0, "failed": 0},
         "results": {"windows": 0, "written": 0, "events": 0, "skipped": 0, "failed": 0},
+        "integrated": {"windows": 0, "written": 0, "skipped": 0, "failed": 0},
         "shp": {"symbols": 0, "written": 0, "skipped": 0, "skipped_no_scrip": 0, "failed": 0},
     }
 
@@ -278,6 +287,9 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
             if not args.skip_results:
                 print(f"backfill_filings: results + event-calendar {frm}..{to} ...")
                 await _seed_nse_windowed(conn, store, http, clock, "results", frm, to, summary)
+            if not args.skip_integrated:
+                print(f"backfill_filings: integrated filings {frm}..{to} ...")
+                await _seed_nse_windowed(conn, store, http, clock, "integrated", frm, to, summary)
             if not args.skip_shp:
                 if args.redo_shp:
                     cleared = _cp_clear_feed(conn, "shp")
@@ -292,7 +304,7 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
 
     path = _write_report(settings, args, source, frm, to, summary)
     _print_summary(summary, path)
-    failed = summary["pit"]["failed"] + summary["results"]["failed"] + summary["shp"]["failed"]
+    failed = sum(summary[feed]["failed"] for feed in ("pit", "results", "integrated", "shp"))
     return 1 if failed else 0
 
 
@@ -306,7 +318,8 @@ def _write_report(settings, args, source, frm, to, summary) -> Path:
                 "from": frm.isoformat(),
                 "to": to.isoformat(),
                 "universe_source": source,
-                "skip": {"pit": args.skip_pit, "results": args.skip_results, "shp": args.skip_shp},
+                "skip": {"pit": args.skip_pit, "results": args.skip_results,
+                         "integrated": args.skip_integrated, "shp": args.skip_shp},
                 "summary": summary,
             },
             indent=2,
@@ -318,7 +331,7 @@ def _write_report(settings, args, source, frm, to, summary) -> Path:
 
 def _print_summary(summary: dict, path: Path) -> None:
     print("\n=== filings backfill summary ===")
-    for feed in ("pit", "results", "shp"):
+    for feed in ("pit", "results", "integrated", "shp"):
         print(f"  [{feed}] " + "  ".join(f"{k}={v}" for k, v in summary[feed].items()))
     print(f"report: {path}")
 

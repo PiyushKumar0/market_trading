@@ -31,7 +31,13 @@ from engine.datafeeds.earnings_calendar import EarningsCalendarJob
 from engine.datafeeds.filings_events import SOURCE_NSE
 from engine.datafeeds.filings_pit import FilingsPitJob, insider_id, parse_pit, pit_url
 from engine.datafeeds.filings_pit_fresh import BSE_ID_PREFIX, BSE_SOURCE
-from engine.datafeeds.filings_results import FilingsResultsJob, parse_results
+from engine.datafeeds.filings_results import (
+    FilingsResultsJob,
+    ResultsLineItemsJob,
+    parse_integrated_results,
+    parse_results,
+    parse_xbrl_line_items,
+)
 from engine.datafeeds.filings_shp import (
     FilingsShpJob,
     parse_shp_detail,
@@ -55,6 +61,7 @@ D = FIXED_NOW.date()
 
 PIT_JSON = json.loads((FIXTURES / "filings_pit.json").read_text(encoding="utf-8"))
 RESULTS_JSON = json.loads((FIXTURES / "filings_results.json").read_text(encoding="utf-8"))
+INTEGRATED_JSON = json.loads((FIXTURES / "filings_integrated_results.json").read_text(encoding="utf-8"))
 SHP_MASTER_JSON = json.loads((FIXTURES / "shp_master.json").read_text(encoding="utf-8"))
 SHP_QUARTER_INDEX_JSON = json.loads((FIXTURES / "shp_quarter_index.json").read_text(encoding="utf-8"))
 SHP_DETAIL_JSON = json.loads((FIXTURES / "shp_detail.json").read_text(encoding="utf-8"))
@@ -80,6 +87,7 @@ def _no_waits(monkeypatch):
     monkeypatch.setattr("engine.core.nse_http._sleep", _instant)
     monkeypatch.setattr("engine.core.bse_http._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.filings_pit._sleep", _instant)
+    monkeypatch.setattr("engine.datafeeds.filings_results._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.filings_shp._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.isin_map._sleep", _instant)
 
@@ -463,17 +471,19 @@ def test_parse_results_fixture():
     assert rn["exchdiss_dt"] == datetime(2023, 4, 6, 18, 18, 2, tzinfo=IST)
 
 
-async def test_filings_results_persists_both_legs(store, clock):
+async def test_filings_results_persists_every_leg(store, clock):
     client = routed_client({
         "corporates-financial-results": httpx.Response(200, json=RESULTS_JSON),
+        "integrated-filing-results": httpx.Response(200, json=INTEGRATED_JSON),
         "event-calendar": httpx.Response(200, json=EVENT_CALENDAR_JSON),
     })
     earnings = EarningsCalendarJob(store, clock, client)   # provider shares the routed client
     job = FilingsResultsJob(store, clock, client, earnings=earnings)
     result = await job.run(D)
     assert result.ok is True and result.degraded is False
-    assert result.results_written == 2 and result.events_written == 3
-    assert {r["symbol"] for r in store.get_results_filings()} == {"VIDEOIND", "RNAVAL"}
+    assert result.results_written == 2 and result.integrated_written == 2 and result.events_written == 3
+    assert {r["symbol"] for r in store.get_results_filings()} == {"VIDEOIND", "RNAVAL", "LUMINO"}
+    assert result.newest_period == date(2026, 6, 30)
     assert store.get_earnings_calendar(date(2026, 7, 1), date(2026, 7, 31))   # board-meeting dates merged
 
 
@@ -483,6 +493,8 @@ async def test_filings_results_partial_failure_keeps_other_leg(store, clock):
             return httpx.Response(200, text="ok")
         if "corporates-financial-results" in str(request.url):
             raise httpx.ConnectError("results down", request=request)
+        if "integrated-filing-results" in str(request.url):
+            return httpx.Response(200, json=INTEGRATED_JSON)
         return httpx.Response(200, json=EVENT_CALENDAR_JSON)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
@@ -493,6 +505,156 @@ async def test_filings_results_partial_failure_keeps_other_leg(store, clock):
     assert result.failed_legs == ("results",)
     assert result.events_written == 3                        # the other leg still ingested
     assert msgs and msgs[0].data["job_id"] == "filings_results" and msgs[0].severity == "warning"
+
+
+# =========================================================================== integrated filings + line items
+# Fixtures are verbatim NSE captures (2026-09-24): an Integrated Filing listing page subset, and the
+# XBRL of BDL's Q4 FY26 (INDAS: quarter AND full-year contexts), HDFC Bank's Q1 FY27 consolidated
+# (BANKING taxonomy) and HDFC Life's Q1 FY27 (LI taxonomy).
+def _xbrl(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+def test_parse_integrated_results_keeps_originals_only():
+    rows = parse_integrated_results(INTEGRATED_JSON)
+    assert [(r["symbol"], r["consolidated"]) for r in rows] == [("LUMINO", True), ("LUMINO", False)]
+    cons = rows[0]
+    assert cons["period_end"] == date(2026, 6, 30)                       # qe_Date "30-JUN-2026"
+    assert cons["audited"] is False                                      # "Un-Audited"
+    assert cons["broadcast_dt"] == datetime(2026, 9, 21, 20, 42, 13, tzinfo=IST)
+    assert cons["exchdiss_dt"] == datetime(2026, 9, 21, 20, 42, 33, tzinfo=IST)   # creation_Date
+    assert cons["xbrl"].endswith("INTEGRATED_FILING_INDAS_1726157_21092026084233_WEB.xml")
+    # The MAXESTATES row is a Revision (no broadcast time; restates a broadcast period) — skipped.
+
+
+def test_parse_integrated_results_falls_back_to_the_creation_stamp():
+    raw = {**INTEGRATED_JSON["data"][0], "broadcast_Date": None}
+    (row,) = parse_integrated_results({"data": [raw]})
+    assert row["broadcast_dt"] == row["exchdiss_dt"] == datetime(2026, 9, 21, 20, 42, 33, tzinfo=IST)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "period_end", "revenue", "pat"),
+    [
+        # Q4 carries the quarter (Jan-Mar) and the full year under the same end date: quarter wins.
+        ("xbrl_indas_q4_bdl.xml", date(2026, 3, 31), Decimal("4802044000"), Decimal("1131821000")),
+        # Bank: no RevenueFromOperations — total Income; profit tag ProfitLossForThePeriod.
+        ("xbrl_banking_hdfcbank.xml", date(2026, 6, 30), Decimal("1331103600000"), Decimal("203826900000")),
+        # Life insurer: gross premium; ProfitLossAfterTaxAndExtraordinaryItems.
+        ("xbrl_li_hdfclife.xml", date(2026, 6, 30), Decimal("171664400000"), Decimal("6114200000")),
+    ],
+)
+def test_parse_xbrl_line_items(fixture, period_end, revenue, pat):
+    assert parse_xbrl_line_items(_xbrl(fixture), period_end) == (revenue, pat)
+
+
+def test_parse_xbrl_line_items_without_that_period_returns_nothing():
+    assert parse_xbrl_line_items(_xbrl("xbrl_indas_q4_bdl.xml"), date(2025, 12, 31)) == (None, None)
+
+
+def _filing(symbol, period_end, consolidated, **extra):
+    return {"symbol": symbol, "period_end": period_end, "consolidated": consolidated,
+            "xbrl": f"https://nsearchives.nseindia.com/x/{symbol}_{period_end}_{int(consolidated)}.xml", **extra}
+
+
+def test_listing_reupsert_never_blanks_parsed_line_items(store):
+    store.upsert_results_filings([_filing("BDL", date(2026, 3, 31), False)])
+    store.set_results_line_items(
+        [{**_filing("BDL", date(2026, 3, 31), False), "revenue": Decimal("4802044000"), "pat": Decimal("1")}]
+    )
+    store.upsert_results_filings([_filing("BDL", date(2026, 3, 31), False, audited=True)])   # re-listed
+    (row,) = store.get_results_filings(symbol="BDL")
+    assert row["revenue"] == Decimal("4802044000") and row["line_items_at"] is not None
+    assert row["audited"] is True                                        # metadata still updates
+
+
+def test_line_item_candidates_prefer_consolidated_and_skip_attempted(store):
+    q1, q4, old = date(2026, 6, 30), date(2026, 3, 31), date(2024, 12, 31)
+    store.upsert_results_filings([
+        _filing("AAA", q1, True), _filing("AAA", q1, False),    # consolidated exists -> standalone skipped
+        _filing("BBB", q1, False),                              # standalone only -> taken
+        _filing("AAA", q4, True),
+        _filing("BBB", old, False),                             # before the horizon
+        _filing("ZZZ", q1, True),                               # outside the symbol set
+    ])
+    store.set_results_line_items([{**_filing("AAA", q4, True), "revenue": None, "pat": None}])   # attempted
+    got = store.results_line_item_candidates(["AAA", "BBB"], since=date(2025, 6, 1), limit=10)
+    assert [(r["symbol"], r["period_end"], r["consolidated"]) for r in got] == [
+        ("AAA", q1, True), ("BBB", q1, False),
+    ]
+    assert len(store.results_line_item_candidates(["AAA", "BBB"], since=date(2025, 6, 1), limit=1)) == 1
+
+
+async def test_stale_results_feed_is_degraded_and_alerted(store, clock):
+    """The 2025-26 failure: the listing kept 'succeeding' while nothing new arrived."""
+    client = routed_client({
+        "corporates-financial-results": httpx.Response(200, json=RESULTS_JSON),   # periods <= 2024-12-31
+        "integrated-filing-results": httpx.Response(200, json={"data": [], "totalCount": 0}),
+    })
+    msgs, sink = collect_alerts()
+    result = await FilingsResultsJob(store, clock, client, notify=sink).run(D)
+    assert result.ok is True                        # the listings themselves answered
+    assert result.degraded is True and result.failed_legs == ("stale",)
+    assert result.newest_period == date(2024, 12, 31)
+    assert msgs and "stale" in msgs[0].body and msgs[0].severity == "warning"
+
+
+async def test_integrated_listing_walks_every_page(monkeypatch):
+    monkeypatch.setattr(fres, "INTEGRATED_PAGE_SIZE", 1)
+    pages = {1: INTEGRATED_JSON["data"][0], 2: INTEGRATED_JSON["data"][1]}
+    served: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/":
+            return httpx.Response(200, text="ok")                        # nse_get's cookie prime
+        n = int(request.url.params["page"])
+        served.append(n)
+        return httpx.Response(200, json={"data": [pages[n]], "totalCount": 2})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+    rows = await fres.fetch_integrated_results(client, D, D, timeout=5)
+    assert len(rows) == 2 and served == [1, 2]
+
+
+def _line_items_world(store, clock, routes):
+    store.upsert_universe_daily([{"d": clock.today(), "symbol": s, "included": True} for s in ("BDL", "HDFCBANK")])
+    store.upsert_results_filings([
+        {**_filing("BDL", date(2026, 3, 31), False), "xbrl": "https://nsearchives.nseindia.com/bdl.xml"},
+        {**_filing("HDFCBANK", date(2026, 6, 30), True), "xbrl": "https://nsearchives.nseindia.com/hdfcbank.xml"},
+    ])
+    return ResultsLineItemsJob(store, clock, routed_client(routes))
+
+
+async def test_line_items_job_fills_revenue_and_profit(store, clock):
+    job = _line_items_world(store, clock, {
+        "bdl.xml": httpx.Response(200, content=_xbrl("xbrl_indas_q4_bdl.xml")),
+        "hdfcbank.xml": httpx.Response(200, content=_xbrl("xbrl_banking_hdfcbank.xml")),
+    })
+    result = await job.run()
+    assert (result.pending, result.filled, result.failed) == (2, 2, 0)
+    rows = {r["symbol"]: r for r in store.get_results_filings()}
+    assert rows["BDL"]["revenue"] == Decimal("4802044000") and rows["BDL"]["pat"] == Decimal("1131821000")
+    assert rows["HDFCBANK"]["revenue"] == Decimal("1331103600000")
+    assert (await job.run()).pending == 0                                # never re-fetched
+
+
+async def test_line_items_job_retries_fetch_failures_but_not_malformed_files(store, clock):
+    def down():
+        raise httpx.ConnectError("archive down")
+
+    job = _line_items_world(store, clock, {
+        "bdl.xml": down,
+        "hdfcbank.xml": httpx.Response(200, content=b"<not-xml"),
+    })
+    result = await job.run()
+    assert (result.pending, result.filled, result.no_revenue, result.failed) == (2, 0, 1, 1)
+    remaining = store.results_line_item_candidates(["BDL", "HDFCBANK"], since=date(2025, 1, 1), limit=10)
+    assert [r["symbol"] for r in remaining] == ["BDL"]                   # transient: still pending
+
+
+async def test_line_items_job_without_a_universe_does_nothing(store, clock):
+    job = ResultsLineItemsJob(store, clock, failing_client())
+    assert (await job.run()).pending == 0
 
 
 # =========================================================================== SHP (master + BSE detail)

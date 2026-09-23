@@ -517,23 +517,26 @@ _SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (symbol, qtr_end, category)
     )
     """,
-    # results_filings — NSE financial-results filing METADATA (line items NULL in stage 1; §2.8.4
-    # stages 2). PK (symbol, period_end, consolidated) keeps standalone + consolidated as distinct
-    # rows (both stored, consolidated preferred downstream — §2.8 edge cases). ``broadcast_dt`` is the
-    # point-in-time timestamp every as-of join keys on (never the period label — period labels lie).
+    # results_filings — NSE financial-results filings: metadata from the listing APIs, quarterly
+    # ``revenue``/``pat`` (₹, absolute) parsed from each filing's XBRL by ``results_line_items``
+    # (§2.8.4 stage 2; ``line_items_at`` = parse attempted). PK (symbol, period_end, consolidated)
+    # keeps standalone + consolidated as distinct rows (both stored, consolidated preferred
+    # downstream — §2.8 edge cases). ``broadcast_dt`` is the point-in-time timestamp every as-of join
+    # keys on (never the period label — period labels lie).
     """
     CREATE TABLE IF NOT EXISTS results_filings (
-        symbol       TEXT NOT NULL,
-        period_end   DATE NOT NULL,
-        consolidated BOOLEAN NOT NULL,
-        audited      BOOLEAN,
-        broadcast_dt TIMESTAMPTZ,
-        exchdiss_dt  TIMESTAMPTZ,
-        xbrl         TEXT,
-        revenue      DECIMAL(18,2),
-        pat          DECIMAL(18,2),
-        eps          DECIMAL(12,4),
-        ingested_at  TIMESTAMPTZ NOT NULL,
+        symbol        TEXT NOT NULL,
+        period_end    DATE NOT NULL,
+        consolidated  BOOLEAN NOT NULL,
+        audited       BOOLEAN,
+        broadcast_dt  TIMESTAMPTZ,
+        exchdiss_dt   TIMESTAMPTZ,
+        xbrl          TEXT,
+        revenue       DECIMAL(18,2),
+        pat           DECIMAL(18,2),
+        eps           DECIMAL(12,4),
+        ingested_at   TIMESTAMPTZ NOT NULL,
+        line_items_at TIMESTAMPTZ,
         PRIMARY KEY (symbol, period_end, consolidated)
     )
     """,
@@ -633,9 +636,15 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "results_filings": (
         ("symbol", "period_end", "consolidated", "audited", "broadcast_dt", "exchdiss_dt", "xbrl",
-         "revenue", "pat", "eps", "ingested_at"),
+         "revenue", "pat", "eps", "ingested_at", "line_items_at"),
         ("symbol", "period_end", "consolidated"),
     ),
+}
+
+#: Columns a conflicting upsert may FILL but never blank: the listing jobs re-upsert filing metadata
+#: with the line items NULL, which the generic ``excluded`` update would write over parsed values.
+_KEEP_ON_NULL: dict[str, frozenset[str]] = {
+    "results_filings": frozenset({"revenue", "pat", "eps", "line_items_at"}),
 }
 
 # Tables whose PK is a CONTENT HASH of the row (identical id ⇒ identical row). Conflict action for
@@ -1000,6 +1009,20 @@ class MarketStore:
             self._migrate_corrections_reason(con)
             self._migrate_sentiment_measures(con)
             self._migrate_watchlist_reversal(con)
+            self._migrate_results_line_items_at(con)
+
+    def _migrate_results_line_items_at(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``results_filings.line_items_at`` column (§2.8.4 stage 2,
+        2026-09-24), mirroring :meth:`_migrate_watchlist_reversal`. NULL on every legacy row means
+        "line items never attempted", which is exactly what those rows are."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'results_filings'"
+            ).fetchall()
+        }
+        if "line_items_at" not in present:
+            con.execute("ALTER TABLE results_filings ADD COLUMN line_items_at TIMESTAMPTZ")
+            _log.info("results_filings_column_added", column="line_items_at")
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
@@ -1198,7 +1221,11 @@ class MarketStore:
             rows = [{**defaults, **row} for row in rows]
         non_pk = [c for c in cols if c not in pk]
         if non_pk and table not in _CONTENT_HASH_PK_TABLES:
-            updates = ", ".join(f'"{c}" = excluded."{c}"' for c in non_pk)
+            keep = _KEEP_ON_NULL.get(table, frozenset())
+            updates = ", ".join(
+                f'"{c}" = COALESCE(excluded."{c}", {table}."{c}")' if c in keep else f'"{c}" = excluded."{c}"'
+                for c in non_pk
+            )
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
         else:
             # Content-hash-PK tables (id derives from the row's content): identical id ⇒ identical
@@ -2027,6 +2054,45 @@ class MarketStore:
         """Latest stored results ``broadcast_dt`` — the filings_results incremental watermark (§2.8)."""
         row = self._fetchall("SELECT max(broadcast_dt) FROM results_filings")[0]
         return _ist(row[0]) if row[0] is not None else None
+
+    def latest_results_period(self) -> date | None:
+        """Newest stored ``period_end`` — the feed-staleness probe (an idle listing still "succeeds")."""
+        row = self._fetchall("SELECT max(period_end) FROM results_filings")[0]
+        return row[0]
+
+    def results_line_item_candidates(
+        self, symbols: Sequence[str], *, since: date, limit: int
+    ) -> list[dict[str, Any]]:
+        """Filings whose XBRL line items were never attempted, newest period first. One per
+        (symbol, period): the CONSOLIDATED filing when the issuer filed one, else standalone (§2.8)."""
+        if not symbols or limit <= 0:
+            return []
+        return self._fetch_dicts(
+            """
+            SELECT symbol, period_end, consolidated, xbrl FROM results_filings r
+            WHERE xbrl IS NOT NULL AND line_items_at IS NULL AND period_end >= ?
+              AND symbol IN (SELECT unnest(?))
+              AND (consolidated OR NOT EXISTS (
+                    SELECT 1 FROM results_filings c
+                    WHERE c.symbol = r.symbol AND c.period_end = r.period_end
+                      AND c.consolidated AND c.xbrl IS NOT NULL))
+            ORDER BY period_end DESC, symbol
+            LIMIT ?
+            """,
+            [since, list(symbols), limit],
+        )
+
+    def set_results_line_items(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Record parsed ``revenue``/``pat`` (either may be None when the filing lacks the tag) and
+        stamp ``line_items_at`` so the filing is never re-fetched."""
+        now = self._clock.now()
+        for row in rows:
+            self._execute(
+                "UPDATE results_filings SET revenue = ?, pat = ?, line_items_at = ? "
+                "WHERE symbol = ? AND period_end = ? AND consolidated = ?",
+                [row["revenue"], row["pat"], now, row["symbol"], row["period_end"], row["consolidated"]],
+            )
+        return len(rows)
 
     # ================================================================== tick Parquet writer (§4.3)
     @property

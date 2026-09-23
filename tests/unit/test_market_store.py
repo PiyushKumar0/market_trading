@@ -190,6 +190,33 @@ def test_correction_reason_persists_and_legacy_db_is_migrated(tmp_path, clock):
         s.close()
 
 
+def test_results_filings_legacy_db_gains_line_items_at(tmp_path, clock):
+    """A pre-2026-09-24 ``results_filings`` gets ``line_items_at`` on open; legacy rows read back as
+    never attempted, i.e. line-item candidates."""
+    db = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(                                               # the stage-1 shape, verbatim
+        "CREATE TABLE results_filings (symbol TEXT NOT NULL, period_end DATE NOT NULL, "
+        "consolidated BOOLEAN NOT NULL, audited BOOLEAN, broadcast_dt TIMESTAMPTZ, "
+        "exchdiss_dt TIMESTAMPTZ, xbrl TEXT, revenue DECIMAL(18,2), pat DECIMAL(18,2), "
+        "eps DECIMAL(12,4), ingested_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (symbol, period_end, consolidated))"
+    )
+    con.execute("INSERT INTO results_filings VALUES ('BDL', DATE '2026-03-31', FALSE, TRUE, NULL, NULL, "
+                "'https://x/bdl.xml', NULL, NULL, NULL, ?)", [clock.now()])
+    con.close()
+
+    s = MarketStore(db, tmp_path / "parquet", clock)
+    s.open()                                                   # migrates
+    try:
+        s.init_schema()                                        # idempotent: the ALTER runs once
+        (row,) = s.get_results_filings(symbol="BDL")
+        assert row["line_items_at"] is None
+        got = s.results_line_item_candidates(["BDL"], since=date(2026, 1, 1), limit=5)
+        assert [r["symbol"] for r in got] == ["BDL"]
+    finally:
+        s.close()
+
+
 def test_bar_src_is_constrained(store, clock):
     # Model-level: BarSrc is a closed Literal.
     with pytest.raises(ValidationError):

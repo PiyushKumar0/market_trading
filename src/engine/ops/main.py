@@ -61,7 +61,12 @@ from engine.datafeeds.deals import DealsJob, DealsResult
 from engine.datafeeds.earnings_calendar import EarningsCalendarJob, EarningsCalendarResult
 from engine.datafeeds.filings_pit import FilingsPitJob, FilingsPitResult
 from engine.datafeeds.filings_pit_fresh import FilingsPitFreshJob, FilingsPitFreshResult
-from engine.datafeeds.filings_results import FilingsResultsJob, FilingsResultsResult
+from engine.datafeeds.filings_results import (
+    FilingsResultsJob,
+    FilingsResultsResult,
+    ResultsLineItemsJob,
+    ResultsLineItemsResult,
+)
 from engine.datafeeds.filings_shp import FilingsShpJob, FilingsShpResult
 from engine.datafeeds.ins_crossings import InsCrossingsJob, InsCrossingsResult
 from engine.datafeeds.news import NSE_ANN_KEY, Headline, NewsIngest
@@ -106,6 +111,7 @@ from engine.ops.jobs import (
     JOB_PREOPEN_PLANNER,
     JOB_RECO_EXPIRE,
     JOB_RECONCILE,
+    JOB_RESULTS_LINE_ITEMS,
     JOB_SECTOR_MAP,
     JOB_SURVEILLANCE,
     JOB_TICK_COMPACT,
@@ -199,7 +205,7 @@ JobRunFn = Callable[..., Awaitable[None]]
 PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_INSTRUMENTS, JOB_SURVEILLANCE, JOB_EARNINGS,          # safety/deadline-critical
     JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CORP_ACTIONS, JOB_SECTOR_MAP, JOB_BACKUP,  # run-latest
-    JOB_FILINGS_SHP,                                                             # run-latest (§2.8)
+    JOB_FILINGS_SHP, JOB_RESULTS_LINE_ITEMS,                                     # run-latest (§2.8)
     JOB_RECONCILE, JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_DEALS, JOB_FEATURES,        # date-keyed
     JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
     JOB_INS_CROSSINGS,                                                           # date-keyed (§6.1 `ins`)
@@ -226,9 +232,10 @@ _RECO_EXPIRE_IST = time(15, 45)
 #: wedge costs the digest alone. Digest staleness already degrades ``cat`` safely (digest_stale_max_h).
 #: Members, in catch-up dependency order: news chain (20) → digest (25) → planner (28), plus the WO-7
 #: tick compaction — pure EOD housekeeping (readers see fragments and compacted files identically),
-#: and the single heaviest catch-up step by wall-clock, so boot is precisely where it must not be.
+#: and the single heaviest catch-up step by wall-clock, so boot is precisely where it must not be —
+#: and ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot reads.
 POST_ARM_JOB_IDS: tuple[str, ...] = (
-    JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_TICK_COMPACT,
+    JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_TICK_COMPACT, JOB_RESULTS_LINE_ITEMS,
 )
 
 #: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
@@ -332,6 +339,8 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
         # §2.8 SHP + pledge: run-latest (per-symbol BSE detail only for new submissions), after the
         # EOD data jobs; never entry-blocking (filings are features/risk-context only in stage 1).
         JobSpec(JOB_FILINGS_SHP, JobClass.RUN_LATEST, settings.jobs.filings_shp_ist, fns[JOB_FILINGS_SHP], order=80),
+        JobSpec(JOB_RESULTS_LINE_ITEMS, JobClass.RUN_LATEST, settings.jobs.results_line_items_ist,
+                fns[JOB_RESULTS_LINE_ITEMS], order=85),
         JobSpec(JOB_BACKUP, JobClass.RUN_LATEST, settings.jobs.backup_ist, fns[JOB_BACKUP], order=90),
         # date-keyed backfill — one run per missed trading day, ascending
         JobSpec(JOB_RECONCILE, JobClass.DATE_KEYED, settings.jobs.reconcile_ist, fns[JOB_RECONCILE], order=10),
@@ -663,6 +672,7 @@ async def run() -> int:
     # reaching 199 of 480 eligible issuers (plan §2.8, 2026-09-12).
     filings_pit_fresh = FilingsPitFreshJob(store, clock, http, settings=settings, notify=notify)
     filings_results = FilingsResultsJob(store, clock, http, earnings=earnings, notify=notify)
+    results_line_items = ResultsLineItemsJob(store, clock, http)
     filings_shp = FilingsShpJob(store, clock, http, notify=notify)
     # §6.1 `ins` (2026-08-17): EOD insider net-buy crossing detection over the SAME validated crossing
     # function the WO-16 study runs (engine.datafeeds.insider_crossings). No HTTP — it reads the rows
@@ -1242,6 +1252,9 @@ async def run() -> int:
         # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
         return await filings_results.run(d)
 
+    async def job_results_line_items() -> ResultsLineItemsResult:
+        return await results_line_items.run()
+
     async def job_filings_shp() -> FilingsShpResult:
         # Forwarded (2026-08-13): filings_shp degrades-without-raising (E5) — the watermark verdict
         # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
@@ -1298,6 +1311,7 @@ async def run() -> int:
         JOB_FILINGS_PIT_FRESH: job_filings_pit_fresh,
         JOB_FILINGS_RESULTS: job_filings_results,
         JOB_FILINGS_SHP: job_filings_shp,
+        JOB_RESULTS_LINE_ITEMS: job_results_line_items,
         JOB_INS_CROSSINGS: job_ins_crossings,
         JOB_TICK_COMPACT: job_tick_compact,
         # Phase-2 (§8.3): digest always (deterministic, $0); planner/nightly/expire register even

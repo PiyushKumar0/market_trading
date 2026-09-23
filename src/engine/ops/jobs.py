@@ -129,6 +129,7 @@ JOB_FILINGS_PIT = "filings_pit"                  # §2.8 insider trades (NSE PIT
 JOB_FILINGS_PIT_FRESH = "filings_pit_fresh"      # §2.8 stage-3 fresh insider (BSE, same-day) — date-keyed
 JOB_FILINGS_RESULTS = "filings_results"          # §2.8 results + board-meeting dates — date-keyed
 JOB_FILINGS_SHP = "filings_shp"                  # §2.8 SHP + pledge — run-latest
+JOB_RESULTS_LINE_ITEMS = "results_line_items"    # §2.8.4 quarterly revenue/PAT from XBRL — run-latest
 JOB_RECONCILE = "bar_reconcile"                  # §4.4 job 2 (A13) — date-keyed
 JOB_DAILY_BARS = "daily_bars"                    # §4.4 job 3 — date-keyed
 JOB_FEATURES = "features_daily"                  # §3.2.5/§6.2 nightly feature snapshot — date-keyed
