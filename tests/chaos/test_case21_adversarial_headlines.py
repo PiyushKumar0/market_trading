@@ -30,7 +30,8 @@ Clauses asserted (ENTRY side):
   ``test_syndicated_pr_is_one_cluster_and_cannot_exceed_the_guarded_entries``
 * other symbols' watchlist entries unaffected (baseline world vs adversarial world) —
   ``test_other_symbols_watchlist_entries_unaffected``; and the same clause when the compromised
-  model emits entity strings for companies the headline never names — a DEFECT, xfail strict:
+  model emits entity strings for companies the headline never names (CD-5, fixed 2026-09-24 —
+  entities not found in the shown headline never reach the resolver):
   ``test_foreign_entity_strings_from_the_model_cannot_touch_other_symbols``
 
 Skipped: the EXIT side (held symbol, news-triggered risk-reducing exit) — no news-triggered exit path
@@ -280,14 +281,6 @@ def _foreign_entity_analyst(foreign: str):
     return analyst
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: model-emitted entity strings are resolved without checking they occur in the headline — "
-    "NewsScoringJob._write_back (news_scoring.py:336,345) feeds score.entities to "
-    "EntityResolver.resolve(extra_texts=...) (news_pipeline.py:721-741, which also honours an "
-    "[NSE:<SYMBOL>] token found in model text) and unions the result into the cluster's symbols, so one "
-    "injected single-source headline naming only RELIANCE re-grades INFY's row and promotes HDFCBANK "
-    "context->originating"
-))
 @pytest.mark.parametrize(
     ("foreign", "victim"),
     [("Infosys", "INFY"), ("[NSE:INFY]", "INFY"), ("HDFC Bank", "HDFCBANK")],

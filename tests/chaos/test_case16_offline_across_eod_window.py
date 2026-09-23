@@ -30,10 +30,12 @@ detailed spec) does not, and the registry runs ``corp_actions`` RUN_LATEST (forw
 For a one-trading-day gap both classes mean "exactly once" — asserted as such (see case 17 for the
 multi-day behaviour).
 
-DEFECT (xfail strict, ``test_case16_missed_eod_earnings_calendar_is_caught_up_before_entries``): the
-EOD-window SAFETY-CRITICAL job ``earnings_calendar`` (18:30; §2.6 lists earnings among the EOD jobs
-AND among the "must run or verify before entries open, else FROZEN + alert" set) is neither replayed
-nor flagged: the runner's safety-critical executor only ever considers TODAY's fire-time.
+CD-3 (fixed 2026-09-24): the EOD-window SAFETY-CRITICAL job ``earnings_calendar`` (18:30; §2.6 lists
+earnings among the EOD jobs AND among the "must run or verify before entries open, else FROZEN +
+alert" set) was neither replayed nor flagged, because the runner only considered TODAY's fire-time.
+It now resolves the run that governs the next entries (``CatchUpRunner._governing_day``);
+``test_case16_missed_eod_jobs_caught_up_once_idempotently`` asserts the replay with the rest of the
+missed EOD window.
 
 Unbuilt (skipped, ``test_case16_champion_challenger_eval_single_snapshot``): the champion/challenger
 evaluation (§6.4) — ``JOB_CHAMP_CHALL`` is a reserved watermark id only; no job is registered (the
@@ -78,12 +80,13 @@ def _at(d: date, tm: time) -> datetime:
     return datetime.combine(d, tm, tzinfo=IST)
 
 
-def _missed_eod(proc: EngineProcess) -> tuple[set[str], set[str]]:
+def _missed_eod(proc: EngineProcess) -> tuple[set[str], set[str], set[str]]:
     """Wed's missed EOD window, read off the REAL registry: every job whose fire-time is after the
-    15:40 stop — (date-keyed ids, run-latest ids)."""
+    15:40 stop — (date-keyed ids, run-latest ids, safety-critical ids)."""
     dk = {s.job_id for s in proc.registry.specs(JobClass.DATE_KEYED) if s.at > A_STOP}
     rl = {s.job_id for s in proc.registry.specs(JobClass.RUN_LATEST) if s.at > A_STOP and s.fire_day is None}
-    return dk, rl
+    sc = {s.job_id for s in proc.registry.specs(JobClass.SAFETY_CRITICAL) if s.at > A_STOP}
+    return dk, rl, sc
 
 
 async def _offline_across_wed_eod(tmp_path, monkeypatch) -> tuple[RigEnv, EngineProcess, int, int]:
@@ -110,25 +113,28 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     report = b.report
     assert report is not None and report.crash_recovered is False
     calls = env.calls(since=calls_b)
-    eod_date_keyed, eod_run_latest = _missed_eod(b)
+    eod_date_keyed, eod_run_latest, eod_safety = _missed_eod(b)
     assert PLAN_NAMED_DATE_KEYED | {JOB_TICK_COMPACT} <= eod_date_keyed
     assert {JOB_BACKUP, JOB_CORP_ACTIONS} <= eod_run_latest
+    assert JOB_EARNINGS in eod_safety
 
     # Date-keyed: exactly one run per missed trading day (Wed), run_for = Wed.
     for job_id in sorted(eod_date_keyed):
         assert [d for j, d in calls if j == job_id] == [WED], f"{job_id}: {[c for c in calls if c[0] == job_id]}"
-    # Run-latest (incl. backup): a single snapshot run, recorded under the latest missed fire-day.
-    for job_id in sorted(eod_run_latest):
+    # Run-latest (incl. backup) and the EOD safety-critical jobs Thu's entries read (earnings,
+    # CD-3): a single run, recorded under the missed fire-day.
+    for job_id in sorted(eod_run_latest | eod_safety):
         assert [j for j, _ in calls if j == job_id] == [job_id], job_id
         assert b.catch_up.was_run(job_id, WED)
     # Nothing that was NOT missed ran (Wed's morning ran in A; nothing of Thu's is due yet).
-    assert {j for j, _ in calls} == eod_date_keyed | eod_run_latest
+    assert {j for j, _ in calls} == eod_date_keyed | eod_run_latest | eod_safety
     assert report.jobs_failed == [] and report.frozen_reasons == []
     assert b.mode.risk_state() == RiskState.NORMAL
+    assert b.catch_up.stale_safety_jobs() == []
 
     # "startup report lists what was caught up": the boot pass (load-bearing scope) in the
     # StartupReport, and every pass — incl. the post-arm one-shot (tick_compact) — to the owner.
-    everything = {f"{j}:{WED.isoformat()}" for j in eod_date_keyed | eod_run_latest}
+    everything = {f"{j}:{WED.isoformat()}" for j in eod_date_keyed | eod_run_latest | eod_safety}
     boot_pass = everything - {f"{j}:{WED.isoformat()}" for j in opsmain.POST_ARM_JOB_IDS}
     assert set(report.jobs_caught_up) == boot_pass
     catchup_reports = [m for m in env.messages(since=sent_b) if m.kind == MessageKind.CATCHUP_REPORT]
@@ -148,30 +154,6 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     report_c = await c.boot()
     assert report_c.jobs_caught_up == [] and env.calls(since=before) == []
     await c.stop()
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: a missed EOD earnings_calendar run (safety-critical, 18:30) is neither caught up "
-    "nor flagged at the next boot — CatchUpRunner._run_safety_critical only checks TODAY's fire-time",
-)
-async def test_case16_missed_eod_earnings_calendar_is_caught_up_before_entries(tmp_path, monkeypatch):
-    """§2.6 active period (c) names earnings among the EOD jobs, and §2.6 step 5 classes it
-    safety/deadline-critical: "must run or verify before entries open, else FROZEN-for-entries +
-    alert". Thu's entries open at 10:00 on Tue's earnings calendar unless the missed Wed 18:30 run is
-    replayed (or the staleness freezes entries with a DATA_FRESHNESS_FROZEN alert)."""
-    env, b, calls_b, sent_b = await _offline_across_wed_eod(tmp_path, monkeypatch)
-    earnings = next(s for s in b.registry.specs() if s.job_id == JOB_EARNINGS)
-    assert earnings.job_class is JobClass.SAFETY_CRITICAL and earnings.at > A_STOP   # an EOD-window job
-    ran = [d for j, d in env.calls(since=calls_b) if j == JOB_EARNINGS]
-    frozen = any(c == f"data_freshness:{JOB_EARNINGS}" for c, _s, _d in b.latch.active_causes())
-    alerted = any(m.kind == MessageKind.DATA_FRESHNESS_FROZEN and m.data.get("job_id") == JOB_EARNINGS
-                  for m in env.messages(since=sent_b))
-    stale = JOB_EARNINGS in b.catch_up.stale_safety_jobs()
-    await b.stop()
-    assert ran == [None] or (frozen and alerted and stale), (
-        f"missed Wed earnings: ran={ran} frozen={frozen} alerted={alerted} stale={stale}"
-    )
 
 
 def test_case16_champion_challenger_eval_single_snapshot() -> None:

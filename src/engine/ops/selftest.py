@@ -286,11 +286,11 @@ class SelfTest:
             return SelfTestCheck(
                 name="data_freshness",
                 status=CheckStatus.FAIL,
-                detail=f"safety-critical jobs not fresh today after catch-up: {stale} (§2.6 step 5)",
+                detail=f"safety-critical jobs not fresh after catch-up: {stale} (§2.6 step 5)",
                 implies=Implies.FROZEN,
             )
         return SelfTestCheck(name="data_freshness", status=CheckStatus.PASS,
-                             detail="today-dated safety-critical jobs fresh (instruments/surveillance/earnings)")
+                             detail="safety-critical jobs fresh (instruments/surveillance/earnings)")
 
     async def _check_warmup_ready(self) -> SelfTestCheck:
         """§7.1 ``warmup_ready`` as a self-test line — split per coverage class on 2026-09-17 (the

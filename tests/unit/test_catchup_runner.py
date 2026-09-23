@@ -2,7 +2,8 @@
 
 Scenario: FIXED_NOW is Wed 2026-06-17 10:05 IST; the engine was last up Fri 2026-06-12 evening.
 Missed trading days in the gap: Mon 15, Tue 16 (13/14 = weekend), plus today's already-due morning
-jobs. Asserts the §2.6 step-5 classes: safety-critical run-or-verify TODAY (in dependency order,
+jobs. Asserts the §2.6 step-5 classes: safety-critical run-or-verify the run that governs the next
+entries (in dependency order,
 before everything else), run-latest exactly ONCE for the whole gap, date-keyed once per missed
 trading day ascending, watermarks respected on re-run, and the freeze/notify seams on failure.
 """
@@ -531,11 +532,9 @@ async def test_freeze_alert_retries_when_the_send_itself_failed(conn, clock, cal
 
 
 @pytest.mark.asyncio
-async def test_freeze_notified_prunes_prior_day_entries(conn, calendar):
-    """``_freeze_notified`` keys are (job_id, date) pairs and every write ADDS a new key — a date
-    never recurs, so nothing ever naturally overwrites yesterday's entry. Left unpruned the set grows
-    by one member per (job, day) failure for the life of the process. Same-day dedup must still hold
-    on both sides of a day roll."""
+async def test_freeze_notified_dedups_per_governing_day_and_prunes_by_age(conn, calendar):
+    """``_freeze_notified`` keys are (job_id, run_for) pairs and every write ADDS a new key, so the
+    set is pruned by age. Dedup holds per governing day across sweeps and day rolls."""
     sent: list = []
 
     async def notify(msg) -> None:
@@ -555,25 +554,93 @@ async def test_freeze_notified_prunes_prior_day_entries(conn, calendar):
 
     ticker.at = datetime(2026, 6, 18, 10, 5, tzinfo=IST)               # Thu — the day rolls
     await runner.catch_up(off_since=OFF_SINCE)
-    assert len(_freeze_alerts(sent)) == 2                              # new day, new alert
-    assert ("instruments", "2026-06-17") not in runner._freeze_notified   # prior day evicted
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert len(_freeze_alerts(sent)) == 2                              # new day, new alert, once
     assert ("instruments", "2026-06-18") in runner._freeze_notified
 
-    await runner.catch_up(off_since=OFF_SINCE)                         # same-day dedup holds again
-    assert len(_freeze_alerts(sent)) == 2
+    ticker.at = datetime(2026, 7, 20, 10, 5, tzinfo=IST)               # > max_lookback_days later
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert ("instruments", "2026-06-17") not in runner._freeze_notified   # aged out
+    assert ("instruments", "2026-06-18") not in runner._freeze_notified
+    assert ("instruments", "2026-07-20") in runner._freeze_notified
 
 
 @pytest.mark.asyncio
-async def test_safety_critical_not_yet_due_today_is_skipped(conn, clock, calendar):
-    """A safety job whose fire-time is later today is NOT force-run — the re-armed scheduler fires
-    it; freshness is re-verified before entries (§2.6)."""
+async def test_two_jobs_failing_for_different_governing_days_alert_once_each(conn, clock, calendar):
+    """An EOD job's governing day is the previous fire-day while a pre-open job's is today; both
+    failing together must not evict each other's dedup key and re-alert on every sweep."""
+    sent: list = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    reg = JobRegistry()
+    reg.register(_spec_recorder([], "instruments", JobClass.SAFETY_CRITICAL, time(8, 15), order=10,
+                                fail_on="always"))
+    reg.register(_spec_recorder([], "earnings_calendar", JobClass.SAFETY_CRITICAL, time(18, 30),
+                                order=30, fail_on="always"))
+    runner = _build_runner(conn, clock, calendar, reg, notify=notify)
+
+    for _ in range(3):
+        await runner.catch_up(off_since=OFF_SINCE)
+    alerts = _freeze_alerts(sent)
+    assert sorted(m.data["job_id"] for m in alerts) == ["earnings_calendar", "instruments"]
+    assert runner.stale_safety_jobs() == ["instruments", "earnings_calendar"]
+
+
+@pytest.mark.asyncio
+async def test_missed_eod_safety_run_is_replayed_before_the_next_session(conn, clock, calendar):
+    """2026-09-23 chaos case 16: an EOD safety job (earnings 18:30) feeds the NEXT session, so at a
+    Wed 10:05 boot the governing run is Tue's. Missed ⇒ replayed once, recorded under Tue; today's
+    18:30 is left to the scheduler."""
     calls: list = []
     reg = JobRegistry()
-    reg.register(_spec_recorder(calls, "earnings_calendar", JobClass.SAFETY_CRITICAL, time(18, 0)))
+    reg.register(_spec_recorder(calls, "earnings_calendar", JobClass.SAFETY_CRITICAL, time(18, 30)))
     runner = _build_runner(conn, clock, calendar, reg)
+    assert runner.stale_safety_jobs() == ["earnings_calendar"]
+
     result = await runner.catch_up(off_since=OFF_SINCE)
-    assert calls == [] and result.jobs_caught_up == []
-    assert runner.stale_safety_jobs() == []   # not due yet ⇒ not stale
+    assert calls == [("earnings_calendar", None)]
+    assert result.jobs_caught_up == [f"earnings_calendar:{TUE.isoformat()}"]
+    assert runner.was_run("earnings_calendar", TUE) and not runner.was_run("earnings_calendar", WED)
+    assert runner.stale_safety_jobs() == []
+
+    calls.clear()
+    await runner.catch_up(off_since=OFF_SINCE)                         # watermark respected
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("now", "job", "at", "expect_run_for"),
+    [
+        # Pre-open boot: today's 08:15 fire precedes the open — the scheduler owns it, even though
+        # Tue's run was missed (re-running it pre-login would only fail and page).
+        (datetime(2026, 6, 17, 7, 0, tzinfo=IST), "instruments", time(8, 15), None),
+        # Pre-open boot, EOD job: the governing run is Tue's 18:30.
+        (datetime(2026, 6, 17, 7, 0, tzinfo=IST), "earnings_calendar", time(18, 30), TUE),
+        # After the close, before today's EOD fire: that fire governs tomorrow and is still ahead.
+        (datetime(2026, 6, 17, 16, 0, tzinfo=IST), "earnings_calendar", time(18, 30), None),
+        # After today's EOD fire: today's run governs tomorrow.
+        (datetime(2026, 6, 17, 19, 0, tzinfo=IST), "earnings_calendar", time(18, 30), WED),
+        # Saturday: Monday's entries read Friday's EOD run; Monday's pre-open fire is still ahead.
+        (datetime(2026, 6, 20, 11, 0, tzinfo=IST), "earnings_calendar", time(18, 30), date(2026, 6, 19)),
+        (datetime(2026, 6, 20, 11, 0, tzinfo=IST), "instruments", time(8, 15), None),
+    ],
+)
+async def test_governing_run_per_boot_moment(conn, calendar, now, job, at, expect_run_for):
+    calls: list = []
+    reg = JobRegistry()
+    reg.register(_spec_recorder(calls, job, JobClass.SAFETY_CRITICAL, at))
+    runner = _build_runner(conn, Clock(time_source=lambda: now), calendar, reg)
+
+    result = await runner.catch_up(off_since=OFF_SINCE)
+    if expect_run_for is None:
+        assert calls == [] and result.jobs_caught_up == []
+        assert runner.stale_safety_jobs() == []
+    else:
+        assert result.jobs_caught_up == [f"{job}:{expect_run_for.isoformat()}"]
+        assert runner.stale_safety_jobs() == []
 
 
 def test_stale_safety_jobs_predicate(conn, clock, calendar):

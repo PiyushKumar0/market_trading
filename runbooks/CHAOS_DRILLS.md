@@ -27,7 +27,7 @@ marker automatically. The flags list skip reasons (`-rs`) and pinned defects (`-
 - **`xfail(strict=True)`** marks a real defect (the CD-n list in §2). The test asserts the plan's
   behaviour, so fixing the defect makes it XPASS, which fails the run until the marker is removed.
 
-Status as of 2026-09-23: 56 passed, 21 skipped, 9 xfailed.
+Status as of 2026-09-24: 59 passed, 21 skipped, 5 xfailed (CD-3 and CD-5 fixed).
 
 | # | Case | File | Asserted today | Skipped / pending | Defects |
 |---|---|---|---|---|---|
@@ -39,12 +39,12 @@ Status as of 2026-09-23: 56 passed, 21 skipped, 9 xfailed.
 | 13 | Holiday start | `test_case13_holiday_start.py` | no session, no LLM calls, jobs skip and are not replayed, heartbeat-only health | — | — |
 | 14 | Clock skew > 2 s | `test_case14_clock_skew.py` | boot skew → FROZEN + gate `clock_skew` refusal; resync + restart reopens | mid-session skew detection (skew is boot-only, accepted for Phase 2) | CD-2 |
 | 15 | Clean stop + same-day restart | `test_case15_clean_stop_same_day_restart.py` | repeat stop signals ignored; STOPPED + `last_clean_stop_at` committed; one ENGINE_STOPPED; restart not crash-recovered; catch-up exact | restart reconcile (P3) | live drill failed 09-23, see §3 |
-| 16 | Offline across EOD | `test_case16_offline_across_eod_window.py` | each missed EOD job caught up once, idempotently | champ/chall eval (unbuilt) | CD-3 |
+| 16 | Offline across EOD | `test_case16_offline_across_eod_window.py` | each missed EOD job caught up once, idempotently, incl. the EOD safety-critical earnings run | champ/chall eval (unbuilt) | — |
 | 17 | Offline multi-day | `test_case17_offline_multi_day.py` | per-trading-day re-run (weekend + holiday skipped); candle gap backfilled; warm-up enforced | ex-date GTT repair (P3) | — |
 | 18 | Cold start too close to window | `test_case18_cold_start_warmup.py` | regime shortfall freezes until candles land; intraday-only shortfall refuses per candidate; daily-only per symbol | — | — |
 | 19 | Scheduled start missed | `test_case19_scheduled_start_missed.py` | one SCHEDULED_START_MISSED after grace, edge-triggered; none on weekend/holiday | open MIS rides backstop (P3) | — |
 | 20 | News down / DG3 pre-open | `test_case20_news_layer_down.py` | empty-but-fresh digest rung; digest-failure rung → CATALYST_DISABLED; no FROZEN; non-`cat` ranking identical; self-restores next day | — | CD-4 |
-| 21 | Prompt-injection headlines (entry side) | `test_case21_adversarial_headlines.py` | schema-invalid scores dropped; single-source ⇒ `context` at most; syndicated PR = one cluster; other symbols unaffected | exit side (P3) | CD-5 |
+| 21 | Prompt-injection headlines (entry side) | `test_case21_adversarial_headlines.py` | schema-invalid scores dropped; single-source ⇒ `context` at most; syndicated PR = one cluster; other symbols unaffected, incl. model-emitted foreign entity strings | exit side (P3) | — |
 | 22 | Lifecycle notifications | `test_case22_lifecycle_notifications.py` | (a) clean stop: one ENGINE_STOPPED, watchdog silent; (b) crash: one ENGINE_DOWN, crash-recovered restart; (c) killed while off: silent | capital protection (P3) | — |
 | 23 | Shutdown races tick flush | `test_case23_shutdown_races_tick_flush.py` | no deadlock; late flush restaged with explicit log | — | CD-6, CD-7 |
 
@@ -59,13 +59,20 @@ there are no platform positions.
 
 | ID | Case | Defect | Mitigation today | Severity |
 |---|---|---|---|---|
-| CD-3 | 16 | A missed EOD `earnings_calendar` run (safety-critical, 18:30) is never caught up, frozen on, or flagged. `CatchUpRunner._run_safety_critical` and `stale_safety_jobs` only look at *today's* run (`src/engine/ops/jobs.py:370`, `:595`). After an evening offline, entries open on the day-before calendar. | none | **high**: feeds the results-day ban |
-| CD-5 | 21 | Entity strings emitted by the model are resolved into symbols with no check that they appear in the headline (`src/engine/ops/news_scoring.py:336`, `:345`). An injected cluster can attach to, and re-grade, other symbols (context → originating). | the gate's C3 cost check still rejects; the 2/day catalyst budget bounds it | **high** (A3r) |
 | CD-1 | 3 | Feed staleness never latches a FROZEN cause: `ticker_supervisor.py:1036` publishes STALE, but no subscriber sets a risk cause. `limits.feed_heartbeat_silence_s` is parsed and unread, and `catalog.feed_stale` is never sent. | the per-candidate `stale_data_guard` refuses every entry | medium |
 | CD-2 | 14 | The 60 s warm-up lift clears the `startup_selftest` cause, including a clock-skew freeze, without re-measuring skew (`lifecycle.py:701`, `:711`). This contradicts its own docstring. | the boot-scoped gate `clock_skew` rule keeps refusing entries | medium |
 | CD-4 | 20 | A digest that is stale or missing *without an exception* never sends CATALYST_DISABLED. The only emitter is the digest-exception path in `main.py`; `news_pipeline.digest_status` has no alerting caller. | `cat` still originates nothing | low (alert gap) |
 | CD-6 | 23 | EventBus delivery tasks are untracked (`eventbus.py:58`), and teardown never drains them before `store.close()`. | `close()`'s bounded flush wait usually hides it | low |
 | CD-7 | 23 | A flush still running when `close()`'s 15 s wait expires hits `RuntimeError` on the closed connection (`store.py:2178` checks `closed` once, before the write), and the batch is lost unstaged. | rare: needs a >15 s COPY at stop | low |
+
+Fixed (2026-09-24):
+- **CD-3** — a missed EOD `earnings_calendar` run was never caught up or flagged: catch-up only
+  looked at *today's* fire-time. `CatchUpRunner._governing_day` now resolves the run the next
+  entries read (the previous evening's for an EOD job); a pre-open job's run stays with the scheduler.
+- **CD-5** — model-emitted entity strings were resolved with no check they appear in the headline.
+  `NewsScoringJob._write_back` now drops strings not found whole-word (HTML-unescaped) in the
+  headline the model was shown. Measured on 26,133 live entities: 99.2% verbatim; the dropped rest
+  are mostly macro terms, plus entities attached to the wrong cluster of a batch.
 
 Other gaps the suite surfaced (not pinned as defects):
 - **No budget-tier message on billing-error DG4.** A billing-error DG4 is never published on

@@ -126,6 +126,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     assert all(s.at > A_STOP for s in reg.specs(JobClass.DATE_KEYED)), "stop day must be a missed EOD"
     run_latest = {s.job_id for s in reg.specs(JobClass.RUN_LATEST)}
     morning_safety = {s.job_id for s in reg.specs(JobClass.SAFETY_CRITICAL) if s.at <= B_BOOT}
+    eod_safety = {s.job_id for s in reg.specs(JobClass.SAFETY_CRITICAL) if s.at > A_STOP}
 
     # Each missed day's EOD jobs: once per missed TRADING day, ascending; never a weekend/holiday.
     for job_id in sorted(date_keyed):
@@ -138,7 +139,12 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     for job_id in sorted(morning_safety):                      # today's deadline jobs: run for today
         assert [j for j, _ in calls if j == job_id] == [job_id]
         assert b.catch_up.was_run(job_id, restart_day)
-    assert {j for j, _ in calls} == date_keyed | run_latest | morning_safety
+    # EOD deadline jobs (earnings, CD-3): today's entries read the LAST missed day's run — one
+    # replay, never one per missed day (the feed is forward-looking).
+    for job_id in sorted(eod_safety):
+        assert [j for j, _ in calls if j == job_id] == [job_id]
+        assert b.catch_up.was_run(job_id, missed[-1])
+    assert {j for j, _ in calls} == date_keyed | run_latest | morning_safety | eod_safety
     # Sunday's weekly sector map fell inside the gap: one run, recorded under that Sunday.
     sunday = next(d for d in off_days if d.weekday() == 6)
     assert b.catch_up.was_run(JOB_SECTOR_MAP, sunday)

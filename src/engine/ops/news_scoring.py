@@ -73,6 +73,7 @@ queued batch waits rather than skipping — see :meth:`NewsScoringJob.run_batch`
 from __future__ import annotations
 
 import asyncio
+import html
 from collections.abc import Mapping, Sequence
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -82,7 +83,7 @@ from pydantic import BaseModel, ConfigDict
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.core.log import get_logger
-from engine.datafeeds.news_pipeline import EntityResolver, NewsCluster
+from engine.datafeeds.news_pipeline import EntityResolver, NewsCluster, title_tokens
 from engine.intelligence.agents import news_analyst
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
@@ -333,7 +334,17 @@ class NewsScoringJob:
             if cluster is None:
                 stale.append(score.cluster_id)
                 continue
-            resolved = self._resolver.resolve(cluster, extra_texts=score.entities)
+            # ``entities`` must be verbatim strings from the headline the model was SHOWN (the sent
+            # snapshot — a merge may have changed the live representative since). Anything else is
+            # injected or misaligned and could attach another company's symbol (chaos case 21).
+            shown = sent[score.cluster_id].representative
+            entities = [e for e in score.entities if _in_headline(e, shown)]
+            if len(entities) < len(score.entities):
+                _log.warning(
+                    "news_entities_not_in_headline", cluster_id=score.cluster_id,
+                    dropped=[e for e in score.entities if e not in entities],
+                )
+            resolved = self._resolver.resolve(cluster, extra_texts=entities)
             await self._log_unmatched(cluster, score, resolved)
             rows.append(
                 cluster.model_copy(
@@ -382,6 +393,16 @@ class NewsScoringJob:
                 cluster_id=cluster.cluster_id,
                 candidate_symbols=list(entry.candidate_symbols),
             )
+
+
+def _in_headline(entity: str, headline: str) -> bool:
+    """``entity`` occurs in ``headline`` as a whole-word token run, under the resolver's own
+    normalization. HTML entities are decoded first: feeds deliver ``L&amp;T`` while the model
+    writes ``L&T``."""
+    needle = title_tokens(html.unescape(entity))
+    hay = title_tokens(html.unescape(headline))
+    n = len(needle)
+    return n > 0 and any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
 
 
 def _chunks(clusters: Sequence[NewsCluster], size: int) -> list[Sequence[NewsCluster]]:

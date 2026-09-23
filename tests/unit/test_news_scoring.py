@@ -30,6 +30,7 @@ from engine.ops.news_scoring import (
     SKIP_GOVERNOR,
     SKIP_OUTSIDE_WINDOWS,
     NewsScoringJob,
+    _in_headline,
 )
 
 CAL_DIR = config_dir() / "calendar"
@@ -372,21 +373,68 @@ async def test_an_llm_sector_with_no_resolver_tag_persists_nothing(store, make_j
 
 
 # --------------------------------------------------------------------------- entities (§2.7 step 3)
-async def test_llm_entity_strings_resolve_to_a_new_unambiguous_symbol(store, make_job, now_box):
-    """The LLM never assigns a symbol: its verbatim strings re-enter the resolver (§3.2.4)."""
+async def test_only_entity_strings_found_in_the_shown_headline_reach_the_resolver(
+    store, make_job, now_box, caplog
+):
+    """The LLM never assigns a symbol: its VERBATIM strings re-enter the resolver (§3.2.4). A string
+    absent from the headline — injected (chaos case 21) or misaligned to the wrong cluster — must
+    not attach another company, whether as an alias or as an exchange token."""
     seed_cluster(
         store,
         "c-1",
         first_seen=now_box[0] - timedelta(minutes=45),
-        representative="Quarterly numbers impress the street",   # matches no alias
+        representative="Reliance quarterly numbers impress the street",
     )
-    harness = FakeHarness(overrides={"c-1": {"entities": ["Reliance Industries"]}})
+    harness = FakeHarness(
+        overrides={"c-1": {"entities": ["Reliance", "Tata Motors", "[NSE:TATAMOTORS]"]}}
+    )
 
-    await make_job(harness).run_batch()
+    with caplog.at_level("WARNING", logger="engine.ops.news_scoring"):
+        await make_job(harness).run_batch()
 
     row = rows_by_id(store)["c-1"]
     assert list(row["symbols"]) == ["RELIANCE"]
     assert list(row["entities"]) == ["reliance"]     # the resolver's matched alias, not model prose
+    (dropped,) = [r for r in caplog.records if r.getMessage() == "news_entities_not_in_headline"]
+    assert list(dropped.dropped) == ["Tata Motors", "[NSE:TATAMOTORS]"]
+
+
+async def test_entities_are_grounded_in_the_headline_the_model_was_shown(store, make_job, now_box):
+    """A merge during the model call can replace the representative; the model's strings are held
+    to the text it actually saw, while the live row still resolves its own headline."""
+    seed_cluster(store, "c-1", first_seen=now_box[0] - timedelta(minutes=45),
+                 representative="Reliance bags large order from state utility")
+    lock = asyncio.Lock()
+    harness = LockProbeHarness(
+        lock,
+        overrides={"c-1": {"entities": ["Reliance"]}},
+        on_call=lambda: store._execute(
+            "UPDATE news_clusters SET representative = ? WHERE cluster_id = ?",
+            ["Tata Motors bags large order from state utility", "c-1"],
+        ),
+    )
+
+    await make_job(harness).run_batch(lock=lock)
+
+    assert list(rows_by_id(store)["c-1"]["symbols"]) == ["RELIANCE", "TATAMOTORS"]
+
+
+@pytest.mark.parametrize(
+    ("entity", "headline", "expected"),
+    [
+        ("L&T", "L&amp;T bags order from NHAI", True),                   # feeds deliver escaped &
+        ("Larsen & Toubro", "Larsen &amp; Toubro Q1 profit rises", True),
+        ("reliance industries", "Reliance Industries' Q1 beats", True),  # case + punctuation
+        ("Reli", "Reliance Industries Q1 beats", False),                 # whole words only
+        ("Infosys", "Reliance Industries Q1 beats", False),
+        ("[NSE:INFY]", "[NSE:RELIANCE] Board meeting outcome", False),
+        ("[NSE:RELIANCE]", "[NSE:RELIANCE] Board meeting outcome", True),
+        ("", "Reliance Industries Q1 beats", False),
+        ("—", "Reliance — Q1 beats", False),                              # no tokens at all
+    ],
+)
+def test_in_headline_matching(entity, headline, expected):
+    assert _in_headline(entity, headline) is expected
 
 
 async def test_ambiguous_and_unmatched_entity_strings_add_no_symbol(store, make_job, now_box):
@@ -394,7 +442,7 @@ async def test_ambiguous_and_unmatched_entity_strings_add_no_symbol(store, make_
         store,
         "c-1",
         first_seen=now_box[0] - timedelta(minutes=45),
-        representative="Telecom operator raises tariffs across circles",
+        representative="Bharti and Some Unknown Startup raise tariffs across circles",
     )
     harness = FakeHarness(
         overrides={"c-1": {"entities": ["Bharti", "Some Unknown Startup"]}}
@@ -557,9 +605,10 @@ async def test_the_lock_covers_the_store_hops_but_never_the_model_call(store, ma
     seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
     lock = asyncio.Lock()
     probe = LockProbeStore(store, lock)
-    # An unmatchable entity string makes _log_unmatched fire, so the §5.5 unresolved-entity hop —
-    # the job's OTHER write, easy to leave outside the hold — is pinned under the lock too.
-    harness = LockProbeHarness(lock, overrides={"c-000": {"entities": ["Some Unknown Startup"]}})
+    # An unmatchable (but verbatim) entity string makes _log_unmatched fire, so the §5.5
+    # unresolved-entity hop — the job's OTHER write, easy to leave outside the hold — is pinned
+    # under the lock too.
+    harness = LockProbeHarness(lock, overrides={"c-000": {"entities": ["state utility"]}})
 
     result = await make_job(harness, store_override=probe).run_batch(lock=lock)
 

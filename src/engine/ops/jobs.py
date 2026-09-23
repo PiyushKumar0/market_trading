@@ -356,22 +356,48 @@ class CatchUpRunner:
 
     # ------------------------------------------------------------------ freshness (§3.2.12 self-test)
     def stale_safety_jobs(self, now: datetime | None = None) -> list[str]:
-        """Safety-critical jobs whose fire-time passed today without a recorded success — the
-        §3.2.12 data-freshness predicate ("today-dated instruments/surveillance/earnings present").
-        Empty when no registry is wired (nothing to verify yet)."""
+        """Safety-critical jobs whose governing run (:meth:`_governing_day`) is due but unrecorded —
+        the §3.2.12 data-freshness predicate. Empty when no registry is wired (nothing to verify)."""
         if not self.has_registry:
             return []
         now = now or self._clock.now()
-        today = now.date()
         stale: list[str] = []
         for spec in self._registry.specs(JobClass.SAFETY_CRITICAL):  # type: ignore[union-attr]
-            if not self._fires_on(spec, today):
-                continue
-            if self._clock.combine(today, spec.at) > now:
-                continue  # not yet due today — the armed scheduler will fire it
-            if not self.was_run(spec.job_id, today):
+            run_for = self._governing_day(spec, now)
+            if run_for is not None and not self.was_run(spec.job_id, run_for):
                 stale.append(spec.job_id)
         return stale
+
+    def _governing_day(self, spec: JobSpec, now: datetime) -> date | None:
+        """The fire-day whose run the next entries read, once its fire-time has passed.
+
+        §2.6: safety-critical jobs run or verify before entries open, so the governing run is the
+        latest fire at or before the next moment entries can be taken — ``now`` in session, else the
+        next session's open. For a pre-open job (instruments 08:15) that is today's own fire; for an
+        EOD job (earnings 18:30) it is the PREVIOUS fire-day's (2026-09-23 chaos case 16: a missed
+        evening run was never replayed, so the next session traded on an older calendar). ``None``
+        while that fire is still ahead (the armed scheduler owns it) or no session is in reach.
+        """
+        today = now.date()
+        session = self._calendar.session(today)
+        if session is not None and now < session.close:
+            horizon = max(now, session.open)
+        else:
+            try:
+                nxt = self._calendar.session(self._calendar.next_trading_day(today))
+            except ValueError:
+                return None
+            if nxt is None:
+                return None
+            horizon = nxt.open
+        d = horizon.date()
+        floor = today - timedelta(days=self._max_lookback_days)
+        while d >= floor:
+            fire = self._clock.combine(d, spec.at)
+            if self._fires_on(spec, d) and fire <= horizon:
+                return d if fire <= now else None
+            d -= timedelta(days=1)
+        return None
 
     # ------------------------------------------------------------------ the catch-up pass (§2.6 step 5)
     async def catch_up(
@@ -588,13 +614,13 @@ class CatchUpRunner:
 
     # ------------------------------------------------------------------ per-class executors
     async def _run_safety_critical(self, spec: JobSpec, now: datetime, result: CatchUpResult) -> None:
-        """Deadline job: only TODAY's freshness matters (§2.6 — 'run or verify before entries open').
-        Already-recorded-today ⇒ verified fresh, nothing to do. Not yet due today ⇒ the re-armed
-        scheduler fires it (and freshness is re-verified before entries by the lifecycle/self-test)."""
-        today = now.date()
-        if not self._fires_on(spec, today) or self._clock.combine(today, spec.at) > now:
+        """Deadline job: only the governing run matters (§2.6 — 'run or verify before entries open';
+        :meth:`_governing_day`). Already recorded ⇒ verified fresh, nothing to do. Still ahead ⇒ the
+        re-armed scheduler fires it (and freshness is re-verified before entries by the self-test)."""
+        run_for = self._governing_day(spec, now)
+        if run_for is None:
             return
-        if self.was_run(spec.job_id, today):
+        if self.was_run(spec.job_id, run_for):
             # Verified fresh — a PRIOR failure's latched cause is stale evidence; clear it so a
             # restart self-heals (2026-08-06: instruments failed pre-login, succeeded post-login,
             # and the latch held FROZEN all day because no path cleared on later success).
@@ -605,36 +631,38 @@ class CatchUpRunner:
             if not _job_result_ok(outcome):
                 # degraded return = failure for the watermark; the job already alerted (E5)
                 _log.warning("safety_critical_catchup_degraded", job_id=spec.job_id)
-                await self._fail_safety_critical(spec, today, result)
+                await self._fail_safety_critical(spec, run_for, now, result)
                 return
-            self.record_run(spec.job_id, today)
-            result.jobs_caught_up.append(f"{spec.job_id}:{today.isoformat()}")
+            self.record_run(spec.job_id, run_for)
+            result.jobs_caught_up.append(f"{spec.job_id}:{run_for.isoformat()}")
             await self._clear_freshness(spec.job_id)
         except Exception:  # noqa: BLE001 - a safety-critical failure freezes entries, never crashes boot
             _log.exception("safety_critical_catchup_failed", job_id=spec.job_id)
-            await self._fail_safety_critical(spec, today, result)
+            await self._fail_safety_critical(spec, run_for, now, result)
 
-    async def _fail_safety_critical(self, spec: JobSpec, today: date, result: CatchUpResult) -> None:
+    async def _fail_safety_critical(
+        self, spec: JobSpec, run_for: date, now: datetime, result: CatchUpResult
+    ) -> None:
         """Shared failure handling for the safety-critical path — an exception and a not-ok return
         are treated identically (record failed, freeze, notify).
 
-        The freeze is unconditional (idempotent); the NOTIFY is once per (job, day) per process
+        The freeze is unconditional (idempotent); the NOTIFY is once per (job, run_for) per process
         (WO-23) — a persistently failing job used to re-alert on every 30-min sweep.
         """
-        self.record_run(spec.job_id, today, status="failed")
-        result.jobs_failed.append(f"{spec.job_id}:{today.isoformat()}")
+        self.record_run(spec.job_id, run_for, status="failed")
+        result.jobs_failed.append(f"{spec.job_id}:{run_for.isoformat()}")
         reason = f"data_freshness:{spec.job_id}"
         result.frozen_reasons.append(reason)
         if self._freeze is not None:
             await self._freeze(reason)
-        # Prune before keying: every write below ADDS a new (job_id, date) pair — a date never
-        # recurs, so nothing ever overwrites yesterday's — and this is the only write site, so
-        # left alone the set grows by one member per (job, day) failure for the life of the
-        # process. `today` here is always the real current date (§2.6 — safety-critical is a
-        # deadline job, never backdated), so anything stamped with a different date is stale.
-        today_iso = today.isoformat()
-        self._freeze_notified = {k for k in self._freeze_notified if k[1] == today_iso}
-        key = (spec.job_id, today_iso)
+        # Prune before keying: every write below ADDS a new (job_id, date) pair and a date never
+        # recurs, so left alone the set grows for the life of the process. Pruned by AGE, not by
+        # "same date as this failure": two jobs can fail for different governing days at once (an
+        # EOD job's is the previous fire-day), and date-equality pruning would evict each other's
+        # key on alternating sweeps and re-alert both every 30 minutes.
+        horizon = (now.date() - timedelta(days=self._max_lookback_days)).isoformat()
+        self._freeze_notified = {k for k in self._freeze_notified if k[1] >= horizon}
+        key = (spec.job_id, run_for.isoformat())
         if self._notify is not None and key not in self._freeze_notified:
             await self._notify(catalog.data_freshness_frozen(
                 job_id=spec.job_id,
