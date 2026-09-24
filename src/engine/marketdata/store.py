@@ -293,8 +293,6 @@ _SCHEMA: tuple[str, ...] = (
         ingested_at   TIMESTAMPTZ NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_news_url ON news(url)",
-    "CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at)",
     # news_clusters — §2.7 step 2 output + step-4 LLM scores. source_domains is the DISTINCT set
     # (the §7.1 catalyst_guard.min_source_domains corroboration input); symbols[] is EntityResolver
     # output ONLY (the LLM never assigns a symbol, §2.7 step 3). Replay/backtest consume these
@@ -399,7 +397,6 @@ _SCHEMA: tuple[str, ...] = (
         reversal_of         TEXT
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_watchlist_day ON catalyst_watchlist(d, symbol)",
     # calendar — trading days + session times + muhurat/shortened flags (R6); YAML-sourced.
     """
     CREATE TABLE IF NOT EXISTS calendar (
@@ -494,8 +491,6 @@ _SCHEMA: tuple[str, ...] = (
         ingested_at     TIMESTAMPTZ NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_insider_symbol ON insider_trades(symbol)",
-    "CREATE INDEX IF NOT EXISTS idx_insider_broadcast ON insider_trades(broadcast_dt)",
     # shp_quarterly — SEBI-format shareholding pattern per (symbol, quarter, category), incl. the
     # per-category pledged/encumbered + locked shares (§2.8.1). Source ``bse`` (detail stack) or
     # ``nse`` (master, freshness only). ``revised`` marks a re-filed quarter (latest wins).
@@ -994,7 +989,7 @@ class MarketStore:
     _INSTRUMENTS_TICK_SCALE = 6
 
     def init_schema(self) -> None:
-        """Create every §4.3 table + index. Idempotent (IF NOT EXISTS) — safe on every startup.
+        """Create every §4.3 table and drop :data:`_DROPPED_INDEXES`. Idempotent — safe on every startup.
 
         Also runs the one-shot ``instruments_daily.tick_size`` widen (2026-07-21): ``CREATE TABLE IF
         NOT EXISTS`` never alters an existing column, so a legacy DB would keep truncating sub-paisa
@@ -1010,6 +1005,18 @@ class MarketStore:
             self._migrate_sentiment_measures(con)
             self._migrate_watchlist_reversal(con)
             self._migrate_results_line_items_at(con)
+            for name in self._DROPPED_INDEXES:
+                con.execute(f"DROP INDEX IF EXISTS {name}")
+
+    #: Secondary indexes this store no longer creates. On 2026-09-24 the two on ``news`` and the two
+    #: on ``insider_trades`` were found missing the same rows (7,044 and 420): a lookup they served
+    #: silently skipped those rows, and the ``news`` url dedup let 4,094 duplicates in. The tables'
+    #: primary keys stayed complete. The tables are small enough to scan, so no secondary index is
+    #: kept; ``test_market_store`` asserts none exists.
+    _DROPPED_INDEXES = (
+        "idx_news_url", "idx_news_published", "idx_watchlist_day", "idx_insider_symbol",
+        "idx_insider_broadcast",
+    )
 
     def _migrate_results_line_items_at(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently add the nullable ``results_filings.line_items_at`` column (§2.8.4 stage 2,
@@ -1745,6 +1752,14 @@ class MarketStore:
                 )
                 inserted += cur.fetchone()[0]
         return inserted
+
+    def existing_news_urls(self, urls: Sequence[str]) -> set[str]:
+        """The subset of ``urls`` already stored, in one scan. A poll re-submits mostly known URLs,
+        and without an index each :meth:`insert_news` dedup check is a scan of its own."""
+        if not urls:
+            return set()
+        rows = self._fetchall("SELECT DISTINCT url FROM news WHERE url IN (SELECT UNNEST(?))", [list(urls)])
+        return {r[0] for r in rows}
 
     def set_news_cluster(self, headline_ids: Sequence[str], cluster_id: str) -> None:
         """Assign headlines to a cluster (§2.7 step 2 output)."""

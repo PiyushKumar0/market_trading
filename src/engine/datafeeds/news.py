@@ -495,8 +495,11 @@ class NewsIngest:
     def _insert_batch(self, batch: list[Headline]) -> list[Headline]:
         """Insert row-by-row (sync; called via ``store.arun``) so cross-poll URL dupes are dropped
         and the return value is exactly the NEW headlines, each with its minted ``headline_id``."""
+        known = self._store.existing_news_urls([h.url for h in batch])
         inserted: list[Headline] = []
         for h in batch:
+            if h.url in known:
+                continue
             hid = h.headline_id or str(ULID())
             row = {
                 "headline_id": hid,

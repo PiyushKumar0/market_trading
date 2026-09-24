@@ -577,6 +577,19 @@ def test_retention_purges_expired_only(tmp_path):
         s.close()
 
 
+def test_store_keeps_no_secondary_index(tmp_path, clock):
+    """2026-09-24: the live store's secondary indexes had lost rows that lookups then skipped. A store
+    that still carries them loses them on open, and a fresh one never gets one."""
+    s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
+    try:
+        assert s._fetchall("SELECT index_name FROM duckdb_indexes()", []) == []
+        s._execute("CREATE INDEX idx_news_url ON news(url)")                     # a pre-fix store
+        s.init_schema()
+        assert s._fetchall("SELECT index_name FROM duckdb_indexes()", []) == []
+    finally:
+        s.close()
+
+
 # --------------------------------------------------------------------------- news pipeline surfaces
 def test_news_insert_dedupes_on_url_and_clusters(store, clock):
     rows = [
@@ -587,6 +600,9 @@ def test_news_insert_dedupes_on_url_and_clusters(store, clock):
     ]
     assert store.insert_news(rows) == 2
     assert store.insert_news(rows) == 0                          # idempotent backfill (Â§4.4 job 10)
+
+    assert store.existing_news_urls(["https://et/1", "https://et/2"]) == {"https://et/1"}
+    assert store.existing_news_urls([]) == set()
 
     headlines = store.get_news(unclustered_only=True)
     assert len(headlines) == 2 and all(h["untrusted"] for h in headlines)   # Â§2.4: always untrusted
