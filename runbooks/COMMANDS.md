@@ -130,6 +130,10 @@ uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --sk
 # Run 2026-09-24 from 2025-01-01: 23,779 filings. Quarterly revenue/PAT then fill nightly via the
 # results_line_items job (19:30, <=300 XBRL fetches per run) — no backfill command needed for them.
 uv run python scripts\backfill_filings.py seed --from 2025-01-01 --skip-pit --skip-results --skip-shp
+# SHP history for the 298 names the daily isin_map job first mapped on 2026-09-24 (none has an SHP
+# row; filings_shp had been skipping them since 09-04). Per-symbol checkpoints skip the 199 already
+# seeded. Engine OFF; expect ~1.5x the 3.5 h the 199-name seed took, so a weekend job (resumable).
+uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --skip-results --skip-integrated
 ```
 
 ## Protected config (after ANY owner-directed edit to limits.yaml / envelope.yaml)

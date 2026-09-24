@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 05:40–06:30 — full-universe ISIN map, feed-freshness census, BSE User-Agent (owner: "Proceed with fixing the issues…"); b052f30; engine still stopped (owner stop 04:06)
+
+- **Context:** the owner concluded the platform now had complete data. A census of every feed's newest
+  data disagreed, and the two proposed fixes were approved: rebuild the ISIN map for the full
+  NIFTY 500, and add a staleness alarm covering every feed.
+- **Found while fixing:**
+  - **BSE refuses the old UA.** Between 05:51 and 06:10 BSE's API host answered 403 to the
+    `Chrome/126` UA every feed sent, on the scrip master, an SHP endpoint and the insider-disclosure
+    endpoint (`getCorp_Regulation_ng`). The same request with `Chrome/153` got 200. The engine's own
+    fetch at 19:00 on 09-23 had passed (a 5,044-row master), so the block began overnight.
+    NSE (API and archives) and the news RSS hosts accept both UAs. Unfixed, tonight's 19:00 insider
+    feed (the `ins` rule's only live source) would have got 403.
+  - **SHP was skipping ~300 names.** `filings_shp` counts a symbol missing from `symbol_isin` as
+    out-of-universe. The map had held the 200 names of 07-17 since then, so from O15 (09-04) every
+    SHP filing from the other NIFTY-500 names was dropped silently. Nothing in a decision path reads
+    `shp_quarterly`, so no live decision used the gap.
+- **Built (plan §2.8.5 addendum 2026-09-24):**
+  - `isin_map` is now a scheduled run-latest job at 18:40. The BSE bulk master is fetched only while
+    some code is missing, and a stored code wins. Rows are re-stamped daily, so a code left behind by
+    a rename resolves to the newest symbol. The per-symbol PeerSmartSearch resolver is deleted.
+  - `feed_freshness` runs at 21:30, post-arm. It checks 10 feeds against per-feed lag limits and
+    sends one alert per stale streak.
+  - One `BROWSER_USER_AGENT` constant replaces four hard-coded UAs.
+  - The 45 s master timeout now applies to both readers of the master.
+- **Validation:**
+  - Scratch worktree, then cherry-pick.
+  - Full suite: 3203 passed, 21 skipped, 5 xfailed. The last two edits (rename ordering, per-streak
+    alerts) came after that run, so the 1,178 tests touching the changed modules were re-run: green.
+  - **Live, engine stopped:**
+    - Census before: stale `insider_nse` (newest 05-02, 145 days) and `isin_map` (07-17,
+      48 sessions).
+    - `IsinMapJob` run: 500 constituents, 497 with a BSE code. The 3 without are BSE, CDSL and
+      DUMMYHEG, none BSE-listed, the same 3 measured on 09-12. No code or ISIN is shared between
+      symbols.
+    - Census after: only `insider_nse` stale. Every EOD feed is at lag 1 (09-23 data), news at 0.
+  - The non-quarter-end SHP dates (126 of 2,423 symbol-dates, e.g. ADANIENT 07-07) look like the
+    SEBI event-driven SHP filings; they only make the census more lenient.
+- **Open / not fixed:**
+  - NSE PIT route dead upstream since 05-02; needs a new source.
+  - BSE `Isdefault=2` ~25-row cap.
+  - 13 `insider_trades` rows with source-typo dates.
+  - SHP history for the 298 newly mapped names: COMMANDS "Backfills", a weekend job.
+  - Chaos defects CD-1, CD-2, CD-4, CD-6 and CD-7.
+- **Engine:** still stopped since the owner's 04:06 stop; the next boot runs b052f30.
+
 ## 2026-09-24 05:00–05:30 — results data integrated (owner: "Probe and find sources to integrate this data, then work into making our system work correctly"); 221d43c; live listing backfilled with the engine stopped (owner stop 04:06)
 
 - **Source found by capturing NSE's own page traffic:**

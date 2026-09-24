@@ -275,7 +275,7 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
 
         summary = _new_summary()
         async with httpx.AsyncClient(follow_redirects=True) as http:
-            # SHP needs BSE scrip codes: build symbol_isin first (paces its own BSE calls, §2.8).
+            # SHP needs BSE scrip codes: build symbol_isin first (at most one BSE master request, §2.8).
             if not args.skip_shp:
                 print(f"backfill_filings: building symbol_isin for {len(universe)} symbols ...")
                 isin_result = await IsinMapJob(settings, store, clock, http).run(universe)
