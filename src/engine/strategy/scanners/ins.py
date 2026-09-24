@@ -71,11 +71,11 @@ scanner's.
 
 EVIDENCE CAVEATS THAT RIDE ALONG (WO-16, binding — plan §6.1):
 
-* **Live-reachability.** Live crossings are computable only from the BSE fresh feed (live since
-  2026-07-19, ~13-18 in-universe rows/day); the NSE PIT feed's ~70-day content embargo makes it
-  historical-only. The live-reachable event population is therefore NOT proven identical to the
-  backtested one. The ``ins_crossings`` job logs fresh-feed row counts every run: sustained zero-rows
-  is STARVATION, not absence of signal.
+* **Live-reachability.** Live crossings come from the BSE fresh feed (live since 2026-07-19, ~13-18
+  in-universe rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old NSE route's ~70-day
+  content embargo had made NSE historical-only). The live-reachable event population is NOT proven
+  identical to the backtested one. The ``ins_crossings`` job logs fresh-feed row counts every run:
+  sustained zero-rows is STARVATION, not absence of signal.
 * The CPCV pass is **boundary-exact** (60.0% of folds against a 60% bar — one fold from failure).
 * The survivorship / index-membership bound is uncorrectable with stored data.
 

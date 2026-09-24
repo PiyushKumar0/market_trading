@@ -20,9 +20,10 @@ floor), not just the unit tests.
 
 **Standing WO-16 caveats (carried, never hidden — plan §6.1 `ins` addendum):**
 
-* Live crossings are computable only from the **BSE fresh feed** (live since 2026-07-19, ~13-18
-  in-universe rows/day); the NSE PIT feed's ~70-day content embargo makes it historical-only. The
-  live-reachable event population is therefore NOT proven identical to the backtested one.
+* Live crossings come from the **BSE fresh feed** (live since 2026-07-19, ~13-18 in-universe
+  rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old NSE route's ~70-day content
+  embargo had made NSE historical-only). The live-reachable event population is NOT proven
+  identical to the backtested one.
 * The CPCV pass is boundary-exact (60.0% of folds against a 60% bar — one fold from failure).
 * The survivorship / index-membership bound is uncorrectable with stored data.
 

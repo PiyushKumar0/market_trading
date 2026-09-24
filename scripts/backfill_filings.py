@@ -53,7 +53,13 @@ from engine.core.nse_http import nse_get  # noqa: E402
 from engine.datafeeds.earnings_calendar import event_calendar_range_url, parse_event_calendar  # noqa: E402
 from engine.datafeeds.filings_pit import PIT_PACE_S as _PACE_S  # noqa: E402
 from engine.datafeeds.filings_pit import PIT_WINDOW_DAYS as _NSE_WINDOW_DAYS  # noqa: E402
-from engine.datafeeds.filings_pit import parse_pit, pit_url  # noqa: E402
+from engine.datafeeds.filings_pit import (  # noqa: E402
+    PIT_GG_FIRST_DAY,
+    PitIngest,
+    ingest_pit_window,
+    parse_pit,
+    pit_url,
+)
 from engine.datafeeds.filings_pit import pit_windows as _windows  # noqa: E402
 from engine.datafeeds.filings_results import fetch_integrated_results, parse_results, results_url  # noqa: E402
 from engine.datafeeds.filings_shp import (  # noqa: E402
@@ -155,10 +161,12 @@ def _cp_set(conn: sqlite3.Connection, feed: str, unit: str, through: str, now: s
 # --------------------------------------------------------------------------- per-feed seed legs
 async def _seed_nse_windowed(
     conn, store, http, clock, feed: str, frm: date, to: date, summary: dict,
+    *, symbols: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     """Walk PIT, results or integrated filings over ≤31-day windows (checkpoint per window).
     event-calendar rides the same window as the results leg (its historical board-meeting dates →
-    earnings_calendar)."""
+    earnings_calendar). PIT days before 2026-05-03 come from the old route; later days from the PIT
+    V2.0 listing, fetching the XBRL of ``symbols``' filings only."""
     for w_frm, w_to in _windows(frm, to):
         unit = f"{w_frm.isoformat()}..{w_to.isoformat()}"
         if _cp_done(conn, feed, unit):
@@ -166,9 +174,19 @@ async def _seed_nse_windowed(
             continue
         try:
             if feed == "pit":
-                resp = await nse_get(http, pit_url(w_frm, w_to), timeout=20.0)
-                rows = parse_pit(json.loads(resp.content))
-                written = await store.arun(store.upsert_insider_trades, rows)
+                written = 0
+                if w_frm < PIT_GG_FIRST_DAY:
+                    resp = await nse_get(http, pit_url(w_frm, w_to), timeout=20.0)
+                    rows = parse_pit(json.loads(resp.content))
+                    written += await store.arun(store.upsert_insider_trades, rows)
+                if w_to >= PIT_GG_FIRST_DAY:
+                    if w_frm < PIT_GG_FIRST_DAY:
+                        await asyncio.sleep(_PACE_S)
+                    ingest = PitIngest()
+                    await ingest_pit_window(
+                        http, store, max(w_frm, PIT_GG_FIRST_DAY), w_to, symbols, ingest, timeout=20.0
+                    )
+                    written += ingest.written
             elif feed == "integrated":
                 rows = await fetch_integrated_results(http, w_frm, w_to, timeout=20.0)
                 written = await store.arun(store.upsert_results_filings, rows)
@@ -283,7 +301,9 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
             if not args.skip_pit:
                 # ASCII only in prints: Windows consoles may be cp1252 ('<=' not '≤').
                 print(f"backfill_filings: PIT {frm}..{to} in <={_NSE_WINDOW_DAYS}d windows ...")
-                await _seed_nse_windowed(conn, store, http, clock, "pit", frm, to, summary)
+                await _seed_nse_windowed(
+                    conn, store, http, clock, "pit", frm, to, summary, symbols=set(universe)
+                )
             if not args.skip_results:
                 print(f"backfill_filings: results + event-calendar {frm}..{to} ...")
                 await _seed_nse_windowed(conn, store, http, clock, "results", frm, to, summary)

@@ -15,6 +15,7 @@ import importlib.util
 import json
 import logging
 import sys
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -24,12 +25,20 @@ import pytest
 
 from engine.core.bse_http import BseError, bse_get
 from engine.core.clock import IST
+from engine.core.config import load_settings
 from engine.datafeeds import filings_pit as fpit
 from engine.datafeeds import filings_results as fres
 from engine.datafeeds import filings_shp as fshp
 from engine.datafeeds.earnings_calendar import EarningsCalendarJob
 from engine.datafeeds.filings_events import SOURCE_NSE
-from engine.datafeeds.filings_pit import FilingsPitJob, insider_id, parse_pit, pit_url
+from engine.datafeeds.filings_pit import (
+    FilingsPitJob,
+    insider_id,
+    parse_pit,
+    parse_pit_filings,
+    parse_pit_xbrl,
+    pit_url,
+)
 from engine.datafeeds.filings_pit_fresh import BSE_ID_PREFIX, BSE_SOURCE
 from engine.datafeeds.filings_results import (
     FilingsResultsJob,
@@ -58,6 +67,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 D = FIXED_NOW.date()
 
 PIT_JSON = json.loads((FIXTURES / "filings_pit.json").read_text(encoding="utf-8"))
+# Captured 2026-09-24 from NSE's PIT V2.0 route: listing rows (NCLIND, NAUKRI, an HCLTECH revision, a
+# blank-symbol row) and NAUKRI's real XBRL (four disclosures).
+PIT_GG_JSON = json.loads((FIXTURES / "filings_pit_gg.json").read_text(encoding="utf-8"))
+NAUKRI_XBRL = (FIXTURES / "pit_xbrl_naukri.xml").read_bytes()
+NAUKRI_XBRL_URL = "https://nsearchives.nseindia.com/corporate/xbrl/IT_2460_WebXMLFile_20260923_165535265.xml"
+NAUKRI_BCAST = datetime(2026, 9, 23, 16, 55, 37, tzinfo=IST)
 RESULTS_JSON = json.loads((FIXTURES / "filings_results.json").read_text(encoding="utf-8"))
 INTEGRATED_JSON = json.loads((FIXTURES / "filings_integrated_results.json").read_text(encoding="utf-8"))
 SHP_MASTER_JSON = json.loads((FIXTURES / "shp_master.json").read_text(encoding="utf-8"))
@@ -203,17 +218,71 @@ def test_pit_url_has_explicit_window():
     )
 
 
-async def test_filings_pit_run_persists_and_is_idempotent(store, clock):
-    job = FilingsPitJob(store, clock, client_serving(httpx.Response(200, json=PIT_JSON)))
+def test_parse_pit_filings_keys_on_dissemination_time_oldest_first():
+    filings = parse_pit_filings(PIT_GG_JSON)
+    assert [f.symbol for f in filings] == ["HCLTECH", "NAUKRI", "NCLIND"]    # blank-symbol row skipped
+    naukri = filings[1]
+    assert naukri.broadcast_dt == datetime(2026, 9, 23, 16, 55, 37, tzinfo=IST)  # exchdisstime, not :35
+    assert naukri.xbrl == NAUKRI_XBRL_URL
+
+
+def test_parse_pit_xbrl_real_filing():
+    filing = fpit.PitFiling(symbol="NAUKRI", broadcast_dt=NAUKRI_BCAST, xbrl=NAUKRI_XBRL_URL)
+    rows, non_equity = parse_pit_xbrl(NAUKRI_XBRL, filing)
+    assert non_equity == 0 and len(rows) == 4
+    buy = next(r for r in rows if r["txn_type"] == "Buy")
+    assert buy == {
+        "id": insider_id("NAUKRI", "Niraj Kumar Rana", NAUKRI_BCAST, "Buy", 5000, Decimal("6362853")),
+        "symbol": "NAUKRI", "person_name": "Niraj Kumar Rana", "person_category": "Designated Person",
+        "acq_mode": "Market Purchase", "txn_type": "Buy", "qty": 5000, "value": Decimal("6362853"),
+        "before_pct": 0.02, "after_pct": 0.02,                  # 0.0002 in the filing is a fraction
+        "txn_from": date(2026, 9, 21), "txn_to": date(2026, 9, 21), "intim_dt": date(2026, 9, 22),
+        "broadcast_dt": NAUKRI_BCAST, "xbrl": NAUKRI_XBRL_URL,
+    }
+    warrants = NAUKRI_XBRL.replace(b">Equity<", b">Warrants<", 1)
+    rows, non_equity = parse_pit_xbrl(warrants, filing)
+    assert non_equity == 1 and len(rows) == 3
+    with pytest.raises(ET.ParseError):
+        parse_pit_xbrl(b"<html>not xbrl", filing)
+
+
+async def test_filings_pit_ingests_constituent_filings_and_is_idempotent(store, clock, monkeypatch):
+    seen: list[str] = []
+    routes = {"corporates-pit-gg": lambda: httpx.Response(200, json=PIT_GG_JSON),
+              NAUKRI_XBRL_URL: lambda: httpx.Response(200, content=NAUKRI_XBRL),
+              "IT_1828_WebXMLFile": lambda: httpx.Response(404)}          # HCLTECH's file is gone
+    job = _pit_job(store, clock, monkeypatch, routed_client(routes, seen))
     result = await job.run(D)
-    assert result.ok is True and result.rows_written == 2
-    again = await job.run(D)                            # content-hash PK ⇒ upsert, not duplicate
-    assert again.ok is True
-    rows = store.get_insider_trades()
-    assert len(rows) == 2
-    hl = next(r for r in rows if r["symbol"] == "HDFCLIFE")
-    assert hl["value"] == Decimal("20280942.00") and hl["broadcast_dt"] == datetime(2023, 1, 31, 20, 39, tzinfo=IST)
-    assert hl["ingested_at"] == FIXED_NOW              # Clock-stamped, tz-aware IST
+    assert result.ok is True and result.rows_written == 4
+    assert not [u for u in seen if "IT_2568" in u]                          # NCLIND: not a constituent
+    again = await job.run(D)                                  # content-hash PK ⇒ upsert, not duplicate
+    assert again.ok is True and len(store.get_insider_trades()) == 4
+    assert {r["ingested_at"] for r in store.get_insider_trades()} == {FIXED_NOW}
+
+
+async def test_filings_pit_transient_xbrl_failure_stops_behind_the_filing(store, clock, monkeypatch):
+    # HCLTECH (09-09) is served, NAUKRI (09-23) fails: the run stops with HCLTECH upserted, so the
+    # watermark sits BEHIND the unfetched filing and the next run fetches it.
+    naukri_up = {"ok": False}
+    routes = {"corporates-pit-gg": lambda: httpx.Response(200, json=PIT_GG_JSON),
+              "IT_1828_WebXMLFile": lambda: httpx.Response(200, content=NAUKRI_XBRL),
+              NAUKRI_XBRL_URL: lambda: httpx.Response(200 if naukri_up["ok"] else 503, content=NAUKRI_XBRL)}
+    msgs, sink = collect_alerts()
+    job = _pit_job(store, clock, monkeypatch, routed_client(routes), notify=sink)
+    result = await job.run(D)
+    assert result.ok is False and result.rows_written == 4 and msgs
+    assert store.latest_insider_broadcast(SOURCE_NSE) == datetime(2026, 9, 9, 19, 54, 1, tzinfo=IST)
+    naukri_up["ok"] = True
+    assert (await job.run(D)).ok is True
+    assert {r["symbol"] for r in store.get_insider_trades()} == {"HCLTECH", "NAUKRI"}
+
+
+async def test_filings_pit_without_constituents_degrades_before_fetching(store, clock, monkeypatch):
+    seen: list[str] = []
+    msgs, sink = collect_alerts()
+    job = _pit_job(store, clock, monkeypatch, routed_client({}, seen), notify=sink, symbols={})
+    result = await job.run(D)
+    assert result.ok is False and "constituents" in result.reason and seen == [] and msgs
 
 
 async def test_filings_shp_out_of_universe_skip_is_not_degraded(store, clock):
@@ -256,16 +325,26 @@ def test_insider_reupsert_is_do_nothing_and_never_faults(store):
     assert rows[0]["person_name"] == "A"
 
 
-async def test_filings_pit_window_keys_off_watermark(store, clock):
+async def test_filings_pit_window_keys_off_watermark(store, clock, monkeypatch):
     # Seed a stored broadcast on 2026-06-10; the run-day is D (2026-06-17): window = [10-06, 17-06].
     store.upsert_insider_trades(
         [{"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 6, 10, 18, 0, tzinfo=IST)}]
     )
     seen: list[str] = []
-    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": httpx.Response(200, json={"data": []})}, seen))
+    job = _pit_job(store, clock, monkeypatch, routed_client({"corporates-pit-gg": empty_pit}, seen))
     await job.run(D)
-    pit_calls = [u for u in seen if "corporates-pit" in u]
-    assert pit_calls and "from_date=10-06-2026" in pit_calls[0] and "to_date=17-06-2026" in pit_calls[0]
+    assert pit_spans(seen) == [(date(2026, 6, 10), D)]
+
+
+async def test_filings_pit_does_not_refetch_filings_older_than_the_watermark(store, clock, monkeypatch):
+    store.upsert_insider_trades([{"id": "seed", "symbol": "X", "broadcast_dt": NAUKRI_BCAST}])
+    seen: list[str] = []
+    routes = {"corporates-pit-gg": lambda: httpx.Response(200, json=PIT_GG_JSON),
+              NAUKRI_XBRL_URL: lambda: httpx.Response(200, content=NAUKRI_XBRL)}
+    job = _pit_job(store, clock, monkeypatch, routed_client(routes, seen))
+    assert (await job.run(D)).ok is True
+    assert not [u for u in seen if "IT_1828" in u]            # HCLTECH 09-09 is behind the watermark
+    assert [u for u in seen if u == NAUKRI_XBRL_URL]          # a filing AT the watermark is re-read
 
 
 def test_store_insider_source_predicate_matches_the_feeds_tags():
@@ -298,18 +377,53 @@ async def test_latest_insider_broadcast_partitions_by_id_prefix(store):
         store.latest_insider_broadcast("sebi")
 
 
+def _trade(id_: str, broadcast: datetime, *, person="Niraj Kumar Rana", qty=5000, value="6362853") -> dict:
+    return {"id": id_, "symbol": "NAUKRI", "person_name": person, "txn_type": "Buy", "qty": qty,
+            "value": Decimal(value), "txn_from": date(2026, 9, 21), "txn_to": date(2026, 9, 21),
+            "broadcast_dt": broadcast}
+
+
+def test_insider_trades_count_a_trade_both_exchanges_carry_once(store):
+    # Shapes measured 2026-09-24: the same filing on BSE (earlier) and NSE (~24 s later).
+    bse = datetime(2026, 9, 23, 16, 55, 13, tzinfo=IST)
+    nse = datetime(2026, 9, 23, 16, 55, 37, tzinfo=IST)
+    store.upsert_insider_trades([
+        _trade(f"{BSE_ID_PREFIX}a", bse), _trade("a", nse, person=" niraj  KUMAR rana "),
+        _trade(f"{BSE_ID_PREFIX}k1", bse, qty=12505, value="125050"),     # two trades, one person,
+        _trade(f"{BSE_ID_PREFIX}k2", bse, qty=705, value="7050"),         # one day, one filing
+        _trade("k1", nse, qty=12505, value="125050"), _trade("k2", nse, qty=705, value="7050"),
+    ])
+    rows = store.get_insider_trades()
+    assert sorted(r["id"] for r in rows) == [f"{BSE_ID_PREFIX}a", f"{BSE_ID_PREFIX}k1", f"{BSE_ID_PREFIX}k2"]
+    assert len(store.get_insider_trades(symbol="NAUKRI")) == 3
+
+
+def test_insider_trades_keep_one_sources_repeats_and_pair_before_filtering(store):
+    t0 = datetime(2026, 9, 23, 16, 0, tzinfo=IST)
+    store.upsert_insider_trades([
+        _trade("n1", t0), _trade("n2", t0 + timedelta(hours=1)),          # NSE repeats: history as stored
+        _trade(f"{BSE_ID_PREFIX}b1", t0 + timedelta(minutes=30)),         # pairs with n1 only
+    ])
+    assert sorted(r["id"] for r in store.get_insider_trades()) == ["n1", "n2"]
+    # The kept copy (n1) is before the window, so the pair stays out whole: its later BSE copy
+    # must not surface as a trade inside the window.
+    inside = store.get_insider_trades(broadcast_from=t0 + timedelta(minutes=10))
+    assert [r["id"] for r in inside] == ["n2"]
+
+
 def empty_pit() -> httpx.Response:
-    """A FRESH empty PIT response per call — the job now issues several per run."""
+    """A FRESH empty PIT listing per call — the job issues several per run."""
     return httpx.Response(200, json={"data": []})
 
 
-def pit_row(broadcast: str, symbol: str = "RELIANCE") -> dict:
-    return {"symbol": symbol, "acqName": "A N Other", "date": broadcast,
-            "tdpTransactionType": "Buy", "secAcq": "100", "secVal": "250000"}
+def _pit_job(store, clock, monkeypatch, http, *, notify=None, symbols=None) -> FilingsPitJob:
+    constituents = {"NAUKRI": "INE663F01032", "HCLTECH": "INE860A01027"} if symbols is None else symbols
+    monkeypatch.setattr("engine.datafeeds.filings_pit.load_constituents_isin", lambda _s: constituents)
+    return FilingsPitJob(store, clock, http, settings=load_settings(), notify=notify)
 
 
 def pit_spans(seen: list[str]) -> list[tuple[date, date]]:
-    """``(from_date, to_date)`` of every corporates-pit request, in call order."""
+    """``(from_date, to_date)`` of every PIT listing request, in call order."""
     out: list[tuple[date, date]] = []
     for url in seen:
         if "corporates-pit" not in url:
@@ -341,7 +455,7 @@ def test_pit_window_unit_matches_the_backfill_that_walks_the_same_endpoint():
     assert fpit.MAX_WINDOW_DAYS == fpit.PIT_WINDOW_DAYS * fpit.MAX_WINDOWS_PER_RUN - 1
 
 
-async def test_filings_pit_window_ignores_the_bse_watermark(store, clock):
+async def test_filings_pit_window_ignores_the_bse_watermark(store, clock, monkeypatch):
     # The regression §2.8.5 records: a BSE fresh row stamped the run day pinned the whole-table
     # watermark to today and collapsed this job's window to [d-1, d].
     store.upsert_insider_trades([
@@ -350,21 +464,21 @@ async def test_filings_pit_window_ignores_the_bse_watermark(store, clock):
          "broadcast_dt": datetime(2026, 6, 17, 19, 3, tzinfo=IST)},
     ])
     seen: list[str] = []
-    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": empty_pit}, seen))
+    job = _pit_job(store, clock, monkeypatch, routed_client({"corporates-pit-gg": empty_pit}, seen))
     result = await job.run(D)
     # 02-05 -> 17-06 is 46 days: two contiguous <=31-day requests, not one 46-day one.
     assert pit_spans(seen) == [(date(2026, 5, 2), date(2026, 6, 1)), (date(2026, 6, 2), D)]
     assert result.ok is True and result.frm == date(2026, 5, 2) and result.to == D
 
 
-async def test_filings_pit_window_floored_and_chunked(store, clock, caplog):
+async def test_filings_pit_window_floored_and_chunked(store, clock, monkeypatch, caplog):
     # A watermark older than the floor becomes neither ONE wide request nor an unbounded number of
     # them: exactly MAX_WINDOWS_PER_RUN chunks of <=PIT_WINDOW_DAYS (§2.8.5).
     store.upsert_insider_trades(
         [{"id": "ancient", "symbol": "X", "broadcast_dt": datetime(2024, 1, 5, 10, 0, tzinfo=IST)}]
     )
     seen: list[str] = []
-    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": empty_pit}, seen))
+    job = _pit_job(store, clock, monkeypatch, routed_client({"corporates-pit-gg": empty_pit}, seen))
     floor = D - timedelta(days=fpit.MAX_WINDOW_DAYS)
     with caplog.at_level(logging.INFO, logger="engine.datafeeds.filings_pit"):
         result = await job.run(D)
@@ -377,7 +491,7 @@ async def test_filings_pit_window_floored_and_chunked(store, clock, caplog):
         clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
         assert [r.levelname for r in clamps] == ["WARNING"]
         assert clamps[0].uncovered_days == (floor - date(2024, 1, 5)).days
-        # LATCHED: the condition holds for as long as the route stays dead, and a boot catch-up
+        # LATCHED: the condition holds for as long as the feed stores nothing, and a boot catch-up
         # replays one run per missed day through this instance — warn on the transition only.
         await job.run(D)
         clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
@@ -393,7 +507,7 @@ async def test_filings_pit_window_floored_and_chunked(store, clock, caplog):
         assert [r.levelname for r in clamps] == ["WARNING", "INFO", "WARNING"]
 
 
-async def test_filings_pit_stops_at_the_first_failing_window(store, clock):
+async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monkeypatch):
     # A chunked run that dies part-way must leave the watermark INSIDE the covered prefix, so the
     # next run re-opens AT the hole rather than stepping over it (§2.8.5).
     store.upsert_insider_trades(
@@ -404,23 +518,26 @@ async def test_filings_pit_stops_at_the_first_failing_window(store, clock):
     def flaky_pit():
         calls["n"] += 1
         if calls["n"] == 1:
-            return httpx.Response(200, json={"data": [pit_row("10-May-2026 11:00:00")]})
+            return httpx.Response(200, json={"data": [{
+                "symbol": "NAUKRI", "exchdisstime": "10-May-2026 11:00:00", "xmlFileName": NAUKRI_XBRL_URL,
+            }]})
         raise httpx.ConnectError("upstream gone")
 
     msgs, sink = collect_alerts()
     seen: list[str] = []
-    job = FilingsPitJob(store, clock, routed_client({"corporates-pit": flaky_pit}, seen), notify=sink)
+    routes = {"corporates-pit-gg": flaky_pit, NAUKRI_XBRL_URL: lambda: httpx.Response(200, content=NAUKRI_XBRL)}
+    job = _pit_job(store, clock, monkeypatch, routed_client(routes, seen), notify=sink)
     result = await job.run(D)
     spans = pit_spans(seen)
     assert spans[0] == (date(2026, 5, 2), date(2026, 6, 1))   # window 1 served, upserted
     assert set(spans[1:]) == {(date(2026, 6, 2), D)}          # window 2 retried by nse_get, then out
     assert result.ok is False and result.degraded is True     # never raises (E5)
-    assert result.rows_parsed == 1 and result.rows_written == 1  # the partial ingest is durable
+    assert result.rows_parsed == 4 and result.rows_written == 4  # the partial ingest is durable
     assert msgs and msgs[0].data["job_id"] == "filings_pit"
     # The watermark sits behind the hole, not past it: the retry re-opens at 10-05, inside window 2.
     assert store.latest_insider_broadcast(SOURCE_NSE) == datetime(2026, 5, 10, 11, 0, tzinfo=IST)
     seen.clear()
-    await FilingsPitJob(store, clock, routed_client({"corporates-pit": empty_pit}, seen)).run(D)
+    await _pit_job(store, clock, monkeypatch, routed_client({"corporates-pit-gg": empty_pit}, seen)).run(D)
     assert pit_spans(seen)[0] == (date(2026, 5, 10), date(2026, 6, 9))
 
 
@@ -434,8 +551,8 @@ async def test_filings_pit_degrades_when_the_watermark_read_raises(store, clock,
     monkeypatch.setattr(store, "alatest_insider_broadcast", boom)
     msgs, sink = collect_alerts()
     seen: list[str] = []
-    result = await FilingsPitJob(
-        store, clock, routed_client({"corporates-pit": empty_pit}, seen), notify=sink
+    result = await _pit_job(
+        store, clock, monkeypatch, routed_client({"corporates-pit-gg": empty_pit}, seen), notify=sink
     ).run(D)
     assert result.ok is False and result.degraded is True and result.reason.startswith("ValueError")
     assert result.frm == D and result.to == D and result.rows_written == 0
@@ -443,13 +560,13 @@ async def test_filings_pit_degrades_when_the_watermark_read_raises(store, clock,
     assert msgs and msgs[0].data["job_id"] == "filings_pit"   # and the owner IS told
 
 
-async def test_filings_pit_failure_degrades_and_warns(store, clock):
+async def test_filings_pit_failure_degrades_and_warns(store, clock, monkeypatch):
     msgs, sink = collect_alerts()
-    result = await FilingsPitJob(store, clock, failing_client(), notify=sink).run(D)
+    result = await _pit_job(store, clock, monkeypatch, failing_client(), notify=sink).run(D)
     assert result.ok is False and result.degraded is True    # never raises (E5)
     assert msgs and msgs[0].data["job_id"] == "filings_pit"
     assert msgs[0].severity == "warning"                     # filings are NOT safety-critical (§2.8 rule iii)
-    assert fpit.NSE_PIT_URL.startswith("https://www.nseindia.com/")
+    assert fpit.NSE_PIT_GG_URL.startswith("https://www.nseindia.com/")
 
 
 # =========================================================================== results filings

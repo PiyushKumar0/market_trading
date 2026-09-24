@@ -1,8 +1,9 @@
 """Daily census of every ingested feed's newest data (job ``feed_freshness``, 21:30).
 
 Each feed's own job alerts when a fetch FAILS. What none of them catch is a fetch that succeeds and
-delivers nothing new — NSE ``corporates-pit`` (empty since mid-2026) and the results listing (no
-period after Dec-2024) both ran "green" for months that way. This census compares each feed's
+delivers nothing new — NSE ``corporates-pit`` (empty after 2026-05-02, when NSE moved insider
+filings to a new route) and the results listing (no period after Dec-2024) both ran "green" for
+months that way. This census compares each feed's
 newest delivered data (:meth:`MarketStore.feed_newest`) with the lag its own history shows it can
 have, and alerts the owner when a feed goes past it — once per stale streak, so a feed that stays
 dead does not bury the next one in a daily repeat. Not entry-blocking. The results feed carries its
@@ -35,7 +36,7 @@ MAX_LAG: dict[str, tuple[int, str]] = {
     "corp_actions": (2, "trading"),
     "earnings_calendar": (2, "trading"),
     "insider_bse": (5, "trading"),          # sparse: days without a universe filing are normal
-    "insider_nse": (90, "calendar"),        # historical route, ~70-day content embargo (plan §2.8)
+    "insider_nse": (5, "trading"),          # the same constituent filings as BSE (PIT V2.0 route)
     "shareholding": (130, "calendar"),      # newest quarter end; filings due 21 days after it
     "news": (2, "calendar"),
     "sector_map": (10, "calendar"),         # weekly rebuild

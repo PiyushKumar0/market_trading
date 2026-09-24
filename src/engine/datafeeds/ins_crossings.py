@@ -20,9 +20,11 @@ is to feed that function the right inputs and journal what comes back.
 
 STARVATION VISIBILITY (plan §6.1, binding)
 ------------------------------------------
-Live crossings are computable only from the **BSE fresh feed** (live since 2026-07-19, ~13-18
-in-universe rows/day); the NSE PIT feed's ~70-day content embargo makes it historical-only, so the
-live-reachable event population is NOT proven identical to the backtested one. Every run therefore
+Live crossings come from two same-day feeds carrying the same filings: the **BSE fresh feed** (live
+since 2026-07-19, ~13-18 in-universe rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old
+NSE route's ~70-day embargo had made NSE historical-only). :meth:`MarketStore.get_insider_trades`
+counts a trade both feeds carry once. The live-reachable event population is still NOT proven
+identical to the backtested one. Every run therefore
 logs ``ins_crossings_run`` with the day's fresh-feed row counts alongside the crossings found:
 **sustained zero-rows is starvation of the feed, not absence of signal**, and the two are
 indistinguishable from a "0 crossings" line alone. That was the 2026-08-04 news-corpus lesson; it is
@@ -34,8 +36,8 @@ universe (4.6%) where the NSE corpus the edge was measured on carried 1,565. ``i
 therefore also carries ``coverage_pct`` (:func:`coverage_percent`), and a run under
 :data:`COVERAGE_WARN_PCT` raises ``ins_feed_coverage_low`` — the row-count warning above fires only
 on ZERO rows and was silent through the whole episode. ``coverage_pct`` measures the 120-day CORPUS,
-not today's feed (a PIT backfill of ~70-day-old rows can widen it with the live feed unchanged), so
-both lines also carry ``fresh_symbols_in_universe``: the issuers the live BSE feed reached on ``d``.
+not today's feed (a backfill can widen it with the live feeds unchanged), so both lines also carry
+``fresh_symbols_in_universe``: the issuers the live feeds reached on ``d``.
 
 This alarm does NOT own the feed's own resolution stage. Widening the corpus lifts ``coverage_pct``
 above the floor and silences this line permanently, so a later collapse of
@@ -71,8 +73,7 @@ from pydantic import BaseModel, ConfigDict
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.log import get_logger
-from engine.datafeeds.filings_events import insider_net_buy, row_source
-from engine.datafeeds.filings_pit_fresh import BSE_SOURCE
+from engine.datafeeds.filings_events import insider_net_buy
 from engine.marketdata.store import MarketStore
 
 _log = get_logger("engine.datafeeds.ins_crossings")
@@ -106,7 +107,7 @@ class InsCrossingsResult(BaseModel):
     for_session: date | None = None
     universe_symbols: int = 0
     symbols_with_filings: int = 0
-    fresh_rows_today: int = 0        # BSE fresh-feed insider rows broadcast on d (whole market)
+    fresh_rows_today: int = 0        # insider rows broadcast on d (both live feeds, constituents)
     fresh_rows_in_universe: int = 0  # ...of those, rows on an ELIGIBLE symbol (the plan's ~13-18/day)
     crossings_found: int = 0
     rows_written: int = 0
@@ -176,20 +177,17 @@ class InsCrossingsJob:
             if symbol in eligible:
                 by_symbol[symbol].append(row)
 
-        # --- feed-health telemetry: what the BSE FRESH feed delivered for d (the only live-reachable
-        #     source — the NSE PIT feed's ~70-day embargo makes it historical-only, WO-16).
-        fresh_today = [
-            row for row in filings
-            if row_source(row) == BSE_SOURCE and _broadcast_date(row) == d
-        ]
+        # --- feed-health telemetry: what the live feeds delivered for d (both are same-day, so a row
+        #     broadcast on d can only have come from one of them).
+        fresh_today = [row for row in filings if _broadcast_date(row) == d]
         fresh_in_universe = [
             row for row in fresh_today if str(row.get("symbol") or "").upper() in eligible
         ]
-        # ISSUERS the live feed reached today, apart from the ROWS it delivered. `by_symbol` below
-        # counts the 120-day CORPUS, which includes the ~70-day-embargoed NSE PIT rows: a PIT
-        # backfill can widen `coverage_pct` past the alarm threshold while today's live feed still
-        # reaches the same handful of issuers. Logging both keeps "the corpus is wide" readable
-        # apart from "today's feed reached N issuers" even when the alarm has gone quiet.
+        # ISSUERS the live feeds reached today, apart from the ROWS they delivered. `by_symbol` below
+        # counts the 120-day CORPUS: a backfill can widen `coverage_pct` past the alarm threshold
+        # while today's live feeds still reach the same handful of issuers. Logging both keeps "the
+        # corpus is wide" readable apart from "today's feeds reached N issuers" even when the alarm
+        # has gone quiet.
         fresh_symbols_in_universe = len({
             str(row.get("symbol") or "").upper() for row in fresh_in_universe
         })

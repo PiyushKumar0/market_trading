@@ -1,0 +1,68 @@
+{
+ "data": [
+  {
+   "appId": "3557",
+   "broadcastDateTime": "24-Sep-2026 08:04:16",
+   "companyName": "NCL INDUSTRIES LIMITED",
+   "diff": "00:00:02",
+   "exchdisstime": "24-Sep-2026 08:04:18",
+   "ixbrl": "https://nsearchives.nseindia.com/corporate/ixbrl/IT_2568_20260924_080416567_WEB.html",
+   "ixbrlFileSize": "28.17 KB",
+   "prevAppId": null,
+   "regulation": "Regulation 7 (2)",
+   "revisionRemark": null,
+   "symbol": "NCLIND",
+   "typeOfSubmission": "Original",
+   "xbrlFileSize": "8.11 KB",
+   "xmlFileName": "https://nsearchives.nseindia.com/corporate/xbrl/IT_2568_WebXMLFile_20260924_080416500.xml"
+  },
+  {
+   "appId": "3548",
+   "broadcastDateTime": "23-Sep-2026 16:55:35",
+   "companyName": "Info Edge (India) Limited",
+   "diff": "00:00:02",
+   "exchdisstime": "23-Sep-2026 16:55:37",
+   "ixbrl": "https://nsearchives.nseindia.com/corporate/ixbrl/IT_2460_20260923_165535325_WEB.html",
+   "ixbrlFileSize": "40.18 KB",
+   "prevAppId": null,
+   "regulation": "Regulation 7 (2)",
+   "revisionRemark": null,
+   "symbol": "NAUKRI",
+   "typeOfSubmission": "Original",
+   "xbrlFileSize": "13.33 KB",
+   "xmlFileName": "https://nsearchives.nseindia.com/corporate/xbrl/IT_2460_WebXMLFile_20260923_165535265.xml"
+  },
+  {
+   "appId": "3119",
+   "broadcastDateTime": "09-Sep-2026 19:54:00",
+   "companyName": "HCL Technologies Limited",
+   "diff": "00:00:00",
+   "exchdisstime": "09-Sep-2026 19:54:01",
+   "ixbrl": "https://nsearchives.nseindia.com/corporate/ixbrl/IT_1828_20260909_195400354_WEB.html",
+   "ixbrlFileSize": "41.13 KB",
+   "prevAppId": null,
+   "regulation": "Regulation 7 (2)",
+   "revisionRemark": "The XBRL filing was submitted on 3 September 2026 within the prescribed timeline. Under the transaction details, the transaction type was correctly reported as \"Sell\". However, due to an inadvertent clerical error, the Mode of Acquisition/Disposal was incorrectly mentioned as \"Market Purchase\" instead of \"Market Sale\".\r\n\r\n\r\n\r\nThe error is purely clerical in nature and does not affect any other information disclosed in the filing. Accordingly, the filing is being revised solely to rectify the aforementioned discrepancy and ensure that the disclosure accurately reflects the transaction details.",
+   "symbol": "HCLTECH",
+   "typeOfSubmission": "Revision",
+   "xbrlFileSize": "13.07 KB",
+   "xmlFileName": "https://nsearchives.nseindia.com/corporate/xbrl/IT_1828_WebXMLFile_20260909_195400317.xml"
+  },
+  {
+   "appId": "0",
+   "broadcastDateTime": "24-Sep-2026 08:04:16",
+   "companyName": "NCL INDUSTRIES LIMITED",
+   "diff": "00:00:02",
+   "exchdisstime": "24-Sep-2026 08:04:18",
+   "ixbrl": "https://nsearchives.nseindia.com/corporate/ixbrl/IT_2568_20260924_080416567_WEB.html",
+   "ixbrlFileSize": "28.17 KB",
+   "prevAppId": null,
+   "regulation": "Regulation 7 (2)",
+   "revisionRemark": null,
+   "symbol": "",
+   "typeOfSubmission": "Original",
+   "xbrlFileSize": "8.11 KB",
+   "xmlFileName": "https://nsearchives.nseindia.com/corporate/xbrl/IT_2568_WebXMLFile_20260924_080416500.xml"
+  }
+ ]
+}

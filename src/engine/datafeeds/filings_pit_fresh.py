@@ -1,9 +1,10 @@
 """BSE FRESH insider disclosures -> ``insider_trades`` (§2.8 job ``filings_pit_fresh``, 19:00 - stage 3).
 
-The NSE PIT feed (:mod:`engine.datafeeds.filings_pit`) is structurally embargoed ~70 days (re-verified
-2026-07-19: boundary 2026-05-10), so it is the deep HISTORICAL backbone but useless for SAME-DAY
-origination. BSE ``getCorp_Regulation_ng/w`` (found 2026-07-19 via browser network capture, plan §2.8
-source table) serves the SAME structured PIT rows fresh on the disclosure day, with a full
+The old NSE PIT route was embargoed ~70 days (re-verified 2026-07-19: boundary 2026-05-10), so when
+this feed was built it was the only SAME-DAY source; since 2026-09-24 :mod:`engine.datafeeds.filings_pit`
+reads NSE's same-day PIT V2.0 route too, and ``MarketStore.get_insider_trades`` counts a trade both
+feeds carry once. BSE ``getCorp_Regulation_ng/w`` (found 2026-07-19 via browser network capture, plan
+§2.8 source table) serves the SAME structured PIT rows fresh on the disclosure day, with a full
 ``Fld_CreateDate`` broadcast timestamp. This feed pulls those rows into the SAME ``insider_trades``
 table the NSE feed writes, DATA ONLY (no decision path touched — the §2.8.2 event typing / §2.7
 catalyst wiring stay behind §8.6; this feed only makes the fresh rows AVAILABLE).

@@ -689,8 +689,8 @@ _EXCL_INDEX_LEGACY = "not_nifty200"
 
 # Duplicated from ``engine.datafeeds.filings_pit_fresh.BSE_ID_PREFIX``: this module CANNOT import
 # that one (every datafeed imports the store — a store->datafeeds import would cycle). Must stay
-# equal to it; ``tests/unit/test_filings_feeds.py`` asserts the pair matches. NSE corporates-pit
-# rows carry the bare content hash, BSE fresh-feed rows the tagged one, so the id prefix IS the
+# equal to it; ``tests/unit/test_filings_feeds.py`` asserts the pair matches. NSE rows (both PIT
+# routes) carry the bare content hash, BSE fresh-feed rows the tagged one, so the id prefix IS the
 # source partition of ``insider_trades`` (§2.8.5) — no source column exists. A THIRD source must add
 # its tag here AND be excluded from the 'nse' predicate: bare-id means NSE only while 'bse:' is the
 # only tag (verified 2026-09-13 on the live store: 44,187 bare / 405 'bse:' / no other prefix).
@@ -1965,11 +1965,31 @@ class MarketStore:
         self, *, symbol: str | None = None,
         broadcast_from: datetime | None = None, broadcast_to: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM insider_trades WHERE TRUE"
+        """Insider trades, each trade ONCE across exchanges. The same PIT filing reaches NSE and BSE,
+        so a trade can be stored by both feeds under different ids (each hashes its own broadcast
+        time). Rows of the two sources with the same symbol, person, side, qty, value and trade dates
+        are paired off in broadcast order and the earlier of each pair is kept — the point-in-time
+        choice. Rows of ONE source are never merged, so single-source history is returned as stored.
+        Pairing runs before the broadcast filter, so a pair straddling ``broadcast_from`` is dropped
+        whole rather than surfacing its later copy."""
+        base = "SELECT * FROM insider_trades"
         params: list[Any] = []
         if symbol is not None:
-            sql += " AND symbol = ?"
+            base += " WHERE symbol = ?"
             params.append(symbol)
+        trade = (
+            "symbol, lower(regexp_replace(trim(coalesce(person_name, '')), '\\s+', ' ', 'g')), "
+            "lower(coalesce(txn_type, '')), qty, value, txn_from, txn_to"
+        )
+        sql = (
+            "SELECT * EXCLUDE (src, nth, pick) FROM ("
+            f" SELECT *, row_number() OVER (PARTITION BY {trade}, nth ORDER BY broadcast_dt, id) AS pick"
+            " FROM ("
+            f"  SELECT *, row_number() OVER (PARTITION BY {trade}, src ORDER BY broadcast_dt, id) AS nth"
+            f"  FROM (SELECT *, {_INSIDER_SOURCE_PREDICATE['bse']} AS src FROM ({base}))"
+            " )"
+            ") WHERE pick = 1"
+        )
         if broadcast_from is not None:
             sql += " AND broadcast_dt >= ?"
             params.append(broadcast_from)

@@ -672,7 +672,7 @@ async def run() -> int:
     deals = DealsJob(store, clock, http, notify=notify)
     # §2.8 corporate-filings feeds (data-only in stage 1; never entry-blocking, E5). filings_results
     # reuses the earnings provider's historical leg (run_range) for board-meeting dates.
-    filings_pit = FilingsPitJob(store, clock, http, notify=notify)
+    filings_pit = FilingsPitJob(store, clock, http, settings=settings, notify=notify)
     # settings: filings_pit_fresh rebuilds its scrip->symbol map every run from the cached
     # index-constituents CSV (symbol->ISIN) + the BSE bulk master (ISIN->scrip). Without it the map
     # is only what symbol_isin holds, which is how the §6.1 `ins` feed ended up reaching 199 of 480

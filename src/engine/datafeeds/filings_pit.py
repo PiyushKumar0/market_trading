@@ -1,29 +1,34 @@
-"""NSE PIT insider trades → ``insider_trades`` (§2.8 job ``filings_pit``, ~18:35 — O14, E5).
+"""NSE insider trades → ``insider_trades`` (§2.8 job ``filings_pit``, ~18:35 — O14, E5).
 
-Pulls structured insider/PIT disclosures from the NSE ``corporates-pit`` API and persists them to the
-DuckDB ``insider_trades`` table (§2.8.1). DATA ONLY in stage 1 — no decision path is touched (the
-§2.8.2 event typing / §2.7 catalyst wiring is a later stage, gated on the §2.8.4 event study).
+**Two NSE routes.** Insider (PIT) disclosures moved to SEBI's PIT V2.0 XBRL filings on 2026-05-03 (found
+2026-09-24 by capturing NSE's own insider-trading page). The old ``corporates-pit`` route
+(:func:`pit_url`, :func:`parse_pit`) holds the history up to 2026-05-02 and only
+``scripts/backfill_filings.py`` still walks it. The daily job reads ``corporates-pit-gg``
+(:func:`pit_gg_url`): one listing row per FILING, with its trades in the filing's XBRL (one context per
+disclosure, :func:`parse_pit_xbrl`). Only index constituents' XBRL is fetched, the same universe the
+BSE fresh feed resolves to.
 
-**Point-in-time discipline (§2.8 rule i):** every row carries the exchange broadcast timestamp
-(``broadcast_dt``, minute-granular ``date`` field) — every downstream as-of join keys on THAT, never
-the ``txn_from``/``txn_to`` period. The PK is a sha256 content hash of
-(symbol, person_name, broadcast_dt, txn_type, qty, value) so an amended/duplicate broadcast of the
-same transaction collapses to one row (latest wins) and a genuinely different transaction never
-collides (§2.8 edge cases).
+**Point-in-time discipline (§2.8 rule i):** ``broadcast_dt`` is the exchange dissemination time (the
+listing's received time when that is missing; the two differ by at most 5 s), and every downstream
+as-of join keys on it, never the ``txn_from``/``txn_to`` period. The PK is a sha256 content hash of
+(symbol, person_name, broadcast_dt, txn_type, qty, value), so a re-ingested filing never duplicates.
 
-**Endpoint quirk (probe-verified):** ``corporates-pit`` returns an EMPTY ``data`` list unless BOTH
-``from_date`` and ``to_date`` (DD-MM-YYYY) are supplied — so this feed ALWAYS passes an explicit
+**Both exchanges carry the same filing** (2026-09-24: all 19 NSE disclosures of 09-22/23 matched a BSE
+fresh-feed row field for field, BSE 20 s to 3 min earlier). Each source's rows are stored as they
+come; :meth:`MarketStore.get_insider_trades` pairs the two copies of a trade and keeps the earlier.
+
+**Window.** Both routes return nothing without an explicit ``from_date``/``to_date`` (DD-MM-YYYY)
 window. The daily job's window is ``[watermark → run-day]`` where the watermark is the latest stored
 ``broadcast_dt`` **of this source's rows only** (§2.8.5, 2026-09-13 — the BSE fresh feed writes into
 the same table every day and a whole-table watermark collapsed this window to ``[d-1, d]``), floored
-at :data:`MAX_WINDOW_DAYS` behind the run day and walked in :data:`PIT_WINDOW_DAYS` chunks, ONE
-request apiece. A fresh store fetches just the run-day; history older than the floor is the
-backfill's job (``scripts/backfill_filings.py seed --from <day> --skip-results --skip-shp``).
+at :data:`MAX_WINDOW_DAYS` behind the run day and walked in :data:`PIT_WINDOW_DAYS` chunks. A filing
+broadcast before the watermark is not fetched again. History older than the floor is the backfill's
+job (``scripts/backfill_filings.py seed --from <day> --skip-results --skip-integrated --skip-shp``).
 
-Parsing is defensive (E5): the row list is under the ``data`` wrapper key, field names are matched
-case-insensitively with aliases, and a row missing a symbol OR an unparseable broadcast timestamp is
-skipped-and-counted. On fetch failure: alert + leave existing rows in force (the §2.6 date-keyed
-catch-up retries the missed day). Never raises into the scheduler.
+**Failure model (E5).** A listing row without a symbol, broadcast time or XBRL link is skipped and
+counted, as is a filing whose XBRL is gone (404/410) or malformed. Any other failure stops the run with
+every earlier filing already upserted, so the watermark never steps over an unfetched filing and the
+§2.6 date-keyed catch-up retries. Alert + degraded result; never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -31,7 +36,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+import xml.etree.ElementTree as ET
+from collections.abc import Awaitable, Callable, Collection
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -40,15 +47,24 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from engine.core.clock import IST, Clock
+from engine.core.config import Settings
 from engine.core.log import get_logger
 from engine.core.nse_http import nse_get
+from engine.datafeeds.isin_map import load_constituents_isin
 from engine.marketdata.store import MarketStore
 from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.filings_pit")
 
-#: NSE PIT insider-trades API (equities). [VERIFY Phase-1]; anti-bot [likely] (cookie-gated www host).
+#: Old NSE PIT insider-trades route: broadcasts up to 2026-05-02 only (history, backfill script).
 NSE_PIT_URL = "https://www.nseindia.com/api/corporates-pit"
+
+#: NSE PIT V2.0 filing listing (equities) — every insider filing from :data:`PIT_GG_FIRST_DAY` on.
+NSE_PIT_GG_URL = "https://www.nseindia.com/api/corporates-pit-gg"
+PIT_GG_FIRST_DAY = date(2026, 5, 3)
+
+#: XBRL statuses that mean the filing's file will never be served (skip it; do not stall the feed).
+_XBRL_GONE = frozenset({404, 410})
 
 #: This job's source tag in ``insider_trades`` — the bare-id rows (``filings_pit_fresh`` writes the
 #: ``bse:``-tagged ones). Canonical: ``filings_events.SOURCE_NSE`` imports this directly — filings_events
@@ -66,14 +82,12 @@ NSE_SOURCE = "nse"
 #: the backfill does.
 PIT_WINDOW_DAYS = 31
 
-#: Requests ONE run may issue, hence the window-START floor (§2.8.5, 2026-09-13). The window opens at
-#: the per-SOURCE NSE watermark, which is 2026-05-02 while the route is stale upstream and widens by
-#: a day per day — unbounded without a floor. Window bounds are INCLUSIVE, so N chunks reach
-#: ``N * PIT_WINDOW_DAYS - 1`` days behind the run day: six of them cover the 2026-05-02 gap whole
-#: through run day 2026-11-03 (the floor first bites 2026-11-04; today, 2026-09-13, it is five
-#: requests). A residue older than the floor is an owner-run
-#: ``scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-shp``, announced
-#: by ``filings_pit_window_clamped``.
+#: Listing requests ONE run may issue, hence the window-START floor (§2.8.5, 2026-09-13). The window
+#: opens at the per-SOURCE NSE watermark, which widens by a day for every day the feed stores nothing —
+#: unbounded without a floor. Window bounds are INCLUSIVE, so N chunks reach
+#: ``N * PIT_WINDOW_DAYS - 1`` days behind the run day. A residue older than the floor is an owner-run
+#: ``scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-integrated
+#: --skip-shp``, announced by ``filings_pit_window_clamped``.
 MAX_WINDOWS_PER_RUN = 6
 MAX_WINDOW_DAYS = PIT_WINDOW_DAYS * MAX_WINDOWS_PER_RUN - 1
 
@@ -88,11 +102,16 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 def pit_url(frm: date, to: date, *, symbol: str | None = None) -> str:
-    """PIT URL for the explicit ``[frm, to]`` window (DD-MM-YYYY; the endpoint is EMPTY without it)."""
+    """Old-route PIT URL for the explicit ``[frm, to]`` window (DD-MM-YYYY; EMPTY without it)."""
     url = f"{NSE_PIT_URL}?index=equities&from_date={frm:%d-%m-%Y}&to_date={to:%d-%m-%Y}"
     if symbol:
         url += f"&symbol={symbol}"
     return url
+
+
+def pit_gg_url(frm: date, to: date) -> str:
+    """PIT V2.0 filing listing for filings broadcast in ``[frm, to]`` (DD-MM-YYYY)."""
+    return f"{NSE_PIT_GG_URL}?index=equities&from_date={frm:%d-%m-%Y}&to_date={to:%d-%m-%Y}"
 
 
 def pit_windows(frm: date, to: date, span_days: int = PIT_WINDOW_DAYS) -> list[tuple[date, date]]:
@@ -274,8 +293,142 @@ def parse_pit(payload: Any) -> list[dict[str, Any]]:
     return rows
 
 
+@dataclass(frozen=True)
+class PitFiling:
+    """One ``corporates-pit-gg`` listing row: a filing whose trades are in its XBRL."""
+
+    symbol: str
+    broadcast_dt: datetime
+    xbrl: str
+
+
+def parse_pit_filings(payload: Any) -> list[PitFiling]:
+    """PIT V2.0 listing JSON → filings, oldest first. A row without a symbol, a parseable broadcast
+    time or an XBRL link is skipped and counted."""
+    filings: list[PitFiling] = []
+    skipped = 0
+    for raw in _rows_of(payload):
+        keys = {str(k).lower(): v for k, v in raw.items()}
+        symbol = _clean(keys.get("symbol")).upper()
+        broadcast_dt = _parse_dt(keys.get("exchdisstime")) or _parse_dt(keys.get("broadcastdatetime"))
+        xbrl = _clean(keys.get("xmlfilename"))
+        if not symbol or broadcast_dt is None or not xbrl:
+            skipped += 1
+            continue
+        filings.append(PitFiling(symbol=symbol, broadcast_dt=broadcast_dt, xbrl=xbrl))
+    if skipped:
+        _log.warning("filings_pit_malformed_rows", skipped=skipped)
+    return sorted(filings, key=lambda f: f.broadcast_dt)
+
+
+def _pct(raw: Any) -> float | None:
+    """PIT V2.0 holdings are fractions (0.4745 = 47.45%); stored as percent like the other feeds."""
+    d = _dec(raw)
+    return float(d * 100) if d is not None else None
+
+
+def parse_pit_xbrl(content: bytes | str, filing: PitFiling) -> tuple[list[dict[str, Any]], int]:
+    """One PIT V2.0 XBRL filing → (``insider_trades`` rows for its equity disclosures, count of
+    non-equity disclosures skipped). Raises :class:`xml.etree.ElementTree.ParseError` on a malformed
+    document."""
+    facts_by_ctx: dict[str, dict[str, str]] = {}
+    for el in ET.fromstring(content):
+        ctx = el.get("contextRef")
+        if ctx:
+            facts_by_ctx.setdefault(ctx, {})[el.tag.rsplit("}", 1)[-1]] = (el.text or "").strip()
+    rows: list[dict[str, Any]] = []
+    non_equity = 0
+    for facts in facts_by_ctx.values():
+        if "SecuritiesAcquiredOrDisposedTransactionType" not in facts:
+            continue  # the filing-level context
+        if not facts.get("TypeOfInstrument", "").lower().startswith("equity"):
+            non_equity += 1
+            continue
+        person_name = facts.get("NameOfThePerson", "")
+        txn_type = facts["SecuritiesAcquiredOrDisposedTransactionType"]
+        qty = _int(facts.get("SecuritiesAcquiredOrDisposedNumberOfSecurity"))
+        value = _dec(facts.get("SecuritiesAcquiredOrDisposedValueOfSecurity"))
+        rows.append(
+            {
+                "id": insider_id(filing.symbol, person_name, filing.broadcast_dt, txn_type, qty, value),
+                "symbol": filing.symbol,
+                "person_name": person_name or None,
+                "person_category": facts.get("CategoryOfPerson") or None,
+                "acq_mode": facts.get("ModeOfAcquisitionOrDisposal") or None,
+                "txn_type": txn_type or None,
+                "qty": qty,
+                "value": value,
+                "before_pct": _pct(
+                    facts.get("SecuritiesHeldPriorToAcquisitionOrDisposalPercentageOfShareholding")
+                ),
+                "after_pct": _pct(  # the taxonomy's own spelling: "Acquistion"
+                    facts.get("SecuritiesHeldPostAcquistionOrDisposalPercentageOfShareholding")
+                ),
+                "txn_from": _parse_date(
+                    facts.get("DateOfAllotmentAdviceOrAcquisitionOfSharesOrSaleOfSharesSpecifyFromDate")
+                ),
+                "txn_to": _parse_date(
+                    facts.get("DateOfAllotmentAdviceOrAcquisitionOfSharesOrSaleOfSharesSpecifyToDate")
+                ),
+                "intim_dt": _parse_date(facts.get("DateOfIntimationToCompany")),
+                "broadcast_dt": filing.broadcast_dt,
+                "xbrl": filing.xbrl,
+            }
+        )
+    return rows, non_equity
+
+
+@dataclass
+class PitIngest:
+    """Running tallies of an ingest — mutable, so a caller still holds them when the ingest raises."""
+
+    filings: int = 0
+    out_of_universe: int = 0
+    already_ingested: int = 0
+    xbrl_fetched: int = 0
+    xbrl_unavailable: int = 0
+    non_equity: int = 0
+    rows: int = 0
+    written: int = 0
+
+
+async def ingest_pit_window(
+    http: httpx.AsyncClient, store: MarketStore, frm: date, to: date, symbols: Collection[str],
+    stats: PitIngest, *, after: datetime | None = None, timeout: float,
+) -> None:
+    """List the PIT V2.0 filings broadcast in ``[frm, to]`` and upsert each constituent filing's trades,
+    oldest first, one filing at a time. A filing broadcast before ``after`` (the watermark) is not
+    fetched again. A gone (404/410) or malformed XBRL is skipped and counted; any other failure raises
+    with every earlier filing already upserted."""
+    resp = await nse_get(http, pit_gg_url(frm, to), timeout=timeout)
+    for filing in parse_pit_filings(json.loads(resp.content)):
+        stats.filings += 1
+        if filing.symbol not in symbols:
+            stats.out_of_universe += 1
+            continue
+        if after is not None and filing.broadcast_dt < after:
+            stats.already_ingested += 1
+            continue
+        await _sleep(PIT_PACE_S)
+        try:
+            xml = await nse_get(http, filing.xbrl, timeout=timeout)
+            rows, non_equity = parse_pit_xbrl(xml.content, filing)
+        except (httpx.HTTPStatusError, ET.ParseError) as exc:
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in _XBRL_GONE:
+                raise
+            stats.xbrl_unavailable += 1
+            _log.warning("filings_pit_xbrl_unavailable", symbol=filing.symbol, xbrl=filing.xbrl,
+                         error=f"{type(exc).__name__}: {exc}")
+            continue
+        stats.xbrl_fetched += 1
+        stats.non_equity += non_equity
+        stats.rows += len(rows)
+        if rows:
+            stats.written += await store.arun(store.upsert_insider_trades, rows)
+
+
 class FilingsPitJob:
-    """§2.8 job ``filings_pit`` — NSE PIT insider trades → ``insider_trades`` (date-keyed, E5)."""
+    """§2.8 job ``filings_pit`` — NSE PIT V2.0 insider trades → ``insider_trades`` (date-keyed, E5)."""
 
     def __init__(
         self,
@@ -283,12 +436,15 @@ class FilingsPitJob:
         clock: Clock,
         http: httpx.AsyncClient,
         *,
+        settings: Settings,
         notify: NotifySink | None = None,
         request_timeout_s: float = 20.0,
     ) -> None:
         self._store = store
         self._clock = clock
         self._http = http
+        #: Locates the index-constituents CSV: only constituents' filings are fetched.
+        self._settings = settings
         self._notify = notify
         self._timeout = float(request_timeout_s)
         #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): with the watermark fix forwarding this
@@ -297,7 +453,7 @@ class FilingsPitJob:
         self._alerted: set[date] = set()
         #: Window-floor latch: WARNING on the TRANSITION into clamping, not once per run and not once
         #: per replayed date (a boot catch-up replays one run per missed day through THIS instance,
-        #: and while the NSE route stays dead the condition holds forever). Cleared the moment the
+        #: and while the feed stores nothing the condition holds on every run). Cleared the moment the
         #: watermark is back inside the cap — a latching cause needs a symmetric clear (2026-09-01
         #: catchup_safety_jobs lesson) or the alarm never re-arms.
         self._clamped = False
@@ -316,7 +472,8 @@ class FilingsPitJob:
             return frm
         # Rows older than `floor` and newer than the watermark are NOT requested by this run, and no
         # later run reaches them either: a successful run lifts the watermark past the gap. Recovery
-        # is `scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-shp`.
+        # is `scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-integrated
+        # --skip-shp`.
         log = _log.info if self._clamped else _log.warning
         log(
             "filings_pit_window_clamped", watermark=frm.isoformat(), frm=floor.isoformat(),
@@ -326,53 +483,51 @@ class FilingsPitJob:
         return floor
 
     async def run(self, d: date) -> FilingsPitResult:
-        """Fetch + upsert PIT filings over ``[frm → d]`` in ≤:data:`PIT_WINDOW_DAYS` chunks, where
-        ``frm`` is the NSE watermark capped at ``d`` and floored at ``d - MAX_WINDOW_DAYS``
-        (:meth:`_window_start`). Idempotent on the content-hash id; ``d`` is the run day (§2.6
-        date-keyed). Never raises into the scheduler (E5) — the watermark read is inside the guard
-        too, so a store fault or an unknown source tag degrades like a fetch failure."""
+        """Ingest the PIT V2.0 filings broadcast over ``[frm → d]`` in ≤:data:`PIT_WINDOW_DAYS`
+        chunks, where ``frm`` is the NSE watermark capped at ``d`` and floored at
+        ``d - MAX_WINDOW_DAYS`` (:meth:`_window_start`). Idempotent on the content-hash id; ``d`` is
+        the run day (§2.6 date-keyed). Never raises into the scheduler (E5) — the constituents and
+        watermark reads are inside the guard too, so they degrade like a fetch failure."""
         # `frm` stands at the run day until the watermark is read, so a store fault reports the
         # degenerate window it never got to widen; `windows_done=0` on the warning is what separates
         # "the watermark read failed" from "the first fetch failed".
         frm = d
         win: tuple[date, date] | None = None
-        windows = parsed = written = 0
+        windows = 0
+        stats = PitIngest()
         try:
+            symbols = load_constituents_isin(self._settings).keys()
+            if not symbols:
+                raise RuntimeError("the index-constituents CSV gave no symbols")
             watermark = await self._store.alatest_insider_broadcast(source=NSE_SOURCE)
             frm = self._window_start(watermark, d)
             for win in pit_windows(frm, d):
                 if windows:
                     await _sleep(PIT_PACE_S)  # never burst the cookie-gated www host (§2.8)
-                resp = await nse_get(self._http, pit_url(*win), timeout=self._timeout)
-                rows = parse_pit(json.loads(resp.content))
+                await ingest_pit_window(
+                    self._http, self._store, *win, symbols, stats, after=watermark, timeout=self._timeout
+                )
                 windows += 1
-                parsed += len(rows)
-                # Upserted PER window, BEFORE the next fetch: a run that dies at window k leaves the
-                # watermark inside the covered prefix, so the next run resumes AT the hole instead of
-                # stepping over it (the watermark is derived from rows, not from fetch progress).
-                if rows:
-                    written += await self._store.arun(self._store.upsert_insider_trades, rows)
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning(
                 "filings_pit_fetch_failed", d=d.isoformat(), error=reason,
                 window=f"{win[0].isoformat()}..{win[1].isoformat()}" if win is not None else None,
-                windows_done=windows,
+                windows_done=windows, **asdict(stats),
             )
             if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
                 await self._alert(d, reason)
                 self._alerted.add(d)
             return FilingsPitResult(
                 ok=False, degraded=True, frm=frm, to=d,
-                rows_parsed=parsed, rows_written=written, reason=reason,
+                rows_parsed=stats.rows, rows_written=stats.written, reason=reason,
             )
 
         self._alerted.discard(d)  # a success for d re-arms the alert (dedup is per failing streak)
         _log.info(
-            "filings_pit_ingested", frm=frm.isoformat(), to=d.isoformat(),
-            windows=windows, parsed=parsed, written=written,
+            "filings_pit_ingested", frm=frm.isoformat(), to=d.isoformat(), windows=windows, **asdict(stats)
         )
-        return FilingsPitResult(ok=True, frm=frm, to=d, rows_parsed=parsed, rows_written=written)
+        return FilingsPitResult(ok=True, frm=frm, to=d, rows_parsed=stats.rows, rows_written=stats.written)
 
     async def _alert(self, d: date, reason: str) -> None:
         if self._notify is None:
