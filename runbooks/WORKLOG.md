@@ -1,5 +1,68 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 09:30–17:45 — NSE insider feed integrated, chaos defects CD-1/2/4/6/7 fixed (owner: "Integrate NSE insider feed, then work on fix for the CD issues. Validate them."); 1e69389..d084f34 deployed 17:36
+
+- **What shipped** (plan §2.8.5 addendum 2026-09-24 later, `runbooks/CHAOS_DRILLS.md` §2):
+  - `filings_pit` reads NSE's PIT V2.0 route `corporates-pit-gg` and fetches each constituent filing's
+    XBRL. One failed XBRL is skipped and retried by later runs inside a 7-day margin; the store pairs
+    the BSE and NSE copies of each trade and keeps the earlier broadcast.
+  - CD-1: an in-session feed STALE latches `feed_stale` FROZEN, and the next HEALTHY clears it.
+  - CD-2: a boot clock-skew freeze holds through the warm-up lift.
+  - CD-4: CATALYST_DISABLED is sent when no digest has run by an in-window sweep.
+  - CD-6: shutdown drains bus deliveries for up to 5 s before the store closes.
+  - CD-7: a flush cut off by close restages its unwritten ticks.
+- **Review round** (two independent reviewers, then fixes: 26a3769, d084f34):
+  - The CD-1 latch awaited the owner's Telegram page inside the feed-health publisher. In an outage
+    that stalls the frame reader until the silence monitor kills a healthy child; it now runs
+    detached.
+  - CD-4 checked `digest_status`, which reads a late run yesterday as fresh.
+  - The old 10 s drain could overrun NSSM's 30 s stop grace.
+  - One bad XBRL stopped the whole insider run.
+  - `filings_events` carried a second, looser cross-source dedup that could drop another person's
+    trade.
+- **Validation:**
+  - Chaos suite: 64 passed, 21 skipped (Phase-3-gated), 0 xfailed.
+  - Unit, property and replay: 3,153 passed.
+  - `tests/replay/test_golden_day.py::test_run_never_blocks_the_event_loop` failed twice under load
+    (1.07 s gap, 1.0 s bound) and passed on re-run. Its path uses neither `EventBus` nor the tick
+    flush; the base commit's own call time varied between 1.3 and 3.1 s.
+- **Deploy 17:07–17:36** (engine stopped 17:07, clean stop): fast-forwarded `phase2`, then ran
+  `FilingsPitJob` once on the live store for 04-25 → 09-24:
+  - ok, not degraded; 1,769 NSE rows written; newest broadcast 16:40 today.
+  - The pre-05-03 NSE corpus is unchanged: 44,187 rows, identical id hash.
+  - Census: no stale feed.
+  - Boot: engine started 17:36, `selftest ok`, `boot_contract_ok` 17:43.
+- **Pairing verified against Python:**
+  - 524 BSE rows; 505 have an exact NSE twin; 505 pairs collapse to one row each (88 kept from NSE,
+    417 kept from BSE).
+  - `get_insider_trades` returns exactly the set a Python re-implementation of the rule does,
+    filtered and unfiltered.
+  - The 19 unpaired BSE rows differ in person name ("(revised)" suffix) or pledge wording ("Pledge
+    Invoke" vs "Invoke"). None is an open-market buy, so `ins` is unaffected.
+- **Found: DuckDB ART secondary indexes have lost entries (NOT fixed; owner decision).** Only
+  index-served lookups are wrong (`count_if` full scans agree with the data). A sweep of every index
+  on a copy of the store found two damaged tables:
+  - `insider_trades.idx_insider_broadcast`: a plain `broadcast_dt >= ?` from 05-27 returned 1,621
+    of 2,041 rows, with 420 of 524 BSE rows missing. Before today `get_insider_trades` filtered
+    exactly that way, so `ins_crossings` may have been reading only a fraction of the BSE feed.
+    Unmeasured: when the loss began. Today's code filters outside the pairing subquery (no index
+    use) and was verified exact.
+  - `news.idx_news_url` and `idx_news_published`: 7,044 of 31,245 rows are missing from lookups.
+    `insert_news` dedups with `NOT EXISTS (... url = ?)`, so the same URL was stored again:
+    4,094 duplicate rows from 3,377 URLs, 56 in July, 2,371 in August, 1,667 in September; 39 of
+    those URLs span two clusters. Origination is unaffected: the copies share one domain, and
+    origination needs 2.
+  - Likely cause: UPDATEs on indexed tables (`set_news_cluster` on every clustering pass; the old
+    `insider_trades` DO UPDATE before 07-23). On a copy, DROP + CREATE INDEX restores exact lookups
+    with the data untouched. For `news` that is temporary while the UPDATEs continue.
+  - The live reindex was refused by the session's permission check (live-store surgery beyond the
+    request), so it is left to the owner. The proposed fix: drop the four secondary indexes (the
+    tables are 31k–46k rows, a scan is cheap) with a boot migration, and dedupe `news`.
+- **Known, documented, not changed:** revision filings stored as their own rows; CATALYST_DISABLED
+  can repeat once per restart on a no-digest day; the CD-7 restage makes a late flush's loss
+  explicit but cannot write it.
+- **Not pushed** (phase2 is unpushed; push waits for owner permission).
+
 ## 2026-09-24 09:00–09:15 — NSE insider trades found on a new endpoint (owner: "Look for new endpoint"); probe only, nothing integrated
 
 - **How found:** loaded NSE's insider-trading page in Chrome and captured its traffic. The page no

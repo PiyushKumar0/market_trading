@@ -134,6 +134,11 @@ uv run python scripts\backfill_filings.py seed --from 2025-01-01 --skip-pit --sk
 # row; filings_shp had been skipping them since 09-04). Per-symbol checkpoints skip the 199 already
 # seeded. Engine OFF; expect ~1.5x the 3.5 h the 199-name seed took, so a weekend job (resumable).
 uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --skip-results --skip-integrated
+# NSE insider trades when the daily filings_pit window was clamped (its warning names the uncovered
+# days). Days from 2026-05-03 come from the PIT V2.0 route and checkpoint as `pit_gg`; earlier days
+# from the old route. Engine OFF. The 2026-09-24 live catch-up (04-25 -> 09-24) needed no backfill:
+# filings_pit's own run covered it (1,769 rows, ~22 min).
+uv run python scripts\backfill_filings.py seed --from 2026-05-03 --skip-results --skip-integrated --skip-shp
 ```
 
 ## Protected config (after ANY owner-directed edit to limits.yaml / envelope.yaml)
