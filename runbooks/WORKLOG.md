@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 09:00–09:15 — NSE insider trades found on a new endpoint (owner: "Look for new endpoint"); probe only, nothing integrated
+
+- **How found:** loaded NSE's insider-trading page in Chrome and captured its traffic. The page no
+  longer calls `corporates-pit`. It calls `/api/corporates-pit-gg?index=equities` (plus `index=sme`
+  507 rows and `index=invitsreits` 19 rows). Its table config was last modified 2026-09-18.
+- **What it holds:**
+  - 2,814 equity filings, 03-May-2026 → 24-Sep 08:04; it starts the day after the old route's
+    last row (02-May).
+  - 542 symbols, 114 of them in the NIFTY-500 universe.
+  - 2,760 filings under Reg 7(2) and 54 under Reg 7(3); 36 are revisions.
+  - `from_date`/`to_date` and `symbol` filters work. July returned 247 in one call, identical to
+    the unfiltered list, and nothing comes back before 05-03.
+  - On 09-23: 33 filings, 8 in-universe from 7 issuers (BSE feed that day: 12 rows from 6
+    issuers).
+- **Trade details are in the per-filing XBRL** (nsearchives, `in-bse-co` taxonomy, one context
+  per disclosure). Verified on NAUKRI (4 disclosures) and MARINE (Reg 7(3)).
+  - Fields: person, category, qty, value ₹, Buy/Sell, mode ("Market Purchase"/"Market Sale"), trade
+    from/to dates, intimation date, exchange executed.
+  - Pre/post holdings are FRACTIONS.
+  - The filing carries the BSE scrip code too, so both exchanges receive the same filing.
+- **Engine path works:** `nse_get` on the listing returned 200 with the same 33 rows for 09-23.
+- **Why it is not wired yet:** `ins_crossings` sums every `insider_trades` row in its 10-session
+  window. Each source's id hashes its own broadcast time, so the same trade from both exchanges
+  would be stored twice and double the net-buy sum. A cross-exchange dedupe (keeping the EARLIER
+  broadcast, the point-in-time-correct one) must land with it.
+- **Backfill size:** 737 in-universe filings since 05-03, 393 of them in the 05-03 → 07-18 hole
+  that neither source covers.
+
 ## 2026-09-24 05:40–06:30 — full-universe ISIN map, feed-freshness census, BSE User-Agent (owner: "Proceed with fixing the issues…"); b052f30; engine still stopped (owner stop 04:06)
 
 - **Context:** the owner concluded the platform now had complete data. A census of every feed's newest
