@@ -141,6 +141,19 @@ uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --sk
 uv run python scripts\backfill_filings.py seed --from 2026-05-03 --skip-results --skip-integrated --skip-shp
 ```
 
+## News duplicate cleanup after the index fix (2026-09-24) - engine OFF, owner-run
+
+The engine's first boot on a968ca7 or later drops the store's five secondary indexes by itself.
+`dedupe_news.py` deletes the duplicate headlines the damaged url index let in. It drops the indexes
+first itself, so it can run before or after that boot. One command, so the engine is not left down:
+
+```powershell
+Stop-Service mt-engine; .venv\Scripts\python.exe scripts\dedupe_news.py; Start-Service mt-engine
+```
+
+On a copy of the 09-24 19:01 store it deleted 4,054 rows (a few more if duplicates arrive before the
+url index is dropped) and left 39 urls stored twice, one copy per cluster. A re-run is a no-op.
+
 ## Protected config (after ANY owner-directed edit to limits.yaml / envelope.yaml)
 
 ```powershell

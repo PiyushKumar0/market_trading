@@ -1,5 +1,49 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-24 19:00–19:50 — DuckDB secondary-index damage fixed in code; live apply is owner-run (owner: "Work on the issues found and fix them accordingly")
+
+- **Diagnosis** (store copy taken at 19:01 after a clean stop):
+  - In each table the SAME rows are missing from both secondary indexes: 7,044 for `news`, 420 for
+    `insider_trades`. They are whole ingest runs on scattered days from 07-21 (insider) and 08-04
+    (news).
+  - Every primary key is complete: rows equal distinct keys in all 23 keyed tables, including those
+    re-upserted daily.
+  - The 17:45 note's UPDATE hypothesis does not hold, since the lost rows are insert batches.
+  - Nor does a plain kill-and-replay: in DuckDB 1.5.4, rows replayed from the WAL after `os._exit`
+    are found by every index.
+  - The losses start mid-session and span clean and crash-recovered boots, so the trigger is not
+    identified.
+- **Impact:**
+  - `ins`: re-running the crossing rule over 07-21 → 09-23 on the rows each run had matches every
+    crossing journalled since the job went live (08-18). The index damage cost no signal.
+  - The missing NSE feed did cost signals. With the NSE history, `ins` would have crossed
+    BERGEPAINT 09-08, ASAHIINDIA 09-09 and JSL 09-10 (it journalled JSL on 09-22), NAVA on 09-15
+    rather than 09-17, and not ECLERX 09-16. Today's run, the first with NSE rows, saw filings from
+    103 eligible symbols (22 before).
+  - `news`: 4,094 duplicate rows. 4,054 sit in the same cluster as an earlier copy. 40 formed new
+    clusters (re-fetched old stories, all scored); 10 watchlist rows cite them, all graded `context`,
+    none `originating`.
+- **Fix (a968ca7):**
+  - `init_schema` no longer creates the five secondary indexes and drops them from an existing
+    store. `test_market_store` asserts none exists.
+  - Without the url index each dedup insert is a ~10 ms scan and a poll re-submits ~430 known URLs
+    (4.4 s). So the poll now fetches the stored subset of its URLs in one scan (11 ms) and inserts
+    only the rest; `insert_news` keeps its `NOT EXISTS` guard.
+  - `scripts/dedupe_news.py` deletes the duplicates: per url, the earliest copy in each cluster
+    stays, and an unclustered copy stays only when no clustered copy exists. It rolls back if any url
+    or member-backed cluster would vanish.
+- **Validation:**
+  - Unit, property, replay and chaos: 3,219 passed, 21 skipped (Phase-3-gated).
+  - On the store copy: indexes dropped and 4,054 rows deleted, with the same 27,372 urls and 22,677
+    member-backed clusters; the re-run is a no-op.
+  - Synthetic keep-rule test (`test_dedupe_news_script`).
+- **Not applied live:**
+  - The session's permission check refused the live row deletion as a mass delete. It had earlier
+    refused the live index change.
+  - The index drop applies on the engine's next boot of this tree; the dedupe is an owner command
+    (COMMANDS, "News duplicate cleanup").
+  - Until the reboot, the running engine still dedups through the damaged url index.
+
 ## 2026-09-24 09:30–17:45 — NSE insider feed integrated, chaos defects CD-1/2/4/6/7 fixed (owner: "Integrate NSE insider feed, then work on fix for the CD issues. Validate them."); 1e69389..d084f34 deployed 17:36
 
 - **What shipped** (plan §2.8.5 addendum 2026-09-24 later, `runbooks/CHAOS_DRILLS.md` §2):
