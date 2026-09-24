@@ -1998,6 +1998,16 @@ class MarketStore:
             params.append(broadcast_to)
         return self._fetch_dicts(sql + " ORDER BY broadcast_dt, id", params)
 
+    def nse_insider_xbrls(self, since: datetime) -> set[str]:
+        """XBRL links of the NSE filings stored with a broadcast at or after ``since`` — the ones
+        ``filings_pit`` need not fetch again."""
+        rows = self._fetchall(
+            "SELECT DISTINCT xbrl FROM insider_trades "
+            f"WHERE {_INSIDER_SOURCE_PREDICATE['nse']} AND xbrl IS NOT NULL AND broadcast_dt >= ?",
+            [since],
+        )
+        return {r[0] for r in rows}
+
     def latest_insider_broadcast(self, source: str | None = None) -> datetime | None:
         """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark (§2.8).
 

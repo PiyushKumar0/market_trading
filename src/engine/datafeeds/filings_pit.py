@@ -18,17 +18,19 @@ fresh-feed row field for field, BSE 20 s to 3 min earlier). Each source's rows a
 come; :meth:`MarketStore.get_insider_trades` pairs the two copies of a trade and keeps the earlier.
 
 **Window.** Both routes return nothing without an explicit ``from_date``/``to_date`` (DD-MM-YYYY)
-window. The daily job's window is ``[watermark → run-day]`` where the watermark is the latest stored
-``broadcast_dt`` **of this source's rows only** (§2.8.5, 2026-09-13 — the BSE fresh feed writes into
-the same table every day and a whole-table watermark collapsed this window to ``[d-1, d]``), floored
-at :data:`MAX_WINDOW_DAYS` behind the run day and walked in :data:`PIT_WINDOW_DAYS` chunks. A filing
-broadcast before the watermark is not fetched again. History older than the floor is the backfill's
-job (``scripts/backfill_filings.py seed --from <day> --skip-results --skip-integrated --skip-shp``).
+window. The daily job's window is ``[watermark - PIT_RETRY_DAYS → run-day]`` where the watermark is
+the latest stored ``broadcast_dt`` **of this source's rows only** (§2.8.5, 2026-09-13 — the BSE fresh
+feed writes into the same table every day and a whole-table watermark collapsed this window to
+``[d-1, d]``), floored at :data:`MAX_WINDOW_DAYS` behind the run day and walked in
+:data:`PIT_WINDOW_DAYS` chunks. A filing whose XBRL link already has stored rows is not fetched again.
+History older than the floor is the backfill's job
+(``scripts/backfill_filings.py seed --from <day> --skip-results --skip-integrated --skip-shp``).
 
 **Failure model (E5).** A listing row without a symbol, broadcast time or XBRL link is skipped and
-counted, as is a filing whose XBRL is gone (404/410) or malformed. Any other failure stops the run with
-every earlier filing already upserted, so the watermark never steps over an unfetched filing and the
-§2.6 date-keyed catch-up retries. Alert + degraded result; never raises into the scheduler.
+counted. A filing whose XBRL fails (fetch, parse or store) is skipped and counted, and fetched again on
+later runs while it stays inside the retry margin, so one bad filing never stalls the rest. A failed
+listing, or a run in which every XBRL fetch failed, alerts and returns a degraded result for the §2.6
+date-keyed catch-up to retry. Never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -63,8 +65,10 @@ NSE_PIT_URL = "https://www.nseindia.com/api/corporates-pit"
 NSE_PIT_GG_URL = "https://www.nseindia.com/api/corporates-pit-gg"
 PIT_GG_FIRST_DAY = date(2026, 5, 3)
 
-#: XBRL statuses that mean the filing's file will never be served (skip it; do not stall the feed).
-_XBRL_GONE = frozenset({404, 410})
+#: Days before the watermark each run lists again. A filing whose XBRL failed (not yet on the archive
+#: host, a transient error, a malformed file) is fetched again on every run inside this margin; one
+#: failure never stalls the filings behind it.
+PIT_RETRY_DAYS = 7
 
 #: This job's source tag in ``insider_trades`` — the bare-id rows (``filings_pit_fresh`` writes the
 #: ``bse:``-tagged ones). Canonical: ``filings_events.SOURCE_NSE`` imports this directly — filings_events
@@ -339,13 +343,13 @@ def parse_pit_xbrl(content: bytes | str, filing: PitFiling) -> tuple[list[dict[s
     rows: list[dict[str, Any]] = []
     non_equity = 0
     for facts in facts_by_ctx.values():
-        if "SecuritiesAcquiredOrDisposedTransactionType" not in facts:
+        if "NameOfThePerson" not in facts and "SecuritiesAcquiredOrDisposedTransactionType" not in facts:
             continue  # the filing-level context
         if not facts.get("TypeOfInstrument", "").lower().startswith("equity"):
             non_equity += 1
             continue
         person_name = facts.get("NameOfThePerson", "")
-        txn_type = facts["SecuritiesAcquiredOrDisposedTransactionType"]
+        txn_type = facts.get("SecuritiesAcquiredOrDisposedTransactionType", "")
         qty = _int(facts.get("SecuritiesAcquiredOrDisposedNumberOfSecurity"))
         value = _dec(facts.get("SecuritiesAcquiredOrDisposedValueOfSecurity"))
         rows.append(
@@ -386,7 +390,7 @@ class PitIngest:
     out_of_universe: int = 0
     already_ingested: int = 0
     xbrl_fetched: int = 0
-    xbrl_unavailable: int = 0
+    xbrl_failed: int = 0
     non_equity: int = 0
     rows: int = 0
     written: int = 0
@@ -394,37 +398,34 @@ class PitIngest:
 
 async def ingest_pit_window(
     http: httpx.AsyncClient, store: MarketStore, frm: date, to: date, symbols: Collection[str],
-    stats: PitIngest, *, after: datetime | None = None, timeout: float,
+    stats: PitIngest, *, done: Collection[str], timeout: float,
 ) -> None:
     """List the PIT V2.0 filings broadcast in ``[frm, to]`` and upsert each constituent filing's trades,
-    oldest first, one filing at a time. A filing broadcast before ``after`` (the watermark) is not
-    fetched again. A gone (404/410) or malformed XBRL is skipped and counted; any other failure raises
-    with every earlier filing already upserted."""
+    oldest first. A filing whose XBRL link is in ``done`` (already stored) is not fetched again. A
+    filing that fails is skipped and counted, and the listing continues; a failed listing raises."""
     resp = await nse_get(http, pit_gg_url(frm, to), timeout=timeout)
     for filing in parse_pit_filings(json.loads(resp.content)):
         stats.filings += 1
         if filing.symbol not in symbols:
             stats.out_of_universe += 1
             continue
-        if after is not None and filing.broadcast_dt < after:
+        if filing.xbrl in done:
             stats.already_ingested += 1
             continue
         await _sleep(PIT_PACE_S)
         try:
             xml = await nse_get(http, filing.xbrl, timeout=timeout)
             rows, non_equity = parse_pit_xbrl(xml.content, filing)
-        except (httpx.HTTPStatusError, ET.ParseError) as exc:
-            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in _XBRL_GONE:
-                raise
-            stats.xbrl_unavailable += 1
-            _log.warning("filings_pit_xbrl_unavailable", symbol=filing.symbol, xbrl=filing.xbrl,
+            written = await store.arun(store.upsert_insider_trades, rows) if rows else 0
+        except Exception as exc:  # noqa: BLE001 - one filing never stops the rest; retried next run
+            stats.xbrl_failed += 1
+            _log.warning("filings_pit_xbrl_failed", symbol=filing.symbol, xbrl=filing.xbrl,
                          error=f"{type(exc).__name__}: {exc}")
             continue
         stats.xbrl_fetched += 1
         stats.non_equity += non_equity
         stats.rows += len(rows)
-        if rows:
-            stats.written += await store.arun(store.upsert_insider_trades, rows)
+        stats.written += written
 
 
 class FilingsPitJob:
@@ -459,7 +460,8 @@ class FilingsPitJob:
         self._clamped = False
 
     def _window_start(self, watermark: datetime | None, d: date) -> date:
-        """Window start: the NSE watermark, capped at ``d`` then floored at ``d - MAX_WINDOW_DAYS``.
+        """Window start: the NSE watermark, capped at ``d``, less :data:`PIT_RETRY_DAYS`, floored at
+        ``d - MAX_WINDOW_DAYS``.
 
         The CAP is what keeps a catch-up replaying an OLD day from inverting the window when stored
         rows run ahead of ``d`` — :func:`pit_windows` yields NOTHING for an inverted span, which would
@@ -469,7 +471,7 @@ class FilingsPitJob:
         floor = d - timedelta(days=MAX_WINDOW_DAYS)
         if frm >= floor:
             self._clamped = False
-            return frm
+            return max(frm - timedelta(days=PIT_RETRY_DAYS), floor)
         # Rows older than `floor` and newer than the watermark are NOT requested by this run, and no
         # later run reaches them either: a successful run lifts the watermark past the gap. Recovery
         # is `scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-integrated
@@ -484,10 +486,10 @@ class FilingsPitJob:
 
     async def run(self, d: date) -> FilingsPitResult:
         """Ingest the PIT V2.0 filings broadcast over ``[frm → d]`` in ≤:data:`PIT_WINDOW_DAYS`
-        chunks, where ``frm`` is the NSE watermark capped at ``d`` and floored at
-        ``d - MAX_WINDOW_DAYS`` (:meth:`_window_start`). Idempotent on the content-hash id; ``d`` is
-        the run day (§2.6 date-keyed). Never raises into the scheduler (E5) — the constituents and
-        watermark reads are inside the guard too, so they degrade like a fetch failure."""
+        chunks (:meth:`_window_start`), skipping filings already stored. Idempotent on the
+        content-hash id; ``d`` is the run day (§2.6 date-keyed). Never raises into the scheduler (E5)
+        — the constituents and watermark reads are inside the guard too, so they degrade like a
+        fetch failure."""
         # `frm` stands at the run day until the watermark is read, so a store fault reports the
         # degenerate window it never got to widen; `windows_done=0` on the warning is what separates
         # "the watermark read failed" from "the first fetch failed".
@@ -501,13 +503,18 @@ class FilingsPitJob:
                 raise RuntimeError("the index-constituents CSV gave no symbols")
             watermark = await self._store.alatest_insider_broadcast(source=NSE_SOURCE)
             frm = self._window_start(watermark, d)
+            done = await self._store.arun(
+                self._store.nse_insider_xbrls, datetime.combine(frm, datetime.min.time(), tzinfo=IST)
+            )
             for win in pit_windows(frm, d):
                 if windows:
                     await _sleep(PIT_PACE_S)  # never burst the cookie-gated www host (§2.8)
                 await ingest_pit_window(
-                    self._http, self._store, *win, symbols, stats, after=watermark, timeout=self._timeout
+                    self._http, self._store, *win, symbols, stats, done=done, timeout=self._timeout
                 )
                 windows += 1
+            if stats.xbrl_failed and not stats.xbrl_fetched:
+                raise RuntimeError(f"all {stats.xbrl_failed} XBRL fetches failed")
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning(
@@ -527,7 +534,10 @@ class FilingsPitJob:
         _log.info(
             "filings_pit_ingested", frm=frm.isoformat(), to=d.isoformat(), windows=windows, **asdict(stats)
         )
-        return FilingsPitResult(ok=True, frm=frm, to=d, rows_parsed=stats.rows, rows_written=stats.written)
+        return FilingsPitResult(
+            ok=True, degraded=stats.xbrl_failed > 0, frm=frm, to=d,
+            rows_parsed=stats.rows, rows_written=stats.written,
+        )
 
     async def _alert(self, d: date, reason: str) -> None:
         if self._notify is None:

@@ -166,10 +166,12 @@ async def _seed_nse_windowed(
     """Walk PIT, results or integrated filings over ≤31-day windows (checkpoint per window).
     event-calendar rides the same window as the results leg (its historical board-meeting dates →
     earnings_calendar). PIT days before 2026-05-03 come from the old route; later days from the PIT
-    V2.0 listing, fetching the XBRL of ``symbols``' filings only."""
+    V2.0 listing, fetching the XBRL of ``symbols``' filings only. A PIT window reaching the V2.0 era
+    checkpoints as ``pit_gg``: the old route's ``pit`` checkpoints for those spans hold nothing."""
     for w_frm, w_to in _windows(frm, to):
         unit = f"{w_frm.isoformat()}..{w_to.isoformat()}"
-        if _cp_done(conn, feed, unit):
+        cp_feed = "pit_gg" if feed == "pit" and w_to >= PIT_GG_FIRST_DAY else feed
+        if _cp_done(conn, cp_feed, unit):
             summary[feed]["skipped"] += 1
             continue
         try:
@@ -184,9 +186,12 @@ async def _seed_nse_windowed(
                         await asyncio.sleep(_PACE_S)
                     ingest = PitIngest()
                     await ingest_pit_window(
-                        http, store, max(w_frm, PIT_GG_FIRST_DAY), w_to, symbols, ingest, timeout=20.0
+                        http, store, max(w_frm, PIT_GG_FIRST_DAY), w_to, symbols, ingest,
+                        done=frozenset(), timeout=20.0,
                     )
                     written += ingest.written
+                    if ingest.xbrl_failed:          # leave the window open for the re-run
+                        raise RuntimeError(f"{ingest.xbrl_failed} XBRL fetches failed")
             elif feed == "integrated":
                 rows = await fetch_integrated_results(http, w_frm, w_to, timeout=20.0)
                 written = await store.arun(store.upsert_results_filings, rows)
@@ -207,7 +212,7 @@ async def _seed_nse_windowed(
             _log.warning("filings_seed_window_failed", feed=feed, unit=unit, error=f"{type(exc).__name__}: {exc}")
             await asyncio.sleep(_PACE_S)
             continue
-        _cp_set(conn, feed, unit, w_to.isoformat(), clock.now().isoformat())
+        _cp_set(conn, cp_feed, unit, w_to.isoformat(), clock.now().isoformat())
         summary[feed]["written"] += written
         summary[feed]["windows"] += 1
         _log.info("filings_seed_window_done", feed=feed, unit=unit, written=written)

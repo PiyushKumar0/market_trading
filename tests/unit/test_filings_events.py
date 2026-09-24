@@ -2,8 +2,9 @@
 ``insider_trades``-shaped rows. Covers: the trailing-window crossing (delegated verbatim to the
 stage-2-validated ``event_study.insider_cluster_events``) + emitted metadata (trailing_value /
 contributing count / dominant person-category / point-in-time broadcast_dt); the open-market predicate
-excluding ESOP; the below-threshold empty case; cross-source dedup preferring NSE; and ``row_source``
-id-prefix inference. No store, no network — every input is a hand-built dict.
+excluding ESOP; the below-threshold empty case; equal trades of different people all counting (the
+store pairs cross-exchange duplicates); and ``row_source`` id-prefix inference. No store, no network —
+every input is a hand-built dict.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from engine.core.clock import IST
 from engine.datafeeds.filings_events import (
     INSIDER_TRAILING_SESSIONS,
     FilingsEventBuilder,
-    dedup_cross_source,
     insider_net_buy,
     row_source,
 )
@@ -82,46 +82,18 @@ def test_trailing_window_is_ten_sessions():
     assert INSIDER_TRAILING_SESSIONS == 10
 
 
-# =========================================================================== cross-source dedup
-def _nse(symbol: str, txn_from: date, qty: int) -> dict:
-    return {
-        "id": "a" * 64, "symbol": symbol, "txn_type": "Buy", "acq_mode": "Market Purchase",
-        "qty": qty, "value": Decimal("500000"), "txn_from": txn_from,
-        "broadcast_dt": datetime(txn_from.year, txn_from.month, txn_from.day, 20, 0, tzinfo=IST),
-    }
-
-
+# =========================================================================== row source
 def test_row_source_from_id_prefix_and_explicit():
     assert row_source({"id": "bse:xyz"}) == "bse"
     assert row_source({"id": "a" * 64}) == "nse"
     assert row_source({"id": "bse:xyz", "source": "nse"}) == "nse"   # explicit key wins
 
 
-def test_dedup_drops_bse_row_superseded_by_nse():
-    d = SESSIONS[1]
-    bse = _buy(1, 500_000)                 # id 'bse:...', qty 1001, txn_from SESSIONS[1]
-    nse = _nse("AAA", d, bse["qty"])       # same (symbol, txn_from, qty) from NSE
-    out = dedup_cross_source([bse, nse])
-    assert len(out) == 1 and row_source(out[0]) == "nse"
-
-
-def test_dedup_keeps_bse_row_without_nse_counterpart():
-    bse = _buy(1, 500_000)
-    nse_other = _nse("AAA", SESSIONS[4], 9999)      # different key -> does not supersede
-    out = dedup_cross_source([bse, nse_other])
-    assert bse in out and nse_other in out and len(out) == 2
-
-
-def test_insider_net_buy_dedups_before_clustering():
-    # The SAME disclosure from both feeds must count ONCE. bse + nse rows share (symbol, txn_from, qty);
-    # a distinct second buy pushes the (deduped) trailing sum over the floor exactly once.
-    d2 = SESSIONS[2]
-    bse_dup = _buy(2, 600_000)
-    nse_dup = _nse("AAA", d2, bse_dup["qty"])
-    nse_dup["value"] = Decimal("600000")
-    second = _buy(3, 600_000)
-    events = insider_net_buy([bse_dup, nse_dup, second], SESSIONS, min_value_inr=THRESHOLD)
-    # Without dedup the two copies would double-count to 1.8M; with dedup the trailing sum is 1.2M,
-    # still one crossing but the contributing count reflects the deduped set.
-    assert len(events) == 1
-    assert events[0]["contributing_filings_n"] == 2
+def test_equal_trades_of_different_people_all_count():
+    """Two promoters buying the same qty on the same day are two trades. The old (symbol, txn_from,
+    qty) cross-source rule could drop one of them; duplicates are now paired in the store."""
+    a, b = _buy(2, 600_000), _buy(2, 600_000)
+    a["person_name"] = "Promoter One"                    # BSE row
+    b.update(id="b" * 64, person_name="Promoter Two")    # NSE row, same symbol/date/qty
+    events = insider_net_buy([a, b], SESSIONS, min_value_inr=THRESHOLD)
+    assert len(events) == 1 and events[0]["trailing_value"] == Decimal("1200000")
