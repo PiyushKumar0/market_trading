@@ -31,9 +31,9 @@ Clauses asserted:
 * rung (ii) — digest MISSING / STALE because today's run failed: ``CATALYST_DISABLED(reason)``,
   ``cat`` originates nothing, no FROZEN — ``test_digest_failure_disables_cat_with_catalyst_disabled``
 * rung (ii) — a STALE digest that nobody re-ran (late boot: the window-open sweep beats the catch-up
-  digest) still originates nothing — ``test_stale_digest_at_sweep_time_originates_nothing``; its
-  ``CATALYST_DISABLED`` alert is a DEFECT (xfail strict) —
-  ``test_stale_digest_at_sweep_time_alerts_catalyst_disabled``
+  digest) still originates nothing — ``test_stale_digest_at_sweep_time_originates_nothing`` — and the
+  sweep sends ``CATALYST_DISABLED`` once a day — ``test_stale_digest_at_sweep_time_alerts_catalyst_disabled``
+  (CD-4, fixed 2026-09-24)
 * non-``cat`` ranking identical, news up-but-quiet vs down (§6.2 neutral defaults), the other
   scanners unaffected — ``test_non_cat_candidates_identical_news_quiet_vs_down`` (real
   ``LiveScanContextProvider`` + ``FeatureEngine`` + the enabled per-bar scanners over identical bars)
@@ -85,9 +85,15 @@ from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor, TokenUsage
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.marketdata.store import DailyBar, MarketStore
-from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_disabled, catalyst_watchlist
+from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_watchlist
 from engine.notify.telegram import TelegramBot
-from engine.ops.main import INDEX_SYMBOL, VIX_SYMBOL, _read_cat_watchlist, _watchlist_rows_for_symbols
+from engine.ops.main import (
+    INDEX_SYMBOL,
+    VIX_SYMBOL,
+    _CatalystDisabledAlert,
+    _read_cat_watchlist,
+    _watchlist_rows_for_symbols,
+)
 from engine.ops.news_scoring import NewsScoringJob
 from engine.ops.scan_context import LiveScanContextProvider
 from engine.risk.causes import RiskStateLatch
@@ -255,6 +261,7 @@ class NewsWorld:
             ))
 
         self.notify = self.bot.send                             # main.py:494-505 (log mirror aside)
+        self.catalyst_disabled = _CatalystDisabledAlert(self.notify, self.clock)
         self.sdk = sdk
         self.harness = AgentHarness({"news_analyst": NEWS_DEF}, self.governor, self.clock, conn,
                                     query_fn=sdk, alert=alert, options_cls=_Options)
@@ -369,7 +376,7 @@ class NewsWorld:
         try:
             result = await self.digest.run(self.clock.today())
         except Exception as exc:
-            await self.notify(catalyst_disabled(f"digest failed: {exc}"))
+            await self.catalyst_disabled(f"digest failed: {exc}")
             raise
         await self.notify(catalyst_watchlist(result.n_originating, result.n_context))
         return result
@@ -396,6 +403,13 @@ class NewsWorld:
             cat_rows, params={"stop_pct": SETTINGS.cat.stop_pct, "hold_sessions": SETTINGS.cat.hold_sessions},
         ) if cat_rows else []
         return [c for c in self.prescreen.admit(raw, d, in_window=in_window) if c.strategy_id == cat.STRATEGY_ID]
+
+    async def window_open_sweep(self, d: date) -> list[SignalCandidate]:
+        """``_scan_sweep`` at the window edge: the digest-freshness alert (§2.7 rung ii), then the
+        ``cat`` leg."""
+        self.set_time(at(d, 10, 5))
+        await self.catalyst_disabled.if_digest_not_fresh(self.digest, self.store, d)
+        return self.cat_sweep(d)
 
     # ------------------------------------------------------------------ observations
     def messages(self, kind: MessageKind | None = None) -> list[tuple[str, str, str]]:
@@ -467,8 +481,9 @@ async def test_healthy_preopen_control_originates_cat(make_world) -> None:
 
     assert (result.n_originating, result.n_context) == (1, 0), result
     assert w.watchlist(WED)["RELIANCE"]["grade"] == "originating"
-    assert [c.symbol for c in w.cat_sweep(WED)] == ["RELIANCE"]
+    assert [c.symbol for c in await w.window_open_sweep(WED)] == ["RELIANCE"]
     assert w.digest.digest_status(WED) == "fresh"
+    assert w.messages(MessageKind.CATALYST_DISABLED) == []      # a fresh digest never alerts
     assert [b for _, _, b in w.messages(MessageKind.CATALYST_WATCHLIST)] == [
         catalyst_watchlist(1, 0).body]
     w.assert_not_frozen()
@@ -548,9 +563,9 @@ async def test_digest_failure_disables_cat_with_catalyst_disabled(make_world, pr
         w.store.get_news_clusters = real_read
 
     assert w.digest.digest_status(WED) == ("stale" if prior_digest else "missing")
+    assert await w.window_open_sweep(WED) == []                 # `cat` disabled for the day
     disabled = w.messages(MessageKind.CATALYST_DISABLED)
     assert len(disabled) == 1 and "digest failed" in disabled[0][2], w.messages()
-    assert w.cat_sweep(WED) == []                               # `cat` disabled for the day
     w.assert_other_agents_admitted()
     w.assert_not_frozen()
 
@@ -579,17 +594,13 @@ async def test_stale_digest_at_sweep_time_originates_nothing(make_world) -> None
     w.assert_not_frozen()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: a digest that is STALE/MISSING at use time without the digest job raising (late boot: "
-    "the window-open cat sweep runs before the catch-up digest) raises no CATALYST_DISABLED — the only "
-    "emitter is main.py:1169 (digest exception); CatalystDigestJob.digest_status (news_pipeline.py:1324) "
-    "has no production caller except the API freshness read"
-))
 async def test_stale_digest_at_sweep_time_alerts_catalyst_disabled(make_world) -> None:
-    """Rung (ii): STALE ⇒ ``cat`` disabled **+ ``CATALYST_DISABLED(reason)``** — the owner is told."""
+    """Rung (ii): STALE ⇒ ``cat`` disabled **+ ``CATALYST_DISABLED(reason)``** — the owner is told
+    (CD-4, fixed 2026-09-24: only a raising digest run used to alert)."""
     w = await _late_boot_stale_world(make_world)
-    w.cat_sweep(WED)
-    assert w.messages(MessageKind.CATALYST_DISABLED), w.messages()
+    assert await w.window_open_sweep(WED) == []
+    disabled = w.messages(MessageKind.CATALYST_DISABLED)
+    assert len(disabled) == 1 and "digest stale at the window-open sweep" in disabled[0][2]
 
 
 # =========================================================================== recovery
@@ -606,8 +617,8 @@ async def test_next_healthy_preopen_restores_cat_without_owner_action(make_world
 
     w.digest.run = _fault
     assert isinstance(await w.preopen(WED), OSError)
-    assert w.cat_sweep(WED) == []
-    assert len(w.messages(MessageKind.CATALYST_DISABLED)) == 1
+    assert await w.window_open_sweep(WED) == []
+    assert len(w.messages(MessageKind.CATALYST_DISABLED)) == 1  # the failed run and the sweep: one page
 
     w.digest.run = real_run                                     # the storage fault clears
     w.sdk.dead = None                                           # the SDK recovers

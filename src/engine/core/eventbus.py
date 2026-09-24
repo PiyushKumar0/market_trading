@@ -29,11 +29,13 @@ class EventBus:
     ``publish`` is fire-and-forget (schedules handler tasks on the running loop); ``apublish`` awaits
     all handlers (deterministic ordering — used where a publisher needs delivery before proceeding, and
     in tests). A handler that raises is logged and isolated; it never breaks the publisher or sibling
-    handlers (R8 observability over silent loss).
+    handlers (R8 observability over silent loss). :meth:`drain` awaits what ``publish`` scheduled, so
+    teardown can finish every delivery before closing the stores the handlers write to.
     """
 
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Handler]] = {}
+        self._inflight: set[asyncio.Task[None]] = set()
 
     def subscribe(self, topic: str, handler: Handler) -> None:
         self._subscribers.setdefault(topic, []).append(handler)
@@ -55,7 +57,18 @@ class EventBus:
             asyncio.run(self._deliver_all(topic, list(handlers), event))
             return
         for handler in list(handlers):
-            loop.create_task(self._deliver_one(topic, handler, event))
+            task = loop.create_task(self._deliver_one(topic, handler, event))
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
+
+    async def drain(self, timeout: float) -> int:
+        """Await every delivery ``publish`` has scheduled, including ones scheduled while draining,
+        for at most ``timeout`` seconds. Returns how many were still running at the bound."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._inflight and (remaining := deadline - loop.time()) > 0:
+            await asyncio.wait(set(self._inflight), timeout=remaining)
+        return len(self._inflight)
 
     async def apublish(self, topic: str, event: BaseModel) -> None:
         """Await delivery to every handler (exceptions isolated + logged)."""

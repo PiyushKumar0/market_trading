@@ -56,6 +56,7 @@ from engine.ops.heartbeat import HeartbeatWriter
 from engine.ops.jobs import CatchUpRunner
 from engine.ops.lifecycle import SessionLifecycle, StartupReport
 from engine.ops.main import (
+    _SHUTDOWN_BUS_DRAIN_S,
     DEFER_POST_ARM_JOBS,
     PHASE1_JOB_IDS,
     PHASE2_JOB_IDS,
@@ -461,7 +462,7 @@ class EngineProcess:
     async def stop(self) -> None:
         """main.py's graceful teardown: scheduler down → post-arm cancelled → bars flushed → ticker
         stopped → ``lifecycle.shutdown()`` (backup hook, STOPPED commit, heartbeat join,
-        ENGINE_STOPPED) → store.close → conn.close → process exit."""
+        ENGINE_STOPPED) → bus drained → store.close → conn.close → process exit."""
         self.scheduler.shutdown()
         await cancel_post_arm(self.post_arm)
         if self.bar_builder is not None:
@@ -469,6 +470,7 @@ class EngineProcess:
         if self.ticker is not None:
             await self.ticker.stop()
         await self.lifecycle.shutdown()
+        await self.bus.drain(_SHUTDOWN_BUS_DRAIN_S)
         if self.store is not None:
             self.store.close()
         await asyncio.sleep(0)                  # let APScheduler's loop-deferred shutdown land

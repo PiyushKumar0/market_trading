@@ -2291,21 +2291,36 @@ class MarketStore:
                 self._tick_buffer[:0] = batch
             _log.warning("tick_flush_skipped_store_closed", ticks=len(batch))
             return []
-        self._bulk_write(
-            "_tick_stage", _TICK_COLUMNS, [[getattr(t, c) for c in _TICK_COLUMNS] for t in batch]
-        )
         written: list[Path] = []
-        for d, symbol in group_keys:
-            out = self._tick_partition_dir(d, symbol) / f"{ULID()!s}.parquet"
-            with self._timed_lock(f"copy_ticks:{symbol}"):
-                self._execute_locked(
-                    self._require_con(),
-                    "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
-                    "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
-                    f"TO '{out.as_posix()}' (FORMAT PARQUET)",
-                    [symbol, d],
-                )
-            written.append(out)
+        done: set[tuple[date, str]] = set()
+        try:
+            self._bulk_write(
+                "_tick_stage", _TICK_COLUMNS, [[getattr(t, c) for c in _TICK_COLUMNS] for t in batch]
+            )
+            for d, symbol in group_keys:
+                out = self._tick_partition_dir(d, symbol) / f"{ULID()!s}.parquet"
+                with self._timed_lock(f"copy_ticks:{symbol}"):
+                    self._execute_locked(
+                        self._require_con(),
+                        "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
+                        "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
+                        f"TO '{out.as_posix()}' (FORMAT PARQUET)",
+                        [symbol, d],
+                    )
+                written.append(out)
+                done.add((d, symbol))
+        except Exception:
+            if self._con is not None:
+                raise
+            # close() stopped waiting (_CLOSE_FLUSH_WAIT_S) and closed under this flush: restage
+            # the partitions not yet written, exactly as for an orphaned late flush.
+            unwritten = [
+                t for t in batch if (t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) not in done
+            ]
+            with self._tick_lock:
+                self._tick_buffer[:0] = unwritten
+            _log.warning("tick_flush_skipped_store_closed", ticks=len(unwritten))
+            return written
         _log.info("ticks_flushed", ticks=len(batch), files=len(written))
         return written
 

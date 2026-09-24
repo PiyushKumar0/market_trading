@@ -42,7 +42,7 @@ from engine.broker.instruments import InstrumentStore, UnknownInstrument
 from engine.broker.kite_client import KiteClient, OrderSurfaceViolation
 from engine.broker.rate_limiter import RateLimiter
 from engine.broker.session import SessionManager
-from engine.broker.ticker_supervisor import TickerSupervisor
+from engine.broker.ticker_supervisor import FEED_HEALTH_TOPIC, TickerSupervisor
 from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
@@ -84,7 +84,7 @@ from engine.marketdata.reconcile import ReconcileJob
 from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
-from engine.notify.catalog import CatalogMessage, MessageKind, login_prompt
+from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_disabled, login_prompt
 from engine.ops.early_hydration import EarlyHydration
 from engine.ops.feed_freshness import FeedFreshnessJob, FeedFreshnessResult
 from engine.ops.health import HealthMonitor
@@ -154,7 +154,7 @@ from engine.ops.warmup import (
     WarmupGate,
     WarmupStatus,
 )
-from engine.risk.causes import RiskStateLatch
+from engine.risk.causes import RiskStateLatch, feed_health_to_latch
 from engine.risk.exposure import ExposureTracker
 from engine.risk.gate import GateContextBuilder, RiskGate
 from engine.risk.kill import KillSwitch
@@ -601,7 +601,7 @@ async def run() -> int:
     # subscribed instrument) cannot flap the single lag episode — 14 ERROR/recovered pairs in 83 ms
     # and 6 owner pages on the 15:40:02 boot. Subscribed HERE, well before the ticker is spawned
     # (step 7, ticker_resume_hook), so the boot's own transitions are never missed.
-    bus.subscribe("feed.health", bar_builder.on_feed_health)
+    bus.subscribe(FEED_HEALTH_TOPIC, bar_builder.on_feed_health)
 
     # Shared injected httpx client for every best-effort feed (convention 11 / E5). Owned here.
     # Default browser headers + split timeout (A3/A4): the bare python-httpx UA is tarpitted/blocked by
@@ -932,6 +932,7 @@ async def run() -> int:
         r["parameter"]: r["value"] for r in conn.execute("SELECT parameter, value FROM envelope_state").fetchall()
     }
     digest_job = CatalystDigestJob(store, clock, calendar, protected_store, envelope=_envelope_state or None)
+    catalyst_disabled_alert = _CatalystDisabledAlert(notify, clock)
     scoring_job = (
         NewsScoringJob(store, resolver, assembler, harness, agent_defs, governor, clock, calendar)
         if harness is not None and "news_analyst" in agent_defs else None
@@ -960,6 +961,8 @@ async def run() -> int:
         # and every websocket upgrade 400-rejected forever (2026-07-23 root cause, zero ticks ever).
         api_key=session.api_key() or "",
     )
+    # §7.1 stale_data_guard (R2): a heartbeat-silent feed latches FROZEN until the feed is HEALTHY.
+    bus.subscribe(FEED_HEALTH_TOPIC, feed_health_to_latch(latch, ticker.in_market_hours))
 
     # ------------------------------------------------------------------ watchlist helpers
     def watchlist_symbols() -> list[str]:
@@ -1180,12 +1183,12 @@ async def run() -> int:
         # §4.4 job 14 (~08:35): emits CATALYST_WATCHLIST on every SUCCESSFUL run — including an
         # empty-but-fresh (0, 0); a failed run alerts CATALYST_DISABLED and re-raises so the
         # watermark records the failure (§2.7 fail-safe ladder, chaos case 20 convention).
-        from engine.notify.catalog import catalyst_disabled, catalyst_watchlist
+        from engine.notify.catalog import catalyst_watchlist
 
         try:
             result = await digest_job.run(clock.today())
         except Exception as exc:
-            await notify(catalyst_disabled(f"digest failed: {exc}"))
+            await catalyst_disabled_alert(f"digest failed: {exc}")
             raise
         await notify(catalyst_watchlist(result.n_originating, result.n_context))
 
@@ -1714,6 +1717,13 @@ async def run() -> int:
             batch_in_window = _w[0] <= now <= _w[1]
         except ValueError:
             batch_in_window = False      # not a trading day ⇒ no window ⇒ nothing originates (R6)
+        if batch_in_window:
+            # §2.7 rung (ii): a stale or missing digest disables `cat` for this sweep. Say so even when
+            # no digest run raised — a late boot sweeps before the catch-up digest has run.
+            try:
+                await catalyst_disabled_alert.if_digest_not_fresh(digest_job, store, today)
+            except Exception:  # noqa: BLE001 - an alert must never cost the day's sweep
+                _log.exception("catalyst_digest_status_failed")
 
         def _collect_and_scan():
             latest = []
@@ -2279,6 +2289,9 @@ async def run() -> int:
         await telegram.stop()
     await _stop_api(server_task)
     await http.aclose()
+    undrained = await bus.drain(_SHUTDOWN_BUS_DRAIN_S)   # no handler may reach a closed store
+    if undrained:
+        _log.warning("shutdown_bus_undrained", deliveries=undrained, waited_s=_SHUTDOWN_BUS_DRAIN_S)
     store.close()
     conn.close()
     instance_lock.release()   # cosmetic tidiness — every non-clean exit is covered by the kernel
@@ -3246,6 +3259,10 @@ _FREEZE_LIFT_MIN_GAP = timedelta(minutes=2)
 #: sweep from holding the service stop open.
 _SHUTDOWN_LIFT_WAIT_S = 15.0
 
+#: How long a graceful stop waits for event-bus deliveries (mostly tick handlers awaiting a flush)
+#: before `store.close()`. Shorter than the flush wait inside `close()`, which still follows it.
+_SHUTDOWN_BUS_DRAIN_S = 10.0
+
 
 
 def _subscription_tokens(symbols: Iterable[str], token_for_symbol: Callable[[str], int | None]) -> list[int]:
@@ -3601,6 +3618,27 @@ def _watchlist_rows_for_symbols(rows: list, symbols: set[str]) -> list:
     the filter shipped inline without a test on the real row type. Now a helper, tested with the
     real NamedTuples."""
     return [r for r in rows if r.symbol in symbols]
+
+
+class _CatalystDisabledAlert:
+    """``CATALYST_DISABLED`` at most once a day (§2.7 rung ii): a failed digest run and the
+    window-open sweep that then finds no fresh digest are one outage, not two pages."""
+
+    def __init__(self, notify: Callable[[CatalogMessage], Awaitable[None]], clock: Clock) -> None:
+        self._notify = notify
+        self._clock = clock
+        self._sent_on: date | None = None
+
+    async def __call__(self, reason: str) -> None:
+        today = self._clock.today()
+        if self._sent_on != today:
+            self._sent_on = today
+            await self._notify(catalyst_disabled(reason))
+
+    async def if_digest_not_fresh(self, digest: CatalystDigestJob, store: MarketStore, d: date) -> None:
+        status = await store.arun(digest.digest_status, d)
+        if status != "fresh":
+            await self(f"digest {status} at the window-open sweep")
 
 
 def _read_cat_watchlist(

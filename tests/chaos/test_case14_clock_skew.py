@@ -18,8 +18,8 @@ Clauses:
 * "until resync" — entries stay REFUSED while skewed even across the warm-up lift:
   ``test_entries_stay_refused_while_skewed_even_after_the_warmup_lift``; resync plus the restart the
   Phase-2 design requires re-opens them: ``test_resync_then_restart_reopens_entries``.
-* DEFECT (xfail strict): ``test_skew_freeze_holds_until_resync`` — the risk-state FROZEN is lifted by
-  the 60 s warm-up refresh while NTP still reports the skew (see its reason / the module report).
+* ``test_skew_freeze_holds_until_resync`` — the risk-state FROZEN survives the 60 s warm-up refresh
+  while NTP still reports the skew (CD-2, fixed 2026-09-24).
 * Skipped (an accepted Phase-2 gap, NOT Phase-3): mid-session skew detection and in-session resync —
   ``test_mid_session_skew_detection_and_in_session_resync``.
 
@@ -187,8 +187,8 @@ async def test_boot_with_skew_beyond_limit_freezes_entries_and_alerts(skew_rig, 
 
 # ------------------------------------------------------------------------ until resync (entries)
 async def test_entries_stay_refused_while_skewed_even_after_the_warmup_lift(skew_rig):
-    """The backstop that holds today: whatever happens to the risk state (see the xfail below), the
-    boot-scoped skew verdict keeps the §7.1 clock_skew rule refusing every entry while skewed."""
+    """The gate's own backstop, independent of the risk state: the boot-scoped skew verdict keeps the
+    §7.1 clock_skew rule refusing every entry while skewed."""
     rig = skew_rig
     rig.ntp.offset_s = 3.5
     await rig.boot()
@@ -222,12 +222,9 @@ async def test_resync_then_restart_reopens_entries(skew_rig):
 
 
 # ----------------------------------------------------------------------- until resync (risk state)
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: the 60 s warm-up refresh lifts the clock-skew FROZEN without re-measuring skew — "
-    "lifecycle._maybe_lift_warmup_freeze runs selftest.run(check_skew=False) (clock_skew SKIP) and "
-    "then clears the 'startup_selftest' cause that carries clock_skew (lifecycle.py:701/711)"
-))
 async def test_skew_freeze_holds_until_resync(skew_rig):
+    """CD-2 (fixed 2026-09-24): the 60 s warm-up lift used to clear the 'startup_selftest' cause that
+    carries clock_skew — its self-test skips the NTP check. It now holds on the boot's skew verdict."""
     rig = skew_rig
     rig.ntp.offset_s = 3.5
     await rig.boot()

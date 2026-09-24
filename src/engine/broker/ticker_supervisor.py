@@ -99,7 +99,7 @@ from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.types import Tick
-from engine.notify.catalog import CatalogMessage, feed_degraded, feed_wedged
+from engine.notify.catalog import CatalogMessage, feed_degraded, feed_stale, feed_wedged
 
 #: Owner-notification sink type (§3.2.11): async, consumes a typed :class:`CatalogMessage`.
 NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
@@ -1034,10 +1034,14 @@ class TickerSupervisor:
                             kill_after_s=kill_after,
                         )
                     self._set_state("STALE")
-                    await self._publish_health()  # R2 — STALE transition for the stale-data guard
+                    self._publish_stale()  # R2 — STALE transition for the stale-data guard
                     # The kill_after contract, honoured: the SAME restart machinery the child's own
                     # ``tcp_connection_lost``/exit takes (``_respawn`` → terminate + fresh spawn).
                     await self._respawn(reason="heartbeat_silence")
+                    # Paged AFTER the respawn, for the reason _publish_stale gives. Out of session a
+                    # silent feed is no incident.
+                    if self.in_market_hours():
+                        await self._notify_stale(silence)
                     return
 
                 # Heartbeats fine, but is the FEED actually delivering ticks? A child heartbeats every
@@ -1056,7 +1060,7 @@ class TickerSupervisor:
         any non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
         HEALTHY happens on the next tick in :meth:`_handle_frame`.
         """
-        if self._state != "HEALTHY" or not self._in_market_hours():
+        if self._state != "HEALTHY" or not self.in_market_hours():
             return
         silence = self._effective_tick_silence_s()
         if silence is None or silence <= budget_s:
@@ -1099,7 +1103,7 @@ class TickerSupervisor:
         # A wedged feed is a real feed-lost incident: publish STALE (fail toward visibility — the §7.1
         # stale-data guard can FREEZE entries) before the respawn re-enters WARMING.
         self._set_state("STALE")
-        await self._publish_health()  # R2 — STALE transition for the stale-data guard
+        self._publish_stale()  # R2 — STALE transition for the stale-data guard
         await self._respawn(reason="warming_timeout")
         return True
 
@@ -1112,7 +1116,7 @@ class TickerSupervisor:
         except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
             _log.exception("feed_wedged_notify_failed")
 
-    def _in_market_hours(self, now: datetime | None = None) -> bool:
+    def in_market_hours(self, now: datetime | None = None) -> bool:
         """True iff ``now`` is inside today's NSE continuous session (calendar+clock). Without a
         calendar (bare harness) the feed cannot know it is in-session ⇒ False (guard disabled)."""
         if self._calendar is None:
@@ -1141,6 +1145,16 @@ class TickerSupervisor:
             await self._notify(feed_degraded(age_s=age_s, budget_s=budget_s))
         except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
             _log.exception("feed_degraded_notify_failed")
+
+    async def _notify_stale(self, age_s: float) -> None:
+        """Owner alert on a running feed's heartbeat-silence STALE (best-effort, like the others). The
+        60 s health poll almost never sees STALE: the respawn moves the state on within the cycle."""
+        if self._notify is None:
+            return
+        try:
+            await self._notify(feed_stale(age_s))
+        except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
+            _log.exception("feed_stale_notify_failed")
 
     def stats_snapshot(self) -> dict[str, Any]:
         """Return + reset the since-last-call feed counters for the periodic ``feed_stats`` line (R8).
@@ -1267,6 +1281,14 @@ class TickerSupervisor:
         if self._bus is None:
             return
         await self._bus.apublish(FEED_HEALTH_TOPIC, self.health())
+
+    def _publish_stale(self) -> None:
+        """Publish STALE fire-and-forget. Its subscribers must not hold up the respawn that follows:
+        the §7.1 latch changes the risk state, and that change pages the owner through Telegram, which
+        can take up to 95 s in an outage. The delivery still runs before the new child can report
+        HEALTHY, which needs many loop turns (spawn, connect, hello)."""
+        if self._bus is not None:
+            self._bus.publish(FEED_HEALTH_TOPIC, self.health())
 
 
 # --------------------------------------------------------------------------- tiny stdlib indirections

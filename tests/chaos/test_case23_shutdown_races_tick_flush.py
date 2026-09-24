@@ -16,7 +16,7 @@ subscribed to ``"tick"`` on the real ``EventBus``; ticks arrive by fire-and-forg
 ``MarketStore.aflush_ticks`` on the store's ``mt-flush`` thread. The flush is held mid-flight inside
 its batch write (the unit tests' ``_bulk_write`` seam) and the clean stop runs main.py's teardown
 order: scheduler down → post-arm cancelled → ``bar_builder.flush_all`` → ticker stop →
-``lifecycle.shutdown`` (ENGINE_STOPPED) → ``store.close()`` → conn close. The whole scenario runs on
+``lifecycle.shutdown`` (ENGINE_STOPPED) → ``bus.drain`` → ``store.close()`` → conn close. The whole scenario runs on
 its own event-loop thread joined with a hard bound, so a deadlock FAILS the test instead of hanging it.
 
 Tests:
@@ -27,13 +27,12 @@ Tests:
 * ``…_late_flush_after_close_restages_with_explicit_log`` — a size-due burst whose bus handlers only
   run after ``store.close()`` (the undrained-handler hazard): the orphaned flush restages the batch and
   logs ``tick_flush_skipped_store_closed``; nothing raises. (passes)
-* ``…_bus_handlers_drained_before_store_close`` — DEFECT (xfail strict): main.py's teardown has no
-  bus-drain step; the tick handler awaiting the in-flight flush is still pending when ``store.close()``
-  is entered.
-* ``…_flush_wedged_past_close_bound_degrades_gracefully`` — DEFECT (xfail strict): a flush still
-  mid-flight when ``close()``'s bounded wait (``_CLOSE_FLUSH_WAIT_S``) expires crashes with
-  ``RuntimeError('MarketStore is not open')`` and loses its batch — no restage, no
-  ``tick_flush_skipped_store_closed`` (that check runs once, before the batch write).
+* ``…_bus_handlers_drained_before_store_close`` — the teardown drains the bus
+  (``_SHUTDOWN_BUS_DRAIN_S``) before ``store.close()``, so no delivery is pending at close (CD-6,
+  fixed 2026-09-24).
+* ``…_flush_wedged_past_close_bound_degrades_gracefully`` — a flush still mid-flight when both
+  bounds (the drain and ``close()``'s ``_CLOSE_FLUSH_WAIT_S``) expire restages its unwritten batch with
+  ``tick_flush_skipped_store_closed`` instead of crashing (CD-7, fixed 2026-09-24).
 """
 
 from __future__ import annotations
@@ -43,8 +42,6 @@ import logging
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-
-import pytest
 
 from engine.core.clock import IST
 from engine.core.types import Tick
@@ -144,6 +141,10 @@ def _tracebacks(caplog) -> list[str]:
 
 # --------------------------------------------------------------------------- the race: completes
 def test_case23_clean_stop_during_in_flight_flush_completes_without_deadlock(tmp_path, monkeypatch, caplog):
+    import tests.chaos._lifecycle_rig as rig_mod
+
+    # The bus drain gives up first, so close() meets the in-flight flush — the race this test is about.
+    monkeypatch.setattr(rig_mod, "_SHUTDOWN_BUS_DRAIN_S", 0.1)
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
     async def scenario() -> dict:
@@ -228,13 +229,9 @@ def test_case23_late_flush_after_close_restages_with_explicit_log(tmp_path, monk
     assert env.lifecycle_row()["state"] == "STOPPED"
 
 
-# --------------------------------------------------------------------------- DEFECT: no bus drain
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: main.py's teardown never drains EventBus handlers before store.close() — "
-    "EventBus.publish creates untracked tasks and run() goes ticker.stop → lifecycle.shutdown → store.close",
-)
+# --------------------------------------------------------------------------- bus drained before close
 def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
+    """CD-6 (fixed 2026-09-24): teardown now awaits ``bus.drain`` before ``store.close()``."""
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
     async def scenario() -> list[str]:
@@ -258,17 +255,14 @@ def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
     assert pending_at_close == [], f"bus handler deliveries still pending at store.close(): {pending_at_close}"
 
 
-# --------------------------------------------------------------------------- DEFECT: wedged past the bound
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: a flush still mid-flight when close()'s bounded wait expires raises "
-    "RuntimeError('MarketStore is not open') and drops its batch — store._flush_locked checks "
-    "for a closed store only once, before the batch write",
-)
+# --------------------------------------------------------------------------- wedged past the bound
 def test_case23_flush_wedged_past_close_bound_degrades_gracefully(tmp_path, monkeypatch, caplog):
+    """CD-7 (fixed 2026-09-24): the flush close() gave up on used to raise and lose its batch."""
     import engine.marketdata.store as store_mod
+    import tests.chaos._lifecycle_rig as rig_mod
 
     monkeypatch.setattr(store_mod, "_CLOSE_FLUSH_WAIT_S", 0.3)   # the live bound is 15 s; same code path
+    monkeypatch.setattr(rig_mod, "_SHUTDOWN_BUS_DRAIN_S", 0.3)   # the drain gives up on the wedge too
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
     async def scenario() -> dict:

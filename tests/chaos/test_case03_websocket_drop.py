@@ -27,8 +27,8 @@ Clauses:
   HEALTHY *and* fresh ticks arrive).
 * The literal websocket drop — KiteTicker dies INSIDE a still-heartbeating child, then gives up
   (``on_noreconnect`` ⇒ child exits) ⇒ ``test_websocket_drop_inside_the_child_refuses_entries_then_respawns_on_exit``.
-* DEFECT (xfail strict): "FROZEN" — ``test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery``:
-  no FROZEN risk state is ever latched for feed staleness (see its reason / the report).
+* "FROZEN" — ``test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery``: STALE latches the
+  ``feed_stale`` cause and pages the owner once; the next HEALTHY clears it (CD-1, fixed 2026-09-24).
 * "positions remain broker-protected" — Phase-3-gated (``test_positions_remain_broker_protected``).
 """
 
@@ -54,7 +54,8 @@ from engine.core.config import config_dir, load_settings
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.marketdata.store import MarketStore
-from engine.risk.causes import RiskStateLatch
+from engine.notify.catalog import MessageKind
+from engine.risk.causes import RiskStateLatch, feed_health_to_latch
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 from tests.chaos._entry_gate_rig import INDEX_SYMBOL, LIMITS_YAML, build_entry_gate, entry_checks
@@ -244,6 +245,7 @@ async def feed_rig(conn, tmp_path, monkeypatch):
 
     sup = TickerSupervisor(ticker_settings, clock, bus, symbol_for_token=TOKENS.get, api_key="ak",
                            calendar=calendar, notify=notify)
+    bus.subscribe(FEED_HEALTH_TOPIC, feed_health_to_latch(latch, sup.in_market_hours))   # as main wires it
     children: list[_FakeTickerChild] = []
 
     async def fake_create_subprocess_exec(*_args, env=None, **_kw):   # the child-process boundary
@@ -380,14 +382,9 @@ async def test_websocket_drop_inside_the_child_refuses_entries_then_respawns_on_
     assert checks["stale_data_guard"].passed
 
 
-# ------------------------------------------------------------------------ FROZEN (R2) — DEFECT
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT: feed heartbeat silence > 10 s publishes feed.health=STALE and respawns, but NOTHING "
-    "latches a FROZEN risk-state cause — the only feed.health subscriber is BarBuilder's reconnect "
-    "grace (main.py), HealthMonitor only alerts, limits.stale_data_guard.feed_heartbeat_silence_s is "
-    "parsed but never read, and catalog.feed_stale ('Feed stale — entries frozen') is never sent"
-))
+# ----------------------------------------------------------------------------------- FROZEN (R2)
 async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_rig):
+    """CD-1 (fixed 2026-09-24): STALE used to latch nothing and page nobody."""
     rig = feed_rig
     child1 = await _healthy_feed(rig)
     assert rig.mode.risk_state() == RiskState.NORMAL
@@ -400,7 +397,8 @@ async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_
     # §9.4 / §7.1: "feed heartbeat silence 10 s ⇒ FROZEN" — and it must still hold while the
     # respawned feed is only WARMING (entries resume only after the feed is healthy).
     assert rig.mode.risk_state() == RiskState.FROZEN
-    assert rig.latch.active_causes() != []
+    assert [c for c, _s, _d in rig.latch.active_causes()] == ["feed_stale"]
+    assert [m.kind for m in rig.notified] == [MessageKind.FEED_STALE]     # one in-session page
 
     await child2.heartbeat()
     await _until(lambda: rig.sup.health().state == "HEALTHY", "respawned feed HEALTHY")

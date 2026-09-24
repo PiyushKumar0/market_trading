@@ -25,6 +25,8 @@ freeze and an owner pause clear only on the owner's ``/resume_entries`` (§3.2.1
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from engine.core.clock import Clock
 from engine.core.db import transaction
@@ -53,6 +55,10 @@ CAUSE_OWNER_PAUSE = "owner_pause"
 #: ≥3 broker rejects in 60 s (§3.5.1). The ONE FROZEN cause §3.5.3 says never auto-recovers: it clears
 #: only on the owner's ``/resume_entries``, which is why that command clears this cause too.
 CAUSE_REJECTION_STORM = "rejection_storm"
+
+#: Feed heartbeat silence past the §7.1 ``stale_data_guard`` budget (R2): set on the ticker
+#: supervisor's STALE transition, cleared on its next HEALTHY one (data-quality class, §3.5.3).
+CAUSE_FEED_STALE = "feed_stale"
 
 
 class RiskStateLatch:
@@ -179,3 +185,23 @@ class RiskStateLatch:
         for cause in cleared:
             await self.clear_cause(cause, who)
         return cleared
+
+
+def feed_health_to_latch(
+    latch: RiskStateLatch, in_session: Callable[[], bool]
+) -> Callable[[Any], Awaitable[None]]:
+    """``feed.health`` subscriber driving :data:`CAUSE_FEED_STALE`. STALE latches only in session:
+    every risk-state change pages the owner, and a feed silent overnight (a sleeping laptop) holds no
+    entry. WARMING and DEGRADED leave the cause as it is: a respawned feed must reach HEALTHY first,
+    and a heartbeating but tickless feed is refused per candidate by the tick-age rule. The clear
+    runs only while the cause is active, since HEALTHY is republished on every reconnect."""
+
+    async def on_feed_health(health: Any) -> None:
+        if health.state == "STALE" and in_session():
+            age = health.last_frame_age_s
+            detail = "no feed frame since the respawn" if age is None else f"no feed frame for {age:.0f}s"
+            await latch.set_cause(CAUSE_FEED_STALE, RiskState.FROZEN, detail, Actor.RISK_GATE)
+        elif health.state == "HEALTHY" and any(c == CAUSE_FEED_STALE for c, _s, _d in latch.active_causes()):
+            await latch.clear_cause(CAUSE_FEED_STALE, Actor.RISK_GATE)
+
+    return on_feed_health

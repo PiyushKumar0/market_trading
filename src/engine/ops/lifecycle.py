@@ -266,6 +266,9 @@ class SessionLifecycle:
         self._verify_cnc = verify_cnc_protected_hook
         self._backup = backup_hook
         self._suppress_report_notify = False   # crash-loop coalescing (§2.2): silent boots stay silent
+        #: The boot self-test's skew verdict. Skew is measured at boot only (Phase 2), so a skew
+        #: freeze holds until a resync plus restart (§9.4 case 14) — the warm-up lift must not clear it.
+        self._boot_clock_skewed = False
 
     async def _freeze(self, cause: str, detail: str) -> None:
         """FROZEN-for-entries through the §3.5.3 cause ledger when wired (single-writer discipline —
@@ -345,6 +348,7 @@ class SessionLifecycle:
         st: SelfTestReport = await self._selftest.run(check_skew=check_skew, include_freshness=False)
         report.needs_login = st.needs_login
         report.frozen_reasons = list(st.frozen_reasons)
+        self._boot_clock_skewed = "clock_skew" in st.frozen_reasons
 
         # Apply the §2.4 single integrity rule: a protected-store failure with a FLAT book ⇒ FROZEN;
         # with a LIVE book (or at runtime) ⇒ kill.
@@ -686,9 +690,11 @@ class SessionLifecycle:
         """Lift the warm-up FROZEN-for-entries once coverage is met — SAFELY (§2.6 step-6 reopen).
 
         Conservative by construction: never overrides the kill switch, never clears a CLOSE_ONLY /
-        KILLED latch (those re-arm only on owner action, R3/R5), and re-runs the CHEAP self-test
-        preconditions (no NTP, no catch-up) so a still-standing secrets / clock / trade-window /
-        integrity / token freeze is respected — the warm-up reopen must never clear a warranted freeze.
+        KILLED latch (those re-arm only on owner action, R3/R5), re-runs the CHEAP self-test
+        preconditions (no NTP, no catch-up) so a still-standing secrets / trade-window / integrity /
+        token freeze is respected, and holds while the boot measured clock skew (that check needs NTP,
+        so only the boot verdict can speak for it) — the warm-up reopen must never clear a warranted
+        freeze.
         Multi-reason data-freshness arbitration is the Phase-2 gate's job (risk/mode.py: "most-
         restrictive-wins / latch logic is the gate's"). Returns ``(lifted, why)``."""
         if self._kill.is_killed():
@@ -699,8 +705,9 @@ class SessionLifecycle:
         if state != RiskState.FROZEN:
             return False, "latched"   # CLOSE_ONLY / KILLED — owner re-arm only (R3/R5)
         st = await self._selftest.run(check_skew=False, include_freshness=False)
-        if st.needs_login or st.frozen_reasons:
-            _log.info("warmup_lift_held", needs_login=st.needs_login, other_frozen=st.frozen_reasons)
+        if st.needs_login or st.frozen_reasons or self._boot_clock_skewed:
+            other = [*st.frozen_reasons, *(["clock_skew"] if self._boot_clock_skewed else [])]
+            _log.info("warmup_lift_held", needs_login=st.needs_login, other_frozen=other)
             return False, "other_freeze"
         if self._latch is not None:
             # Clear ONLY the causes this lifecycle owns and has just re-verified; the ledger resolves

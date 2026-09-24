@@ -689,6 +689,57 @@ async def test_true_silence_past_kill_after_restarts_the_child(monkeypatch):
     assert sup.health().state == "STALE"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session", [_FakeSession(_at(9, 15), _at(15, 30)), None], ids=["in_session", "closed"])
+async def test_heartbeat_silence_pages_the_owner_only_in_session(monkeypatch, session):
+    """CD-1: the STALE transition is where the owner hears of a lost feed — the 60 s health poll
+    almost never sees STALE, because the respawn moves the state on within the same cycle."""
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    notes = _NotifyRec()
+    sup = _monitor_sup(clock, calendar=_FakeCalendar(session), notify=notes)
+
+    async def fake_respawn(*, reason):
+        return None
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(_i):
+        now.set(now.value + dt.timedelta(seconds=1))
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=30)
+    assert [m.kind for m in notes.msgs] == ([MessageKind.FEED_STALE] if session else [])
+
+
+@pytest.mark.asyncio
+async def test_a_slow_stale_subscriber_never_delays_the_respawn(monkeypatch):
+    """STALE is published fire-and-forget: the §7.1 latch behind it pages through Telegram (up to
+    95 s in an outage), and the respawn must not wait for that."""
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    sup = _monitor_sup(clock)
+    stuck = asyncio.Event()
+
+    async def slow_subscriber(_health):
+        await stuck.wait()
+
+    sup._bus.subscribe(FEED_HEALTH_TOPIC, slow_subscriber)
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(_i):
+        now.set(now.value + dt.timedelta(seconds=1))
+
+    await asyncio.wait_for(_run_monitor(sup, monkeypatch, cycle, cycles=30), timeout=5)
+    assert respawns == ["heartbeat_silence"]
+    stuck.set()
+    assert await sup._bus.drain(5) == 0
+
+
 # ------------------------------------------------------------------ 3. STALE recovers on frames
 @pytest.mark.asyncio
 async def test_stale_recovers_to_healthy_when_frames_resume(clock):

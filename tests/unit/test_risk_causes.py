@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import pytest
 
+from engine.broker.ticker_supervisor import FeedHealth
 from engine.core.db import connect
 from engine.core.enums import Actor, RiskState
 from engine.risk.causes import (
+    CAUSE_FEED_STALE,
     CAUSE_OWNER_PAUSE,
     CAUSE_REJECTION_STORM,
     RiskStateLatch,
+    feed_health_to_latch,
 )
 from engine.risk.mode import ModeManager
 
@@ -201,3 +204,37 @@ async def test_clear_inactive_cause_never_relaxes_an_out_of_ledger_state(conn, c
 
     assert resolved == RiskState.FROZEN
     assert mode.risk_state() == RiskState.FROZEN
+
+
+# --------------------------------------------------------------------------- feed.health → feed_stale
+@pytest.mark.asyncio
+async def test_feed_stale_latches_through_warming_and_clears_on_healthy(conn, clock, latch):
+    on_health = feed_health_to_latch(latch, lambda: True)
+    await on_health(FeedHealth(state="STALE", last_frame_age_s=11.0))
+    for state in ("WARMING", "DEGRADED", "STOPPED"):                     # none of these is recovery
+        await on_health(FeedHealth(state=state))
+    assert latch.active_causes() == [(CAUSE_FEED_STALE, RiskState.FROZEN, "no feed frame for 11s")]
+    await on_health(FeedHealth(state="HEALTHY"))
+    assert latch.active_causes() == [] and _mode(conn, clock).risk_state() == RiskState.NORMAL
+
+
+@pytest.mark.asyncio
+async def test_feed_healthy_never_touches_another_cause(conn, clock, latch, monkeypatch):
+    await latch.set_cause(CAUSE_OWNER_PAUSE, RiskState.FROZEN, "owner", Actor.OWNER)
+    cleared: list[str] = []
+    real_clear = latch.clear_cause
+
+    async def spy(cause, who):
+        cleared.append(cause)
+        return await real_clear(cause, who)
+
+    monkeypatch.setattr(latch, "clear_cause", spy)
+    await feed_health_to_latch(latch, lambda: True)(FeedHealth(state="HEALTHY"))  # every reconnect
+    assert cleared == [] and _mode(conn, clock).risk_state() == RiskState.FROZEN
+
+
+@pytest.mark.asyncio
+async def test_feed_stale_out_of_session_latches_nothing(conn, clock, latch):
+    """Every risk-state change pages the owner; a laptop waking overnight must not page twice."""
+    await feed_health_to_latch(latch, lambda: False)(FeedHealth(state="STALE", last_frame_age_s=9e3))
+    assert latch.active_causes() == [] and _mode(conn, clock).risk_state() == RiskState.NORMAL
