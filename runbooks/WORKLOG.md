@@ -1,5 +1,25 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-25 01:14–01:30 — index fix live; owner ran the news dedupe
+
+- **Stop and boot:**
+  - The owner's stop at 01:13:59 was clean: the store closed and `engine_stopped` was logged at +19 s.
+  - `scripts/dedupe_news.py` ran; its summary printed on the owner's console.
+  - The engine booted at 01:15:08 on fe47338, so `init_schema` dropped the secondary indexes:
+    crash_recovered false, self-test ok, `boot_contract_ok` at 01:22:11.
+  - The first news poll after boot fetched 530 URLs (527 unique) and inserted 0.
+- **The process outlived `engine_stopped` by 10 s and NSSM killed it at its 30 s limit**
+  (`stop_forced`, signal 21). The store was already closed and the stop recorded, so the next boot
+  was not crash-recovered and the log line's hint ("state stays RUNNING") did not apply. The four
+  stops of 09-24 exited within 2 s; the log does not say what held this one.
+- **CD-6 budget corrected:**
+  - Stop-to-backup took 11.2 s (2.8–5.8 s on 09-24), so "a ~6 s backup, worst case 26 s" was wrong.
+  - The `main.py` comment and CHAOS_DRILLS now give the measured 13–20 s stops. A wedged flush on
+    top can pass 30 s and end in a kill, which leaves a WAL for the next boot to replay.
+- **Post-boot slow statements** (5–13 s, one `store_stalled`) match earlier boots: `universe_daily`
+  upserts took 5–21 s, `sentiment_agg` 8.6 s, and the same `news_clusters` query 5.4 s. They are not
+  caused by the dropped indexes.
+
 ## 2026-09-24 19:00–19:50 — DuckDB secondary-index damage fixed in code; live apply is owner-run (owner: "Work on the issues found and fix them accordingly")
 
 - **Diagnosis** (store copy taken at 19:01 after a clean stop):

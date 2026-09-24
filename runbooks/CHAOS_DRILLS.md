@@ -75,8 +75,9 @@ Fixed (2026-09-24):
   shared with the digest-failure path; a restart on such a day can send one more.
 - **CD-6** — teardown closed the store with bus deliveries still running. `EventBus` tracks what
   `publish` schedules, and `main.py` awaits `bus.drain(_SHUTDOWN_BUS_DRAIN_S = 5 s)` before
-  `store.close()`: with the ~6 s backup and the store's 15 s flush wait, the worst case stays inside
-  NSSM's 30 s stop grace.
+  `store.close()`. Measured stops take 13–20 s (the backup alone 3–11 s). A wedged flush, which the
+  store waits up to 15 s on, can push a stop past NSSM's 30 s grace; the kill then leaves a WAL for
+  the next boot to replay.
 - **CD-7** — a flush still writing when `close()` gave up raised and lost its batch. It now restages
   the partitions it had not written, with `tick_flush_skipped_store_closed`.
 - **CD-3** — a missed EOD `earnings_calendar` run was never caught up or flagged: catch-up only

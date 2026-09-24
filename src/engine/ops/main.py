@@ -3261,8 +3261,9 @@ _FREEZE_LIFT_MIN_GAP = timedelta(minutes=2)
 _SHUTDOWN_LIFT_WAIT_S = 15.0
 
 #: How long a graceful stop waits for event-bus deliveries (mostly tick handlers awaiting a flush)
-#: before `store.close()`, which then waits up to 15 s on the same flush. Worst case with a wedged
-#: flush: the ~6 s backup + 5 + 15 = 26 s, inside the 30 s the service manager allows a stop.
+#: before `store.close()`, which then waits up to 15 s on the same flush. Measured stops take 13-20 s,
+#: the backup alone 3-11 s (2026-09-24/25). A wedged flush on top can pass the 30 s the service manager
+#: allows and end in a kill; the next boot then replays the store's WAL.
 _SHUTDOWN_BUS_DRAIN_S = 5.0
 
 
