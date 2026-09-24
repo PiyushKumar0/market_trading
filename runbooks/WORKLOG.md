@@ -19,6 +19,14 @@
 - **Post-boot slow statements** (5–13 s, one `store_stalled`) match earlier boots: `universe_daily`
   upserts took 5–21 s, `sentiment_agg` 8.6 s, and the same `news_clusters` query 5.4 s. They are not
   caused by the dropped indexes.
+- **Validated 01:35 on the live store** (owner stop 01:33, clean, no WAL; opened read-only):
+  - No secondary index.
+  - `news`: 27,661 rows, 27,621 urls. No (url, cluster) pair is stored twice and no unclustered
+    duplicate is left. 39 urls keep one copy per distinct cluster, by design.
+  - No duplicate from the old code's last run (19:01–01:14) survived. The boot run added no rows.
+  - `insider_trades` range and symbol filters equal full-scan counts; all 549 BSE rows are visible.
+  - Primary keys are intact on `news`, `insider_trades`, `news_clusters` and `catalyst_watchlist`.
+  - Engine restarted 01:36: not crash-recovered, self-test ok.
 
 ## 2026-09-24 19:00–19:50 — DuckDB secondary-index damage fixed in code; live apply is owner-run (owner: "Work on the issues found and fix them accordingly")
 
