@@ -43,6 +43,7 @@ from engine.broker.kite_client import KiteClient, OrderSurfaceViolation
 from engine.broker.rate_limiter import RateLimiter
 from engine.broker.session import SessionManager
 from engine.broker.ticker_supervisor import TickerSupervisor
+from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import Settings, config_dir, load_settings, load_yaml, repo_root
@@ -69,6 +70,7 @@ from engine.datafeeds.filings_results import (
 )
 from engine.datafeeds.filings_shp import FilingsShpJob, FilingsShpResult
 from engine.datafeeds.ins_crossings import InsCrossingsJob, InsCrossingsResult
+from engine.datafeeds.isin_map import IsinMapJob, IsinMapResult
 from engine.datafeeds.news import NSE_ANN_KEY, Headline, NewsIngest
 from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
 from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
@@ -84,6 +86,7 @@ from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, login_prompt
 from engine.ops.early_hydration import EarlyHydration
+from engine.ops.feed_freshness import FeedFreshnessJob, FeedFreshnessResult
 from engine.ops.health import HealthMonitor
 from engine.ops.heartbeat import HeartbeatWriter
 from engine.ops.holdings_reconcile import (
@@ -100,12 +103,14 @@ from engine.ops.jobs import (
     JOB_DEALS,
     JOB_EARNINGS,
     JOB_FEATURES,
+    JOB_FEED_FRESHNESS,
     JOB_FILINGS_PIT,
     JOB_FILINGS_PIT_FRESH,
     JOB_FILINGS_RESULTS,
     JOB_FILINGS_SHP,
     JOB_INS_CROSSINGS,
     JOB_INSTRUMENTS,
+    JOB_ISIN_MAP,
     JOB_NEWS_CHAIN,
     JOB_NIGHTLY_REVIEW,
     JOB_PREOPEN_PLANNER,
@@ -205,7 +210,8 @@ JobRunFn = Callable[..., Awaitable[None]]
 PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_INSTRUMENTS, JOB_SURVEILLANCE, JOB_EARNINGS,          # safety/deadline-critical
     JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CORP_ACTIONS, JOB_SECTOR_MAP, JOB_BACKUP,  # run-latest
-    JOB_FILINGS_SHP, JOB_RESULTS_LINE_ITEMS,                                     # run-latest (§2.8)
+    JOB_ISIN_MAP, JOB_FILINGS_SHP, JOB_RESULTS_LINE_ITEMS,                       # run-latest (§2.8)
+    JOB_FEED_FRESHNESS,                                                          # run-latest
     JOB_RECONCILE, JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_DEALS, JOB_FEATURES,        # date-keyed
     JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
     JOB_INS_CROSSINGS,                                                           # date-keyed (§6.1 `ins`)
@@ -233,9 +239,11 @@ _RECO_EXPIRE_IST = time(15, 45)
 #: Members, in catch-up dependency order: news chain (20) → digest (25) → planner (28), plus the WO-7
 #: tick compaction — pure EOD housekeeping (readers see fragments and compacted files identically),
 #: and the single heaviest catch-up step by wall-clock, so boot is precisely where it must not be —
-#: and ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot reads.
+#: ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot reads — and
+#: ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them.
 POST_ARM_JOB_IDS: tuple[str, ...] = (
     JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_TICK_COMPACT, JOB_RESULTS_LINE_ITEMS,
+    JOB_FEED_FRESHNESS,
 )
 
 #: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
@@ -339,8 +347,11 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
         # §2.8 SHP + pledge: run-latest (per-symbol BSE detail only for new submissions), after the
         # EOD data jobs; never entry-blocking (filings are features/risk-context only in stage 1).
         JobSpec(JOB_FILINGS_SHP, JobClass.RUN_LATEST, settings.jobs.filings_shp_ist, fns[JOB_FILINGS_SHP], order=80),
+        JobSpec(JOB_ISIN_MAP, JobClass.RUN_LATEST, settings.jobs.isin_map_ist, fns[JOB_ISIN_MAP], order=78),
         JobSpec(JOB_RESULTS_LINE_ITEMS, JobClass.RUN_LATEST, settings.jobs.results_line_items_ist,
                 fns[JOB_RESULTS_LINE_ITEMS], order=85),
+        JobSpec(JOB_FEED_FRESHNESS, JobClass.RUN_LATEST, settings.jobs.feed_freshness_ist,
+                fns[JOB_FEED_FRESHNESS], order=95),
         JobSpec(JOB_BACKUP, JobClass.RUN_LATEST, settings.jobs.backup_ist, fns[JOB_BACKUP], order=90),
         # date-keyed backfill — one run per missed trading day, ascending
         JobSpec(JOB_RECONCILE, JobClass.DATE_KEYED, settings.jobs.reconcile_ist, fns[JOB_RECONCILE], order=10),
@@ -598,11 +609,7 @@ async def run() -> int:
     # bounded retry on top of this client's shared (primed) cookie jar.
     http = httpx.AsyncClient(
         follow_redirects=True,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
+        headers={"User-Agent": BROWSER_USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
         timeout=httpx.Timeout(30.0, connect=10.0),
     )
 
@@ -668,11 +675,13 @@ async def run() -> int:
     filings_pit = FilingsPitJob(store, clock, http, notify=notify)
     # settings: filings_pit_fresh rebuilds its scrip->symbol map every run from the cached
     # index-constituents CSV (symbol->ISIN) + the BSE bulk master (ISIN->scrip). Without it the map
-    # is whatever the last manual isin_map backfill left, which is how the §6.1 `ins` feed ended up
-    # reaching 199 of 480 eligible issuers (plan §2.8, 2026-09-12).
+    # is only what symbol_isin holds, which is how the §6.1 `ins` feed ended up reaching 199 of 480
+    # eligible issuers (plan §2.8, 2026-09-12).
     filings_pit_fresh = FilingsPitFreshJob(store, clock, http, settings=settings, notify=notify)
     filings_results = FilingsResultsJob(store, clock, http, earnings=earnings, notify=notify)
     results_line_items = ResultsLineItemsJob(store, clock, http)
+    isin_map = IsinMapJob(settings, store, clock, http, notify=notify)
+    feed_freshness = FeedFreshnessJob(store, clock, calendar, notify=notify)
     filings_shp = FilingsShpJob(store, clock, http, notify=notify)
     # §6.1 `ins` (2026-08-17): EOD insider net-buy crossing detection over the SAME validated crossing
     # function the WO-16 study runs (engine.datafeeds.insider_crossings). No HTTP — it reads the rows
@@ -1255,6 +1264,12 @@ async def run() -> int:
     async def job_results_line_items() -> ResultsLineItemsResult:
         return await results_line_items.run()
 
+    async def job_isin_map() -> IsinMapResult:
+        return await isin_map.run()
+
+    async def job_feed_freshness() -> FeedFreshnessResult:
+        return await feed_freshness.run()
+
     async def job_filings_shp() -> FilingsShpResult:
         # Forwarded (2026-08-13): filings_shp degrades-without-raising (E5) — the watermark verdict
         # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
@@ -1312,6 +1327,8 @@ async def run() -> int:
         JOB_FILINGS_RESULTS: job_filings_results,
         JOB_FILINGS_SHP: job_filings_shp,
         JOB_RESULTS_LINE_ITEMS: job_results_line_items,
+        JOB_ISIN_MAP: job_isin_map,
+        JOB_FEED_FRESHNESS: job_feed_freshness,
         JOB_INS_CROSSINGS: job_ins_crossings,
         JOB_TICK_COMPACT: job_tick_compact,
         # Phase-2 (§8.3): digest always (deterministic, $0); planner/nightly/expire register even

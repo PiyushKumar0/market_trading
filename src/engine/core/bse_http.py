@@ -1,10 +1,10 @@
 """Shared BSE HTTP hardening — browser headers, bounded retry, error-page detection (§2.8, E5).
 
 BSE's ``api.bseindia.com/BseIndiaAPI/api/*`` JSON endpoints are the §2.8 SHP/pledge-history source
-(``SHPQNewFormat/w`` quarter index + ``CorporatesSHPSecuritybeta/w`` detail) and the ISIN→scrip-code
-utility (``PeerSmartSearch/w``). They gate on a browser User-Agent and the ``Origin``/``Referer``
-site headers (the default ``python-httpx`` UA is rejected), but — unlike NSE — carry NO anti-bot
-cookie priming step.
+(``SHPQNewFormat/w`` quarter index + ``CorporatesSHPSecuritybeta/w`` detail) and the bulk scrip master
+(``ListofScripData/w``). They gate on a CURRENT browser User-Agent (the default ``python-httpx`` UA and,
+since 2026-09, a stale Chrome version are rejected with 403) and the ``Origin``/``Referer`` site
+headers, but — unlike NSE — carry NO anti-bot cookie priming step.
 
 **The documented BSE quirk (§2.8 source verdicts):** a bad request does NOT 404. It returns HTTP
 **200** that either redirects to ``…/error_Bse.html`` (final URL) or serves that error HTML with a
@@ -26,10 +26,9 @@ degrade+alert path is left intact):
 ``_sleep`` is a module-level indirection (defaults to :func:`asyncio.sleep`) so tests can monkeypatch
 it and observe the backoff schedule without actually waiting (same pattern as ``nse_http``).
 
-Note the JSON-parse health check is on parse-ABILITY, not shape: some BSE endpoints legitimately
-return a JSON-encoded STRING rather than an object (``PeerSmartSearch/w`` wraps its ``<li>`` HTML as a
-JSON string — probe-verified) — that still parses, so it passes; only the ``error_Bse.html`` page (not
-valid JSON at all) is rejected. The caller ``json.loads`` the body and handles str-vs-dict itself.
+Note the JSON-parse health check is on parse-ABILITY, not shape: any valid JSON passes (a JSON-encoded
+string included); only the ``error_Bse.html`` page (not valid JSON at all) is rejected. The caller
+``json.loads`` the body and checks its shape itself.
 """
 
 from __future__ import annotations
@@ -39,6 +38,7 @@ import json
 
 import httpx
 
+from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.log import get_logger
 
 _log = get_logger("engine.core.bse_http")
@@ -47,8 +47,7 @@ _log = get_logger("engine.core.bse_http")
 #: imports THIS; no per-feed copy drifts). BSE rejects the default ``python-httpx`` UA and requires
 #: the site ``Origin``/``Referer`` (probe evidence, §2.8).
 BSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0 Safari/537.36",
+    "User-Agent": BROWSER_USER_AGENT,
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://www.bseindia.com",

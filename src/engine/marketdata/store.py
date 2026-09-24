@@ -460,7 +460,7 @@ _SCHEMA: tuple[str, ...] = (
     # Every row carries broadcast/dissemination point-in-time timestamps + an ``ingested_at`` stamp;
     # money is DECIMAL (never float), consistent with the price columns above (§2.8.1, §3.2 money).
     # symbol_isin — the stable cross-exchange join key: NIFTY-constituents ISIN + resolved BSE scrip
-    # code (nullable until PeerSmartSearch resolves it). ISINs survive symbol renames (§2.8.1).
+    # code (nullable until the BSE scrip master resolves it). ISINs survive symbol renames (§2.8.1).
     """
     CREATE TABLE IF NOT EXISTS symbol_isin (
         symbol         TEXT PRIMARY KEY,
@@ -1945,11 +1945,11 @@ class MarketStore:
         """``bse_scrip_code -> symbol`` REVERSE map — the §2.8 fresh-insider feed resolves a BSE
         ``Fld_ScripCode`` back to our symbol (the whole market is served, so most scrips are
         out-of-universe and simply absent). Codes are normalized to a bare-int string so ``500325``,
-        ``'500325'`` and ``'500325.0'`` all collide (idempotent with the stored TEXT column). If two
-        symbols ever share a scrip code the last-seen wins (deterministic; scrip codes are unique in
-        practice)."""
+        ``'500325'`` and ``'500325.0'`` all collide (idempotent with the stored TEXT column). Two
+        symbols share a code after a rename, which leaves the old symbol's row behind: the newest
+        ``as_of`` wins, because the daily ``isin_map`` job re-stamps only current constituents."""
         out: dict[str, str] = {}
-        for r in self.get_symbol_isin():
+        for r in self._fetch_dicts("SELECT symbol, bse_scrip_code FROM symbol_isin ORDER BY as_of, symbol"):
             key = _norm_scrip_code(r.get("bse_scrip_code"))
             if key:
                 out[key] = r["symbol"]
@@ -2002,6 +2002,26 @@ class MarketStore:
             sql += f" WHERE {predicate}"
         row = self._fetchall(sql)[0]
         return _ist(row[0]) if row[0] is not None else None
+
+    #: Newest data each feed has delivered — the ``feed_freshness`` census. News by INGESTION time
+    #: (publish stamps can be future-dated); corp actions / earnings by ``recorded_at``, which every
+    #: delivered row rewrites; shareholding by its newest quarter end.
+    _FEED_NEWEST_SQL: dict[str, str] = {
+        "bhavcopy": "SELECT max(d) FROM bars_1d",
+        "deals": "SELECT max(d) FROM flagged_instrument_days",
+        "corp_actions": "SELECT max(recorded_at) FROM corp_actions",
+        "earnings_calendar": "SELECT max(recorded_at) FROM earnings_calendar",
+        "insider_nse": f"SELECT max(broadcast_dt) FROM insider_trades WHERE {_INSIDER_SOURCE_PREDICATE['nse']}",
+        "insider_bse": f"SELECT max(broadcast_dt) FROM insider_trades WHERE {_INSIDER_SOURCE_PREDICATE['bse']}",
+        "shareholding": "SELECT max(qtr_end) FROM shp_quarterly",
+        "news": "SELECT max(ingested_at) FROM news",
+        "sector_map": "SELECT max(as_of) FROM sector_map",
+        "isin_map": "SELECT max(as_of) FROM symbol_isin",
+    }
+
+    def feed_newest(self) -> dict[str, date | datetime | None]:
+        """``{feed: newest delivered date or timestamp}`` (None = the feed never delivered)."""
+        return {feed: _ist(self._fetchall(sql)[0][0]) for feed, sql in self._FEED_NEWEST_SQL.items()}
 
     def upsert_shp_quarterly(self, rows: Sequence[dict[str, Any]]) -> int:
         """Upsert SEBI-format SHP rows (idempotent on (symbol, qtr_end, category); latest wins)."""

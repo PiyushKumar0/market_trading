@@ -402,7 +402,7 @@ async def test_master_shape_change_is_degraded_not_a_silent_revert(
 async def test_stale_stored_symbol_shadows_the_master_and_is_counted(
     store, clock, settings, monkeypatch, caplog
 ):
-    """``symbol_isin`` has no refresh job, so after a tradingsymbol rename (MINDTREE->LTIM class) the
+    """After a tradingsymbol rename (MINDTREE->LTIM class), until ``isin_map`` stores the new symbol the
     stale stored row keeps shadowing the right symbol. Stored still wins — but the loser is counted
     and warned, or the run line would certify full resolution while that issuer starves forever."""
     monkeypatch.setattr(
@@ -686,3 +686,13 @@ def test_bse_scrip_symbol_map_round_trip(seeded_store):
     m = seeded_store.bse_scrip_symbol_map()
     assert m["500325"] == "RELIANCE" and m["544759"] == "GOLDLINE"
     assert "539843" not in m                                      # NINtec never seeded
+
+
+def test_bse_scrip_symbol_map_prefers_the_newest_row_after_a_rename(store):
+    """The renamed-away symbol sorts LAST, so symbol order alone would resolve its filings to it."""
+    store.upsert_symbol_isin([
+        {"symbol": "MINDTREE", "isin": "INE214T01019", "bse_scrip_code": "532819",
+         "as_of": D - timedelta(days=60)},
+        {"symbol": "LTIM", "isin": "INE214T01019", "bse_scrip_code": "532819", "as_of": D},
+    ])
+    assert store.bse_scrip_symbol_map()["532819"] == "LTIM"

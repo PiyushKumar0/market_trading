@@ -58,6 +58,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.clock import Clock
 from engine.core.config import config_dir, load_yaml
 from engine.core.log import get_logger
@@ -112,8 +113,7 @@ _INDUSTRY_ALIAS_LOOKUP: dict[str, str] = {
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
 
 _NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0 Safari/537.36",
+    "User-Agent": BROWSER_USER_AGENT,
     "Accept": "text/csv, text/plain, */*",
     "Referer": "https://www.nseindia.com/",
 }

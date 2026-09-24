@@ -31,6 +31,7 @@ import weakref
 
 import httpx
 
+from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.log import get_logger
 
 _log = get_logger("engine.core.nse_http")
@@ -42,8 +43,7 @@ _NSE_WWW_HOST = "www.nseindia.com"
 #: Canonical browser-shaped headers — the single source of truth (each feed imports THIS; no per-feed
 #: copy drifts). NSE rejects the default ``python-httpx`` UA outright (anti-bot [likely], §A3/A4).
 NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0 Safari/537.36",
+    "User-Agent": BROWSER_USER_AGENT,
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.nseindia.com/",

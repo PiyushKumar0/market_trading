@@ -47,7 +47,7 @@ never entry-blocking, §2.8 rule iii) and leaves existing rows in force for the 
 
 **The resolution map is rebuilt EVERY run (2026-09-12 starvation fix, plan §2.8).** It used to be the
 ``symbol_isin`` reverse map alone (:meth:`MarketStore.bse_scrip_symbol_map`) — a table nothing
-refreshes: ``isin_map`` is not a scheduled job, so the map stayed at the 200 symbols the 2026-07-17
+refreshed: ``isin_map`` was not scheduled until 2026-09-24, so the map stayed at the 200 symbols the 2026-07-17
 backfill seeded while O15 widened the eligible universe to 480 on 09-04. 281 of 480 eligible issuers
 therefore had NO scrip code and every BSE row they filed was dropped as an unmapped scrip (measured
 2026-09-11: 257 of ~298 fetched rows), which is why the §6.1 ``ins`` rule saw 22 issuers. So this feed
@@ -96,6 +96,7 @@ from engine.datafeeds.filings_pit import insider_id
 from engine.datafeeds.insider_crossings import is_open_market_buy
 from engine.datafeeds.isin_map import (
     BSE_SCRIP_MASTER_URL,
+    SCRIP_MASTER_TIMEOUT_S,
     load_constituents_isin,
     parse_scrip_master,
 )
@@ -113,10 +114,6 @@ BSE_ROW_CAP = 25
 
 #: Belt-and-braces narrow-sweep lookback (days) behind the run day for the Isdefault=2 surface.
 FRESH_WINDOW_DAYS = 3
-
-#: Floor on the scrip-master read timeout: that response is ~1.7 MB (5,004 rows) where the insider
-#: surfaces are a few hundred KB, so it must not inherit a per-surface timeout tuned for them.
-SCRIP_MASTER_TIMEOUT_S = 45.0
 
 #: Quiet period after a FAILED scrip-master fetch before another is attempted. This job is DATE_KEYED,
 #: so a boot after a multi-day stop replays one run per missed day back-to-back; without this a BSE

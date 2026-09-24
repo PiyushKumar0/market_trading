@@ -526,8 +526,10 @@ class JobTimesCfg(BaseModel):
     ins_crossings_ist: time = time(19, 15)      # §6.1 ins_crossings — MUST stay after filings_pit_fresh
                                                 # (19:00): it consumes that job's same-day BSE rows
     filings_results_ist: time = time(18, 45)    # §2.8 filings_results (results + board-meeting dates, date-keyed)
+    isin_map_ist: time = time(18, 40)           # §2.8 isin_map — before filings_shp, which fetches mapped symbols only
     filings_shp_ist: time = time(18, 50)        # §2.8 filings_shp (SHP + pledge, run-latest)
     results_line_items_ist: time = time(19, 30)  # §2.8.4 results_line_items — after filings_results lists new filings
+    feed_freshness_ist: time = time(21, 30)     # feed census — after the EOD feeds (deals 20:30, features 20:45)
     nightly_review_ist: time = time(21, 0)      # §5.5/§6.4
     backup_ist: time = time(21, 0)              # §10.5 (watermark-driven)
     sector_map_weekly_day: str = "SUN"          # §4.4 job 13 (sector_map + theme_map refresh)

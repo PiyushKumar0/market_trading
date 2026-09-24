@@ -3,7 +3,7 @@ the BSE ``error_Bse.html``-as-200 quirk, content-hash id stability, watermark wi
 round-trips, and the per-source/per-symbol degrade-never-raise contract.
 
 Fixtures are lifted VERBATIM from the Phase-1 probe result files where a real capture exists (PIT,
-results, SHP-master, PeerSmartSearch HTML). The BSE SHP DETAIL stack (``shp_quarter_index.json`` /
+results, SHP-master, the Integrated Filing listing and XBRL). The BSE SHP DETAIL stack (``shp_quarter_index.json`` /
 ``shp_detail.json``) is REPRESENTATIVE, not probe-verified: those endpoints returned ``error_Bse.html``
 during probing (see the ``filings_shp`` module docstring) — the parsers key off BSE's
 structurally-verified Table/Table1 envelope with [VERIFY Phase-1] field aliases.
@@ -49,9 +49,7 @@ from engine.datafeeds.isin_map import (
     IsinMapJob,
     parse_announcements_isin,
     parse_constituents_isin,
-    parse_peersmartsearch,
     parse_scrip_master,
-    scrip_for_isin,
 )
 from engine.marketdata.store import _INSIDER_SOURCE_PREDICATE, MarketStore
 from tests.conftest import FIXED_NOW
@@ -66,7 +64,6 @@ SHP_MASTER_JSON = json.loads((FIXTURES / "shp_master.json").read_text(encoding="
 SHP_QUARTER_INDEX_JSON = json.loads((FIXTURES / "shp_quarter_index.json").read_text(encoding="utf-8"))
 SHP_DETAIL_JSON = json.loads((FIXTURES / "shp_detail.json").read_text(encoding="utf-8"))
 EVENT_CALENDAR_JSON = json.loads((FIXTURES / "event_calendar.json").read_text(encoding="utf-8"))
-PEER_HTML = (FIXTURES / "peersmartsearch.html").read_text(encoding="utf-8")
 BSE_ERROR_HTML = (FIXTURES / "bse_error_page.html").read_text(encoding="utf-8")
 
 CONSTITUENTS_CSV = (
@@ -89,7 +86,6 @@ def _no_waits(monkeypatch):
     monkeypatch.setattr("engine.datafeeds.filings_pit._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.filings_results._sleep", _instant)
     monkeypatch.setattr("engine.datafeeds.filings_shp._sleep", _instant)
-    monkeypatch.setattr("engine.datafeeds.isin_map._sleep", _instant)
 
 
 @pytest.fixture
@@ -872,42 +868,52 @@ def test_parse_scrip_master_first_code_per_isin_wins_and_tolerates_a_wrapper():
     assert parse_scrip_master({}) == {} and parse_scrip_master(None) == {}
 
 
-def test_parse_peersmartsearch_and_scrip_lookup():
-    entries = parse_peersmartsearch(PEER_HTML)
-    assert len(entries) == 4
-    assert scrip_for_isin(entries, "INE002A01018") == "500325"     # RELIANCE, among several results
-    assert scrip_for_isin(entries, "INE036A01016") == "500390"     # RELINFRA
-    assert scrip_for_isin(entries, "INEZZZZZZZZZ0") is None
+_SCRIP_MASTER = [
+    {"SCRIP_CD": "500325", "ISIN_NUMBER": "INE002A01018"},   # RELIANCE
+    {"SCRIP_CD": "532540", "ISIN_NUMBER": "INE467B01029"},   # TCS
+]
 
 
-async def test_isin_map_build_persists_with_scrip_codes(store, clock, monkeypatch):
-    # Isolate from the filesystem: the CSV layer returns a fixed mapping; the BSE resolve is mocked.
+def _isin_job(store, clock, monkeypatch, master_response, *, notify=None):
+    """IsinMapJob over two constituents (CSV layer stubbed) and a mocked BSE bulk master."""
     monkeypatch.setattr(
         "engine.datafeeds.isin_map.load_constituents_isin",
-        lambda settings: {"RELIANCE": "INE002A01018"},
+        lambda settings: {"RELIANCE": "INE002A01018", "TCS": "INE467B01029"},
     )
     from engine.core.config import load_settings
 
-    # PeerSmartSearch is served application/json with the HTML wrapped as a JSON string (probe-verified).
-    client = client_serving(httpx.Response(200, json=PEER_HTML))
-    job = IsinMapJob(load_settings(), store, clock, client)
-    result = await job.run(["RELIANCE"])
-    assert result.ok is True and result.with_isin == 1 and result.scrip_resolved == 1
-    row = store.get_symbol_isin(symbol="RELIANCE")[0]
-    assert row["isin"] == "INE002A01018" and row["bse_scrip_code"] == "500325"
-    assert row["as_of"] == D
+    urls: list[str] = []
+    client = routed_client({"ListofScripData": master_response}, recorder=urls)
+    return IsinMapJob(load_settings(), store, clock, client, notify=notify), urls
 
 
-async def test_isin_map_missing_scrip_is_null_not_a_failure(store, clock, monkeypatch):
-    monkeypatch.setattr(
-        "engine.datafeeds.isin_map.load_constituents_isin",
-        lambda settings: {"RELIANCE": "INE002A01018"},
+async def test_isin_map_maps_every_constituent_from_one_master_request(store, clock, monkeypatch):
+    job, urls = _isin_job(store, clock, monkeypatch, httpx.Response(200, json=_SCRIP_MASTER))
+    result = await job.run()                                     # default: every index constituent
+    assert (result.ok, result.symbols, result.with_isin, result.scrip_resolved) == (True, 2, 2, 2)
+    rows = store.get_symbol_isin()
+    assert {r["symbol"]: r["bse_scrip_code"] for r in rows} == {"RELIANCE": "500325", "TCS": "532540"}
+    assert {r["as_of"] for r in rows} == {D}
+    await job.run()                                              # every code stored: no request
+    assert sum("ListofScripData" in u for u in urls) == 1
+
+
+async def test_isin_map_keeps_a_stored_code_when_the_isin_changes(store, clock, monkeypatch):
+    """A split issues a new ISIN but keeps the BSE scrip code: the stored code wins, the ISIN updates."""
+    store.upsert_symbol_isin(
+        [{"symbol": "RELIANCE", "isin": "INE002A01010", "bse_scrip_code": "500325", "as_of": D}]
     )
-    from engine.core.config import load_settings
-
-    # PeerSmartSearch returns the BSE error page ⇒ resolve degrades to a NULL scrip code (never raises).
-    client = client_serving(httpx.Response(200, text=BSE_ERROR_HTML))
-    result = await IsinMapJob(load_settings(), store, clock, client).run(["RELIANCE"])
-    assert result.ok is True and result.scrip_resolved == 0
+    master = [{"SCRIP_CD": "999999", "ISIN_NUMBER": "INE002A01018"}, _SCRIP_MASTER[1]]
+    job, _ = _isin_job(store, clock, monkeypatch, httpx.Response(200, json=master))
+    await job.run()
     row = store.get_symbol_isin(symbol="RELIANCE")[0]
-    assert row["isin"] == "INE002A01018" and row["bse_scrip_code"] is None
+    assert (row["isin"], row["bse_scrip_code"]) == ("INE002A01018", "500325")
+
+
+async def test_isin_map_master_down_fails_and_alerts_once_per_streak(store, clock, monkeypatch):
+    msgs, sink = collect_alerts()
+    job, _ = _isin_job(store, clock, monkeypatch, httpx.Response(200, text=BSE_ERROR_HTML), notify=sink)
+    first, second = await job.run(), await job.run()
+    assert first.ok is False and first.scrip_resolved == 0 and "scrip master" in first.reason
+    assert second.ok is False and len(msgs) == 1
+    assert {r["symbol"] for r in store.get_symbol_isin()} == {"RELIANCE", "TCS"}   # ISINs still stored

@@ -243,9 +243,10 @@ def test_registry_covers_every_phase1_job() -> None:
     # Phase-1 fns only ⇒ the Phase-2 specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 20   # +4 §2.8 filings, +1 WO-7 tick compaction,
+    assert len(reg) == len(PHASE1_JOB_IDS) == 22   # +4 §2.8 filings, +1 WO-7 tick compaction,
                                                    # +1 §6.1 ins_crossings (2026-08-17),
-                                                   # +1 §2.8.4 results_line_items (2026-09-24)
+                                                   # +1 §2.8.4 results_line_items, +1 isin_map,
+                                                   # +1 feed_freshness (2026-09-24)
 
 
 def test_registry_phase2_jobs_register_when_their_fns_exist() -> None:
@@ -302,6 +303,8 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_INS_CROSSINGS:     (JobClass.DATE_KEYED, time(19, 15)),
         opsmain.JOB_FILINGS_SHP:     (JobClass.RUN_LATEST,   time(18, 50)),
         opsmain.JOB_RESULTS_LINE_ITEMS: (JobClass.RUN_LATEST, time(19, 30)),
+        opsmain.JOB_ISIN_MAP:          (JobClass.RUN_LATEST, time(18, 40)),
+        opsmain.JOB_FEED_FRESHNESS:    (JobClass.RUN_LATEST, time(21, 30)),
         # WO-7 storage housekeeping: post-EOD, after the nightly review's 21:00 slot.
         opsmain.JOB_TICK_COMPACT:      (JobClass.DATE_KEYED, time(22, 30)),
     }
@@ -319,6 +322,13 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
     # Filing listings → their XBRL line items; and the minutes-long fetch batch never runs in boot.
     assert by_id[opsmain.JOB_FILINGS_RESULTS].at < by_id[opsmain.JOB_RESULTS_LINE_ITEMS].at
     assert opsmain.JOB_RESULTS_LINE_ITEMS in opsmain.POST_ARM_JOB_IDS
+    # The ISIN map feeds the shareholding job (which fetches mapped symbols only), on the clock and
+    # in catch-up order; the census judges the EOD feeds after they land, and after a boot's catch-up.
+    assert by_id[opsmain.JOB_ISIN_MAP].at < by_id[opsmain.JOB_FILINGS_SHP].at
+    assert by_id[opsmain.JOB_ISIN_MAP].order < by_id[opsmain.JOB_FILINGS_SHP].order
+    assert max(by_id[j].at for j in (opsmain.JOB_DEALS, opsmain.JOB_FEATURES, opsmain.JOB_CORP_ACTIONS)) \
+        < by_id[opsmain.JOB_FEED_FRESHNESS].at
+    assert opsmain.JOB_FEED_FRESHNESS in opsmain.POST_ARM_JOB_IDS
 
 
 def test_instruments_runs_before_surveillance_in_dependency_order() -> None:
