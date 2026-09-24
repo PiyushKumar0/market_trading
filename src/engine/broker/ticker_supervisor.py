@@ -1056,7 +1056,7 @@ class TickerSupervisor:
         any non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
         HEALTHY happens on the next tick in :meth:`_handle_frame`.
         """
-        if self._state != "HEALTHY" or not self._in_market_hours():
+        if self._state != "HEALTHY" or not self.in_market_hours():
             return
         silence = self._effective_tick_silence_s()
         if silence is None or silence <= budget_s:
@@ -1112,7 +1112,7 @@ class TickerSupervisor:
         except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
             _log.exception("feed_wedged_notify_failed")
 
-    def _in_market_hours(self, now: datetime | None = None) -> bool:
+    def in_market_hours(self, now: datetime | None = None) -> bool:
         """True iff ``now`` is inside today's NSE continuous session (calendar+clock). Without a
         calendar (bare harness) the feed cannot know it is in-session ⇒ False (guard disabled)."""
         if self._calendar is None:

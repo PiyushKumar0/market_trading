@@ -242,10 +242,10 @@ def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
 
         def spy_close() -> None:
             pending_at_close.extend(t.get_name() for t in _bus_deliveries(loop))
-            release.set()
             real_close()
 
         store.close = spy_close
+        threading.Timer(1.0, release.set).start()     # the flush ends inside the drain's bound
         await proc.stop()
         for task in _bus_deliveries(loop):
             await asyncio.wait_for(task, timeout=SLOW_FLUSH_MAX_S)

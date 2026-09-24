@@ -28,7 +28,9 @@ Clauses:
 * The literal websocket drop — KiteTicker dies INSIDE a still-heartbeating child, then gives up
   (``on_noreconnect`` ⇒ child exits) ⇒ ``test_websocket_drop_inside_the_child_refuses_entries_then_respawns_on_exit``.
 * "FROZEN" — ``test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery``: STALE latches the
-  ``feed_stale`` cause and pages the owner once; the next HEALTHY clears it (CD-1, fixed 2026-09-24).
+  ``feed_stale`` cause and the next HEALTHY clears it; the owner is paged by the two risk-state
+  changes (CD-1, fixed 2026-09-24). ``test_a_slow_owner_page_never_stalls_the_feed``: a stuck page
+  never stalls the frame reader.
 * "positions remain broker-protected" — Phase-3-gated (``test_positions_remain_broker_protected``).
 """
 
@@ -54,8 +56,8 @@ from engine.core.config import config_dir, load_settings
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.marketdata.store import MarketStore
-from engine.notify.catalog import MessageKind
 from engine.risk.causes import RiskStateLatch, feed_health_to_latch
+from engine.risk.events import TOPIC_RISK_STATE
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 from tests.chaos._entry_gate_rig import INDEX_SYMBOL, LIMITS_YAML, build_entry_gate, entry_checks
@@ -237,6 +239,12 @@ async def feed_rig(conn, tmp_path, monkeypatch):
         health_events.append(fh.state)
 
     bus.subscribe(FEED_HEALTH_TOPIC, _record_health)
+    risk_events: list = []                                # what the Telegram bot pages the owner with
+
+    async def _record_risk(evt) -> None:
+        risk_events.append(evt)
+
+    bus.subscribe(TOPIC_RISK_STATE, _record_risk)
 
     notified: list = []
 
@@ -282,9 +290,10 @@ async def feed_rig(conn, tmp_path, monkeypatch):
         await _until(lambda: all(last_ticks.get(s, (None, None))[1] == at for s in TOKENS.values()),
                      "ticks delivered to the tick cache")
 
-    rig = SimpleNamespace(now=now, clock=clock, mode=mode, latch=latch, sup=sup, children=children,
-                          pacer=pacer, health_events=health_events, notified=notified, checks=checks,
-                          spawned=spawned, delivered=delivered, tick_age_s=tick_age_s)
+    rig = SimpleNamespace(now=now, clock=clock, bus=bus, mode=mode, latch=latch, sup=sup, children=children,
+                          pacer=pacer, health_events=health_events, risk_events=risk_events,
+                          notified=notified, checks=checks, spawned=spawned, delivered=delivered,
+                          tick_age_s=tick_age_s)
     try:
         yield rig
     finally:
@@ -398,7 +407,6 @@ async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_
     # respawned feed is only WARMING (entries resume only after the feed is healthy).
     assert rig.mode.risk_state() == RiskState.FROZEN
     assert [c for c, _s, _d in rig.latch.active_causes()] == ["feed_stale"]
-    assert [m.kind for m in rig.notified] == [MessageKind.FEED_STALE]     # one in-session page
 
     await child2.heartbeat()
     await _until(lambda: rig.sup.health().state == "HEALTHY", "respawned feed HEALTHY")
@@ -408,6 +416,35 @@ async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_
     # Symmetric clear (§3.5.3 data-quality class): no latch left set once the feed is healthy.
     assert rig.mode.risk_state() == RiskState.NORMAL
     assert rig.latch.active_causes() == []
+    # The owner hears it from the two risk-state changes, which carry the cause; nothing else pages.
+    assert [(e.new_state, e.reason.startswith("feed_stale")) for e in rig.risk_events] == [
+        (RiskState.FROZEN, True), (RiskState.NORMAL, True)]
+    assert rig.notified == []
+
+
+async def test_a_slow_owner_page_never_stalls_the_feed(feed_rig):
+    """2026-09-24 review: the risk-state page (Telegram, up to 95 s in an outage) ran inside the
+    frame reader's HEALTHY publish, so heartbeats went unread and the monitor killed a live child."""
+    rig = feed_rig
+    telegram_down = asyncio.Event()
+
+    async def stuck_page(_evt) -> None:
+        await telegram_down.wait()
+
+    rig.bus.subscribe(TOPIC_RISK_STATE, stuck_page)
+    await _healthy_feed(rig)
+    for _ in range(11):                                   # > 10 s of frame silence ⇒ STALE + respawn
+        await rig.pacer.cycle()
+    child2 = await rig.spawned(2)
+    await child2.heartbeat()
+    await _until(lambda: rig.sup.health().state == "HEALTHY", "respawned feed HEALTHY")
+    for _ in range(15):                                   # 15 s of a live child, one heartbeat a second
+        await rig.pacer.cycle()
+        await child2.heartbeat()
+        await _until(lambda: rig.sup.health().last_frame_age_s == 0.0, "heartbeat read")
+    assert len(rig.children) == 2 and not child2.terminated
+    assert rig.mode.risk_state() == RiskState.NORMAL      # the ledger moved; only the page is stuck
+    telegram_down.set()
 
 
 # ------------------------------------------------------------------------------- Phase-3-gated

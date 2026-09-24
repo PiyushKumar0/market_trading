@@ -1717,13 +1717,6 @@ async def run() -> int:
             batch_in_window = _w[0] <= now <= _w[1]
         except ValueError:
             batch_in_window = False      # not a trading day ⇒ no window ⇒ nothing originates (R6)
-        if batch_in_window:
-            # §2.7 rung (ii): a stale or missing digest disables `cat` for this sweep. Say so even when
-            # no digest run raised — a late boot sweeps before the catch-up digest has run.
-            try:
-                await catalyst_disabled_alert.if_digest_not_fresh(digest_job, store, today)
-            except Exception:  # noqa: BLE001 - an alert must never cost the day's sweep
-                _log.exception("catalyst_digest_status_failed")
 
         def _collect_and_scan():
             latest = []
@@ -2063,6 +2056,14 @@ async def run() -> int:
                            pending=len(pending_rows))
         if trigger != "scan_now":       # /scan_now gets the body as its direct reply — no double send
             await notify(msg)
+        if batch_in_window:
+            # §2.7 rung (ii): without today's digest `cat` originated nothing in this sweep. Said even
+            # when no digest run raised (a late boot sweeps before the catch-up digest), and only
+            # after the sweep, so a slow page never delays it.
+            try:
+                await catalyst_disabled_alert.if_no_digest_today(store, today)
+            except Exception:  # noqa: BLE001 - an alert must never fail the sweep
+                _log.exception("catalyst_digest_check_failed")
         return msg.body
 
     # Fire the sweep on the window-INACTIVE→ACTIVE edge (covers both the daily window-open moment
@@ -3260,8 +3261,9 @@ _FREEZE_LIFT_MIN_GAP = timedelta(minutes=2)
 _SHUTDOWN_LIFT_WAIT_S = 15.0
 
 #: How long a graceful stop waits for event-bus deliveries (mostly tick handlers awaiting a flush)
-#: before `store.close()`. Shorter than the flush wait inside `close()`, which still follows it.
-_SHUTDOWN_BUS_DRAIN_S = 10.0
+#: before `store.close()`, which then waits up to 15 s on the same flush. Worst case with a wedged
+#: flush: the ~6 s backup + 5 + 15 = 26 s, inside the 30 s the service manager allows a stop.
+_SHUTDOWN_BUS_DRAIN_S = 5.0
 
 
 
@@ -3621,8 +3623,8 @@ def _watchlist_rows_for_symbols(rows: list, symbols: set[str]) -> list:
 
 
 class _CatalystDisabledAlert:
-    """``CATALYST_DISABLED`` at most once a day (§2.7 rung ii): a failed digest run and the
-    window-open sweep that then finds no fresh digest are one outage, not two pages."""
+    """``CATALYST_DISABLED`` at most once a day per process (§2.7 rung ii): a failed digest run and
+    the window-open sweep that then finds no digest for today are one outage, not two pages."""
 
     def __init__(self, notify: Callable[[CatalogMessage], Awaitable[None]], clock: Clock) -> None:
         self._notify = notify
@@ -3635,10 +3637,14 @@ class _CatalystDisabledAlert:
             self._sent_on = today
             await self._notify(catalyst_disabled(reason))
 
-    async def if_digest_not_fresh(self, digest: CatalystDigestJob, store: MarketStore, d: date) -> None:
-        status = await store.arun(digest.digest_status, d)
-        if status != "fresh":
-            await self(f"digest {status} at the window-open sweep")
+    async def if_no_digest_today(self, store: MarketStore, d: date) -> None:
+        """`cat` sweeps only day ``d``'s watchlist, so it is off unless a digest ran on ``d``; every
+        run stamps ``sentiment_agg``. A late run yesterday still reads "fresh" by age at ``d``'s
+        window open, which is why this checks the date, not ``digest_status``."""
+        last = await store.arun(store.latest_sentiment_as_of)
+        if last is None or last.astimezone(IST).date() < d:
+            when = "none on record" if last is None else f"last {last.astimezone(IST):%d-%b %H:%M}"
+            await self(f"no catalyst digest has run today ({when})")
 
 
 def _read_cat_watchlist(

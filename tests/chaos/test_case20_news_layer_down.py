@@ -405,11 +405,11 @@ class NewsWorld:
         return [c for c in self.prescreen.admit(raw, d, in_window=in_window) if c.strategy_id == cat.STRATEGY_ID]
 
     async def window_open_sweep(self, d: date) -> list[SignalCandidate]:
-        """``_scan_sweep`` at the window edge: the digest-freshness alert (§2.7 rung ii), then the
-        ``cat`` leg."""
-        self.set_time(at(d, 10, 5))
-        await self.catalyst_disabled.if_digest_not_fresh(self.digest, self.store, d)
-        return self.cat_sweep(d)
+        """``_scan_sweep`` at the window edge: the ``cat`` leg, then the no-digest-today alert (§2.7
+        rung ii)."""
+        admitted = self.cat_sweep(d)
+        await self.catalyst_disabled.if_no_digest_today(self.store, d)
+        return admitted
 
     # ------------------------------------------------------------------ observations
     def messages(self, kind: MessageKind | None = None) -> list[tuple[str, str, str]]:
@@ -600,7 +600,7 @@ async def test_stale_digest_at_sweep_time_alerts_catalyst_disabled(make_world) -
     w = await _late_boot_stale_world(make_world)
     assert await w.window_open_sweep(WED) == []
     disabled = w.messages(MessageKind.CATALYST_DISABLED)
-    assert len(disabled) == 1 and "digest stale at the window-open sweep" in disabled[0][2]
+    assert len(disabled) == 1 and "no catalyst digest has run today" in disabled[0][2]
 
 
 # =========================================================================== recovery

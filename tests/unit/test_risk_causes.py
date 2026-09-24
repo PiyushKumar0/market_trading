@@ -4,11 +4,14 @@ cause while another is live must NOT reopen entries."""
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from engine.broker.ticker_supervisor import FeedHealth
 from engine.core.db import connect
 from engine.core.enums import Actor, RiskState
+from engine.core.eventbus import EventBus
 from engine.risk.causes import (
     CAUSE_FEED_STALE,
     CAUSE_OWNER_PAUSE,
@@ -16,6 +19,7 @@ from engine.risk.causes import (
     RiskStateLatch,
     feed_health_to_latch,
 )
+from engine.risk.events import TOPIC_RISK_STATE
 from engine.risk.mode import ModeManager
 
 
@@ -207,15 +211,42 @@ async def test_clear_inactive_cause_never_relaxes_an_out_of_ledger_state(conn, c
 
 
 # --------------------------------------------------------------------------- feed.health → feed_stale
+async def _deliver(on_health, health: FeedHealth) -> None:
+    """The subscriber returns at once and does its latch work in a task: let that task run."""
+    await on_health(health)
+    await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_feed_stale_latches_through_warming_and_clears_on_healthy(conn, clock, latch):
     on_health = feed_health_to_latch(latch, lambda: True)
-    await on_health(FeedHealth(state="STALE", last_frame_age_s=11.0))
+    await _deliver(on_health, FeedHealth(state="STALE", last_frame_age_s=11.0))
     for state in ("WARMING", "DEGRADED", "STOPPED"):                     # none of these is recovery
-        await on_health(FeedHealth(state=state))
+        await _deliver(on_health, FeedHealth(state=state))
     assert latch.active_causes() == [(CAUSE_FEED_STALE, RiskState.FROZEN, "no feed frame for 11s")]
-    await on_health(FeedHealth(state="HEALTHY"))
+    await _deliver(on_health, FeedHealth(state="HEALTHY"))
     assert latch.active_causes() == [] and _mode(conn, clock).risk_state() == RiskState.NORMAL
+
+
+@pytest.mark.asyncio
+async def test_feed_health_never_waits_on_the_owner_page(conn, clock):
+    """The ticker publishes feed.health from its frame reader; a risk-state page stuck on Telegram
+    (up to 95 s in an outage) must not hold it, while the ledger still moves at once."""
+    bus = EventBus()
+    telegram_down = asyncio.Event()
+
+    async def stuck_page(_evt) -> None:
+        await telegram_down.wait()
+
+    bus.subscribe(TOPIC_RISK_STATE, stuck_page)
+    latch = RiskStateLatch(conn, clock, ModeManager(conn, clock, bus))
+    on_health = feed_health_to_latch(latch, lambda: True)
+    await asyncio.wait_for(_deliver(on_health, FeedHealth(state="STALE", last_frame_age_s=11.0)), 1)
+    assert _mode(conn, clock).risk_state() == RiskState.FROZEN
+    await asyncio.wait_for(_deliver(on_health, FeedHealth(state="HEALTHY")), 1)
+    assert _mode(conn, clock).risk_state() == RiskState.NORMAL
+    telegram_down.set()
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -229,12 +260,12 @@ async def test_feed_healthy_never_touches_another_cause(conn, clock, latch, monk
         return await real_clear(cause, who)
 
     monkeypatch.setattr(latch, "clear_cause", spy)
-    await feed_health_to_latch(latch, lambda: True)(FeedHealth(state="HEALTHY"))  # every reconnect
+    await _deliver(feed_health_to_latch(latch, lambda: True), FeedHealth(state="HEALTHY"))  # every reconnect
     assert cleared == [] and _mode(conn, clock).risk_state() == RiskState.FROZEN
 
 
 @pytest.mark.asyncio
 async def test_feed_stale_out_of_session_latches_nothing(conn, clock, latch):
     """Every risk-state change pages the owner; a laptop waking overnight must not page twice."""
-    await feed_health_to_latch(latch, lambda: False)(FeedHealth(state="STALE", last_frame_age_s=9e3))
+    await _deliver(feed_health_to_latch(latch, lambda: False), FeedHealth(state="STALE", last_frame_age_s=9e3))
     assert latch.active_causes() == [] and _mode(conn, clock).risk_state() == RiskState.NORMAL

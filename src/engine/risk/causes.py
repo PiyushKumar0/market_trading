@@ -24,8 +24,9 @@ freeze and an owner pause clear only on the owner's ``/resume_entries`` (§3.2.1
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 from engine.core.clock import Clock
@@ -194,14 +195,29 @@ def feed_health_to_latch(
     every risk-state change pages the owner, and a feed silent overnight (a sleeping laptop) holds no
     entry. WARMING and DEGRADED leave the cause as it is: a respawned feed must reach HEALTHY first,
     and a heartbeating but tickless feed is refused per candidate by the tick-age rule. The clear
-    runs only while the cause is active, since HEALTHY is republished on every reconnect."""
+    runs only while the cause is active, since HEALTHY is republished on every reconnect.
+
+    The latch work runs detached. The ticker publishes ``feed.health`` from its frame reader and its
+    silence monitor, and a risk-state change waits on the owner's Telegram page (up to 95 s in an
+    outage): awaited there, it stalls the reader until the monitor kills a healthy child."""
+    running: set[asyncio.Task[RiskState]] = set()
+
+    def finished(task: asyncio.Task[RiskState]) -> None:
+        running.discard(task)
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            _log.error("feed_stale_latch_failed", error=f"{type(exc).__name__}: {exc}")
+
+    def detach(work: Coroutine[Any, Any, RiskState]) -> None:
+        task = asyncio.get_running_loop().create_task(work)
+        running.add(task)
+        task.add_done_callback(finished)
 
     async def on_feed_health(health: Any) -> None:
         if health.state == "STALE" and in_session():
             age = health.last_frame_age_s
             detail = "no feed frame since the respawn" if age is None else f"no feed frame for {age:.0f}s"
-            await latch.set_cause(CAUSE_FEED_STALE, RiskState.FROZEN, detail, Actor.RISK_GATE)
+            detach(latch.set_cause(CAUSE_FEED_STALE, RiskState.FROZEN, detail, Actor.RISK_GATE))
         elif health.state == "HEALTHY" and any(c == CAUSE_FEED_STALE for c, _s, _d in latch.active_causes()):
-            await latch.clear_cause(CAUSE_FEED_STALE, Actor.RISK_GATE)
+            detach(latch.clear_cause(CAUSE_FEED_STALE, Actor.RISK_GATE))
 
     return on_feed_health

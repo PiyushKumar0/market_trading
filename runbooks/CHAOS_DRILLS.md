@@ -32,7 +32,7 @@ Status as of 2026-09-24: 64 passed, 21 skipped, 0 xfailed (every pinned defect, 
 | # | Case | File | Asserted today | Skipped / pending | Defects |
 |---|---|---|---|---|---|
 | 1, 2a, 2b, 7–12 | Positions, protection, circuit, broker outage, GTT, RMS | `test_phase3_gated_cases.py` | — | all Phase-3-gated | — |
-| 3 | WebSocket drop | `test_case03_websocket_drop.py` | 10 s silence → STALE + kill/respawn + `feed_stale` FROZEN cause + one in-session page; entries refused from 5 s tick age; resume only when HEALTHY and fresh | positions broker-protected (P3) | CD-1 (fixed) |
+| 3 | WebSocket drop | `test_case03_websocket_drop.py` | 10 s silence → STALE + kill/respawn + in-session `feed_stale` FROZEN cause, paged by its two risk-state changes; a slow page never stalls the feed; entries refused from 5 s tick age; resume only when HEALTHY and fresh | positions broker-protected (P3) | CD-1 (fixed) |
 | 4 | Token expiry mid-day | `test_case04_token_expiry.py` | FROZEN `kite_token_rejected` + one page with login link; opening order refused before broker; re-login clears | protection resting (P3) | — |
 | 5 | LLM timeout / garbage / quota | `test_case05_llm_failure.py` | no proposal + alert per failure mode; DG4 same path; deterministic time-stop exit still delivered | square-off unaffected (P3) | — |
 | 6 | Rejection storm / 429s | `test_case06_broker_rejection_storm.py` | 429s paced, never amplified; entry budget exhausted → risk-reducing lane still reaches broker | ≥3 rejects/60 s ⇒ FROZEN (unbuilt: `CAUSE_REJECTION_STORM` is never set); retry/backoff (unbuilt, WO-P3-5) | — |
@@ -43,7 +43,7 @@ Status as of 2026-09-24: 64 passed, 21 skipped, 0 xfailed (every pinned defect, 
 | 17 | Offline multi-day | `test_case17_offline_multi_day.py` | per-trading-day re-run (weekend + holiday skipped); candle gap backfilled; warm-up enforced | ex-date GTT repair (P3) | — |
 | 18 | Cold start too close to window | `test_case18_cold_start_warmup.py` | regime shortfall freezes until candles land; intraday-only shortfall refuses per candidate; daily-only per symbol | — | — |
 | 19 | Scheduled start missed | `test_case19_scheduled_start_missed.py` | one SCHEDULED_START_MISSED after grace, edge-triggered; none on weekend/holiday | open MIS rides backstop (P3) | — |
-| 20 | News down / DG3 pre-open | `test_case20_news_layer_down.py` | empty-but-fresh digest rung; digest failure or a stale/missing digest at the window-open sweep → one CATALYST_DISABLED a day; no FROZEN; non-`cat` ranking identical; self-restores next day | — | CD-4 (fixed) |
+| 20 | News down / DG3 pre-open | `test_case20_news_layer_down.py` | empty-but-fresh digest rung; digest failure, or no digest yet today at an in-window sweep → one CATALYST_DISABLED a day; no FROZEN; non-`cat` ranking identical; self-restores next day | — | CD-4 (fixed) |
 | 21 | Prompt-injection headlines (entry side) | `test_case21_adversarial_headlines.py` | schema-invalid scores dropped; single-source ⇒ `context` at most; syndicated PR = one cluster; other symbols unaffected, incl. model-emitted foreign entity strings | exit side (P3) | — |
 | 22 | Lifecycle notifications | `test_case22_lifecycle_notifications.py` | (a) clean stop: one ENGINE_STOPPED, watchdog silent; (b) crash: one ENGINE_DOWN, crash-recovered restart; (c) killed while off: silent | capital protection (P3) | — |
 | 23 | Shutdown races tick flush | `test_case23_shutdown_races_tick_flush.py` | no deadlock; bus drained before store close; a late or wedged flush restages its unwritten batch with an explicit log | — | CD-6, CD-7 (fixed) |
@@ -59,19 +59,24 @@ A new defect is pinned by an `xfail(strict=True)` test and listed here as open. 
 Fixed (2026-09-24):
 - **CD-1** — feed staleness never latched a FROZEN cause or paged anyone. `engine.risk.causes.feed_health_to_latch`
   (subscribed in `main.py`) now sets `feed_stale` on the supervisor's STALE transition in market hours
-  and clears it on the next HEALTHY; the supervisor sends `feed_stale` once per heartbeat-silence
-  episode, also in session only. Out of hours nothing latches: every risk-state change pages the owner,
-  and a laptop waking overnight must not. The 60 s health poll almost never saw STALE, because the respawn moves the state on within the
-  same cycle. `limits.feed_heartbeat_silence_s` is still enforced through
-  `ticker.heartbeat_silence_kill_s`; the case-3 rig asserts the two are equal.
+  and clears it on the next HEALTHY. The owner hears it from the two risk-state changes, which carry
+  the cause; there is no separate feed page. The latch update runs as its own task, because
+  publishing a risk-state change waits on the Telegram send (up to 95 s) and must not hold up the
+  feed's health publisher. Out of hours nothing latches: the tick-age rule already refuses entries,
+  and a laptop waking overnight must not page. The 60 s health poll almost never saw STALE, because
+  the respawn moves the state on within the same cycle. `limits.feed_heartbeat_silence_s` is still
+  enforced through `ticker.heartbeat_silence_kill_s`; the case-3 rig asserts the two are equal.
 - **CD-2** — the warm-up lift cleared a boot clock-skew freeze. `SessionLifecycle` keeps the boot's
   skew verdict and the lift holds on it; only a resync plus restart reopens entries (Phase-2 design).
-- **CD-4** — a stale or missing digest that did not raise sent no CATALYST_DISABLED. The window-open
-  sweep now checks `digest_status`; `_CatalystDisabledAlert` sends at most one a day, shared with the
-  digest-failure path.
+- **CD-4** — a missing digest that did not raise sent no CATALYST_DISABLED. `cat` reads only
+  today's watchlist, so after each in-window sweep `main.py` checks that a digest has run today
+  (every run stamps `sentiment_agg`); a late run yesterday still reads "fresh" by age, so the check
+  is on the date, not `digest_status`. `_CatalystDisabledAlert` sends at most one a day per process,
+  shared with the digest-failure path; a restart on such a day can send one more.
 - **CD-6** — teardown closed the store with bus deliveries still running. `EventBus` tracks what
-  `publish` schedules, and `main.py` awaits `bus.drain(_SHUTDOWN_BUS_DRAIN_S = 10 s)` before
-  `store.close()`.
+  `publish` schedules, and `main.py` awaits `bus.drain(_SHUTDOWN_BUS_DRAIN_S = 5 s)` before
+  `store.close()`: with the ~6 s backup and the store's 15 s flush wait, the worst case stays inside
+  NSSM's 30 s stop grace.
 - **CD-7** — a flush still writing when `close()` gave up raised and lost its batch. It now restages
   the partitions it had not written, with `tick_flush_skipped_store_closed`.
 - **CD-3** — a missed EOD `earnings_calendar` run was never caught up or flagged: catch-up only
