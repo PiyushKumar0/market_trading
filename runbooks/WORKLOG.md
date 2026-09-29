@@ -1,5 +1,17 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-29 13:4x — G2 C1, C4, C5 accepted by the owner
+
+- Owner, verbatim:
+  - "Consider C1 and as it is, the current status is not an issue."
+  - "Consider C4, C5 signed off."
+- Recorded as owner decisions at the 10:52 measurement:
+  - **C1** accepted at its status: 29/44 sessions, 7/9 since 09-17.
+  - **C4** signed: 2 executions, both closed.
+  - **C5** signed: 21 rec sessions as the collector counts them, 12 of them with an entry rec.
+- **G2 now waits only on C6's broker-side half:** the owner's Kite order-book audit. The platform
+  side is MET.
+
 ## 2026-09-29 10:5x — G2 C8 + C9 signed off by the owner; G2 re-measured; the 09-29 C1 miss traced to a catch-up blocked by tick compaction (owner: "G2 sign off has been done")
 
 - **Sign-off record.** Read back from the owner's review page store (`signoff/g2`, version 8;
