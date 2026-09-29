@@ -353,8 +353,14 @@ bars are judged against owner-set state (the trade window) that moved during the
       week; never read criterion 7 against a month total.
 - [ ] **Zero API orders:** "zero API orders placed (**broker order book empty of platform orders** —
       audited)". Evidence: `scripts/g2_evidence.py` criterion 6 proves the platform side
-      (`orders` / `order_events` empty); `[owner-manual]` — the broker-side audit in Kite Console
-      (Orders → all/GTT tabs for the period). The engine cannot evidence its own absence there.
+      (`orders` / `order_events` empty). `[owner-manual]` — the broker side, for the period since
+      2026-07-29 (what each Zerodha surface can show, checked against their support pages 2026-09-29):
+      1. Console → Reports → Tradebook → segment Equity → date range from the period start to today
+         (at most 365 days per download): every trade in it is one you placed yourself.
+      2. Kite → Orders (today's order book) and its GTT tab: every entry is yours.
+      Kite keeps only the current day's order book; past cancelled or rejected orders are not
+      viewable anywhere, but Zerodha support can supply a given day's order log on request. The
+      engine cannot evidence its own absence there.
 - [ ] **Watchlist precision:** "owner has reviewed watchlist precision on **at least two weekly
       samples** (are `originating` entries genuinely material catalysts?)". `[owner-manual]` — sample
       the dashboard news/watchlist panel or `catalyst_watchlist` grade=`originating` rows for two
