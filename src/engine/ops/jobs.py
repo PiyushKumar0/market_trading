@@ -22,7 +22,7 @@ across releases (they ARE the watermark identity).
 
 **Boot ordering (WO-15, 2026-08-13).** A pass is scoped (:class:`CatchUpScope`): the boot pass runs
 LOAD-BEARING data steps only, while the ids the integrator declares ``deferred`` (the news chain →
-digest → planner, plus tick compaction) fire as one-shots AFTER ``scheduler.start()`` through the
+digest → planner) fire as one-shots AFTER ``scheduler.start()`` through the
 same machinery under ``DEFERRED`` — same code, same watermarks, new firing point. The 08-10 wedge
 (an unbounded news chain inside boot) starved every scheduled job for 8 h *including* the sweep that
 exists to self-heal; behind the armed scheduler the identical wedge costs only the digest. Passes
@@ -66,6 +66,14 @@ def _job_result_ok(result: object) -> bool:
     a blanket ``bool``-is-the-verdict rule would turn every blocked run into a retry that spends.
     The composition-root wrappers translate that tri-state into :class:`AdvisoryRun` (``.ok``)."""
     return bool(getattr(result, "ok", True))
+
+
+def _job_unfinished(result: object) -> bool:
+    """A result whose ``unfinished`` is True did not do the day's work (``TickCompactionResult``:
+    skipped for an in-flight run, or stopped at the session window / shutdown). Its runner records NO
+    watermark, so the day stays missed and a later pass replays it. Recording those as success left
+    every ``tick_compact`` watermark from 2026-09-22 to 09-28 without a completed run behind it."""
+    return getattr(result, "unfinished", False) is True
 
 
 class AdvisoryOutcome(StrEnum):
@@ -199,6 +207,12 @@ class JobRegistry:
         """Specs in dependency order (stable sort by ``order`` preserves registration order)."""
         picked = [s for s in self._specs if job_class is None or s.job_class == job_class]
         return sorted(picked, key=lambda s: s.order)
+
+    def select(self, keep: Callable[[JobSpec], bool]) -> JobRegistry:
+        """A new registry of the specs ``keep`` accepts, registration order preserved."""
+        picked = JobRegistry()
+        picked._specs = [s for s in self._specs if keep(s)]
+        return picked
 
     def __len__(self) -> int:
         return len(self._specs)
@@ -408,14 +422,8 @@ class CatchUpRunner:
         *,
         off_since: datetime | None = None,
         scope: CatchUpScope = CatchUpScope.LOAD_BEARING,
-        exclude: Collection[str] = (),
     ) -> CatchUpResult:
         """Replay every missed job in ``scope`` over the off-window, by class then dependency order.
-
-        ``exclude`` (WO-21) drops named job ids from THIS pass only — a caller-side, per-pass veto
-        with no watermark side effects, so the next pass that does not veto them replays them
-        normally. It exists for the post-arm one-shot's in-session ``tick_compact`` gate
-        (``engine.ops.main``); ``deferred`` is the standing set, this is the situational one.
 
         SINGLE-FLIGHT (WO-15 (ii)): a pass firing while another is still running is a logged no-op,
         never a second concurrent replay. Watermarks make a *later* pass a cheap no-op anyway, but
@@ -431,7 +439,7 @@ class CatchUpRunner:
             )
             return CatchUpResult(skipped_in_flight=True)
         async with self._pass_lock:
-            return await self._pass(off_since=off_since, scope=scope, exclude=exclude)
+            return await self._pass(off_since=off_since, scope=scope)
 
     # ------------------------------------------------------------------ early hydration (§2.6, 2026-09-09)
     async def hydrate_ahead(
@@ -542,9 +550,7 @@ class CatchUpRunner:
             self.record_run(spec.job_id, today, status="failed")
             return "failed"
 
-    async def _pass(
-        self, *, off_since: datetime | None, scope: CatchUpScope, exclude: Collection[str] = ()
-    ) -> CatchUpResult:
+    async def _pass(self, *, off_since: datetime | None, scope: CatchUpScope) -> CatchUpResult:
         now = self._clock.now()
         result = CatchUpResult(
             off_duration_s=max(0.0, (now - off_since).total_seconds()) if off_since else 0.0
@@ -553,11 +559,11 @@ class CatchUpRunner:
             _log.info("catch_up_no_registry", note="Phase-1 jobs registered by the integrator (§2.6)")
             return result
 
-        for spec in self._in_scope(JobClass.SAFETY_CRITICAL, scope, exclude):
+        for spec in self._in_scope(JobClass.SAFETY_CRITICAL, scope):
             await self._run_safety_critical(spec, now, result)
-        for spec in self._in_scope(JobClass.RUN_LATEST, scope, exclude):
+        for spec in self._in_scope(JobClass.RUN_LATEST, scope):
             await self._run_latest(spec, now, off_since, result)
-        for spec in self._in_scope(JobClass.DATE_KEYED, scope, exclude):
+        for spec in self._in_scope(JobClass.DATE_KEYED, scope):
             await self._run_date_keyed(spec, now, off_since, result)
 
         _log.info(
@@ -587,17 +593,9 @@ class CatchUpRunner:
             return True
         return bool(result.jobs_failed) and result.jobs_failed != self._last_failed_alert
 
-    def _in_scope(
-        self, job_class: JobClass, scope: CatchUpScope, exclude: Collection[str] = ()
-    ) -> list[JobSpec]:
-        """The class's specs in dependency order, filtered by the WO-15 deferred set.
-
-        ``exclude`` (WO-21) is applied FIRST and to every scope — a per-pass veto is unconditional
-        by construction, otherwise an ``ALL`` sweep would quietly reinstate what the caller vetoed.
-        """
+    def _in_scope(self, job_class: JobClass, scope: CatchUpScope) -> list[JobSpec]:
+        """The class's specs in dependency order, filtered by the WO-15 deferred set."""
         specs = self._registry.specs(job_class)  # type: ignore[union-attr]
-        if exclude:
-            specs = [s for s in specs if s.job_id not in exclude]
         if scope is CatchUpScope.ALL or not self._deferred:
             return specs
         if scope is CatchUpScope.DEFERRED:
@@ -710,7 +708,9 @@ class CatchUpRunner:
         :data:`GIVE_UP_AFTER_DAYS` is marked ``skipped`` (terminal — ``was_run`` treats it as done)
         instead of retrying forever; a still-``failed`` day that has drifted beyond the
         ``max_lookback_days`` scan horizon is resolved the same way (the horizon already meant
-        give-up — silently, and it would otherwise pin ``first_failed_date`` forever)."""
+        give-up — silently, and it would otherwise pin ``first_failed_date`` forever). An
+        :func:`_job_unfinished` run records nothing and ends this job's replay; the next pass
+        resumes at that day."""
         today = now.date()
         for stale in self._failed_dates_before(spec.job_id, today - timedelta(days=self._max_lookback_days)):
             self.record_run(spec.job_id, stale, status="skipped")
@@ -720,6 +720,9 @@ class CatchUpRunner:
         for d in self._missed_days(spec, now, off_since, include_failed=True):
             try:
                 outcome = await spec.run(d)  # type: ignore[call-arg]
+                if _job_unfinished(outcome):
+                    _log.info("date_keyed_unfinished", job_id=spec.job_id, run_for=d.isoformat())
+                    return
                 if not _job_result_ok(outcome):
                     # degraded return = failure for the watermark; the job already alerted (E5)
                     _log.warning("date_keyed_catchup_degraded", job_id=spec.job_id, run_for=d.isoformat())

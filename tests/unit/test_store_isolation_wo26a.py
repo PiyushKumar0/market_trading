@@ -177,7 +177,7 @@ def test_close_waits_for_an_in_flight_flush_instead_of_skipping_it(tmp_path, clo
 async def test_store_calls_run_on_mt_store_and_flushes_on_mt_flush(tmp_path, clock, monkeypatch):
     """Thread names are the cheapest proof that the offloads landed where they were routed -- and
     the only proof that survives a refactor of how they get there."""
-    store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock)
+    store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, max_buffered_ticks=1)
     store.open()
     try:
         assert store._store_executor is None and store._flush_executor is None   # created lazily
@@ -223,7 +223,7 @@ async def test_the_live_flush_path_skips_without_even_reaching_the_pool(tmp_path
     for seconds -- the pile-up in its last remaining form, now made of queue entries and tick-handler
     latency instead of threads. So the skip is decided on the loop: no hop, no queue entry, and the
     flush pool is not even constructed."""
-    store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock)
+    store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, max_buffered_ticks=1)
     store.open()
     started, release = threading.Event(), threading.Event()
     real_locked = store._flush_lock.locked
@@ -249,6 +249,48 @@ async def test_the_live_flush_path_skips_without_even_reaching_the_pool(tmp_path
         holder.join(SLOW_FLUSH_MAX_S * 2)
         # ...and the next cycle, with the lock free, goes all the way through to parquet.
         assert len(await store.aflush_ticks()) == 1
+        store.close()
+
+
+async def test_a_flush_queued_behind_one_that_drained_the_batch_writes_nothing(tmp_path, clock,
+                                                                              monkeypatch):
+    """``locked()`` cannot see a flush that is queued but not yet started, so every tick event of a
+    burst handled before the pool thread takes the lock queues one more. Live on 2026-09-29 the
+    queue ran back to back -- a flush every 3.2 s of ~630 ticks, ~280 files each -- because a queued
+    flush wrote whatever had been staged since the one in front of it. It must re-check that the
+    batch is still due once it holds the lock."""
+    store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, max_buffered_ticks=2)
+    store.open()
+    occupied, release = threading.Event(), threading.Event()
+
+    def occupy_the_flush_thread() -> None:
+        occupied.set()
+        release.wait(SLOW_FLUSH_MAX_S)
+
+    try:
+        blocker = asyncio.get_running_loop().run_in_executor(store._flush_pool(), occupy_the_flush_thread)
+        assert await asyncio.to_thread(occupied.wait, SLOW_FLUSH_MAX_S)
+        store.stage_tick(_tick(clock.now()))
+        store.stage_tick(_tick(clock.now() + timedelta(seconds=1), vol=101))    # due: the batch cap
+        first = asyncio.ensure_future(store.aflush_ticks())
+        second = asyncio.ensure_future(store.aflush_ticks())
+        await asyncio.sleep(0)                                  # both queue behind the blocker
+        real_flush_locked = store._flush_locked
+
+        def flush_then_a_tick_arrives() -> list[Path]:
+            written = real_flush_locked()
+            store.stage_tick(_tick(clock.now() + timedelta(seconds=2), vol=102))
+            return written
+
+        monkeypatch.setattr(store, "_flush_locked", flush_then_a_tick_arrives)
+        release.set()
+        await blocker
+        assert len(await first) == 1
+        assert await second == []                               # one staged tick is not a due batch
+        assert store.tick_flush_skips == 0                      # ...decided under the lock, not skipped
+        assert store.pending_tick_count == 1                    # still staged for the next due flush
+    finally:
+        release.set()
         store.close()
 
 

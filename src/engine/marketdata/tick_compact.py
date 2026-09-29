@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -125,11 +126,18 @@ class TickCompactionResult:
     failures: list[str] = field(default_factory=list)       # "YYYY-MM-DD/SYMBOL: reason"
     budget_exhausted: bool = False                          # stopped on max_symbol_days, more remains
     skipped_in_flight: bool = False                         # 2026-08-14: another run already held the lock
+    stopped: bool = False                                   # 2026-09-29: the caller's ``stop`` fired, more remains
+
+    @property
+    def unfinished(self) -> bool:
+        """The run did not do the day's work: skipped for an in-flight run, or stopped by the caller.
+        Its runner records no watermark, so the day stays missed and a later pass replays it."""
+        return self.skipped_in_flight or self.stopped
 
 
 def compact_ticks(
     parquet_root: Path | str, *, upto: date, today: date,
-    max_dates: int = 40, max_symbol_days: int = 400,
+    max_dates: int = 40, max_symbol_days: int = 400, stop: Callable[[], bool] | None = None,
 ) -> TickCompactionResult:
     """Compact every tick date partition ``<= upto`` and strictly BEFORE ``today``, oldest first.
 
@@ -150,6 +158,12 @@ def compact_ticks(
     ``skipped_in_flight=True`` on an otherwise-default (``ok=True``) result, which is deliberately
     watermark-neutral: the in-flight run owns whatever this day's real outcome turns out to be.
 
+    ``stop`` (2026-09-29) is polled before every symbol-day; once it returns True the run ends there
+    with ``stopped=True``. The engine passes "the session window has begun or the engine is stopping":
+    a run is otherwise unbounded in wall-clock (a host that sleeps mid-run resumes it hours later,
+    in-session), and a worker thread still compacting at shutdown holds the process past NSSM's stop
+    grace (every stop during a run on 09-25/26/28/29 ended in a forced kill).
+
     Synchronous and blocking (DuckDB + filesystem): call it via ``asyncio.to_thread``.
     """
     if not _COMPACT_LOCK.acquire(blocking=False):
@@ -161,6 +175,7 @@ def compact_ticks(
     try:
         return _compact_ticks_locked(
             parquet_root, upto=upto, today=today, max_dates=max_dates, max_symbol_days=max_symbol_days,
+            stop=stop,
         )
     finally:
         _COMPACT_LOCK.release()
@@ -168,6 +183,7 @@ def compact_ticks(
 
 def _compact_ticks_locked(
     parquet_root: Path | str, *, upto: date, today: date, max_dates: int, max_symbol_days: int,
+    stop: Callable[[], bool] | None,
 ) -> TickCompactionResult:
     """The actual scan-and-compact body, run under :data:`_COMPACT_LOCK` by :func:`compact_ticks`."""
     result = TickCompactionResult()
@@ -205,6 +221,11 @@ def _compact_ticks_locked(
                     _log.info("tick_compaction_budget_exhausted", stopped_at=f"{d.isoformat()}/{sym_dir.name}",
                               symbol_days=result.symbol_days_compacted, note="resumes on the next run")
                     return _done(result)
+                if stop is not None and stop():
+                    result.stopped = True
+                    _log.info("tick_compaction_stopped", stopped_at=f"{d.isoformat()}/{sym_dir.name}",
+                              symbol_days=result.symbol_days_compacted, note="resumes on the next run")
+                    return _done(result)
                 _compact_symbol_day(con, d, sym_dir, result)
                 if result.symbol_days_compacted and result.symbol_days_compacted % 50 == 0:
                     _log.info("tick_compaction_progress", date=d.isoformat(),
@@ -219,7 +240,7 @@ def _done(result: TickCompactionResult) -> TickCompactionResult:
         "tick_compaction_done", dates=result.dates, symbol_days=result.symbol_days_compacted,
         fragments_removed=result.fragments_removed, rows=result.rows_written,
         skipped_current_date=result.skipped_current_date, failures=result.failures,
-        budget_exhausted=result.budget_exhausted, ok=result.ok,
+        budget_exhausted=result.budget_exhausted, stopped=result.stopped, ok=result.ok,
     )
     return result
 

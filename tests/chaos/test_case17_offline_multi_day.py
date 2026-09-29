@@ -64,7 +64,7 @@ from engine.ops.jobs import (
     JOB_TICK_COMPACT,
     JobClass,
 )
-from engine.ops.main import INDEX_SYMBOL, VIX_SYMBOL, post_arm_exclusions
+from engine.ops.main import INDEX_SYMBOL, VIX_SYMBOL, _in_session_window
 from engine.ops.post_login import regime_and_warmup_backfill
 from engine.ops.warmup import WarmupGate
 from tests.chaos._lifecycle_rig import EngineProcess, RigEnv, run_session
@@ -119,9 +119,8 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     env, b, calls_b, _sent_b = await _gap_restart(tmp_path, monkeypatch, gap)
     calls = env.calls(since=calls_b)
     reg = b.registry
-    in_session_veto = set(post_arm_exclusions(env.clock, b.calendar))   # WO-21 at a 09:30 boot
-    assert in_session_veto == {JOB_TICK_COMPACT}
-    date_keyed = {s.job_id for s in reg.specs(JobClass.DATE_KEYED)} - in_session_veto
+    assert _in_session_window(env.clock, b.calendar)           # WO-21 at a 09:30 boot: no compaction
+    date_keyed = {s.job_id for s in reg.specs(JobClass.DATE_KEYED)} - {JOB_TICK_COMPACT}
     assert PLAN_NAMED_DATE_KEYED <= date_keyed
     assert all(s.at > A_STOP for s in reg.specs(JobClass.DATE_KEYED)), "stop day must be a missed EOD"
     run_latest = {s.job_id for s in reg.specs(JobClass.RUN_LATEST)}
@@ -148,7 +147,8 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     # Sunday's weekly sector map fell inside the gap: one run, recorded under that Sunday.
     sunday = next(d for d in off_days if d.weekday() == 6)
     assert b.catch_up.was_run(JOB_SECTOR_MAP, sunday)
-    # tick_compact: vetoed in-session (WO-21) — the debt stays on the watermark for the evening sweep.
+    # tick_compact: the lane starts nothing in-session (WO-21) — the debt stays on the watermark for the
+    # first sweep after the window.
     assert all(not b.catch_up.was_run(JOB_TICK_COMPACT, d) for d in missed)
 
     report = b.report

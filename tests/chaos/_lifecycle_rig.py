@@ -3,7 +3,8 @@
 Not a test module (no ``test_`` prefix, so pytest does not collect it). It composes the REAL engine
 components the way ``engine.ops.main.run`` wires them — ``SessionLifecycle`` + ``SelfTest`` + the
 ``RiskStateLatch`` cause ledger, a ``CatchUpRunner`` over the real ``build_job_registry`` inventory
-(``deferred=POST_ARM_JOB_IDS``), the dedicated-thread ``HeartbeatWriter``, the ``Scheduler`` armed by
+(``deferred=POST_ARM_JOB_IDS``) with ``tick_compact`` in its own ``CompactionLane``, the
+dedicated-thread ``HeartbeatWriter``, the ``Scheduler`` armed by
 ``_arm_registry_jobs`` and started by ``start_scheduler_and_fire_post_arm``, the real
 ``_snapshot_backup`` shutdown hook, optionally a ``MarketStore`` + ``BarBuilder`` on the ``EventBus``
 — and drives the REAL ``scripts/watchdog.py`` IO shell (``read_snapshot`` → ``run_tick`` →
@@ -53,7 +54,7 @@ from engine.core.secrets import REQUIRED_AT_STARTUP
 from engine.core.types import OwnerConfirmation, TradeWindow
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.ops.heartbeat import HeartbeatWriter
-from engine.ops.jobs import CatchUpRunner
+from engine.ops.jobs import JOB_TICK_COMPACT, CatchUpResult, CatchUpRunner
 from engine.ops.lifecycle import SessionLifecycle, StartupReport
 from engine.ops.main import (
     _SHUTDOWN_BUS_DRAIN_S,
@@ -61,7 +62,9 @@ from engine.ops.main import (
     PHASE1_JOB_IDS,
     PHASE2_JOB_IDS,
     POST_ARM_JOB_IDS,
+    CompactionLane,
     _arm_registry_jobs,
+    _catchup_sweep_once,
     _snapshot_backup,
     build_job_registry,
     cancel_post_arm,
@@ -374,9 +377,14 @@ class EngineProcess:
 
         self.registry = build_job_registry(s, env.job_fns())
         self.catch_up = CatchUpRunner(
-            self.conn, clock, self.calendar, self.registry,
+            self.conn, clock, self.calendar, self.registry.select(lambda sp: sp.job_id != JOB_TICK_COMPACT),
             freeze=freeze_entries, notify=env.notify, clear=clear_entries_cause,
             deferred=POST_ARM_JOB_IDS if DEFER_POST_ARM_JOBS else (),
+        )
+        self.compaction_lane = CompactionLane(
+            CatchUpRunner(self.conn, clock, self.calendar,
+                          self.registry.select(lambda sp: sp.job_id == JOB_TICK_COMPACT), notify=env.notify),
+            clock, self.calendar,
         )
         self.warmup_gate = warmup_gate_factory(self) if warmup_gate_factory is not None else None
         self.self_test = SelfTest(
@@ -423,22 +431,34 @@ class EngineProcess:
 
     # ------------------------------------------------------------------ boot (main.py order)
     async def boot(self) -> StartupReport:
-        """``_arm_registry_jobs`` → ``lifecycle.startup`` → ``start_scheduler_and_fire_post_arm``.
-        The post-arm one-shot is a background task in main.py; the rig awaits it so a scenario's
-        job ledger is complete when the boot returns."""
+        """``_arm_registry_jobs`` → ``lifecycle.startup`` → ``start_scheduler_and_fire_post_arm`` →
+        the compaction lane. Both post-arm tasks run in the background in main.py; the rig awaits them
+        so a scenario's job ledger is complete when the boot returns."""
         self.env.processes.spawn(self.pid)
         _arm_registry_jobs(self.scheduler, self.registry, self.catch_up, self.env.clock)
         self.report = await self.lifecycle.startup(check_skew=False)
-        self.post_arm = start_scheduler_and_fire_post_arm(
-            self.scheduler, self.catch_up, self.env.clock, self.calendar, armed=asyncio.Event(),
-        )
+        self.post_arm = start_scheduler_and_fire_post_arm(self.scheduler, self.catch_up, armed=asyncio.Event())
+        self.compaction_lane.spawn("post_arm")
         # APScheduler triggers run on the REAL wall clock; the scenario runs on the movable one.
         # Paused (still armed, still ``is_running()``) so a real-world cron minute can never fire a
         # job mid-test — scenarios fire jobs explicitly through fire_scheduled().
         self.scheduler._sched.pause()
         if self.post_arm is not None:
             await asyncio.wait_for(asyncio.shield(self.post_arm), timeout=WAIT_BOUND_S)
+        await self._compaction_settled()
         return self.report
+
+    async def sweep(self) -> CatchUpResult:
+        """One 30-min catch-up sweep exactly as scheduled, with the compaction lane pass it may start
+        awaited too (a background task in main.py)."""
+        result = await _catchup_sweep_once(self.catch_up, self.latch, self.kill, self.compaction_lane)
+        await self._compaction_settled()
+        return result
+
+    async def _compaction_settled(self) -> None:
+        task = self.compaction_lane._task
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=WAIT_BOUND_S)
 
     async def fire_scheduled(self, job_id: str) -> None:
         """Invoke the job exactly as APScheduler would at its fire-time: the armed job's own
@@ -465,6 +485,7 @@ class EngineProcess:
         ENGINE_STOPPED) → bus drained → store.close → conn.close → process exit."""
         self.scheduler.shutdown()
         await cancel_post_arm(self.post_arm)
+        await self.compaction_lane.cancel()
         if self.bar_builder is not None:
             self.bar_builder.flush_all()
         if self.ticker is not None:
@@ -486,8 +507,9 @@ class EngineProcess:
         self.heartbeat.stop()                   # its thread died with the process
         if self.scheduler.is_running():
             self.scheduler.shutdown()
-        if self.post_arm is not None and not self.post_arm.done():
-            self.post_arm.cancel()
+        for task in (self.post_arm, self.compaction_lane._task):
+            if task is not None and not task.done():
+                task.cancel()
         if self.store is not None:
             self.store.close()
         await asyncio.sleep(0)

@@ -60,6 +60,7 @@ from engine.ops.main import (
     NO_EDGE_SHADOW_STRATEGIES,
     PHASE1_JOB_IDS,
     POST_ARM_JOB_IDS,
+    CompactionLane,
     _arm_live_jobs,
     _arm_registry_jobs,
     _consume_ins_pending,
@@ -522,6 +523,29 @@ async def test_scheduled_runner_records_success_for_ok_true_result(conn, clock, 
     await _scheduled_runner(spec, catch_up, clock)()
 
     assert catch_up.was_run(JOB_BHAVCOPY, clock.today()) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [TickCompactionResult(skipped_in_flight=True), TickCompactionResult(stopped=True)],
+    ids=["another_run_holds_the_lock", "stopped_at_the_window_or_shutdown"],
+)
+async def test_scheduled_runner_records_nothing_for_an_unfinished_run(
+    conn, clock, calendar, result: TickCompactionResult
+) -> None:
+    """2026-09-29: every ``tick_compact`` watermark from 09-22 to 09-28 was a 22:30 fire that found
+    a catch-up compaction in flight, returned ``ok=True`` and was recorded as success. An unfinished
+    run records nothing, so the day stays missed and the next pass replays it."""
+    catch_up = CatchUpRunner(conn, clock, calendar)
+
+    async def run_it(d: date) -> TickCompactionResult:
+        return result
+
+    spec = JobSpec(opsmain.JOB_TICK_COMPACT, JobClass.DATE_KEYED, time(22, 30), run_it, order=90)
+    await _scheduled_runner(spec, catch_up, clock)()
+
+    assert conn.execute("SELECT count(*) FROM job_runs").fetchone()[0] == 0
 
 
 # ---------------------------------------- scheduled fire vs today's watermark (§2.6 early hydration)
@@ -1770,8 +1794,8 @@ def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context() -> N
 
 
 # =========================================================================== WO-15 boot ordering
-# (i) boot catch-up runs load-bearing data steps only; the news chain + digest + planner (+ WO-7
-# compaction) fire as one-shots AFTER scheduler.start(); (iii) engine_ready never waits on the chain.
+# (i) boot catch-up runs load-bearing data steps only; the news chain + digest + planner fire as
+# one-shots AFTER scheduler.start(); (iii) engine_ready never waits on the chain.
 # The machinery is pinned in test_catchup_runner.py; here it is the composition root's boot TAIL.
 
 
@@ -1852,9 +1876,7 @@ async def test_scheduler_is_armed_before_the_deferred_chain_fires(conn, clock, c
     catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events),
                              deferred=POST_ARM_JOB_IDS)
 
-    task = start_scheduler_and_fire_post_arm(
-        _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
-    )
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, armed=asyncio.Event())
 
     assert events == ["scheduler_armed"]           # the chain has not even started yet
     await task
@@ -1886,9 +1908,7 @@ async def test_armed_event_is_set_after_the_one_shot_is_dispatched(conn, clock, 
     hook = asyncio.create_task(early_login())
     await asyncio.sleep(0)                           # parked on `armed`, exactly like a 06:30 login
 
-    task = start_scheduler_and_fire_post_arm(
-        _FakeScheduler(events), catch_up, clock, calendar, armed=armed,
-    )
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, armed=armed)
 
     assert armed.is_set() is True
     assert events == ["scheduler_armed"]             # released at arming, not after the chain ran
@@ -1914,9 +1934,7 @@ async def test_news_backlog_boot_reaches_engine_ready_in_load_bearing_time(conn,
 
     async def boot_tail() -> asyncio.Task | None:
         await catch_up.catch_up()                  # what SessionLifecycle.startup awaits (2.6 step 5)
-        task = start_scheduler_and_fire_post_arm(
-            scheduler, catch_up, clock, calendar, armed=asyncio.Event(),
-        )
+        task = start_scheduler_and_fire_post_arm(scheduler, catch_up, armed=asyncio.Event())
         events.append("engine_ready")
         return task
 
@@ -1940,9 +1958,7 @@ async def test_a_failing_post_arm_chain_records_a_failed_watermark_and_never_rai
     catch_up = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events, boom=True),
                              deferred=POST_ARM_JOB_IDS)
 
-    task = start_scheduler_and_fire_post_arm(
-        _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
-    )
+    task = start_scheduler_and_fire_post_arm(_FakeScheduler(events), catch_up, armed=asyncio.Event())
     await task                                     # a chain failure never escapes into the boot path
 
     assert task.exception() is None
@@ -1967,18 +1983,16 @@ async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, cal
 
     scheduler = _FakeScheduler(events)
     armed = asyncio.Event()
-    assert start_scheduler_and_fire_post_arm(
-        scheduler, catch_up, clock, calendar, armed=armed,
-    ) is None
+    assert start_scheduler_and_fire_post_arm(scheduler, catch_up, armed=armed) is None
     assert armed.is_set() is True                  # the login hook is released either way
     assert scheduler.started is True               # arming still happens, unconditionally
 
 
-# ============================================= WO-21 (ii): no in-session tick compaction (2026-08-20)
+# ================================ compaction lane + WO-21 (ii): no in-session tick compaction (2026-08-20)
 # An 11:26 IST crash-recovery boot fired the post-arm compaction backlog DURING the session: ~16 GB
-# peak, tick processing >1 h behind wall clock, /db/query unresponsive, Telegram timing out. The
-# post-arm one-shot now vetoes tick_compact for an in-session boot; the 22:30 slot still covers the
-# day. Every OTHER post-arm job is untouched — a mid-session recovery still wants the news chain.
+# peak, tick processing >1 h behind wall clock, /db/query unresponsive, Telegram timing out. Since
+# 2026-09-29 compaction runs in its own runner (CompactionLane), which starts no pass inside that
+# window — and whose pass lock no other catch-up waits on.
 
 # Trading day (Wed), IST times around the session; and a weekend inside the same clock window.
 _IN_SESSION = datetime(2026, 6, 17, 11, 26, tzinfo=IST)      # the incident's own boot time
@@ -1990,104 +2004,130 @@ def _clock_at(when: datetime) -> Clock:
     return Clock(time_source=lambda: when)
 
 
-def _compaction_registry(events: list[str]) -> JobRegistry:
-    """news_chain (deferred, kept) + tick_compact (deferred, the WO-21 veto target)."""
-    async def chain() -> None:
-        events.append("chain")
-
+def _compaction_lane(conn, clock, calendar, events: list[str], *, last_done: date,
+                     gate: asyncio.Event | None = None) -> CompactionLane:
+    """A lane with a real compaction BACKLOG — the 2026-08-20 shape. ``tick_compact`` is DATE_KEYED
+    at 22:30, so without a prior watermark today's fire-time has not passed and there is nothing to
+    replay; seeding a success at ``last_done`` makes the days after it genuinely missed. ``gate``
+    holds each compaction open until set."""
     async def compact(d: date) -> None:
         events.append(f"compact:{d.isoformat()}")
+        if gate is not None:
+            await gate.wait()
 
     reg = JobRegistry()
-    reg.register(JobSpec(opsmain.JOB_NEWS_CHAIN, JobClass.RUN_LATEST, time(8, 25), chain, order=20))
     reg.register(JobSpec(opsmain.JOB_TICK_COMPACT, JobClass.DATE_KEYED, time(22, 30), compact, order=90))
-    return reg
-
-
-def _compaction_catch_up(conn, clock, calendar, events: list[str], *, last_done: date) -> CatchUpRunner:
-    """A runner with a real compaction BACKLOG — the 2026-08-20 shape. ``tick_compact`` is DATE_KEYED
-    at 22:30, so without a prior watermark today's fire-time has not passed and there is nothing to
-    replay; seeding a success at ``last_done`` makes the days after it genuinely missed."""
-    catch_up = CatchUpRunner(conn, clock, calendar, _compaction_registry(events),
-                             deferred=POST_ARM_JOB_IDS)
-    catch_up.record_run(opsmain.JOB_TICK_COMPACT, last_done)
-    return catch_up
+    runner = CatchUpRunner(conn, clock, calendar, reg)
+    runner.record_run(opsmain.JOB_TICK_COMPACT, last_done)
+    return CompactionLane(runner, clock, calendar)
 
 
 @pytest.mark.asyncio
-async def test_in_session_boot_skips_tick_compact_and_logs_it(conn, calendar, caplog) -> None:
+async def test_a_running_compaction_never_blocks_the_main_catch_up(conn, calendar) -> None:
+    """2026-09-28/29: in the shared runner a backlog compaction held the pass lock from 21:27 to past
+    10:07 the next morning; every 30-min sweep logged ``catch_up_skipped_in_flight`` and the 08:35
+    digest the host slept through was never caught up. In its own lane, compaction delays nothing
+    but compaction."""
+    clock = _clock_at(_EVENING)
+    events: list[str] = []
+    gate = asyncio.Event()                         # the compaction outlives the whole test body
+    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 14), gate=gate)
+    main = CatchUpRunner(conn, clock, calendar, _post_arm_registry(events))
+
+    task = lane.spawn("post_arm")
+    await asyncio.sleep(0)
+    assert events == ["compact:2026-06-15"]        # parked inside the compaction
+
+    result = await asyncio.wait_for(main.catch_up(scope=CatchUpScope.ALL), timeout=5)
+    assert result.skipped_in_flight is False
+    assert main.was_run(opsmain.JOB_NEWS_CHAIN, clock.today()) is True
+    assert not task.done()
+
+    gate.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert events[-1] == "compact:2026-06-16"
+
+
+@pytest.mark.asyncio
+async def test_in_session_the_lane_starts_nothing_and_logs_it(conn, calendar, caplog) -> None:
     clock = _clock_at(_IN_SESSION)
     events: list[str] = []
-    catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 14))
+    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 14))
 
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
-        task = start_scheduler_and_fire_post_arm(
-            _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
-        )
-    await task
+        assert lane.spawn("sweep") is None
 
     # The backlog (Mon 15th + Tue 16th) is real — the evening test below runs it — and NONE of it
     # starts inside the session: that pass is what peaked at ~16 GB on 2026-08-20.
-    assert not [e for e in events if e.startswith("compact")]
-    assert "chain" in events                       # every other post-arm job is unchanged
+    assert events == []
     skips = [r for r in caplog.records if r.getMessage() == "post_arm_skipped_in_session"]
     assert len(skips) == 1
-    assert skips[0].job_id == opsmain.JOB_TICK_COMPACT
+    assert skips[0].job_id == opsmain.JOB_TICK_COMPACT and skips[0].path == "sweep"
     assert skips[0].now.startswith("2026-06-17T11:26")
-    # A veto is per-pass, not a watermark: nothing is recorded, so the 22:30 slot / next ALL sweep
-    # still owns the backlog.
-    assert catch_up.was_run(opsmain.JOB_TICK_COMPACT, date(2026, 6, 15)) is False
+    # A veto is not a watermark: nothing is recorded, so the first pass after the window owns it.
+    assert conn.execute(
+        "SELECT count(*) FROM job_runs WHERE job_id=? AND run_for_date>?",
+        (opsmain.JOB_TICK_COMPACT, "2026-06-14"),
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
-async def test_evening_boot_still_fires_tick_compact(conn, calendar, caplog) -> None:
+async def test_an_evening_lane_pass_runs_the_backlog(conn, calendar, caplog) -> None:
     clock = _clock_at(_EVENING)
     events: list[str] = []
-    catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 14))
+    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 14))
 
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
-        task = start_scheduler_and_fire_post_arm(
-            _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
-        )
-    await task
+        await lane.spawn("post_arm")
 
-    assert [e for e in events if e.startswith("compact")] == [
-        "compact:2026-06-15", "compact:2026-06-16",
-    ]
-    assert "chain" in events
+    assert events == ["compact:2026-06-15", "compact:2026-06-16"]
     assert not [r for r in caplog.records if r.getMessage() == "post_arm_skipped_in_session"]
 
 
 @pytest.mark.asyncio
-async def test_weekend_boot_in_the_clock_window_still_fires_tick_compact(conn, calendar) -> None:
+async def test_a_weekend_lane_pass_in_the_clock_window_still_runs(conn, calendar) -> None:
     """The gate protects a SESSION, not a wall-clock range: a Saturday 11:26 recovery boot is
     exactly when the fragment backlog should be collapsed."""
     clock = _clock_at(_WEEKEND_MIDDAY)
     assert calendar.is_trading_day(clock.today()) is False
     events: list[str] = []
-    catch_up = _compaction_catch_up(conn, clock, calendar, events, last_done=date(2026, 6, 17))
+    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 17))
 
-    await start_scheduler_and_fire_post_arm(
-        _FakeScheduler(events), catch_up, clock, calendar, armed=asyncio.Event(),
-    )
+    await lane.spawn("post_arm")
 
-    assert [e for e in events if e.startswith("compact")] == [
-        "compact:2026-06-18", "compact:2026-06-19",
-    ]
+    assert events == ["compact:2026-06-18", "compact:2026-06-19"]
+
+
+@pytest.mark.asyncio
+async def test_the_lane_runs_one_pass_at_a_time_and_cancels_on_shutdown(conn, calendar) -> None:
+    clock = _clock_at(_EVENING)
+    events: list[str] = []
+    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 14),
+                            gate=asyncio.Event())
+
+    task = lane.spawn("post_arm")
+    await asyncio.sleep(0)
+    assert lane.spawn("sweep") is None             # the running pass owns the backlog
+    await lane.cancel()
+    assert task.cancelled()
+    assert events == ["compact:2026-06-15"]
+    assert lane.spawn("sweep") is not None         # a finished (here: cancelled) pass frees the lane
+    await lane.cancel()
 
 
 @pytest.mark.parametrize(
-    ("when", "expected"),
+    ("when", "inside"),
     [
-        (datetime(2026, 6, 17, 8, 44, tzinfo=IST), ()),                          # just before open-side bound
-        (datetime(2026, 6, 17, 8, 45, tzinfo=IST), (opsmain.JOB_TICK_COMPACT,)),  # inclusive lower bound
-        (datetime(2026, 6, 17, 15, 45, tzinfo=IST), (opsmain.JOB_TICK_COMPACT,)),  # inclusive upper bound
-        (datetime(2026, 6, 17, 15, 46, tzinfo=IST), ()),                         # just after close-side bound
-        (datetime(2026, 6, 17, 3, 0, tzinfo=IST), ()),                           # small hours
+        (datetime(2026, 6, 17, 8, 44, tzinfo=IST), False),     # just before open-side bound
+        (datetime(2026, 6, 17, 8, 45, tzinfo=IST), True),      # inclusive lower bound
+        (datetime(2026, 6, 17, 15, 45, tzinfo=IST), True),     # inclusive upper bound
+        (datetime(2026, 6, 17, 15, 46, tzinfo=IST), False),    # just after close-side bound
+        (datetime(2026, 6, 17, 3, 0, tzinfo=IST), False),      # small hours
+        (_WEEKEND_MIDDAY, False),                              # the clock window, but no session
     ],
 )
-def test_post_arm_exclusion_window_bounds(calendar, when: datetime, expected: tuple) -> None:
-    assert opsmain.post_arm_exclusions(_clock_at(when), calendar) == expected
+def test_in_session_window_bounds(calendar, when: datetime, inside: bool) -> None:
+    assert opsmain._in_session_window(_clock_at(when), calendar) is inside
 
 
 # =========================================================================== WO-14 (c) translation
@@ -2229,12 +2269,14 @@ async def test_retention_failure_warns_and_never_breaks_the_job(caplog) -> None:
     [
         TickCompactionResult(ok=False, failures=["2026-08-01/RELIANCE: boom"]),
         TickCompactionResult(skipped_in_flight=True),
+        TickCompactionResult(stopped=True),
     ],
-    ids=["degraded_pass", "another_run_holds_the_lock"],
+    ids=["degraded_pass", "another_run_holds_the_lock", "stopped_at_the_window_or_shutdown"],
 )
 async def test_retention_is_gated_on_a_clean_pass(result: TickCompactionResult) -> None:
     """A degraded pass leaves un-compacted symbol-days for the retry; a skipped-in-flight pass means
-    ANOTHER compaction run is walking those partitions right now. Neither is a moment to rmtree."""
+    ANOTHER compaction run is walking those partitions right now; a stopped pass was cut off at the
+    session window or by a stop signal. None of them is a moment to rmtree."""
     store = _FakeRetentionStore()
     await opsmain.apply_tick_retention(store, result)
     assert store.calls == 0
@@ -2248,6 +2290,20 @@ def test_tick_compact_closure_calls_retention_after_the_pass() -> None:
     assert "await apply_tick_retention(store, result)" in body
     assert body.index("compact_ticks") < body.index("apply_tick_retention")   # AFTER the pass
     assert "return result" in body                          # and the job's own verdict is unchanged
+    # 2026-09-29: the run ends at the WO-21 window and on a stop signal — a worker thread still
+    # compacting at shutdown held the process past NSSM's grace on every stop during a run.
+    assert "stop=lambda: stop_event.is_set() or _in_session_window(clock, calendar)" in body
+
+
+def test_run_gives_tick_compact_its_own_lane() -> None:
+    """Source-level pin of the 2026-09-29 wiring, which lives in the composition root: the main
+    runner never holds compaction, the lane runner holds nothing else, the lane starts behind the
+    post-arm one-shot, and shutdown cancels it."""
+    src = inspect.getsource(opsmain.run)
+    assert "registry.select(lambda s: s.job_id != JOB_TICK_COMPACT)" in src
+    assert "registry.select(lambda s: s.job_id == JOB_TICK_COMPACT)" in src
+    assert src.index("start_scheduler_and_fire_post_arm(") < src.index('compaction_lane.spawn("post_arm")')
+    assert "await compaction_lane.cancel()" in src
 
 
 # =========================================================================== WO-25c boot contract
@@ -2356,9 +2412,7 @@ async def test_wedged_seeding_boot_still_arms_the_scheduler(conn, clock, calenda
 
     async def boot_tail() -> asyncio.Task | None:
         await seed_boot_snapshots(warmup_refresh, health_check, timeout_s=0.05)
-        task = start_scheduler_and_fire_post_arm(
-            scheduler, catch_up, clock, calendar, armed=asyncio.Event(),
-        )
+        task = start_scheduler_and_fire_post_arm(scheduler, catch_up, armed=asyncio.Event())
         events.append("engine_ready")
         return task
 
@@ -2561,14 +2615,16 @@ async def test_reconcile_catchup_freeze_branching() -> None:
     assert latch.calls == []
 
 
-async def test_catchup_sweep_vetoes_tick_compact_in_session(calendar) -> None:
-    """2026-09-04 11:39 IST: the 30-min sweep (ALL scope) replayed a missed ``tick_compact`` INSIDE
-    the live session — ``tick_compaction_recovered 2026-09-02/NHPC`` — and the engine spent the next
-    hours in store stalls and late ticks (the 2026-08-20 class). WO-21 (ii)'s veto guarded only the
-    post-arm one-shot; the sweep path takes the same veto now, and still reconciles the freeze."""
+async def test_catchup_sweep_runs_the_main_pass_then_the_compaction_lane() -> None:
+    """The sweep's main pass is the whole main registry (compaction is not in it, so nothing is
+    vetoed there), the freeze still reconciles, and the compaction lane is offered its pass AFTER
+    — the lane itself applies the WO-21 window (2026-09-04 11:39: an in-session sweep replay of
+    ``tick_compact`` cost the afternoon in store stalls and late ticks)."""
     from engine.core.enums import RiskState
     from engine.ops.jobs import CatchUpResult
     from engine.ops.main import _catchup_sweep_once
+
+    order: list[str] = []
 
     class FakeCatchUp:
         def __init__(self):
@@ -2576,7 +2632,16 @@ async def test_catchup_sweep_vetoes_tick_compact_in_session(calendar) -> None:
 
         async def catch_up(self, **kw):
             self.calls.append(kw)
+            order.append("main")
             return CatchUpResult()
+
+    class FakeLane:
+        def __init__(self):
+            self.paths: list[str] = []
+
+        def spawn(self, path):
+            self.paths.append(path)
+            order.append("lane")
 
     class FakeLatch:
         def __init__(self):
@@ -2595,19 +2660,11 @@ async def test_catchup_sweep_vetoes_tick_compact_in_session(calendar) -> None:
         def is_killed(self):
             return False
 
-    # In-session on a trading day: tick_compact is vetoed for THIS pass; the freeze still reconciles.
-    cu, latch = FakeCatchUp(), FakeLatch()
-    await _catchup_sweep_once(cu, latch, FakeKill(), _clock_at(datetime(2026, 6, 17, 11, 39, tzinfo=IST)), calendar)
-    assert cu.calls[0]["exclude"] == (opsmain.JOB_TICK_COMPACT,)
+    cu, latch, lane = FakeCatchUp(), FakeLatch(), FakeLane()
+    await _catchup_sweep_once(cu, latch, FakeKill(), lane)
+    assert cu.calls == [{"scope": CatchUpScope.ALL}]
     assert latch.calls == [("clear", "catchup_safety_jobs")]
-
-    # After the close (and on a weekend) nothing is vetoed — the backlog SHOULD collapse then.
-    cu = FakeCatchUp()
-    await _catchup_sweep_once(cu, FakeLatch(), FakeKill(), _clock_at(datetime(2026, 6, 17, 16, 0, tzinfo=IST)), calendar)
-    assert cu.calls[0]["exclude"] == ()
-    cu = FakeCatchUp()
-    await _catchup_sweep_once(cu, FakeLatch(), FakeKill(), _clock_at(_WEEKEND_MIDDAY), calendar)
-    assert cu.calls[0]["exclude"] == ()
+    assert lane.paths == ["sweep"] and order == ["main", "lane"]
 
 
 # ------------------------------------------------- freeze-lift re-sweep + batch ticks (2026-09-11)

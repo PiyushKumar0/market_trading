@@ -303,6 +303,27 @@ def test_a_run_is_bounded_and_resumes_where_it_stopped(store, tmp_path):
                for s in ("AAA", "BBB", "CCC"))
 
 
+def test_a_run_ends_before_the_next_symbol_day_once_stop_fires(store, tmp_path):
+    """2026-09-29: ``stop`` (the WO-21 window, or a stop signal) ends a run between symbol-days —
+    never inside one — and the result is unfinished, so its runner records no watermark and a later
+    pass resumes it."""
+    for symbol in ("AAA", "BBB", "CCC"):
+        _write_fragments(store, YESTERDAY, symbol=symbol, n=2)
+    polls: list[int] = []
+
+    def stop() -> bool:
+        polls.append(1)
+        return len(polls) > 1                          # let the first symbol-day through, then stop
+
+    first = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY, stop=stop)
+    assert (first.symbol_days_compacted, first.stopped, first.unfinished, first.ok) == (1, True, True, True)
+    assert [f.name for f in _files(store, YESTERDAY, "AAA")] == [COMPACT_NAME]
+    assert len(_files(store, YESTERDAY, "BBB")) == 2   # not started: no half-compacted partition
+
+    second = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY, stop=lambda: False)
+    assert (second.symbol_days_compacted, second.stopped, second.unfinished) == (2, False, False)
+
+
 def test_compaction_connection_is_memory_bounded(store, tmp_path):
     """2026-08-18 (the 53 GB incident): the compaction connection must carry an explicit DuckDB
     memory_limit and a spill temp_directory inside ticks/, and the dot-named spill dir must be

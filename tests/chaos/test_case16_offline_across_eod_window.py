@@ -17,11 +17,11 @@ Clauses covered:
 
 * every missed EOD job caught up ONCE for Wed via its watermark — the date-keyed set (bar_reconcile,
   bhavcopy, daily_bars, deals, features_daily, filings_pit, filings_pit_fresh, filings_results,
-  ins_crossings, nightly_review, and tick_compact through the post-arm one-shot) with ``run_for`` =
+  ins_crossings, nightly_review, and tick_compact through the compaction lane) with ``run_for`` =
   Wed; the run-latest EOD set (reco_expire, filings_shp, corp_actions, backup) exactly once — backup
   as ONE run-latest snapshot;
-* idempotent — an immediate 30-min ``catchup_sweep`` pass (``_catchup_sweep_once``, ALL scope) and a
-  further restart re-run nothing;
+* idempotent — an immediate 30-min ``catchup_sweep`` pass (``_catchup_sweep_once``: ALL scope, then
+  the compaction lane) and a further restart re-run nothing;
 * "startup report lists what was caught up" — ``StartupReport.jobs_caught_up`` and the owner's
   ``CATCHUP_REPORT`` both carry every caught-up ``job:date``.
 
@@ -133,9 +133,9 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     assert b.catch_up.stale_safety_jobs() == []
 
     # "startup report lists what was caught up": the boot pass (load-bearing scope) in the
-    # StartupReport, and every pass — incl. the post-arm one-shot (tick_compact) — to the owner.
+    # StartupReport, and every pass — incl. the post-arm one-shot and the compaction lane — to the owner.
     everything = {f"{j}:{WED.isoformat()}" for j in eod_date_keyed | eod_run_latest | eod_safety}
-    boot_pass = everything - {f"{j}:{WED.isoformat()}" for j in opsmain.POST_ARM_JOB_IDS}
+    boot_pass = everything - {f"{j}:{WED.isoformat()}" for j in (*opsmain.POST_ARM_JOB_IDS, JOB_TICK_COMPACT)}
     assert set(report.jobs_caught_up) == boot_pass
     catchup_reports = [m for m in env.messages(since=sent_b) if m.kind == MessageKind.CATCHUP_REPORT]
     owner_listed = {entry for m in catchup_reports for entry in m.data["jobs_caught_up"]}
@@ -145,7 +145,7 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     # Idempotent: the 30-min sweep (ALL scope, exactly as scheduled) replays nothing …
     env.at(_t(THU, 8, 6))
     before = len(env.job_calls)
-    sweep = await opsmain._catchup_sweep_once(b.catch_up, b.latch, b.kill, env.clock, b.calendar)
+    sweep = await b.sweep()
     assert sweep.jobs_caught_up == [] and env.calls(since=before) == []
     # … and neither does another restart.
     await b.stop()

@@ -824,7 +824,9 @@ class MarketStore:
         ~1.9 KB each; 60 s cuts the fragment count ~10× and the nightly compaction merges the
         remainder to one file per symbol-day. Cost: the raw-TICK loss window on a hard crash
         widens 5→60 s — bars_1m is built and persisted independently, so the exposure is R9
-        fill-model raw ticks only, never bar/decision data.
+        fill-model raw ticks only, never bar/decision data. The cap is a memory valve sized above a
+        minute's peak flow (24,332 ticks, 2026-09-29; ~2.3 KB each) so the interval governs: at the
+        old 2,000 it tripped every ~9 s and the fragments stayed at 2–4 K per symbol-day.
     """
 
     def __init__(
@@ -834,7 +836,7 @@ class MarketStore:
         clock: Clock,
         *,
         flush_interval_s: float = 60.0,
-        max_buffered_ticks: int = 2000,
+        max_buffered_ticks: int = 30_000,
     ) -> None:
         self._db_path = Path(db_path)
         self._parquet_root = Path(parquet_root)
@@ -2214,7 +2216,7 @@ class MarketStore:
             return self.flush_ticks()
         return []
 
-    def flush_ticks(self, *, wait_s: float = 0.0) -> list[Path]:
+    def flush_ticks(self, *, wait_s: float = 0.0, if_due: bool = False) -> list[Path]:
         """Write the buffered batch to ``ticks/date=…/symbol=…/<ulid>.parquet`` (one file per
         (date, symbol) group in the batch) and reset the flush timer. Decimal/tz exact.
 
@@ -2230,6 +2232,9 @@ class MarketStore:
         ``wait_s`` > 0 waits that long for the in-flight flush instead of skipping. Only
         :meth:`close` uses it — see there for why it is the one caller that may not skip.
 
+        ``if_due`` flushes only a batch that is still due once the lock is held — see
+        :meth:`aflush_ticks`, its caller.
+
         Lock discipline: ``_flush_lock`` serializes whole flushes (the stage table is shared
         working space); the DuckDB ``_lock`` is held only per statement — one staged bulk write
         for the WHOLE batch, then one brief COPY per (date, symbol) partition — so concurrent
@@ -2243,6 +2248,8 @@ class MarketStore:
             self._note_flush_skipped(waited_s=wait_s)
             return []
         try:
+            if if_due and not self.tick_flush_due():
+                return []
             return self._flush_locked()
         finally:
             self._flush_lock.release()
@@ -2493,12 +2500,18 @@ class MarketStore:
         own latency behind a flush that can run for seconds — the pile-up in its last remaining
         form. The check is optimistic and the try-acquire inside :meth:`flush_ticks` remains the
         authority; losing the race costs one skipped cycle and never a tick, because the batch
-        stays staged and stays due."""
+        stays staged and stays due.
+
+        The check cannot see a flush that is queued but not yet started: every tick event of a
+        burst handled before the pool thread takes the lock queues one more. Each queued flush
+        re-checks ``if_due`` under the lock, so only the first writes; the rest find the batch
+        drained. Without the re-check they ran back to back (2026-09-29: a flush every 3.2 s of
+        ~630 ticks, ~280 files each, at 221 ticks/s)."""
         if self._flush_lock.locked():
             self._note_flush_skipped()
             return []
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._flush_pool(), self.flush_ticks)
+        return await loop.run_in_executor(self._flush_pool(), functools.partial(self.flush_ticks, if_due=True))
 
     async def aget_ticks(self, symbol: str, d: date) -> list[Tick]:
         return await self._off(self.get_ticks, symbol, d)

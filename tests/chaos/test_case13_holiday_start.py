@@ -151,7 +151,13 @@ def holiday_engine(conn, db_path, tmp_path, monkeypatch):
 
     fns = {jid: _recorder(jid) for jid in (*opsmain.PHASE1_JOB_IDS, *opsmain.PHASE2_JOB_IDS)}
     registry = opsmain.build_job_registry(settings, fns)
-    catch_up = CatchUpRunner(conn, clock, calendar, registry, deferred=opsmain.POST_ARM_JOB_IDS)
+    catch_up = CatchUpRunner(conn, clock, calendar,
+                             registry.select(lambda s: s.job_id != opsmain.JOB_TICK_COMPACT),
+                             deferred=opsmain.POST_ARM_JOB_IDS)
+    compaction_lane = opsmain.CompactionLane(
+        CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id == opsmain.JOB_TICK_COMPACT)),
+        clock, calendar,
+    )
     for spec in registry.specs():           # an engine that ran normally through Thursday
         catch_up.record_run(spec.job_id, PRIOR_TRADING_DAY)
 
@@ -174,7 +180,8 @@ def holiday_engine(conn, db_path, tmp_path, monkeypatch):
     rig = type("HolidayRig", (), {})()
     rig.__dict__.update(
         now=now, clock=clock, calendar=calendar, mode=mode, kill=kill, latch=latch,
-        settings=settings, registry=registry, catch_up=catch_up, lifecycle=lifecycle,
+        settings=settings, registry=registry, catch_up=catch_up, compaction_lane=compaction_lane,
+        lifecycle=lifecycle,
         self_test=self_test, heartbeat=heartbeat, notified=notified,
         sdk_smoke_calls=sdk_smoke_calls, job_calls=job_calls, conn=conn,
     )
@@ -281,6 +288,12 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
 
 
 # ------------------------------------------------------------------------------------ jobs skip
+async def _lane_pass(rig) -> None:
+    task = rig.compaction_lane.spawn("sweep")
+    assert task is not None                 # a holiday, and 23:30, are outside the WO-21 window
+    await task
+
+
 async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
     rig = holiday_engine
     report = await _boot(rig)
@@ -294,10 +307,13 @@ async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
         await scheduler._sched.get_job(job_id).func()
     # Safety-critical jobs are not "stale" on a holiday — so no data_freshness FROZEN either.
     assert rig.catch_up.stale_safety_jobs() == []
-    # The post-arm one-shot + a late-evening sweep, after every fire-time of the day has passed.
+    # The post-arm one-shot + a late-evening sweep, after every fire-time of the day has passed —
+    # each followed by the compaction lane pass run() starts behind it.
     await rig.catch_up.catch_up(scope=CatchUpScope.DEFERRED)
+    await _lane_pass(rig)
     rig.now.at = datetime(2026, 6, 26, 23, 30, tzinfo=IST)
     await rig.catch_up.catch_up(scope=CatchUpScope.ALL)
+    await _lane_pass(rig)
 
     assert rig.job_calls == []
     assert rig.conn.execute(
@@ -309,6 +325,7 @@ async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
     # holiday is never replayed as a "missed" day (§2.6 step 5: fire-days are NSE trading days).
     rig.now.at = datetime(2026, 6, 29, 23, 30, tzinfo=IST)
     await rig.catch_up.catch_up(scope=CatchUpScope.ALL)
+    await _lane_pass(rig)
     date_keyed = {s.job_id for s in rig.registry.specs(JobClass.DATE_KEYED)}
     ran_for = {(jid, d) for jid, d in rig.job_calls if jid in date_keyed}
     assert ran_for == {(jid, NEXT_TRADING_DAY) for jid in date_keyed}

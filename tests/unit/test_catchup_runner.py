@@ -275,6 +275,51 @@ async def test_date_keyed_notok_return_is_a_failure_and_resumes(conn, clock, cal
     assert [(j, d) for j, d in calls] == [("bhavcopy", TUE)]
 
 
+class _Unfinished:
+    """``TickCompactionResult``'s unfinished shape: skipped for an in-flight run, or stopped."""
+
+    ok = True
+    unfinished = True
+
+
+@pytest.mark.asyncio
+async def test_date_keyed_unfinished_run_records_nothing_and_the_next_pass_resumes(conn, clock, calendar):
+    """2026-09-29: an unfinished run did not do the day's work. It records no watermark — the day
+    stays missed — and ends the replay there, so the next pass resumes at that day. Recorded as
+    success, every ``tick_compact`` watermark from 09-22 to 09-28 had no completed run behind it."""
+    calls: list = []
+    unfinished_once = [MON]
+
+    async def run(d: date) -> _Unfinished | None:
+        calls.append(d)
+        if d in unfinished_once:
+            unfinished_once.remove(d)
+            return _Unfinished()
+        return None
+
+    reg = JobRegistry()
+    reg.register(JobSpec(job_id="tick_compact", job_class=JobClass.DATE_KEYED, at=time(18, 30), run=run))
+    runner = _build_runner(conn, clock, calendar, reg)
+    runner.record_run("tick_compact", FRI)
+
+    result = await runner.catch_up(off_since=OFF_SINCE)
+    assert calls == [MON]                                         # TUE not attempted behind it
+    assert result.jobs_caught_up == [] and result.jobs_failed == []
+    assert runner.last_success_date("tick_compact") == FRI and runner.first_failed_date("tick_compact") is None
+
+    await runner.catch_up(off_since=OFF_SINCE)
+    assert calls == [MON, MON, TUE]
+    assert runner.was_run("tick_compact", MON) and runner.was_run("tick_compact", TUE)
+
+
+def test_registry_select_keeps_registration_order_and_leaves_the_source_whole():
+    reg = JobRegistry()
+    for job_id in ("a", "b", "c"):
+        reg.register(_spec_recorder([], job_id, JobClass.RUN_LATEST, time(8, 0)))
+    assert [s.job_id for s in reg.select(lambda s: s.job_id != "b").specs()] == ["a", "c"]
+    assert len(reg) == 3
+
+
 # ============================================================ give-up + report dedup (2026-08-18)
 def _backdate_first_failed(conn, job_id: str, d: date, first_failed: datetime) -> None:
     """Manufacture a failing streak (the clock is frozen at FIXED_NOW, so a real streak cannot

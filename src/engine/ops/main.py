@@ -129,6 +129,7 @@ from engine.ops.jobs import (
     JobRegistry,
     JobSpec,
     _job_result_ok,
+    _job_unfinished,
 )
 from engine.ops.keep_awake import KeepAwake
 from engine.ops.lifecycle import SessionLifecycle
@@ -236,14 +237,12 @@ _RECO_EXPIRE_IST = time(15, 45)
 #: made naive early arming unsafe. These now fire as one-shots through the SAME catch-up machinery
 #: (same watermarks, same dependency order) immediately AFTER the scheduler is armed, so an identical
 #: wedge costs the digest alone. Digest staleness already degrades ``cat`` safely (digest_stale_max_h).
-#: Members, in catch-up dependency order: news chain (20) → digest (25) → planner (28), plus the WO-7
-#: tick compaction — pure EOD housekeeping (readers see fragments and compacted files identically),
-#: and the single heaviest catch-up step by wall-clock, so boot is precisely where it must not be —
+#: Members, in catch-up dependency order: news chain (20) → digest (25) → planner (28), plus
 #: ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot reads — and
-#: ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them.
+#: ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them. Tick
+#: compaction is not a member: it runs in its own runner (:class:`CompactionLane`).
 POST_ARM_JOB_IDS: tuple[str, ...] = (
-    JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_TICK_COMPACT, JOB_RESULTS_LINE_ITEMS,
-    JOB_FEED_FRESHNESS,
+    JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RESULTS_LINE_ITEMS, JOB_FEED_FRESHNESS,
 )
 
 #: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
@@ -281,14 +280,14 @@ EARLY_HYDRATION_JOB_IDS: tuple[str, ...] = (
 #: the post-arm one-shot becomes a no-op. Flip + restart; no other code path changes.
 DEFER_POST_ARM_JOBS = True
 
-#: WO-21 (ii): the IST window in which a boot must NOT fire the post-arm ``tick_compact`` one-shot.
+#: WO-21 (ii): the IST window in which ``tick_compact`` must NOT run: no compaction lane pass starts
+#: inside it, and a running one stops before its next symbol-day (2026-09-29).
 #: 2026-08-20, 11:26 IST — a mid-session crash-recovery boot fired the compaction backlog catch-up
 #: while the market was open: ~16 GB memory peak, tick processing fell more than an hour behind wall
 #: clock, ``/db/query`` went unresponsive and Telegram sends timed out. Compaction is idle-hours
-#: housekeeping (§4.3/WO-7): the 22:30 scheduled slot still covers the day, and the 30-min ``ALL``
-#: sweep re-runs whatever the skipped one-shot left unwatermarked once the session is over — so the
-#: skip costs a few hours of fragment retention, never a compaction. Bounds bracket the session with
-#: margin either side (08:45 is ahead of the 09:00 pre-open, 15:45 behind the 15:30 close).
+#: housekeeping (§4.3/WO-7): the first lane pass after the window replays whatever was skipped or
+#: stopped, so the veto costs a few hours of fragment retention, never a compaction. Bounds bracket
+#: the session with margin either side (08:45 is ahead of the 09:00 pre-open, 15:45 behind the close).
 _IN_SESSION_START_IST = time(8, 45)
 _IN_SESSION_END_IST = time(15, 45)
 
@@ -1302,9 +1301,11 @@ async def run() -> int:
         # Off the event loop (DuckDB + a large filesystem walk, §2.2) and on its OWN connection —
         # never the live MarketStore's, which is the bar/tick write path. Today's partition is
         # skipped inside compact_ticks (the writer still owns it). Ok-bearing: a failed symbol-day
-        # sinks the watermark and the next sweep retries only what did not compact.
+        # sinks the watermark and the next sweep retries only what did not compact. ``stop`` ends
+        # the run at the WO-21 window or on a stop signal (compact_ticks docstring).
         result = await asyncio.to_thread(
-            compact_ticks, settings.parquet_dir(), upto=d, today=clock.today()
+            compact_ticks, settings.parquet_dir(), upto=d, today=clock.today(),
+            stop=lambda: stop_event.is_set() or _in_session_window(clock, calendar),
         )
         # WO-23: the §4.5 retention sweep runs HERE, right after the nightly compaction — see
         # ``apply_tick_retention``. It never changes this job's ok-bearing result.
@@ -1386,11 +1387,17 @@ async def run() -> int:
         symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL, vix_symbol=VIX_SYMBOL,
     )
     heartbeat = HeartbeatWriter(settings.sqlite_path(), clock, interval_s=settings.lifecycle.heartbeat_write_s)
-    catch_up = CatchUpRunner(conn, clock, calendar, registry, freeze=freeze_entries, notify=notify,
-                             clear=clear_entries_cause,
+    catch_up = CatchUpRunner(conn, clock, calendar,
+                             registry.select(lambda s: s.job_id != JOB_TICK_COMPACT),
+                             freeze=freeze_entries, notify=notify, clear=clear_entries_cause,
                              # WO-15 (i): boot replays load-bearing data steps only; POST_ARM_JOB_IDS
                              # fire after scheduler.start() (rollback: DEFER_POST_ARM_JOBS = False).
                              deferred=POST_ARM_JOB_IDS if DEFER_POST_ARM_JOBS else ())
+    compaction_lane = CompactionLane(
+        CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id == JOB_TICK_COMPACT),
+                      notify=notify),
+        clock, calendar,
+    )
 
     self_test = SelfTest(
         conn=conn, clock=clock, settings=settings, secrets=secrets,
@@ -1643,11 +1650,10 @@ async def run() -> int:
     async def catchup_sweep() -> None:
         try:
             # ALL scope (WO-15): the sweep is the retry path for the post-arm one-shots too — a
-            # news chain / digest / planner / compaction run that failed after arming is swept here
-            # exactly like any other missed job. Single-flight makes a sweep landing on top of a
-            # still-running pass a logged no-op rather than a double replay. The in-session
-            # tick_compact veto applies here too (2026-09-04) — see _catchup_sweep_once.
-            await _catchup_sweep_once(catch_up, latch, kill, clock, calendar)
+            # news chain / digest / planner run that failed after arming is swept here exactly like
+            # any other missed job. Single-flight makes a sweep landing on top of a still-running
+            # pass a logged no-op rather than a double replay. Compaction is swept in its own lane.
+            await _catchup_sweep_once(catch_up, latch, kill, compaction_lane)
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
 
@@ -2251,9 +2257,8 @@ async def run() -> int:
     # WO-15 (i)+(iii): arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it
     # as a background task. engine_ready (below) must not wait on the news chain — a wedged chain now
     # costs the digest, not the whole scheduled day (2026-08-10). Its own 600 s resolve cap bounds it.
-    post_arm_task = start_scheduler_and_fire_post_arm(
-        scheduler, catch_up, clock, calendar, armed=scheduler_armed,
-    )
+    post_arm_task = start_scheduler_and_fire_post_arm(scheduler, catch_up, armed=scheduler_armed)
+    compaction_lane.spawn("post_arm")
     # §2.6 EARLY HYDRATION boot trigger (2026-09-21): a boot on a trading day before the open hydrates
     # under the same gates as an early login — the watermarks it leaves make a later login free.
     early_hydration_task = asyncio.create_task(early_hydration.on_boot(), name="early_hydration_boot")
@@ -2274,6 +2279,7 @@ async def run() -> int:
     # for an engine that is deliberately shutting down.
     scheduler.shutdown()                      # no new job fires can race the teardown
     await cancel_post_arm(post_arm_task)      # a still-running post-arm one-shot never blocks a stop
+    await compaction_lane.cancel()            # …nor a compaction lane pass
     await cancel_post_arm(early_hydration_task)  # a still-running boot hydration never blocks a stop
     if _freeze_lift_tasks:
         # …nor a detached freeze-lift re-sweep. WAIT it out first (a sweep is seconds): the task parks
@@ -2308,47 +2314,72 @@ async def run() -> int:
 
 
 # --------------------------------------------------------------------------- boot tail (WO-15)
-def post_arm_exclusions(
-    clock: Clock, calendar: NSECalendar, *, path: str = "post_arm"
-) -> tuple[str, ...]:
-    """Catch-up jobs a pass must NOT fire, given WHEN it runs (WO-21 (ii)).
-
-    Only ``tick_compact`` is ever vetoed, and only for a pass landing inside a live trading session
-    (:data:`_IN_SESSION_START_IST`..:data:`_IN_SESSION_END_IST` on an NSE trading day). Every other
-    job is unchanged: the news chain / digest / planner are pre-open work that a mid-session recovery
-    still wants done, whereas compaction competes with the tick writer for exactly the resources the
-    session needs (2026-08-20 11:26 IST — see the constants above).
-
-    Two callers share the veto (``path`` names which, in the log): the post-arm one-shot at boot,
-    and — since 2026-09-04 — every 30-min catch-up sweep (:func:`_catchup_sweep_once`): on 09-04 the
-    sweep replayed a missed ``tick_compact`` at 11:39 IST inside the session and the engine spent
-    the afternoon in store stalls and late ticks, the very class the one-shot veto exists for.
-
-    Non-trading day (weekend / holiday) inside the same clock window ⇒ no veto: there is no session
-    to protect, and a Saturday pass is precisely when the backlog SHOULD be collapsed.
-    """
+def _in_session_window(clock: Clock, calendar: NSECalendar) -> bool:
+    """WO-21 (ii): inside :data:`_IN_SESSION_START_IST`..:data:`_IN_SESSION_END_IST` on an NSE trading
+    day, where tick compaction must not run — it competes with the tick writer for exactly the
+    resources the session needs (2026-08-20 11:26 IST; on 09-04 an 11:39 sweep replay cost the
+    afternoon in store stalls and late ticks). A non-trading day inside the same clock window is
+    outside it: there is no session to protect, and a Saturday is precisely when the backlog SHOULD
+    be collapsed."""
     now = clock.now()
-    if not calendar.is_trading_day(now.date()):
-        return ()
-    if not (_IN_SESSION_START_IST <= now.time() <= _IN_SESSION_END_IST):
-        return ()
-    _log.info("post_arm_skipped_in_session", job_id=JOB_TICK_COMPACT, now=now.isoformat(), path=path)
-    return (JOB_TICK_COMPACT,)
+    return calendar.is_trading_day(now.date()) and _IN_SESSION_START_IST <= now.time() <= _IN_SESSION_END_IST
 
 
-async def _catchup_sweep_once(catch_up: CatchUpRunner, latch, kill, clock: Clock, calendar: NSECalendar):
-    """One 30-min catch-up sweep: ALL scope, the in-session ``tick_compact`` veto, then the
-    catchup_safety_jobs freeze reconciliation (2026-09-02). Extracted from the scheduler closure so
-    the veto on THIS path is testable (2026-09-04)."""
-    exclude = post_arm_exclusions(clock, calendar, path="sweep")
-    result = await catch_up.catch_up(scope=CatchUpScope.ALL, exclude=exclude)
+class CompactionLane:
+    """``tick_compact`` in its OWN single-flight catch-up runner (2026-09-29).
+
+    In the shared runner a backlog compaction held the pass lock for its whole run: the 21:27 post-arm
+    pass of 2026-09-28 was still compacting at 10:07 the next morning, every 30-min sweep in between
+    logged ``catch_up_skipped_in_flight``, and the 08:35 digest the host slept through was never
+    caught up. This runner shares only the ``job_runs`` table with the main one, so a long compaction
+    delays nothing but compaction. At most one lane pass runs at a time, and none starts inside the
+    WO-21 window; a running one stops there by itself (``job_tick_compact``'s ``stop``).
+    """
+
+    def __init__(self, runner: CatchUpRunner, clock: Clock, calendar: NSECalendar) -> None:
+        self._runner = runner
+        self._clock = clock
+        self._calendar = calendar
+        self._task: asyncio.Task | None = None
+
+    def spawn(self, path: str) -> asyncio.Task | None:
+        """Start a lane pass unless one is running or the WO-21 window vetoes it (``path`` names the
+        caller in the log). Returns the new task, or ``None`` when nothing was started."""
+        if self._task is not None and not self._task.done():
+            return None
+        if _in_session_window(self._clock, self._calendar):
+            _log.info("post_arm_skipped_in_session", job_id=JOB_TICK_COMPACT,
+                      now=self._clock.now().isoformat(), path=path)
+            return None
+        self._task = asyncio.create_task(self._pass(), name="compaction_lane")
+        return self._task
+
+    async def _pass(self) -> None:
+        try:
+            await self._runner.catch_up(scope=CatchUpScope.ALL)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - housekeeping must never surface into the scheduler loop
+            _log.exception("compaction_lane_failed")
+
+    async def cancel(self) -> None:
+        """Cancel + join a running lane pass on shutdown. Its worker thread cannot be cancelled; it
+        ends before its next symbol-day once the stop signal is set (``compact_ticks``'s ``stop``)."""
+        await cancel_post_arm(self._task)
+
+
+async def _catchup_sweep_once(catch_up: CatchUpRunner, latch, kill, lane: CompactionLane) -> CatchUpResult:
+    """One 30-min catch-up sweep: ALL scope, the catchup_safety_jobs freeze reconciliation
+    (2026-09-02), then a compaction lane pass (:meth:`CompactionLane.spawn`). Extracted from the
+    scheduler closure so this path is testable (2026-09-04)."""
+    result = await catch_up.catch_up(scope=CatchUpScope.ALL)
     await _reconcile_catchup_freeze(result, latch, kill)
+    lane.spawn("sweep")
     return result
 
 
 def start_scheduler_and_fire_post_arm(
-    scheduler: Scheduler, catch_up: CatchUpRunner, clock: Clock, calendar: NSECalendar,
-    *, armed: asyncio.Event,
+    scheduler: Scheduler, catch_up: CatchUpRunner, *, armed: asyncio.Event,
 ) -> asyncio.Task | None:
     """Arm the scheduler, THEN fire the deferred one-shots behind it — never the other way round.
 
@@ -2364,9 +2395,6 @@ def start_scheduler_and_fire_post_arm(
     Returns the task (``None`` when the rollback flag is off / nothing is deferred) so shutdown can
     cancel it; a crash inside is logged, never raised into the boot path.
 
-    WO-21 (ii): :func:`post_arm_exclusions` decides, from the boot's own wall clock, which one-shots
-    this boot must skip — today only the in-session ``tick_compact``.
-
     ``armed`` (§2.6 early hydration, 2026-09-09) is the composition root's "the scheduler is up"
     event that the early-login hook waits on, so its pre-open chain is held to the SAME firing-point
     rule this function exists to enforce. REQUIRED, not optional: a caller that forgot it would park
@@ -2376,15 +2404,11 @@ def start_scheduler_and_fire_post_arm(
     if not (DEFER_POST_ARM_JOBS and POST_ARM_JOB_IDS):
         armed.set()                     # nothing to dispatch — arming itself is the release point
         return None
-    exclude = post_arm_exclusions(clock, calendar)
-    fired = [j for j in POST_ARM_JOB_IDS if j not in exclude]
 
     async def _fire() -> None:
         try:
-            result: CatchUpResult = await catch_up.catch_up(
-                scope=CatchUpScope.DEFERRED, exclude=exclude
-            )
-            _log.info("post_arm_jobs_complete", jobs=fired,
+            result: CatchUpResult = await catch_up.catch_up(scope=CatchUpScope.DEFERRED)
+            _log.info("post_arm_jobs_complete", jobs=list(POST_ARM_JOB_IDS),
                       caught_up=result.jobs_caught_up, failed=result.jobs_failed,
                       skipped_in_flight=result.skipped_in_flight)
         except asyncio.CancelledError:
@@ -2392,7 +2416,7 @@ def start_scheduler_and_fire_post_arm(
         except Exception:  # noqa: BLE001 - these jobs are never entry-blocking (§2.6/§2.7)
             _log.exception("post_arm_jobs_failed")
 
-    _log.info("post_arm_jobs_fired", jobs=fired, skipped=list(exclude))
+    _log.info("post_arm_jobs_fired", jobs=list(POST_ARM_JOB_IDS))
     task = asyncio.create_task(_fire(), name="post_arm_catchup")
     # §2.6 early hydration (2026-09-09): release the login hook only AFTER the one-shot is dispatched.
     # Both are the same single-flighted CatchUpRunner: released first, the woken hook takes the pass
@@ -2459,6 +2483,9 @@ def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
     SLEEP case: a PC that sleeps through the fire times and wakes at 09:30 finds the catch-up sweep
     satisfied and keeps the 06:30 run. A second pre-open plan message on an awake-PC early-login day
     is the accepted, documented cost (§2.6 "Early-hydration addendum").
+
+    An unfinished run (:func:`~engine.ops.jobs._job_unfinished`) records nothing: the day stays missed
+    and the next catch-up pass replays it.
     """
     async def _fire() -> None:
         today = clock.today()
@@ -2467,6 +2494,9 @@ def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
                 outcome = await spec.run(today)  # type: ignore[call-arg]
             else:
                 outcome = await spec.run()       # type: ignore[call-arg]
+            if _job_unfinished(outcome):
+                _log.info("scheduled_job_unfinished", job_id=spec.job_id)
+                return
             if not _job_result_ok(outcome):
                 # degraded return = failure for the watermark; the job already alerted its own
                 # failure (E5) — no new alert from the runner.
@@ -3898,14 +3928,15 @@ async def apply_tick_retention(store: MarketStore, result: TickCompactionResult)
     owns the closed tick partitions and runs nightly after the writer is done with them.
 
     Gated on a clean pass: ``ok=False`` means a symbol-day is still un-compacted (retention would be
-    purging under a job that is going to be retried), and ``skipped_in_flight=True`` means ANOTHER
+    purging under a job that is going to be retried), ``skipped_in_flight=True`` means ANOTHER
     compaction run holds the lock right now — ``rmtree`` of an old partition while that run is
-    walking it is the one race worth avoiding. Either way the next nightly pass sweeps.
+    walking it is the one race worth avoiding — and ``stopped=True`` means the run was cut off at the
+    WO-21 window or by a stop signal, where no store work belongs. The next completed pass sweeps.
 
     Failure is contained: a retention error WARNs and returns, never touching the compaction job's
     ok-bearing result (a purge that could not run is not a data-freshness failure).
     """
-    if not result.ok or result.skipped_in_flight:
+    if not result.ok or result.unfinished:
         return
     try:
         report = await store.aapply_retention()
