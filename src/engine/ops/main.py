@@ -1302,7 +1302,12 @@ async def run() -> int:
         # never the live MarketStore's, which is the bar/tick write path. Today's partition is
         # skipped inside compact_ticks (the writer still owns it). Ok-bearing: a failed symbol-day
         # sinks the watermark and the next sweep retries only what did not compact. ``stop`` ends
-        # the run at the WO-21 window or on a stop signal (compact_ticks docstring).
+        # the run at the WO-21 window or on a stop signal (compact_ticks docstring). Buffered ticks
+        # are written first (waiting out an in-flight flush, as close() does): the tail of a session
+        # the engine stayed up through is otherwise written by the next morning's first flush,
+        # beside a date a post-midnight run already compacted — a fragment compaction refuses to
+        # merge, so every later run would fail on it.
+        await asyncio.to_thread(store.flush_ticks, wait_s=15.0)
         result = await asyncio.to_thread(
             compact_ticks, settings.parquet_dir(), upto=d, today=clock.today(),
             stop=lambda: stop_event.is_set() or _in_session_window(clock, calendar),

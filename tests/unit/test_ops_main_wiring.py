@@ -2293,6 +2293,10 @@ def test_tick_compact_closure_calls_retention_after_the_pass() -> None:
     # 2026-09-29: the run ends at the WO-21 window and on a stop signal — a worker thread still
     # compacting at shutdown held the process past NSSM's grace on every stop during a run.
     assert "stop=lambda: stop_event.is_set() or _in_session_window(clock, calendar)" in body
+    # ...and buffered ticks are written BEFORE compaction reads the partitions: a session tail left
+    # for the next morning's flush would land beside a date a post-midnight run already compacted.
+    assert (body.index("await asyncio.to_thread(store.flush_ticks, wait_s=")
+            < body.index("compact_ticks, settings.parquet_dir()"))
 
 
 def test_run_gives_tick_compact_its_own_lane() -> None:
