@@ -1,5 +1,70 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-29 12:4x–16:1x — compaction lane, compaction stop, tick-flush queue fix (owner: "Work on the proposed fix, and validate them"); c526e81 + 8481667 on `wip/compaction-lane`, NOT deployed
+
+- **Diagnosis** (logs, `job_runs` and the ticks tree, all read-only):
+  - Every compaction run since 09-19 was killed by a restart before it finished;
+    `tick_compaction_done` was last logged 09-19 01:19. Runs manage ~50 symbol-days per 35–130 min.
+  - Every `tick_compact` watermark from 09-22 to 09-28 is a 22:30 fire that found a catch-up
+    compaction in flight: `skipped_in_flight` returned `ok=True` and was recorded as success.
+  - The tick writer flushed every 3.2 s (984 flushes an hour, ~630 ticks and ~280 files each at
+    221 ticks/s), so symbol-days held 2–4 K fragments against the ~375 WO-7 designed for. Every
+    tick event handled before the flush thread took the lock queued one more flush (`aflush_ticks`
+    sees a running flush, not a queued one), and each queued flush wrote whatever had been staged
+    since. Behind that, the 2,000-tick cap tripped every ~9 s, so the 60 s interval never governed.
+  - Every stop taken while a compaction ran (09-25 01:13, 09-26 15:58, 09-28 16:24, 09-29 10:09)
+    lacks `exit_clean`; the six stops without one logged it within a second. `asyncio.run` waits
+    up to 300 s for executor threads before `_hard_exit`, so NSSM killed the process at 30 s. This
+    is the unexplained 09-25 01:14 forced stop.
+- **Fix (c526e81):**
+  - `CompactionLane`: `tick_compact` in its own `CatchUpRunner`. It is started behind the post-arm
+    one-shot and after each 30-min sweep, runs one pass at a time, starts none inside the WO-21
+    window, and is cancelled on shutdown. The main runner's registry no longer holds it.
+  - `compact_ticks(stop=...)`, polled before each symbol-day: the WO-21 window or a stop signal.
+  - An unfinished run (skipped for an in-flight run, or stopped) records no watermark, in the
+    scheduled fire and in the date-keyed catch-up alike.
+  - A queued flush re-checks under the lock that its batch is still due. `max_buffered_ticks`
+    2,000 → 30,000 (peak minute 24,332 ticks; ~2.3 KB a tick, so a 60 s batch is ~30–55 MB).
+  - The catch-up runner's per-pass `exclude` lost its only callers and is removed.
+- **Independent review (Opus agent, after the close).** Three findings:
+  - F1: the funnel-alarm change (below) blinds the alarm. Accepted; commit dropped.
+  - F2: a stop during a backlog symbol-day can still pass NSSM's grace. Accepted as known, see
+    limits.
+  - F3: a post-midnight run can compact date D before D's session tail is flushed at the next
+    morning's first tick. That leaves a fragment compaction refuses to merge, so every later run
+    fails. Fixed in 8481667: `job_tick_compact` writes the buffered ticks first. The trigger
+    predates the change; nothing in the logs or `job_runs` shows it ever fired.
+- **Validation:**
+  - Full suite in the worktree at c526e81: 3,231 passed, 21 skipped (Phase-3-gated). After
+    8481667 the affected files were re-run: 185 passed, 3 skipped.
+  - Watched fail first: the queued-flush regression test fails with the re-check disabled.
+  - Load harness (real EventBus/BarBuilder/MarketStore, 221 ticks/s over 300 symbols, 130 s):
+    old code 57 flushes (2.1 s apart, ~440 ticks, 56 fragments per symbol); new code 2 flushes
+    (59.6 s apart, ~13.3 K ticks, 2 fragments per symbol); no tick lost.
+- **Deploy blocked:** the session's auto-mode permission check refused the fast-forward of
+  `phase2` (the live tree) as a production deploy. Owner steps, outside session hours:
+  `git merge --ff-only wip/compaction-lane`, then a stop + start of `mt-engine`. A stop while
+  the old code is compacting (sweeps from 16:10 on) ends in NSSM's kill, which is harmless.
+- **Check after the deploy boot:**
+  - `post_arm_jobs_fired` lists no `tick_compact`.
+  - A lane pass logs `tick_compaction_progress` or `post_arm_skipped_in_session` (path).
+  - `catch_up_complete scope=all` keeps appearing every 30 min while compaction runs.
+  - Next session: `ticks_flushed` about once a minute at ~11–24 K ticks.
+- **Known limits:**
+  - Until the backlog drains (~5 nights), a stop during a symbol-day of 2–4 K fragments (28–47 s
+    measured) can still pass NSSM's 30 s grace. Harmless: the store is closed and STOPPED
+    committed first.
+  - `tick_buffer_backlog` (a log line only) now needs 4 × 30,000 ticks.
+  - Compaction catch-ups send their own CATCHUP_REPORT.
+- **Funnel alarm, owner-reported 15:08 (`funnel_zero_in_session`): a false alarm, left as is.**
+  - Last forward 11:44. A JSWINFRA brk20 slot at 12:06 waited for its retest, skipped by a live
+    drain as `forward_skipped_outside_band`. The window shut at 12:31
+    (`forward_queue_window_closed`), and the alarm, counting market-session minutes, paged from 14:07.
+  - Counting only in-window minutes was built and withdrawn (review F1): with a 120-min threshold
+    and a ~2 h window, a real wedge starting mid-window could never page.
+  - The alarm needs a signal that separates "held for price" from "wedged"; that is the owner's
+    decision.
+
 ## 2026-09-29 13:4x — G2 C1, C4, C5 accepted by the owner
 
 - Owner, verbatim:
