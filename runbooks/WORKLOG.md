@@ -1,5 +1,61 @@
 # WORKLOG — autonomous operations log
 
+## 2026-09-29 10:5x — G2 C8 + C9 signed off by the owner; G2 re-measured; the 09-29 C1 miss traced to a catch-up blocked by tick compaction (owner: "G2 sign off has been done")
+
+- **Sign-off record.** Read back from the owner's review page store (`signoff/g2`, version 8;
+  private page https://claude.ai/artifact/9HkBwiuaurxfBAb3aPWNFF):
+  - **C8 adopted 10:49:39 IST** as the two G2 weekly samples: the 09-24 04:3x review below.
+    - One re-judge: EUROPRATIK (09-24, 56% stake in Fabwood) went from doubtful to **valid**.
+    - Every other event stands as Claude judged it. No note.
+    - Precision with the owner's call: week of 09-07 **2/5 events valid (40%)**; week of 09-21
+      **7/8 (87.5%)**.
+  - **C9 signed 10:49:50 IST.** All 85 payloads reviewed carry a gate verdict with its checks, cost
+    math and a manual checklist:
+    - 17 entries: full 30-rule gate, 3-step checklist.
+    - 68 exits: `position_known` check only, 1-step checklist, edge 0. That is by design (R3):
+      exits are never gated on a §7.1 limit.
+    - The 5 delivered since the review are complete too: MEESHO, JYOTICNC, TITAN and CARBORUNIV
+      (09-25), PATANJALI (09-29).
+  - The three resolver fixes the C8 review proposed stay HELD until the `cat` v2 shadow verdict
+    (owner decision 09-24).
+- **G2 re-measured 10:52** (`scripts/g2_evidence.py`, 44 sessions 07-29..09-29):
+  - **C1 NOT-MET:** 29/44 = 65.9%; 7/9 since 09-17. 09-28 and 09-29 both missed (below).
+  - **C4 NOT-MET:** 0 taken, 2 closed. 87 recs expired untaken, 1 pending (PATANJALI).
+  - **C5:** 21/44 = MET as the collector counts (any rec). But only **12** of those sessions had
+    an entry rec: 9 are exit-only days (08-28 → 09-10), the repeated HDFCAMC/HINDZINC close
+    alerts. Whether exit-only days count is the owner's decision (raised 09-24, still open).
+  - **MET:** C2a (99.9%), C3 (90/90), C6 platform side, C7 ($29.84 of $200 this quota week).
+  - **Signed:** C8 and C9, above.
+  - **Owner-manual, unrecorded:** the Kite Console order-book audit (C6), and the confirmation
+    that the rec weeks were continuous operation (C5).
+- **09-28 miss, the known late-boot mechanism.**
+  - Boot 10:00:33. The post-arm pass ran the news chain for ~30 min (Monday backlog) before the
+    digest.
+  - Window set at 10:01:35 for 10:20, then at 10:18:34 for 10:25.
+  - Digest 10:32:01, 7 min after the window opened.
+- **09-29 miss, a new mechanism: tick compaction held the catch-up lock.**
+  - The log is silent 08:11 → 09:45, so the host slept through the 08:35 digest (the pre-open
+    sleep the owner accepted on 09-21).
+  - The catch-up that exists to recover a missed digest never ran. Every sweep from 21:51 (09-28)
+    to 09:51 (09-29) logged `catch_up_skipped_in_flight`: passes are single-flight
+    (`CatchUpRunner._pass_lock`, `ops/jobs.py:427`).
+  - The pass in flight was the post-arm one-shot of the 21:27 boot (09-28). It included
+    `tick_compact` and never logged completion. At 22:30 the scheduled compaction slot skipped
+    as already in flight.
+  - At 10:07 that compaction was still on **2026-09-22** (250 symbol-days; ~50 per 35 min
+    awake).
+  - The owner restarted at 10:09. The in-session post-arm pass skips `tick_compact`, so the
+    digest landed at 10:16:01. The window, set at 10:09:03, opened at 10:15: missed by 1 min.
+  - Same pattern at 09-28 16:24: the owner's stop cancelled `job_tick_compact` running inside
+    the 16:00 sweep.
+  - Inference, not observed: without the lock, the 09:51 sweep would likely have landed the
+    digest before the 10:10 window. After the restart, news chain → digest took 2.5 min.
+- **Two open issues.** Neither is fixed; a fix needs the owner's go-ahead and a boot outside
+  session hours.
+  1. Any unbounded job inside a catch-up pass blocks every time-critical catch-up for as long as it
+     runs. That is the 08-10 wedge shape (`ops/jobs.py` module docstring), now via compaction.
+  2. Compaction is ~7 days behind: it was on 09-22 on 09-29.
+
 ## 2026-09-25 01:14–01:30 — index fix live; owner ran the news dedupe
 
 - **Stop and boot:**
