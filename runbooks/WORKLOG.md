@@ -1,6 +1,6 @@
 # WORKLOG — autonomous operations log
 
-## 2026-09-29 12:4x–16:1x — compaction lane, compaction stop, tick-flush queue fix (owner: "Work on the proposed fix, and validate them"); c526e81 + 8481667 on `wip/compaction-lane`, NOT deployed
+## 2026-09-29 12:4x–23:0x — compaction lane, compaction stop, tick-flush queue fix (owner: "Work on the proposed fix, and validate them"); c526e81 + 8481667, deployed 23:04 (owner: "You can deploy your changes")
 
 - **Diagnosis** (logs, `job_runs` and the ticks tree, all read-only):
   - Every compaction run since 09-19 was killed by a restart before it finished;
@@ -41,15 +41,25 @@
   - Load harness (real EventBus/BarBuilder/MarketStore, 221 ticks/s over 300 symbols, 130 s):
     old code 57 flushes (2.1 s apart, ~440 ticks, 56 fragments per symbol); new code 2 flushes
     (59.6 s apart, ~13.3 K ticks, 2 fragments per symbol); no tick lost.
-- **Deploy blocked:** the session's auto-mode permission check refused the fast-forward of
-  `phase2` (the live tree) as a production deploy. Owner steps, outside session hours:
-  `git merge --ff-only wip/compaction-lane`, then a stop + start of `mt-engine`. A stop while
-  the old code is compacting (sweeps from 16:10 on) ends in NSSM's kill, which is harmless.
-- **Check after the deploy boot:**
-  - `post_arm_jobs_fired` lists no `tick_compact`.
-  - A lane pass logs `tick_compaction_progress` or `post_arm_skipped_in_session` (path).
-  - `catch_up_complete scope=all` keeps appearing every 30 min while compaction runs.
+- **Deploy.**
+  - At 16:0x the auto-mode permission check refused the `phase2` fast-forward as a production
+    deploy. The owner then approved it.
+  - 23:02: `git merge --ff-only wip/compaction-lane` (phase2 → 0ef93a5); the import check of the
+    live tree passed.
+  - 23:04:04: stop. The old code was mid-compaction, so after `engine_stopped` at 23:04:17 NSSM
+    logged `stop_forced` at 23:04:35 — the mechanism this fix removes, as predicted.
+  - 23:05:03: boot, `crash_recovered: false`, self-test ok. Boot pass clean (23:06:53).
+    `post_arm_jobs_fired` lists news_chain, catalyst_digest, preopen_planner, results_line_items
+    and feed_freshness, with no `tick_compact`. `engine_ready` at 23:07:10.
+  - The compaction lane's first pass ran right behind post-arm (outside the WO-21 window) and
+    found nothing: at 22:40 the old code had recorded `tick_compact:2026-09-29` as caught up while
+    its own run was still in flight — the false success this fix stops. The backlog (09-22
+    remainder, 09-23 → 09-29, 2–4 K fragments per symbol-day) resumes at the 09-30 22:30 run.
+  - The worktree and `wip/compaction-lane` are removed.
+- **Still to observe:**
   - Next session: `ticks_flushed` about once a minute at ~11–24 K ticks.
+  - While compaction runs: `catch_up_complete scope=all` every 30 min, and `tick_compaction_stopped`
+    at 08:45 if a run is still going.
 - **Known limits:**
   - Until the backlog drains (~5 nights), a stop during a symbol-day of 2–4 K fragments (28–47 s
     measured) can still pass NSSM's 30 s grace. Harmless: the store is closed and STOPPED
