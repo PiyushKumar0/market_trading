@@ -173,7 +173,7 @@ What matters beyond what CLAUDE.md and the plan already say:
 
 ---
 
-## 10. What actually made Fable "Fable" — and how to close the gap
+## 10. The habits behind the quality
 
 Honest assessment: the capability gap between adjacent model tiers is smaller than the *discipline* gap between a careful and a careless pass by the same model. Most of what felt like "Fable-quality" was not raw insight; it was these habits, held consistently even when confident. All of them are structurally replicable:
 
@@ -186,7 +186,7 @@ Honest assessment: the capability gap between adjacent model tiers is smaller th
 7. **Know your failure modes and install tripwires.** The recurring ones at every tier below the frontier: premature closure (§1), anchoring on the user's framing (§1), agreement-bias under pushback (§9), plausible-synthesis-over-grounded-fact (the fix: verifiable pointers, in your own work as much as in delegated work), and silent scope narrowing on long tasks (the fix: re-read the original request before declaring done — did you answer what was *asked*?).
 8. **Checklists beat willpower.** That is why this document is written as checklists. When the context is long and the pressure is high, the model that follows its written procedure outperforms the smarter model that improvises.
 
-None of this is secret knowledge. It is the difference between knowing these things and *doing them every time*. The doing is fully within Opus's reach.
+None of this is secret knowledge. It is the difference between knowing these things and *doing them every time*.
 
 Good hunting.
 

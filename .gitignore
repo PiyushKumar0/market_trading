@@ -54,6 +54,8 @@ desktop.ini
 # --- Claude Code harness transient state (keep .claude/settings*.json if you add them) ---
 .claude/scheduled_tasks.lock
 .claude/projects/
+.claude/worktrees/
+.claude/settings.local.json
 
 # uv lockfile IS committed (reproducible builds) — do not ignore uv.lock
 

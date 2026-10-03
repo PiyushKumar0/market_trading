@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Date)",
+      "PowerShell(Get-Date *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Get-Service *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(git log *)",
+      "PowerShell(git status *)",
+      "PowerShell(git diff *)"
+    ]
+  }
+}

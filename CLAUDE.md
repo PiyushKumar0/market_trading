@@ -4,9 +4,9 @@
 
 ## Model policy — Fable is the manager, not the workhorse
 
-The manager role runs on Claude Fable 5. Fable is the most expensive model in the stack, so its time goes exclusively to work that requires judgement; everything else is delegated to cheaper models via the Agent tool.
+The manager role runs on Fable. Fable is the most expensive model in the stack, so its time goes exclusively to work that requires judgement; everything else is delegated to cheaper models via the Agent tool.
 
-Cost ladder (per MTok in/out, as of 2026-07): Fable 5 $10/$50 → Opus 5 $5/$25 → Sonnet 5 $3/$15 → Haiku 4.5 $1/$5. If prices drift, only the ordering matters.
+Cost order, per token and in subscription-quota draw: Fable → Opus → Sonnet → Haiku. Route by this order; current prices are on the platform.claude.com pricing page if a decision ever needs the actual ratio.
 
 ### Fable does itself (judgement work — never delegate)
 
@@ -18,13 +18,17 @@ Cost ladder (per MTok in/out, as of 2026-07): Fable 5 $10/$50 → Opus 5 $5/$25 
 
 ### Delegate down — cheapest model that clears the bar
 
-Subagents inherit the session model (Fable) by default — **always pass an explicit `model` when delegating**, or grunt work bills at Fable rates.
+Subagents inherit the session model (Fable) **and the session effort level** by default — so grunt work bills at Fable rates and thinks at `xhigh`. **Delegate through the project agent types below**: each pins both `model` and `effort` in `.claude/agents/<name>.md` and carries the repo's hard rules (no engine control, no protected-store edits, git stays with the manager, tests inline).
 
-| Work | Model |
-|---|---|
-| Implementation where the spec leaves real decisions open (design gaps, failure modes the spec can't enumerate), multi-file refactors, tests for complex logic | `"opus"` (Opus 5) |
-| Implementation fully determined by the spec: boilerplate, mechanical edits, routine fixes with an already-named root cause, running test suites and reporting results | `"sonnet"` (Sonnet 5) |
-| Token-hungry, low-judgement work: log digging, big-document reading, research sweeps, browser use, codebase scans, bulk extraction | `"haiku"` (Haiku 4.5) |
+| Work | Agent type (`subagent_type`) | Model / effort |
+|---|---|---|
+| Implementation where the spec leaves real decisions open (design gaps, failure modes the spec can't enumerate), multi-file refactors, tests for complex logic | `designer-impl` | `opus` / `high` |
+| Implementation fully determined by the spec: boilerplate, mechanical edits, routine fixes with an already-named root cause, running test suites and reporting results | `implementer` | `sonnet` / `medium` |
+| Token-hungry, low-judgement work: log digging, big-document reading, research sweeps, codebase scans, bulk extraction | `log-digger` (read-only) | `haiku` / inherited |
+
+The definitions use the family aliases, which resolve to the newest model in each family — no version pin to maintain.
+
+Where no agent type fits — browser use, escalating `log-digger` work a tier up, Haiku-rung material too big for 200K — use a general-purpose agent and **pass an explicit `model`**; it still inherits the session effort. Never pass a `model` override to one of the typed agents: the definition's pairing is the point.
 
 Routing rules:
 
