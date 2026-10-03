@@ -21,6 +21,13 @@
   is unmerged — kept). agents.yaml header now says `max_output_tokens` is unsent. The synced `design`
   plugin (7 MCP servers needing auth) is disabled for this project in `.claude/settings.json`. Two
   stale memories pruned (project overview, resolved news-origination gap); their links reworded.
+- **`scripts/replay_agents.py`** (owner-requested): the 10-03 model checks as a repo tool. `sample` pins
+  live calls from the SDK transcripts (earliest transcript per prompt, so replays never pass as live);
+  `run` replays them with harness-built production options as `--baseline` and a `--model`/`--effort`/
+  `--cli-path` candidate, validates with the agents' real parsers, writes `data/reports/replays/<run>/`;
+  refuses during market hours on trading days. Smoke run (8 calls, effort low vs production) ok.
+  Its first sample also showed the news analyst already live on Sonnet 5.5: the Saturday 19:00–22:00
+  sweep scored 6/6, 6/6 and 24/24 clusters at 21:20–21:36 on 10-03, none dropped.
 
 ## 2026-10-03 16:2x–18:xx — roster sonnet-5 → sonnet-5.5, SDK 0.2.103 → 0.2.159, engine-owned pinned CLI 2.1.288 (owner: "need to update them to latest version"; route, roster and news effort chosen by the owner)
 
