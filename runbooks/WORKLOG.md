@@ -1,5 +1,33 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-03 13:4x–15:xx — analyst thinking depth: per-agent `effort` replaces the dead `max_thinking_tokens=0` pin (owner: "Validate and verify the suggested changes and then apply them"); NOT deployed
+
+- **Finding (prompt audit, `/claude-api prompt-audit`):** the harness pinned thinking off with
+  `max_thinking_tokens=0`, which claude-agent-sdk 0.2.103 marks deprecated (`thinking`/`effort`
+  replace it). Sonnet 5 thinks anyway: 34 of the last 36 engine transcripts carry thinking blocks
+  (hidden text, 2.5–29 K-char signatures); one news call billed 5,328 output tokens for ~8.5 K chars
+  of visible output. Also found: `max_output_tokens` never reaches the SDK (no such option field), so
+  the agents.yaml values are unenforced — reported, not changed.
+- **Replay validation** (real engine prompts from the SDK transcripts, Sonnet 5, ~25 calls, Saturday):
+  - effort only (old prompt): output tokens −22..−34% (news 6.8–7.0 K vs 8.6–9.1 K; preopen
+    5.9–6.9 K vs 9.0–9.2 K), latency −15%; every output schema-valid; preopen focus list present 2/2;
+    news materiality inside the current setup's own run-to-run spread (≥0.5 count 4–8 either way).
+  - the audit's prompt rewrites ("Answer only through the supplied output schema…" + an unnumbered
+    thesis length) were **withdrawn**: with them the preopen planner omitted `focus` entirely in 2 of
+    3 runs (0 of 2 without), and the thesis change was untestable (all intraday replays no_action).
+  - Caveat: replays write sdk-py transcripts into the harvested folder, so later "samples" were
+    re-runs of one prompt per agent — read the numbers as repeated runs, not independent prompts.
+- **Change:** `AgentDef.effort` (Literal low…max; refused on haiku, D9), loaded from agents.yaml
+  and sent as the SDK `effort` option; `max_thinking_tokens` is no longer sent. agents.yaml:
+  news_analyst `low`, intraday/preopen/nightly `medium`. Stale "100% cache miss" note removed from
+  `news_analyst.py`/agents.yaml (latest news call read 14,253 cached tokens). All four SYSTEM_PROMPTs
+  byte-identical to HEAD (verified).
+- **Tests:** 3 new effort tests watched failing on the old harness, then 193 passed across
+  agent_harness/agent_defs/context_assembler/nightly_review/news_scoring; ruff clean on touched files.
+- **Deploy:** not done — the running engine keeps the old options until its next boot, which picks
+  this up from the working tree. Watch after deploy: news `agent_calls` output tokens and duration,
+  preopen `focus` length, intraday no_action rate vs the prior week.
+
 ## 2026-09-29 12:4x–23:0x — compaction lane, compaction stop, tick-flush queue fix (owner: "Work on the proposed fix, and validate them"); c526e81 + 8481667, deployed 23:04 (owner: "You can deploy your changes")
 
 - **Diagnosis** (logs, `job_runs` and the ticks tree, all read-only):

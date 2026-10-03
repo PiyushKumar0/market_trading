@@ -603,9 +603,9 @@ async def test_output_format_fallback_mapping_and_turn_bump(defs, gov, clock, co
     assert opts.max_turns == 4
 
 
-async def test_thinking_capped_to_zero_when_knob_exists(defs, gov, clock, conn) -> None:
-    # The CLI defaults to extended thinking — billed at output rates and measured to add 15-50s to
-    # single-shot scoring calls (2026-07-28). The harness pins it off wherever the knob exists.
+async def test_effort_sent_and_thinking_never_pinned(defs, gov, clock, conn) -> None:
+    # Thinking depth is the agents.yaml effort knob. The deprecated max_thinking_tokens=0 did not stop
+    # Sonnet 5 thinking (2026-10-03 audit) and Opus 5.5 rejects disabled thinking, so it is never sent.
     @dataclass
     class ThinkingOptions:
         model: str | None = None
@@ -615,13 +615,30 @@ async def test_thinking_capped_to_zero_when_knob_exists(defs, gov, clock, conn) 
         allowed_tools: list[str] | None = None
         disallowed_tools: list[str] | None = None
         max_thinking_tokens: int | None = None
+        effort: str | None = None
 
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=ThinkingOptions)
+    agent_def = defs["intraday_analyst"].model_copy(update={"effort": "medium"})
 
-    await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+    await harness.run_single_shot(agent_def, FakeContext(), enter_validator(clock))
 
-    assert fake.calls[0].options.max_thinking_tokens == 0
+    opts = fake.calls[0].options
+    assert opts.effort == "medium"
+    assert opts.max_thinking_tokens is None
+
+
+def test_effort_loads_from_yaml_and_is_refused_on_haiku() -> None:
+    cfg = {"agents": {"x": {"model": "sonnet-5", "shape": "single_shot", "tools_enabled": False,
+                            "effort": "low"}}}
+    assert load_agent_defs(cfg)["x"].effort == "low"
+    cfg["agents"]["x"]["model"] = "haiku-4.5"
+    with pytest.raises(Exception, match="effort is not supported"):
+        load_agent_defs(cfg)
+
+
+def test_shipped_roster_sets_effort_on_every_runnable_agent(real_cfg) -> None:
+    assert all(d.effort is not None for d in load_agent_defs(real_cfg).values())
 
 
 # --------------------------------------------------------------------------- timeout / SDK failures

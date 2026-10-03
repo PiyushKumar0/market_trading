@@ -1,8 +1,7 @@
 """News Analyst agent definition (§5.4 / §2.7 step 4) — SYSTEM prompt, batch schema, output parser.
 
-Byte-stable module constant, same as the other agents — but note this prompt's prefix is under
-Haiku's 4,096-token minimum cacheable prefix, so §11 prices this agent at 100% cache miss BY DESIGN
-(D8). Stability here is a correctness property (replayable calls), not a cost lever.
+Byte-stable module constant, same as the other agents (D8): stability keeps calls replayable and the
+cached prefix warm.
 
 The materiality rubric is anchored VERBATIM in the prompt: unanchored 0..1 "importance" scores drift
 between calls and the §7.1 ``catalyst_guard`` thresholds are calibrated against these anchors.

@@ -26,8 +26,8 @@ are auditable in code rather than prose:
   ``StructuredOutput`` TOOL call whose *input* is the validated payload; that round-trip counts as a
   second turn, so the turn cap gets +1 exactly when the schema knob went out. The tool input is the
   authoritative answer (it can never be fenced or wrapped in prose), and client-side validation
-  remains authoritative on top of it (§8.1). Extended thinking is pinned off (``max_thinking_tokens=0``)
-  wherever the knob exists — it bills at output rates and measured +15-50s latency per call.
+  remains authoritative on top of it (§8.1). Thinking depth is the per-agent ``effort`` knob in
+  agents.yaml; thinking is never disabled (the deprecated ``max_thinking_tokens=0`` did not stop it).
 - **No LLM-originated time (§5.1).** The harness stamps nothing from model output. Temporal stamping
   belongs to the ``validate`` callback the caller supplies (e.g. ``schemas.parse_and_stamp``), which
   overwrites ``valid_until``/ids from ``Clock``.
@@ -150,6 +150,7 @@ class AgentDef(BaseModel):
     tools_enabled: bool
     allowed_tools: list[str]        # MANDATORY (D5/D10)
     max_output_tokens: int | None = Field(default=None, gt=0)
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     timeout_s: float = Field(default=DEFAULT_TIMEOUT_S, gt=0)
     max_turns: int | None = Field(default=None, gt=0)
     run_budget_tokens: RunCaps | None = None
@@ -184,6 +185,8 @@ class AgentDef(BaseModel):
                 f"{self.agent_id}: tools_enabled with an empty allowed_tools list is meaningless — "
                 "'tools_enabled: true' never means SDK defaults (D5/D10)"
             )
+        if self.effort is not None and self.model.startswith("haiku"):
+            raise ValueError(f"{self.agent_id}: effort is not supported on {self.model} (D9)")
         return self
 
     @property
@@ -228,6 +231,7 @@ def load_agent_defs(cfg: dict[str, Any]) -> dict[str, AgentDef]:
             tools_enabled=tools_enabled,
             allowed_tools=allowed_tools,
             max_output_tokens=raw.get("max_output_tokens"),
+            effort=raw.get("effort"),
             timeout_s=float(raw.get("timeout_s", DEFAULT_TIMEOUT_S)),
             max_turns=raw.get("max_turns"),
             run_budget_tokens=RunCaps(**budget) if budget else None,
@@ -980,12 +984,10 @@ class AgentHarness:
             if name:
                 kwargs[name] = agent_def.max_output_tokens
 
-        # The CLI defaults to extended thinking, billed at output rates; measured 2026-07-28 it added
-        # 15-50s to single-shot scoring calls for no schema benefit. Pinned off wherever the knob
-        # exists. (If a Phase-3 agentic agent wants thinking, that becomes an agents.yaml knob.)
-        name = _first_field(cls, ("max_thinking_tokens",))
-        if name:
-            kwargs[name] = 0
+        # Depth via effort, never by disabling thinking: Sonnet 5 thinks under max_thinking_tokens=0
+        # (34/36 sdk transcripts carried thinking blocks, 2026-10-03) and Opus 5.5 rejects disabled.
+        if agent_def.effort is not None and "effort" in fields:
+            kwargs["effort"] = agent_def.effort
 
         # Explicit allowlist on EVERY call (D5/D10) — empty for single-shot. An options surface with
         # NO tool knob is refused for EVERY shape (2026-07-28 review): an SDK release that renames

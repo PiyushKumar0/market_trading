@@ -85,6 +85,8 @@ agents:
                               # judgment point). Phase-2 is RECOMMEND mode, so neither latency nor
                               # tier is order-critical, and the deterministic gates still do the
                               # quality filtering ahead of this call.
+    effort: medium             # thinking DEPTH (2026-10-03 prompt audit): Sonnet 5 thinks whatever the
+                               # deprecated max_thinking_tokens says, so depth is set here, never pinned off
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1200
@@ -101,6 +103,7 @@ agents:
   preopen_planner:
     model: sonnet-5           # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
                               # (Opus for decision roles; one call/day, cost delta trivial)
+    effort: medium
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 2000
@@ -111,8 +114,8 @@ agents:
   news_analyst:                # formerly sentiment_scorer — upgraded per §5.4/§2.7 (2026-07-06)
     model: sonnet-5            # haiku→sonnet 2026-08-18 (owner: substitute Sonnet where it helps —
                                # the haiku choice was cost-driven, not quality-driven; materiality/
-                               # novelty judgments feed the watchlist and `cat` origination). The old
-                               # D8 note stands: lean prompt < 4096-token cacheable prefix => 100% miss
+                               # novelty judgments feed the watchlist and `cat` origination).
+    effort: low                # high-volume rubric scoring
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1500    # richer per-CLUSTER schema: scope/entities/sectors/themes/sentiment/
@@ -135,6 +138,7 @@ agents:
                               # preopen planner's yesterday_review_summary (a summarization product,
                               # not a judgment). Revisit → opus at the Phase-3 AGENTIC upgrade, when
                               # the reviewer pulls its own evidence and tier starts to matter.
+    effort: medium
     # Phase-2 v1 DEVIATION (2026-07-28): single-shot with deterministically pre-assembled context —
     # at Phase-2 volume (a handful of recommendations/day, no auto trades) the §5.5 agentic tool
     # loop adds cost + an unverified SDK MCP surface for no analytical gain. The agentic shape +
