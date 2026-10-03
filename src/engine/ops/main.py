@@ -570,9 +570,11 @@ async def run() -> int:
         agent_defs = roster.defs
         roster_quarantined = roster.quarantined
         if agent_defs:
-            cli_path = resolve_cli_path(agents_cfg, config_dir().parent)
-            _log.info("agent_cli", cli_path=cli_path or "sdk-bundled",
-                      present=cli_path is None or os.path.isfile(cli_path))
+            cli_path = resolve_cli_path(agents_cfg, repo_root())
+            if cli_path is not None and not os.path.isfile(cli_path):
+                _log.error("agent_cli_missing", cli_path=cli_path, hint="every SDK call will fail closed")
+            else:
+                _log.info("agent_cli", cli_path=cli_path or "sdk-bundled")
             harness = AgentHarness(agent_defs, governor, clock, conn, alert=alert, cli_path=cli_path)
         else:
             _log.error("agent_roster_empty", hint="config/agents.yaml — LLM tier disabled this run")

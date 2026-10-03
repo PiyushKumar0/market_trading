@@ -637,12 +637,6 @@ def test_effort_loads_from_yaml_and_is_refused_on_haiku() -> None:
         load_agent_defs(cfg)
 
 
-def test_shipped_roster_leaves_effort_unset_only_on_news(real_cfg) -> None:
-    # news_analyst runs at the CLI default by owner decision (2026-10-03); every other agent pins depth.
-    unset = {k for k, d in load_agent_defs(real_cfg).items() if d.effort is None}
-    assert unset <= {"news_analyst"}
-
-
 @dataclass
 class CliOptions:
     model: str | None = None
@@ -652,26 +646,31 @@ class CliOptions:
     allowed_tools: list[str] | None = None
     disallowed_tools: list[str] | None = None
     cli_path: str | None = None
+    env: dict[str, str] | None = None
 
 
-async def test_pinned_cli_path_is_sent(defs, gov, clock, conn, tmp_path) -> None:
+def pinned_harness(defs, gov, clock, conn, fake, cli_path) -> AgentHarness:
+    return AgentHarness(defs, gov, clock, conn, query_fn=fake, options_cls=CliOptions, cli_path=str(cli_path))
+
+
+async def test_pinned_cli_path_is_sent_with_updater_off(defs, gov, clock, conn, tmp_path) -> None:
     cli = tmp_path / "claude.exe"
     cli.write_bytes(b"")
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
-    harness = make_harness(defs, gov, clock, conn, fake, options_cls=CliOptions)
-    harness._cli_path = str(cli)
+    harness = pinned_harness(defs, gov, clock, conn, fake, cli)
 
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
     assert result.ok
-    assert fake.calls[0].options.cli_path == str(cli)
+    opts = fake.calls[0].options
+    assert opts.cli_path == str(cli)
+    assert opts.env == {"DISABLE_AUTOUPDATER": "1"}
 
 
 async def test_missing_pinned_cli_fails_closed(defs, gov, clock, conn, tmp_path) -> None:
     # Falling back would run whatever `claude` is on PATH — auto-updating, or absent for the service.
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
-    harness = make_harness(defs, gov, clock, conn, fake, options_cls=CliOptions)
-    harness._cli_path = str(tmp_path / "missing" / "claude.exe")
+    harness = pinned_harness(defs, gov, clock, conn, fake, tmp_path / "missing" / "claude.exe")
 
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 

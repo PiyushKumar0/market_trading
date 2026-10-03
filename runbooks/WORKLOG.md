@@ -35,8 +35,16 @@
 - **Change:** MODEL_API_IDS + pricing for sonnet-5.5 / opus-5.5 / fable-5.1 (and the missing
   sonnet-4.6 / opus-4.8 prices; a new test asserts every mapped name is priced — an unpriced name
   fails in governor.price AFTER the call is billed). Roster all `sonnet-5.5`; news_analyst `effort`
-  removed (owner: CLI default). `harness.resolve_cli_path` + `AgentHarness(cli_path=...)`; boot logs
-  `agent_cli` with the path and whether the file exists.
+  removed (owner: CLI default). `harness.resolve_cli_path` (relative to `repo_root()`, not
+  `config_dir().parent`, which `MT_CONFIG_DIR` can move) + `AgentHarness(cli_path=...)`, which also
+  sends `DISABLE_AUTOUPDATER=1` (the SDK sets none, and the pin is a full Claude Code build). Boot
+  logs `agent_cli`, or `agent_cli_missing` at ERROR when the pinned file is absent.
+- **Pre-deploy review (owner-requested, engine stopped 17:43):** the branch was re-verified through the
+  REAL harness path — `run_single_shot` with the real roster, a governor priced from the real
+  agents.yaml, the real validators and the pinned CLI: news, intraday and preopen all ok on attempt 1,
+  `agent_calls`/`budget_ledger` rows on `sonnet-5.5` with nonzero priced cost; the D11 smoke (Haiku)
+  ok. Unit + chaos suites touching the harness/main: 632 passed. `news_clusters.scorer_model` reads
+  `sonnet-5.5` from deploy on — the cat v2 verdict can split its sample on that column.
 - **Deploy is atomic:** the code needs the 0.2.159 venv AND the pinned CLI. Stop engine → merge →
   `uv sync --extra dev` → start → check `agent_cli present=true` and the selftest roster line.
 

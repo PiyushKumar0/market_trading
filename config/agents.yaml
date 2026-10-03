@@ -25,10 +25,9 @@ llm:
   # startup self-test asserts it absent unless overflow is deliberately enabled (D2/§5.6).
   auth_mode: oauth_subscription            # oauth_subscription | api_key (the §13 swap seam)
   setting_sources: []                      # D10: load NOTHING from filesystem CLAUDE.md/settings
-  # Engine-owned Claude Code CLI, relative to the repo root (2026-10-03). Sonnet 5.5 needs CLI >= 2.1.284
-  # and no claude-agent-sdk Windows wheel since 0.2.159 (bundles 2.1.281) ships one, so the engine runs
-  # a pinned copy that never auto-updates. Missing file => every call fails closed (harness).
-  # Re-pin by copying a newer claude.exe to a new version folder and changing this line.
+  # Engine-owned Claude Code CLI, relative to the repo root (2026-10-03): Sonnet 5.5 needs CLI >= 2.1.284,
+  # newer than any claude-agent-sdk Windows wheel bundles. Missing file => every call fails closed.
+  # Re-pin by copying a newer claude.exe into a new version folder and changing this line.
   cli_path: data/run/claude-cli/2.1.288/claude.exe
   # T8 / §14 Q1 — Claude Max consumer-plan Terms-of-Service for UNATTENDED / scheduled / service-account
   # use of the Agent SDK credit: CONFIRMED by the owner (headless use sanctioned), so the engine relies on
@@ -88,13 +87,12 @@ degrade_ladder:
 # with thinking off and 48-80s+ before the harness pinned thinking to zero; the old 45/60s budgets
 # timed out every production call on 2026-07-28 while the tiny smoke call passed. Budgets are ~3x the
 # measured duration — a slow call that completes is billed anyway, so cutting it off wastes the spend.
-# sonnet-5 → sonnet-5.5 roster-wide 2026-10-03 (owner-directed, news_analyst included despite the cat v2
-# shadow window; replay evidence in WORKLOG 2026-10-03). news_analyst carries no effort key (owner):
-# unset sends no --effort, so the pinned CLI's default applies.
+# sonnet-5 → sonnet-5.5 roster-wide 2026-10-03 (owner-directed; WORKLOG has the replay evidence and the
+# cat v2 shadow-window caveat). news_analyst has no effort key by owner choice: the CLI default applies.
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
   intraday_analyst:
-    model: sonnet-5.5           # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
+    model: sonnet-5.5         # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
                               # (Opus for decision roles; entry decisions are the platform's core
                               # judgment point). Phase-2 is RECOMMEND mode, so neither latency nor
                               # tier is order-critical, and the deterministic gates still do the
@@ -115,7 +113,7 @@ agents:
                                # with the deterministic gates still doing the quality filtering)
 
   preopen_planner:
-    model: sonnet-5.5           # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
+    model: sonnet-5.5         # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
                               # (Opus for decision roles; one call/day, cost delta trivial)
     effort: medium
     shape: single_shot
@@ -126,7 +124,7 @@ agents:
     schedule_ist: "08:50"
 
   news_analyst:                # formerly sentiment_scorer — upgraded per §5.4/§2.7 (2026-07-06)
-    model: sonnet-5.5            # haiku→sonnet 2026-08-18 (owner: substitute Sonnet where it helps —
+    model: sonnet-5.5          # haiku→sonnet 2026-08-18 (owner: substitute Sonnet where it helps —
                                # the haiku choice was cost-driven, not quality-driven; materiality/
                                # novelty judgments feed the watchlist and `cat` origination).
     shape: single_shot
@@ -144,7 +142,7 @@ agents:
 
   # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps (D5) ---
   nightly_reviewer:
-    model: sonnet-5.5           # stays sonnet (owner challenge 2026-08-18): every consumer of this
+    model: sonnet-5.5         # stays sonnet (owner challenge 2026-08-18): every consumer of this
                               # output is human-gated or gate-validated — Telegram summary, dashboard
                               # suggestions (owner applies via POST /config/params only), §6.4 step-1
                               # proposals (deterministic validation; live influence Phase 5), and the
@@ -166,7 +164,7 @@ agents:
 
   weekly_researcher:
     enabled: false             # Phase 5 (§8.7); not loadable until its §5.5 read-only MCP allowlist is wired
-    model: sonnet-5.5         # opus→sonnet 2026-09-15 (owner-directed; roster-wide). D9 specified Opus
+    model: sonnet-5.5       # opus→sonnet 2026-09-15 (owner-directed; roster-wide). D9 specified Opus
                             # for the weekly deep review — revisit at the §8.7 Phase-5 enablement,
                             # when this agent actually runs and its output quality can be judged.
     shape: agentic

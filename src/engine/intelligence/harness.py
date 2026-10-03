@@ -78,8 +78,7 @@ MODEL_API_IDS: dict[str, str] = {
     "sonnet-5": "claude-sonnet-5",
     "opus-5": "claude-opus-5",
     "fable-5": "claude-fable-5",
-    # Claude 5.5 / 5.1 (2026-10-03). Each name needs a model_pricing_usd_per_mtok key too, or the
-    # governor refuses to price the call after it has been billed.
+    # Every name here also needs a model_pricing_usd_per_mtok key (governor.price; tested).
     "sonnet-5.5": "claude-sonnet-5-5",
     "opus-5.5": "claude-opus-5-5",
     "fable-5.1": "claude-fable-5-1",
@@ -285,8 +284,8 @@ def load_agent_roster(cfg: dict[str, Any]) -> RosterLoad:
 
 
 def resolve_cli_path(cfg: dict[str, Any], root: Path) -> str | None:
-    """agents.yaml ``llm.cli_path`` as an absolute path; a relative value is taken from the repo root
-    because the service runs from a different working directory (D10). None = the SDK's bundled CLI."""
+    """agents.yaml ``llm.cli_path`` as an absolute path, a relative value taken from ``root`` (the
+    service's working directory is elsewhere, D10). None = the SDK's bundled CLI."""
     raw = (cfg.get("llm") or {}).get("cli_path")
     if not raw:
         return None
@@ -993,12 +992,14 @@ class AgentHarness:
 
         # A pinned CLI that is missing, or an SDK that cannot take one, fails the call: falling back
         # would run whatever `claude` is on PATH (auto-updating, or absent for the service account).
+        # The pin is a full Claude Code build, so its own updater is switched off too.
         if self._cli_path is not None:
-            if "cli_path" not in fields:
-                raise RuntimeError(f"{cls.__name__} exposes no cli_path knob; refusing to call")
+            if "cli_path" not in fields or "env" not in fields:
+                raise RuntimeError(f"{cls.__name__} exposes no cli_path/env knob; refusing to call")
             if not Path(self._cli_path).is_file():
                 raise RuntimeError(f"pinned Claude Code CLI missing at {self._cli_path}; refusing to call")
             kwargs["cli_path"] = self._cli_path
+            kwargs["env"] = {"DISABLE_AUTOUPDATER": "1"}
 
         prefix = ""
         if system_prompt:
