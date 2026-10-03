@@ -31,7 +31,7 @@ holder pid, never delete the file).
 
 ```powershell
 Get-Content data\logs\engine.log -Tail 50 -Wait        # structured log (all launch modes) — primary
-Get-Content data\logs\service.err.log -Tail 50 -Wait   # NSSM-captured stderr: + raw tracebacks/early-boot crashes
+Get-Content data\logs\service.err.log -Tail 50 -Wait   # NSSM-captured stderr: WARNING+ lines, raw tracebacks, early-boot crashes (pre-2026-10-04 non-JSON lines: service-nonjson-archive.log)
 Get-Content data\logs\service.out.log -Tail 50         # NSSM-captured stdout: stray prints
 Get-WinEvent -ProviderName nssm -MaxEvents 20 | Format-Table TimeCreated, Message -Wrap  # start/stop/crash-restart/throttle
 scripts\nssm_install.ps1 -Action status                # service config incl. ObjectName + log paths

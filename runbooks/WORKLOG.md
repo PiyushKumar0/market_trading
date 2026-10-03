@@ -1,5 +1,27 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-04 01:2x–02:xx — disk and repo cleanup; log/backup retention (owner chose from a cleanup survey); code NOT deployed
+
+- **Survey:** `data/` held 22 GB — 9.6 GB backups (two 08-03 pre-remediation DuckDB snapshots, 7.8 GB;
+  251 state snapshots, 1.8 GB, never pruned), 3.2 GB logs (half of it NSSM `service.err` copies of
+  every engine.log line: core.log sent all levels to stderr; NSSM rotates at 10 MB and never deletes),
+  3.4 GB / 1.38 M tick fragments (the 09-29 compaction lane is working through them — no action).
+- **Done now (data/disk, owner-approved):** deleted the two 08-03 DuckDB snapshots (7.6 GB); archived
+  the 78,554 non-JSON lines (uvicorn tracebacks/access lines, deprecation warnings) of 610 rotated
+  `service.*-*.log` files into `data/logs/service-nonjson-archive.log` (6.4 MB), then deleted them
+  (1.6 GB).
+- **Code (takes effect at the next engine restart):** core.log gives stderr WARNING+ only when a log
+  file exists (service.err's documented job is pre-logger output and crashes; uvicorn's own stderr
+  handlers are unaffected). The nightly `job_backup` (never the shutdown backup, inside NSSM's stop
+  grace) prunes state snapshots — all for 14 days, newest per ISO week to 90 days, newest always
+  kept — and rotated service logs older than 90 days.
+- **Repo/Claude:** removed the unused root `package.json`/`package-lock.json`/`node_modules` (Node
+  `sqlite3`, no tracked JS used it; the dashboard has its own), the empty stray
+  `market_trading/data/state.db`, merged local branches `phase0`/`phase1` (`phase1-preremove-backup`
+  is unmerged — kept). agents.yaml header now says `max_output_tokens` is unsent. The synced `design`
+  plugin (7 MCP servers needing auth) is disabled for this project in `.claude/settings.json`. Two
+  stale memories pruned (project overview, resolved news-origination gap); their links reworded.
+
 ## 2026-10-03 16:2x–18:xx — roster sonnet-5 → sonnet-5.5, SDK 0.2.103 → 0.2.159, engine-owned pinned CLI 2.1.288 (owner: "need to update them to latest version"; route, roster and news effort chosen by the owner)
 
 - **Why the SDK and CLI move too:** the engine ran the CLI bundled with claude-agent-sdk 0.2.103, which

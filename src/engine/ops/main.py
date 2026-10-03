@@ -32,6 +32,7 @@ import time as time_module  # `time` itself is datetime.time here (below) — WO
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, NoReturn
 
 import httpx
@@ -1243,6 +1244,15 @@ async def run() -> int:
 
     async def job_backup() -> None:
         await _snapshot_backup(conn, settings, clock)
+        # Nightly only — never on the shutdown backup, which runs inside NSSM's stop grace.
+        try:
+            pruned = await asyncio.to_thread(
+                _prune_retained_files, settings.backups_dir(), settings.logs_dir(), clock.now()
+            )
+        except Exception as exc:  # noqa: BLE001 - housekeeping must not fail the backup job
+            _log.warning("retention_prune_failed", error=str(exc), error_type=type(exc).__name__)
+        else:
+            _log.info("retention_pruned", **pruned)
 
     async def job_bhavcopy(d) -> BhavcopyResult:
         # Forwarded (2026-08-13): bhavcopy degrades-without-raising (E5) — the watermark verdict
@@ -3977,6 +3987,41 @@ async def _snapshot_backup(conn: sqlite3.Connection, settings, clock: Clock) -> 
 
     await asyncio.to_thread(_do)
     _log.info("backup_written", path=str(dst))
+
+
+#: Retention for state snapshots and NSSM-rotated service logs (§10.5); neither pruned itself before
+#: 2026-10 (251 snapshots, 367 rotated logs). engine.log keeps its own 90 days (core.log).
+BACKUP_KEEP_ALL_DAYS = 14
+RETENTION_DAYS = 90
+
+
+def _prune_retained_files(backups: Path, logs: Path, now: datetime) -> dict[str, int]:
+    """Delete state snapshots past retention — every one for 14 days, then the newest per ISO week to
+    90 days — and rotated ``service.*-*.log`` files older than 90 days. The newest snapshot always
+    survives, however old (an engine offline for months still has its last state)."""
+    snapshots: list[tuple[datetime, Path]] = []
+    for p in backups.glob("state-*.db"):
+        try:
+            stamp = datetime.strptime(p.name[len("state-"):-len(".db")], "%Y%m%dT%H%M%S")
+        except ValueError:
+            continue
+        snapshots.append((stamp.replace(tzinfo=now.tzinfo), p))
+    doomed: list[Path] = []
+    weeks_kept: set[tuple[int, int]] = set()
+    for i, (stamp, p) in enumerate(sorted(snapshots, reverse=True)):
+        age = now - stamp
+        if i == 0 or age <= timedelta(days=BACKUP_KEEP_ALL_DAYS):
+            continue
+        week = stamp.isocalendar()[:2]
+        if age <= timedelta(days=RETENTION_DAYS) and week not in weeks_kept:
+            weeks_kept.add(week)
+            continue
+        doomed.append(p)
+    cutoff = (now - timedelta(days=RETENTION_DAYS)).timestamp()
+    logs_doomed = [p for p in logs.glob("service.*-*.log") if p.stat().st_mtime < cutoff]
+    for p in (*doomed, *logs_doomed):
+        p.unlink(missing_ok=True)
+    return {"snapshots_deleted": len(doomed), "service_logs_deleted": len(logs_doomed)}
 
 
 # --------------------------------------------------------------------------- builders (guarded)

@@ -12,5 +12,8 @@
       "PowerShell(git status *)",
       "PowerShell(git diff *)"
     ]
+  },
+  "enabledPlugins": {
+    "design@synced": false
   }
 }

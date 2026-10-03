@@ -110,8 +110,10 @@ def configure_logging(
 ) -> None:
     """Configure the root logger once. Idempotent.
 
-    Writes JSON lines to stderr and (if ``logs_dir`` given) to a rotating ``engine.log`` file.
-    Logs are retained 90 days by the §4.5 retention policy (file rotation is a runbook/ops concern).
+    Writes JSON lines to stderr and (if ``logs_dir`` given) to a rotating ``engine.log`` file kept 90
+    days (§4.5). With a log file, stderr gets WARNING and above only: under NSSM it becomes
+    ``service.err.log``, whose job is pre-logger output and crashes, and a full copy of every line
+    there had doubled log volume (~1.6 GB by 2026-10).
     """
     global _CONFIGURED
     if _CONFIGURED:
@@ -128,6 +130,8 @@ def configure_logging(
 
     stream = logging.StreamHandler(sys.stderr)
     stream.setFormatter(formatter)
+    if logs_dir is not None:
+        stream.setLevel(logging.WARNING)
     root.addHandler(stream)
 
     if logs_dir is not None:

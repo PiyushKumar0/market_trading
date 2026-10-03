@@ -2,9 +2,9 @@
 #
 # NOT a protected store (it is operational config, owner-editable), but the gate/learner never read
 # it — only engine.intelligence does. Model is ALWAYS set explicitly per agent: the SDK defaults to
-# Opus on Max plans and would burn credit at 5× Haiku rates (D4). Every knob (model, max output
-# tokens, max turns, thinking) is verified against the actual SDK surface in the Phase-0 smoke test;
-# note `effort` does NOT exist on Haiku 4.5 (D9).
+# Opus on Max plans and would burn credit at 5× Haiku rates (D4). The harness probes each knob against
+# the SDK's options surface; note `effort` does NOT exist on Haiku 4.5 (D9). `max_output_tokens` is NOT
+# enforced: claude-agent-sdk has no output-token option, so the values below are unsent (2026-10-03).
 
 schema_version: 1
 
