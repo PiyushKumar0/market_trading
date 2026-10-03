@@ -77,7 +77,7 @@ from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
 from engine.features.engine import FeatureEngine
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
-from engine.intelligence.harness import AgentHarness, load_agent_roster, run_sdk_smoke
+from engine.intelligence.harness import AgentHarness, load_agent_roster, resolve_cli_path, run_sdk_smoke
 from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.bar_builder import BarBuilder
 from engine.marketdata.reconcile import ReconcileJob
@@ -565,11 +565,15 @@ async def run() -> int:
     roster_quarantined: dict[str, str] = {}
     harness: AgentHarness | None = None
     try:
-        roster = load_agent_roster(load_yaml(config_dir() / "agents.yaml"))
+        agents_cfg = load_yaml(config_dir() / "agents.yaml")
+        roster = load_agent_roster(agents_cfg)
         agent_defs = roster.defs
         roster_quarantined = roster.quarantined
         if agent_defs:
-            harness = AgentHarness(agent_defs, governor, clock, conn, alert=alert)
+            cli_path = resolve_cli_path(agents_cfg, config_dir().parent)
+            _log.info("agent_cli", cli_path=cli_path or "sdk-bundled",
+                      present=cli_path is None or os.path.isfile(cli_path))
+            harness = AgentHarness(agent_defs, governor, clock, conn, alert=alert, cli_path=cli_path)
         else:
             _log.error("agent_roster_empty", hint="config/agents.yaml — LLM tier disabled this run")
     except Exception:  # noqa: BLE001 - a bad roster must not stop the deterministic engine (D7)

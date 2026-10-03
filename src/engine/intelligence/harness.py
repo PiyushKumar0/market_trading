@@ -52,6 +52,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -77,6 +78,11 @@ MODEL_API_IDS: dict[str, str] = {
     "sonnet-5": "claude-sonnet-5",
     "opus-5": "claude-opus-5",
     "fable-5": "claude-fable-5",
+    # Claude 5.5 / 5.1 (2026-10-03). Each name needs a model_pricing_usd_per_mtok key too, or the
+    # governor refuses to price the call after it has been billed.
+    "sonnet-5.5": "claude-sonnet-5-5",
+    "opus-5.5": "claude-opus-5-5",
+    "fable-5.1": "claude-fable-5-1",
 }
 
 # The SDK's built-in tools, explicitly disabled on every call (§5.1) — "no filesystem, no network, no
@@ -276,6 +282,16 @@ def load_agent_roster(cfg: dict[str, Any]) -> RosterLoad:
             "agent_roster_partial", loaded=sorted(defs), quarantined=sorted(quarantined),
         )
     return RosterLoad(defs=defs, quarantined=quarantined)
+
+
+def resolve_cli_path(cfg: dict[str, Any], root: Path) -> str | None:
+    """agents.yaml ``llm.cli_path`` as an absolute path; a relative value is taken from the repo root
+    because the service runs from a different working directory (D10). None = the SDK's bundled CLI."""
+    raw = (cfg.get("llm") or {}).get("cli_path")
+    if not raw:
+        return None
+    path = Path(str(raw))
+    return str(path if path.is_absolute() else root / path)
 
 
 # --------------------------------------------------------------------------- results
@@ -616,8 +632,11 @@ class AgentHarness:
         query_fn: QueryFn | None = None,
         alert: AlertCallback | None = None,
         options_cls: type | None = None,
+        cli_path: str | None = None,
     ) -> None:
         self.defs = dict(defs)
+        #: Engine-owned Claude Code CLI (agents.yaml ``llm.cli_path``); None = the SDK's bundled CLI.
+        self._cli_path = cli_path
         self._governor = governor
         self._clock = clock
         self._conn = conn
@@ -971,6 +990,15 @@ class AgentHarness:
                 f"{cls.__name__} exposes no setting_sources knob — the service must not inherit stray "
                 "CLAUDE.md/settings from the filesystem (D10); refusing to call"
             )
+
+        # A pinned CLI that is missing, or an SDK that cannot take one, fails the call: falling back
+        # would run whatever `claude` is on PATH (auto-updating, or absent for the service account).
+        if self._cli_path is not None:
+            if "cli_path" not in fields:
+                raise RuntimeError(f"{cls.__name__} exposes no cli_path knob; refusing to call")
+            if not Path(self._cli_path).is_file():
+                raise RuntimeError(f"pinned Claude Code CLI missing at {self._cli_path}; refusing to call")
+            kwargs["cli_path"] = self._cli_path
 
         prefix = ""
         if system_prompt:

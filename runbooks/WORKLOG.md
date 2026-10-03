@@ -1,5 +1,45 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-03 16:2x–18:xx — roster sonnet-5 → sonnet-5.5, SDK 0.2.103 → 0.2.159, engine-owned pinned CLI 2.1.288 (owner: "need to update them to latest version"; route, roster and news effort chosen by the owner)
+
+- **Why the SDK and CLI move too:** the engine ran the CLI bundled with claude-agent-sdk 0.2.103, which
+  is Claude Code 2.1.179; Sonnet 5.5 needs CLI ≥ 2.1.284. No SDK release since 0.2.159 (09-23) ships a
+  Windows wheel — 0.2.160–0.2.163 are sdist-only, install with an EMPTY `_bundled/`, and the SDK then
+  falls back to whatever `claude` is on PATH (auto-updating, or absent for the service). 0.2.159
+  bundles 2.1.281, which logs `unrecognized_model` for claude-sonnet-5-5 and passes it through.
+  Owner chose the pinned-copy route: SDK 0.2.159 + `llm.cli_path` → `data/run/claude-cli/2.1.288/
+  claude.exe` (copy of the global 2.1.288, SHA-256 84304F7D4B0CD0EB…, runs standalone). The harness
+  refuses the call if the file is missing or the SDK has no `cli_path` knob (fail closed, D7).
+- **Sonnet 5.5 migration facts (platform docs):** forced `tool_choice` returns 400 (the CLI's
+  StructuredOutput path survived: every replay returned the schema payload); `thinking: disabled`
+  returns 400 (the engine sends none since de58a13); more refusal categories incl. `general_harms`
+  (0 refusals in 21 Sonnet 5.5 calls); effort levels recalibrated; min cacheable prompt 512 tokens;
+  $2/$10.
+- **Replay evidence** (live engine prompts pinned by transcript file, written before 13:00 today):
+  - production (Sonnet 5, bundled 2.1.179, current effort) vs 5.5, 10 prompts: valid 9/10 vs 10/10 —
+    production hit `error_max_turns` on one news batch; 5.5 is 2–4× faster with 50–75% fewer output
+    tokens; on the one live intraday entry, production emitted `entry_price: null` (the 09-21 defect),
+    5.5 a priced entry.
+  - **news materiality shifts down on 5.5** at low, medium and CLI-default effort alike: high-
+    materiality (≥0.5) clusters per batch 2–3 vs live 4–6; |Δmateriality| vs live ~0.10 (production
+    ~0.05). Of 12 clusters crossing the 0.5 line, most were Sonnet 5 over-rating unlisted names
+    (Carlsberg India IPO, Manipal Payment), generic US-market wraps and promotional copy — 5.5 reads
+    closer to the rubric. **This changes the cat v2 shadow population from deploy day**; the owner
+    took news_analyst to 5.5 knowingly (09-24 hold on scorer-input changes noted in the ask). The
+    cat v2 verdict must split its sample at the deploy date.
+  - intraday: on the LT cat-shadow candidate, 5.5 entered at conf 0.4 in one run and declined in the
+    other (citing the day plan's explicit trade-through warning); production and live entered at 0.55.
+    Watch the cat-shadow evaluation count after deploy.
+  - deploy candidate end-to-end (branch harness → SDK 0.2.159 → pinned 2.1.288 → claude-sonnet-5-5):
+    6/6 valid, 21–34 s.
+- **Change:** MODEL_API_IDS + pricing for sonnet-5.5 / opus-5.5 / fable-5.1 (and the missing
+  sonnet-4.6 / opus-4.8 prices; a new test asserts every mapped name is priced — an unpriced name
+  fails in governor.price AFTER the call is billed). Roster all `sonnet-5.5`; news_analyst `effort`
+  removed (owner: CLI default). `harness.resolve_cli_path` + `AgentHarness(cli_path=...)`; boot logs
+  `agent_cli` with the path and whether the file exists.
+- **Deploy is atomic:** the code needs the 0.2.159 venv AND the pinned CLI. Stop engine → merge →
+  `uv sync --extra dev` → start → check `agent_cli present=true` and the selftest roster line.
+
 ## 2026-10-03 13:4x–15:xx — analyst thinking depth: per-agent `effort` replaces the dead `max_thinking_tokens=0` pin (owner: "Validate and verify the suggested changes and then apply them"); NOT deployed
 
 - **Finding (prompt audit, `/claude-api prompt-audit`):** the harness pinned thinking off with

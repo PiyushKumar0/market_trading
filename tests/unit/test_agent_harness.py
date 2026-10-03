@@ -637,8 +637,57 @@ def test_effort_loads_from_yaml_and_is_refused_on_haiku() -> None:
         load_agent_defs(cfg)
 
 
-def test_shipped_roster_sets_effort_on_every_runnable_agent(real_cfg) -> None:
-    assert all(d.effort is not None for d in load_agent_defs(real_cfg).values())
+def test_shipped_roster_leaves_effort_unset_only_on_news(real_cfg) -> None:
+    # news_analyst runs at the CLI default by owner decision (2026-10-03); every other agent pins depth.
+    unset = {k for k, d in load_agent_defs(real_cfg).items() if d.effort is None}
+    assert unset <= {"news_analyst"}
+
+
+@dataclass
+class CliOptions:
+    model: str | None = None
+    system_prompt: str | None = None
+    setting_sources: list[str] | None = None
+    max_turns: int | None = None
+    allowed_tools: list[str] | None = None
+    disallowed_tools: list[str] | None = None
+    cli_path: str | None = None
+
+
+async def test_pinned_cli_path_is_sent(defs, gov, clock, conn, tmp_path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"")
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=CliOptions)
+    harness._cli_path = str(cli)
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert result.ok
+    assert fake.calls[0].options.cli_path == str(cli)
+
+
+async def test_missing_pinned_cli_fails_closed(defs, gov, clock, conn, tmp_path) -> None:
+    # Falling back would run whatever `claude` is on PATH — auto-updating, or absent for the service.
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=CliOptions)
+    harness._cli_path = str(tmp_path / "missing" / "claude.exe")
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert not result.ok
+    assert fake.calls == []
+
+
+def test_resolve_cli_path(tmp_path) -> None:
+    from engine.intelligence.harness import resolve_cli_path
+
+    assert resolve_cli_path({}, tmp_path) is None
+    assert resolve_cli_path({"llm": {"cli_path": "data/cli/claude.exe"}}, tmp_path) == str(
+        tmp_path / "data" / "cli" / "claude.exe"
+    )
+    absolute = str(tmp_path / "abs" / "claude.exe")
+    assert resolve_cli_path({"llm": {"cli_path": absolute}}, tmp_path) == absolute
 
 
 # --------------------------------------------------------------------------- timeout / SDK failures
@@ -957,6 +1006,15 @@ def test_claude5_family_models_are_mapped() -> None:
     assert MODEL_API_IDS["sonnet-5"] == "claude-sonnet-5"
     assert MODEL_API_IDS["opus-5"] == "claude-opus-5"
     assert MODEL_API_IDS["fable-5"] == "claude-fable-5"
+    assert MODEL_API_IDS["sonnet-5.5"] == "claude-sonnet-5-5"
+    assert MODEL_API_IDS["opus-5.5"] == "claude-opus-5-5"
+    assert MODEL_API_IDS["fable-5.1"] == "claude-fable-5-1"
+
+
+def test_every_mapped_model_is_priced(real_cfg) -> None:
+    # A mapped name with no D4 price loads fine and then fails every call in governor.price, after
+    # the SDK call has already been billed.
+    assert set(MODEL_API_IDS) <= set(real_cfg["model_pricing_usd_per_mtok"])
 
 
 def test_one_bad_def_quarantines_alone_not_the_roster() -> None:
