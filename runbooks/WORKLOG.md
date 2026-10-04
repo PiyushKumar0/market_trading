@@ -1,5 +1,18 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-05 00:5x — G2 C6 broker side attested by the owner; gate G2 complete
+
+- Owner, verbatim: "No GTT or API orders have been placed".
+- Recorded as C6's broker-side check. The platform side was already MET: `orders` and
+  `order_events` are empty, and order-opening calls are refused outside AUTO.
+- Every G2 criterion is now met or owner-decided:
+  - C2a, C3, C6, C7: met.
+  - C8, C9: signed 09-29.
+  - C1: accepted at its status 09-29.
+  - C4, C5: signed 09-29.
+- Phase 3 wiring (WO-P3-5 AUTO(paper) routing, WO-P3-6 R3 managers) still needs the owner's
+  sign-off to start. The `phase2` push also needs the owner's go-ahead (phase end).
+
 ## 2026-10-04 01:2x–02:xx — disk and repo cleanup; log/backup retention (owner chose from a cleanup survey); code NOT deployed
 
 - **Survey:** `data/` held 22 GB — 9.6 GB backups (two 08-03 pre-remediation DuckDB snapshots, 7.8 GB;
