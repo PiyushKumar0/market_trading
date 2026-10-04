@@ -25,11 +25,13 @@ from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_settings
 from engine.core.enums import Actor, RiskState
 from engine.marketdata.store import MarketStore
+from engine.ops.holdings_reconcile import HoldingsReconcileResult
 from engine.ops.lifecycle import WarmupReapply
 from engine.ops.post_login import PostLoginRecovery, resume_ticker
 from engine.ops.warmup import WarmupStatus
 from tests.unit.test_instruments import INDIA_VIX_ROW, NIFTY50_ROW, RELIANCE_ROW, FakeKite
 from tests.unit.test_lifecycle_selftest import OWNER_OK, _build
+from tests.unit.test_warmup_gate import RECENT_5
 
 
 # --------------------------------------------------------------------------- fixtures / fakes
@@ -90,16 +92,23 @@ class FakeBackfill:
         self.boom = boom
         self.run_calls: list[tuple[list[str], str]] = []
         self.gap_calls: list[list[str]] = []
+        self.gap_confirm_until: list = []
+        self.daily_gap_calls: list[tuple[list[str], list]] = []
 
     async def run(self, symbols, interval, start, end):
         if self.boom:
             raise RuntimeError("backfill exploded")
-        self.run_calls.append((list(symbols), interval))
+        self.run_calls.append((list(symbols), interval, start, end))
         return SimpleNamespace(bars_written=len(list(symbols)) * 10)
 
-    async def warmup_gap(self, symbols, frm, to):
+    async def warmup_gap(self, symbols, frm, to, *, confirm_until=None):
         self.gap_calls.append(list(symbols))
+        self.gap_confirm_until.append(confirm_until)
         return SimpleNamespace(bars_written=len(list(symbols)) * 5)
+
+    async def daily_gap(self, symbols, sessions):
+        self.daily_gap_calls.append((list(symbols), list(sessions)))
+        return SimpleNamespace(bars_written=len(list(symbols)) * 3, skipped_covered=0, failed=[])
 
 
 class FakeLifecycle:
@@ -122,7 +131,7 @@ class _FakeGate:
 
 def _mk_recovery(
     *, instruments, market_store, kite, session, backfill, ticker, lifecycle, clock, calendar,
-    watch=("RELIANCE",), notify=None, alert=None,
+    watch=("RELIANCE",), notify=None, alert=None, holdings_reconcile=None,
 ) -> PostLoginRecovery:
     def ticker_tokens() -> list[int]:
         out = []
@@ -137,6 +146,7 @@ def _mk_recovery(
         calendar=calendar, settings=load_settings(), backfill=backfill, ticker=ticker,
         lifecycle=lifecycle, ticker_tokens=ticker_tokens, watchlist_symbols=lambda: list(watch),
         index_symbol="NIFTY 50", vix_symbol="INDIA VIX", notify=notify, alert=alert,
+        holdings_reconcile=holdings_reconcile,
     )
 
 
@@ -268,6 +278,162 @@ async def test_step_failure_isolated_others_still_run(market_store, clock, calen
     assert any("backfill" in msg for _sev, msg in alerts)
 
 
+class _FakeHoldingsReconcile:
+    """Duck-typed ``HoldingsReconcileJob.run`` surface — the step only reads the result."""
+
+    def __init__(self, result: HoldingsReconcileResult) -> None:
+        self._result = result
+        self.calls = 0
+
+    async def run(self) -> HoldingsReconcileResult:
+        self.calls += 1
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_holdings_step_reports_how_many_observations_were_journalled(
+    market_store, clock, calendar
+):
+    """WO-D2 residue: ``observed`` is how many §3.6 journal rows the run actually WROTE, and this
+    ladder calls the job unconditionally — only the hourly tick is window-gated. So checked=3 with
+    observed=0 is a non-trading-day boot that grew no "sold outside the ledger" evidence, which
+    ``checked`` alone cannot say."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+
+    async def _holdings_step(result: HoldingsReconcileResult):
+        job = _FakeHoldingsReconcile(result)
+        rec = _mk_recovery(
+            instruments=instruments, market_store=market_store, kite=None,
+            session=FakeSession(valid=True), backfill=FakeBackfill(), ticker=FakeTicker(),
+            lifecycle=FakeLifecycle(WarmupReapply(ready=True, lifted=True, outcome="ready_lifted")),
+            clock=clock, calendar=calendar, holdings_reconcile=job,
+        )
+        report = await rec.run()
+        assert job.calls == 1                      # last in the ladder, and it ran
+        return {s.name: s for s in report.steps}["holdings"]
+
+    journalled = await _holdings_step(
+        HoldingsReconcileResult(checked=3, flagged=["pos-1"], skipped_young=1, observed=3)
+    )
+    assert journalled.status == "ok"
+    assert journalled.detail == "checked=3 flagged=1 skipped_young=1 observed=3"
+
+    weekend = await _holdings_step(
+        HoldingsReconcileResult(checked=3, flagged=[], skipped_young=0, observed=0)
+    )
+    assert weekend.status == "ok" and weekend.detail == "checked=3 flagged=0 skipped_young=0 observed=0"
+
+
+# ------------------------------------ the ``completed`` gate (§2.6 early hydration, 2026-09-09)
+# Login hooks are fire-and-forget TASKS (``SessionManager._fire_login_hooks`` creates one task per
+# hook), so registration order gives the early-hydration chain NO ordering against this recovery.
+# This event is the real dependency: SET at construction (an engine that never runs a recovery must
+# not block the chain), CLEARED at the top of ``run`` before its first await, SET again in a
+# ``finally`` when the ladder ends — success or not.
+
+
+@pytest.mark.asyncio
+async def test_completed_is_cleared_during_the_run_and_set_afterwards(market_store, clock, calendar):
+    seen: list[bool] = []
+    holder: dict = {}
+
+    class _WatchingBackfill(FakeBackfill):
+        async def run(self, symbols, interval, start, end):
+            seen.append(holder["rec"].completed.is_set())
+            return await super().run(symbols, interval, start, end)
+
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    rec = _mk_recovery(
+        instruments=instruments, market_store=market_store, kite=None,
+        session=FakeSession(valid=True), backfill=_WatchingBackfill(), ticker=FakeTicker(),
+        lifecycle=FakeLifecycle(WarmupReapply(ready=True, lifted=True, outcome="ready_lifted")),
+        clock=clock, calendar=calendar,
+    )
+    holder["rec"] = rec
+
+    assert rec.completed.is_set() is True        # a never-run recovery must not park the chain
+    await rec.run()
+
+    assert seen == [False]                       # cleared for the whole ladder, not just the top
+    assert rec.completed.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_completed_is_set_even_when_a_step_raises(market_store, clock, calendar):
+    """A ``finally``, not a happy-path line: a recovery that FAILS still releases the early-hydration
+    chain — that chain needs no Kite session, and a permanently-cleared event would park it until its
+    own 15-min timeout on every bad morning."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    rec = _mk_recovery(
+        instruments=instruments, market_store=market_store,
+        kite=FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]),
+        session=FakeSession(valid=True), backfill=FakeBackfill(boom=True), ticker=FakeTicker(),
+        lifecycle=FakeLifecycle(
+            WarmupReapply(ready=True, lifted=False, outcome="ready_already_normal")
+        ),
+        clock=clock, calendar=calendar,
+    )
+
+    report = await rec.run()
+
+    assert report.any_failed is True
+    assert rec.completed.is_set() is True
+
+
+class _BlockingBackfill(FakeBackfill):
+    """Blocks the FIRST ``run`` call on an externally controlled gate; every later call passes
+    straight through — lets a test park one ``run()`` mid-ladder while a second overlaps it."""
+
+    def __init__(self, gate: asyncio.Event) -> None:
+        super().__init__()
+        self._gate = gate
+        self._blocked_once = False
+
+    async def run(self, symbols, interval, start, end):
+        if not self._blocked_once:
+            self._blocked_once = True
+            await self._gate.wait()
+        return await super().run(symbols, interval, start, end)
+
+
+@pytest.mark.asyncio
+async def test_completed_stays_clear_until_both_overlapping_runs_finish(market_store, clock, calendar):
+    """Depth-counted (2026-09-09 review): a bare Event set by whichever ``run()`` finishes FIRST would
+    release the early-hydration chain while a second overlapping login's recovery is still mid-ladder.
+    ``SessionManager._fire_login_hooks`` creates one task per hook per login, so two logins landing
+    close together really do fire two concurrent ``run()`` calls — this is not a hypothetical race."""
+    instruments = InstrumentStore(clock)
+    await instruments.refresh(FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
+    gate = asyncio.Event()
+    rec = _mk_recovery(
+        instruments=instruments, market_store=market_store,
+        kite=FakeKite([RELIANCE_ROW, NIFTY50_ROW, INDIA_VIX_ROW]),
+        session=FakeSession(valid=True), backfill=_BlockingBackfill(gate), ticker=FakeTicker(),
+        lifecycle=FakeLifecycle(WarmupReapply(ready=True, lifted=True, outcome="ready_lifted")),
+        clock=clock, calendar=calendar,
+    )
+
+    first = asyncio.create_task(rec.run())
+    await asyncio.sleep(0.05)                        # first run() is parked in its backfill step
+    assert rec.completed.is_set() is False
+
+    second = asyncio.create_task(rec.run())
+    second_report = await asyncio.wait_for(second, timeout=5)   # not blocked — finishes on its own
+    assert second_report.ok is True
+    # The SECOND run() finished, but the FIRST is still in flight (parked on the gate). A bare Event
+    # would have been SET by the second run's own ``finally`` already; depth-counted, it must stay
+    # clear until BOTH are done.
+    assert rec.completed.is_set() is False
+
+    gate.set()                                        # release the first run()'s backfill wait
+    first_report = await asyncio.wait_for(first, timeout=5)
+    assert first_report.ok is True
+    assert rec.completed.is_set() is True
+
+
 @pytest.mark.asyncio
 async def test_idempotent_second_fire_skips_already_good(market_store, clock, calendar):
     """Safe to fire on every login: the second fire skips instruments (a live dump exists) and the ticker
@@ -319,16 +485,97 @@ async def test_resume_ticker_skips_without_valid_token(clock):
     assert ticker.started is None
 
 
+# --------------------------------------------------------------------------- day-leg end clamp (2026-07-29)
+@pytest.mark.asyncio
+async def test_day_backfill_end_clamps_to_yesterday_until_session_close(clock, calendar_fixture=None):
+    """2026-07-29: a day-interval fetch through 'today' DURING the session returns today's RUNNING
+    candle; writing it advances the observed-through checkpoint, so the evening daily_bars job then
+    skips the day and a partial snapshot freezes as today's bar. The day leg must stop at yesterday
+    until the session has closed — today's final bar is the evening job's business."""
+    import datetime as _dt
+
+    from engine.core.clock import IST, Clock
+    from engine.ops.post_login import regime_and_warmup_backfill
+
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
+    bf = FakeBackfill()
+    # conftest clock is 2026-06-17 10:05 IST — mid-session on a trading day → clamp to yesterday.
+    await regime_and_warmup_backfill(bf, clock, calendar, load_settings(),
+                                     lambda: [], "NIFTY 50", "INDIA VIX")
+    _syms, interval, _start, end = bf.run_calls[0]
+    assert interval == "day"
+    assert end == _dt.date(2026, 6, 16)
+
+    # Post-close the same day: today's candle is final and fetchable → end is today.
+    evening = Clock(time_source=lambda: _dt.datetime(2026, 6, 17, 19, 0, tzinfo=IST))
+    cal2 = NSECalendar(config_dir() / "calendar", evening, strict=False)
+    bf2 = FakeBackfill()
+    await regime_and_warmup_backfill(bf2, evening, cal2, load_settings(),
+                                     lambda: [], "NIFTY 50", "INDIA VIX")
+    *_rest, end2 = bf2.run_calls[0]
+    assert end2 == _dt.date(2026, 6, 17)
+
+
+@pytest.mark.asyncio
+async def test_backfill_step_repairs_watchlist_daily_window(clock, calendar):
+    """2026-09-15: a boot onto a watchlist whose members have bars_1d holes had nothing to repair the
+    DAILY class — the daily_gap leg fetches exactly the gate's own window (``daily_lookback_sessions``
+    forwarded from the gate's ``daily_window()``) for the whole watchlist, alongside (not instead of)
+    the regime `run` leg and the mid-session minute `warmup_gap` leg."""
+    from engine.ops.post_login import regime_and_warmup_backfill
+
+    bf = FakeBackfill()
+    written = await regime_and_warmup_backfill(
+        bf, clock, calendar, load_settings(), lambda: ["RELIANCE", "TCS"], "NIFTY 50", "INDIA VIX",
+        daily_lookback_sessions=5,
+    )
+    assert bf.daily_gap_calls == [(["RELIANCE", "TCS"], RECENT_5)]
+    assert written["watchlist_daily_gap_bars"] == 6
+    assert bf.run_calls                                     # the regime `run` leg still happened
+    assert bf.gap_calls == [["RELIANCE", "TCS"]]             # mid-session clock ⇒ minute leg still runs
+
+
+@pytest.mark.asyncio
+async def test_backfill_minute_leg_confirms_upstream_empty_minutes_clamped_to_close(clock, calendar):
+    """2026-09-18: the boot minute leg passes ``confirm_until`` so a tradeless minute (PTCIL 13:36 on
+    09-16) can be confirmed no-trade instead of holding the symbol out all session. It is clamped to
+    ``min(session.close, now − 2 min)``: the −2 min keeps a minute Kite has not published yet out of
+    the confirmation, and the session.close clamp keeps a POST-CLOSE boot from marking after-hours
+    minutes (the §2.6 gate clamps to the close — those were never holes)."""
+    import datetime as _dt
+
+    from engine.core.clock import IST, Clock
+    from engine.ops.post_login import regime_and_warmup_backfill
+
+    # Mid-session (conftest clock is 2026-06-17 10:05 IST): now − 2 min is the binding term.
+    bf = FakeBackfill()
+    await regime_and_warmup_backfill(bf, clock, calendar, load_settings(),
+                                     lambda: ["RELIANCE"], "NIFTY 50", "INDIA VIX")
+    session = calendar.session(clock.today())
+    assert bf.gap_confirm_until == [min(session.close, clock.now() - _dt.timedelta(minutes=2))]
+    assert bf.gap_confirm_until[0] == clock.now() - _dt.timedelta(minutes=2) < session.close
+
+    # Post-close boot: session.close is the binding term — no after-hours minute is ever confirmed.
+    evening = Clock(time_source=lambda: _dt.datetime(2026, 6, 17, 19, 0, tzinfo=IST))
+    cal2 = NSECalendar(config_dir() / "calendar", evening, strict=False)
+    bf2 = FakeBackfill()
+    await regime_and_warmup_backfill(bf2, evening, cal2, load_settings(),
+                                     lambda: ["RELIANCE"], "NIFTY 50", "INDIA VIX")
+    assert bf2.gap_confirm_until == [cal2.session(evening.today()).close]
+
+
 # --------------------------------------------------------------------------- warm-up gate reapply / lift
 @pytest.mark.asyncio
 async def test_reapply_lifts_warmup_freeze_when_ready(conn, clock, temp_config, monkeypatch):
     """§2.6 step-6 reopen: after a warm-up freeze, once coverage is met the reapply lifts FROZEN→NORMAL
-    through the SAME risk-state seam startup uses (never a bypass)."""
+    through the SAME risk-state seam startup uses (never a bypass). The boot blocker is a REGIME-class
+    one since 2026-09-17 — only the freezing classes (REGIME ∪ unattributable) reach the risk state
+    at all, DAILY having joined INTRADAY on the per-symbol side."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, store, lifecycle = _build(conn, clock, temp_config)
     store.register_initial("limits.yaml", OWNER_OK)
     store.register_initial("envelope.yaml", OWNER_OK)
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["orb:RELIANCE bars 3/50"])
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["regime:NIFTY 50 daily bars 0/200"])
     await lifecycle.startup(check_skew=False)
     assert mode.risk_state() == RiskState.FROZEN
 
@@ -344,7 +591,7 @@ async def test_reapply_holds_lift_when_another_freeze_stands(conn, clock, temp_c
     respected — the warm-up reopen must never clear a warranted freeze."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)   # protected store NOT registered
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["orb:X 1/50"])
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["regime:INDIA VIX daily bars 4/20"])
     await lifecycle.startup(check_skew=False)
     assert mode.risk_state() == RiskState.FROZEN
 
@@ -370,8 +617,32 @@ async def test_reapply_does_not_lift_when_killed(conn, clock, temp_config, monke
 
 @pytest.mark.asyncio
 async def test_reapply_freezes_entries_when_not_ready(conn, clock, temp_config, monkeypatch):
-    """Coverage still short on re-evaluation ⇒ FROZEN-for-entries + a WARMUP_FROZEN alert (same as
-    startup step 6): never trade on thin data."""
+    """A FREEZING class still short on re-evaluation ⇒ FROZEN-for-entries + a WARMUP_FROZEN alert
+    (same as startup step 6): never trade on thin data."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    sent = []
+
+    async def notify(m):
+        sent.append(m)
+
+    mode, _kill, store, lifecycle = _build(conn, clock, temp_config, notify=notify)
+    store.register_initial("limits.yaml", OWNER_OK)
+    store.register_initial("envelope.yaml", OWNER_OK)
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["regime:NIFTY 50 daily bars 0/200"])
+    assert mode.risk_state() == RiskState.NORMAL
+
+    res = await lifecycle.reapply_warmup_gate()
+    assert res.ready is False and res.outcome == "frozen" and res.froze is True
+    assert res.classes_short == ["regime"]
+    assert mode.risk_state() == RiskState.FROZEN
+    assert any(str(m.kind) == "warmup_frozen" for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_reapply_never_freezes_on_an_intraday_only_shortfall(conn, clock, temp_config, monkeypatch):
+    """2026-09-13 plan change, the post-login half: a login recovery re-applying the gate must not
+    re-impose the global freeze for a minute hole. The state stays NORMAL, no WARMUP_FROZEN page is
+    sent, and the outcome still names the class so the recovery report is not silent."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -385,6 +656,8 @@ async def test_reapply_freezes_entries_when_not_ready(conn, clock, temp_config, 
     assert mode.risk_state() == RiskState.NORMAL
 
     res = await lifecycle.reapply_warmup_gate()
-    assert res.ready is False and res.outcome == "frozen" and res.froze is True
-    assert mode.risk_state() == RiskState.FROZEN
-    assert any(str(m.kind) == "warmup_frozen" for m in sent)
+    assert res.ready is False and res.froze is False
+    assert res.outcome == "short_already_normal"
+    assert res.classes_short == ["intraday"] and res.blockers == ["orb:Y 2/50"]
+    assert mode.risk_state() == RiskState.NORMAL
+    assert not any(str(m.kind) == "warmup_frozen" for m in sent)

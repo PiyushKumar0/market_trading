@@ -97,6 +97,14 @@ def test_next_trading_day_skips_holiday(cal):
     assert cal.next_trading_day(date(2026, 1, 23)) == date(2026, 1, 27)
 
 
+def test_previous_trading_day_skips_weekend_and_holiday(cal):
+    assert cal.previous_trading_day(MON) == FRI                          # plain weekend walk-back
+    # Mirror of the Republic Day case: 27 (Tue) back over 26 (holiday) + weekend => Fri 23.
+    assert cal.previous_trading_day(date(2026, 1, 27)) == date(2026, 1, 23)
+    # Works from a non-trading day too — the anchor for "last completed session before d".
+    assert cal.previous_trading_day(date(2026, 1, 26)) == date(2026, 1, 23)
+
+
 def test_trade_window_seed_clamped_to_session(clock):
     cal = NSECalendar(
         CAL_DIR, clock, strict=False,

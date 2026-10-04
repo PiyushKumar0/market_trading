@@ -57,6 +57,30 @@ def store(tmp_path, clock):
     s.close()
 
 
+@pytest.mark.asyncio
+async def test_run_executes_the_cluster_pass_off_the_event_loop(store):
+    """2026-08-10: the pure-difflib pass blocked the event loop ~95 s on a weekend backlog (measured
+    90.6 s at 429×1,500). ``run()`` must execute :meth:`cluster` in a worker thread (§3.2 convention
+    12) — pinned so a refactor cannot silently re-inline it."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    fx, headlines = _load_fixture()
+    clusterer = HeadlineClusterer(store, sim_threshold=fx["sim_threshold"],
+                                  max_event_age_days=fx["max_event_age_days"])
+    seen_threads: list[int] = []
+    original = clusterer.cluster
+
+    def spy(hs, existing=None):
+        seen_threads.append(threading.get_ident())
+        return original(hs, existing=existing)
+
+    clusterer.cluster = spy                                    # instance attribute shadows the method
+    touched = await clusterer.run(headlines)
+    assert touched                                             # the pass genuinely ran
+    assert seen_threads and all(t != loop_thread for t in seen_threads)
+
+
 # --------------------------------------------------------------------------- golden file (§9.1)
 def test_golden_file_byte_identity():
     """Same headlines in ⇒ byte-identical clusters out (committed golden pair)."""
@@ -206,9 +230,209 @@ async def test_run_persists_clusters_links_news_and_preserves_scores(store, cloc
     assert news_by_id["n2"]["cluster_id"] == "c-n1"
 
 
+# ----------------------------------------- partial persist -> orphan re-sweep convergence (2026-08-10)
+#: The §4.4 job-10 orphan re-sweep's own bounds (``engine.ops.main.job_news_chain``): unclustered
+#: headlines newer than the cutoff are re-swept, oldest-first, capped. Mirrored here so the
+#: convergence test drives the re-sweep through EXACTLY the production query (the cutoff itself is
+#: pinned in ``test_ops_main_wiring.test_orphan_resweep_abandons_headlines_older_than_four_days``).
+_RESWEEP_ABANDON_DAYS = 4
+_RESWEEP_CAP = 500
+_NEWS_ROW_KEYS = ("headline_id", "title", "source_domain", "url", "published_at")
+
+
+def _persisted_state(s: MarketStore) -> tuple[list[dict], dict[str, str | None]]:
+    """The whole persisted step-2 state: cluster rows + the ``news.cluster_id`` membership map."""
+    return (
+        sorted((dict(r) for r in s.get_news_clusters()), key=lambda r: r["cluster_id"]),
+        {r["headline_id"]: r["cluster_id"] for r in s.get_news()},
+    )
+
+
+async def test_partial_persist_then_resweep_converges_on_the_clean_pass(tmp_path, clock, store):
+    """2026-08-10 filed follow-up: a resolve pass killed by the 600 s bound persists PARTIALLY — the
+    cluster upsert lands as one batch, then the per-cluster ``set_news_cluster`` loop is cut mid-way,
+    leaving inserted-but-unlinked headlines. The next chain run re-sweeps that remainder, and the
+    worklog claims it CONVERGES because :meth:`HeadlineClusterer.cluster` is pure, the cluster upsert
+    is idempotent, and ``headline_ids`` is not a persisted column. This pins that claim end-to-end:
+    the real bound (``resolve_news_bounded``), the real store, the real re-sweep query — final state
+    must be identical to a single clean pass over the same headlines, with no duplicated rows."""
+    import asyncio
+
+    from engine.ops.main import resolve_news_bounded
+
+    fx, headlines = _load_fixture()
+    news_rows = [h.model_dump() for h in headlines]
+
+    def _wired(s: MarketStore) -> HeadlineClusterer:
+        return HeadlineClusterer(
+            s, sim_threshold=fx["sim_threshold"], max_event_age_days=fx["max_event_age_days"]
+        )
+
+    # (a) Reference: ONE clean pass over the whole batch, in its own store.
+    baseline = MarketStore(tmp_path / "baseline.duckdb", tmp_path / "baseline-parquet", clock)
+    baseline.open()
+    try:
+        baseline.insert_news(news_rows)
+        await _wired(baseline).run(headlines)
+        expected = _persisted_state(baseline)
+    finally:
+        baseline.close()
+
+    # (b) The interrupted pass: the third link write wedges ON THE EVENT LOOP (so cancellation is
+    # clean and no worker thread is left behind) and the production bound kills the chain.
+    store.insert_news(news_rows)
+    real_arun = store.arun
+    links = 0
+
+    async def arun_wedging_the_third_link(fn, *args, **kwargs):
+        nonlocal links
+        if getattr(fn, "__name__", "") == "set_news_cluster":
+            links += 1
+            if links > 2:
+                await asyncio.Event().wait()          # the hang the 600 s bound exists for
+        return await real_arun(fn, *args, **kwargs)
+
+    store.arun = arun_wedging_the_third_link           # instance attribute shadows the method
+    try:
+        completed = await resolve_news_bounded(
+            asyncio.Lock(), lambda: _wired(store).run(headlines), timeout_s=1.0
+        )
+    finally:
+        store.arun = real_arun
+    assert completed is False                          # the bound fired; the chain was abandoned
+    partial_clusters, partial_links = _persisted_state(store)
+    assert partial_clusters == expected[0]             # the cluster batch DID land (partial persist)
+    linked = {h for h, c in partial_links.items() if c is not None}
+    assert 0 < len(linked) < len(headlines)            # ...but the link loop died part-way through
+
+    # (c) The re-sweep, issued exactly as job_news_chain issues it (oldest-first, cutoff, cap).
+    orphans = [
+        Headline(**{k: r[k] for k in _NEWS_ROW_KEYS})
+        for r in store.get_news(
+            published_after=clock.now() - timedelta(days=_RESWEEP_ABANDON_DAYS),
+            unclustered_only=True,
+        )
+    ][:_RESWEEP_CAP]
+    assert {h.headline_id for h in orphans} == {h.headline_id for h in headlines} - linked
+    await _wired(store).run(orphans)
+
+    # (d) Convergence: same clusters, same membership, no duplicate rows, nothing left orphaned.
+    final_clusters, final_links = _persisted_state(store)
+    assert (final_clusters, final_links) == expected
+    assert len({r["cluster_id"] for r in final_clusters}) == len(final_clusters)
+    assert all(c is not None for c in final_links.values())
+
+
 async def test_run_requires_store_and_handles_empty_batch(store):
     pure = HeadlineClusterer()
     with pytest.raises(RuntimeError, match="requires a MarketStore"):
         await pure.run([])
     wired = HeadlineClusterer(store)
     assert await wired.run([]) == []
+
+
+# --------------------------------------------------------------------------- boilerplate strip (2026-08-03)
+def test_boilerplate_phrases_do_not_contribute_to_similarity():
+    """The G1-sample production finding (defense-in-depth leg): template phrases are stripped from the
+    similarity input so shared boilerplate cannot glue unrelated titles together on its own. The
+    PRIMARY guard is upstream — NewsIngest drops live-blog page titles entirely (news.drop_title_patterns);
+    this strip covers residual template fragments that slip a pattern list."""
+    a = clusterer_normalize("Dr Reddys Share Price Live Updates")
+    b = clusterer_normalize("IndusInd Bank Share Price Live Updates")
+    assert "share" not in a and "updates" not in b     # template tokens gone from the similarity input
+    assert similarity(a, b) < 0.5                      # only company tokens remain ⇒ clearly dissimilar
+    # A title that IS pure boilerplate falls back to its unstripped tokens — an EMPTY norm would
+    # make every template-only title cluster with every other one at similarity 1.0.
+    assert clusterer_normalize("Live updates") == "live updates"
+
+
+def test_earnings_template_does_not_bridge_different_companies():
+    """G1 seed-6 golden pairs — the three REAL cross-company merges observed live (2026-08-03):
+    same-day "Q1 Results" template headlines cleared the 0.75 bar on shared template tokens alone.
+    With the earnings-template vocabulary stripped, similarity runs on distinctive tokens only."""
+    contaminated = [
+        ("Maruti Suzuki Q1 Results: Profit falls 11% YoY to Rs 3,352 crore; revenue rises 36%",
+         "CDSL Q1 Results: Net profit rises 15% YoY to Rs 118 crore, revenue up 13%"),
+        ("Tata Steel Q1 Results: Profit rises 15% to Rs 2,318 crore, revenue climbs 14%",
+         "Sun Pharma Q1 Results: Profit rises 27% YoY to Rs 2,895 crore; revenue climbs 10.5%"),
+        ("Infosys Q1 Results: Profit rises 12% YoY to Rs 7,769 crore; co trims upper-end revenue forecast",
+         "Tata Consumer Q1 Results: Net profit rises 28% YoY to Rs 427 crore, revenue up 12%"),
+    ]
+    for a, b in contaminated:
+        assert similarity(clusterer_normalize(a), clusterer_normalize(b)) < 0.75, (a, b)
+
+
+def test_same_story_rereports_still_cluster_after_template_strip():
+    """Counterpart golden pairs: near-duplicate re-reports of the SAME story (live clean clusters)
+    must stay at/above the 0.75 bar after the template strip."""
+    clean = [
+        ("HUL Q1 Results: Revenue rises 10% YoY to Rs 17,149 crore, but profit falls 3% on one-off tax credit",
+         "HUL Q1 Results: Revenue rises 10% YoY to Rs 17,341 crore, but profit falls 3% on one-off tax credit"),
+        ("Maruti Suzuki Q1 profit drops 11% YoY to Rs 3,352 crore on higher input costs",
+         "Maruti Suzuki Q1 profit drops 11% to Rs 3,352 crore amid rising input costs"),
+        ("HUL shares slide 5% after weaker-than-expected Q1; PAT dips 3% to Rs 2,673 crore on one-time credit",
+         "HUL shares slide over 6% after weaker-than-expected Q1; PAT dips 3% to Rs 2,673 crore on one-time credit"),
+    ]
+    for a, b in clean:
+        assert similarity(clusterer_normalize(a), clusterer_normalize(b)) >= 0.75, (a, b)
+
+
+# ------------------------------------------ token-bearing representative (§2.7 amendment 2026-09-04)
+def _hl(hid: str, title: str, domain: str, minutes: int) -> Headline:
+    return Headline(
+        headline_id=hid,
+        title=title,
+        source_domain=domain,
+        url=f"https://{domain}/{hid}",
+        published_at=FIXED_NOW - timedelta(minutes=minutes),
+    )
+
+
+FILING = ("[NSE:HINDZINC] Outcome of Board Meeting: Hindustan Zinc Limited has informed the "
+          "Exchange that the Board approved a Letter of Intent for a zinc smelter acquisition")
+PRESS = ("Hindustan Zinc board approves Letter of Intent for a zinc smelter acquisition, "
+         "informs the Exchange")
+
+
+def test_token_bearing_headline_becomes_the_representative_on_join():
+    """A filing merged with its press coverage must stay resolvable: whichever member carries the
+    exchange token becomes the cluster's representative (the resolver only sees that string)."""
+    press = _hl("h-press", PRESS, "economictimes.indiatimes.com", 90)
+    filing = _hl("h-filing", FILING, "nseindia.com", 60)
+    assert similarity(clusterer_normalize(PRESS), clusterer_normalize(FILING)) >= 0.75
+
+    (c,) = HeadlineClusterer(sim_threshold=0.75).cluster([press, filing])
+    assert c.cluster_id == "c-h-press"                     # the press headline still OPENED it…
+    assert c.headline_ids == ["h-press", "h-filing"]
+    assert c.representative == FILING                      # …but the token-bearer represents it
+    assert c.source_domains == ["economictimes.indiatimes.com", "nseindia.com"]
+
+
+def test_plain_headline_never_displaces_a_token_representative():
+    filing = _hl("h-filing", FILING, "nseindia.com", 90)
+    press = _hl("h-press", PRESS, "economictimes.indiatimes.com", 60)
+    (c,) = HeadlineClusterer(sim_threshold=0.75).cluster([filing, press])
+    assert c.headline_ids == ["h-filing", "h-press"]
+    assert c.representative == FILING
+
+
+def test_second_token_headline_does_not_displace_the_first():
+    """Deterministic: the EARLIEST token-bearer (published_at, url order) keeps the seat."""
+    first = _hl("h-a", FILING, "nseindia.com", 90)
+    second = _hl("h-b", FILING + " (revised)", "nseindia.com", 60)
+    (c,) = HeadlineClusterer(sim_threshold=0.75).cluster([first, second])
+    assert c.headline_ids == ["h-a", "h-b"]
+    assert c.representative == FILING
+
+
+async def test_token_representative_promotion_reaches_the_store(store, clock):
+    """The promotion must be what gets PERSISTED — the resolver reads `news_clusters`."""
+    press = _hl("h-press", PRESS, "economictimes.indiatimes.com", 90)
+    filing = _hl("h-filing", FILING, "nseindia.com", 60)
+    for h in (press, filing):
+        store.insert_news([h.model_dump()])
+
+    clusterer = HeadlineClusterer(store, sim_threshold=0.75, max_event_age_days=2)
+    await clusterer.run([press, filing])
+    (row,) = store.get_news_clusters()
+    assert row["representative"] == FILING

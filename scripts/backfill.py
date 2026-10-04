@@ -154,15 +154,16 @@ def _dedup(items: list[str]) -> list[str]:
 def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str]:
     """Resolve the working universe + a human-readable source label (shared by seed/run/status).
 
-    Ladder: ``--symbols`` override → runtime cache ``<data>/universe/nifty200_cached.csv`` (the exact
-    name ``UniverseBuilder`` writes, builder.py:173) → committed seed ``universe.nifty200_seed_path``.
+    Ladder: ``--symbols`` override → runtime cache ``<data>/universe/index_cached.csv`` (the exact
+    name ``UniverseBuilder`` writes) → committed seed ``universe.index_seed_path``. Both were
+    renamed off ``nifty200`` by O15 (2026-09-04), when the eligible index became config (NIFTY 500).
     Returns ``([], "")`` if nothing resolves so the caller can print an actionable error and exit 2.
     """
     if symbols_arg:
         syms = _dedup([s.strip().upper() for s in symbols_arg.split(",") if s.strip()])
         return syms, "--symbols override"
 
-    cache = settings.resolved_data_dir() / "universe" / "nifty200_cached.csv"
+    cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
     if cache.exists():
         try:
             syms = parse_index_constituents_csv(cache.read_text(encoding="utf-8"))
@@ -171,7 +172,7 @@ def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str
         except (OSError, ValueError):
             _log.warning("backfill_cache_unreadable", path=str(cache))
 
-    seed_rel = Path(settings.universe.nifty200_seed_path)
+    seed_rel = Path(settings.universe.index_seed_path)
     seed = seed_rel if seed_rel.is_absolute() else repo_root() / seed_rel
     if seed.exists():
         try:
@@ -571,8 +572,8 @@ def main(argv: list[str] | None = None) -> int:
     if not universe:
         print(
             "backfill: no universe resolved — pass --symbols, or ensure the runtime cache "
-            f"({settings.resolved_data_dir() / 'universe' / 'nifty200_cached.csv'}) or the committed "
-            f"seed ({repo_root() / settings.universe.nifty200_seed_path}) exists",
+            f"({settings.resolved_data_dir() / 'universe' / 'index_cached.csv'}) or the committed "
+            f"seed ({repo_root() / settings.universe.index_seed_path}) exists",
             file=sys.stderr,
         )
         return 2

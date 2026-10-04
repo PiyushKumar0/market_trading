@@ -110,7 +110,8 @@ def test_orb_buy_breakout_hand_computed_levels():
     #   stop   = 102.05 − 2.55 = 99.50            → round_to_tick 99.50
     #   target = 102.05 + 1.5 × 2.55 = 105.875    → round_to_tick 105.90
     #            (105.875 / 0.05 = 2117.5 steps, ROUND_HALF_UP → 2118 → 2118 × 0.05 = 105.90)
-    # score = 1.5 / (2 × 1.5) = 0.5.
+    # score = 1.5 / (1.5 + 2 × 1.5) = 1/3 — the 2026-09-02 saturation-free squash (1/3 exactly at
+    # the volume threshold; the old min(1, ratio/3) clamped most live fires to a 1.0 tie).
     trigger = _buy_trigger(_dt(9, 35))
     ctx = _orb_ctx(_orb_session(trigger), features_snapshot_id="fs-001")
     out = _orb().scan(trigger, ctx)
@@ -123,7 +124,7 @@ def test_orb_buy_breakout_hand_computed_levels():
     assert c.raw_levels.entry == Decimal("102.05")
     assert c.raw_levels.stop == Decimal("99.50")
     assert c.raw_levels.target == Decimal("105.90")
-    assert c.score == pytest.approx(0.5)
+    assert c.score == pytest.approx(1.0 / 3.0)
     assert c.features_snapshot_id == "fs-001"
     assert c.catalyst_ref is None            # price baseline — never a catalyst link (§3.2.5)
     assert len(c.signal_id) == 26            # ULID (§3.2 convention 6)
@@ -309,21 +310,104 @@ def test_rsi2_insufficient_history_fails_to_zero():
     assert Rsi2Scanner().scan(bar, ctx) == []
 
 
+# --------------------------------------------------- regime visibility (owner-directed 2026-09-12)
+# NIFTY 50 sat under its 50-DMA every session from 08-27 and rsi2 produced nothing from 08-28, with
+# no line anywhere saying which leg was shut: "the filter is working" and "the scanner is broken"
+# were indistinguishable from the log for two weeks.
+
+# Close below its own (still rising) 50-DMA — the live shape since 08-27.
+BELOW_DMA_INDEX = [*UPTREND_INDEX[:-1], Decimal("120")]
+
+
+def _regime_records(caplog) -> list:
+    return [r for r in caplog.records if r.getMessage() == "rsi2_regime_blocked"]
+
+
+def test_rsi2_regime_block_logs_the_failing_leg(caplog):
+    good_stock = _dailies([*RSI2_RISING, 196.5])
+    with caplog.at_level("INFO"):
+        assert Rsi2Scanner().scan(
+            _swing_bar("194.50"), ScanContext(daily_bars=good_stock,
+                                              index_daily_closes=BELOW_DMA_INDEX)
+        ) == []
+    rec = _regime_records(caplog)[-1]
+    assert rec.blocked_leg == "close_below_sma50"
+    assert rec.rising is True                    # the 50-DMA is still rising; the CLOSE is the leg
+    assert rec.index_close == 120.0
+    assert rec.sma50 > rec.index_close
+    assert rec.d == DAY.isoformat()
+
+
+def test_rsi2_regime_block_names_the_rising_leg_when_that_is_what_failed(caplog):
+    good_stock = _dailies([*RSI2_RISING, 196.5])
+    with caplog.at_level("INFO"):
+        assert Rsi2Scanner().scan(
+            _swing_bar("194.50"), ScanContext(daily_bars=good_stock,
+                                              index_daily_closes=FALLING_DMA_INDEX)
+        ) == []
+    rec = _regime_records(caplog)[-1]
+    assert rec.blocked_leg == "sma50_not_rising"  # close 160 IS above the 50-DMA; the slope is not
+    assert rec.rising is False
+
+
+def test_rsi2_regime_block_logs_once_per_session(caplog):
+    """``scan`` runs on every 1m bar of every watchlist symbol — ~80,000 calls a session. One line a
+    session, and the day guard must RELEASE on the next session (a latch with no symmetric clear is
+    the 2026-09-01 freeze lesson)."""
+    scanner = Rsi2Scanner()                       # one instance, as the integrator builds it
+    ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=BELOW_DMA_INDEX)
+    with caplog.at_level("INFO"):
+        for mm in range(5):
+            bar = Bar(symbol="TCS", ts_minute=_dt(10, mm), open=Decimal("194.50"),
+                      high=Decimal("194.50"), low=Decimal("194.50"), close=Decimal("194.50"),
+                      volume=1000)
+            assert scanner.scan(bar, ctx) == []
+        assert len(_regime_records(caplog)) == 1
+        # ...and a bar from the NEXT session logs again.
+        next_day = Bar(symbol="TCS", ts_minute=datetime(2026, 6, 18, 10, 0, tzinfo=IST),
+                       open=Decimal("194.50"), high=Decimal("194.50"), low=Decimal("194.50"),
+                       close=Decimal("194.50"), volume=1000)
+        assert scanner.scan(next_day, ctx) == []
+    recs = _regime_records(caplog)
+    assert [r.d for r in recs] == [DAY.isoformat(), "2026-06-18"]
+
+
+def test_rsi2_passing_regime_logs_nothing(caplog):
+    """The line names a SHUT filter. A passing regime that produces a candidate must stay silent, or
+    the signal it exists to carry is buried on every normal session."""
+    ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX)
+    with caplog.at_level("INFO"):
+        assert len(Rsi2Scanner().scan(_swing_bar("194.50"), ctx)) == 1
+    assert _regime_records(caplog) == []
+
+
+def test_rsi2_warmup_shortfall_is_not_a_regime_block(caplog):
+    """Too few index closes is a warm-up condition (§7.1), not a shut regime — the filter was never
+    evaluated, so naming a failing leg would be an invention."""
+    ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX[:69])
+    with caplog.at_level("INFO"):
+        assert Rsi2Scanner().scan(_swing_bar("194.50"), ctx) == []
+    assert _regime_records(caplog) == []
+
+
 # ============================================================================ trend (§6.1 row 3)
 #
-# 60 dailies with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-first-value EMAs of a
-# constant series), so an up provisional close makes the golden cross fire TODAY by construction.
-# Highs/lows creep +0.01/day (+DM=0.01, −DM=0, TR=1.0 uniform) ⇒ +DI=1, −DI=0 ⇒ DX=100 ⇒ ADX=100
-# exactly, and ATR(14,1d)=1.0 exactly — every level is closed-form.
+# 150 dailies (WO-11 floor, F10) with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-
+# first-value EMAs of a constant series), so an up provisional close makes the golden cross fire
+# TODAY by construction. Highs/lows creep +0.001/day (+DM=0.001, −DM=0) — small enough that the
+# cumulative offset never reaches 1.0 across the full 150-bar fixture, keeping TR=1.0 uniform (so
+# ATR(14,1d)=1.0 exactly) for any n used below; DX depends only on the SIGN pattern (−DI=0 exactly
+# since lows never fall ⇒ DX=100·(+DI)/(+DI) = 100 regardless of the +DM magnitude), so ADX=100
+# exactly too — every level stays closed-form at n=60, 149 or 150 alike.
 
 
-def _trend_dailies(n: int = 60, *, directional: bool = True) -> list[DailyBar]:
+def _trend_dailies(n: int = 150, *, directional: bool = True) -> list[DailyBar]:
     d0 = date(2026, 3, 1)
     out = []
     for i in range(n):
         if directional:
-            hi = Decimal("100") + Decimal("0.01") * i
-            lo = Decimal("99") + Decimal("0.01") * i
+            hi = Decimal("100") + Decimal("0.001") * i
+            lo = Decimal("99") + Decimal("0.001") * i
         else:
             hi, lo = Decimal("101"), Decimal("99")   # static H/L: ±DM = 0 ⇒ ADX = 0
         out.append(DailyBar(symbol="TCS", d=d0 + timedelta(days=i), open=Decimal("100"),
@@ -366,7 +450,7 @@ def test_trend_no_fresh_cross_rejected():
         DailyBar(symbol="TCS", d=d0 + timedelta(days=i), open=Decimal(str(100 + 0.5 * i)),
                  high=Decimal(str(101 + 0.5 * i)), low=Decimal(str(99 + 0.5 * i)),
                  close=Decimal(str(100 + 0.5 * i)), volume=1000)
-        for i in range(60)
+        for i in range(150)
     ]
     assert TrendScanner().scan(_swing_bar("135"), ScanContext(daily_bars=dailies)) == []
 
@@ -376,8 +460,22 @@ def test_trend_death_cross_not_emitted():
     assert TrendScanner().scan(_swing_bar("99"), ScanContext(daily_bars=_trend_dailies())) == []
 
 
-def test_trend_insufficient_dailies_fails_to_zero():
-    assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(59))) == []
+def test_trend_warmup_floor_149_150_boundary():
+    # WO-11 (F10): the floor is 150 completed dailies (raised from 60) — the boundary is the test.
+    # 149 fails to zero (warm-up, §7.1 warmup_ready); 150 is a live golden cross, hand-computed
+    # identically to test_trend_golden_cross_hand_computed above.
+    assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(149))) == []
+    out = TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(150)))
+    assert len(out) == 1
+    assert out[0].raw_levels.stop == Decimal("98.50")
+    assert out[0].score == pytest.approx(1.0)
+
+
+def test_trend_young_listing_emits_nothing_at_60_bars():
+    # WO-11 acceptance: a young-listing fixture at the OLD 60-bar floor must now emit nothing — the
+    # exact gap WarmupGate's young-listing exemption previously let through with material EMA-seed
+    # noise (F10).
+    assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(60))) == []
 
 
 # ============================================================================ mom (§6.1 row 4)
@@ -433,3 +531,74 @@ def test_mom_ex_date_skip_horizon():
     assert scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 7, 8)])) == []   # day+21 — inside, skip
     assert len(scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 7, 9)]))) == 1   # day+22 — outside
     assert len(scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 6, 16)]))) == 1  # past ex-date ignored
+
+
+# ------------------------------------------------------------------ pending arm levels (2026-07-29)
+def test_orb_pending_reports_both_range_edges_inside_the_range():
+    """Price INSIDE the auction-seeded range [99.50, 102.00] => both edges reported as arm levels
+    (the sweep's "shift your window to catch it" input)."""
+    inside = Bar(symbol="TCS", ts_minute=_dt(9, 40), open=Decimal("100"), high=Decimal("100.60"),
+                 low=Decimal("99.80"), close=Decimal("100.60"), volume=900)
+    pend = _orb().pending(inside, _orb_ctx(_orb_session(inside)))
+    assert [(p.side, p.trigger_price) for p in pend] == [
+        ("BUY", Decimal("102.00")), ("SELL", Decimal("99.50")),
+    ]
+    assert all(p.strategy_id == "orb" and p.symbol == "TCS" for p in pend)
+    assert all(p.last_price == Decimal("100.60") for p in pend)
+    assert "volume" in pend[0].condition       # the arming volume gate rides along in prose
+
+
+def test_orb_pending_silent_beyond_range_while_forming_and_flagged():
+    trigger = _buy_trigger(_dt(9, 35))                       # beyond the range: scan()'s territory
+    assert _orb().pending(trigger, _orb_ctx(_orb_session(trigger))) == []
+    forming = _uniform_bar(_dt(9, 20))                       # opening range still forming
+    assert _orb().pending(forming, _orb_ctx(_orb_session(forming))) == []
+    inside = Bar(symbol="TCS", ts_minute=_dt(9, 40), open=Decimal("100"), high=Decimal("100.60"),
+                 low=Decimal("99.80"), close=Decimal("100.60"), volume=900)
+    assert _orb().pending(inside, _orb_ctx(_orb_session(inside), flagged=True)) == []
+
+
+def test_rsi2_pending_inverts_the_arm_price():
+    """The bisection contract: the reported dip level brackets the RSI(2) < rsi_entry boundary
+    within one tick, and the level respects the 200-DMA floor."""
+    from engine.strategy.indicators import wilder_rsi
+
+    series = [*RSI2_RISING, 196.5]                           # 199 completed dailies (as scan tests)
+    ctx = ScanContext(daily_bars=_dailies(series), index_daily_closes=UPTREND_INDEX)
+    bar = _swing_bar("199.00")                               # not oversold: no live signal
+    assert Rsi2Scanner().scan(bar, ctx) == []
+    pend = Rsi2Scanner().pending(bar, ctx)
+    assert len(pend) == 1
+    p = pend[0]
+    assert (p.side, p.strategy_id, p.style) == ("BUY", "rsi2", "swing")
+    trigger = float(p.trigger_price)
+    assert trigger < 199.0
+    # One tick below the level: condition holds; one tick above: it does not (bracketing).
+    assert float(wilder_rsi([*series, trigger - 0.05], 2).iloc[-1]) < 10
+    assert float(wilder_rsi([*series, trigger + 0.05], 2).iloc[-1]) >= 10
+    # And the level still clears the 200-DMA computed with the dip in the series.
+    from engine.strategy.indicators import sma
+    assert trigger > float(sma([*series, trigger], 200).iloc[-1])
+
+
+def test_rsi2_pending_silent_when_live_or_regime_off():
+    live_ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX)
+    assert Rsi2Scanner().pending(_swing_bar("194.50"), live_ctx) == []     # already oversold: live
+    flat = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=FLAT_INDEX)
+    assert Rsi2Scanner().pending(_swing_bar("199.00"), flat) == []         # index regime filter off
+
+
+def test_orb_score_never_saturates_and_stays_monotone():
+    """2026-09-02 de-saturation: heavier volume must always score strictly higher, and 1.0 is an
+    asymptote never reached - the three-session lockout (08-27/09-01/09-02) happened because most
+    live fires tied at a clamped 1.0 and neither ranking nor displacement could discriminate."""
+    scores = []
+    for mult in (1.0, 2.0, 4.0, 10.0, 40.0):
+        vol = int(1000 * 1.5 * mult)                     # median is 1000 ⇒ vol_ratio = 1.5 × mult
+        trigger = _buy_trigger(_dt(9, 35), volume=vol)
+        out = _orb().scan(trigger, _orb_ctx(_orb_session(trigger)))
+        assert len(out) == 1
+        scores.append(out[0].score)
+    assert scores == sorted(scores)                      # strictly monotone in volume
+    assert len(set(scores)) == len(scores)               # no ties anywhere on the curve
+    assert scores[-1] < 1.0                              # 60x-median volume still is not "1.0"

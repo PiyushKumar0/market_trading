@@ -1,0 +1,22 @@
+diff --git a/config/limits.yaml b/config/limits.yaml
+index 5f3f4ff..9b8e901 100644
+--- a/config/limits.yaml
++++ b/config/limits.yaml
+@@ -29,7 +29,7 @@ limits:
+   per_trade_risk:
+     intraday_pct: 1.0            # risk-at-stop ≤ 1.0% (₹400 at the ₹40,000 base) intraday
+     swing_position_pct: 2.0      # ≤ 2.0% (₹800) swing/position — owner-confirmed 2026-07-07 (plan §7.1 aligned)
+-    overnight_gap_mult: 2.5      # overnight risk = qty × max(2.5×stop_distance, instrument daily band %) (R2)
++    overnight_gap_mult: 2.0      # overnight risk = qty × max(2.0×stop_distance, instrument daily band %) (R2)
+     on_breach: shrink_else_reject
+ 
+   daily_loss_soft:
+@@ -72,7 +72,7 @@ limits:
+ 
+   per_stock_exposure:
+     max_positions_per_symbol: 1
+-    cnc_notional_inr: 8000      # ≤ ₹8,000/symbol (20% of the ₹40,000 base; deliberately unchanged 2026-09-07) (C4)
++    cnc_notional_inr: 12000     # ≤ ₹12,000/symbol (30% of the ₹40,000 base; O17 owner-directed 2026-09-13, plan 7.1) (C4)
+     on_breach: reject_or_shrink
+ 
+   per_sector_exposure:

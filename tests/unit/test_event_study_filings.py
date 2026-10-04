@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from engine.core.clock import IST
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.strategy.cost_model import CostModel
@@ -168,11 +170,85 @@ def test_measure_directional_gross_minus_cost_is_net():
     obs = es.measure_directional(rows, 3, symbol="X", kind="insider_buy",
                                  horizons=es.INSIDER_HORIZONS, cost_pct=cost)
     assert obs is not None
-    base = rows[3].close
+    base = rows[4].open                    # WO-16 default: filled at the NEXT session's open
     for k in es.INSIDER_HORIZONS:
         expected_gross = (rows[3 + k].close / base - 1.0) * 100.0
         assert abs(obs.gross[k] - expected_gross) < 1e-9
         assert abs(obs.net[k] - (obs.gross[k] - cost)) < 1e-9
+    assert obs.event_date == rows[3].d     # the event stamp stays the PIT event session T
+
+
+# ====================================================== WO-16 entry fill: next_open vs close_t
+def test_measure_directional_next_open_is_default_and_excludes_the_overnight_gap():
+    """A series whose whole move happens in the T->T+1 GAP: close_T fill books it, next_open cannot.
+
+    Flat intraday sessions (open == close) with a one-off +10% overnight gap after T=3 make the two
+    conventions differ materially, which is exactly the WO-2-style regression this pins.
+    """
+    closes = [100.0] * 4 + [110.0] * 26        # gap up between session 3 and 4, flat thereafter
+    opens = list(closes)                       # open == close every session ⇒ zero intraday move
+    rows = _rows_seq(closes, opens)
+
+    default = es.measure_directional(rows, 3, symbol="X", kind="insider_buy",
+                                     horizons=es.INSIDER_HORIZONS, cost_pct=0.0)
+    next_open = es.measure_directional(rows, 3, symbol="X", kind="insider_buy",
+                                       horizons=es.INSIDER_HORIZONS, cost_pct=0.0,
+                                       entry_fill=es.ENTRY_FILL_NEXT_OPEN)
+    close_t = es.measure_directional(rows, 3, symbol="X", kind="insider_buy",
+                                     horizons=es.INSIDER_HORIZONS, cost_pct=0.0,
+                                     entry_fill=es.ENTRY_FILL_CLOSE_T)
+    assert default is not None and next_open is not None and close_t is not None
+    assert es.DEFAULT_ENTRY_FILL == es.ENTRY_FILL_NEXT_OPEN
+    assert default.gross == next_open.gross                    # the DEFAULT is the corrected one
+    for k in es.INSIDER_HORIZONS:
+        assert abs(next_open.gross[k] - 0.0) < 1e-9            # bought at 110 open, still 110
+        assert abs(close_t.gross[k] - 10.0) < 1e-9             # bought at 100 close, booked the gap
+
+
+def test_entry_price_conventions_and_validation():
+    rows = _rows_seq([100, 101, 102], [90, 91, 92])
+    assert es.entry_price(rows, 0, es.ENTRY_FILL_CLOSE_T) == 100.0      # close_T
+    assert es.entry_price(rows, 0, es.ENTRY_FILL_NEXT_OPEN) == 91.0     # open_(T+1)
+    assert es.entry_price(rows, 2, es.ENTRY_FILL_NEXT_OPEN) is None     # no next bar ⇒ unmeasurable
+    with pytest.raises(ValueError, match="entry_fill"):
+        es.entry_price(rows, 0, "same_bar_please")
+
+
+def test_measure_event_next_open_base_and_confirmation_leg_shift():
+    # T=2 reacts up (open 100 < close 102); the confirmation bar T+1 closes >1% up on 5x volume.
+    closes = [100, 100, 102, 104, 106, 108, 110, 112, 114, 116]
+    opens = [100, 100, 100, 103, 105, 107, 109, 111, 113, 115]
+    base_d = date(2026, 2, 2)
+    vols = [1000] * 10
+    vols[3] = 5000                          # the T+1 confirmation bar's volume spike
+    rows = [
+        _row(base_d + timedelta(days=i), opens[i], max(opens[i], closes[i]) + 1,
+             min(opens[i], closes[i]) - 1, closes[i], vols[i])
+        for i in range(10)
+    ]
+    obs = es.measure_event(rows, 2, symbol="X", kind="results_filing", cost_pct=0.0)
+    assert obs is not None and obs.reaction_sign == 1
+    for k in es.HORIZONS:                   # PEAD entry moves from close_T to open_(T+1)
+        assert abs(obs.pead_gross[k] - (rows[2 + k].close / rows[3].open - 1.0) * 100.0) < 1e-9
+    assert obs.confirmed is True            # +1.96% on 5x the 20d median volume
+    for k in (2, 3, 4, 5):                  # confirmation entry shifts to open_(T+2), not close_(T+1)
+        assert abs(obs.confirm_gross[k] - (rows[2 + k].close / rows[4].open - 1.0) * 100.0) < 1e-9
+
+
+def test_after_hours_treats_unknown_midnight_time_as_after_close():
+    """A date-only broadcast parses to 00:00 — unknown time, NOT 'public before dawn' (WO-16).
+
+    The feeds' date-only fallbacks and this module's date-only earnings fallback both produce
+    midnight; treating it as intraday would enter at that session's close on a filing that was in
+    reality disseminated after hours (every real PIT row in the fixture is an evening broadcast).
+    """
+    sess = [date(2026, 1, 8), date(2026, 1, 9), date(2026, 1, 12)]
+    assert es.after_hours(_bdt(sess[0], 0, 0)) is True
+    assert es.after_hours(_bdt(sess[0], 0, 1)) is False               # a real 00:01 stamp is not the guard
+    assert es.entry_session_index(sess, _bdt(sess[0], 0, 0)) == 1     # conservative: NEXT session
+    filings = [{"txn_type": "Buy", "acq_mode": "Market", "value": Decimal("15000000"),
+                "broadcast_dt": datetime(2026, 1, 8, tzinfo=IST)}]    # date-only ⇒ midnight
+    assert es.insider_buy_events(sess, filings, 10_000_000) == [1]
 
 
 def test_measure_directional_insufficient_forward_bars():
@@ -189,13 +265,29 @@ def test_aggregate_and_render_report_gross_and_net_columns():
                                     horizons=es.INSIDER_HORIZONS, cost_pct=0.1)]
     agg = es.aggregate([], [], [o for o in d_obs if o])
     meta = {"generated_at": "2026-07-16T00:00:00+05:30", "n_symbols": 1, "start": "2026-01-01",
-            "end": "2026-03-01", "cost_pct": 0.1, "reference_notional": "20000",
+            "end": "2026-03-01", "cost_pct": 0.3192, "cost_fees_pct": 0.2992,
+            "cost_spread_pct": 0.02, "entry_fill": es.ENTRY_FILL_NEXT_OPEN,
+            "reference_notional": "20000",
             "skip_filings": False, "insider_min_value_inr": 10_000_000, "pledge_delta_min_pct": 5.0}
     md = es.render_markdown(agg, meta)
     assert "mean gross %" in md and "mean net %" in md               # both columns present
     assert "Insider-buy leg" in md and "T+20" in md
     # empty filings legs degrade to an honest n=0 note
     assert "shp_quarterly empty" in md and "results_filings empty" in md
+    # WO-16 header: the spread is broken out, the fill convention and survivorship stated
+    assert "0.2992% statutory fees + 0.0200% measured bid-ask SPREAD" in md
+    assert "next session's OPEN" in md and "open_(T+1)" in md
+    assert "Survivorship caveat" in md
+    assert "broadcast timestamp" in md and "txn_from" in md          # date anchoring stated in the report
+
+
+def test_render_marks_the_superseded_close_t_convention():
+    agg = es.aggregate([], [], [])
+    meta = {"generated_at": "x", "n_symbols": 0, "start": "a", "end": "b", "cost_pct": 0.3192,
+            "entry_fill": es.ENTRY_FILL_CLOSE_T, "reference_notional": "20000", "skip_filings": True,
+            "insider_min_value_inr": 10_000_000, "pledge_delta_min_pct": 5.0}
+    md = es.render_markdown(agg, meta)
+    assert "SUPERSEDED" in md                                        # never silently the old mechanic
 
 
 def test_render_skip_filings_hides_filings_sections():

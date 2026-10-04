@@ -258,6 +258,12 @@ function Install-Service {
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppThrottle',     '60000')   # <60s up == failed start
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppRestartDelay', '15000')   # 15s between restart tries
 
+    # (3b) Stop grace. NSSM's default waits only 1500 ms after the console Ctrl-C, then closes the
+    #      console window -> CTRL_CLOSE_EVENT (SIGBREAK) -> Windows terminates the process. The clean
+    #      shutdown (guard steps + snapshot backup + STOPPED commit) takes several seconds, so at 1.5 s
+    #      every stop since 2026-09-02 died mid-backup and was recorded as a crash (observed 09-23).
+    Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStopMethodConsole', '30000')
+
     # (5) Rotating stdout/stderr under data\logs (E7).
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStdout', $StdoutLog)
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStderr', $StderrLog)
@@ -371,7 +377,7 @@ function Show-Status {
     Write-Host ("    StartType    : {0}  (expected: Manual / Demand per §2.6)" -f $svc.StartType)
 
     # NSSM's own view of the key program settings (read-only `get`).
-    foreach ($key in @('Application', 'AppParameters', 'AppDirectory', 'Start', 'AppExit', 'AppThrottle', 'AppRestartDelay', 'AppStdout', 'AppStderr')) {
+    foreach ($key in @('Application', 'AppParameters', 'AppDirectory', 'Start', 'AppExit', 'AppThrottle', 'AppRestartDelay', 'AppStopMethodConsole', 'AppStdout', 'AppStderr')) {
         if ($key -eq 'AppExit') {
             Write-Host "    AppExit(0)   : $(& $Nssm get $ServiceName AppExit 0)"
             Write-Host "    AppExit(*)   : $(& $Nssm get $ServiceName AppExit Default)"

@@ -8,58 +8,46 @@ open-market promoter/director BUY cluster, stage-2 verdict PASSED: T+10 net +0.7
 n=110). ``pledge_delta`` / ``results_filing`` are NOT built here (stage-2 verdicts INCONCLUSIVE /
 FAILED-as-origination — plan §2.8.4).
 
-**Reuse, don't duplicate (plan §2.8.2 / brief):** the point-in-time entry mapping
+**Reuse, don't duplicate (plan §2.8.2 / §6.1 `ins` addendum):** the point-in-time entry mapping
 (:func:`entry_session_index`), the open-market predicate (:func:`is_open_market_buy` + the pinned
 ``INSIDER_ACQ_MODE_EXCLUSIONS`` taxonomy) and the trailing-window re-arming crossing logic
-(:func:`insider_cluster_events`) are the SAME functions ``scripts/event_study.py`` validated in
-stage 2 — imported here VERBATIM (via the repo's established load-loose-script-by-path pattern, the
-same one ``scripts/filings_experiments.py`` and ``tests/unit/test_event_study_filings.py`` use) so the
-Phase-1 event set is byte-identical to the validated rule. The absolute-₹ floor is applied; the
-§2.8.2 value/20d-ADV floor is deliberately NOT part of this proxy (matching the validated leg — see
-event_study's ``insider_cluster_events`` note).
+(:func:`insider_cluster_events`) are the SAME functions the stage-2 / WO-16 study runs — they now live
+in :mod:`engine.datafeeds.insider_crossings` and are imported here (and back into
+``scripts/event_study.py``) so the live event set is byte-identical to the validated rule. The
+absolute-₹ floor is applied; the §2.8.2 value/20d-ADV floor is deliberately NOT part of this proxy
+(matching the validated leg — see ``insider_cluster_events``'s note).
 
-> Phase-2 note: when this library is wired into the live ``CatalystDigestJob``, the shared primitives
-> should be promoted into the engine package (dependency inverted) rather than path-loaded from
-> ``scripts/`` — engine code should not import a loose script at runtime. Flagged, not done here (a
-> refactor of the stage-2 script + its 3 test consumers is out of this stage's scope).
+> **Resolved 2026-08-17 (§6.1 `ins`).** This module used to path-load ``scripts/event_study.py`` at
+> import time and its own docstring flagged that as a debt to settle "when this library is wired into
+> a live job". ``ins`` is that live job (``engine.datafeeds.ins_crossings``), so the dependency was
+> inverted: the primitives moved into the engine package verbatim and the loose script imports them
+> back. No runtime engine→scripts import remains.
 
-**Cross-source dedup (§2.8 edge case):** the SAME disclosure surfaces first on the BSE fresh feed
-(``source='bse'``, id-prefixed) and again ~70 days later on the NSE PIT structured feed
-(``source='nse'``, bare id). Before clustering, a BSE row whose ``(symbol, txn_from, qty)`` already
-appears from NSE is dropped — the NSE structured row supersedes the interim fresh one. Source is
-recovered from the id prefix (:func:`row_source`); NSE never drops.
+**Cross-source duplicates (§2.8 edge case):** the SAME disclosure reaches both exchanges and both
+feeds store it. :meth:`MarketStore.get_insider_trades` returns each trade once (the earlier broadcast),
+so the rows this module receives are already de-duplicated. Until 2026-09-24 a looser rule here
+dropped a BSE row whose ``(symbol, txn_from, qty)`` matched ANY NSE row, which can drop a different
+person's trade; it was replaced by the store's pairing on the full trade.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
+from engine.datafeeds.filings_pit import NSE_SOURCE as SOURCE_NSE
 from engine.datafeeds.filings_pit_fresh import BSE_ID_PREFIX, BSE_SOURCE
 
-# --- reuse the stage-2 VALIDATED pure functions from scripts/event_study.py (import, never duplicate) ---
-_ES_MODNAME = "mt_event_study"
-if _ES_MODNAME in sys.modules:  # already loaded (e.g. by the event-study tests) — reuse the one instance
-    _es = sys.modules[_ES_MODNAME]
-else:  # pragma: no cover - path-load shim (exercised, but coverage of the branch depends on load order)
-    _ES_PATH = Path(__file__).resolve().parents[3] / "scripts" / "event_study.py"
-    _spec = importlib.util.spec_from_file_location(_ES_MODNAME, _ES_PATH)
-    _es = importlib.util.module_from_spec(_spec)
-    sys.modules[_ES_MODNAME] = _es
-    _spec.loader.exec_module(_es)
-
-is_open_market_buy = _es.is_open_market_buy
-insider_cluster_events = _es.insider_cluster_events
-entry_session_index = _es.entry_session_index
-INSIDER_TRAILING_SESSIONS: int = _es.INSIDER_TRAILING_SESSIONS
-
-SOURCE_NSE = "nse"
+# --- the ONE definition of the validated crossing rule (promoted 2026-08-17, §6.1 `ins`) -------------
+from engine.datafeeds.insider_crossings import (
+    INSIDER_TRAILING_SESSIONS,
+    entry_session_index,
+    insider_cluster_events,
+    is_open_market_buy,
+)
 
 
 def row_source(row: dict[str, Any]) -> str:
@@ -69,22 +57,6 @@ def row_source(row: dict[str, Any]) -> str:
     if explicit:
         return str(explicit).strip().lower()
     return BSE_SOURCE if str(row.get("id") or "").startswith(BSE_ID_PREFIX) else SOURCE_NSE
-
-
-def _dedup_key(row: dict[str, Any]) -> tuple[str, Any, Any]:
-    return (str(row.get("symbol") or "").upper(), row.get("txn_from"), row.get("qty"))
-
-
-def dedup_cross_source(filings: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop BSE rows superseded by an NSE row on ``(symbol, txn_from, qty)`` (§2.8 edge case). NSE rows
-    are never dropped; a BSE row with no NSE counterpart is kept. Order preserved."""
-    nse_keys = {_dedup_key(f) for f in filings if row_source(f) == SOURCE_NSE}
-    out: list[dict[str, Any]] = []
-    for f in filings:
-        if row_source(f) == BSE_SOURCE and _dedup_key(f) in nse_keys:
-            continue
-        out.append(f)
-    return out
 
 
 def insider_net_buy(
@@ -100,11 +72,10 @@ def insider_net_buy(
          person_category_dominant}
 
     The crossing SET comes verbatim from :func:`insider_cluster_events` (the validated rule); the
-    trailing_value / contributing / dominant-category fields are metadata computed around it. Cross-
-    source dedup is applied first. Events are sorted by (symbol, event_session)."""
-    deduped = dedup_cross_source(filings)
+    trailing_value / contributing / dominant-category fields are metadata computed around it. Events
+    are sorted by (symbol, event_session)."""
     by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for f in deduped:
+    for f in filings:
         sym = str(f.get("symbol") or "").upper()
         if sym:
             by_symbol[sym].append(f)
@@ -175,7 +146,6 @@ class FilingsEventBuilder:
 __all__ = [
     "FilingsEventBuilder",
     "INSIDER_TRAILING_SESSIONS",
-    "dedup_cross_source",
     "insider_net_buy",
     "is_open_market_buy",
     "row_source",

@@ -27,16 +27,26 @@ the window to warm up (backfill already attempted at step 4 and coverage still s
 simply keeps answering not-ready — entries stay FROZEN and the owner is alerted; they reopen only
 once coverage is met.
 
+Every blocker carries its CLASS in its rendered prefix (:func:`blocker_class`): ``orb:`` ⇒ intraday
+1-minute coverage, ``rsi2/trend/mom:`` ⇒ completed daily sessions, ``regime:`` ⇒ NIFTY 50 / India
+VIX history — and its SYMBOL in the rest of the line (:func:`blocker_symbol`). Since the 2026-09-13
+plan change the consequence is per class, and since the 2026-09-17 one (§2.6 step-6 addenda) it is
+also per SYMBOL: only the REGIME class (NIFTY 50 / India VIX — every candidate depends on them) and
+an UNATTRIBUTABLE blocker drive the global FROZEN-for-entries, while an INTRADAY or DAILY shortfall
+refuses THAT SYMBOL's candidates per-candidate (risk gate + pre-screen) instead of taking the whole
+book down for one symbol's coverage hole. ``ready`` keeps its old meaning — no blockers at all.
+
 All store scans go through the ``MarketStore`` async wrappers (executor-offloaded — the loop is
 never blocked past the §2.2 heartbeat budget).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import date, timedelta
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
@@ -48,6 +58,88 @@ _log = get_logger("engine.ops.warmup")
 #: §6.1 daily-lookback strategies sharing the 200-session bars_1d requirement (200-DMA bound).
 DAILY_STRATEGY_SCOPE = "rsi2/trend/mom"
 
+#: Deepest daily feature lookback (200-DMA, §6.2) — the gate's default daily coverage window.
+DAILY_LOOKBACK_SESSIONS = 200
+
+#: The three warm-up COVERAGE CLASSES (2026-09-13 plan change). A class is a property of the missing
+#: DATA, not of a strategy: ``intraday`` = today's 1-minute bars, ``daily`` = completed daily
+#: sessions, ``regime`` = index/VIX daily history.
+CLASS_INTRADAY = "intraday"
+CLASS_DAILY = "daily"
+CLASS_REGIME = "regime"
+#: A blocker whose scope prefix matches no class — a synthesized fail-closed sentinel (the
+#: composition root's "unrefreshed" snapshot, the lifecycle's "warmup check failed") or a future
+#: scope whose rendering was not classified here. Coverage that cannot be ATTRIBUTED blocks EVERY
+#: class (R6: what cannot be verified is treated as missing), so a new scope fails safe by default.
+CLASS_UNKNOWN = "unknown"
+
+_REAL_CLASSES = (CLASS_INTRADAY, CLASS_DAILY, CLASS_REGIME)
+
+#: Rendered-prefix ⇒ class. The prefix IS the class label: ``_missing_intraday`` renders ``orb:``,
+#: ``_classify_daily`` renders the scope it is called with (``DAILY_STRATEGY_SCOPE`` or ``regime``).
+#: Classification therefore reads a fact, never a guess — a new scope must be added here AND to the
+#: §7.1 rows, or it falls to :data:`CLASS_UNKNOWN` and blocks everything.
+_CLASS_BY_PREFIX: tuple[tuple[str, str], ...] = (
+    ("orb:", CLASS_INTRADAY),
+    (f"{DAILY_STRATEGY_SCOPE}:", CLASS_DAILY),
+    ("regime:", CLASS_REGIME),
+)
+
+
+def blocker_class(blocker: str) -> str:
+    """The coverage class of one rendered blocker line (:data:`CLASS_UNKNOWN` when unattributable)."""
+    text = str(blocker)
+    for prefix, cls in _CLASS_BY_PREFIX:
+        if text.startswith(prefix):
+            return cls
+    return CLASS_UNKNOWN
+
+
+#: The SYMBOL inside a rendered blocker line. Anchored over EXACTLY the three renderings
+#: :meth:`WarmupGate._evaluate` produces — ``orb:{sym} bars {have}/{need}``,
+#: ``{scope}:{sym} daily bars {have}/{n}`` and ``{scope}:{sym} calendar horizon < {n} sessions`` —
+#: so the lazy symbol group plus the anchored suffix recover names that themselves contain spaces,
+#: ``&`` or ``-`` (``NIFTY 50``, ``INDIA VIX``, ``M&M``, ``GVT&D``, ``BAJAJ-AUTO``). Anything else
+#: is UNATTRIBUTABLE by construction (None), never a guessed symbol.
+_BLOCKER_SYMBOL_RE = re.compile(
+    r"^(?P<scope>orb|" + re.escape(DAILY_STRATEGY_SCOPE) + r"|regime):"
+    r"(?P<sym>.+?) (?:daily bars \d+/\d+|bars \d+/\d+|calendar horizon < \d+ sessions)$"
+)
+
+
+def blocker_symbol(blocker: str) -> str | None:
+    """The SYMBOL one rendered blocker line is attributed to, or None when the line cannot be
+    attributed to any symbol. A None is the fail-closed case everywhere it is consumed: a shortfall
+    nobody can pin on a symbol refuses EVERY symbol in its class (R6)."""
+    m = _BLOCKER_SYMBOL_RE.match(str(blocker))
+    return m.group("sym") if m is not None else None
+
+
+def classify_blockers(blockers: Sequence[str]) -> dict[str, list[str]]:
+    """Bucket rendered blocker lines by :func:`blocker_class`, order preserved. Empty classes are
+    absent from the mapping (a caller asks with ``.get(cls)``, never by membership)."""
+    out: dict[str, list[str]] = {}
+    for blocker in blockers:
+        out.setdefault(blocker_class(blocker), []).append(str(blocker))
+    return out
+
+
+def recent_sessions(calendar: NSECalendar, today: date, n: int) -> list[date] | None:
+    """The most recent ``n`` completed trading sessions strictly before ``today``, DESCENDING
+    (``[0]`` newest). None if the loaded calendars cannot supply ``n`` sessions (bounded walk).
+    Module-level so the daily gap-fill (backfill.daily_gap callers) and the gate share ONE
+    definition of the window — a fill that disagrees with the gate about which sessions count
+    can never clear the gate's blocker."""
+    days: list[date] = []
+    probe = today - timedelta(days=1)
+    for _ in range(n * 3 + 90):   # bounded: weekends+holidays inflate ~n*1.5; never loop forever
+        if len(days) >= n:
+            break
+        if calendar.is_trading_day(probe):
+            days.append(probe)
+        probe -= timedelta(days=1)
+    return days if len(days) >= n else None
+
 
 class WarmupStatus(BaseModel):
     ready: bool
@@ -57,6 +149,55 @@ class WarmupStatus(BaseModel):
     #: 200-session gate, so gating on them freezes entries forever) but surfaced here for the operator
     #: as "symbol(have/need)". A shortfall WITH gaps is a real blocker, not a young listing.
     young_excluded: list[str] = Field(default_factory=list)
+    #: ``blockers`` bucketed by class. DERIVED on every construction rather than passed in, so every
+    #: construction site — this gate, the composition root's fail-closed sentinel, tests, a duck-typed
+    #: fake — answers per class consistently and none can hand out a stale or absent bucketing.
+    blockers_by_class: dict[str, list[str]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _derive_classes(self) -> WarmupStatus:
+        self.blockers_by_class = classify_blockers(self.blockers)
+        return self
+
+    def ready_for(self, cls: str, symbol: str | None = None) -> bool:
+        """Is the ``cls`` coverage class satisfied — for the whole book, or for one SYMBOL?
+
+        ``symbol=None`` keeps the CLASS-WIDE meaning (False if ANY symbol is short in ``cls``); it is
+        what the freeze / lift / owner-notice code asks, because those answer a global question.
+        With a ``symbol`` the answer is per-symbol (owner-directed 2026-09-17): False iff a blocker
+        line in this class is attributed to THAT symbol, or cannot be attributed to any symbol. One
+        symbol's coverage hole must never refuse every candidate of its class — the 2026-09-16 13:36
+        PTCIL tradeless minute took the whole intraday book down from 13:37 to the close.
+
+        Fail-closed in four directions: an UNKNOWN-class blocker (unattributable coverage) holds
+        every class and every symbol down, a not-ready status carrying no blockers at all is
+        unattributable in the same way, a blocker in this class whose symbol cannot be parsed holds
+        every symbol in the class down, and an unrecognised ``cls`` is never "ready". ``ready`` (no
+        blockers anywhere) stays the whole-gate answer."""
+        if cls not in _REAL_CLASSES:
+            return False
+        if not self.ready and not self.blockers:
+            return False
+        if self.blockers_by_class.get(CLASS_UNKNOWN):
+            return False
+        lines = self.blockers_by_class.get(cls) or []
+        if not lines:
+            return True
+        if symbol is None:
+            return False
+        want = str(symbol)
+        return not any(blocker_symbol(line) in (None, want) for line in lines)
+
+    def short_symbols(self, cls: str) -> list[str]:
+        """The symbols ``cls``'s blockers are attributed to — order preserved, de-duplicated, and
+        unattributable lines omitted (they are not a symbol; :meth:`ready_for` handles them). Feeds
+        the owner's per-class transition notice, which counts SYMBOLS rather than blocker lines."""
+        out: list[str] = []
+        for line in self.blockers_by_class.get(cls) or []:
+            sym = blocker_symbol(line)
+            if sym is not None and sym not in out:
+                out.append(sym)
+        return out
 
 
 class WarmupGate:
@@ -87,7 +228,7 @@ class WarmupGate:
         daily_symbols: Sequence[str] | None = None,
         index_symbol: str = "NIFTY 50",
         vix_symbol: str = "INDIA VIX",
-        daily_lookback_sessions: int = 200,
+        daily_lookback_sessions: int = DAILY_LOOKBACK_SESSIONS,
         vix_lookback_sessions: int = 20,
     ) -> None:
         self._store = store
@@ -101,6 +242,12 @@ class WarmupGate:
         self._vix_n = int(vix_lookback_sessions)
 
     # ------------------------------------------------------------------ public surface
+    def set_symbols(self, symbols: Sequence[str], daily_symbols: Sequence[str] | None = None) -> None:
+        """Refresh the coverage set (2026-07-28 review: it was frozen at boot, so an 08:30 universe
+        change left the gate verifying YESTERDAY's watchlist for the rest of the day)."""
+        self._symbols = list(symbols)
+        self._daily_symbols = list(daily_symbols) if daily_symbols is not None else list(symbols)
+
     async def ready(self) -> bool:
         return not await self.missing()
 
@@ -141,7 +288,8 @@ class WarmupGate:
         if y:
             young.append(y)
         if blockers:
-            _log.warning("warmup_not_ready", blockers=blockers, young_excluded=young)
+            _log.warning("warmup_not_ready", blockers=blockers, young_excluded=young,
+                         classes=sorted(classify_blockers(blockers)))
         return blockers, young
 
     # ------------------------------------------------------------------ intraday (orb, today 09:15+)
@@ -180,24 +328,24 @@ class WarmupGate:
             return None, None
         # Short of the lookback. Distinguish a YOUNG LISTING from a real gap: a young listing has its
         # FIRST-EVER bar inside the lookback window (so it cannot supply n sessions) AND a bar for every
-        # session since that first bar (total available == sessions-since-listing, full coverage). A
-        # shortfall that fails EITHER test is a genuine gap and still blocks (never weakened).
-        first_bar, total = await self._store.adaily_bar_span(symbol)
+        # session since that first bar (full coverage). A shortfall that fails EITHER test is a genuine
+        # gap and still blocks (never weakened). Coverage is judged INSIDE the session window only —
+        # the span's total counts every row including today's still-live bar (written by the 18:05
+        # daily_bars job), which the window excludes; comparing against it flipped every young listing
+        # back to a blocker each evening (observed GROWW 2026-07-28).
+        first_bar, _total = await self._store.adaily_bar_span(symbol)
         if first_bar is not None and first_bar > sessions[-1]:
-            since_listing = sum(1 for d in sessions if d >= first_bar)
-            if total == since_listing:
-                return None, f"{symbol}({total}/{n})"
+            since_listing = [d for d in sessions if d >= first_bar]
+            if all(d in present for d in since_listing):
+                return None, f"{symbol}({len(since_listing)}/{n})"
         return f"{scope}:{symbol} daily bars {have}/{n}", None
 
     def _recent_sessions(self, n: int) -> list[date] | None:
         """The most recent ``n`` completed trading sessions strictly before today, DESCENDING
         (``[0]`` newest). None if the loaded calendars cannot supply ``n`` sessions (bounded walk)."""
-        days: list[date] = []
-        probe = self._clock.today() - timedelta(days=1)
-        for _ in range(n * 3 + 90):   # bounded: weekends+holidays inflate ~n*1.5; never loop forever
-            if len(days) >= n:
-                break
-            if self._calendar.is_trading_day(probe):
-                days.append(probe)
-            probe -= timedelta(days=1)
-        return days if len(days) >= n else None
+        return recent_sessions(self._calendar, self._clock.today(), n)
+
+    def daily_window(self) -> list[date] | None:
+        """The gate's own daily coverage window (see :func:`recent_sessions`) — callers that repair
+        daily coverage fetch exactly these sessions, so the repair and the check can never disagree."""
+        return self._recent_sessions(self._daily_n)

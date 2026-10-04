@@ -6,8 +6,11 @@ only (§2.4): every ``news`` row is written ``untrusted=true`` (forced by ``Mark
 
 Feed set (CONFIG — ``settings.yaml news.feeds``; changing it is an owner config change, config_audit):
 
-- **ET Markets RSS** (5-min cadence) + **Moneycontrol RSS** (15-min, polite): parsed with stdlib
-  ``xml.etree.ElementTree`` over an injected ``httpx.AsyncClient`` (convention 11 — E5 best-effort).
+- **RSS**, a config-driven name → ``{url, poll_s}`` map (``news.feeds.rss``; seeds: ET Markets at
+  5 min + Livemint markets/companies at 15 min). Parsed with stdlib ``xml.etree.ElementTree`` over an
+  injected ``httpx.AsyncClient`` (convention 11 — E5 best-effort). Moneycontrol RSS was removed
+  2026-08-04: the feed has been frozen since ~2024-04 (391 polls, zero inserts) and its silence left
+  the corpus single-source, which no §2.7 corroboration gate can pass.
   Malformed items are tolerated: an item without a title or an absolute link is skipped; an item with
   a missing/unparsable ``pubDate`` keeps the headline with ``published_at`` = ingest time (Clock) —
   conservative-recent, never a naive datetime.
@@ -17,6 +20,14 @@ Feed set (CONFIG — ``settings.yaml news.feeds``; changing it is an owner confi
   ``timespan`` is the §4.4 job 10 off-period startup backfill (RSS feeds have a fixed publisher-side
   lookback; GDELT is the only feed with a controllable window, capped at
   ``news.gdelt_backfill_max_days`` ≈ the ~3-month DOC window, E6).
+- **NSE corporate announcements** (``nse_ann``, §2.7 amendment 2026-09-04): the exchange as a source.
+  The 30-session coverage audit found only 47% of each day's top-10 movers had ANY cluster naming
+  them, while the filings that moved them (UNITDSPR's Reg-30 disclosure, HINDZINC's LoI ~2 h ahead of
+  the press) sat unread on ``corporate-announcements``. Items become ordinary ``news`` rows with
+  ``source_domain="nseindia.com"`` (so the exchange counts as ONE corroborating domain under
+  ``catalyst_guard.min_source_domains``, never two) and a title prefixed by the explicit
+  ``[NSE:<SYMBOL>]`` token :class:`~engine.datafeeds.news_pipeline.EntityResolver` honours — the
+  payload carries ``symbol`` natively, so no alias guess is involved anywhere.
 
 Dedupe is by URL: within the polled batch here, and against the ``news`` table by
 ``MarketStore.insert_news`` (idempotent re-polls / overlapping windows / startup backfill).
@@ -29,10 +40,11 @@ anything.
 
 from __future__ import annotations
 
+import html
 import json
 import math
 import xml.etree.ElementTree as ET
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -44,6 +56,8 @@ from ulid import ULID
 from engine.core.clock import IST, Clock
 from engine.core.config import NewsCfg
 from engine.core.log import get_logger
+from engine.core.nse_http import nse_get
+from engine.datafeeds.isin_map import NSE_ANNOUNCEMENTS_URL
 from engine.marketdata.store import MarketStore
 
 _log = get_logger("engine.datafeeds.news")
@@ -68,9 +82,69 @@ GDELT_DOMAIN_ALLOWLIST: frozenset[str] = frozenset({
     "zeebiz.com",
 })
 
-#: Feed keys accepted by :meth:`NewsIngest.poll` — one per §3.2.4 source (distinct poll cadences:
-#: ``news.et_poll_s`` / ``news.mc_poll_s`` / ``news.gdelt_poll_s``; the scheduler may poll each alone).
-FEED_KEYS: tuple[str, ...] = ("et", "mc", "gdelt")
+#: The NON-RSS feed keys accepted by :meth:`NewsIngest.poll`. The RSS keys are config-driven
+#: (``news.feeds.rss``), so the accepted set is built per-instance in ``poll``; each source has its
+#: own cadence (per-feed ``poll_s`` / ``news.gdelt_poll_s`` / ``news.feeds.nse_announcements.poll_s``)
+#: and the scheduler may poll each alone.
+GDELT_KEY = "gdelt"
+NSE_ANN_KEY = "nse_ann"
+
+#: The ONLY ``corporate-announcements`` fields this feed reads, pinned against the LIVE payload
+#: (probed once through :func:`engine.core.nse_http.nse_get`, 2026-09-04 15:14 IST). The response is
+#: a bare JSON list of rows; one row verbatim::
+#:
+#:     {"an_dt": "04-Sep-2026 15:14:44", "attFileSize": "2.60 MB",
+#:      "attchmntFile": "https://nsearchives.nseindia.com/corporate/MOHITIND_04092026151409_NOTICEMIL04092026.pdf",
+#:      "attchmntText": "Mohit Industries Limited has informed the Exchange regarding Notice of
+#:                       Annual General Meeting to be held on September 30, 2026",
+#:      "bflag": null, "csvName": null, "desc": "Shareholders meeting", "difference": "00:00:01",
+#:      "dt": "04092026151444", "exchdisstime": "04-Sep-2026 15:14:45", "fileSize": "2.60 MB",
+#:      "hasXbrl": true, "old_new": null, "orgid": null, "seq_id": "106769737",
+#:      "smIndustry": "Textile Products", "sm_isin": "INE954E01012",
+#:      "sm_name": "Mohit Industries Limited", "sort_date": "2026-09-04 15:14:44",
+#:      "symbol": "MOHITIND"}
+#:
+#: ``desc`` is the SUBJECT (the announcement category ``news.feeds.nse_announcements.drop_subjects``
+#: filters on); ``attchmntText`` is the one-line disclosure body. There is no ``subject`` key in this
+#: payload — the plan's "subject-or-attachment-text" is exactly this pair.
+NSE_ANN_FIELDS: tuple[str, ...] = (
+    "symbol", "desc", "attchmntText", "attchmntFile", "sort_date", "exchdisstime", "an_dt", "seq_id",
+)
+
+#: Deterministic per-announcement URL for an item with no attachment. Dedupe is URL-based, so every
+#: item needs a stable unique key; ``seq_id`` is the exchange's own monotonic announcement id.
+NSE_ANN_ITEM_URL = "https://www.nseindia.com/companies-listing/corporate-filings-announcements#{seq_id}"
+
+#: The exchange is ONE corroborating domain no matter which host serves the PDF (attachments live on
+#: ``nsearchives.nseindia.com``) — pinned, never derived from the item URL.
+NSE_ANN_DOMAIN = "nseindia.com"
+
+
+def nse_ann_url(d: date) -> str:
+    """The announcements endpoint for ONE day (probe 2026-09-09): the bare url answers its 20 newest
+    rows whatever the volume, while ``from_date/to_date`` (DD-MM-YYYY) returns the whole day — 745
+    rows for 08-09-2026 — so a poll asks for the clock's day and the store dedupes the overlap."""
+    stamp = d.strftime("%d-%m-%Y")
+    return f"{NSE_ANNOUNCEMENTS_URL}&from_date={stamp}&to_date={stamp}"
+
+#: Exchange timestamps, tried in this order. ``sort_date`` first because it is the only
+#: locale-INDEPENDENT form (``%b`` parsing follows LC_TIME); live they differ by ~1 s
+#: (an_dt 15:14:44 → exchdisstime 15:14:45), which is immaterial at a 300 s cadence.
+_ANN_DT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("sort_date", "%Y-%m-%d %H:%M:%S"),
+    ("exchdisstime", "%d-%b-%Y %H:%M:%S"),
+    ("an_dt", "%d-%b-%Y %H:%M:%S"),
+)
+
+#: §2.7: stored titles are headline-sized (A3r) — the disclosure body can run to a paragraph.
+NSE_ANN_TITLE_MAX = 300
+
+
+def _clean_title(title: str) -> str:
+    """Whitespace-collapse + HTML-unescape. ET double-escapes entities in RSS ("F&amp;amp;O"
+    survives XML parsing as "F&amp;O") — stored titles must hold the human form ("F&O", "M&M")
+    or drop-pattern and alias matching silently miss (G1 seed-6 row 23)."""
+    return html.unescape(" ".join(title.split()))
 
 
 class Headline(BaseModel):
@@ -125,13 +199,15 @@ class NewsIngest:
         clock: Clock,
         http: httpx.AsyncClient,
         *,
-        request_timeout_s: float = 10.0,
+        request_timeout_s: float | None = None,
     ) -> None:
         self._cfg = cfg
         self._store = store
         self._clock = clock
         self._http = http
-        self._timeout = float(request_timeout_s)
+        # None ⇒ the settings value (news.request_timeout_s); an explicit argument still wins so
+        # tests/probes can tighten it.
+        self._timeout = float(request_timeout_s if request_timeout_s is not None else cfg.request_timeout_s)
 
     # ------------------------------------------------------------------ public surface
     async def poll(
@@ -142,27 +218,51 @@ class NewsIngest:
     ) -> list[Headline]:
         """Poll the configured feeds, dedupe by URL, persist new ``news`` rows; return the NEW headlines.
 
-        ``feeds`` selects a subset of :data:`FEED_KEYS` (None = all three) so the scheduler can honor
-        the distinct §3.2.4 cadences. ``lookback_h`` widens the GDELT ``timespan`` window — the
-        off-period backfill knob (§4.4 job 10); None = the routine window (2× ``gdelt_poll_s``, so
+        ``feeds`` selects a subset of the valid keys — every ``news.feeds.rss`` name plus
+        :data:`GDELT_KEY` and :data:`NSE_ANN_KEY` (None = all of them) — so the scheduler can honor
+        the distinct §3.2.4 per-feed cadences. ``lookback_h`` widens the GDELT ``timespan`` window —
+        the off-period backfill knob (§4.4 job 10); None = the routine window (2× ``gdelt_poll_s``, so
         consecutive polls overlap and boundary items are never missed — URL dedupe absorbs the overlap).
+
+        :data:`NSE_ANN_KEY` stays a VALID key even when the feed is disabled (it just fetches
+        nothing): an owner toggling config off must not turn an armed poll into a ValueError.
 
         Never raises for a feed failure (E5): each source is fetched under its own guard and a dead
         feed just contributes nothing. Returns only the headlines actually INSERTED (post-dedupe),
         each carrying its minted ``headline_id`` — the §2.7 step-2 clusterer input.
         """
-        selected = tuple(feeds) if feeds is not None else FEED_KEYS
-        unknown = set(selected) - set(FEED_KEYS)
+        valid = tuple(self._cfg.feeds.rss) + (GDELT_KEY, NSE_ANN_KEY)
+        selected = tuple(feeds) if feeds is not None else valid
+        unknown = set(selected) - set(valid)
         if unknown:
-            raise ValueError(f"unknown feed key(s) {sorted(unknown)}; allowed: {FEED_KEYS}")
+            raise ValueError(f"unknown feed key(s) {sorted(unknown)}; allowed: {valid}")
 
         batch: list[Headline] = []
-        if "et" in selected:
-            batch += await self._fetch_guarded("et_markets_rss", self._fetch_rss(self._cfg.feeds.et_markets_rss))
-        if "mc" in selected:
-            batch += await self._fetch_guarded("moneycontrol_rss", self._fetch_rss(self._cfg.feeds.moneycontrol_rss))
-        if "gdelt" in selected:
+        for name, feed in self._cfg.feeds.rss.items():
+            if name in selected:
+                batch += await self._fetch_guarded(name, self._fetch_rss(feed.url))
+        if GDELT_KEY in selected:
             batch += await self._fetch_guarded("gdelt_doc", self._fetch_gdelt(lookback_h))
+        if NSE_ANN_KEY in selected and self._cfg.feeds.nse_announcements.enabled:
+            batch += await self._fetch_guarded(NSE_ANN_KEY, self._fetch_nse_ann())
+
+        # §3.2.4/§4.4 job 10 drop list (2026-08-03): auto-generated live-blog/ticker PAGE titles are
+        # not news headlines — they carry zero event content, burn scorer budget, and their template
+        # tokens glued different companies into one cluster (the G1 contamination finding). Owner-
+        # editable in settings (news.drop_title_patterns), case-insensitive substring match.
+        patterns = [p.lower() for p in (self._cfg.drop_title_patterns or [])]
+        if patterns:
+            kept: list[Headline] = []
+            dropped = 0
+            for h in batch:
+                title = h.title.lower()
+                if any(p in title for p in patterns):
+                    dropped += 1
+                else:
+                    kept.append(h)
+            if dropped:
+                _log.info("news_boilerplate_dropped", dropped=dropped, kept=len(kept))
+            batch = kept
 
         deduped = self._dedupe(batch)
         inserted = await self._store.arun(self._insert_batch, deduped)
@@ -204,7 +304,7 @@ class NewsIngest:
         malformed = 0
         for item in root.iter("item"):
             try:
-                title = (item.findtext("title") or "").strip()
+                title = _clean_title(item.findtext("title") or "")
                 link = (item.findtext("link") or "").strip()
                 domain = _domain(link)
                 if not title or not link or not domain:
@@ -253,7 +353,7 @@ class NewsIngest:
         skipped = 0
         for art in payload.get("articles", []):
             try:
-                title = str(art.get("title") or "").strip()
+                title = _clean_title(str(art.get("title") or ""))
                 url = str(art.get("url") or "").strip()
                 domain = _domain(url) or str(art.get("domain") or "").lower()
                 if not title or not url or not domain:
@@ -298,6 +398,87 @@ class NewsIngest:
             return f"{hours}h"
         return f"{math.ceil(hours / 24)}d"
 
+    async def _fetch_nse_ann(self) -> list[Headline]:
+        """NSE ``corporate-announcements`` → token-prefixed headlines (§2.7 amendment 2026-09-04).
+
+        Fetched through :func:`engine.core.nse_http.nse_get`, never a bare GET: the ``/api`` edge is
+        cookie-gated and answers an un-primed request with a MISLEADING 404 (§A3). The endpoint URL
+        is the one the §2.8 ISIN job already uses — one constant, one probe-verified contract.
+
+        A row is unusable without ``symbol`` (the token IS the resolution) and is skipped; every
+        other field degrades: no attachment ⇒ the deterministic :data:`NSE_ANN_ITEM_URL`, no
+        parsable exchange timestamp ⇒ ingest time (Clock), never naive.
+        """
+        cfg = self._cfg.feeds.nse_announcements
+        url = nse_ann_url(self._clock.now().date())   # the whole day, not the 20 newest rows
+        resp = await nse_get(self._http, url, timeout=self._timeout)
+        payload = json.loads(resp.content)
+        rows = payload if isinstance(payload, list) else []
+        if isinstance(payload, dict):  # tolerated envelope shapes (mirrors isin_map's parser)
+            for key in ("data", "rows", "records"):
+                if isinstance(payload.get(key), list):
+                    rows = payload[key]
+                    break
+
+        drops = [s.lower() for s in (cfg.drop_subjects or [])]
+        headlines: list[Headline] = []
+        dropped = skipped = 0
+        for raw in rows:
+            try:
+                if not isinstance(raw, dict):
+                    skipped += 1
+                    continue
+                symbol = str(raw.get("symbol") or "").strip().upper()
+                subject = str(raw.get("desc") or "").strip()
+                if not symbol:
+                    skipped += 1  # no symbol ⇒ no token ⇒ nothing this feed can add
+                    continue
+                if any(d in subject.lower() for d in drops):
+                    dropped += 1  # administrative subject (owner-editable list)
+                    continue
+                body = str(raw.get("attchmntText") or "").strip() or str(raw.get("sm_name") or "")
+                attachment = str(raw.get("attchmntFile") or "").strip()
+                seq_id = str(raw.get("seq_id") or "").strip()
+                if not attachment.startswith("http") and not seq_id:
+                    skipped += 1  # no attachment AND no seq id ⇒ no stable dedupe key exists
+                    continue
+                url = (
+                    attachment if attachment.startswith("http")
+                    else NSE_ANN_ITEM_URL.format(seq_id=seq_id)
+                )
+                subject_and_body = ": ".join(p for p in (subject, body) if p)
+                headlines.append(
+                    Headline(
+                        title=_clean_title(f"[NSE:{symbol}] {subject_and_body}")[:NSE_ANN_TITLE_MAX],
+                        source_domain=NSE_ANN_DOMAIN,
+                        url=url,
+                        published_at=self._parse_ann_dt(raw),
+                    )
+                )
+            except Exception:  # one bad row never kills the feed
+                skipped += 1
+        if dropped or skipped:
+            _log.info(
+                "news_nse_ann_filtered", dropped=dropped, skipped=skipped, kept=len(headlines)
+            )
+        return headlines
+
+    def _parse_ann_dt(self, raw: dict[str, Any]) -> datetime:
+        """Exchange timestamp (IST, naive on the wire) → tz-aware IST; unparsable ⇒ ingest time.
+
+        The fields are tried in :data:`_ANN_DT_FIELDS` order. These stamps are NAIVE IST strings —
+        attaching IST is the correct reading, and the tz-aware Headline validator is the backstop.
+        """
+        for field, fmt in _ANN_DT_FIELDS:
+            value = str(raw.get(field) or "").strip()
+            if not value:
+                continue
+            try:
+                return datetime.strptime(value, fmt).replace(tzinfo=IST)
+            except ValueError:
+                continue
+        return self._clock.now()
+
     # ------------------------------------------------------------------ dedupe + persist
     @staticmethod
     def _dedupe(batch: list[Headline]) -> list[Headline]:
@@ -314,8 +495,11 @@ class NewsIngest:
     def _insert_batch(self, batch: list[Headline]) -> list[Headline]:
         """Insert row-by-row (sync; called via ``store.arun``) so cross-poll URL dupes are dropped
         and the return value is exactly the NEW headlines, each with its minted ``headline_id``."""
+        known = self._store.existing_news_urls([h.url for h in batch])
         inserted: list[Headline] = []
         for h in batch:
+            if h.url in known:
+                continue
             hid = h.headline_id or str(ULID())
             row = {
                 "headline_id": hid,

@@ -2,7 +2,12 @@
 
 A ``Scanner`` is a PURE function of ``(bar, ScanContext, params)``: no Clock, no I/O, no mutable
 state — same inputs ⇒ same candidates (§9.6 determinism, modulo the platform-minted ``signal_id``
-ULID). Anything a scanner needs beyond the bar arrives via :class:`~engine.strategy.types.ScanContext`
+ULID). ONE carve-out (2026-09-12): LOG-ONLY state that cannot reach the returned candidates — a
+once-per-session latch so a shut filter says so without one line per bar per symbol. It must be
+keyed on ``bar.ts_minute.date()``, never a Clock, so a replay logs once per replayed session too;
+:attr:`~engine.strategy.scanners.rsi2.Rsi2Scanner._regime_logged_on` is the pattern to copy. State
+that a ``scan``/``pending`` RESULT depends on is still forbidden outright.
+Anything a scanner needs beyond the bar arrives via :class:`~engine.strategy.types.ScanContext`
 (assembled by the pre-screen's context provider); missing/thin context means FAIL TO ZERO (return
 ``[]``), never raise — thin data is a warm-up condition (§7.1 ``warmup_ready``), not an error.
 
@@ -28,7 +33,7 @@ from typing import ClassVar
 from ulid import ULID
 
 from engine.core.types import Bar
-from engine.strategy.types import RawLevels, ScanContext, Side, SignalCandidate, Style
+from engine.strategy.types import PendingSetup, RawLevels, ScanContext, Side, SignalCandidate, Style
 
 
 class Scanner(abc.ABC):
@@ -55,6 +60,13 @@ class Scanner(abc.ABC):
     @abc.abstractmethod
     def scan(self, bar: Bar, ctx: ScanContext) -> list[SignalCandidate]:
         """Return 0..n candidates for this bar. Pure; fail to zero on missing context."""
+
+    def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
+        """Setups NOT currently true, with the deterministic level that would arm them (§3.2.5 sweep
+        addendum, 2026-07-29). Same purity/fail-to-zero rules as :meth:`scan`; informational only —
+        pendings never enter the pipeline. Default: a scanner that cannot cheaply invert its
+        condition reports nothing."""
+        return []
 
     # ------------------------------------------------------------------ candidate factory
     def _candidate(

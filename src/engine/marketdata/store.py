@@ -18,11 +18,16 @@ serialize; mirrors the SQLite convention).
 Threading / async model (§3.2 convention 4): the core is **synchronous** (DuckDB is native/CPU-bound
 work) with every call serialized by an internal lock — safe because there is exactly one writer and
 readers go through the same connection. Scan-heavy/bulky calls have thin ``a``-prefixed async
-wrappers that offload via ``asyncio.to_thread`` so the asyncio loop is never blocked (§2.2 heartbeat
-invariant); anything without a dedicated wrapper can be offloaded with :meth:`MarketStore.arun`.
+wrappers that offload to the store's OWN bounded worker pool so the asyncio loop is never blocked
+(§2.2 heartbeat invariant); anything without a dedicated wrapper can be offloaded with
+:meth:`MarketStore.arun`. Those wrappers deliberately do **not** use ``asyncio.to_thread``: that is
+the process-wide default executor shared with every other offload, and on 2026-08-25 a slow tick
+flush filled it with blocked threads and starved the entire intelligence layer for 4.4 h (WO-26a).
+Store work now lives in ``mt-store`` (4 workers, reads/writes) and ``mt-flush`` (1 worker, the tick
+flush), so neither can starve the other and nothing outside can starve either.
 
 Tick Parquet dataset (§4.3 ``ticks``): raw FULL-mode frames (cumulative volume + depth top, A13) are
-buffered in memory and flushed every ``flush_interval_s`` (~5 s) or ``max_buffered_ticks``, whichever
+buffered in memory and flushed every ``flush_interval_s`` (60 s default) or ``max_buffered_ticks``, whichever
 first, into ``<parquet_root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<ulid>.parquet``. Each flush writes
 one file per (date, symbol) present in the batch; :meth:`compact_tick_partitions` coalesces a day's
 small batch files into one file per symbol (EOD job) so the 30-day retention window stays a sane file
@@ -37,9 +42,12 @@ daily bars indefinitely — no purge implemented for them here.
 from __future__ import annotations
 
 import asyncio
+import functools
 import shutil
 import threading
+import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -58,6 +66,51 @@ from engine.core.types import Bar, Tick
 _log = get_logger("engine.marketdata.store")
 
 T = TypeVar("T")
+
+#: Hard ceiling on the LIVE store connection's DuckDB memory (§3.2.11, generalizing the 53 GB incident
+#: of 2026-08-17). DuckDB's default is ~80% of RAM (~25 GB here), so one bad scan can commit the whole
+#: machine while the engine is trading — and ``POST /db/query`` now runs owner SQL on this very
+#: instance. Past the limit DuckDB spills to its temp directory instead of taking the RAM. Higher than
+#: ``tick_compact._MEMORY_LIMIT`` (4 GB) on purpose: this connection serves the session, that one is a
+#: maintenance job that must never compete with it.
+_MEMORY_LIMIT = "8GB"
+
+#: Width of the store's private worker pool (``mt-store``), WO-26a. Every DuckDB call serializes on
+#: ``_lock`` anyway, so this is not a parallelism knob — it is a QUEUE depth: enough that the health
+#: probe and a scan read are never behind the same single worker, small enough that a wedged store
+#: cannot bloom threads. 4 is two concurrent readers plus headroom for the probe and one job.
+_STORE_EXECUTOR_WORKERS = 4
+
+#: Quiet window between ``flush_skipped_in_flight`` lines (seconds). Skips are the DESIGNED response
+#: to a burst (see :meth:`MarketStore.flush_ticks`), so one line per skip would mean one line per
+#: tick during exactly the storm the skip exists to survive. The counter carries the real signal.
+_FLUSH_SKIP_LOG_EVERY_S = 60.0
+
+#: How long :meth:`MarketStore.close` waits for an in-flight background flush before giving up on it
+#: (seconds). It is the one caller that must not skip — the connection is about to go — but shutdown
+#: must not hang on a wedged flush either, so the wait is bounded and the give-up is logged.
+_CLOSE_FLUSH_WAIT_S = 15.0
+
+#: Slow-statement telemetry threshold (seconds), §2.6 "Store slow-statement telemetry" (WO-24b
+#: follow-up). The 2026-09-08 11:47 mid-session stall's thread dump (store_stall_stacks) is taken
+#: sequentially and could not tell whether a feature_snapshot INSERT (``_execute``) or a tick-flush
+#: partition COPY (``_flush_locked``) was the statement actually holding ``_lock`` for 59 s. Timed
+#: (see :func:`_note_slow_statement`) via the one shared :class:`_TimedHold` context manager
+#: (:meth:`MarketStore._timed_lock`): every hold taken by the statement helpers —
+#: :meth:`MarketStore._execute`, :meth:`MarketStore._fetchall`, :meth:`MarketStore._fetch_dicts`,
+#: :meth:`MarketStore._bulk_write`, :meth:`MarketStore._upsert_rows` and the per-partition COPY in
+#: :meth:`MarketStore._flush_locked` — PLUS the hand-rolled holds that run SQL of their own:
+#: :meth:`MarketStore.amend_bar_1m_extremes`, the ``_tick_stage`` DELETE at the head of
+#: :meth:`MarketStore._flush_locked`, :meth:`MarketStore.insert_news`,
+#: :meth:`MarketStore.set_news_cluster` and :meth:`MarketStore.compact_tick_partitions`.
+#: :meth:`MarketStore.init_schema` is the ONE hold left
+#: deliberately untimed (with the :meth:`MarketStore.open` hold that wraps it) — boot-only DDL that no
+#: trading-session caller can ever be queued behind, so a slow hold there has no victim to name.
+#: :meth:`MarketStore.ping` is not a site either: it IS the wedge detector (a ``SELECT 1`` that does
+#: not return is the signal), so timing it would only re-report what the health monitor already sees.
+#: A single hold at or above this threshold logs ``store_slow_statement`` so the NEXT stall names its
+#: statement without needing a lucky thread dump.
+_SLOW_STATEMENT_S = 5.0
 
 # ---------------------------------------------------------------------- retention (§4.5, plan-pinned)
 TICKS_RETENTION_DAYS = 30          # raw tick Parquet — enough to calibrate the fill model (R9)
@@ -86,6 +139,8 @@ class DailyBar(BaseModel):
 _SCHEMA: tuple[str, ...] = (
     # bars_1m — OHLCV from cumulative-volume deltas (A13); src provenance; auction_open on the
     # 09:15 row only (A14). PK (symbol, ts_minute) so reconcile can upsert official rows (§4.4 job 2).
+    # A minute in which nothing traded has NO row here and never gets one (no tick to build from, no
+    # Kite candle to fetch) — its "the exchange saw nothing" evidence lives in bars_1m_no_trade below.
     """
     CREATE TABLE IF NOT EXISTS bars_1m (
         symbol       TEXT NOT NULL,
@@ -100,8 +155,27 @@ _SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (symbol, ts_minute)
     )
     """,
+    # bars_1m_no_trade — UPSTREAM-CONFIRMED no-trade minutes (2026-09-18): Kite returned the day's
+    # candles for the span but none for this minute, which the store also lacks, so the exchange
+    # observed "nothing traded" and no bar can ever exist. Written ONLY by BackfillJob.warmup_gap
+    # (src='kite_empty'); coverage_gaps counts these minutes as covered so a thin symbol (PTCIL,
+    # MRF) is no longer refused all session for a hole nothing can fill. Never a synthetic price —
+    # bars_1m is untouched. Tiny (a few rows per thin symbol per day), kept indefinitely.
+    """
+    CREATE TABLE IF NOT EXISTS bars_1m_no_trade (
+        symbol       TEXT NOT NULL,
+        ts_minute    TIMESTAMPTZ NOT NULL,
+        confirmed_at TIMESTAMPTZ NOT NULL,
+        src          TEXT NOT NULL CHECK (src IN ('kite_empty')),
+        PRIMARY KEY (symbol, ts_minute)
+    )
+    """,
     # corrections_log — late ticks past minute+5s grace (§4.4 job 1): symbol, minute, tick_ts, value,
     # plus whether the late tick amended its bar before the nightly reconcile. 90-day retention.
+    # ``reason`` (nullable) records WHY an unamended late tick was refused — notably
+    # 'official_bar_untouchable' when the target row is no longer src='self' (§3.2.3 amendment rules).
+    # It is the LAST column so a fresh DB and a DB widened by _migrate_corrections_reason (which can
+    # only append) carry identical column order.
     """
     CREATE TABLE IF NOT EXISTS corrections_log (
         symbol            TEXT NOT NULL,
@@ -110,7 +184,8 @@ _SCHEMA: tuple[str, ...] = (
         value             DECIMAL(12,2),
         cumulative_volume BIGINT,
         amended           BOOLEAN NOT NULL DEFAULT FALSE,
-        logged_at         TIMESTAMPTZ NOT NULL
+        logged_at         TIMESTAMPTZ NOT NULL,
+        reason            TEXT
     )
     """,
     # bars_1d — Kite historical (adjusted, A11) + bhavcopy cross-check.
@@ -218,8 +293,6 @@ _SCHEMA: tuple[str, ...] = (
         ingested_at   TIMESTAMPTZ NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_news_url ON news(url)",
-    "CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at)",
     # news_clusters — §2.7 step 2 output + step-4 LLM scores. source_domains is the DISTINCT set
     # (the §7.1 catalyst_guard.min_source_domains corroboration input); symbols[] is EntityResolver
     # output ONLY (the LLM never assigns a symbol, §2.7 step 3). Replay/backtest consume these
@@ -278,12 +351,19 @@ _SCHEMA: tuple[str, ...] = (
     """,
     # sentiment_agg — clipped decay-weighted SUM per (scope, scope_key, as_of) (§2.7 step 5(i));
     # the §6.2 features-v2 source. Not money ⇒ DOUBLE.
+    # ``raw_sum``/``n_clusters`` (both nullable, WO-22) are the SATURATION MEASUREMENT: the UNCLIPPED
+    # sum and how many clusters produced it. ``value`` stays clip(raw_sum, −1, +1) — the rail told a
+    # reader nothing about how far past it the flow ran, and it railed on 7 of 17 digest days. They
+    # are the LAST columns so a fresh DB and a DB widened by _migrate_sentiment_measures (which can
+    # only append) carry identical column order.
     """
     CREATE TABLE IF NOT EXISTS sentiment_agg (
-        scope     TEXT NOT NULL CHECK (scope IN ('symbol','sector','theme','market')),
-        scope_key TEXT NOT NULL,
-        as_of     TIMESTAMPTZ NOT NULL,
-        value     DOUBLE NOT NULL,
+        scope      TEXT NOT NULL CHECK (scope IN ('symbol','sector','theme','market')),
+        scope_key  TEXT NOT NULL,
+        as_of      TIMESTAMPTZ NOT NULL,
+        value      DOUBLE NOT NULL,
+        raw_sum    DOUBLE,
+        n_clusters INTEGER,
         PRIMARY KEY (scope, scope_key, as_of)
     )
     """,
@@ -309,10 +389,14 @@ _SCHEMA: tuple[str, ...] = (
         stop_band_high      DECIMAL(12,2),
         target_band_low     DECIMAL(12,2),
         target_band_high    DECIMAL(12,2),
-        expires_at          DATE
+        expires_at          DATE,
+        -- §2.7 `cat_reversal` (2026-08-27): cluster_id of the EARLIER opposite-direction (short)
+        -- cluster of this same (symbol, event_type) story that the row's winning cluster reverses;
+        -- NULL on every ordinary row. Nullable and LAST so a fresh DB and a DB widened by
+        -- _migrate_watchlist_reversal share one column order.
+        reversal_of         TEXT
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_watchlist_day ON catalyst_watchlist(d, symbol)",
     # calendar — trading days + session times + muhurat/shortened flags (R6); YAML-sourced.
     """
     CREATE TABLE IF NOT EXISTS calendar (
@@ -373,7 +457,7 @@ _SCHEMA: tuple[str, ...] = (
     # Every row carries broadcast/dissemination point-in-time timestamps + an ``ingested_at`` stamp;
     # money is DECIMAL (never float), consistent with the price columns above (§2.8.1, §3.2 money).
     # symbol_isin — the stable cross-exchange join key: NIFTY-constituents ISIN + resolved BSE scrip
-    # code (nullable until PeerSmartSearch resolves it). ISINs survive symbol renames (§2.8.1).
+    # code (nullable until the BSE scrip master resolves it). ISINs survive symbol renames (§2.8.1).
     """
     CREATE TABLE IF NOT EXISTS symbol_isin (
         symbol         TEXT PRIMARY KEY,
@@ -407,8 +491,6 @@ _SCHEMA: tuple[str, ...] = (
         ingested_at     TIMESTAMPTZ NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_insider_symbol ON insider_trades(symbol)",
-    "CREATE INDEX IF NOT EXISTS idx_insider_broadcast ON insider_trades(broadcast_dt)",
     # shp_quarterly — SEBI-format shareholding pattern per (symbol, quarter, category), incl. the
     # per-category pledged/encumbered + locked shares (§2.8.1). Source ``bse`` (detail stack) or
     # ``nse`` (master, freshness only). ``revised`` marks a re-filed quarter (latest wins).
@@ -430,23 +512,26 @@ _SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (symbol, qtr_end, category)
     )
     """,
-    # results_filings — NSE financial-results filing METADATA (line items NULL in stage 1; §2.8.4
-    # stages 2). PK (symbol, period_end, consolidated) keeps standalone + consolidated as distinct
-    # rows (both stored, consolidated preferred downstream — §2.8 edge cases). ``broadcast_dt`` is the
-    # point-in-time timestamp every as-of join keys on (never the period label — period labels lie).
+    # results_filings — NSE financial-results filings: metadata from the listing APIs, quarterly
+    # ``revenue``/``pat`` (₹, absolute) parsed from each filing's XBRL by ``results_line_items``
+    # (§2.8.4 stage 2; ``line_items_at`` = parse attempted). PK (symbol, period_end, consolidated)
+    # keeps standalone + consolidated as distinct rows (both stored, consolidated preferred
+    # downstream — §2.8 edge cases). ``broadcast_dt`` is the point-in-time timestamp every as-of join
+    # keys on (never the period label — period labels lie).
     """
     CREATE TABLE IF NOT EXISTS results_filings (
-        symbol       TEXT NOT NULL,
-        period_end   DATE NOT NULL,
-        consolidated BOOLEAN NOT NULL,
-        audited      BOOLEAN,
-        broadcast_dt TIMESTAMPTZ,
-        exchdiss_dt  TIMESTAMPTZ,
-        xbrl         TEXT,
-        revenue      DECIMAL(18,2),
-        pat          DECIMAL(18,2),
-        eps          DECIMAL(12,4),
-        ingested_at  TIMESTAMPTZ NOT NULL,
+        symbol        TEXT NOT NULL,
+        period_end    DATE NOT NULL,
+        consolidated  BOOLEAN NOT NULL,
+        audited       BOOLEAN,
+        broadcast_dt  TIMESTAMPTZ,
+        exchdiss_dt   TIMESTAMPTZ,
+        xbrl          TEXT,
+        revenue       DECIMAL(18,2),
+        pat           DECIMAL(18,2),
+        eps           DECIMAL(12,4),
+        ingested_at   TIMESTAMPTZ NOT NULL,
+        line_items_at TIMESTAMPTZ,
         PRIMARY KEY (symbol, period_end, consolidated)
     )
     """,
@@ -454,7 +539,7 @@ _SCHEMA: tuple[str, ...] = (
 
 #: All §4.3 DuckDB tables created by :meth:`MarketStore.init_schema` (kept in lockstep with tests).
 EXPECTED_TABLES: frozenset[str] = frozenset({
-    "bars_1m", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
+    "bars_1m", "bars_1m_no_trade", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
     "universe_daily", "features_daily", "feature_snapshots", "news", "news_clusters",
     "entity_aliases", "unresolved_entities", "theme_map", "sentiment_agg", "catalyst_watchlist",
     "calendar", "corp_actions", "earnings_calendar", "flagged_instrument_days", "sector_map",
@@ -493,14 +578,14 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("theme",),
     ),
     "sentiment_agg": (
-        ("scope", "scope_key", "as_of", "value"),
+        ("scope", "scope_key", "as_of", "value", "raw_sum", "n_clusters"),
         ("scope", "scope_key", "as_of"),
     ),
     "catalyst_watchlist": (
         ("entry_id", "d", "symbol", "grade", "direction", "event_type", "cluster_refs",
          "materiality", "source_domain_count", "event_age_h", "event_age_sessions",
          "confirm_trigger", "invalidation", "stop_band_low", "stop_band_high",
-         "target_band_low", "target_band_high", "expires_at"),
+         "target_band_low", "target_band_high", "expires_at", "reversal_of"),
         ("entry_id",),
     ),
     "calendar": (
@@ -546,9 +631,15 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "results_filings": (
         ("symbol", "period_end", "consolidated", "audited", "broadcast_dt", "exchdiss_dt", "xbrl",
-         "revenue", "pat", "eps", "ingested_at"),
+         "revenue", "pat", "eps", "ingested_at", "line_items_at"),
         ("symbol", "period_end", "consolidated"),
     ),
+}
+
+#: Columns a conflicting upsert may FILL but never blank: the listing jobs re-upsert filing metadata
+#: with the line items NULL, which the generic ``excluded`` update would write over parsed values.
+_KEEP_ON_NULL: dict[str, frozenset[str]] = {
+    "results_filings": frozenset({"revenue", "pat", "eps", "line_items_at"}),
 }
 
 # Tables whose PK is a CONTENT HASH of the row (identical id ⇒ identical row). Conflict action for
@@ -567,6 +658,40 @@ _TABLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "earnings_calendar": {"kind": "results"},
     "reconcile_log": {"alerted": False},
     "shp_quarterly": {"revised": False},          # mirrors the DDL default (§2.8.1)
+}
+
+# ---------------------------------------------------------------------- late-tick amendment outcomes
+# Returned by :meth:`MarketStore.amend_bar_1m_extremes` (the §3.2.3 read-decide-write seam). The STORE
+# owns atomicity and the src precondition; the CALLER owns what each outcome means in corrections_log.
+AMEND_APPLIED = "amended"          # high/low widened to include the late print
+AMEND_IN_RANGE = "in_range"        # print already inside [low, high] — nothing to do
+AMEND_NO_BAR = "no_bar"            # no stored row for (symbol, minute)
+AMEND_FOREIGN_SRC = "foreign_src"  # row is no longer src=<require_src> (official/backfilled): untouchable
+AMEND_RACE_LOST = "race_lost"      # CAS predicate missed: the row changed under us; nothing written
+
+# Duplicated from ``engine.universe.builder.EXCL_CAP``/``EXCL_INDEX``: this module CANNOT import
+# that one (builder imports the store — a store->builder import would cycle). Must stay equal to
+# the builder constants; ``tests/unit/test_market_store.py`` asserts the pairs match.
+_EXCL_CAP = "watchlist_cap"
+_EXCL_INDEX = "not_in_index"
+#: The pre-O15 spelling of ``_EXCL_INDEX``. The extended leg shipped 2026-09-01 writing
+#: ``not_nifty200``; O15 (2026-09-04) renamed the marker when the index became config. Rows written
+#: 2026-09-01…09-04 still carry the legacy string and NOTHING rewrites history (universe_daily is an
+#: append-per-day audit trail, and a day's rows are the record of what that day's build decided), so
+#: every read of the extended leg accepts EITHER marker and the day-d replace deletes both. Not a
+#: permanent widening: it can be dropped once no retained universe_daily day predates 2026-09-05.
+_EXCL_INDEX_LEGACY = "not_nifty200"
+
+# Duplicated from ``engine.datafeeds.filings_pit_fresh.BSE_ID_PREFIX``: this module CANNOT import
+# that one (every datafeed imports the store — a store->datafeeds import would cycle). Must stay
+# equal to it; ``tests/unit/test_filings_feeds.py`` asserts the pair matches. NSE rows (both PIT
+# routes) carry the bare content hash, BSE fresh-feed rows the tagged one, so the id prefix IS the
+# source partition of ``insider_trades`` (§2.8.5) — no source column exists. A THIRD source must add
+# its tag here AND be excluded from the 'nse' predicate: bare-id means NSE only while 'bse:' is the
+# only tag (verified 2026-09-13 on the live store: 44,187 bare / 405 'bse:' / no other prefix).
+_INSIDER_SOURCE_PREDICATE = {
+    "nse": "id NOT LIKE 'bse:%'",
+    "bse": "id LIKE 'bse:%'",
 }
 
 _TICK_STAGE_DDL = """
@@ -599,6 +724,76 @@ def _ist(value: Any) -> Any:
     return value
 
 
+def _note_slow_statement(label: str, elapsed: float, *, failed: bool = False) -> None:
+    """Log ``store_slow_statement`` (§2.6 hardening (iii), WO-24b follow-up) when ONE ``_lock`` hold
+    lasted ``elapsed`` >= :data:`_SLOW_STATEMENT_S` seconds — so the next mid-session stall names the
+    statement the thread dump could not.
+
+    Contract for every instrumented site (2026-09-09 review; enforced since 2026-09-23 by the one
+    shared :class:`_TimedHold` context manager returned from :meth:`MarketStore._timed_lock` rather
+    than by 11 hand-copied try/finally blocks): take ``t0`` right AFTER acquiring ``_lock``, compute
+    ``elapsed`` right BEFORE releasing it — so a statement that RAISES after a long hold is reported
+    too, with ``failed=True`` — and call this AFTER the ``with self._lock:`` block (now: after
+    ``_TimedHold.__exit__`` releases the lock), where the WARNING can no longer add to the hold it is
+    reporting. One hold must emit exactly ONE event: that is why the read helpers run their statement
+    through :meth:`MarketStore._execute_locked` (silent) instead of nesting :meth:`MarketStore._execute`,
+    which used to log twice per read under identical labels and never timed the fetch phase at all.
+
+    HONEST EXCEPTION: ``_lock`` is an ``RLock``, and a few methods call an instrumented helper from
+    INSIDE their own hold — the delete-then-insert rewrites (:meth:`MarketStore.replace_universe_daily_index_markers`,
+    :meth:`MarketStore.replace_catalyst_watchlist`), the ``_execute``-based frame reads and the
+    Parquet exports. Those notes DO fire while the outer hold is still held, and such a hold emits
+    one event per inner statement rather than one for the hold. At least one of them IS a
+    trading-session path (2026-09-09 review corrected the earlier "none of these runs in-session"
+    claim): :meth:`MarketStore.get_bars_1d_frame` wraps a logging ``_execute``, and the risk gate's
+    co-movement rule reads it live, once per open position per candidate
+    (``src/engine/risk/gate.py`` ~1547). Accepted anyway, not plumbed around: the nested note only
+    fires when the inner statement ALREADY took >= 5 s, and one WARNING costs milliseconds beside
+    that — it cannot meaningfully lengthen the hold it is reporting."""
+    if elapsed < _SLOW_STATEMENT_S:
+        return
+    fields: dict[str, Any] = {
+        "label": label,
+        "elapsed_s": round(elapsed, 3),
+        "thread": threading.current_thread().name,
+    }
+    if failed:
+        fields["failed"] = True        # the hold ended in an exception — the statement never returned
+    _log.warning("store_slow_statement", **fields)
+
+
+class _TimedHold:
+    """One instrumented ``_lock`` hold — the single implementation of the contract documented on
+    :func:`_note_slow_statement` (2026-09-23: replaces 11 copies of the same try/finally). Acquire
+    the lock, take ``t0`` immediately after, compute ``elapsed`` immediately before release, then
+    call :func:`_note_slow_statement` exactly once — AFTER the lock is released — with
+    ``failed=True`` iff the body raised. Exceptions propagate unchanged.
+
+    ``__enter__``/``__exit__`` rather than ``@contextlib.contextmanager``: no generator frame per
+    call, which matters on the hot late-tick :meth:`MarketStore.amend_bar_1m_extremes` path.
+    ``_lock`` is an ``RLock``, so a body that opens another hold (or a plain ``with self._lock:``)
+    nests safely and — per the HONEST EXCEPTION on :func:`_note_slow_statement` — gets its own note
+    while the outer hold is still open; depth is deliberately not tracked, so that stays exactly the
+    existing behaviour."""
+
+    __slots__ = ("_lock", "_label", "_t0")
+
+    def __init__(self, lock: threading.RLock, label: str) -> None:
+        self._lock = lock
+        self._label = label
+        self._t0 = 0.0
+
+    def __enter__(self) -> _TimedHold:
+        self._lock.acquire()
+        self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> None:
+        elapsed = time.perf_counter() - self._t0
+        self._lock.release()
+        _note_slow_statement(self._label, elapsed, failed=exc_type is not None)
+
+
 def _norm_scrip_code(raw: Any) -> str:
     """Normalize a BSE scrip code (int/str, possibly ``'500325.0'``) to a bare-int string; ``''`` for
     blank/None (§2.8 fresh-insider reverse lookup). Keeps a non-numeric code as its stripped self."""
@@ -624,7 +819,14 @@ class MarketStore:
         The single source of "now" (§3.2) — stamps ``ingested_at``/``logged_at`` and drives the tick
         flush timer and retention cutoffs.
     flush_interval_s / max_buffered_ticks:
-        Tick batching knobs (§4.3: ~5 s batches). Whichever trips first flushes the buffer.
+        Tick batching knobs (§4.3). Whichever trips first flushes the buffer. 60 s default
+        (WO-7, 2026-08-13; was 5 s): 5 s batches produced ~752K parquet fragments/day at
+        ~1.9 KB each; 60 s cuts the fragment count ~10× and the nightly compaction merges the
+        remainder to one file per symbol-day. Cost: the raw-TICK loss window on a hard crash
+        widens 5→60 s — bars_1m is built and persisted independently, so the exposure is R9
+        fill-model raw ticks only, never bar/decision data. The cap is a memory valve sized above a
+        minute's peak flow (24,332 ticks, 2026-09-29; ~2.3 KB each) so the interval governs: at the
+        old 2,000 it tripped every ~9 s and the fragments stayed at 2–4 K per symbol-day.
     """
 
     def __init__(
@@ -633,8 +835,8 @@ class MarketStore:
         parquet_root: str | Path,
         clock: Clock,
         *,
-        flush_interval_s: float = 5.0,
-        max_buffered_ticks: int = 2000,
+        flush_interval_s: float = 60.0,
+        max_buffered_ticks: int = 30_000,
     ) -> None:
         self._db_path = Path(db_path)
         self._parquet_root = Path(parquet_root)
@@ -645,9 +847,24 @@ class MarketStore:
         self._con: duckdb.DuckDBPyConnection | None = None
         self._lock = threading.RLock()          # serializes ALL DuckDB access (single writer, §4.1)
         self._tick_lock = threading.Lock()      # tick buffer only — appends never wait on DuckDB
-        self._flush_lock = threading.Lock()     # serializes whole tick flushes (shared stage table)
+        self._flush_lock = threading.Lock()     # single-flight gate for flushes — try-acquired, never queued
         self._tick_buffer: list[Tick] = []
         self._last_flush_at: datetime = clock.now()
+
+        # --- WO-26a (2026-08-25) flush single-flight telemetry: skipped flushes are normal under
+        #     load, so they are COUNTED always and logged at most once per minute.
+        self._flush_skip_lock = threading.Lock()          # counter only — never held across I/O
+        self._flush_skips = 0
+        self._flush_skip_logged_at: datetime | None = None
+        # --- WO-26a partition-dir cache: (see _tick_partition_dir) symbols whose ticks directory is
+        #     known to exist for _tick_dirs_day. Touched only under _flush_lock.
+        self._tick_dirs: set[str] = set()
+        self._tick_dirs_day: date | None = None
+        # --- WO-26a private worker pools (see _pool / _flush_pool). Created lazily so a sync-only
+        #     user (tests, offline jobs) never spawns a thread; released by close().
+        self._pool_lock = threading.Lock()
+        self._store_executor: ThreadPoolExecutor | None = None
+        self._flush_executor: ThreadPoolExecutor | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings, clock: Clock, **kwargs: Any) -> MarketStore:
@@ -663,6 +880,9 @@ class MarketStore:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._parquet_root.mkdir(parents=True, exist_ok=True)
             self._con = duckdb.connect(str(self._db_path))
+            # Every DuckDB instance in this platform carries a stated ceiling (§3.2.11) — set BEFORE
+            # any query so no job or endpoint can commit the machine's memory.
+            self._con.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
             # Session timezone pinned so TIMESTAMPTZ round-trips as IST wall time (§3.2 convention).
             self._con.execute("SET TimeZone='Asia/Kolkata'")
             self.init_schema()
@@ -676,17 +896,71 @@ class MarketStore:
 
         The flush runs BEFORE taking ``_lock``: flush_ticks acquires ``_flush_lock`` then ``_lock``
         per statement, so calling it while already holding ``_lock`` inverts the order against any
-        in-flight background flush (aflush_ticks worker) — a reproducible AB-BA deadlock."""
+        in-flight background flush (aflush_ticks worker) — a reproducible AB-BA deadlock.
+
+        This is also the ONE caller that waits on an in-flight flush instead of skipping it
+        (WO-26a): after this returns the connection is gone, so a skipped batch would have nowhere
+        left to go. The wait is bounded by ``_CLOSE_FLUSH_WAIT_S`` — shutdown must not hang on a
+        wedged flush, which is the failure mode this work order exists to survive."""
         if self._con is None:
+            self._shutdown_pools()
             return
         try:
-            self.flush_ticks()
+            self.flush_ticks(wait_s=_CLOSE_FLUSH_WAIT_S)
         finally:
             with self._lock:
                 if self._con is not None:
                     self._con.close()
                     self._con = None
+            self._shutdown_pools()
         _log.info("market_store_closed", db=str(self._db_path))
+
+    # ------------------------------------------------------------------ worker pools (WO-26a)
+    def _pool(self) -> ThreadPoolExecutor:
+        """The store's PRIVATE worker pool (``mt-store``) — where every async wrapper below runs.
+
+        2026-08-25 root cause: the wrappers offloaded via ``asyncio.to_thread``, i.e. the ONE
+        default executor shared by every offload in the process. A slow tick flush parked ~20
+        threads on ``_flush_lock`` inside that pool, and from then on nothing else could get a
+        worker: the health probe stayed pending 09:15→13:39 (consecutive=264) and the entire
+        intelligence layer ran empty — zero candidates, zero analyst calls, a whole session.
+
+        A pool the store owns makes that structurally impossible in both directions: store work
+        cannot starve the rest of the process, and no SDK call, HTTP parse or other ``to_thread``
+        user can starve a store read. Created lazily, released by :meth:`close`."""
+        with self._pool_lock:
+            if self._store_executor is None:
+                self._store_executor = ThreadPoolExecutor(
+                    max_workers=_STORE_EXECUTOR_WORKERS, thread_name_prefix="mt-store"
+                )
+            return self._store_executor
+
+    def _flush_pool(self) -> ThreadPoolExecutor:
+        """The tick flush's own single-thread pool (``mt-flush``), separate from :meth:`_pool`.
+
+        One thread is exactly the right width because flushes are single-flight already
+        (:meth:`flush_ticks` skips rather than queues). Keeping it out of ``mt-store`` means a long
+        flush can never consume a worker that a store read — or the health probe — needs, which is
+        the other half of the 08-25 lesson."""
+        with self._pool_lock:
+            if self._flush_executor is None:
+                self._flush_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="mt-flush"
+                )
+            return self._flush_executor
+
+    def _shutdown_pools(self) -> None:
+        """Release both pools. ``wait=False`` on purpose: :meth:`close` runs on the event loop at
+        engine shutdown (and inside another pool's worker for the CLI jobs), so joining here would
+        trade a clean stop for a hang on exactly the wedged flush this design exists to survive.
+        Already-queued work still runs; a flush that lands after the connection is gone re-stages
+        its batch and warns (``tick_flush_skipped_store_closed``)."""
+        with self._pool_lock:
+            pools = [p for p in (self._store_executor, self._flush_executor) if p is not None]
+            self._store_executor = None
+            self._flush_executor = None
+        for pool in pools:
+            pool.shutdown(wait=False)
 
     def __enter__(self) -> MarketStore:
         return self.open()
@@ -694,23 +968,70 @@ class MarketStore:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def ping(self) -> bool:
+        """Cheapest possible proof that this store is ALIVE: take ``_lock``, run ``SELECT 1``, return.
+
+        WO-24b-prime (2026-08-21). The 09:56 freeze stalled every store-touching path at once —
+        feature snapshots, the ``warmup_refresh`` job, the gate-context read — for 14 minutes, and
+        afterwards the platform could not say WHICH shared resource had seized, because nothing was
+        probing any of them. This is that probe. It acquires the same ``_lock`` every other method
+        acquires and runs the smallest statement DuckDB has, so a call that does not RETURN means
+        precisely one thing: nobody can get the lock, or the connection itself is wedged.
+
+        Deliberately not wrapped in try/except — raising is a different and equally useful answer
+        from hanging, and the caller (:class:`~engine.ops.health.HealthMonitor`) distinguishes them.
+        """
+        with self._lock:
+            self._require_con().execute("SELECT 1").fetchone()
+        return True
+
     #: Scale ``instruments_daily.tick_size`` must carry (2026-07-21 lossless-hydrate incident). The
     #: ``DECIMAL(18,6)`` DDL applies to fresh DBs; a DB created under the old ``DECIMAL(10,2)`` is
     #: widened once by :meth:`_migrate_instruments_tick_scale` on the next open.
     _INSTRUMENTS_TICK_SCALE = 6
 
     def init_schema(self) -> None:
-        """Create every §4.3 table + index. Idempotent (IF NOT EXISTS) — safe on every startup.
+        """Create every §4.3 table and drop :data:`_DROPPED_INDEXES`. Idempotent — safe on every startup.
 
         Also runs the one-shot ``instruments_daily.tick_size`` widen (2026-07-21): ``CREATE TABLE IF
         NOT EXISTS`` never alters an existing column, so a legacy DB would keep truncating sub-paisa
-        ticks to 0.00 and losing them on hydrate.
+        ticks to 0.00 and losing them on hydrate. Same reason for the ``corrections_log.reason`` add
+        and the ``sentiment_agg`` saturation-measure adds.
         """
         with self._lock:
             con = self._require_con()
             for stmt in _SCHEMA:
                 con.execute(stmt)
             self._migrate_instruments_tick_scale(con)
+            self._migrate_corrections_reason(con)
+            self._migrate_sentiment_measures(con)
+            self._migrate_watchlist_reversal(con)
+            self._migrate_results_line_items_at(con)
+            for name in self._DROPPED_INDEXES:
+                con.execute(f"DROP INDEX IF EXISTS {name}")
+
+    #: Secondary indexes this store no longer creates. On 2026-09-24 the two on ``news`` and the two
+    #: on ``insider_trades`` were found missing the same rows (7,044 and 420): a lookup they served
+    #: silently skipped those rows, and the ``news`` url dedup let 4,094 duplicates in. The tables'
+    #: primary keys stayed complete. The tables are small enough to scan, so no secondary index is
+    #: kept; ``test_market_store`` asserts none exists.
+    _DROPPED_INDEXES = (
+        "idx_news_url", "idx_news_published", "idx_watchlist_day", "idx_insider_symbol",
+        "idx_insider_broadcast",
+    )
+
+    def _migrate_results_line_items_at(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``results_filings.line_items_at`` column (§2.8.4 stage 2,
+        2026-09-24), mirroring :meth:`_migrate_watchlist_reversal`. NULL on every legacy row means
+        "line items never attempted", which is exactly what those rows are."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'results_filings'"
+            ).fetchall()
+        }
+        if "line_items_at" not in present:
+            con.execute("ALTER TABLE results_filings ADD COLUMN line_items_at TIMESTAMPTZ")
+            _log.info("results_filings_column_added", column="line_items_at")
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
@@ -726,6 +1047,65 @@ class MarketStore:
             con.execute("ALTER TABLE instruments_daily ALTER tick_size SET DATA TYPE DECIMAL(18,6)")
             _log.info("instruments_tick_scale_migrated", frm=scale, to=self._INSTRUMENTS_TICK_SCALE)
 
+    def _migrate_corrections_reason(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``corrections_log.reason`` column to a legacy DB (WO-5):
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB created before the
+        column existed would reject every ``append_correction`` carrying a reason. Guarded on
+        ``information_schema`` so the ALTER runs EXACTLY ONCE; a fresh DB already has it and no-ops.
+        Nullable + appended-last ⇒ existing rows keep their values and read back unchanged."""
+        row = con.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'corrections_log' AND column_name = 'reason'"
+        ).fetchone()
+        if row is None:
+            con.execute("ALTER TABLE corrections_log ADD COLUMN reason TEXT")
+            _log.info("corrections_log_reason_column_added")
+
+    #: Nullable ``sentiment_agg`` saturation measures appended by :meth:`_migrate_sentiment_measures`,
+    #: in the order the ALTERs must run to match the fresh-DB column order (WO-22).
+    _SENTIMENT_MEASURE_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("raw_sum", "DOUBLE"), ("n_clusters", "INTEGER"),
+    )
+
+    def _migrate_sentiment_measures(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``sentiment_agg.raw_sum``/``n_clusters`` columns to a legacy
+        DB (WO-22), mirroring :meth:`_migrate_corrections_reason`: ``CREATE TABLE IF NOT EXISTS``
+        never alters an existing table, so a DB written before the measurement existed would reject
+        every digest upsert carrying it. Guarded per column on ``information_schema`` so each ALTER
+        runs EXACTLY ONCE; a fresh DB already has both and this no-ops. Nullable + appended-last ⇒
+        digest rows written BEFORE WO-22 keep reading back with NULL measures, which is exactly what
+        the analyst render treats as "no measurement for this row"."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'sentiment_agg'"
+            ).fetchall()
+        }
+        for column, sql_type in self._SENTIMENT_MEASURE_COLUMNS:
+            if column not in present:
+                con.execute(f"ALTER TABLE sentiment_agg ADD COLUMN {column} {sql_type}")
+                _log.info("sentiment_agg_column_added", column=column)
+
+    def _migrate_watchlist_reversal(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``catalyst_watchlist.reversal_of`` column (§2.7
+        ``cat_reversal``, 2026-08-27), mirroring :meth:`_migrate_sentiment_measures`.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB written before the
+        reversal flag existed would reject every digest upsert carrying it — and the digest is the
+        08:35 job the whole news chain hangs off. Guarded on ``information_schema`` so the ALTER runs
+        EXACTLY ONCE; a fresh DB already has the column and this no-ops. Nullable + appended-last ⇒
+        every watchlist row written before today reads back with ``reversal_of = NULL``, i.e. "not a
+        reversal", which is the correct answer for rows graded before the detector existed."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'catalyst_watchlist'"
+            ).fetchall()
+        }
+        if "reversal_of" not in present:
+            con.execute("ALTER TABLE catalyst_watchlist ADD COLUMN reversal_of TEXT")
+            _log.info("catalyst_watchlist_column_added", column="reversal_of")
+
     def table_names(self) -> set[str]:
         """Names of the persistent tables in the store (for self-tests / the schema lockstep test)."""
         rows = self._fetchall(
@@ -740,20 +1120,44 @@ class MarketStore:
             raise RuntimeError("MarketStore is not open — call open() first")
         return self._con
 
+    def _timed_lock(self, label: str) -> _TimedHold:
+        """Acquire ``_lock`` for ONE instrumented hold — see :class:`_TimedHold` for the contract
+        (§2.6 "Store slow-statement telemetry", documented on :func:`_note_slow_statement`)."""
+        return _TimedHold(self._lock, label)
+
+    def _execute_locked(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        sql: str,
+        params: Sequence[Any] | None = None,
+    ) -> duckdb.DuckDBPyConnection:
+        """Run ONE statement on ``con`` and return the cursor. Deliberately SILENT: the caller is
+        already inside its own :meth:`_timed_lock` hold, so it — not this helper — decides what the
+        hold's single :func:`_note_slow_statement` says and emits it after the release (2026-09-09
+        review: nesting the logging :meth:`_execute` inside a hold logged twice per read under
+        identical labels and left the fetch phase untimed)."""
+        return con.execute(sql, params) if params is not None else con.execute(sql)
+
     def _execute(self, sql: str, params: Sequence[Any] | None = None) -> duckdb.DuckDBPyConnection:
-        with self._lock:
-            con = self._require_con()
-            return con.execute(sql, params) if params is not None else con.execute(sql)
+        with self._timed_lock(sql[:80]):
+            result = self._execute_locked(self._require_con(), sql, params)
+        return result
 
     def _fetchall(self, sql: str, params: Sequence[Any] | None = None) -> list[tuple]:
-        with self._lock:
-            return self._execute(sql, params).fetchall()
+        # The WHOLE hold is one measurement (execute + fetch): a 5 s read split 3 s/2.5 s across the
+        # two phases went unreported when each phase was timed on its own (2026-09-09 review).
+        with self._timed_lock(sql[:80]):
+            cur = self._execute_locked(self._require_con(), sql, params)
+            rows = cur.fetchall()
+        return rows
 
     def _fetch_dicts(self, sql: str, params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
-        with self._lock:
-            cur = self._execute(sql, params)
+        # As _fetchall, and the per-row dict/_ist conversion counts too — it runs under the hold.
+        with self._timed_lock(sql[:80]):
+            cur = self._execute_locked(self._require_con(), sql, params)
             cols = [d[0] for d in cur.description]
-            return [{c: _ist(v) for c, v in zip(cols, row, strict=True)} for row in cur.fetchall()]
+            out = [{c: _ist(v) for c, v in zip(cols, row, strict=True)} for row in cur.fetchall()]
+        return out
 
     #: Row count at which _upsert_rows switches from executemany (~128 rows/s) to the vectorized
     #: _bulk_write path (2026-07-21). In practice only instruments_daily (~113k rows/day) crosses it.
@@ -797,11 +1201,17 @@ class MarketStore:
             dtype=object,
         )
         view = "_mt_bulk_stage"
-        with self._lock:
+        # The whole register/insert/unregister trio is ONE hold (2026-09-09 review): register
+        # materializes the frame as a DuckDB view and unregister tears it down, both under _lock —
+        # timing only the INSERT under-reported the hold every other caller actually waited on.
+        with self._timed_lock(f"bulk_write:{table}:{len(rows)}"):
             con = self._require_con()
             con.register(view, df)
             try:
-                con.execute(f"INSERT INTO {table} ({collist}) SELECT {collist} FROM {view} {conflict}")
+                self._execute_locked(
+                    con,
+                    f"INSERT INTO {table} ({collist}) SELECT {collist} FROM {view} {conflict}",
+                )
             finally:
                 con.unregister(view)
 
@@ -820,7 +1230,11 @@ class MarketStore:
             rows = [{**defaults, **row} for row in rows]
         non_pk = [c for c in cols if c not in pk]
         if non_pk and table not in _CONTENT_HASH_PK_TABLES:
-            updates = ", ".join(f'"{c}" = excluded."{c}"' for c in non_pk)
+            keep = _KEEP_ON_NULL.get(table, frozenset())
+            updates = ", ".join(
+                f'"{c}" = COALESCE(excluded."{c}", {table}."{c}")' if c in keep else f'"{c}" = excluded."{c}"'
+                for c in non_pk
+            )
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
         else:
             # Content-hash-PK tables (id derives from the row's content): identical id ⇒ identical
@@ -852,7 +1266,9 @@ class MarketStore:
         placeholders = ", ".join("?" for _ in cols)
         collist = ", ".join(f'"{c}"' for c in cols)
         sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) {conflict}"
-        with self._lock:
+        # The whole transaction is the hold (2026-09-09 review): a batch that rolls back after 30 s
+        # starved every other caller for 30 s and must still name itself.
+        with self._timed_lock(f"upsert_rows:{table}:{len(rows)}"):
             con = self._require_con()
             # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
             # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
@@ -905,6 +1321,84 @@ class MarketStore:
             )
             for r in rows
         ]
+
+    def amend_bar_1m_extremes(
+        self, symbol: str, minute: datetime, value: Decimal, *, require_src: str = "self"
+    ) -> str:
+        """Atomically widen ONE stored 1m bar's high/low to include ``value`` (§3.2.3 late-tick
+        amendment). Returns one of the module-level ``AMEND_*`` outcomes; writes nothing except on
+        ``AMEND_APPLIED``, and never touches open/close/volume/src/auction_open.
+
+        This is the read-decide-write seam the late-tick path needs (WO-5): ``BarBuilder`` used to
+        ``get_bars_1m`` then ``insert_bars_1m`` as two independent lock acquisitions, so the 15:50
+        ReconcileJob could upsert the canonical official candle in between and have the amendment —
+        computed against the pre-reconcile row and issued as a whole-row upsert — silently overwrite
+        it. Here the SELECT, the decision and the UPDATE happen inside ONE ``_lock`` acquisition and
+        ONE transaction, and the UPDATE re-states the row it read as its own predicate
+        (``src``/``high``/``low`` compare-and-swap) so even a lock-free future caller can only write
+        against the row it decided on — otherwise ``AMEND_RACE_LOST``, write skipped.
+
+        ``require_src`` is a hard precondition, not a filter: a row whose ``src`` has become
+        ``kite_official``/``gap_backfilled`` is CANONICAL (§4.4 job 2) and a stray live tick may never
+        rewrite it — it reports ``AMEND_FOREIGN_SRC`` and leaves the row byte-intact.
+
+        Lock note: this holds ``_lock`` across 2-3 statements (µs-scale point reads/writes on the PK),
+        marginally longer than the one-statement discipline of the flush path — the cost of atomicity.
+        The whole transaction is therefore ONE timed hold (§2.6 hardening (iii), 2026-09-09) via
+        :meth:`_timed_lock` — a 2-3 statement hold that stalls starves every other store caller
+        exactly like a one-statement one. This runs on the LIVE late-tick path, so the instrumentation
+        is deliberately the cheap shape: one small ``__slots__`` object and two ``perf_counter`` reads
+        per amendment, nothing allocated per statement.
+        """
+        with self._timed_lock(f"amend_bar_1m:{symbol}"):
+            con = self._require_con()
+            con.execute("BEGIN TRANSACTION")
+            try:
+                outcome = self._amend_bar_1m_locked(con, symbol, minute, value, require_src)
+            except BaseException:
+                # Mirrors _upsert_rows: a KeyboardInterrupt/CancelledError mid-amendment must
+                # leave no open transaction behind (the connection stays usable for everyone).
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT")
+        return outcome
+
+    def _amend_bar_1m_locked(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        symbol: str,
+        minute: datetime,
+        value: Decimal,
+        require_src: str,
+    ) -> str:
+        """The read-decide-write body of :meth:`amend_bar_1m_extremes` — callers hold ``_lock`` and an
+        open transaction."""
+        row = self._read_bar_extremes(con, symbol, minute)
+        if row is None:
+            return AMEND_NO_BAR
+        src, high, low = row
+        if src != require_src:
+            return AMEND_FOREIGN_SRC
+        if low <= value <= high:
+            return AMEND_IN_RANGE
+        changed = con.execute(
+            "UPDATE bars_1m SET high = ?, low = ? "
+            "WHERE symbol = ? AND ts_minute = ? AND src = ? AND high = ? AND low = ?",
+            [max(high, value), min(low, value), symbol, minute, src, high, low],
+        ).fetchone()[0]
+        return AMEND_APPLIED if changed else AMEND_RACE_LOST
+
+    @staticmethod
+    def _read_bar_extremes(
+        con: duckdb.DuckDBPyConnection, symbol: str, minute: datetime
+    ) -> tuple[str, Decimal, Decimal] | None:
+        """``(src, high, low)`` of one stored bar, or ``None``. Its own method so the CAS predicate in
+        :meth:`_amend_bar_1m_locked` is testable: a test double returning a STALE snapshot must lose
+        the compare-and-swap (``AMEND_RACE_LOST``) and write nothing."""
+        row = con.execute(
+            "SELECT src, high, low FROM bars_1m WHERE symbol = ? AND ts_minute = ?", [symbol, minute]
+        ).fetchone()
+        return (row[0], row[1], row[2]) if row is not None else None
 
     def get_bars_1m_frame(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
         """Bulk float OHLCV frame of 1m bars (``start <= ts_minute < end``), ascending.
@@ -961,12 +1455,48 @@ class MarketStore:
         row = self._fetchall("SELECT max(ts_minute) FROM bars_1m WHERE symbol = ?", [symbol])[0]
         return _ist(row[0]) if row[0] is not None else None
 
+    def mark_no_trade(
+        self, symbol: str, minutes: Sequence[datetime], *, confirmed_at: datetime
+    ) -> int:
+        """Record ``minutes`` as UPSTREAM-CONFIRMED no-trade minutes for ``symbol`` (2026-09-18).
+
+        The ONLY writer is :meth:`engine.marketdata.backfill.BackfillJob.warmup_gap`, and only for a
+        minute Kite could have published and did not (see its contract). ``ON CONFLICT DO NOTHING``:
+        the first confirmation is the record — a re-confirmation must never rewrite ``confirmed_at``.
+        Returns the number of rows handed to the write (an empty ``minutes`` issues no statement).
+        """
+        rows = [
+            [symbol, m.astimezone(IST).replace(second=0, microsecond=0), confirmed_at, "kite_empty"]
+            for m in minutes
+        ]
+        if not rows:
+            return 0
+        self._bulk_write(
+            "bars_1m_no_trade",
+            ("symbol", "ts_minute", "confirmed_at", "src"),
+            rows,
+            pk=("symbol", "ts_minute"),
+            conflict="ON CONFLICT (symbol, ts_minute) DO NOTHING",
+        )
+        return len(rows)
+
+    def no_trade_minutes(self, symbol: str, start: datetime, end: datetime) -> set[datetime]:
+        """Confirmed no-trade minutes for ``symbol`` with ``start <= ts_minute < end`` (tz-aware IST)."""
+        rows = self._fetchall(
+            "SELECT ts_minute FROM bars_1m_no_trade WHERE symbol = ? AND ts_minute >= ? "
+            "AND ts_minute < ?",
+            [symbol, start.astimezone(IST), end.astimezone(IST)],
+        )
+        return {_ist(r[0]) for r in rows}
+
     def coverage_gaps(self, symbol: str, start: datetime, end: datetime) -> list[datetime]:
         """Missing minute-starts in ``[start, end)`` for ``symbol`` (§2.6 step 6 / §7.1 ``warmup_ready``).
 
         Expects a WITHIN-SESSION range (the caller clamps to session minutes via ``NSECalendar``);
         every whole minute in the range is expected to have a bar. Returns the missing minutes
-        ascending — empty list ⇒ contiguous coverage.
+        ascending — empty list ⇒ contiguous coverage. An UPSTREAM-CONFIRMED no-trade minute
+        (``bars_1m_no_trade``) counts as COVERED — the exchange traded nothing in it, so there is no
+        bar to have (2026-09-18: a thin symbol's tradeless minute is an observation, not a hole).
         """
         start = start.astimezone(IST).replace(second=0, microsecond=0)
         end = end.astimezone(IST)
@@ -981,7 +1511,7 @@ class MarketStore:
             "SELECT ts_minute FROM bars_1m WHERE symbol = ? AND ts_minute >= ? AND ts_minute < ?",
             [symbol, start, end],
         )
-        present = {_ist(r[0]) for r in rows}
+        present = {_ist(r[0]) for r in rows} | self.no_trade_minutes(symbol, start, end)
         return [m for m in expected if m not in present]
 
     def has_contiguous_coverage(self, symbol: str, start: datetime, end: datetime) -> bool:
@@ -1054,12 +1584,18 @@ class MarketStore:
         *,
         cumulative_volume: int | None = None,
         amended: bool = False,
+        reason: str | None = None,
     ) -> None:
-        """Log a late tick that arrived past the minute+5s finalize grace (§4.3 corrections_log)."""
+        """Log a late tick that arrived past the minute+5s finalize grace (§4.3 corrections_log).
+
+        ``reason`` (optional) records why an ``amended=False`` row was NOT applied — notably
+        ``'official_bar_untouchable'`` for a late tick aimed at a reconciled/backfilled row (§3.2.3).
+        """
         self._execute(
-            "INSERT INTO corrections_log (symbol, minute, tick_ts, value, cumulative_volume, amended, logged_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            [symbol, minute, tick_ts, value, cumulative_volume, amended, self._clock.now()],
+            "INSERT INTO corrections_log "
+            "(symbol, minute, tick_ts, value, cumulative_volume, amended, logged_at, reason) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [symbol, minute, tick_ts, value, cumulative_volume, amended, self._clock.now(), reason],
         )
 
     def get_corrections(self, d: date) -> list[dict[str, Any]]:
@@ -1106,11 +1642,66 @@ class MarketStore:
     def upsert_universe_daily(self, rows: Sequence[dict[str, Any]]) -> int:
         return self._upsert_rows("universe_daily", rows)
 
+    def replace_universe_daily(self, d: date, rows: Sequence[dict[str, Any]]) -> int:
+        """Day-``d`` universe write with extended-leg hygiene (2026-09-01 review finding): plain
+        upserts never delete, so a same-day re-build with ``batch_universe_enabled`` flipped off —
+        or a shrunken extended candidate set — would leave stale extended rows feeding
+        :meth:`get_batch_universe_symbols` for the rest of the day, defeating the flag's documented
+        rollback guarantee. Extended rows are therefore delete-then-inserted under one lock hold
+        (the ``catalyst_watchlist`` idempotent-rewrite precedent); index-member rows stay pure
+        upserts — every build re-writes their full audit rows by construction.
+
+        BOTH index markers are deleted (O15, 2026-09-04): a re-build on a day whose earlier build
+        wrote the legacy ``not_nifty200`` marker must clear those rows too, or the rollback
+        guarantee holds only for rows the renamed build happened to write."""
+        with self._lock:
+            self._execute(
+                "DELETE FROM universe_daily WHERE d = ? AND len(exclusion_reasons) = 1 "
+                "AND exclusion_reasons[1] IN (?, ?)",
+                [d, _EXCL_INDEX, _EXCL_INDEX_LEGACY],
+            )
+            return self._upsert_rows("universe_daily", rows)
+
     def get_universe_daily(self, d: date, *, included_only: bool = False) -> list[dict[str, Any]]:
         sql = "SELECT * FROM universe_daily WHERE d = ?"
         if included_only:
             sql += " AND included"
         return self._fetch_dicts(sql + " ORDER BY symbol", [d])
+
+    def get_universe_eligible_symbols(self, d: date) -> list[str]:
+        """The ELIGIBLE universe for ``d``: every symbol that passed every §3.2.4 rule, whether or
+        not it made today's top-N focus watchlist — i.e. ``included`` rows PLUS rows excluded for
+        the cap alone (``exclusion_reasons == ['watchlist_cap']``). This is the brk20/ins batch-rule
+        universe (``src/engine/ops/main.py`` ``run_scan_sweep``), not the ``included_only`` focus
+        watchlist — use it wherever "did this symbol clear the rules" matters more than "is it in
+        today's top 100" (the 2026-08-04 BPCL lesson: watchlist-cap-contaminated visibility silently
+        drops otherwise-eligible symbols).
+        """
+        rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
+        return sorted(
+            r["symbol"] for r in rows
+            if r["included"] or list(r["exclusion_reasons"] or []) == [_EXCL_CAP]
+        )
+
+    def get_batch_universe_symbols(self, d: date) -> list[str]:
+        """The BATCH universe for ``d`` (§3.2.4 extended-leg addendum, 2026-09-01): the eligible set
+        (see :meth:`get_universe_eligible_symbols`) PLUS criteria-passing NON-index symbols persisted
+        with the extended-leg marker alone. This is the widest rule-passing scan set — news
+        resolver/digest shadow and the pre-open breakout advisory. NO scanner reads it today: ``hi52``
+        read it at birth (2026-09-01), was scoped back to the eligible set 2026-09-10 and PROMOTED
+        out of shadow 2026-09-12 (plan §8.6).
+        NEVER feed it to anything RECOMMEND-capable: the risk gate approves ``included`` rows only,
+        so an actionable strategy scanning this set would originate un-approvable candidates.
+
+        Either index marker counts (O15, 2026-09-04) — see :data:`_EXCL_INDEX_LEGACY`: rows written
+        2026-09-01…09-04 spell it ``not_nifty200``, and reading only the new spelling would silently
+        drop every pre-rename extended name out of the batch scan set."""
+        rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
+        return sorted(
+            r["symbol"] for r in rows
+            if r["included"]
+            or list(r["exclusion_reasons"] or []) in ([_EXCL_CAP], [_EXCL_INDEX], [_EXCL_INDEX_LEGACY])
+        )
 
     # ================================================================== features (§3.2.5/§6.2)
     def upsert_features_daily(self, rows: Sequence[dict[str, Any]]) -> int:
@@ -1147,13 +1738,16 @@ class MarketStore:
         """
         inserted = 0
         now = self._clock.now()
-        with self._lock:
+        # ONE hold spans the whole row loop, so the note names the batch, not a statement (§2.6
+        # hardening (iii), 2026-09-09): a backfill of hundreds of headlines is row-at-a-time INSERT
+        # under a single _lock acquisition — the batch IS the hold every other caller waits behind.
+        with self._timed_lock(f"insert_news:{len(rows)}"):
             con = self._require_con()
             for row in rows:
                 hid = row.get("headline_id") or str(ULID())
                 cur = con.execute(
-                    "INSERT INTO news (headline_id, title, source_domain, url, published_at, cluster_id, "
-                    "untrusted, ingested_at) "
+                    "INSERT INTO news (headline_id, title, source_domain, url, published_at, "
+                    "cluster_id, untrusted, ingested_at) "
                     "SELECT ?,?,?,?,?,?,TRUE,? WHERE NOT EXISTS (SELECT 1 FROM news WHERE url = ?)",
                     [hid, row["title"], row["source_domain"], row["url"], row["published_at"],
                      row.get("cluster_id"), now, row["url"]],
@@ -1161,9 +1755,19 @@ class MarketStore:
                 inserted += cur.fetchone()[0]
         return inserted
 
+    def existing_news_urls(self, urls: Sequence[str]) -> set[str]:
+        """The subset of ``urls`` already stored, in one scan. A poll re-submits mostly known URLs,
+        and without an index each :meth:`insert_news` dedup check is a scan of its own."""
+        if not urls:
+            return set()
+        rows = self._fetchall("SELECT DISTINCT url FROM news WHERE url IN (SELECT UNNEST(?))", [list(urls)])
+        return {r[0] for r in rows}
+
     def set_news_cluster(self, headline_ids: Sequence[str], cluster_id: str) -> None:
         """Assign headlines to a cluster (§2.7 step 2 output)."""
-        with self._lock:
+        # executemany binds row-at-a-time, so the hold scales with the cluster's size — one note for
+        # the whole hold (§2.6 hardening (iii), 2026-09-09).
+        with self._timed_lock(f"set_news_cluster:{len(headline_ids)}"):
             con = self._require_con()
             con.executemany(
                 "UPDATE news SET cluster_id = ? WHERE headline_id = ?",
@@ -1245,9 +1849,12 @@ class MarketStore:
         return self._fetch_dicts("SELECT * FROM theme_map ORDER BY theme")
 
     def upsert_sentiment_agg(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Write digest rows. ``raw_sum``/``n_clusters`` (the WO-22 saturation measure) are OPTIONAL:
+        a row omitting them stores NULL, so a caller written before the measure existed still works."""
         return self._upsert_rows("sentiment_agg", rows)
 
     def get_sentiment_agg(self, as_of: datetime) -> list[dict[str, Any]]:
+        """One run's rows, including ``raw_sum``/``n_clusters`` — NULL on rows digested before WO-22."""
         return self._fetch_dicts(
             "SELECT * FROM sentiment_agg WHERE as_of = ? ORDER BY scope, scope_key", [as_of]
         )
@@ -1355,11 +1962,11 @@ class MarketStore:
         """``bse_scrip_code -> symbol`` REVERSE map — the §2.8 fresh-insider feed resolves a BSE
         ``Fld_ScripCode`` back to our symbol (the whole market is served, so most scrips are
         out-of-universe and simply absent). Codes are normalized to a bare-int string so ``500325``,
-        ``'500325'`` and ``'500325.0'`` all collide (idempotent with the stored TEXT column). If two
-        symbols ever share a scrip code the last-seen wins (deterministic; scrip codes are unique in
-        practice)."""
+        ``'500325'`` and ``'500325.0'`` all collide (idempotent with the stored TEXT column). Two
+        symbols share a code after a rename, which leaves the old symbol's row behind: the newest
+        ``as_of`` wins, because the daily ``isin_map`` job re-stamps only current constituents."""
         out: dict[str, str] = {}
-        for r in self.get_symbol_isin():
+        for r in self._fetch_dicts("SELECT symbol, bse_scrip_code FROM symbol_isin ORDER BY as_of, symbol"):
             key = _norm_scrip_code(r.get("bse_scrip_code"))
             if key:
                 out[key] = r["symbol"]
@@ -1375,11 +1982,31 @@ class MarketStore:
         self, *, symbol: str | None = None,
         broadcast_from: datetime | None = None, broadcast_to: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM insider_trades WHERE TRUE"
+        """Insider trades, each trade ONCE across exchanges. The same PIT filing reaches NSE and BSE,
+        so a trade can be stored by both feeds under different ids (each hashes its own broadcast
+        time). Rows of the two sources with the same symbol, person, side, qty, value and trade dates
+        are paired off in broadcast order and the earlier of each pair is kept — the point-in-time
+        choice. Rows of ONE source are never merged, so single-source history is returned as stored.
+        Pairing runs before the broadcast filter, so a pair straddling ``broadcast_from`` is dropped
+        whole rather than surfacing its later copy."""
+        base = "SELECT * FROM insider_trades"
         params: list[Any] = []
         if symbol is not None:
-            sql += " AND symbol = ?"
+            base += " WHERE symbol = ?"
             params.append(symbol)
+        trade = (
+            "symbol, lower(regexp_replace(trim(coalesce(person_name, '')), '\\s+', ' ', 'g')), "
+            "lower(coalesce(txn_type, '')), qty, value, txn_from, txn_to"
+        )
+        sql = (
+            "SELECT * EXCLUDE (src, nth, pick) FROM ("
+            f" SELECT *, row_number() OVER (PARTITION BY {trade}, nth ORDER BY broadcast_dt, id) AS pick"
+            " FROM ("
+            f"  SELECT *, row_number() OVER (PARTITION BY {trade}, src ORDER BY broadcast_dt, id) AS nth"
+            f"  FROM (SELECT *, {_INSIDER_SOURCE_PREDICATE['bse']} AS src FROM ({base}))"
+            " )"
+            ") WHERE pick = 1"
+        )
         if broadcast_from is not None:
             sql += " AND broadcast_dt >= ?"
             params.append(broadcast_from)
@@ -1388,10 +2015,60 @@ class MarketStore:
             params.append(broadcast_to)
         return self._fetch_dicts(sql + " ORDER BY broadcast_dt, id", params)
 
-    def latest_insider_broadcast(self) -> datetime | None:
-        """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark (§2.8)."""
-        row = self._fetchall("SELECT max(broadcast_dt) FROM insider_trades")[0]
+    def nse_insider_xbrls(self, since: datetime) -> set[str]:
+        """XBRL links of the NSE filings stored with a broadcast at or after ``since`` — the ones
+        ``filings_pit`` need not fetch again."""
+        rows = self._fetchall(
+            "SELECT DISTINCT xbrl FROM insider_trades "
+            f"WHERE {_INSIDER_SOURCE_PREDICATE['nse']} AND xbrl IS NOT NULL AND broadcast_dt >= ?",
+            [since],
+        )
+        return {r[0] for r in rows}
+
+    def latest_insider_broadcast(self, source: str | None = None) -> datetime | None:
+        """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark (§2.8).
+
+        ``source`` selects the partition by id tag (§2.8.5, 2026-09-13): ``'nse'`` = the bare-id
+        ``corporates-pit`` rows, ``'bse'`` = the ``bse:``-prefixed fresh-feed rows, ``None`` = the
+        whole table (the pre-2026-09-13 reading, kept for callers that want "any insider row").
+        Only ``'nse'`` has a production caller: ``filings_pit_fresh`` windows on DATES, never on
+        a watermark, so ``'bse'`` is the symmetric reading kept for a future one.
+        WHOLE-TABLE IS WRONG FOR A PER-JOB WINDOW: the BSE feed writes same-day rows, which pins the
+        NSE job's window to ``[d-1, d]`` and leaves a revived NSE route unable to reopen its own gap.
+        An unknown tag RAISES rather than falling back to the whole table — a silent fallback is
+        exactly that bug again.
+        """
+        sql = "SELECT max(broadcast_dt) FROM insider_trades"
+        if source is not None:
+            predicate = _INSIDER_SOURCE_PREDICATE.get(source.strip().lower())
+            if predicate is None:
+                raise ValueError(
+                    f"unknown insider source {source!r} "
+                    f"(expected one of {sorted(_INSIDER_SOURCE_PREDICATE)} or None)"
+                )
+            sql += f" WHERE {predicate}"
+        row = self._fetchall(sql)[0]
         return _ist(row[0]) if row[0] is not None else None
+
+    #: Newest data each feed has delivered — the ``feed_freshness`` census. News by INGESTION time
+    #: (publish stamps can be future-dated); corp actions / earnings by ``recorded_at``, which every
+    #: delivered row rewrites; shareholding by its newest quarter end.
+    _FEED_NEWEST_SQL: dict[str, str] = {
+        "bhavcopy": "SELECT max(d) FROM bars_1d",
+        "deals": "SELECT max(d) FROM flagged_instrument_days",
+        "corp_actions": "SELECT max(recorded_at) FROM corp_actions",
+        "earnings_calendar": "SELECT max(recorded_at) FROM earnings_calendar",
+        "insider_nse": f"SELECT max(broadcast_dt) FROM insider_trades WHERE {_INSIDER_SOURCE_PREDICATE['nse']}",
+        "insider_bse": f"SELECT max(broadcast_dt) FROM insider_trades WHERE {_INSIDER_SOURCE_PREDICATE['bse']}",
+        "shareholding": "SELECT max(qtr_end) FROM shp_quarterly",
+        "news": "SELECT max(ingested_at) FROM news",
+        "sector_map": "SELECT max(as_of) FROM sector_map",
+        "isin_map": "SELECT max(as_of) FROM symbol_isin",
+    }
+
+    def feed_newest(self) -> dict[str, date | datetime | None]:
+        """``{feed: newest delivered date or timestamp}`` (None = the feed never delivered)."""
+        return {feed: _ist(self._fetchall(sql)[0][0]) for feed, sql in self._FEED_NEWEST_SQL.items()}
 
     def upsert_shp_quarterly(self, rows: Sequence[dict[str, Any]]) -> int:
         """Upsert SEBI-format SHP rows (idempotent on (symbol, qtr_end, category); latest wins)."""
@@ -1445,11 +2122,60 @@ class MarketStore:
         row = self._fetchall("SELECT max(broadcast_dt) FROM results_filings")[0]
         return _ist(row[0]) if row[0] is not None else None
 
+    def latest_results_period(self) -> date | None:
+        """Newest stored ``period_end`` — the feed-staleness probe (an idle listing still "succeeds")."""
+        row = self._fetchall("SELECT max(period_end) FROM results_filings")[0]
+        return row[0]
+
+    def results_line_item_candidates(
+        self, symbols: Sequence[str], *, since: date, limit: int
+    ) -> list[dict[str, Any]]:
+        """Filings whose XBRL line items were never attempted, newest period first. One per
+        (symbol, period): the CONSOLIDATED filing when the issuer filed one, else standalone (§2.8)."""
+        if not symbols or limit <= 0:
+            return []
+        return self._fetch_dicts(
+            """
+            SELECT symbol, period_end, consolidated, xbrl FROM results_filings r
+            WHERE xbrl IS NOT NULL AND line_items_at IS NULL AND period_end >= ?
+              AND symbol IN (SELECT unnest(?))
+              AND (consolidated OR NOT EXISTS (
+                    SELECT 1 FROM results_filings c
+                    WHERE c.symbol = r.symbol AND c.period_end = r.period_end
+                      AND c.consolidated AND c.xbrl IS NOT NULL))
+            ORDER BY period_end DESC, symbol
+            LIMIT ?
+            """,
+            [since, list(symbols), limit],
+        )
+
+    def set_results_line_items(self, rows: Sequence[dict[str, Any]]) -> int:
+        """Record parsed ``revenue``/``pat`` (either may be None when the filing lacks the tag) and
+        stamp ``line_items_at`` so the filing is never re-fetched."""
+        now = self._clock.now()
+        for row in rows:
+            self._execute(
+                "UPDATE results_filings SET revenue = ?, pat = ?, line_items_at = ? "
+                "WHERE symbol = ? AND period_end = ? AND consolidated = ?",
+                [row["revenue"], row["pat"], now, row["symbol"], row["period_end"], row["consolidated"]],
+            )
+        return len(rows)
+
     # ================================================================== tick Parquet writer (§4.3)
     @property
     def pending_tick_count(self) -> int:
         with self._tick_lock:
             return len(self._tick_buffer)
+
+    @property
+    def tick_flush_skips(self) -> int:
+        """Flushes that returned immediately because another was already running (WO-26a).
+
+        A steadily climbing count is not an error — it is the pile-up that used to happen instead,
+        now costing nothing. A count climbing while ``ticks_flushed`` does NOT is the shape worth
+        alerting on: it means one flush never finished."""
+        with self._flush_skip_lock:
+            return self._flush_skips
 
     def stage_tick(self, tick: Tick) -> bool:
         """Append one tick to the buffer WITHOUT flushing; True when a flush is due.
@@ -1490,52 +2216,145 @@ class MarketStore:
             return self.flush_ticks()
         return []
 
-    def flush_ticks(self) -> list[Path]:
+    def flush_ticks(self, *, wait_s: float = 0.0, if_due: bool = False) -> list[Path]:
         """Write the buffered batch to ``ticks/date=…/symbol=…/<ulid>.parquet`` (one file per
         (date, symbol) group in the batch) and reset the flush timer. Decimal/tz exact.
+
+        **Single-flight with SKIP (WO-26a, 2026-08-25).** A flush that finds another flush already
+        running returns IMMEDIATELY — it never queues behind ``_flush_lock``. The live path calls
+        this once per tick event whose batch is due (``BarBuilder.on_tick_event``), so a flush that
+        runs long used to convert every subsequent tick into one more BLOCKED worker thread: on
+        08-25 a stack dump caught ~20 of them stopped at this lock inside the shared
+        ``asyncio.to_thread`` pool, with the whole process starved behind them. Skipping costs
+        nothing at all: the staged ticks stay in the buffer, ``_last_flush_at`` is only reset by a
+        flush that actually RUNS, so the batch is still due and the next tick event flushes it.
+
+        ``wait_s`` > 0 waits that long for the in-flight flush instead of skipping. Only
+        :meth:`close` uses it — see there for why it is the one caller that may not skip.
+
+        ``if_due`` flushes only a batch that is still due once the lock is held — see
+        :meth:`aflush_ticks`, its caller.
 
         Lock discipline: ``_flush_lock`` serializes whole flushes (the stage table is shared
         working space); the DuckDB ``_lock`` is held only per statement — one staged bulk write
         for the WHOLE batch, then one brief COPY per (date, symbol) partition — so concurrent
         bar upserts wait at most one statement (~ms), never a whole flush."""
-        with self._flush_lock:
-            with self._tick_lock:
-                batch, self._tick_buffer = self._tick_buffer, []
-                self._last_flush_at = self._clock.now()
-            if not batch:
+        acquired = (
+            self._flush_lock.acquire(timeout=wait_s)
+            if wait_s > 0
+            else self._flush_lock.acquire(blocking=False)
+        )
+        if not acquired:
+            self._note_flush_skipped(waited_s=wait_s)
+            return []
+        try:
+            if if_due and not self.tick_flush_due():
                 return []
-            group_keys = sorted(
-                {(t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) for t in batch}
+            return self._flush_locked()
+        finally:
+            self._flush_lock.release()
+
+    def _note_flush_skipped(self, *, waited_s: float = 0.0) -> None:
+        """Count a skipped flush; log at most one line per ``_FLUSH_SKIP_LOG_EVERY_S`` (WO-26a).
+
+        The counter (:attr:`tick_flush_skips`) is the telemetry; the periodic line is the
+        breadcrumb that says the skip path is doing its job, carrying the running total and the
+        backlog it left staged."""
+        with self._flush_skip_lock:
+            self._flush_skips += 1
+            total = self._flush_skips
+            now = self._clock.now()
+            due = (
+                self._flush_skip_logged_at is None
+                or (now - self._flush_skip_logged_at).total_seconds() >= _FLUSH_SKIP_LOG_EVERY_S
             )
-            with self._lock:
-                closed = self._con is None
-                if not closed:
-                    self._con.execute("DELETE FROM _tick_stage")
-            if closed:
-                # Orphaned late flush after close() (shutdown edge): restage rather than crash a
-                # background worker; nothing can write these post-close — the loss is explicit.
-                with self._tick_lock:
-                    self._tick_buffer[:0] = batch
-                _log.warning("tick_flush_skipped_store_closed", ticks=len(batch))
-                return []
+            if due:
+                self._flush_skip_logged_at = now
+        if due:
+            _log.info(
+                "flush_skipped_in_flight",
+                skipped_total=total,
+                pending_ticks=self.pending_tick_count,
+                waited_s=waited_s,
+            )
+
+    def _tick_partition_dir(self, d: date, symbol: str) -> Path:
+        """The ``ticks/date=…/symbol=…`` directory, created ONCE per (date, symbol) per process.
+
+        WO-26a: the flush used to ``mkdir(parents=True, exist_ok=True)`` for every one of the ~200
+        symbols in each batch — ~200 filesystem round-trips per pass, all of them inside
+        ``_flush_lock``, all of them re-proving what the previous flush 60 s earlier had already
+        established. On a busy Windows volume that is a large part of what made a flush long enough
+        for callers to pile up behind it in the first place.
+
+        The cache is cleared on DATE rollover, so it stays one trading day wide (~200 entries) and
+        a new day still gets its directories created. Called only under ``_flush_lock``, which is
+        what makes the unsynchronized set access safe."""
+        part_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}" / f"symbol={symbol}"
+        if d != self._tick_dirs_day:
+            self._tick_dirs_day = d
+            self._tick_dirs.clear()
+        if symbol not in self._tick_dirs:
+            part_dir.mkdir(parents=True, exist_ok=True)
+            self._tick_dirs.add(symbol)
+        return part_dir
+
+    def _flush_locked(self) -> list[Path]:
+        """The flush proper. Callers hold ``_flush_lock`` — see :meth:`flush_ticks`."""
+        with self._tick_lock:
+            batch, self._tick_buffer = self._tick_buffer, []
+            self._last_flush_at = self._clock.now()
+        if not batch:
+            return []
+        group_keys = sorted(
+            {(t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) for t in batch}
+        )
+        # The stage wipe is its own _lock hold and its own note (§2.6 hardening (iii), 2026-09-09):
+        # on a big backlog the DELETE is not free, and it runs BEFORE the bulk_write/copy_ticks pair,
+        # so leaving it untimed would have blamed the next statement for its share of a stall.
+        with self._timed_lock("flush_stage_delete"):
+            closed = self._con is None
+            if not closed:
+                self._con.execute("DELETE FROM _tick_stage")
+        if closed:
+            # Orphaned late flush after close() (shutdown edge): restage rather than crash a
+            # background worker; nothing can write these post-close — the loss is explicit.
+            with self._tick_lock:
+                self._tick_buffer[:0] = batch
+            _log.warning("tick_flush_skipped_store_closed", ticks=len(batch))
+            return []
+        written: list[Path] = []
+        done: set[tuple[date, str]] = set()
+        try:
             self._bulk_write(
                 "_tick_stage", _TICK_COLUMNS, [[getattr(t, c) for c in _TICK_COLUMNS] for t in batch]
             )
-            written: list[Path] = []
             for d, symbol in group_keys:
-                part_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}" / f"symbol={symbol}"
-                part_dir.mkdir(parents=True, exist_ok=True)
-                out = part_dir / f"{ULID()!s}.parquet"
-                with self._lock:
-                    self._require_con().execute(
+                out = self._tick_partition_dir(d, symbol) / f"{ULID()!s}.parquet"
+                with self._timed_lock(f"copy_ticks:{symbol}"):
+                    self._execute_locked(
+                        self._require_con(),
                         "COPY (SELECT * FROM _tick_stage WHERE tradingsymbol = ? "
                         "AND CAST(exchange_ts AS DATE) = ? ORDER BY exchange_ts) "
                         f"TO '{out.as_posix()}' (FORMAT PARQUET)",
                         [symbol, d],
                     )
                 written.append(out)
-            _log.info("ticks_flushed", ticks=len(batch), files=len(written))
+                done.add((d, symbol))
+        except Exception:
+            if self._con is not None:
+                raise
+            # close() stopped waiting (_CLOSE_FLUSH_WAIT_S) and closed under this flush: restage
+            # the partitions not yet written, exactly as for an orphaned late flush.
+            unwritten = [
+                t for t in batch if (t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) not in done
+            ]
+            with self._tick_lock:
+                self._tick_buffer[:0] = unwritten
+            _log.warning("tick_flush_skipped_store_closed", ticks=len(unwritten))
             return written
+        _log.info("ticks_flushed", ticks=len(batch), files=len(written))
+        return written
 
     def get_ticks(self, symbol: str, d: date) -> list[Tick]:
         """Read back a day's ticks for ``symbol`` from the Parquet dataset (fill-model calibration, R9)."""
@@ -1558,7 +2377,11 @@ class MarketStore:
         if not day_dir.exists():
             return []
         compacted: list[Path] = []
-        with self._lock:
+        # ONE hold spans the whole per-symbol loop — ~200 COPYs plus their unlinks under a single
+        # _lock acquisition — so it gets ONE note for the whole hold (§2.6 hardening (iii),
+        # 2026-09-09), which is the number a stalled caller experienced. Per-symbol notes would say
+        # "everything was fast" about a hold that lasted minutes.
+        with self._timed_lock(f"compact_ticks:{d.isoformat()}"):
             con = self._require_con()
             for sym_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
                 files = sorted(sym_dir.glob("*.parquet"))
@@ -1566,8 +2389,8 @@ class MarketStore:
                     continue
                 out = sym_dir / f"compact-{ULID()!s}.parquet"
                 con.execute(
-                    f"COPY (SELECT * FROM read_parquet(?) ORDER BY exchange_ts) TO '{out.as_posix()}' "
-                    "(FORMAT PARQUET)",
+                    f"COPY (SELECT * FROM read_parquet(?) ORDER BY exchange_ts) "
+                    f"TO '{out.as_posix()}' (FORMAT PARQUET)",
                     [(sym_dir / "*.parquet").as_posix()],
                 )
                 for f in files:
@@ -1608,74 +2431,124 @@ class MarketStore:
         return report
 
     # ================================================================== async wrappers (§3.2 conv. 4)
-    # Thin `asyncio.to_thread` offloads so scan-heavy DuckDB work never blocks the asyncio loop
-    # (§2.2 heartbeat invariant). The sync core stays the single implementation.
+    # Thin offloads so scan-heavy DuckDB work never blocks the asyncio loop (§2.2 heartbeat
+    # invariant). The sync core stays the single implementation. Every one of them goes through
+    # :meth:`_off` onto the store's PRIVATE ``mt-store`` pool — never ``asyncio.to_thread``, whose
+    # shared default executor is what a slow flush drained on 2026-08-25 (WO-26a; see :meth:`_pool`).
+    async def _off(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        """Run ``fn`` on the store's own pool — the single offload seam for the wrappers below."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._pool(), functools.partial(fn, *args, **kwargs))
+
     async def arun(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
         """Run any MarketStore method (or callable) in a worker thread — the generic offload for
         calls without a dedicated wrapper below."""
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        return await self._off(fn, *args, **kwargs)
+
+    async def aping(self) -> bool:
+        """:meth:`ping` off the loop — the liveness probe the health pulse awaits (WO-24b-prime).
+
+        Goes through the SAME offload as every other wrapper here on purpose: a probe that took a
+        private thread would answer "the lock is free" while the path the engine actually uses was
+        starved, which is the one lie this watchdog must not be able to tell. Since WO-26a that
+        path is the ``mt-store`` pool — so this probe now tests both halves of the real thing, the
+        lock AND the ability to get a worker, which is precisely the pair that failed on 08-25."""
+        return await self._off(self.ping)
 
     async def ainsert_bars_1m(self, bars: Sequence[Bar]) -> int:
-        return await asyncio.to_thread(self.insert_bars_1m, bars)
+        return await self._off(self.insert_bars_1m, bars)
 
     async def aget_bars_1m(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
-        return await asyncio.to_thread(self.get_bars_1m, symbol, start, end)
+        return await self._off(self.get_bars_1m, symbol, start, end)
 
     async def alast_bar_time(self, symbol: str) -> datetime | None:
-        return await asyncio.to_thread(self.last_bar_time, symbol)
+        return await self._off(self.last_bar_time, symbol)
+
+    async def amark_no_trade(
+        self, symbol: str, minutes: Sequence[datetime], *, confirmed_at: datetime
+    ) -> int:
+        return await self._off(self.mark_no_trade, symbol, minutes, confirmed_at=confirmed_at)
+
+    async def ano_trade_minutes(
+        self, symbol: str, start: datetime, end: datetime
+    ) -> set[datetime]:
+        return await self._off(self.no_trade_minutes, symbol, start, end)
 
     async def acoverage_gaps(self, symbol: str, start: datetime, end: datetime) -> list[datetime]:
-        return await asyncio.to_thread(self.coverage_gaps, symbol, start, end)
+        return await self._off(self.coverage_gaps, symbol, start, end)
 
     async def ahas_contiguous_coverage(self, symbol: str, start: datetime, end: datetime) -> bool:
-        return await asyncio.to_thread(self.has_contiguous_coverage, symbol, start, end)
+        return await self._off(self.has_contiguous_coverage, symbol, start, end)
 
     async def aupsert_bars_1d(self, bars: Sequence[DailyBar]) -> int:
-        return await asyncio.to_thread(self.upsert_bars_1d, bars)
+        return await self._off(self.upsert_bars_1d, bars)
 
     async def aget_bars_1d(self, symbol: str, start: date, end: date) -> list[DailyBar]:
-        return await asyncio.to_thread(self.get_bars_1d, symbol, start, end)
+        return await self._off(self.get_bars_1d, symbol, start, end)
 
     async def adaily_bar_span(self, symbol: str) -> tuple[date | None, int]:
-        return await asyncio.to_thread(self.daily_bar_span, symbol)
+        return await self._off(self.daily_bar_span, symbol)
 
     async def aflush_ticks(self) -> list[Path]:
-        return await asyncio.to_thread(self.flush_ticks)
+        """Flush on the DEDICATED single-thread ``mt-flush`` pool (WO-26a) — never the store read
+        pool, never the shared default executor. Combined with the skip semantics of
+        :meth:`flush_ticks`, a slow flush can now delay nothing but the next flush.
+
+        The skip is decided HERE, on the loop, when a flush is visibly already running. The live
+        caller is ``BarBuilder.on_tick_event``, which awaits this once per due tick: hopping to the
+        pool only to discover the lock is taken would put both a queue entry and the tick handler's
+        own latency behind a flush that can run for seconds — the pile-up in its last remaining
+        form. The check is optimistic and the try-acquire inside :meth:`flush_ticks` remains the
+        authority; losing the race costs one skipped cycle and never a tick, because the batch
+        stays staged and stays due.
+
+        The check cannot see a flush that is queued but not yet started: every tick event of a
+        burst handled before the pool thread takes the lock queues one more. Each queued flush
+        re-checks ``if_due`` under the lock, so only the first writes; the rest find the batch
+        drained. Without the re-check they ran back to back (2026-09-29: a flush every 3.2 s of
+        ~630 ticks, ~280 files each, at 221 ticks/s)."""
+        if self._flush_lock.locked():
+            self._note_flush_skipped()
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._flush_pool(), functools.partial(self.flush_ticks, if_due=True))
 
     async def aget_ticks(self, symbol: str, d: date) -> list[Tick]:
-        return await asyncio.to_thread(self.get_ticks, symbol, d)
+        return await self._off(self.get_ticks, symbol, d)
 
     async def aapply_retention(self) -> dict[str, int]:
-        return await asyncio.to_thread(self.apply_retention)
+        return await self._off(self.apply_retention)
 
     async def ainsert_news(self, rows: Sequence[dict[str, Any]]) -> int:
-        return await asyncio.to_thread(self.insert_news, rows)
+        return await self._off(self.insert_news, rows)
 
     async def aupsert_news_clusters(self, rows: Sequence[dict[str, Any]]) -> int:
-        return await asyncio.to_thread(self.upsert_news_clusters, rows)
+        return await self._off(self.upsert_news_clusters, rows)
 
     async def aget_news_clusters(self, **filters: Any) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(lambda: self.get_news_clusters(**filters))
+        return await self._off(self.get_news_clusters, **filters)
 
     async def areplace_catalyst_watchlist(self, d: date, rows: Sequence[dict[str, Any]]) -> int:
-        return await asyncio.to_thread(self.replace_catalyst_watchlist, d, rows)
+        return await self._off(self.replace_catalyst_watchlist, d, rows)
 
     async def aget_catalyst_watchlist(self, d: date, *, grade: str | None = None) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(lambda: self.get_catalyst_watchlist(d, grade=grade))
+        return await self._off(self.get_catalyst_watchlist, d, grade=grade)
 
     # --- §2.8 corporate-filings async offloads (the jobs upsert under store.arun; these are the
-    #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop) ---
-    async def alatest_insider_broadcast(self) -> datetime | None:
-        return await asyncio.to_thread(self.latest_insider_broadcast)
+    #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop).
+    #     2026-09-02 review: these five predate WO-26a and were missed by its to_thread→_off
+    #     migration — the last shared-executor path into the store, now closed. ---
+    async def alatest_insider_broadcast(self, source: str | None = None) -> datetime | None:
+        return await self._off(self.latest_insider_broadcast, source)
 
     async def alatest_shp_broadcast(self) -> datetime | None:
-        return await asyncio.to_thread(self.latest_shp_broadcast)
+        return await self._off(self.latest_shp_broadcast)
 
     async def alatest_results_broadcast(self) -> datetime | None:
-        return await asyncio.to_thread(self.latest_results_broadcast)
+        return await self._off(self.latest_results_broadcast)
 
     async def asymbol_isin_map(self) -> dict[str, dict[str, Any]]:
-        return await asyncio.to_thread(self.symbol_isin_map)
+        return await self._off(self.symbol_isin_map)
 
     async def abse_scrip_symbol_map(self) -> dict[str, str]:
-        return await asyncio.to_thread(self.bse_scrip_symbol_map)
+        return await self._off(self.bse_scrip_symbol_map)

@@ -344,6 +344,12 @@ class FilingsShpJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Alert dedup (2026-08-13, DEVIATES from bhavcopy's per-date ``set[date]``): ``run()`` is
+        #: RUN_LATEST and takes no ``d`` — neither it nor ``_alert`` carries a run-date to key on (see
+        #: the composition-root sweep report), so there is no per-day identity to dedup against. A
+        #: single process-lifetime flag stands in for "currently in a failing/degraded streak" instead;
+        #: reset (re-arming the alert) on the next fully-clean run.
+        self._alerted: bool = False
 
     async def run(self) -> FilingsShpResult:
         """Scan the NSE SHP-master for new submissions and fetch the BSE detail stack for each.
@@ -354,7 +360,9 @@ class FilingsShpJob:
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
             reason = f"master: {type(exc).__name__}: {exc}"
             _log.warning("filings_shp_master_failed", error=reason)
-            await self._alert(reason)
+            if not self._alerted:  # dedup: don't storm on every retry of a still-failing streak
+                await self._alert(reason)
+                self._alerted = True
             return FilingsShpResult(ok=False, degraded=True, reason=reason)
 
         watermark = await self._store.alatest_shp_broadcast()
@@ -421,10 +429,14 @@ class FilingsShpJob:
         # (2026-07-23 owner report: a "7 skipped (no scrip code)" alert fired on a healthy run).
         degraded = bool(failed or skipped_no_scrip)
         if degraded:
-            await self._alert(
-                f"{failed} symbol(s) failed BSE detail fetch, {skipped_no_scrip} in-universe "
-                f"symbol(s) missing a scrip mapping"
-            )
+            if not self._alerted:  # dedup: don't storm on every retry of a still-degraded streak
+                await self._alert(
+                    f"{failed} symbol(s) failed BSE detail fetch, {skipped_no_scrip} in-universe "
+                    f"symbol(s) missing a scrip mapping"
+                )
+                self._alerted = True
+        else:
+            self._alerted = False  # a fully clean run re-arms the alert for a later streak
         result = FilingsShpResult(
             ok=True,
             degraded=degraded,

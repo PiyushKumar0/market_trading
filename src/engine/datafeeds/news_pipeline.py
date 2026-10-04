@@ -1,6 +1,7 @@
-"""Deterministic news pipeline, §2.7 steps 2–3: ``HeadlineClusterer`` + ``EntityResolver`` (§3.2.4).
+"""Deterministic news pipeline, §2.7 steps 2–3 + 5: ``HeadlineClusterer`` + ``EntityResolver``
+(§3.2.4) and the ``CatalystDigestJob`` (§3.2.4 / §4.4 job 14).
 
-Both algorithms are PINNED by the plan — cluster membership drives the §7.1
+Every algorithm here is PINNED by the plan — cluster membership drives the §7.1
 ``catalyst_guard.min_source_domains`` corroboration count and the resolver's symbols feed the
 catalyst watchlist, so there is zero implementation latitude and NO LLM anywhere in this module:
 
@@ -11,14 +12,24 @@ catalyst watchlist, so there is zero implementation latitude and NO LLM anywhere
   ``news.cluster_sim_threshold`` (default 0.75), considering only clusters with ``last_seen`` inside
   the ``cat.max_event_age_days`` window; no match ⇒ a new cluster with this headline as
   representative. A cluster carries its DISTINCT ``source_domains`` set. Deterministic and
-  golden-file unit-tested (§9.1): same headlines in ⇒ same clusters out.
-- **EntityResolver** (§2.7 step 3): case-insensitive WHOLE-WORD PHRASE containment of the normalized
+  golden-file unit-tested (§9.1): same headlines in ⇒ same clusters out. One preference on top
+  (§2.7 amendment 2026-09-04): a joining member carrying an :data:`EXCHANGE_TOKEN_RE` token becomes
+  the representative, so a filing merged with its press coverage stays exactly resolvable.
+- **EntityResolver** (§2.7 step 3): an explicit ``[NSE:<SYMBOL>]`` exchange token (§2.7 amendment
+  2026-09-04) resolves first and exactly, under the same universe check and stripped before alias
+  matching; then case-insensitive WHOLE-WORD PHRASE containment of the normalized
   alias in the normalized title. Alias seed = instruments-dump company names with legal suffixes
   stripped MINUS a curated common-English-word stoplist. AMBIGUOUS (an alias mapping to >1 distinct
   tradingsymbol, OR different companies' aliases matching overlapping title spans) ⇒ NO match, never
   a guess — logged to ``unresolved_entities`` (weekly suggestion loop, §5.5). Out-of-universe
   entities are recorded, never traded. Sector/theme tags via ``sector_map`` + ``theme_map`` keyword
   match (same whole-word rule).
+- **CatalystDigestJob** (§2.7 step 5): the two pinned digest outputs — ``sentiment_agg`` (a clipped
+  decay-weighted SUM, never a mean) and the day's ``catalyst_watchlist`` (grades + deterministic
+  §6.1 levels). It consumes the step-4 scores through the persisted ``news_clusters`` columns only,
+  so replay never re-invokes the LLM (R8/§9.6), and loads the ``catalyst_guard`` block
+  hash-verified at run time (§2.4 item 1) — the enforcement site, never a constructor argument.
+  Its own resolved ambiguities are listed on the class, not here.
 
 Spec ambiguities resolved here (documented for the integrator):
 
@@ -34,10 +45,9 @@ Spec ambiguities resolved here (documented for the integrator):
   clusterer's sorted-set normalization.
 
 Phase-2 pointer (deliberately NOT stubbed here, per plan): §2.7 step 4 — News Analyst scoring
-(§5.4, Tier-1 LLM, scores persisted per CLUSTER) — and step 5 — ``CatalystDigestJob`` (§4.4 job 14)
-— belong to ``engine.intelligence``. The News Analyst's verbatim entity strings for unmatched
-clusters re-enter :meth:`EntityResolver.resolve` via ``extra_texts`` — the LLM never assigns a
-symbol directly (§3.2.4).
+(§5.4, Tier-1 LLM, scores persisted per CLUSTER) — belongs to ``engine.intelligence``. The News
+Analyst's verbatim entity strings for unmatched clusters re-enter :meth:`EntityResolver.resolve`
+via ``extra_texts`` — the LLM never assigns a symbol directly (§3.2.4).
 
 Failure model: this module is deterministic CPU-bound work over already-ingested rows; the async
 ``run`` wrappers offload DuckDB access through ``MarketStore`` (convention 12) and are scheduled by
@@ -46,19 +56,30 @@ the §4.4 job-10 pipeline, which is never load-bearing (E5).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import math
 import re
+import time as _time_mod
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from difflib import SequenceMatcher
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
+from ulid import ULID
 
+from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
+from engine.core.config import CatCfg, config_dir, load_yaml
 from engine.core.log import get_logger
+from engine.core.protected_store import ProtectedStore
 from engine.datafeeds.news import Headline
-from engine.marketdata.store import MarketStore
+from engine.datafeeds.sector_map import SECTOR_SOURCES
+from engine.marketdata.store import DailyBar, MarketStore
+from engine.strategy.indicators import wilder_atr
 
 _log = get_logger("engine.datafeeds.news_pipeline")
 
@@ -80,6 +101,7 @@ ALIAS_STOPLIST: frozenset[str] = frozenset({
     "idea",       # (curated) Vodafone Idea aliases
     "coal",       # Coal India Ltd -> "coal" after suffix strip
     "oil",        # Oil India Ltd -> "oil" after suffix strip
+    "dollar",     # Dollar Industries — matched currency contexts (G1 seed-7 row 47, owner-marked)
     "page",       # Page Industries Ltd -> "page"
     "escorts",    # Escorts Kubota / Escorts Ltd
     "lupin",      # Lupin Ltd (common noun)
@@ -87,10 +109,19 @@ ALIAS_STOPLIST: frozenset[str] = frozenset({
     "century",    # Century Textiles / Century Plyboards
     "campus",     # Campus Activewear Ltd
     "united",     # United Spirits / United Breweries partial forms
+    "bse",        # BSE Ltd — fires on VENUE mentions ("IPO set for BSE SME debut", quote-page
+                  # boilerplate); G1 owner verdict 2026-08-03 rows 17/21. Genuine BSE-the-company
+                  # coverage is the accepted recall cost (venue noise dominates).
 })
 
 #: Sector label that must never become a keyword tag (§4.4 job 13 fallback bucket).
 _UNCLASSIFIED = "UNCLASSIFIED"
+
+#: The ten NSE sectoral-index sector names — the ONLY sector labels allowed into the keyword
+#: vocabulary. sector_map's industry fallback (2026-09-21) also mints buckets like CAPITAL_GOODS,
+#: SERVICES and DIVERSIFIED for the exposure caps and sector features; as headline keywords those
+#: generic words would false-tag wholesale ("services", "diversified"), so they are filtered out.
+_INDEX_SECTORS: frozenset[str] = frozenset(sector for sector, _ in SECTOR_SOURCES)
 
 #: The pinned §4.3 ``news_clusters`` columns (mirrors MarketStore._TABLE_SPEC — unknown keys are a
 #: hard error there, so this tuple is validated on every upsert).
@@ -106,9 +137,93 @@ def title_tokens(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+#: §2.7 amendment 2026-09-04 — the EXPLICIT EXCHANGE TOKEN. ``NewsIngest``'s ``nse_ann`` feed
+#: prefixes every announcement title with ``[NSE:<SYMBOL>]``, taken verbatim from the exchange
+#: payload's ``symbol`` field. It is an EXACT identification, not a guess: the resolver honours it
+#: ahead of alias matching (still subject to the universe check), and the clusterer prefers a
+#: token-bearing headline as a cluster's representative so a filing merged with its press coverage
+#: stays resolvable. The character class covers NSE tradingsymbols (``M&MFIN``, ``BAJAJ-AUTO``).
+EXCHANGE_TOKEN_RE = re.compile(r"\[NSE:([A-Z0-9&\-]+)\]")
+
+
+def exchange_tokens(text: str) -> list[str]:
+    """The exchange-token symbols in ``text``, in order of appearance, deduped (usually one)."""
+    out: list[str] = []
+    for symbol in EXCHANGE_TOKEN_RE.findall(text or ""):
+        if symbol not in out:
+            out.append(symbol)
+    return out
+
+
+def strip_exchange_tokens(text: str) -> str:
+    """``text`` with every exchange token removed — alias matching must NEVER see it.
+
+    The token is exchange-assigned identity, not prose: left in, its ``NSE`` prefix and the symbol
+    itself are ordinary words to :meth:`EntityResolver._match_aliases`, and either could match an
+    alias (or poison a span component into ``ambiguous``).
+    """
+    return EXCHANGE_TOKEN_RE.sub(" ", text or "")
+
+
+#: §3.2.4 boilerplate strip (2026-08-03, plan-amended): recurring TEMPLATE phrases in Indian
+#: financial-press headlines. ET emits dozens of near-identical "<Company> Share Price Live
+#: Updates: ..." titles a day; with the template tokens included, the boilerplate dominated the
+#: token-set similarity and glued DIFFERENT companies into one cluster (worst observed live: 27
+#: companies in a single cluster — G1 sample finding). Phrases are removed as whole-word token
+#: SUBSEQUENCES before the sorted-set normalization, longest first. Curated in code like
+#: :data:`ALIAS_STOPLIST` (owner-reviewed; not learnable).
+CLUSTERER_BOILERPLATE_PHRASES: tuple[str, ...] = (
+    "share price live updates",
+    "stock price live updates",
+    "results live updates",
+    "share price highlights",
+    "live updates",
+    "share price today",
+    "stock market live updates",
+    # Earnings-template vocabulary (2026-08-03, G1 seed-6): same-day "<Company> Q1 Results:
+    # Profit rises N% YoY to Rs M crore" headlines from DIFFERENT companies shared enough
+    # template tokens to clear the 0.75 similarity bar (3 live cross-company merges: Maruti+CDSL,
+    # TataSteel+SunPharma, Infosys+TataConsumer). Similarity must run on the DISTINCTIVE tokens
+    # (company name + figures), so the template predicates are stripped — clusterer-only; the
+    # resolver never sees this list.
+    "q1 results", "q2 results", "q3 results", "q4 results",
+    "net profit", "profit rises", "profit falls", "profit jumps", "profit drops",
+    "profit surges", "profit dips", "revenue rises", "revenue climbs", "revenue up",
+    "q1", "q2", "q3", "q4", "yoy", "qoq", "rs", "crore", "cr", "results",
+)
+_BOILERPLATE_TOKENSEQS: tuple[tuple[str, ...], ...] = tuple(
+    sorted((tuple(p.split()) for p in CLUSTERER_BOILERPLATE_PHRASES), key=len, reverse=True)
+)
+
+
+def _strip_boilerplate(tokens: list[str]) -> list[str]:
+    """Remove every whole-word occurrence of each boilerplate phrase from the token sequence."""
+    for seq in _BOILERPLATE_TOKENSEQS:
+        n = len(seq)
+        out: list[str] = []
+        i = 0
+        while i < len(tokens):
+            if tuple(tokens[i:i + n]) == seq:
+                i += n
+            else:
+                out.append(tokens[i])
+                i += 1
+        tokens = out
+    return tokens
+
+
 def clusterer_normalize(title: str) -> str:
-    """§3.2.4 pinned clusterer normalization: sorted set of UNIQUE lowercase alphanumeric tokens."""
-    return " ".join(sorted(set(title_tokens(title))))
+    """§3.2.4 pinned clusterer normalization: boilerplate-phrase strip (see
+    :data:`CLUSTERER_BOILERPLATE_PHRASES`), then the sorted set of UNIQUE lowercase alphanumeric
+    tokens. The strip runs on the ORDERED token sequence (phrases are positional); the set/sort
+    happens after, so the §9.1 golden-file determinism is unchanged in kind.
+
+    A title made ENTIRELY of boilerplate falls back to its unstripped token set — two empty
+    norms would be similarity 1.0 and everything template-only would collapse into one cluster.
+    """
+    tokens = title_tokens(title)
+    stripped = _strip_boilerplate(tokens)
+    return " ".join(sorted(set(stripped or tokens)))
 
 
 def similarity(norm_a: str, norm_b: str) -> float:
@@ -122,10 +237,26 @@ def strip_legal_suffixes(company_name: str) -> str:
     Stripping is iterative (``"COAL INDIA LIMITED" → "coal india" → "coal"``) — the resulting
     common-word aliases are handled by :data:`ALIAS_STOPLIST`, not by refusing the strip.
     """
+    return alias_variants(company_name)[-1] if title_tokens(company_name) else ""
+
+
+def alias_variants(company_name: str) -> list[str]:
+    """EVERY stage of the iterative suffix strip, longest first (never below one token).
+
+    The seed takes all stages, not just the final strip (G1 seed-5 row 20, 2026-08-03): "COAL
+    INDIA" fully strips to "coal", which the stoplist rightly kills — but the unstripped
+    "coal india" stage is exactly what headlines print, and dropping ONLY the dangerous stage
+    keeps the company resolvable instead of erasing it. All stages map to the same symbol, so
+    overlapping-span matches stay unambiguous (union of 1).
+    """
     tokens = title_tokens(company_name)
+    if not tokens:
+        return []
+    out = [" ".join(tokens)]
     while len(tokens) > 1 and tokens[-1] in LEGAL_SUFFIX_TOKENS:
         tokens.pop()
-    return " ".join(tokens)
+        out.append(" ".join(tokens))
+    return out
 
 
 class NewsCluster(BaseModel):
@@ -244,7 +375,17 @@ class HeadlineClusterer:
         norms: dict[str, str] = {c.cluster_id: clusterer_normalize(c.representative) for c in clusters}
         touched: dict[str, NewsCluster] = {}
 
-        for h in sorted(hs, key=lambda h: (h.published_at, h.url)):
+        # Progress visibility (2026-08-10): a weekend-backlog pass is legitimately ~90 s of pure
+        # difflib CPU (measured: 429 headlines × 1,500 window clusters = 90.6 s) — without these
+        # lines a long pass is indistinguishable from a wedge in the log.
+        started = _time_mod.perf_counter()
+        if len(hs) >= 100:   # backlog-sized passes only — per-poll trickles would log ~1,000×/day
+            _log.info("news_clustering_started", headlines=len(hs), window_clusters=len(clusters))
+
+        for i, h in enumerate(sorted(hs, key=lambda h: (h.published_at, h.url))):
+            if i and i % 100 == 0:
+                _log.info("news_clustering_progress", done=i, total=len(hs),
+                          elapsed_s=round(_time_mod.perf_counter() - started, 1))
             norm = clusterer_normalize(h.title)
             target: NewsCluster | None = None
             # Greedy: the EARLIEST-first_seen cluster (not the best-scoring one) at/above threshold.
@@ -266,6 +407,15 @@ class HeadlineClusterer:
                 clusters.append(target)
                 norms[cid] = norm
             else:
+                # §2.7 amendment 2026-09-04: a token-bearing member PROMOTES itself to
+                # representative. The resolver only ever sees the representative, so a filing that
+                # merges into its press coverage would otherwise lose the one string that names its
+                # symbol exactly. Deterministic: the earliest such member (processing order) keeps
+                # the seat — an existing token representative is never displaced. The cluster's
+                # comparison norm follows the representative, per the pinned §3.2.4 rule.
+                if exchange_tokens(h.title) and not exchange_tokens(target.representative):
+                    target.representative = h.title
+                    norms[target.cluster_id] = norm
                 if h.source_domain not in target.source_domains:
                     target.source_domains = sorted({*target.source_domains, h.source_domain})
                 target.first_seen = min(target.first_seen, h.published_at)
@@ -289,7 +439,10 @@ class HeadlineClusterer:
         window_start = min(h.published_at for h in hs) - self._window
         rows = await self._store.arun(self._store.get_news_clusters, last_seen_after=window_start)
         existing = [NewsCluster.from_row(r) for r in rows]
-        touched = self.cluster(hs, existing=existing)
+        # OFF the event loop (2026-08-10, §3.2 convention 12 / §2.2 heartbeat invariant): the pure
+        # difflib pass is CPU-bound and blocked the loop ~95 s on the weekend backlog — every loop
+        # consumer (bus handlers, API, scheduler) stalls for its duration when run inline.
+        touched = await asyncio.to_thread(self.cluster, hs, existing)
         await self._store.aupsert_news_clusters([c.to_row() for c in touched])
         for c in touched:
             if c.headline_ids:
@@ -308,9 +461,12 @@ class EntityResolver:
     """§2.7 step 3 — deterministic-first symbol/sector/theme tagging. Ambiguous ⇒ NO match, ever.
 
     State (alias map, sector map, theme keywords, universe) is loaded from the store via
-    :meth:`load` / :meth:`aload`, or injected directly for tests/pure use. ``universe=None`` means
-    "universe unknown" (e.g. before the 08:30 build): no out-of-universe filtering happens here and
-    the §2.7 step-5 digest re-checks ``symbol ∈ universe`` before anything can be traded.
+    :meth:`load` / :meth:`aload`, or injected directly for tests/pure use. ``universe`` is one of
+    three states after :meth:`load`: a non-empty frozenset (the built batch universe, filtered
+    normally); an EMPTY frozenset (the build ran but nothing passed — FAIL CLOSED, every symbol
+    resolves ``out_of_universe``); or ``None`` ("universe unknown", e.g. before the 08:30 build —
+    no ``universe_daily`` rows for the day at all), where no out-of-universe filtering happens here
+    and the §2.7 step-5 digest re-checks ``symbol ∈ universe`` before anything can be traded.
 
     Parameters
     ----------
@@ -324,7 +480,10 @@ class EntityResolver:
     theme_map:
         ``theme -> keywords[]`` (§4.3 ``theme_map`` seeded from config/themes.yaml).
     universe:
-        Today's included universe symbols, or None if not yet built.
+        Today's ELIGIBLE universe symbols (every rule-passing symbol, including beyond-cap rows —
+        the brk20/ins batch-rule set), NOT the top-100 focus watchlist, or None if not yet built.
+        News visibility must not be watchlist-cap-contaminated (the 2026-08-04 BPCL lesson,
+        re-found in the news layer 2026-08-18).
     """
 
     def __init__(
@@ -359,16 +518,24 @@ class EntityResolver:
         merged: dict[str, set[str]] = {}
         for alias, syms in pairs:
             norm = " ".join(title_tokens(alias))
-            if not norm:
+            if not norm or norm in ALIAS_STOPLIST:
+                # Stoplist enforced at LOAD too, not only at seed time — a previously-persisted row
+                # for a later-stoplisted alias (BSE, 2026-08-03) must stop matching immediately on
+                # the next load, without requiring store surgery while the engine holds the lock.
                 continue
             merged.setdefault(norm, set()).update(syms)
         self._aliases = {a: frozenset(s) for a, s in merged.items()}
 
     def set_sector_map(self, sector_map: Mapping[str, str]) -> None:
-        """Sector keywords = the distinct sector NAMES (whole-word phrase rule), minus UNCLASSIFIED."""
+        """Sector keywords = the distinct INDEX sector NAMES (whole-word phrase rule).
+
+        UNCLASSIFIED and every industry-derived bucket are excluded: those buckets exist for the
+        §7.1 exposure caps and the sector features, never as headline keywords — "services" or
+        "diversified" as a keyword would false-tag a large share of the corpus.
+        """
         kw: dict[str, set[str]] = {}
         for sector in sector_map.values():
-            if sector == _UNCLASSIFIED:
+            if sector == _UNCLASSIFIED or sector.strip().upper() not in _INDEX_SECTORS:
                 continue
             norm = " ".join(title_tokens(sector))
             if norm:
@@ -385,18 +552,52 @@ class EntityResolver:
         self._theme_keywords = {k: frozenset(v) for k, v in kw.items()}
 
     def load(self, d: Any = None) -> None:
-        """(Re)load alias/sector/theme/universe state from the store (sync; see :meth:`aload`)."""
+        """(Re)load alias/sector/theme/universe state from the store (sync; see :meth:`aload`).
+
+        CURATED rows take priority: for an alias with any ``source='curated'`` row, only the
+        curated symbol(s) load — the owner's explicit mapping overrides the machine seed (§6.3
+        platform-suggests-owner-sets; e.g. "Reliance" pins RELIANCE over the conglomerate-prefix
+        ambiguity union the seed produces).
+
+        Universe loads via :meth:`MarketStore.get_batch_universe_symbols` — the BATCH universe
+        (rule-passing incl. beyond-cap AND criteria-passing non-index rows, §3.2.4 extended-leg
+        addendum 2026-09-01), NOT the top-N focus watchlist; news visibility must not be
+        watchlist-cap-contaminated (the 2026-08-04 BPCL lesson, re-found in the news layer
+        2026-08-18) nor index-contaminated (the 2026-08-31 BALRAMCHIN sugar-policy day: a
+        sector_policy catalyst on a criteria-passing non-index symbol was invisible to the whole
+        news layer). `cat`/`cat_reversal` remain fail-closed at the C3 gate, so the widening grows
+        the SHADOW evidence base at zero trading risk.
+        """
         if self._store is None:
             raise RuntimeError("EntityResolver.load requires a MarketStore")
+        curated_syms: dict[str, set[str]] = {}
+        all_syms: dict[str, set[str]] = {}
+        for row in self._store.get_entity_aliases():
+            all_syms.setdefault(row["alias"], set()).add(row["tradingsymbol"])
+            if row.get("source") == "curated":
+                curated_syms.setdefault(row["alias"], set()).add(row["tradingsymbol"])
         self._set_aliases(
-            (row["alias"], (row["tradingsymbol"],)) for row in self._store.get_entity_aliases()
+            (a, tuple(sorted(curated_syms.get(a) or syms))) for a, syms in all_syms.items()
         )
         self.set_sector_map({r["symbol"]: r["sector"] for r in self._store.get_sector_map()})
         self.set_theme_map({r["theme"]: list(r["keywords"] or []) for r in self._store.get_theme_map()})
         if d is None and self._clock is not None:
             d = self._clock.today()
-        universe_rows = self._store.get_universe_daily(d, included_only=True) if d is not None else []
-        self._universe = frozenset(r["symbol"] for r in universe_rows) or None
+        if d is None:
+            self._universe = None
+        else:
+            universe_symbols = self._store.get_batch_universe_symbols(d)
+            if universe_symbols:
+                self._universe = frozenset(universe_symbols)
+            else:
+                rows = self._store.get_universe_daily(d)
+                if rows:
+                    # Rows exist but none passed (every row excluded) — the build ran, so this is
+                    # "empty", not "unknown".
+                    _log.warning("universe_empty_fail_closed", d=str(d), rows=len(rows))
+                    self._universe = frozenset()
+                else:
+                    self._universe = None
 
     async def aload(self, d: Any = None) -> None:
         if self._store is None:
@@ -407,27 +608,55 @@ class EntityResolver:
         """Build the §3.2.4 alias SEED from instruments-dump rows and merge + persist it.
 
         ``instruments`` yields dicts with ``name``/``tradingsymbol`` (the ``instruments_daily`` row
-        shape, §4.3) or plain ``(company_name, tradingsymbol)`` tuples. Each company name gets its
-        legal suffixes stripped (:func:`strip_legal_suffixes`); aliases in :data:`ALIAS_STOPLIST`
-        are dropped (common English words — owner-reviewed in Phase 1). ``entity_aliases`` starts as
-        exactly this seed; returns the number of (alias, symbol) pairs seeded.
+        shape, §4.3) or plain ``(company_name, tradingsymbol)`` tuples. Each company name seeds
+        EVERY suffix-strip stage (:func:`alias_variants`); aliases in :data:`ALIAS_STOPLIST` are
+        dropped per stage (common English words — owner-reviewed in Phase 1). ``entity_aliases``
+        starts as exactly this seed; returns the number of (alias, symbol) pairs seeded.
+
+        DICT rows are filtered to NSE EQUITIES (2026-08-03: seeding the FULL dump poisoned
+        resolution — every derivative row's ``name`` is its underlying, so one company name mapped
+        to hundreds of contract symbols and the ambiguity rule un-matched previously-good aliases;
+        live resolution fell 108→39 clusters). Tuple rows are trusted as (company_name, symbol).
         """
         pairs: list[tuple[str, str]] = []
+        stripped_stage: set[str] = set()
         stoplisted = 0
         for item in instruments:
             if isinstance(item, tuple):
                 name, symbol = item
             else:
+                if str(item.get("exchange") or "") != "NSE" or str(item.get("instrument_type") or "") != "EQ":
+                    continue
                 name, symbol = item.get("name"), item.get("tradingsymbol")
             if not name or not symbol:
                 continue
-            alias = strip_legal_suffixes(str(name))
-            if not alias:
+            for stage, alias in enumerate(alias_variants(str(name))):
+                if alias in ALIAS_STOPLIST:
+                    stoplisted += 1
+                    continue
+                pairs.append((alias, str(symbol)))
+                if stage > 0:
+                    stripped_stage.add(alias)
+
+        # Conglomerate-surname guard (G1 seed-6 rows 6/19/25): a STRIPPED-stage alias ("ADANI
+        # ENTERPRISES" → "adani") that token-PREFIXES another company's alias is ambiguous by
+        # construction — a bare "Adani"/"Godrej" headline must refuse with candidates, not default
+        # to whichever family member's name happened to strip shortest. Union the prefixed symbols
+        # in; the §3.2.4 multi-symbol rule then refuses, while span subsumption still resolves
+        # "Adani Power" to ADANIPOWER. Curated rows override at load() ("Reliance" → RELIANCE).
+        alias_syms: dict[str, set[str]] = {}
+        for a, s in pairs:
+            alias_syms.setdefault(a, set()).add(s)
+        by_first: dict[str, list[str]] = {}
+        for a in alias_syms:
+            by_first.setdefault(a.split(" ", 1)[0], []).append(a)
+        for a in stripped_stage:
+            if a not in alias_syms:
                 continue
-            if alias in ALIAS_STOPLIST:
-                stoplisted += 1
-                continue
-            pairs.append((alias, str(symbol)))
+            toks = a.split(" ")
+            for b in by_first.get(toks[0], ()):
+                if b != a and b.split(" ")[: len(toks)] == toks:
+                    pairs.extend((a, s) for s in alias_syms[b] - alias_syms[a])
 
         self._set_aliases(
             list((a, syms) for a, syms in self._aliases.items())
@@ -442,6 +671,33 @@ class EntityResolver:
         _log.info("entity_aliases_seeded", seeded=len(pairs), stoplisted=stoplisted)
         return len(pairs)
 
+    def seed_curated_aliases(self, cfg: Mapping[str, Any]) -> int:
+        """Merge + persist the ``config/aliases.yaml`` CURATED additions (§3.2.4 "curated additions";
+        §6.3 platform-suggests-owner-sets — this file is the owner's surface). Same normalization and
+        stoplist as the dump seed; persisted with ``source='curated'`` so the daily re-seed never
+        confuses provenance. Returns the number of pairs applied."""
+        pairs: list[tuple[str, str]] = []
+        for item in cfg.get("aliases") or []:
+            alias, symbol = item.get("alias"), item.get("tradingsymbol")
+            if not alias or not symbol:
+                continue
+            norm = " ".join(title_tokens(str(alias)))
+            if not norm or norm in ALIAS_STOPLIST:
+                continue
+            pairs.append((norm, str(symbol)))
+        self._set_aliases(
+            list((a, syms) for a, syms in self._aliases.items())
+            + [(a, (s,)) for a, s in pairs]
+        )
+        if self._store is not None and pairs:
+            added_at = self._clock.now() if self._clock is not None else None
+            self._store.upsert_entity_aliases(
+                [{"alias": a, "tradingsymbol": s, "source": "curated", "added_at": added_at}
+                 for a, s in sorted(set(pairs))]
+            )
+        _log.info("entity_aliases_curated", applied=len(pairs))
+        return len(pairs)
+
     # ------------------------------------------------------------------ resolution (pinned rule)
     def resolve(self, c: NewsCluster, *, extra_texts: Sequence[str] = ()) -> ResolvedCluster:
         """Resolve one cluster deterministically (§3.2.4). Never guesses.
@@ -449,17 +705,40 @@ class EntityResolver:
         ``extra_texts`` is the Phase-2 seam: verbatim entity STRINGS emitted by the News Analyst
         for unmatched clusters re-enter here under the same whole-word rule (the LLM never assigns
         a symbol). An extra text matching nothing is logged ``no_match``.
+
+        EXPLICIT EXCHANGE TOKENS (§2.7 amendment 2026-09-04) are honoured FIRST: a
+        ``[NSE:<SYMBOL>]`` token in the representative (or in an extra text) resolves to that
+        symbol directly — the exchange stated it, so no alias is needed and no guess is made — and
+        is then held to the SAME universe check as any alias match. The token is stripped before
+        alias matching so it can never be read as free text, while alias matching still runs on the
+        rest of the title (a filing that also names another company still resolves both). A token
+        contributes no ``entities`` row: it is not an alias, and the §5.5 suggestion loop must not
+        learn one from it.
         """
-        resolved, unresolved = self._match_aliases(c.representative)
+        rep_text = strip_exchange_tokens(c.representative)
+        token_symbols = exchange_tokens(c.representative)
+        resolved, unresolved = self._match_aliases(rep_text)
         for text in extra_texts:
-            r2, u2 = self._match_aliases(text)
-            if not r2 and not u2:
+            tokens = exchange_tokens(text)
+            r2, u2 = self._match_aliases(strip_exchange_tokens(text))
+            if not r2 and not u2 and not tokens:
                 unresolved.append(UnresolvedEntity(entity_text=text, reason="no_match"))
+            token_symbols += [s for s in tokens if s not in token_symbols]
             resolved += r2
             unresolved += u2
 
         entities: set[str] = set()
         symbols: set[str] = set()
+        for symbol in token_symbols:
+            if self._universe is not None and symbol not in self._universe:
+                # An exact exchange symbol is still not a licence to trade it (§2.7 step 3).
+                unresolved.append(
+                    UnresolvedEntity(
+                        entity_text=symbol, reason="out_of_universe", candidate_symbols=(symbol,)
+                    )
+                )
+            else:
+                symbols.add(symbol)
         for aliases_in, symbol in resolved:
             entities.update(aliases_in)
             if self._universe is not None and symbol not in self._universe:
@@ -477,8 +756,8 @@ class EntityResolver:
             cluster_id=c.cluster_id,
             entities=sorted(entities),
             symbols=sorted(symbols),
-            sectors=self._match_keywords(c.representative, self._sector_keywords),
-            themes=self._match_keywords(c.representative, self._theme_keywords),
+            sectors=self._match_keywords(rep_text, self._sector_keywords),
+            themes=self._match_keywords(rep_text, self._theme_keywords),
             unresolved=sorted(
                 set(unresolved), key=lambda u: (u.entity_text, u.reason, u.candidate_symbols)
             ),
@@ -528,6 +807,12 @@ class EntityResolver:
         components; a component whose symbol union is >1 (a multi-symbol alias, or different
         companies' aliases overlapping) resolves to NOTHING and every alias in it is logged
         ``ambiguous`` with the union as candidates.
+
+        SUBSUMPTION refinement (2026-08-03, G1 seed-6 row 47): a match whose span is STRICTLY
+        contained in a longer match's span is subsumed — the most specific phrase wins. Without
+        it, curating "SBI" (SBIN) silently killed every "SBI Card" headline, and "PVR Inox"
+        refused because the contained "Inox" (a different company) poisoned the component.
+        Staggered partial overlaps (neither contains the other) still refuse — never a guess.
         """
         tokens = title_tokens(text)
         matches: list[tuple[int, int, str, frozenset[str]]] = []
@@ -537,6 +822,13 @@ class EntityResolver:
             for i in range(len(tokens) - n + 1):
                 if tokens[i:i + n] == alias_toks:
                     matches.append((i, i + n, alias, syms))
+        matches = [
+            m for m in matches
+            if not any(
+                o[0] <= m[0] and m[1] <= o[1] and (o[1] - o[0]) > (m[1] - m[0])
+                for o in matches
+            )
+        ]
         matches.sort(key=lambda m: (m[0], m[1], m[2]))
 
         components: list[list[tuple[int, int, str, frozenset[str]]]] = []
@@ -576,3 +868,794 @@ class EntityResolver:
             if self._contains_phrase(tokens, phrase.split(" ")):
                 tags.update(tagset)
         return sorted(tags)
+
+
+# =========================================================================== §2.7 step 5 (digest)
+#: The §5.4 event types that carry the O13 T+1 PEAD sign-agreement requirement (§6.1 `cat`).
+EARNINGS_EVENT_TYPES: frozenset[str] = frozenset({"earnings_result", "earnings_guidance"})
+
+#: ``cat.*`` behaviour knobs the digest needs. All but ``fanout_weight`` are §6.3 envelope rows;
+#: ``fanout_weight`` is settings.yaml-resident (owner-only, deliberately NOT learnable).
+CAT_PARAM_KEYS: tuple[str, ...] = (
+    "materiality_min", "novelty_min", "max_event_age_days", "decay_halflife_h",
+    "confirm_move_pct", "stop_atr_mult", "rr_target", "fanout_weight",
+)
+
+#: §7.1 `catalyst_guard` fallbacks, used ONLY for a key absent from the hash-verified block. Each
+#: fails to LESS activity (empty event-type list ⇒ nothing can originate), so a truncated guard
+#: block can never widen the origination surface (§2.7 fail-safe ladder).
+_GUARD_FALLBACKS: dict[str, Any] = {
+    "min_source_domains": 2,
+    "sentiment_min_long": 0.30,
+    "digest_stale_max_h": 20,
+    "originating_event_types": (),
+}
+
+#: §2.7 step 5(ii) inclusion floor: below this WEIGHTED materiality a cluster feeds `sentiment_agg`
+#: only — no watchlist row at all (the §5.4 rubric noise line).
+INCLUSION_FLOOR = 0.2
+
+
+class _BestCluster(NamedTuple):
+    """The cluster chosen to REPRESENT a symbol in the day's ``catalyst_watchlist``.
+
+    Two materiality values, deliberately distinct (2026-08-27 HINDZINC fix):
+
+    ``rank_materiality`` is the RECENCY-DECAYED weight and exists ONLY to order candidates —
+    it never reaches a threshold, a grade or a stored column. ``weighted_materiality`` is the
+    undecayed ``materiality × fanout`` value that the §2.7 inclusion floor, the
+    :func:`originating_conditions` AND-list and the persisted ``materiality`` column all use,
+    exactly as before: the row must describe its cluster faithfully, and origination must not
+    silently narrow just because the whole corpus aged an hour.
+    """
+
+    cluster: NewsCluster
+    rank_materiality: float
+    weighted_materiality: float
+    weighted_sentiment: float
+    age_sessions: int
+
+
+class _StoryMember(NamedTuple):
+    """One age-eligible cluster's contribution to a ``(symbol, event_type)`` STORY.
+
+    The story-level view the 2026-08-05 corroboration amendment already needed (``story_domains`` /
+    ``story_refs``), carrying the extra facts :func:`reversal_source` needs to reason about
+    DIRECTION over time: when the cluster was first seen, its UNDECAYED weighted materiality /
+    sentiment, and whether the cluster NAMED this symbol. Materiality and sentiment arrive already
+    multiplied by ``cat.fanout_weight`` for a fanned-out sector/theme cluster — the same convention
+    every other threshold in this module uses.
+
+    ``named`` is False for a fan-out membership: the resolver placed the symbol in the story because
+    the cluster tagged its sector/theme, not because anything resolved to the symbol itself.
+    """
+
+    cluster_id: str
+    first_seen: datetime
+    weighted_materiality: float
+    weighted_sentiment: float
+    named: bool
+
+
+def reversal_source(
+    members: Sequence[_StoryMember],
+    *,
+    winner_id: str,
+    winner_first_seen: datetime,
+    sentiment_min: float,
+) -> str | None:
+    """Did this story ESTABLISH the opposite direction before the winning cluster reversed it?
+
+    Returns the ``cluster_id`` of the earlier, floor-clearing, OPPOSITE-direction (short) cluster the
+    winner reverses, or ``None``. The caller invokes this only when the winning direction is ``long``
+    (§2.7 ``cat_reversal``, 2026-08-27), so "opposite" always means the short side — the mirror case
+    (a positive story getting denied) is deliberately NOT detected here: that is an exit-side signal
+    on an existing position, already owned by the §5.2(b) risk-reducing exit path.
+
+    The four conditions, each load-bearing:
+
+    * **``named`` — the predecessor RESOLVED to this symbol**, rather than reaching it by sector/theme
+      fan-out. A sector-wide bearish cluster clears the two bars below for every constituent at once
+      (0.6 materiality × 0.5 fan-out = 0.30 > floor; −0.7 × 0.5 = −0.35 ≤ −0.30), so without this the
+      next symbol-specific positive headline of that event_type would be a "reversal" of a story that
+      never named the symbol — one sector headline manufacturing a reversal per constituent. Fan-out
+      still corroborates (step 5(ii)) and can still WIN the row; it cannot be what was REVERSED.
+      Applies to the PREDECESSOR only — the winning cluster's scope rules are untouched.
+    * **strictly earlier ``first_seen``** — a reversal needs something to reverse. Equal timestamps do
+      NOT qualify: two clusters landing in the same instant are a disagreement between outlets, not a
+      story that changed its mind, and the §2.7 corroboration rule already fails those to LESS
+      activity. Strict ``<`` also excludes the winner from reversing itself.
+    * **cleared :data:`INCLUSION_FLOOR` on its own UNDECAYED weighted materiality** — the same bar
+      that decides whether a cluster may REPRESENT a symbol at all. A sub-floor bearish murmur is
+      noise the digest already refuses to build a row from, and it must not be promotable into
+      "an established bearish claim" merely by being reversed.
+    * **weighted sentiment <= -``sentiment_min``** — the exact mirror of the long classification the
+      row itself uses (``sentiment_min_long``), so "opposite direction" means what the rest of §2.7
+      means by direction and cannot drift from it.
+
+    Ties break on the strongest claim (highest weighted materiality), then on ``cluster_id`` ascending
+    — a total order over corpus-only facts, so §9.1 replay yields the identical answer. This function
+    reads NOTHING outside its arguments: no clock, no store, no LLM call.
+    """
+    best_id: str | None = None
+    best_key: tuple[float, str] | None = None
+    for m in members:
+        if not m.named:
+            continue
+        if m.cluster_id == winner_id or m.first_seen >= winner_first_seen:
+            continue
+        if m.weighted_materiality < INCLUSION_FLOOR:
+            continue
+        if m.weighted_sentiment > -sentiment_min:
+            continue
+        key = (-m.weighted_materiality, m.cluster_id)
+        if best_key is None or key < best_key:
+            best_key, best_id = key, m.cluster_id
+    return best_id
+
+
+#: ``earnings_calendar.kind`` marking a results day T (R2 no-entry day + the O13 reaction bar).
+#: ``EarningsCalendarJob.classify_event`` already folds results-considering board meetings into it.
+_RESULTS_KIND = "results"
+
+_ATR_PERIOD = 14
+#: ``bars_1d`` rows needed strictly before ``d`` for levels: the Wilder ATR seed lands at index
+#: ``period − 1``, so 15 rows give a seeded value plus one recursion step. Fewer ⇒ levels NULL.
+_MIN_LEVEL_BARS = 15
+#: Calendar span pulled for the per-symbol daily history (≈60 sessions ≫ _MIN_LEVEL_BARS, and wide
+#: enough to contain the O13 results-day-T bar, which lies inside the cluster lookback window).
+_HISTORY_LOOKBACK_DAYS = 90
+#: Bound on the day-at-a-time calendar walks (a missing calendar year must not spin, R6).
+_MAX_CALENDAR_SCAN_DAYS = 60
+
+_PAISE = Decimal("0.01")
+_HUNDRED = Decimal("100")
+
+
+def load_cat_params(envelope: Mapping[str, Any] | None = None) -> dict[str, float]:
+    """``cat.*`` digest params: ``config/envelope.yaml`` defaults + settings.yaml ``cat``, overridden
+    by ``envelope`` (namespaced ``cat.rr_target`` and bare ``rr_target`` both resolve; every other
+    strategy's keys are ignored, so the live §6.5 ``envelope_state`` mapping can be passed whole).
+
+    The bounds file is read UNVERIFIED here because only its DEFAULTS are used — every value that
+    can license a trade comes from the caller's ``envelope_state`` row or from the hash-verified
+    ``catalyst_guard`` block (§2.4 item 1), never from this read.
+    """
+    cfg = config_dir()
+    params: dict[str, float] = {
+        name[len("cat."):]: float(spec["default"])
+        for name, spec in (load_yaml(cfg / "envelope.yaml").get("parameters") or {}).items()
+        if name.startswith("cat.") and isinstance(spec, Mapping)
+    }
+    settings_cat = load_yaml(cfg / "settings.yaml").get("cat") or {}
+    params["fanout_weight"] = float(settings_cat.get("fanout_weight", CatCfg().fanout_weight))
+    for key, value in (envelope or {}).items():
+        bare = key[len("cat."):] if key.startswith("cat.") else key
+        if bare in CAT_PARAM_KEYS:
+            params[bare] = float(value)
+    missing = [k for k in CAT_PARAM_KEYS if k not in params]
+    if missing:
+        raise KeyError(f"cat params missing from envelope.yaml/settings.yaml and overrides: {missing}")
+    return params
+
+
+def guard_value(guard: Mapping[str, Any], key: str) -> Any:
+    """One ``catalyst_guard`` value, falling back to the pinned §7.1 default (:data:`_GUARD_FALLBACKS`)."""
+    value = guard.get(key)
+    return _GUARD_FALLBACKS[key] if value is None else value
+
+
+def originating_conditions(
+    *,
+    weighted_materiality: float,
+    weighted_sentiment: float,
+    event_type: str | None,
+    source_domain_count: int,
+    novelty: float | None,
+    in_universe: bool,
+    flagged: bool,
+    results_day_t: bool,
+    earnings_reaction_agrees: bool,
+    materiality_min: float,
+    novelty_min: float,
+    guard: Mapping[str, Any],
+) -> dict[str, bool]:
+    """The §2.7 step-5(ii) AND-list, one boolean per condition — ``originating`` iff ALL are True.
+
+    Pure: every argument is already-gathered evidence, so each condition is unit-testable in
+    isolation and the store reads stay out of the rule. ``guard`` is the hash-verified §7.1
+    ``catalyst_guard`` block. Materiality/sentiment arrive ALREADY weighted by
+    ``cat.fanout_weight`` for a fanned-out sector/theme cluster (§2.7: the weight multiplies both
+    BEFORE the comparison). Short-direction candidates fail ``sentiment_long`` by construction —
+    the §1.4.9 shorts gate, not a separate rule. ``source_domain_count`` is the §2.7 STORY-level
+    union (2026-08-05): distinct domains across all age-eligible clusters for the same
+    ``(symbol, event_type)``, gathered by the digest — not one cluster's own set.
+    """
+    allowed = tuple(guard_value(guard, "originating_event_types") or ())
+    return {
+        "materiality": weighted_materiality >= materiality_min,
+        "sentiment_long": weighted_sentiment >= float(guard_value(guard, "sentiment_min_long")),
+        "event_type": event_type is not None and event_type in allowed,
+        "source_domains": source_domain_count >= int(guard_value(guard, "min_source_domains")),
+        "novelty": novelty is not None and novelty >= novelty_min,
+        "in_universe": in_universe,
+        "not_flagged": not flagged,
+        "not_results_day": not results_day_t,
+        "earnings_reaction": earnings_reaction_agrees,
+    }
+
+
+def _clip(value: float) -> float:
+    return max(-1.0, min(1.0, value))
+
+
+def _age_hours(ran_at: datetime, first_seen: datetime) -> float:
+    """Hours from ``first_seen`` to the run's single fixed ``ran_at``, CLAMPED AT ZERO.
+
+    The clamp is the point: a future ``first_seen`` (clock skew, a bad feed timestamp) must be able to
+    fade a contribution, never AMPLIFY it beyond its unaged weight — a negative age would make
+    :func:`_decay` return a factor above 1.
+    """
+    return max(0.0, (ran_at - first_seen).total_seconds() / 3600.0)
+
+
+def _decay(age_h: float, halflife: float) -> float:
+    """§2.7 step-5 recency decay: ``0.5 ^ (age_h / cat.decay_halflife_h)``.
+
+    ONE definition for both consumers, so ``sentiment_agg`` (step 5(i)) and the watchlist's
+    best-cluster ranking (step 5(ii)) age a story on the same clock — the 2026-08-27 HINDZINC split
+    was exactly the two outputs disagreeing about which news is current, and a second copy of this
+    exponent is how that reappears.
+
+    The two callers apply it to different things and only one bounds it: step 5(i) is an additive
+    SUM and drops clusters past ``6 * halflife`` (a <1.6% contribution not worth carrying), while the
+    ranking is a pure comparison key where an equivalent cutoff would delete a symbol's row rather
+    than merely down-weight it. That asymmetry is deliberate; see the callers.
+    """
+    return 0.5 ** (age_h / halflife)
+
+
+def _paise(value: Decimal) -> Decimal:
+    """Quantize to the DECIMAL(12,2) column scale. NO tick snapping here: the watchlist stores raw
+    deterministic levels; the live scanner is what publishes tick-legal order prices (§3.2.5)."""
+    return value.quantize(_PAISE, rounding=ROUND_HALF_UP)
+
+
+def _reaction_agrees(bars: Sequence[DailyBar], t_day: date, sentiment: float) -> bool:
+    """O13 PEAD agreement: ``sign(cluster sentiment) == sign(close_T − open_T)`` from ``bars_1d``.
+
+    ``close_T == open_T`` ⇒ reaction sign 0 ⇒ never agrees (conservative, §6.1). A MISSING T bar is
+    treated identically: an unverifiable reaction can never license origination.
+    """
+    bar = next((b for b in bars if b.d == t_day), None)
+    if bar is None or sentiment == 0:
+        return False
+    reaction = bar.close - bar.open
+    if reaction == 0:
+        return False
+    return (reaction > 0) == (sentiment > 0)
+
+
+class CatalystDigestResult(BaseModel):
+    """One digest run's outcome (§2.7 step 5). ``(0, 0)`` is a SUCCESS — an empty-but-FRESH digest
+    means `cat` simply originates nothing; only STALE/MISSING disables it (§2.7 fail-safe ladder)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    d: date
+    n_originating: int
+    n_context: int
+    sentiment_rows: int
+    ran_at: datetime
+
+
+class CatalystDigestJob:
+    """§2.7 step 5 / §4.4 job 14 (~08:35, before the 08:50 planner; idempotent run-latest catch-up).
+
+    Two outputs, both deterministic and both re-derivable from persisted scores (no LLM, R8):
+
+    (i) ``sentiment_agg`` — ``clip(Σᵢ sentimentᵢ·materialityᵢ·wᵢ·0.5^(age_hᵢ/half-life), −1, +1)`` per
+    ``(scope, scope_key)`` over scored clusters with ``age_h ≤ 6×`` half-life, age measured from
+    cluster ``first_seen`` to the run time. A decayed SUM, never a mean. Each row also carries the
+    UNCLIPPED ``raw_sum`` and the contributing ``n_clusters`` (WO-21) — the clip is lossy exactly
+    where it matters, so what it discarded is stored beside it rather than inferred downstream.
+
+    (ii) ``catalyst_watchlist`` — every scored cluster whose TRADING-SESSION event age ≤
+    ``cat.max_event_age_days``, best cluster per symbol, graded by :func:`originating_conditions`
+    with §6.1 levels on ``originating`` rows only. "Best" is the highest materiality after the
+    SAME ``0.5^(age_h/cat.decay_halflife_h)`` decay (ii) shares with (i) — a ranking key only
+    (see :class:`_BestCluster`), so the two outputs always agree on which news is current.
+
+    Parameters
+    ----------
+    store / clock / calendar:
+        DuckDB access (all reads/writes offloaded via ``arun``, convention 12), the single "now",
+        and the weekend/holiday-aware session arithmetic (R6).
+    protected_store:
+        Loads ``limits.yaml`` HASH-VERIFIED at run time — the ``catalyst_guard`` block is never
+        accepted as a constructor argument (§2.4 item 1: the enforcement site verifies it). A
+        verification failure propagates: an unverifiable anti-manipulation surface must yield NO
+        digest (which disables `cat` for the day), never a permissive one.
+    envelope:
+        Live §6.5 ``envelope_state`` values; see :func:`load_cat_params` for defaults + key forms.
+
+    Spec ambiguities resolved here (documented for the integrator):
+
+    - ``market``-scope clusters contribute to the ``market`` row ONLY — never a symbol row and
+      never a watchlist row (§2.7: market news feeds regime context, "**never** origination").
+    - Sector/theme fan-out consumes the RESOLVER's tags (``sectors``/``themes``) and is intersected
+      with today's ELIGIBLE universe (rule-passing incl. beyond-cap rows, not just the top-100 focus
+      watchlist) when one exists; with no universe row yet the raw constituents are used and the
+      ``in_universe`` condition still blocks origination.
+    - The ``market``/``market`` row is written on EVERY run (0.0 when no market cluster scored), so
+      "the digest ran" is observable even for an empty corpus — otherwise an empty-but-fresh digest
+      would be indistinguishable from a missing one (§2.7 fail-safe ladder needs that distinction).
+    - The row's ``materiality`` is the WEIGHTED, UNDECAYED value (what the grade decision used);
+      the recency decay orders candidates and is never stored. ``event_age_h`` is informational,
+      ``event_age_sessions`` is the eligibility clock.
+    - A cluster below :data:`INCLUSION_FLOOR` can corroborate a story but never REPRESENT a symbol
+      (2026-08-27): the floor gates candidacy, not the finished row, so decayed ranking cannot let
+      a fresh sub-floor mention take the slot and delete a still-material story's row. A symbol
+      carries a row iff some cluster targeting it clears the floor — unchanged by the decay.
+    - ``source_domain_count`` is the STORY-level union (2026-08-05): distinct domains across ALL
+      age-eligible clusters targeting the same ``(symbol, event_type)`` — cross-outlet paraphrase
+      never merges under the pinned §3.2.4 similarity, so cluster-level counting was structurally
+      unpassable. ``cluster_refs`` = best cluster first + every corroborating cluster id (§6.5).
+    - ``expires_at`` is the first trading day the event EXCEEDS the age horizon (session age
+      ``max_event_age_days + 1``) — i.e. the first digest day it no longer qualifies.
+    """
+
+    def __init__(
+        self,
+        store: MarketStore,
+        clock: Clock,
+        calendar: NSECalendar,
+        protected_store: ProtectedStore,
+        envelope: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._store = store
+        self._clock = clock
+        self._calendar = calendar
+        self._protected = protected_store
+        self._params = load_cat_params(envelope)
+
+    # ------------------------------------------------------------------ session arithmetic (R6)
+    def event_age_sessions(self, first_seen: datetime, d: date) -> int:
+        """§2.7 step-5(ii) event age: TRADING DAYS in ``(first_seen date, d]``.
+
+        The digest runs pre-open, so ``d`` is the first session the event can be traded into and
+        counts as age 1 — a Friday-evening or weekend event is therefore age 1 at Monday's digest
+        (which keeps Friday reporters T+1-PEAD-eligible, O13), and a same-day event is age 0.
+        """
+        start = first_seen.astimezone(IST).date()
+        probe, age = start + timedelta(days=1), 0
+        while probe <= d:
+            if self._calendar.is_trading_day(probe):
+                age += 1
+            probe += timedelta(days=1)
+        return age
+
+    def _oldest_eligible_date(self, d: date, max_days: int) -> date:
+        """Earliest ``first_seen`` DATE whose session age at ``d`` can still be ≤ ``max_days``."""
+        probe, remaining = d, max_days
+        for _ in range(_MAX_CALENDAR_SCAN_DAYS):
+            if remaining <= 0:
+                break
+            probe -= timedelta(days=1)
+            if self._calendar.is_trading_day(probe):
+                remaining -= 1
+        return probe
+
+    def _expires_at(self, first_seen: datetime, max_days: int) -> date:
+        """The trading day the event EXCEEDS ``cat.max_event_age_days`` (session age max+1)."""
+        probe = first_seen.astimezone(IST).date()
+        for _ in range(max_days + 1):
+            probe = self._calendar.next_trading_day(probe)
+        return probe
+
+    # ------------------------------------------------------------------ guard (§2.4 item 1)
+    def _guard(self) -> dict[str, Any]:
+        """The ``catalyst_guard`` block from the HASH-VERIFIED ``limits.yaml`` — loaded per run, at
+        the enforcement site, exactly like the gate loads its limits (§2.4 item 1 / §7.1)."""
+        limits = self._protected.load_verified("limits.yaml")
+        guard = (limits.get("limits") or {}).get("catalyst_guard")
+        if not isinstance(guard, Mapping):
+            raise ValueError("limits.yaml has no `limits.catalyst_guard` block (§7.1 owner-only surface)")
+        return dict(guard)
+
+    # ------------------------------------------------------------------ run (§2.7 step 5)
+    async def run(self, d: date) -> CatalystDigestResult:
+        ran_at = self._clock.now()
+        guard = self._guard()
+        max_days = int(self._params["max_event_age_days"])
+        halflife = float(self._params["decay_halflife_h"])
+
+        # One lookback covering BOTH computations: the sentiment decay horizon (6× half-life) and
+        # the session-age horizon expanded to calendar days (weekends/holidays included).
+        window_start = min(
+            ran_at - timedelta(hours=6.0 * halflife),
+            self._clock.combine(self._oldest_eligible_date(d, max_days), time(0, 0)),
+        )
+        rows = await self._store.arun(
+            self._store.get_news_clusters, scored=True, last_seen_after=window_start
+        )
+        clusters = [
+            NewsCluster.from_row(r)
+            for r in rows
+            if r.get("sentiment") is not None and r.get("materiality") is not None
+        ]
+        sector_symbols = _reverse_sector_map(await self._store.arun(self._store.get_sector_map, as_of=d))
+        theme_symbols = {
+            r["theme"]: set(r["symbols"] or [])
+            for r in await self._store.arun(self._store.get_theme_map)
+        }
+        # 2026-09-01 (§3.2.4 extended-leg addendum): the digest grades over the BATCH universe so
+        # catalyst_watchlist/in_universe covers criteria-passing non-index names — shadow-only by
+        # construction (both cat legs are C3-fail-closed; the gate never approves non-included rows).
+        universe = set(await self._store.arun(self._store.get_batch_universe_symbols, d))
+
+        sentiment_rows = self._sentiment_rows(clusters, ran_at, sector_symbols, theme_symbols, universe)
+        await self._store.arun(self._store.upsert_sentiment_agg, sentiment_rows)
+
+        watch_rows = await self._watchlist_rows(
+            d, clusters, ran_at, guard, sector_symbols, theme_symbols, universe,
+            earnings_from=window_start.date(),
+        )
+        await self._store.arun(self._store.replace_catalyst_watchlist, d, watch_rows)
+
+        n_originating = sum(1 for r in watch_rows if r["grade"] == "originating")
+        result = CatalystDigestResult(
+            d=d,
+            n_originating=n_originating,
+            n_context=len(watch_rows) - n_originating,
+            sentiment_rows=len(sentiment_rows),
+            ran_at=ran_at,
+        )
+        _log.info(
+            "catalyst_digest",
+            d=str(d),
+            clusters=len(clusters),
+            sentiment_rows=result.sentiment_rows,
+            n_originating=result.n_originating,
+            n_context=result.n_context,
+        )
+        return result
+
+    def digest_status(self, d: date) -> Literal["fresh", "stale", "missing"]:
+        """§2.7 fail-safe input for features-v2 + the ``CATALYST_DISABLED`` alert (scanner: Phase 3).
+
+        ``missing`` = no digest artifact at all (no ``sentiment_agg`` stamp, no ``d`` watchlist);
+        ``stale`` = the latest stamp is older than ``catalyst_guard.digest_stale_max_h`` (or day
+        ``d`` has rows with no stamp at all — an age that cannot be established is never "fresh").
+        An EMPTY digest is ``fresh``: only stale/missing disables `cat`.
+        """
+        as_of = self._store.latest_sentiment_as_of()
+        if as_of is None:
+            return "missing" if not self._store.get_catalyst_watchlist(d) else "stale"
+        age_h = (self._clock.now() - as_of).total_seconds() / 3600.0
+        return "stale" if age_h > float(guard_value(self._guard(), "digest_stale_max_h")) else "fresh"
+
+    # ------------------------------------------------------------------ step 5(i): sentiment_agg
+    def _sentiment_rows(
+        self,
+        clusters: Sequence[NewsCluster],
+        ran_at: datetime,
+        sector_symbols: Mapping[str, set[str]],
+        theme_symbols: Mapping[str, set[str]],
+        universe: set[str],
+    ) -> list[dict[str, Any]]:
+        halflife = float(self._params["decay_halflife_h"])
+        fanout = float(self._params["fanout_weight"])
+        totals: dict[tuple[str, str], float] = defaultdict(float)
+        # Contributing clusters per (scope, key), counted in lockstep with ``totals`` — with the
+        # unclipped sum this makes SATURATION a measured quantity instead of a guess at the rail
+        # (WO-21): "−1.000" alone cannot distinguish two mild headlines from nine severe ones.
+        counts: dict[tuple[str, str], int] = defaultdict(int)
+        for c in clusters:
+            age_h = _age_hours(ran_at, c.first_seen)
+            # Past six half-lives a cluster contributes under 1.6% of its weight to this SUM; dropping
+            # it keeps a long tail of near-zero terms from accumulating into the aggregate. A cutoff
+            # is meaningful here precisely because this is an additive total — the step-5(ii) ranking
+            # deliberately has no equivalent (see :func:`_decay` and the ranking comment there).
+            if age_h > 6.0 * halflife:
+                continue
+            base = float(c.sentiment) * float(c.materiality) * _decay(age_h, halflife)
+            w = fanout if c.scope in ("sector", "theme") else 1.0
+            for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
+                totals[("symbol", symbol)] += base * w
+                counts[("symbol", symbol)] += 1
+            for sector in c.sectors or []:
+                totals[("sector", sector)] += base
+                counts[("sector", sector)] += 1
+            for theme in c.themes or []:
+                totals[("theme", theme)] += base
+                counts[("theme", theme)] += 1
+            if c.scope == "market":
+                totals[("market", "market")] += base
+                counts[("market", "market")] += 1
+        totals.setdefault(("market", "market"), 0.0)   # digest-ran marker (see class docstring)
+        counts.setdefault(("market", "market"), 0)     # …and the marker contributes no cluster
+        return [
+            {
+                "scope": scope, "scope_key": key, "as_of": ran_at,
+                "value": _clip(total),                 # the §2.7 formula's clipped value, unchanged
+                "raw_sum": total,                      # …and what it was clipped FROM
+                "n_clusters": counts[(scope, key)],
+            }
+            for (scope, key), total in sorted(totals.items())
+        ]
+
+    def _symbol_targets(
+        self,
+        c: NewsCluster,
+        sector_symbols: Mapping[str, set[str]],
+        theme_symbols: Mapping[str, set[str]],
+        universe: set[str],
+    ) -> set[str]:
+        """Symbols a cluster contributes to: its resolved ``symbols`` plus, for a sector/theme
+        cluster, the fan-out constituents of the RESOLVER's tags (the LLM never assigns a symbol)."""
+        if c.scope == "market":
+            return set()
+        symbols = set(c.symbols or [])
+        if c.scope in ("sector", "theme"):
+            tags = (c.sectors or []) if c.scope == "sector" else (c.themes or [])
+            source = sector_symbols if c.scope == "sector" else theme_symbols
+            fan: set[str] = set()
+            for tag in tags:
+                fan |= source.get(tag, set())
+            symbols |= (fan & universe) if universe else fan
+        return symbols
+
+    # ------------------------------------------------------------------ step 5(ii): watchlist
+    async def _watchlist_rows(
+        self,
+        d: date,
+        clusters: Sequence[NewsCluster],
+        ran_at: datetime,
+        guard: Mapping[str, Any],
+        sector_symbols: Mapping[str, set[str]],
+        theme_symbols: Mapping[str, set[str]],
+        universe: set[str],
+        *,
+        earnings_from: date,
+    ) -> list[dict[str, Any]]:
+        p = self._params
+        max_days = int(p["max_event_age_days"])
+        fanout = float(p["fanout_weight"])
+        # Same §6.3 knob step 5(i) decays `sentiment_agg` with — the watchlist's best-cluster
+        # ranking must age a story on the SAME clock as the aggregate, or the two outputs disagree
+        # about which news is current (the 2026-08-27 HINDZINC split; see the ranking comment below).
+        halflife = float(p["decay_halflife_h"])
+        sentiment_min = float(guard_value(guard, "sentiment_min_long"))
+
+        # PRIOR session's bulk/block-deal flags (2026-08-18 fix): the ~08:35 digest runs before the
+        # 20:30 deals job can possibly have written day-``d`` rows, so a ``d`` read was structurally
+        # empty and the ``not_flagged`` origination gate had never bound. Same semantics as the scan
+        # context: a deal on the last completed session flags the symbol today.
+        try:
+            flagged_day: date | None = self._calendar.previous_trading_day(d)
+        except ValueError:       # no prior session resolvable (calendar hole) — no flags, no error
+            flagged_day = None
+        flagged = (
+            {r["symbol"]
+             for r in await self._store.arun(self._store.get_flagged_instrument_days, flagged_day)}
+            if flagged_day is not None else set()
+        )
+        results_days: dict[str, set[date]] = defaultdict(set)
+        for r in await self._store.arun(self._store.get_earnings_calendar, earnings_from, d):
+            if r.get("kind") == _RESULTS_KIND:
+                results_days[r["symbol"]].add(r["event_date"])
+
+        # Best cluster per symbol = highest RECENCY-DECAYED weighted materiality; ties break on
+        # cluster_id (§9.1 determinism: the same corpus must yield the same watchlist — decay is a
+        # pure function of first_seen against the run's single fixed ``ran_at``).
+        #
+        # The decay is step 5(i)'s, to the same shared :func:`_decay`/:func:`_age_hours`. What this
+        # path does NOT take from 5(i) is its `6 * halflife` cutoff, and that is deliberate: there the
+        # cutoff drops a negligible term from an additive SUM, whereas here the decayed value is a
+        # pure ORDERING key. A cutoff in this loop would skip the cluster out of the corroboration and
+        # reversal maps built below, or — applied only to candidacy — delete a symbol's row outright
+        # when its one floor-clearing cluster is old, the same failure the INCLUSION_FLOOR note guards
+        # against. Eligibility here is the SESSION bound (`max_event_age_days`, applied above) because
+        # sessions are the unit the rule is written in; ranking needs no second, hour-based bound.
+        # 2026-08-27 (HINDZINC): ranking on RAW materiality let a stale cluster hold the slot
+        # indefinitely. A regulatory_policy cluster (Aug 24–25, stake-sale speculation, short,
+        # materiality 0.6) outranked the Aug 26 DIPAM denial that resolved it (+5.1% on the day),
+        # so the Aug 27 watchlist still read `direction: short` while `sentiment_agg` — which
+        # already decays — had correctly netted +0.569. The row and the aggregate disagreed
+        # because only one of them counted the clock. Decaying the RANKING key lets a fresher
+        # cluster overtake a stale one on its own, with no "is this a denial of that" detection:
+        # at the 24h default half-life a same-day follow-up outranks a day-old cluster of up to
+        # ~2× its materiality, and yesterday's story keeps the slot against today's trivia.
+        #
+        # The same pass builds the STORY-level corroboration maps (§2.7 step 5(ii), 2026-08-05
+        # owner-directed) — UNCHANGED and deliberately upstream of every filter below: cross-outlet
+        # paraphrase never merges under the pinned §3.2.4 similarity (measured: 0/1,400 live
+        # cross-feed pairs ≥ 0.75, best TRUE pair below a FALSE pair), so the min_source_domains
+        # count is the union of domains across ALL age-eligible clusters targeting the same
+        # (symbol, event_type) — an event_type disagreement between outlets loses the corroboration
+        # (fails to LESS activity, never false-corroboration).
+        best: dict[str, _BestCluster] = {}
+        story_domains: dict[tuple[str, str | None], set[str]] = defaultdict(set)
+        story_refs: dict[tuple[str, str | None], set[str]] = defaultdict(set)
+        # Same story grouping as story_refs, keeping the DIRECTION-over-time facts `reversal_of`
+        # needs (§2.7 `cat_reversal`, 2026-08-27). Built in this pass, from the same corpus, so the
+        # reversal verdict stays a pure function of (clusters, ran_at) — §9.1 determinism.
+        story_members: dict[tuple[str, str | None], list[_StoryMember]] = defaultdict(list)
+        for c in clusters:
+            age_sessions = self.event_age_sessions(c.first_seen, d)
+            if age_sessions > max_days:
+                continue
+            w = fanout if c.scope in ("sector", "theme") else 1.0
+            weighted_materiality = float(c.materiality) * w
+            weighted_sentiment = float(c.sentiment) * w
+            rank_materiality = weighted_materiality * _decay(_age_hours(ran_at, c.first_seen), halflife)
+            named = set(c.symbols or ())        # resolved to the symbol vs reached by fan-out
+            for symbol in self._symbol_targets(c, sector_symbols, theme_symbols, universe):
+                story_domains[(symbol, c.event_type)].update(c.source_domains or [])
+                story_refs[(symbol, c.event_type)].add(c.cluster_id)
+                story_members[(symbol, c.event_type)].append(
+                    _StoryMember(
+                        cluster_id=c.cluster_id,
+                        first_seen=c.first_seen,
+                        weighted_materiality=weighted_materiality,
+                        weighted_sentiment=weighted_sentiment,
+                        named=symbol in named,
+                    )
+                )
+                if weighted_materiality < INCLUSION_FLOOR:
+                    # Noise-line clusters corroborate (above) but can never REPRESENT a symbol.
+                    # The floor is tested on the UNDECAYED value and gates CANDIDACY rather than
+                    # the finished row, which keeps the set of symbols carrying a row identical to
+                    # the pre-decay behaviour: a symbol has a row iff some cluster of its own
+                    # clears the floor. Testing the decayed value here, or leaving the floor
+                    # downstream of the ranking, would let a fresh sub-floor mention win the slot
+                    # and delete a still-material story's row outright.
+                    continue
+                current = best.get(symbol)
+                if current is None or (-rank_materiality, c.cluster_id) < (
+                    -current.rank_materiality, current.cluster.cluster_id
+                ):
+                    best[symbol] = _BestCluster(
+                        cluster=c,
+                        rank_materiality=rank_materiality,
+                        weighted_materiality=weighted_materiality,
+                        weighted_sentiment=weighted_sentiment,
+                        age_sessions=age_sessions,
+                    )
+
+        rows: list[dict[str, Any]] = []
+        for symbol in sorted(best):
+            # Everything from here down uses the UNDECAYED weighted materiality: decay chose WHICH
+            # cluster speaks for the symbol, and says nothing about whether that cluster is
+            # material enough to trade (the inclusion floor already bound at candidacy).
+            c, _rank, weighted_materiality, weighted_sentiment, age_sessions = best[symbol]
+            symbol_results = results_days.get(symbol, set())
+            t_day = max((t for t in symbol_results if t < d), default=None)
+            history: list[DailyBar] | None = None
+            reaction_agrees = True             # vacuous unless this IS an earnings event with a T
+            if c.event_type in EARNINGS_EVENT_TYPES and t_day is not None:
+                history = await self._history(symbol, d)
+                reaction_agrees = _reaction_agrees(history, t_day, weighted_sentiment)
+            # §2.7 step 5(ii) story-level corroboration: the guard input is the (symbol, event_type)
+            # domain union, not this cluster's own set (which is single-outlet in the normal case).
+            corroboration = story_domains.get((symbol, c.event_type), set()) | set(c.source_domains or [])
+            conditions = originating_conditions(
+                weighted_materiality=weighted_materiality,
+                weighted_sentiment=weighted_sentiment,
+                event_type=c.event_type,
+                source_domain_count=len(corroboration),
+                novelty=c.novelty,
+                in_universe=symbol in universe,
+                flagged=symbol in flagged,
+                results_day_t=d in symbol_results,
+                earnings_reaction_agrees=reaction_agrees,
+                materiality_min=float(p["materiality_min"]),
+                novelty_min=float(p["novelty_min"]),
+                guard=guard,
+            )
+            originating = all(conditions.values())
+            levels: dict[str, Decimal] = {}
+            if originating:
+                if history is None:
+                    history = await self._history(symbol, d)
+                levels = self._levels(history)
+                if not levels:
+                    # Never blocks the grade: the scanner's live confirmation still needs its own
+                    # levels, and a thin-history symbol is caught by warmup_ready anyway (§7.1).
+                    _log.warning(
+                        "catalyst_levels_unavailable", symbol=symbol, d=str(d), bars=len(history)
+                    )
+            direction = (
+                "long" if weighted_sentiment >= sentiment_min
+                else "short" if weighted_sentiment <= -sentiment_min
+                else None
+            )
+            # §2.7 `cat_reversal` (2026-08-27, the HINDZINC denial): this story previously ESTABLISHED
+            # the opposite (short) direction and the winning cluster reverses it — a resolved-uncertainty
+            # relief setup, not merely fresh good news. LONG-ONLY by construction: computed only when
+            # the winner is long, so a positive story being denied is never flagged here (that is the
+            # exit side, §5.2(b)). Purely additive — no existing field, grade, level or condition above
+            # reads it, so `cat` v2's event definition is untouched. (Its shadow CLOCK is not: the
+            # decay ranking above restarts it under WO-18's pre-registration — §2.7, 2026-08-28.)
+            reversal_of = (
+                reversal_source(
+                    story_members.get((symbol, c.event_type), ()),
+                    winner_id=c.cluster_id,
+                    winner_first_seen=c.first_seen,
+                    sentiment_min=sentiment_min,
+                )
+                if direction == "long" else None
+            )
+            rows.append({
+                "entry_id": str(ULID()),
+                "symbol": symbol,
+                "grade": "originating" if originating else "context",
+                "direction": direction,
+                "event_type": c.event_type,
+                # Best cluster FIRST, then every corroborating cluster id (§6.5 audit trail).
+                "cluster_refs": [c.cluster_id] + sorted(
+                    story_refs.get((symbol, c.event_type), set()) - {c.cluster_id}
+                ),
+                "materiality": weighted_materiality,
+                "source_domain_count": len(corroboration),
+                "event_age_h": (ran_at - c.first_seen).total_seconds() / 3600.0,
+                "event_age_sessions": age_sessions,
+                "expires_at": self._expires_at(c.first_seen, max_days),
+                # NULL on every non-reversal row (the overwhelming normal case) — the `cat_reversal`
+                # scanner's ONLY input beyond the columns `cat` already reads (§2.7, single seam O11).
+                "reversal_of": reversal_of,
+                **levels,
+            })
+        return rows
+
+    async def _history(self, symbol: str, d: date) -> list[DailyBar]:
+        """``bars_1d`` strictly BEFORE ``d`` — the digest is pre-open, day ``d`` has no bar yet."""
+        return await self._store.arun(
+            self._store.get_bars_1d,
+            symbol,
+            d - timedelta(days=_HISTORY_LOOKBACK_DAYS),
+            d - timedelta(days=1),
+        )
+
+    def _levels(self, bars: Sequence[DailyBar]) -> dict[str, Decimal]:
+        """Deterministic §6.1 `cat` levels from bars strictly before ``d``; ``{}`` on thin history.
+
+        Only the PRICE leg of the §6.1 confirmation is computable at 08:35: ``confirm_trigger =
+        prior_close × (1 + cat.confirm_move_pct/100)``. The ``max()`` against the day's first-30-min
+        high and the relative-volume leg are LIVE scanner conditions — the trigger here is the floor
+        the scanner raises, never the whole rule. ``invalidation = prior_close``: a confirmation move
+        fully retraced voids the setup (documented decision — §2.7 pins the level set, not this
+        choice). Stop/target BANDS collapse to a point because ``entry == confirm_trigger`` is the
+        only entry price knowable pre-open; the live scanner recomputes both at the true entry.
+        """
+        if len(bars) < _MIN_LEVEL_BARS:
+            return {}
+        atr = wilder_atr(
+            [b.high for b in bars], [b.low for b in bars], [b.close for b in bars], _ATR_PERIOD
+        )
+        latest = float(atr.iloc[-1])
+        if not math.isfinite(latest) or latest <= 0:
+            return {}
+        prior_close = bars[-1].close
+        # Quantize the trigger FIRST: stop/target are anchored to the PUBLISHED trigger, so the
+        # persisted levels satisfy the §6.1 arithmetic exactly as stored (no residual drift).
+        trigger = _paise(prior_close * (Decimal(1) + Decimal(str(self._params["confirm_move_pct"])) / _HUNDRED))
+        stop = _paise(trigger - Decimal(str(self._params["stop_atr_mult"])) * Decimal(str(latest)))
+        target = _paise(trigger + Decimal(str(self._params["rr_target"])) * (trigger - stop))
+        return {
+            "confirm_trigger": trigger,
+            "invalidation": _paise(prior_close),
+            "stop_band_low": stop,
+            "stop_band_high": stop,
+            "target_band_low": target,
+            "target_band_high": target,
+        }
+
+
+def _reverse_sector_map(rows: Iterable[Mapping[str, Any]]) -> dict[str, set[str]]:
+    """``sector_map`` rows → ``sector -> {symbols}`` (the §2.7 sector fan-out constituents)."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        out[row["sector"]].add(row["symbol"])
+    return dict(out)

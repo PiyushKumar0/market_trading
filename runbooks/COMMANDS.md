@@ -31,10 +31,19 @@ holder pid, never delete the file).
 
 ```powershell
 Get-Content data\logs\engine.log -Tail 50 -Wait        # structured log (all launch modes) — primary
-Get-Content data\logs\service.err.log -Tail 50 -Wait   # NSSM-captured stderr: + raw tracebacks/early-boot crashes
+Get-Content data\logs\service.err.log -Tail 50 -Wait   # NSSM-captured stderr: WARNING+ lines, raw tracebacks, early-boot crashes (pre-2026-10-04 non-JSON lines: service-nonjson-archive.log)
 Get-Content data\logs\service.out.log -Tail 50         # NSSM-captured stdout: stray prints
 Get-WinEvent -ProviderName nssm -MaxEvents 20 | Format-Table TimeCreated, Message -Wrap  # start/stop/crash-restart/throttle
 scripts\nssm_install.ps1 -Action status                # service config incl. ObjectName + log paths
+```
+
+**Stop grace (2026-09-23, owner, ELEVATED shell, once):** NSSM's 1.5 s default console wait kills the
+engine mid-shutdown, so every stop records as a crash. Give it 30 s, then verify with a stop/start
+(runbooks/CHAOS_DRILLS.md §3, case 15):
+
+```powershell
+nssm set mt-engine AppStopMethodConsole 30000
+nssm get mt-engine AppStopMethodConsole                  # want: 30000
 ```
 
 ## Universe symbol list (the canonical 200-name set for historical runs)
@@ -50,8 +59,56 @@ $syms = ((Get-Content data\reports\orb_sweep_20260712T033313.json | ConvertFrom-
 uv run python scripts\backtest.py all --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
 # one strategy, finer grid:
 uv run python scripts\backtest.py rsi2 --grid-density medium --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
+# positional leg measured against ITS holding cap (R2, 2026-09-12) — WO-3 floor = cost_floor/120:
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
 ```
 Reports → `data/reports/<strat>_<ts>.md` (+ sweep). ORB leg ≈ 90 min on the full 498-session window.
+`--margin-floor-days` defaults to 20 (the §7.1 swing cap); set it per-leg, never on an `all` run — the
+value used is printed in the validation report's "Multiple-testing discipline" block.
+Since 2026-09-12 (R2) both reports also carry the leg's MEASURED holding period — mean/median/p90
+sessions, closed-only beside all-trades, the open-trade count, and the same round-trip floor re-based
+on each of those horizons with its headroom multiple. Read the verdict against those rows: the
+registered denominator is a §7.1 CAP, so the floor at the cap is the loosest bar the horizon allows.
+Reporting only — the promotion rule is unchanged.
+
+**Sweep mechanics (WO-M, 2026-09-13).** Every sweep artifact now carries a one-line `Mechanics:`
+stamp — `stops=intrabar_ohlc · stop_exit_price=stopmarket · expectancy=closed_trades_only ·
+fills=next_bar_open` — and a validation artifact carries the same stamp **when its returns came out
+of the sweep**. Read the absence of a stamp differently on the two:
+
+- **A sweep artifact** (`*_sweep_*.md/json`) with no stamp, or the words `PRE-2026-09-13
+  (unstamped)`, came off the pre-fix mechanics — daily stops decided on the close and filled there,
+  stop exits charged no spread, and open positions inside the ranked per-trade expectancy, all three
+  in the strategy's favour. Its numbers are **not** comparable term-by-term with a stamped one and
+  must never be pooled with them. `SweepRunner` always stamps, so on this side absence *is* pre-fix.
+- **A validation artifact** (`<strat>_<ts>.md/json`) with no `Sweep mechanics:` line means "pre-fix
+  sweep **or** no sweep at all" — `ValidationPipeline` also validates return series that never went
+  through `SweepRunner` (the event-study harnesses, e.g. `scripts\validate_insider.py`, build their
+  own series and charge their own fills/costs, so none of the three sweep settings applies to them).
+  Never read an unstamped verdict as an assertion that the three pre-fix biases are in it; check
+  whether a `*_sweep_*` artifact of the same run exists before concluding anything.
+
+A verdict whose params the grid never ranked carries a **THESE PARAMS ARE NOT A GRID WINNER** banner
+(and `params_are_grid_winner: false` in the JSON) — that is the §6.3 envelope DEFAULTS being
+validated because no config closed a round trip; it is not a swept result. The `expectancy (CLOSED)`
+column is the ranked/promotion statistic; `expectancy (all)` is the pre-fix headline, kept beside it,
+and `win% (CLOSED)` is over the same round trips as `expectancy (CLOSED)`. In the persisted
+`param_sets.validation_report`, the pre-fix key names `sweep_expectancy_pct` and `win_rate` are
+RETIRED rather than redefined — a query for them returns pre-2026-09-13 rows only; the post-fix rows
+carry `sweep_expectancy_closed_pct` / `sweep_expectancy_all_pct` / `win_rate_closed` / `win_rate_all`.
+The re-run that produced the post-fix record (engine Stopped; the CLI applies migrations and writes
+`param_sets` rows, its normal path):
+
+```powershell
+# trend cell A at both denominators, then cell B (reporting-only, NEVER pooled with A):
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 20
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
+uv run python scripts\backtest.py trend --from 2024-01-01 --to 2026-09-12 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
+# the two swing legs at their documented defaults, for the record:
+uv run python scripts\backtest.py rsi2 --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
+uv run python scripts\backtest.py mom  --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
+```
+`orb` is deliberately NOT re-run: it is parked (plan §6.1, 0/15 twice) and its leg costs ≈ 90 min.
 
 ## Event study (§2.7 proxy + §2.8.4 filings legs)
 
@@ -69,7 +126,33 @@ uv run python scripts\backfill.py seed --skip-daily --minute-years 3 --reset-che
 # filings (public NSE/BSE APIs, no Kite needed; checkpointed/resumable; SHP leg ≈ 3.5 h):
 uv run python scripts\backfill_filings.py seed --from 2023-07-01
 uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --skip-results --redo-shp
+# Integrated Filing results listing only (every result since the Mar-2025 quarter; ~2.5 min, engine OFF).
+# Run 2026-09-24 from 2025-01-01: 23,779 filings. Quarterly revenue/PAT then fill nightly via the
+# results_line_items job (19:30, <=300 XBRL fetches per run) — no backfill command needed for them.
+uv run python scripts\backfill_filings.py seed --from 2025-01-01 --skip-pit --skip-results --skip-shp
+# SHP history for the 298 names the daily isin_map job first mapped on 2026-09-24 (none has an SHP
+# row; filings_shp had been skipping them since 09-04). Per-symbol checkpoints skip the 199 already
+# seeded. Engine OFF; expect ~1.5x the 3.5 h the 199-name seed took, so a weekend job (resumable).
+uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --skip-results --skip-integrated
+# NSE insider trades when the daily filings_pit window was clamped (its warning names the uncovered
+# days). Days from 2026-05-03 come from the PIT V2.0 route and checkpoint as `pit_gg`; earlier days
+# from the old route. Engine OFF. The 2026-09-24 live catch-up (04-25 -> 09-24) needed no backfill:
+# filings_pit's own run covered it (1,769 rows, ~22 min).
+uv run python scripts\backfill_filings.py seed --from 2026-05-03 --skip-results --skip-integrated --skip-shp
 ```
+
+## News duplicate cleanup after the index fix (2026-09-24) - engine OFF, owner-run
+
+The engine's first boot on a968ca7 or later drops the store's five secondary indexes by itself.
+`dedupe_news.py` deletes the duplicate headlines the damaged url index let in. It drops the indexes
+first itself, so it can run before or after that boot. One command, so the engine is not left down:
+
+```powershell
+Stop-Service mt-engine; .venv\Scripts\python.exe scripts\dedupe_news.py; Start-Service mt-engine
+```
+
+On a copy of the 09-24 19:01 store it deleted 4,054 rows (a few more if duplicates arrive before the
+url index is dropped) and left 39 urls stored twice, one copy per cluster. A re-run is a no-op.
 
 ## Protected config (after ANY owner-directed edit to limits.yaml / envelope.yaml)
 
@@ -77,11 +160,37 @@ uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --sk
 uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citing the directive>"
 ```
 
+The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Pending as of 2026-09-23:
+
+```powershell
+# O17 sizing caps (plan §7.1 O17): overnight_gap_mult 2.5 -> 2.0, cnc_notional_inr 8000 -> 12000.
+# ONE combined patch (supersedes o17_limits_2026-09-13.patch): limits.yaml + the knock-ons that must
+# land in the same boot — hi52.expected_edge_pct 1.47 -> 1.53 (derived from the gap mult, pinned by a
+# test), the ins stop comment, hi52_forward_verdict fallbacks, 8 tests that encode limit arithmetic,
+# and the plan's O17 status. Full unit suite green on it in a scratch worktree (3076 passed, 09-23).
+# Run outside 09:15-15:30, from the repo root, with a clean `git status`.
+Stop-Service mt-engine
+git apply --check runbooks\briefs\o17_combined_2026-09-23.patch   # must print nothing
+git apply runbooks\briefs\o17_combined_2026-09-23.patch
+.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "O17 2026-09-23 owner-applied"
+Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
+git add -u; git commit -m "O17 applied (owner): combined patch + reseed"
+```
+
 ## Tests / verification
 
 ```powershell
 uv run pytest tests/unit -q                     # full suite (~457 tests, ~2 min)
 uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_sweep_signals.py -q
+```
+
+After ANY edit to `config/agents.yaml`, validate through the engine's own loader BEFORE the
+restart that would apply it (an unmapped model name darkens the whole LLM tier — 2026-08-03):
+
+```powershell
+.venv\Scripts\python.exe -c "from engine.core.config import load_yaml, config_dir; from engine.intelligence.harness import load_agent_roster; r = load_agent_roster(load_yaml(config_dir() / 'agents.yaml')); print(r)"
+# want: every enabled agent in defs with the intended model/timeout, and quarantined={}
 ```
 
 ## Store inspection (read-only; safe while engine is OFF, fails if any writer holds the lock)
@@ -97,3 +206,208 @@ Coverage checks: see scratch patterns in WORKLOG entries (bars/filings min/max/c
   `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -match 'engine.ops.main' }`
 - A backtest/backfill blocks engine startup for its duration — schedule long runs outside
   trading/EOD-job hours.
+
+## Phase-2 surfaces (2026-07-28)
+
+```powershell
+# Dashboard build (served by the engine at / from dashboard/dist):
+cd dashboard; npm install; npm run build; cd ..
+# Dashboard preview WITHOUT the engine (dev only, 2026-09-08): dist + canned rows across several IST
+# days at http://127.0.0.1:8499/, any token passes; $env:NO_TODAY='1' drops today's ledger rows.
+cd dashboard; node fixture_server.mjs; cd ..
+# Phase-2 test slices:
+uv run pytest tests/unit/test_risk_gate.py tests/unit/test_reco_pipeline.py -q     # gate + pipeline
+uv run pytest tests/unit/test_budget_governor.py tests/unit/test_agent_harness.py -q  # LLM plumbing
+uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py -q   # news layer
+```
+- RECOMMEND flow needs: mode RECOMMEND (`/mode RECOMMEND`), valid trade window, warm-up ready,
+  and the Claude OAuth token present (else the LLM tier is disabled and only scanners run).
+- **Budget window is the subscription's QUOTA WEEK (2026-09-12):** Thursday 14:00 IST → next Thursday
+  14:00 IST (`llm.quota_window` in agents.yaml; `weekly_credit_usd` + weekly per-agent allocations).
+  `/budget` (Telegram or `GET /budget`) prints the window key (the start Thursday's date), the
+  window spend per agent vs allocation, the tier and the live forward cap. DG1 trips on PACE only;
+  an agent past 85% of its own allocation degrades only itself (cap = 0.67 × base), at 100% it is
+  hard-stopped. A change to agents.yaml applies on the next engine boot — validate with the loader
+  one-liner above first. The month column in `budget_ledger` is written but read by nothing.
+- Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
+
+## News-feed health (2026-08-04, after the MC-retirement remediation)
+
+```powershell
+# Engine service restart (NSSM; SCM stop registers as crash_recovered=true in startup_report — harmless):
+Restart-Service mt-engine
+
+# Per-feed poll health from logs (fetched/unique/inserted; a feed whose standalone polls NEVER
+# insert is dead or frozen upstream — the MC failure shape):
+Select-String -Path data\logs\engine.log -Pattern '"news_polled"' | ForEach-Object { $_.Line | ConvertFrom-Json } |
+  Group-Object { $_.feeds -join ',' } | ForEach-Object { "{0}: polls={1} inserted={2}" -f $_.Name, $_.Count, (($_.Group | Measure-Object inserted -Sum).Sum) }
+
+# Corpus corroboration health (needs engine OFF, or run against a data\backups\*.duckdb copy):
+# distribution of distinct source domains per scored cluster — if ~all are 1, min_source_domains:2
+# can never pass and n_originating is structurally 0 (see memory: news-feed-starvation-zero-origination):
+uv run python -c "import duckdb, collections; con = duckdb.connect(r'data\market.duckdb', read_only=True); rows = con.execute(\"select source_domains from news_clusters where sentiment is not null\").fetchall(); print(collections.Counter(len(r[0] or []) for r in rows))"
+
+# RSS liveness probe (a feed whose newest pubDate is days old is frozen upstream — retire it):
+# session scratchpad probe_feeds.py pattern; quick single-feed check:
+uv run python -c "import httpx, xml.etree.ElementTree as ET; r = httpx.get('https://www.livemint.com/rss/markets', headers={'User-Agent': 'Mozilla/5.0'}, follow_redirects=True, timeout=30); print(r.status_code, [i.findtext('pubDate') for i in ET.fromstring(r.content).findall('.//item')][:3])"
+```
+
+## Gate G2 evidence (Phase 2 exit gate, §8.3)
+
+```powershell
+.venv\Scripts\python.exe scripts\g2_evidence.py --json data\reports\g2_evidence.json   # read-only state.db; safe with engine up
+```
+Read the SOURCES + COVERAGE CAVEATS block before quoting; RUNBOOK "Gate G2 evidence checklist" lists the owner-manual halves.
+
+## One-off ledger repair (2026-09-03) — expired→taken entry row stuck at 'no_action'
+
+Symptom: a recommendation /taken AFTER it expired keeps `expire_stale`'s `outcome_label='no_action'`
+on its ENTRY row, and `pipeline.close()` completes only `WHERE outcome_label IS NULL`, so the real
+outcome never lands. Fixed prospectively in `take()` (commit 2184a2a); rows taken before that need
+this repair. Run with the engine idle (health pulses only in the log tail). Find candidates first:
+
+```powershell
+.venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('file:data/state.db?mode=ro', uri=True); print(c.execute(\"SELECT l.entry_id, p.symbol, l.outcome_label, l.closed_at FROM learning_ledger l JOIN positions p ON p.position_id=l.position_id WHERE p.state='OPEN' AND l.strategy_id IS NOT NULL AND l.outcome_label IS NOT NULL\").fetchall())"
+# then, per entry_id, inside BEGIN IMMEDIATE with rowcount==1 asserted (script pattern: session scratchpad ledger_fix_hdfcamc.py):
+#   UPDATE learning_ledger SET outcome_label=NULL, closed_at=NULL
+#   WHERE entry_id=? AND outcome_label='no_action' AND exit_px IS NULL
+#     AND position_id IN (SELECT position_id FROM positions WHERE state='OPEN')
+```
+
+## Universe build outside the engine (2026-09-06) — e.g. the first build after an index change
+
+Engine OFF (single DuckDB writer); no Kite session needed (index list, margins, surveillance are public
+downloads; the F&O map hydrates from the stored `instruments_daily` snapshot). Replace-writes the day's
+`universe_daily` rows + `data/universe/index_cached.csv`; the scheduled 08:30 job on that date still runs
+if the engine is up and rebuilds the same rows (idempotent). Exit 1 = built but DEGRADED (read the log).
+
+```powershell
+.venv\Scripts\python.exe scripts\build_universe.py --date 2026-09-07
+```
+
+## Bhavcopy archive backfill (2026-09-03) — full-market bars_1d + corp-action history, 2022-07 → 2026-07-12
+
+Engine must be OFF (single DuckDB writer); ~1,000 sessions at ~1-2 s each, checkpointed per date in
+`filings_backfill_checkpoints` (feed `bhavcopy_archive`; `corp_actions_archive` per ≤35-day window), so
+it is safe to interrupt and resume across evenings. Kite-official rows are never overwritten (A11).
+
+```powershell
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --status          # read-only progress; safe with the engine live
+# FIRST (precondition for the live hi52 unadjusted-history veto, 2026-09-03): corp-action history over the
+# veto's 400-day lookback — the daily job only holds windowed rows since 2026-08-14 (call-date-only before):
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2025-06-01 --to 2026-08-14 --skip-bhavcopy
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py                   # default 2022-07-01..2026-07-12, both legs
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2024-07-01 --to 2024-12-31 --skip-corp-actions
+```
+Then re-run `scripts\backtest_hi52.py` (engine still off) — and note the backtest must apply the same
+unadjusted-history veto the live sweep applies (`hi52.unadjusted_history` over `corp_actions`), which
+the corp-actions leg makes possible for the 2022→2026 population.
+
+## Phase 3 foundation (2026-09-10) — replay a recorded day / recalibrate the paper fill model
+
+Both read the tick Parquet archive with their OWN in-memory DuckDB and never open `market.duckdb`,
+so they are safe beside the live engine (I/O-modest; prefer compacted days).
+
+```powershell
+# Replay one recorded symbol-day through the real BarBuilder (scratch store, ULID-masked digest):
+.venv\Scripts\python.exe scripts\replay_day.py --day 2026-09-09 --symbols RELIANCE [--out report.json]
+# Recalibrate config\fill_model.yaml (bounded, compacted sessions only; exit 3 = nothing read, file untouched):
+.venv\Scripts\python.exe scripts\calibrate_fill_model.py --parquet-root data\parquet --out config\fill_model.yaml --report data\reports\fill_model_calibration_<date> --compacted-only [--days N --symbols-per-day N]
+# Phase-3 test tiers:
+.venv\Scripts\python.exe -m pytest tests\unit\test_oms_state.py tests\unit\test_oms_store.py tests\property -q   # OMS core + 9.2 properties
+.venv\Scripts\python.exe -m pytest tests\unit\test_paper_broker.py tests\unit\test_fill_model.py tests\unit\test_broker_surface.py -q
+.venv\Scripts\python.exe -m pytest tests\replay -q                                                              # ~2 min, golden day
+```
+Policy pins (plan §3.2.9 / §8.4 addendum): a calibration may only tighten the fill model; the
+calibrated half-spread is a PERCENT of mid floored at half a tick in the consumer.
+
+## hi52 backtest registrations (2026-09-09) — v1 and the pre-registered v2, engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\backtest_hi52.py --out data\reports\backtest_hi52_<date>.json                     # v1 (default)
+.venv\Scripts\python.exe scripts\backtest_hi52.py --registration v2 --out data\reports\backtest_hi52_v2_<date>.json  # v2: smooth + no-gap + index population, N=2
+```
+v2 is a SEPARATE pre-registration (plan §6.1 hi52 addendum, thresholds fixed from the 09-03 medians),
+never a knob on v1: report the two side by side, never pooled; `fold_pass_min(2)` = 60% applies to v2.
+Since the 2026-09-12 promotion the v1 path scans `hi52.V1_PARAMS` (the live defaults with the three
+v2 thresholds neutralized) — v1 stays reproducible while the LIVE rule gates on them.
+
+## hi52 forward-test verdict (2026-09-12 promotion) — the kill criterion, engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\hi52_forward_verdict.py                                        # as of today
+.venv\Scripts\python.exe scripts\hi52_forward_verdict.py --as-of 2026-10-31 --json data\reports\hi52_forward_<date>.json
+.venv\Scripts\python.exe scripts\hi52_forward_verdict.py --notional 8000                        # what-if only: prints OVERRIDE
+```
+Read-only against `state.db` + `market.duckdb`; ALWAYS exits 0 (the VERDICT line carries the answer,
+`UNAVAILABLE` if a store could not be read — a running engine holds the DuckDB lock). Population =
+every published `hi52` signal from 2026-09-14; entry = the OPEN of the journal day itself (= the
+backtest's anchor: the journal day is the session after the trigger, so this measures the same
+quantity the registered edge was measured as — the live fill lands later that morning, so realized
+results trail the metric by that intraday drift), exit = the close of the k-th SESSION of the hold
+(entry session first), net of one CNC round trip at the §7.1-SIZED notional
+(`swing_position_pct` / (`overnight_gap_mult` × the 6% stop) = equity/7.5, taken at the SMALLEST
+`equity_snapshots` reading in the window — ₹5,234 ⇒ 0.54% at the 2026-09-11 equity, and a
+drawn-down snapshot anywhere in the window gives a smaller notional and a HIGHER floor, which can
+only make DEMOTE easier; `--equity` overrides the equity and `--notional` skips the derivation
+outright and prints OVERRIDE, and the derivation prints with the verdict either way, so check which
+notional and floor it used before quoting a number). T+5 and T+10 print as DIAGNOSTICS and are
+labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.47) comes
+from the SAME derivation in this script (`registered_edge_pct()`, charged at the `equity_floor_rung`
+book) and a unit test pins the two together, so re-deriving by hand is never necessary.
+The 2026-09-14 boundary is an
+ASSUMPTION about the deploy date, printed as such — pass `--from` if the tranche shipped later. **Rule: DEMOTE if n ≥ 20 AND
+(median net at T+20 ≤ 0 OR hit rate at T+20 < 50%); HOLD otherwise; INSUFFICIENT below 20.** Run it
+at 20 and at 40 signals (plan §8.6 "hi52 KILL CRITERION"). A DEMOTE is two edits in one commit:
+re-add `hi52` to `NO_EDGE_SHADOW_STRATEGIES` **and** delete `hi52.expected_edge_pct` from
+`settings.yaml`. First-20-signal outcomes are validation, not income — nothing else moves in
+response to them.
+
+## brk20 entry-mechanism backtest (R1, 2026-09-12) — three registered entry variants, engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\backtest_brk20.py --out data\reports\backtest_brk20_<date>.json --verify-window 25
+```
+Writes the `.md` report beside the JSON, same stem. `--verify-window K` re-scans the first K symbols
+with the full row prefix and aborts on any disagreement with the bounded scan window — cheap, so run
+it. The population is the CURRENT eligible universe read from `universe_daily` and applied backwards
+(survivorship-tainted proxy); an empty `universe_daily` is a refusal, not a degraded run. `--symbols`
+OVERRIDES that population and stamps the document as a smoke run — never quote a `--symbols` run as
+the registered study. Trial count is fixed at N=3 (V1 next-open, V2 limit-at-H20 within 3 and within
+5 sessions); there is deliberately no fill-window or rule-parameter flag, because one would turn N=3
+into N=k silently.
+
+Re-run 2026-09-12 12:02 with the audit corrections (same command, same data, every headline number
+reproduced to 4 dp). What the artifacts now carry, and how to read them:
+
+- **The three variants share a SIGNAL population but NOT a trade set** (8,292 / 4,230 / 4,898 trades):
+  a V2 limit fills only when price returns to the level. Every pooled V1-vs-V2 number is therefore a
+  comparison PER FILLED TRADE across two different event sets. The old "one shared population … same
+  event set" line is gone from the report; do not reintroduce it.
+- **STEP 3B / `matched_cohorts`** is the decomposition that makes the mechanisms comparable: V1
+  re-quoted on exactly the cohort each V2 variant filled (the entry **PRICE** effect) and on the
+  cohort it never filled (the **SELECTION** effect), with n, median/mean gross and net and hit rate
+  per horizon per cell, plus the same split per margin tercile. Descriptive, not a fourth trial.
+- **Every cell prints its own fill rate** (`n_signals_in_cell` / `fill_rate_in_cell`). An "in every
+  margin tercile" claim is only readable off `v2_beats_matched_v1_in_every_margin_tercile`, never off
+  the unmatched pooled rows.
+- **Reported promotability is CPCV AND geometry** (2026-09-12 amendment): a cell that passes the
+  mean-based CPCV gate while its MEDIAN net is ≤ 0 prints `GATES DISAGREE` and reads NOT promotable.
+  Both decision-rule outcomes are printed — the registered gate (`decision`) and the tightened one
+  (`decision_under_tightened_reporting_rule`) — with an explicit "does the tightening change the
+  registered outcome?" line. On the 2026-09-12 run it does not.
+
+## Sector map rebuild outside the engine (2026-09-21) - after a classification change, engine OFF
+
+The `sector_map` job is Sunday-only, so a new override or a classifier change (the 2026-09-21
+NSE-Industry fallback) otherwise waits a week. Same `SectorMapJob` the engine wires, same store.
+
+```powershell
+Stop-Service mt-engine                                   # single-writer DuckDB
+.venv\Scripts\python.exe scripts\run_sector_map.py       # as_of today; prints the bucket counts
+Start-Service mt-engine
+```
+
+First run 2026-09-21 02:37 IST: batch universe 910 (as of 09-18), snapshot 913 -> 926 rows,
+UNCLASSIFIED 750 -> 426 (the remainder = extended non-index names, never gate-approvable),
+`industry_classified=337`. `--dry-run` reports the current snapshot without writing.

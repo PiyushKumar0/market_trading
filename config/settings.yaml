@@ -79,26 +79,103 @@ data:
   # ex-date open Rs 2358 (no raw jump); daily agrees (2332). So the backfill / bar-stitching job needs
   # NO re-adjustment of Kite minute history across ex-dates (A11). Recorded also in plan section 14 Q10.
   minute_candles_adjusted: true
-  universe_max_watchlist: 50              # active intraday watchlist cap [tunable] (A3 not the binding constraint)
+  universe_max_watchlist: 300            # active intraday watchlist cap [tunable] (A3 not the binding constraint)
+                                          # 50 -> 100 owner-directed 2026-08-04 (BPCL, liquidity rank 96,
+                                          # was structurally invisible); 100 -> 200 owner-directed 2026-08-20
+                                          # (origination review: cap >= eligible set, watchlist_cap exclusion
+                                          # now structurally empty - per-bar scanners see the full eligible
+                                          # NIFTY200). O15 2026-09-04: eligible widened to NIFTY 500, so this
+                                          # cap BINDS again by design - the tick watchlist is the top 200
+                                          # eligible by traded value, the rest audit as watchlist_cap; raising
+                                          # it is a separate, measured step (tick volume, bar building and
+                                          # per-minute feature snapshots all scale with it). First boot after a
+                                          # raise backfills 1m history for the newly watched symbols (A2
+                                          # throttled - longer warm-up that morning). 200 -> 300 owner-agreed
+                                          # 2026-09-07: first step of the staged raise toward the NIFTY 500
+                                          # eligible set; measure stalls / late ticks / snapshot time /
+                                          # warm-up on the next session before stepping to 400 and 480.
   min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
   backfill_daily_years: 2
   backfill_minute_years: 1
+  batch_universe_enabled: true            # §3.2.4 extended leg (owner-directed 2026-09-01, movers review):
+                                          # criteria-passing NON-index symbols persisted included=False,
+                                          # exclusion_reasons=['not_in_index'] — batch rules / news shadow /
+                                          # pre-open advisory only; tick watchlist + risk gate stay scoped to
+                                          # the configured index (NIFTY 500 since 2026-09-04, O15).
+                                          # false = exact pre-addendum universe shape (the rollback line).
+  batch_universe_max: 600                 # top-N extended by median traded value (sanity cap)
 
 # --- News-intelligence layer (§2.7) — owner-only operational config; changes audited (config_audit) ---
 news:
-  # Feed set (§3.2.4 NewsIngest). URLs are SEEDS to be VERIFIED at Phase-1 implementation (feeds move;
-  # the G1 gate exercises them live for ≥5 sessions). Headline-level only; bodies never fetched.
+  # Feed set (§3.2.4 NewsIngest). `rss` is an open name -> {url, poll_s} map: one scheduler job per
+  # entry, so adding/removing a source is a settings edit, not a code change. Headline-level only;
+  # bodies never fetched. Moneycontrol RSS REMOVED 2026-08-04 — its whole feed ecosystem has been
+  # frozen since ~2024-04 (probe 2026-08-04: newest pubDate ~832 days old; 391 engine polls inserted
+  # 0 headlines ever), which left the corpus ET-only and made cat's min_source_domains:2 unpassable.
   feeds:
-    et_markets_rss:   "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"  # 5-min poll [VERIFY Phase-1]
-    moneycontrol_rss: "https://www.moneycontrol.com/rss/business.xml"                         # 15-min, polite [VERIFY Phase-1]
-    gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query, 15-min [VERIFY Phase-1]
+    rss:
+      et:                                                                                    # verified live 2026-08-04
+        url:    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
+        poll_s: 300                                                                          # 5-min cadence (§3.2.4)
+      livemint_markets:                                                                      # verified live 2026-08-04 (HTTP 200, 35 items, newest 11 min old)
+        url:    "https://www.livemint.com/rss/markets"
+        poll_s: 900                                                                          # 15-min, polite
+      livemint_companies:                                                                    # verified live 2026-08-04 (HTTP 200, 35 items, newest 31 min old)
+        url:    "https://www.livemint.com/rss/companies"
+        poll_s: 900                                                                          # 15-min, polite
+      # 2026-08-05 pool widening (owner-directed): the corroboration pool was effectively TWO domains
+      # (both livemint feeds are ONE domain), so min_source_domains:2 required the exact ET∩LM
+      # intersection. Three new DOMAINS below take the pool to five — "any 2 of 5" is realistic for
+      # genuine stories, unchanged bar for a manipulator. Probed live 2026-08-05; rejected same day:
+      # financialexpress (malformed XML), zeebiz + business-standard (WAF 403 — RE-PROBED LIVE
+      # 2026-09-04: the 403 no longer reproduces, so business-standard is ADOPTED below),
+      # businesstoday (no dates).
+      hbl_markets:                                                                           # verified live 2026-08-05 (60 items, newest 34 min)
+        url:    "https://www.thehindubusinessline.com/markets/feeder/default.rss"
+        poll_s: 900
+      hbl_companies:                                                                         # verified live 2026-08-05 (60 items, newest 40 min)
+        url:    "https://www.thehindubusinessline.com/companies/feeder/default.rss"
+        poll_s: 900
+      cnbctv18_market:                                                                       # verified live 2026-08-05 (200 items, newest 10 min)
+        url:    "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml"
+        poll_s: 900
+      ndtvprofit:                                                                            # verified live 2026-08-05 (20 items, newest 63 min)
+        url:    "https://feeds.feedburner.com/ndtvprofit-latest"
+        poll_s: 900
+      # 2026-09-04 coverage widening (owner-directed "improve the coverage"): Business Standard is a
+      # sixth DOMAIN for the story-level corroboration count. The 2026-08-05 WAF 403 was re-probed
+      # live and does not reproduce.
+      bs_markets:                                                                            # verified live 2026-09-04 (HTTP 200, newest item <20 min)
+        url:    "https://www.business-standard.com/rss/markets-106.rss"
+        poll_s: 900
+      bs_companies:                                                                          # verified live 2026-09-04 (HTTP 200, 35 items, newest 35 min)
+        url:    "https://www.business-standard.com/rss/companies-101.rss"
+        poll_s: 900
+    gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query [VERIFY Phase-1]
+    # The EXCHANGE as a feed (§2.7 amendment 2026-09-04): NSE corporate-announcements, fetched
+    # through the shared nse_http client. Items carry `symbol` natively, so each becomes a news row
+    # titled "[NSE:<SYMBOL>] <subject>: <text>" that EntityResolver resolves exactly (never an alias
+    # guess), with source_domain nseindia.com — ONE corroborating domain, never two. Coverage audit:
+    # only 47% of top-10 movers had any cluster naming them; UNITDSPR's Reg-30 disclosure and
+    # HINDZINC's LoI (~2 h before the press headline) were on this endpoint and in no press feed.
+    nse_announcements:
+      enabled: true                # owner off switch: false = no fetch and no scheduler job
+      poll_s: 300                  # the exchange disseminates all day; 5-min cadence (§2.7)
+      drop_subjects:               # case-insensitive SUBSTRING match on the item's subject (`desc`)
+        - "Trading Window"                          # routine PIT compliance window notices
+        - "Loss of Share Certificate"               # registrar administrivia
+        - "Compliances-Certificate"                 # periodic compliance certificates
+        - "Newspaper Publication"                   # catches NSE's "Copy of Newspaper Publication"
+        - "Analysts/Institutional Investor Meet"    # meeting schedules, not the outcome
+        - "Change in Registrar"
+        - "Book Closure"
   cluster_sim_threshold: 0.75    # §3.2.4 pinned clustering similarity [tunable, owner] — drives the
                                  # corroboration count, so owner-only (never in envelope.yaml)
-  et_poll_s: 300                 # ET Markets RSS poll cadence (§3.2.4: 5 min)
-  mc_poll_s: 900                 # Moneycontrol RSS poll cadence (15 min, polite)
-  gdelt_poll_s: 1800             # GDELT DOC 2.0 poll cadence — raised 900→1800 (2026-07-22: intermittent
-                                 # 429s/throttle pages at 15-min; GDELT updates 15-min but O12 only needs
-                                 # the pre-open digest, so 30-min halves quota pressure at zero cost)
+  gdelt_poll_s: 3600             # GDELT DOC 2.0 poll cadence — 1800→3600 (2026-08-04: the 429s persisted
+                                 # at 30-min, and a probe of a SINGLE fresh request still 429'd, so the
+                                 # limit is not cadence-shaped; O12 only needs the pre-open digest)
+  request_timeout_s: 30          # per-fetch HTTP timeout — 10→30 (2026-08-04: 121 ConnectTimeouts against
+                                 # GDELT at the old 10 s; ~99% of polls returned nothing)
   backfill_lookback_h: 72        # off-period startup headline backfill window (§4.4 job 10)
   gdelt_backfill_max_days: 90    # GDELT DOC ~3-month window — no deeper backfill dependency (E6)
 
@@ -107,6 +184,27 @@ cat:
                                  # before threshold comparison. Owner-only, deliberately NOT learnable.
   max_event_age_days: 2          # §2.7 HeadlineClusterer near-duplicate assignment window + `cat` catalyst
                                  # age horizon (owner-only, NOT learnable; wired into HeadlineClusterer)
+  # --- `cat` v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18). ins-mechanics mirror.
+  # Deliberately NO expected_edge_pct: there is no validated edge (the shadow measures it), so the
+  # §7.1 C3 gate fail-closed-rejects every cat candidate — signals are journalled at prescreen
+  # admission, nothing reaches RECOMMEND. Adding the edge key is the §8.6 owner gate, post-verdict.
+  stop_pct: 5.0                  # disaster stop; §7.1 overnight_gap_mult arithmetic (the ins 5% reasoning)
+  hold_sessions: 20              # = the §7.1 swing max_holding cap; exit is TIME, target is None
+
+# §2.7 `cat_reversal` SHADOW (2026-08-27, the HINDZINC denial) — story-level directional REVERSAL as
+# its own catalyst: the winning cluster of a (symbol, event_type) story reverses an EARLIER,
+# floor-clearing, opposite-direction cluster of the same story. Separate experiment from `cat` v2,
+# with its own pre-registered horizons (T+5 / T+10), its own clock and its own knobs — deliberately
+# NOT sharing `cat.stop_pct`, so tuning one can never silently move the other.
+#
+# Entries count against the SAME catalyst_guard.max_catalyst_entries_day budget `cat` uses (the cap
+# keys off the candidate's catalyst_ref, not its strategy_id) — adding a strategy must not widen the
+# platform's total news-originated exposure surface. No expected_edge_pct: registered instead in the
+# gate's no_edge_shadow_strategies, so C3 rejects every candidate whatever target the analyst emits.
+cat_reversal:
+  stop_pct: 5.0                  # disaster stop; §7.1 overnight_gap_mult arithmetic (the ins reasoning)
+  hold_sessions: 10              # intended exit if §8.6 ever opens = the longer horizon (T+10);
+                                 # INERT during the shadow — nothing is ever held
 
 # §2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
 # envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: read by NO decision
@@ -116,12 +214,232 @@ filings:
   insider_min_value_over_adv: 0.05   # AND value/20d-ADV floor (§2.8.2)
   pledge_delta_min_pct: 5.0          # QoQ promoter-pledge %-point change to flag (§2.8.2)
 
+# §6.1 `ins` — insider net-BUY swing leg (owner-directed 2026-08-17, the first EVIDENCE-FIRST
+# origination rule). OWNER-ONLY knobs, not in the learnable envelope (§6.3) for Phase 2.
+#
+# PROVENANCE (WO-16, 2026-08-14 — IMPROVEMENT_SPEC.md): the §2.8.4 insider_net_buy leg was re-run
+# under corrected mechanics — DISCLOSURE-date anchoring (never the insider's transaction date),
+# next-session-OPEN fills, the corrected spread-inclusive CNC cost surface, and the WO-3 margin floor
+# on the CPCV stage — and SURVIVED: T+10 +0.7297% / T+20 +1.5797% net, CPCV +0.0359%/day with the
+# median passing split 4x the margin floor. It is the ONLY recorded edge that survived, which is the
+# whole reason this block exists.
+#
+# HONEST CAVEATS, carried not hidden (plan §6.1 `ins` addendum):
+#   * Live crossings come from the BSE FRESH feed (live 2026-07-19, ~13-18 in-universe rows/day) and,
+#     since 2026-09-24, NSE's PIT V2.0 route (the old NSE route's ~70-day embargo had made NSE
+#     historical-only). The live-reachable event population is NOT proven identical to the backtested
+#     one. The ins_crossings job logs fresh-feed row counts every run — sustained zero-rows is
+#     STARVATION, not absence of signal.
+#   * The CPCV pass is boundary-exact: 60.0% of folds against a 60% bar, one fold from failure.
+#   * The survivorship / index-membership bound is uncorrectable with stored data.
+ins:
+  stop_pct: 5.0                # DISASTER stop, a deliberate deviation from the stopless validated
+                               # design: §7.1 sizing needs a risk distance, so one must exist. Set
+                               # 2026-08-17 to the then-WIDEST economically viable point: the §7.1
+                               # overnight_gap_mult charges every swing unit 2.0× its stop distance
+                               # (O17; 2.5× when set), so at the ₹20,000 equity these were measured
+                               # on notional ≈ ₹400/(2.0×stop%) (₹400/(2.5×stop%)), and the DP flat
+                               # charge makes WIDER stops WORSE — measured edge multiples (real gate
+                               # + CostModel, ins edge 1.58): 4%→2.88× PASS (2.52×), 5%→2.52× PASS
+                               # (2.19×), 6%→2.23× PASS (1.90× REJECT), 7%→1.9991× REJECT (1.68×),
+                               # 8%→1.84× REJECT (1.57×). So [4-6] of the future [4-8] envelope
+                               # range is viable at that capital ([4-5] pre-O17); at the ₹40,000
+                               # base (O16) all of [4-8] clears. O17 did not change this value —
+                               # re-choosing it is a separate owner decision (plan §6.1).
+  hold_sessions: 20            # = the §7.1 max_holding swing cap (limits.yaml swing_trading_days: 20)
+                               # = exactly the validated T+20 horizon, so the EXISTING max-holding
+                               # machinery IS the exit path. No new exit code exists for `ins`.
+                               # FUTURE §6.3 envelope row [10-20] — static owner knob for Phase 2.
+  threshold_inr: 10000000      # ₹1cr trailing-10-session open-market insider net-BUY floor.
+                               # OWNER-FIXED and NEVER learnable: this threshold DEFINES the validated
+                               # event population — moving it re-opens multiplicity.
+  expected_edge_pct: 1.58      # the validated T+20 NET drift, fed to the C3 cost gate. `ins` ships
+                               # target: None (the T+20 median +1.21% is INFORMATION, never an order
+                               # level), so the gate cannot derive an edge from the levels — this is
+                               # the per-strategy input it uses instead. At default sizing (2% swing
+                               # risk / 6% stop ~ ₹6.7k notional) the CNC round trip is ~0.53% incl.
+                               # the DP flat charge => edge multiple ~3x. The exact CostModel
+                               # adjudicates per candidate; small notionals may be shrunk or rejected,
+                               # and that is the gate doing its job.
+
+# §6.1/§8.6 `hi52` — 52wk-high-proximity swing v2, PROMOTED out of shadow 2026-09-12 as a FORWARD
+# TEST with a written kill rule (plan §8.6 addendum; `scripts/hi52_forward_verdict.py` is the
+# verdict). The rule's own parameters (incl. v2's smooth/gap thresholds) live in
+# hi52.DEFAULT_PARAMS where the 09-09 pre-registration froze them — only the edge is config.
+hi52:
+  expected_edge_pct: 1.53      # the C3 edge basis for a targetless proposal, the `ins` seam. NOT a
+                               # net-drift transcription: DERIVED, and by ONE formula that lives in
+                               # code — scripts/hi52_forward_verdict.py `registered_edge_pct()`,
+                               # which a unit test pins against THIS key, so the two cannot drift.
+                               #   edge = measured T+20 median GROSS - CostModel.breakeven_pct(N)
+                               #   N    = equity x per_trade_risk.swing_position_pct/100
+                               #          / (per_trade_risk.overnight_gap_mult x stop_pct/100)
+                               # GROSS = +2.0336% (v2 discrete run 2026-09-09, n=1,794 —
+                               # data/reports/backtest_hi52_v2_2026-09-09.json, geometry block).
+                               # N is not chosen, it is implied by §7.1 sizing: a swing position is
+                               # capped at 2.0% of equity charged at 2.0x the stop distance (O17;
+                               # 2.5x before it), and hi52's stop is 6%, so
+                               # N <= equity x 2% / (2.0 x 6%) = equity/6 — Rs 6,000 at the
+                               # equity_floor_rung (Rs 36,000, the
+                               # SMALLEST equity the risk table still lets a position be opened at:
+                               # below it the platform goes flat + CLOSE_ONLY). The floor RISES as
+                               # the book shrinks, and this key is a
+                               # constant read for months, so it is derived at the WORST permitted
+                               # book rather than at today's: 2.0336 - 0.4982 = 1.5354 => 1.53
+                               # (pre-O17 at 2.5x: Rs 4,800, 2.0336 - 0.5619 = 1.4717 => 1.47),
+                               # ROUNDED DOWN (rounding an edge up is the one direction that buys a
+                               # candidate a C3 pass it did not earn). Deliberately NOT the
+                               # backtest's own +1.71% net: it charged 0.3192% at a Rs 20,000
+                               # reference size this book never trades. OWNER-SET, NEVER
+                               # learner-movable (the `ins` pattern): this number is what the §7.1
+                               # C3 check multiplies against the cost floor, so a learner allowed to
+                               # raise it could buy any candidate a pass. DEMOTION under the kill
+                               # rule is TWO edits in one owner-visible commit, both or neither:
+                               # (1) re-add hi52.STRATEGY_ID to ops.main.NO_EDGE_SHADOW_STRATEGIES
+                               # and (2) DELETE this key. Either alone leaves a half-promoted rule.
+                               # Edit (2) BITES: Hi52Cfg.expected_edge_pct defaults to None, so an
+                               # absent key un-registers the edge instead of falling back to a
+                               # number in code.
+
+# §6.1 `brk20` — the ENTRY MECHANISM, not the rule. The rule's own parameters live in
+# brk20.DEFAULT_PARAMS (the §6.3 learnable envelope) and the WO-19 stop-geometry floor in
+# brk20.FLOOR_PARAMS (owner-only by construction); this block holds only how long the broken level
+# is offered for.
+brk20:
+  retest_sessions: 5           # TRADING sessions after the crossing session during which the broken
+                               # level may be RE-PUBLISHED when the live price comes back inside the
+                               # §7.1 entry_sanity_band (src/engine/strategy/retest.py, migration
+                               # 0014). 5 = `V2_limit_at_H20_N5`, the variant the 2026-09-12
+                               # pre-registered entry-mechanism backtest returned under its own
+                               # decision rule (median net +0.0513% at T+10 — the only variant
+                               # geometry-viable there — and +0.9168% at T+20; CPCV fold pass
+                               # 73.3%/80.0%; fill rate 59.1%). What SHIPPED before WO-R was N=1:
+                               # the level published once, on the crossing session, fill rate 31.4%
+                               # off the registered delay histogram and no measured return at all.
+                               # OWNER-ONLY and NEVER learnable: this number IS the registered
+                               # mechanism — N=1 and N=3 were both measured and both lost, and every
+                               # other N was never run, so a learner moving it would be selecting an
+                               # entry mechanism no study measured. It buys `brk20` no expectancy
+                               # presumption (the study chose between two mechanisms; it promoted no
+                               # rule, on a survivorship-tainted eligible-universe proxy), no new
+                               # entry price, no widened band and no new admission capacity — every
+                               # re-publication faces the same prescreen caps and the same §7.1 gate.
+
 # §3.2.5 pre-screen candidate-origination throttles (owner-tunable). Scanner PARAMETERS live in the
 # learner-writable envelope_state (R4), never here — these are coarse per-day caps only.
 strategy:
   prescreen:
-    max_candidates_per_day: 20   # signal.candidate publications per trading day (SignalPreScreen)
-    max_per_strategy_day:        # optional per-strategy sub-cap (blank = only the daily total applies)
+    # signal.candidate publications per trading day (SignalPreScreen). 20→48 (2026-08-18): this cap
+    # exists to protect the ANALYST forward budget, and that budget moved without it — agents.yaml
+    # `intraday_analyst.prescreen_cap_per_day` went 6→12 (2026-08-11) →48 (2026-08-18, the ~5x
+    # envelope raise, sized "to clear a 66-candidate morning") while this number sat at 20, unchanged
+    # since Phase 1. Origination was therefore throttled 2.4x BELOW the thing it throttles for.
+    # Observed live 2026-08-18: 20/20 slots spent by 10:10:49, then 2,549 refusals for the rest of
+    # the session (47 distinct orb pairs at score >= 0.99) against 13 analyst calls and 0 proposals.
+    # Set EQUAL to prescreen_cap_per_day deliberately — one number, one meaning; if the forward cap
+    # moves again this must move with it (there is no derivation, only this comment).
+    max_candidates_per_day: 48
+    # Admission ORDER (WO-1, 2026-08-13). `ranked` = the pre-screen admits a batch score-descending
+    # and the analyst forward queue picks by per-strategy score quantile; `arrival` = the pre-WO-1
+    # first-come-first-served order. `arrival` is the documented ROLLBACK setting and nothing else.
+    admission_mode: ranked
+    # Forward-queue DRAIN trigger (2026-08-14). `paced` = the analyst slot is spent on a fixed
+    # cadence (engine.ops.pipeline.FORWARD_PACING_MIN, 3 min) so candidates accumulate and the
+    # ranking above actually chooses between them; `immediate` = the pre-2026-08-14 inline drain,
+    # where the arriving candidate was the only one pending and all 12 slots went in the first five
+    # minutes of the session (live 2026-08-14). `immediate` is the documented ROLLBACK and nothing
+    # else.
+    forward_drain_mode: paced
+    # Per-strategy publication sub-caps [owner knob — NOT in the learnable envelope (§6.3); the
+    # learner may never move a cap that decides which strategies get evaluated at all].
+    # `default` binds any strategy without its own line, and at 16 = 33% of max_candidates_per_day
+    # it STRUCTURALLY prevents any single strategy — including one added after this file was
+    # written — from taking more than a third of the day's slots. orb is capped explicitly: on
+    # 2026-08-11 it took 55% of the day's publications purely by firing first.
+    # Rescaled with the day cap 2026-08-18 (20→48). The sub-caps SUM to 63 > 48, same shape as
+    # before the rescale (36 > 20): the day cap is the aggregate bound, these decide the MIX.
+    # HISTORICAL (superseded 2026-09-12 by orb: 0 below — kept because it is the reasoning that set
+    # the 7 the park replaces, and it returns with the strategy if orb is ever re-enabled).
+    # orb was deliberately NOT scaled with the rest — two independent reasons:
+    #   (i) drain physics: orb is the only intraday-style scanner, so its queued candidates carry
+    #       TTL_INTRADAY_MIN (20 min) against FORWARD_PACING_MIN (3 min) — a simultaneous burst of
+    #       N can drain at most ~7 before TTL expiry, and expiry never re-arms the day slot. A cap
+    #       above 7 guarantees burned slots on a burst day, and orb IS bursty (it fires at
+    #       range-completion). 7 = floor(20/3) + 1, the largest burst the pacing can fully serve.
+    #   (ii) score quality: 2026-08-18 showed orb firing on 76 symbols with 883 fires at exactly
+    #        score 1.0 — a SATURATED score, under which WO-1's ranked admission degenerates to
+    #        emission order. Until that is diagnosed, more orb slots just buy first-come noise.
+    max_per_strategy_day:
+      default: 16
+      orb: 0                     # parked 2026-09-12 (owner-directed after the 09-11 audit): 101 of
+                                 # 229 analyst forwards since 08-17 with zero entry proposals; three
+                                 # intraday price-only families refuted at retail cost (ORB 0/15 CPCV
+                                 # twice, tdc 09-04, candle battery 09-04); re-enable only behind a
+                                 # pre-registered intraday hypothesis that clears the cost floor
+                                 # (plan §8.6). 0 = admit nothing, charge no slot, one
+                                 # prescreen_strategy_disabled line a day, and no arm levels in the
+                                 # sweep verdict (a parked strategy can never arm).
+      rsi2: 16
+      trend: 10
+      mom: 8
+      brk20: 12
+      ins: 8                     # §6.1 `ins` (2026-08-17): a rare, EOD-batch event — ~13-18 fresh
+                                 # in-universe filings a day yield few crossings, so this is a
+                                 # ceiling against a cluster day, not an expected daily draw (4→8
+                                 # 2026-08-18 with the day cap; the expected draw is unchanged).
+      cat: 2                     # §2.7 v2 shadow (2026-08-18, WO-18): = catalyst_guard
+                                 # .max_catalyst_entries_day; measured flow ~0.3-0.6/day, so 2 is a
+                                 # cluster-day ceiling. Binds even before the guard-side wiring.
+      cat_reversal: 2            # §2.7 cat_reversal shadow (2026-08-27). Matches `cat`'s value: this
+                                 # is a PRESCREEN admission slot budget (analyst spend), a different
+                                 # and NON-shared budget from catalyst_guard.max_catalyst_entries_day
+                                 # — which cat_reversal DOES share with `cat`, so the platform's total
+                                 # news-originated entry ceiling stays 2/day with this strategy added.
+                                 # Reversal rows are a strict SUBSET of originating rows, so the real
+                                 # flow is well under `cat`'s; 2 is a ceiling, not an expectation.
+      hi52: 3                    # §6.1/§8.6 hi52 v2 (promoted 2026-09-12): 52wk-high-proximity
+                                 # fresh-crosses over the ELIGIBLE universe. Fresh-cross-only plus
+                                 # the v2 smooth/gap filters keeps natural flow to a handful/day; 3
+                                 # caps analyst spend on a cluster day. UNCHANGED by the promotion
+                                 # deliberately — the forward test measures the rule, not a wider
+                                 # tap, and these candidates now take REAL slots in the one ranked
+                                 # batch admission (scores ~0.95-1.0 rank above brk20's ~0.5-0.6,
+                                 # so this cap is what bounds the displacement they can do). It does
+                                 # NOT get publication priority with them: ops.main
+                                 # ._publication_order keeps hi52 last in the batch, so the analyst
+                                 # forward slot's fired_at tie-break still goes to the validated
+                                 # legs exactly as it did before the promotion.
+    cap_release_schedule:        # Owner-directed 2026-09-02 (3rd straight session of window-open cap
+      orb:                       # lockout: 08-27 KALYANKJIL 1.0@12:49, 09-01 PERSISTENT/HCLTECH/INFY,
+        "10:00": 3               # 09-02 IDEA/VMM/OIL all 1.0, all refused). Cumulative tranches by
+        "11:30": 5               # IST bar time; effective cap = min(max_per_strategy_day, tranche).
+        "13:00": 7               # Paired with the same-day orb score de-saturation so displacement
+                                 # discriminates WITHIN a tranche. Absent/removed = flat caps (rollback).
+                                 # INERT while orb is parked (min(0, tranche) = 0, and the park gate
+                                 # refuses before the schedule is read); kept for the re-enable.
+    # How much better a later candidate must score to take a full cap's admission slot from an
+    # unevaluated (or, since 2026-09-04, declined) incumbent of the SAME strategy [owner knob — NOT in the learnable envelope (§6.3),
+    # same reason as max_per_strategy_day above: it decides which candidates get evaluated at all].
+    #
+    # Why the cap needed displacement at all, and what makes it safe: the module docstring of
+    # src/engine/strategy/prescreen.py (the "Cap displacement" section) — the 2026-08-27 incident,
+    # the invariants, and why it could not be fixed in the pipeline.
+    #
+    # Why 0.10 rather than a bare "strictly higher":
+    #   (i) scores are clamped to [0, 1], so strict inequality lets 0.801 evict 0.800 — a
+    #       publication, a journal write and a discarded queue entry spent on noise, and an
+    #       oscillation that a margin makes structurally impossible;
+    #  (ii) 0.10 is a tenth of the clamped [0, 1] score range — the smallest gap that still names a
+    #       materially better candidate rather than noise, and small enough that a real afternoon
+    #       fire can clear it. Deliberately NOT tied to the forward ranker's quintile bands: those
+    #       are EMPIRICAL rank quintiles of a strategy's own day, not fixed 0.2-wide slices of the
+    #       score, so "one band" is not a score distance and there is no equivalence to borrow.
+    # Compared in integer basis points, never float arithmetic: 0.90 - 0.80 is 0.09999999999999998
+    # in IEEE-754, which would make this boundary depend on representation rather than on the rule.
+    # Raising it makes displacement rarer; `null` disables it entirely (the pre-2026-08-27 rollback).
+    # NOTE: orb's score SATURATES (883 fires at exactly 1.0 on 2026-08-18, see (ii) above), and equal
+    # incumbents are undisplaceable at ANY margin — so this knob cannot rescue a saturated strategy.
+    displacement_margin: 0.10
 
 # §3.2.3 ReconcileJob drift thresholds (A13) [tunable]: alert when >max_bad_bar_fraction of compared
 # bars drift by >vol_drift_pct volume or >close_drift_ticks ticks on close. Offline spans are
@@ -138,10 +456,14 @@ backfill:
   day_chunk_days: 2000           # max span per day-interval historical request
 
 # §3.2.4 UniverseBuilder inputs (A8). The NSE list fetch is best-effort (E5); the seed CSV is the
-# offline fallback so universe build never hard-depends on an NSE page.
+# offline fallback so universe build never hard-depends on an NSE page. The index is CONFIG, not a
+# constant: O15 (owner-directed 2026-09-04) widened the eligible universe NIFTY200 -> NIFTY 500.
+# The retired nifty200_* keys have NO aliases — UniverseCfg forbids extras, so a stale settings.yaml
+# fails loudly at boot instead of quietly presenting the wrong universe as live.
 universe:
-  nifty200_source_url: "https://archives.nseindia.com/content/indices/ind_nifty200list.csv"  # [VERIFY Phase-1]
-  nifty200_seed_path: "config/universe/nifty200_seed.csv"
+  index_name: "NIFTY 500"                  # logged on universe_built; named in the fallback alert
+  index_source_url: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]
+  index_seed_path: "config/universe/nifty500_seed.csv"   # nifty200_seed.csv stays as history, unread
 
 # §10.1 scheduler fire-times (IST, trading days, R6). Fire-times only — every job is also §2.6
 # catch-up-eligible on the next startup if its fire-time passed while the engine was off.
@@ -162,6 +484,10 @@ jobs:
                                  # corp_actions; still before the 21:00 backup)
   filings_pit_ist: "18:35"       # §2.8 filings_pit — insider trades (NSE PIT, historical; date-keyed)
   filings_pit_fresh_ist: "19:00" # §2.8 filings_pit_fresh — BSE fresh insider, same-day (date-keyed)
+  ins_crossings_ist: "19:15"     # §6.1 ins_crossings — EOD insider net-buy crossing detection
+                                 # (date-keyed). MUST stay AFTER filings_pit_fresh (19:00): it reads
+                                 # the same-day BSE rows that job ingests. Its catch-up `order` (66)
+                                 # enforces the same dependency when a missed day is replayed.
   filings_results_ist: "18:45"   # §2.8 filings_results — results + board-meeting dates (date-keyed)
   filings_shp_ist: "18:50"       # §2.8 filings_shp — SHP + pledge (run-latest)
   nightly_review_ist: "21:00"    # §5.5/§6.4

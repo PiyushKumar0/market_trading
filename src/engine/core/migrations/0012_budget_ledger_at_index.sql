@@ -1,0 +1,16 @@
+-- ------------------------------------------- §5.6 budget governor: index the ledger's time column
+-- 2026-09-12 (owner-directed): the governor's period became the SUBSCRIPTION's quota week (Thursday
+-- 14:00 IST → Thursday 14:00 IST), not the calendar month, so every spend query changed shape from
+-- ``WHERE month = ?`` to ``WHERE at >= ? AND at < ?``. ``idx_budget_month`` cannot serve that range
+-- and the ladder is re-evaluated on EVERY billed call, so without this index each call would scan the
+-- whole ledger (2,028 rows and growing ~60/day) several times over.
+--
+-- The range is a lexicographic string compare, which is sound only because every writer stamps ``at``
+-- from the IST ``Clock`` — a fixed ``+05:30`` offset makes ISO-8601 sort chronologically (the same
+-- convention ``idx_notifications_created_at`` rests on); ``BudgetGovernor.record`` now rejects a naive
+-- ``at`` outright so a stray stamp cannot land outside every window.
+--
+-- ``idx_budget_month`` is deliberately LEFT IN PLACE: the ``month`` column is still written on every
+-- row as history, and dropping an index is not something a forward-only migration should do for a
+-- table the nightly review also scans.
+CREATE INDEX IF NOT EXISTS idx_budget_at ON budget_ledger (at);

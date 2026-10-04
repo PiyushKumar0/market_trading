@@ -29,11 +29,19 @@ data/
 *.key
 *.pem
 secrets.*
+# ...but not the keyring-access module (code, no secret values): ignoring it left a fresh clone
+# unable to import `engine` (found 2026-09-23 building a scratch worktree).
+!src/engine/core/secrets.py
 
 # --- Dashboard build output (O8) ---
 dashboard/node_modules/
 dashboard/dist/
 dashboard/.vite/
+
+# web/dist/ is SOURCE, not build output: the hand-written, dependency-free notifications page
+# (WO-24d, served at /notifications-ui). The generic `dist/` rule above would otherwise swallow it,
+# so the only file the platform's own dashboard page consists of could never be committed.
+!web/dist/
 
 # --- OS / editor ---
 Thumbs.db
@@ -46,6 +54,8 @@ desktop.ini
 # --- Claude Code harness transient state (keep .claude/settings*.json if you add them) ---
 .claude/scheduled_tasks.lock
 .claude/projects/
+.claude/worktrees/
+.claude/settings.local.json
 
 # uv lockfile IS committed (reproducible builds) — do not ignore uv.lock
 

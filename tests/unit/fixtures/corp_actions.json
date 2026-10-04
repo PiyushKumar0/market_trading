@@ -1,34 +1,82 @@
-{
-  "data": [
-    {
-      "symbol": "RELIANCE",
-      "comp": "Reliance Industries Limited",
-      "purpose": "Dividend - Rs 9 Per Share",
-      "exDate": "15-Jul-2026"
-    },
-    {
-      "symbol": "BEL",
-      "comp": "Bharat Electronics Limited",
-      "purpose": "Bonus 1:1",
-      "exDate": "20-Jul-2026"
-    },
-    {
-      "symbol": "TATAMOTORS",
-      "comp": "Tata Motors Limited",
-      "purpose": "Face Value Split (Sub-Division) - From Rs 2 Per Share To Re 1 Per Share",
-      "exDate": "22-Jul-2026"
-    },
-    {
-      "symbol": "XYZCO",
-      "comp": "XYZ Company Limited",
-      "purpose": "Scheme of Arrangement",
-      "exDate": "01-Aug-2026"
-    },
-    {
-      "symbol": "NODATE",
-      "comp": "No Date Limited",
-      "purpose": "Dividend - Rs 2 Per Share",
-      "exDate": ""
-    }
-  ]
-}
+[
+  {
+    "symbol": "RELIANCE",
+    "series": "EQ",
+    "ind": "-",
+    "faceVal": "10",
+    "subject": "Dividend - Rs 9 Per Share",
+    "exDate": "15-Jul-2026",
+    "recDate": "15-Jul-2026",
+    "bcStartDate": "-",
+    "bcEndDate": "-",
+    "ndStartDate": "-",
+    "ndEndDate": "-",
+    "comp": "Reliance Industries Limited",
+    "isin": "INE002A01018",
+    "caBroadcastDate": null
+  },
+  {
+    "symbol": "BEL",
+    "series": "EQ",
+    "ind": "-",
+    "faceVal": "1",
+    "subject": "Bonus 1:1",
+    "exDate": "20-Jul-2026",
+    "recDate": "20-Jul-2026",
+    "bcStartDate": "-",
+    "bcEndDate": "-",
+    "ndStartDate": "-",
+    "ndEndDate": "-",
+    "comp": "Bharat Electronics Limited",
+    "isin": "INE263A01024",
+    "caBroadcastDate": null
+  },
+  {
+    "symbol": "TATAMOTORS",
+    "series": "EQ",
+    "ind": "-",
+    "faceVal": "2",
+    "subject": "Face Value Split (Sub-Division) - From Rs 2 Per Share To Re 1 Per Share",
+    "exDate": "22-Jul-2026",
+    "recDate": "22-Jul-2026",
+    "bcStartDate": "-",
+    "bcEndDate": "-",
+    "ndStartDate": "-",
+    "ndEndDate": "-",
+    "comp": "Tata Motors Limited",
+    "isin": "INE155A01022",
+    "caBroadcastDate": null
+  },
+  {
+    "symbol": "XYZCO",
+    "series": "EQ",
+    "ind": "-",
+    "faceVal": "10",
+    "subject": "Scheme of Arrangement",
+    "exDate": "01-Aug-2026",
+    "recDate": "01-Aug-2026",
+    "bcStartDate": "-",
+    "bcEndDate": "-",
+    "ndStartDate": "-",
+    "ndEndDate": "-",
+    "comp": "XYZ Company Limited",
+    "isin": "INE000X01011",
+    "caBroadcastDate": null
+  },
+  {
+    "symbol": "NODATE",
+    "series": "EQ",
+    "ind": "-",
+    "faceVal": "10",
+    "subject": "Dividend - Rs 2 Per Share",
+    "exDate": "",
+    "recDate": "",
+    "bcStartDate": "-",
+    "bcEndDate": "-",
+    "ndStartDate": "-",
+    "ndEndDate": "-",
+    "comp": "No Date Limited",
+    "isin": "INE000N01019",
+    "caBroadcastDate": null
+  }
+]

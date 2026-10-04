@@ -154,6 +154,17 @@ class NSECalendar:
             probe += timedelta(days=1)
         raise ValueError(f"no trading day found within ~1y after {d} (calendar horizon, R6)")
 
+    def previous_trading_day(self, d: date) -> date:
+        """Latest trading day strictly before ``d`` — the "last completed session" anchor used by
+        readers of EOD-published data (e.g. ``flagged_instrument_days``, written at 20:30 of its own
+        day and therefore only knowable for sessions before today)."""
+        probe = d - timedelta(days=1)
+        for _ in range(370):  # bounded: a missing prior-year calendar must not loop forever
+            if self.is_trading_day(probe):
+                return probe
+            probe -= timedelta(days=1)
+        raise ValueError(f"no trading day found within ~1y before {d} (calendar horizon, R6)")
+
     def verified_horizon(self) -> date | None:
         """The furthest date the loaded calendars are verified through (None if none verified)."""
         horizons = [c.verified_through for c in self._years.values() if c.verified and c.verified_through]

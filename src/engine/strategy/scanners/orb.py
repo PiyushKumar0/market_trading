@@ -8,8 +8,10 @@ tick-derived high/low, so the seed bar's effective range is
 with ``volume ≥ vol_mult × median(volume over the 20 session bars immediately BEFORE the trigger
 bar)``; stop anchored at the **opposite range edge**: risk = ``stop_range_frac × (entry − range_low)``
 for BUY (mirror ``× (range_high − entry)`` for SELL); target = ``rr_target × risk`` where risk = the
-(unrounded) stop distance; suppressed on ``flagged_instrument_days`` (volume breakouts on
-bulk/block-deal days are untrustworthy, §4.4 job 9).
+(unrounded) stop distance; suppressed when the symbol had a bulk/block deal on the PRIOR trading
+session (``flagged_instrument_days`` via ``ctx.flagged`` — NSE publishes deals EOD, so the prior
+session's are the freshest knowable intraday; volume breakouts around deal activity are
+untrustworthy, §4.4 job 9).
 
 v2 note: v1 sized the stop as ``stop_atr_mult × ATR(14, 1m)`` — a noise-scale unit (~0.14% of price
 median) below the ₹20k MIS cost floor (round-trip ≈ 40–90% of the stop), which made negative net
@@ -30,8 +32,16 @@ Documented choices where the sketch is silent:
 * **Both directions are emitted** (BUY above the range, SELL below): the sketch says "beyond range".
   Whether SELL (MIS short) candidates are tradeable is downstream policy (§1.4.9 shorts gate / risk
   gate) — the baseline records both for §6.1 attribution.
-* **Score** = ``min(1, volume_ratio / (2 × vol_mult))`` — 0.5 exactly at the volume threshold, 1.0
-  at twice the threshold. Informational only (§3.2.5).
+* **Score** = ``vol_ratio / (vol_ratio + 2 × vol_mult)`` — a saturating-free squash (owner-directed
+  2026-09-02): 1/3 exactly at the volume threshold, 1/2 at twice it, asymptote 1 never reached. The
+  previous ``min(1, vol_ratio / (2 × vol_mult))`` clamped at 1.0 from 2×-threshold volume upward,
+  which most post-range bars clear — so on 2026-08-27/09-01/09-02 a large share of live fires tied
+  at exactly 1.0, the WO-1 ranking and the 2026-08-27 displacement margin had nothing to
+  discriminate with, and the window-open burst kept the whole day's sub-cap regardless of quality
+  (three sessions of ``prescreen_cap_suppressed`` on later score-1.0 fires). Scores have been
+  ranking-RELEVANT since WO-1 (admission order + displacement), not merely informational; this is a
+  RANKING heuristic within the strategy, monotone in the one quality signal orb's own rule uses —
+  it claims no edge and is not a learnable parameter.
 """
 
 from __future__ import annotations
@@ -42,13 +52,30 @@ from datetime import datetime, time, timedelta
 from engine.core.types import Bar
 from engine.strategy.indicators import rolling_median_volume
 from engine.strategy.scanners.base import Scanner, register
-from engine.strategy.types import ScanContext, Side, SignalCandidate, round_to_tick
+from engine.strategy.types import PendingSetup, ScanContext, Side, SignalCandidate, round_to_tick
 
 #: Plan-pinned base entry window (§6.1: "entries 09:30–14:30"), intersected with the owner window.
 BASE_ENTRY_START = time(9, 30)
 BASE_ENTRY_END = time(14, 30)
 
 _MEDIAN_WINDOW = 20   # §6.1: "20-bar median"
+
+
+def _opening_range(bars: list[Bar], session_open: datetime, range_end: datetime) -> tuple[float, float] | None:
+    """The A14 auction-open-seeded opening range ``(high, low)``, or None if no range bars exist."""
+    range_bars = [b for b in bars if session_open <= b.ts_minute < range_end]
+    if not range_bars:
+        return None
+    range_high = -math.inf
+    range_low = math.inf
+    for b in range_bars:
+        hi, lo = float(b.high), float(b.low)
+        if b.ts_minute == session_open and b.auction_open is not None:
+            hi = max(hi, float(b.auction_open))
+            lo = min(lo, float(b.auction_open))
+        range_high = max(range_high, hi)
+        range_low = min(range_low, lo)
+    return range_high, range_low
 
 
 @register
@@ -65,7 +92,7 @@ class OrbScanner(Scanner):
 
     def scan(self, bar: Bar, ctx: ScanContext) -> list[SignalCandidate]:
         if ctx.flagged:
-            return []  # bulk/block-deal day — volume breakout suppressed (§6.1)
+            return []  # bulk/block deal on the prior session — volume breakout suppressed (§6.1)
         if ctx.session_open is None or ctx.trade_window is None:
             return []  # fail to zero on missing context (warm-up / provider gap)
         bars = ctx.intraday_bars
@@ -86,18 +113,10 @@ class OrbScanner(Scanner):
             return []
 
         # ---- opening range, auction-open-seeded (A14).
-        range_bars = [b for b in bars if ctx.session_open <= b.ts_minute < range_end]
-        if not range_bars:
+        orange = _opening_range(bars, ctx.session_open, range_end)
+        if orange is None:
             return []
-        range_high = -math.inf
-        range_low = math.inf
-        for b in range_bars:
-            hi, lo = float(b.high), float(b.low)
-            if b.ts_minute == ctx.session_open and b.auction_open is not None:
-                hi = max(hi, float(b.auction_open))
-                lo = min(lo, float(b.auction_open))
-            range_high = max(range_high, hi)
-            range_low = min(range_low, lo)
+        range_high, range_low = orange
 
         close_f = float(bar.close)
         side: Side
@@ -139,6 +158,54 @@ class OrbScanner(Scanner):
                 entry=bar.close,
                 stop=stop,
                 target=target,
-                score=vol_ratio / (2.0 * p["vol_mult"]),
+                # Saturation-free squash (2026-09-02, module docstring): 1/3 at threshold, →1 never.
+                score=vol_ratio / (vol_ratio + 2.0 * p["vol_mult"]),
             )
+        ]
+
+    def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
+        """Both range edges as arm levels while price sits INSIDE the opening range (§3.2.5 sweep).
+
+        Reported without the volume/entry-window gates applied — those are conditions of the moment
+        the break happens, which is exactly what the owner is deciding whether to be present for.
+        The base 09:30–14:30 bound rides along in ``condition`` so the owner knows the legal span.
+        """
+        if ctx.flagged or ctx.session_open is None:
+            return []
+        bars = ctx.intraday_bars
+        if not bars:
+            return []
+        p = self.params
+        range_end = ctx.session_open + timedelta(minutes=int(p["orb_minutes"]))
+        if bar.ts_minute < range_end:
+            return []  # range still forming — no level to arm against yet
+        orange = _opening_range(bars, ctx.session_open, range_end)
+        if orange is None:
+            return []
+        range_high, range_low = orange
+        close_f = float(bar.close)
+        if close_f > range_high or close_f < range_low:
+            return []  # already beyond the range — that is scan()'s live-signal territory
+        condition = (
+            f"1m close beyond the level on volume ≥ {p['vol_mult']:g}× 20-bar median; "
+            f"entries legal {BASE_ENTRY_START:%H:%M}–{BASE_ENTRY_END:%H:%M} ∩ trade window"
+        )
+        # The full would-be plan AT the trigger (§6.1 v2): risk spans the whole range, stop at the
+        # opposite edge, fixed target at rr_target × risk — the owner never sees a naked level.
+        risk = p["stop_range_frac"] * (range_high - range_low)
+        return [
+            PendingSetup(
+                strategy_id=self.strategy_id, symbol=bar.symbol, side="BUY", style=self.style,
+                trigger_price=round_to_tick(range_high), arms_when="above", last_price=bar.close,
+                stop_price=round_to_tick(range_high - risk),
+                target_price=round_to_tick(range_high + p["rr_target"] * risk),
+                condition=condition,
+            ),
+            PendingSetup(
+                strategy_id=self.strategy_id, symbol=bar.symbol, side="SELL", style=self.style,
+                trigger_price=round_to_tick(range_low), arms_when="below", last_price=bar.close,
+                stop_price=round_to_tick(range_low + risk),
+                target_price=round_to_tick(range_low - p["rr_target"] * risk),
+                condition=condition,
+            ),
         ]

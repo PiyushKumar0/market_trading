@@ -1,5 +1,8 @@
 """Tier-1 ↔ code schemas (R1): the action-object union (§3.3), GateVerdict (§3.4), Recommendation (§3.6).
 
+The models themselves now live in :mod:`engine.core.contracts` (R1 import-graph guard, §9.1) — this
+module RE-EXPORTS them unchanged and keeps the SDK-facing helpers that only Tier-1 needs.
+
 These are the ONLY shape in which Tier-1 (Claude) output crosses into the deterministic tiers. The SDK
 call uses :data:`ActionProposal` as its structured-output schema (D5/D7); anything that fails validation
 after retries is dropped with an alert — NEVER parsed from prose (D7).
@@ -18,45 +21,78 @@ Three locked conventions (Phase-0 deliverables, §8.1):
    mandatory ``additionalProperties:false`` / no recursive schemas) are enforced CLIENT-SIDE by
    re-validating the model after parse — which is exactly what :func:`parse_and_stamp` does. See
    :data:`STRUCTURED_OUTPUT_NOTES`.
+
+   Corollary (WO-21, 2026-08-20): the intraday wire schema is the FLAT merge
+   :func:`intraday_guidance_json_schema`, which advertises EVERY action's fields for EVERY action,
+   while the authoritative union forbids extras on each variant. The two disagree by construction,
+   so :func:`parse_intraday` runs :func:`_sanitize_guidance_extras` first — it drops the
+   ADVERTISED-but-wrong-for-this-action keys and nothing else. Genuinely foreign keys (never
+   advertised) still die ``schema_invalid``: ``extra="forbid"`` keeps its R1 teeth.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Annotated, Any, Literal
+import json
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    PlainSerializer,
-    TypeAdapter,
-    WithJsonSchema,
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+
+from engine.core.contracts import (
+    ACTION_MODELS,
+    ActionBase,
+    ActionProposal,
+    ActionProposalAdapter,
+    CancelAction,
+    CheckResult,
+    CostBreakdown,
+    DecimalStr,
+    EnterAction,
+    ExitAction,
+    GateVerdict,
+    ModifyStopAction,
+    ModifyTargetAction,
+    Recommendation,
+    _to_decimal,
 )
+from engine.core.log import get_logger
 
-from engine.core.enums import Mode, RiskState
+_log = get_logger("engine.intelligence.schemas")
 
-
-# --------------------------------------------------------------------------- Decimal-as-string
-def _to_decimal(v: Any) -> Decimal:
-    if isinstance(v, Decimal):
-        return v
-    if isinstance(v, float):
-        return Decimal(str(v))   # str() first: never inherit binary-float artifacts into a price
-    return Decimal(v)            # str | int
-
-
-DecimalStr = Annotated[
-    Decimal,
-    BeforeValidator(_to_decimal),
-    PlainSerializer(lambda v: str(v), return_type=str, when_used="json"),
-    # LOCK the WIRE schema to "string" in BOTH modes (WithJsonSchema overrides pydantic's default
-    # anyOf[number,string] for a BeforeValidator-annotated Decimal). Without this the exported SDK
-    # structured-output schema would invite the model to emit a JSON number and corrupt a price/tick
-    # (§8.1 decimal-as-string convention). The validator still accepts str|int|float defensively.
-    WithJsonSchema({"type": "string", "description": "decimal price as a string (no float corruption)"}),
+__all__ = [
+    "ACTION_MODELS",
+    "CLUSTER_EVENT_TYPES",
+    "EXIT_REASON_CODES",
+    "STRUCTURED_OUTPUT_NOTES",
+    "ActionBase",
+    "ActionProposal",
+    "ActionProposalAdapter",
+    "CancelAction",
+    "CheckResult",
+    "ClusterScore",
+    "ClusterScoreBatch",
+    "CostBreakdown",
+    "DayPlan",
+    "DayPlanCatalystFocus",
+    "DayPlanFocus",
+    "DecimalStr",
+    "EnterAction",
+    "ExitAction",
+    "GateVerdict",
+    "IntradayOutput",
+    "IntradayOutputAdapter",
+    "ModifyStopAction",
+    "ModifyTargetAction",
+    "NightlyReview",
+    "NoActionOutput",
+    "ParamSuggestion",
+    "Recommendation",
+    "TradeAttribution",
+    "action_proposal_json_schema",
+    "intraday_guidance_json_schema",
+    "intraday_output_json_schema",
+    "parse_and_stamp",
+    "parse_cluster_scores",
+    "parse_intraday",
 ]
 
 # Notes recorded during the Phase-0 smoke test (§8.1): structured-output constraints to enforce
@@ -71,134 +107,12 @@ STRUCTURED_OUTPUT_NOTES = {
     "identity_fields_platform_stamped": ["proposal_id", "agent_id", "inputs_digest"],
 }
 
-
-# --------------------------------------------------------------------------- action union (§3.3)
-class ActionBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[1] = 1
-    proposal_id: str = ""        # PLATFORM-STAMPED (ULID). Default "" so the LLM may omit it.
-    agent_id: str = ""           # PLATFORM-STAMPED: which Tier-1 agent produced it.
-    thesis: str = Field(min_length=20, max_length=600)        # 3–5 lines
-    confidence: float = Field(ge=0.0, le=1.0)
-    # PLATFORM-STAMPED: Clock.now() + per-style TTL (§3.2.1). The LLM never emits a date/time; any value
-    # it supplies is overwritten by stamp_proposal(). Optional on the wire so the model may omit it.
-    valid_until: AwareDatetime | None = None     # tz-aware IST only (§9.1 no-naive-datetime invariant)
-    inputs_digest: str = ""      # PLATFORM-STAMPED: hash of AssembledContext for audit/replay (R8)
-
-
-class EnterAction(ActionBase):
-    action: Literal["enter"]
-    tradingsymbol: str
-    exchange: Literal["NSE"]
-    side: Literal["BUY", "SELL"]
-    style: Literal["intraday", "swing", "position"]           # O3: intraday=MIS, else CNC
-    entry_type: Literal["LIMIT", "MARKET"]
-    entry_price: DecimalStr | None = None                     # required if LIMIT; gate checks sanity band
-    stop_price: DecimalStr                                    # MANDATORY — no stopless proposals exist
-    target_price: DecimalStr | None = None
-    quantity: int = Field(gt=0)                               # gate may only shrink (R1)
-    signal_id: str                                            # links to a live SignalPreScreen candidate
-    strategy_id: str
-    features_snapshot_id: str
-
-
-class ExitAction(ActionBase):
-    action: Literal["exit"]
-    position_id: str
-    exit_type: Literal["MARKET", "LIMIT"]
-    limit_price: DecimalStr | None = None
-    reason: Literal["thesis_invalidated", "target_neared", "risk_event", "time_stop", "other"]
-
-
-class ModifyStopAction(ActionBase):
-    action: Literal["modify-stop"]
-    position_id: str
-    new_stop: DecimalStr                                      # gate: tighten ⇒ auto; widen ⇒ owner approval
-
-
-class ModifyTargetAction(ActionBase):
-    action: Literal["modify-target"]
-    position_id: str
-    new_target: DecimalStr | None = None                     # None = remove target; extend ⇒ owner approval
-
-
-class CancelAction(ActionBase):
-    action: Literal["cancel"]
-    order_id: str                                            # NON-PROTECTIVE orders only (R1/R3)
-
-
-ActionProposal = Annotated[
-    EnterAction | ExitAction | ModifyStopAction | ModifyTargetAction | CancelAction,
-    Field(discriminator="action"),
-]
-
-ActionProposalAdapter: TypeAdapter[Any] = TypeAdapter(ActionProposal)
-
-# The five concrete classes, keyed by their ``action`` literal (handy for tests + dispatch).
-ACTION_MODELS = {
-    "enter": EnterAction,
-    "exit": ExitAction,
-    "modify-stop": ModifyStopAction,
-    "modify-target": ModifyTargetAction,
-    "cancel": CancelAction,
-}
-
-
-# --------------------------------------------------------------------------- GateVerdict (§3.4)
-class CheckResult(BaseModel):
-    rule_id: str            # §7.1 id, e.g. "per_trade_risk", "circuit_proximity", "margin_buffer"
-    passed: bool
-    value: str
-    limit: str
-    headroom: str           # human-readable; ships in recommendations (R1)
-
-
-class CostBreakdown(BaseModel):     # from CostModel (C2/C3)
-    notional: DecimalStr
-    total_cost: DecimalStr
-    breakeven_pct: DecimalStr
-    expected_edge_pct: DecimalStr
-    edge_multiple: DecimalStr       # must be ≥ edge_multiple_min [tunable]
-    components: dict[str, DecimalStr]   # brokerage, stt, txn, sebi, stamp, gst, dp
-
-
-class GateVerdict(BaseModel):
-    verdict_id: str
-    proposal_id: str
-    verdict: Literal["approve", "shrink", "reject", "owner_approval_required"]
-    original_qty: int | None = None
-    approved_qty: int | None = None     # shrink: cost model re-run on approved_qty (R1)
-    checks: list[CheckResult]           # every rule evaluated, pass or fail — full audit (R8)
-    cost: CostBreakdown | None = None
-    reasons: list[str] = Field(default_factory=list)
-    mode: Mode
-    risk_state: RiskState
-    degrade_tier: str
-    evaluated_at: AwareDatetime         # platform-stamped (Clock); tz-aware IST only (§9.1)
-
-
-# --------------------------------------------------------------------------- Recommendation (§3.6)
-class Recommendation(BaseModel):
-    rec_id: str
-    created_at: AwareDatetime           # tz-aware IST only (§9.1)
-    valid_until: AwareDatetime
-    kind: Literal["entry", "exit", "adjust"]
-    instrument: str
-    side: Literal["BUY", "SELL"]
-    style: Literal["intraday", "swing", "position"]
-    product: Literal["MIS", "CNC"]
-    entry_zone: tuple[DecimalStr, DecimalStr]
-    stop: DecimalStr
-    targets: list[DecimalStr]
-    qty: int
-    notional: DecimalStr                # gate-approved size (R1)
-    thesis: str
-    confidence: float
-    short_flag_higher_tail_risk: bool = False     # shorts marked per shorting policy (C8)
-    gate: GateVerdict                   # verdict + per-rule headroom ship in payload (R1)
-    cost: CostBreakdown                 # this trade's specific breakeven math (C3)
-    manual_checklist: list[str]         # B7/R3 protective-order checklist for the human
+#: The CLOSED exit reasons, DERIVED from :class:`ExitAction`'s own ``Literal`` — never retyped, so the
+#: wire schema, the sanitizer and the position-event context cannot drift from the contract. The flat
+#: guidance schema advertises them under ``exit_reason`` because ``reason`` there is ``no_action``'s
+#: free prose (2026-09-03..09-10: 47 of 47 first-attempt exits died ``literal_error`` at ``exit.reason``
+#: because the only place the model ever saw these codes was the pydantic error echoed on retry).
+EXIT_REASON_CODES: tuple[str, ...] = get_args(ExitAction.model_fields["reason"].annotation)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -236,3 +150,448 @@ def parse_and_stamp(
     # AwareDatetime / no-naive-datetime invariant (§9.1). Round-tripping through the adapter re-checks
     # every field and keeps the concrete discriminated subclass.
     return ActionProposalAdapter.validate_python(stamped.model_dump(mode="python"))
+
+
+# =========================================================================== Intraday Analyst (§5.2)
+class NoActionOutput(BaseModel):
+    """The Intraday Analyst's second legal output: an explicit refusal to act (§5.2 output schema).
+
+    ``no_action`` is a first-class answer, not a failure — a heartbeat call (§5.2 trigger (c)) may
+    emit NOTHING else. It carries no platform-stamped fields: nothing downstream of it can trade, so
+    there is no proposal identity, TTL or audit digest to stamp.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["no_action"]
+    reason: str = Field(min_length=5)
+    regime_note: str = ""       # optional regime read; feeds the NEXT context's stable block (§5.2)
+    # Guidance-schema compatibility (2026-08-12): the FLAT structured-output schema (§8.1 — the CLI
+    # degrades to text on unions, pinned 2026-07-29) advertises ``thesis``/``confidence`` for EVERY
+    # action, so the model legitimately attaches them when declining — 9 schema_invalid failures on
+    # 2026-08-12 (retries hit the same shape; one terminal). Accepted here, unused downstream;
+    # ``extra="forbid"`` still rejects genuinely foreign fields (R1 structural coherence intact).
+    #
+    # WO-21 (2026-08-20) GENERALISES this half-patch: two accepted fields only ever covered the two
+    # extras seen that day, and the same schema mismatch killed BOTH of the first-ever ``enter``
+    # outputs (ICICIAMC + POLICYBZR brk20, all 3 retries burned on ``extra_forbidden``; 8 of 13
+    # intraday calls failed that way). :func:`_sanitize_guidance_extras` now DROPS every
+    # advertised-but-wrong-for-this-action key before union validation, for every action — so no
+    # further per-model field needs to be added here as the guidance schema grows. These two stay
+    # (dropping is silent on the wire but these are the two the model most often means, and keeping
+    # them costs nothing); everything else the guidance advertises is handled by the sanitizer.
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    thesis: str | None = None
+
+
+#: §5.2 output schema: the §3.3 action union PLUS ``no_action``, discriminated on ``action``.
+IntradayOutput = Annotated[
+    EnterAction | ExitAction | ModifyStopAction | ModifyTargetAction | CancelAction | NoActionOutput,
+    Field(discriminator="action"),
+]
+
+IntradayOutputAdapter: TypeAdapter[Any] = TypeAdapter(IntradayOutput)
+
+
+def intraday_output_json_schema() -> dict[str, Any]:
+    """JSON Schema for the §5.2 output union — the Intraday Analyst's structured-output schema."""
+    return IntradayOutputAdapter.json_schema()
+
+
+def intraday_guidance_json_schema() -> dict[str, Any]:
+    """FLAT single-object schema for the runtime's structured-output knob (§8.1).
+
+    The CLI's ``output_format`` silently falls back to plain TEXT mode for any schema containing a
+    ``oneOf``/``anyOf`` union — root-level, wrapped, or de-discriminated (pinned live 2026-07-29:
+    every intraday call answered in fenced prose and died schema_invalid while the flat news/plan
+    schemas engaged the StructuredOutput tool). So the knob gets this flattened merge of the §5.2
+    union — every variant's model-emitted field, ``action`` as the closed enum, only ``action``
+    required — and the DISCRIMINATED union in :func:`parse_intraday` remains the authoritative
+    contract exactly as §8.1 locks it. A payload this schema admits but the union rejects still
+    fails client-side and retries under D7. Platform-stamped fields (proposal_id, valid_until,
+    agent_id, inputs_digest) are deliberately absent: the model has no business emitting them, and
+    the runtime's own schema coaching steers it off any it invents (additionalProperties: false).
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [*ACTION_MODELS.keys(), "no_action"],
+            },
+            # ActionBase / NoActionOutput
+            # NO maxLength here — deliberately (2026-09-03). It was advertised for one session
+            # (2026-09-02) as "prevention" and proved net harmful: the runtime enforces the wire
+            # schema on the StructuredOutput tool input and RE-PROMPTS on violation, each bounce
+            # costing a turn, so a verbose thesis that the client-side clamp would truncate for free
+            # instead burned 3-4x output tokens per call and, on 2026-09-03 09:51, exhausted the
+            # 4-turn budget — the FIRST-EVER intraday max-turns sdk_error (terminal: no D7 retry,
+            # candidate re-armed, $0.33 gone). Post-deploy the clamp fired 0 times and
+            # string_too_long vanished: overflow was being intercepted upstream at the worse layer.
+            # The prose note in `numeric_constraints_client_side` stays; the clamp in
+            # _sanitize_guidance_extras is the converging mechanism.
+            "thesis": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reason": {"type": "string"},        # no_action free text; an exit's code is exit_reason
+            "regime_note": {"type": "string"},
+            # EnterAction
+            "tradingsymbol": {"type": "string"},
+            "exchange": {"type": "string", "enum": ["NSE"]},
+            "side": {"type": "string", "enum": ["BUY", "SELL"]},
+            "style": {"type": "string", "enum": ["intraday", "swing", "position"]},
+            "entry_type": {"type": "string", "enum": ["LIMIT", "MARKET"]},
+            "entry_price": {"type": "string"},
+            "stop_price": {"type": "string"},
+            "target_price": {"type": "string"},
+            "quantity": {"type": "integer", "minimum": 1},
+            "signal_id": {"type": "string"},
+            "strategy_id": {"type": "string"},
+            "features_snapshot_id": {"type": "string"},
+            # ExitAction / ModifyStop / ModifyTarget / Cancel
+            "position_id": {"type": "string"},
+            "exit_type": {"type": "string", "enum": ["MARKET", "LIMIT"]},
+            "limit_price": {"type": "string"},
+            # The exit's CLOSED reason gets its OWN key: ``reason`` above is no_action's free prose and
+            # a flat merge cannot be two shapes at once. _sanitize_guidance_extras maps this onto
+            # ExitAction.reason before the union validates. A member enum is safe here — only
+            # oneOf/anyOf unions disengage the runtime's structured output (2026-07-29).
+            "exit_reason": {"type": "string", "enum": list(EXIT_REASON_CODES)},
+            "new_stop": {"type": "string"},
+            "new_target": {"type": "string"},
+            "order_id": {"type": "string"},
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    }
+
+
+def _field_max_len(field_info: Any) -> int | None:
+    """The declared ``max_length`` of a pydantic field, or None when unconstrained."""
+    for meta in getattr(field_info, "metadata", ()):
+        cap = getattr(meta, "max_length", None)
+        if isinstance(cap, int):
+            return cap
+    return None
+
+
+def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str:
+    """Drop the guidance-advertised fields THIS action forbids, before the union validates (WO-21).
+
+    The wire schema (:func:`intraday_guidance_json_schema`) is a FLAT merge — it must be, or the CLI
+    degrades to text mode (pinned 2026-07-29) — so it advertises every action's fields for every
+    action. The model therefore legitimately attaches ``reason``/``regime_note`` to an ``enter``, or
+    ``tradingsymbol``/``signal_id``/``strategy_id`` to a ``no_action``, and the authoritative
+    discriminated union (``extra="forbid"`` everywhere) rejects it as ``extra_forbidden``. On
+    2026-08-20 that killed both first-ever ``enter`` outputs plus 8 of 13 intraday calls: retries
+    re-emit the same shape because the schema keeps inviting it, so retrying can never converge.
+
+    What is dropped is EXACTLY ``raw ∩ (advertised − target-model fields)``:
+
+    * a key the guidance never advertised (a confabulated ``frobnicate``) is untouched and still
+      dies ``schema_invalid`` — R1 structural coherence is preserved, the union stays authoritative;
+    * platform-stamped fields (``proposal_id``/``agent_id``/``valid_until``/``inputs_digest``) are
+      deliberately NOT advertised, so they pass through here and are overwritten by
+      :func:`parse_and_stamp` exactly as before;
+    * a missing or unrecognised ``action`` sanitizes NOTHING — the payload is undiscriminatable, so
+      it must fail validation as it does today rather than be silently reshaped.
+
+    **Value-shaped reconciliation (2026-09-02, the exit-thesis incident):** the same flat-schema
+    mismatch exists for VALUES — ``thesis``'s 600-char cap lived only in the client-side prose note,
+    so a verbose-but-valid EXIT died ``string_too_long`` on all 3 attempts, twice, losing both
+    refreshed exit recommendations for open positions (retries re-invite the same verbosity, so
+    retrying cannot converge — the WO-21 argument exactly). An ADVERTISED ``str`` field overflowing
+    the MATCHED model's own declared ``max_length`` is therefore clamped to that cap (logged
+    ``guidance_prose_clamped``). Truncation is the ONLY reshaping: ``min_length``, enum, numeric and
+    every other constraint still fail exactly as before (too-short prose is deficient content, and
+    silently altering a number or id would corrupt semantics, R1); a field the guidance never
+    advertised, or whose target declares no cap, is untouched.
+
+    **Exit reasons (2026-09-11):** ``reason`` on the wire is ``no_action``'s free prose, but
+    :class:`ExitAction` declares it a CLOSED ``Literal``, so every exit died ``literal_error`` on
+    attempt 1 — 47 of 47 since 2026-09-03, converging only because the harness echoes the pydantic
+    error (the one place the model ever saw the codes), and 10 exits were lost outright before that.
+    The schema now advertises those codes as :data:`EXIT_REASON_CODES` under ``exit_reason``; on an
+    ``exit`` a valid code is MOVED onto ``reason`` (``guidance_exit_reason_mapped``) and the displaced
+    prose becomes the ``thesis`` only when there is none to lose. That is a RENAME of an in-enum
+    value, never an interpretation: an absent or out-of-enum ``exit_reason`` leaves ``reason``
+    untouched and the payload fails exactly as it does today — prose is never guessed into a code (R1).
+
+    A ``str`` payload is JSON-decoded first; anything that is not a JSON object (bad JSON, a list, a
+    scalar) is returned verbatim so the caller's original validation path produces the original error.
+    """
+    payload: Any = raw
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return raw                      # let validate_json raise the ValidationError it always did
+    if not isinstance(payload, dict):
+        return raw
+    action = payload.get("action")
+    if not isinstance(action, str):
+        return payload
+    target = NoActionOutput if action == "no_action" else ACTION_MODELS.get(action)
+    if target is None:
+        return payload                      # unrecognised action ⇒ sanitize nothing, fail as today
+    if action == "exit":
+        code = payload.get("exit_reason")
+        if isinstance(code, str) and code in EXIT_REASON_CODES:
+            prose = payload.get("reason")
+            thesis = payload.get("thesis")
+            # The prose is only WORTH keeping if it is prose (a bare code carries nothing the code
+            # does not) and only SAFE to keep where no thesis would be overwritten.
+            to_thesis = (
+                isinstance(prose, str)
+                and prose.strip() != ""
+                and prose not in EXIT_REASON_CODES
+                and not (isinstance(thesis, str) and thesis.strip())
+            )
+            payload = {**payload, "reason": code}
+            if to_thesis:
+                payload["thesis"] = prose
+            _log.info("guidance_exit_reason_mapped", code=code, prose_to_thesis=to_thesis)
+        # exit_reason itself is advertised-but-foreign to every model, so the drop below removes it.
+    advertised = set(intraday_guidance_json_schema()["properties"]) - {"action"}
+    droppable = advertised - set(target.model_fields)
+    dropped = sorted(key for key in payload if key in droppable)
+    if dropped:
+        _log.info("guidance_extras_dropped", action=action, dropped=dropped)
+        payload = {key: value for key, value in payload.items() if key not in droppable}
+    for name, info in target.model_fields.items():
+        if name not in advertised:
+            continue
+        value = payload.get(name)
+        cap = _field_max_len(info)
+        if isinstance(value, str) and cap is not None and len(value) > cap:
+            _log.info("guidance_prose_clamped", action=action, field=name,
+                      from_len=len(value), to_len=cap)
+            payload = {**payload, name: value[:cap]}
+    return payload
+
+
+def parse_intraday(
+    raw: dict[str, Any] | str,
+    *,
+    proposal_id: str,
+    agent_id: str,
+    valid_until: AwareDatetime,
+    inputs_digest: str,
+) -> Any:
+    """Validate Intraday Analyst output into an ``ActionProposal`` (stamped) or :class:`NoActionOutput`.
+
+    Actions go through :func:`parse_and_stamp` so the platform-stamped identity/temporal fields are
+    overwritten exactly as they are on every other action path; ``no_action`` is plain-validated —
+    stamping it would imply it can be acted on. A schema-invalid payload raises ``ValidationError``
+    here and resolves to no-proposal + alert upstream (D7) — never re-parsed from prose.
+
+    WO-21: :func:`_sanitize_guidance_extras` runs FIRST, reconciling the flat wire schema with the
+    discriminated union. It only ever removes keys the wire schema itself advertised; required-field
+    and value-constraint enforcement below is untouched.
+    """
+    sanitized = _sanitize_guidance_extras(raw)
+    model = (
+        IntradayOutputAdapter.validate_json(sanitized)
+        if isinstance(sanitized, str)
+        else IntradayOutputAdapter.validate_python(sanitized)
+    )
+    if isinstance(model, NoActionOutput):
+        return model
+    return parse_and_stamp(
+        model.model_dump(mode="python"),
+        proposal_id=proposal_id,
+        agent_id=agent_id,
+        valid_until=valid_until,
+        inputs_digest=inputs_digest,
+    )
+
+
+# =========================================================================== Pre-open Planner (§5.3)
+class DayPlanFocus(BaseModel):
+    """One focus symbol of the day plan. Advisory: the scanners still originate every signal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    bias: Literal["long", "short", "avoid"]
+    levels: str                 # free text — the planner NEVER emits binding numeric levels (§5.3)
+    why: str
+
+
+class DayPlanCatalystFocus(BaseModel):
+    """Advisory commentary on ONE catalyst-watchlist entry (§5.3).
+
+    The planner may highlight or deprioritize a watchlist symbol; it can neither add a symbol to the
+    watchlist nor upgrade a ``context`` entry to ``originating``, and ``advisory_levels`` is prose —
+    the binding origination levels stay the scanner's deterministic ones (§2.7 step 6).
+    ``event_type`` is a free string (it echoes the watchlist entry): one odd advisory value must not
+    void the whole day plan, unlike the cluster taxonomy below which is per-item droppable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    event_type: str
+    direction: Literal["long", "short", "neutral"]
+    advisory_levels: str
+    drift_note: str
+
+
+class DayPlan(BaseModel):
+    """The 08:50 day plan (§5.3) — one JSON row per trading day in ``day_plans``, fed into every
+    intraday context's STABLE block (D8)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    regime: str
+    focus: list[DayPlanFocus] = Field(default_factory=list, max_length=8)     # §5.3: 3–8 symbols
+    catalyst_focus: list[DayPlanCatalystFocus] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    no_trade_today: bool = False
+
+
+# =========================================================================== News Analyst (§5.4)
+#: The CLOSED event taxonomy (§5.4). Out-of-enum ⇒ the cluster is DROPPED at parse + logged (D7).
+CLUSTER_EVENT_TYPES: tuple[str, ...] = (
+    "earnings_result",
+    "earnings_guidance",
+    "order_win",
+    "capacity_expansion",
+    "m_and_a",
+    "mgmt_change",
+    "regulatory_policy",
+    "govt_program",
+    "rating_change",
+    "analyst_action",
+    "legal_action",
+    "dividend_corp_action",
+    "macro_data",
+    "global_market",
+    "sector_policy",
+    "disruption",
+    "pump_promo_suspect",
+    "other",
+)
+
+
+class ClusterScore(BaseModel):
+    """One scored headline CLUSTER (§5.4 / §2.7 step 4) — one score per cluster, never per headline.
+
+    ``entities`` are VERBATIM strings as they appear in the news; only the deterministic
+    EntityResolver maps them to tradingsymbols (§2.7 step 3), never the LLM. Every score is
+    UNTRUSTED evidence (§2.4).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cluster_id: str
+    scope: Literal["market", "sector", "theme", "stock"]
+    entities: list[str] = Field(default_factory=list)
+    sectors: list[str] = Field(default_factory=list)
+    themes: list[str] = Field(default_factory=list)     # from the in-prompt theme vocabulary
+    sentiment: float = Field(ge=-1.0, le=1.0)
+    materiality: float = Field(ge=0.0, le=1.0)          # rubric-anchored in the system prompt
+    event_type: Literal[
+        "earnings_result",
+        "earnings_guidance",
+        "order_win",
+        "capacity_expansion",
+        "m_and_a",
+        "mgmt_change",
+        "regulatory_policy",
+        "govt_program",
+        "rating_change",
+        "analyst_action",
+        "legal_action",
+        "dividend_corp_action",
+        "macro_data",
+        "global_market",
+        "sector_policy",
+        "disruption",
+        "pump_promo_suspect",
+        "other",
+    ]
+    novelty: float = Field(ge=0.0, le=1.0)              # NEW information vs rehash of a scored story
+
+
+class ClusterScoreBatch(BaseModel):
+    """The News Analyst's batched output — up to 30 cluster scores per call (§5.4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scores: list[ClusterScore] = Field(default_factory=list)
+
+
+def parse_cluster_scores(raw: dict[str, Any] | list[Any] | str) -> tuple[list[ClusterScore], list[str]]:
+    """Validate a score batch PER ITEM: returns ``(valid_scores, dropped_cluster_ids)``.
+
+    D7/§5.4: an out-of-enum ``event_type`` (or any other invalid field) drops THAT cluster and is
+    logged — it never voids the batch, because one confabulated event type must not cost 29 good
+    scores. A dropped cluster simply stays unscored, which excludes it from origination (§2.7
+    fail-safe ladder). A cluster whose ``cluster_id`` is itself unusable is reported positionally.
+    """
+    payload: Any = json.loads(raw) if isinstance(raw, str) else raw
+    if isinstance(payload, dict):
+        items = payload.get("scores", [])
+    else:
+        items = payload
+    if not isinstance(items, list):
+        raise ValueError(f"cluster score batch is not a list of scores (got {type(items).__name__})")
+
+    scores: list[ClusterScore] = []
+    dropped: list[str] = []
+    for index, item in enumerate(items):
+        try:
+            scores.append(ClusterScore.model_validate(item))
+        except ValidationError:
+            cid = item.get("cluster_id") if isinstance(item, dict) else None
+            dropped.append(cid if isinstance(cid, str) and cid else f"#{index}")
+    return scores, dropped
+
+
+# =========================================================================== Nightly Reviewer (§5.5)
+class ParamSuggestion(BaseModel):
+    """ONE suggested envelope-parameter value (§5.5 output contract).
+
+    A SUGGESTION, never a setting: the §6.4 validation pipeline and the owner decide (R4). The job
+    that persists a review DROPS any suggestion whose ``parameter`` is not an ``envelope.yaml`` name
+    or whose ``proposed_value`` falls outside that parameter's bounds — the model's suggestible set
+    is the list it was shown in the context, and no downstream reader re-derives it.
+
+    ``proposed_value`` is a float because every envelope parameter is a plain numeric knob (§6.3):
+    no price, no money, so the decimal-as-string convention deliberately does not apply here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    parameter: str
+    proposed_value: float
+    evidence_refs: list[str] = Field(default_factory=list)   # entry_id / rec_id, never prose
+
+
+class TradeAttribution(BaseModel):
+    """Attribution of ONE closed learning-ledger row (§5.5).
+
+    ``thesis_wrong`` and ``process_error`` are different failures: the first is the market
+    disagreeing with a correctly-executed idea, the second is the platform or the owner mishandling
+    it. Collapsing them would make the lessons unactionable, which is why the verdict is a closed
+    enum rather than free text.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entry_id: str
+    verdict: Literal["thesis_right", "thesis_wrong", "process_error", "unclear"]
+    note: str = ""
+
+
+class NightlyReview(BaseModel):
+    """The Nightly Post-Trade Reviewer's output (§5.5) — one JSON row per trading day in
+    ``nightly_reviews``, read by ``GET /config/params`` and the daily owner summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lessons: list[str] = Field(default_factory=list)
+    param_suggestions: list[ParamSuggestion] = Field(default_factory=list)
+    process_errors: list[str] = Field(default_factory=list)
+    trade_attributions: list[TradeAttribution] = Field(default_factory=list)
+    summary: str

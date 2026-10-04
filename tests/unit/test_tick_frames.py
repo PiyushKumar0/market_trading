@@ -25,6 +25,7 @@ from engine.broker.ticker_supervisor import (
     TICK_TOPIC,
     OrderUpdateFrame,
     TickerSupervisor,
+    _ImplausibleTimestamp,
     parse_tick_frame,
 )
 from engine.core.clock import IST
@@ -184,6 +185,48 @@ def test_parse_tick_frame_rejects_missing_load_bearing_fields():
             parse_tick_frame(broken, "X")
 
 
+def test_parse_tick_frame_rejects_an_epoch_exchange_timestamp():
+    """2026-08-20: a zeroed wire ``exchange_timestamp`` arrives as ``datetime.fromtimestamp(0)`` and
+    used to parse cleanly into a tz-aware 1970 datetime — valid to the Tick model, and a
+    ``date=1970-01-01`` tick partition in the store. It is a zeroed field, not a timestamp.
+
+    WO-24e (2026-08-21): this is now its OWN drop path — ``_ImplausibleTimestamp``, a ``ValueError``
+    subclass — distinct from a genuinely MISSING field (still the plain ``ValueError`` below)."""
+    epoch_wire = dt.datetime.fromtimestamp(0).isoformat()      # what ticker/main.py would forward
+    broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": epoch_wire}
+    with pytest.raises(_ImplausibleTimestamp, match="exchange_timestamp"):
+        parse_tick_frame(broken, "RELIANCE")
+    assert issubclass(_ImplausibleTimestamp, ValueError)        # callers that only catch ValueError still work
+
+
+@pytest.mark.parametrize(
+    ("wire", "ok"),
+    [
+        ("2019-12-31T23:59:59", False),      # below the floor
+        ("2020-01-01T00:00:00", True),       # the floor itself is plausible (inclusive)
+        ("2026-08-20T11:26:40", True),       # real data
+    ],
+)
+def test_exchange_timestamp_plausibility_floor(wire: str, ok: bool):
+    frame = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": wire}
+    if ok:
+        assert parse_tick_frame(frame, "X").exchange_ts == dt.datetime.fromisoformat(wire).replace(
+            tzinfo=IST
+        )
+    else:
+        with pytest.raises(_ImplausibleTimestamp):               # WO-24e: own subclass, below the floor
+            parse_tick_frame(frame, "X")
+
+
+def test_parse_tick_frame_missing_exchange_timestamp_is_plain_valueerror_not_implausible():
+    """WO-24e: an ABSENT ``exchange_timestamp`` is a different defect than epoch-0 — it stays the
+    plain ``ValueError`` (generic parse_error path), never ``_ImplausibleTimestamp``."""
+    broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": None}
+    with pytest.raises(ValueError, match="missing exchange_timestamp") as exc_info:
+        parse_tick_frame(broken, "X")
+    assert not isinstance(exc_info.value, _ImplausibleTimestamp)
+
+
 # --------------------------------------------------------------------------- hello / heartbeat
 def test_hello_frame_carries_version_secret_and_token_count():
     app = _app(tokens=[1, 2, 3])
@@ -215,9 +258,75 @@ def test_heartbeat_carries_ws_state_and_tick_age():
     app._on_ticks(None, [_KITE_TICK])           # a tick flowed
     app._send_heartbeat()
     hb2 = pub.frames[-1]
-    assert hb2["seq"] == 2
+    # seq 3, not 2: `_on_connect` emits its own in-band heartbeat (the connect_seq carrier, below).
+    assert hb2["seq"] == 3
     assert hb2["ws_connected"] is True
     assert isinstance(hb2["last_tick_age_s"], float) and hb2["last_tick_age_s"] >= 0.0
+
+
+# ------------------------------------- in-child reconnect signal (2026-09-09, plan §2.6 hardening (i))
+def test_heartbeat_carries_the_connect_seq_and_it_bumps_on_every_connect():
+    """`connect_seq` is the engine's in-band reconnect signal: a per-child counter on EVERY heartbeat.
+
+    KiteTicker reconnects inside the child, so the supervisor sees no state transition; `ws_connected`
+    alone is not enough (a sub-second drop, or an `on_error` path with no `on_close`, never reports
+    False at all — this test's second reconnect). The counter is bumped by `_on_connect` regardless of
+    how the drop was reported."""
+    app = _app()
+    pub = _CollectingPublisher()
+    app._publisher = pub
+
+    app._send_heartbeat()
+    assert pub.frames[-1]["connect_seq"] == 0           # never connected yet
+
+    app._on_connect(_FakeKws(), None)                   # first connect: in-band frame carries seq 1
+    assert pub.frames[-1]["connect_seq"] == 1
+    app._send_heartbeat()
+    assert pub.frames[-1]["connect_seq"] == 1           # ... and rides every subsequent beat
+
+    app._on_close(None, 1006, "dropped")                # a reported drop
+    app._on_connect(_FakeKws(), None)
+    assert pub.frames[-1]["connect_seq"] == 2
+
+    app._on_connect(_FakeKws(), None)                   # a drop with NO on_close (gap (b))
+    assert pub.frames[-1]["connect_seq"] == 3
+
+
+def test_on_connect_emits_its_heartbeat_before_it_subscribes():
+    """ORDERING IS THE POINT. Kite delivers its connect-time snapshot within ~50 ms of the re-subscribe
+    — far inside the 1 s heartbeat cadence — so a reconnect signal published on the NEXT beat arrives
+    after the burst has already flapped BarBuilder's lag episode. Emitting the heartbeat at the top of
+    `_on_connect`, before `ws.subscribe`, puts the signal ahead of the snapshot ticks in the same
+    stdout pipe, which is ordered."""
+    order: list[str] = []
+
+    class _OrderedPublisher(_CollectingPublisher):
+        def send_frame(self, obj: dict) -> None:
+            order.append(f"frame:{obj.get('type')}")
+            super().send_frame(obj)
+
+    class _OrderedKws(_FakeKws):
+        def subscribe(self, tokens):
+            order.append("subscribe")
+            super().subscribe(tokens)
+
+        def set_mode(self, mode, tokens):
+            order.append("set_mode")
+            super().set_mode(mode, tokens)
+
+    app = _app(tokens=[408065, 884737])
+    pub = _OrderedPublisher()
+    app._publisher = pub
+    kws = _OrderedKws()
+
+    app._on_connect(kws, None)
+
+    assert order == ["frame:heartbeat", "subscribe", "set_mode"]
+    hb = pub.frames[0]
+    assert hb["connect_seq"] == 1
+    assert hb["ws_connected"] is True           # the flag is set BEFORE the frame is built, not after
+    assert kws.subscribed == [[408065, 884737]]
+    assert kws.modes == [("full", [408065, 884737])]
 
 
 # --------------------------------------------------------------------------- control plane

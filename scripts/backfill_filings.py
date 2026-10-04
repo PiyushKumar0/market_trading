@@ -8,8 +8,8 @@ owns the fetch). Point-in-time throughout (§2.8 rule i): every row keyed on its
 timestamp, never the period label.
 
     python scripts/backfill_filings.py seed [--from YYYY-MM-DD] [--symbols CSV]
-                                             [--skip-pit] [--skip-results] [--skip-shp]
-                                             [--config-dir DIR]
+                                             [--skip-pit] [--skip-results] [--skip-integrated]
+                                             [--skip-shp] [--config-dir DIR]
 
 Default ``--from`` is 3 years back; ``--to`` is always today. NSE endpoints (PIT, results,
 event-calendar) are walked in ≤31-day windows; BSE SHP is a per-symbol quarter loop. Every request is
@@ -51,8 +51,17 @@ from engine.core.log import configure_logging, get_logger  # noqa: E402
 from engine.core.migrations import apply_migrations  # noqa: E402
 from engine.core.nse_http import nse_get  # noqa: E402
 from engine.datafeeds.earnings_calendar import event_calendar_range_url, parse_event_calendar  # noqa: E402
-from engine.datafeeds.filings_pit import parse_pit, pit_url  # noqa: E402
-from engine.datafeeds.filings_results import parse_results, results_url  # noqa: E402
+from engine.datafeeds.filings_pit import PIT_PACE_S as _PACE_S  # noqa: E402
+from engine.datafeeds.filings_pit import PIT_WINDOW_DAYS as _NSE_WINDOW_DAYS  # noqa: E402
+from engine.datafeeds.filings_pit import (  # noqa: E402
+    PIT_GG_FIRST_DAY,
+    PitIngest,
+    ingest_pit_window,
+    parse_pit,
+    pit_url,
+)
+from engine.datafeeds.filings_pit import pit_windows as _windows  # noqa: E402
+from engine.datafeeds.filings_results import fetch_integrated_results, parse_results, results_url  # noqa: E402
 from engine.datafeeds.filings_shp import (  # noqa: E402
     BSE_SHP_DETAIL_URL,
     BSE_SHP_QUARTER_INDEX_URL,
@@ -65,9 +74,9 @@ from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 _log = get_logger("scripts.backfill_filings")
 
-#: ≥1.5 s between requests (§2.8, observed safe). NSE windows are ≤31 days apiece.
-_PACE_S = 1.5
-_NSE_WINDOW_DAYS = 31
+#: ``_PACE_S`` / ``_NSE_WINDOW_DAYS`` / ``_windows`` are local aliases of filings_pit's public
+#: ``PIT_PACE_S`` / ``PIT_WINDOW_DAYS`` / ``pit_windows`` — this script walks the SAME endpoint in the
+#: same unit (§2.8), so filings_pit is the one canonical copy.
 _SEED_YEARS = 3
 
 
@@ -88,6 +97,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols", default=None, help="comma-separated universe override (uppercased)")
     parser.add_argument("--skip-pit", action="store_true", help="skip the insider-trades (PIT) leg")
     parser.add_argument("--skip-results", action="store_true", help="skip the results + event-calendar leg")
+    parser.add_argument(
+        "--skip-integrated", action="store_true",
+        help="skip the Integrated Filing (Financials) listing leg (every result since the Mar-2025 quarter)",
+    )
     parser.add_argument("--skip-shp", action="store_true", help="skip the SHP + pledge leg (BSE)")
     parser.add_argument(
         "--redo-shp", action="store_true",
@@ -107,12 +120,15 @@ def _cp_clear_feed(conn: sqlite3.Connection, feed: str) -> int:
 
 # --------------------------------------------------------------------------- universe resolution
 def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str]:
-    """Resolve the working symbol set + source label (runtime cache → committed seed → --symbols)."""
+    """Resolve the working symbol set + source label (runtime cache → committed seed → --symbols).
+
+    Cache/seed names track ``UniverseBuilder``; both were renamed off ``nifty200`` by O15
+    (2026-09-04), when the eligible index became config (NIFTY 500)."""
     if symbols_arg:
         syms = sorted({s.strip().upper() for s in symbols_arg.split(",") if s.strip()})
         return syms, "--symbols override"
-    cache = settings.resolved_data_dir() / "universe" / "nifty200_cached.csv"
-    seed_rel = Path(settings.universe.nifty200_seed_path)
+    cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
+    seed_rel = Path(settings.universe.index_seed_path)
     seed = seed_rel if seed_rel.is_absolute() else repo_root() / seed_rel
     for path, label in ((cache, f"runtime cache {cache}"), (seed, f"committed seed {seed}")):
         try:
@@ -126,17 +142,6 @@ def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str
 
 
 # --------------------------------------------------------------------------- windows + checkpoints
-def _windows(frm: date, to: date, span_days: int = _NSE_WINDOW_DAYS) -> list[tuple[date, date]]:
-    """Ascending ≤``span_days`` windows covering ``[frm, to]`` inclusive."""
-    out: list[tuple[date, date]] = []
-    cur = frm
-    while cur <= to:
-        end = min(cur + timedelta(days=span_days - 1), to)
-        out.append((cur, end))
-        cur = end + timedelta(days=1)
-    return out
-
-
 def _cp_done(conn: sqlite3.Connection, feed: str, unit: str) -> bool:
     row = conn.execute(
         "SELECT through_date FROM filings_backfill_checkpoints WHERE feed=? AND unit=?", (feed, unit)
@@ -156,19 +161,40 @@ def _cp_set(conn: sqlite3.Connection, feed: str, unit: str, through: str, now: s
 # --------------------------------------------------------------------------- per-feed seed legs
 async def _seed_nse_windowed(
     conn, store, http, clock, feed: str, frm: date, to: date, summary: dict,
+    *, symbols: frozenset[str] | set[str] = frozenset(),
 ) -> None:
-    """Walk PIT or results over ≤31-day windows (checkpoint per window). event-calendar rides the
-    same window as the results leg (its historical board-meeting dates → earnings_calendar)."""
+    """Walk PIT, results or integrated filings over ≤31-day windows (checkpoint per window).
+    event-calendar rides the same window as the results leg (its historical board-meeting dates →
+    earnings_calendar). PIT days before 2026-05-03 come from the old route; later days from the PIT
+    V2.0 listing, fetching the XBRL of ``symbols``' filings only. A PIT window reaching the V2.0 era
+    checkpoints as ``pit_gg``: the old route's ``pit`` checkpoints for those spans hold nothing."""
     for w_frm, w_to in _windows(frm, to):
         unit = f"{w_frm.isoformat()}..{w_to.isoformat()}"
-        if _cp_done(conn, feed, unit):
+        cp_feed = "pit_gg" if feed == "pit" and w_to >= PIT_GG_FIRST_DAY else feed
+        if _cp_done(conn, cp_feed, unit):
             summary[feed]["skipped"] += 1
             continue
         try:
             if feed == "pit":
-                resp = await nse_get(http, pit_url(w_frm, w_to), timeout=20.0)
-                rows = parse_pit(json.loads(resp.content))
-                written = await store.arun(store.upsert_insider_trades, rows)
+                written = 0
+                if w_frm < PIT_GG_FIRST_DAY:
+                    resp = await nse_get(http, pit_url(w_frm, w_to), timeout=20.0)
+                    rows = parse_pit(json.loads(resp.content))
+                    written += await store.arun(store.upsert_insider_trades, rows)
+                if w_to >= PIT_GG_FIRST_DAY:
+                    if w_frm < PIT_GG_FIRST_DAY:
+                        await asyncio.sleep(_PACE_S)
+                    ingest = PitIngest()
+                    await ingest_pit_window(
+                        http, store, max(w_frm, PIT_GG_FIRST_DAY), w_to, symbols, ingest,
+                        done=frozenset(), timeout=20.0,
+                    )
+                    written += ingest.written
+                    if ingest.xbrl_failed:          # leave the window open for the re-run
+                        raise RuntimeError(f"{ingest.xbrl_failed} XBRL fetches failed")
+            elif feed == "integrated":
+                rows = await fetch_integrated_results(http, w_frm, w_to, timeout=20.0)
+                written = await store.arun(store.upsert_results_filings, rows)
             else:  # results (+ event calendar)
                 resp = await nse_get(http, results_url(w_frm, w_to), timeout=20.0)
                 rows = parse_results(json.loads(resp.content))
@@ -186,7 +212,7 @@ async def _seed_nse_windowed(
             _log.warning("filings_seed_window_failed", feed=feed, unit=unit, error=f"{type(exc).__name__}: {exc}")
             await asyncio.sleep(_PACE_S)
             continue
-        _cp_set(conn, feed, unit, w_to.isoformat(), clock.now().isoformat())
+        _cp_set(conn, cp_feed, unit, w_to.isoformat(), clock.now().isoformat())
         summary[feed]["written"] += written
         summary[feed]["windows"] += 1
         _log.info("filings_seed_window_done", feed=feed, unit=unit, written=written)
@@ -239,6 +265,7 @@ def _new_summary() -> dict:
     return {
         "pit": {"windows": 0, "written": 0, "skipped": 0, "failed": 0},
         "results": {"windows": 0, "written": 0, "events": 0, "skipped": 0, "failed": 0},
+        "integrated": {"windows": 0, "written": 0, "skipped": 0, "failed": 0},
         "shp": {"symbols": 0, "written": 0, "skipped": 0, "skipped_no_scrip": 0, "failed": 0},
     }
 
@@ -271,7 +298,7 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
 
         summary = _new_summary()
         async with httpx.AsyncClient(follow_redirects=True) as http:
-            # SHP needs BSE scrip codes: build symbol_isin first (paces its own BSE calls, §2.8).
+            # SHP needs BSE scrip codes: build symbol_isin first (at most one BSE master request, §2.8).
             if not args.skip_shp:
                 print(f"backfill_filings: building symbol_isin for {len(universe)} symbols ...")
                 isin_result = await IsinMapJob(settings, store, clock, http).run(universe)
@@ -279,10 +306,15 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
             if not args.skip_pit:
                 # ASCII only in prints: Windows consoles may be cp1252 ('<=' not '≤').
                 print(f"backfill_filings: PIT {frm}..{to} in <={_NSE_WINDOW_DAYS}d windows ...")
-                await _seed_nse_windowed(conn, store, http, clock, "pit", frm, to, summary)
+                await _seed_nse_windowed(
+                    conn, store, http, clock, "pit", frm, to, summary, symbols=set(universe)
+                )
             if not args.skip_results:
                 print(f"backfill_filings: results + event-calendar {frm}..{to} ...")
                 await _seed_nse_windowed(conn, store, http, clock, "results", frm, to, summary)
+            if not args.skip_integrated:
+                print(f"backfill_filings: integrated filings {frm}..{to} ...")
+                await _seed_nse_windowed(conn, store, http, clock, "integrated", frm, to, summary)
             if not args.skip_shp:
                 if args.redo_shp:
                     cleared = _cp_clear_feed(conn, "shp")
@@ -297,7 +329,7 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
 
     path = _write_report(settings, args, source, frm, to, summary)
     _print_summary(summary, path)
-    failed = summary["pit"]["failed"] + summary["results"]["failed"] + summary["shp"]["failed"]
+    failed = sum(summary[feed]["failed"] for feed in ("pit", "results", "integrated", "shp"))
     return 1 if failed else 0
 
 
@@ -311,7 +343,8 @@ def _write_report(settings, args, source, frm, to, summary) -> Path:
                 "from": frm.isoformat(),
                 "to": to.isoformat(),
                 "universe_source": source,
-                "skip": {"pit": args.skip_pit, "results": args.skip_results, "shp": args.skip_shp},
+                "skip": {"pit": args.skip_pit, "results": args.skip_results,
+                         "integrated": args.skip_integrated, "shp": args.skip_shp},
                 "summary": summary,
             },
             indent=2,
@@ -323,7 +356,7 @@ def _write_report(settings, args, source, frm, to, summary) -> Path:
 
 def _print_summary(summary: dict, path: Path) -> None:
     print("\n=== filings backfill summary ===")
-    for feed in ("pit", "results", "shp"):
+    for feed in ("pit", "results", "integrated", "shp"):
         print(f"  [{feed}] " + "  ".join(f"{k}={v}" for k, v in summary[feed].items()))
     print(f"report: {path}")
 
@@ -339,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     if not universe:
         print(
             "backfill_filings: no universe resolved — pass --symbols, or ensure the runtime cache / "
-            f"committed seed ({repo_root() / settings.universe.nifty200_seed_path}) exists",
+            f"committed seed ({repo_root() / settings.universe.index_seed_path}) exists",
             file=sys.stderr,
         )
         return 2

@@ -54,9 +54,16 @@ implements the exact mirror):
     packet; the engine attaches ``Asia/Kolkata`` (§3.2).
   * ``order``      — ``{type:"order", data:<verbatim Kite postback dict>}`` (A3): the raw
     ``on_order_update`` payload, untouched — the OMS correlates it (§3.5.1).
-  * ``heartbeat``  — ``{type:"heartbeat", seq, ws_connected, last_tick_age_s}`` every 1 s (§2.2);
-    ``ws_connected``/``last_tick_age_s`` let the engine distinguish "ticker alive but feed silent"
-    from "ticker alive, market quiet".
+  * ``heartbeat``  — ``{type:"heartbeat", seq, ws_connected, last_tick_age_s, connect_seq}`` every
+    1 s (§2.2); ``ws_connected``/``last_tick_age_s`` let the engine distinguish "ticker alive but
+    feed silent" from "ticker alive, market quiet". ``connect_seq`` (2026-09-09, plan §2.6 hardening
+    (i)) is a per-child counter bumped on every ``_on_connect`` — the engine's IN-BAND reconnect
+    signal, because KiteTicker reconnects inside this process and the engine sees no state change of
+    its own. It is ALSO emitted out of cadence: :meth:`TickerApp._on_connect` sends one heartbeat at
+    its top, BEFORE ``ws.subscribe``, so the bumped value precedes Kite's connect-time snapshot ticks
+    in this same stdout/TCP stream (ordered) rather than trailing them by up to a full 1 s beat.
+    Additive + optional, so it is NOT a breaking schema change and ``v`` stays 1 per the
+    :data:`_PROTOCOL_VERSION` rule below; an engine that never reads it is unaffected.
   * control (inbound) — ``{type:"subscribe", tokens:[…]}`` (§3.2.2 ``update_subscriptions``): the
     child diffs the token set, (un)subscribes, and re-asserts FULL mode on the new set.
   * stdin (one-time, §2.4) — a single length-prefixed msgpack frame
@@ -93,6 +100,11 @@ from twisted.protocols.basic import LineReceiver
 _LEN_PREFIX = struct.Struct(">I")
 
 #: Wire-protocol version stamped on the ``hello`` frame (bump on any breaking schema change).
+#: BREAKING means a reader pinned to the current version would mis-parse the stream: a removed or
+#: renamed field, a changed type/meaning, a new REQUIRED field. Adding an OPTIONAL field an old
+#: reader simply ignores is additive, not breaking, so it does not bump (2026-09-09 ``connect_seq``
+#: on the heartbeat, plan §2.6 hardening (i)) — and the engine's mirror constant
+#: (``engine.broker.ticker_supervisor.PROTOCOL_VERSION``) stays pinned at the same value.
 _PROTOCOL_VERSION = 1
 
 #: IST for log timestamps only (this process makes no trading time decisions — no ``core.Clock``).
@@ -323,6 +335,11 @@ class TickerApp:
         self._heartbeat: LoopingCall | None = None
         #: Monotonic-ish counter so the engine can detect dropped heartbeats / reordering.
         self._heartbeat_seq = 0
+        #: Monotonically increasing count of KiteTicker ``on_connect`` callbacks in THIS child's life
+        #: (0 = not yet connected). Rides every heartbeat as ``connect_seq``; a CHANGE of it is the
+        #: engine's only in-band evidence of an in-child reconnect (2026-09-09, plan §2.6 (i)) —
+        #: :meth:`_on_connect` bumps it and flushes a heartbeat before re-subscribing.
+        self._connect_seq = 0
         #: Built lazily once the TCP link is up so we never stream into a dead socket.
         self._kws: KiteTicker | None = None
         #: Websocket state + last-tick monotonic instant for the heartbeat's health fields (§2.2):
@@ -394,6 +411,13 @@ class TickerApp:
 
         ``ws_connected`` + ``last_tick_age_s`` (monotonic; ``None`` until the first tick) let the
         engine distinguish "ticker alive but feed silent" from "ticker alive, market quiet".
+        ``connect_seq`` carries the in-child reconnect signal (2026-09-09, plan §2.6 hardening (i)):
+        see :attr:`_connect_seq` and :meth:`_on_connect`, which also calls this OUT of cadence.
+
+        Called both by the 1 s ``LoopingCall`` and directly by :meth:`_on_connect`; it is a plain
+        synchronous ``transport.write`` either way, so an extra call is just one more frame in the
+        stream — the ordinary ``seq`` counter increments for it exactly as it does for a timed beat,
+        which is what keeps ``seq`` a truthful "frames emitted" count for the engine's gap detection.
         """
         if self._publisher is None:
             return
@@ -409,6 +433,7 @@ class TickerApp:
                 "seq": self._heartbeat_seq,
                 "ws_connected": self._ws_connected,
                 "last_tick_age_s": last_tick_age,
+                "connect_seq": self._connect_seq,
             }
         )
 
@@ -436,9 +461,26 @@ class TickerApp:
 
     # ---- KiteTicker callbacks ----
     def _on_connect(self, ws: Any, response: Any) -> None:
-        """Subscribe to the token set and request FULL mode (cumulative volume + depth, A13/§6.2)."""
-        _log("kws.connected", tokens=len(self._tokens))
+        """Announce the (re)connect in-band, THEN subscribe + request FULL mode (A13/§6.2).
+
+        ORDER IS LOAD-BEARING (2026-09-09, plan §2.6 hardening (i)). KiteTicker reconnects inside
+        this process, so the engine never sees a supervisor state change; without a signal here its
+        ``BarBuilder`` lag watchdog treats Kite's connect-time snapshot — one tick per subscribed
+        instrument, carrying that instrument's LAST-TRADE timestamp — as consumption lag and flaps an
+        alarm episode per tick (the 2026-09-03 15:40:02 storm). That snapshot starts landing within
+        ~50 ms of the ``ws.subscribe`` below, so a signal riding the NEXT 1 s heartbeat arrives after
+        the damage. Bumping :attr:`_connect_seq` and flushing a heartbeat FIRST puts it ahead of the
+        snapshot in the very same stdout/TCP stream, which is ordered — no timing assumption, no new
+        channel, no new frame type. ``_ws_connected`` is set before the flush so that frame is
+        self-consistent (``ws_connected=True`` alongside the bumped seq).
+
+        A drop that never reported itself (a sub-second reconnect, or an ``on_error`` path with no
+        ``on_close``) is covered for free: the counter is bumped by the RE-CONNECT, not by the drop.
+        """
+        self._connect_seq += 1
         self._ws_connected = True
+        _log("kws.connected", tokens=len(self._tokens), connect_seq=self._connect_seq)
+        self._send_heartbeat()          # in-band reconnect signal — MUST precede the subscribe below
         if self._tokens:
             ws.subscribe(self._tokens)
             ws.set_mode(_MODE_FULL, self._tokens)

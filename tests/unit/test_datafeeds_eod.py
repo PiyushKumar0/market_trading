@@ -129,6 +129,45 @@ async def test_bhavcopy_failure_degrades_and_alerts(store, clock):
     assert store.get_bars_1d("RELIANCE", D, D) == []     # keeps whatever it had (here: nothing)
 
 
+async def test_bhavcopy_repeated_failure_alerts_once(store, clock):
+    """2026-08-13 fix: with the watermark bug fixed, the 30-min catch-up sweeps genuinely re-run a
+    still-failing day — alerting on EVERY attempt would storm during a long NSE outage. Two
+    consecutive failing runs for the same date must produce exactly one notify."""
+    msgs, sink = collect_alerts()
+    job = BhavcopyJob(store, clock, failing_client(), notify=sink)
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is False and result2.ok is False
+    assert len(msgs) == 1
+    assert msgs[0].data["d"] == D.isoformat()
+
+
+async def test_bhavcopy_alert_rearms_after_success(store, clock):
+    """A success for ``d`` discards its dedup entry — a LATER failure for the same date (a fresh
+    failing streak, not a repeat of the old one) can alert again."""
+    msgs, sink = collect_alerts()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("BhavCopy_NSE_CM_0_0_0_20260617_F_0000.csv", BHAVCOPY_CSV)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, content=buf.getvalue())
+        raise httpx.ConnectError("nse unreachable", request=request)   # every attempt after the first
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    job = BhavcopyJob(store, clock, client, notify=sink)
+
+    ok_result = await job.run(D)
+    assert ok_result.ok is True
+    fail_result = await job.run(D)                        # same date, now failing
+    assert fail_result.ok is False
+    assert len(msgs) == 1                                 # the success discarded the dedup entry
+    assert msgs[0].data["d"] == D.isoformat()
+
+
 # =========================================================================== corp actions (job 7)
 def test_classify_purpose_deterministic():
     assert classify_purpose("Dividend - Rs 9 Per Share") == ("dividend", None, Decimal("9"))
@@ -138,6 +177,11 @@ def test_classify_purpose_deterministic():
     # Compound purpose classifies by the structural action (bonus/split before dividend).
     assert classify_purpose("Bonus 2:1 and Dividend Rs 3")[0] == "bonus"
     assert classify_purpose("Scheme of Arrangement") == ("other", None, None)   # recorded, not guessed
+    # 2026-09-03: the rescaling vocabulary the hi52 unadjusted-history veto keys on.
+    assert classify_purpose("Consolidation of Equity Shares")[0] == "split"
+    assert classify_purpose("Sub Division of Equity Shares From Rs 10 To Rs 1")[0] == "split"
+    assert classify_purpose("Demerger")[0] == "demerger"
+    assert classify_purpose("Reduction of Capital")[0] == "demerger"
 
 
 def test_parse_corp_actions_fixture():
@@ -173,6 +217,34 @@ async def test_corp_actions_failure_alerts_critical(store, clock):
     assert msgs and msgs[0].severity == "critical"       # A12 safety-critical set (§2.6 step 5)
     assert msgs[0].data["job_id"] == "corp_actions"
     assert ca.NSE_CORP_ACTIONS_URL.startswith("https://www.nseindia.com/")
+    assert ca.NSE_CORP_ACTIONS_URL.endswith("/corporates-corporateActions?index=equities")
+
+
+def test_corp_actions_url_windows_from_run_day():
+    """2026-08-14 route fix: the bare ``?index=equities`` call returns ONLY same-day ex-dates (verified
+    live) — useless for the forward-looking consumers (scan_context/preopen_planner/features.engine all
+    query ``get_corp_actions`` with an ``ex_to`` horizon), so every fetch is explicitly date-ranged."""
+    url = ca.corp_actions_url(date(2026, 8, 14))
+    assert url.startswith(ca.NSE_CORP_ACTIONS_URL)
+    assert "from_date=07-08-2026" in url                  # d - 7 (_BACKWARD_WINDOW_DAYS)
+    assert "to_date=18-09-2026" in url                     # d + 35 (_FORWARD_WINDOW_DAYS)
+
+
+async def test_corp_actions_run_requests_windowed_url(store, clock):
+    """The production fetch path (not just the standalone URL builder) must actually request the
+    windowed URL, anchored on the run day ``D`` (FIXED_NOW.date() == 2026-06-17)."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json=CORP_ACTIONS_JSON)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = await CorpActionsJob(store, clock, client).run(D)
+    assert result.ok is True
+    assert captured["url"].startswith(ca.NSE_CORP_ACTIONS_URL)
+    assert "from_date=10-06-2026" in captured["url"]       # D - 7
+    assert "to_date=22-07-2026" in captured["url"]          # D + 35
 
 
 # =========================================================================== earnings (job 8)
@@ -214,7 +286,42 @@ async def test_earnings_failure_alerts_critical(store, clock):
     assert ec.NSE_EVENT_CALENDAR_URL.startswith("https://www.nseindia.com/")
 
 
+async def test_earnings_repeated_failure_alerts_once(store, clock):
+    """2026-08-13 (critical-severity representative, binary ok/fail shape — mirrors bhavcopy exactly):
+    with the watermark fix now forwarding this SAFETY_CRITICAL job's ok through the composition root,
+    same-day catch-up sweeps genuinely re-run a still-failing day — two consecutive failing runs for
+    the same date must produce exactly one notify."""
+    msgs, sink = collect_alerts()
+    job = EarningsCalendarJob(store, clock, failing_client(), notify=sink)
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is False and result2.ok is False
+    assert len(msgs) == 1
+    assert msgs[0].severity == "critical"
+    assert msgs[0].data["d"] == D.isoformat()
+
+
 # =========================================================================== deals (job 9)
+def test_parse_deals_historical_or_live_shape():
+    """The post-migration (2026-08-18) ``historicalOR/bulk-block-short-deals`` response, verbatim
+    rows from the live probe that found the new route — pins that the alias tables really do cover
+    the ``BD_*`` shape end to end (the migration shipped as a URL-only change on that claim)."""
+    payload = {"data": [
+        {"BD_DT_DATE": "13-AUG-2026", "BD_DT_ORDER": "2026-08-12T18:30:00.000Z",
+         "BD_SYMBOL": "APOLLOPIPE", "BD_SCRIP_NAME": "Apollo Pipes Limited",
+         "BD_CLIENT_NAME": "ANIL LAXMICHAND SHAH", "BD_BUY_SELL": "BUY",
+         "BD_QTY_TRD": 247365, "BD_TP_WATP": 508.81, "BD_REMARKS": "-"},
+        {"BD_DT_DATE": "12-AUG-2026", "BD_DT_ORDER": "2026-08-11T18:30:00.000Z",
+         "BD_SYMBOL": "OTHERDAY", "BD_SCRIP_NAME": "Wrong Day Ltd",
+         "BD_CLIENT_NAME": "X", "BD_BUY_SELL": "SELL",
+         "BD_QTY_TRD": 1, "BD_TP_WATP": 1.0, "BD_REMARKS": "-"},
+    ]}
+    rows = parse_deals(payload, date(2026, 8, 13), REASON_BULK)
+    assert [r["symbol"] for r in rows] == ["APOLLOPIPE"]      # wrong-day row dropped
+    details = json.loads(rows[0]["details"])
+    assert details == {"client": "ANIL LAXMICHAND SHAH", "qty": "247365", "price": "508.81"}
+
+
 def test_parse_deals_fixture():
     rows = parse_deals(BULK_DEALS_JSON, D, REASON_BULK)
     # Wrong-day row and blank-symbol row dropped; both LOWFLT prints keyed to (symbol, d, reason).
@@ -226,7 +333,7 @@ def test_parse_deals_fixture():
 
 async def test_deals_run_flags_bulk_and_block_days(store, clock):
     def handler(request: httpx.Request) -> httpx.Response:
-        if "bulk-deals" in str(request.url):
+        if "optionType=bulk_deals" in str(request.url):
             return httpx.Response(200, json=BULK_DEALS_JSON)
         return httpx.Response(200, json=BLOCK_DEALS_JSON)
 
@@ -241,7 +348,7 @@ async def test_deals_run_flags_bulk_and_block_days(store, clock):
 
 async def test_deals_partial_failure_keeps_other_source(store, clock):
     def handler(request: httpx.Request) -> httpx.Response:
-        if "block-deals" in str(request.url):
+        if "optionType=block_deals" in str(request.url):
             raise httpx.ConnectError("blocked", request=request)
         return httpx.Response(200, json=BULK_DEALS_JSON)
 
@@ -253,6 +360,27 @@ async def test_deals_partial_failure_keeps_other_source(store, clock):
     assert result.failed_sources == ("block",)
     assert {r["symbol"] for r in store.get_flagged_instrument_days(D)} == {"LOWFLT"}
     assert msgs and msgs[0].data["failed_sources"] == ["block"]
+
+
+async def test_deals_repeated_partial_failure_alerts_once(store, clock):
+    """2026-08-13 (warning-severity representative, single-alert-call-site shape that DIFFERS from
+    bhavcopy's binary ok/fail): deals' alert fires even when ``ok`` stays True (one of two sources
+    down) — the dedup guards the ``_alert`` call site itself, keyed on ``d``, not on ``ok``. Two
+    consecutive partial-failure runs for the same date must still produce exactly one notify."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "optionType=block_deals" in str(request.url):
+            raise httpx.ConnectError("blocked", request=request)
+        return httpx.Response(200, json=BULK_DEALS_JSON)
+
+    msgs, sink = collect_alerts()
+    job = DealsJob(store, clock, httpx.AsyncClient(transport=httpx.MockTransport(handler)), notify=sink)
+    result1 = await job.run(D)
+    result2 = await job.run(D)
+    assert result1.ok is True and result2.ok is True              # ok stays True both times
+    assert result1.degraded is True and result2.degraded is True
+    assert len(msgs) == 1
+    assert msgs[0].severity == "warning"
+    assert msgs[0].data["failed_sources"] == ["block"]
 
 
 async def test_deals_total_failure_never_raises(store, clock):

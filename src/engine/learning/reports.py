@@ -37,8 +37,30 @@ def _pct(value: float | None, dp: int = 3) -> str:
     return "—" if value is None else f"{value:+.{dp}f}%"
 
 
+def _num(value: float | None, dp: int = 2) -> str:
+    """A plain (unsigned) number — holding durations are counts, never signed returns."""
+    return "—" if value is None else f"{value:.{dp}f}"
+
+
 def _slug_ts(generated_at) -> str:
     return generated_at.strftime("%Y%m%dT%H%M%S")
+
+
+def _margin_floor_txt(report: ValidationReport) -> str:
+    """The WO-3 floor with the DENOMINATOR it was taken at — the horizon is a protocol choice
+    (20 sessions for a swing leg, the §7.1 120 for a positional one), so a report that printed only
+    the resulting %/day would not be reproducible from the artifact alone."""
+    if report.margin_floor_pct_per_day is None:
+        return "not evaluated (no round-trip cost floor supplied — fail-closed, see Reasons)"
+    denom = (
+        ""
+        if report.margin_floor_days is None or report.cost_floor_pct is None
+        else (
+            f" (= round-trip cost floor {report.cost_floor_pct:.4f}% / "
+            f"{report.margin_floor_days} sessions)"
+        )
+    )
+    return f"{report.margin_floor_pct_per_day:.5f}%/day{denom}"
 
 
 # --------------------------------------------------------------------------- validation report
@@ -49,6 +71,16 @@ def render_markdown(report: ValidationReport) -> str:
     lines.append("")
     lines.append(f"_Generated {report.generated_at.isoformat()} · param_set `{report.param_set_id}`_")
     lines.append("")
+    # WO-M (2026-09-13): the sweep-mechanics stamp travels with the VERDICT too — a verdict is only
+    # comparable to another verdict produced the same way. Emitted ONLY when the ParamSet carries a
+    # stamp: this pipeline also validates returns that never came out of SweepRunner at all (the
+    # event-study harnesses build their own series and charge their own fills/costs), and printing
+    # "PRE-2026-09-13 (unstamped)" on one of those would assert three sweep biases it cannot have.
+    # Absence is the tell here, exactly as it is on the SweepReport side — with the difference that
+    # on THIS side absence means "pre-fix sweep OR no sweep", which COMMANDS.md says in words.
+    if report.sweep_mechanics:
+        lines.append(f"_Sweep mechanics: `{report.sweep_mechanics}`_")
+        lines.append("")
 
     # ---- verdict banner (first, always) -----------------------------------------------------
     if report.promotable:
@@ -60,6 +92,18 @@ def render_markdown(report: ValidationReport) -> str:
         for r in report.reasons:
             lines.append(f"- {r}")
     lines.append("")
+
+    # ---- defaults-fallback banner ------------------------------------------------------------
+    # A verdict on params the grid never ranked must not render like a verdict on a grid winner.
+    # Sits with the verdict, above every other statistic, because it changes what ALL of them mean.
+    if report.params_are_grid_winner is False:
+        lines.append(
+            "> **THESE PARAMS ARE NOT A GRID WINNER.** The sweep ranked no configuration (none "
+            "closed a round trip inside the window, or the open/closed split was unreadable), so "
+            "the §6.3 envelope DEFAULTS were validated instead. The trial count, sweep context and "
+            "winner-stability flag below describe a grid that selected nothing."
+        )
+        lines.append("")
 
     # ---- honest negative-expectancy banner (C9) ---------------------------------------------
     if report.expectancy_pct is not None and report.expectancy_pct < 0.0:
@@ -82,7 +126,73 @@ def render_markdown(report: ValidationReport) -> str:
     lines.append(f"- **Cited trial count N**: {n_txt}")
     lines.append(f"- **Required CPCV fold-pass (`fold_pass_min(N)`)**: {bar_txt}")
     lines.append(f"- **Observed CPCV fold-pass fraction**: {frac_txt}")
+    lines.append(f"- **Margin floor (WO-3)**: {_margin_floor_txt(report)}")
+    lines.append(
+        "- **Observed median passing-split expectancy**: "
+        + (
+            "no passing splits"
+            if report.cpcv_median_passing_expectancy_pct is None
+            else f"{report.cpcv_median_passing_expectancy_pct:+.5f}%/day"
+        )
+    )
     lines.append("")
+
+    # ---- R2 realized-hold cells (REPORTING ONLY, 2026-09-12) ---------------------------------
+    # The bar above is quoted at a CAP (20 swing / 120 positional). These rows re-base the same
+    # round-trip floor on the horizon this run was actually held for, so "passes the floor" can
+    # never be read as comfortable without the reader seeing at what horizon.
+    if report.realized_hold_cells:
+        lines.append("### Margin floor at the MEASURED holding period (reporting only, R2)")
+        lines.append("")
+        lines.append(
+            f"Not part of the promotion rule — the verdict above stands on the registered "
+            f"{report.margin_floor_days}-session denominator. Headroom = observed median "
+            "passing-split expectancy ÷ that cell's floor."
+        )
+        lines.append("")
+        lines.append("| horizon | sessions | margin floor | headroom |")
+        lines.append("|:--------|---------:|-------------:|---------:|")
+        for c in report.realized_hold_cells:
+            head = "—" if c.headroom_x is None else f"{c.headroom_x:.2f}×"
+            lines.append(
+                f"| {c.label} | {c.hold_sessions:.2f} | "
+                f"{c.margin_floor_pct_per_day:.5f}%/day | {head} |"
+            )
+        lines.append("")
+    if report.realized_hold is not None and report.realized_hold.n_trades:
+        h = report.realized_hold
+        lines.append("### Holding period + open-trade split (reporting only, R2)")
+        lines.append("")
+        lines.append(
+            f"- Trades: {h.n_trades}  ·  closed: {h.n_closed}  ·  **still open at the window "
+            f"edge: {h.n_open}**"
+        )
+        lines.append(
+            f"- Per-trade net return — CLOSED round trips only (the sweep headline and ranking "
+            f"statistic since WO-M): {_pct(h.expectancy_per_trade_closed_pct, 4)}  ·  ALL trades "
+            f"incl. open marks (reporting only): {_pct(h.expectancy_per_trade_pct, 4)}"
+        )
+        lines.append(
+            f"- Holding sessions, all trades — mean {_num(h.mean_sessions)} · median "
+            f"{_num(h.median_sessions)} · p90 {_num(h.p90_sessions)}"
+        )
+        lines.append(
+            f"- Holding sessions, closed only — mean {_num(h.mean_sessions_closed)} · median "
+            f"{_num(h.median_sessions_closed)} · p90 {_num(h.p90_sessions_closed)}"
+        )
+        lines.append(
+            "- An OPEN trade contributes its AGE at the window edge, not a realized hold, and its "
+            "return is unrealized mark-to-market with no exit leg paid."
+        )
+        lines.append("")
+    if report.population_is_survivorship_tainted_proxy:
+        lines.append(
+            "> **SURVIVORSHIP: the population is a tainted proxy** — a present-day symbol list "
+            "applied backwards (no point-in-time index membership is stored anywhere in this "
+            "platform). Every LEVEL above is biased HIGH by an unmeasurable amount; comparisons "
+            "against other runs on the same list are unaffected."
+        )
+        lines.append("")
 
     # ---- summary stats ----------------------------------------------------------------------
     lines.append("## Cost-adjusted summary")
@@ -188,21 +298,101 @@ def render_sweep_markdown(report: SweepReport) -> str:
         f"- Reference notional: ₹{report.reference_notional}  ·  modelled per-side fee: "
         f"{report.per_side_fee_pct:.4f}%"
     )
-    lines.append(f"- Best params (by expectancy): {report.best_params}")
+    lines.append(f"- Best params (by CLOSED-trade expectancy): {report.best_params}")
+    # WO-M (2026-09-13): the one-line mechanics stamp. A sweep number is only meaningful with the
+    # three settings it was produced under, and a pre-fix artifact carries no stamp at all — which
+    # is how the two are told apart.
+    lines.append(f"- **Mechanics**: `{report.mechanics or 'PRE-2026-09-13 (unstamped)'}`")
     lines.append("")
+
+    # ---- R2 (2026-09-12): what the winning config's trades actually looked like --------------
+    # The per-config table below reports one per-trade expectancy and no horizon at all, which is
+    # how a run could be promoted against a floor spread over 120 sessions without anyone knowing
+    # the median trade was held for 33 — and without the reader seeing that some of those "trades"
+    # were still open. Both go here, for the config the run selected. Since WO-M the headline is
+    # the CLOSED-trade figure and the all-trades one is what is reported beside it.
+    best_stat = next(
+        (s for s in report.stats if report.best_params is not None and s.params == report.best_params),
+        None,
+    )
+    if best_stat is not None and best_stat.n_trades:
+        unit = report.bar_unit
+        lines.append("## Winning config — holding period + open-trade split (R2, reporting only)")
+        lines.append("")
+        lines.append(
+            f"- Trades: {best_stat.n_trades}  ·  closed: {best_stat.n_closed}  ·  **still open at "
+            f"the window edge: {best_stat.n_open}**"
+        )
+        lines.append(
+            f"- Per-trade net return — CLOSED round trips only (the headline, and the statistic "
+            f"this winner was ranked on, WO-M): {_pct(best_stat.expectancy_pct, 4)}  ·  ALL trades "
+            f"incl. open marks (reporting only): {_pct(best_stat.expectancy_all_pct, 4)}"
+        )
+        win_c = "—" if best_stat.win_rate_closed is None else f"{best_stat.win_rate_closed:.1%}"
+        win_a = "—" if best_stat.win_rate is None else f"{best_stat.win_rate:.1%}"
+        lines.append(
+            f"- Win rate — CLOSED round trips (same population as the headline above): {win_c}  ·  "
+            f"ALL trades incl. open marks: {win_a}"
+        )
+        lines.append(
+            f"- Holding {unit}s, all trades — mean {_num(best_stat.hold_bars_mean)} · median "
+            f"{_num(best_stat.hold_bars_median)} · p90 {_num(best_stat.hold_bars_p90)}"
+        )
+        lines.append(
+            f"- Holding {unit}s, closed only — mean {_num(best_stat.hold_bars_mean_closed)} · "
+            f"median {_num(best_stat.hold_bars_median_closed)} · p90 "
+            f"{_num(best_stat.hold_bars_p90_closed)}"
+        )
+        lines.append(
+            "- An OPEN trade's duration is its AGE at the window edge, not a realized hold, and "
+            "its return is unrealized mark-to-market with no exit leg paid. Every configuration's "
+            "own figures are in the JSON artifact."
+        )
+        lines.append("")
+    if report.population_is_survivorship_tainted_proxy:
+        lines.append(
+            "> **SURVIVORSHIP: the population is a tainted proxy** — a present-day symbol list "
+            "applied backwards (no point-in-time index membership is stored anywhere in this "
+            "platform). Every LEVEL below is biased HIGH by an unmeasurable amount; comparisons "
+            "against other runs on the same list are unaffected."
+        )
+        lines.append("")
+
     lines.append("## Per-configuration stats")
     lines.append("")
-    lines.append("| params | trades | win% | expectancy | total | Sharpe | maxDD |")
-    lines.append("|:-------|-------:|-----:|-----------:|------:|-------:|------:|")
+    lines.append(
+        "| params | trades | closed | win% (CLOSED) | win% (all) | expectancy (CLOSED) | "
+        "expectancy (all) | total | Sharpe | maxDD |"
+    )
+    lines.append(
+        "|:-------|-------:|-------:|--------------:|-----------:|--------------------:|"
+        "-----------------:|------:|-------:|------:|"
+    )
     for s in report.stats:
         params = ", ".join(f"{k}={s.params[k]}" for k in sorted(s.params))
         win = "—" if s.win_rate is None else f"{s.win_rate:.0%}"
+        # WO-M follow-up: the closed-only win rate sits FIRST, beside the closed-only expectancy it
+        # shares a population with — quoting "win rate X%, expectancy Y%" off this row must not mix
+        # a mark-to-market hit rate with a realized per-trade mean.
+        win_closed = "—" if s.win_rate_closed is None else f"{s.win_rate_closed:.0%}"
         sharpe = "—" if s.sharpe is None else f"{s.sharpe:.2f}"
         mdd = "—" if s.max_drawdown_pct is None else f"{s.max_drawdown_pct:.2f}%"
         lines.append(
-            f"| {params} | {s.n_trades} | {win} | {_pct(s.expectancy_pct, 4)} | "
+            f"| {params} | {s.n_trades} | {s.n_closed} | {win_closed} | {win} | "
+            f"{_pct(s.expectancy_pct, 4)} | {_pct(s.expectancy_all_pct, 4)} | "
             f"{_pct(s.total_return_pct)} | {sharpe} | {mdd} |"
         )
+    lines.append("")
+    # WO-M (iii): the ranked column is the CLOSED one; the all-trades column is the pre-fix
+    # headline, kept visible so the size of that bias is readable per config instead of asserted.
+    lines.append(
+        "_`expectancy (CLOSED)` is the ranked/promotion statistic (mean net return over round trips "
+        "that closed inside the window); `expectancy (all)` adds positions still open at the window "
+        "edge at unrealized mark-to-market with no exit leg paid — the pre-2026-09-13 headline. "
+        "`win% (CLOSED)` is over the SAME round trips as `expectancy (CLOSED)`; `win% (all)` counts "
+        "every trade, open ones included. Neither win rate is a promotion input. A `—` in the "
+        "CLOSED columns means the config closed no round trip, so it was not rankable._"
+    )
     lines.append("")
     if report.notes:
         lines.append("## Notes / documented approximations")

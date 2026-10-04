@@ -1,0 +1,13 @@
+-- ------------------------------------------------------- §3.2.5/§5.2(a) day-slot journal: unsizeable
+-- 2026-08-14: a structurally-unforwardable candidate (no stop level ⇒ max_qty_by_risk is 0 ⇒ a
+-- guaranteed no_action, §7.1 — today: `mom` until ledger-driven rebalance state lands) is journalled
+-- by ``_journal_slot`` at the TOP of ``on_signal_candidate``, before the stopless short-circuit a few
+-- lines later ever runs. Until this column existed that row was indistinguishable from a candidate
+-- that was genuinely refused a forward slot (starvation) — the funnel rendered both as "unforwarded",
+-- so a `mom` candidate scored 1.0 with no stop showed up as the day's best UNFORWARDED score and was
+-- read as starvation in the nightly review. `unsizeable` = 1 marks a row that was never ELIGIBLE for
+-- a slot in the first place, independent of whichever branch of ``on_signal_candidate`` it fell
+-- through afterwards (mode/kill/window rearms all leave it set — the fact is about the candidate,
+-- not the control-flow path). Additive and non-destructive: rows written before this migration keep
+-- unsizeable 0 (rendered as ordinary unforwarded, matching their pre-existing behaviour exactly).
+ALTER TABLE prescreen_day_slots ADD COLUMN unsizeable INTEGER NOT NULL DEFAULT 0;

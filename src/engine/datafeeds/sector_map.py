@@ -3,8 +3,19 @@
 ``sector_map`` is the DETERMINISTIC source for the §7.1 ``per_sector_exposure`` gate input and the
 §2.7 sector fan-out — the Kite instruments dump carries no sector field, so sector membership comes
 from the NSE sectoral-index constituent lists (Bank, IT, Pharma, FMCG, Auto, Metal, Energy, Realty,
-PSU Bank, Financial Services). A symbol in no list maps to sector ``UNCLASSIFIED`` (capped at 1 open
-position by the gate [conservative], §4.4 job 13).
+PSU Bank, Financial Services). Classification is a four-rung ladder, each rung a pure supplement to
+the one above it (``mapping.setdefault`` throughout): index scrape (first-wins over the pinned
+:data:`SECTOR_SOURCES` order) → owner overrides (``config/sector_overrides.yaml``) → the NSE
+**Industry** label carried by the universe index CSV (:func:`parse_industry_csv` /
+:func:`industry_sector`, 2026-09-21: under the NIFTY 500 eligible universe the ten sectoral indices
+claim only ~170 names, and on 2026-09-16/17 one pending UNCLASSIFIED recommendation blocked four
+other candidates for its whole two-session validity) → ``UNCLASSIFIED`` (capped at 1 open position
+by the gate [conservative], §4.4 job 13).
+
+Industry-derived buckets (``CAPITAL_GOODS``, ``SERVICES``, ``DIVERSIFIED``, …) exist ONLY for the
+§7.1 exposure caps and the sector features. They never enter the §2.7 news keyword vocabulary, which
+stays restricted to the ten index sector names (:data:`SECTOR_SOURCES`) — a keyword "services" or
+"diversified" would false-tag headlines wholesale.
 
 Classification is FIRST-WINS over the pinned :data:`SECTOR_SOURCES` order (most-specific first:
 PSU Bank ⊂ Bank ⊂ Financial Services) so a symbol in overlapping indices lands in exactly one
@@ -19,6 +30,18 @@ the scheduler.
 The same job refreshes ``theme_map`` from the ``config/themes.yaml`` seed — rows are written
 VERBATIM (owner-approved additions only: the weekly researcher SUGGESTS, the owner edits the YAML,
 §5.5/§6.3 — nothing is ever auto-added here).
+
+A small owner-curated supplement, ``config/sector_overrides.yaml`` (same §5.5/§6.3 convention as
+``themes.yaml``), folds names the scraped indices structurally exclude (e.g. AMCs are tagged
+Industry=Financial Services by NSE but are not constituents of the real Nifty Financial Services
+index) into their natural sector. Applied AFTER the index-scrape classification as a pure
+supplement — ``mapping.setdefault``, so a symbol already classified by a real index is never
+touched — on top of BOTH a fresh scrape and a reused frozen-cache fallback. Same E5 guarantee as
+everything else here: a malformed/missing override file degrades to "no overrides this run" and
+alerts, never breaks sector classification. Sector NAMES in the file are also validated against
+:data:`SECTOR_SOURCES` at merge time (``_load_overrides``) — an unknown name is dropped (its
+symbols stay UNCLASSIFIED) and alerted rather than minting a phantom sector bucket the exposure
+gate never groups on.
 """
 
 from __future__ import annotations
@@ -26,7 +49,8 @@ from __future__ import annotations
 import csv
 import io
 import json
-from collections.abc import Awaitable, Callable, Iterable
+import re
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -34,6 +58,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.clock import Clock
 from engine.core.config import config_dir, load_yaml
 from engine.core.log import get_logger
@@ -45,7 +70,7 @@ _log = get_logger("engine.datafeeds.sector_map")
 #: Sector for symbols in no sectoral index — the gate caps it at 1 open position (§4.4 job 13).
 UNCLASSIFIED = "UNCLASSIFIED"
 
-#: NSE sectoral-index constituent CSVs (archives host — same format as the NIFTY200 list:
+#: NSE sectoral-index constituent CSVs (archives host — same format as the universe index list:
 #: ``Company Name,Industry,Symbol,Series,ISIN Code``). All [VERIFY Phase-1] — NSE moves these.
 #: ORDER IS LOAD-BEARING: classification is first-wins, most-specific index first (PSU Bank before
 #: Bank before Financial Services), so overlapping memberships resolve deterministically.
@@ -62,9 +87,33 @@ SECTOR_SOURCES: tuple[tuple[str, str], ...] = (
     ("REALTY", "https://archives.nseindia.com/content/indices/ind_niftyrealtylist.csv"),
 )
 
+#: NSE **Industry** labels (the second column of every constituents CSV, incl. the universe index
+#: list) that map onto an index-backed sector name from :data:`SECTOR_SOURCES` — so the industry
+#: fallback reuses the real bucket instead of minting a near-duplicate one next to it. Labels with
+#: no index behind them (Capital Goods, Services, Diversified, …) are normalised by
+#: :func:`industry_sector` instead. Lookup is on the stripped, lower-cased label.
+#: NOTE: Power and Oil Gas & Consumable Fuels BOTH fold into ENERGY — that is the composition of the
+#: real Nifty Energy index (oil & gas + power utilities), not a shortcut.
+INDUSTRY_SECTOR_ALIASES: dict[str, str] = {
+    "Financial Services": "FINANCIAL_SERVICES",
+    "Information Technology": "IT",
+    "Healthcare": "PHARMA",
+    "Fast Moving Consumer Goods": "FMCG",
+    "Automobile and Auto Components": "AUTO",
+    "Metals & Mining": "METAL",
+    "Power": "ENERGY",
+    "Oil Gas & Consumable Fuels": "ENERGY",
+    "Realty": "REALTY",
+}
+
+_INDUSTRY_ALIAS_LOOKUP: dict[str, str] = {
+    label.strip().lower(): sector for label, sector in INDUSTRY_SECTOR_ALIASES.items()
+}
+
+_NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
+
 _NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0 Safari/537.36",
+    "User-Agent": BROWSER_USER_AGENT,
     "Accept": "text/csv, text/plain, */*",
     "Referer": "https://www.nseindia.com/",
 }
@@ -84,18 +133,42 @@ class SectorMapResult(BaseModel):
     degraded_sources: tuple[str, ...] = ()
     rows_written: int = 0
     classified: int = 0
+    #: Symbols the NSE-Industry fallback classified this run (subset of ``classified``) — they
+    #: would have been ``UNCLASSIFIED`` before 2026-09-21.
+    industry_classified: int = 0
     unclassified: int = 0
     themes_written: int = 0
     reason: str | None = None
 
 
-def parse_constituents_csv(text: str) -> list[str]:
-    """Symbols from an NSE index-constituents CSV (``Company Name,Industry,Symbol,Series,ISIN``).
+def industry_sector(label: str) -> str:
+    """One NSE ``Industry`` label → the sector bucket the industry fallback would assign.
 
-    Defensive (E5), same conventions as the NIFTY200 parser in ``engine.universe.builder`` (kept
+    :data:`INDUSTRY_SECTOR_ALIASES` first (case-insensitive on the stripped label) so a label with
+    a real index behind it lands in that index's bucket; otherwise the label itself, upper-cased
+    with every run of non-alphanumerics collapsed to ``_`` ("Capital Goods" → ``CAPITAL_GOODS``,
+    "Media Entertainment & Publication" → ``MEDIA_ENTERTAINMENT_PUBLICATION``). A blank label (or
+    one with no alphanumerics at all) returns ``""`` = no classification, NOT a phantom bucket.
+    """
+    stripped = (label or "").strip()
+    if not stripped:
+        return ""
+    alias = _INDUSTRY_ALIAS_LOOKUP.get(stripped.lower())
+    if alias is not None:
+        return alias
+    return _NON_ALNUM_RE.sub("_", stripped).strip("_").upper()
+
+
+def _iter_constituent_rows(text: str, *, extra_columns: Sequence[str] = ()) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """Shared row walk for the two constituents-CSV parsers (``Company Name,Industry,Symbol,Series,
+    ISIN``) — the comment-skip / case-insensitive column lookup / EQ filter live here ONCE.
+
+    Defensive (E5), same conventions as the index parser in ``engine.universe.builder`` (kept
     local — no universe→datafeeds import edge): ``#`` comment lines skipped, ``Symbol`` column
-    located case-insensitively, a ``Series`` column (if present) filters to EQ. Order-preserving,
-    de-duplicated, uppercased.
+    located case-insensitively, a ``Series`` column (if present) filters to EQ. Yields
+    ``(SYMBOL, (extra column values, stripped, in the requested order))`` for every non-blank
+    symbol, in file order and NOT de-duplicated (each caller de-dupes as it wants). A requested
+    column missing from the header raises :class:`ValueError`, exactly like ``Symbol``.
     """
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     reader = csv.DictReader(io.StringIO("\n".join(lines)))
@@ -103,18 +176,49 @@ def parse_constituents_csv(text: str) -> list[str]:
     sym_col = norm.get("symbol")
     if sym_col is None:
         raise ValueError(f"no Symbol column in constituents CSV: {reader.fieldnames}")
+    wanted: list[str] = []
+    for column in extra_columns:
+        col = norm.get(column.strip().lower())
+        if col is None:
+            raise ValueError(f"no {column} column in constituents CSV: {reader.fieldnames}")
+        wanted.append(col)
     series_col = norm.get("series")
-    out: list[str] = []
-    seen: set[str] = set()
     for row in reader:
         if series_col is not None:
             series = (row.get(series_col) or "").strip().upper()
             if series and series != "EQ":
                 continue
         symbol = (row.get(sym_col) or "").strip().upper()
-        if symbol and symbol not in seen:
+        if symbol:
+            yield symbol, tuple((row.get(col) or "").strip() for col in wanted)
+
+
+def parse_constituents_csv(text: str) -> list[str]:
+    """Symbols from an NSE index-constituents CSV (``Company Name,Industry,Symbol,Series,ISIN``).
+
+    Order-preserving, de-duplicated, uppercased; see :func:`_iter_constituent_rows` for the
+    defensive parsing conventions.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for symbol, _ in _iter_constituent_rows(text):
+        if symbol not in seen:
             seen.add(symbol)
             out.append(symbol)
+    return out
+
+
+def parse_industry_csv(text: str) -> dict[str, str]:
+    """``{SYMBOL: raw NSE Industry label}`` from the same CSV shape — the industry-fallback input.
+
+    Labels are returned VERBATIM (only stripped); :func:`industry_sector` does the bucket mapping,
+    so the two concerns stay separable and testable. Same defensive conventions as
+    :func:`parse_constituents_csv`; first occurrence of a symbol wins. A CSV with no ``Industry``
+    column raises :class:`ValueError`, like the ``Symbol`` case.
+    """
+    out: dict[str, str] = {}
+    for symbol, (industry,) in _iter_constituent_rows(text, extra_columns=("Industry",)):
+        out.setdefault(symbol, industry)
     return out
 
 
@@ -141,6 +245,37 @@ def load_theme_seed(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_sector_overrides(path: str | Path) -> dict[str, str]:
+    """``config/sector_overrides.yaml`` → ``{symbol: sector}``, owner-curated supplement.
+
+    Shape: ``overrides: {sector_name: [symbol, ...]}``. Same §5.5/§6.3 owner-approval convention
+    as :func:`load_theme_seed` (platform suggests, owner edits the YAML). Flattened to one sector
+    per symbol here for the caller's merge; if a symbol is listed under two sectors in the file
+    itself, the later one wins (dict overwrite) — the file is small and owner-curated, so this is
+    a YAML-authoring mistake, not a runtime concern.
+
+    Raises (never caught here — E5 degrade-and-alert is the caller's job, matching
+    ``_refresh_themes``'s handling of :func:`load_theme_seed`) on a missing file or malformed
+    schema so the caller can tell "no overrides configured / broken" apart from "empty file".
+    """
+    raw = load_yaml(path)
+    overrides = raw.get("overrides") or {}
+    if not isinstance(overrides, dict):
+        raise ValueError("sector_overrides.yaml: 'overrides' must be a mapping")
+    out: dict[str, str] = {}
+    for sector, symbols in overrides.items():
+        sector_name = str(sector).strip().upper()
+        if not sector_name:
+            continue
+        if not isinstance(symbols, list):
+            raise ValueError(f"sector_overrides.yaml: '{sector}' symbols must be a list")
+        for sym in symbols:
+            symbol = str(sym).strip().upper()
+            if symbol:
+                out[symbol] = sector_name
+    return out
+
+
 class SectorMapJob:
     """§4.4 job 13 — weekly ``sector_map`` snapshot + ``theme_map`` seed refresh (R1, E5).
 
@@ -157,6 +292,15 @@ class SectorMapJob:
         sector — the frozen fallback copy reused per-source on failure, surviving restarts.
     themes_path:
         The theme seed YAML; defaults to ``config/themes.yaml`` under the configured config dir.
+    overrides_path:
+        The owner-curated sector-override YAML; defaults to ``config/sector_overrides.yaml``
+        under the configured config dir.
+    industry_paths:
+        Candidate universe index CSVs carrying NSE's ``Industry`` column, in preference order
+        (runtime cache first, committed seed last) — the third rung of the classification ladder.
+        The FIRST readable one is used; none readable ⇒ no fallback this run (E5 supplement, logged
+        ``sector_industry_source_unavailable``, no owner alert — the ladder still ends in
+        ``UNCLASSIFIED``). Empty (the default) disables the rung entirely.
     notify:
         Optional owner-alert sink; degraded sources / a skipped snapshot alert through it.
     """
@@ -169,6 +313,8 @@ class SectorMapJob:
         cache_path: str | Path,
         *,
         themes_path: str | Path | None = None,
+        overrides_path: str | Path | None = None,
+        industry_paths: Sequence[str | Path] = (),
         notify: NotifySink | None = None,
         request_timeout_s: float = 20.0,
     ) -> None:
@@ -177,28 +323,44 @@ class SectorMapJob:
         self._http = http
         self._cache_path = Path(cache_path)
         self._themes_path = Path(themes_path) if themes_path is not None else config_dir() / "themes.yaml"
+        self._overrides_path = (
+            Path(overrides_path) if overrides_path is not None else config_dir() / "sector_overrides.yaml"
+        )
+        self._industry_paths = tuple(Path(p) for p in industry_paths)
         self._notify = notify
         self._timeout = float(request_timeout_s)
+        #: Per-``d`` (as_of) alert dedup (2026-08-13, mirrors bhavcopy): guards all THREE alert sites
+        #: below (job-failed, no-data, degraded-frozen-copies) — the last of which can fire on an
+        #: otherwise ``ok=True`` run, so the dedup is keyed at each ``_alert`` call site, not on ``ok``.
+        #: The theme-seed alert in ``_refresh_themes`` has no ``d`` to key on and is NOT deduped here
+        #: (see that method — it also never drives ``ok``/the watermark, only ``themes_ok``).
+        self._alerted: set[date] = set()
 
     async def run(self, d: date, *, universe_symbols: Iterable[str] | None = None) -> SectorMapResult:
         """Build + persist the ``as_of=d`` sector snapshot and refresh ``theme_map``.
 
-        ``universe_symbols`` (typically today's NIFTY200/watchlist) get explicit ``UNCLASSIFIED``
-        rows when no index claims them, so the snapshot is total over the tradeable set. Idempotent
-        run-latest (§2.6): the (as_of, symbol) upsert makes a re-run harmless. Never raises (E5).
+        ``universe_symbols`` (since O15, 2026-09-04: today's BATCH universe — eligible + capped +
+        extended, ~800 names against the pre-O15 ~200 watchlist) get explicit ``UNCLASSIFIED`` rows
+        when no index claims them, so the snapshot is total over the tradeable set. The widening is
+        a pure set-difference pass over the already-fetched sectoral lists plus that many more
+        upserted rows — no extra HTTP: the ten sectoral fetches are per-index, not per-symbol.
+        Idempotent run-latest (§2.6): the (as_of, symbol) upsert makes a re-run harmless.
+        Never raises (E5).
         """
         try:
             return await self._run(d, universe_symbols)
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise into the scheduler
             reason = f"{type(exc).__name__}: {exc}"
             _log.exception("sector_map_job_failed", d=d.isoformat())
-            await self._alert(
-                title="Sector-map job failed",
-                body=f"Weekly sector_map/theme_map refresh failed: {reason}. Previous snapshot "
-                "remains the latest (per_sector_exposure keeps last week's map, R1/E5).",
-                severity="critical",
-                data={"job_id": "sector_map", "d": d.isoformat(), "reason": reason},
-            )
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(
+                    title="Sector-map job failed",
+                    body=f"Weekly sector_map/theme_map refresh failed: {reason}. Previous snapshot "
+                    "remains the latest (per_sector_exposure keeps last week's map, R1/E5).",
+                    severity="critical",
+                    data={"job_id": "sector_map", "d": d.isoformat(), "reason": reason},
+                )
+                self._alerted.add(d)
             return SectorMapResult(as_of=d, ok=False, reason=reason)
 
     # ------------------------------------------------------------------ core
@@ -232,17 +394,41 @@ class SectorMapJob:
         if not mapping:
             # Nothing classifies at all (every source down AND no frozen copy): writing a snapshot
             # of only-UNCLASSIFIED rows would clobber the previous good map — keep it instead.
-            await self._alert(
-                title="Sector map has NO data — snapshot skipped",
-                body="Every sectoral-index source failed and no frozen fallback exists. The previous "
-                "sector_map snapshot remains the latest (R1/E5).",
-                severity="critical",
-                data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
-            )
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+                await self._alert(
+                    title="Sector map has NO data — snapshot skipped",
+                    body="Every sectoral-index source failed and no frozen fallback exists. The "
+                    "previous sector_map snapshot remains the latest (R1/E5).",
+                    severity="critical",
+                    data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
+                )
+                self._alerted.add(d)
             return SectorMapResult(
                 as_of=d, ok=False, themes_ok=themes_ok, degraded_sources=tuple(degraded),
                 themes_written=themes_written, reason="no sector data (all sources failed, no cache)",
             )
+
+        # Owner-curated supplement (config/sector_overrides.yaml) — see the module docstring for the
+        # placement, the setdefault semantics and the E5 degrade rule. Entries are validated against
+        # the known-good SECTOR_SOURCES sector names here (not in load_sector_overrides, which only
+        # validates YAML shape) — an unknown name must never mint a phantom sector bucket that
+        # per_sector_exposure never groups on (see _load_overrides).
+        overrides = await self._load_overrides(valid_sectors=frozenset(s for s, _ in SECTOR_SOURCES))
+        for symbol, sector in overrides.items():
+            mapping.setdefault(symbol, sector)
+
+        # Third rung: NSE's own Industry label for everything the ten indices and the owner
+        # overrides left unclaimed (see the module docstring for the ladder + the 2026-09-21
+        # evidence). setdefault again — index and override classification always win.
+        industry_classified = 0
+        if self._industry_paths:
+            before = len(mapping)
+            for symbol, label in self._load_industries().items():
+                sector = industry_sector(label)
+                key = symbol.strip().upper()
+                if sector and key:
+                    mapping.setdefault(key, sector)
+            industry_classified = len(mapping) - before
 
         extra = sorted(
             {str(s).strip().upper() for s in (universe_symbols or []) if str(s).strip()} - set(mapping)
@@ -252,13 +438,17 @@ class SectorMapJob:
         written = await self._store.arun(self._store.upsert_sector_map, d, rows)
 
         if degraded:
-            await self._alert(
-                title="Sector map degraded — frozen copies reused",
-                body=f"Sectoral-index source(s) failed: {', '.join(degraded)}. Cached constituent "
-                "lists reused where available; membership may be stale (E5).",
-                severity="warning",
-                data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
-            )
+            if d not in self._alerted:  # dedup: don't storm on every retry of a still-degraded day
+                await self._alert(
+                    title="Sector map degraded — frozen copies reused",
+                    body=f"Sectoral-index source(s) failed: {', '.join(degraded)}. Cached constituent "
+                    "lists reused where available; membership may be stale (E5).",
+                    severity="warning",
+                    data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
+                )
+                self._alerted.add(d)
+        else:
+            self._alerted.discard(d)  # a fully clean run for d re-arms the alert for a later streak
         _log.info(
             "sector_map_written",
             as_of=d.isoformat(),
@@ -266,6 +456,8 @@ class SectorMapJob:
             unclassified=len(extra),
             degraded=degraded,
             themes=themes_written,
+            overrides=len(overrides),
+            industry_classified=industry_classified,
         )
         return SectorMapResult(
             as_of=d,
@@ -274,6 +466,7 @@ class SectorMapJob:
             degraded_sources=tuple(degraded),
             rows_written=written,
             classified=len(mapping),
+            industry_classified=industry_classified,
             unclassified=len(extra),
             themes_written=themes_written,
         )
@@ -297,6 +490,77 @@ class SectorMapJob:
         stamped = [{**row, "updated_at": now} for row in rows]
         written = await self._store.arun(self._store.upsert_theme_map, stamped)
         return True, written
+
+    # ------------------------------------------------------------------ sector overrides (owner supplement)
+    async def _load_overrides(self, *, valid_sectors: frozenset[str]) -> dict[str, str]:
+        """``config/sector_overrides.yaml`` supplement — same E5 shape as ``_refresh_themes``: a
+        missing or malformed file degrades to "no overrides this run" (never blocks the
+        index-scrape classification in ``_run``), alerted but non-fatal.
+
+        ``load_sector_overrides`` validates YAML shape only, not sector names — an entry naming a
+        sector outside ``valid_sectors`` (a typo, e.g. 'FINANCIALSERVICES') is dropped here rather
+        than merged: left in, it would create a phantom one-symbol sector bucket that
+        ``per_sector_exposure`` never groups on, so the symbol's notional escapes the cap silently
+        instead of landing in UNCLASSIFIED (the conservative fallback). Valid entries in the same
+        file are unaffected.
+        """
+        try:
+            overrides = load_sector_overrides(self._overrides_path)
+        except Exception as exc:  # noqa: BLE001 - E5: override failure never blocks classification
+            reason = f"{type(exc).__name__}: {exc}"
+            _log.warning("sector_overrides_unreadable", path=str(self._overrides_path), error=reason)
+            await self._alert(
+                title="Sector overrides file unreadable",
+                body=f"config/sector_overrides.yaml could not be loaded ({reason}). Proceeding with "
+                "index-scrape classification only this run — overrides are never load-bearing (E5).",
+                severity="warning",
+                data={"job_id": "sector_map", "reason": reason},
+            )
+            return {}
+
+        unknown = sorted({sector for sector in overrides.values() if sector not in valid_sectors})
+        if not unknown:
+            return overrides
+        _log.warning("sector_overrides_unknown_sector", sectors=unknown)
+        await self._alert(
+            title="Sector overrides reference unknown sector name(s)",
+            body=f"config/sector_overrides.yaml names sector(s) not in SECTOR_SOURCES: "
+            f"{', '.join(unknown)}. Those entries are skipped this run — affected symbols stay "
+            "UNCLASSIFIED (conservative) rather than form an uncapped phantom bucket (E5). Other "
+            "entries in the file still apply.",
+            severity="warning",
+            data={"job_id": "sector_map", "unknown_sectors": unknown},
+        )
+        return {sym: sector for sym, sector in overrides.items() if sector in valid_sectors}
+
+    # ------------------------------------------------------------------ industry fallback (3rd rung)
+    def _load_industries(self) -> dict[str, str]:
+        """``{SYMBOL: Industry label}`` from the FIRST readable :attr:`_industry_paths` entry.
+
+        E5 supplement, weaker than the override rung: a missing/unparseable/empty candidate is
+        logged and the next one tried; none usable degrades to "no industry fallback this run"
+        (``sector_industry_source_unavailable``) with NO owner alert — the symbols simply stay
+        ``UNCLASSIFIED``, which is exactly the pre-2026-09-21 behaviour, not a new failure.
+        """
+        tried: list[str] = []
+        for path in self._industry_paths:
+            tried.append(str(path))
+            try:
+                if not path.exists():
+                    continue
+                labels = parse_industry_csv(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001 - E5: try the next candidate, never raise
+                _log.warning(
+                    "sector_industry_source_unreadable",
+                    path=str(path),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            if labels:
+                _log.info("sector_industry_source", path=str(path), symbols=len(labels))
+                return labels
+        _log.warning("sector_industry_source_unavailable", paths=tried)
+        return {}
 
     # ------------------------------------------------------------------ cache (frozen fallback, E5)
     def _load_cache(self) -> dict[str, dict[str, Any]]:

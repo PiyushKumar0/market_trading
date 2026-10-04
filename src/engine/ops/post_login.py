@@ -21,11 +21,18 @@ startup steps:
     (b) backfill     — regime daily history (NIFTY 50 / India VIX) + intraday warm-up-gap fill for the
                        watchlist — the SAME calls startup makes, shared via
                        :func:`regime_and_warmup_backfill`;
-    (c) warm-up      — re-evaluate the §2.6 step-6 gate and, once coverage is met, LIFT the warm-up
+    (c) warm-up      — re-evaluate the §2.6 step-6 gate and, once the FREEZING classes (REGIME /
+                       unattributable — since 2026-09-17 an INTRADAY or DAILY shortfall is refused
+                       per SYMBOL at the gate instead) are covered, LIFT the warm-up
                        FROZEN-for-entries through the lifecycle's own gate application
                        (:meth:`SessionLifecycle.reapply_warmup_gate` — never a direct risk-state bypass);
     (d) ticker       — start the feed with the subscription tokens — the SAME step-7 resume logic,
-                       shared via :func:`resume_ticker`.
+                       shared via :func:`resume_ticker`;
+    (e) holdings     — §3.6 holdings reconcile (2026-09-07). NOT a recovery step: it restores nothing
+                       and gates nothing. It runs here because a fresh token is the first moment the
+                       account can be read at all, and the owner's overnight sells are exactly what
+                       the morning needs to know. Last in the ladder, and its own failures are already
+                       swallowed by the job.
 
 Idempotent by construction: safe to fire on every login / daily token refresh — each step skips when
 its state is already good and says so in the summary. One ``post_login_recovery`` event is emitted with
@@ -38,6 +45,7 @@ the recovery share the exact same ladder) talks only to ``core`` + ``broker`` + 
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -56,6 +64,8 @@ from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.store import MarketStore
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
+from engine.ops.holdings_reconcile import HoldingsReconcileJob
+from engine.ops.warmup import DAILY_LOOKBACK_SESSIONS, recent_sessions
 
 if TYPE_CHECKING:  # only for typing — lifecycle imports nothing from here, so no runtime cycle
     from engine.ops.lifecycle import SessionLifecycle
@@ -180,21 +190,49 @@ async def regime_and_warmup_backfill(
     watchlist_symbols: Callable[[], list[str]],
     index_symbol: str,
     vix_symbol: str,
+    *,
+    daily_lookback_sessions: int = DAILY_LOOKBACK_SESSIONS,
 ) -> dict[str, int]:
     """§2.6 step 4: warm the regime daily history (NIFTY 50 / India VIX — checkpointed, cheap on
-    re-runs) and gap-fill today's intraday minute bars for the watchlist from official candles so
-    warm-up never needs live ticks. Extracted so startup and the post-login re-trigger issue the
-    IDENTICAL calls. Returns bars written per leg (``{"regime_daily_bars", "warmup_gap_bars"}``)."""
+    re-runs), repair the watchlist's daily lookback (the warm-up gate's own window — coverage-checked
+    per symbol, so a healthy watchlist costs zero Kite requests), and gap-fill today's intraday minute
+    bars for the watchlist from official candles so warm-up never needs live ticks. Extracted so
+    startup and the post-login re-trigger issue the IDENTICAL calls. Returns bars written per leg
+    (``{"regime_daily_bars", "watchlist_daily_gap_bars", "warmup_gap_bars"}``)."""
     today = clock.today()
+    session = calendar.session(today)
+    # The day-interval end is clamped to YESTERDAY until today's session has closed: an intraday
+    # fetch returns today's RUNNING candle, and writing it advances the observed-through checkpoint
+    # so the 18:05 daily_bars job skips the day — freezing a partial snapshot as today's daily bar
+    # forever (2026-07-29: NIFTY 50/VIX closes stuck at the 09:53 boot's LTP until repaired).
+    # Today's FINAL bar is the evening job's business, never an intraday fetch's.
+    day_end = today
+    if session is not None and clock.now() <= session.close:
+        day_end = today - timedelta(days=1)
     day_report = await backfill.run(
         [index_symbol, vix_symbol], "day",
-        today - timedelta(days=365 * settings.data.backfill_daily_years), today,
+        today - timedelta(days=365 * settings.data.backfill_daily_years), day_end,
     )
-    written = {"regime_daily_bars": day_report.bars_written, "warmup_gap_bars": 0}
-    session = calendar.session(today)
+    written = {"regime_daily_bars": day_report.bars_written, "watchlist_daily_gap_bars": 0, "warmup_gap_bars": 0}
     watch = watchlist_symbols()
+    # 2026-09-15: repair the WATCHLIST's daily lookback too (the gate's exact window) — a boot onto a
+    # universe whose members have bars_1d holes froze the DAILY class with nothing to lift it. Coverage
+    # is checked per symbol from the store first, so a healthy watchlist costs zero Kite requests.
+    if watch:
+        sessions = recent_sessions(calendar, today, daily_lookback_sessions)
+        if sessions is None:
+            _log.warning("watchlist_daily_gap_skipped", reason="calendar_horizon")
+        else:
+            daily_report = await backfill.daily_gap(watch, sessions)
+            written["watchlist_daily_gap_bars"] = daily_report.bars_written
     if session is not None and watch:
-        gap_report = await backfill.warmup_gap(watch, session.open, clock.now())
+        # ``confirm_until`` clamped to session.close (2026-09-18): a post-close boot must not mark
+        # every after-hours minute no-trade — the §2.6 gate clamps to the close, so those were never
+        # holes. The −2 min keeps a minute Kite has not published yet out of the confirmation.
+        gap_report = await backfill.warmup_gap(
+            watch, session.open, clock.now(),
+            confirm_until=min(session.close, clock.now() - timedelta(minutes=2)),
+        )
         written["warmup_gap_bars"] = gap_report.bars_written
     return written
 
@@ -219,6 +257,18 @@ class PostLoginRecovery:
     Registered via :meth:`SessionManager.add_login_hook`; :meth:`run` is the guarded four-step recovery
     fired fire-and-forget when a token becomes valid. Every step is guarded and logged individually —
     a step that raises marks itself failed and alerts, the others still run, and the loop never crashes.
+
+    :attr:`completed` is the §2.6 early-hydration handshake (2026-09-09).
+    :meth:`SessionManager._fire_login_hooks` creates ONE TASK PER HOOK, so registration order gives
+    :class:`~engine.ops.early_hydration.EarlyHydration` no ordering against this recovery at all — the
+    two run concurrently. This event is what sequences them: SET in ``__init__`` (an engine that never
+    runs a recovery must not park the chain), CLEARED at the top of :meth:`run` before its first
+    await, and SET again in a ``finally`` — a FAILED recovery releases the chain exactly like a clean
+    one, because the pre-open chain needs no Kite session and a stuck event would cost the digest.
+    DEPTH-COUNTED via ``_in_flight`` (2026-09-09 review): two overlapping logins fire two concurrent
+    ``run()`` tasks, and a bare Event would be SET by whichever finishes FIRST — releasing the chain
+    while the other is still mid-ladder. The event re-sets only once every in-flight ``run()`` has
+    reached its own ``finally``.
     """
 
     def __init__(
@@ -240,6 +290,7 @@ class PostLoginRecovery:
         vix_symbol: str,
         notify: Notify | None = None,
         alert: AlertCallback | None = None,
+        holdings_reconcile: HoldingsReconcileJob | None = None,
     ) -> None:
         self._instruments = instruments
         self._store = store
@@ -257,27 +308,51 @@ class PostLoginRecovery:
         self._vix_symbol = vix_symbol
         self._notify = notify
         self._alert = alert
+        self._holdings_reconcile = holdings_reconcile
+        #: "This recovery is not running" (§2.6 early hydration, 2026-09-09 — see the class docstring).
+        #: Starts SET so an engine that never fires a login hook blocks nothing. DEPTH-COUNTED
+        #: (2026-09-09 review): a bare Event is set by whichever ``run()`` finishes FIRST, which would
+        #: release the early-hydration chain while a SECOND overlapping login's recovery is still
+        #: mid-ladder — ``SessionManager._fire_login_hooks`` fires one task per hook per login, so two
+        #: logins landing close together really do overlap. ``_in_flight`` counts concurrent runs; the
+        #: event only sets again once the count returns to zero.
+        self.completed = asyncio.Event()
+        self.completed.set()
+        self._in_flight = 0
 
     async def run(self) -> PostLoginRecoveryReport:
         """Fire the guarded four-step recovery and emit the summary. Never raises: this is a login
         hook — a failure degrades + alerts, it must never propagate into the login path or the loop."""
-        _log.info("post_login_recovery_start", token_valid=self._session.token_valid())
-        steps = [
-            await self._guard("instruments", self._step_instruments),
-            await self._guard("backfill", self._step_backfill),
-            await self._guard("warmup", self._step_warmup),
-            await self._guard("ticker", self._step_ticker),
-        ]
-        any_failed = any(s.status == "failed" for s in steps)
-        report = PostLoginRecoveryReport(steps=steps, ok=not any_failed, any_failed=any_failed)
-        _log.info(
-            "post_login_recovery",
-            ok=report.ok,
-            steps={s.name: s.status for s in steps},
-            detail={s.name: s.detail for s in steps},
-        )
-        await self._emit_summary(report)
-        return report
+        # Cleared BEFORE the first await (2026-09-09): the early-hydration hook is a sibling task
+        # dispatched in the same fan-out, so any await here is a chance for it to run and miss the
+        # ladder it depends on. Depth-counted (2026-09-09 review) so a SECOND overlapping ``run()``
+        # does not let the FIRST run's ``finally`` release the chain out from under it — the event is
+        # only re-set once every in-flight run (this one included) has reached its own ``finally``.
+        self._in_flight += 1
+        self.completed.clear()
+        try:
+            _log.info("post_login_recovery_start", token_valid=self._session.token_valid())
+            steps = [
+                await self._guard("instruments", self._step_instruments),
+                await self._guard("backfill", self._step_backfill),
+                await self._guard("warmup", self._step_warmup),
+                await self._guard("ticker", self._step_ticker),
+                await self._guard("holdings", self._step_holdings),
+            ]
+            any_failed = any(s.status == "failed" for s in steps)
+            report = PostLoginRecoveryReport(steps=steps, ok=not any_failed, any_failed=any_failed)
+            _log.info(
+                "post_login_recovery",
+                ok=report.ok,
+                steps={s.name: s.status for s in steps},
+                detail={s.name: s.detail for s in steps},
+            )
+            await self._emit_summary(report)
+            return report
+        finally:
+            self._in_flight -= 1
+            if self._in_flight == 0:
+                self.completed.set()
 
     async def _guard(
         self, name: str, fn: Callable[[], Awaitable[tuple[str, str]]]
@@ -344,6 +419,28 @@ class PostLoginRecovery:
     async def _step_ticker(self) -> tuple[str, str]:
         status = await resume_ticker(self._session, self._kite, self._ticker, self._ticker_tokens)
         return (("ok" if status == "started" else "skipped"), status)
+
+    # ------------------------------------------------------------------ (e) holdings reconcile
+    async def _step_holdings(self) -> tuple[str, str]:
+        """§3.6 holdings reconcile — NON-load-bearing (see the module docstring): it never fails the
+        ladder. The job swallows its own broker errors and reports them as ``error``, which is
+        recorded here as a ``skipped`` step: "could not read the account" is not a recovery failure,
+        and marking it one would put a red step in every pre-login-token report.
+
+        ``observed`` (WO-D2) is the §3.6 journal rows this run actually wrote: ``checked`` on a
+        trading day, 0 on any other (this ladder calls ``run`` unconditionally — only the hourly tick
+        is window-gated) and 0 when the journal write itself failed and was swallowed. Reporting it
+        says whether the "sold outside the ledger" evidence grew, which ``checked`` alone cannot."""
+        if self._holdings_reconcile is None:
+            return ("skipped", "not_wired")
+        result = await self._holdings_reconcile.run()
+        if result.error is not None:
+            return ("skipped", f"error={result.error[:120]}")
+        return (
+            "ok",
+            f"checked={result.checked} flagged={len(result.flagged)} "
+            f"skipped_young={result.skipped_young} observed={result.observed}",
+        )
 
     # ------------------------------------------------------------------ summary notify
     async def _emit_summary(self, report: PostLoginRecoveryReport) -> None:

@@ -53,8 +53,14 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
   If the holder is a wedged boot, the watchdog force-kills it and the lock frees itself on process
   death (never delete `engine.lock` by hand; the lock lives in the kernel, not the file).
 - **Stop:** stop the NSSM service (or Ctrl-C). **First Ctrl-C = graceful** (honoured at the next safe
-  point, even mid-startup); **second Ctrl-C = forced hard exit** (2026-07-21 fix — state stays RUNNING
-  so the next boot crash-recovers; positions stay broker-protected, R3). A wedged internal worker can
+  point, even mid-startup); **a second Ctrl-C more than 10 s after the first = forced hard exit**
+  (2026-07-21 fix — state stays RUNNING so the next boot crash-recovers; positions stay broker-protected,
+  R3). Repeats inside those 10 s are logged `stop_signal_repeat_ignored` and ignored. **NSSM must give
+  the engine time to stop:** `AppStopMethodConsole` = 30000 ms (set by `nssm_install.ps1`). At NSSM's
+  1500 ms default it closes the console window after 1.5 s (a SIGBREAK repeat at +1.3 s) and Windows
+  terminates the process mid-backup, so every stop 09-02..09-23 was recorded as a crash. A clean stop
+  is confirmed by `engine_lifecycle.state = STOPPED` with `last_clean_stop_at` at the stop time, and no
+  `stop_forced` line in `engine.log`. A wedged internal worker can
   no longer leave a zombie process holding the lock. The shutdown guard (§2.6) will, from Phase 3,
   flatten an open MIS before window-end / verify CNC GTTs / cancel working entries — never leaving the
   PC dead with an unprotected position or a resting entry order.
@@ -140,15 +146,16 @@ uses). Times are the `jobs:` block in `config/settings.yaml`.
 | 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift (A13); one run per missed day |
 | 18:00 | `bhavcopy` | date-keyed | UDiFF cross-check/fill of `bars_1d` |
 | 18:05 | `daily_bars` | date-keyed | nightly incremental official-candle backfill (watchlist + NIFTY 50 + India VIX) |
-| 18:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; GTT adjust is Phase 3) |
 | 18:30 | `earnings_calendar` | safety-critical | results/board-meeting dates (R2/O13) |
-| 18:45 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` |
-| 18:50 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe |
+| 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |
+| 20:30 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` (moved 18:45→20:30 2026-07-24) |
+| 20:45 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe (moved 18:50→20:45 2026-08-18 — MUST stay after `deals`/`corp_actions`, it reads both) |
 | 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` (§10.5) |
 
 Live (interval, not calendar-gated, run whenever the engine is up): `bar_advance` (5 s bar
-finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the per-feed news polls `news_poll_et`
-(`news.et_poll_s`=300 s) / `news_poll_mc` (900 s) / `news_poll_gdelt` (900 s).
+finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the news polls — one `news_poll_<name>`
+job per `news.feeds.rss` entry at its own `poll_s` (2026-08-04 seed: `et` 300 s, `livemint_markets` /
+`livemint_companies` 900 s) plus `news_poll_gdelt` (`news.gdelt_poll_s`=3600 s).
 
 ## Historical backfill procedure (A2, checkpointed & resumable)
 
@@ -184,6 +191,39 @@ python scripts/q15_candle_latency.py [--minutes 15] [--symbols … ] [--poll-s 2
 Records per-minute availability + percentile latencies to `data/reports/q15_latency.json`. Confirm the
 `warmup_ready` FROZEN fallback holds if candles are late (a start too close to the window stays FROZEN).
 
+## Pre-open start (tick coverage) (§14 Q14, IMPROVEMENT_SPEC.md F8)
+
+**Start the engine by 09:05 IST on trading days.** Raw tick capture — and therefore everything
+`data/parquet/ticks` carries (bid/ask, depth, cumulative volume) — begins only once the ticker
+subprocess is up; a late start loses the opening session **permanently**. Unlike `bars_1m`, which
+the §2.6 warm-up gap-fill can reconstruct OHLCV-only from Kite's historical MINUTE-CANDLE API
+(`src='gap_backfilled'`), raw ticks have **no backfill path** — Kite exposes no historical tick/quote
+API, so a tick the engine was not up to receive is gone for good, independent of any code fix.
+
+**Measured evidence (F8):** first captured bar was **09:19 IST on 2026-08-12** and **09:52 IST on
+2026-08-11** — both late-start days. On each, the opening ~30 minutes (09:15 auction-to-open onward,
+the most information-dense stretch of the session) are absent from tick storage. Consequence: any
+opening-range strategy (§6.1 `orb`-class) and any open-session spread measurement are blind exactly
+there — this also **understated** the audit's own opening-range estimate (only 24/48 measured
+symbol-days had a usable capture start; see `IMPROVEMENT_SPEC.md` Part III, "Measurement provenance
+(spread/range, W2b)").
+
+This is a start-**time** requirement, not a missing capability — every start already runs the
+identical §2.6 recovery/catch-up path regardless of clock time; starting earlier only means the
+ticker subscribes and writes before 09:15 instead of after.
+
+**Mitigation — pick one:**
+1. **Manual (default):** start the engine (service or `python -m engine.ops.main`) by 09:05 IST
+   yourself, same discipline as the morning login flow above.
+2. **Scheduled (owner option, plan §14 Q14):** Q14 recorded manual-start-primary **deliberately** —
+   this note documents the already-built option, it does not change that default. Register the
+   wake-capable engine-start Scheduled Task (§10.7 below): `\.scripts\schedule_tasks.ps1
+   -WithEngineStarts`, with a `lifecycle.active_period_starts` time at or before 09:05 IST. The
+   watchdog (`scripts/watchdog.py`) already alerts (`SCHEDULED_START_MISSED`) if a scheduled start
+   fails to fire, so a missed pre-open wake is caught the same day.
+
+Neither option is registered by default — this note changes no config and creates no Scheduled Task.
+
 ## Out-of-band watchdog + Scheduled Tasks (§2.2/§10.7)
 
 The engine's `HealthMonitor` dies with the process and cannot detect its own death, so a **separate
@@ -209,16 +249,24 @@ The G1 gate exercises these live for ≥5 sessions. Confirm each returns parseab
 browser-shaped headers; a per-source failure degrades gracefully (reuse-yesterday / skip) but should be
 re-pointed, not left broken. Feed set is `config_audit`-tracked (owner-only changes).
 
-- [ ] **ET Markets RSS** — `news.feeds.et_markets_rss` (5-min poll).
-- [ ] **Moneycontrol RSS** — `news.feeds.moneycontrol_rss` (15-min poll).
+- [x] **ET Markets RSS** — `news.feeds.rss.et` (300 s poll). Verified live 2026-08-04.
+- [x] **Livemint markets/companies RSS** — `news.feeds.rss.livemint_*` (900 s). Verified live 2026-08-04.
+      (Moneycontrol RSS RETIRED 2026-08-04: whole MC feed ecosystem frozen since ~2024-04 — newest
+      pubDate ~832 days old, 391 polls with zero inserts. Do not re-add without a fresh probe.)
+- [x] **Hindu BusinessLine markets/companies, CNBC-TV18 market, NDTV Profit** —
+      `news.feeds.rss.hbl_* / cnbctv18_market / ndtvprofit` (900 s). Verified live 2026-08-05
+      (corroboration-pool widening 2→5 domains; both Livemint feeds are ONE domain). Rejected
+      2026-08-05: financialexpress (malformed XML), zeebiz + business-standard (WAF 403),
+      businesstoday (no parseable pubDates).
 - [ ] **GDELT DOC 2.0** — `GDELT_DOC_URL` + `news.feeds.gdelt_doc_query`, client-side filtered to
       `GDELT_DOMAIN_ALLOWLIST` (module-pinned in `datafeeds/news.py`; widening it is a code change).
 - [ ] **MIS leverage** — `KITE_MIS_MARGINS_URL` = `https://api.kite.trade/margins/equity` (fail-closed:
       empty ⇒ no symbol MIS-eligible).
 - [ ] **Surveillance** (`datafeeds`… `universe/surveillance.py`): NSE GSM/ASM/ESM report APIs, T2T from
       `EQUITY_L.csv` (series BE/BZ), unsolicited-SMS list.
-- [ ] **NIFTY200 membership** — `universe.nifty200_source_url` (archives host); falls back to
-      `data/universe/nifty200_cached.csv` then the committed `config/universe/nifty200_seed.csv`.
+- [ ] **Index membership** (`universe.index_name`, NIFTY 500 since 2026-09-04, O15) —
+      `universe.index_source_url` (archives host); falls back to `data/universe/index_cached.csv`
+      then the committed `universe.index_seed_path` (`config/universe/nifty500_seed.csv`).
 - [ ] **Bhavcopy** — `BHAVCOPY_URL_TEMPLATE` (UDiFF, archives host).
 - [ ] **Corp actions** — `https://www.nseindia.com/api/corporates-corporate-actions?index=equities`.
 - [ ] **Event calendar** — `https://www.nseindia.com/api/event-calendar`.
@@ -246,3 +294,74 @@ ambiguous names correctly UNmatched (`unresolved_entities` log, §9.1).
       `scripts/rescrape_costs.py` before release and diff `config/costs.yaml`.
 - [ ] **News pipeline** ingesting + clustering + resolving on live feeds for **≥5 sessions**, with the
       50-headline entity-resolution precision spot-check above (≥95%).
+
+---
+
+# Phase 2 — RECOMMEND live operations (§8.3, gate G2)
+
+## Gate G2 evidence checklist (§8.3)
+
+Run the collector first — it computes every machine-checkable bar below in one pass and prints a
+MET / NOT-MET / N-A column plus the per-session digest detail and the budget table:
+
+```
+.venv\Scripts\python.exe scripts\g2_evidence.py [--from 2026-07-29] [--to YYYY-MM-DD]
+                                                [--window YYYY-MM-DD] [--json data\reports\g2_evidence.json]
+```
+
+It opens `data/state.db` **read-only** (`file:…?mode=ro`) and never touches `data/market.duckdb`, so
+it is safe to run against the live engine. It reads DB rows only — no engine log parsing, no engine
+import. Read the **SOURCES + COVERAGE CAVEATS** block it prints before quoting any number: several
+bars are judged against owner-set state (the trade window) that moved during the day.
+
+- [ ] **Digest before window-open:** "catalyst digest + watchlist produced before window-open on
+      **≥90% of sessions**". Evidence: `scripts/g2_evidence.py` criterion 1 (source:
+      `job_runs(job_id='catalyst_digest').last_success_at` vs the `config_audit`
+      `trade_window_state` value in force at the digest instant). ⚠ Judge the per-session detail
+      table by hand where the **WINDOW RESET LATER SAME DAY** flag is set — on those days the owner
+      moved the window after the digest landed, so the pass/fail depends on which value you count.
+- [ ] **News Analyst schema validity:** "News Analyst batches schema-valid on **≥95% of calls**".
+      Evidence: `scripts/g2_evidence.py` criterion 2a (source: `agent_calls`, **one row per SDK
+      call, retries included** — the conservative denominator). Criterion 2b reports the Intraday
+      Analyst for context; §8.3 sets no bar on it, but a low reading is a live defect to fix.
+- [ ] **Recommendation delivery timeliness:** "**≥90%** of recommendations delivered before their
+      validity window opens". Evidence: `scripts/g2_evidence.py` criterion 3 (source:
+      `recommendations.delivered_at` vs the payload's `valid_until`; the payload carries no
+      `valid_from`, so the window opens at `created_at ≤ delivered_at` by construction).
+- [ ] **Payload completeness:** "daily recommendations with **gate verdicts + cost math + manual
+      checklist in every payload**". `[owner-manual]` — sample delivered `recommendations.payload`
+      rows and confirm `gate`, `cost`, and `manual_checklist` are populated on each.
+- [ ] **Duration:** "**4 weeks** of daily recommendations". Evidence: `scripts/g2_evidence.py`
+      criterion 5 counts sessions with ≥1 delivered recommendation against a 20-session bar;
+      `[owner-manual]` sign-off that the 4 weeks were *continuous operating* weeks, not a padded
+      count across outages.
+- [ ] **Owner manual executions:** "owner has executed **≥5 recommendations manually** and outcomes
+      captured in the ledger". Evidence: `scripts/g2_evidence.py` criterion 4 counts
+      `recommendations.human_action='taken'` (and `'closed'`); `[owner-manual]` — the executions
+      themselves, reported back through Telegram `/taken <rec_id> <qty> <price>` and
+      `/closed <rec_id> <price>` so the `learning_ledger` row closes with a real outcome (§6.5).
+- [ ] **Budget discipline (D6, re-scoped 2026-08-13):** the plan's original bar ("within **10%**
+      of console-reconciled spend") assumed a monthly-credit billing model that doesn't exist —
+      owner clarification 2026-08-13: SDK usage bills against the Claude subscription's **weekly
+      usage limits** (Anthropic's June-15 notice paused the credit change), so there is no console
+      dollar figure to reconcile. The check is now: `scripts/g2_evidence.py` criterion 7 —
+      ledger arithmetic sane and **quota-week**-to-date spend within the **self-imposed** allocations
+      in `config/agents.yaml` (the DG-ladder input); `[owner-manual]` — subscription usage-limit
+      headroom not under pressure during the soak. Both halves of that ratio have been one *week*
+      since 2026-09-12 (§5.6: the governor's period is the subscription's Thu-14:00-IST quota window
+      and `budget_allocations_usd` are weekly dollars) — `--window YYYY-MM-DD` reports an earlier
+      week; never read criterion 7 against a month total.
+- [ ] **Zero API orders:** "zero API orders placed (**broker order book empty of platform orders** —
+      audited)". Evidence: `scripts/g2_evidence.py` criterion 6 proves the platform side
+      (`orders` / `order_events` empty). `[owner-manual]` — the broker side, for the period since
+      2026-07-29 (what each Zerodha surface can show, checked against their support pages 2026-09-29):
+      1. Console → Reports → Tradebook → segment Equity → date range from the period start to today
+         (at most 365 days per download): every trade in it is one you placed yourself.
+      2. Kite → Orders (today's order book) and its GTT tab: every entry is yours.
+      Kite keeps only the current day's order book; past cancelled or rejected orders are not
+      viewable anywhere, but Zerodha support can supply a given day's order log on request. The
+      engine cannot evidence its own absence there.
+- [ ] **Watchlist precision:** "owner has reviewed watchlist precision on **at least two weekly
+      samples** (are `originating` entries genuinely material catalysts?)". `[owner-manual]` — sample
+      the dashboard news/watchlist panel or `catalyst_watchlist` grade=`originating` rows for two
+      separate weeks and record the verdict (same shape as the G1 50-headline sample above).

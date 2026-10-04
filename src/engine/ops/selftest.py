@@ -35,9 +35,11 @@ from pydantic import BaseModel, Field
 from engine import _preload
 from engine.core.clock import Clock, ClockSkewUnavailable
 from engine.core.config import Settings, config_dir, load_yaml
+from engine.core.enums import Actor
 from engine.core.log import get_logger
 from engine.core.protected_store import PROTECTED_NAMES, ProtectedStore
 from engine.core.secrets import Secrets
+from engine.ops.warmup import CLASS_REGIME, CLASS_UNKNOWN
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 
@@ -101,6 +103,13 @@ class SelfTest:
         session_manager=None,
         catch_up=None,
         warmup_gate=None,
+        exposure=None,
+        limits_engine=None,
+        latch=None,
+        sdk_smoke=None,
+        calendar=None,
+        roster_quarantined: dict[str, str] | None = None,
+        roster_loaded: int | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -114,6 +123,20 @@ class SelfTest:
         # WarmupGate — both optional; unwired ⇒ the freshness checks surface as SKIP, never silently pass.
         self._catch_up = catch_up
         self._warmup_gate = warmup_gate
+        # §2.6 step-2 seams (Phase 2): ExposureTracker + LimitsEngine + RiskStateLatch drive the
+        # day-counter rebuild and the startup floor-ladder re-evaluation; unwired ⇒ SKIP.
+        self._exposure = exposure
+        self._limits = limits_engine
+        self._latch = latch
+        # D11 seam: an async callable performing ONE cheap SDK round-trip (composition wires it to
+        # the AgentHarness). The self-test owns the trading-day gate + per-day dedupe; a failed call
+        # is WARN, never FROZEN — LLM availability is not a safety input (D7/R1).
+        self._sdk_smoke = sdk_smoke
+        self._calendar = calendar
+        # Roster health (2026-08-03: a quarantined/unloadable roster used to surface only as an
+        # innocuous-looking sdk_smoke SKIP while every LLM job silently no-op'd).
+        self._roster_quarantined = dict(roster_quarantined or {})
+        self._roster_loaded = roster_loaded
 
     async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
@@ -125,14 +148,12 @@ class SelfTest:
         report.checks.append(await self._check_clock_skew(check_skew))
         report.checks.append(self._check_trade_window())
         report.checks.append(self._check_token())
-        report.checks.append(self._stub(
-            "risk_counters_rebuild", "§2.6 day-scoped counters — TODO(Phase 2/3): ledger + reconcile"))
-        report.checks.append(self._stub(
-            "equity_halt_ladder", "§2.6 floor-ladder re-eval — TODO(Phase 2/3): ExposureTracker equity"))
+        report.checks.append(await self._check_risk_counters_rebuild())
+        report.checks.append(await self._check_equity_halt_ladder())
         if include_freshness:
             report.checks.extend(await self.data_freshness_checks())
-        report.checks.append(self._stub(
-            "sdk_smoke", "one cheap Haiku call — wired with the intelligence harness, Phase 1 (D11)"))
+        report.checks.append(self._check_agent_roster())
+        report.checks.append(await self._check_sdk_smoke())
 
         for c in report.checks:
             level = _log.info if c.status in (CheckStatus.PASS, CheckStatus.SKIP) else _log.warning
@@ -265,13 +286,24 @@ class SelfTest:
             return SelfTestCheck(
                 name="data_freshness",
                 status=CheckStatus.FAIL,
-                detail=f"safety-critical jobs not fresh today after catch-up: {stale} (§2.6 step 5)",
+                detail=f"safety-critical jobs not fresh after catch-up: {stale} (§2.6 step 5)",
                 implies=Implies.FROZEN,
             )
         return SelfTestCheck(name="data_freshness", status=CheckStatus.PASS,
-                             detail="today-dated safety-critical jobs fresh (instruments/surveillance/earnings)")
+                             detail="safety-critical jobs fresh (instruments/surveillance/earnings)")
 
     async def _check_warmup_ready(self) -> SelfTestCheck:
+        """§7.1 ``warmup_ready`` as a self-test line — split per coverage class on 2026-09-17 (the
+        residue the 2026-09-13 addendum registered).
+
+        A raise still FAILs implying FROZEN (coverage that cannot be verified is missing, R6), and a
+        fully-ready gate still PASSes. In between, the check now follows the same rule as the
+        lifecycle: only a REGIME shortfall (or an unattributable blocker, which ``ready_for`` folds
+        into every class) is a GLOBAL condition and implies FROZEN; an INTRADAY or DAILY shortfall is
+        per-symbol and refused at the gate, so it is a WARN that implies nothing — a self-test that
+        re-imposed the global freeze here would undo the addendum the moment a standalone ``run()``
+        or a dashboard/CLI ``selftest`` endpoint was wired. A status with no ``ready_for`` keeps
+        today's FAIL+FROZEN (the flat fallback is never looser than the per-class answer)."""
         if self._warmup_gate is None:
             return self._stub(
                 "warmup_ready", "no WarmupGate wired — integrator passes engine.ops.warmup.WarmupGate (§2.6)"
@@ -286,13 +318,139 @@ class SelfTest:
         if status.ready:
             return SelfTestCheck(name="warmup_ready", status=CheckStatus.PASS,
                                  detail="contiguous coverage satisfies every strategy lookback (§7.1)")
+        ready_for = getattr(status, "ready_for", None)
+        if ready_for is None:
+            return SelfTestCheck(
+                name="warmup_ready",
+                status=CheckStatus.FAIL,
+                detail="insufficient contiguous coverage: " + "; ".join(status.blockers[:6]),
+                implies=Implies.FROZEN,
+            )
+        if not ready_for(CLASS_REGIME):
+            by_class = getattr(status, "blockers_by_class", {}) or {}
+            global_lines = list(by_class.get(CLASS_REGIME, [])) + list(by_class.get(CLASS_UNKNOWN, []))
+            return SelfTestCheck(
+                name="warmup_ready",
+                status=CheckStatus.FAIL,
+                detail="insufficient contiguous coverage: " + "; ".join(
+                    (global_lines or status.blockers)[:6]),
+                implies=Implies.FROZEN,
+            )
         return SelfTestCheck(
             name="warmup_ready",
-            status=CheckStatus.FAIL,
-            detail="insufficient contiguous coverage: " + "; ".join(status.blockers[:6]),
-            implies=Implies.FROZEN,
+            status=CheckStatus.WARN,
+            detail="per-symbol coverage short: " + "; ".join(status.blockers[:6]),
+            implies=Implies.NONE,
         )
 
     @staticmethod
     def _stub(name: str, detail: str) -> SelfTestCheck:
         return SelfTestCheck(name=name, status=CheckStatus.SKIP, detail=detail)
+
+    async def _check_risk_counters_rebuild(self) -> SelfTestCheck:
+        """§2.6 step 2: rebuild the day-scoped risk counters from the ledger/positions tables so a
+        same-day restart cannot reset exhausted entry capacity. The rebuild IS the read — the
+        tracker recomputes from tables on every call; this check performs and reports it."""
+        if self._exposure is None:
+            return self._stub("risk_counters_rebuild", "ExposureTracker not wired")
+        try:
+            d = self._clock.today()
+            if self._latch is not None:
+                # §3.5.3 behavioural auto-clear: yesterday's day-scoped causes re-arm this session.
+                await self._latch.clear_stale_daily(d.isoformat(), Actor.RISK_GATE)
+            losses = self._exposure.consecutive_losses(d)
+            opened = self._exposure.trades_opened_today(d)
+            baseline = self._exposure.day_baseline(d)
+            day_mtm = self._exposure.day_mtm(d)
+        except Exception as exc:  # noqa: BLE001 - a broken rebuild must freeze entries, not crash boot
+            return SelfTestCheck(name="risk_counters_rebuild", status=CheckStatus.FAIL,
+                                 detail=f"rebuild failed: {exc}", implies=Implies.FROZEN)
+        return SelfTestCheck(
+            name="risk_counters_rebuild", status=CheckStatus.PASS,
+            detail=(f"consecutive_losses={losses} opened_today={opened} "
+                    f"day_baseline={baseline} day_mtm={day_mtm}"),
+        )
+
+    async def _check_equity_halt_ladder(self) -> SelfTestCheck:
+        """§2.6 step 2: re-evaluate the continuous equity halt ladder against reconciled equity and
+        APPLY each breached rung's full §7.1 action before entries reopen — a startup trip must be
+        behaviorally identical to a live trip (state + downgrade + kill where specified)."""
+        if self._exposure is None or self._limits is None:
+            return self._stub("equity_halt_ladder", "ExposureTracker/LimitsEngine not wired")
+        from engine.risk.limits import floor_limits_from
+
+        try:
+            from decimal import Decimal
+
+            table = self._limits.load()
+            breaches = self._exposure.evaluate_floors(floor_limits_from(table))
+            if breaches:
+                await self._exposure.apply_floor_breaches(
+                    breaches, self._mode, self._kill, latch=self._latch,
+                )
+            # §7.1 daily-loss rungs re-checked on startup too — an offline-realized loss past −5/−7%
+            # must trip exactly as a live one would (§2.6 step 2).
+            day_rungs = self._exposure.evaluate_day_loss(
+                Decimal(str(table.limits.daily_loss_soft.day_mtm_pct)),
+                Decimal(str(table.limits.daily_loss_hard.day_mtm_pct)),
+            )
+            if day_rungs and self._latch is not None:
+                await self._exposure.apply_day_loss(day_rungs, self._mode, self._latch)
+        except Exception as exc:  # noqa: BLE001 - an unevaluable ladder freezes entries, never crashes
+            return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.FAIL,
+                                 detail=f"ladder evaluation failed: {exc}", implies=Implies.FROZEN)
+        tripped = [b.rung for b in breaches] + day_rungs
+        if tripped:
+            return SelfTestCheck(
+                name="equity_halt_ladder", status=CheckStatus.WARN,
+                detail=f"rung(s) tripped and APPLIED on startup: {', '.join(tripped)} "
+                       f"(equity {self._exposure.equity()})",
+            )
+        return SelfTestCheck(name="equity_halt_ladder", status=CheckStatus.PASS,
+                             detail=f"no rung breached (equity {self._exposure.equity()})")
+
+    def _check_agent_roster(self) -> SelfTestCheck:
+        """Tier-1 roster health (D7): WARN — never FROZEN, the LLM is not load-bearing — when any
+        agent definition was quarantined or the roster is empty, so a config typo shows up as a
+        named check instead of a day of silent no-op LLM jobs (2026-08-03 sonnet-5 incident)."""
+        if self._roster_loaded is None and not self._roster_quarantined:
+            return self._stub("agent_roster", "roster not wired")
+        if self._roster_quarantined:
+            names = ", ".join(f"{a} ({r[:80]})" for a, r in sorted(self._roster_quarantined.items()))
+            return SelfTestCheck(name="agent_roster", status=CheckStatus.WARN,
+                                 detail=f"{self._roster_loaded or 0} loaded; QUARANTINED: {names}")
+        if not self._roster_loaded:
+            return SelfTestCheck(name="agent_roster", status=CheckStatus.WARN,
+                                 detail="EMPTY roster — LLM tier disabled this run")
+        return SelfTestCheck(name="agent_roster", status=CheckStatus.PASS,
+                             detail=f"{self._roster_loaded} agent defs loaded")
+
+    async def _check_sdk_smoke(self) -> SelfTestCheck:
+        """D11: one cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading
+        day via a ``job_runs`` watermark. WARN on failure — never FROZEN (LLM availability is not a
+        safety input, D7)."""
+        if self._sdk_smoke is None:
+            return self._stub("sdk_smoke", "harness smoke callable not wired")
+        d = self._clock.today()
+        if self._calendar is not None and not self._calendar.is_trading_day(d):
+            return self._stub("sdk_smoke", "non-trading day (D11: skipped)")
+        row = self._conn.execute(
+            "SELECT status FROM job_runs WHERE job_id='sdk_smoke' AND run_for_date=?", (d.isoformat(),)
+        ).fetchone()
+        if row is not None and row["status"] == "success":
+            return self._stub("sdk_smoke", "already verified this trading day (deduped)")
+        try:
+            detail = await self._sdk_smoke()
+        except Exception as exc:  # noqa: BLE001 - a dead SDK degrades to no-proposal, never blocks boot
+            return SelfTestCheck(name="sdk_smoke", status=CheckStatus.WARN,
+                                 detail=f"SDK call failed: {exc}")
+        now = self._clock.now().isoformat()
+        self._conn.execute(
+            "INSERT INTO job_runs (job_id, run_for_date, last_success_at, last_attempt_at, status) "
+            "VALUES ('sdk_smoke', ?, ?, ?, 'success') "
+            "ON CONFLICT(job_id, run_for_date) DO UPDATE SET last_success_at=excluded.last_success_at, "
+            "last_attempt_at=excluded.last_attempt_at, status='success'",
+            (d.isoformat(), now, now),
+        )
+        self._conn.commit()
+        return SelfTestCheck(name="sdk_smoke", status=CheckStatus.PASS, detail=detail)

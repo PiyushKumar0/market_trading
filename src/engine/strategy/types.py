@@ -78,6 +78,35 @@ class SignalCandidate(BaseModel):
     catalyst_ref: str | None = None           # catalyst_watchlist.entry_id (§2.7); price baselines: None
 
 
+class PendingSetup(BaseModel):
+    """A strategy condition that is NOT currently true, with the deterministic price at which it
+    would arm (§3.2.5 sweep addendum, owner-directed 2026-07-29).
+
+    Purely informational — it never enters the pipeline and no LLM sees it at origination. The owner
+    uses it to decide whether shifting/extending the trade window is worth it ("RELIANCE arms above
+    ₹1,280"). ``trigger_price`` is None where the condition is not price-invertible (cross-sectional
+    / rule-based) and ``condition`` then carries the plain-text rule alone. ``arms_when`` is the
+    SCANNER's own statement of the crossing direction (2026-07-29 owner feedback: inferring it from
+    price comparison mislabeled a BUY breakout "below" when trigger == last). ``stop_price`` /
+    ``target_price`` / ``exit_rule`` carry the full would-be trade plan so the owner message never
+    shows a naked buy/sell point.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    strategy_id: str
+    symbol: str
+    side: Side
+    style: Style
+    trigger_price: Decimal | None = None       # tick-rounded arm level; None = not price-invertible
+    arms_when: Literal["above", "below"] = "above"   # crossing direction, declared by the scanner
+    last_price: Decimal | None = None          # the scanned bar's close, for at-a-glance distance
+    stop_price: Decimal | None = None          # the stop the strategy would use at the trigger
+    target_price: Decimal | None = None        # fixed target where the rule defines one
+    exit_rule: str = ""                        # words, where exit is rule-based instead of a target
+    condition: str = ""                        # human-readable arming rule (volume gate, window, …)
+
+
 class ScanContext(BaseModel):
     """Everything a scanner may read for one bar, assembled by the pre-screen's context provider.
 
@@ -98,8 +127,10 @@ class ScanContext(BaseModel):
     """Reference-index (NIFTY 50) daily closes ascending — the rsi2 regime filter input (§6.1)."""
 
     flagged: bool = False
-    """Symbol appears in ``flagged_instrument_days`` for today (bulk/block deal) — volume-breakout
-    scanners suppress (§6.1 orb; Phase-3 cat)."""
+    """Symbol appears in ``flagged_instrument_days`` for the PRIOR trading session (bulk/block
+    deal) — volume-breakout scanners suppress (§6.1 orb; Phase-3 cat). Prior session, not today:
+    NSE publishes deals ~EOD and the deals job writes them at 20:30, so a day's own flags are
+    unknowable while it trades (2026-08-18 fix — a today-read was structurally empty)."""
 
     trade_window: tuple[datetime, datetime] | None = None
     """Today's owner trade window [start, end], already session-clamped (``NSECalendar.trade_window``)."""

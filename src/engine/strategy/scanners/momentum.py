@@ -8,14 +8,19 @@ Inputs arrive pre-computed on the context (the provider computes ``indicators.mo
 same ``bars_1d`` history for EVERY universe symbol — a per-symbol scanner cannot see the cross
 section): ``ctx.momentum_by_symbol`` (symbol → 4-week fractional return; NaN = insufficient
 history ⇒ unrankable), ``ctx.mom_sessions_since_rebalance`` (trading sessions since the last
-rebalance; ``None`` ⇒ never ⇒ due now), ``ctx.upcoming_ex_dates`` (this symbol's known upcoming
-corp-action ex-dates, A12).
+rebalance; ``None`` ⇒ never ⇒ due now — WO-13, 2026-08-13: the LIVE provider now supplies the real,
+restart-persisted count instead of a permanent ``None``; see ``engine.ops.scan_context``'s
+``mom_rebalance_state`` — ``None`` remains the correct value for the genuine bootstrap case), and
+``ctx.upcoming_ex_dates`` (this symbol's known upcoming corp-action ex-dates, A12).
 
 Documented choices where the sketch is silent:
 
 * **Rebalance cadence** is denominated in TRADING SESSIONS (§6.3: ``rebalance_days`` upper bound 20
   = the §7.1 swing holding cap in td). Due when ``sessions_since >= rebalance_days`` or never
-  rebalanced. The provider/position-manager owns updating the last-rebalance marker after acting.
+  rebalanced. WO-13: the LIVE provider owns advancing the persisted last-rebalance marker, purely
+  on cadence (matching the sweep's fixed ``valid_positions[::rebalance_days]`` indexing) — a
+  rebalance day is a calendar/session event, not conditioned on whether a candidate this scanner
+  emits actually clears the gate or gets acted on.
 * **Ex-date skip horizon (A12)**: skip the symbol when any upcoming ex-date falls within
   ``ceil(rebalance_days × 7/5)`` CALENDAR days of the bar's day (inclusive) — the trading-session
   hold horizon mapped conservatively (rounded up) onto the calendar, since the scanner is

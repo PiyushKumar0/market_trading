@@ -14,10 +14,17 @@ Documented choices where the sketch is silent:
   point. ADX(14) and ATR(14, 1d) are computed on COMPLETED daily bars only — today's daily
   high/low/close do not exist intraday (a 1m bar is not a day bar); the trigger's trend-strength and
   trail distance come from finished sessions.
-* **Warm-up**: ≥ 60 completed dailies required (EMA50 needs ~3×period ≈ 150 for textbook-exact
-  values but is seeded deterministically from the series start — see ``indicators`` module contract;
-  ADX(14) itself needs 28 rows; the 60 floor keeps early-history EMA seeding noise out of live
-  signals; ``warmup_ready``/§2.6 backfill supplies 1–2 y of dailies in practice).
+* **Warm-up**: ≥ 150 completed dailies required (WO-11, 2026-08-13 — raised from a 60-bar floor,
+  audit finding F10). EMA is seeded deterministically from the series start (see ``indicators``
+  module contract), so the seed's own contribution after ``n`` bars decays as
+  ``(1 − alpha)**n`` with ``alpha = 2 / (period + 1)``; for EMA(50) (``alpha = 2/51``) that residual
+  seed weight is **9.07% at 60 bars** — still material — versus **0.25% at 150 bars**, the
+  sub-1%-residual convergence point this floor targets (the derivation this docstring states is the
+  one WO-11's acceptance bar cites). ADX(14) itself only needs 28 rows — EMA50's seed is the binding
+  constraint, not ADX. ``warmup_ready``/§2.6 backfill supplies 1–2 y of dailies for established
+  listings, so the raise costs nothing there; it only holds back young listings, closing the gap
+  where WarmupGate's young-listing exemption previously let a 60–150-session listing through with a
+  live golden-cross carrying material EMA-seed noise (fewer trend signals on young names — intended).
 * **ADX boundary is strict**: ``adx > adx_min``, not ``>=``.
 * **Score** = ``(adx − adx_min) / (50 − adx_min)`` clamped to [0, 1] — ADX 50 (a very strong trend)
   or higher scores 1.0. Informational only.
@@ -36,7 +43,8 @@ _EMA_FAST = 20         # §6.1: 20/50 EMA cross
 _EMA_SLOW = 50
 _ATR_PERIOD = 14       # §6.1: ATR(14, 1d)
 _ADX_PERIOD = 14
-_MIN_DAILIES = 60      # warm-up floor (see module docstring)
+_MIN_DAILIES = 150     # warm-up floor (WO-11, F10): EMA(50) seed residual weight (1 - 2/51)^n is
+                        # 9.07% at 60 bars vs 0.25% at 150 — see module docstring "Warm-up" bullet
 _ADX_SCORE_CEIL = 50.0
 
 

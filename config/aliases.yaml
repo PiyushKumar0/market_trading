@@ -1,0 +1,71 @@
+# config/aliases.yaml — CURATED entity-alias additions (§3.2.4/§4.3: "seed + curated additions").
+#
+# The daily seed derives aliases from the instruments dump's LEGAL names; colloquial press names
+# that the legal name does not contain live here. Owner-editable. GOVERNANCE AMENDED 2026-08-18
+# (owner directive): the platform may now add rows autonomously, with the duty to inform the owner
+# on every change (was: §5.5 loop suggests, only the owner adds). Additions stay evidence-first —
+# each row cites its unresolved-entity basis. Merged into entity_aliases by the daily instruments
+# job with source='curated'.
+#
+# Seeded 2026-08-03 from the owner's G1 sample verdict (rows 43/44/48/50):
+#   - Groww's legal name is "Billionbrains Garage Ventures Ltd." — no headline ever says that.
+#   - "SBI Card(s)" is how the press writes SBI Cards and Payment Services.
+#   - Lloyds Metals & Energy is OUT of the NIFTY200 universe: the alias exists so the resolver
+#     records it as out_of_universe (the §3.2.4 disposition) instead of a bare no_match.
+#   - "Kotak Bank" is the common short form (the full "Kotak Mahindra Bank" seeds from the dump).
+
+schema_version: 1
+
+aliases:
+  - { alias: "Groww",       tradingsymbol: GROWW }
+  - { alias: "SBI Card",    tradingsymbol: SBICARD }
+  - { alias: "SBI Cards",   tradingsymbol: SBICARD }
+  - { alias: "Kotak Bank",  tradingsymbol: KOTAKBANK }
+  - { alias: "Lloyds Metals", tradingsymbol: LLOYDSME }
+  # 2026-08-03 seed-5 verdict (rows 29/33/39/40/45): press short forms of legal names. "SBI" is
+  # safe by construction — in an "SBI Card"/"SBI Life" headline the longer curated phrase wins
+  # (§3.2.4 subsumption: the most specific phrase resolves; bare "SBI" alone means the bank).
+  - { alias: "HCL Tech",         tradingsymbol: HCLTECH }
+  - { alias: "Kalyan Jewellers", tradingsymbol: KALYANKJIL }
+  - { alias: "SBI",              tradingsymbol: SBIN }
+  - { alias: "SBI Life",         tradingsymbol: SBILIFE }
+  - { alias: "BEL",              tradingsymbol: BEL }
+  - { alias: "Adani Power",      tradingsymbol: ADANIPOWER }
+  - { alias: "Adani Energy",     tradingsymbol: ADANIENSOL }
+  # 2026-08-03 multi-ticker follow-up (rows 4/11/18/20): Zerodha truncates dump names at ~20
+  # chars, so TCS seeds as "tata consultancy serv lt" and ADANIENSOL as the singular "adani
+  # energy solution" — press acronyms/short forms must be curated; the dump can never yield them.
+  - { alias: "TCS",              tradingsymbol: TCS }
+  - { alias: "RIL",              tradingsymbol: RELIANCE }
+  - { alias: "M&M",              tradingsymbol: "M&M" }
+  - { alias: "HUL",              tradingsymbol: HINDUNILVR }
+  - { alias: "L&T",              tradingsymbol: LT }
+  - { alias: "Cholamandalam",    tradingsymbol: CHOLAFIN }
+  - { alias: "Adani Energy Solutions", tradingsymbol: ADANIENSOL }
+  # 2026-08-03 seed-6 follow-up. "Reliance" pins RELIANCE over the seed's conglomerate-prefix
+  # ambiguity union (curated rows override seed rows at load); bare "Adani"/"Godrej" stay
+  # deliberately ambiguous — no curated pin. The SBI fund-house family maps to SBIFUNDS (listed
+  # NSE EQ, outside NIFTY200): headlines about the AMC record out_of_universe instead of wrongly
+  # attaching SBIN via the bare "SBI" alias.
+  - { alias: "Reliance",         tradingsymbol: RELIANCE }
+  - { alias: "Adani Green",      tradingsymbol: ADANIGREEN }
+  - { alias: "Adani Ports",      tradingsymbol: ADANIPORTS }
+  - { alias: "SBI Fund",         tradingsymbol: SBIFUNDS }
+  - { alias: "SBI Funds",        tradingsymbol: SBIFUNDS }
+  - { alias: "SBI Funds Management", tradingsymbol: SBIFUNDS }
+  - { alias: "SBI MF",           tradingsymbol: SBIFUNDS }
+  - { alias: "SBI Mutual Fund",  tradingsymbol: SBIFUNDS }
+  # 2026-08-18 (platform-added under the amended governance above; basis = the unresolved-entity
+  # dump behind the resolver-universe fix, WORKLOG this date). Press short forms the dump's legal
+  # names can never yield — the seed rows are "britannia industries" / "dabur india" / "grasim
+  # industries", and headlines routinely drop the second word. Subsumption keeps the long seed
+  # form winning whenever it is present, so these change only the bare-form headlines.
+  # NOT added: "LG Electronics" — both LG seed forms already exist; those headlines failed on the
+  # resolver's watchlist-cap universe bug (fixed this date), not on a missing alias.
+  - { alias: "Britannia",        tradingsymbol: BRITANNIA }   # 11 unresolved hits to 08-13
+  - { alias: "Dabur",            tradingsymbol: DABUR }       # 10 unresolved hits to 08-10
+  - { alias: "Grasim",           tradingsymbol: GRASIM }      # 3 bare-form hits to 08-13
+  # Vikram Solar is OUT of the NIFTY200 universe: the LLOYDSME pattern — the alias exists so the
+  # resolver records out_of_universe (the §3.2.4 disposition) instead of a bare no_match, keeping
+  # the 2026-08-17 probe's motivating name visible in the audit trail.
+  - { alias: "Vikram Solar",     tradingsymbol: VIKRAMSOLR }

@@ -25,6 +25,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from engine.core.contracts import Recommendation
+
 # Severity is a closed vocabulary shared by every kind; "critical" maps to the loud/alert path.
 Severity = Literal["info", "warning", "critical"]
 
@@ -117,6 +119,14 @@ class MessageKind(StrEnum):
     order call. Owner confirms via ``/taken`` (one tap) ⇒ ``origin='recommended'``; dismiss/expiry ⇒
     ``no_action``. Never auto-adopted."""
 
+    POSITION_NOT_IN_HOLDINGS = "position_not_in_holdings"
+    """The §3.6 holdings reconcile found a tracked OPEN CNC position that is ABSENT or SHORT in the
+    broker's holdings (owner-directed 2026-09-07): the owner almost certainly sold it and never sent
+    ``/closed``, so the platform is tracking — and blocking new buys on — a position that no longer
+    exists. One alert per position per trading day, naming the exact ``/closed <entry_rec_id> <price>``
+    reply. Alert-only: the platform never auto-closes a human-owned position (the exit price is the
+    owner's fact, §6.5) and never touches risk state on this signal."""
+
     RECONCILE_DRIFT = "reconcile_drift"
     """Nightly self-built-vs-official bar reconciliation drifted beyond thresholds (A13/§3.2.3:
     |Δvol|>``reconcile.vol_drift_pct`` or |Δclose|>``reconcile.close_drift_ticks`` on more than
@@ -145,6 +155,34 @@ class MessageKind(StrEnum):
     calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
     FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3)."""
 
+    MODE_CHANGE = "mode_change"
+    """The engine mode moved ``OFF ↔ RECOMMEND ↔ AUTO`` (§10.3 ``MODE_CHANGE``). Owner-initiated or a
+    risk-forced downgrade — the ``actor`` says which, and a risk-forced one never re-arms on a timer
+    (R3/R5). Warning: the owner must always know which mode their capital is running under."""
+
+    RISK_STATE_CHANGE = "risk_state_change"
+    """The Tier-2 risk state moved (§10.3 ``RISK_STATE(FROZEN/CLOSE_ONLY)``, §3.5.3). Carries the
+    per-cause reason that drove the edge — states are reached by direct per-cause edges composed
+    most-restrictive-wins, so the cause is the actionable half of the message (see
+    :class:`engine.risk.causes.RiskStateLatch`)."""
+
+    CATALYST_WATCHLIST = "catalyst_watchlist"
+    """The daily catalyst watchlist was built (§4.4 job 14 / §10.3 ``CATALYST_WATCHLIST``): how many
+    symbols are ORIGINATING candidates (news may start a trade) vs CONTEXT-only (news may veto/size
+    but never originate, O11/§2.7)."""
+
+    CATALYST_DISABLED = "catalyst_disabled"
+    """The news/catalyst layer disabled itself via the §2.7 fail-safe ladder (stale digest, too few
+    source domains, feed outage, …). Warning, not critical: the platform keeps trading its
+    deterministic strategies — it just stops originating on news (§10.3 ``CATALYST_DISABLED``)."""
+
+    SCAN_SWEEP = "scan_sweep"
+    """An on-demand scanner sweep completed (§3.2.5 sweep addendum, 2026-07-29): fired when the
+    trade window becomes active or the owner asks via ``/scan_now``. Carries the explicit verdict —
+    candidates published now, plus the deterministic PENDING arm levels ("X arms below ₹N") so the
+    owner can decide whether shifting the window is worth it. Never silent: "nothing to trade right
+    now" is a first-class answer."""
+
     POST_LOGIN_RECOVERY = "post_login_recovery"
     """The §2.6 cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
     ``/kite/callback`` route or the Telegram ``/token`` fallback both land in
@@ -152,6 +190,13 @@ class MessageKind(StrEnum):
     boot could not — instruments load/persist, regime + warm-up-gap backfill, warm-up re-evaluation
     (and freeze-lift once coverage is met), and ticker start — and reports the per-step outcome so a
     BACKGROUND recovery is never silent. Info severity unless a step failed (then warning)."""
+
+    EARLY_HYDRATION = "early_hydration"
+    """The §2.6 early-hydration pass ran (owner-directed 2026-09-09): an early Kite login (~06:30) on
+    a trading day pulled the pre-open chain — surveillance, universe, news chain, catalyst digest,
+    pre-open planner — forward from its 08:20–08:50 clock, so the digest exists before the window
+    opens on days the owner is travelling at 08:15. Carries the per-job outcome (ran / already run /
+    failed); info severity unless a job failed (then warning)."""
 
 
 class CatalogMessage(BaseModel):
@@ -193,13 +238,19 @@ class CatalogMessage(BaseModel):
 # nothing is mangled by float formatting; mirrors the §8.1 decimal-as-string convention).
 
 
+def login_instruction(url: str) -> str:
+    """The tappable re-login instruction sentence, shared by every login-required alert body
+    (``login_prompt`` below and ``ops.token_check``'s pre-open probe)."""
+    return f"Open: {url}\nThen send /token <request_token>."
+
+
 def login_prompt(url: str) -> CatalogMessage:
     """Daily Kite login required (R6). ``url`` is the broker login URL; the owner opens it and
     returns the ``request_token`` via ``/token`` (§3.2.11)."""
     return CatalogMessage(
         kind=MessageKind.LOGIN_PROMPT,
         title="Kite login required",
-        body=f"Daily login needed before trading can resume. Open: {url}\nThen send /token <request_token>.",
+        body=f"Daily login needed before trading can resume. {login_instruction(url)}",
         severity="critical",
         data={"login_url": url},
     )
@@ -246,30 +297,48 @@ def startup_report(
     prior_state: str,
     frozen_reasons: list[str],
     deferred_steps: list[str],
+    warmup_classes_short: list[str] | None = None,
+    warmup_blockers: list[str] | None = None,
 ) -> CatalogMessage:
     """The every-startup recovery & catch-up report (§2.6 step 7 / STARTUP_REPORT).
 
     Critical when the book is frozen on an integrity failure, the kill switch is engaged, or the
     prior run crashed; otherwise info. The owner sees a compact status line plus the frozen/deferred
     reasons — the full structured report is preserved in ``data`` (and the ``startup_report`` log),
-    never dumped as a raw dict into the prose (R8)."""
+    never dumped as a raw dict into the prose (R8).
+
+    ``warmup_classes_short`` renders its own line because since the 2026-09-13 per-class scoping
+    (§2.6 step-6 addendum) a short warm-up class no longer implies a ``frozen:`` entry: an INTRADAY
+    shortfall refuses intraday candidates per candidate and sends no ``WARMUP_FROZEN`` page, so this
+    line is the owner's ONLY boot-time notice that the session is running on incomplete coverage."""
     lead = f"⚠ crash-recovered (prior state {prior_state}) — " if crash_recovered else ""
     frozen = ", ".join(frozen_reasons) if frozen_reasons else "none"
     deferred = ", ".join(deferred_steps) if deferred_steps else "none"
+    classes = list(warmup_classes_short or [])
+    blockers = list(warmup_blockers or [])
+    warm_line = ""
+    if classes:
+        # The first few blockers only: a market-wide minute hole renders one line per watch symbol,
+        # and the whole list is in ``data`` + the structured log for anyone who needs it.
+        shown = ", ".join(blockers[:3])
+        more = f", +{len(blockers) - 3} more" if len(blockers) > 3 else ""
+        detail = f" ({shown}{more})" if shown else ""
+        warm_line = f"\nwarm-up short: {', '.join(classes)}{detail}"
     return CatalogMessage(
         kind=MessageKind.STARTUP_REPORT,
         title="Startup recovery complete",
         body=(
             f"{lead}mode={mode} · risk={risk_state} · killed={killed} · "
             f"login_needed={needs_login} · integrity_ok={integrity_ok}\n"
-            f"frozen: {frozen}\ndeferred: {deferred}"
+            f"frozen: {frozen}\ndeferred: {deferred}{warm_line}"
         ),
         severity="critical" if (killed or not integrity_ok or crash_recovered) else "info",
         data={
             "mode": mode, "risk_state": risk_state, "killed": killed, "needs_login": needs_login,
             "integrity_ok": integrity_ok, "crash_recovered": crash_recovered,
             "prior_state": prior_state, "frozen_reasons": frozen_reasons,
-            "deferred_steps": deferred_steps,
+            "deferred_steps": deferred_steps, "warmup_classes_short": classes,
+            "warmup_blockers": blockers,
         },
     )
 
@@ -352,8 +421,53 @@ def rec_fill_suspected(
         # One-tap confirm: the button command is the literal /taken the bot will execute (§3.6).
         reply_keyboard=[
             [{"text": f"✓ /taken {symbol} {qty}@{price_s}", "command": f"/taken {rec_id} {qty} {price_s}"}],
-            [{"text": "✗ No action", "command": f"/reject {rec_id}"}],
+            # /veto is the rec-dismiss command (§3.6); /reject resolves owner_approvals rows.
+            [{"text": "✗ No action", "command": f"/veto {rec_id}"}],
         ],
+    )
+
+
+def position_not_in_holdings(
+    *,
+    symbol: str,
+    position_id: str,
+    tracked_qty: int,
+    held_qty: int,
+    entry_rec_id: str | None,
+) -> CatalogMessage:
+    """A tracked OPEN CNC position is absent/short in the broker's holdings (§3.6 reconcile).
+
+    The message exists to produce ONE owner action, so the body ends in the literal reply to type:
+    ``/closed <entry_rec_id> <price>``. ``entry_rec_id`` is the ENTRY recommendation id from the
+    learning ledger (``/closed`` accepts an exit rec's id too, but the entry is the id the ledger row
+    is keyed on); when the position has no ledger row at all the alert says so and names the
+    ``position_id`` instead — an un-actionable-but-explicit page beats silence, which is the
+    eleven-session limbo this check was built to end.
+
+    No ``reply_keyboard``: unlike ``REC_FILL_SUSPECTED``, the platform does not know the exit price —
+    it is the owner's fact (§6.5) — so a one-tap button would have to invent one.
+    """
+    reply = (
+        f"/closed {entry_rec_id} <price>" if entry_rec_id
+        else f"/closed <rec_id> <price> (no learning-ledger row for position {position_id})"
+    )
+    return CatalogMessage(
+        kind=MessageKind.POSITION_NOT_IN_HOLDINGS,
+        title=f"{symbol} tracked but not in holdings",
+        body=(
+            f"The platform still tracks {symbol} x{tracked_qty}, but your Kite holdings show "
+            f"{held_qty}. If you already sold it, report the exit so the ledger and the position "
+            f"caps match reality:\n{reply}\nprice = your actual exit price. "
+            f"(position {position_id}; if you still hold it, ignore this.)"
+        ),
+        severity="warning",
+        data={
+            "symbol": symbol,
+            "position_id": position_id,
+            "tracked_qty": tracked_qty,
+            "held_qty": held_qty,
+            "entry_rec_id": entry_rec_id,
+        },
     )
 
 
@@ -429,21 +543,29 @@ def backfill_report(
     )
 
 
-def warmup_frozen(*, blockers: list[str]) -> CatalogMessage:
+def warmup_frozen(*, blockers: list[str], classes: list[str] | None = None) -> CatalogMessage:
     """Entries FROZEN by the cold-start warm-up gate (§2.6 step 6 / §7.1 ``warmup_ready``).
 
     Each blocker is a rendered "scope: have/need" line (e.g. ``"orb:RELIANCE bars 12/30"``) — the
     strategies/symbols whose feature lookbacks lack contiguous bar coverage. Entries reopen
-    automatically once coverage is met; risk-reducing actions were never gated (R3)."""
+    automatically once coverage is met; risk-reducing actions were never gated (R3).
+
+    ``classes`` are the coverage classes short (2026-09-13, §2.6 step-6 addendum). It LEADS the body
+    and travels in ``data`` beside the blockers rather than inside them: which class froze entries is
+    the first thing the owner needs, an intraday line riding along in the same freeze must not read
+    as the cause, and every element of ``blockers`` stays a rendered "scope: have/need" line for the
+    consumers that parse it."""
+    lead = f"classes short: {', '.join(classes)} — entries FROZEN\n" if classes else ""
     return CatalogMessage(
         kind=MessageKind.WARMUP_FROZEN,
         title="Warm-up incomplete — entries frozen",
         body=(
+            f"{lead}"
             "Insufficient contiguous bar coverage for feature lookbacks (never trade on thin data):\n"
             + "\n".join(f"• {b}" for b in blockers)
         ),
         severity="warning",
-        data={"blockers": blockers},
+        data={"blockers": blockers, "classes": list(classes or [])},
     )
 
 
@@ -511,6 +633,389 @@ def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
             "steps": [{"name": n, "status": s, "detail": d} for n, s, d in steps],
             "any_failed": any_failed,
         },
+    )
+
+
+def early_hydration(*, at: str, outcomes: list[tuple[str, str]]) -> CatalogMessage:
+    """Early-hydration summary (§2.6 addendum, 2026-09-09) — ONE owner line per early login.
+
+    ``at`` is the already-``Clock``-derived HH:MM of the login (this module never reads a clock);
+    ``outcomes`` is the ordered ``(job_id, outcome)`` list from ``CatchUpRunner.hydrate_ahead``,
+    outcome in {ran, already_run, failed}. Reads as "Early hydration 06:32: universe_build ran, ...
+    (surveillance already run)" — the owner's proof the day's digest exists before the window opens,
+    and, on a bad morning, which job did not make it. Warning severity iff something failed."""
+    ran = [j for j, o in outcomes if o == "ran"]
+    failed = [j for j, o in outcomes if o == "failed"]
+    already = [j for j, o in outcomes if o == "already_run"]
+    body = f"Early hydration {at}: " + (", ".join(f"{j} ran" for j in ran) or "nothing left to run")
+    if failed:
+        body += " - FAILED: " + ", ".join(failed)
+    if already:
+        body += f" ({', '.join(already)} already run)"
+    return CatalogMessage(
+        kind=MessageKind.EARLY_HYDRATION,
+        title="Early hydration" + (" (with failures)" if failed else ""),
+        body=body,
+        severity="warning" if failed else "info",
+        data={
+            "at": at,
+            "outcomes": [{"job_id": j, "outcome": o} for j, o in outcomes],
+            "ran": ran, "already_run": already, "failed": failed,
+        },
+    )
+
+
+def mode_change(old: str, new: str, actor: str, reason: str) -> CatalogMessage:
+    """Engine mode changed (§10.3 ``MODE_CHANGE``; §3.5.3 machine). Rendered from the ``mode.changed``
+    event, so the owner sees every transition — including a gate-forced downgrade they did not ask for
+    (which re-arms only on explicit owner action, never a timer; R3/R5)."""
+    return CatalogMessage(
+        kind=MessageKind.MODE_CHANGE,
+        title=f"Mode {old} → {new}",
+        body=f"Engine mode changed {old} → {new} by {actor} (reason: {reason}).",
+        severity="warning",
+        data={"old": old, "new": new, "actor": actor, "reason": reason},
+    )
+
+
+def risk_state_change(old: str, new: str, cause: str) -> CatalogMessage:
+    """Risk state changed (§10.3 ``RISK_STATE``; §3.5.3 per-cause edges, most-restrictive-wins).
+
+    ``cause`` is the latching cause (or the re-arm note) from
+    :class:`engine.risk.causes.RiskStateLatch` — the actionable half: it names what must clear before
+    entries reopen. Risk-reducing actions are never gated by any of these states (R3)."""
+    return CatalogMessage(
+        kind=MessageKind.RISK_STATE_CHANGE,
+        title=f"Risk state {old} → {new}",
+        body=(
+            f"Risk state changed {old} → {new} (cause: {cause}).\n"
+            "Risk-reducing exits/protection continue in every state (R3)."
+        ),
+        severity="warning",
+        data={"old": old, "new": new, "cause": cause},
+    )
+
+
+def kill_state(*, killed: bool, reason: str, actor: str) -> CatalogMessage:
+    """Kill switch engaged or reset (§10.3 ``KILL/KILL_RESET``, §7.2). Engaging is loud (``critical``)
+    and single-step; the reset is the owner's two-step ``/kill_reset`` + ``/confirm`` flow (R10)."""
+    return CatalogMessage(
+        kind=MessageKind.KILL,
+        title="KILL SWITCH ENGAGED" if killed else "Kill switch reset",
+        body=(
+            f"Trading halted — {reason} (by {actor}). Reset is owner two-step: /kill_reset then /confirm."
+            if killed
+            else f"Kill switch cleared by {actor} ({reason}); trading may resume subject to mode + risk state."
+        ),
+        severity="critical" if killed else "warning",
+        data={"killed": killed, "reason": reason, "actor": actor},
+    )
+
+
+def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -> CatalogMessage:
+    """The daily trade window was changed (§3.2.7/§10.3 ``TRADE_WINDOW_CHANGED``). Already-rendered
+    ``HH:MM`` strings in (no Clock access here); the setter validated + audited before publishing."""
+    return CatalogMessage(
+        kind=MessageKind.TRADE_WINDOW_CHANGED,
+        title=f"Trade window {start}-{end}",
+        body=(
+            f"Entries are now confined to {start}-{end} IST (MIS square-off buffer {buffer_min}m), "
+            f"set by {actor}. Exits/protection are never gated by the window (R3)."
+        ),
+        severity="info",
+        data={"start": start, "end": end, "buffer_min": buffer_min, "actor": actor},
+    )
+
+
+def budget_tier(old: str, new: str, window_spend: Decimal, window_key: str) -> CatalogMessage:
+    """The §5.6 degrade ladder moved a rung (§10.3 ``BUDGET_TIER(DGn)``).
+
+    Reuses :data:`MessageKind.BUDGET_WARNING` — the ladder IS the budget warning; a second kind for the
+    same event would fork the audit log (R8). The window is named in the prose: the period is the
+    subscription's Thursday-14:00-IST quota week, so "$103" alone reads as a month figure to the owner."""
+    return CatalogMessage(
+        kind=MessageKind.BUDGET_WARNING,
+        title=f"Budget tier {old} → {new}",
+        body=(
+            f"LLM/API degrade ladder moved {old} → {new} (window spend ${window_spend}, "
+            f"week from {window_key} 14:00 IST). "
+            "Capabilities change per the §5.6 ladder; /budget shows the per-agent split."
+        ),
+        severity="warning",
+        data={
+            "old_tier": old,
+            "new_tier": new,
+            "window_key": window_key,
+            "window_spend_usd": str(window_spend),
+        },
+    )
+
+
+#: Owner-facing strategy names (2026-07-29 feedback: "orb/rsi2 are not easy to understand").
+STRATEGY_LABELS: dict[str, str] = {
+    "orb": "intraday breakout",
+    "rsi2": "swing dip-buy",
+    "trend": "swing trend-follow",
+    "mom": "swing momentum",
+    "cat": "news catalyst",
+}
+
+_STYLE_HEADERS: dict[str, str] = {
+    "intraday": "INTRADAY (square off the same day)",
+    "swing": "SWING (hold for days)",
+    "position": "POSITION (longer hold)",
+}
+
+
+def _sweep_trade_line(row: dict[str, Any], *, live: bool) -> list[str]:
+    """Two lines per setup: the WHAT (symbol/side/label/level) and the PLAN (stop/target/exit).
+
+    ``row`` keys: symbol, side, strategy_id, entry|trigger, arms_when, last, stop, target,
+    exit_rule, held (all optional except symbol/side/strategy_id).
+    """
+    label = STRATEGY_LABELS.get(row.get("strategy_id", ""), row.get("strategy_id", "?"))
+    held = "  ← you HOLD this" if row.get("held") else ""
+    if live:
+        head = f"• {row['symbol']} {row['side']} ({label}){held}"
+        detail = f"  entry ₹{row.get('entry', '?')}"
+    else:
+        verb = "breaks above" if row.get("arms_when") == "above" else "dips below"
+        now = f" (now ₹{row['last']})" if row.get("last") is not None else ""
+        head = f"• {row['symbol']} {row['side']} if price {verb} ₹{row.get('trigger', '?')}{now}{held}"
+        detail = f"  entry ₹{row.get('trigger', '?')}"
+    if row.get("stop") is not None:
+        detail += f" · stop ₹{row['stop']}"
+    if row.get("target") is not None:
+        detail += f" · target ₹{row['target']}"
+    elif row.get("exit_rule"):
+        detail += f" · {row['exit_rule']}"
+    return [head, detail]
+
+
+def _sweep_section(rows: list[dict[str, Any]], *, live: bool) -> list[str]:
+    """Group rows under their style header, intraday first (2026-07-29: separate the trade types)."""
+    out: list[str] = []
+    for style in ("intraday", "swing", "position"):
+        block = [r for r in rows if r.get("style") == style]
+        if not block:
+            continue
+        out.append(_STYLE_HEADERS[style] + ":")
+        for row in block:
+            out += _sweep_trade_line(row, live=live)
+    return out
+
+
+def scan_sweep(
+    *,
+    trigger: str,
+    live: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    suppressed_today: int,
+) -> CatalogMessage:
+    """§3.2.5 sweep verdict (2026-07-29): the owner always hears SOMETHING when a sweep runs.
+
+    Rendering per owner feedback (2026-07-29): trade types grouped intraday/swing, every setup
+    shows its full plan (entry + stop + target or exit rule), friendly strategy names, held
+    positions flagged. ``live`` rows are candidates entering the pipeline now; ``pending`` rows are
+    would-arm levels; ``suppressed_today`` counts day slots already spent.
+    """
+    if live:
+        headline = f"{len(live)} candidate(s) qualify — evaluating now"
+    elif pending:
+        headline = "Nothing to trade right now — nearest setups below"
+    else:
+        headline = "Nothing to trade right now — no live or pending setups"
+    lines = [headline]
+    if live:
+        lines += ["", "▶ LIVE — sent to the analyst:"] + _sweep_section(live, live=True)
+    if pending:
+        lines += ["", "⏳ NOT YET TRIGGERED — would arm at:"] + _sweep_section(pending, live=False)
+    if suppressed_today:
+        lines += ["", f"({suppressed_today} setup(s) already evaluated today — once-per-day rule)"]
+    return CatalogMessage(
+        kind=MessageKind.SCAN_SWEEP,
+        title="Scan sweep: " + ("candidates found" if live else "nothing to trade right now"),
+        body="\n".join(lines),
+        severity="info",
+        data={
+            "trigger": trigger,
+            "live": live,
+            "pending": pending,
+            "suppressed_today": suppressed_today,
+        },
+    )
+
+
+def catalyst_watchlist(n_originating: int, n_context: int) -> CatalogMessage:
+    """Daily catalyst watchlist built (§4.4 job 14 / §10.3 ``CATALYST_WATCHLIST(n_originating,
+    n_context)``). ORIGINATING symbols may start a trade; CONTEXT-only symbols may only veto/size
+    one (O11/§2.7) — the split is the whole message."""
+    return CatalogMessage(
+        kind=MessageKind.CATALYST_WATCHLIST,
+        title="Catalyst watchlist built",
+        body=(
+            f"originating: {n_originating}\ncontext-only: {n_context}\n"
+            "Context-only symbols can veto or size a trade, never originate one (O11)."
+        ),
+        severity="info",
+        data={"n_originating": n_originating, "n_context": n_context},
+    )
+
+
+def catalyst_disabled(reason: str) -> CatalogMessage:
+    """The news/catalyst layer disabled itself (§2.7 fail-safe ladder / §10.3 ``CATALYST_DISABLED``).
+    Deterministic strategies keep running — only news-originated entries stop."""
+    return CatalogMessage(
+        kind=MessageKind.CATALYST_DISABLED,
+        title="Catalyst layer disabled",
+        body=(
+            f"News-originated entries are OFF: {reason}\n"
+            "Deterministic strategies are unaffected; the layer re-enables when the condition clears."
+        ),
+        severity="warning",
+        data={"reason": reason},
+    )
+
+
+#: §3.6 recommendation rendering budgets — a Telegram message must stay readable on a phone.
+THESIS_MAX_CHARS = 300
+MAX_HEADROOM_LINES = 5
+
+#: Placeholder for the one field the platform must NOT prefill: the price the owner actually paid.
+#: Everything else in the footer is known at delivery time; a guessed fill price would be a fabricated
+#: number in the owner's own audit trail (§8.1 — the recommendation's entry zone is not a fill).
+_PRICE_PLACEHOLDER = "<price>"
+
+
+def _capture_footer(rec: Recommendation) -> str:
+    """The copy-ready outcome-capture line that closes every §3.6 recommendation (WO-29, 2026-08-26).
+
+    The message used to end at the B7 checklist, and the only handle it carried for ``/taken`` was a
+    ``rec_id`` printed nowhere — so on the first day the owner actually took a recommendation, the
+    capture command was untypable. The footer now states the command verbatim, with the INSTRUMENT as
+    the handle (which the owner commands resolve, WO-29(a)) and the recommended qty already filled in.
+    Only the fill price stays a placeholder, because that number is the owner's, not the platform's.
+
+    Three kinds, three honest footers. An ``entry`` is a fill to record or decline. An ``exit`` asks
+    for an order whose result is reported with ``/closed``. An ``adjust`` places NO order at all (its
+    checklist is "move the stop"), so it gets the decline half only — instructing the owner to
+    ``/closed`` a position the platform just asked them to KEEP would be a wrong instruction on a
+    money surface, and "the exit-kind form" is not one an adjust can honestly carry.
+    """
+    if rec.kind == "entry":
+        return (
+            f"record: /taken {rec.instrument} {rec.qty} {_PRICE_PLACEHOLDER} · "
+            f"decline: /veto {rec.instrument}"
+        )
+    if rec.kind == "exit":
+        return (
+            f"record: /closed {rec.instrument} {_PRICE_PLACEHOLDER} · "
+            f"decline: /veto {rec.instrument}"
+        )
+    return f"decline: /veto {rec.instrument}"
+
+
+def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -> CatalogMessage:
+    """Render a §3.6 :class:`~engine.core.contracts.Recommendation` for the owner (§10.3
+    ``RECOMMENDATION``).
+
+    Everything the human needs to act is in the prose — instrument/side/style/product, entry zone,
+    stop, targets, size, the gate verdict WITH per-rule headroom (R1: headroom ships in the payload),
+    this trade's breakeven math (C3), and the B7/R3 manual protective-order checklist. The platform
+    places ZERO API orders in RECOMMEND, so the checklist is the mechanism that transfers protection
+    responsibility to the human explicitly — it is never truncated away.
+
+    LEVEL vs CURRENT PRICE (WO-4, 2026-08-13). A degenerate entry zone (``low == high``) is a LIMIT
+    proposal: the price is an instruction, and for a ``brk20`` candidate it is specifically the broken
+    20-day-high LEVEL, so it is labelled as one rather than shown as a range of itself. ``ltp`` is the
+    live price the engine sized against; when supplied, the message states BOTH it and the level plus
+    the gap between them, because "buy at 100" is only actionable next to "it is trading at 100.50" —
+    the F5 defect was a payload that rendered a price the market had already left. It is optional so a
+    caller with no live quote renders exactly the pre-WO-4 message rather than a fabricated one; the
+    structured ``data`` carries ``ltp`` either way (``None`` when unknown), so the audit log can always
+    tell "no quote" from "quote equal to the level".
+
+    Failed gate checks sort first among the at-most :data:`MAX_HEADROOM_LINES` headroom lines: a
+    ``shrink``/``owner_approval_required`` verdict is only meaningful next to the rule that caused it.
+    The thesis is truncated at :data:`THESIS_MAX_CHARS`; the full object is on the dashboard.
+
+    CAPTURE FOOTER (WO-29, 2026-08-26). The final line is the command the owner types back, with the
+    instrument as its handle — see :func:`_capture_footer`. Before it, the §8.3 capture flow needed a
+    ``rec_id`` this message never printed, which is exactly how the first executed recommendation
+    ended up unrecordable.
+    """
+    low, high = rec.entry_zone
+    at_level = low == high
+    targets = " / ".join(str(t) for t in rec.targets) or "(none)"
+    thesis = rec.thesis[:THESIS_MAX_CHARS] + ("…" if len(rec.thesis) > THESIS_MAX_CHARS else "")
+    checks = sorted(rec.gate.checks, key=lambda c: c.passed)[:MAX_HEADROOM_LINES]
+    approved = rec.gate.approved_qty if rec.gate.approved_qty is not None else rec.qty
+    entry_text = f"level {low} (limit-at-level)" if at_level else f"entry {low}-{high}"
+
+    lines = [
+        f"{rec.side} {rec.instrument} · {rec.style}/{rec.product} · qty {rec.qty} "
+        f"(notional ₹{rec.notional})",
+        f"{entry_text} · stop {rec.stop} · targets {targets}",
+    ]
+    if ltp is not None and ltp > 0:
+        gap = (low - ltp) / ltp * Decimal(100)
+        lines.append(
+            f"current price {ltp} · {'level' if at_level else 'entry'} {low} is {gap:+.2f}% away"
+        )
+    lines.append(
+        f"confidence {rec.confidence:.2f} · valid until {rec.valid_until.isoformat(timespec='minutes')}"
+    )
+    if rec.short_flag_higher_tail_risk:
+        lines.append("SHORT — higher tail risk (C8 shorting policy).")
+    lines += [
+        f"thesis: {thesis}",
+        f"gate: {rec.gate.verdict} (approved qty {approved})",
+    ]
+    lines += [
+        f"  • {c.rule_id}: {c.value} vs {c.limit} — headroom {c.headroom}{'' if c.passed else ' (FAILED)'}"
+        for c in checks
+    ]
+    lines.append(
+        f"cost: breakeven {rec.cost.breakeven_pct}% · total ₹{rec.cost.total_cost} · "
+        f"edge {rec.cost.edge_multiple}x"
+    )
+    lines.append("checklist (yours to place — the platform places no orders in RECOMMEND, B7):")
+    lines += [f"  • {item}" for item in rec.manual_checklist]
+    # WO-29: the last line is the reply the owner types back — the message teaches its own capture.
+    lines.append(_capture_footer(rec))
+
+    return CatalogMessage(
+        kind=MessageKind.RECOMMENDATION,
+        title=f"Recommendation {rec.kind}: {rec.side} {rec.instrument}",
+        body="\n".join(lines),
+        severity="info",
+        data={
+            "rec_id": rec.rec_id,
+            "kind": rec.kind,
+            "instrument": rec.instrument,
+            "side": rec.side,
+            "style": rec.style,
+            "product": rec.product,
+            "qty": rec.qty,
+            "notional": str(rec.notional),
+            "entry_zone": [str(low), str(high)],
+            # WO-4: the actionable trigger and the price it must be judged against, as separate
+            # machine-readable fields — never only the level, never only the quote.
+            "level": str(low) if at_level else None,
+            "ltp": None if ltp is None else str(ltp),
+            "stop": str(rec.stop),
+            "targets": [str(t) for t in rec.targets],
+            "confidence": rec.confidence,
+            "verdict": rec.gate.verdict,
+            "breakeven_pct": str(rec.cost.breakeven_pct),
+            "valid_until": rec.valid_until.isoformat(),
+        },
+        # One-tap outcome capture (§3.6): the owner confirms the fill with the observed qty/price.
+        # Keyed on the INSTRUMENT since WO-29, so this hint and the rendered footer prefill the same
+        # command — a keyboard that still handed back a rec_id would reintroduce the exact defect the
+        # footer exists to close, on the day someone finally wires the widget.
+        reply_keyboard=[[{"text": f"✓ /taken {rec.instrument}",
+                          "command": f"/taken {rec.instrument} {rec.qty} "}]],
     )
 
 

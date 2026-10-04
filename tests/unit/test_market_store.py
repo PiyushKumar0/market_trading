@@ -6,6 +6,8 @@ settings keys + notify-catalog messages."""
 from __future__ import annotations
 
 import datetime as dt
+import logging
+import threading
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
@@ -16,7 +18,16 @@ from pydantic import ValidationError
 from engine.core.clock import Clock
 from engine.core.config import load_settings
 from engine.core.types import Bar, Tick
-from engine.marketdata.store import EXPECTED_TABLES, MarketStore
+from engine.marketdata import store as store_module
+from engine.marketdata.store import (
+    AMEND_APPLIED,
+    AMEND_FOREIGN_SRC,
+    AMEND_IN_RANGE,
+    AMEND_NO_BAR,
+    AMEND_RACE_LOST,
+    EXPECTED_TABLES,
+    MarketStore,
+)
 from engine.notify.catalog import (
     MessageKind,
     backfill_report,
@@ -31,7 +42,7 @@ from tests.conftest import FIXED_NOW
 # The complete Â§4.3 DuckDB table inventory. Adding a table to the schema without adding it here fails
 # CI and vice-versa (the same lockstep guard as test_migrations for SQLite).
 PLAN_TABLES = {
-    "bars_1m", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
+    "bars_1m", "bars_1m_no_trade", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
     "universe_daily", "features_daily", "feature_snapshots", "news", "news_clusters",
     "entity_aliases", "unresolved_entities", "theme_map", "sentiment_agg", "catalyst_watchlist",
     "calendar", "corp_actions", "earnings_calendar", "flagged_instrument_days", "sector_map",
@@ -113,6 +124,99 @@ def test_bars_1m_upsert_official_replaces_self(store, clock):
     assert got[0].src == "kite_official" and got[0].close == Decimal("2341.15")
 
 
+def test_amend_bar_1m_extremes_is_a_guarded_compare_and_swap(store, clock, monkeypatch):
+    """The §3.2.3 late-tick amendment seam (WO-5): only ``src='self'`` rows are amendable, only
+    high/low ever move, and a decision taken against a STALE row loses the CAS instead of writing."""
+    minute = clock.combine(clock.today(), time(11, 0))
+    window = (minute, minute + timedelta(minutes=1))
+    store.insert_bars_1m([_bar(minute)])                       # self: high 2340.00 / low 2337.05
+
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("2339.00")) == AMEND_IN_RANGE
+    assert store.amend_bar_1m_extremes("NOSUCH", minute, Decimal("1.00")) == AMEND_NO_BAR
+
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("2345.00")) == AMEND_APPLIED
+    got = store.get_bars_1m("RELIANCE", *window)[0]
+    assert got.high == Decimal("2345.00")                       # widened
+    assert (got.open, got.low, got.close, got.volume, got.src) == (                 # nothing else moved
+        Decimal("2338.55"), Decimal("2337.05"), Decimal("2339.90"), 12500, "self")
+
+    # Official/backfilled rows are canonical (§4.4 job 2) — refused, byte-intact.
+    store.insert_bars_1m([_bar(minute, src="kite_official")])
+    before = store.get_bars_1m("RELIANCE", *window)[0]
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("9999.00")) == AMEND_FOREIGN_SRC
+    assert store.get_bars_1m("RELIANCE", *window)[0] == before
+    assert store.amend_bar_1m_extremes(
+        "RELIANCE", minute, Decimal("9999.00"), require_src="kite_official") == AMEND_APPLIED
+
+    # CAS: the row moved under the decision ⇒ the UPDATE predicate misses ⇒ nothing is written.
+    store.insert_bars_1m([_bar(minute, src="self")])
+    fresh = store.get_bars_1m("RELIANCE", *window)[0]
+    monkeypatch.setattr(
+        MarketStore, "_read_bar_extremes",
+        staticmethod(lambda con, symbol, m: ("self", Decimal("1.00"), Decimal("0.50"))),
+    )
+    assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("5.00")) == AMEND_RACE_LOST
+    assert store.get_bars_1m("RELIANCE", *window)[0] == fresh
+
+
+def test_correction_reason_persists_and_legacy_db_is_migrated(tmp_path, clock):
+    """``corrections_log.reason`` round-trips, and a DB created before the column existed gets it
+    added exactly once on open (CREATE TABLE IF NOT EXISTS never alters an existing table)."""
+    db = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("SET TimeZone='Asia/Kolkata'")
+    con.execute(                                               # the pre-WO-5 shape, verbatim
+        "CREATE TABLE corrections_log (symbol TEXT NOT NULL, minute TIMESTAMPTZ NOT NULL, "
+        "tick_ts TIMESTAMPTZ NOT NULL, value DECIMAL(12,2), cumulative_volume BIGINT, "
+        "amended BOOLEAN NOT NULL DEFAULT FALSE, logged_at TIMESTAMPTZ NOT NULL)"
+    )
+    con.execute("INSERT INTO corrections_log VALUES ('RELIANCE', ?, ?, 12.50, 7, FALSE, ?)",
+                [clock.now(), clock.now(), clock.now()])
+    con.close()
+
+    s = MarketStore(db, tmp_path / "parquet", clock)
+    s.open()                                                   # migrates
+    try:
+        s.init_schema()                                        # idempotent: the ALTER runs once
+        s.append_correction("RELIANCE", clock.now(), clock.now(), Decimal("150.00"),
+                            cumulative_volume=720, amended=False,
+                            reason="official_bar_untouchable")
+        rows = s.get_corrections(clock.today())
+        assert len(rows) == 2                                  # the legacy row survived the ALTER
+        assert {r["reason"] for r in rows} == {None, "official_bar_untouchable"}
+        legacy = next(r for r in rows if r["reason"] is None)
+        assert legacy["value"] == Decimal("12.50") and legacy["cumulative_volume"] == 7
+    finally:
+        s.close()
+
+
+def test_results_filings_legacy_db_gains_line_items_at(tmp_path, clock):
+    """A pre-2026-09-24 ``results_filings`` gets ``line_items_at`` on open; legacy rows read back as
+    never attempted, i.e. line-item candidates."""
+    db = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(                                               # the stage-1 shape, verbatim
+        "CREATE TABLE results_filings (symbol TEXT NOT NULL, period_end DATE NOT NULL, "
+        "consolidated BOOLEAN NOT NULL, audited BOOLEAN, broadcast_dt TIMESTAMPTZ, "
+        "exchdiss_dt TIMESTAMPTZ, xbrl TEXT, revenue DECIMAL(18,2), pat DECIMAL(18,2), "
+        "eps DECIMAL(12,4), ingested_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (symbol, period_end, consolidated))"
+    )
+    con.execute("INSERT INTO results_filings VALUES ('BDL', DATE '2026-03-31', FALSE, TRUE, NULL, NULL, "
+                "'https://x/bdl.xml', NULL, NULL, NULL, ?)", [clock.now()])
+    con.close()
+
+    s = MarketStore(db, tmp_path / "parquet", clock)
+    s.open()                                                   # migrates
+    try:
+        s.init_schema()                                        # idempotent: the ALTER runs once
+        (row,) = s.get_results_filings(symbol="BDL")
+        assert row["line_items_at"] is None
+        got = s.results_line_item_candidates(["BDL"], since=date(2026, 1, 1), limit=5)
+        assert [r["symbol"] for r in got] == ["BDL"]
+    finally:
+        s.close()
+
+
 def test_bar_src_is_constrained(store, clock):
     # Model-level: BarSrc is a closed Literal.
     with pytest.raises(ValidationError):
@@ -146,6 +250,46 @@ def test_last_bar_time_and_coverage_gap_check(store, clock):
     assert store.has_contiguous_coverage("RELIANCE", start, end) is False  # Â§2.6 step-6 warm-up gate
     store.insert_bars_1m([_bar(start + timedelta(minutes=2))])
     assert store.has_contiguous_coverage("RELIANCE", start, end) is True
+
+
+def test_no_trade_minutes_count_as_covered(store, clock):
+    """2026-09-18: a minute in which NOTHING traded has no bar and never will — no tick to build
+    from, no Kite candle to fetch (PTCIL 13:36 on 09-16 refused the symbol for the whole session).
+    An UPSTREAM-CONFIRMED no-trade minute is an observation, not a hole: ``coverage_gaps`` unions
+    ``bars_1m_no_trade`` into the present set, and no synthetic bar is ever written."""
+    start = clock.combine(clock.today(), time(13, 30))
+    end = start + timedelta(minutes=5)
+    traded = [start, start + timedelta(minutes=1), start + timedelta(minutes=4)]
+    tradeless = [start + timedelta(minutes=2), start + timedelta(minutes=3)]
+    store.insert_bars_1m([_bar(m) for m in traded])
+    assert store.coverage_gaps("RELIANCE", start, end) == tradeless
+
+    assert store.mark_no_trade("RELIANCE", tradeless, confirmed_at=FIXED_NOW) == 2
+    assert store.coverage_gaps("RELIANCE", start, end) == []
+    assert store.has_contiguous_coverage("RELIANCE", start, end) is True
+    # …and NOT by inventing a price: bars_1m still holds only the three real bars.
+    assert len(store.get_bars_1m("RELIANCE", start, end)) == 3
+
+    # The read is range-scoped and symbol-scoped, exactly like the bars_1m half.
+    assert store.no_trade_minutes("RELIANCE", start, end) == set(tradeless)
+    assert store.no_trade_minutes("RELIANCE", start, start + timedelta(minutes=3)) == {tradeless[0]}
+    assert store.no_trade_minutes("RELIANCE", end, end + timedelta(minutes=10)) == set()
+    assert store.no_trade_minutes("TCS", start, end) == set()
+    assert store.coverage_gaps("TCS", start, end) != []          # another symbol keeps its holes
+
+    # Re-confirming the same minutes is a no-op (PK conflict ignored — the first record stands).
+    assert store.mark_no_trade("RELIANCE", tradeless, confirmed_at=FIXED_NOW + timedelta(hours=1)) == 2
+    assert store.no_trade_minutes("RELIANCE", start, end) == set(tradeless)
+    rows = store._fetchall(
+        "SELECT confirmed_at, src FROM bars_1m_no_trade WHERE symbol = ? ORDER BY ts_minute",
+        ["RELIANCE"],
+    )
+    assert len(rows) == 2
+    assert {r[1] for r in rows} == {"kite_empty"}
+    assert all(r[0].astimezone(FIXED_NOW.tzinfo) == FIXED_NOW for r in rows)   # never rewritten
+
+    # Nothing to mark ⇒ no statement, no row.
+    assert store.mark_no_trade("RELIANCE", [], confirmed_at=FIXED_NOW) == 0
 
 
 # --------------------------------------------------------------------------- bars_1d
@@ -185,6 +329,178 @@ def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
     assert back[0].avg_price == Decimal("2338.1234")
     assert back[0].exchange_ts == ts and back[0].exchange_ts.tzinfo is not None
     assert store.get_ticks("RELIANCE", date(2020, 1, 1)) == []
+
+
+# --------------------------------------------------------------------------- slow-statement telemetry
+def _slow_events(caplog) -> list:
+    """The ``store_slow_statement`` records captured so far (§2.6 hardening (iii))."""
+    return [r for r in caplog.records if r.getMessage() == "store_slow_statement"]
+
+
+def test_slow_statement_default_threshold_is_5s():
+    """The plan pins the threshold at 5 s (§2.6 hardening (iii)); the telemetry tests below force it
+    to 0.0/1e9 to be deterministic, so the shipped default needs its own assertion."""
+    assert store_module._SLOW_STATEMENT_S == 5.0
+
+
+def test_slow_statement_one_event_per_lock_hold(store, clock, monkeypatch, caplog):
+    """§2.6 'Store slow-statement telemetry' (WO-24b follow-up): the 2026-09-08 11:47 stall's
+    thread-by-thread dump could not tell whether a feature_snapshot INSERT (_execute) or a tick-flush
+    COPY (_flush_locked) held ``_lock`` for 59 s. Every ``_lock`` hold is now timed and a hold >=
+    _SLOW_STATEMENT_S logs ``store_slow_statement``.
+
+    2026-09-09 review: ``_lock`` is an RLock and the read helpers used to call the LOGGING ``_execute``
+    from inside their own hold, so one read emitted TWO events under identical labels while the hold
+    was still held, and each phase was timed separately (a 3 s execute + 2.5 s fetch went unreported).
+    One hold, ONE event — asserted by count, not by 'any'."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    ts = clock.now()
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.insert_bars_1m([_bar(ts.replace(second=0, microsecond=0))])
+
+        caplog.clear()                                   # (a) point read through _fetchall
+        store.get_bars_1m("RELIANCE", ts - timedelta(days=1), ts + timedelta(days=1))
+        fetchall_events = _slow_events(caplog)
+
+        caplog.clear()                                   # (b) dict read through _fetch_dicts
+        store.get_universe_daily(clock.today())
+        fetch_dicts_events = _slow_events(caplog)
+
+        caplog.clear()                                   # (c) small write through _upsert_rows
+        store.upsert_sector_map(
+            clock.today(),
+            [{"symbol": "RELIANCE", "sector": "Energy"}, {"symbol": "TCS", "sector": "IT"}],
+        )
+        upsert_events = _slow_events(caplog)
+
+    assert len(fetchall_events) == 1, [r.label for r in fetchall_events]
+    assert fetchall_events[0].label.startswith("SELECT symbol, ts_minute")
+    assert len(fetch_dicts_events) == 1, [r.label for r in fetch_dicts_events]
+    assert fetch_dicts_events[0].label.startswith("SELECT * FROM universe_daily")
+    assert [r.label for r in upsert_events] == ["upsert_rows:sector_map:2"]
+
+    for r in fetchall_events + fetch_dicts_events + upsert_events:
+        assert isinstance(r.elapsed_s, float) and r.elapsed_s >= 0.0
+        # "thread" collides with logging.LogRecord's own reserved attribute, so _safe_extra (§log.py)
+        # stores our field as "thread_" on the record -- the warning() call itself still passes "thread".
+        assert r.thread_ == threading.current_thread().name
+        assert not hasattr(r, "failed")                  # the statement returned — no failure marker
+
+
+def test_slow_statement_reports_a_statement_that_raises(store, monkeypatch, caplog):
+    """A hold that ends in an exception is exactly the one worth naming (a 30 s batch that then rolls
+    back starved every other caller for 30 s), so elapsed is captured in a ``finally`` and the note is
+    emitted after the release either way, with ``failed=True``. Re-raise semantics are unchanged."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        with pytest.raises(duckdb.Error):
+            store._execute("SELECT * FROM no_such_table_wo24b")
+    events = _slow_events(caplog)
+    assert len(events) == 1, [r.label for r in events]
+    assert events[0].label.startswith("SELECT * FROM no_such_table_wo24b")
+    assert events[0].failed is True
+
+
+def test_slow_statement_flush_paths_and_silence_below_threshold(store, clock, monkeypatch, caplog):
+    """The tick-flush pair (``_bulk_write`` stage load + per-partition ``copy_ticks`` COPY) names
+    itself, and nothing is logged below the threshold. The silence phase uses a 1e9 s sentinel rather
+    than the real 5.0: on a slow volume a genuine multi-second flush would otherwise make this flap."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    ts = clock.now()
+    store.buffer_tick(_tick(ts))
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.flush_ticks()
+    labels = [r.label for r in _slow_events(caplog)]
+    assert "copy_ticks:RELIANCE" in labels                                   # _flush_locked partition COPY
+    assert any(lbl.startswith("bulk_write:_tick_stage:") for lbl in labels)  # _bulk_write stage load
+
+    caplog.clear()
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 1e9)              # nothing can qualify
+    store.buffer_tick(_tick(ts))
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.get_bars_1m("RELIANCE", ts - timedelta(days=1), ts + timedelta(days=1))
+        store.get_universe_daily(clock.today())
+        store.flush_ticks()
+    assert _slow_events(caplog) == []
+
+
+def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypatch, caplog):
+    """The statement helpers were instrumented first; the 2026-09-09 review found the coverage claim
+    overstated, because five methods take their OWN ``with self._lock:`` and run SQL inside it —
+    ``amend_bar_1m_extremes`` (live late-tick path), the ``_tick_stage`` DELETE at the head of a
+    flush, ``insert_news``, ``set_news_cluster`` and ``compact_tick_partitions``. Each is ONE hold
+    (``insert_news`` and ``compact_tick_partitions`` loop MANY statements inside one acquisition), so
+    each must emit exactly ONE event naming the hold — not one per statement, and not none at all."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
+    ts = clock.now().replace(second=0, microsecond=0)
+    store.insert_bars_1m([_bar(ts)])
+    today = clock.today()
+
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        caplog.clear()                                   # (a) amend: SELECT + UPDATE + BEGIN/COMMIT
+        assert store.amend_bar_1m_extremes("RELIANCE", ts, Decimal("2345.00")) == AMEND_APPLIED
+        amend = [r.label for r in _slow_events(caplog)]
+
+        caplog.clear()                                   # (b) insert_news: 2 rows, one hold
+        store.insert_news([
+            {"title": "a", "source_domain": "et.com", "url": "https://e/a", "published_at": ts},
+            {"title": "b", "source_domain": "et.com", "url": "https://e/b", "published_at": ts},
+        ])
+        news = [r.label for r in _slow_events(caplog)]
+
+        hids = [h["headline_id"] for h in store.get_news(unclustered_only=True)]
+        caplog.clear()                                   # (c) set_news_cluster: executemany, one hold
+        store.set_news_cluster(hids, "01CLUSTER")
+        cluster = [r.label for r in _slow_events(caplog)]
+
+        store.buffer_tick(_tick(ts))
+        caplog.clear()                                   # (d) the stage wipe that opens every flush
+        store.flush_ticks()
+        flush = [r.label for r in _slow_events(caplog)]
+
+        store.buffer_tick(_tick(ts + timedelta(seconds=1), vol=7))
+        store.flush_ticks()                              # a 2nd partition file, so compaction runs
+        caplog.clear()                                   # (e) compact: whole per-symbol COPY loop
+        store.compact_tick_partitions(today)
+        compact = [r.label for r in _slow_events(caplog)]
+
+    # One combined assertion so an uninstrumented hold shows up as a gap in the WHOLE census rather
+    # than short-circuiting on whichever site happens to be checked first.
+    assert {
+        "amend": amend,
+        "insert_news": news,
+        "set_news_cluster": cluster,
+        "flush_stage_delete": flush.count("flush_stage_delete"),
+        "compact": compact,                                     # ONE event, not one per symbol
+    } == {
+        "amend": ["amend_bar_1m:RELIANCE"],
+        "insert_news": ["insert_news:2"],
+        "set_news_cluster": ["set_news_cluster:2"],
+        "flush_stage_delete": 1,
+        "compact": [f"compact_ticks:{today.isoformat()}"],
+    }
+    assert "copy_ticks:RELIANCE" in flush                                    # the pre-existing pair
+    assert any(lbl.startswith("bulk_write:_tick_stage:") for lbl in flush)   # still one event each
+
+
+def test_slow_statement_hand_rolled_holds_are_silent_below_threshold(store, clock, monkeypatch, caplog):
+    """The other half of the contract for the five holds above: below the threshold they say nothing.
+    The sentinel is 1e9 s rather than the real 5.0 so a slow CI volume cannot make this flap."""
+    monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 1e9)
+    ts = clock.now().replace(second=0, microsecond=0)
+    store.insert_bars_1m([_bar(ts)])
+    store.buffer_tick(_tick(ts))
+    with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
+        store.amend_bar_1m_extremes("RELIANCE", ts, Decimal("2345.00"))
+        store.insert_news(
+            [{"title": "a", "source_domain": "et.com", "url": "https://e/a", "published_at": ts}]
+        )
+        store.set_news_cluster([h["headline_id"] for h in store.get_news()], "01CLUSTER")
+        store.flush_ticks()
+        store.buffer_tick(_tick(ts + timedelta(seconds=1), vol=7))
+        store.flush_ticks()
+        store.compact_tick_partitions(clock.today())
+    assert _slow_events(caplog) == []
 
 
 def test_tick_autoflush_on_batch_size(tmp_path, clock):
@@ -261,6 +577,19 @@ def test_retention_purges_expired_only(tmp_path):
         s.close()
 
 
+def test_store_keeps_no_secondary_index(tmp_path, clock):
+    """2026-09-24: the live store's secondary indexes had lost rows that lookups then skipped. A store
+    that still carries them loses them on open, and a fresh one never gets one."""
+    s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
+    try:
+        assert s._fetchall("SELECT index_name FROM duckdb_indexes()", []) == []
+        s._execute("CREATE INDEX idx_news_url ON news(url)")                     # a pre-fix store
+        s.init_schema()
+        assert s._fetchall("SELECT index_name FROM duckdb_indexes()", []) == []
+    finally:
+        s.close()
+
+
 # --------------------------------------------------------------------------- news pipeline surfaces
 def test_news_insert_dedupes_on_url_and_clusters(store, clock):
     rows = [
@@ -271,6 +600,9 @@ def test_news_insert_dedupes_on_url_and_clusters(store, clock):
     ]
     assert store.insert_news(rows) == 2
     assert store.insert_news(rows) == 0                          # idempotent backfill (Â§4.4 job 10)
+
+    assert store.existing_news_urls(["https://et/1", "https://et/2"]) == {"https://et/1"}
+    assert store.existing_news_urls([]) == set()
 
     headlines = store.get_news(unclustered_only=True)
     assert len(headlines) == 2 and all(h["untrusted"] for h in headlines)   # Â§2.4: always untrusted
@@ -377,6 +709,71 @@ def test_instruments_universe_features_roundtrip(store, clock):
     assert store.get_feature_snapshot("NOPE") is None
 
 
+def test_get_universe_eligible_symbols_includes_watchlist_cap_only_rows(store, clock):
+    """The 2026-08-18 news-layer fix: ``included`` rows AND watchlist_cap-only exclusions are
+    eligible; any other exclusion reason (alone or alongside the cap) is not."""
+    d = clock.today()
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "RELIANCE", "included": True},
+        {"d": d, "symbol": "LGEINDIA", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+        {"d": d, "symbol": "GSMCO", "included": False, "exclusion_reasons": ["surveillance_gsm"]},
+        {"d": d, "symbol": "BOTHCO", "included": False,
+         "exclusion_reasons": ["watchlist_cap", "surveillance_gsm"]},
+    ])
+    assert store.get_universe_eligible_symbols(d) == ["LGEINDIA", "RELIANCE"]
+
+
+def test_universe_eligible_symbols_literal_matches_builder_excl_cap():
+    """The store cannot import ``engine.universe.builder`` (layering — builder imports the store),
+    so the ``watchlist_cap`` literal is duplicated; this test is the guard against the two drifting."""
+    from engine.marketdata.store import _EXCL_CAP, _EXCL_INDEX
+    from engine.universe.builder import EXCL_CAP, EXCL_INDEX
+
+    assert _EXCL_CAP == EXCL_CAP
+    assert _EXCL_INDEX == EXCL_INDEX
+
+
+def test_batch_universe_reads_both_index_markers(store, clock):
+    """O15 (2026-09-04): the extended-leg marker was renamed ``not_nifty200`` → ``not_in_index``
+    when the index became NIFTY 500. Rows written 2026-09-01…09-04 carry the LEGACY marker and
+    nothing rewrites history, so the batch view must honour both — otherwise every extended name
+    persisted before the rename silently leaves the news/advisory/shadow scan set."""
+    from engine.marketdata.store import _EXCL_INDEX, _EXCL_INDEX_LEGACY
+
+    assert (_EXCL_INDEX, _EXCL_INDEX_LEGACY) == ("not_in_index", "not_nifty200")
+    d = clock.today()
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "RELIANCE", "included": True},
+        {"d": d, "symbol": "CAPPED", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+        {"d": d, "symbol": "NEWEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX]},
+        {"d": d, "symbol": "OLDEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX_LEGACY]},
+        {"d": d, "symbol": "GSMCO", "included": False, "exclusion_reasons": ["surveillance_gsm"]},
+    ])
+    assert store.get_batch_universe_symbols(d) == ["CAPPED", "NEWEXT", "OLDEXT", "RELIANCE"]
+    # The eligible (index-scoped) view is unchanged by either marker.
+    assert store.get_universe_eligible_symbols(d) == ["CAPPED", "RELIANCE"]
+
+
+def test_replace_universe_daily_clears_both_index_markers(store, clock):
+    """The delete-then-insert hygiene of :meth:`replace_universe_daily` must clear LEGACY-marker
+    rows too: a 2026-09-04 build that rewrites the extended leg would otherwise leave the previous
+    build's ``not_nifty200`` rows alive in the batch view for the rest of the day."""
+    from engine.marketdata.store import _EXCL_INDEX, _EXCL_INDEX_LEGACY
+
+    d = clock.today()
+    store.upsert_universe_daily([
+        {"d": d, "symbol": "OLDEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX_LEGACY]},
+        {"d": d, "symbol": "STALEEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX]},
+        {"d": d, "symbol": "CAPPED", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+    ])
+    store.replace_universe_daily(d, [
+        {"d": d, "symbol": "RELIANCE", "included": True},
+        {"d": d, "symbol": "FRESHEXT", "included": False, "exclusion_reasons": [_EXCL_INDEX]},
+    ])
+    rows = {r["symbol"] for r in store.get_universe_daily(d)}
+    assert rows == {"RELIANCE", "FRESHEXT", "CAPPED"}      # both stale markers gone, cap row kept
+
+
 # --------------------------------------------------------------------------- async wrappers
 async def test_async_wrappers_offload_sync_core(store, clock):
     minute = clock.combine(clock.today(), time(10, 0))
@@ -385,16 +782,32 @@ async def test_async_wrappers_offload_sync_core(store, clock):
     assert got[0].open == Decimal("2338.55")
     assert await store.alast_bar_time("RELIANCE") == minute
     assert await store.ahas_contiguous_coverage("RELIANCE", minute, minute + timedelta(minutes=1))
+    quiet = minute + timedelta(minutes=1)
+    assert await store.amark_no_trade("RELIANCE", [quiet], confirmed_at=FIXED_NOW) == 1
+    assert await store.ano_trade_minutes("RELIANCE", quiet, quiet + timedelta(minutes=1)) == {quiet}
+    assert await store.acoverage_gaps("RELIANCE", minute, quiet + timedelta(minutes=1)) == []
     assert await store.arun(store.table_names) >= PLAN_TABLES
 
 
 # --------------------------------------------------------------------------- settings (additive keys)
 def test_settings_load_with_new_phase1_keys():
     s = load_settings()
-    # gdelt_poll_s raised 900→1800 on 2026-07-22 (intermittent 429s; O12 needs only the pre-open digest)
-    assert (s.news.et_poll_s, s.news.mc_poll_s, s.news.gdelt_poll_s) == (300, 900, 1800)
+    # Per-feed RSS cadences (§3.2.4); gdelt_poll_s 1800→3600 and request_timeout_s 10→30 on
+    # 2026-08-04 (persistent 429s at 30-min; 121 ConnectTimeouts at the old 10 s timeout).
+    rss = s.news.feeds.rss
+    # 2026-08-05 pool widening: 3 new DOMAINS (hbl/cnbctv18/ndtvprofit) — corroboration pool 2 → 5.
+    # 2026-09-04 coverage widening: business-standard re-probed live (its 08-05 WAF 403 is gone) ⇒ 6.
+    assert {n: f.poll_s for n, f in rss.items()} == {
+        "et": 300, "livemint_markets": 900, "livemint_companies": 900,
+        "hbl_markets": 900, "hbl_companies": 900, "cnbctv18_market": 900, "ndtvprofit": 900,
+        "bs_markets": 900, "bs_companies": 900,
+    }
+    # The exchange as a feed (§2.7 amendment 2026-09-04) — its own cadence and drop list.
+    ann = s.news.feeds.nse_announcements
+    assert (ann.enabled, ann.poll_s) == (True, 300) and "Trading Window" in ann.drop_subjects
+    assert (s.news.gdelt_poll_s, s.news.request_timeout_s) == (3600, 30.0)
     assert s.news.backfill_lookback_h == 72 and s.news.gdelt_backfill_max_days == 90
-    assert s.news.cluster_sim_threshold == 0.75 and s.news.feeds.et_markets_rss.startswith("https://")
+    assert s.news.cluster_sim_threshold == 0.75 and rss["et"].url.startswith("https://")
     assert s.cat.fanout_weight == 0.5
     assert (s.reconcile.vol_drift_pct, s.reconcile.close_drift_ticks) == (2.0, 1)
     assert s.reconcile.max_bad_bar_fraction == 0.01
@@ -402,12 +815,27 @@ def test_settings_load_with_new_phase1_keys():
     assert s.lifecycle.active_period_starts == [time(8, 0)]
     assert (s.lifecycle.start_grace_s, s.lifecycle.catchup_grace_s) == (900, 900)
     assert s.lifecycle.crashloop_window_s == 600
-    assert s.universe.nifty200_seed_path == "config/universe/nifty200_seed.csv"
-    assert s.universe.nifty200_source_url.startswith("https://")
+    # O15 (2026-09-04): the eligible universe is the CONFIGURED index, NIFTY 500 since this date.
+    assert s.universe.index_name == "NIFTY 500"
+    assert s.universe.index_seed_path == "config/universe/nifty500_seed.csv"
+    assert s.universe.index_source_url.endswith("ind_nifty500list.csv")
     assert s.jobs.reconcile_ist == time(15, 50) and s.jobs.catalyst_digest_ist == time(8, 35)
     assert s.jobs.sector_map_weekly_day == "SUN"
     # Pre-existing keys still load (additive-only change).
     assert s.trade_window.start_ist == dt.time(10, 0) and s.data.minute_candles_adjusted is True
+
+
+def test_retired_nifty200_universe_keys_are_rejected_not_ignored():
+    """O15 (2026-09-04): ``nifty200_source_url`` / ``nifty200_seed_path`` were REPLACED, not
+    aliased. ``UniverseCfg`` therefore forbids extras — a settings.yaml left on the old keys must
+    fail loudly at boot instead of silently falling through to the NIFTY 500 defaults and
+    presenting a stale config as live."""
+    from engine.core.config import UniverseCfg
+
+    with pytest.raises(ValidationError):
+        UniverseCfg(nifty200_source_url="https://example.invalid/ind_nifty200list.csv")
+    with pytest.raises(ValidationError):
+        UniverseCfg(nifty200_seed_path="config/universe/nifty200_seed.csv")
 
 
 # --------------------------------------------------------------------------- notify catalog additions

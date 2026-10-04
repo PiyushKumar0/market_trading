@@ -1,0 +1,266 @@
+<!doctype html>
+<!--
+  MT Notifications — the owner-facing view of the WO-24d notification journal (owner-directed
+  2026-08-21: "a dashboard section listing all of a day's Telegram notifications chronologically").
+
+  DELIBERATELY DEPENDENCY-FREE. One file, inline CSS + JS, ZERO external resources: no CDN, no
+  webfont, no build step. The LAN box that serves this has a flaky path to the outside world — that
+  flakiness is the entire reason this page exists — so a page that needed the internet to render an
+  outage report would be broken exactly when it is needed. It is also NOT part of the React app in
+  dashboard/: this is source, hand-written, and `npm run build` must never be able to clobber it.
+
+  It is served UNAUTHENTICATED (a browser cannot attach a bearer header to a navigation) and so it
+  ships EMPTY: it holds no data, prompts for the dashboard token itself, keeps it in localStorage,
+  and every row it shows comes from bearer-authed GET /notifications (R10).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>MT Notifications</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+    --fg: #e6e8ee; --muted: #98a0b0; --accent: #6ea8fe;
+    --sev-critical: #e5484d; --sev-error: #e8830c; --sev-warning: #d9a406;
+    --sev-info: #6b7280; --ok: #30a46c; --pending: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-monospace, "Cascadia Mono", "Consolas", "SFMono-Regular", monospace;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 10px 14px;
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  }
+  h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; letter-spacing: .02em; }
+  .grow { flex: 1 1 auto; }
+  input[type=date], button {
+    font: inherit; color: var(--fg); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  #meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  main { padding: 12px 14px 40px; }
+  #err {
+    display: none; margin: 0 0 12px; padding: 9px 12px; border-radius: 6px;
+    background: #2b1618; border: 1px solid var(--sev-critical); color: #ffc9cb;
+  }
+  .row {
+    display: grid; grid-template-columns: 78px 82px 1fr 130px;
+    gap: 10px; align-items: start;
+    padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel); margin-bottom: 6px;
+  }
+  .time { color: var(--muted); }
+  .kind { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .title { font-weight: 600; word-break: break-word; }
+  details > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 3px; list-style: revert;
+  }
+  pre.body {
+    margin: 6px 0 0; padding: 8px 10px; background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word; color: var(--fg);
+  }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    color: #0b0d11; white-space: nowrap;
+  }
+  .sev-critical { background: var(--sev-critical); color: #fff; }
+  .sev-error    { background: var(--sev-error); }
+  .sev-warning  { background: var(--sev-warning); }
+  .sev-info     { background: var(--sev-info); color: #fff; }
+  .st-delivered { background: var(--ok); color: #fff; }
+  .st-pending   { background: var(--pending); color: #fff; }
+  .st-failed    { background: var(--sev-critical); color: #fff; cursor: help; }
+  .status { text-align: right; }
+  .empty { color: var(--muted); padding: 24px 4px; }
+  @media (max-width: 620px) {
+    .row { grid-template-columns: 70px 1fr; }
+    .kind, .status { grid-column: 2; text-align: left; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>MT Notifications</h1>
+  <input type="date" id="day" aria-label="day">
+  <button id="refresh" type="button">refresh</button>
+  <button id="token" type="button">token</button>
+  <span class="grow"></span>
+  <span id="meta">loading&hellip;</span>
+</header>
+<main>
+  <div id="err" role="alert"></div>
+  <div id="rows"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "mt_dashboard_token";
+  var REFRESH_MS = 60000;
+  var SEVERITIES = { critical: 1, error: 1, warning: 1, info: 1 };
+
+  var dayEl = document.getElementById("day");
+  var rowsEl = document.getElementById("rows");
+  var metaEl = document.getElementById("meta");
+  var errEl = document.getElementById("err");
+
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+
+  // Local date, NOT toISOString(): the box runs on IST and toISOString would hand back the UTC day,
+  // which is yesterday for anything logged before 05:30 IST.
+  function todayLocal() {
+    var d = new Date();
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  }
+
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+
+  function askToken(reason) {
+    var supplied = window.prompt(reason || "Dashboard token (Authorization: Bearer …)", getToken());
+    if (supplied === null) { return getToken(); }
+    supplied = supplied.trim();
+    try { localStorage.setItem(TOKEN_KEY, supplied); } catch (e) { /* private mode: session-only */ }
+    return supplied;
+  }
+
+  function showError(text) {
+    errEl.textContent = text;
+    errEl.style.display = text ? "block" : "none";
+  }
+
+  // Every value from the API lands in the DOM as TEXT (createTextNode / .textContent), never as
+  // innerHTML: a notification body is arbitrary engine-authored prose and must not be able to inject
+  // markup into the page that reports it.
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) { node.className = cls; }
+    if (text !== undefined && text !== null) { node.textContent = String(text); }
+    return node;
+  }
+
+  function timeOf(createdAt) {
+    var s = String(createdAt || "");
+    var m = s.match(/T(\d{2}:\d{2}:\d{2})/);
+    return m ? m[1] : s.slice(0, 8);
+  }
+
+  function severityBadge(severity) {
+    var key = String(severity || "info").toLowerCase();
+    if (!SEVERITIES[key]) { key = "info"; }
+    return el("span", "badge sev-" + key, key);
+  }
+
+  function statusBadge(row) {
+    var status = String(row.status || "pending").toLowerCase();
+    var attempts = Number(row.attempts || 0);
+    if (status === "delivered") {
+      var ok = el("span", "badge st-delivered", "delivered");
+      ok.title = "delivered " + (row.delivered_at || "") + " on attempt " + attempts;
+      return ok;
+    }
+    if (status === "failed") {
+      var bad = el("span", "badge st-failed", "failed");
+      bad.title = String(row.last_error || "expired without delivery");
+      return bad;
+    }
+    var wait = el("span", "badge st-pending", "pending " + attempts);
+    wait.title = row.last_error ? String(row.last_error) : "queued for retry";
+    return wait;
+  }
+
+  function renderRow(row) {
+    var wrap = el("div", "row");
+    wrap.appendChild(el("div", "time", timeOf(row.created_at)));
+
+    var sev = el("div", "sev");
+    sev.appendChild(severityBadge(row.severity));
+    wrap.appendChild(sev);
+
+    var mid = el("div", "mid");
+    mid.appendChild(el("div", "title", row.title || "(no title)"));
+    var body = row.body === null || row.body === undefined ? "" : String(row.body);
+    if (body.length) {
+      var details = el("details");
+      details.appendChild(el("summary", null, "body (" + body.length + " chars)"));
+      details.appendChild(el("pre", "body", body));
+      mid.appendChild(details);
+    }
+    wrap.appendChild(mid);
+
+    var right = el("div", "status");
+    right.appendChild(statusBadge(row));
+    right.appendChild(el("div", "kind", row.kind || "—"));
+    wrap.appendChild(right);
+    return wrap;
+  }
+
+  function render(day, rows) {
+    rowsEl.textContent = "";
+    if (!rows.length) {
+      rowsEl.appendChild(el("div", "empty", "No notifications journalled on " + day + "."));
+    } else {
+      // The API already returns created_at ASC; the page never re-sorts, so what is shown is the
+      // order the engine actually raised them in.
+      for (var i = 0; i < rows.length; i++) { rowsEl.appendChild(renderRow(rows[i])); }
+    }
+    var now = new Date();
+    metaEl.textContent = day + " · " + rows.length + " row" + (rows.length === 1 ? "" : "s")
+      + " · refreshed " + pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" + pad(now.getSeconds());
+  }
+
+  var inFlight = false;
+
+  function load(retriedAfter401) {
+    if (inFlight) { return; }
+    var day = dayEl.value || todayLocal();
+    var token = getToken();
+    if (!token) {
+      token = askToken("Dashboard token required to read /notifications");
+      if (!token) { showError("No token entered — press 'token' to try again."); return; }
+    }
+    inFlight = true;
+    fetch("/notifications?d=" + encodeURIComponent(day), {
+      headers: { "Authorization": "Bearer " + token },
+      cache: "no-store"
+    }).then(function (res) {
+      if (res.status === 401) {
+        if (retriedAfter401) { throw new Error("401 — token rejected again"); }
+        inFlight = false;
+        askToken("Token rejected (401). Re-enter the dashboard token:");
+        load(true);
+        return null;
+      }
+      if (!res.ok) { throw new Error("HTTP " + res.status); }
+      return res.json();
+    }).then(function (data) {
+      if (!data) { return; }
+      showError("");
+      render(data.d || day, data.rows || []);
+    }).catch(function (e) {
+      showError("Could not load notifications: " + (e && e.message ? e.message : e));
+      metaEl.textContent = day + " · error";
+    }).then(function () { inFlight = false; });
+  }
+
+  dayEl.value = todayLocal();
+  dayEl.addEventListener("change", function () { load(false); });
+  document.getElementById("refresh").addEventListener("click", function () { load(false); });
+  document.getElementById("token").addEventListener("click", function () {
+    askToken("Dashboard token (Authorization: Bearer …)");
+    load(false);
+  });
+  load(false);
+  window.setInterval(function () { load(false); }, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
