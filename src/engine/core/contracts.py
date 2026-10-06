@@ -30,6 +30,7 @@ Three locked conventions (Phase-0 deliverables, §8.1):
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -195,6 +196,20 @@ class Recommendation(BaseModel):
     gate: GateVerdict                   # verdict + per-rule headroom ship in payload (R1)
     cost: CostBreakdown                 # this trade's specific breakeven math (C3)
     manual_checklist: list[str]         # B7/R3 protective-order checklist for the human
+    # Plan Q1.1 — optional so stored payloads still parse; set on entry recs only.
+    strategy_id: str | None = None
+    proposal_id: str | None = None
+    entry_type: Literal["LIMIT", "MARKET"] | None = None
+    reference_entry: DecimalStr | None = None   # the scanner's raw levels
+    reference_stop: DecimalStr | None = None
+    hold_sessions: int | None = None
+    exit_session: date | None = None            # None with hold_sessions set = pending calendar
+    exit_kind: Literal["time", "stop_target"] | None = None
+    risk_inr: DecimalStr | None = None
+    stop_atr_mult: DecimalStr | None = None
+    gtt_instruction: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+    registered_edge_pct: DecimalStr | None = None
 
 
 # ------------------------------------------------------------------- order postback wire (§3.5.1)

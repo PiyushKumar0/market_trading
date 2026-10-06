@@ -96,6 +96,7 @@ from engine.ops.holdings_reconcile import (
     in_reconcile_window,
     positions_missing_from_holdings,
 )
+from engine.ops.holds import build_hold_fn
 from engine.ops.jobs import (
     JOB_BACKUP,
     JOB_BHAVCOPY,
@@ -157,6 +158,7 @@ from engine.ops.warmup import (
     WarmupGate,
     WarmupStatus,
 )
+from engine.ops.why import make_why_fn
 from engine.risk.causes import RiskStateLatch, feed_health_to_latch
 from engine.risk.exposure import ExposureTracker
 from engine.risk.gate import GateContextBuilder, RiskGate
@@ -167,7 +169,7 @@ from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.retest import RestingLevelBook
 from engine.strategy.scanners import brk20, build_enabled_scanners, cat, cat_reversal, hi52, ins
-from engine.strategy.types import SignalCandidate
+from engine.strategy.types import SignalCandidate, round_to_tick
 from engine.universe.builder import UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
 from engine.universe.surveillance import SurveillanceIngest
@@ -794,7 +796,9 @@ async def run() -> int:
     book = RecommendationBook(
         conn, clock, cost_model,
         overnight_gap_mult_fn=lambda: limits_engine.load().limits.per_trade_risk.overnight_gap_mult,
+        calendar=calendar, veto_window_sessions=settings.recommend.veto_window_sessions,
     )
+    hold_fn = build_hold_fn(settings, limits_engine)
     pipeline = (
         RecommendationPipeline(
             assembler, harness, agent_defs, gate, ctx_builder, book, mode, kill,
@@ -815,13 +819,19 @@ async def run() -> int:
             take_displaced=lambda: prescreen.take_displaced(),
             # 2026-09-04: a no_action verdict makes its pair displaceable again (same late binding).
             decline=lambda sym, sid: prescreen.decline(sym, sid),
-            ltp_fn=mark_price,          # D1 (e): the brk20 entry-band screen at the forward slot
+            # D1 (e) brk20 entry-band screen; the MARKET anchor of the D3 stop re-anchor.
+            ltp_fn=mark_price,
             # 2026-09-13 per-class warm-up: the SAME snapshot the gate context reads, so an intraday
             # candidate the gate would refuse for intraday coverage never spends an analyst call.
             warmup_status_fn=warmup_status_snapshot,
             admission_mode=settings.strategy.prescreen.admission_mode,   # WO-1 rollback flag
             # 2026-08-14 rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
             forward_drain_mode=settings.strategy.prescreen.forward_drain_mode,
+            hold_fn=hold_fn,
+            round_tick_fn=_round_tick_fn(instruments),
+            recommend=settings.recommend,
+            strategy_edge_pct=_strategy_expected_edge_pct(settings),   # the gate's own map
+            reports_dir=data_dir / "reports",
         )
         if harness is not None else None
     )
@@ -2164,6 +2174,7 @@ async def run() -> int:
 
     if telegram is not None:
         telegram.set_scan_sweep_fn(run_scan_sweep)
+        telegram.set_why_fn(make_why_fn(store=store, conn=conn, clock=clock, calendar=calendar))
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
@@ -3289,6 +3300,20 @@ def _strategy_expected_edge_pct(settings: Settings) -> dict[str, Decimal]:
     if settings.hi52.expected_edge_pct is not None:
         edges[hi52.STRATEGY_ID] = Decimal(str(settings.hi52.expected_edge_pct))
     return edges
+
+
+def _round_tick_fn(instruments: InstrumentStore) -> Callable[[str, Decimal], Decimal]:
+    """``instruments.round_to_tick``, falling back to the scanners' NSE tick (logged) for a symbol
+    missing from today's dump."""
+
+    def round_tick(symbol: str, price: Decimal) -> Decimal:
+        try:
+            return instruments.round_to_tick(symbol, price)
+        except UnknownInstrument:
+            _log.warning("round_tick_fallback", symbol=symbol)
+            return round_to_tick(price)
+
+    return round_tick
 
 #: Strategies whose candidates can carry a ``catalyst_ref`` — the §2.7 news-originated legs. Read at
 #: ONE place: :func:`_hydrate_prescreen`, which uses it to rebuild the

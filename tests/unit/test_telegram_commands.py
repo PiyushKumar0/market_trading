@@ -29,7 +29,8 @@ from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.intelligence.governor import BudgetGovernor
 from engine.notify import catalog
 from engine.notify.catalog import MessageKind
-from engine.notify.telegram import TelegramBot, _owner_only
+from engine.notify.telegram import _USAGE_VETO, VETO_REASONS, TelegramBot, _owner_only
+from engine.ops.pipeline import RecommendationBook
 from engine.risk.causes import CAUSE_OWNER_PAUSE, CAUSE_REJECTION_STORM, RiskStateLatch
 from engine.risk.events import (
     TOPIC_KILL_STATE,
@@ -99,6 +100,15 @@ class _FakeBook:
     def __init__(self, *, raises: Exception | None = None) -> None:
         self.calls: list[tuple] = []
         self._raises = raises
+        self._real: RecommendationBook | None = None
+
+    def bind(self, conn, clock) -> None:
+        """Candidates come from the REAL book over the test ledger; only the actions are faked."""
+        calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
+        self._real = RecommendationBook(conn, clock, None, calendar=calendar, veto_window_sessions=3)
+
+    def decision_candidates(self, symbol, now) -> list[dict]:
+        return [] if self._real is None else self._real.decision_candidates(symbol, now)
 
     async def take(self, rec_id: str, qty: int, price: Decimal) -> str:
         self.calls.append(("take", rec_id, qty, price))
@@ -112,8 +122,8 @@ class _FakeBook:
             raise self._raises
         return f"recorded: closed {rec_id} @ {price}"
 
-    async def veto(self, rec_id: str) -> str:
-        self.calls.append(("veto", rec_id))
+    async def veto(self, rec_id: str, reason: str | None) -> str:
+        self.calls.append(("veto", rec_id, reason))
         if self._raises:
             raise self._raises
         return f"recorded: vetoed {rec_id}"
@@ -225,6 +235,7 @@ def _insert_position(conn, position_id: str, **kw) -> None:
         ("approve", ("ap-1",)),
         ("reject", ("ap-1",)),
         ("token", ("tok",)),
+        ("why", ("TCS",)),
     ],
 )
 async def test_unwired_dependency_says_so(bot, msg, command, args):
@@ -238,7 +249,9 @@ async def test_unwired_dependency_says_so(bot, msg, command, args):
 
 # --------------------------------------------------------------------------- owner-ID lock (R10)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command", ["taken", "veto", "pause_entries", "resume_entries", "approve"])
+@pytest.mark.parametrize(
+    "command", ["taken", "veto", "pause_entries", "resume_entries", "approve", "why"]
+)
 async def test_new_commands_are_owner_locked(clock, conn, latch, msg, command):
     """A foreign chat gets NO reply and causes NO state change — silent drop, not an error message."""
     book = _FakeBook()
@@ -253,6 +266,32 @@ async def test_new_commands_are_owner_locked(clock, conn, latch, msg, command):
 
     await guarded(_Update(msg, chat_id=OWNER_CHAT), _Ctx("rec-1", "5", "2450"))
     assert len(msg.sent) == 1                       # the owner's identical update DOES reach it
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args", "fn_raises", "expected"),
+    [
+        (("TCS",), False, "report for TCS"),
+        ((), False, "/why <symbol>"),
+        (("TCS", "RELIANCE"), False, "/why <symbol>"),
+        (("TCS",), True, "/why failed: RuntimeError: boom"),
+    ],
+)
+async def test_why_handler(bot, msg, args, fn_raises, expected):
+    calls: list[str] = []
+
+    async def why_fn(symbol: str) -> str:
+        calls.append(symbol)
+        if fn_raises:
+            raise RuntimeError("boom")
+        return f"report for {symbol}"
+
+    bot.set_why_fn(why_fn)
+    await bot._cmd_why(_Update(msg), _Ctx(*args))
+
+    assert msg.sent == [expected]
+    assert calls == (["TCS"] if expected != "/why <symbol>" else [])
 
 
 # --------------------------------------------------------------------------- outcome capture (§3.6)
@@ -302,7 +341,7 @@ async def test_closed_and_veto_delegate(clock, msg):
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)
     await bot._cmd_closed(_Update(msg), _Ctx("rec-1", "2500.50"))
     await bot._cmd_veto(_Update(msg), _Ctx("rec-2"))
-    assert book.calls == [("close", "rec-1", Decimal("2500.50")), ("veto", "rec-2")]
+    assert book.calls == [("close", "rec-1", Decimal("2500.50")), ("veto", "rec-2", None)]
     assert msg.sent == ["recorded: closed rec-1 @ 2500.50", "recorded: vetoed rec-2"]
 
 
@@ -355,6 +394,7 @@ def _insert_rec(
 
 def _capture_bot(clock, conn, book) -> TelegramBot:
     """A bot wired for outcome capture: the book to act through, the state store to resolve against."""
+    book.bind(conn, clock)
     return TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)
 
 
@@ -374,8 +414,80 @@ async def test_taken_resolves_a_symbol_to_the_real_rec_id(clock, conn, msg):
 async def test_veto_resolves_a_symbol_to_the_real_rec_id(clock, conn, msg):
     _insert_rec(conn, REC_A, instrument="HDFCAMC")
     book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "Price"))
+    assert book.calls == [("veto", REC_A, "price")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", VETO_REASONS)
+async def test_every_veto_code_is_accepted(clock, conn, msg, reason):
+    _insert_rec(conn, REC_A)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", reason))
+    assert book.calls == [("veto", REC_A, reason)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("args", "reply"), [
+    (("HDFCAMC",), "usage: /veto HDFCAMC <market|price|size|trust|away|other>"),   # bare entry veto
+    (("HDFCAMC", "nope"), f"usage: {_USAGE_VETO}"),
+    (("HDFCAMC", "price", "x"), f"usage: {_USAGE_VETO}"),
+])
+async def test_an_entry_veto_without_a_valid_reason_records_nothing(clock, conn, msg, args, reply):
+    _insert_rec(conn, REC_A)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx(*args))
+    assert msg.sent == [reply] and book.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("valid_until", "found"), [
+    (DEAD_UNTIL, True),                        # expired today
+    ("2026-06-12T15:30:00+05:30", True),       # Fri: 3rd session after is today (Wed 06-17)
+    ("2026-06-11T15:30:00+05:30", False),      # Thu: 3rd session after was Tue 06-16
+])
+async def test_an_expired_rec_is_vetoable_only_inside_the_window(clock, conn, msg, valid_until, found):
+    _insert_rec(conn, REC_A, valid_until=valid_until, human_action="expired")
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
+    assert book.calls == ([("veto", REC_A, "price")] if found else [])
+
+
+@pytest.mark.asyncio
+async def test_a_decided_expired_rec_is_not_vetoable_by_symbol(clock, conn, msg):
+    _insert_rec(conn, REC_A, valid_until=DEAD_UNTIL, human_action="expired")
+    conn.execute("UPDATE recommendations SET skip_reason='price' WHERE rec_id=?", (REC_A,))
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "size"))
+    assert book.calls == [] and "no open recommendation for HDFCAMC" in msg.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_a_live_and_an_expired_candidate_give_the_list_and_no_action(clock, conn, msg):
+    _insert_rec(conn, REC_A, valid_until=DEAD_UNTIL, human_action="expired")
+    _insert_rec(conn, REC_B, delivered_at="2026-06-17T09:58:00+05:30")
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
+    assert book.calls == []
+    assert "2 recommendations match HDFCAMC" in msg.sent[0]
+    assert REC_A in msg.sent[0] and REC_B in msg.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_an_exit_rec_keeps_the_bare_veto(clock, conn, msg):
+    _insert_rec(conn, REC_A, kind="exit")
+    book = _FakeBook()
     await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
-    assert book.calls == [("veto", REC_A)]
+    assert book.calls == [("veto", REC_A, None)]
+
+
+@pytest.mark.asyncio
+async def test_taken_still_finds_an_expired_rec_after_a_veto(clock, conn, msg):
+    _insert_rec(conn, REC_A, valid_until=DEAD_UNTIL, human_action="expired")
+    conn.execute("UPDATE recommendations SET skip_reason='price' WHERE rec_id=?", (REC_A,))
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
+    assert book.calls == [("take", REC_A, 12, Decimal("4210"))]
 
 
 @pytest.mark.asyncio
@@ -462,22 +574,22 @@ async def test_a_ulid_argument_keeps_the_original_id_path(clock, conn, msg):
     await bot._cmd_taken(_Update(msg), _Ctx(REC_A, "12", "4210"))
     await bot._cmd_veto(_Update(msg), _Ctx(REC_C))            # not in the ledger at all
 
-    assert book.calls == [("take", REC_A, 12, Decimal("4210")), ("veto", REC_C)]
+    assert book.calls == [("take", REC_A, 12, Decimal("4210")), ("veto", REC_C, None)]
 
 
 @pytest.mark.asyncio
-async def test_a_ulid_reaches_the_book_even_when_the_symbol_would_not(clock, conn, msg):
-    """The id path is the escape hatch: an EXPIRED recommendation is unreachable by ticker but still
-    addressable by id, so the owner is never locked out of a row the book might still accept."""
+async def test_a_lapsed_unswept_rec_is_reachable_by_ticker_and_by_id(clock, conn, msg):
+    """Past valid_until but not yet swept: inside the veto window, so the ticker resolves it (and a
+    bare /veto asks for the reason); the id path still reaches the book directly."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=DEAD_UNTIL)
     book = _FakeBook()
     bot = _capture_bot(clock, conn, book)
 
     await bot._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
-    assert book.calls == [] and "no open recommendation for HDFCAMC" in msg.sent[0]
+    assert book.calls == [] and msg.sent[0].startswith("usage: /veto")
 
-    await bot._cmd_veto(_Update(msg), _Ctx(REC_A))
-    assert book.calls == [("veto", REC_A)]
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A, "away"))
+    assert book.calls == [("veto", REC_A, "away")]
 
 
 @pytest.mark.asyncio
@@ -507,12 +619,12 @@ async def test_an_unusable_valid_until_stays_open(clock, conn, msg, valid_until)
     which recommendations exist (the last case is a real IST wall-clock with no tzinfo)."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=valid_until)
     book = _FakeBook()
-    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
-    assert book.calls == [("veto", REC_A)]
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
+    assert book.calls == [("veto", REC_A, "price")]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("human_action", ["taken", "dismissed", "expired", "closed"])
+@pytest.mark.parametrize("human_action", ["taken", "dismissed", "closed"])
 async def test_an_already_actioned_recommendation_is_not_open(clock, conn, msg, human_action):
     _insert_rec(conn, REC_A, instrument="HDFCAMC", human_action=human_action)
     book = _FakeBook()
@@ -602,8 +714,8 @@ async def test_a_garbled_payload_is_listed_by_id_but_never_ticker_resolved(clock
     assert book.calls == []
     assert REC_A in msg.sent[0]                      # listed: the id is still a usable handle
 
-    await bot._cmd_veto(_Update(msg), _Ctx(REC_A))   # …and it works
-    assert book.calls == [("veto", REC_A)]
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A, "price"))   # …and it works
+    assert book.calls == [("veto", REC_A, "price")]
 
 
 @pytest.mark.asyncio
@@ -621,8 +733,8 @@ async def test_a_broken_ledger_read_never_takes_down_the_command(clock, conn, ms
     assert book.calls == []
     assert "could not read the recommendation ledger to resolve HDFCAMC" in msg.sent[0]
 
-    await bot._cmd_veto(_Update(msg), _Ctx(REC_A))
-    assert book.calls == [("veto", REC_A)]
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A, "price"))
+    assert book.calls == [("veto", REC_A, "price")]
 
 
 # --------------------------------------------------------------------------- read-only reports

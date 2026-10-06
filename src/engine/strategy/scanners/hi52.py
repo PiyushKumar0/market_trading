@@ -143,7 +143,7 @@ DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped envelope, frozen for the f
     "min_sessions": 126,
     "vol_mult": 1.0,
     "ex_skip_days": 10,
-    "hold_sessions": 20,          # documentation only — see module docstring; not read below
+    "hold_sessions": 20,          # the live hold, read by engine.ops.holds; not read below
     "stop_pct": 6.0,
     # v2 signal-time filters (pre-registered 2026-09-09, gating since the 2026-09-12 promotion).
     # OWNER-ONLY and NEVER learnable — not now, not when §6.3 learning lands: these three numbers

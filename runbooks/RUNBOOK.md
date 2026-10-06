@@ -340,6 +340,7 @@ bars are judged against owner-set state (the trade window) that moved during the
       `recommendations.human_action='taken'` (and `'closed'`); `[owner-manual]` — the executions
       themselves, reported back through Telegram `/taken <rec_id> <qty> <price>` and
       `/closed <rec_id> <price>` so the `learning_ledger` row closes with a real outcome (§6.5).
+      `/why <symbol>` is the read-only "where does this name stand" report (no LLM, no sweep).
 - [ ] **Budget discipline (D6, re-scoped 2026-08-13):** the plan's original bar ("within **10%**
       of console-reconciled spend") assumed a monthly-credit billing model that doesn't exist —
       owner clarification 2026-08-13: SDK usage bills against the Claude subscription's **weekly

@@ -61,8 +61,10 @@ import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -71,6 +73,7 @@ from ulid import ULID
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
+from engine.core.config import RecommendSettings
 from engine.core.contracts import (
     EnterAction,
     ExitAction,
@@ -89,14 +92,24 @@ from engine.intelligence.schemas import (
     intraday_guidance_json_schema,
     parse_intraday,
 )
+from engine.learning.evidence import evidence_line
+from engine.learning.hi52_forward import (
+    PROMOTION_DATE,
+    forward_line,
+    forward_progress,
+    load_series,
+    load_signal_rows,
+)
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.notify.episodes import AlertEpisodes
 from engine.ops.holdings_reconcile import MissingHolding, positions_missing_from_holdings
+from engine.ops.holds import HoldFn, exit_session, is_time_exit
 from engine.ops.warmup import CLASS_INTRADAY, blocker_symbol
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
-from engine.strategy.types import SignalCandidate
+from engine.strategy.scanners import hi52, ins
+from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 
 _log = get_logger("engine.ops.pipeline")
 
@@ -236,6 +249,15 @@ _ORPHAN_ALERT_MAX_AGE_MIN = 24 * 60
 #: on every pulse; this throttle decides which pulses do the work (WO-24c).
 _ORPHAN_SWEEP_INTERVAL_MIN = 5
 
+#: Strategies whose stop is re-anchored to the delivered entry at the rule's percentage (D3).
+REANCHOR_STRATEGIES = frozenset({hi52.STRATEGY_ID, ins.STRATEGY_ID})
+
+#: Ceiling on collecting one card's extras; must stay <= ``_GATE_CONTEXT_DEADLINE_S``.
+_EXTRAS_DEADLINE_S = 15.0
+
+#: Calendar days of ``bars_1d`` read for the card's ATR(14, 1d).
+_ATR_1D_LOOKBACK_DAYS = 45
+
 
 class GateContextTimeout(Exception):
     """One gate-context build blew ``_GATE_CONTEXT_DEADLINE_S`` (WO-24a — see the constant).
@@ -284,6 +306,14 @@ class _PendingForward:
     seq: int                    # arrival sequence: the last, always-unique deterministic tie-break
     expires_at: datetime        # the candidate's own §5.2 TTL horizon; past it the levels are stale
     front: bool = False         # WO-20d: a re-queued failed evaluation, ahead of every fresh arrival
+
+
+@dataclass
+class RecExtras:
+    """Card extras read from stores and reports; any part may be missing."""
+
+    stop_atr_mult: Decimal | None = None
+    evidence: list[str] = dataclass_field(default_factory=list)
 
 
 #: ``owner_approvals.kind`` per action type (§3.4 ``owner_approval_required``).
@@ -365,10 +395,13 @@ class RecommendationBook:
     """
 
     def __init__(self, conn: sqlite3.Connection, clock: Clock, cost_model: CostModel, *,
-                 overnight_gap_mult_fn: Callable[[], Any] | None = None) -> None:
+                 overnight_gap_mult_fn: Callable[[], Any] | None = None,
+                 calendar: NSECalendar | None = None, veto_window_sessions: int = 3) -> None:
         self._conn = conn
         self._clock = clock
         self._costs = cost_model
+        self._calendar = calendar
+        self._veto_window_sessions = veto_window_sessions
         self._ledger_cols: frozenset[str] | None = None
         #: The §7.1 ``per_trade_risk.overnight_gap_mult`` the gate sized swing/position entries on,
         #: read at call time from the hash-verified limits (WO-V re-review, 2026-09-13). Unwired ⇒
@@ -472,7 +505,8 @@ class RecommendationBook:
                 ),
             )
             self._conn.execute(
-                "UPDATE recommendations SET human_action='taken', human_fill_price=? WHERE rec_id=?",
+                "UPDATE recommendations SET human_action='taken', human_fill_price=?, "
+                "skip_reason=NULL, skip_reason_at=NULL WHERE rec_id=?",
                 (str(price), rec_id),
             )
             # outcome_label/closed_at reset to NULL (2026-09-02 review): an expired→taken rec has
@@ -596,25 +630,84 @@ class RecommendationBook:
         )
 
     # ------------------------------------------------------------------ owner declines
-    async def veto(self, rec_id: str) -> str:
-        """``/veto <rec_id>`` — the owner declines. Recorded as ``dismissed`` + a ``no_action`` label:
-        a decline and a silent non-fill are different facts, both training signal (§6.5)."""
+    async def veto(self, rec_id: str, reason: str | None = None) -> str:
+        """``/veto <rec_id> [reason]`` — the owner declines. A live rec is recorded as ``dismissed`` + a
+        ``no_action`` label: a decline and a silent non-fill are different facts, both training signal
+        (§6.5). An expired entry rec keeps ``expired`` and gains only the reason (its ledger row is
+        already ``no_action``)."""
         row = self._rec_row(rec_id)
+        now = self._clock.now()
+        if self._expired(row, now) and reason is not None and self._kind(row) == "entry":
+            with transaction(self._conn):
+                self._conn.execute(
+                    "UPDATE recommendations SET skip_reason=?, skip_reason_at=? WHERE rec_id=?",
+                    (reason, now.isoformat(), rec_id),
+                )
+            _log.warning("recommendation_vetoed", rec_id=rec_id, reason=reason, expired=True)
+            return f"recommendation {rec_id} stays expired — reason '{reason}' recorded."
         if row["human_action"]:
             raise ValueError(
                 f"recommendation {rec_id} is already '{row['human_action']}' — nothing to veto"
             )
-        now = self._clock.now()
         with transaction(self._conn):
             self._conn.execute(
-                "UPDATE recommendations SET human_action='dismissed' WHERE rec_id=?", (rec_id,)
+                "UPDATE recommendations SET human_action='dismissed', skip_reason=?, skip_reason_at=? "
+                "WHERE rec_id=?",
+                (reason, None if reason is None else now.isoformat(), rec_id),
             )
             self._conn.execute(
                 "UPDATE learning_ledger SET outcome_label='no_action', closed_at=? WHERE rec_id=?",
                 (now.isoformat(), rec_id),
             )
-        _log.warning("recommendation_vetoed", rec_id=rec_id)
+        _log.warning("recommendation_vetoed", rec_id=rec_id, reason=reason)
         return f"recommendation {rec_id} dismissed — recorded as a no_action outcome (§6.5)."
+
+    def decision_candidates(self, symbol: str | None, now: datetime) -> list[dict[str, Any]]:
+        """Undecided ENTRY recs (optionally for one symbol), oldest first: live, or ``expired`` with no
+        ``skip_reason`` and ``valid_until`` inside the last ``veto_window_sessions`` sessions. Without a
+        calendar no expired rec qualifies."""
+        rows = self._conn.execute(
+            "SELECT rec_id, payload, delivered_at, human_action FROM recommendations "
+            "WHERE delivered_at IS NOT NULL AND (human_action IS NULL "
+            "OR (human_action='expired' AND skip_reason IS NULL)) ORDER BY delivered_at"
+        ).fetchall()
+        wanted = None if symbol is None else symbol.strip().upper()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            data = self._rec_payload(row)
+            instrument = str(data.get("instrument") or "")
+            if self._kind(row) != "entry" or (wanted is not None and instrument.upper() != wanted):
+                continue
+            if self._expired(row, now) and not self._in_veto_window(data, now):
+                continue
+            out.append({
+                "rec_id": str(row["rec_id"]), "instrument": instrument,
+                "side": str(data.get("side") or "?"), "qty": int(data.get("qty") or 0),
+                "kind": "entry", "delivered_at": row["delivered_at"],
+                "valid_until": data.get("valid_until"),
+            })
+        return out
+
+    def _in_veto_window(self, data: dict[str, Any], now: datetime) -> bool:
+        if self._calendar is None:
+            return False
+        try:
+            expiry = datetime.fromisoformat(str(data["valid_until"])).date()
+            return now.date() <= self._calendar.add_sessions(expiry, self._veto_window_sessions)
+        except (KeyError, ValueError):
+            return False
+
+    @classmethod
+    def _kind(cls, row: sqlite3.Row) -> str:
+        return str(cls._rec_payload(row).get("kind") or "entry")
+
+    @classmethod
+    def _expired(cls, row: sqlite3.Row, now: datetime) -> bool:
+        """Swept to ``expired``, or past ``valid_until`` and not yet swept (the 15:45 sweep lags)."""
+        return row["human_action"] == "expired" or (
+            row["human_action"] is None
+            and recommendation_expired(cls._rec_payload(row).get("valid_until"), now)
+        )
 
     # ------------------------------------------------------------------ TTL sweep
     def expire_stale(self, now: datetime) -> int:
@@ -778,6 +871,11 @@ class RecommendationPipeline:
         warmup_status_fn: Callable[[], Any] | None = None,
         admission_mode: str = "ranked",
         forward_drain_mode: str = "paced",
+        hold_fn: HoldFn | None = None,
+        round_tick_fn: Callable[[str, Decimal], Decimal] | None = None,
+        recommend: RecommendSettings | None = None,
+        strategy_edge_pct: Mapping[str, Decimal] | None = None,
+        reports_dir: Path | None = None,
     ) -> None:
         if admission_mode not in FORWARD_MODES:
             raise ValueError(f"admission_mode must be one of {FORWARD_MODES}, got {admission_mode!r}")
@@ -822,10 +920,19 @@ class RecommendationPipeline:
         #: (symbol, strategy_id) -> the analyst RAN and said no_action, so the pair is displaceable
         #: again (2026-09-04; wired to SignalPreScreen.decline). Not a re-arm: the slot stays spent.
         self._decline = decline
-        #: symbol -> live LTP (wired to the tick cache in ``engine.ops.main``). Read ONLY by the
-        #: D1 (e) band screen in :meth:`_take_forward_slot`; unwired ⇒ no screen, which is the
-        #: pre-2026-09-12 behaviour. Never a gate input: the gate reads its own LTP from GateContext.
+        #: symbol -> live LTP (wired to the tick cache in ``engine.ops.main``). Read by the D1 (e)
+        #: band screen in :meth:`_take_forward_slot` and as the MARKET anchor in
+        #: :meth:`_reanchored_stop`; unwired ⇒ neither. Never a gate input: the gate reads its own
+        #: LTP from GateContext.
         self._ltp_fn = ltp_fn
+        #: (strategy_id, style) -> hold sessions (``engine.ops.holds``); unwired ⇒ no exit date.
+        self._hold_fn = hold_fn
+        self._round_tick = round_tick_fn or (lambda _symbol, price: round_to_tick(price))
+        self._recommend = recommend or RecommendSettings()
+        #: The registered-edge map the RiskGate is built with; shown only on targetless recs.
+        self._strategy_edge = dict(strategy_edge_pct or {})
+        #: Backtest reports the evidence line reads; unwired ⇒ no backtest line.
+        self._reports_dir = reports_dir
         #: The §2.6 warm-up snapshot the GATE reads (wired to the same ``warmup_status_snapshot`` in
         #: ``engine.ops.main``), consulted per COVERAGE CLASS (2026-09-13) at both analyst-call commit
         #: points (:meth:`on_signal_candidate` and :meth:`_take_forward_slot`), to keep an intraday
@@ -2164,6 +2271,8 @@ class RecommendationPipeline:
                 "enter_limit_price_defaulted", signal_id=candidate.signal_id,
                 symbol=candidate.symbol, strategy_id=candidate.strategy_id, entry_price=str(level),
             )
+        if payload.action == "enter":
+            payload = self._one_exit(payload, candidate)
 
         try:
             verdict, gate_ctx = await self._gate_and_persist(
@@ -2188,7 +2297,10 @@ class RecommendationPipeline:
         # Same reference the gate priced the proposal on: the LIMIT price when given, else the live
         # LTP, else the candidate's trigger level (never a guess above all three).
         reference = _dec(getattr(gate_ctx, "ltp", None) or entry_ref)
-        rec = self.build_recommendation(payload, verdict, reference)
+        extras = await self._collect_extras(payload, reference, d)
+        rec = self.build_recommendation(
+            payload, verdict, reference, extras, raw_levels=candidate.raw_levels
+        )
         self._book.deliver(
             rec,
             ledger_fields={
@@ -2306,9 +2418,10 @@ class RecommendationPipeline:
 
     # ================================================================== recommendation assembly
     def build_recommendation(
-        self, action: EnterAction, verdict: GateVerdict, entry_ref: Decimal
+        self, action: EnterAction, verdict: GateVerdict, entry_ref: Decimal,
+        extras: RecExtras | None = None, *, raw_levels: RawLevels | None = None,
     ) -> Recommendation:
-        """Build the §3.6 owner payload from an approved/shrunk ``enter`` proposal.
+        """Build the §3.6 owner payload from an approved/shrunk ``enter`` proposal. No I/O.
 
         ``entry_zone`` for a LIMIT proposal is the single proposed price on both sides — the price is
         the instruction. For a MARKET proposal there is no price yet, so the zone spans from the
@@ -2327,9 +2440,15 @@ class RecommendationPipeline:
         targets = [_dec(action.target_price)] if action.target_price is not None else []
         notional = _money(Decimal(qty) * zone[0])
         cost = verdict.cost or self._book.cost_model.round_trip(notional or zone[0], product)
+        stop = _dec(action.stop_price)
+        created_at = self._clock.now()
+        hold = self._hold_fn(action.strategy_id, action.style) if self._hold_fn else None
+        gtt = self._gtt_instruction(action) if product == "CNC" else None
+        extras = extras or RecExtras()
+        adverse_entry = zone[1] if action.side == "BUY" else zone[0]
         return Recommendation(
             rec_id=str(ULID()),
-            created_at=self._clock.now(),
+            created_at=created_at,
             valid_until=action.valid_until or self._ttl(action.style),
             kind="entry",
             instrument=action.tradingsymbol,
@@ -2337,7 +2456,7 @@ class RecommendationPipeline:
             style=action.style,
             product=product,
             entry_zone=zone,
-            stop=_dec(action.stop_price),
+            stop=stop,
             targets=targets,
             qty=qty,
             notional=notional,
@@ -2346,11 +2465,25 @@ class RecommendationPipeline:
             short_flag_higher_tail_risk=action.side == "SELL",
             gate=verdict,
             cost=cost,
-            manual_checklist=self._entry_checklist(action, zone, product),
+            manual_checklist=self._entry_checklist(action, zone, product, gtt),
+            strategy_id=action.strategy_id,
+            proposal_id=action.proposal_id or None,
+            entry_type=action.entry_type,
+            reference_entry=raw_levels.entry if raw_levels else None,
+            reference_stop=raw_levels.stop if raw_levels else None,
+            hold_sessions=hold,
+            exit_session=exit_session(self._calendar, created_at, hold) if hold else None,
+            exit_kind="stop_target" if targets else "time",
+            risk_inr=_money(Decimal(qty) * abs(adverse_entry - stop)),
+            stop_atr_mult=extras.stop_atr_mult,
+            gtt_instruction=gtt,
+            evidence=list(extras.evidence),
+            registered_edge_pct=None if targets else self._strategy_edge.get(action.strategy_id),
         )
 
     def _entry_checklist(
-        self, action: EnterAction, zone: tuple[Decimal, Decimal], product: str
+        self, action: EnterAction, zone: tuple[Decimal, Decimal], product: str,
+        gtt: str | None = None,
     ) -> list[str]:
         """The B7/R3 protective-order checklist — the whole mechanism by which protection becomes the
         human's job in RECOMMEND. Never truncated, never optional."""
@@ -2364,17 +2497,128 @@ class RecommendationPipeline:
         if product == "MIS":
             items.append(f"after entry fills, place SL-M at {stop}")
         else:
-            target = _dec(action.target_price) if action.target_price is not None else None
-            items.append(
-                f"after entry fills, place GTT OCO stop {stop}"
-                + (f" / target {target}" if target is not None else " (no target — stop-only GTT)")
-            )
+            items.append(gtt or self._gtt_instruction(action))
         items.append(f"set alert at {alert}")
         if product == "MIS":
             window = self._window(self._clock.today())
             end = window[1].strftime("%H:%M") if window else "the trade-window end"
             items.append(f"square off by {end}; 15:10 is only a session backstop")
         return items
+
+    def _gtt_instruction(self, action: EnterAction) -> str:
+        """The CNC protective-GTT checklist line (plan Q1.3). CNC is long-only, so the stop leg is a
+        sell below the entry."""
+        stop = _dec(action.stop_price)
+        offset = _dec(self._recommend.gtt_limit_offset_pct) / _HUNDRED
+        limit = self._round_tick(action.tradingsymbol, stop * (Decimal(1) - offset))
+        why = " so a fast drop still fills" if limit < stop else ""
+        if action.target_price is None:
+            return (f"after entry fills, place a single-trigger GTT: sell if price falls to "
+                    f"₹{stop}; limit ₹{limit}{why}")
+        return (f"after entry fills, place a GTT OCO: stop ₹{stop} (limit ₹{limit}{why}) / "
+                f"target ₹{_dec(action.target_price)}")
+
+    def _one_exit(self, payload: EnterAction, candidate: SignalCandidate) -> EnterAction:
+        """D3 stop re-anchoring and one exit per rec (plan Q1.2): a time-exit strategy with a
+        registered edge loses any analyst-set target, so the gate prices that edge. Without one
+        (rsi2) the target stays: dropping it would make every entry fail C3."""
+        update: dict[str, Any] = {}
+        if payload.strategy_id in REANCHOR_STRATEGIES:
+            stop = self._reanchored_stop(payload, candidate)
+            if stop is not None:
+                update["stop_price"] = stop
+        if (
+            is_time_exit(payload.strategy_id) and payload.strategy_id in self._strategy_edge
+            and payload.target_price is not None
+        ):
+            _log.info("target_dropped", signal_id=candidate.signal_id, symbol=candidate.symbol,
+                      strategy_id=payload.strategy_id, target=str(payload.target_price))
+            update["target_price"] = None
+        if not update:
+            return payload
+        return EnterAction.model_validate({**payload.model_dump(), **update})
+
+    def _reanchored_stop(self, payload: EnterAction, candidate: SignalCandidate) -> Decimal | None:
+        """``anchor × (1 − frac)``, ``frac = 1 − raw_stop/raw_entry``; the anchor is the LIMIT price,
+        else the live mark. ``None`` = leave the stop as proposed."""
+        raw = candidate.raw_levels
+        if raw.stop is None or raw.entry <= 0:
+            return None
+        frac = Decimal(1) - _dec(raw.stop) / _dec(raw.entry)
+        if frac <= 0:
+            return None
+        if payload.entry_type == "LIMIT":
+            anchor = payload.entry_price
+        else:
+            try:
+                anchor = self._ltp_fn(candidate.symbol) if self._ltp_fn is not None else None
+            except Exception as exc:  # noqa: BLE001 - a broken mark leaves the stop as proposed
+                _log.warning("stop_reanchor_no_mark", symbol=candidate.symbol, error=repr(exc))
+                return None
+        if anchor is None or anchor <= 0:
+            return None
+        anchor = _dec(anchor)
+        stop = self._round_tick(candidate.symbol, anchor * (Decimal(1) - frac))
+        # entry_move_pct bounds the per_trade_risk shrink of a qty sized on the raw geometry.
+        _log.info(
+            "stop_reanchored", signal_id=candidate.signal_id, symbol=candidate.symbol,
+            strategy_id=payload.strategy_id, anchor=str(anchor), raw_entry=str(raw.entry),
+            raw_stop=str(raw.stop), proposed_stop=str(payload.stop_price), stop=str(stop),
+            entry_move_pct=str(_money((anchor / _dec(raw.entry) - 1) * _HUNDRED)),
+        )
+        return stop
+
+    async def _collect_extras(
+        self, action: EnterAction, reference: Decimal, d: date
+    ) -> RecExtras:
+        """Card extras under ``_EXTRAS_DEADLINE_S``; a timeout keeps whatever was collected."""
+        extras = RecExtras()
+        try:
+            await asyncio.wait_for(
+                self._fill_extras(extras, action, reference, d), _EXTRAS_DEADLINE_S
+            )
+        except TimeoutError:
+            _log.warning("rec_extras_timeout", symbol=action.tradingsymbol,
+                         strategy_id=action.strategy_id, deadline_s=_EXTRAS_DEADLINE_S)
+        return extras
+
+    async def _fill_extras(
+        self, extras: RecExtras, action: EnterAction, reference: Decimal, d: date
+    ) -> None:
+        symbol = action.tradingsymbol
+        try:
+            line = (evidence_line(action.strategy_id, self._reports_dir)
+                    if self._reports_dir is not None else None)
+            if line:
+                extras.evidence.append(line)
+        except Exception as exc:  # noqa: BLE001 - an extra never blocks the card
+            _log.warning("rec_extras_failed", part="evidence", symbol=symbol, error=repr(exc))
+        try:
+            bars = await self._store.arun(
+                self._store.get_bars_1d, symbol,
+                d - timedelta(days=_ATR_1D_LOOKBACK_DAYS), d - timedelta(days=1),
+            )
+            if len(bars) >= ATR_PERIOD:
+                atr = float(wilder_atr([b.high for b in bars], [b.low for b in bars],
+                                       [b.close for b in bars], ATR_PERIOD).iloc[-1])
+                entry = _dec(action.entry_price) if action.entry_price is not None else reference
+                if np.isfinite(atr) and atr > 0:
+                    extras.stop_atr_mult = (
+                        abs(entry - _dec(action.stop_price)) / Decimal(str(atr))
+                    ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        except Exception as exc:  # noqa: BLE001 - an extra never blocks the card
+            _log.warning("rec_extras_failed", part="stop_atr_mult", symbol=symbol, error=repr(exc))
+        if action.strategy_id != hi52.STRATEGY_ID:
+            return
+        try:
+            signals = load_signal_rows(self._conn, start=PROMOTION_DATE, as_of=d)
+            series = await self._store.arun(
+                load_series, self._store._fetchall,  # noqa: SLF001 - the store's own locked read
+                [s.symbol for s in signals], start=PROMOTION_DATE, end=d,
+            )
+            extras.evidence.append(forward_line(*forward_progress(signals, series)))
+        except Exception as exc:  # noqa: BLE001 - an extra never blocks the card
+            _log.warning("rec_extras_failed", part="hi52_forward", symbol=symbol, error=repr(exc))
 
     # ================================================================== trigger (b): position events
     async def on_bar(self, bar: Bar) -> None:

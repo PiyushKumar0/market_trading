@@ -1,6 +1,6 @@
 """hi52 forward-test measurement — shared by ``scripts/hi52_forward_verdict.py`` and the rec card.
 
-Pure: signals and per-symbol ``bars_1d`` series are arguments, so callers own the store access.
+Measurement is pure; the loaders read through a connection or fetcher the caller owns.
 Conventions (entry = the OPEN of journal day ``d``; exit = the CLOSE of the ``k``-th session of the
 hold, entry session first) are pinned in the script's module docstring.
 """
@@ -8,10 +8,13 @@ hold, entry session first) are pinned in the script's module docstring.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+import sqlite3
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
-from typing import NamedTuple
+from datetime import date, datetime
+from typing import Any, NamedTuple
+
+from engine.strategy.scanners.hi52 import STRATEGY_ID
 
 #: First session of the PROMOTED population (ASSUMED — see the script's PROMOTION_DATE_PROVENANCE).
 PROMOTION_DATE = date(2026, 9, 14)
@@ -140,3 +143,66 @@ def forward_progress(
 
 def forward_line(k: int, m: int) -> str:
     return f"forward test: {k} of {MIN_SIGNALS} matured ({m} signals since {PROMOTED_ON})"
+
+
+class StoreUnreadable(RuntimeError):
+    """A store could not be opened/read. Carries the operator-facing reason."""
+
+
+def load_signal_rows(conn: sqlite3.Connection, *, start: date, as_of: date) -> list[Signal]:
+    """Published ``hi52`` signals in ``[start, as_of]``, ascending by (day, symbol).
+
+    Every ``prescreen_day_slots`` row is a PUBLICATION, so the row set IS the signal population;
+    ``evaluated``/``forwarded`` are deliberately not filtered on.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT d, symbol FROM prescreen_day_slots "
+            "WHERE strategy_id = ? AND d >= ? AND d <= ? ORDER BY d, symbol",
+            (STRATEGY_ID, start.isoformat(), as_of.isoformat()),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise StoreUnreadable(f"state.db: {type(exc).__name__}: {exc}") from exc
+    out: list[Signal] = []
+    for d, symbol in rows:
+        try:
+            out.append(Signal(date.fromisoformat(str(d)), str(symbol)))
+        except ValueError:                 # a malformed day is a corrupt row, never a measurement
+            continue
+    return out
+
+
+def load_series(
+    fetchall: Callable[[str, list[Any]], Sequence[Sequence[Any]]],
+    symbols: Sequence[str],
+    *,
+    start: date,
+    end: date,
+) -> dict[str, Series]:
+    """Ascending ``bars_1d`` opens/closes in ``[start, end]`` for ``symbols``.
+
+    ``fetchall(sql, params)`` runs one DuckDB query and returns its rows. ``end`` bounds the read so
+    a past verdict stays reproducible.
+    """
+    wanted = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+    if not wanted:
+        return {}
+    placeholders = ", ".join("?" for _ in wanted)
+    sql = (
+        f'SELECT symbol, d, "open", "close" FROM bars_1d '
+        f"WHERE symbol IN ({placeholders}) AND d >= ? AND d <= ? ORDER BY symbol, d"
+    )
+    try:
+        rows = fetchall(sql, [*wanted, start, end])
+    except Exception as exc:  # noqa: BLE001 - a missing/renamed table is one clear refusal
+        raise StoreUnreadable(f"bars_1d: {type(exc).__name__}: {exc}") from exc
+    out: dict[str, Series] = {}
+    for symbol, d, o, c in rows:
+        sym = str(symbol)
+        s = out.get(sym)
+        if s is None:
+            s = out[sym] = Series(symbol=sym, dates=[], open=[], close=[])
+        s.dates.append(d.date() if isinstance(d, datetime) else d)
+        s.open.append(float(o) if o is not None else math.nan)
+        s.close.append(float(c) if c is not None else math.nan)
+    return out

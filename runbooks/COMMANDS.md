@@ -230,6 +230,9 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
   hard-stopped. A change to agents.yaml applies on the next engine boot — validate with the loader
   one-liner above first. The month column in `budget_ledger` is written but read by nothing.
 - Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
+- `/why <symbol>`: read-only report (universe status, hi52/brk20 distance to trigger, surveillance and
+  results-day flags, latest insider/pledge filings, last rec, open positions, last verdict). Each
+  DuckDB read times out at 5 s and prints "<section>: unavailable"; no LLM, no `/scan_now`.
 
 ## News-feed health (2026-08-04, after the MC-retirement remediation)
 

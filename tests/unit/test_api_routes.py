@@ -638,6 +638,25 @@ def test_recommendations_latest_delivered_first_with_payload_and_human_action(co
     assert next(rec for rec in recs if rec["rec_id"] == "rec-2")["human_action"] is None
 
 
+def test_recommendations_shape_is_unchanged_by_the_q1_payload_fields(conn, clock) -> None:
+    payload = {
+        "rec_id": "rec-q1", "kind": "entry", "instrument": "BHEL", "stop": "418.30", "targets": [],
+        "hold_sessions": 20, "exit_session": None, "exit_kind": "time", "risk_inr": "373.80",
+        "gtt_instruction": "after entry fills, place a single-trigger GTT", "evidence": ["x"],
+        "registered_edge_pct": "1.53", "reference_entry": "427.90", "reference_stop": "402.25",
+    }
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?, ?, ?)",
+        ("rec-q1", json.dumps(payload), "2026-10-06T10:00:00+05:30"),
+    )
+    [rec] = _client(conn=conn, clock=clock).get("/recommendations", headers=AUTH).json()[
+        "recommendations"
+    ]
+    assert set(rec) == {"rec_id", "recommendation", "delivered_at", "human_action",
+                        "human_fill_price", "outcome"}
+    assert rec["recommendation"] == payload
+
+
 # --------------------------------------------------------------------------- POST /db/query (§3.2.11)
 # Owner ad-hoc read surface (owner-directed 2026-08-19): the engine process HOLDS market.duckdb, so it
 # answers read-only questions instead of being STOPPED for them. Read-only is enforced by statement

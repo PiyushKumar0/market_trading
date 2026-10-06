@@ -227,7 +227,9 @@ _ULID_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 #: because it is the form the owner can actually type from the delivery message (WO-29).
 _USAGE_TAKEN = "/taken <symbol|rec_id> <qty> <price>"
 _USAGE_CLOSED = "/closed <symbol|rec_id> <price>"
-_USAGE_VETO = "/veto <symbol|rec_id>"
+VETO_REASONS = ("market", "price", "size", "trust", "away", "other")
+_USAGE_VETO = f"/veto <symbol|rec_id> <{'|'.join(VETO_REASONS)}>"
+_USAGE_WHY = "/why <symbol>"
 
 #: Rows a resolution reply may list before it summarises the rest. ``_reply`` writes straight to
 #: ``reply_text`` — it does NOT pass through ``send()``'s splitter — so an unbounded list would
@@ -253,7 +255,9 @@ class RecoBook(Protocol):
 
     async def close(self, rec_id: str, price: Decimal) -> str: ...
 
-    async def veto(self, rec_id: str) -> str: ...
+    async def veto(self, rec_id: str, reason: str | None) -> str: ...
+
+    def decision_candidates(self, symbol: str | None, now: datetime) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -306,7 +310,9 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Mark a taken recommendation closed at price (records the outcome). The symbol is "
                  "enough while exactly one taken recommendation on it is open.", True),
     _CommandSpec("veto", _USAGE_VETO,
-                 "Decline an open recommendation; it is recorded as vetoed, never as taken.", True),
+                 "Decline a recommendation with a reason (live, or expired within the last "
+                 "sessions); it is recorded as vetoed, never as taken. Exit and adjust "
+                 "recommendations need no reason.", True),
     _CommandSpec("close", "/close <position_id>",
                  "Guidance for exiting a position — in RECOMMEND the exit is yours to place (B7).",
                  True),
@@ -327,6 +333,9 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("scan_now", "/scan_now",
                  "Sweep the scanners on demand: live candidates enter the pipeline; otherwise "
                  "the reply lists the price levels at which today's setups would arm.", True),
+    _CommandSpec("why", _USAGE_WHY,
+                 "Where one symbol stands: universe status, trigger levels, flags, filings, last "
+                 "recommendation, positions, last verdict. Read-only.", True),
 )
 
 
@@ -456,6 +465,7 @@ class TelegramBot:
         self._conn = conn
         #: async (trigger) -> owner-facing sweep verdict text (§3.2.5 sweep addendum, 2026-07-29).
         self._scan_sweep_fn = scan_sweep_fn
+        self._why_fn: Callable[[str], Awaitable[str]] | None = None
         self._app: Application | None = None
         #: A start() that timed out AFTER start_polling succeeded leaves a LIVE poller behind
         #: (2026-08-07 review round): retained here so stop() can always reach it for teardown —
@@ -478,6 +488,10 @@ class TelegramBot:
         """Late-wire the ``/scan_now`` sweep (§3.2.5 addendum; the closure needs the pre-screen,
         which is built after the bot in the composition root)."""
         self._scan_sweep_fn = fn
+
+    def set_why_fn(self, fn: Callable[[str], Awaitable[str]]) -> None:
+        """Late-wire the ``/why`` reader (needs the market store, built after the bot)."""
+        self._why_fn = fn
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -922,6 +936,7 @@ class TelegramBot:
             "reject": self._cmd_reject,
             "token": self._cmd_token,
             "scan_now": self._cmd_scan_now,
+            "why": self._cmd_why,
         }
 
     def _register_handlers(self, app: Application) -> None:
@@ -988,6 +1003,25 @@ class TelegramBot:
         except Exception as exc:  # noqa: BLE001 - a sweep failure is a reply, never a dead command
             _log.exception("telegram_scan_now_failed")
             await _reply(update, f"sweep failed: {type(exc).__name__}: {exc}")
+            return
+        await _reply(update, text)
+
+    # ------------------------------------------------------------------ /why (read-only)
+    async def _cmd_why(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Deterministic per-symbol status report; reads only, never sweeps or enqueues."""
+        if self._why_fn is None:
+            await _reply(update, "/why: not wired.")
+            return
+        args = _args(context)
+        if len(args) != 1:
+            await _reply(update, _USAGE_WHY)
+            return
+        _log.info("telegram_cmd_why", symbol=args[0])
+        try:
+            text = await self._why_fn(args[0])
+        except Exception as exc:  # noqa: BLE001 - a failed report is a reply, never a dead command
+            _log.exception("telegram_why_failed")
+            await _reply(update, f"/why failed: {type(exc).__name__}: {exc}")
             return
         await _reply(update, text)
 
@@ -1219,9 +1253,36 @@ class TelegramBot:
             )
         return recs
 
+    def _veto_recs(self) -> list[_LedgerRec]:
+        """What ``/veto`` may act on: the book's entry candidates (live, or expired inside the veto
+        window) plus the live exit/adjust recs, which keep the bare veto."""
+        entries = [
+            _LedgerRec(
+                rec_id=str(c["rec_id"]), instrument=str(c["instrument"]), side=str(c["side"]),
+                qty=int(c["qty"]), kind=str(c["kind"]), delivered_at=c["delivered_at"],
+                valid_until=c["valid_until"],
+            )
+            for c in self._reco_book.decision_candidates(None, self._clock.now())
+        ]
+        others = [rec for rec in self._ledger_recs(None) if rec.kind != "entry"]
+        return sorted(entries + others, key=lambda rec: rec.delivered_at or "")
+
+    def _rec_kind(self, rec_id: str) -> str | None:
+        """The ``kind`` of a ledger row, or None when it cannot be read (the book then decides)."""
+        if self._conn is None:
+            return None
+        try:
+            row = self._conn.execute(
+                "SELECT payload FROM recommendations WHERE rec_id=?", (rec_id,)
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane (R8)
+            _log.exception("telegram_rec_kind_failed", rec_id=rec_id)
+            return None
+        return None if row is None else str(_payload_dict(row["payload"]).get("kind") or "entry")
+
     async def _resolve_rec_arg(
         self, update: Update, arg: str, *, human_action: str | None,
-        include_expired: bool = False,
+        include_expired: bool = False, decision: bool = False,
     ) -> str | None:
         """Resolve a capture command's first argument to a real ``rec_id`` — or reply and return None.
 
@@ -1245,7 +1306,7 @@ class TelegramBot:
         if self._conn is None:
             return arg
         try:
-            recs = self._ledger_recs(human_action)
+            recs = self._veto_recs() if decision else self._ledger_recs(human_action)
             if include_expired:
                 # /taken only (2026-08-26, the first live fill): the owner executed intraday and
                 # recorded in the evening — the 15:45 sweep had already labelled the row expired,
@@ -1333,20 +1394,25 @@ class TelegramBot:
         await _reply(update, await _book_result(self._reco_book.close(rec_id, price)))
 
     async def _cmd_veto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner declines an open recommendation. Recorded as vetoed — never silently as a non-fill,
-        which is a different (unbiased) training label (§6.5)."""
+        """Owner declines a recommendation. Recorded as vetoed — never silently as a non-fill,
+        which is a different (unbiased) training label (§6.5). An entry rec needs a reason code;
+        exit/adjust recs take the bare form."""
         if self._reco_book is None:
             await _reply(update, "/veto: recommendation book not wired.")
             return
         args = _args(context)
-        if len(args) != 1:
+        reason = args[1].lower() if len(args) == 2 else None
+        if len(args) not in (1, 2) or (reason is not None and reason not in VETO_REASONS):
             await _reply(update, f"usage: {_USAGE_VETO}")
             return
-        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None)
+        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None, decision=True)
         if rec_id is None:
             return
-        _log.warning("telegram_cmd_veto", arg=args[0], rec_id=rec_id)
-        await _reply(update, await _book_result(self._reco_book.veto(rec_id)))
+        if reason is None and self._rec_kind(rec_id) == "entry":
+            await _reply(update, f"usage: /veto {args[0].upper()} <{'|'.join(VETO_REASONS)}>")
+            return
+        _log.warning("telegram_cmd_veto", arg=args[0], rec_id=rec_id, reason=reason)
+        await _reply(update, await _book_result(self._reco_book.veto(rec_id, reason)))
 
     async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Exit guidance — the v1 answer, and an honest one: in RECOMMEND the platform places ZERO API

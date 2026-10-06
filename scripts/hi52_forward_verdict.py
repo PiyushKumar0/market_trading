@@ -94,7 +94,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sqlite3
 import statistics
@@ -119,6 +118,9 @@ from engine.learning.hi52_forward import (  # noqa: E402
     Measured,
     Series,
     Signal,
+    StoreUnreadable,
+    load_series,
+    load_signal_rows,
     measure_all,
     measure_signal,  # noqa: F401 - re-exported
 )
@@ -308,34 +310,6 @@ def verdict(cells: Mapping[str, Mapping[str, Any]]) -> tuple[str, str]:
 
 
 # =============================================================================== read-only stores
-class StoreUnreadable(RuntimeError):
-    """A store could not be opened/read. Carries the operator-facing reason."""
-
-
-def load_signal_rows(conn: sqlite3.Connection, *, start: date, as_of: date) -> list[Signal]:
-    """Published ``hi52`` signals in ``[start, as_of]``, ascending by (day, symbol).
-
-    Every row in ``prescreen_day_slots`` is a PUBLICATION (one per (day, symbol, strategy)), so the
-    row set IS the signal population — ``evaluated``/``forwarded`` describe what the analyst budget
-    then did with it and are deliberately not filtered on (module docstring).
-    """
-    try:
-        rows = conn.execute(
-            "SELECT d, symbol FROM prescreen_day_slots "
-            "WHERE strategy_id = ? AND d >= ? AND d <= ? ORDER BY d, symbol",
-            (STRATEGY_ID, start.isoformat(), as_of.isoformat()),
-        ).fetchall()
-    except sqlite3.Error as exc:
-        raise StoreUnreadable(f"state.db: {type(exc).__name__}: {exc}") from exc
-    out: list[Signal] = []
-    for d, symbol in rows:
-        try:
-            out.append(Signal(date.fromisoformat(str(d)), str(symbol)))
-        except ValueError:                 # a malformed day is a corrupt row, never a measurement
-            continue
-    return out
-
-
 def load_sizing_limits(path: Path) -> tuple[Decimal, Decimal, str]:
     """``(swing_position_pct, overnight_gap_mult, provenance)`` from ``config/limits.yaml``.
 
@@ -433,38 +407,6 @@ def open_market_db(path: Path):
             f"cannot open {path} read-only: {type(exc).__name__}: {exc}\n"
             "  DuckDB is single-writer: if the mt-engine service is running it owns this file."
         ) from exc
-
-
-def load_series(conn, symbols: Sequence[str], *, start: date, end: date) -> dict[str, Series]:
-    """Ascending ``bars_1d`` opens/closes in ``[start, end]`` for ``symbols``.
-
-    ``start`` must sit far enough BEFORE the first signal for nothing — the signal day itself is the
-    anchor — but ``end`` is the ``--as-of`` bound and is what keeps a past verdict reproducible.
-    """
-    if not symbols:
-        return {}
-    wanted = sorted({s.strip().upper() for s in symbols if s and s.strip()})
-    if not wanted:
-        return {}
-    placeholders = ", ".join("?" for _ in wanted)
-    sql = (
-        f'SELECT symbol, d, "open", "close" FROM bars_1d '
-        f"WHERE symbol IN ({placeholders}) AND d >= ? AND d <= ? ORDER BY symbol, d"
-    )
-    try:
-        rows = conn.execute(sql, [*wanted, start, end]).fetchall()
-    except Exception as exc:  # noqa: BLE001 - a missing/renamed table is one clear refusal
-        raise StoreUnreadable(f"bars_1d: {type(exc).__name__}: {exc}") from exc
-    out: dict[str, Series] = {}
-    for symbol, d, o, c in rows:
-        sym = str(symbol)
-        s = out.get(sym)
-        if s is None:
-            s = out[sym] = Series(symbol=sym, dates=[], open=[], close=[])
-        s.dates.append(d.date() if isinstance(d, datetime) else d)
-        s.open.append(float(o) if o is not None else math.nan)
-        s.close.append(float(c) if c is not None else math.nan)
-    return out
 
 
 # =============================================================================== report
@@ -722,7 +664,8 @@ def main(argv: list[str] | None = None) -> int:
         market = open_market_db(Path(args.db))
         try:
             series = load_series(
-                market, [s.symbol for s in signals], start=start, end=as_of
+                lambda sql, params: market.execute(sql, params).fetchall(),
+                [s.symbol for s in signals], start=start, end=as_of,
             )
         finally:
             market.close()

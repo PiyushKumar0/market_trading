@@ -30,8 +30,10 @@ import pytest
 import yaml
 from ulid import ULID
 
+from engine.broker.instruments import UnknownInstrument
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
+from engine.core.config import load_settings
 from engine.core.contracts import CheckResult, CostBreakdown, EnterAction, GateVerdict, Recommendation
 from engine.core.enums import Mode, RiskState
 from engine.core.types import Bar, TradeWindow
@@ -39,6 +41,8 @@ from engine.intelligence.context import AssembledContext
 from engine.intelligence.harness import AgentDef, AgentResult
 from engine.notify.catalog import MessageKind
 from engine.ops import pipeline as pipeline_module
+from engine.ops.holds import build_hold_fn
+from engine.ops.main import _round_tick_fn
 from engine.ops.nightly_review import read_funnel_raw_counts
 from engine.ops.pipeline import (
     ATR_PERIOD,
@@ -46,6 +50,7 @@ from engine.ops.pipeline import (
     POSITION_EVENT_DEBOUNCE_MIN,
     QUANTILE_BANDS,
     TTL_INTRADAY_MIN,
+    RecExtras,
     RecommendationBook,
     RecommendationPipeline,
 )
@@ -197,6 +202,12 @@ class FakeStore:
 
     def get_sector_map(self, as_of=None) -> list[dict[str, str]]:
         return self.sectors
+
+    def get_bars_1d(self, symbol, start, end) -> list[Any]:
+        return []
+
+    async def arun(self, fn, /, *args, **kwargs):
+        return fn(*args, **kwargs)
 
 
 class Notifier:
@@ -354,7 +365,7 @@ def make_pipeline(
     *, conn, clock, calendar, book, harness, gate, ctx, limits, store=None, governor=None,
     mode=None, kill=None, notify=None, assembler=None, rearm=None, funnel_raw=None,
     claim_slot=None, take_displaced=None, decline=None, ltp_fn=None, warmup_status_fn=None,
-    admission_mode="ranked", forward_drain_mode="paced",
+    admission_mode="ranked", forward_drain_mode="paced", capital=CAPITAL_BASE, **extra: Any,
 ) -> tuple[RecommendationPipeline, dict[str, Any]]:
     parts = {
         "assembler": assembler or FakeAssembler(),
@@ -366,7 +377,7 @@ def make_pipeline(
         "kill": kill or FakeKill(),
         "notify": notify or Notifier(),
         "store": store or FakeStore(),
-        "exposure": ExposureTracker(conn, clock, CAPITAL_BASE),
+        "exposure": ExposureTracker(conn, clock, capital),
     }
     pipeline = RecommendationPipeline(
         parts["assembler"], harness, agent_defs(), gate, parts["ctx_builder"], book,
@@ -374,7 +385,7 @@ def make_pipeline(
         parts["notify"], clock, calendar, conn, parts["store"], rearm=rearm,
         funnel_raw=funnel_raw, claim_slot=claim_slot, take_displaced=take_displaced,
         decline=decline, ltp_fn=ltp_fn, warmup_status_fn=warmup_status_fn,
-        admission_mode=admission_mode, forward_drain_mode=forward_drain_mode,
+        admission_mode=admission_mode, forward_drain_mode=forward_drain_mode, **extra,
     )
     return pipeline, parts
 
@@ -1182,7 +1193,10 @@ async def test_market_entry_zone_spans_the_sanity_band(
     assert mis.entry_zone == (Decimal("250.00"), Decimal("252.50")) and mis.product == "MIS"
     assert cnc.entry_zone == (Decimal("250.00"), Decimal("255.00")) and cnc.product == "CNC"
     assert mis.notional == Decimal("2500.00")                   # qty 10 x the zone LOW
-    assert "GTT OCO stop 247.50 / target 256" in " ".join(cnc.manual_checklist)   # CNC, not SL-M
+    oco = ("after entry fills, place a GTT OCO: stop ₹247.50 (limit ₹245.05 so a fast drop still "
+           "fills) / target ₹256")
+    assert oco in cnc.manual_checklist and cnc.gtt_instruction == oco    # CNC, not SL-M
+    assert mis.gtt_instruction is None
     assert "SL-M at 247.50" in " ".join(mis.manual_checklist)     # MIS wording
     assert not any("square off by" in item for item in cnc.manual_checklist)   # MIS-only line
     assert "set alert at 248.75" in mis.manual_checklist          # stop + 0.5 x (entry - stop)
@@ -1363,6 +1377,113 @@ async def test_veto_records_a_no_action_outcome(conn, book, cost_model):
     assert ledger["outcome_label"] == "no_action" and ledger["closed_at"]
     with pytest.raises(ValueError, match="already 'dismissed'"):
         await book.veto(rec.rec_id)
+
+
+@pytest.fixture
+def veto_book(conn, pclock, cost_model, calendar) -> RecommendationBook:
+    return RecommendationBook(conn, pclock, cost_model, calendar=calendar, veto_window_sessions=3)
+
+
+def _expired_rec(conn, book, cost_model, **overrides) -> Recommendation:
+    rec = make_rec(cost_model, **overrides)
+    book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    book.expire_stale(NOW + timedelta(hours=6))
+    return rec
+
+
+def _row(conn, rec_id):
+    return conn.execute(
+        "SELECT human_action, skip_reason, skip_reason_at FROM recommendations WHERE rec_id=?", (rec_id,)
+    ).fetchone()
+
+
+async def test_veto_with_a_reason_dismisses_a_live_rec(conn, veto_book, cost_model):
+    rec = make_rec(cost_model)
+    veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    await veto_book.veto(rec.rec_id, "price")
+
+    row = _row(conn, rec.rec_id)
+    assert (row["human_action"], row["skip_reason"]) == ("dismissed", "price") and row["skip_reason_at"]
+    assert conn.execute("SELECT outcome_label FROM learning_ledger").fetchone()[0] == "no_action"
+
+
+@pytest.mark.parametrize(("at", "inside"), [
+    (datetime(2026, 6, 22, 10, 0, tzinfo=IST), True),       # 3rd session after Wed 06-17
+    (datetime(2026, 6, 23, 10, 0, tzinfo=IST), False),      # 4th
+])
+async def test_expired_rec_is_a_candidate_only_inside_the_veto_window(
+    conn, veto_book, cost_model, at, inside
+):
+    rec = _expired_rec(conn, veto_book, cost_model)
+    assert [c["rec_id"] for c in veto_book.decision_candidates(SYMBOL, at)] == (
+        [rec.rec_id] if inside else []
+    )
+
+
+async def test_veto_on_an_expired_rec_keeps_it_expired_and_taken_clears_the_reason(
+    conn, veto_book, cost_model
+):
+    rec = _expired_rec(conn, veto_book, cost_model)
+    ledger_before = conn.execute("SELECT * FROM learning_ledger").fetchone()
+
+    await veto_book.veto(rec.rec_id, "away")
+    row = _row(conn, rec.rec_id)
+    assert (row["human_action"], row["skip_reason"]) == ("expired", "away") and row["skip_reason_at"]
+    assert tuple(conn.execute("SELECT * FROM learning_ledger").fetchone()) == tuple(ledger_before)
+    assert veto_book.decision_candidates(SYMBOL, NOW) == []                  # decided now
+
+    await veto_book.take(rec.rec_id, 10, Decimal("100"))
+    row = _row(conn, rec.rec_id)
+    assert (row["human_action"], row["skip_reason"], row["skip_reason_at"]) == ("taken", None, None)
+
+
+async def test_a_lapsed_rec_the_sweep_has_not_reached_vetoes_as_expired(conn, veto_book, cost_model):
+    rec = make_rec(cost_model, valid_until=NOW - timedelta(minutes=1))
+    veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    assert [c["rec_id"] for c in veto_book.decision_candidates(SYMBOL, NOW)] == [rec.rec_id]
+
+    await veto_book.veto(rec.rec_id, "market")
+    assert tuple(_row(conn, rec.rec_id))[:2] == (None, "market")
+    veto_book.expire_stale(NOW)
+    assert tuple(_row(conn, rec.rec_id))[:2] == ("expired", "market")
+
+
+async def test_a_dismissed_rec_cannot_be_taken(conn, veto_book, cost_model):
+    rec = make_rec(cost_model)
+    veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    await veto_book.veto(rec.rec_id, "size")
+    with pytest.raises(ValueError, match="already 'dismissed'"):
+        await veto_book.take(rec.rec_id, 10, Decimal("100"))
+
+
+async def test_live_and_expired_candidates_for_one_symbol_are_both_listed(conn, veto_book, cost_model):
+    expired = _expired_rec(conn, veto_book, cost_model)
+    live = make_rec(cost_model, valid_until=NOW + timedelta(days=1))
+    veto_book.deliver(live, ledger_fields=dict(LEDGER_FIELDS))
+    other = make_rec(cost_model, instrument="TCS", valid_until=NOW + timedelta(days=1))
+    veto_book.deliver(other, ledger_fields=dict(LEDGER_FIELDS))
+
+    ids = [c["rec_id"] for c in veto_book.decision_candidates(SYMBOL, NOW)]
+    assert sorted(ids) == sorted([expired.rec_id, live.rec_id])
+    assert len(veto_book.decision_candidates(None, NOW)) == 3
+
+
+async def test_without_a_calendar_expired_recs_are_not_candidates(conn, book, cost_model):
+    _expired_rec(conn, book, cost_model)
+    assert book.decision_candidates(SYMBOL, NOW) == []
+
+
+async def test_an_exit_rec_is_not_a_candidate_and_keeps_the_bare_veto(conn, veto_book, cost_model):
+    rec = make_rec(cost_model)
+    veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    conn.execute(
+        "UPDATE recommendations SET payload=json_set(payload, '$.kind', 'exit') WHERE rec_id=?",
+        (rec.rec_id,),
+    )
+    assert veto_book.decision_candidates(SYMBOL, NOW) == []
+    await veto_book.veto(rec.rec_id)
+    row = _row(conn, rec.rec_id)
+    assert (row["human_action"], row["skip_reason"], row["skip_reason_at"]) == ("dismissed", None, None)
 
 
 async def test_expire_stale_labels_non_fills_and_is_idempotent(conn, book, cost_model):
@@ -3993,3 +4114,208 @@ async def test_a_raising_ltp_seam_forwards_the_brk20_candidate_and_warns(
     assert forward_journal(conn)[("TCS", "brk20")] == 1
     failed = log_events(caplog, "forward_band_screen_failed")
     assert len(failed) == 1 and failed[0].symbol == "TCS"
+
+
+# =========================================================================== plan Q1.1-Q1.3
+#: BHEL 2026-10-06: the sweep's rule geometry (6% stop); the rec came at 445.00.
+BHEL_RAW = RawLevels(entry=Decimal("427.90"), stop=Decimal("402.25"), target=None)
+EDGES = {"hi52": Decimal("1.53"), "ins": Decimal("1.58")}
+EQUITY_40K = Decimal("40000")
+
+
+def hi52_candidate(**overrides: Any) -> SignalCandidate:
+    return candidate(**{"strategy_id": "hi52", "style": "swing", "raw_levels": BHEL_RAW,
+                        **overrides})
+
+
+def hi52_enter(**overrides: Any) -> dict[str, Any]:
+    return {**ENTER_JSON, "strategy_id": "hi52", "style": "swing", "entry_price": "445.00",
+            "stop_price": "402.25", "target_price": None, **overrides}
+
+
+def stamped(json_: dict[str, Any]) -> EnterAction:
+    return EnterAction(**json_, proposal_id="01P", agent_id="a",
+                       valid_until=NOW + timedelta(minutes=20), inputs_digest="d")
+
+
+def q1_pipeline(conn, clock, calendar, book, limit_table, cost_model, **kw: Any):
+    kw.setdefault("harness", FakeHarness())
+    kw.setdefault("ctx", passing_ctx(equity=EQUITY_40K, ltp=Decimal("445.00")))
+    return make_pipeline(
+        conn=conn, clock=clock, calendar=calendar, book=book,
+        gate=RiskGate(StubLimits(limit_table), cost_model, clock, strategy_expected_edge_pct=EDGES),
+        limits=StubLimits(limit_table), capital=EQUITY_40K, strategy_edge_pct=EDGES,
+        hold_fn=build_hold_fn(load_settings(), StubLimits(limit_table)), **kw,
+    )
+
+
+@pytest.mark.parametrize("at_raw_max", [False, True])
+async def test_bhel_stop_is_reanchored_to_the_delivered_entry(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog, at_raw_max
+):
+    """D3: 6% under 445.00 is 418.30, not the sweep's 402.25; qty 14 then fits per_trade_risk, and a
+    qty sized on the raw geometry shrinks by at most anchor/raw_entry − 1 (to the integer)."""
+    pipeline, parts = q1_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    qty = pipeline._max_qty_by_risk(hi52_candidate()) if at_raw_max else 14
+    parts["harness"].queued.append(hi52_enter(quantity=qty, target_price="470"))
+    with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, hi52_candidate())
+
+    verdict = json.loads(conn.execute("SELECT payload FROM verdicts").fetchone()[0])
+    anchor, raw_entry = Decimal("445.00"), BHEL_RAW.entry
+    assert verdict["approved_qty"] >= int(qty * raw_entry / anchor)
+    if not at_raw_max:
+        assert verdict["verdict"] == "approve" and verdict["approved_qty"] == 14
+    [moved] = log_events(caplog, "stop_reanchored")
+    assert moved.entry_move_pct == "4.00" and len(log_events(caplog, "target_dropped")) == 1
+
+    payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
+    assert Recommendation.model_validate(payload).model_dump(mode="json") == payload
+    assert {k: payload[k] for k in (
+        "stop", "targets", "reference_entry", "reference_stop", "strategy_id", "entry_type",
+        "hold_sessions", "exit_session", "exit_kind", "risk_inr", "registered_edge_pct",
+        "gtt_instruction",
+    )} == {
+        "stop": "418.30", "targets": [], "reference_entry": "427.90", "reference_stop": "402.25",
+        "strategy_id": "hi52", "entry_type": "LIMIT", "hold_sessions": 20,
+        "exit_session": "2026-07-15", "exit_kind": "time", "risk_inr": "373.80",
+        "registered_edge_pct": "1.53",
+        "gtt_instruction": "after entry fills, place a single-trigger GTT: sell if price falls to "
+                           "₹418.30; limit ₹414.10 so a fast drop still fills",
+    }
+
+
+@pytest.mark.parametrize(
+    ("strategy_id", "raw", "overrides", "ltp", "stop", "target"),
+    [
+        ("hi52", BHEL_RAW, {"entry_type": "MARKET", "entry_price": None}, "445.00", "418.30", None),
+        ("hi52", BHEL_RAW, {"entry_type": "MARKET", "entry_price": None}, None, "402.25", None),
+        ("ins", BHEL_RAW, {}, None, "418.30", None),
+        ("ins", RawLevels(entry=Decimal("427.90")), {}, None, "402.25", None),
+        ("ins", RawLevels(entry=Decimal("400"), stop=Decimal("402.25")), {}, None, "402.25", None),
+        ("ins", BHEL_RAW, {"target_price": "470"}, None, "418.30", None),
+        ("rsi2", BHEL_RAW, {"target_price": "470"}, None, "402.25", "470"),
+        ("brk20", BHEL_RAW, {"target_price": "470"}, None, "402.25", "470"),
+    ],
+    ids=["market-mark", "market-no-mark", "ins-limit", "no-raw-stop", "frac<=0", "ins-target",
+         "rsi2-keeps-target", "brk20"],
+)
+def test_one_exit_per_rec(
+    conn, pclock, calendar, book, limit_table, cost_model, strategy_id, raw, overrides, ltp, stop,
+    target,
+):
+    pipeline, _ = q1_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                              ltp_fn=lambda _s: None if ltp is None else Decimal(ltp))
+    out = pipeline._one_exit(
+        stamped(hi52_enter(strategy_id=strategy_id, **overrides)),
+        hi52_candidate(strategy_id=strategy_id, raw_levels=raw),
+    )
+    assert out.stop_price == Decimal(stop)
+    assert out.target_price == (None if target is None else Decimal(target))
+
+
+def test_stop_only_cnc_gtt_line_reads_the_shipped_recommend_settings(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    recommend = load_settings().recommend
+    pipeline, _ = q1_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                              recommend=recommend)
+    rec = pipeline.build_recommendation(
+        stamped(hi52_enter(stop_price="247.50", entry_price="250")),
+        verdict_of("approve", cost_model), Decimal("250"),
+    )
+    line = ("after entry fills, place a single-trigger GTT: sell if price falls to ₹247.50; "
+            "limit ₹245.05 so a fast drop still fills")     # 247.50 × (1 − 1%) on the 0.05 tick
+    assert recommend.gtt_limit_offset_pct == 1.0
+    assert rec.gtt_instruction == line and line in rec.manual_checklist
+
+
+def test_a_pre_q1_payload_still_parses(cost_model):
+    new = {"strategy_id", "proposal_id", "entry_type", "reference_entry", "reference_stop",
+           "hold_sessions", "exit_session", "exit_kind", "risk_inr", "stop_atr_mult",
+           "gtt_instruction", "evidence", "registered_edge_pct"}
+    old = {k: v for k, v in make_rec(cost_model).model_dump(mode="json").items() if k not in new}
+    rec = Recommendation.model_validate(old)
+    assert set(Recommendation.model_fields) - set(old) == new
+    assert rec.evidence == [] and all(getattr(rec, k) is None for k in new - {"evidence"})
+
+
+async def test_an_exit_date_beyond_the_loaded_calendars_is_pending(
+    conn, ticker, pclock, book, limit_table, cost_model, tmp_path
+):
+    ticker.at = datetime(2026, 12, 28, 10, 5, tzinfo=IST)
+    cal = _horizon_calendar(tmp_path, pclock, conn)
+    pipeline, _ = q1_pipeline(conn, pclock, cal, book, limit_table, cost_model)
+    rec = pipeline.build_recommendation(
+        stamped(hi52_enter()), verdict_of("approve", cost_model), Decimal("445.00")
+    )
+    assert rec.hold_sessions == 20 and rec.exit_session is None and rec.exit_kind == "time"
+
+
+class HangingStore(FakeStore):
+    async def arun(self, fn, /, *args, **kwargs):
+        await asyncio.Event().wait()
+
+
+async def test_an_extras_timeout_still_delivers_the_card(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(pipeline_module, "_EXTRAS_DEADLINE_S", 0.05)
+    cell = {"n": 1794, "hit_rate_net": 0.5819, "median_net": 1.7144}
+    (tmp_path / "backtest_hi52_v2_2026-09-09.json").write_text(json.dumps({"constructs": {
+        "discrete_fresh_cross": {"cells": {"all": {"horizons": {"20": cell}}}}}}), encoding="utf-8")
+    pipeline, parts = q1_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, store=HangingStore(),
+        reports_dir=tmp_path, harness=FakeHarness(hi52_enter(quantity=14)),
+    )
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, hi52_candidate())
+
+    payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
+    assert payload["stop_atr_mult"] is None
+    assert [line.split(":")[0] for line in payload["evidence"]] == [
+        "backtest (fixed T+20 hold, no stop)"
+    ]
+    assert len(log_events(caplog, "rec_extras_timeout")) == 1
+    assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
+
+
+class ExtrasStore(FakeStore):
+    def get_bars_1d(self, symbol, start, end):
+        return [SimpleNamespace(high=Decimal("110"), low=Decimal("100"), close=Decimal("105"))] * 20
+
+    def _fetchall(self, sql, params):
+        return [("OLD", date(2026, 9, 14) + timedelta(days=i), 100.0, 101.0) for i in range(25)]
+
+
+async def test_extras_carry_the_atr_multiple_and_the_hi52_forward_line(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    conn.executemany(
+        "INSERT INTO prescreen_day_slots (d, symbol, strategy_id, published_at, evaluated, score, "
+        "forwarded) VALUES (?, ?, 'hi52', '2026-09-14T09:15:00+05:30', 1, 0.9, 1)",
+        [("2026-09-14", "OLD"), ("2026-10-07", "BHEL")],
+    )
+    pipeline, _ = q1_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                              store=ExtrasStore())
+    extras = await pipeline._collect_extras(
+        stamped(hi52_enter(stop_price="418.30")), Decimal("445.00"), date(2026, 10, 7)
+    )
+    assert extras == RecExtras(       # |445.00 − 418.30| / ATR 10 = 2.67
+        stop_atr_mult=Decimal("2.7"),
+        evidence=["forward test: 1 of 20 matured (2 signals since 2026-09-12)"],
+    )
+
+
+def test_round_tick_falls_back_to_the_nse_tick_for_an_unknown_symbol(caplog):
+    class Instruments:
+        def round_to_tick(self, symbol, price):
+            if symbol == "KNOWN":
+                return price.quantize(Decimal("0.01"))
+            raise UnknownInstrument(symbol)
+
+    round_tick = _round_tick_fn(Instruments())
+    with caplog.at_level(logging.WARNING, logger="engine.ops.main"):
+        assert round_tick("KNOWN", Decimal("414.117")) == Decimal("414.12")
+        assert round_tick("NEW", Decimal("414.117")) == Decimal("414.10")
+    assert [r.symbol for r in log_events(caplog, "round_tick_fallback")] == ["NEW"]
