@@ -211,7 +211,7 @@ def create_app(
     settings: Settings = load_settings()
     secrets = secrets or Secrets()
 
-    app = FastAPI(title="market_trading dashboard", version="0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="market_trading dashboard", version="0", docs_url=None, redoc_url=None, openapi_url=None)
     # Stash injected collaborators on app.state for handlers / future phases (no globals).
     app.state.session_manager = session_manager
     app.state.mode_manager = mode_manager
