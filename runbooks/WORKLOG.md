@@ -1,5 +1,39 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-06 14:xx–23:4x — Plan for measure / honest card / paper autopilot / research (owner: "Plan the entire change process … Reiterate through the plan repeatedly … until you are sure it is implementation ready"); docs only, nothing deployed
+
+- **Owner decisions:** D1–D12, recorded in the plan's §0:
+  - recs and paper in parallel, fully isolated
+  - D2 time exit at the close of the 20th session
+  - D3 stop re-anchor
+  - `/veto` reasons plus a 15:45 reminder
+  - `/protected` confirmation
+  - paper go-ahead with no real orders
+  - paper pauses while the real side is frozen
+  - paper uses the real `limits.yaml` caps
+  - deferred: the regime tag, `GET /why`, C4 and the B2 digest
+- **Plan:** `runbooks/plan-2026-10-06-measure-card-paper-research.md`, v5.
+  - M0: plan of record, calendar helper, migration 0015, horizon monitor
+  - M1: owner surface
+  - M2: measurement
+  - M3: live-impossibility pins, migration 0016, scope isolation
+  - M4: paper autopilot
+  - M5: pre-registered research
+- **How:**
+  - Six read-only subsystem maps, then four adversarial review rounds (5, 3, 2 and 1 reviewers; 76 → 71 → 29 → 9 findings).
+  - The manager verified every finding against the code before accepting it. Ledgers: `data/reports/quantsync_2026-10-06/plan_review_round{2,3,4}.md`.
+  - Every fan-out ran after the 15:30 close; the first started at 15:43.
+- **Code facts surfaced** (implementation inputs; nothing changed):
+  - A non-NORMAL real risk state stops the pipeline before the analyst (`ops/pipeline.py:1959-1961`).
+  - `calendar.ex_dates` is a stub that returns `[]`.
+  - PaperBroker fills a marketable LIMIT at its limit price.
+  - The live scheduler ignores `fire_day`; only `sector_map` has a cron.
+  - Nothing reads `feature_flags.paper_only`.
+  - `/openapi.json` is unauthenticated.
+  - Kite minute and daily candles come corporate-action adjusted (A11).
+- **Ops:** the host was in Modern Standby 16:28–21:32 and stalled the round-2 agents, which were resumed via SendMessage. The engine stayed `Running`, the governor at DG0, with no session-limit errors.
+- **Next:** the owner reviews the plan. Implementation starts at M0 on `wip/m0` once they give the go-ahead.
+
 ## 2026-10-06 11:2x–14:xx — QuantSync competitor research (owner: "research and analyse what it is doing better than our platform"); docs only, nothing deployed
 
 - **What ran:**
