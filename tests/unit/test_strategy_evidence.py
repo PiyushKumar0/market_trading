@@ -47,7 +47,7 @@ def test_missing_key_drops_only_its_part(tmp_path):
             "20": {"n": 4898, "median_net": 0.9168}}}}}}}), encoding="utf-8")
     assert evidence_line("brk20", tmp_path, _REGISTRY) == (
         "backtest (limit fill within 5 sessions, fixed T+20 hold, no stop): "
-        "n 4898, median net 0.92%"
+        "n 4898, median net 0.92% — shipped stop and target untested (study C1)"
     )
 
 
