@@ -43,9 +43,11 @@ export function PositionsPanel({ data }: { data: PositionsResponse | null }) {
                   {p.origin === 'recommended' && p.state === 'OPEN' ? (
                     <div>
                       {p.owner_protected_at ? (
-                        <Chip v={`owner-confirmed protected ${p.owner_protected_at}`} tone="ok" />
+                        <Chip v="protected" tone="ok"
+                              title={`owner-confirmed protected ${p.owner_protected_at}`} />
                       ) : (
-                        <Chip v="UNPROTECTED (unconfirmed)" tone="bad" />
+                        <Chip v="UNPROTECTED" tone="bad"
+                              title={`unconfirmed — reply /protected ${p.symbol} once the GTT is placed`} />
                       )}
                     </div>
                   ) : null}
