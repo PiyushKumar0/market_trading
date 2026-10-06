@@ -126,6 +126,7 @@ from engine.ops.jobs import (
     JOB_TICK_COMPACT,
     JOB_TIME_EXIT_CHECK,
     JOB_UNIVERSE,
+    JOB_WEEKLY_SUMMARY,
     AdvisoryRun,
     CatchUpResult,
     CatchUpRunner,
@@ -162,6 +163,7 @@ from engine.ops.warmup import (
     WarmupGate,
     WarmupStatus,
 )
+from engine.ops.weekly_summary import WeeklySummaryJob
 from engine.ops.why import make_why_fn
 from engine.risk.causes import RiskStateLatch, feed_health_to_latch
 from engine.risk.exposure import ExposureTracker
@@ -233,7 +235,7 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
 PHASE2_JOB_IDS: tuple[str, ...] = (
     JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RECO_EXPIRE,   # run-latest
     JOB_TIME_EXIT_CHECK,                                         # run-latest (regular sessions)
-    JOB_REC_OUTCOMES, JOB_NIGHTLY_REVIEW,                        # date-keyed
+    JOB_REC_OUTCOMES, JOB_WEEKLY_SUMMARY, JOB_NIGHTLY_REVIEW,    # date-keyed
 )
 
 #: Fire-time for the §3.6 expiry labeling sweep — after the 15:30 close, before EOD reconcile.
@@ -249,11 +251,12 @@ _RECO_EXPIRE_IST = time(15, 45)
 #: Members, in catch-up dependency order: time exit (5) → news chain (20) → digest (25) → planner
 #: (28), plus ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot
 #: reads — and ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them —
-#: and ``rec_outcomes`` (hindsight scoring; nothing reads it at boot).
+#: and ``rec_outcomes`` + ``weekly_summary`` (hindsight scoring and its owner digest; nothing reads
+#: either at boot).
 #: Tick compaction is not a member: it runs in its own runner (:class:`CompactionLane`).
 POST_ARM_JOB_IDS: tuple[str, ...] = (
     JOB_TIME_EXIT_CHECK, JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER,
-    JOB_RESULTS_LINE_ITEMS, JOB_FEED_FRESHNESS, JOB_REC_OUTCOMES,
+    JOB_RESULTS_LINE_ITEMS, JOB_FEED_FRESHNESS, JOB_REC_OUTCOMES, JOB_WEEKLY_SUMMARY,
 )
 
 #: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
@@ -318,6 +321,21 @@ def _regular_session(calendar: NSECalendar) -> Callable[[date], bool]:
     def fires(d: date) -> bool:
         session = calendar.session(d)
         return session is not None and not session.is_muhurat
+    return fires
+
+
+def _last_regular_session_of_week(calendar: NSECalendar) -> Callable[[date], bool]:
+    """A ``fire_day``: a regular session whose next regular session is in a later ISO week. A calendar
+    horizon with no next session counts as the last."""
+    regular = _regular_session(calendar)
+
+    def fires(d: date) -> bool:
+        if not regular(d):
+            return False
+        try:
+            return calendar.add_sessions(d, 1).isocalendar()[:2] > d.isocalendar()[:2]
+        except ValueError:
+            return True
     return fires
 
 
@@ -399,8 +417,8 @@ def build_job_registry(
     # disabled, D7). Catch-up dependency order within RUN_LATEST: universe(10) → news_chain(20) →
     # digest(25) → planner(28) — the digest needs scored clusters + today's universe; the planner
     # needs the digest (§2.7 steps 4-6).
-    if fns.get(JOB_TIME_EXIT_CHECK) is not None and calendar is None:
-        raise ValueError("time_exit_check needs the calendar for its regular-session fire_day")
+    if calendar is None and any(fns.get(j) is not None for j in (JOB_TIME_EXIT_CHECK, JOB_WEEKLY_SUMMARY)):
+        raise ValueError("time_exit_check and weekly_summary need the calendar for their fire_day")
     for spec in (
         JobSpec(JOB_TIME_EXIT_CHECK, JobClass.RUN_LATEST, settings.jobs.time_exit_check_ist,
                 fns.get(JOB_TIME_EXIT_CHECK), order=5,
@@ -419,6 +437,9 @@ def build_job_registry(
         # After bhavcopy (20) and daily_bars (30): it scores on their bars.
         JobSpec(JOB_REC_OUTCOMES, JobClass.DATE_KEYED, settings.jobs.rec_outcomes_ist,
                 fns.get(JOB_REC_OUTCOMES), order=35),
+        JobSpec(JOB_WEEKLY_SUMMARY, JobClass.DATE_KEYED, settings.jobs.weekly_summary_ist,
+                fns.get(JOB_WEEKLY_SUMMARY), order=36,
+                fire_day=_last_regular_session_of_week(calendar) if calendar is not None else None),
         JobSpec(JOB_NIGHTLY_REVIEW, JobClass.DATE_KEYED, settings.jobs.nightly_review_ist,
                 fns.get(JOB_NIGHTLY_REVIEW), order=80),
     ):
@@ -1390,6 +1411,7 @@ async def run() -> int:
     # ``catch_up`` is bound below, before any job can run.
     rec_outcomes = RecOutcomesJob(conn, store, calendar, cost_model, hold_fn, clock,
                                   was_run=lambda job_id, d: catch_up.was_run(job_id, d))
+    weekly_summary = WeeklySummaryJob(conn, notify, lambda job_id, d: catch_up.was_run(job_id, d))
 
     registry = build_job_registry(settings, {
         JOB_INSTRUMENTS: job_instruments,
@@ -1421,6 +1443,7 @@ async def run() -> int:
         JOB_RECO_EXPIRE: job_reco_expire,
         JOB_TIME_EXIT_CHECK: job_time_exit_check,
         JOB_REC_OUTCOMES: rec_outcomes.run,
+        JOB_WEEKLY_SUMMARY: weekly_summary.run,
         JOB_NIGHTLY_REVIEW: job_nightly_review,
     }, calendar=calendar)
 

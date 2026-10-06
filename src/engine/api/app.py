@@ -43,6 +43,7 @@ from engine.core.enums import Actor, Mode
 from engine.core.log import get_logger
 from engine.core.secrets import DASHBOARD_TOKEN, Secrets
 from engine.intelligence.events import TOPIC_BUDGET_STATE
+from engine.ops.scorecard import LABEL, scorecard
 from engine.risk.events import TOPIC_KILL_STATE, TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_TRADE_WINDOW
 
 _log = get_logger("engine.api.app")
@@ -331,6 +332,14 @@ def create_app(
             for r in rows
         ]
         return {"recommendations": out}
+
+    @app.get("/scorecard")
+    async def scorecard_route(_: Owner) -> dict[str, Any]:
+        """Per-strategy hindsight outcomes of delivered entry recs (plan Q2.4)."""
+        conn = app.state.conn
+        if conn is None:
+            return {"label": LABEL, "bench": {}, "strategies": {}}
+        return scorecard(conn)
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:

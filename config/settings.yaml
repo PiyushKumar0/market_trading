@@ -489,6 +489,7 @@ jobs:
                                  # retries always succeeded, so the data exists — the TIME was wrong)
   earnings_ist: "18:30"          # §4.4 job 8 (R2)
   rec_outcomes_ist: "18:30"      # plan Q2.3 hindsight rec scoring — after daily_bars (18:05)
+  weekly_summary_ist: "19:00"    # plan Q2.6 weekly owner summary — after rec_outcomes
   deals_ist: "20:30"             # §4.4 job 9 (flagged_instrument_days) — moved 18:45→20:30 (2026-07-24:
                                  # three consecutive evening 503s, same NSE maintenance window as
                                  # corp_actions; still before the 21:00 backup)

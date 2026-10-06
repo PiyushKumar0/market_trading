@@ -326,7 +326,7 @@ async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
     rig.now.at = datetime(2026, 6, 29, 23, 30, tzinfo=IST)
     await rig.catch_up.catch_up(scope=CatchUpScope.ALL)
     await _lane_pass(rig)
-    date_keyed = {s.job_id for s in rig.registry.specs(JobClass.DATE_KEYED)}
+    date_keyed = {s.job_id for s in rig.registry.specs(JobClass.DATE_KEYED) if s.fire_day is None}
     ran_for = {(jid, d) for jid, d in rig.job_calls if jid in date_keyed}
     assert ran_for == {(jid, NEXT_TRADING_DAY) for jid in date_keyed}
     assert all(d != HOLIDAY for _jid, d in rig.job_calls)

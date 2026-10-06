@@ -15,7 +15,7 @@
  * Gate reasons come from the recommendation's own embedded verdict (§3.6 `gate`) — never from
  * `/decisions`: a different proposal's verdict is never this card's provenance.
  */
-import type { RecommendationRow } from '../types'
+import type { RecommendationPayload, RecommendationRow } from '../types'
 import {
   Chip,
   DayFold,
@@ -45,8 +45,16 @@ function validTill(iso: string): string {
   return day && day !== todayIst() ? `${day} ${hhmmss(iso)}` : hhmmss(iso)
 }
 
+/** Exit chip text: the date once the calendar resolves it, "pending" while a hold is set without one,
+ *  nothing for a rec with no time exit. */
+function exitText(rec: RecommendationPayload | null): string | null {
+  if (rec?.exit_session) return `${rec.exit_session}${rec.hold_sessions != null ? ` · ${rec.hold_sessions} sessions` : ''}`
+  return rec?.hold_sessions != null ? 'pending' : null
+}
+
 function RecommendationCard({ row }: { row: RecommendationRow }) {
   const rec = row.recommendation
+  const exit = exitText(rec)
   const gate = rec?.gate
   const zone = rec?.entry_zone
   const reasons = gate?.reasons ?? []
@@ -68,6 +76,15 @@ function RecommendationCard({ row }: { row: RecommendationRow }) {
         <span className="dim">delivered {hhmmss(row.delivered_at)}</span>
       </div>
 
+      {exit || rec?.risk_inr || rec?.stop_atr_mult || rec?.registered_edge_pct ? (
+        <div className="row">
+          {exit ? <Chip k="exit" v={exit} tone={rec?.exit_session ? 'info' : 'warn'} /> : null}
+          {rec?.risk_inr ? <Chip k="risk to stop" v={`₹${rec.risk_inr}`} tone="bad" /> : null}
+          {rec?.stop_atr_mult ? <Chip k="stop distance" v={`${rec.stop_atr_mult}× ATR`} /> : null}
+          {rec?.registered_edge_pct ? <Chip k="registered edge" v={`${rec.registered_edge_pct}%`} /> : null}
+        </div>
+      ) : null}
+
       <div className="row">
         <Chip k="entry" v={zone ? `${zone[0]} – ${zone[1]}` : '—'} />
         <Chip k="stop" v={rec?.stop ?? '—'} tone="bad" />
@@ -87,6 +104,12 @@ function RecommendationCard({ row }: { row: RecommendationRow }) {
       </div>
 
       <div className="thesis">{rec?.thesis ?? ''}</div>
+
+      {(rec?.evidence ?? []).length > 0 ? (
+        <ul className="checklist">
+          {rec?.evidence?.map((line, i) => <li key={i}>{line}</li>)}
+        </ul>
+      ) : null}
 
       {reasons.length > 0 ? (
         <div className="row">

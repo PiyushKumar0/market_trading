@@ -62,6 +62,7 @@ from engine.ops.jobs import (
     JOB_RECONCILE,
     JOB_SECTOR_MAP,
     JOB_TICK_COMPACT,
+    JOB_WEEKLY_SUMMARY,
     JobClass,
 )
 from engine.ops.main import INDEX_SYMBOL, VIX_SYMBOL, _in_session_window
@@ -106,6 +107,7 @@ async def _gap_restart(tmp_path, monkeypatch, gap: str, **proc_kw):
     # Scenario precondition on the configured schedule (settings.yaml jobs.*): nothing fires inside
     # the stop day's uptime — the rig fires no scheduled jobs there.
     assert not [s.job_id for s in b.registry.specs() if A_BOOT < s.at <= A_STOP]
+    b.catch_up.record_run(JOB_WEEKLY_SUMMARY, prior)   # fires on Fridays only: the prior evening never ran it
     await b.boot()
     return env, b, calls_b, sent_b
 
@@ -120,7 +122,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     calls = env.calls(since=calls_b)
     reg = b.registry
     assert _in_session_window(env.clock, b.calendar)           # WO-21 at a 09:30 boot: no compaction
-    date_keyed = {s.job_id for s in reg.specs(JobClass.DATE_KEYED)} - {JOB_TICK_COMPACT}
+    date_keyed = {s.job_id for s in reg.specs(JobClass.DATE_KEYED)} - {JOB_TICK_COMPACT, JOB_WEEKLY_SUMMARY}
     assert PLAN_NAMED_DATE_KEYED <= date_keyed
     assert all(s.at > A_STOP for s in reg.specs(JobClass.DATE_KEYED)), "stop day must be a missed EOD"
     run_latest = {s.job_id for s in reg.specs(JobClass.RUN_LATEST)}
@@ -143,7 +145,9 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     for job_id in sorted(eod_safety):
         assert [j for j, _ in calls if j == job_id] == [job_id]
         assert b.catch_up.was_run(job_id, missed[-1])
-    assert {j for j, _ in calls} == date_keyed | run_latest | morning_safety | eod_safety
+    assert {j for j, _ in calls} == date_keyed | run_latest | morning_safety | eod_safety | {JOB_WEEKLY_SUMMARY}
+    # The weekly summary fires only on a week's last session: Fri 06-12 / Thu 06-25 (06-26 is a holiday).
+    assert [d for j, d in calls if j == JOB_WEEKLY_SUMMARY] == [missed[-1]]
     # Sunday's weekly sector map fell inside the gap: one run, recorded under that Sunday.
     sunday = next(d for d in off_days if d.weekday() == 6)
     assert b.catch_up.was_run(JOB_SECTOR_MAP, sunday)

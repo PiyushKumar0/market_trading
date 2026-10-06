@@ -70,7 +70,23 @@ function rec(id, day, hms, inst, side, kind, action, extra = {}) {
 
 let recommendations = [
   rec('r-t1', today, '10:15:03', 'HDFCAMC', 'SELL', 'exit', null),
-  rec('r-t2', today, '09:41:10', 'TATASTEEL', 'BUY', 'enter', null),
+  rec('r-t2', today, '09:41:10', 'TATASTEEL', 'BUY', 'entry', null, {
+    strategy_id: 'hi52',
+    hold_sessions: 20,
+    exit_session: shift(today, 28),
+    exit_kind: 'time',
+    risk_inr: '1250.00',
+    stop_atr_mult: '2.5',
+    evidence: ['52-week high close 171.40 on volume 1.8x 20d average', 'NIFTY 200 member'],
+    registered_edge_pct: '1.20',
+  }),
+  // Hold set, calendar not yet resolved: exit reads "pending"; no evidence / edge lines.
+  rec('r-t3', today, '09:44:00', 'SAIL', 'BUY', 'entry', null, {
+    strategy_id: 'brk20',
+    hold_sessions: 10,
+    risk_inr: '900.00',
+    stop_atr_mult: '2.0',
+  }),
   rec('r-y1', d1, '13:00:19', 'HDFCAMC', 'SELL', 'exit', 'expired'),
   rec('r-y2', d1, '13:00:12', 'HINDZINC', 'SELL', 'exit', 'expired'),
   rec('r-y3', d1, '10:02:00', 'CEIGALL', 'BUY', 'enter', 'dismissed'),
@@ -175,9 +191,60 @@ const budgetFixture = {
   degrade_tier: 'DG0',
 }
 
+function pos(id, symbol, protectedAt) {
+  return {
+    position_id: id,
+    symbol,
+    side: 'BUY',
+    style: 'swing',
+    product: 'CNC',
+    qty: 3,
+    avg_entry: '2445.00',
+    stop: '2321.00',
+    target: null,
+    state: 'OPEN',
+    protection_state: null,
+    is_paper: 0,
+    origin: 'recommended',
+    close_reason: null,
+    opened_at: `${d1}T10:05:00+05:30`,
+    closed_at: null,
+    realized_pnl: null,
+    costs: null,
+    owner_protected_at: protectedAt,
+    protection_reminders: protectedAt ? 0 : 2,
+  }
+}
+
+const scorecardFixture = {
+  label: 'hindsight on official bars — not platform equity',
+  bench: { time: 'time: fill+1..exit', intrasession: 'intrasession: fill+1..exit-1' },
+  strategies: {
+    hi52: {
+      recs: {
+        n: 12, filled: 9, closed: 6, hit_rate: 0.5, median_net: 0.8, mean_net: 1.1, net_t20: 1.6,
+        mean_excess: 0.4, actions: { taken: 3, dismissed: 4, expired: 5 },
+        skip_reasons: { 'too far': 2, 'no cash': 1 }, daily_basis: 2, unscorable: 1,
+      },
+      paper: { closed: 0, hit_rate: null, net: null, open: 0 },
+    },
+    unattributed: {
+      recs: {
+        n: 3, filled: 0, closed: 0, hit_rate: null, median_net: null, mean_net: null, net_t20: null,
+        mean_excess: null, actions: { open: 3 }, skip_reasons: {}, daily_basis: 0, unscorable: 0,
+      },
+      paper: { closed: 0, hit_rate: null, net: null, open: 0 },
+    },
+  },
+}
+
 const routes = {
   '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: 'NORMAL' },
-  '/positions': { positions: [], as_of: new Date().toISOString() },
+  '/positions': {
+    positions: [pos('pos-1', 'JINDALSTEL', `${d1}T10:20:00+05:30`), pos('pos-2', 'TATASTEEL', null)],
+    as_of: new Date().toISOString(),
+  },
+  '/scorecard': scorecardFixture,
   '/decisions': { decisions },
   '/recommendations': { recommendations },
   '/risk/headroom': { headroom: {} },

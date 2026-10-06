@@ -13,6 +13,7 @@ import type {
   NotificationsResponse,
   PositionsResponse,
   RecommendationsResponse,
+  ScorecardResponse,
   Snapshot,
   TradeWindowResponse,
   WatchlistResponse,
@@ -24,6 +25,7 @@ export const POLL_INTERVAL_MS = 10_000
  *  that was already delivered to Telegram costs nothing, so it rides its own slow cycle instead of
  *  adding a ninth route to the 10 s poll. */
 export const NOTIFICATIONS_INTERVAL_MS = 60_000
+export const SCORECARD_INTERVAL_MS = 60_000
 
 /** Most recent frames kept in the events feed — a LAN console, not an archive (the audit trail is
  *  the engine's own tables). */
@@ -185,6 +187,46 @@ export function useNotifications(token: string): NotificationsState {
 
     void cycle()
     const timer = window.setInterval(() => void cycle(), NOTIFICATIONS_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [token])
+
+  return state
+}
+
+/** `GET /scorecard` every 60 s — hindsight aggregates move only when an outcome row is written. A
+ *  failed cycle keeps the data already on screen. */
+export interface ScorecardState {
+  data: ScorecardResponse | null
+  error: string | null
+  unauthorized: boolean
+}
+
+export function useScorecard(token: string): ScorecardState {
+  const [state, setState] = useState<ScorecardState>({ data: null, error: null, unauthorized: false })
+
+  useEffect(() => {
+    if (!token) return
+    let cancelled = false
+
+    async function cycle() {
+      try {
+        const data = await apiGet<ScorecardResponse>('/scorecard')
+        if (!cancelled) setState({ data, error: null, unauthorized: false })
+      } catch (e) {
+        if (cancelled) return
+        setState((prev) => ({
+          ...prev,
+          error: e instanceof Error ? e.message : String(e),
+          unauthorized: e instanceof ApiError && e.status === 401,
+        }))
+      }
+    }
+
+    void cycle()
+    const timer = window.setInterval(() => void cycle(), SCORECARD_INTERVAL_MS)
     return () => {
       cancelled = true
       window.clearInterval(timer)

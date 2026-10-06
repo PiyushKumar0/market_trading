@@ -11,7 +11,7 @@
  */
 import { useState } from 'react'
 import { ApiError, apiPost, getToken, setToken } from './api'
-import { useLiveEvents, useNotifications, usePoll } from './hooks'
+import { useLiveEvents, useNotifications, usePoll, useScorecard } from './hooks'
 import { BudgetPanel } from './components/BudgetPanel'
 import { DecisionsPanel } from './components/DecisionsPanel'
 import { EventsPanel } from './components/EventsPanel'
@@ -20,6 +20,7 @@ import { NewsPanel } from './components/NewsPanel'
 import { NotificationsPanel } from './components/NotificationsPanel'
 import { PositionsPanel } from './components/PositionsPanel'
 import { RecommendationsPanel } from './components/RecommendationsPanel'
+import { ScorecardPanel } from './components/ScorecardPanel'
 import { StatusHeader } from './components/StatusHeader'
 import { TradeWindowForm } from './components/TradeWindowForm'
 
@@ -65,6 +66,7 @@ export default function App() {
   const { snapshot, error, unauthorized, lastPollAt, refresh } = usePoll(token)
   const { events, conn } = useLiveEvents(token)
   const notifications = useNotifications(token)
+  const scorecard = useScorecard(token)
 
   function saveToken(next: string) {
     setToken(next)
@@ -114,6 +116,7 @@ export default function App() {
       <div className="grid">
         <RecommendationsPanel rows={snapshot.recommendations?.recommendations ?? []} />
         <PositionsPanel data={snapshot.positions} />
+        <ScorecardPanel {...scorecard} />
         <DecisionsPanel rows={snapshot.decisions?.decisions ?? []} />
         <HeadroomPanel data={snapshot.headroom} />
         <BudgetPanel data={snapshot.budget} />

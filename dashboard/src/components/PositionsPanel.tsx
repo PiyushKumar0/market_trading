@@ -40,6 +40,15 @@ export function PositionsPanel({ data }: { data: PositionsResponse | null }) {
                 <td>
                   {p.origin}
                   {p.is_paper ? <span className="dim"> paper</span> : null}
+                  {p.origin === 'recommended' && p.state === 'OPEN' ? (
+                    <div>
+                      {p.owner_protected_at ? (
+                        <Chip v={`owner-confirmed protected ${p.owner_protected_at}`} tone="ok" />
+                      ) : (
+                        <Chip v="UNPROTECTED (unconfirmed)" tone="bad" />
+                      )}
+                    </div>
+                  ) : null}
                 </td>
               </tr>
             ))}

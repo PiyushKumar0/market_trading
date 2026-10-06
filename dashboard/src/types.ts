@@ -36,6 +36,8 @@ export interface PositionRow {
   closed_at: string | null
   realized_pnl: string | null
   costs: string | null
+  owner_protected_at: string | null // set by Telegram /protected; recommended positions only
+  protection_reminders: number
 }
 
 export interface PositionsResponse {
@@ -126,6 +128,20 @@ export interface RecommendationPayload {
   short_flag_higher_tail_risk?: boolean
   gate?: GatePayload
   manual_checklist?: string[]
+  // Entry recs only (plan Q1.1); absent on older stored payloads.
+  strategy_id?: string | null
+  entry_type?: string | null
+  reference_entry?: string | null
+  reference_stop?: string | null
+  hold_sessions?: number | null
+  /** "YYYY-MM-DD"; null with `hold_sessions` set = exit date pending the calendar. */
+  exit_session?: string | null
+  exit_kind?: 'time' | 'stop_target' | null
+  risk_inr?: string | null
+  stop_atr_mult?: string | null
+  gtt_instruction?: string | null
+  evidence?: string[]
+  registered_edge_pct?: string | null
 }
 
 export interface RecommendationRow {
@@ -139,6 +155,38 @@ export interface RecommendationRow {
 
 export interface RecommendationsResponse {
   recommendations: RecommendationRow[]
+}
+
+// --------------------------------------------------------------------------- GET /scorecard
+/** Rates and returns are plain numbers (percent for `*_net`/`*_t20`/`*_excess`, fraction for
+ *  `hit_rate`), null when no trade backs them. */
+export interface ScorecardRecs {
+  n: number
+  filled: number
+  closed: number
+  hit_rate: number | null
+  median_net: number | null
+  mean_net: number | null
+  net_t20: number | null
+  mean_excess: number | null
+  actions: Record<string, number>
+  skip_reasons: Record<string, number>
+  daily_basis: number
+  unscorable: number
+}
+
+/** Stub until paper trading lands (plan Q4.11). */
+export interface ScorecardPaper {
+  closed: number
+  hit_rate: number | null
+  net: number | null
+  open: number
+}
+
+export interface ScorecardResponse {
+  label: string
+  bench: Record<string, string>
+  strategies: Record<string, { recs: ScorecardRecs; paper: ScorecardPaper }>
 }
 
 // --------------------------------------------------------------------------- GET /risk/headroom

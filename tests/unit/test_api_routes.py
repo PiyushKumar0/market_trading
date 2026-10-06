@@ -24,6 +24,7 @@ from engine.core.protected_store import ProtectedStore
 from engine.core.secrets import DASHBOARD_TOKEN
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.governor import BudgetGovernor, TokenUsage
+from engine.ops.scorecard import LABEL
 from engine.risk.events import TOPIC_MODE_CHANGED, ModeChanged
 from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
@@ -658,6 +659,25 @@ def test_recommendations_shape_is_unchanged_by_the_q1_payload_fields(conn, clock
 
 
 # --------------------------------------------------------------------------- POST /db/query (§3.2.11)
+def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
+    unwired = _client().get("/scorecard", headers=AUTH).json()
+    assert unwired == {"label": LABEL, "bench": {}, "strategies": {}}
+    assert _client().get("/scorecard").status_code in (401, 403)
+
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?, ?, ?)",
+        ("rec-s", json.dumps({"kind": "entry"}), "2026-10-06T10:00:00+05:30"),
+    )
+    conn.execute(
+        "INSERT INTO rec_outcomes (rec_id, strategy_id, status, updated_at) "
+        "VALUES ('rec-s', 'hi52', 'unfilled', 'x')"
+    )
+    body = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()
+    assert body["label"] == LABEL
+    assert body["strategies"]["hi52"]["paper"] == {"closed": 0, "hit_rate": None, "net": None, "open": 0}
+    assert body["strategies"]["hi52"]["recs"]["n"] == 1
+
+
 # Owner ad-hoc read surface (owner-directed 2026-08-19): the engine process HOLDS market.duckdb, so it
 # answers read-only questions instead of being STOPPED for them. Read-only is enforced by statement
 # TYPE (DuckDB's parser) / authorizer action (SQLite) — never by inspecting the SQL text, so these

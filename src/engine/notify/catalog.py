@@ -68,7 +68,8 @@ class MessageKind(StrEnum):
     """End-of-day owner digest — realised P&L, trades, open positions, FROZEN reasons (O8/R8)."""
 
     WEEKLY_SUMMARY = "weekly_summary"
-    """Weekly owner digest — rolling P&L, drawdown vs the §7.1 weekly rung, learning status (O8)."""
+    """Weekly owner digest, sent after the week's last regular session by ``ops.weekly_summary``:
+    the week's recs by owner decision plus hindsight outcomes. Not platform P&L (O8)."""
 
     ENGINE_STARTED = "engine_started"
     """Process-lifecycle alert sent immediately on boot (§2.2), BEFORE the §2.6 recovery/catch-up runs,
@@ -455,6 +456,39 @@ def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
         title="Expired recommendations awaiting your reason",
         body="\n".join(lines),
         data={"rec_ids": [r["rec_id"] for r in rows]},
+    )
+
+
+def weekly_summary(
+    *, d: date, delivered: int, taken: int, skipped: dict[str, int], expired: int,
+    skipped_closed: int, skipped_rupees: float, strategies: list[tuple[str, int, float | None, float | None]],
+) -> CatalogMessage:
+    """Three lines: the week's recs by owner decision, the hindsight value of skipped recs, and the
+    cumulative per-strategy ``(id, closed, mean net %, mean excess %)``."""
+    def pct(x: float | None) -> str:
+        return "n/a" if x is None else f"{x:+.2f}%"
+
+    reasons = f" ({', '.join(f'{k} {v}' for k, v in sorted(skipped.items()))})" if skipped else ""
+    lines = [
+        f"Delivered {delivered}, taken {taken}, skipped {sum(skipped.values())}{reasons}, "
+        f"expired without a reason {expired}.",
+        f"Skipped recs closed to date: {skipped_closed}, hindsight {skipped_rupees:+,.0f} rupees at each "
+        "rec's own notional, not platform P&L."
+        if skipped_closed else "No skipped rec has closed yet.",
+        "Closed recs to date, hindsight, mean per rec: "
+        + ("; ".join(f"{sid} n={n} net {pct(net)} excess {pct(exc)}" for sid, n, net, exc in strategies)
+           if strategies else "none yet."),
+    ]
+    return CatalogMessage(
+        kind=MessageKind.WEEKLY_SUMMARY,
+        title=f"Week to {d.isoformat()}",
+        body="\n".join(lines),
+        data={
+            "d": d.isoformat(), "delivered": delivered, "taken": taken, "skipped": skipped,
+            "expired": expired, "skipped_closed": skipped_closed, "skipped_rupees": skipped_rupees,
+            "strategies": [list(s) for s in strategies],
+        },
+        dedupe_key=f"weekly_summary:{d.isoformat()}",
     )
 
 

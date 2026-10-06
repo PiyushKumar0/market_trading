@@ -30,13 +30,17 @@ goes on every request as `Authorization: Bearer`, and on the `/ws/live` handshak
 
 **Polling.** One 10 s cycle fetches, in parallel: `/mode`, `/positions`, `/decisions`,
 `/recommendations`, `/risk/headroom`, `/budget`, `/config/trade_window`, `/news/watchlist`. Results
-merge per-key, so one unwired collaborator never blanks the console. `/ws/live` runs alongside and
+merge per-key, so one unwired collaborator never blanks the console. `/scorecard` and
+`/notifications` each poll on their own 60 s hook. `/ws/live` runs alongside and
 appends relayed state-change frames (mode / risk / kill / trade-window / budget) to the events feed;
 the engine's 15 s `ping` keepalive is filtered out.
 
 **Panels.** Status header (mode / routing / risk_state, trade window, degrade tier, KILLED banner) ·
-Recommendations (thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action
-chip) · Positions · Decision log (proposal → verdict → cited rules) · Risk headroom · Agent budget ·
+Recommendations (exit date or "pending", risk to stop, stop ATR multiple, evidence, registered edge,
+thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action chip) · Positions
+(recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)") · Scorecard
+(per-strategy hindsight outcomes, labelled as such, plus the paper columns — a stub until paper
+trading lands) · Decision log (proposal → verdict → cited rules) · Risk headroom · Agent budget ·
 Trade-window editor · Live events · Notifications (the day's Telegram transcript) · News/catalyst
 watchlist (originating vs context + digest freshness). The two ledgers — recommendations and the
 decision log — are folded by IST day (`ui.tsx` `useDayFolds`): today's fold starts open, earlier

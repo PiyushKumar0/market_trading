@@ -261,6 +261,7 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
     fns[opsmain.JOB_RECO_EXPIRE] = _noop
     fns[opsmain.JOB_TIME_EXIT_CHECK] = _noop
     fns[opsmain.JOB_REC_OUTCOMES] = _noop_dated
+    fns[opsmain.JOB_WEEKLY_SUMMARY] = _noop_dated
     fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
     by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns, calendar=calendar).specs()}
     assert set(by_id) == set(PHASE1_JOB_IDS) | set(opsmain.PHASE2_JOB_IDS)
@@ -271,6 +272,7 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
         opsmain.JOB_TIME_EXIT_CHECK: (JobClass.RUN_LATEST, time(9, 30), 5),
         opsmain.JOB_RECO_EXPIRE:     (JobClass.RUN_LATEST, time(15, 45), 60),
         opsmain.JOB_REC_OUTCOMES:    (JobClass.DATE_KEYED, time(18, 30), 35),
+        opsmain.JOB_WEEKLY_SUMMARY:  (JobClass.DATE_KEYED, time(19, 0), 36),
         opsmain.JOB_NIGHTLY_REVIEW:  (JobClass.DATE_KEYED, time(21, 0), 80),
     }
     for jid, (cls, at, order) in expected.items():
@@ -285,6 +287,10 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
         assert by_id[dep].at < by_id[opsmain.JOB_REC_OUTCOMES].at
         assert by_id[dep].order < by_id[opsmain.JOB_REC_OUTCOMES].order
     assert opsmain.JOB_REC_OUTCOMES in POST_ARM_JOB_IDS
+    # weekly_summary waits for rec_outcomes: after it, on the clock and in catch-up.
+    assert by_id[opsmain.JOB_REC_OUTCOMES].at < by_id[opsmain.JOB_WEEKLY_SUMMARY].at
+    assert by_id[opsmain.JOB_REC_OUTCOMES].order < by_id[opsmain.JOB_WEEKLY_SUMMARY].order
+    assert opsmain.JOB_WEEKLY_SUMMARY in POST_ARM_JOB_IDS
 
 
 def test_registry_classes_and_fire_times_match_the_schedule() -> None:
@@ -1878,6 +1884,7 @@ def test_every_post_arm_job_is_a_registered_never_safety_critical_job(calendar) 
     fns[opsmain.JOB_RECO_EXPIRE] = _noop
     fns[opsmain.JOB_TIME_EXIT_CHECK] = _noop
     fns[opsmain.JOB_REC_OUTCOMES] = _noop_dated
+    fns[opsmain.JOB_WEEKLY_SUMMARY] = _noop_dated
     fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
     by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns, calendar=calendar).specs()}
     assert set(POST_ARM_JOB_IDS) <= set(by_id)

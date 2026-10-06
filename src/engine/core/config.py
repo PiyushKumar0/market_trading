@@ -531,7 +531,8 @@ class JobTimesCfg(BaseModel):
     corp_actions_ist: time = time(18, 15)       # §4.4 job 7 (A12)
     earnings_ist: time = time(18, 30)           # §4.4 job 8 (R2)
     rec_outcomes_ist: time = time(18, 30)       # plan Q2.3 — after daily_bars (18:05), whose run it waits for
-    deals_ist: time = time(18, 45)              # §4.4 job 9 (flagged_instrument_days)
+    weekly_summary_ist: time = time(19, 0)      # plan Q2.6 — after rec_outcomes (18:30)
+    deals_ist: time = time(18, 45)            # §4.4 job 9 (flagged_instrument_days)
     filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)
     filings_pit_fresh_ist: time = time(19, 0)   # §2.8 filings_pit_fresh (BSE fresh insider, date-keyed)
     ins_crossings_ist: time = time(19, 15)      # §6.1 ins_crossings — MUST stay after filings_pit_fresh

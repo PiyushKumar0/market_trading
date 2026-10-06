@@ -83,7 +83,7 @@ def _at(d: date, tm: time) -> datetime:
 def _missed_eod(proc: EngineProcess) -> tuple[set[str], set[str], set[str]]:
     """Wed's missed EOD window, read off the REAL registry: every job whose fire-time is after the
     15:40 stop — (date-keyed ids, run-latest ids, safety-critical ids)."""
-    dk = {s.job_id for s in proc.registry.specs(JobClass.DATE_KEYED) if s.at > A_STOP}
+    dk = {s.job_id for s in proc.registry.specs(JobClass.DATE_KEYED) if s.at > A_STOP and s.fire_day is None}
     rl = {s.job_id for s in proc.registry.specs(JobClass.RUN_LATEST) if s.at > A_STOP and s.fire_day is None}
     sc = {s.job_id for s in proc.registry.specs(JobClass.SAFETY_CRITICAL) if s.at > A_STOP}
     return dk, rl, sc
