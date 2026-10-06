@@ -16,7 +16,9 @@ EXPECTED_TABLES = {
     "learning_ledger", "param_sets", "model_registry", "envelope_state", "shadow_trades",
     "recommendations", "backfill_checkpoints", "filings_backfill_checkpoints", "schema_migrations",
     "day_plans", "agent_calls", "equity_snapshots", "risk_state_causes", "nightly_reviews",
-    "notifications",
+    "notifications", "prescreen_day_slots", "mom_rebalance_state", "ins_pending",
+    "funnel_raw_counts", "holdings_observations", "brk20_resting_levels",
+    "rec_outcomes", "universe_ew_returns",
 }
 
 

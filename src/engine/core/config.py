@@ -132,6 +132,15 @@ class LifecycleCfg(BaseModel):
 class ClockCfg(BaseModel):
     ntp_servers: list[str] = Field(default_factory=lambda: ["time.windows.com", "pool.ntp.org"])
     max_skew_s: int = 2
+    calendar_horizon_alert_sessions: int = 40
+
+
+class RecommendSettings(BaseModel, extra="forbid"):
+    gtt_limit_offset_pct: float = 1.0
+    veto_window_sessions: int = 3
+    protection_first_reminder_min: int = 30
+    reminder_window_start: time = time(8, 0)
+    reminder_window_end: time = time(22, 0)
 
 
 class DataCfg(BaseModel):
@@ -560,6 +569,7 @@ class Settings(BaseModel):
     telegram: TelegramCfg = Field(default_factory=TelegramCfg)
     lifecycle: LifecycleCfg = Field(default_factory=LifecycleCfg)
     clock: ClockCfg = Field(default_factory=ClockCfg)
+    recommend: RecommendSettings = Field(default_factory=RecommendSettings)
     data: DataCfg = Field(default_factory=DataCfg)
     news: NewsCfg = Field(default_factory=NewsCfg)
     cat: CatCfg = Field(default_factory=CatCfg)

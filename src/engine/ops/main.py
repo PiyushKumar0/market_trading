@@ -86,6 +86,7 @@ from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_disabled, login_prompt
+from engine.ops.calendar_horizon import check_calendar_horizon
 from engine.ops.early_hydration import EarlyHydration
 from engine.ops.feed_freshness import FeedFreshnessJob, FeedFreshnessResult
 from engine.ops.health import HealthMonitor
@@ -1286,7 +1287,10 @@ async def run() -> int:
         return await isin_map.run()
 
     async def job_feed_freshness() -> FeedFreshnessResult:
-        return await feed_freshness.run()
+        result = await feed_freshness.run()
+        await check_calendar_horizon(
+            calendar, clock, settings.clock.calendar_horizon_alert_sessions, notify)
+        return result
 
     async def job_filings_shp() -> FilingsShpResult:
         # Forwarded (2026-08-13): filings_shp degrades-without-raising (E5) — the watermark verdict
@@ -2184,6 +2188,7 @@ async def run() -> int:
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
     if telegram is not None:
         await telegram.start()
+    await check_calendar_horizon(calendar, clock, settings.clock.calendar_horizon_alert_sessions, notify)
 
     # --- BIND THE LOGIN CALLBACK API *BEFORE* startup recovery (2026-07-21 lockout). The owner's only
     #     browser login route (GET /kite/callback, :8400) is hosted by THIS uvicorn server, and it used

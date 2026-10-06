@@ -19,6 +19,7 @@ carries the structured fields the bot/audit log persists alongside the rendered 
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
@@ -198,6 +199,15 @@ class MessageKind(StrEnum):
     opens on days the owner is travelling at 08:15. Carries the per-job outcome (ran / already run /
     failed); info severity unless a job failed (then warning)."""
 
+    CALENDAR_HORIZON = "calendar_horizon"
+    """The verified trading calendar ends within ``clock.calendar_horizon_alert_sessions`` sessions."""
+
+    REC_DECISION_REMINDER = "rec_decision_reminder"
+    """A recommendation still has no owner decision (taken/skipped/vetoed)."""
+
+    PROTECTION_REMINDER = "protection_reminder"
+    """A taken position still has no confirmed protective GTT."""
+
 
 class CatalogMessage(BaseModel):
     """A single rendered, typed owner notification consumed by ``TelegramBot.send`` (§3.2.11).
@@ -218,6 +228,8 @@ class CatalogMessage(BaseModel):
     severity: Severity = "info"
     data: dict[str, Any] = Field(default_factory=dict)
     reply_keyboard: list[list[dict[str, str]]] | None = None
+    dedupe_key: str | None = None
+    """Journal-level idempotency key: a second send with the same key is dropped, not delivered."""
 
     def render(self) -> str:
         """Owner-facing plain-text rendering consumed by ``TelegramBot.send`` (§3.2.11).
@@ -1016,6 +1028,24 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
         # footer exists to close, on the day someone finally wires the widget.
         reply_keyboard=[[{"text": f"✓ /taken {rec.instrument}",
                           "command": f"/taken {rec.instrument} {rec.qty} "}]],
+    )
+
+
+def calendar_horizon(horizon: date | None, sessions_left: int) -> CatalogMessage:
+    """The verified calendar ends soon; exit dates beyond it show as pending."""
+    through = horizon.isoformat() if horizon else "none"
+    return CatalogMessage(
+        kind=MessageKind.CALENDAR_HORIZON,
+        title="Trading calendar horizon approaching",
+        body=(
+            f"The trading calendar is verified only through {through} ({sessions_left} sessions). "
+            "Exit dates beyond it show as pending. Add config/calendar/"
+            f"{(horizon.year if horizon else date.today().year) + 1}.yaml once NSE publishes "
+            "the holiday list (usually mid-December)."
+        ),
+        severity="warning",
+        data={"horizon": through, "sessions_left": sessions_left},
+        dedupe_key=f"calendar_horizon:{through}",
     )
 
 

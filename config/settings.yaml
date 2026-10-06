@@ -71,6 +71,14 @@ telegram:
 clock:
   ntp_servers: ["time.windows.com", "pool.ntp.org"]
   max_skew_s: 2                           # > 2 s => no new entries until resync (R6); mirrors limits.clock_skew
+  calendar_horizon_alert_sessions: 40     # CALENDAR_HORIZON alert when fewer verified sessions remain
+
+recommend:
+  gtt_limit_offset_pct: 1.0
+  veto_window_sessions: 3
+  protection_first_reminder_min: 30
+  reminder_window_start: "08:00"
+  reminder_window_end: "22:00"
 
 data:
   # A11 empirical answer (scripts/a11_check.py): are Kite minute candles corp-action adjusted?

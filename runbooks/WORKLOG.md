@@ -1,5 +1,12 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-07 01:28– — Implementing plan v5 (owner: "Implement and validate the plan … Avoid redundancy, over complication or unnecessary comments. Keep test cases concise")
+
+- **Where:** worktree `..\mt_wip`, branches `wip/m0` → `wip/m1` → … (one per milestone, plan §3.2). The live tree (`phase3`, engine running) is untouched until a milestone deploys.
+- **M0 (wip/m0):** Q0.1 plan-of-record notes in `IMPLEMENTATION_PLAN.md` (22 §s, D8 verbatim + D9–D12 in §8.4, stale hi52 1.47 text now points at `settings.yaml`); Q0.2 `NSECalendar.add_sessions`; Q0.3 migration 0015; Q0.4 `CALENDAR_HORIZON` monitor (boot + daily `feed_freshness`), sent once per horizon value.
+- **Manager decision beyond the plan:** "outbox dedupe key" had no mechanism, so 0015 adds `notifications.dedupe_key` (partial UNIQUE index) and `CatalogMessage.dedupe_key`; a keyed message journals and sends at most once. Q4.10's paper alerts reuse it.
+- **Deferred:** the Q0.2 `bars_1d` muhurat / DR-drill check and the Q5.1 snapshot need `market.duckdb`, which the running engine holds; tick compaction was mid-pass at 01:42, so both move to the evening stop window.
+
 ## 2026-10-06 14:xx–23:4x — Plan for measure / honest card / paper autopilot / research (owner: "Plan the entire change process … Reiterate through the plan repeatedly … until you are sure it is implementation ready"); docs only, nothing deployed
 
 - **Owner decisions:** D1–D12, recorded in the plan's §0:

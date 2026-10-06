@@ -91,6 +91,10 @@ if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
 
 _log = get_logger("engine.notify.telegram")
 
+
+class _Deduped(Exception):
+    """The journal's unique ``dedupe_key`` index already holds this message."""
+
 #: HTTP transport budget (WO-25b, 2026-08-24). python-telegram-bot builds its ``HTTPXRequest`` with a
 #: 5.0 s ``connect_timeout`` by default — and the LAN box's first TCP connect to ``api.telegram.org``
 #: was MEASURED at 4.25 s and 4.84 s on 08-24, i.e. INSIDE that default by fractions of a second. That
@@ -603,7 +607,11 @@ class TelegramBot:
         row however many parts the wire needed.
         """
         text = self._render(msg)
-        notification_id = self._journal_insert(msg, text)
+        try:
+            notification_id = self._journal_insert(msg, text)
+        except _Deduped:
+            _log.info("notification_deduped", dedupe_key=msg.dedupe_key)
+            return
         await self._deliver(text, notification_id)
 
     async def _deliver(self, text: str, notification_id: str | None) -> bool:
@@ -681,10 +689,15 @@ class TelegramBot:
             with transaction(conn):
                 conn.execute(
                     "INSERT INTO notifications (notification_id, created_at, kind, severity, title, "
-                    "body, status, attempts) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0)",
-                    (notification_id, now, kind, severity, title, body),
+                    "body, status, attempts, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
+                    (notification_id, now, kind, severity, title, body, getattr(msg, "dedupe_key", None)),
                 )
             return notification_id
+        except sqlite3.IntegrityError as exc:
+            if getattr(msg, "dedupe_key", None) is not None:
+                raise _Deduped from exc
+            _log.warning("notification_journal_failed", op="insert", error=_error_label(exc))
+            return None
         except Exception as exc:  # noqa: BLE001 - journalling must never block a send (R8)
             _log.warning("notification_journal_failed", op="insert", error=_error_label(exc))
             return None

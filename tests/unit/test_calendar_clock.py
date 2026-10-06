@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
@@ -103,6 +103,41 @@ def test_previous_trading_day_skips_weekend_and_holiday(cal):
     assert cal.previous_trading_day(date(2026, 1, 27)) == date(2026, 1, 23)
     # Works from a non-trading day too — the anchor for "last completed session before d".
     assert cal.previous_trading_day(date(2026, 1, 26)) == date(2026, 1, 23)
+
+
+MUHURAT = date(2026, 11, 8)   # Sunday special session
+
+
+@pytest.mark.parametrize("d, n, count_special, expected", [
+    (FRI, 1, False, MON),                                       # weekend
+    (date(2026, 1, 23), 1, False, date(2026, 1, 27)),           # weekend + Republic Day
+    (WED, 5, False, date(2026, 6, 24)),
+    (date(2026, 11, 6), 1, False, date(2026, 11, 9)),           # muhurat skipped
+    (date(2026, 11, 6), 1, True, MUHURAT),                      # muhurat counted
+    (SAT, 0, False, MON),                                       # n=0 from a non-session day
+    (REPUBLIC_DAY, 1, False, date(2026, 1, 28)),                # d non-session: count from next session
+    (WED, 0, False, WED),
+    (MUHURAT, 0, False, date(2026, 11, 9)),                     # uncounted special d
+    (MUHURAT, 0, True, MUHURAT),
+])
+def test_add_sessions(cal, d, n, count_special, expected):
+    assert cal.add_sessions(d, n, count_special=count_special) == expected
+
+
+def test_add_sessions_rejects_negative_and_raises_past_horizon(cal):
+    with pytest.raises(ValueError):
+        cal.add_sessions(WED, -1)
+    with pytest.raises(ValueError, match="calendar horizon"):
+        cal.add_sessions(date(2026, 12, 31), 1)   # no 2027 calendar shipped
+
+
+def test_retest_expiry_matches_add_sessions_over_2026(cal, clock, conn):
+    from engine.strategy.retest import DEFAULT_RETEST_SESSIONS, RestingLevelBook
+
+    book = RestingLevelBook(conn, cal, clock)
+    sessions = [d for i in range(365) if cal.is_trading_day(d := date(2026, 1, 1) + timedelta(days=i))]
+    for d in sessions[:-DEFAULT_RETEST_SESSIONS - 1]:   # tail runs past the calendar horizon
+        assert book._expiry(d) == cal.add_sessions(d, DEFAULT_RETEST_SESSIONS, count_special=True)
 
 
 def test_trade_window_seed_clamped_to_session(clock):

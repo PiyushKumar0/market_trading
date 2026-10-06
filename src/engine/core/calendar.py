@@ -154,6 +154,29 @@ class NSECalendar:
             probe += timedelta(days=1)
         raise ValueError(f"no trading day found within ~1y after {d} (calendar horizon, R6)")
 
+    def add_sessions(self, d: date, n: int, *, count_special: bool = False) -> date:
+        """The ``n``-th counted session after ``d``; ``n=0`` is the first counted session on/after ``d``.
+
+        Muhurat/special sessions are skipped unless ``count_special``. Past the calendar horizon
+        ``next_trading_day``'s ValueError propagates.
+        """
+        if n < 0:
+            raise ValueError(f"n must be >= 0, got {n}")
+
+        def counted(x: date) -> bool:
+            return self.is_trading_day(x) and (count_special or x not in self._years[x.year].muhurat)
+
+        def advance(x: date) -> date:
+            x = self.next_trading_day(x)
+            while not counted(x):
+                x = self.next_trading_day(x)
+            return x
+
+        cur = d if counted(d) else advance(d)
+        for _ in range(n):
+            cur = advance(cur)
+        return cur
+
     def previous_trading_day(self, d: date) -> date:
         """Latest trading day strictly before ``d`` — the "last completed session" anchor used by
         readers of EOD-published data (e.g. ``flagged_instrument_days``, written at 20:30 of its own
