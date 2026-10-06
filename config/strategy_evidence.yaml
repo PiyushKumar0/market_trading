@@ -1,0 +1,29 @@
+# Backtest evidence per strategy for the rec card. Values are dotted paths into the report JSON
+# (reports live in <data dir>/reports); no numbers here. Registered edges stay in settings.yaml.
+strategies:
+  hi52:
+    summary: 52-week-high fresh cross on NIFTY index names, T+20 swing
+    measured_exit: fixed T+20 hold, no stop
+    report: backtest_hi52_v2_2026-09-09.json
+    n: constructs.discrete_fresh_cross.cells.all.horizons.20.n
+    hit: constructs.discrete_fresh_cross.cells.all.horizons.20.hit_rate_net
+    median_net: constructs.discrete_fresh_cross.cells.all.horizons.20.median_net
+    cpcv: constructs.discrete_fresh_cross.cpcv.20.fold_pass_fraction
+    caveat: shipped stop untested (study C1)
+  brk20:
+    summary: 20-day breakout, limit at the broken level with a 5-session fill window
+    measured_exit: limit fill within 5 sessions, fixed T+20 hold, no stop
+    report: backtest_brk20_2026-09-12.json
+    n: variants.V2_limit_at_H20_N5.cells.all.horizons.20.n
+    hit: variants.V2_limit_at_H20_N5.cells.all.horizons.20.hit_rate_net
+    median_net: variants.V2_limit_at_H20_N5.cells.all.horizons.20.median_net
+    cpcv: variants.V2_limit_at_H20_N5.cpcv.20.fold_pass_fraction
+    caveat: shipped stop and target untested (study C1)
+  ins:
+    summary: insider net buys of at least Rs 1 crore, T+20 swing
+    measured_exit: next-open entry, fixed T+20 hold, no stop
+    report: event_study_20260814T023244.json
+    n: aggregate.legs.insider_buy.horizons.20.n
+    hit: aggregate.legs.insider_buy.horizons.20.hit_rate_net
+    median_net: aggregate.legs.insider_buy.horizons.20.median_net
+    caveat: shipped stop untested (study C1)

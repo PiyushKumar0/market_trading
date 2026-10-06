@@ -35,6 +35,7 @@ from engine.ops.nightly_review import (
     DECLINES_TITLE,
     FUNNEL_TITLE,
     NightlyReviewJob,
+    _closed_trades,
     build_analyst_declines,
     build_funnel_summary,
     build_review_context,
@@ -296,6 +297,25 @@ def test_context_empty_day_says_so_explicitly(conn) -> None:
     assert "  - cat.rr_target: min=1.0 max=3.0 default=1.5" in text
 
 
+def test_expired_recs_are_counted_separately_from_closed_trades(conn) -> None:
+    seed_day(conn)
+    for i in (2, 3):
+        conn.execute(
+            """
+            INSERT INTO learning_ledger
+                (entry_id, position_id, rec_id, is_paper, strategy_id, confidence, qty,
+                 outcome_label, created_at, closed_at)
+            VALUES (?, 'POS-1', ?, 0, 'orb', 0.5, 0, 'no_action', ?, ?)
+            """,
+            (f"LL-{i}", f"REC-{i}", f"{D.isoformat()}T09:00:00+05:30", f"{D.isoformat()}T15:30:00+05:30"),
+        )
+    text = build_review_context(conn, None, D, BOUNDS)
+
+    assert [r["entry_id"] for r in _closed_trades(conn, D)] == ["LL-1"]
+    assert "entry_id=LL-2" not in text
+    assert "recommendations expired unactioned (not trades): 2" in text
+
+
 def test_context_is_byte_stable_for_the_same_rows(conn) -> None:
     seed_day(conn)
     assert build_review_context(conn, None, D, BOUNDS) == build_review_context(conn, None, D, BOUNDS)
@@ -352,6 +372,7 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
     assert msg.severity == "info"
     assert REVIEW["summary"] in msg.body
     assert msg.data["trades_closed"] == 1
+    assert msg.data["recs_expired"] == 0
     assert msg.data["recommendations"] == 1
     assert msg.data["param_suggestions"] == 1
     assert msg.data["param_suggestions_dropped"] == 0

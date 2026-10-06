@@ -99,12 +99,11 @@ import os
 import sqlite3
 import statistics
 import sys
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 _REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if _REPO_SRC not in sys.path:  # pragma: no cover - loose-script shim
@@ -112,16 +111,21 @@ if _REPO_SRC not in sys.path:  # pragma: no cover - loose-script shim
 
 from engine.core.clock import IST  # noqa: E402
 from engine.core.config import load_yaml, repo_root  # noqa: E402
+from engine.learning.hi52_forward import (  # noqa: E402
+    HORIZONS,
+    MIN_SIGNALS,
+    PROMOTION_DATE,
+    VERDICT_HORIZON,
+    Measured,
+    Series,
+    Signal,
+    measure_all,
+    measure_signal,  # noqa: F401 - re-exported
+)
 from engine.strategy.cost_model import CostModel  # noqa: E402
 from engine.strategy.scanners.hi52 import DEFAULT_PARAMS, STRATEGY_ID  # noqa: E402
 
 # =============================================================================== pinned constants
-#: First session of the PROMOTED population. 2026-09-12 is the promotion commit (a Saturday); the
-#: first sweep that could originate under it is Monday 2026-09-14. Rows before this are the SHADOW
-#: population on a different rule (v1 filters were diagnostics then) and are never pooled with it.
-#: It is an ASSUMPTION, not a measurement — see :data:`PROMOTION_DATE_PROVENANCE`.
-PROMOTION_DATE = date(2026, 9, 14)
-
 #: Printed with every verdict, because the boundary is a PREDICTION about when the tranche deploys
 #: and nothing in either store records the deploy. If the engine runs a window_open sweep on or after
 #: 2026-09-14 on code that still has ``hi52`` in ``NO_EDGE_SHADOW_STRATEGIES`` (the v1 rule: smooth
@@ -134,21 +138,8 @@ PROMOTION_DATE_PROVENANCE = (
     "and pass --from if the tranche shipped later"
 )
 
-#: Horizons measured, in trading sessions of the HOLD (the entry session counts as the first).
-#: T+5 is printed because the manager asked to see it (2026-09-12) — the v2 study measured it DEAD
-#: (median gross +0.24% against a 0.32% floor), so it is a DIAGNOSTIC and can never be a verdict:
-#: a cell the promoted rule makes no claim about is exactly the cell post-hoc reading reaches for.
-HORIZONS: tuple[int, ...] = (5, 10, 20)
-
-#: The ONE horizon the verdict reads — the horizon the registered edge was measured over.
-VERDICT_HORIZON = 20
-
 #: Everything else is labelled "diagnostic" in the report, so no one can quote it as an outcome.
 DIAGNOSTIC_HORIZONS: tuple[int, ...] = tuple(k for k in HORIZONS if k != VERDICT_HORIZON)
-
-#: Minimum measured T+20 signals before the rule can say anything. Below it the verdict is
-#: INSUFFICIENT, never HOLD: "not yet refuted" and "no evidence" must not read the same.
-MIN_SIGNALS = 20
 
 #: §7.1 ``per_trade_risk`` inputs of the notional derivation, as ``config/limits.yaml`` carries them
 #: after O17. FALLBACKS only: :func:`load_sizing_limits` reads the live file, so an owner change
@@ -262,116 +253,6 @@ VERDICT_UNAVAILABLE = "UNAVAILABLE"
 
 #: Review cadence the plan addendum fixes: run this at 20 and at 40 signals.
 REVIEW_AT_SIGNALS: tuple[int, ...] = (20, 40)
-
-
-class Signal(NamedTuple):
-    """One published hi52 signal: the journal day and its symbol."""
-
-    d: date
-    symbol: str
-
-
-@dataclass(frozen=True)
-class Series:
-    """One symbol's ascending ``bars_1d`` sessions. Only opens and closes are read."""
-
-    symbol: str
-    dates: list[date]
-    open: list[float]
-    close: list[float]
-
-    def __len__(self) -> int:
-        return len(self.dates)
-
-
-@dataclass
-class Measured:
-    """One measured signal. ``gross``/``net`` are PERCENT returns per horizon, equal notional."""
-
-    symbol: str
-    signal_date: date
-    entry_date: date
-    entry_px: float
-    gross: dict[int, float] = field(default_factory=dict)
-    net: dict[int, float] = field(default_factory=dict)
-
-
-# =============================================================================== measurement (pure)
-def measure_signal(
-    series: Series, signal_date: date, *, cost_pct: float, horizons: Sequence[int] = HORIZONS
-) -> Measured | None:
-    """Measure one signal against one symbol's series, or ``None`` when it cannot be anchored.
-
-    ``None`` means: the signal day is not a session in this series, or its open is unusable. The
-    entry is ``open(d)`` — the journal day's OWN open, the study's anchor (module docstring) — so
-    the entry bar exists whenever the anchor does, and the exit for horizon ``k`` is the close of
-    the ``k``-th session of the hold, ``close[i + k - 1]``, the entry session counting as the first.
-    A signal that HAS an entry but has not reached a horizon is returned with that horizon simply
-    absent from ``gross``/``net`` — horizons are measured on their own event sets (module
-    docstring), so a young signal contributes to the cells it has reached and to no others.
-    Never raises on ordinary or malformed bars: a non-finite/non-positive price drops that cell.
-    """
-    try:
-        i = series.dates.index(signal_date)
-    except ValueError:
-        return None
-    entry_px = series.open[i]
-    if not math.isfinite(entry_px) or entry_px <= 0.0:
-        return None
-    out = Measured(
-        symbol=series.symbol, signal_date=signal_date,
-        entry_date=series.dates[i], entry_px=float(entry_px),
-    )
-    for k in horizons:
-        if k < 1 or i + k - 1 >= len(series.dates):
-            continue                      # not yet held that long — not a refusal, just not yet
-        exit_px = series.close[i + k - 1]
-        if not math.isfinite(exit_px) or exit_px <= 0.0:
-            continue
-        gross = (float(exit_px) / float(entry_px) - 1.0) * 100.0
-        out.gross[k] = gross
-        out.net[k] = gross - cost_pct
-    return out
-
-
-def measure_all(
-    signals: Iterable[Signal],
-    series_by_symbol: Mapping[str, Series],
-    *,
-    cost_pct: float,
-    horizons: Sequence[int] = HORIZONS,
-) -> tuple[list[Measured], dict[str, int]]:
-    """Measure every signal. Returns the trades and the skip tally.
-
-    The tally is not cosmetic, and its FOUR classes are not one class: an ``n`` that shrank because
-    the newest signals have no entry bar YET (``no_entry_yet`` — the ordinary state of a forward test
-    at every run) reads nothing like one that shrank because a symbol's bhavcopy row is missing
-    (``no_bars``/``unanchored``, a store defect worth chasing) or because a bar is malformed
-    (``bad_entry_bar``). Collapsing them would send an operator after a phantom data gap.
-
-    Since the entry is ``open(d)`` itself (2026-09-12), the two anchor failures are told apart by
-    WHERE ``d`` sits relative to the stored series: past its last session ⇒ the day's bhavcopy has
-    not landed yet (``no_entry_yet``, and on the morning of every run the newest rows are exactly
-    that); inside the stored range but absent ⇒ a genuine hole (``unanchored``). Guessing between
-    them would send an operator chasing a gap that is really this morning.
-    """
-    trades: list[Measured] = []
-    skipped = {"no_bars": 0, "unanchored": 0, "no_entry_yet": 0, "bad_entry_bar": 0}
-    for sig in signals:
-        series = series_by_symbol.get(sig.symbol)
-        if series is None or not len(series):
-            skipped["no_bars"] += 1
-            continue
-        # The two reasons measure_signal refuses an anchor, told apart here rather than guessed at.
-        if sig.d not in series.dates:
-            skipped["no_entry_yet" if sig.d > series.dates[-1] else "unanchored"] += 1
-            continue
-        m = measure_signal(series, sig.d, cost_pct=cost_pct, horizons=horizons)
-        if m is None:
-            skipped["bad_entry_bar"] += 1
-            continue
-        trades.append(m)
-    return trades, skipped
 
 
 def _cell(gross: list[float], net: list[float]) -> dict[str, Any]:
