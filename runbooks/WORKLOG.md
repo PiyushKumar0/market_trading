@@ -1,5 +1,31 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-06 11:2x–14:xx — QuantSync competitor research (owner: "research and analyse what it is doing better than our platform"); docs only, nothing deployed
+
+- **What ran:**
+  - Inline exploration of https://rsitradingplatform.vercel.app (chrome-devtools, public GETs, snapshots saved).
+  - NSE UDiFF bhavcopy 2024-12-02 → 2026-10-05 downloaded to a scratch copy. `market.duckdb` was never opened; the engine was live.
+  - Our `state.db` read only via `?mode=ro`.
+  - After the owner's trade window closed (12:30; owner, verbatim: "Trade window has closed now, you can continue with your task") a 7-agent read-only verification workflow ran. The manager spot-checked every claim it overturned.
+- **Report:** `runbooks/quantsync-comparison-2026-10-06.md`. Artefacts in `data/reports/quantsync_2026-10-06/` (gitignored).
+- **Verdict on QuantSync:**
+  - Their "54.7% / PF 1.98 verified" record is a backfilled simulation: EOD-close fills, exits booked a session late, late-booked stops, no costs, constant "ML 70%".
+  - Under our execution their selection has no typical-trade edge: T+20 net median −0.69%. Inside NIFTY 500 (n=76) the median is −0.93%.
+  - What they do better is product: decision-ready cards, a visible track record, any-stock analysis, a trades-only channel.
+- **Our gaps found:**
+  - The owner took the first 2 entry recs (both losses; HDFCAMC unprotected, −8.3%), then 0 of 28, while present at the dashboard on rec mornings.
+  - Nothing prices untaken recs (`shadow_trades` empty). Over the same windows our recs' −1.72% equals the market's −1.65% (beta).
+  - The brk20 1R/2R and hi52 6% exits were never backtested (all evidence is fixed-horizon).
+  - Card defects: "(FAILED)" on approved shrinks, a self-contradictory OCO line, no exit date on T+20 recs, BHEL 10-06 shipped with a 9.6% stop on a 6% rule.
+  - 95% of the 528 owner-channel messages since 09-14 are ops traffic.
+  - No regime filter outside rsi2.
+- **Proposed (none built):**
+  - A1 rec-outcome scorecard (new table; never `positions`/`learning_ledger`/`shadow_trades`).
+  - A2 skip reasons.
+  - B1 honest card; B2 channel split; B3 protection/exit loop; B4 `/why`.
+  - C1–C4 pre-registered research.
+  - D1–D3 owner decisions (AUTO-paper go-ahead; the evening-GTT plan is NOT recommended as drafted; remote dashboard not now).
+
 ## 2026-10-05 00:5x — G2 C6 broker side attested by the owner; gate G2 complete
 
 - Owner, verbatim: "No GTT or API orders have been placed".
