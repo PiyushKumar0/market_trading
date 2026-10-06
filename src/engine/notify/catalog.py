@@ -19,8 +19,9 @@ carries the structured fields the bot/audit log persists alongside the rendered 
 
 from __future__ import annotations
 
+import re
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -439,6 +440,24 @@ def rec_fill_suspected(
     )
 
 
+def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
+    """Expired recommendations still undecided: one ``/veto`` line each, with no default reason."""
+    from engine.notify.telegram import VETO_REASONS  # telegram imports this module
+
+    codes = "|".join(VETO_REASONS)
+    lines = [
+        f"{r['instrument']} {r['side']} qty {r['qty']} (expired {str(r['valid_until'])[:10]}): "
+        f"/veto {r['instrument']} <{codes}>"
+        for r in rows
+    ]
+    return CatalogMessage(
+        kind=MessageKind.REC_DECISION_REMINDER,
+        title="Expired recommendations awaiting your reason",
+        body="\n".join(lines),
+        data={"rec_ids": [r["rec_id"] for r in rows]},
+    )
+
+
 def position_not_in_holdings(
     *,
     symbol: str,
@@ -480,6 +499,21 @@ def position_not_in_holdings(
             "held_qty": held_qty,
             "entry_rec_id": entry_rec_id,
         },
+    )
+
+
+def protection_reminder(*, symbol: str, qty: int, opened_at: str, as_of: str) -> CatalogMessage:
+    """A taken position has no owner-confirmed protective order. ``severity='critical'`` alone makes
+    it non-expiring; ``as_of`` is the time the check ran, since a delayed send is still readable."""
+    return CatalogMessage(
+        kind=MessageKind.PROTECTION_REMINDER,
+        title=f"{symbol} has no confirmed stop order",
+        body=(
+            f"{symbol} x{qty} (taken {opened_at}) has no protective order confirmed as of {as_of}. "
+            f"Place the GTT stop, then reply /protected {symbol}."
+        ),
+        severity="critical",
+        data={"symbol": symbol, "qty": qty, "opened_at": opened_at, "as_of": as_of},
     )
 
 
@@ -892,6 +926,7 @@ def catalyst_disabled(reason: str) -> CatalogMessage:
 #: §3.6 recommendation rendering budgets — a Telegram message must stay readable on a phone.
 THESIS_MAX_CHARS = 300
 MAX_HEADROOM_LINES = 5
+MAX_MESSAGE_CHARS = 4096  # plain text, no parse mode
 
 #: Placeholder for the one field the platform must NOT prefill: the price the owner actually paid.
 #: Everything else in the footer is known at delivery time; a guessed fill price would be a fabricated
@@ -915,9 +950,11 @@ def _capture_footer(rec: Recommendation) -> str:
     money surface, and "the exit-kind form" is not one an adjust can honestly carry.
     """
     if rec.kind == "entry":
+        from engine.notify.telegram import VETO_REASONS  # telegram imports this module
+
         return (
             f"record: /taken {rec.instrument} {rec.qty} {_PRICE_PLACEHOLDER} · "
-            f"decline: /veto {rec.instrument}"
+            f"decline: /veto {rec.instrument} <{'|'.join(VETO_REASONS)}>"
         )
     if rec.kind == "exit":
         return (
@@ -927,78 +964,119 @@ def _capture_footer(rec: Recommendation) -> str:
     return f"decline: /veto {rec.instrument}"
 
 
+def _exit_clause(rec: Recommendation) -> str:
+    """The planned exit, or "" when the payload carries none. Pending = hold known, calendar not."""
+    pending = f"pending (NSE {rec.created_at.year + 1} calendar)"
+    if rec.exit_kind == "time" and rec.hold_sessions is not None:
+        if rec.exit_session is None:
+            return f"exit date {pending}"
+        return f"sell by the close on {rec.exit_session.isoformat()} (session {rec.hold_sessions})"
+    if rec.exit_kind == "stop_target":
+        plan = f"stop ₹{rec.stop}"
+        if rec.targets:
+            plan += f" / target{'s' * (len(rec.targets) > 1)} ₹" + ", ₹".join(map(str, rec.targets))
+        if rec.exit_session is not None:
+            return f"{plan}; time cap {rec.exit_session.isoformat()}"
+        if rec.hold_sessions is not None:
+            return f"{plan}; time cap {pending}"
+        return plan
+    return ""
+
+
+def _stop_line(rec: Recommendation, entry: Decimal, targets: str) -> str:
+    pct = abs(entry - rec.stop) / entry * 100
+    line = f"stop ₹{rec.stop} = {pct:.1f}% {'below' if rec.side == 'BUY' else 'above'} entry"
+    if rec.stop_atr_mult is not None:
+        line += f" · {rec.stop_atr_mult:.1f}× daily ATR"
+    if rec.reference_entry and rec.reference_stop and rec.reference_stop != rec.stop:
+        rule = abs(rec.reference_entry - rec.reference_stop) / rec.reference_entry * 100
+        line += f" · rule {rule:.1f}% re-anchored from ₹{rec.reference_entry} to ₹{entry}"
+    if rec.exit_kind is None:
+        line += f" · targets {targets}"
+    return line
+
+
+def _gate_lines(rec: Recommendation) -> list[str]:
+    """Verdict line plus headroom lines. A shrink's binding rule is its cause, not a failure; every
+    other failed check is always shown, passed ones only fill the remaining slots."""
+    gate = rec.gate
+    approved = gate.approved_qty if gate.approved_qty is not None else rec.qty
+    bound: set[str] = set()
+    if gate.verdict == "shrink":
+        found = next((m for r in gate.reasons if (m := re.search(r"\(bound by ([^)]+)\)", r))), None)
+        bound = set(found[1].split(", ")) if found else set()
+        verdict = f"shrunk {gate.original_qty}→{approved}" + (f" (bound by {found[1]})" if found else "")
+    else:
+        verdict = f"{gate.verdict} (approved qty {approved})"
+    checks = sorted(gate.checks, key=lambda c: c.passed)
+    failed = sum(not c.passed for c in checks)
+    return [f"gate: {verdict}"] + [
+        f"  • {c.rule_id}: {c.value} vs {c.limit} — headroom {c.headroom}"
+        f"{' (FAILED)' if not c.passed and c.rule_id not in bound else ''}"
+        for c in checks[: max(failed, MAX_HEADROOM_LINES)]
+    ]
+
+
 def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -> CatalogMessage:
-    """Render a §3.6 :class:`~engine.core.contracts.Recommendation` for the owner (§10.3
-    ``RECOMMENDATION``).
+    """Render a §3.6 :class:`~engine.core.contracts.Recommendation` (plan Q1.5 card).
 
-    Everything the human needs to act is in the prose — instrument/side/style/product, entry zone,
-    stop, targets, size, the gate verdict WITH per-rule headroom (R1: headroom ships in the payload),
-    this trade's breakeven math (C3), and the B7/R3 manual protective-order checklist. The platform
-    places ZERO API orders in RECOMMEND, so the checklist is the mechanism that transfers protection
-    responsibility to the human explicitly — it is never truncated away.
-
-    LEVEL vs CURRENT PRICE (WO-4, 2026-08-13). A degenerate entry zone (``low == high``) is a LIMIT
-    proposal: the price is an instruction, and for a ``brk20`` candidate it is specifically the broken
-    20-day-high LEVEL, so it is labelled as one rather than shown as a range of itself. ``ltp`` is the
-    live price the engine sized against; when supplied, the message states BOTH it and the level plus
-    the gap between them, because "buy at 100" is only actionable next to "it is trading at 100.50" —
-    the F5 defect was a payload that rendered a price the market had already left. It is optional so a
-    caller with no live quote renders exactly the pre-WO-4 message rather than a fabricated one; the
-    structured ``data`` carries ``ltp`` either way (``None`` when unknown), so the audit log can always
-    tell "no quote" from "quote equal to the level".
-
-    Failed gate checks sort first among the at-most :data:`MAX_HEADROOM_LINES` headroom lines: a
-    ``shrink``/``owner_approval_required`` verdict is only meaningful next to the rule that caused it.
-    The thesis is truncated at :data:`THESIS_MAX_CHARS`; the full object is on the dashboard.
-
-    CAPTURE FOOTER (WO-29, 2026-08-26). The final line is the command the owner types back, with the
-    instrument as its handle — see :func:`_capture_footer`. Before it, the §8.3 capture flow needed a
-    ``rec_id`` this message never printed, which is exactly how the first executed recommendation
-    ended up unrecordable.
+    Pure: every line is printed only when the payload carries its data. A degenerate entry zone is a
+    LIMIT level; ``ltp`` (optional, never invented) adds the gap to it. Every failed gate check is
+    shown, the B7 checklist is never truncated, and the capture footer is always the last line.
     """
     low, high = rec.entry_zone
     at_level = low == high
     targets = " / ".join(str(t) for t in rec.targets) or "(none)"
-    thesis = rec.thesis[:THESIS_MAX_CHARS] + ("…" if len(rec.thesis) > THESIS_MAX_CHARS else "")
-    checks = sorted(rec.gate.checks, key=lambda c: c.passed)[:MAX_HEADROOM_LINES]
-    approved = rec.gate.approved_qty if rec.gate.approved_qty is not None else rec.qty
     entry_text = f"level {low} (limit-at-level)" if at_level else f"entry {low}-{high}"
+    title = f"Recommendation {rec.kind}: {rec.side} {rec.instrument}"
 
-    lines = [
+    head = [
         f"{rec.side} {rec.instrument} · {rec.style}/{rec.product} · qty {rec.qty} "
-        f"(notional ₹{rec.notional})",
-        f"{entry_text} · stop {rec.stop} · targets {targets}",
+        f"(notional ₹{rec.notional}) · {entry_text}"
     ]
+    if rec.risk_inr is not None:
+        head[0] += f" · ₹{rec.risk_inr} at risk to the stop"
+    if exit_text := _exit_clause(rec):
+        head[0] += f" · {exit_text}"
+    head.append(_stop_line(rec, high, targets))
     if ltp is not None and ltp > 0:
         gap = (low - ltp) / ltp * Decimal(100)
-        lines.append(
+        head.append(
             f"current price {ltp} · {'level' if at_level else 'entry'} {low} is {gap:+.2f}% away"
         )
-    lines.append(
-        f"confidence {rec.confidence:.2f} · valid until {rec.valid_until.isoformat(timespec='minutes')}"
-    )
+    head.append(f"valid until {rec.valid_until.isoformat(timespec='minutes')}")
     if rec.short_flag_higher_tail_risk:
-        lines.append("SHORT — higher tail risk (C8 shorting policy).")
-    lines += [
-        f"thesis: {thesis}",
-        f"gate: {rec.gate.verdict} (approved qty {approved})",
-    ]
-    lines += [
-        f"  • {c.rule_id}: {c.value} vs {c.limit} — headroom {c.headroom}{'' if c.passed else ' (FAILED)'}"
-        for c in checks
-    ]
-    lines.append(
+        head.append("SHORT — higher tail risk (C8 shorting policy).")
+    edge = []
+    if rec.registered_edge_pct is not None:
+        expected = (rec.notional * rec.registered_edge_pct / 100).quantize(Decimal(1), ROUND_HALF_UP)
+        edge.append(f"registered edge {rec.registered_edge_pct}% net ≈ ₹{expected} — not a forecast")
+
+    tail = [
+        *_gate_lines(rec),
         f"cost: breakeven {rec.cost.breakeven_pct}% · total ₹{rec.cost.total_cost} · "
-        f"edge {rec.cost.edge_multiple}x"
-    )
-    lines.append("checklist (yours to place — the platform places no orders in RECOMMEND, B7):")
-    lines += [f"  • {item}" for item in rec.manual_checklist]
-    # WO-29: the last line is the reply the owner types back — the message teaches its own capture.
-    lines.append(_capture_footer(rec))
+        f"edge {rec.cost.edge_multiple}x",
+        "checklist (yours to place — the platform places no orders in RECOMMEND, B7):",
+        *(f"  • {item}" for item in rec.manual_checklist),
+        # WO-29: the last line is the reply the owner types back — the message teaches its own capture.
+        _capture_footer(rec),
+    ]
+
+    # Evidence and thesis are the only elastic lines; the checklist and footer are never cut.
+    evidence = [f"evidence: {e}" for e in rec.evidence]
+    thesis = rec.thesis[:THESIS_MAX_CHARS] + ("…" if len(rec.thesis) > THESIS_MAX_CHARS else "")
+    # Budget: title glyph + separators + "thesis: " prefix, with slack.
+    room = MAX_MESSAGE_CHARS - len(title) - len("\n".join([*head, *edge, *tail])) - 32
+    while evidence and room < len("\n".join(evidence)) + len(thesis):
+        evidence.pop()
+    thesis_room = room - len("\n".join(evidence))
+    if len(thesis) > thesis_room:
+        thesis = thesis[: max(thesis_room - 1, 0)] + "…"
+    lines = [*head, *evidence, *edge, f"thesis: {thesis}", *tail]
 
     return CatalogMessage(
         kind=MessageKind.RECOMMENDATION,
-        title=f"Recommendation {rec.kind}: {rec.side} {rec.instrument}",
+        title=title,
         body="\n".join(lines),
         severity="info",
         data={

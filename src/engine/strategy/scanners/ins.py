@@ -54,10 +54,10 @@ Levels, pre-registered in the plan:
   INFORMATION, never an order level, and inventing one would put a fabricated number into the
   gate's edge math. The C3 edge input comes from the configured per-strategy expected edge
   (``ins.expected_edge_pct`` = the validated T+20 net +1.58%), not from a synthetic target.
-* **Exit is TIME**, not price: hold to the §7.1 ``max_holding`` swing cap of 20 trading days —
-  exactly the validated T+20 horizon — so the EXISTING max-holding machinery IS the exit path
-  (``RecommendationPipeline.check_aged_positions``). No exit code lives here or anywhere else for
-  ``ins``. The T+10 variant remains recorded evidence, not a rule.
+* **Exit is TIME**, not price: hold ``ins.hold_sessions`` (20) sessions — exactly the validated
+  T+20 horizon — and the D2 time exit (``RecommendationPipeline.time_exit_check``) IS the exit path.
+  No exit code lives here or anywhere else for ``ins``. The T+10 variant remains recorded evidence,
+  not a rule.
 
 Rounding order is pinned (as for ``brk20``): ``entry``/``stop`` are tick-rounded and the coherence
 test is applied AFTER rounding, so a stop that collapses onto the entry under tick rounding emits

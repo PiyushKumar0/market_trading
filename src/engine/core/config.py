@@ -525,10 +525,12 @@ class JobTimesCfg(BaseModel):
     universe_build_ist: time = time(8, 30)      # §3.2.4 UniverseBuilder
     catalyst_digest_ist: time = time(8, 35)     # §4.4 job 14 (§2.7 step 5)
     preopen_planner_ist: time = time(8, 50)     # §5.3
+    time_exit_check_ist: time = time(9, 30)     # D2 time exit (plan Q1.6)
     reconcile_ist: time = time(15, 50)          # §4.4 job 2 (A13)
     bhavcopy_ist: time = time(18, 0)            # §4.4 job 6
     corp_actions_ist: time = time(18, 15)       # §4.4 job 7 (A12)
     earnings_ist: time = time(18, 30)           # §4.4 job 8 (R2)
+    rec_outcomes_ist: time = time(18, 30)       # plan Q2.3 — after daily_bars (18:05), whose run it waits for
     deals_ist: time = time(18, 45)              # §4.4 job 9 (flagged_instrument_days)
     filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)
     filings_pit_fresh_ist: time = time(19, 0)   # §2.8 filings_pit_fresh (BSE fresh insider, date-keyed)

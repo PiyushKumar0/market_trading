@@ -9,7 +9,7 @@ Plan row (IMPLEMENTATION_PLAN.md §9.4, case 16), "Must hold":
 
 Scenario (``tests/chaos/_lifecycle_rig.py``: real lifecycle + CatchUpRunner over the real
 ``build_job_registry`` inventory, job BODIES recorded instead of hitting NSE/Kite/LLM): Tue's evening
-session left every job watermarked; process A runs Wed 2026-06-17 09:05 → clean stop 15:40, i.e.
+session left every job watermarked; process A runs Wed 2026-06-17 09:35 → clean stop 15:40, i.e.
 BEFORE the whole EOD window (reco-expiry 15:45, reconcile 15:50 … tick compaction 22:30). The PC
 sleeps overnight; process B boots Thu 08:05 (before the 08:15 instruments fire).
 
@@ -66,7 +66,7 @@ from engine.ops.jobs import (
 from tests.chaos._lifecycle_rig import EngineProcess, RigEnv, run_session
 
 TUE, WED, THU = date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18)
-A_BOOT, A_STOP, B_BOOT = time(9, 5), time(15, 40), time(8, 5)
+A_BOOT, A_STOP, B_BOOT = time(9, 35), time(15, 40), time(8, 5)   # A boots after the 09:30 time exit
 
 #: The date-keyed jobs the §9.4 row names (corp-actions: see the module docstring).
 PLAN_NAMED_DATE_KEYED = {JOB_RECONCILE, JOB_BHAVCOPY, JOB_DEALS, JOB_NIGHTLY_REVIEW}
@@ -90,7 +90,7 @@ def _missed_eod(proc: EngineProcess) -> tuple[set[str], set[str], set[str]]:
 
 
 async def _offline_across_wed_eod(tmp_path, monkeypatch) -> tuple[RigEnv, EngineProcess, int, int]:
-    """Tue evening session → Wed 09:05-15:40 session (stops BEFORE the EOD window) → Thu 08:05 boot.
+    """Tue evening session → Wed 09:35-15:40 session (stops BEFORE the EOD window) → Thu 08:05 boot.
     Returns (env, process B, job-ledger index at B's boot, notification index at B's boot)."""
     env = RigEnv(tmp_path, monkeypatch, start=_t(TUE, 22, 45))
     await run_session(env, _t(TUE, 22, 45), _t(TUE, 22, 50))

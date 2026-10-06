@@ -72,8 +72,8 @@ at sweep time. So, identically to ``ins`` and ``cat``:
   exist, and the §7.1 ``per_trade_risk.overnight_gap_mult`` (2.5x) arithmetic applies to a swing
   entry (the ``ins`` 2026-08-17 correction). It is NOT the rule's exit.
 * ``target`` = ``None``. The rule has no price target and will not invent one.
-* **Exit is TIME**: the existing §7.1 ``max_holding`` swing path
-  (``RecommendationPipeline.check_aged_positions``). No exit code lives here.
+* **Exit is TIME**: hold ``cat_reversal.hold_sessions`` sessions; the D2 time exit
+  (``RecommendationPipeline.time_exit_check``) is the exit path. No exit code lives here.
 
 Rounding order is pinned as for ``brk20``/``ins``/``cat``: ``entry``/``stop`` are tick-rounded and
 coherence is checked AFTER rounding, so a stop that collapses onto the entry emits nothing rather

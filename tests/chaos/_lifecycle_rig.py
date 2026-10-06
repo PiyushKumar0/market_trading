@@ -375,7 +375,7 @@ class EngineProcess:
         async def clear_entries_cause(reason: str) -> None:   # mirrors main.py clear_entries_cause
             await self.latch.clear_cause(reason, Actor.RISK_GATE)
 
-        self.registry = build_job_registry(s, env.job_fns())
+        self.registry = build_job_registry(s, env.job_fns(), calendar=self.calendar)
         self.catch_up = CatchUpRunner(
             self.conn, clock, self.calendar, self.registry.select(lambda sp: sp.job_id != JOB_TICK_COMPACT),
             freeze=freeze_entries, notify=env.notify, clear=clear_entries_cause,

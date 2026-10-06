@@ -250,21 +250,27 @@ def test_registry_covers_every_phase1_job() -> None:
                                                    # +1 feed_freshness (2026-09-24)
 
 
-def test_registry_phase2_jobs_register_when_their_fns_exist() -> None:
+def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
     """§8.3 wiring: digest 08:35 → planner 08:50 (run-latest, after the news chain in catch-up
-    order), reco-expiry 15:45 run-latest, nightly review 21:00 date-keyed (§2.6 per missed day)."""
+    order), time exit 09:30 run-latest ahead of the post-arm news chain, reco-expiry 15:45
+    run-latest, rec outcomes 18:30 date-keyed after daily_bars, nightly review 21:00 date-keyed
+    (§2.6 per missed day)."""
     fns = _all_noop_fns()
     fns[opsmain.JOB_CATALYST_DIGEST] = _noop
     fns[opsmain.JOB_PREOPEN_PLANNER] = _noop
     fns[opsmain.JOB_RECO_EXPIRE] = _noop
+    fns[opsmain.JOB_TIME_EXIT_CHECK] = _noop
+    fns[opsmain.JOB_REC_OUTCOMES] = _noop_dated
     fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
-    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns).specs()}
+    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns, calendar=calendar).specs()}
     assert set(by_id) == set(PHASE1_JOB_IDS) | set(opsmain.PHASE2_JOB_IDS)
 
     expected = {
         opsmain.JOB_CATALYST_DIGEST: (JobClass.RUN_LATEST, time(8, 35), 25),
         opsmain.JOB_PREOPEN_PLANNER: (JobClass.RUN_LATEST, time(8, 50), 28),
+        opsmain.JOB_TIME_EXIT_CHECK: (JobClass.RUN_LATEST, time(9, 30), 5),
         opsmain.JOB_RECO_EXPIRE:     (JobClass.RUN_LATEST, time(15, 45), 60),
+        opsmain.JOB_REC_OUTCOMES:    (JobClass.DATE_KEYED, time(18, 30), 35),
         opsmain.JOB_NIGHTLY_REVIEW:  (JobClass.DATE_KEYED, time(21, 0), 80),
     }
     for jid, (cls, at, order) in expected.items():
@@ -272,6 +278,13 @@ def test_registry_phase2_jobs_register_when_their_fns_exist() -> None:
     # Catch-up dependency order (§2.7 steps 4-6): news chain before digest before planner.
     news = by_id[opsmain.JOB_NEWS_CHAIN].order
     assert news < by_id[opsmain.JOB_CATALYST_DIGEST].order < by_id[opsmain.JOB_PREOPEN_PLANNER].order
+    assert by_id[opsmain.JOB_TIME_EXIT_CHECK].order < news
+    assert opsmain.JOB_TIME_EXIT_CHECK in POST_ARM_JOB_IDS
+    # rec_outcomes scores on bhavcopy's and daily_bars' bars: after both, on the clock and in catch-up.
+    for dep in (opsmain.JOB_BHAVCOPY, opsmain.JOB_DAILY_BARS):
+        assert by_id[dep].at < by_id[opsmain.JOB_REC_OUTCOMES].at
+        assert by_id[dep].order < by_id[opsmain.JOB_REC_OUTCOMES].order
+    assert opsmain.JOB_REC_OUTCOMES in POST_ARM_JOB_IDS
 
 
 def test_registry_classes_and_fire_times_match_the_schedule() -> None:
@@ -676,6 +689,27 @@ def test_holdings_reconcile_is_not_armed_without_a_broker(clock, calendar) -> No
                    ticker=object(), calendar=calendar, clock=clock)
 
     assert "holdings_reconcile" not in {j.id for j in sched._sched.get_jobs()}
+
+
+@pytest.mark.parametrize("wired", [True, False])
+def test_protection_reminder_tick_is_armed_every_300s_only_when_wired(clock, calendar, wired) -> None:
+    sched = Scheduler(clock, calendar)
+
+    async def _resolve_news(_hs) -> None:
+        return None
+
+    async def _tick() -> None:
+        return None
+
+    _arm_live_jobs(sched, load_settings(), bar_builder=None, health=None,
+                   news_ingest=None, resolve_news=_resolve_news,
+                   ticker=object(), calendar=calendar, clock=clock,
+                   protection_reminder_tick=_tick if wired else None)
+
+    jobs = {j.id: j for j in sched._sched.get_jobs()}
+    assert ("protection_reminder_tick" in jobs) is wired
+    if wired:
+        assert str(timedelta(seconds=300)) in str(jobs["protection_reminder_tick"].trigger)
 
 
 def test_nse_announcements_job_is_not_armed_when_disabled(clock, calendar) -> None:
@@ -1835,15 +1869,17 @@ def _post_arm_registry(events: list[str], *, gate: asyncio.Event | None = None,
     return reg
 
 
-def test_every_post_arm_job_is_a_registered_never_safety_critical_job() -> None:
+def test_every_post_arm_job_is_a_registered_never_safety_critical_job(calendar) -> None:
     """WO-15's deferred set must name real registry ids — a typo would silently defer nothing (and
     silently never fire it, since the post-arm pass selects BY id)."""
     fns = _all_noop_fns()
     fns[opsmain.JOB_CATALYST_DIGEST] = _noop
     fns[opsmain.JOB_PREOPEN_PLANNER] = _noop
     fns[opsmain.JOB_RECO_EXPIRE] = _noop
+    fns[opsmain.JOB_TIME_EXIT_CHECK] = _noop
+    fns[opsmain.JOB_REC_OUTCOMES] = _noop_dated
     fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
-    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns).specs()}
+    by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns, calendar=calendar).specs()}
     assert set(POST_ARM_JOB_IDS) <= set(by_id)
     # None of them is safety-critical: the deferred set may never contain an entry-gating job.
     assert all(by_id[j].job_class is not JobClass.SAFETY_CRITICAL for j in POST_ARM_JOB_IDS)

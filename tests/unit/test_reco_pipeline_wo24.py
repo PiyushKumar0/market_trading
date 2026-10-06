@@ -349,10 +349,10 @@ async def test_a_hung_context_on_a_position_event_never_escapes_on_bar(
 async def test_a_hung_context_on_the_time_stop_sweep_alerts_per_position_then_fails_the_job(
     conn, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
 ):
-    """§7.1 ``max_holding`` runs EOD and as a startup catch-up, so an escaping timeout takes out the
-    whole sweep — including the aged positions BEHIND the one that stalled. Each is now its own
-    alert, and the timeout is re-raised only once the sweep is done: a swallowed one would record a
-    success watermark for ``reco_expire`` and defer the exit by a day instead of the catch-up
+    """The D2 time exit runs at 09:30 and as a catch-up, so an escaping timeout takes out the whole
+    check — including the due positions BEHIND the one that stalled. Each is now its own alert, and
+    the timeout is re-raised only once the check is done: a swallowed one would record a success
+    watermark for ``time_exit_check`` and defer the exit by a session instead of the catch-up
     retrying it."""
     monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
     opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)         # far more than 20 trading sessions back
@@ -368,7 +368,7 @@ async def test_a_hung_context_on_the_time_stop_sweep_alerts_per_position_then_fa
 
     with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
         with pytest.raises(GateContextTimeout):
-            await pipeline.check_aged_positions(TODAY)
+            await pipeline.time_exit_check(TODAY)
 
     assert hanging.cancelled == 2                            # the sweep reached BOTH positions
     assert counted_rows(conn, "proposals") == 2

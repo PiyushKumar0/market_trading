@@ -463,7 +463,7 @@ async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, co
     )
     w.ctx_seam.ctx = _passing_ctx(positions_known=frozenset({position_id}))
 
-    issued = await w.pipeline.check_aged_positions(w.clock.today())
+    issued = await w.pipeline.time_exit_check(w.clock.today())
 
     assert issued == 1
     assert w.sdk.calls == calls_before                           # exits never touch Tier 1 (R1)

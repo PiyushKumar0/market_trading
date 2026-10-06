@@ -99,10 +99,9 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   share of the day; the ordering consequence of a high scale there is handled at the composition
   root (``ops.main._publication_order``), not by rescaling here. Rescaling is therefore NOT free:
   it would move this rule's own quantile history and its place in that batch sort.
-* Exit is TIME, not price, exactly as for ``cat``: ``hold_sessions`` (= the §7.1 swing ``max_holding``
-  cap) is carried in :data:`DEFAULT_PARAMS` purely as documentation of the intended cap — the
-  EXISTING max-holding machinery (``RecommendationPipeline.check_aged_positions``) is the exit path,
-  and no exit code lives here, mirroring ``cat.DEFAULT_PARAMS["hold_sessions"]`` exactly.
+* Exit is TIME, not price, exactly as for ``cat``: :data:`DEFAULT_PARAMS` ``hold_sessions`` is the
+  hold the hold map (``ops.holds``) gives hi52, and the D2 time exit
+  (``RecommendationPipeline.time_exit_check``) is the exit path; no exit code lives here.
 * Diagnostics (Frog-in-the-Pan path-smoothness — the v2 GATE's own inputs since 2026-09-12, and
   logged per surviving candidate by the composition root's ``hi52_sweep`` line):
   ``up_day_frac`` = fraction of the last 20 sessions with ``close > prev close``; ``max_day_move`` =

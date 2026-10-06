@@ -230,6 +230,10 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
   hard-stopped. A change to agents.yaml applies on the next engine boot — validate with the loader
   one-liner above first. The month column in `budget_ledger` is written but read by nothing.
 - Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
+- `/protected <symbol|rec_id>`: confirm the stop order for a taken position. Until then `/positions`
+  shows "UNPROTECTED (unconfirmed)" and `protection_reminder_tick` (300 s) sends at most two critical
+  reminders (30 min after `/taken`, deferred to 08:00 if outside 08:00-22:00; again once the next
+  session opens). Reminders stop on `/protected`, a close, or a zero holdings journal.
 - `/why <symbol>`: read-only report (universe status, hi52/brk20 distance to trigger, surveillance and
   results-day flags, latest insider/pledge filings, last rec, open positions, last verdict). Each
   DuckDB read times out at 5 s and prints "<section>: unavailable"; no LLM, no `/scan_now`.

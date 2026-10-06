@@ -549,32 +549,32 @@ def test_shipped_settings_cap_ins(conn):
 
 
 # =========================================================================== the exit path (§7.1)
-def test_max_holding_exit_needs_no_ins_specific_code():
-    """§6.1: "the EXISTING max-holding machinery IS the exit path" — `ins` ships NO exit code.
+def test_time_exit_needs_no_ins_specific_code():
+    """§6.1: the D2 time exit IS the `ins` exit path — `ins` ships NO exit code.
 
-    Two things make that true and both are asserted here rather than assumed:
-
-    1. ``RecommendationPipeline.check_aged_positions`` selects its cap by ``position['style']`` alone
-       and contains no ``strategy_id`` branch at all, so an `ins` position (style ``swing``) flows
-       through the identical path as any other swing.
-    2. The swing cap it reads is 20 trading days — exactly ``ins.hold_sessions`` and exactly the
-       validated T+20 horizon. If either number moved, the strategy's exit would silently stop
-       matching the horizon its evidence was measured over.
+    1. ``RecommendationPipeline.time_exit_check`` and its exit-session resolver name no strategy;
+       the hold comes from the hold map.
+    2. The hold map gives `ins` 20 sessions — exactly ``ins.hold_sessions``, the swing cap and the
+       validated T+20 horizon. If any number moved, the exit would silently stop matching the
+       horizon its evidence was measured over.
     """
     import inspect
-
-    from engine.ops.pipeline import RecommendationPipeline
-
-    source = inspect.getsource(RecommendationPipeline.check_aged_positions)
-    assert "strategy_id" not in source, "the max_holding exit must stay strategy-agnostic"
-    assert 'position["style"]' in source
+    from types import SimpleNamespace
 
     import yaml
 
     from engine.core.config import load_settings
+    from engine.ops.holds import build_hold_fn
+    from engine.ops.pipeline import RecommendationPipeline
     from engine.risk.limits import LimitTable
+
+    for fn in (RecommendationPipeline.time_exit_check, RecommendationPipeline._exit_due):
+        source = inspect.getsource(fn)
+        assert '"ins"' not in source and "ins.STRATEGY_ID" not in source
 
     limits_path = Path(__file__).resolve().parents[2] / "config" / "limits.yaml"
     table = LimitTable.model_validate(yaml.safe_load(limits_path.read_text(encoding="utf-8")))
+    settings = load_settings()
+    hold_fn = build_hold_fn(settings, SimpleNamespace(load=lambda: table))
+    assert hold_fn("ins", "swing") == settings.ins.hold_sessions == 20
     assert int(table.limits.max_holding.swing_trading_days) == 20
-    assert load_settings().ins.hold_sessions == 20

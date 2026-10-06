@@ -1288,6 +1288,29 @@ async def test_a_gapped_fill_is_recorded_and_the_stop_risk_drift_is_called_out(
     assert "CHECK THE SIZE" in summary and "1820.00" in summary and "2.5x" not in summary
 
 
+@pytest.mark.parametrize("gtt", [None, "place a single-trigger GTT: sell if price falls to 99"])
+async def test_take_reply_reprints_the_gtt_instruction_only_when_stored(book, cost_model, gtt):
+    rec = make_rec(cost_model, gtt_instruction=gtt)
+    book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    reply = await book.take(rec.rec_id, 10, Decimal("100.00"))
+    assert (gtt is None) or (gtt in reply)
+    assert (f"reply /protected {SYMBOL} once placed" in reply) == (gtt is not None)
+
+
+async def test_protect_stamps_once_by_symbol_or_rec_id(conn, book, cost_model):
+    rec = make_rec(cost_model)
+    book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    with pytest.raises(ValueError, match="no open recommended position"):
+        await book.protect(SYMBOL)                       # not taken yet
+    await book.take(rec.rec_id, 10, Decimal("100.00"))
+
+    assert "marked protected" in await book.protect(SYMBOL.lower())
+    stamped = conn.execute("SELECT owner_protected_at FROM positions").fetchone()[0]
+    assert stamped
+    assert "already confirmed" in await book.protect(rec.rec_id)
+    assert conn.execute("SELECT owner_protected_at FROM positions").fetchone()[0] == stamped
+
+
 # =========================================================================== the ledger matrix (Â§3.6)
 async def test_take_close_veto_and_the_worked_pnl(conn, ticker, pclock, book, cost_model):
     """The full outcome-capture matrix, to the paisa, with the Â§6.5 label it produces."""
@@ -1486,6 +1509,64 @@ async def test_an_exit_rec_is_not_a_candidate_and_keeps_the_bare_veto(conn, veto
     assert (row["human_action"], row["skip_reason"], row["skip_reason_at"]) == ("dismissed", None, None)
 
 
+@pytest.mark.parametrize("n", [0, 1, 3])
+async def test_reminder_rows_list_every_unreminded_expired_rec_until_marked(
+    conn, veto_book, cost_model, n
+):
+    recs = [_expired_rec(conn, veto_book, cost_model, instrument=f"SYM{i}") for i in range(n)]
+    ids = sorted(r.rec_id for r in recs)
+    assert sorted(r["rec_id"] for r in veto_book.reminder_rows(NOW)) == ids
+
+    veto_book.mark_reminded(ids, NOW)
+    assert veto_book.reminder_rows(NOW) == []
+
+
+async def test_reminder_rows_skip_exit_live_and_decided_recs(conn, veto_book, cost_model):
+    exit_rec = _expired_rec(conn, veto_book, cost_model, instrument="EXITSYM")
+    conn.execute(
+        "UPDATE recommendations SET payload=json_set(payload, '$.kind', 'exit') WHERE rec_id=?",
+        (exit_rec.rec_id,),
+    )
+    vetoed = _expired_rec(conn, veto_book, cost_model, instrument="VETOED")
+    await veto_book.veto(vetoed.rec_id, "price")
+    veto_book.deliver(
+        make_rec(cost_model, instrument="LIVE", valid_until=NOW + timedelta(days=1)),
+        ledger_fields=dict(LEDGER_FIELDS),
+    )
+    assert veto_book.reminder_rows(NOW) == []
+
+
+async def test_a_rec_expired_during_an_outage_is_reminded_inside_the_window_only(
+    conn, veto_book, cost_model
+):
+    rec = _expired_rec(conn, veto_book, cost_model)
+    two_sessions_on = datetime(2026, 6, 19, 15, 45, tzinfo=IST)      # Wed 06-17 expiry, Fri
+    assert [r["rec_id"] for r in veto_book.reminder_rows(two_sessions_on)] == [rec.rec_id]
+    assert veto_book.reminder_rows(datetime(2026, 6, 23, 15, 45, tzinfo=IST)) == []
+
+
+async def test_decision_reminder_message_has_one_line_per_rec_and_no_default_code(
+    conn, veto_book, cost_model
+):
+    from engine.notify.catalog import rec_decision_reminder
+
+    rec = _expired_rec(conn, veto_book, cost_model)
+    msg = rec_decision_reminder(veto_book.reminder_rows(NOW))
+    assert msg.kind is MessageKind.REC_DECISION_REMINDER and msg.severity != "critical"
+    assert msg.body == (
+        f"{SYMBOL} BUY qty 10 (expired 2026-06-17): "
+        f"/veto {SYMBOL} <market|price|size|trust|away|other>"
+    )
+    assert msg.data["rec_ids"] == [rec.rec_id]
+
+
+async def test_expire_stale_does_not_return_already_expired_recs(conn, veto_book, cost_model):
+    rec = make_rec(cost_model)
+    veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    assert veto_book.expire_stale(NOW + timedelta(hours=6)) == [rec.rec_id]
+    assert veto_book.expire_stale(NOW + timedelta(hours=7)) == []
+
+
 async def test_expire_stale_labels_non_fills_and_is_idempotent(conn, book, cost_model):
     """Â§3.6: a non-fill is itself training signal â€” attribution must not be biased to taken trades."""
     stale = make_rec(cost_model, valid_until=NOW - timedelta(minutes=1))
@@ -1495,8 +1576,8 @@ async def test_expire_stale_labels_non_fills_and_is_idempotent(conn, book, cost_
         book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
     await book.take(taken.rec_id, 10, Decimal("100.00"))
 
-    assert book.expire_stale(NOW) == 1
-    assert book.expire_stale(NOW) == 0                       # idempotent â€” human_action IS NULL filter
+    assert book.expire_stale(NOW) == [stale.rec_id]
+    assert book.expire_stale(NOW) == []                      # idempotent â€” human_action IS NULL filter
 
     actions = dict(conn.execute("SELECT rec_id, human_action FROM recommendations").fetchall())
     assert actions[stale.rec_id] == "expired"
@@ -1605,12 +1686,13 @@ async def test_aged_position_exit_is_deterministic(
         ctx=passing_ctx(positions_known=frozenset({position_id})),
         limits=StubLimits(limit_table),
     )
-    issued = await pipeline.check_aged_positions(TODAY)
+    issued = await pipeline.time_exit_check(TODAY)
 
     assert issued == 1 and harness.calls == []
     payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
     assert payload["kind"] == "exit" and payload["qty"] == 10
-    assert payload["manual_checklist"] == [f"exit at market: close {SYMBOL} x10 now"]
+    # No entry rec: the 21st session after opened_at (2026-03-02), Holi and Good Friday skipped.
+    assert payload["manual_checklist"] == [f"{SYMBOL} x10 — overdue since 2026-04-06: sell now"]
     proposal = json.loads(conn.execute("SELECT payload FROM proposals").fetchone()[0])
     assert proposal["reason"] == "time_stop" and proposal["agent_id"] == "platform"
     assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
@@ -1987,8 +2069,8 @@ async def test_a_sold_outside_the_ledger_position_ages_out_of_the_O16_window(
     delivers NO exit recommendation at all, so three calendar days after the last one the position
     stops reading as "exiting" and starts counting against the §7.1 ``max_open_positions`` /
     ``per_sector_exposure`` caps again - capacity the owner no longer really has, until the ``/closed``
-    reply lands or the §7.1 ``max_holding`` sweep starts issuing its daily deterministic exit (which
-    re-enters the window: ``test_the_max_holding_sweep_is_not_gated_by_the_position_event_screens``).
+    reply lands or the D2 time exit starts issuing its daily deterministic exit (which
+    re-enters the window: ``test_the_time_exit_is_not_gated_by_the_position_event_screens``).
 
     It is a CAPACITY cost, never a risk one - the caps get tighter, not looser - and the alternative
     inside WO-D2's file scope was worse: teaching the gate this predicate would relax a §7.1 limit on
@@ -2026,12 +2108,13 @@ async def test_a_sold_outside_the_ledger_position_ages_out_of_the_O16_window(
     assert _exiting() == frozenset()      # ⇒ it occupies a §7.1 position/sector slot again
 
 
-async def test_the_max_holding_sweep_is_not_gated_by_the_position_event_screens(
+async def test_the_time_exit_is_not_gated_by_the_position_event_screens(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """§7.1 ``max_holding`` is a DETERMINISTIC platform decision, not a position event: it spends no
-    analyst call and it is the backstop that keeps a stale position from living forever. The WO-D2
-    screens sit on the analyst path only and must not reach it."""
+    """The D2 time exit is a DETERMINISTIC platform decision, not a position event: it spends no
+    analyst call and it is the backstop that keeps a stale position from living forever — so it
+    alerts even when the holdings journal shows zero shares. The WO-D2 screens sit on the analyst
+    path only and must not reach it."""
     opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)
     position_id = _open_position(conn, pclock, style="swing", opened_at=opened, stop="95")
     _observe_holding(conn, position_id, TODAY - timedelta(days=1))
@@ -2040,7 +2123,7 @@ async def test_the_max_holding_sweep_is_not_gated_by_the_position_event_screens(
         conn, pclock, calendar, book, limit_table, cost_model, FakeHarness(), position_id
     )
 
-    assert await pipeline.check_aged_positions(TODAY) == 1
+    assert await pipeline.time_exit_check(TODAY) == 1
 
 
 # ------------------------------------ the open-positions line the analyst reasons over (WO-D2 residue)
@@ -3452,7 +3535,7 @@ async def test_expired_then_taken_then_closed_records_the_real_outcome(
 
     rec = make_rec(cost_model)
     book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
-    assert book.expire_stale(NOW + _td(days=1)) == 1
+    assert book.expire_stale(NOW + _td(days=1)) == [rec.rec_id]
     row = conn.execute("SELECT outcome_label FROM learning_ledger WHERE rec_id=?", (rec.rec_id,)).fetchone()
     assert row["outcome_label"] == "no_action"                # the expiry stamp the fix must undo
 

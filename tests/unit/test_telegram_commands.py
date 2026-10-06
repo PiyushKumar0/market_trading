@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -127,6 +128,12 @@ class _FakeBook:
         if self._raises:
             raise self._raises
         return f"recorded: vetoed {rec_id}"
+
+    async def protect(self, symbol_or_rec: str) -> str:
+        self.calls.append(("protect", symbol_or_rec))
+        if self._raises:
+            raise self._raises
+        return f"recorded: protected {symbol_or_rec}"
 
 
 class _BookWithApproval(_FakeBook):
@@ -757,6 +764,30 @@ async def test_positions_lists_open_rows(clock, conn, msg):
 
 
 @pytest.mark.asyncio
+async def test_positions_protection_text_for_recommended_rows(clock, conn, msg):
+    _insert_position(conn, "pos-a", symbol="AAA", protection_state=None)
+    _insert_position(conn, "pos-b", symbol="BBB", protection_state=None)
+    conn.execute("UPDATE positions SET owner_protected_at='2026-06-17T10:20:00+05:30' "
+                 "WHERE position_id='pos-b'")
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
+
+    await bot._cmd_positions(_Update(msg), _Ctx())
+    lines = {ln.split()[0]: ln for ln in msg.sent[0].splitlines()[1:]}
+    assert "UNPROTECTED (unconfirmed)" in lines["AAA"]
+    assert "owner-confirmed protected 2026-06-17T10:20:00+05:30" in lines["BBB"]
+
+
+@pytest.mark.asyncio
+async def test_protected_delegates_to_the_book_and_checks_arity(clock, msg):
+    book = _FakeBook()
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)
+    await bot._cmd_protected(_Update(msg), _Ctx("RELIANCE"))
+    await bot._cmd_protected(_Update(msg), _Ctx())
+    assert book.calls == [("protect", "RELIANCE")]
+    assert msg.sent == ["recorded: protected RELIANCE", "usage: /protected <symbol|rec_id>"]
+
+
+@pytest.mark.asyncio
 async def test_positions_empty_book(clock, conn, msg):
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
     await bot._cmd_positions(_Update(msg), _Ctx())
@@ -1035,8 +1066,8 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     assert message.kind == MessageKind.RECOMMENDATION
     for fragment in (
         "BUY RELIANCE", "intraday/MIS", "qty 5", "₹12250.00",
-        "entry 2449.00-2451.00", "stop 2400.00", "targets 2550.00 / 2600.00",
-        "confidence 0.72", "gate: shrink (approved qty 5)",
+        "entry 2449.00-2451.00", "stop ₹2400.00 = 2.1% below entry", "targets 2550.00 / 2600.00",
+        "gate: shrunk 10→5",
         "breakeven 0.15%", "edge 3.0x",
         "after entry fills place SL-M at 2400.00", "square off by 10:30",
     ):
@@ -1049,6 +1080,7 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     assert "per_trade_risk: 1.4% vs 1.0% — headroom -0.4% (FAILED)" in text
     # R8: structured payload lives in data, never leaks into the owner's prose.
     assert message.data["rec_id"] == "rec-1" and message.data["verdict"] == "shrink"
+    assert "confidence" not in text and message.data["confidence"] == 0.72
     for leak in ("CheckResult(", "rule_id=", "MessageKind.", "data={", "reply_keyboard="):
         assert leak not in text, leak
     # A genuine ZONE (low != high) is not a level, and an unsupplied quote is stated as unknown
@@ -1080,7 +1112,7 @@ def test_recommendation_renders_a_targetless_ins_payload(clock):
 
     assert "swing/CNC" in text
     assert "targets (none)" in text                 # honest absence, not a fabricated level
-    assert "stop 94.00" in text
+    assert "stop ₹94.00 = 6.0% below entry" in text
     assert "level 100.00 (limit-at-level)" in text  # the pre-open reference, labelled as a level
     assert "current price 100.50" in text
     assert "time exit: square off after 20 trading days" in text
@@ -1151,7 +1183,7 @@ def test_recommendation_ends_with_a_copy_ready_capture_footer(clock):
     unrecordable. Symbol and qty are prefilled; ONLY the fill price stays a placeholder, because that
     number is the owner's and a guessed one would be a fabrication in their own audit trail."""
     text = catalog.recommendation_message(_recommendation(clock)).render()
-    footer = "record: /taken RELIANCE 5 <price> · decline: /veto RELIANCE"
+    footer = "record: /taken RELIANCE 5 <price> · decline: /veto RELIANCE <market|price|size|trust|away|other>"
 
     assert footer in text
     assert text.splitlines()[-1] == footer          # LAST line: the reply, after the B7 checklist
@@ -1176,6 +1208,93 @@ def test_adjust_recommendation_footer_offers_only_the_decline(clock):
     assert "/taken" not in text and "/closed" not in text
 
 
+def _card(clock, *, bound: bool = True, failed: tuple[str, ...] = (), **update) -> Recommendation:
+    """The BHEL 10-06 card: stop re-anchored 402.25 -> 418.30, shrunk 14 -> 9."""
+    base = _recommendation(clock)
+    checks = [CheckResult(rule_id=r, passed=r not in {"per_trade_risk", *failed}, value="1", limit="2",
+                          headroom="1") for r in ("per_trade_risk", "gross", "net", *failed)]
+    reasons = ["shrink: qty 14 -> 9 (bound by per_trade_risk)"] if bound else ["shrunk to fit"]
+    gate = base.gate.model_copy(update={"original_qty": 14, "approved_qty": 9, "checks": checks,
+                                        "reasons": reasons})
+    fields = {
+        "instrument": "BHEL", "qty": 9, "notional": Decimal("4005.00"), "gate": gate, "targets": [],
+        "entry_zone": (Decimal("445.00"), Decimal("445.00")), "stop": Decimal("418.30"),
+        "reference_entry": Decimal("427.90"), "reference_stop": Decimal("402.25"),
+        "risk_inr": Decimal("241"), "stop_atr_mult": Decimal("2.14"), "hold_sessions": 20,
+        "exit_session": date(2026, 11, 3), "exit_kind": "time", "registered_edge_pct": Decimal("1.53"),
+        "evidence": ["backtest: n 100, hit 60%"], "thesis": "52-week high", **update,
+    }
+    return base.model_copy(update=fields)
+
+
+def test_card_lines_follow_the_plan_order(clock):
+    lines = catalog.recommendation_message(_card(clock)).render().splitlines()
+    wanted = [
+        "BUY BHEL", "stop ₹418.30 = 6.0% below entry · 2.1× daily ATR · rule 6.0% re-anchored from ₹427.90 to ₹445.00",
+        "evidence:", "registered edge 1.53% net ≈ ₹61 — not a forecast", "thesis:", "gate: shrunk 14→9 (bound by per_trade_risk)",
+        "cost:", "checklist",
+    ]
+    at = [next(i for i, ln in enumerate(lines) if ln.startswith(w)) for w in wanted]
+    assert at == sorted(at)
+    assert "₹241 at risk to the stop · sell by the close on 2026-11-03 (session 20)" in lines[1]
+    assert "confidence" not in "\n".join(lines)
+
+
+def test_card_prints_only_the_data_it_has(clock):
+    bare = {"risk_inr": None, "stop_atr_mult": None, "reference_stop": None, "hold_sessions": None,
+            "exit_session": None, "exit_kind": None, "registered_edge_pct": None, "evidence": []}
+    text = catalog.recommendation_message(_card(clock, **bare)).render()
+    for absent in ("at risk", "ATR", "re-anchored", "sell by", "pending", "evidence", "registered edge"):
+        assert absent not in text
+
+
+@pytest.mark.parametrize(
+    ("update", "clause"),
+    [
+        ({"exit_session": None}, "exit date pending (NSE {y} calendar)"),
+        ({"exit_kind": "stop_target", "exit_session": None, "targets": [Decimal("470.00")]},
+         "stop ₹418.30 / target ₹470.00; time cap pending (NSE {y} calendar)"),
+        ({"exit_kind": "stop_target", "targets": [Decimal("470.00")]},
+         "stop ₹418.30 / target ₹470.00; time cap 2026-11-03"),
+    ],
+)
+def test_card_exit_forms(clock, update, clause):
+    rec = _card(clock, **update)
+    assert clause.format(y=rec.created_at.year + 1) in catalog.recommendation_message(rec).render()
+
+
+def test_shrink_cause_is_not_marked_failed_but_other_failures_are(clock):
+    text = catalog.recommendation_message(_card(clock, failed=("r1", "r2", "r3", "r4", "r5", "r6"))).render()
+    assert "per_trade_risk: 1 vs 2 — headroom 1\n" in text
+    assert all(f"r{i}: 1 vs 2 — headroom 1 (FAILED)" in text for i in range(1, 7))
+
+
+def test_shrink_without_a_bound_by_reason_still_reads_shrunk(clock):
+    text = catalog.recommendation_message(_card(clock, bound=False)).render()
+    assert "gate: shrunk 14→9\n" in text and "bound by" not in text
+
+
+def test_card_fits_telegram_and_never_cuts_checklist_or_footer(clock):
+    checklist = [f"step {i} " + "x" * 80 for i in range(20)]
+    rec = _card(clock, thesis="T" * 4000, manual_checklist=checklist, evidence=["e" * 900] * 4)
+    message = catalog.recommendation_message(rec)
+    text = message.render()
+    assert len(text) <= 4096
+    assert all(f"  • {item}" in text for item in checklist)
+    assert text.splitlines()[-1].startswith("record: /taken BHEL 9 <price>")
+
+
+def test_render_does_no_io(clock, monkeypatch):
+    def _no_io(*_a, **_k):
+        raise AssertionError("I/O during render")
+
+    rec = _card(clock)
+    monkeypatch.setattr("builtins.open", _no_io)
+    monkeypatch.setattr("socket.socket.connect", _no_io)
+    monkeypatch.setattr("sqlite3.connect", _no_io)
+    catalog.recommendation_message(rec).render()
+
+
 @pytest.mark.asyncio
 async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, msg):
     """End-to-end WO-29: what the owner reads in the delivery message, typed back verbatim, reaches
@@ -1190,7 +1309,7 @@ async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, m
     record, _sep, decline = footer.partition(" · ")
     symbol, qty, placeholder = record.removeprefix("record: /taken ").split()
     assert (symbol, qty, placeholder) == ("RELIANCE", "5", "<price>")
-    assert decline == "decline: /veto RELIANCE"
+    assert decline == "decline: /veto RELIANCE <market|price|size|trust|away|other>"
 
     book = _FakeBook()
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)

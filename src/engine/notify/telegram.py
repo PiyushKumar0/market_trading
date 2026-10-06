@@ -230,6 +230,7 @@ _USAGE_CLOSED = "/closed <symbol|rec_id> <price>"
 VETO_REASONS = ("market", "price", "size", "trust", "away", "other")
 _USAGE_VETO = f"/veto <symbol|rec_id> <{'|'.join(VETO_REASONS)}>"
 _USAGE_WHY = "/why <symbol>"
+_USAGE_PROTECTED = "/protected <symbol|rec_id>"
 
 #: Rows a resolution reply may list before it summarises the rest. ``_reply`` writes straight to
 #: ``reply_text`` — it does NOT pass through ``send()``'s splitter — so an unbounded list would
@@ -256,6 +257,8 @@ class RecoBook(Protocol):
     async def close(self, rec_id: str, price: Decimal) -> str: ...
 
     async def veto(self, rec_id: str, reason: str | None) -> str: ...
+
+    async def protect(self, symbol_or_rec: str) -> str: ...
 
     def decision_candidates(self, symbol: str | None, now: datetime) -> list[dict[str, Any]]: ...
 
@@ -313,6 +316,9 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Decline a recommendation with a reason (live, or expired within the last "
                  "sessions); it is recorded as vetoed, never as taken. Exit and adjust "
                  "recommendations need no reason.", True),
+    _CommandSpec("protected", _USAGE_PROTECTED,
+                 "Confirm you placed the protective stop order for a taken position; stops the "
+                 "protection reminders.", True),
     _CommandSpec("close", "/close <position_id>",
                  "Guidance for exiting a position — in RECOMMEND the exit is yours to place (B7).",
                  True),
@@ -927,6 +933,7 @@ class TelegramBot:
             "taken": self._cmd_taken,
             "closed": self._cmd_closed,
             "veto": self._cmd_veto,
+            "protected": self._cmd_protected,
             "close": self._cmd_close,
             "positions": self._cmd_positions,
             "pnl": self._cmd_pnl,
@@ -1414,6 +1421,18 @@ class TelegramBot:
         _log.warning("telegram_cmd_veto", arg=args[0], rec_id=rec_id, reason=reason)
         await _reply(update, await _book_result(self._reco_book.veto(rec_id, reason)))
 
+    async def _cmd_protected(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner confirms the protective stop order is placed (D6)."""
+        if self._reco_book is None:
+            await _reply(update, "/protected: recommendation book not wired.")
+            return
+        args = _args(context)
+        if len(args) != 1:
+            await _reply(update, f"usage: {_USAGE_PROTECTED}")
+            return
+        _log.warning("telegram_cmd_protected", arg=args[0])
+        await _reply(update, await _book_result(self._reco_book.protect(args[0])))
+
     async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Exit guidance — the v1 answer, and an honest one: in RECOMMEND the platform places ZERO API
         orders (B7), so there is nothing for this command to send. It marks nothing and changes no
@@ -1437,7 +1456,7 @@ class TelegramBot:
             return
         rows = self._conn.execute(
             "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, origin, "
-            "protection_state FROM positions WHERE state='OPEN' ORDER BY opened_at"
+            "protection_state, owner_protected_at FROM positions WHERE state='OPEN' ORDER BY opened_at"
         ).fetchall()
         _log.info("telegram_cmd_positions", count=len(rows))
         if not rows:
@@ -1445,10 +1464,17 @@ class TelegramBot:
             return
         lines = [f"open positions: {len(rows)}"]
         for row in rows:
+            if row["protection_state"]:
+                protection = row["protection_state"]
+            elif row["origin"] == "recommended":
+                protection = (f"owner-confirmed protected {row['owner_protected_at']}"
+                              if row["owner_protected_at"] else "UNPROTECTED (unconfirmed)")
+            else:
+                protection = "unprotected"
             lines.append(
                 f"{row['symbol']} {row['side']} {row['qty']} @ {row['avg_entry']} · "
                 f"{row['product'] or '-'} · stop {row['stop'] or '-'} · target {row['target'] or '-'} · "
-                f"{row['origin']} · {row['protection_state'] or 'unprotected'} · id {row['position_id']}"
+                f"{row['origin']} · {protection} · id {row['position_id']}"
             )
         await _reply(update, "\n".join(lines))
 

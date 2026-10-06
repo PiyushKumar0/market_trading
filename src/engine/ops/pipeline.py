@@ -15,8 +15,8 @@ Two objects:
   labelled ``no_action`` in the ledger so attribution is not biased toward only the trades the owner
   happened to take (§3.6/§6.5).
 * :class:`RecommendationPipeline` — the trigger handlers. ``on_signal_candidate`` (§5.2 trigger a) is
-  the entry path and is **window-gated**; ``on_bar`` (trigger b) and ``check_aged_positions`` (§7.1
-  ``max_holding``) are risk-reducing and therefore **never** window-gated (R3); ``heartbeat``
+  the entry path and is **window-gated**; ``on_bar`` (trigger b) and ``time_exit_check`` (the D2
+  time exit) are risk-reducing and therefore **never** window-gated (R3); ``heartbeat``
   (trigger c) is window-gated and can only refresh the regime note.
 
 Conventions that are load-bearing here:
@@ -25,7 +25,7 @@ Conventions that are load-bearing here:
   ``Clock``/``NSECalendar``; any value the model emits is discarded by ``parse_intraday``.
 * **Fail to no-proposal (D7).** A governor block, a schema failure, a timeout or an SDK death all
   resolve to "no recommendation + owner alert" — never to a salvaged/guessed action.
-* **Exits never depend on an LLM (R1).** :meth:`check_aged_positions` builds its ``ExitAction``
+* **Exits never depend on an LLM (R1).** :meth:`time_exit_check` builds its ``ExitAction``
   deterministically in Python and never calls the harness.
 * **Money is ``Decimal``, timestamps are tz-aware IST strings** in every row written here.
 * **The analyst slot goes to the best pending candidate, not the earliest** (§5.2(a), WO-1
@@ -119,7 +119,7 @@ NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
 #: ``agent_calls.agent_id`` are all this one string.
 INTRADAY_AGENT_ID = "intraday_analyst"
 
-#: ``agent_id`` stamped on a DETERMINISTIC (no-LLM) proposal — the §7.1 ``max_holding`` time stop.
+#: ``agent_id`` stamped on a DETERMINISTIC (no-LLM) proposal — the D2 time exit.
 #: Distinct from the analyst id so the ledger can separate model decisions from platform decisions.
 PLATFORM_AGENT_ID = "platform"
 
@@ -165,10 +165,10 @@ _HOT_PATH_COUNTERS = (
 )
 _HOT_PATH_TIMERS = ("atr_store_read_ms", "atr_incremental_ms", "sector_store_read_ms")
 
-#: The deterministic time-stop thesis (§7.1 ``max_holding``). A constant, not model text: R1 says an
-#: exit must survive with the LLM dead, so nothing on this path may be generated.
+#: The deterministic time-exit thesis (D2). A constant, not model text: R1 says an exit must survive
+#: with the LLM dead, so nothing on this path may be generated.
 TIME_STOP_THESIS = (
-    "Deterministic time stop: this position has exceeded the §7.1 max_holding age for its style. "
+    "Deterministic time exit: this position has reached the end of its hold. "
     "No model was consulted — exits and stops never depend on an LLM response (R1)."
 )
 
@@ -525,6 +525,10 @@ class RecommendationBook:
             f"(position {position_id}). The protective orders are yours to place — the platform "
             "places none in RECOMMEND (B7)."
         )
+        if data.get("gtt_instruction"):
+            summary += (
+                f"\n{data['gtt_instruction']}\nreply /protected {data.get('instrument')} once placed"
+            )
         drift = self._stop_risk_drift(data, price)
         if drift is None:
             return summary
@@ -710,8 +714,8 @@ class RecommendationBook:
         )
 
     # ------------------------------------------------------------------ TTL sweep
-    def expire_stale(self, now: datetime) -> int:
-        """Expire every unconfirmed recommendation past ``valid_until``; returns how many (§3.6).
+    def expire_stale(self, now: datetime) -> list[str]:
+        """Expire every unconfirmed recommendation past ``valid_until``; returns their rec_ids (§3.6).
 
         The unbiased training signal: a non-fill is labelled ``no_action`` rather than dropped, so
         attribution is not computed only over the trades the owner happened to take. Idempotent — an
@@ -729,7 +733,7 @@ class RecommendationBook:
             if recommendation_expired(data.get("valid_until"), now):
                 stale.append(str(row["rec_id"]))
         if not stale:
-            return 0
+            return []
         stamp = now.isoformat()
         with transaction(self._conn):
             for rec_id in stale:
@@ -741,7 +745,51 @@ class RecommendationBook:
                     (stamp, rec_id),
                 )
         _log.info("recommendations_expired", count=len(stale), rec_ids=stale)
-        return len(stale)
+        return stale
+
+    def reminder_rows(self, now: datetime) -> list[dict[str, Any]]:
+        """Expired decision candidates (see :meth:`decision_candidates`) not yet reminded."""
+        pending = {
+            r[0] for r in self._conn.execute(
+                "SELECT rec_id FROM recommendations "
+                "WHERE human_action='expired' AND reminder_sent_at IS NULL"
+            )
+        }
+        return [c for c in self.decision_candidates(None, now) if c["rec_id"] in pending]
+
+    def mark_reminded(self, rec_ids: list[str], now: datetime) -> None:
+        with transaction(self._conn):
+            self._conn.executemany(
+                "UPDATE recommendations SET reminder_sent_at=? WHERE rec_id=?",
+                [(now.isoformat(), rec_id) for rec_id in rec_ids],
+            )
+
+    # ------------------------------------------------------------------ owner confirms the stop order
+    async def protect(self, symbol_or_rec: str) -> str:
+        """``/protected <symbol|rec_id>`` — stamp ``owner_protected_at`` on the OPEN recommended
+        position, found through its learning-ledger rec link."""
+        arg = symbol_or_rec.strip()
+        rows = self._conn.execute(
+            "SELECT DISTINCT p.position_id, p.symbol, p.owner_protected_at FROM positions p "
+            "JOIN learning_ledger l ON l.position_id = p.position_id "
+            "WHERE p.state='OPEN' AND p.origin='recommended' AND (p.symbol=? OR l.rec_id=?)",
+            (arg.upper(), arg),
+        ).fetchall()
+        if not rows:
+            raise ValueError(f"no open recommended position for {arg}")
+        if len(rows) > 1:
+            raise ValueError(f"{arg} matches {len(rows)} open positions — send the rec_id instead")
+        row = rows[0]
+        if row["owner_protected_at"]:
+            return f"{row['symbol']} already confirmed protected at {row['owner_protected_at']}."
+        now = self._clock.now()
+        with transaction(self._conn):
+            self._conn.execute(
+                "UPDATE positions SET owner_protected_at=? WHERE position_id=?",
+                (now.isoformat(), row["position_id"]),
+            )
+        _log.warning("position_protected", position_id=row["position_id"], symbol=row["symbol"])
+        return f"{row['symbol']} marked protected (owner-confirmed) at {now:%Y-%m-%d %H:%M}."
 
     # ------------------------------------------------------------------ internals
     def _ledger_columns(self) -> frozenset[str]:
@@ -2369,8 +2417,8 @@ class RecommendationPipeline:
     async def _handle_gate_context_timeout_position(
         self, position: sqlite3.Row, action: Any, exc: GateContextTimeout
     ) -> None:
-        """The same WO-24a landing for the two position-management paths (trigger (b) and the §7.1
-        sweep). No verdict is fabricated and the orphan is left for :meth:`sweep_orphaned_proposals`,
+        """The same WO-24a landing for the two position-management paths (trigger (b) and the D2
+        time exit). No verdict is fabricated and the orphan is left for :meth:`sweep_orphaned_proposals`,
         exactly as on the candidate path; there is no day slot to hand back here, because neither
         path is a prescreen publication. Shares the ERROR event name with the candidate handler so
         one grep finds every timeout. Never raises: it IS the failure path.
@@ -2381,11 +2429,11 @@ class RecommendationPipeline:
             "gate_context_timeout", position_id=position_id, symbol=symbol, action=action.action,
             proposal_id=exc.proposal_id, deadline_s=_GATE_CONTEXT_DEADLINE_S,
         )
-        # The deterministic time stop is the only proposal here the platform builds itself.
+        # The deterministic time exit is the only proposal here the platform builds itself.
         if str(action.agent_id) == PLATFORM_AGENT_ID:
             next_step = (
-                "the sweep finishes the other aged positions, then fails the reco_expire job so "
-                "the catch-up retries it (30-min sweep / next startup); it is idempotent by age"
+                "the check finishes the other due positions, then fails the time_exit_check job so "
+                "the catch-up retries it (30-min sweep / next startup), re-issuing every due exit"
             )
         else:
             next_step = (
@@ -2881,15 +2929,14 @@ class RecommendationPipeline:
         self._book.deliver(rec, ledger_fields=self._manage_ledger_fields(action, verdict, position))
         await self._send(catalog.recommendation_message(rec, ltp=ltp))
 
-    # ================================================================== §7.1 max_holding
-    async def check_aged_positions(self, d: date) -> int:
-        """§7.1 ``max_holding`` zombie protection — run EOD and as a startup catch-up (§2.6).
+    # ================================================================== D2 time exit
+    async def time_exit_check(self, d: date) -> int:
+        """D2 time exit: an exit recommendation for every OPEN recommended position whose exit
+        session is on or before ``d``, re-issued each session until ``/closed``.
 
-        DETERMINISTIC: the ``ExitAction`` is built in Python and the harness is never called. R1 —
-        an exit that only happens when a model answers is not an exit. Returns how many exit
-        recommendations were issued. A ``GateContextTimeout`` on one position is alerted and the
-        sweep continues, but it is re-raised once the loop is done so the job's watermark records a
-        failure and the catch-up retries — a swallowed timeout would defer a §7.1 exit by a day.
+        DETERMINISTIC (R1): the harness is never called. Returns how many exit recommendations were
+        issued. A ``GateContextTimeout`` on one position is alerted and the loop continues; it is
+        re-raised after the loop so the job records a failure and the catch-up retries.
         """
         table = self._limits.load()
         caps = {
@@ -2906,8 +2953,8 @@ class RecommendationPipeline:
             cap = caps.get(style)
             if cap is None:                       # intraday is squared off by the window, not by age
                 continue
-            age = self._session_age(position["opened_at"], d)
-            if age is None or age <= cap:
+            due = self._exit_due(position, style, cap)
+            if due is None or due > d:
                 continue
             action = ExitAction(
                 action="exit",
@@ -2926,27 +2973,69 @@ class RecommendationPipeline:
                     action, str(position["symbol"]), str(position["side"] or "BUY"), style, d
                 )
             except GateContextTimeout as exc:
-                # One stalled position may not take the sweep down with it: the aged positions
+                # One stalled position may not take the check down with it: the due positions
                 # BEHIND it still have to be looked at (WO-24a). Re-raised after the loop.
                 await self._handle_gate_context_timeout_position(position, action, exc)
                 timed_out = timed_out or exc
                 continue
             if verdict.verdict not in ("approve", "shrink"):
                 continue
-            rec = self._manage_recommendation(action, verdict, position, None)
+            rec = self._manage_recommendation(
+                action, verdict, position, None, checklist=[self._time_exit_line(position, due, d)]
+            )
             self._book.deliver(
                 rec, ledger_fields=self._manage_ledger_fields(action, verdict, position)
             )
             await self._send(catalog.recommendation_message(rec))
             issued += 1
-            _log.warning("max_holding_exit_recommended", position_id=position["position_id"],
-                         style=style, age_sessions=age, cap=cap, rec_id=rec.rec_id)
-        # The §7.1 sweep is this class's own end-of-session hook, so it is where the WO-8 read
-        # ledger gets emitted — one line per session, no new wiring in the composition root.
-        self.log_hot_path_stats("eod")
+            _log.warning("time_exit_recommended", position_id=position["position_id"],
+                         style=style, exit_session=due.isoformat(), rec_id=rec.rec_id)
         if timed_out is not None:
             raise timed_out
         return issued
+
+    def _exit_due(self, position: sqlite3.Row, style: str, cap: int) -> date | None:
+        """The position's exit session: the entry rec's payload ``exit_session``, else the hold
+        counted from the rec's delivery (never from ``opened_at``); with no entry rec, the first
+        session past the style ``cap`` counted from ``opened_at``. ``None`` = not computable yet."""
+        entry = next(
+            (row for row in self._conn.execute(
+                "SELECT r.payload, r.delivered_at, l.strategy_id FROM learning_ledger l "
+                "JOIN recommendations r ON r.rec_id = l.rec_id "
+                "WHERE l.position_id = ? AND r.delivered_at IS NOT NULL ORDER BY r.delivered_at",
+                (position["position_id"],),
+            ) if RecommendationBook._kind(row) == "entry"),
+            None,
+        )
+        if entry is not None:
+            data = RecommendationBook._rec_payload(entry)
+            try:
+                return date.fromisoformat(str(data["exit_session"]))
+            except (KeyError, ValueError):
+                pass
+            strategy_id = str(entry["strategy_id"] or data.get("strategy_id") or "")
+            hold = self._hold_fn(strategy_id, style) if self._hold_fn else None
+            if hold is not None:
+                try:
+                    delivered = datetime.fromisoformat(str(entry["delivered_at"]))
+                    return exit_session(self._calendar, delivered, hold)
+                except ValueError:
+                    pass
+        try:
+            opened = datetime.fromisoformat(str(position["opened_at"])).date()
+            return self._calendar.add_sessions(opened + timedelta(days=1), cap, count_special=True)
+        except ValueError:
+            return None
+
+    def _time_exit_line(self, position: sqlite3.Row, due: date, d: date) -> str:
+        now = self._clock.now()
+        session = self._calendar.session(d)
+        before_close = session is not None and now < session.close
+        head = f"{position['symbol']} x{int(position['qty'] or 0)} — "
+        if due == d and before_close:
+            return head + f"sell before the close on {due.isoformat()}"
+        inside = before_close and session is not None and session.open <= now
+        return head + f"overdue since {due.isoformat()}: sell {'now' if inside else 'at the next open'}"
 
     # ================================================================== trigger (c): heartbeat
     async def heartbeat(self) -> None:
@@ -3078,7 +3167,8 @@ class RecommendationPipeline:
         ))
 
     def _manage_recommendation(
-        self, action: Any, verdict: GateVerdict, position: sqlite3.Row, ltp: Decimal | None
+        self, action: Any, verdict: GateVerdict, position: sqlite3.Row, ltp: Decimal | None,
+        *, checklist: list[str] | None = None,
     ) -> Recommendation:
         """Build an ``exit``/``adjust`` recommendation for an already-open recommended position.
 
@@ -3100,7 +3190,7 @@ class RecommendationPipeline:
         rec_side = held_side if adjust else ("SELL" if held_side == "BUY" else "BUY")
         stop = _dec(action.new_stop) if adjust else _dec(position["stop"])
         notional = _money(Decimal(qty) * reference)
-        checklist = (
+        checklist = checklist or (
             [f"move the stop on {position['symbol']} to {stop} (modify the existing SL-M/GTT)"]
             if adjust
             else [f"exit at market: close {position['symbol']} x{qty} now"]
@@ -3207,22 +3297,6 @@ class RecommendationPipeline:
             return self._calendar.trade_window(d)
         except ValueError:               # not a trading day ⇒ no window ⇒ no entry-seeking calls
             return None
-
-    def _session_age(self, opened_at: Any, d: date) -> int | None:
-        """TRADING sessions elapsed since ``opened_at`` (exclusive) through ``d`` (inclusive)."""
-        try:
-            opened = datetime.fromisoformat(str(opened_at)).date()
-        except (TypeError, ValueError):
-            return None
-        if opened >= d:
-            return 0
-        sessions = 0
-        probe = opened
-        while probe < d:
-            probe = probe + timedelta(days=1)
-            if self._calendar.is_trading_day(probe):
-                sessions += 1
-        return sessions
 
     # ------------------------------------------------------------------ WO-8 hot-path read hygiene
     def _atr_1m(self, bar: Bar) -> Decimal | None:

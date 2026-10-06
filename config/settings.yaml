@@ -481,12 +481,14 @@ jobs:
   universe_build_ist: "08:30"    # §3.2.4 UniverseBuilder
   catalyst_digest_ist: "08:35"   # §4.4 job 14 (§2.7 step 5)
   preopen_planner_ist: "08:50"   # §5.3 pre-open planner
+  time_exit_check_ist: "09:30"   # D2 time exit (plan Q1.6)
   reconcile_ist: "15:50"         # §4.4 job 2 (A13)
   bhavcopy_ist: "18:00"          # §4.4 job 6
   corp_actions_ist: "20:15"      # §4.4 job 7 (A12) — moved 18:15→20:15 (2026-07-24: three consecutive
                                  # evening 404s in NSE's ~18:15-19:00 maintenance window; morning
                                  # retries always succeeded, so the data exists — the TIME was wrong)
   earnings_ist: "18:30"          # §4.4 job 8 (R2)
+  rec_outcomes_ist: "18:30"      # plan Q2.3 hindsight rec scoring — after daily_bars (18:05)
   deals_ist: "20:30"             # §4.4 job 9 (flagged_instrument_days) — moved 18:45→20:30 (2026-07-24:
                                  # three consecutive evening 503s, same NSE maintenance window as
                                  # corp_actions; still before the 21:00 backup)

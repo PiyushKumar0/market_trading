@@ -143,10 +143,12 @@ uses). Times are the `jobs:` block in `config/settings.yaml`.
 | 08:25 | `news_chain` | run-latest | backfill → cluster → resolve (never entry-blocking, §2.7) |
 | 08:30 | `universe_build` | run-latest | NIFTY200 ∩ MIS ∩ ¬surveillance ∩ ≥₹5cr (A8/C7) |
 | 08:30 Sun | `sector_map` | run-latest | weekly `sector_map`+`theme_map` (fires Sunday, not a trading day) |
+| 09:30 | `time_exit_check` | run-latest | D2 time exit: an exit rec for every open recommended position at or past its exit session, every session until `/closed`; regular sessions only (never muhurat) |
 | 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift (A13); one run per missed day |
 | 18:00 | `bhavcopy` | date-keyed | UDiFF cross-check/fill of `bars_1d` |
 | 18:05 | `daily_bars` | date-keyed | nightly incremental official-candle backfill (watchlist + NIFTY 50 + India VIX) |
 | 18:30 | `earnings_calendar` | safety-critical | results/board-meeting dates (R2/O13) |
+| 18:30 | `rec_outcomes` | date-keyed | hindsight scoring of every delivered entry rec on official bars (fill, exit, net, T+5/10/20, excess over the equal-weight universe) into `rec_outcomes`; waits for that day's `daily_bars`; no scanner, threshold or promotion reads it |
 | 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |
 | 20:30 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` (moved 18:45→20:30 2026-07-24) |
 | 20:45 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe (moved 18:50→20:45 2026-08-18 — MUST stay after `deals`/`corp_actions`, it reads both) |
@@ -299,6 +301,32 @@ ambiguous names correctly UNmatched (`unresolved_entities` log, §9.1).
 
 # Phase 2 — RECOMMEND live operations (§8.3, gate G2)
 
+## Reading the card
+
+An entry card, top to bottom (BHEL 10-06 as it now reads). A line is omitted when its data is absent.
+
+```
+BUY BHEL · swing/CNC · qty 9 (notional ₹4005.00) · level 445.00 (limit-at-level) · ₹241 at risk to the stop · sell by the close on 2026-11-03 (session 20)
+stop ₹418.30 = 6.0% below entry · 2.1× daily ATR · rule 6.0% re-anchored from ₹427.90 to ₹445.00
+evidence: backtest (fixed T+20 hold, no stop): n …, hit …, median net …
+registered edge 1.53% net ≈ ₹61 — not a forecast
+thesis: …
+gate: shrunk 14→9 (bound by per_trade_risk)
+cost: …
+checklist (yours to place …)
+record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|away|other>
+```
+
+- **Exit:** a time exit sells at the close of the stated session (the entry session is session 1). If the
+  calendar does not reach it the card says "exit date pending (NSE <year> calendar)"; brk20 shows
+  "stop / target; time cap <date>" instead.
+- **Stop:** hi52/ins re-anchor the stop to the delivered entry at the rule's percentage; the "re-anchored" tail
+  shows the scanner's entry it moved from.
+- **Expected ₹:** shown only for registered edges, as notional × edge. It is a historical median, not a forecast.
+- **Gate:** "shrunk A→B" means approved at the smaller size, the named rule bounding it. `(FAILED)` marks any other failed rule.
+- **Footer:** always last. `/veto` takes one reason code.
+- Confidence is not on the card (it stays in the payload and the gate).
+
 ## Gate G2 evidence checklist (§8.3)
 
 Run the collector first — it computes every machine-checkable bar below in one pass and prints a
@@ -340,6 +368,8 @@ bars are judged against owner-set state (the trade window) that moved during the
       `recommendations.human_action='taken'` (and `'closed'`); `[owner-manual]` — the executions
       themselves, reported back through Telegram `/taken <rec_id> <qty> <price>` and
       `/closed <rec_id> <price>` so the `learning_ledger` row closes with a real outcome (§6.5).
+      After placing the GTT stop, reply `/protected <symbol>`; unconfirmed positions are flagged
+      UNPROTECTED in `/positions` and reminded twice.
       `/why <symbol>` is the read-only "where does this name stand" report (no LLM, no sweep).
 - [ ] **Budget discipline (D6, re-scoped 2026-08-13):** the plan's original bar ("within **10%**
       of console-reconciled spend") assumed a monthly-credit billing model that doesn't exist —

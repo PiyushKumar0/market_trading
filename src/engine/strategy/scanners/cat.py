@@ -60,9 +60,9 @@ Levels, pre-registered in the plan:
 * ``target`` = ``None``. The rule has no price target. The v1 ATR-anchored ``rr_target`` band belonged
   to the retired confirmation design; inventing a level to replace it would put a fabricated number
   into the gate's edge math.
-* **Exit is TIME**, not price: the §7.1 ``max_holding`` swing cap of 20 trading days, so the EXISTING
-  max-holding machinery IS the exit path (``RecommendationPipeline.check_aged_positions``). No exit
-  code lives here or anywhere else for ``cat``.
+* **Exit is TIME**, not price: hold ``cat.hold_sessions`` sessions, and the D2 time exit
+  (``RecommendationPipeline.time_exit_check``) IS the exit path. No exit code lives here or anywhere
+  else for ``cat``.
 
 Rounding order is pinned (as for ``brk20``/``ins``): ``entry``/``stop`` are tick-rounded and the
 coherence test is applied AFTER rounding, so a stop that collapses onto the entry under tick rounding

@@ -150,7 +150,7 @@ def holiday_engine(conn, db_path, tmp_path, monkeypatch):
         return run
 
     fns = {jid: _recorder(jid) for jid in (*opsmain.PHASE1_JOB_IDS, *opsmain.PHASE2_JOB_IDS)}
-    registry = opsmain.build_job_registry(settings, fns)
+    registry = opsmain.build_job_registry(settings, fns, calendar=calendar)
     catch_up = CatchUpRunner(conn, clock, calendar,
                              registry.select(lambda s: s.job_id != opsmain.JOB_TICK_COMPACT),
                              deferred=opsmain.POST_ARM_JOB_IDS)

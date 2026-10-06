@@ -117,12 +117,14 @@ from engine.ops.jobs import (
     JOB_NEWS_CHAIN,
     JOB_NIGHTLY_REVIEW,
     JOB_PREOPEN_PLANNER,
+    JOB_REC_OUTCOMES,
     JOB_RECO_EXPIRE,
     JOB_RECONCILE,
     JOB_RESULTS_LINE_ITEMS,
     JOB_SECTOR_MAP,
     JOB_SURVEILLANCE,
     JOB_TICK_COMPACT,
+    JOB_TIME_EXIT_CHECK,
     JOB_UNIVERSE,
     AdvisoryRun,
     CatchUpResult,
@@ -146,6 +148,8 @@ from engine.ops.post_login import (
     resume_ticker,
 )
 from engine.ops.preopen_planner import PreopenPlannerJob
+from engine.ops.protection_reminders import ProtectionReminders
+from engine.ops.rec_outcomes import RecOutcomesJob
 from engine.ops.scan_context import LiveScanContextProvider
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import SelfTest
@@ -228,7 +232,8 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
 #: (one review per missed trading day, §2.6). Registered only when the owning object was built.
 PHASE2_JOB_IDS: tuple[str, ...] = (
     JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RECO_EXPIRE,   # run-latest
-    JOB_NIGHTLY_REVIEW,                                          # date-keyed
+    JOB_TIME_EXIT_CHECK,                                         # run-latest (regular sessions)
+    JOB_REC_OUTCOMES, JOB_NIGHTLY_REVIEW,                        # date-keyed
 )
 
 #: Fire-time for the §3.6 expiry labeling sweep — after the 15:30 close, before EOD reconcile.
@@ -241,12 +246,14 @@ _RECO_EXPIRE_IST = time(15, 45)
 #: made naive early arming unsafe. These now fire as one-shots through the SAME catch-up machinery
 #: (same watermarks, same dependency order) immediately AFTER the scheduler is armed, so an identical
 #: wedge costs the digest alone. Digest staleness already degrades ``cat`` safely (digest_stale_max_h).
-#: Members, in catch-up dependency order: news chain (20) → digest (25) → planner (28), plus
-#: ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot reads — and
-#: ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them. Tick
-#: compaction is not a member: it runs in its own runner (:class:`CompactionLane`).
+#: Members, in catch-up dependency order: time exit (5) → news chain (20) → digest (25) → planner
+#: (28), plus ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot
+#: reads — and ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them —
+#: and ``rec_outcomes`` (hindsight scoring; nothing reads it at boot).
+#: Tick compaction is not a member: it runs in its own runner (:class:`CompactionLane`).
 POST_ARM_JOB_IDS: tuple[str, ...] = (
-    JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RESULTS_LINE_ITEMS, JOB_FEED_FRESHNESS,
+    JOB_TIME_EXIT_CHECK, JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER,
+    JOB_RESULTS_LINE_ITEMS, JOB_FEED_FRESHNESS, JOB_REC_OUTCOMES,
 )
 
 #: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
@@ -305,6 +312,15 @@ def _is_sunday(d: date) -> bool:
     return d.weekday() == 6   # §4.4 job 13 weekly cadence — fires Sunday, not a trading day
 
 
+def _regular_session(calendar: NSECalendar) -> Callable[[date], bool]:
+    """A ``fire_day``: a trading day that is not a muhurat/special session. It replaces the
+    trading-day test in the catch-up, so it must include it."""
+    def fires(d: date) -> bool:
+        session = calendar.session(d)
+        return session is not None and not session.is_muhurat
+    return fires
+
+
 def _session_open_ist(calendar: NSECalendar, clock: Clock) -> time:
     """Today's continuous-session open (IST), from the calendar the rest of the engine reads (R6) —
     the SAME source ``HealthMonitor._session_open`` uses, never a second hardcoded 09:15 (2026-09-09).
@@ -326,11 +342,14 @@ def _session_open_ist(calendar: NSECalendar, clock: Clock) -> time:
     return _SESSION_OPEN_FALLBACK
 
 
-def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
+def build_job_registry(
+    settings, fns: Mapping[str, JobRunFn], *, calendar: NSECalendar | None = None
+) -> JobRegistry:
     """Populate the §10.1/§4.4 Phase-1 ``JobRegistry`` — the single inventory driving BOTH the live
     :class:`~engine.ops.scheduler.Scheduler` and the startup :class:`~engine.ops.jobs.CatchUpRunner`.
 
-    ``fns`` maps each :data:`PHASE1_JOB_IDS` entry to its async runner. Job classes/fire-times/dependency
+    ``fns`` maps each :data:`PHASE1_JOB_IDS` entry to its async runner; ``calendar`` is required when
+    ``fns`` carries ``time_exit_check`` (its ``fire_day``). Job classes/fire-times/dependency
     ``order`` encode §2.6 step-5 semantics: safety-critical (run/verify-before-entries), idempotent
     run-latest (single catch-up over the gap), date-keyed (one run per missed trading day). Extracted to
     module scope so the wiring is unit-testable independent of the broker/store side of the graph.
@@ -380,7 +399,12 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
     # disabled, D7). Catch-up dependency order within RUN_LATEST: universe(10) → news_chain(20) →
     # digest(25) → planner(28) — the digest needs scored clusters + today's universe; the planner
     # needs the digest (§2.7 steps 4-6).
+    if fns.get(JOB_TIME_EXIT_CHECK) is not None and calendar is None:
+        raise ValueError("time_exit_check needs the calendar for its regular-session fire_day")
     for spec in (
+        JobSpec(JOB_TIME_EXIT_CHECK, JobClass.RUN_LATEST, settings.jobs.time_exit_check_ist,
+                fns.get(JOB_TIME_EXIT_CHECK), order=5,
+                fire_day=_regular_session(calendar) if calendar is not None else None),
         # NOTE (2026-08-18): the digest reads the PRIOR session's deals flags. In one catch-up pass
         # RUN_LATEST runs before DATE_KEYED, so a same-pass deals catch-up lands AFTER the digest —
         # the ordering that saves this is WO-15: the digest is a DEFERRED job, so the boot pass
@@ -392,6 +416,9 @@ def build_job_registry(settings, fns: Mapping[str, JobRunFn]) -> JobRegistry:
                 fns.get(JOB_PREOPEN_PLANNER), order=28),
         JobSpec(JOB_RECO_EXPIRE, JobClass.RUN_LATEST, _RECO_EXPIRE_IST,
                 fns.get(JOB_RECO_EXPIRE), order=60),
+        # After bhavcopy (20) and daily_bars (30): it scores on their bars.
+        JobSpec(JOB_REC_OUTCOMES, JobClass.DATE_KEYED, settings.jobs.rec_outcomes_ist,
+                fns.get(JOB_REC_OUTCOMES), order=35),
         JobSpec(JOB_NIGHTLY_REVIEW, JobClass.DATE_KEYED, settings.jobs.nightly_review_ist,
                 fns.get(JOB_NIGHTLY_REVIEW), order=80),
     ):
@@ -1221,12 +1248,25 @@ async def run() -> int:
 
     async def job_reco_expire() -> None:
         # §3.6: expired-unconfirmed recommendations become labelled no_action rows (unbiased non-fill
-        # signal); aged tracked positions get their §7.1 max_holding exit recommendations.
-        expired = book.expire_stale(clock.now())
+        # signal).
+        now = clock.now()
+        expired = book.expire_stale(now)
         if expired:
-            _log.info("recommendations_expired", count=expired)
+            _log.info("recommendations_expired", count=len(expired))
+        cfg = settings.recommend
+        if cfg.reminder_window_start <= now.time() <= cfg.reminder_window_end:
+            rows = book.reminder_rows(now)
+            if rows:
+                await notify(catalog.rec_decision_reminder(rows))
+                book.mark_reminded([r["rec_id"] for r in rows], now)
         if pipeline is not None:
-            await pipeline.check_aged_positions(clock.today())
+            pipeline.log_hot_path_stats("eod")
+
+    async def job_time_exit_check() -> None:
+        if pipeline is None:
+            # A FAILED watermark, not a silent success: open positions still need their time exit.
+            raise RuntimeError("time exit unavailable — recommendation pipeline not built")
+        await pipeline.time_exit_check(clock.today())
 
     async def job_nightly_review(d) -> AdvisoryRun:
         if nightly_job is None:
@@ -1347,6 +1387,10 @@ async def run() -> int:
         await apply_tick_retention(store, result)
         return result
 
+    # ``catch_up`` is bound below, before any job can run.
+    rec_outcomes = RecOutcomesJob(conn, store, calendar, cost_model, hold_fn, clock,
+                                  was_run=lambda job_id, d: catch_up.was_run(job_id, d))
+
     registry = build_job_registry(settings, {
         JOB_INSTRUMENTS: job_instruments,
         JOB_SURVEILLANCE: job_surveillance,
@@ -1375,8 +1419,10 @@ async def run() -> int:
         JOB_CATALYST_DIGEST: job_catalyst_digest,
         JOB_PREOPEN_PLANNER: job_preopen_planner,
         JOB_RECO_EXPIRE: job_reco_expire,
+        JOB_TIME_EXIT_CHECK: job_time_exit_check,
+        JOB_REC_OUTCOMES: rec_outcomes.run,
         JOB_NIGHTLY_REVIEW: job_nightly_review,
-    })
+    }, calendar=calendar)
 
     # =========================================================================================
     # OPS: freeze seam, warm-up gate, heartbeat, catch-up (registry), self-test, lifecycle.
@@ -1702,6 +1748,14 @@ async def run() -> int:
             await holdings_reconcile.run()
         except Exception:  # noqa: BLE001 - a diagnostic must never take down the scheduler loop
             _log.exception("holdings_reconcile_tick_failed")
+
+    protection_reminders = ProtectionReminders(conn, clock, calendar, notify, settings.recommend)
+
+    async def protection_reminder_tick() -> None:
+        try:
+            await protection_reminders.tick()
+        except Exception:  # noqa: BLE001 - a reminder must never take down the scheduler loop
+            _log.exception("protection_reminder_tick_failed")
 
     # --- on-demand scanner sweep (§3.2.5 addendum, owner-directed 2026-07-29): the answer to "what
     #     could I trade right now, and at what price would today's setups arm?" Runs when the trade
@@ -2193,7 +2247,8 @@ async def run() -> int:
                    window_sweep_tick=window_sweep_tick, forward_drain_tick=forward_drain_tick,
                    holdings_reconcile_tick=(
                        holdings_reconcile_tick if holdings_reconcile is not None else None
-                   ))
+                   ),
+                   protection_reminder_tick=protection_reminder_tick)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -2522,10 +2577,14 @@ def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
     is the accepted, documented cost (§2.6 "Early-hydration addendum").
 
     An unfinished run (:func:`~engine.ops.jobs._job_unfinished`) records nothing: the day stays missed
-    and the next catch-up pass replays it.
+    and the next catch-up pass replays it. A day ``spec.fire_day`` excludes runs nothing and records
+    nothing.
     """
     async def _fire() -> None:
         today = clock.today()
+        if spec.fire_day is not None and not spec.fire_day(today):
+            _log.info("scheduled_job_not_fire_day", job_id=spec.job_id, d=today.isoformat())
+            return
         try:
             if spec.job_class == JobClass.DATE_KEYED:
                 outcome = await spec.run(today)  # type: ignore[call-arg]
@@ -2554,6 +2613,7 @@ def _arm_live_jobs(
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
     scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
     window_sweep_tick=None, forward_drain_tick=None, holdings_reconcile_tick=None,
+    protection_reminder_tick=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -2643,6 +2703,10 @@ def _arm_live_jobs(
         # the 09:20–15:30 window (holdings_reconcile.in_reconcile_window).
         scheduler.add_job(holdings_reconcile_tick, trigger=IntervalTrigger(seconds=3600),
                           job_id="holdings_reconcile", guard=False)
+    if protection_reminder_tick is not None:
+        # Plan Q1.9: self-gates on the reminder window; not calendar-gated (a late-night /taken).
+        scheduler.add_job(protection_reminder_tick, trigger=IntervalTrigger(seconds=300),
+                          job_id="protection_reminder_tick", guard=False)
 
 
 # --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)
