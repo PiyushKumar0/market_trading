@@ -4444,3 +4444,155 @@ def test_round_tick_falls_back_to_the_nse_tick_for_an_unknown_symbol(caplog):
         assert round_tick("KNOWN", Decimal("414.117")) == Decimal("414.12")
         assert round_tick("NEW", Decimal("414.117")) == Decimal("414.10")
     assert [r.symbol for r in log_events(caplog, "round_tick_fallback")] == ["NEW"]
+
+
+# =========================================================================== plan Q4.9: the paper branch
+SWING_ENTER = {**ENTER_JSON, "style": "swing"}
+
+
+class ScopedGate:
+    """``real``/``paper`` verdict kinds by which builder's context is judged; a fresh verdict_id per
+    evaluation, as the RiskGate mints."""
+
+    def __init__(self, cost_model: CostModel, paper_ctx: GateContext, real: str, paper: str) -> None:
+        self.cost_model, self.paper_ctx = cost_model, paper_ctx
+        self.kinds = {"real": real, "paper": paper}
+        self.seen: list[tuple[str, Any]] = []
+
+    def evaluate(self, action, ctx) -> GateVerdict:
+        scope = "paper" if ctx is self.paper_ctx else "real"
+        self.seen.append((scope, action))
+        return verdict_of(self.kinds[scope], self.cost_model, proposal_id=action.proposal_id)
+
+
+def paper_pipeline(conn, clock, calendar, book, limit_table, cost_model, *, real="approve",
+                   paper="approve", enabled=True, submit=None, **kw: Any):
+    paper_ctx = passing_ctx()
+    probe = SimpleNamespace(gate=ScopedGate(cost_model, paper_ctx, real, paper),
+                            builder=FakeCtxBuilder(paper_ctx), submitted=[])
+
+    async def record(proposal, verdict) -> None:
+        probe.submitted.append((proposal.proposal_id, verdict.verdict_id))
+
+    kw.setdefault("harness", FakeHarness(dict(SWING_ENTER)))
+    pipeline, probe.parts = make_pipeline(
+        conn=conn, clock=clock, calendar=calendar, book=book, gate=probe.gate,
+        ctx=kw.pop("ctx", passing_ctx()), limits=StubLimits(limit_table),
+        paper_ctx_builder=probe.builder, paper_submit=submit or record,
+        paper_enabled_fn=lambda: enabled, **kw,
+    )
+    return pipeline, probe
+
+
+def verdict_rows(conn) -> list[tuple[str, str, int]]:
+    return [tuple(r) for r in conn.execute(
+        "SELECT proposal_id, verdict, is_paper FROM verdicts ORDER BY is_paper")]
+
+
+@pytest.mark.parametrize(("real", "paper"), [
+    ("reject", "approve"), ("owner_approval_required", "approve"), ("approve", "reject"),
+    ("approve", "approve"), ("shrink", "shrink"),
+])
+async def test_paper_judges_the_same_proposal_after_any_real_verdict(
+    conn, pclock, calendar, book, limit_table, cost_model, real, paper
+):
+    pipeline, probe = paper_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                                     real=real, paper=paper)
+    await publish_candidate(pipeline, candidate(style="swing"))
+
+    [proposal_id] = [r[0] for r in conn.execute("SELECT proposal_id FROM proposals")]
+    assert verdict_rows(conn) == [(proposal_id, real, 0), (proposal_id, paper, 1)]
+    assert [scope for scope, _ in probe.gate.seen] == ["real", "paper"]
+    paper_verdict_id = conn.execute("SELECT verdict_id FROM verdicts WHERE is_paper = 1").fetchone()[0]
+    assert probe.submitted == ([(proposal_id, paper_verdict_id)] if paper in ("approve", "shrink") else [])
+    recs = conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
+    assert recs == (1 if real in ("approve", "shrink") else 0)
+    assert len(probe.parts["harness"].calls) == 1                  # zero LLM calls added
+
+
+@pytest.mark.parametrize("wiring", ["unwired", "paper off"])
+async def test_paper_off_writes_no_paper_verdict(
+    conn, pclock, calendar, book, limit_table, cost_model, wiring
+):
+    if wiring == "unwired":
+        pipeline, _ = make_pipeline(
+            conn=conn, clock=pclock, calendar=calendar, book=book,
+            harness=FakeHarness(dict(SWING_ENTER)), gate=StubGate(verdict_of("approve", cost_model)),
+            ctx=passing_ctx(), limits=StubLimits(limit_table),
+        )
+    else:
+        pipeline, probe = paper_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                                         enabled=False)
+    await publish_candidate(pipeline, candidate(style="swing"))
+
+    assert [(v, p) for _, v, p in verdict_rows(conn)] == [("approve", 0)]
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+    if wiring == "paper off":
+        assert probe.builder.calls == [] and probe.submitted == []
+
+
+async def test_mis_is_refused_by_paper_before_its_gate(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    pipeline, probe = paper_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                                     harness=FakeHarness(dict(ENTER_JSON)))
+    await publish_candidate(pipeline, candidate())                 # intraday => MIS
+
+    assert [(v, p) for _, v, p in verdict_rows(conn)] == [("approve", 0)]
+    assert probe.builder.calls == [] and probe.submitted == []
+
+
+async def test_a_real_gate_timeout_leaves_the_proposal_a_real_orphan_with_no_paper_verdict(
+    conn, pclock, calendar, book, limit_table, cost_model, monkeypatch
+):
+    class Hanging:
+        async def build(self, *args):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(pipeline_module, "_GATE_CONTEXT_DEADLINE_S", 0.05)
+    pipeline, probe = paper_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    pipeline._ctx_builder = Hanging()
+    await publish_candidate(pipeline, candidate(style="swing"))
+
+    assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 1
+    assert verdict_rows(conn) == []
+    assert probe.builder.calls == [] and probe.submitted == []
+    assert probe.parts["notify"].messages[-1].data["rule_id"] == "gate_context_timeout"
+
+
+@pytest.mark.parametrize("broken", ["paper builder", "paper submit"])
+async def test_a_paper_failure_never_touches_rec_delivery(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog, broken
+):
+    async def explode(*_args):
+        raise RuntimeError("paper broke")
+
+    pipeline, probe = paper_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                                     submit=explode if broken == "paper submit" else None)
+    if broken == "paper builder":
+        probe.builder.build = explode
+    with caplog.at_level(logging.ERROR, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, candidate(style="swing"))
+
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+    assert probe.parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
+    assert len(log_events(caplog, "paper_branch_failed")) == 1
+    assert pipeline._pending_forwards == []                        # not re-queued as a failed forward
+
+
+async def test_both_gates_judge_the_reanchored_stop(conn, pclock, calendar, book, limit_table, cost_model):
+    pipeline, probe = paper_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model,
+        harness=FakeHarness(hi52_enter(quantity=14)), ctx=passing_ctx(ltp=Decimal("445.00")),
+    )
+    await publish_candidate(pipeline, hi52_candidate())
+
+    assert [(scope, a.stop_price) for scope, a in probe.gate.seen] == [
+        ("real", Decimal("418.30")), ("paper", Decimal("418.30"))]
+
+
+def test_paper_enabled_fn_needs_the_other_paper_seams(conn, pclock, calendar, book, limit_table, cost_model):
+    with pytest.raises(ValueError, match="paper_ctx_builder and paper_submit"):
+        make_pipeline(conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
+                      gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
+                      limits=StubLimits(limit_table), paper_enabled_fn=lambda: True)

@@ -40,13 +40,13 @@ from engine.core.clock import Clock
 from engine.core.config import config_dir, load_yaml
 from engine.core.db import transaction
 from engine.core.log import get_logger
-from engine.core.scope import scope_sql
+from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.intelligence.agents import nightly
 from engine.intelligence.context import AssembledContext
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentHarness
 from engine.intelligence.schemas import NightlyReview, ParamSuggestion
-from engine.notify.catalog import CatalogMessage, MessageKind
+from engine.notify.catalog import CatalogMessage, MessageKind, inr
 from engine.ops.jobs import AdvisoryOutcome
 
 _log = get_logger("engine.ops.nightly_review")
@@ -251,6 +251,31 @@ def _verdict_lines(conn: sqlite3.Connection, d: date) -> list[str]:
     else:
         lines.append(f"  reject reasons by failing rule_id: {_NONE}")
     return lines
+
+
+def paper_line(conn: sqlite3.Connection, d: date) -> str | None:
+    """``paper: day ₹X · since <epoch> ₹Y · open N · halts …`` (plan Q4.10): net P&L of the paper trades
+    closed on ``d`` and in the current epoch, open positions, active halts. None if paper was never turned
+    on or the line cannot be computed: the real summary still sends."""
+    try:
+        state = conn.execute("SELECT epoch_started_at FROM paper_state WHERE id = 1 AND changed_at IS NOT NULL").fetchone()
+        if state is None:
+            return None
+        epoch = state["epoch_started_at"]
+        rows = conn.execute(
+            f"SELECT net_pnl, closed_at FROM learning_ledger WHERE {scope_sql('paper')} AND closed_at IS NOT NULL"
+        ).fetchall()
+        day = sum((Decimal(r["net_pnl"] or 0) for r in rows if r["closed_at"][:10] == _day_prefix(d)), Decimal(0))
+        since = sum((Decimal(r["net_pnl"] or 0) for r in rows if epoch is None or r["closed_at"] >= epoch), Decimal(0))
+        held = conn.execute(
+            f"SELECT COUNT(*) FROM positions WHERE {scope_sql('paper', has_origin=True)} AND {HELD_STATES_SQL['paper']}"
+        ).fetchone()[0]
+        halts = [r["cause"] for r in conn.execute("SELECT cause FROM paper_halts WHERE cleared_at IS NULL ORDER BY set_at")]
+    except Exception:
+        _log.exception("nightly_paper_line_failed", d=d.isoformat())
+        return None
+    return (f"paper: day {inr(day)} · since {'start' if epoch is None else epoch[:10]} {inr(since)} · "
+            f"open {held} · halts {', '.join(halts) or _NONE}")
 
 
 def _agent_failure_lines(conn: sqlite3.Connection, d: date) -> list[str]:
@@ -991,6 +1016,7 @@ class NightlyReviewJob:
         The suggestion COUNT ships, not the values: the owner applies a parameter through
         ``POST /config/params`` after the §6.4 pipeline has had a look, never off a phone notification.
         """
+        paper = paper_line(self._conn, d)
         return CatalogMessage(
             kind=MessageKind.DAILY_SUMMARY,
             title=f"Nightly review {d.isoformat()}",
@@ -999,7 +1025,8 @@ class NightlyReviewJob:
                 f"trades closed {trades} (expired recs {expired}, vetoed {vetoed}) · recommendations {recs} · lessons {len(review.lessons)} · "
                 f"process errors {len(review.process_errors)} · "
                 f"parameter suggestions {len(review.param_suggestions)} (dropped {dropped})\n"
-                "Suggestions are suggestions: the owner sets parameters via /config/params (R4)."
+                + (f"{paper}\n" if paper else "")
+                + "Suggestions are suggestions: the owner sets parameters via /config/params (R4)."
             ),
             severity="info",
             data={

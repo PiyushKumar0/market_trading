@@ -39,9 +39,17 @@ function DecisionLine({ d }: { d: DecisionRow }) {
       <td title={rawId(d.proposal)}>{d.subject || rawId(d.proposal)}</td>
       <td>
         {d.verdict ? <Chip v={d.verdict} tone={toneFor(d.verdict)} /> : <span className="dim">pending</span>}
+        {d.paper_verdict ? (
+          <div>
+            <Chip k="paper" v={d.paper_verdict.verdict} tone={toneFor(d.paper_verdict.verdict)} />
+          </div>
+        ) : null}
       </td>
       <td style={{ whiteSpace: 'normal' }}>
         {d.reasons.length === 0 ? <span className="dim">—</span> : d.reasons.join(', ')}
+        {d.paper_verdict?.reasons.length ? (
+          <div className="dim">paper: {d.paper_verdict.reasons.join(', ')}</div>
+        ) : null}
       </td>
     </tr>
   )

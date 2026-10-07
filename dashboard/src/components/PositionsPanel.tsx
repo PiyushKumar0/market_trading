@@ -38,8 +38,7 @@ export function PositionsPanel({ data }: { data: PositionsResponse | null }) {
                   <Chip v={p.state ?? '—'} tone={toneFor(p.state)} />
                 </td>
                 <td>
-                  {p.origin}
-                  {p.is_paper ? <span className="dim"> paper</span> : null}
+                  {p.origin} {p.is_paper ? <Chip v="PAPER" tone="info" title="simulated position" /> : null}
                   {p.origin === 'recommended' && p.state === 'OPEN' ? (
                     <div>
                       {p.owner_protected_at ? (

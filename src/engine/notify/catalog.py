@@ -50,7 +50,8 @@ class MessageKind(StrEnum):
 
     FILL = "fill"
     """An order filled — AUTO-mode platform fill or owner-confirmed RECOMMEND fill (R8 audit).
-    Carries symbol, side, qty, avg price, order id."""
+    Carries symbol, side, qty, avg price, order id. A paper fill is titled "PAPER" and carries
+    ``is_paper`` in ``data`` (paper entry completion and position close, never a real order)."""
 
     LIMIT_BREACH = "limit_breach"
     """A §7.1 risk rule tripped (FREEZE/FLATTEN/limit), alerting the owner with the tripping rule
@@ -210,6 +211,10 @@ class MessageKind(StrEnum):
 
     PROTECTION_REMINDER = "protection_reminder"
     """A taken position still has no confirmed protective GTT."""
+
+    PAPER_ALERT = "paper_alert"
+    """The paper path itself failed: a paper position lost its protection, or paper construction
+    failed at boot. Always ``critical``; halts, voids and reconcile mismatches are not sent."""
 
 
 class CatalogMessage(BaseModel):
@@ -1165,6 +1170,51 @@ def calendar_horizon(horizon: date | None, sessions_left: int) -> CatalogMessage
         severity="warning",
         data={"horizon": through, "sessions_left": sessions_left},
         dedupe_key=f"calendar_horizon:{through}",
+    )
+
+
+def inr(amount: Decimal) -> str:
+    """``₹1234.50`` / ``-₹165.00``: the sign leads the symbol."""
+    return f"{'-' if amount < 0 else ''}₹{abs(amount)}"
+
+
+def paper_entry_filled(*, order_id: str, symbol: str, qty: int, avg_price: Decimal) -> CatalogMessage:
+    """A paper entry order completed: ``qty`` at the position's average price."""
+    return CatalogMessage(
+        kind=MessageKind.FILL,
+        title=f"PAPER fill: {symbol}",
+        body=f"Paper entry filled: {qty} {symbol} at an average of {inr(avg_price)}.",
+        data={"is_paper": True, "order_id": order_id, "symbol": symbol, "qty": qty, "avg_price": str(avg_price)},
+        dedupe_key=f"paper_fill:{order_id}",
+    )
+
+
+def paper_position_closed(
+    *, position_id: str, symbol: str, qty: int, exit_price: Decimal, net_pnl: Decimal, reason: str, basis: str
+) -> CatalogMessage:
+    """A paper position closed (never a void): exit price, net P&L, the reason and how it was priced."""
+    return CatalogMessage(
+        kind=MessageKind.FILL,
+        title=f"PAPER close: {symbol}",
+        body=(f"Paper position closed: {qty} {symbol} out at {inr(exit_price)}, net {inr(net_pnl)}. "
+              f"Reason {reason}, basis {basis}."),
+        data={
+            "is_paper": True, "position_id": position_id, "symbol": symbol, "qty": qty,
+            "exit_price": str(exit_price), "net_pnl": str(net_pnl), "reason": reason, "basis": basis,
+        },
+        dedupe_key=f"paper_close:{position_id}",
+    )
+
+
+def paper_alert(key: str, message: str) -> CatalogMessage:
+    """The paper path failed. ``key`` is ``<position_id>:<attempt>`` or ``construct:<attempt>``."""
+    return CatalogMessage(
+        kind=MessageKind.PAPER_ALERT,
+        title="PAPER alert",
+        body=message,
+        severity="critical",
+        data={"is_paper": True, "key": key},
+        dedupe_key=f"paper_alert:{key}",
     )
 
 

@@ -82,6 +82,17 @@ export interface DecisionRow {
   verdict: string | null // approve | shrink | reject | owner_approval_required
   reasons: string[]
   evaluated_at: string | null
+  is_paper: false
+  /** The paper gate's verdict on the same proposal; null until it has evaluated one. */
+  paper_verdict: PaperVerdict | null
+}
+
+export interface PaperVerdict {
+  verdict_id: string
+  verdict: string
+  reasons: string[]
+  evaluated_at: string | null
+  is_paper: true
 }
 
 export interface DecisionsResponse {
@@ -175,7 +186,7 @@ export interface ScorecardRecs {
   unscorable: number
 }
 
-/** Stub until paper trading lands (plan Q4.11). */
+/** Paper trades of the current epoch, voids excluded; `net` is rupees. */
 export interface ScorecardPaper {
   closed: number
   hit_rate: number | null

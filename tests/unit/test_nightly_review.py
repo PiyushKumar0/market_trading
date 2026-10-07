@@ -41,6 +41,7 @@ from engine.ops.nightly_review import (
     build_funnel_summary,
     build_review_context,
     load_envelope_bounds,
+    paper_line,
 )
 from engine.strategy.types import RawLevels, SignalCandidate
 
@@ -871,3 +872,63 @@ def test_a_day_with_no_analyst_calls_renders_none(conn) -> None:
     assert build_analyst_declines(conn, EMPTY_DAY).lines() == []
     text = build_review_context(conn, None, EMPTY_DAY, BOUNDS)
     assert f"{DECLINES_TITLE}: none" in text
+
+
+# =========================================================================== the paper line (plan Q4.10)
+def paper_on(conn, epoch: str | None = None) -> None:
+    conn.execute("INSERT INTO paper_state (id, enabled, changed_at, epoch_started_at) VALUES (1, 1, ?, ?)",
+                 (f"{D.isoformat()}T09:00:00+05:30", epoch))
+
+
+def paper_trade(conn, entry_id: str, net: str, closed_on: date) -> None:
+    conn.execute(
+        "INSERT INTO learning_ledger (entry_id, position_id, is_paper, strategy_id, net_pnl, close_reason, "
+        "outcome_label, created_at, closed_at) VALUES (?, ?, 1, 'hi52', ?, 'stop', 'win', ?, ?)",
+        (entry_id, entry_id, net, f"{closed_on.isoformat()}T10:00:00+05:30", f"{closed_on.isoformat()}T14:00:00+05:30"),
+    )
+
+
+def test_paper_line_is_absent_until_paper_is_switched_on(conn) -> None:
+    assert paper_line(conn, D) is None
+    conn.execute("INSERT INTO paper_state (id) VALUES (1)")
+    assert paper_line(conn, D) is None
+
+
+def test_paper_line_without_activity(conn) -> None:
+    paper_on(conn)
+    assert paper_line(conn, D) == "paper: day ₹0 · since start ₹0 · open 0 · halts none"
+
+
+def test_paper_line_with_activity_counts_paper_only_and_only_this_epoch(conn) -> None:
+    paper_on(conn, epoch=f"{date(2026, 6, 16).isoformat()}T09:00:00+05:30")
+    paper_trade(conn, "P-1", "120.50", D)
+    paper_trade(conn, "P-2", "-300.25", D)
+    paper_trade(conn, "P-3", "40.00", date(2026, 6, 16))
+    paper_trade(conn, "P-0", "999.00", date(2026, 6, 15))                  # before the epoch
+    seed_day(conn)                                                          # a real -165.00 trade today
+    conn.execute(
+        "INSERT INTO positions (position_id, symbol, side, style, product, qty, state, origin, is_paper) "
+        "VALUES ('OPEN-1', 'TCS', 'BUY', 'swing', 'CNC', 5, 'PENDING_EXIT', 'platform', 1)"
+    )
+    conn.execute("INSERT INTO paper_halts (cause, rung, set_at, latched) VALUES ('daily_loss_soft', 'FROZEN', 'x', 0)")
+    conn.execute("INSERT INTO paper_halts (cause, rung, set_at, cleared_at) VALUES ('old', 'FROZEN', 'x', 'y')")
+
+    assert paper_line(conn, D) == (
+        "paper: day -₹179.75 · since 2026-06-16 -₹139.75 · open 1 · halts daily_loss_soft"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_uncomputable_paper_line_is_omitted_and_the_summary_still_sends(
+    conn, gov, clock, calendar, agent_defs, notify, sent
+) -> None:
+    seed_day(conn)
+    paper_on(conn)
+    job = make_job(conn, gov, clock, calendar, agent_defs, FakeHarness(raw=json.dumps(REVIEW)), notify=notify)
+    assert await job.run(D) is AdvisoryOutcome.RAN
+    assert "paper: day" in sent[0].body
+
+    conn.execute("DROP TABLE paper_halts")
+    sent.clear()
+    assert await job.run(D) is AdvisoryOutcome.RAN
+    assert "paper:" not in sent[0].body and REVIEW["summary"] in sent[0].body

@@ -2,7 +2,7 @@
 
 No LLM, no sweep, nothing enqueued. A section whose read fails or times out says so and the rest of
 the reply still goes out. Telegram caps a message at 4096 chars and ``_reply`` does not split, so every
-section is truncated and nine capped sections plus the header fit under the cap.
+section is truncated and ten capped sections plus the header fit under the cap.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.core.log import get_logger
-from engine.core.scope import scope_sql
+from engine.core.scope import Scope, scope_sql
 from engine.marketdata.store import MarketStore
 from engine.strategy.scanners import brk20, hi52
 
@@ -190,25 +190,34 @@ async def _positions(c: _Ctx) -> str:
     )
 
 
-async def _verdict(c: _Ctx) -> str:
+def _last_verdict(c: _Ctx, scope: Scope, label: str) -> str:
     row = c.conn.execute(
         "SELECT v.verdict, v.payload, v.evaluated_at FROM verdicts v "
         "JOIN proposals p ON p.proposal_id = v.proposal_id "
-        f"WHERE json_extract(p.payload, '$.tradingsymbol') = ? AND {scope_sql('real', 'v')} "
+        f"WHERE json_extract(p.payload, '$.tradingsymbol') = ? AND {scope_sql(scope, 'v')} "
         "ORDER BY v.evaluated_at DESC LIMIT 1",
         (c.sym,),
     ).fetchone()
     if row is None:
-        return "last verdict: none"
+        return f"{label}: none"
     reasons = json.loads(row["payload"]).get("reasons") or []
-    return (f"last verdict: {row['verdict']} on {row['evaluated_at'][:10]}"
+    return (f"{label}: {row['verdict']} on {row['evaluated_at'][:10]}"
             + (f" - reasons: {'; '.join(map(str, reasons))}" if reasons else ""))
+
+
+async def _verdict(c: _Ctx) -> str:
+    return _last_verdict(c, "real", "last verdict")
+
+
+async def _paper_verdict(c: _Ctx) -> str:
+    return _last_verdict(c, "paper", "last paper verdict")
 
 
 _SECTIONS: tuple[tuple[str, Callable[[_Ctx], Coroutine[Any, Any, str]]], ...] = (
     ("universe", _universe), ("surveillance", _surveillance), ("results", _results),
     ("levels", _levels), ("insider", _insider), ("pledge", _pledge),
     ("last rec", _last_rec), ("positions", _positions), ("last verdict", _verdict),
+    ("last paper verdict", _paper_verdict),
 )
 
 

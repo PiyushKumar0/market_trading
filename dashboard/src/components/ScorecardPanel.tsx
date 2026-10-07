@@ -1,12 +1,14 @@
 /**
  * Panel — per-strategy scorecard (`GET /scorecard`, plan Q2.4/Q2.5). The `recs` columns are HINDSIGHT
  * outcomes of delivered entry recommendations on official bars, never platform equity; the engine's
- * own label is shown above the table. The `paper` columns are the paper-trading stub until Q4.11.
+ * own label is shown above the table. The `paper` columns are simulated trades of the current paper
+ * epoch (voids excluded), net in rupees — not hindsight.
  */
 import type { ScorecardState } from '../hooks'
 import { Chip, Empty, Panel, dash } from './ui'
 
 const pct = (v: number | null) => (v === null ? null : `${v.toFixed(2)}%`)
+const rupees = (v: number | null) => (v === null ? null : `₹${v.toFixed(0)}`)
 const rate = (v: number | null) => (v === null ? null : `${(v * 100).toFixed(0)}%`)
 const counts = (m: Record<string, number>) =>
   Object.entries(m)
@@ -50,7 +52,7 @@ export function ScorecardPanel({ data, error, unauthorized }: ScorecardState) {
               <th>owner action</th>
               <th className="num">paper closed</th>
               <th className="num">paper hit</th>
-              <th className="num">paper net</th>
+              <th className="num">paper net ₹</th>
               <th className="num">paper open</th>
             </tr>
           </thead>
@@ -69,7 +71,7 @@ export function ScorecardPanel({ data, error, unauthorized }: ScorecardState) {
                 <td title={counts(recs.skip_reasons)}>{dash(counts(recs.actions))}</td>
                 <td className="num">{paper.closed}</td>
                 <td className="num">{dash(rate(paper.hit_rate))}</td>
-                <td className="num">{dash(pct(paper.net))}</td>
+                <td className="num">{dash(rupees(paper.net))}</td>
                 <td className="num">{paper.open}</td>
               </tr>
             ))}

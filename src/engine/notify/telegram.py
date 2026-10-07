@@ -1561,7 +1561,8 @@ class TelegramBot:
         def rows(where: str) -> list[Any]:
             return conn.execute(
                 "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, origin, "
-                f"protection_state, owner_protected_at FROM positions WHERE {where} ORDER BY opened_at"
+                "protection_state, owner_protected_at, state, strategy_id, exit_session "
+                f"FROM positions WHERE {where} ORDER BY opened_at"
             ).fetchall()
 
         def line(row: Any) -> str:
@@ -1578,12 +1579,21 @@ class TelegramBot:
                 f"{row['origin']} · {protection} · id {row['position_id']}"
             )
 
+        def paper_line(row: Any) -> str:
+            exiting = " · EXITING" if row["state"] == "PENDING_EXIT" else ""
+            return (
+                f"{row['symbol']} {row['side']} {row['qty']} @ {row['avg_entry']} · "
+                f"stop {row['stop'] or '-'} · target {row['target'] or '-'} · {row['strategy_id'] or '-'} · "
+                f"exit session {row['exit_session'] or '-'} · GTT {row['protection_state'] or 'PENDING'}"
+                f"{exiting} · id {row['position_id']}"
+            )
+
         real = rows(f"state='OPEN' AND {scope_sql('real')}")
         paper = rows(f"{HELD_STATES_SQL['paper']} AND {scope_sql('paper')}")
         _log.info("telegram_cmd_positions", count=len(real), paper=len(paper))
         lines = [f"open positions: {len(real)}", *map(line, real)] if real else ["no open positions."]
         if paper:
-            lines += [f"paper positions: {len(paper)}", *map(line, paper)]
+            lines += [f"paper positions: {len(paper)}", *map(paper_line, paper)]
         await _reply(update, "\n".join(lines))
 
     async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

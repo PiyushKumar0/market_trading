@@ -38,9 +38,10 @@ the engine's 15 s `ping` keepalive is filtered out.
 **Panels.** Status header (mode / routing / risk_state, trade window, degrade tier, KILLED banner) ·
 Recommendations (exit date or "pending", risk to stop, stop ATR multiple, evidence, registered edge,
 thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action chip) · Positions
-(recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)") · Scorecard
-(per-strategy hindsight outcomes, labelled as such, plus the paper columns — a stub until paper
-trading lands) · Decision log (proposal → verdict → cited rules) · Risk headroom · Agent budget ·
+(recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)"; paper ones a PAPER
+chip) · Scorecard (per-strategy hindsight outcomes, labelled as such, plus the paper columns: simulated
+trades of the current epoch, voids excluded, net in rupees) · Decision log (proposal → verdict → cited
+rules; the paper gate's verdict and rules sit beside the real ones) · Risk headroom · Agent budget ·
 Trade-window editor · Live events · Notifications (the day's Telegram transcript) · News/catalyst
 watchlist (originating vs context + digest freshness). The two ledgers — recommendations and the
 decision log — are folded by IST day (`ui.tsx` `useDayFolds`): today's fold starts open, earlier

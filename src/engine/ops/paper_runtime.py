@@ -32,6 +32,8 @@ from engine.core.log import get_logger
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.core.types import Bar, Session, Tick
 from engine.learning.exit_sim import Held, SimBar, simulate
+from engine.notify import catalog
+from engine.notify.catalog import CatalogMessage
 from engine.oms.exits import CorpActionsFn, ExitManager, PreExMarkFn
 from engine.oms.manager import OrderGuard, OrderManager, PaperOrderBlocked
 from engine.oms.positions import PositionBook
@@ -99,8 +101,83 @@ async def no_step() -> None:
 
 
 async def log_paper_alert(key: str, message: str) -> None:
-    """PAPER_ALERT placeholder until Q4.10 adds the catalog kind; never the real alert sink."""
+    """The log-only alert: a bare PaperRuntime's default."""
     _log.critical("paper_alert", key=key, message=message)
+
+
+async def no_notify(msg: CatalogMessage) -> None:
+    """The owner sink of a composition built without one."""
+
+
+_ENTRY_FILLS = (
+    "SELECT o.order_id, o.filled_qty, p.symbol, p.avg_entry FROM orders o "
+    "JOIN positions p ON p.position_id = o.position_id "
+    f"WHERE {scope_sql('paper', 'o')} AND o.role = 'entry' AND o.state = 'FILLED' "
+    f"AND {scope_sql('paper', 'p', has_origin=True)}"
+)
+_CLOSES = (
+    "SELECT l.position_id, l.qty, l.exit_px, l.net_pnl, l.close_reason, p.symbol, p.close_basis "
+    "FROM learning_ledger l JOIN positions p ON p.position_id = l.position_id "
+    f"WHERE {scope_sql('paper', 'l')} AND l.close_reason != 'void' "
+    f"AND {scope_sql('paper', 'p', has_origin=True)}"
+)
+
+
+class PaperNotifier:
+    """Owner messages from the paper path (plan Q4.10), through the owner sink and never the real alert
+    sink: PAPER_ALERT for protection and construction failures, FILL for entry completions and closes.
+    Halts, reconcile mismatches, voids and late corporate actions are only logged.
+
+    Fills and closes are found by scanning the paper tables, since closes also happen with no broker
+    order (session prep). What already exists at boot counts as announced; the journal's dedupe_key
+    drops anything a restart would announce twice."""
+
+    def __init__(self, conn: sqlite3.Connection, clock: Clock, notify: Callable[[CatalogMessage], Awaitable[None]]):
+        self._conn = conn
+        self._clock = clock
+        self._notify = notify
+        try:
+            self._announced = {m.dedupe_key for m in self._fills()}
+        except Exception:
+            _log.exception("paper_announced_unread")
+            self._announced = set()
+
+    async def alert(self, key: str, message: str) -> None:
+        """The ``PaperAlert``: ``key`` is ``<position_id>:<attempt>``, ``construct`` or ``prep``."""
+        _log.critical("paper_alert", key=key, message=message)
+        if key == "prep":
+            return
+        if key == "construct":
+            key = f"construct:{self._clock.now().isoformat()}"
+        await self._send(catalog.paper_alert(key, message))
+
+    async def tick(self) -> None:
+        for msg in self._fills():
+            if msg.dedupe_key not in self._announced:
+                self._announced.add(msg.dedupe_key)
+                await self._send(msg)
+
+    def _fills(self) -> list[CatalogMessage]:
+        entries = [
+            catalog.paper_entry_filled(
+                order_id=r["order_id"], symbol=r["symbol"], qty=int(r["filled_qty"]), avg_price=Decimal(r["avg_entry"])
+            )
+            for r in self._conn.execute(_ENTRY_FILLS)
+        ]
+        closes = [
+            catalog.paper_position_closed(
+                position_id=r["position_id"], symbol=r["symbol"], qty=int(r["qty"]), exit_price=Decimal(r["exit_px"]),
+                net_pnl=Decimal(r["net_pnl"]), reason=r["close_reason"], basis=r["close_basis"] or "fill",
+            )
+            for r in self._conn.execute(_CLOSES)
+        ]
+        return entries + closes
+
+    async def _send(self, msg: CatalogMessage) -> None:
+        try:
+            await self._notify(msg)
+        except Exception:
+            _log.exception("paper_notify_failed", dedupe_key=msg.dedupe_key)
 
 
 def seeded_counters(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -313,7 +390,7 @@ class PaperRuntime:
     def attach(
         self, *, orders: OrderManager, book: PositionBook, protection: ProtectionManager, exits: ExitManager,
         pre_ex_mark_fn: PreExMarkFn,
-    ) -> None:
+    ) -> tuple[SessionPrep, Reconciler]:
         """Plug in session prep and the reconcile passes over the managers built on :attr:`broker`."""
         if self.broker is None or self._bars_fn is None or self._replay_fn is None or self._corp_actions_fn is None:
             raise RuntimeError("session prep needs the broker and the injected bars, replay and corp-actions fns")
@@ -324,6 +401,7 @@ class PaperRuntime:
         self.reconciler = Reconciler(self._conn, self._clock, self.broker, orders=orders, protection=protection)
         self._prep = self.session_prep.run
         self._reconcile = self.reconciler.run
+        return self.session_prep, self.reconciler
 
     def _construct(self) -> None:
         seqs = self._step("seed_counters", lambda: seeded_counters(self._conn))

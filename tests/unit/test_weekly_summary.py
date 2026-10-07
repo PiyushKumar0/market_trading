@@ -14,6 +14,7 @@ from engine.ops import main as opsmain
 from engine.ops.jobs import JOB_REC_OUTCOMES, JOB_WEEKLY_SUMMARY, CatchUpRunner, CatchUpScope
 from engine.ops.weekly_summary import WeeklySummaryJob
 from tests.unit.test_ops_main_wiring import _all_noop_fns
+from tests.unit.test_scorecard import seed_paper
 
 FRI = date(2026, 10, 9)
 
@@ -87,6 +88,24 @@ async def test_content_is_three_hindsight_lines(conn) -> None:
         "ins n=2 net +5.00% excess +4.00%",
     ]
     assert msg.dedupe_key == "weekly_summary:2026-10-09"
+
+
+async def test_paper_line_only_with_paper_activity(conn) -> None:
+    sent: list = []
+    await _job(conn, sent).run(FRI)
+    assert "Paper" not in sent[0].body and "paper" not in sent[0].data
+
+    seed_paper(conn)
+    await _job(conn, sent).run(FRI)
+    assert sent[1].body.splitlines()[3] == (
+        "Paper, current epoch, simulated fills: 3 closed, hit 33%, net +50 rupees, 3 open."
+    )
+    assert sent[1].data["paper"] == {"closed": 3, "net": 50.25, "open": 3}
+    assert sent[1].body.splitlines()[:3] == sent[0].body.splitlines()
+
+    conn.execute("DELETE FROM learning_ledger")
+    await _job(conn, sent).run(FRI)
+    assert sent[2].body.splitlines()[3] == "Paper, current epoch, simulated fills: 0 closed, 3 open."
 
 
 async def test_no_recs_still_sends_with_zeros(conn) -> None:

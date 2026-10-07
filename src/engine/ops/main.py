@@ -30,6 +30,7 @@ import sqlite3
 import threading
 import time as time_module  # `time` itself is datetime.time here (below) — WO-25c needs monotonic()
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -48,6 +49,7 @@ from engine.core.browser_ua import BROWSER_USER_AGENT
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import Settings, config_dir, load_settings, load_yaml, repo_root
+from engine.core.contracts import EnterAction, GateVerdict
 from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
@@ -87,7 +89,13 @@ from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_disabled, login_prompt
-from engine.oms.manager import paper_order_guard
+from engine.oms.exits import ExitManager
+from engine.oms.manager import OrderManager, paper_order_guard
+from engine.oms.positions import PositionBook
+from engine.oms.prep import SessionPrep
+from engine.oms.protection import ProtectionManager
+from engine.oms.reconcile import Reconciler
+from engine.oms.state import PlatformOrder
 from engine.ops.calendar_horizon import check_calendar_horizon
 from engine.ops.early_hydration import EarlyHydration
 from engine.ops.feed_freshness import FeedFreshnessJob, FeedFreshnessResult
@@ -98,7 +106,7 @@ from engine.ops.holdings_reconcile import (
     in_reconcile_window,
     positions_missing_from_holdings,
 )
-from engine.ops.holds import build_hold_fn
+from engine.ops.holds import HoldFn, build_hold_fn, session_of
 from engine.ops.jobs import (
     JOB_BACKUP,
     JOB_BHAVCOPY,
@@ -144,13 +152,16 @@ from engine.ops.lifecycle import SessionLifecycle
 from engine.ops.news_scoring import NewsScoringJob
 from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
 from engine.ops.paper_control import PaperControl
-from engine.ops.paper_risk import PaperRisk, no_exit_routine, paper_effective_state
+from engine.ops.paper_risk import PaperRisk, paper_effective_state
 from engine.ops.paper_runtime import (
     PAPER_TICK_S,
+    PaperNotifier,
     PaperRuntime,
     backfill_bars_fn,
     exit_sim_replay,
+    no_notify,
     store_corp_actions_fn,
+    store_pre_ex_mark_fn,
 )
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.post_login import (
@@ -871,6 +882,35 @@ async def run() -> int:
         calendar=calendar, veto_window_sessions=settings.recommend.veto_window_sessions,
     )
     hold_fn = build_hold_fn(settings, limits_engine)
+
+    # --- paper autopilot (plan Q4.1, Q4.9): nothing paper exists unless the subsystem is enabled. Built
+    #     before the pipeline that takes its seams, the scheduler and the ticker, so the bridge sees the
+    #     first tick. A failed build leaves paper off and the real engine untouched. ---
+    paper: PaperStack | None = None
+    if settings.paper.subsystem_enabled:
+        paper = await _compose_paper(
+            conn, clock, calendar, bus, settings, paper_control,
+            real_risk_state=mode.risk_state, limits=limits_engine, tick_size_fn=tick_size_for,
+            round_tick_fn=_round_tick_fn(instruments), cost_model=cost_model, hold_fn=hold_fn,
+            store=store, backfill=backfill,
+            ctx_builder_fn=lambda tracker: GateContextBuilder(
+                limits_engine, tracker, instruments, store, calendar, clock, mode, kill,
+                ltp_fn=mark_price, tick_age_fn=tick_age_s,
+                warmup_status_fn=warmup_status_snapshot,
+                clock_skew_ok_fn=lambda: skew_holder["ok"],
+                degrade_tier_fn=lambda: governor.degrade_tier().value,
+                conn=conn, index_symbol=INDEX_SYMBOL, scope="paper",
+            ),
+            notify=notify,
+        )
+        if telegram is not None:
+            built = paper is not None
+            telegram.set_paper(
+                paper_control, autopilot_built=lambda: built,
+                status_fn=paper.status if paper is not None else None,
+                counters_fn=paper.counters if paper is not None else None,
+            )
+
     pipeline = (
         RecommendationPipeline(
             assembler, harness, agent_defs, gate, ctx_builder, book, mode, kill,
@@ -904,6 +944,10 @@ async def run() -> int:
             recommend=settings.recommend,
             strategy_edge_pct=_strategy_expected_edge_pct(settings),   # the gate's own map
             reports_dir=data_dir / "reports",
+            # D1: None (subsystem disabled or failed to build) ⇒ no paper verdict, no paper order.
+            paper_ctx_builder=paper.ctx_builder if paper is not None else None,
+            paper_submit=paper.submit if paper is not None else None,
+            paper_enabled_fn=paper.entries_open if paper is not None else None,
         )
         if harness is not None else None
     )
@@ -2270,28 +2314,6 @@ async def run() -> int:
         telegram.set_scan_sweep_fn(run_scan_sweep)
         telegram.set_why_fn(make_why_fn(store=store, conn=conn, clock=clock, calendar=calendar))
 
-    # --- paper autopilot (plan Q4.1): nothing paper exists unless the subsystem is enabled. Built
-    #     before the scheduler arms and before the ticker starts, so the bridge sees the first tick. ---
-    paper_runtime: PaperRuntime | None = None
-    if settings.paper.subsystem_enabled:
-        paper_runtime = PaperRuntime(
-            conn, clock, calendar, bus, settings.paper,
-            capital_base_fn=lambda: limits_engine.load().capital_base_inr,
-            tick_size_fn=tick_size_for,
-            order_guard=paper_order_guard(paper_control.enabled, paper_effective_state(conn, mode.risk_state)),
-            bars_fn=backfill_bars_fn(backfill, store, calendar),
-            replay_fn=exit_sim_replay,
-            corp_actions_fn=store_corp_actions_fn(store),
-        )
-        await paper_runtime.start()
-        if not paper_runtime.degraded and paper_runtime.broker is not None:
-            paper_risk = PaperRisk(
-                conn, clock, calendar.session, paper_runtime.broker,
-                capital_base=_capital_base, mark_price=paper_runtime.mark,
-                limits_fn=limits_engine.load, flatten=no_exit_routine,
-            )
-            paper_runtime.set_tick_steps(equity=paper_risk.tick)
-
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
     # WO-21 (iii): pre-open token probe at 08:40. Wired only when a broker facade exists (no api_key
@@ -2311,7 +2333,7 @@ async def run() -> int:
                        holdings_reconcile_tick if holdings_reconcile is not None else None
                    ),
                    protection_reminder_tick=protection_reminder_tick,
-                   paper_tick=paper_runtime.paper_tick if paper_runtime is not None else None)
+                   paper_tick=paper.runtime.paper_tick if paper is not None else None)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -2446,6 +2468,8 @@ async def run() -> int:
         await cancel_post_arm(_lift_task)
     bar_builder.flush_all()                   # finalize any open minute bars (EOD/shutdown, §4.4 job 1)
     await ticker.stop()
+    if paper is not None:
+        await paper.stop()                    # no paper write may race the shutdown backup
     await lifecycle.shutdown()                # runs backup hook, commits STOPPED, joins the heartbeat
     if telegram is not None:
         await telegram.stop()
@@ -3478,6 +3502,153 @@ _SHUTDOWN_LIFT_WAIT_S = 15.0
 #: allows and end in a kill; the next boot then replays the store's WAL.
 _SHUTDOWN_BUS_DRAIN_S = 5.0
 
+
+@dataclass(frozen=True)
+class PaperStack:
+    """The composed paper autopilot (plan Q4.1-Q4.9), built only when ``paper.subsystem_enabled``."""
+
+    clock: Clock
+    control: PaperControl
+    runtime: PaperRuntime
+    orders: OrderManager
+    exits: ExitManager
+    risk: PaperRisk
+    prep: SessionPrep
+    reconciler: Reconciler
+    ctx_builder: GateContextBuilder
+
+    def entries_open(self) -> bool:
+        """The pipeline's ``paper_enabled_fn``: ``/paper on`` and this session's prep completed."""
+        return self.control.enabled() and self.runtime.prep_ready()
+
+    async def submit(self, proposal: EnterAction, verdict: GateVerdict) -> PlatformOrder | None:
+        """The pipeline's ``paper_submit``: the corporate-action entry refusal (Q4.6), then the paper
+        entry. Unreadable corporate actions refuse too."""
+        try:
+            refusal = await self.exits.entry_refusal(
+                proposal.tradingsymbol, proposal.strategy_id, proposal.style, self.clock.now()
+            )
+        except Exception:
+            _log.exception("paper_entry_refusal_unreadable", proposal_id=proposal.proposal_id)
+            refusal = "corporate actions unreadable"
+        if refusal is not None:
+            _log.warning("paper_entry_refused", proposal_id=proposal.proposal_id,
+                         symbol=proposal.tradingsymbol, reason=refusal)
+            return None
+        return await self.orders.submit(proposal, verdict)
+
+    def status(self) -> dict[str, Any]:
+        tracker = self.risk.tracker
+        return {"open_positions": tracker.open_position_counts().total, "day_pnl": f"{tracker.day_mtm():.2f}"}
+
+    def counters(self) -> dict[str, int]:
+        exits = self.exits.counters
+        return {
+            "reconcile_mismatches": self.reconciler.counters.mismatches,
+            "voids": exits.voids + self.prep.counters.voids,
+            "late_corp_actions": exits.late_corp_actions,
+        }
+
+    async def stop(self) -> None:
+        for part, stop in (("runtime", self.runtime.stop), ("orders", self.orders.stop)):
+            try:
+                await stop()
+            except Exception:
+                _log.exception("paper_stop_failed", part=part)
+
+
+async def _compose_paper(
+    conn: sqlite3.Connection,
+    clock: Clock,
+    calendar: NSECalendar,
+    bus: EventBus,
+    settings: Settings,
+    control: PaperControl,
+    *,
+    real_risk_state: Callable[[], RiskState],
+    limits: LimitsEngine,
+    tick_size_fn: Callable[[str], Decimal],
+    round_tick_fn: Callable[[str, Decimal], Decimal],
+    cost_model: CostModel,
+    hold_fn: HoldFn,
+    store: MarketStore,
+    backfill: BackfillJob | None,
+    ctx_builder_fn: Callable[[ExposureTracker], GateContextBuilder],
+    notify: Callable[[CatalogMessage], Awaitable[None]] = no_notify,
+) -> PaperStack | None:
+    """Build every paper manager on one PaperBroker and wire them (plan Q4.1-Q4.10). Never raises: a
+    failure leaves nothing subscribed or armed, sends PAPER_ALERT and returns None."""
+    corp_actions = store_corp_actions_fn(store)
+    pre_ex_mark = store_pre_ex_mark_fn(store)
+    notifier = PaperNotifier(conn, clock, notify)
+    runtime: PaperRuntime | None = None
+    try:
+        runtime = PaperRuntime(
+            conn, clock, calendar, bus, settings.paper,
+            capital_base_fn=lambda: limits.load().capital_base_inr,
+            tick_size_fn=tick_size_fn,
+            order_guard=paper_order_guard(control.enabled, paper_effective_state(conn, real_risk_state)),
+            alert=notifier.alert,
+            bars_fn=backfill_bars_fn(backfill, store, calendar),
+            replay_fn=exit_sim_replay,
+            corp_actions_fn=corp_actions,
+        )
+        await runtime.start()
+        broker = runtime.broker
+        if runtime.degraded or broker is None:
+            return None                       # start() alerted and subscribed nothing
+        # OrderManager, PositionBook and ProtectionManager need each other: the callbacks bind late.
+        orders = OrderManager(
+            conn, clock, broker, order_guard=runtime.guard,
+            sell_check=lambda position_id, qty: book.check_sell(position_id, qty),
+            on_fill=lambda *fill: protection.on_fill(*fill),
+            on_transition=lambda order, event: protection.on_transition(order, event),
+        )
+        sessions: dict[str, Any] = {
+            "session_of": lambda ts: session_of(calendar, ts), "add_sessions": calendar.add_sessions,
+        }
+        book = PositionBook(
+            conn, clock, broker, orders=orders, hold_fn=hold_fn,
+            round_trip_fn=lambda notional, product: cost_model.round_trip(notional, product).total_cost,
+            **sessions,
+        )
+        exits = ExitManager(
+            conn, clock, broker, orders=orders, book=book, session_fn=calendar.session, hold_fn=hold_fn,
+            corp_actions_fn=corp_actions, pre_ex_mark_fn=pre_ex_mark, settings=settings.paper, **sessions,
+        )
+        protection = ProtectionManager(
+            conn, clock, broker, orders=orders, book=book, exit_fn=exits.exit_position,
+            notify=notifier.alert, session_fn=calendar.session, ltp_fn=runtime.mark,
+            round_tick_fn=round_tick_fn,
+            gtt_limit_offset_pct=Decimal(str(settings.recommend.gtt_limit_offset_pct)),
+            settings=settings.paper,
+        )
+        risk = PaperRisk(
+            conn, clock, calendar.session, broker, capital_base=limits.load().capital_base_inr,
+            mark_price=runtime.mark, limits_fn=limits.load, flatten=exits.flatten_all,
+        )
+        prep, reconciler = runtime.attach(
+            orders=orders, book=book, protection=protection, exits=exits, pre_ex_mark_fn=pre_ex_mark,
+        )
+        async def equity_and_fills() -> None:
+            try:
+                await risk.tick()
+            finally:
+                await notifier.tick()
+
+        runtime.set_tick_steps(protection=protection.tick, exits=exits.tick, equity=equity_and_fills)
+        stack = PaperStack(
+            clock, control, runtime, orders, exits, risk, prep, reconciler, ctx_builder_fn(risk.tracker),
+        )
+        orders.start(bus)
+    except Exception:
+        _log.exception("paper_compose_failed")
+        if runtime is not None:
+            await runtime.stop()              # a restored GTT must not fire with no OMS consumer
+        await notifier.alert("construct", "paper construction failed; paper is off until a restart")
+        return None
+    _log.info("paper_composed")
+    return stack
 
 
 def _held_symbols(conn: sqlite3.Connection) -> list[str]:

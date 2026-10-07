@@ -31,6 +31,7 @@ from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine
 from engine.risk.mode import ModeManager
+from tests.unit.test_scorecard import seed_paper
 
 _TOKEN = "s3cret-dash-token"
 AUTH = {"Authorization": f"Bearer {_TOKEN}"}
@@ -719,6 +720,27 @@ def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
     assert body["label"] == LABEL
     assert body["strategies"]["hi52"]["paper"] == {"closed": 0, "hit_rate": None, "net": None, "open": 0}
     assert body["strategies"]["hi52"]["recs"]["n"] == 1
+
+    seed_paper(conn)
+    paper = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()["strategies"]["hi52"]["paper"]
+    assert paper == {"closed": 2, "hit_rate": 0.5, "net": 60.25, "open": 2}
+
+
+def test_positions_and_orders_carry_is_paper(conn, clock) -> None:
+    for pid, paper in (("pos-real", 0), ("pos-paper", 1)):
+        conn.execute(
+            "INSERT INTO positions (position_id, symbol, state, is_paper, origin) "
+            "VALUES (?, 'X', 'OPEN', ?, 'platform')", (pid, paper),
+        )
+        conn.execute(
+            "INSERT INTO orders (order_id, role, is_paper, state, product) VALUES (?, 'entry', ?, 'COMPLETE', 'CNC')",
+            (f"o-{pid}", paper),
+        )
+    client = _client(conn=conn, clock=clock)
+    positions = client.get("/positions", headers=AUTH).json()["positions"]
+    orders = client.get("/orders", headers=AUTH).json()["orders"]
+    assert {p["position_id"]: p["is_paper"] for p in positions} == {"pos-real": 0, "pos-paper": 1}
+    assert {o["order_id"]: o["is_paper"] for o in orders} == {"o-pos-real": 0, "o-pos-paper": 1}
 
 
 # Owner ad-hoc read surface (owner-directed 2026-08-19): the engine process HOLDS market.duckdb, so it

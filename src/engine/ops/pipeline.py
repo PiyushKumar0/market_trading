@@ -4,7 +4,8 @@ Lives in ``engine.ops`` because it is the only package allowed to import everyth
 wires Tier-1 (``intelligence``), Tier-2 (``risk``), the store, the notifier and the state DB into one
 flow. Nothing here places a broker order — in RECOMMEND the platform places **zero** API orders
 including GTTs (B7); the ``manual_checklist`` on every recommendation is the mechanism that transfers
-protective-order responsibility to the human explicitly.
+protective-order responsibility to the human explicitly. The paper branch (D1) hands a paper-approved
+proposal to the paper OrderManager seam, which only reaches a PaperBroker (D8).
 
 Two objects:
 
@@ -115,6 +116,8 @@ from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 _log = get_logger("engine.ops.pipeline")
 
 NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
+#: ``submit(proposal, paper_verdict)``: place the paper CNC entry (the paper OrderManager seam).
+PaperSubmitFn = Callable[[EnterAction, GateVerdict], Awaitable[Any]]
 
 #: The §5.2 agent this pipeline drives. Its ``agents.yaml`` key, the governor's spend key and the
 #: ``agent_calls.agent_id`` are all this one string.
@@ -928,7 +931,12 @@ class RecommendationPipeline:
         recommend: RecommendSettings | None = None,
         strategy_edge_pct: Mapping[str, Decimal] | None = None,
         reports_dir: Path | None = None,
+        paper_ctx_builder: Any = None,
+        paper_submit: PaperSubmitFn | None = None,
+        paper_enabled_fn: Callable[[], bool] | None = None,
     ) -> None:
+        if paper_enabled_fn is not None and (paper_ctx_builder is None or paper_submit is None):
+            raise ValueError("paper_enabled_fn needs paper_ctx_builder and paper_submit")
         if admission_mode not in FORWARD_MODES:
             raise ValueError(f"admission_mode must be one of {FORWARD_MODES}, got {admission_mode!r}")
         if forward_drain_mode not in FORWARD_DRAIN_MODES:
@@ -985,6 +993,10 @@ class RecommendationPipeline:
         self._strategy_edge = dict(strategy_edge_pct or {})
         #: Backtest reports the evidence line reads; unwired ⇒ no backtest line.
         self._reports_dir = reports_dir
+        #: D1 paper seams; ``paper_enabled_fn`` None ⇒ paper is off and no paper verdict is written.
+        self._paper_ctx_builder = paper_ctx_builder
+        self._paper_submit = paper_submit
+        self._paper_enabled_fn = paper_enabled_fn
         #: The §2.6 warm-up snapshot the GATE reads (wired to the same ``warmup_status_snapshot`` in
         #: ``engine.ops.main``), consulted per COVERAGE CLASS (2026-09-13) at both analyst-call commit
         #: points (:meth:`on_signal_candidate` and :meth:`_take_forward_slot`), to keep an intraday
@@ -2328,10 +2340,10 @@ class RecommendationPipeline:
         if payload.action == "enter":
             payload, stop_anchor = self._one_exit(payload, candidate)
 
+        side = str(getattr(payload, "side", candidate.side))
         try:
             verdict, gate_ctx = await self._gate_and_persist(
-                payload, candidate.symbol, str(getattr(payload, "side", candidate.side)),
-                candidate.style, d,
+                payload, candidate.symbol, side, candidate.style, d,
             )
         except GateContextTimeout as exc:
             # WO-24a: handled HERE, deliberately not left to _evaluate_forward_guarded. That guard
@@ -2340,14 +2352,19 @@ class RecommendationPipeline:
             # would take the next slot, hit the same dead store and spend a second analyst call to
             # learn nothing. Re-arming the day slot instead hands the pair back to the prescreen, so
             # it re-publishes on its own terms once the store answers again.
+            # No paper verdict either: the proposal stays a real orphan for the WO-24c alert.
             await self._handle_gate_context_timeout(candidate, exc)
             return
         if verdict.verdict == "owner_approval_required":
             await self._request_owner_approval(payload, verdict)
-            return
-        if verdict.verdict not in ("approve", "shrink") or payload.action != "enter":
-            return
+        elif verdict.verdict in ("approve", "shrink") and payload.action == "enter":
+            await self._deliver_entry(payload, verdict, gate_ctx, candidate, entry_ref, stop_anchor, d)
+        await self._paper_branch(payload, candidate.symbol, side, candidate.style, d)
 
+    async def _deliver_entry(
+        self, payload: EnterAction, verdict: GateVerdict, gate_ctx: Any, candidate: SignalCandidate,
+        entry_ref: Decimal, stop_anchor: Decimal | None, d: date,
+    ) -> None:
         # Same reference the gate priced the proposal on: the LIMIT price when given, else the live
         # LTP, else the candidate's trigger level (never a guess above all three).
         reference = _dec(getattr(gate_ctx, "ltp", None) or entry_ref)
@@ -2378,6 +2395,31 @@ class RecommendationPipeline:
         await self._send(catalog.recommendation_message(
             rec, ltp=_dec(live_ltp) if live_ltp is not None else None,
         ))
+
+    async def _paper_branch(self, payload: Any, symbol: str, side: str, style: str, d: date) -> None:
+        """D1: judge the same proposal against the paper book (one ``is_paper=1`` verdict) and hand an
+        approve/shrink to the paper submit seam. CNC entries only (§1.3). Never raises into the real
+        path, whose outcome is already final."""
+        enabled, submit = self._paper_enabled_fn, self._paper_submit
+        if (
+            enabled is None
+            or submit is None
+            or payload.action != "enter"
+            or _product_of(payload.style) != "CNC"
+        ):
+            return
+        try:
+            if not enabled():
+                return
+            verdict, _ = await self._evaluate_and_persist_verdict(
+                payload, self._paper_ctx_builder, True, symbol, side, style, d
+            )
+            _log.info("paper_verdict", proposal_id=payload.proposal_id, symbol=symbol,
+                      verdict=verdict.verdict, verdict_id=verdict.verdict_id)
+            if verdict.verdict in ("approve", "shrink"):
+                await submit(payload, verdict)
+        except Exception:  # noqa: BLE001 - paper never costs the real path anything
+            _log.exception("paper_branch_failed", proposal_id=payload.proposal_id, symbol=symbol)
 
     async def _handle_gate_context_timeout(
         self, candidate: SignalCandidate, exc: GateContextTimeout
@@ -3102,14 +3144,24 @@ class RecommendationPipeline:
         purpose (see that class); the caller decides what the trigger path does about it.
         """
         self._persist_proposal(action)
+        return await self._evaluate_and_persist_verdict(
+            action, self._ctx_builder, False, symbol, side, style, d
+        )
+
+    async def _evaluate_and_persist_verdict(
+        self, action: Any, ctx_builder: Any, is_paper: bool, symbol: str, side: str, style: str,
+        d: date,
+    ) -> tuple[GateVerdict, Any]:
+        """Build ``ctx_builder``'s context under the WO-24a deadline, evaluate, persist the verdict in
+        the builder's scope. The proposal row must already exist."""
         try:
             gate_ctx = await asyncio.wait_for(
-                self._ctx_builder.build(symbol, side, style, d), _GATE_CONTEXT_DEADLINE_S
+                ctx_builder.build(symbol, side, style, d), _GATE_CONTEXT_DEADLINE_S
             )
         except TimeoutError as exc:      # 3.12: asyncio.TimeoutError IS the builtin TimeoutError
             raise GateContextTimeout(symbol, str(action.proposal_id)) from exc
         verdict = self._gate.evaluate(action, gate_ctx)
-        self._persist_verdict(verdict)
+        self._persist_verdict(verdict, is_paper)
         return verdict, gate_ctx
 
     def _persist_proposal(self, action: Any) -> None:
@@ -3123,13 +3175,14 @@ class RecommendationPipeline:
             ),
         )
 
-    def _persist_verdict(self, verdict: GateVerdict) -> None:
+    def _persist_verdict(self, verdict: GateVerdict, is_paper: bool) -> None:
         self._conn.execute(
-            "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at, is_paper) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 verdict.verdict_id, verdict.proposal_id, verdict.verdict,
                 _json_payload(verdict.model_dump(mode="json")), verdict.evaluated_at.isoformat(),
+                int(is_paper),
             ),
         )
 

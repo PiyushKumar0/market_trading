@@ -724,8 +724,7 @@ def test_optional_interval_ticks_are_armed_at_their_cadence_only_when_wired(
 
 def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built() -> None:
     src = inspect.getsource(opsmain.run)
-    assert "if settings.paper.subsystem_enabled:\n        paper_runtime = PaperRuntime(" in src
-    assert "paper_tick=paper_runtime.paper_tick if paper_runtime is not None else None" in src
+    assert "paper_tick=paper.runtime.paper_tick if paper is not None else None" in src
 
 
 def test_nse_announcements_job_is_not_armed_when_disabled(clock, calendar) -> None:
@@ -1839,7 +1838,8 @@ def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context() -> N
     gate would have approved (or spend analyst calls the gate then rejects). ONE snapshot function
     is wired to both seams in the composition root."""
     src = inspect.getsource(opsmain.run)
-    assert src.count("warmup_status_fn=warmup_status_snapshot,") == 2   # ctx_builder + pipeline
+    # real ctx_builder + paper ctx_builder + pipeline
+    assert src.count("warmup_status_fn=warmup_status_snapshot,") == 3
     assert "def warmup_status_snapshot() -> WarmupStatus:" in src
 
 
@@ -3493,18 +3493,33 @@ def test_the_sweep_decides_the_ins_consume_at_publication_from_the_real_risk_sta
 
 
 def test_nothing_paper_is_built_unless_the_subsystem_is_enabled() -> None:
-    """Plan §1.1/Q4.1: every paper construction in the composition root sits under the flag, and the
-    runtime is started before the scheduler arms."""
-    src = inspect.getsource(opsmain.run)
-    tree = ast.parse(src)
+    """Plan §1.1/Q4.1/Q4.9: every paper construction lives in ``_compose_paper``, which ``run`` calls
+    once, under the flag, before the pipeline and the scheduler. Disabled, every paper seam the
+    pipeline, the scheduler and the shutdown see is None."""
+    module = ast.parse(inspect.getsource(opsmain))
+    compose = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_compose_paper")
+    inside = {id(n) for n in ast.walk(compose)}
+    builders = {"PaperRuntime", "OrderManager", "PositionBook", "ExitManager", "ProtectionManager", "PaperRisk",
+                "paper_order_guard", "PaperBroker"}
+    calls = [n for n in ast.walk(module) if isinstance(n, ast.Call) and ast.unparse(n.func) in builders]
+    assert {ast.unparse(n.func) for n in calls} == builders - {"PaperBroker"}    # the runtime builds it
+    assert [ast.unparse(n.func) for n in calls if id(n) not in inside] == []
+
+    run = ast.parse(inspect.getsource(opsmain.run))
     gated = {
         id(inner)
-        for node in ast.walk(tree)
+        for node in ast.walk(run)
         if isinstance(node, ast.If) and ast.unparse(node.test) == "settings.paper.subsystem_enabled"
         for inner in ast.walk(node)
     }
-    builders = {"PaperRuntime", "PaperBroker", "OrderManager", "paper_order_guard"}
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in builders]
-    assert "PaperRuntime" in {ast.unparse(n.func) for n in calls}
-    assert [ast.unparse(n.func) for n in calls if id(n) not in gated] == []
-    assert src.index("await paper_runtime.start()") < src.index("_arm_registry_jobs(scheduler")
+    composes = [n for n in ast.walk(module) if isinstance(n, ast.Call) and ast.unparse(n.func) == "_compose_paper"]
+    assert len(composes) == 1
+    assert [id(n) in gated for n in ast.walk(run)
+            if isinstance(n, ast.Call) and ast.unparse(n.func) == "_compose_paper"] == [True]
+    src = inspect.getsource(opsmain.run)
+    assert (src.index("paper = await _compose_paper(") < src.index("RecommendationPipeline(")
+            < src.index("_arm_registry_jobs(scheduler"))
+    for seam in ("paper_ctx_builder=paper.ctx_builder", "paper_submit=paper.submit",
+                 "paper_enabled_fn=paper.entries_open", "paper_tick=paper.runtime.paper_tick"):
+        assert f"{seam} if paper is not None else None" in src
+    assert "if paper is not None:\n        await paper.stop()" in src

@@ -905,6 +905,23 @@ async def test_positions_puts_paper_rows_in_their_own_section(clock, conn, msg):
 
 
 @pytest.mark.asyncio
+async def test_positions_paper_line_shows_strategy_exit_session_and_gtt_state(clock, conn, msg):
+    _insert_position(conn, "pos-p1", symbol="AAA", origin="platform", protection_state="PROTECTED")
+    _insert_position(conn, "pos-p2", symbol="BBB", origin="platform", protection_state=None,
+                     state="PENDING_EXIT", opened_at="2026-06-17T10:01:00+05:30")
+    conn.execute("UPDATE positions SET is_paper=1, strategy_id='hi52', exit_session='2026-07-01' "
+                 "WHERE position_id='pos-p1'")
+    conn.execute("UPDATE positions SET is_paper=1 WHERE position_id='pos-p2'")
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
+    await bot._cmd_positions(_Update(msg), _Ctx())
+
+    first, second = msg.sent[0].splitlines()[-2:]
+    assert "hi52 · exit session 2026-07-01 · GTT PROTECTED" in first and "EXITING" not in first
+    assert "- · exit session - · GTT PENDING · EXITING" in second
+    assert "unprotected" not in msg.sent[0] and "None" not in msg.sent[0]
+
+
+@pytest.mark.asyncio
 async def test_positions_empty_book(clock, conn, msg):
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
     await bot._cmd_positions(_Update(msg), _Ctx())

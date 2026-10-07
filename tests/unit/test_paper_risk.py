@@ -186,18 +186,15 @@ async def test_a_raising_paper_tracker_still_lets_the_real_apply_run(
 
 
 def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick() -> None:
+    # ``_compose_paper`` runs only under the flag (test_ops_main_wiring pins that).
+    compose = ast.parse(inspect.getsource(opsmain._compose_paper))
+    calls = {ast.unparse(n.func): n for n in ast.walk(compose) if isinstance(n, ast.Call)}
+    guard = next(k.value for k in calls["PaperRuntime"].keywords if k.arg == "order_guard")
+    assert ast.unparse(guard) == "paper_order_guard(control.enabled, paper_effective_state(conn, real_risk_state))"
+    flatten = next(k.value for k in calls["PaperRisk"].keywords if k.arg == "flatten")
+    assert ast.unparse(flatten) == "exits.flatten_all"
     tree = ast.parse(inspect.getsource(opsmain.run))
-    gated = {
-        id(inner)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "settings.paper.subsystem_enabled"
-        for inner in ast.walk(node)
-    }
-    calls = {ast.unparse(n.func): n for n in ast.walk(tree) if isinstance(n, ast.Call)}
-    assert {"PaperRisk", "paper_effective_state"} <= {name for name, n in calls.items() if id(n) in gated}
-    runtime = calls["PaperRuntime"]
-    guard = next(k.value for k in runtime.keywords if k.arg == "order_guard")
-    assert ast.unparse(guard) == "paper_order_guard(paper_control.enabled, paper_effective_state(conn, mode.risk_state))"
+    assert "real_risk_state=mode.risk_state" in ast.unparse(tree)
     equity_tick = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "equity_tick")
     assert "paper" not in ast.unparse(equity_tick).lower()
 

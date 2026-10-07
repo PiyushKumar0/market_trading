@@ -104,10 +104,20 @@ def _seed_sqlite(conn, sym: str = "TCS", reasons: list[str] | None = None) -> No
     )
 
 
+def _seed_paper_verdict(conn, reasons: list[str]) -> None:
+    """Later than the real verdict, so a scope leak in either direction shows."""
+    conn.execute(
+        "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at, is_paper) "
+        "VALUES ('PV1', 'PR1', 'approve', ?, '2026-06-16T09:31:07+05:30', 1)",
+        (json.dumps({"reasons": reasons}),),
+    )
+
+
 @pytest.mark.asyncio
 async def test_every_section_present(store, conn, clock):
     _seed_duckdb(store)
     _seed_sqlite(conn)
+    _seed_paper_verdict(conn, ["paper cap ok"])
 
     out = await _why(store, conn, clock)(" tcs ")
 
@@ -124,6 +134,7 @@ async def test_every_section_present(store, conn, clock):
         "last rec: 2026-06-16 entry - expired - skip reason price - outcome closed net +1.50%",
         "positions: BUY 5 @ 100 stop 95 target 110 (recommended)",
         "last verdict: reject on 2026-06-16 - reasons: C3 edge below cost; day cap",
+        "last paper verdict: approve on 2026-06-16 - reasons: paper cap ok",
     ):
         assert expected in out
     assert "Sell" not in out and "99.0" not in out and "BUY 7" not in out
@@ -140,7 +151,7 @@ async def test_every_section_absent_for_unknown_symbol(store, conn, clock):
         "universe: not listed on 2026-06-17", "surveillance: not in the 2026-06-17 instrument dump",
         "results: none dated in the next 10 days", "levels: no daily bars", "insider: no filings",
         "pledge: no shareholding filings", "last rec: none", "positions: none open",
-        "last verdict: none",
+        "last verdict: none", "last paper verdict: none",
     ):
         assert expected in out
 
@@ -208,6 +219,7 @@ async def test_reply_stays_under_telegram_cap(store, conn, clock):
         "median_traded_value": None,
     }])
     _seed_sqlite(conn, reasons=["long reason " * 40] * 5)
+    _seed_paper_verdict(conn, ["long reason " * 40] * 5)
 
     out = await _why(store, conn, clock)("TCS")
 

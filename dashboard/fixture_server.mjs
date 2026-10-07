@@ -104,8 +104,12 @@ let recommendations = [
   rec('r-undated', null, '00:00:00', 'UNDATED', 'BUY', 'enter', null),
 ]
 
-function dec(id, day, hms, agent, action, subject, verdict, reasons) {
+function dec(id, day, hms, agent, action, subject, verdict, reasons, paper = null) {
   return {
+    is_paper: false,
+    paper_verdict: paper && {
+      verdict_id: `${id}-pv`, verdict: paper[0], reasons: paper[1], evaluated_at: `${day}T${hms}+05:30`, is_paper: true,
+    },
     proposal_id: id,
     agent_id: agent,
     action,
@@ -121,7 +125,10 @@ function dec(id, day, hms, agent, action, subject, verdict, reasons) {
 
 let decisions = [
   dec('p-t1', today, '10:14:58', 'swing_analyst', 'exit', 'HDFCAMC', 'approve', []),
-  dec('p-t2', today, '09:41:01', 'swing_analyst', 'enter', 'TATASTEEL', 'reject', ['per_trade_risk']),
+  // Real rejects, paper approves: the two verdicts sit side by side.
+  dec('p-t2', today, '09:41:01', 'swing_analyst', 'enter', 'TATASTEEL', 'reject', ['per_trade_risk'],
+    ['approve', []]),
+  dec('p-t3', today, '09:40:00', 'swing_analyst', 'enter', 'SAIL', 'approve', [], ['reject', ['paper_open_positions']]),
   dec('p-y1', d1, '13:00:10', 'swing_analyst', 'exit', 'HDFCAMC', 'approve', []),
   dec('p-y2', d1, '13:00:05', 'swing_analyst', 'exit', 'HINDZINC', 'approve', []),
   dec('p-y3', d1, '10:01:50', 'swing_analyst', 'enter', 'CEIGALL', 'reject', ['max_open_positions', 'per_sector_exposure']),
@@ -226,7 +233,7 @@ const scorecardFixture = {
         mean_excess: 0.4, actions: { taken: 3, dismissed: 4, expired: 5 },
         skip_reasons: { 'too far': 2, 'no cash': 1 }, daily_basis: 2, unscorable: 1,
       },
-      paper: { closed: 0, hit_rate: null, net: null, open: 0 },
+      paper: { closed: 4, hit_rate: 0.75, net: 1840.5, open: 2 },
     },
     unattributed: {
       recs: {
@@ -241,7 +248,11 @@ const scorecardFixture = {
 const routes = {
   '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: 'NORMAL' },
   '/positions': {
-    positions: [pos('pos-1', 'JINDALSTEL', `${d1}T10:20:00+05:30`), pos('pos-2', 'TATASTEEL', null)],
+    positions: [
+      pos('pos-1', 'JINDALSTEL', `${d1}T10:20:00+05:30`),
+      pos('pos-2', 'TATASTEEL', null),
+      { ...pos('pos-3', 'SAIL', null), is_paper: 1, origin: 'platform', protection_state: 'PROTECTED' },
+    ],
     as_of: new Date().toISOString(),
   },
   '/scorecard': scorecardFixture,

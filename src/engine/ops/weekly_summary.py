@@ -58,13 +58,27 @@ class WeeklySummaryJob:
         ]
         skipped = Counter(r[2] for r in week if r[2])
         n_closed, rupees = self._conn.execute(_SKIPPED_CLOSED).fetchone()
+        card = scorecard(self._conn)["strategies"]
         strategies = [
             (sid, s["recs"]["closed"], s["recs"]["mean_net"], s["recs"]["mean_excess"])
-            for sid, s in scorecard(self._conn)["strategies"].items() if s["recs"]["closed"]
+            for sid, s in card.items() if s["recs"]["closed"]
         ]
-        await self._notify(catalog.weekly_summary(
+        message = catalog.weekly_summary(
             d=d, delivered=len(week), taken=sum(r[1] in ("taken", "closed") for r in week),
             skipped=dict(skipped), expired=sum(r[1] == "expired" and not r[2] for r in week),
             skipped_closed=n_closed, skipped_rupees=rupees, strategies=strategies,
-        ))
+        )
+        paper = [s["paper"] for s in card.values()]
+        closed, open_n = sum(p["closed"] for p in paper), sum(p["open"] for p in paper)
+        if closed or open_n:
+            wins = sum(round(p["hit_rate"] * p["closed"]) for p in paper if p["closed"])
+            net = sum(p["net"] or 0 for p in paper)
+            line = (f"Paper, current epoch, simulated fills: {closed} closed"
+                    + (f", hit {wins / closed:.0%}, net {net:+,.0f} rupees" if closed else "")
+                    + f", {open_n} open.")
+            message = message.model_copy(update={
+                "body": f"{message.body}\n{line}",
+                "data": {**message.data, "paper": {"closed": closed, "net": net, "open": open_n}},
+            })
+        await self._notify(message)
         return WeeklySummaryResult(d)

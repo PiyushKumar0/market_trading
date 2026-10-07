@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter, defaultdict
+from decimal import Decimal
 from statistics import mean, median
 from typing import Any
 
+from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.learning.benchmark import BENCH_INTRASESSION, BENCH_TIME
 
-LABEL = "hindsight on official bars — not platform equity"
+LABEL = "hindsight on official bars â€” not platform equity"
 UNATTRIBUTED = "unattributed"
 
 # Entry recs only (rec_outcomes never scores exit recs); void_ca is excluded from every stat.
@@ -27,6 +29,18 @@ _SQL = (
 )
 
 
+# Paper trades of the current epoch (as the paper book counts them); a void is excluded.
+_PAPER_CLOSED_SQL = (
+    "SELECT strategy_id, net_pnl FROM learning_ledger "
+    f"WHERE {scope_sql('paper')} AND closed_at IS NOT NULL AND COALESCE(outcome_label, '') != 'void' "
+    "AND closed_at >= COALESCE((SELECT epoch_started_at FROM paper_state WHERE id = 1), '')"
+)
+_PAPER_OPEN_SQL = (
+    f"SELECT strategy_id FROM positions WHERE {HELD_STATES_SQL['paper']} "
+    f"AND {scope_sql('paper', has_origin=True)}"
+)
+
+
 def _mean(xs: list[float]) -> float | None:
     return mean(xs) if xs else None
 
@@ -35,14 +49,36 @@ def scorecard(conn: sqlite3.Connection) -> dict[str, Any]:
     by_strategy: dict[str, list[tuple]] = defaultdict(list)
     for row in conn.execute(_SQL):
         by_strategy[row[0] or UNATTRIBUTED].append(tuple(row))
+    paper = _paper(conn)
     return {
         "label": LABEL,
         "bench": {"time": BENCH_TIME, "intrasession": BENCH_INTRASESSION},
-        "strategies": {sid: _strategy(rows) for sid, rows in sorted(by_strategy.items())},
+        "strategies": {
+            sid: _strategy(by_strategy.get(sid, []), paper.get(sid, _paper_stats([], 0)))
+            for sid in sorted(by_strategy.keys() | paper.keys())
+        },
     }
 
 
-def _strategy(rows: list[tuple]) -> dict[str, Any]:
+def _paper_stats(nets: list[Decimal], open_n: int) -> dict[str, Any]:
+    return {
+        "closed": len(nets),
+        "hit_rate": sum(n > 0 for n in nets) / len(nets) if nets else None,
+        "net": float(sum(nets)) if nets else None,
+        "open": open_n,
+    }
+
+
+def _paper(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """Per strategy: closed trades, hit rate, net rupees (a float) and open positions."""
+    nets: dict[str, list[Decimal]] = defaultdict(list)
+    for sid, net_pnl in conn.execute(_PAPER_CLOSED_SQL):
+        nets[sid or UNATTRIBUTED].append(Decimal(net_pnl))
+    open_counts = Counter(sid or UNATTRIBUTED for (sid,) in conn.execute(_PAPER_OPEN_SQL))
+    return {sid: _paper_stats(nets[sid], open_counts[sid]) for sid in nets.keys() | open_counts.keys()}
+
+
+def _strategy(rows: list[tuple], paper: dict[str, Any]) -> dict[str, Any]:
     closed = [r for r in rows if r[1] == "closed"]
     nets = [r[3] for r in closed if r[3] is not None]
     actions = Counter("taken" if r[6] == "closed" else (r[6] or "open") for r in rows)
@@ -61,5 +97,5 @@ def _strategy(rows: list[tuple]) -> dict[str, Any]:
             "daily_basis": sum(r[2] == "daily" for r in rows),
             "unscorable": sum(r[1] == "unscorable" for r in rows),
         },
-        "paper": {"closed": 0, "hit_rate": None, "net": None, "open": 0},
+        "paper": paper,
     }
