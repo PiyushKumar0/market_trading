@@ -27,6 +27,7 @@ from engine.core.config import PaperSettings
 from engine.core.log import get_logger
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.core.types import Session
+from engine.oms.exits import cancel_working_entries
 from engine.oms.manager import OrderManager
 from engine.oms.positions import LEG_REASON, PositionBook, leg_of
 from engine.oms.state import (
@@ -58,7 +59,8 @@ class ExitFn(Protocol):
     def __call__(self, position_id: str, reason: CloseReason, basis: str) -> Awaitable[None]: ...
 
 
-#: ``notify(key, message)``: PAPER_ALERT, never the real alert sink; ``key`` is ``<position_id>:<attempt>``.
+#: ``notify(key, message)``: PAPER_ALERT, never the real alert sink; ``key`` is ``<position_id>:<attempt>:<at>``,
+#: unique per failure across boots.
 PaperNotify = Callable[[str, str], Awaitable[None]]
 SessionFn = Callable[[date], Session | None]
 LtpFn = Callable[[str], Decimal | None]
@@ -171,7 +173,9 @@ class ProtectionManager:
 
     async def _protect(self, row: sqlite3.Row, book: dict[int, dict[str, Any]]) -> None:
         pid = row["position_id"]
-        if pid in self._queued:
+        # _verify_all awaits between rows: the exit routine may have taken this position meanwhile.
+        row = self._held_row(pid)
+        if pid in self._queued or row is None or row["state"] != PositionState.OPEN.value:
             return
         gtt = self._conn.execute(
             f"SELECT * FROM gtts WHERE position_id = ? AND {_PAPER} ORDER BY gtt_id DESC LIMIT 1", (pid,)
@@ -271,22 +275,13 @@ class ProtectionManager:
         self._gtt_state(gtt_id, "triggered")
         legs = [o for o in await self._broker.orders() if (leg_of(o.get("tag")) or (None,))[0] == gtt_id]
         working = [o for o in legs if o["status"] not in TERMINAL_STATUSES]
-        await self._cancel_entries(pid)
+        await cancel_working_entries(self._conn, self._orders, pid, "gtt_triggered")
         if not working:
             await self._exit(pid, CloseReason.GTT_FAILURE_EXIT, "gtt_spent")
             return
         index = leg_of(working[0]["tag"])[1]
         self._book.mark_pending_exit(pid, LEG_REASON.get(index, CloseReason.STOP))
         _log.info("paper_exit_working", position_id=pid, gtt_id=gtt_id, leg=index)
-
-    async def _cancel_entries(self, pid: str) -> None:
-        rows = self._conn.execute(
-            f"SELECT broker_order_id FROM orders WHERE position_id = ? AND role = 'entry' AND {_PAPER} "
-            f"AND {_WORKING} AND broker_order_id IS NOT NULL",
-            (pid,),
-        ).fetchall()
-        for r in rows:
-            await self._orders.cancel(r["broker_order_id"], reason="gtt_triggered")
 
     # ---------------------------------------------------------------- exits
     async def _sell_ended(self, order: PlatformOrder, ended: OrderState) -> None:
@@ -352,7 +347,8 @@ class ProtectionManager:
         attempt = self._alerts[pid] = self._alerts.get(pid, 0) + 1
         _log.error("paper_protection_failed", position_id=pid, why=why)
         try:
-            await self._notify(f"{pid}:{attempt}", f"paper protection failed for {pid}: {why}")
+            key = f"{pid}:{attempt}:{self._clock.now().isoformat(timespec='seconds')}"
+            await self._notify(key, f"paper protection failed for {pid}: {why}")
         except Exception:
             _log.exception("paper_alert_failed", position_id=pid)
         if exit_now:

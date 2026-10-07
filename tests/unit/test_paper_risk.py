@@ -154,6 +154,18 @@ async def test_a_paper_floor_breach_latches_paper_halts_only_and_exits_the_book_
     assert flattens == ["equity_floor"] * 2
 
 
+async def test_no_snapshot_or_halt_while_a_held_paper_symbol_is_unmarked(conn, make_risk, marks) -> None:
+    conn.execute("UPDATE paper_equity_snapshots SET equity = '44000'")   # the baseline carried TCS at 440
+    position(conn)
+    risk = make_risk()
+
+    await risk.tick()
+    assert halts(conn) == {} and conn.execute("SELECT COUNT(*) FROM paper_equity_snapshots").fetchone()[0] == 1
+    marks["TCS"] = Decimal("440")
+    await risk.tick()
+    assert halts(conn) == {} and conn.execute("SELECT COUNT(*) FROM paper_equity_snapshots").fetchone()[0] == 2
+
+
 async def test_a_real_position_never_moves_paper_equity(conn, make_risk, marks) -> None:
     position(conn, paper=False)
     marks["TCS"] = Decimal("300")

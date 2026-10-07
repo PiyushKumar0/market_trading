@@ -77,7 +77,7 @@ _LEDGER = [
     (1, "hi52", "win", "100.50", "2026-10-06T15:00:00+05:30"),
     (1, "hi52", "loss", "-40.25", "2026-10-06T15:05:00+05:30"),
     (1, "hi52", "void", "999.00", "2026-10-06T15:10:00+05:30"),
-    (1, "hi52", "win", "500.00", "2026-10-01T15:00:00+05:30"),      # before the epoch
+    (1, "hi52", "win", "500.00", "2026-10-01T15:00:00+05:30"),      # before the epoch: still on the card
     (0, "hi52", "win", "700.00", "2026-10-06T15:00:00+05:30"),      # a real trade
     (1, "paperonly", "loss", "-10.00", "2026-10-06T15:00:00+05:30"),
 ]
@@ -103,11 +103,16 @@ def seed_paper(conn) -> None:
         )
 
 
-def test_paper_half_counts_this_epochs_paper_trades_and_excludes_voids(conn) -> None:
+def test_label_is_the_literal_em_dash_text() -> None:
+    assert LABEL == "hindsight on official bars — not platform equity"
+    assert "Ã" not in LABEL
+
+
+def test_paper_half_keeps_pre_epoch_paper_trades_and_excludes_voids(conn) -> None:
     _seed(conn)
     seed_paper(conn)
     strategies = scorecard(conn)["strategies"]
-    assert strategies["hi52"]["paper"] == {"closed": 2, "hit_rate": 0.5, "net": 60.25, "open": 2}
+    assert strategies["hi52"]["paper"] == {"closed": 3, "hit_rate": 2 / 3, "net": 560.25, "open": 2}
     assert strategies["paperonly"]["paper"] == {"closed": 1, "hit_rate": 0.0, "net": -10.0, "open": 0}
     assert strategies["unattributed"]["paper"] == {"closed": 0, "hit_rate": None, "net": None, "open": 1}
     assert strategies["paperonly"]["recs"]["n"] == 0

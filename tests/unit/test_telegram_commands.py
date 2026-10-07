@@ -387,6 +387,16 @@ async def test_paper_status_uses_providers_else_na(paper_bot):
 
 
 @pytest.mark.asyncio
+async def test_paper_status_says_when_the_autopilot_is_not_built(paper_bot):
+    b, control, _ = paper_bot
+    control.set_enabled(True, "owner")
+    assert "not built" not in await _paper(b, "status")
+    b.set_paper(control, autopilot_built=lambda: False)
+    first, second = (await _paper(b, "status")).splitlines()[:2]
+    assert "autopilot not built" in first and "paper enabled: True" in second
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("args", [(), ("bogus",), ("on", "x")])
 async def test_paper_usage(paper_bot, args):
     assert await _paper(paper_bot[0], *args) == "/paper <on|off|status|reset>"

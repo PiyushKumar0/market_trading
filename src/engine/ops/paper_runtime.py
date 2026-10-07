@@ -40,10 +40,11 @@ from engine.oms.positions import PositionBook
 from engine.oms.prep import BarsFn, Replayed, ReplayFn, SessionPrep, Walk
 from engine.oms.protection import ProtectionManager
 from engine.oms.reconcile import Reconciler
-from engine.oms.state import CloseReason, OrderState, modify_rejected, transition
+from engine.oms.state import CloseReason, OrderRole, OrderState, modify_rejected, transition
 from engine.oms.store import OrderStore
 from engine.paper.broker import GTT_ID_BASE, ORDER_ID_BASE, PaperBroker
 from engine.paper.fill_model import FillModelConfig, load_fill_model
+from engine.risk.gate import TERMINAL_ORDER_STATES_SQL
 from engine.strategy.scanners.hi52 import UNADJUSTED_KINDS
 
 if TYPE_CHECKING:
@@ -70,8 +71,12 @@ TickStep = Callable[[], Awaitable[Any]]
 PAPER_TICK_S = 30
 #: The close reconcile (Q4.7) runs once a session from this long before the close.
 CLOSE_RECONCILE_LEAD = timedelta(minutes=5)
-#: How far back a pre-ex mark is looked for; none found prices a void at ``avg_entry``.
+#: How far back a stored mark is looked for; none found prices a void at ``avg_entry``.
 PRE_EX_LOOKBACK = timedelta(days=10)
+#: Bounds the restart mark seeding that precedes session prep.
+SEED_MARKS_S = 30.0
+#: ``last_mark_fn(symbol, at)``: the last stored price at or before ``at`` and its timestamp.
+LastMarkFn = Callable[[str, datetime], Awaitable[tuple[Decimal, datetime] | None]]
 
 
 class PrepState(StrEnum):
@@ -112,7 +117,8 @@ async def no_notify(msg: CatalogMessage) -> None:
 _ENTRY_FILLS = (
     "SELECT o.order_id, o.filled_qty, p.symbol, p.avg_entry FROM orders o "
     "JOIN positions p ON p.position_id = o.position_id "
-    f"WHERE {scope_sql('paper', 'o')} AND o.role = 'entry' AND o.state = 'FILLED' "
+    f"WHERE {scope_sql('paper', 'o')} AND o.role = 'entry' AND o.state IN {TERMINAL_ORDER_STATES_SQL} "
+    "AND o.filled_qty > 0 "
     f"AND {scope_sql('paper', 'p', has_origin=True)}"
 )
 _CLOSES = (
@@ -253,15 +259,31 @@ def store_corp_actions_fn(store: MarketStore) -> CorpActionsFn:
     return corp_actions
 
 
+async def _last_bar(store: MarketStore, symbol: str, end: datetime) -> Bar | None:
+    """The last stored 1m bar before ``end``."""
+    bars = await store.arun(store.get_bars_1m, symbol, end - PRE_EX_LOOKBACK, end)
+    return bars[-1] if bars else None
+
+
 def store_pre_ex_mark_fn(store: MarketStore) -> PreExMarkFn:
     """The ExitManager's ``pre_ex_mark_fn``: the close of the last stored 1m bar before the ex-date."""
 
     async def pre_ex_mark(symbol: str, ex_date: date) -> Decimal | None:
-        end = datetime.combine(ex_date, time(0), tzinfo=IST)
-        bars = await store.arun(store.get_bars_1m, symbol, end - PRE_EX_LOOKBACK, end)
-        return bars[-1].close if bars else None
+        bar = await _last_bar(store, symbol, datetime.combine(ex_date, time(0), tzinfo=IST))
+        return None if bar is None else bar.close
 
     return pre_ex_mark
+
+
+def store_last_mark_fn(store: MarketStore) -> LastMarkFn:
+    """The runtime's ``last_mark_fn``: the close of the last stored 1m bar whose minute starts at or
+    before ``at``, stamped with that minute."""
+
+    async def last_mark(symbol: str, at: datetime) -> tuple[Decimal, datetime] | None:
+        bar = await _last_bar(store, symbol, at.replace(second=0, microsecond=0) + _MINUTE)
+        return None if bar is None else (bar.close, bar.ts_minute)
+
+    return last_mark
 
 
 def session_segments(calendar: NSECalendar, frm: datetime, to: datetime) -> Iterator[tuple[datetime, datetime]]:
@@ -336,8 +358,11 @@ class PaperRuntime:
         bars_fn: BarsFn | None = None,
         replay_fn: ReplayFn | None = None,
         corp_actions_fn: CorpActionsFn | None = None,
+        last_mark_fn: LastMarkFn | None = None,
     ) -> None:
         self._bars_fn = bars_fn
+        self._last_mark_fn = last_mark_fn
+        self._orders: OrderManager | None = None
         self._replay_fn = replay_fn
         self._corp_actions_fn = corp_actions_fn
         self.session_prep: SessionPrep | None = None
@@ -399,6 +424,7 @@ class PaperRuntime:
             corp_actions_fn=self._corp_actions_fn, pre_ex_mark_fn=pre_ex_mark_fn, mark_fn=self.mark,
         )
         self.reconciler = Reconciler(self._conn, self._clock, self.broker, orders=orders, protection=protection)
+        self._orders = orders
         self._prep = self.session_prep.run
         self._reconcile = self.reconciler.run
         return self.session_prep, self.reconciler
@@ -464,7 +490,8 @@ class PaperRuntime:
         self._order_guard(intent)
 
     def mark(self, symbol: str) -> Decimal | None:
-        """The last price forwarded to the broker: paper equity never marks ahead of session prep."""
+        """The last price forwarded to the broker, or the stored one prep seeded: paper equity never
+        marks ahead of session prep."""
         mark = self._marks.get(symbol)
         return mark[0] if mark is not None else None
 
@@ -484,7 +511,8 @@ class PaperRuntime:
     ) -> None:
         """Wire the managers built on :attr:`broker`: ProtectionManager.tick, ExitManager.tick and the
         Q4.8 equity snapshot and halts. The close reconcile comes with :meth:`attach`."""
-        self._steps = (("protection", protection), ("exits", exits), ("equity", equity))
+        self._steps = (("protection", protection), ("exits", exits), ("equity", equity),
+                       ("entries", self._cancel_blocked_entries))
 
     async def paper_tick(self) -> None:
         """The 30 s ``paper_tick`` job. Does nothing until this session's prep has completed; the
@@ -508,6 +536,21 @@ class PaperRuntime:
             await step()
         except Exception:
             _log.exception("paper_tick_step_failed", step=name)
+
+    async def _cancel_blocked_entries(self) -> None:
+        """Cancel every resting paper entry while the order guard refuses entries (paper off or the
+        effective state not NORMAL; an unreadable state refuses too). A partial fill keeps its part."""
+        if self._orders is None:
+            return
+        try:
+            self._order_guard("entry")
+            return
+        except Exception as exc:
+            blocked = str(exc)
+        for order in OrderStore(self._conn).open_orders():
+            if order.is_paper and order.role is OrderRole.ENTRY and order.broker_order_id is not None:
+                _log.warning("paper_entry_cancel_blocked", order_id=order.order_id, blocked=blocked)
+                await self._orders.cancel(order.broker_order_id, reason="entries_blocked")
 
     # ---------------------------------------------------------------- bridge
     async def _tick_event(self, tick: Tick) -> None:
@@ -568,6 +611,7 @@ class PaperRuntime:
 
     async def _run_prep(self, session_date: date, since: datetime | None, until: datetime) -> None:
         _log.info("paper_prep_started", since=since, until=until)
+        await self._seed_marks(since)
         try:
             async with asyncio.timeout(PREP_BACKSTOP_S):
                 await self._prep(since, until)
@@ -591,6 +635,21 @@ class PaperRuntime:
         _log.info("paper_prep_done", failed=failed, last_observed_at=self._last_observed)
         if failed:
             await self._send_alert("prep", f"paper session prep failed for ({since}, {until}]; forwarding resumed")
+
+    async def _seed_marks(self, observed: datetime | None) -> None:
+        """Mark each held paper symbol at its last stored bar up to ``observed`` unless a newer mark is
+        carried: prep voids and the first equity snapshot after a restart price at the last mark."""
+        if observed is None or self._last_mark_fn is None:
+            return
+        try:
+            async with asyncio.timeout(SEED_MARKS_S):
+                for symbol in held_paper_symbols(self._conn):
+                    found = await self._last_mark_fn(symbol, observed)
+                    mark = self._marks.get(symbol)
+                    if found is not None and (mark is None or found[1] > mark[1]):
+                        self._marks[symbol] = found
+        except Exception:
+            _log.exception("paper_marks_not_seeded", observed=observed)
 
     async def _send_alert(self, key: str, message: str) -> None:
         try:

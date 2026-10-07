@@ -98,14 +98,24 @@ async def test_paper_line_only_with_paper_activity(conn) -> None:
     seed_paper(conn)
     await _job(conn, sent).run(FRI)
     assert sent[1].body.splitlines()[3] == (
-        "Paper, current epoch, simulated fills: 3 closed, hit 33%, net +50 rupees, 3 open."
+        "Paper, all epochs, simulated fills: 4 closed, hit 50%, net +550 rupees, 3 open."
     )
-    assert sent[1].data["paper"] == {"closed": 3, "net": 50.25, "open": 3}
+    assert sent[1].data["paper"] == {"closed": 4, "net": 550.25, "open": 3}
     assert sent[1].body.splitlines()[:3] == sent[0].body.splitlines()
 
     conn.execute("DELETE FROM learning_ledger")
     await _job(conn, sent).run(FRI)
-    assert sent[2].body.splitlines()[3] == "Paper, current epoch, simulated fills: 0 closed, 3 open."
+    assert sent[2].body.splitlines()[3] == "Paper, all epochs, simulated fills: 0 closed, 3 open."
+
+
+async def test_a_failing_paper_query_drops_the_paper_line_not_the_summary(conn, monkeypatch) -> None:
+    _seed(conn)
+    monkeypatch.setattr("engine.ops.scorecard._PAPER_OPEN_SQL", "SELECT broken")
+    sent: list = []
+    await _job(conn, sent).run(FRI)
+    (msg,) = sent
+    assert len(msg.body.splitlines()) == 3 and "paper" not in msg.data
+    assert "hi52 n=2" in msg.body
 
 
 async def test_no_recs_still_sends_with_zeros(conn) -> None:

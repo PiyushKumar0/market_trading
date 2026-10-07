@@ -69,6 +69,16 @@ class _Deferred:
     alarmed: bool = False
 
 
+async def cancel_working_entries(conn: sqlite3.Connection, orders: OrderManager, pid: str, reason: str) -> None:
+    """A resting entry must not buy into a position on its way out."""
+    for r in conn.execute(
+        f"SELECT broker_order_id FROM orders WHERE position_id = ? AND role = 'entry' AND {_PAPER} "
+        f"AND {_WORKING} AND broker_order_id IS NOT NULL",
+        (pid,),
+    ).fetchall():
+        await orders.cancel(r["broker_order_id"], reason=reason)
+
+
 def _ex_date(value: Any) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -149,6 +159,7 @@ class ExitManager:
             self._deferred.pop(pid, None)
             self._book.mark_pending_exit(pid, LEG_REASON.get(working_leg[1], CloseReason.STOP))
             _log.info("paper_exit_handed_to_leg", position_id=pid, gtt_id=working_leg[0], reason=reason.value)
+            await cancel_working_entries(self._conn, self._orders, pid, "exit_handed_to_leg")
             return
         known = self._broker_ids(pid)
         if any(leg is not None and leg[0] in gtt_ids and o["order_id"] not in known for leg, o in legs):
@@ -159,12 +170,7 @@ class ExitManager:
         # PENDING_EXIT first: verify_all never re-arms a position whose GTT is about to go.
         self._book.mark_pending_exit(pid, reason, basis)
         await self._delete_active(pid, [g["id"] for g in live if g["status"] == "active"])
-        for r in self._conn.execute(
-            f"SELECT broker_order_id FROM orders WHERE position_id = ? AND role = 'entry' AND {_PAPER} "
-            f"AND {_WORKING} AND broker_order_id IS NOT NULL",
-            (pid,),
-        ).fetchall():
-            await self._orders.cancel(r["broker_order_id"], reason="exit_routine")
+        await cancel_working_entries(self._conn, self._orders, pid, "exit_routine")
         row = self._held_row(pid)
         if row is None:
             return
@@ -288,43 +294,52 @@ class ExitManager:
         return f"unadjusted corporate action on {hits[0].isoformat()} inside the hold ({entry.isoformat()}, {hold}]"
 
     async def _corp_recheck(self, today: date, now: datetime) -> None:
-        """An ex-date found today voids a position held across it; one that closed today is re-labelled
-        VOID. Both price at the pre-ex mark. A failed void re-arms the check for the next tick."""
-        symbols = {r["symbol"] for r in await self._corp_actions(today, today) if _ex_date(r["ex_date"]) == today}
-        if not symbols:
-            return
+        """A held position voids at the pre-ex mark of the first ex-date in (entry session, today],
+        however late it was found; one that closed today across today's ex-date is re-labelled VOID.
+        A failed void re-arms the check for the next tick."""
+        def entry(row: sqlite3.Row) -> date:
+            return self._session_of(datetime.fromisoformat(row["opened_at"]))
 
-        def spans(row: sqlite3.Row) -> bool:
-            return row["symbol"] in symbols and self._session_of(datetime.fromisoformat(row["opened_at"])) < today
+        held = self._held()
+        entered = {r["position_id"]: entry(r) for r in held}
+        ex_dates: dict[str, set[date]] = {}
+        for r in await self._corp_actions(min(entered.values(), default=today), today):
+            ex_dates.setdefault(r["symbol"], set()).add(_ex_date(r["ex_date"]))
 
         failed = False
-        for row in self._held():
-            if spans(row):
-                try:
-                    mark = await self._pre_ex_mark(row["symbol"], today)
-                    await self._book.void(row["position_id"], mark, now, "corp_action_late")
-                except Exception:
-                    failed = True
-                    _log.exception("paper_late_void_failed", position_id=row["position_id"])
-                    continue
-                self._late_find(row, "void", mark)
+        for row in held:
+            pid = row["position_id"]
+            ex = min((d for d in ex_dates.get(row["symbol"], ()) if entered[pid] < d <= today), default=None)
+            if ex is None:
+                continue
+            try:
+                mark = await self._pre_ex_mark(row["symbol"], ex)
+                await self._book.void(pid, mark, now, "corp_action_late")
+            except Exception:
+                failed = True
+                _log.exception("paper_late_void_failed", position_id=pid)
+                continue
+            self._late_find(row, "void", mark, ex)
         for row in self._conn.execute(
             f"SELECT * FROM positions WHERE {_PAPER_POSITION} AND state = 'CLOSED' AND substr(closed_at, 1, 10) = ? "
             f"AND close_reason IS NOT 'void'",
             (today.isoformat(),),
         ).fetchall():
-            if spans(row):
+            if today in ex_dates.get(row["symbol"], ()) and entry(row) < today:
                 mark = await self._pre_ex_mark(row["symbol"], today)
                 self._relabel_void(row, mark)
-                self._late_find(row, "relabel", mark)
+                self._late_find(row, "relabel", mark, today)
         if failed:
             self._corp_checked_at = None
 
-    def _late_find(self, row: sqlite3.Row, action: str, mark: Decimal | None) -> None:
+    def _late_find(self, row: sqlite3.Row, action: str, mark: Decimal | None, ex: date) -> None:
+        """Halts latched before the late find stay latched: the owner judges a ``/paper reset``."""
         self.counters.late_corp_actions += 1
         self.counters.voids += 1
+        halts = [r["cause"] for r in self._conn.execute(
+            "SELECT cause FROM paper_halts WHERE cleared_at IS NULL ORDER BY set_at")]
         _log.warning("paper_corp_action_late", position_id=row["position_id"], symbol=row["symbol"], action=action,
-                     mark=None if mark is None else str(mark))
+                     ex_date=ex.isoformat(), mark=None if mark is None else str(mark), halts=halts)
 
     def _relabel_void(self, row: sqlite3.Row, mark: Decimal | None) -> None:
         """Re-price a closed position at ``mark`` (``avg_entry`` when unknown), cost-free, as VOID."""

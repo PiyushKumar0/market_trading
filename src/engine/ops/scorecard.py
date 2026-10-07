@@ -14,7 +14,7 @@ from typing import Any
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.learning.benchmark import BENCH_INTRASESSION, BENCH_TIME
 
-LABEL = "hindsight on official bars â€” not platform equity"
+LABEL = "hindsight on official bars — not platform equity"
 UNATTRIBUTED = "unattributed"
 
 # Entry recs only (rec_outcomes never scores exit recs); void_ca is excluded from every stat.
@@ -29,11 +29,10 @@ _SQL = (
 )
 
 
-# Paper trades of the current epoch (as the paper book counts them); a void is excluded.
+# Paper trades of every epoch (a /paper reset keeps the record); a void is excluded.
 _PAPER_CLOSED_SQL = (
     "SELECT strategy_id, net_pnl FROM learning_ledger "
-    f"WHERE {scope_sql('paper')} AND closed_at IS NOT NULL AND COALESCE(outcome_label, '') != 'void' "
-    "AND closed_at >= COALESCE((SELECT epoch_started_at FROM paper_state WHERE id = 1), '')"
+    f"WHERE {scope_sql('paper')} AND closed_at IS NOT NULL AND COALESCE(outcome_label, '') != 'void'"
 )
 _PAPER_OPEN_SQL = (
     f"SELECT strategy_id FROM positions WHERE {HELD_STATES_SQL['paper']} "
@@ -45,11 +44,11 @@ def _mean(xs: list[float]) -> float | None:
     return mean(xs) if xs else None
 
 
-def scorecard(conn: sqlite3.Connection) -> dict[str, Any]:
+def scorecard(conn: sqlite3.Connection, *, with_paper: bool = True) -> dict[str, Any]:
     by_strategy: dict[str, list[tuple]] = defaultdict(list)
     for row in conn.execute(_SQL):
         by_strategy[row[0] or UNATTRIBUTED].append(tuple(row))
-    paper = _paper(conn)
+    paper = _paper(conn) if with_paper else {}
     return {
         "label": LABEL,
         "bench": {"time": BENCH_TIME, "intrasession": BENCH_INTRASESSION},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from decimal import Decimal
 
 import pytest
@@ -272,6 +273,19 @@ async def test_a_time_exit_while_a_partial_entry_rests_cancels_it_and_sells_the_
     assert (pos["state"], pos["qty"], pos["close_reason"]) == ("CLOSED", 10, "time_stop")
 
 
+async def test_an_exit_handed_to_a_working_leg_cancels_the_resting_entry(conn, rig) -> None:
+    await rig.mgr.submit(*seed(conn, qty=20, limit="96"))
+    volume(rig, 10)
+    await rig.px(at(10, 1), "95.90", cum=5000)
+    [entry] = orders(conn, "entry")
+    rig.now.value = at(10, 1, 30)
+    rig.broker.on_tick(tick(at(10, 1, 30), "94.00", cum=5000))
+
+    await rig.em.exit_position(entry["position_id"], R.TIME_STOP, "time")
+    assert position(conn, entry["position_id"])["state"] == "PENDING_EXIT"
+    assert rig.mgr.cancel_intended(entry["order_id"]) and orders(conn, "exit") == []
+
+
 async def test_a_missed_time_exit_goes_at_the_first_in_session_moment_noted_overdue(conn, rig) -> None:
     pid = await rig.enter()
     for ts in (at(15, 31), at(9, 14, 59, NEXT)):
@@ -349,6 +363,21 @@ async def test_a_late_ex_date_today_voids_a_position_held_across_it_at_the_pre_e
     assert Decimal(pos["realized_pnl"]) == gross and ledger(conn, pid)["outcome_label"] == "void"
     assert await rig.gtts() == [] and orders(conn, "exit") == []
     assert (rig.em.counters.voids, rig.em.counters.late_corp_actions) == (1, 1)
+
+
+@pytest.mark.parametrize("ex, voided", [(DAY, False), (NEXT, True)], ids=["on-entry", "inside-hold"])
+async def test_an_ex_date_found_sessions_later_voids_a_position_held_across_it(conn, rig, caplog, ex, voided) -> None:
+    rig.hold = 5
+    pid = await rig.enter()
+    conn.execute("INSERT INTO paper_halts (cause, rung, set_at) VALUES ('daily_loss', 'REDUCED', ?)",
+                 (at(10, 0, d=NEXT).isoformat(),))
+    rig.corp.append(corp(SYM, ex))
+    with caplog.at_level(logging.WARNING, logger="engine.oms.exits"):
+        await rig.run(at(10, 0, d=FRI))
+
+    assert position(conn, pid)["state"] == ("CLOSED" if voided else "OPEN")
+    assert [(r.ex_date, r.halts) for r in caplog.records if r.getMessage() == "paper_corp_action_late"] == (
+        [(NEXT.isoformat(), ["daily_loss"])] if voided else [])
 
 
 async def test_a_close_made_on_a_late_found_ex_date_is_relabelled_void_at_the_pre_ex_mark(conn, rig) -> None:

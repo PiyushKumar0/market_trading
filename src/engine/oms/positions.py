@@ -105,6 +105,7 @@ class PositionBook:
         session_of: SessionOfFn,
         add_sessions: AddSessionsFn,
         round_trip_fn: RoundTripFn,
+        fees_fn: RoundTripFn | None = None,
     ) -> None:
         if not isinstance(broker, PaperBroker):
             raise TypeError(f"PositionBook takes a PaperBroker only, got {type(broker).__name__} (D8)")
@@ -116,6 +117,7 @@ class PositionBook:
         self._session_of = session_of
         self._add_sessions = add_sessions
         self._round_trip = round_trip_fn
+        self._fees = fees_fn or round_trip_fn
 
     # ---------------------------------------------------------------- fills
     def on_fill(self, order: PlatformOrder, qty: int, price: Decimal, at: datetime) -> None:
@@ -194,7 +196,7 @@ class PositionBook:
         if reason is None:
             _log.warning("paper_close_reason_unknown", order_id=order.order_id)
         self._close(row, realized, at, CloseReason(reason or CloseReason.EXTERNAL_UNKNOWN),
-                    row["close_basis"] or "fill")
+                    row["close_basis"] or "fill", fill_priced=True)
 
     # ---------------------------------------------------------------- exits
     def check_sell(self, position_id: str, qty: int) -> None:
@@ -291,7 +293,12 @@ class PositionBook:
         return {r["broker_order_id"]: int(r["filled_qty"] or 0) for r in rows}
 
     # ---------------------------------------------------------------- close
-    def _close(self, row: sqlite3.Row, realized: Decimal, at: datetime, reason: CloseReason, basis: str) -> None:
+    def _close(
+        self, row: sqlite3.Row, realized: Decimal, at: datetime, reason: CloseReason, basis: str,
+        *, fill_priced: bool = False,
+    ) -> None:
+        """A broker fill's price already carries the half-spread, so a fill-priced close charges fees only;
+        a close priced off a bar charges the full round trip, spread included."""
         position_id = row["position_id"]
         entry = self._conn.execute(
             f"SELECT proposal_id, verdict_id, filled_qty FROM orders "
@@ -305,7 +312,8 @@ class PositionBook:
         avg = _dec(row["avg_entry"])
         gross = _money(realized)
         void = reason is CloseReason.VOID
-        costs = Decimal("0.00") if void else _money(self._round_trip(avg * qty, row["product"]))
+        cost_fn = self._fees if fill_priced else self._round_trip
+        costs = Decimal("0.00") if void else _money(cost_fn(avg * qty, row["product"]))
         net = gross - costs
         outcome = "void" if void else "win" if net > 0 else "loss" if net < 0 else "scratch"
         opened = datetime.fromisoformat(row["opened_at"])

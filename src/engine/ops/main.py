@@ -161,6 +161,7 @@ from engine.ops.paper_runtime import (
     exit_sim_replay,
     no_notify,
     store_corp_actions_fn,
+    store_last_mark_fn,
     store_pre_ex_mark_fn,
 )
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
@@ -3516,6 +3517,7 @@ class PaperStack:
     prep: SessionPrep
     reconciler: Reconciler
     ctx_builder: GateContextBuilder
+    notifier: PaperNotifier
 
     def entries_open(self) -> bool:
         """The pipeline's ``paper_enabled_fn``: ``/paper on`` and this session's prep completed."""
@@ -3550,7 +3552,8 @@ class PaperStack:
         }
 
     async def stop(self) -> None:
-        for part, stop in (("runtime", self.runtime.stop), ("orders", self.orders.stop)):
+        parts = (("runtime", self.runtime.stop), ("notifier", self.notifier.tick), ("orders", self.orders.stop))
+        for part, stop in parts:
             try:
                 await stop()
             except Exception:
@@ -3592,6 +3595,7 @@ async def _compose_paper(
             bars_fn=backfill_bars_fn(backfill, store, calendar),
             replay_fn=exit_sim_replay,
             corp_actions_fn=corp_actions,
+            last_mark_fn=store_last_mark_fn(store),
         )
         await runtime.start()
         broker = runtime.broker
@@ -3610,6 +3614,8 @@ async def _compose_paper(
         book = PositionBook(
             conn, clock, broker, orders=orders, hold_fn=hold_fn,
             round_trip_fn=lambda notional, product: cost_model.round_trip(notional, product).total_cost,
+            fees_fn=lambda notional, product: (
+                (bd := cost_model.round_trip(notional, product)).total_cost - bd.components["spread"]),
             **sessions,
         )
         exits = ExitManager(
@@ -3638,7 +3644,7 @@ async def _compose_paper(
 
         runtime.set_tick_steps(protection=protection.tick, exits=exits.tick, equity=equity_and_fills)
         stack = PaperStack(
-            clock, control, runtime, orders, exits, risk, prep, reconciler, ctx_builder_fn(risk.tracker),
+            clock, control, runtime, orders, exits, risk, prep, reconciler, ctx_builder_fn(risk.tracker), notifier,
         )
         orders.start(bus)
     except Exception:

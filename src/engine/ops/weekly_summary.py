@@ -12,10 +12,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from engine.core.clock import IST
+from engine.core.log import get_logger
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
 from engine.ops.jobs import JOB_REC_OUTCOMES
 from engine.ops.scorecard import scorecard
+
+_log = get_logger("engine.ops.weekly_summary")
 
 _ENTRY = "COALESCE(json_extract(r.payload, '$.kind'), 'entry') = 'entry'"
 _WEEK_RECS = (
@@ -58,7 +61,13 @@ class WeeklySummaryJob:
         ]
         skipped = Counter(r[2] for r in week if r[2])
         n_closed, rupees = self._conn.execute(_SKIPPED_CLOSED).fetchone()
-        card = scorecard(self._conn)["strategies"]
+        try:
+            card = scorecard(self._conn)["strategies"]
+            paper = [s["paper"] for s in card.values()]
+        except Exception:
+            _log.exception("weekly_summary_paper_failed")
+            card = scorecard(self._conn, with_paper=False)["strategies"]
+            paper = []
         strategies = [
             (sid, s["recs"]["closed"], s["recs"]["mean_net"], s["recs"]["mean_excess"])
             for sid, s in card.items() if s["recs"]["closed"]
@@ -68,12 +77,11 @@ class WeeklySummaryJob:
             skipped=dict(skipped), expired=sum(r[1] == "expired" and not r[2] for r in week),
             skipped_closed=n_closed, skipped_rupees=rupees, strategies=strategies,
         )
-        paper = [s["paper"] for s in card.values()]
         closed, open_n = sum(p["closed"] for p in paper), sum(p["open"] for p in paper)
         if closed or open_n:
             wins = sum(round(p["hit_rate"] * p["closed"]) for p in paper if p["closed"])
             net = sum(p["net"] or 0 for p in paper)
-            line = (f"Paper, current epoch, simulated fills: {closed} closed"
+            line = (f"Paper, all epochs, simulated fills: {closed} closed"
                     + (f", hit {wins / closed:.0%}, net {net:+,.0f} rupees" if closed else "")
                     + f", {open_n} open.")
             message = message.model_copy(update={

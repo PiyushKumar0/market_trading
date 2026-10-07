@@ -46,7 +46,7 @@ FLATTEN_CAUSES = frozenset({"floor_equity_floor_rung", "floor_cumulative_floor",
 FlattenFn = Callable[[str], Awaitable[int]]
 SessionFn = Callable[[date], Session | None]
 
-_HELD = (f"SELECT position_id FROM positions "
+_HELD = (f"SELECT position_id, symbol FROM positions "
          f"WHERE {scope_sql('paper', has_origin=True)} AND {HELD_STATES_SQL['paper']}")
 _WORKING = f"SELECT 1 FROM orders WHERE {scope_sql('paper')} AND state NOT IN {TERMINAL_ORDER_STATES_SQL} LIMIT 1"
 
@@ -100,6 +100,7 @@ class PaperRisk:
         self._session_fn = session_fn
         self._broker = broker
         self._capital_base = capital_base
+        self._mark_price = mark_price
         self._limits_fn = limits_fn
         self._flatten = flatten
         self._flattened: set[str] = set()
@@ -120,6 +121,11 @@ class PaperRisk:
         await self._flatten_if_due()
 
     def _evaluate(self, now: datetime) -> None:
+        # An unmarked holding would count at avg_entry against a baseline that carried its mark.
+        unmarked = sorted({r["symbol"] for r in self._conn.execute(_HELD) if self._mark_price(r["symbol"]) is None})
+        if unmarked:
+            _log.warning("paper_equity_skipped_unmarked", symbols=unmarked)
+            return
         self.tracker.persist_snapshot()
         table = self._limits_fn()
         reasons = {

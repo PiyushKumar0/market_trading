@@ -21,7 +21,7 @@ from engine.ops.paper_runtime import PaperNotifier
 from engine.risk.gate import GateContextBuilder
 from engine.strategy.cost_model import CostModel
 from tests.unit.test_paper_composition import LIMITS, Limits, Store
-from tests.unit.test_protection_manager import Rig, at, position, round_tick
+from tests.unit.test_protection_manager import Rig, at, orders, position, round_tick, seed, volume
 
 
 @pytest.fixture
@@ -93,6 +93,21 @@ async def test_an_entry_completion_and_a_close_are_each_sent_once(conn, rig) -> 
     assert len(sink.sent) == 2 and close.dedupe_key == f"paper_close:{pid}"
     assert (close.data["exit_price"], close.data["net_pnl"], close.data["reason"], close.data["basis"]) == (
         ledger["exit_px"], ledger["net_pnl"], "stop", "fill")
+
+
+async def test_a_partial_entry_fill_ended_by_a_cancel_is_sent_with_its_filled_qty(conn, rig) -> None:
+    sink = Sink()
+    paper = notifier(rig, sink)
+    await rig.mgr.submit(*seed(conn, qty=20, limit="100"))
+    volume(rig, 10)
+    await rig.px(at(10, 1), "99.90", cum=5000)
+    [entry] = orders(conn, "entry")
+    await rig.mgr.cancel(entry["broker_order_id"], reason="test")
+    await rig.settle()
+
+    await paper.tick()
+    assert orders(conn, "entry")[0]["state"] == "CANCELLED"
+    assert [(m.dedupe_key, m.data["qty"]) for m in sink.sent] == [(f"paper_fill:{entry['order_id']}", 10)]
 
 
 async def test_what_exists_at_boot_is_not_announced_again(conn, rig) -> None:

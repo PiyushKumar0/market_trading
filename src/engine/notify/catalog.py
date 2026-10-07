@@ -474,7 +474,8 @@ def weekly_summary(
     skipped_closed: int, skipped_rupees: float, strategies: list[tuple[str, int, float | None, float | None]],
 ) -> CatalogMessage:
     """Three lines: the week's recs by owner decision, the hindsight value of skipped recs, and the
-    cumulative per-strategy ``(id, closed, mean net %, mean excess %)``."""
+    cumulative per-strategy ``(id, closed, mean net %, mean excess %)``. The job appends a fourth
+    paper line (all epochs, simulated) when paper has activity."""
     def pct(x: float | None) -> str:
         return "n/a" if x is None else f"{x:+.2f}%"
 

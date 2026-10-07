@@ -22,7 +22,13 @@ from engine.oms.state import OrderState
 from engine.oms.store import OrderStore
 from engine.ops.paper_control import PaperControl
 from engine.ops.paper_risk import paper_effective_state
-from engine.ops.paper_runtime import PaperRuntime, PrepState, backfill_bars_fn, exit_sim_replay
+from engine.ops.paper_runtime import (
+    PaperRuntime,
+    PrepState,
+    backfill_bars_fn,
+    exit_sim_replay,
+    store_last_mark_fn,
+)
 from engine.paper.broker import GTT_ID_BASE, ORDER_ID_BASE
 from engine.paper.fill_model import FillModelConfig, load_fill_model
 from engine.risk.limits import LimitsEngine
@@ -587,6 +593,45 @@ async def test_a_prep_timeout_voids_alerts_and_forwarding_resumes(
     seen = spy(monkeypatch, runtime)
     await send(bus, now, at(10, 30, 30))
     assert [t.exchange_ts for t in seen] == [at(10, 30, 30)]
+
+
+class _Bars:
+    """The MarketStore surface ``store_last_mark_fn`` reads."""
+
+    def __init__(self, bars: list[Bar]) -> None:
+        self.bars = bars
+
+    async def arun(self, fn, /, *args):
+        return fn(*args)
+
+    def get_bars_1m(self, symbol: str, start: dt.datetime, end: dt.datetime) -> list[Bar]:
+        return [b for b in self.bars if b.symbol == symbol and start <= b.ts_minute < end]
+
+
+async def test_a_restart_seeds_the_last_stored_mark_up_to_last_observed_and_prep_voids_at_it(
+    conn, bus, clock, make_runtime, make_stack, now
+) -> None:
+    PaperControl(conn, clock)
+    conn.execute("UPDATE paper_state SET last_observed_at = ?", (at(10, 30, 20).isoformat(),))
+    insert_position(conn, "P")
+    proposal, verdict = seed(conn)
+    conn.execute("INSERT INTO orders (order_id, position_id, proposal_id, verdict_id, role, is_paper, state, product, "
+                 "side, qty, filled_qty, created_at, updated_at) VALUES ('E', 'P', ?, ?, 'entry', 1, 'FILLED', 'CNC', "
+                 "'BUY', 10, 10, ?, ?)", (proposal.proposal_id, verdict.verdict_id, *(at(9, 30).isoformat(),) * 2))
+    stored = [bar(at(10, m)).model_copy(update={"close": Decimal(px)}) for m, px in ((29, "104"), (30, "103"), (31, "90"))]
+
+    async def failed(symbols, _frm, _to) -> dict:
+        return dict.fromkeys(symbols)
+
+    now.value = at(11, 0)
+    runtime = await make_runtime(**prep_fns(bars_fn=failed), last_mark_fn=store_last_mark_fn(_Bars(stored)))
+    attach(runtime, make_stack, now)
+    await send(bus, now, at(11, 0, 5))
+    await prep_done(runtime)
+
+    pos = position(conn, "P")
+    assert (pos["close_basis"], Decimal(pos["realized_pnl"])) == ("downtime_uncovered", Decimal("30"))
+    assert runtime.mark("TCS") == Decimal("103")
 
 
 # ---------------------------------------------------------------- paper risk seams (Q4.8)

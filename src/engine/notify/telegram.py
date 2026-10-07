@@ -1114,6 +1114,8 @@ class TelegramBot:
         counters = self._paper_counters_fn() if self._paper_counters_fn else None
         halts = self._paper.active_halts()
         return "\n".join([
+            *([] if self._paper_autopilot_built()
+              else ["autopilot not built (subsystem disabled or construction failed); flags below are stored only"]),
             f"paper enabled: {st['enabled']} (changed {st['changed_at']} by {st['changed_by']})",
             f"epoch_started_at: {st['epoch_started_at']}",
             f"reset_requested_at: {st['reset_requested_at']}",

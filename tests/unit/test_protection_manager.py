@@ -416,8 +416,36 @@ async def test_protection_failed_runs_the_exit_routine_and_alerts(conn, rig, mon
 
     pos = position(conn, pid)
     assert (pos["protection_state"], pos["state"], [k for k, _ in rig.alerts]) == (
-        "PROTECTION_FAILED", "PENDING_EXIT", [f"{pid}:1"])
+        "PROTECTION_FAILED", "PENDING_EXIT", [alert_key(pid, 1, at(10, 5))])
     assert rig.exits == [(R.GTT_FAILURE_EXIT, "protection_failed")] and len(orders(conn, "exit")) == 1
+
+
+def alert_key(pid: str, attempt: int, ts: dt.datetime) -> str:
+    return f"{pid}:{attempt}:{ts.isoformat(timespec='seconds')}"
+
+
+async def test_a_failure_after_a_restart_is_not_deduped_against_the_last_boot(conn, rig) -> None:
+    pid = await rig.enter()
+    for minute in (5, 6):
+        rig.now.value = at(10, minute)
+        rig.pm._alerts.clear()
+        await rig.pm._fail(pid, "GTT lost", exit_now=False)
+    assert [k for k, _ in rig.alerts] == [alert_key(pid, 1, at(10, m)) for m in (5, 6)]
+
+
+async def test_a_position_sent_to_exit_while_verify_awaits_gets_no_fresh_gtt(conn, rig) -> None:
+    p1 = await rig.enter(n=1)
+    p2 = await rig.enter(n=2, ts=at(10, 0, 3))
+    for g in await rig.gtts():
+        await rig.broker.delete_gtt(g["id"])
+    conn.execute("UPDATE positions SET stop = '120' WHERE position_id = ?", (p1,))
+
+    async def exit_elsewhere(_pid: str, _reason: CloseReason, _basis: str) -> None:
+        rig.book.mark_pending_exit(p2, R.TIME_STOP)
+
+    rig.pm._exit_fn = exit_elsewhere
+    await rig.pm.verify_all()
+    assert position(conn, p2)["state"] == "PENDING_EXIT" and await rig.gtts() == []
 
 
 async def test_a_rejected_exit_is_retried_three_times_then_fails_and_retries_next_session(
@@ -433,7 +461,7 @@ async def test_a_rejected_exit_is_retried_three_times_then_fails_and_retries_nex
     pos = position(conn, pid)
     assert rejected == ["REJECTED"] * 4 and rig.exits == [(R.TIME_STOP, "fill")] * 4
     assert (pos["state"], pos["protection_state"], [k for k, _ in rig.alerts]) == (
-        "PENDING_EXIT", "PROTECTION_FAILED", [f"{pid}:1"])
+        "PENDING_EXIT", "PROTECTION_FAILED", [alert_key(pid, 1, at(15, 20))])
     rig.now.value = at(15, 25)
     await rig.pm.tick()
     assert len(rig.exits) == 4

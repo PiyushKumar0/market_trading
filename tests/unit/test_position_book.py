@@ -22,7 +22,8 @@ from engine.risk.exposure import ExposureTracker
 
 SYM = "TCS"
 DAY = dt.date(2026, 6, 17)
-COST_RATE = Decimal("0.003")
+COST_RATE = Decimal("0.003")            # fees + spread: bar-priced closes
+FEE_RATE = Decimal("0.002")             # fees only: a broker fill's price already carries the spread
 
 
 def at(h: int, m: int, s: int = 0) -> dt.datetime:
@@ -72,6 +73,10 @@ async def rig(conn, bus):
         holder["rig"].costs.append((notional, product))
         return notional * COST_RATE
 
+    def fees(notional: Decimal, product: str) -> Decimal:
+        holder["rig"].costs.append((notional, product))
+        return notional * FEE_RATE
+
     def on_fill(order, qty, price, when) -> None:
         holder["rig"].fills.append((order.role, qty, price))
         book.on_fill(order, qty, price, when)
@@ -79,7 +84,8 @@ async def rig(conn, bus):
     mgr = OrderManager(conn, clock, broker, order_guard=lambda _: None,
                        sell_check=lambda pid, qty: book.check_sell(pid, qty), on_fill=on_fill)
     book = PositionBook(conn, clock, broker, orders=mgr, hold_fn=lambda _s, _style: holder["rig"].hold,
-                        session_of=lambda ts: ts.date(), add_sessions=add_sessions, round_trip_fn=round_trip)
+                        session_of=lambda ts: ts.date(), add_sessions=add_sessions, round_trip_fn=round_trip,
+                        fees_fn=fees)
     mgr.start(bus)
     holder["rig"] = _Rig(broker, mgr, book, now)
     yield holder["rig"]
@@ -193,7 +199,7 @@ async def test_partial_entry_fills_open_then_accrete_and_exit_fills_close_throug
     sells = [(q, p) for role, q, p in rig.fills if role is OrderRole.EXIT]
     assert len(sells) > 1 and sum(q for q, _ in sells) == 60
     gross = sum((q * (p - avg) for q, p in sells), Decimal(0)).quantize(Decimal("0.01"))
-    costs = (avg * 60 * COST_RATE).quantize(Decimal("0.01"))
+    costs = (avg * 60 * FEE_RATE).quantize(Decimal("0.01"))
     row = position(conn, entry.position_id)
     assert (row["state"], row["qty"], row["close_reason"], row["close_basis"]) == ("CLOSED", 60, "time_stop", "fill")
     assert (Decimal(row["realized_pnl"]), Decimal(row["costs"])) == (gross, costs)
@@ -214,7 +220,7 @@ def test_exit_session_is_session_n_of_the_hold_else_pending(conn, rig, hold, cal
 @pytest.mark.parametrize("exit_px, tag, reason, outcome", [
     ("110", "gtt:900001:1", "target", "win"),
     ("95", "gtt:900001:0", "stop", "loss"),
-    ("100.30", None, "external_unknown", "scratch"),
+    ("100.20", None, "external_unknown", "scratch"),
 ], ids=["target-leg", "stop-leg", "unnamed-exit"])
 def test_close_books_gross_costs_at_the_entry_notional_and_a_paper_ledger_row(
     conn, rig, exit_px, tag, reason, outcome
@@ -228,13 +234,13 @@ def test_close_books_gross_costs_at_the_entry_notional_and_a_paper_ledger_row(
     row = position(conn, pid)
     assert (row["state"], row["qty"], Decimal(row["avg_entry"]), row["close_reason"], row["close_basis"]) == (
         "CLOSED", 10, avg, reason, "fill")
-    assert (Decimal(row["realized_pnl"]), row["costs"], row["closed_at"]) == (gross, "3.00", at(11, 0).isoformat())
+    assert (Decimal(row["realized_pnl"]), row["costs"], row["closed_at"]) == (gross, "2.00", at(11, 0).isoformat())
     [entry] = ledger(conn)
     expected = {
         "position_id": pid, "rec_id": None, "is_paper": 1, "strategy_id": "hi52",
         "features_snapshot_id": "f", "agent_id": "swing", "proposal_id": "P1", "verdict_id": "V1",
         "entry_px": "100.0000", "exit_px": str(Decimal(exit_px).quantize(Decimal("0.0001"))), "qty": 10,
-        "costs": "3.00", "gross_pnl": str(gross), "net_pnl": str(gross - Decimal("3.00")), "holding_minutes": 59,
+        "costs": "2.00", "gross_pnl": str(gross), "net_pnl": str(gross - Decimal("2.00")), "holding_minutes": 59,
         "close_reason": reason, "outcome_label": outcome, "created_at": at(10, 1).isoformat(),
         "closed_at": at(11, 0).isoformat(),
     }
@@ -294,6 +300,7 @@ async def test_a_bookkeeping_close_cancels_working_orders_and_deletes_the_active
     row = position(conn, pid)
     assert (row["state"], row["close_reason"], row["close_basis"], row["realized_pnl"]) == (
         "CLOSED", "stop", "downtime_replay", "-30.00")
+    assert row["costs"] == "3.00"                       # priced off a bar: fees plus the spread
 
 
 @pytest.mark.parametrize("neutered", ["delete_gtt", "cancel_order"])
