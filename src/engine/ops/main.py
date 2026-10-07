@@ -142,6 +142,7 @@ from engine.ops.keep_awake import KeepAwake
 from engine.ops.lifecycle import SessionLifecycle
 from engine.ops.news_scoring import NewsScoringJob
 from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
+from engine.ops.paper_control import PaperControl
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.post_login import (
     PostLoginRecovery,
@@ -633,6 +634,9 @@ async def run() -> int:
         session=session, conn=conn, bus=bus,
     )
     telegram_holder["bot"] = telegram
+    paper_control = PaperControl(conn, clock)
+    if telegram is not None:
+        telegram.set_paper(paper_control, autopilot_built=lambda: settings.paper.subsystem_enabled)
     # After _build_telegram subscribed to the bus, so the MODE_CHANGE alert is journalled.
     await mode.enforce_paper_only()
 
@@ -1633,7 +1637,7 @@ async def run() -> int:
     # --- dashboard API ---
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
                       protected_store=protected_store, exposure=exposure, governor=governor,
-                      limits_engine=limits_engine, market_store=store)
+                      limits_engine=limits_engine, market_store=store, paper_control=paper_control)
     if not secrets.has(DASHBOARD_TOKEN):
         _log.warning("dashboard_token_missing", hint="run scripts/dpapi_set.py --generate-dashboard-token")
 
@@ -4208,13 +4212,14 @@ def _build_telegram(settings, secrets, clock, mode, kill, *, latch=None, governo
 
 
 def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protected_store=None,
-                exposure=None, governor=None, limits_engine=None, market_store=None):
+                exposure=None, governor=None, limits_engine=None, market_store=None,
+                paper_control=None):
     from engine.api.app import create_app
 
     return create_app(session_manager=session, mode_manager=mode, kill_switch=kill,
                       secrets=secrets, clock=clock, bus=bus, conn=conn, store=protected_store,
                       exposure=exposure, governor=governor, limits_engine=limits_engine,
-                      market_store=market_store)
+                      market_store=market_store, paper_control=paper_control)
 
 
 async def _serve_api(app, settings):

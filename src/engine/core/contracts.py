@@ -225,6 +225,8 @@ class Recommendation(BaseModel):
 
 #: Canonical event bus topic for broker order postbacks (§3.2.1, A3) — drives the OMS (§3.5.1).
 ORDER_UPDATE_TOPIC = "order.update"
+#: Paper postbacks travel apart from real ones (plan §1.2), so no real-order consumer can see one.
+PAPER_ORDER_UPDATE_TOPIC = "paper.order.update"
 
 
 class OrderUpdateFrame(BaseModel):

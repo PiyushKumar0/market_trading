@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from engine.core.calendar import NSECalendar
+from engine.core.clock import Clock
 from engine.core.config import config_dir, load_yaml
 from engine.core.contracts import CheckResult, CostBreakdown, GateVerdict, Recommendation
 from engine.core.enums import Actor, DegradeTier, Mode, RiskState, Routing
@@ -31,6 +32,7 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.notify import catalog
 from engine.notify.catalog import MessageKind
 from engine.notify.telegram import _USAGE_VETO, VETO_REASONS, TelegramBot, _owner_only
+from engine.ops.paper_control import PaperControl
 from engine.ops.pipeline import RecommendationBook
 from engine.risk.causes import CAUSE_OWNER_PAUSE, CAUSE_REJECTION_STORM, RiskStateLatch
 from engine.risk.events import (
@@ -243,6 +245,7 @@ def _insert_position(conn, position_id: str, **kw) -> None:
         ("reject", ("ap-1",)),
         ("token", ("tok",)),
         ("why", ("TCS",)),
+        ("paper", ("status",)),
     ],
 )
 async def test_unwired_dependency_says_so(bot, msg, command, args):
@@ -299,6 +302,94 @@ async def test_why_handler(bot, msg, args, fn_raises, expected):
 
     assert msg.sent == [expected]
     assert calls == (["TCS"] if expected != "/why <symbol>" else [])
+
+
+# --------------------------------------------------------------------------- /paper (plan Q4.0)
+@pytest.fixture
+def paper_bot(conn):
+    """A bot wired to a real PaperControl on a clock the test can advance; autopilot built by default."""
+    now = [datetime(2026, 6, 17, 10, 5, tzinfo=timezone(timedelta(hours=5, minutes=30)))]
+    clock = Clock(time_source=lambda: now[0])
+    control = PaperControl(conn, clock)
+    b = TelegramBot("dummy-token", owner_chat_id=OWNER_CHAT, clock=clock)
+    b.set_paper(control, autopilot_built=lambda: True)
+    return b, control, now
+
+
+async def _paper(b, *args) -> str:
+    m = _CapturingMessage()
+    await b._cmd_paper(_Update(m), _Ctx(*args))
+    return m.sent[-1]
+
+
+async def _confirm(b, phrase: str) -> str:
+    m = _CapturingMessage()
+    await b._cmd_confirm(_Update(m), _Ctx(phrase))
+    return m.sent[-1]
+
+
+def _phrase(reply: str) -> str:
+    return reply.rsplit("/confirm ", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_paper_on_and_reset_are_two_step(paper_bot):
+    b, control, _ = paper_bot
+    reply = await _paper(b, "on")
+    assert not control.enabled()
+    assert await _confirm(b, _phrase(reply)) == "paper ON."
+    assert control.enabled()
+    reply = await _paper(b, "reset")
+    assert control.state()["reset_requested_at"] is None
+    await _confirm(b, _phrase(reply))
+    assert control.state()["reset_requested_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_paper_off_applies_immediately(paper_bot):
+    b, control, _ = paper_bot
+    control.set_enabled(True, "owner")
+    assert "paper OFF" in await _paper(b, "off")
+    assert not control.enabled()
+
+
+@pytest.mark.asyncio
+async def test_paper_refused_while_a_challenge_is_pending_and_accepted_once_it_expires(paper_bot):
+    b, control, now = paper_bot
+    first = _phrase(await _paper(b, "on"))
+    assert "pending" in await _paper(b, "reset")
+    now[0] += timedelta(minutes=3)
+    second = _phrase(await _paper(b, "reset"))
+    assert second != first
+    await _confirm(b, second)
+    assert control.state()["reset_requested_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_paper_on_refused_without_the_autopilot(paper_bot):
+    b, control, _ = paper_bot
+    b.set_paper(control, autopilot_built=lambda: False)
+    assert "not enabled" in await _paper(b, "on")
+    assert b._pending is None and not control.enabled()
+
+
+@pytest.mark.asyncio
+async def test_paper_status_uses_providers_else_na(paper_bot):
+    b, control, _ = paper_bot
+    control.set_enabled(True, "owner")
+    text = await _paper(b, "status")
+    assert "paper enabled: True" in text and "open positions: n/a" in text and "counters: n/a" in text
+    b.set_paper(control, autopilot_built=lambda: True,
+                status_fn=lambda: {"open_positions": 2, "day_pnl": "-15.50"},
+                counters_fn=lambda: {"voids": 1})
+    text = await _paper(b, "status")
+    assert "open positions: 2" in text and "day P&L: -15.50" in text and "{'voids': 1}" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [(), ("bogus",), ("on", "x")])
+async def test_paper_usage(paper_bot, args):
+    assert await _paper(paper_bot[0], *args) == "/paper <on|off|status|reset>"
 
 
 # --------------------------------------------------------------------------- outcome capture (§3.6)

@@ -477,6 +477,7 @@ class ReplayHarness:
         )
         self._opened = False
         self._broker: ReplayBroker | None = None
+        self._topic = ORDER_UPDATE_TOPIC
         self._bars: dict[date, list[Bar]] = {}
         self._frames: list[OrderUpdateFrame] = []
         self._reader: ThreadPoolExecutor | None = None
@@ -503,21 +504,23 @@ class ReplayHarness:
 
     # ------------------------------------------------------------------ lifecycle
     def attach_broker(self, broker: ReplayBroker) -> None:
-        """Attach the duck-typed broker driven by :meth:`run` (``on_tick`` / ``on_bar``)."""
+        """Attach the duck-typed broker driven by :meth:`run` (``on_tick`` / ``on_bar``). Its
+        ``topic``, when it has one, is the topic :meth:`publish` collects."""
         self._broker = broker
+        self._topic = getattr(broker, "topic", ORDER_UPDATE_TOPIC)
 
     def publish(self, topic: str, event: BaseModel) -> None:
         """The event-bus ``publish`` seam a replayed broker is constructed with (§3.2.9).
 
-        ``PaperBroker(publish=harness.publish)``. Every :data:`ORDER_UPDATE_TOPIC` frame is recorded
-        here — this collector is what the digest hashes and what ``ReplayReport.postbacks`` counts.
+        ``PaperBroker(publish=harness.publish)``. Every frame on the attached broker's topic
+        (default :data:`ORDER_UPDATE_TOPIC`) is recorded here — this collector is what the digest hashes and what ``ReplayReport.postbacks`` counts.
         Frames on other topics are accepted and ignored: the harness asserts the ORDER path, and a
         broker publishing something else must not crash a replay over it.
 
         Synchronous and allocation-cheap by design: it is called from inside the broker's ``on_tick``,
         i.e. on the hot path, once per order state change.
         """
-        if topic == ORDER_UPDATE_TOPIC:
+        if topic == self._topic:
             self._frames.append(event)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------ scripted actions (§9.6)
@@ -729,7 +732,7 @@ class ReplayHarness:
         if size > baseline:
             raise ReplayContractError(
                 f"broker's orderbook grew from {baseline} to {size} order(s) during the replay but "
-                f"the harness collected zero {ORDER_UPDATE_TOPIC!r} frames — construct it with "
+                f"the harness collected zero {self._topic!r} frames — construct it with "
                 "publish=harness.publish; a bars-only digest would silently stop asserting anything "
                 "about orders (§8.4)"
             )

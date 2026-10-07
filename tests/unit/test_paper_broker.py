@@ -5,8 +5,9 @@ Every rule asserted here is a CONSERVATISM rule -- the paper tier exists to prod
 live tier can only beat, never a number it has to live up to (R9). The load-bearing cases:
 
 * market orders wait out the 700 ms simulated latency and then pay half-spread + k*sigma;
-* limit orders need a TRADE-THROUGH, never a touch, and never fill better than their limit
-  (the 9.3 conservatism case);
+* limit orders need a TRADE-THROUGH, never a touch; one through on its first eligible tick is
+  marketable and fills at market capped at its limit, any other rests and fills at its limit
+  (the 9.3 conservatism case, plan Q4.2d);
 * SL-M is gap-aware: a session-open print through a stop fills at the PRINT, not at the stop
   (the 9.3 "results-day gap through a stop" case -- the loss is allowed to exceed per-trade risk);
 * partials are budgeted at 10% of the MINUTE's volume -- per (order, minute), not per tick -- and
@@ -37,9 +38,11 @@ import pytest
 from pydantic import BaseModel
 
 from engine.core.clock import IST, Clock
-from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
+from engine.core.contracts import ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.types import Bar, Tick
 from engine.paper.broker import (
+    GTT_ID_BASE,
+    ORDER_ID_BASE,
     SIGMA_BOOTSTRAP_PCT,
     SIGMA_FLOOR_PCT,
     PaperBroker,
@@ -200,31 +203,55 @@ async def test_market_sell_receives_less(broker: PaperBroker, bus: _Bus, now: _N
 
 # =========================================================================== (b) limit trade-through
 @pytest.mark.parametrize(
-    ("side", "limit", "touch", "through"),
+    ("side", "first", "then", "expected"),
     [
-        ("BUY", "100.00", "100.00", "99.95"),
-        ("SELL", "100.00", "100.00", "100.05"),
+        # Marketable (through on the first eligible tick): ltp + slippage, capped at the limit.
+        # mid k=0.5, half-spread 0.05, bootstrap sigma 0.2% of ltp, rounded against the taker.
+        ("BUY", "99.50", None, "99.65"),
+        ("BUY", "99.95", None, "100.00"),      # 100.10 at market, capped at the limit
+        ("SELL", "100.50", None, "100.30"),
+        ("SELL", "100.05", None, "100.00"),    # 99.85 at market, capped at the limit
+        # Resting (a touch on the first eligible tick): fills at its limit however deep the later
+        # trade-through, never at the better traded price (9.3 conservatism case).
+        ("BUY", "100.00", "99.00", "100.00"),
+        ("SELL", "100.00", "101.00", "100.00"),
     ],
 )
-async def test_limit_needs_trade_through_and_never_fills_better_than_its_price(
-    broker: PaperBroker, bus: _Bus, now: _Now, side: str, limit: str, touch: str, through: str
+async def test_limit_is_classed_marketable_or_resting_on_its_first_eligible_tick(
+    broker: PaperBroker, bus: _Bus, now: _Now, side: str, first: str, then: str | None, expected: str
 ) -> None:
     now.set(at(10, 0, 0))
     oid = await broker.place_order(
-        order(transaction_type=side, order_type="LIMIT", price=Decimal(limit))
+        order(transaction_type=side, order_type="LIMIT", price=Decimal("100.00"))
     )
     bus.clear()
 
-    # A tick exactly AT the limit is a touch, not a trade-through: no fill (9.3 conservatism).
-    broker.on_tick(tick(at(10, 0, 1), touch))
-    assert bus.frames == []
-
-    broker.on_tick(tick(at(10, 0, 2), through))
+    broker.on_tick(tick(at(10, 0, 1), first))
+    if then is not None:
+        assert bus.frames == []                          # a touch is not a trade-through
+        broker.on_tick(tick(at(10, 0, 2), then))
     filled = bus.for_order(oid)[-1]
     assert filled["status"] == "COMPLETE"
-    # The fill price is the LIMIT, never the (better) traded price -- a limit never fills worse than
-    # its price, and paper never credits it with better.
-    assert filled["average_price"] == Decimal(limit)
+    assert filled["average_price"] == Decimal(expected)
+
+
+async def test_a_marketable_limit_filled_across_two_minutes_prices_both_fills_at_market(
+    broker: PaperBroker, bus: _Bus, now: _Now
+) -> None:
+    now.set(at(10, 0, 0))
+    oid = await broker.place_order(order(order_type="LIMIT", price=Decimal("100.00"), quantity=60))
+    broker.on_bar(
+        Bar(symbol=SYM, ts_minute=at(10, 0), open=Decimal("100"), high=Decimal("100"),
+            low=Decimal("100"), close=Decimal("100"), volume=300)
+    )
+    bus.clear()
+
+    broker.on_tick(tick(at(10, 1, 0), "99.50", cum=5000))    # 30 of 300 at 99.65
+    broker.on_tick(tick(at(10, 1, 30), "99.00", cum=5000))   # budget spent for this minute
+    broker.on_tick(tick(at(10, 2, 0), "99.00", cum=5000))    # 30 more at 99.15
+    frames = bus.for_order(oid)
+    assert [f["filled_quantity"] for f in frames] == [30, 60]
+    assert [f["average_price"] for f in frames] == [Decimal("99.65"), Decimal("99.40")]
 
 
 async def test_limit_respects_the_latency_too(broker: PaperBroker, bus: _Bus, now: _Now) -> None:
@@ -1253,6 +1280,119 @@ async def test_a_raising_publish_never_leaves_a_resting_leg_with_a_gtt_that_did_
     br.on_tick(tick(at(10, 0, 3), "93.00"))              # the leg is NOT booked a second time
     assert [d for d in published if d.get("price") == Decimal("95.00")] == booked
     assert len([o for o in await br.orders() if o["status"] == "OPEN"]) == 1
+
+
+# =========================================================================== (h2) plan Q4.2
+def _make(now: _Now, publish, **kw) -> PaperBroker:
+    return PaperBroker(
+        clock=Clock(time_source=now), publish=publish, fill_model=FillModelConfig(),
+        tick_size=lambda symbol: TICK_SIZE, rng_seed=1234, rejection_rate=0.0, **kw,
+    )
+
+
+def _stop_target(stop_limit: str = "94.00") -> dict:
+    """A Kite-shaped protective OCO: the stop leg's limit sits below its trigger."""
+    req = _oco("95.00", "110.00")
+    req["orders"][0]["price"] = Decimal(stop_limit)
+    return req
+
+
+def _gtt_row(gtt_id: int, req: dict, state: str = "ACTIVE") -> dict:
+    """``req`` as the 0016 ``gtts`` columns store it (TEXT prices)."""
+    triggers, legs = req["trigger_values"], req["orders"]
+    two = len(triggers) == 2
+    return {
+        "gtt_id": gtt_id, "position_id": "p1", "state": state, "is_paper": 1,
+        "symbol": req["tradingsymbol"], "side": legs[0]["transaction_type"],
+        "product": legs[0]["product"], "qty": legs[0]["quantity"],
+        "trigger_low": str(triggers[0]), "trigger_high": str(triggers[1]) if two else None,
+        "stop_limit": str(legs[0]["price"]), "target_limit": str(legs[1]["price"]) if two else None,
+        "last_price": str(req["last_price"]), "created_at": at(10, 0).isoformat(),
+    }
+
+
+@pytest.mark.parametrize(
+    ("kw", "order_id", "gtt_id", "topic"),
+    [
+        ({}, ORDER_ID_BASE + 1, GTT_ID_BASE + 1, ORDER_UPDATE_TOPIC),
+        ({"order_seq": 7, "gtt_seq": 3, "topic": PAPER_ORDER_UPDATE_TOPIC},
+         ORDER_ID_BASE + 8, GTT_ID_BASE + 4, PAPER_ORDER_UPDATE_TOPIC),
+    ],
+    ids=["defaults", "seeded"],
+)
+async def test_seeded_id_counters_and_the_postback_topic(
+    now: _Now, bus: _Bus, kw: dict, order_id: int, gtt_id: int, topic: str
+) -> None:
+    br = _make(now, bus, **kw)
+    assert await br.place_order(order()) == f"{order_id:015d}"
+    assert await br.place_gtt(_oco("95.00", "110.00")) == gtt_id
+    assert br.topic == topic
+    assert {t for t, _ in bus.frames} == {topic}
+
+
+def _single_stop() -> dict:
+    req = _stop_target()
+    req.update(trigger_type="single", trigger_values=req["trigger_values"][:1],
+               orders=req["orders"][:1])
+    return req
+
+
+@pytest.mark.parametrize("req", [_stop_target(), _single_stop()], ids=["two-leg", "single"])
+async def test_restore_rebooks_active_gtts_identically(now: _Now, req: dict) -> None:
+    now.set(at(10, 0, 0))
+    placed_bus, restored_bus = _Bus(), _Bus()
+    placed = _make(now, placed_bus)
+    gid = await placed.place_gtt(req)
+    restored = _make(now, restored_bus)
+    rows = [_gtt_row(gid, req), _gtt_row(gid + 1, req, state="TRIGGERED")]
+
+    assert restored.restore(rows) == [gid]
+    assert await restored.gtts() == await placed.gtts()
+    for br in (placed, restored):
+        br.on_tick(tick(at(10, 0, 2), "94.80"))              # the stop fires...
+        br.on_tick(tick(at(10, 0, 3), "94.80"))              # ...and its leg fills
+    assert restored_bus.data() == placed_bus.data()
+    assert await restored.place_gtt(req) == gid + 1      # a restored id is never minted again
+
+
+async def test_restore_books_nothing_when_any_row_is_invalid(broker: PaperBroker) -> None:
+    good = _gtt_row(GTT_ID_BASE + 1, _stop_target())
+    with pytest.raises(PaperOrderError):
+        broker.restore([good, {**good, "gtt_id": GTT_ID_BASE + 2, "qty": 0}])
+    with pytest.raises(PaperOrderError, match="already"):
+        broker.restore([good, good])
+    assert await broker.gtts() == []
+
+
+@pytest.mark.parametrize(("leg", "fire", "fill"), [(0, "94.80", "94.65"), (1, "110.50", "110.30")])
+async def test_a_fired_leg_is_tagged_and_fills_near_the_market(
+    broker: PaperBroker, bus: _Bus, now: _Now, leg: int, fire: str, fill: str
+) -> None:
+    """Before Q4.2d the stop leg booked its 94.00 limit, ~1% worse than live and than exit_sim."""
+    now.set(at(10, 0, 0))
+    gid = await broker.place_gtt(_stop_target())
+    bus.clear()
+    broker.on_tick(tick(at(10, 0, 2), fire))
+    broker.on_tick(tick(at(10, 0, 3), fire))
+    frames = bus.data()
+    assert {f["tag"] for f in frames} == {f"gtt:{gid}:{leg}"}
+    assert frames[-1]["status"] == "COMPLETE"
+    assert frames[-1]["average_price"] == Decimal(fill)
+
+
+@pytest.mark.parametrize("corrupt", [False, True], ids=["triggered", "failed"])
+async def test_delete_of_a_gtt_that_is_no_longer_active_raises_like_kite(
+    broker: PaperBroker, now: _Now, corrupt: bool
+) -> None:
+    now.set(at(10, 0, 0))
+    gid = await broker.place_gtt(_oco("95.00", "110.00"))
+    if corrupt:
+        broker._gtt_book[gid].orders[0]["quantity"] = 0
+    broker.on_tick(tick(at(10, 0, 2), "94.00"))
+    status = "failed" if corrupt else "triggered"
+    with pytest.raises(PaperOrderError, match=status):
+        await broker.delete_gtt(gid)
+    assert [g["status"] for g in await broker.gtts()] == [status]
 
 
 # =========================================================================== (i) order guard

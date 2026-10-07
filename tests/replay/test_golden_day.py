@@ -46,7 +46,7 @@ import duckdb
 import pytest
 
 from engine.core.clock import IST, Clock
-from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
+from engine.core.contracts import ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.types import Bar, Tick
 from engine.marketdata.store import _TICK_COLUMNS
 from engine.paper.broker import PaperBroker
@@ -503,6 +503,24 @@ def test_book_already_full_at_run_start_is_not_a_hard_error(
     finally:
         harness.close()
     assert report.postbacks == 0
+
+
+@pytest.mark.parametrize("topic", [ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC])
+def test_the_harness_collects_only_the_attached_brokers_topic(
+    synthetic_day: SyntheticDay, tmp_path: Path, topic: str
+) -> None:
+    harness = ReplayHarness(synthetic_day.root, tmp_path / "topic")
+    broker = PaperBroker(
+        clock=harness.clock, publish=harness.publish, fill_model=FillModelConfig(),
+        tick_size=lambda _symbol: Decimal("0.05"), rng_seed=1, topic=topic,
+    )
+    harness.attach_broker(broker)
+    frames = {
+        t: OrderUpdateFrame(data={"order_id": t}) for t in (ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC)
+    }
+    for t, frame in frames.items():
+        harness.publish(t, frame)
+    assert harness.postbacks() == [frames[topic]]
 
 
 def test_second_run_on_the_same_broker_is_not_a_false_positive(

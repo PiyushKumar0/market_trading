@@ -10,17 +10,20 @@ real broker order, so §8.3's zero-API-orders constraint is untouched.
 Design rules, all of them load-bearing:
 
 * **Postbacks are the ONLY output.** Every state change publishes exactly one
-  :class:`~engine.core.contracts.OrderUpdateFrame` on ``order.update`` with a Kite-shaped ``data``
-  dict — the same topic and the same field names the mt-ticker child forwards for live orders, so
-  live and paper share ONE OMS parser (§3.5.1, §8.4 WO-P3-1). The frame and topic live in
+  :class:`~engine.core.contracts.OrderUpdateFrame` on the broker's ``topic`` (production:
+  ``PAPER_ORDER_UPDATE_TOPIC``, never the real ``order.update``) with a Kite-shaped ``data`` dict —
+  the same field names the mt-ticker child forwards for live orders, so live and paper share ONE
+  OMS parser (§3.5.1, §8.4 WO-P3-1). The frame and topic live in
   ``engine.core.contracts`` precisely because two brokers emit them; this module imports nothing
   from ``engine.broker`` (§3.2.9: the paper tier depends on ``core`` alone, enforced by
   ``tests/unit/test_import_graph.py``). Price fields are :class:`~decimal.Decimal` rather than the
   float a real Kite postback carries; the OMS parser coerces with ``Decimal(str(v))`` either way,
   so Decimal is lossless where a float would not be.
 * **Conservative fills, never optimistic ones** (§9.3). A market order waits out the simulated
-  latency and pays half-spread + k·σ₁ₘ; a limit order needs a strict TRADE-THROUGH and still fills
-  at its limit, never at the better traded price; an SL-M fills at the print it triggered on, which
+  latency and pays half-spread + k·σ₁ₘ; a limit order needs a strict TRADE-THROUGH, and is classed
+  once, on its first eligible tick: through on that tick it is MARKETABLE and fills like a market
+  order capped at its limit, otherwise it RESTS and fills at its limit, never at the better traded
+  price (plan Q4.2d); an SL-M fills at the print it triggered on, which
   is what makes a gap through a stop cost more than the stop distance; every order gets a
   ``participation_cap`` share of each MINUTE's volume — a budget per (order, minute), not per tick
   (fix round 2026-09-10: applied per tick it was unbounded per minute, and a probe measured single
@@ -96,7 +99,7 @@ from engine.paper.fill_model import FillModelConfig
 from engine.paper.surface import ReqLike
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Mapping
 
     from pydantic import BaseModel
 
@@ -108,9 +111,9 @@ _log = get_logger("engine.paper.broker")
 #: Base for paper order ids. 15 digits, numeric-string — Kite-shaped, so nothing downstream can
 #: start depending on a paper-only id format (and a paper id never collides with a live one, which
 #: is 25xxxxxxxxxxxxx-style for the current era).
-_ORDER_ID_BASE = 900000000000000
+ORDER_ID_BASE = 900000000000000
 #: Base for paper GTT trigger ids (Kite returns an int).
-_GTT_ID_BASE = 900000
+GTT_ID_BASE = 900000
 
 #: Order statuses this broker emits. Kite's vocabulary, restricted to what v1 can reach.
 TERMINAL_STATUSES = frozenset({"COMPLETE", "CANCELLED", "REJECTED"})
@@ -206,6 +209,7 @@ class _Order:
     fill_value: Decimal = Decimal(0)
     status_message: str = ""
     triggered: bool = False           # SL-M only: the trigger has been crossed
+    marketable: bool | None = None    # LIMIT only: set once, on the first eligible tick
     # Timestamp of this row's LAST state change (set by _postback). Reported by orders() so a read
     # never restamps the book with the read time — the reconciler (R5) compares broker timestamps
     # against platform rows, and "everything updated just now" is the one answer that tells it
@@ -348,7 +352,7 @@ class PaperBroker:
         what makes the golden replay day byte-identical (§9.6).
     publish:
         The event-bus publish callable (``EventBus.publish``). Every state change goes out as
-        ``publish(ORDER_UPDATE_TOPIC, OrderUpdateFrame(data=...))``.
+        ``publish(topic, OrderUpdateFrame(data=...))``.
     fill_model:
         :class:`~engine.paper.fill_model.FillModelConfig` — latency, buckets/k, half-spread rules.
     tick_size:
@@ -367,6 +371,12 @@ class PaperBroker:
         with the book left completely unmodified (§3.5.3 order-surface predicate).
     available_margin:
         The static balance :meth:`margins` reports (stub; C6 margin math lives in the OMS).
+    order_seq / gtt_seq:
+        The last sequence number already issued; the next id is ``ORDER_ID_BASE + order_seq + 1``
+        (``GTT_ID_BASE`` for GTTs). A restarted broker must be seeded past every stored paper id,
+        or a reused id is absorbed by the OMS as a terminal duplicate (plan Q4.2a).
+    topic:
+        The postback topic. Production passes ``PAPER_ORDER_UPDATE_TOPIC`` (plan §1.2).
     """
 
     def __init__(
@@ -381,6 +391,9 @@ class PaperBroker:
         participation_cap: float = 0.10,
         order_guard: Callable[[str], None] | None = None,
         available_margin: Decimal = Decimal("1000000"),
+        order_seq: int = 0,
+        gtt_seq: int = 0,
+        topic: str = ORDER_UPDATE_TOPIC,
     ) -> None:
         self._clock = clock
         self._publish = publish
@@ -402,8 +415,13 @@ class PaperBroker:
         # session. Broker-wide rather than per-symbol because Kite's day book is account-wide.
         self._session_date: date | None = None
         self._sigma = SigmaEstimator()
-        self._next_order_seq = 0
-        self._next_gtt_seq = 0
+        self._next_order_seq = order_seq
+        self._next_gtt_seq = gtt_seq
+        self._topic = topic
+
+    @property
+    def topic(self) -> str:
+        return self._topic
 
     # ---------------------------------------------------------------- internals: ids / state
     def _state(self, symbol: str) -> _SymbolState:
@@ -415,11 +433,11 @@ class PaperBroker:
 
     def _mint_order_id(self) -> str:
         self._next_order_seq += 1
-        return f"{_ORDER_ID_BASE + self._next_order_seq:015d}"
+        return f"{ORDER_ID_BASE + self._next_order_seq:015d}"
 
     def _mint_gtt_id(self) -> int:
         self._next_gtt_seq += 1
-        return _GTT_ID_BASE + self._next_gtt_seq
+        return GTT_ID_BASE + self._next_gtt_seq
 
     def _guard(self, intent: str) -> None:
         """Run the order-surface guard FIRST, before validation, id minting, the RNG draw, or any
@@ -470,7 +488,7 @@ class PaperBroker:
         :meth:`_publish_guarded` instead.
         """
         order.last_update_at = at
-        self._publish(ORDER_UPDATE_TOPIC, OrderUpdateFrame(data=self._data(order, at)))
+        self._publish(self._topic, OrderUpdateFrame(data=self._data(order, at)))
 
     def _publish_guarded(self, order: _Order, at: datetime) -> None:
         """The ONE postback path for everything emitted from inside ``on_tick`` (round-4 fix,
@@ -850,15 +868,60 @@ class PaperBroker:
         return gtt_id
 
     async def delete_gtt(self, gtt_id: int) -> None:
-        """Delete a GTT. Kite drops it from the account entirely, so a deleted id is thereafter
-        ``unknown`` (a second delete raises) and can never fire again."""
+        """Delete an ACTIVE GTT. Kite drops it from the account entirely, so a deleted id is
+        thereafter ``unknown`` (a second delete raises) and can never fire again; a GTT that is no
+        longer active cannot be deleted, as on Kite."""
         self._guard("risk_reducing")
-        existing = self._gtt_book.pop(gtt_id, None)
+        existing = self._gtt_book.get(gtt_id)
         if existing is None:
             raise PaperOrderError(f"unknown gtt trigger_id {gtt_id!r}")
+        if existing.status != "active":
+            raise PaperOrderError(f"gtt {gtt_id} is {existing.status} and cannot be deleted")
+        del self._gtt_book[gtt_id]
         gtts = self._state(existing.tradingsymbol).gtts
         if gtt_id in gtts:
             gtts.remove(gtt_id)
+
+    def restore(self, gtt_rows: Iterable[Mapping[str, Any]]) -> list[int]:
+        """Re-book the ACTIVE GTTs among ``gtt_rows`` (plain dicts of the 0016 ``gtts`` columns),
+        each with its stored ``last_price`` so every leg keeps its trigger direction. Other states
+        are skipped. All rows are validated before any is booked; returns the restored ids."""
+        restored: dict[int, _Gtt] = {}
+        for row in gtt_rows:
+            if str(row.get("state") or "").lower() != "active":
+                continue
+            gtt_id = int(row["gtt_id"])
+            if gtt_id in self._gtt_book or gtt_id in restored:
+                raise PaperOrderError(f"gtt {gtt_id} is already in the book")
+            legs = [(row["trigger_low"], row.get("stop_limit"))]
+            if row.get("trigger_high") is not None:
+                legs.append((row["trigger_high"], row.get("target_limit")))
+            leg = {
+                "transaction_type": row.get("side"),
+                "quantity": row.get("qty"),
+                "product": row.get("product"),
+                "order_type": "LIMIT",
+            }
+            gtt = self._validate_gtt(
+                {
+                    "tradingsymbol": row.get("symbol"),
+                    "last_price": row.get("last_price"),
+                    "trigger_values": [trigger for trigger, _ in legs],
+                    "orders": [
+                        {**leg, "price": None if price is None else Decimal(str(price))}
+                        for _, price in legs
+                    ],
+                },
+                gtt_id=gtt_id,
+            )
+            if row.get("created_at"):
+                gtt.created_at = datetime.fromisoformat(str(row["created_at"]))
+            restored[gtt_id] = gtt
+        for gtt_id, gtt in restored.items():
+            self._gtt_book[gtt_id] = gtt
+            self._state(gtt.tradingsymbol).gtts.append(gtt_id)
+            self._next_gtt_seq = max(self._next_gtt_seq, gtt_id - GTT_ID_BASE)
+        return list(restored)
 
     async def gtts(self) -> list:
         """All GTT triggers, Kite-shaped (``id`` / ``status`` / ``condition`` / ``orders``).
@@ -1166,17 +1229,15 @@ class PaperBroker:
         if tick.exchange_ts < order.eligible_at:
             return                                   # still inside the simulated latency
 
-        limit_fill = False
-        if order.order_type == "LIMIT":
+        limit = order.price if order.order_type == "LIMIT" else None
+        if limit is not None:
             # TRADE-THROUGH only: a tick exactly AT the limit is a touch, and a touch is not
             # evidence that our resting order traded — the §9.3 conservatism case.
-            assert order.price is not None
-            through = (
-                tick.ltp < order.price if order.transaction_type == "BUY" else tick.ltp > order.price
-            )
+            through = tick.ltp < limit if order.transaction_type == "BUY" else tick.ltp > limit
+            if order.marketable is None:
+                order.marketable = through
             if not through:
                 return
-            limit_fill = True
         elif order.order_type == "SL-M":
             if not order.triggered:
                 assert order.trigger_price is not None
@@ -1204,11 +1265,14 @@ class PaperBroker:
         if qty <= 0:
             return
 
-        if limit_fill:
-            fill_price = order.price
-            assert fill_price is not None
-        else:
+        if limit is None:
             fill_price = self._market_price(order, tick)
+        elif not order.marketable:
+            fill_price = limit
+        elif order.transaction_type == "BUY":
+            fill_price = min(self._market_price(order, tick), limit)
+        else:
+            fill_price = max(self._market_price(order, tick), limit)
 
         order.filled_qty += qty
         order.minute_filled += qty            # spend this minute's participation budget
@@ -1312,6 +1376,7 @@ class PaperBroker:
         leg = _gtt_leg_request(
             gtt.tradingsymbol, gtt.exchange, gtt.trigger_values[index], gtt.orders[index]
         )
+        leg["tag"] = f"gtt:{gtt.gtt_id}:{index}"     # the OMS adopts the leg by this tag (Q4.3)
         order = self._register(self._validate(leg))
         gtt.status = "triggered"
         self._publish_guarded(order, order.placed_at)
@@ -1325,6 +1390,8 @@ class PaperBroker:
 
 
 __all__ = [
+    "GTT_ID_BASE",
+    "ORDER_ID_BASE",
     "PaperBroker",
     "PaperOrderError",
     "SigmaEstimator",

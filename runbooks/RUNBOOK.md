@@ -372,6 +372,7 @@ bars are judged against owner-set state (the trade window) that moved during the
       After placing the GTT stop, reply `/protected <symbol>`; unconfirmed positions are flagged
       UNPROTECTED in `/positions` and reminded twice.
       `/why <symbol>` is the read-only "where does this name stand" report (no LLM, no sweep).
+      `/paper on|off|status|reset` controls the paper autopilot (`on` needs `paper.subsystem_enabled: true`).
 - [ ] **Budget discipline (D6, re-scoped 2026-08-13):** the plan's original bar ("within **10%**
       of console-reconciled spend") assumed a monthly-credit billing model that doesn't exist —
       owner clarification 2026-08-13: SDK usage bills against the Claude subscription's **weekly

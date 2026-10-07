@@ -80,6 +80,12 @@ recommend:
   reminder_window_start: "08:00"
   reminder_window_end: "22:00"
 
+paper:
+  subsystem_enabled: false
+  seed: 20261006
+  exit_minutes_before_close: 10
+  exit_working_timeout_min: 5
+
 data:
   # A11 empirical answer (scripts/a11_check.py): are Kite minute candles corp-action adjusted?
   # RESOLVED 2026-07-05 -> true (ADJUSTED). Verified against the BSE 2:1 bonus (ex-date 2025-05-23,

@@ -237,6 +237,9 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
 - `/why <symbol>`: read-only report (universe status, hi52/brk20 distance to trigger, surveillance and
   results-day flags, latest insider/pledge filings, last rec, open positions, last verdict). Each
   DuckDB read times out at 5 s and prints "<section>: unavailable"; no LLM, no `/scan_now`.
+- `/paper on|off|status|reset`: paper autopilot control. `on` and `reset` need `/confirm <phrase>` and are
+  refused while an unexpired challenge is pending; `on` also needs `paper.subsystem_enabled: true` in
+  settings.yaml (shipped false). `off` stops new entries, exits continue. `GET /paper` returns control state.
 
 ## News-feed health (2026-08-04, after the MC-retirement remediation)
 

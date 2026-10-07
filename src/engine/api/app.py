@@ -198,6 +198,7 @@ def create_app(
     governor: Any = None,
     limits_engine: Any = None,
     market_store: Any = None,
+    paper_control: Any = None,
 ) -> FastAPI:
     """Construct the dashboard ``FastAPI`` app (§3.2.11).
 
@@ -227,6 +228,7 @@ def create_app(
     app.state.governor = governor
     app.state.limits_engine = limits_engine
     app.state.market_store = market_store   # MarketStore (news watchlist); `store` is the ProtectedStore
+    app.state.paper_control = paper_control
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
@@ -354,6 +356,12 @@ def create_app(
         if conn is None:
             return {"label": LABEL, "bench": {}, "strategies": {}}
         return scorecard(conn)
+
+    @app.get("/paper")
+    async def paper(_: Owner) -> dict[str, Any]:
+        """Paper autopilot control state only (plan Q4.0)."""
+        control = app.state.paper_control
+        return {"enabled": False} if control is None else control.state()
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:

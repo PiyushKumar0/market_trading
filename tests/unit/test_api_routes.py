@@ -24,6 +24,7 @@ from engine.core.protected_store import ProtectedStore
 from engine.core.secrets import DASHBOARD_TOKEN
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.governor import BudgetGovernor, TokenUsage
+from engine.ops.paper_control import PaperControl
 from engine.ops.scorecard import LABEL
 from engine.risk.events import TOPIC_MODE_CHANGED, ModeChanged
 from engine.risk.exposure import ExposureTracker
@@ -174,6 +175,7 @@ def test_unwired_routes_return_stub_shapes() -> None:
     assert client.get("/orders", headers=AUTH).json() == {"orders": []}
     assert client.get("/decisions", headers=AUTH).json() == {"decisions": []}
     assert client.get("/verdicts", headers=AUTH).json() == {"verdicts": []}
+    assert client.get("/paper", headers=AUTH).json() == {"enabled": False}
     assert client.get("/risk/headroom", headers=AUTH).json() == {"headroom": {}}
     assert client.get("/budget", headers=AUTH).json() == {"budget": {}, "degrade_tier": None}
     assert client.get("/learning/status", headers=AUTH).json() == {"learning": {}}
@@ -211,6 +213,16 @@ def test_positions_open_first_with_as_of(conn, clock) -> None:
     body = r.json()
     assert [p["position_id"] for p in body["positions"]] == ["p-open", "p-closed"]
     assert body["as_of"] == clock.now().isoformat()
+
+
+def test_paper_route_returns_control_state_and_is_owner_gated(conn, clock) -> None:
+    control = PaperControl(conn, clock)
+    control.set_enabled(True, "owner")
+    client = _client(paper_control=control)
+    assert client.get("/paper").status_code == 401
+    body = client.get("/paper", headers=AUTH).json()
+    assert body["enabled"] is True and body["changed_by"] == "owner"
+    assert set(body) == {"enabled", "changed_at", "changed_by", "epoch_started_at", "reset_requested_at"}
 
 
 def test_orders_latest_100_first(conn, clock) -> None:

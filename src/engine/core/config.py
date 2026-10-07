@@ -143,6 +143,13 @@ class RecommendSettings(BaseModel, extra="forbid"):
     reminder_window_end: time = time(22, 0)
 
 
+class PaperSettings(BaseModel, extra="forbid"):
+    subsystem_enabled: bool = False
+    seed: int = 20261006
+    exit_minutes_before_close: int = 10
+    exit_working_timeout_min: int = 5
+
+
 class DataCfg(BaseModel):
     minute_candles_adjusted: bool | None = None   # A11 result; None until scripts/a11_check.py runs
     universe_max_watchlist: int = 50
@@ -573,6 +580,7 @@ class Settings(BaseModel):
     lifecycle: LifecycleCfg = Field(default_factory=LifecycleCfg)
     clock: ClockCfg = Field(default_factory=ClockCfg)
     recommend: RecommendSettings = Field(default_factory=RecommendSettings)
+    paper: PaperSettings = Field(default_factory=PaperSettings)
     data: DataCfg = Field(default_factory=DataCfg)
     news: NewsCfg = Field(default_factory=NewsCfg)
     cat: CatCfg = Field(default_factory=CatCfg)

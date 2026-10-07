@@ -85,6 +85,7 @@ from engine.risk.mode import ModeRefused
 if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
     from engine.broker.session import SessionManager
     from engine.intelligence.governor import BudgetGovernor
+    from engine.ops.paper_control import PaperControl
     from engine.risk.causes import RiskStateLatch
     from engine.risk.exposure import ExposureTracker
     from engine.risk.kill import KillSwitch
@@ -232,7 +233,8 @@ _USAGE_CLOSED = "/closed <symbol|rec_id> <price>"
 VETO_REASONS = ("market", "price", "size", "trust", "away", "other")
 _USAGE_VETO = f"/veto <symbol|rec_id> <{'|'.join(VETO_REASONS)}>"
 _USAGE_WHY = "/why <symbol>"
-_USAGE_PROTECTED = "/protected <symbol|rec_id>"
+_USAGE_PAPER = "/paper <on|off|status|reset>"
+_USAGE_PROTECTED ="/protected <symbol|rec_id>"
 
 #: Rows a resolution reply may list before it summarises the rest. ``_reply`` writes straight to
 #: ``reply_text`` — it does NOT pass through ``send()``'s splitter — so an unbounded list would
@@ -344,6 +346,9 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("why", _USAGE_WHY,
                  "Where one symbol stands: universe status, trigger levels, flags, filings, last "
                  "recommendation, positions, last verdict. Read-only.", True),
+    _CommandSpec("paper", _USAGE_PAPER,
+                 "Paper autopilot: on and reset need /confirm; off applies now (no new entries, exits "
+                 "continue); status is read-only.", True),
 )
 
 
@@ -474,6 +479,10 @@ class TelegramBot:
         #: async (trigger) -> owner-facing sweep verdict text (§3.2.5 sweep addendum, 2026-07-29).
         self._scan_sweep_fn = scan_sweep_fn
         self._why_fn: Callable[[str], Awaitable[str]] | None = None
+        self._paper: PaperControl | None = None
+        self._paper_autopilot_built: Callable[[], bool] = lambda: False
+        self._paper_status_fn: Callable[[], dict[str, Any]] | None = None
+        self._paper_counters_fn: Callable[[], dict[str, Any]] | None = None
         self._app: Application | None = None
         #: A start() that timed out AFTER start_polling succeeded leaves a LIVE poller behind
         #: (2026-08-07 review round): retained here so stop() can always reach it for teardown —
@@ -500,6 +509,21 @@ class TelegramBot:
     def set_why_fn(self, fn: Callable[[str], Awaitable[str]]) -> None:
         """Late-wire the ``/why`` reader (needs the market store, built after the bot)."""
         self._why_fn = fn
+
+    def set_paper(
+        self,
+        control: PaperControl,
+        *,
+        autopilot_built: Callable[[], bool],
+        status_fn: Callable[[], dict[str, Any]] | None = None,
+        counters_fn: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
+        """Late-wire ``/paper``. ``status_fn`` returns ``open_positions`` / ``day_pnl``; ``counters_fn``
+        returns the reconcile/void/corporate-action counters. Either absent prints ``n/a``."""
+        self._paper = control
+        self._paper_autopilot_built = autopilot_built
+        self._paper_status_fn = status_fn
+        self._paper_counters_fn = counters_fn
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -956,6 +980,7 @@ class TelegramBot:
             "token": self._cmd_token,
             "scan_now": self._cmd_scan_now,
             "why": self._cmd_why,
+            "paper": self._cmd_paper,
         }
 
     def _register_handlers(self, app: Application) -> None:
@@ -1043,6 +1068,60 @@ class TelegramBot:
             await _reply(update, f"/why failed: {type(exc).__name__}: {exc}")
             return
         await _reply(update, text)
+
+    # ------------------------------------------------------------------ /paper (plan Q4.0)
+    async def _cmd_paper(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """``on`` and ``reset`` are two-step and refused while an unexpired challenge is pending;
+        ``off`` applies at once; ``status`` reads."""
+        if self._paper is None:
+            await _reply(update, "/paper: not wired.")
+            return
+        args = _args(context)
+        sub = args[0].lower() if len(args) == 1 else ""
+        paper = self._paper
+        if sub == "status":
+            await _reply(update, self._paper_status_text())
+        elif sub == "off":
+            paper.set_enabled(False, Actor.OWNER.value)
+            _log.warning("telegram_cmd_paper_off")
+            await _reply(update, "paper OFF: no new entries; exits and GTTs continue.")
+        elif sub in ("on", "reset"):
+            if sub == "on" and not self._paper_autopilot_built():
+                await _reply(update, "/paper on refused: the paper subsystem is not enabled "
+                                     "(paper.subsystem_enabled is false or it failed to build).")
+                return
+            if self._pending is not None and self._clock.now() <= self._pending.expires_at:
+                await _reply(update, f"/paper {sub} refused: a confirmation for "
+                                     f"{self._pending.action} is pending; /confirm it or let it expire.")
+                return
+
+            async def _apply(confirmation: OwnerConfirmation) -> str:
+                if sub == "on":
+                    paper.set_enabled(True, Actor.OWNER.value)
+                    return "paper ON."
+                paper.request_reset(Actor.OWNER.value)
+                return "paper reset requested: exits all, then a new epoch once the book is flat."
+
+            phrase = self._issue_challenge(f"paper {sub}", _apply)
+            await _reply(update, f"Confirm paper {sub}. Reply:\n/confirm {phrase}")
+        else:
+            await _reply(update, _USAGE_PAPER)
+
+    def _paper_status_text(self) -> str:
+        assert self._paper is not None
+        st = self._paper.state()
+        info = self._paper_status_fn() if self._paper_status_fn else {}
+        counters = self._paper_counters_fn() if self._paper_counters_fn else None
+        halts = self._paper.active_halts()
+        return "\n".join([
+            f"paper enabled: {st['enabled']} (changed {st['changed_at']} by {st['changed_by']})",
+            f"epoch_started_at: {st['epoch_started_at']}",
+            f"reset_requested_at: {st['reset_requested_at']}",
+            f"open positions: {info.get('open_positions', 'n/a')}",
+            f"day P&L: {info.get('day_pnl', 'n/a')}",
+            "halts: " + (", ".join(f"{h['cause']}={h['rung']}" for h in halts) if halts else "none"),
+            f"counters: {counters if counters is not None else 'n/a'}",
+        ])
 
     # ------------------------------------------------------------------ /kill (single-step, wired)
     async def _cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
