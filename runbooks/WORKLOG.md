@@ -52,6 +52,36 @@
   - Host in Modern Standby about 03:5x–06:26; the `%TEMP%` session scratchpad was wiped during it (nothing lost; state moved outside `%TEMP%`).
   - 06:32 the engine was stop/started from outside this session (SIGINT, then a clean boot at 06:34 on the unchanged live tree).
   - An orphaned chrome-devtools automation Chrome from 10-06 held the MCP profile and was closed.
+- **Deploy M3 + M4, 16:15–16:18** (owner: "Merge M3 and M4, deploy and validate"):
+  - `state.db` → `data\backups\pre_0016.db`.
+  - `phase3` fast-forwarded to `wip/m4` (5f496be). Boot: `migrations_applied_on_boot [0016_paper_book.sql]` 16:16:19, `engine_ready` 16:18:34.
+  - Read-only DB checks (`mt_build_notes\validate_m4.py`): the paper tables exist, `verdicts.is_paper` is present, the entry-verdict unique index is present, `paper_state` is disabled, and there are 0 paper rows.
+  - Full suite on 5f496be: 3915 passed, 20 skipped.
+  - Paper stays unbuilt (`paper.subsystem_enabled: false`); Q4.13 go-live is owner work.
+- **First `rec_outcomes` run:**
+  - The host was in Modern Standby 17:21–20:14 and missed the 18:00–19:30 EOD jobs.
+  - The 30-min catch-up sweep (20:16–20:30) replayed all of them for 10-07 with no failures, including bhavcopy, daily_bars, rec_outcomes, the filings jobs and ins_crossings.
+  - `rec_outcomes` scored 34/34 delivered entry recs: 12 unfilled, 11 closed, 11 open, all filled ones on the `1m_post_delivery` basis.
+  - `universe_ew_returns` covers 2026-08-26 → 10-07 (29 sessions). The watermark is success and there were no warnings.
+  - The 20:20 "catch-up complete (with failures)" Telegram is the compaction lane's `tick_compact:2026-10-06` (budget exhausted, degraded); it retries on its own.
+- **Paper panel** (owner: "add a separate paper panel to the dashboard. Plan it out, review them without bias and then implement them"), a4a4e4c:
+  - Plan `mt_build_notes\paper_panel_plan.md`. Three independent reviewers (truthfulness, data correctness, simplicity) were folded in before any code.
+  - High findings fixed:
+    - the first epoch has `epoch_started_at` NULL, so a plain `>=` filter would have blanked the panel at go-live;
+    - unfilled entry orders have no positions row, so their symbol comes from the proposal;
+    - the entries chip ignored the RECOMMEND-pipeline gates, so it now uses the engine's own guard plus the header mode;
+    - stale equity and paused halts were invisible, so they are now labelled.
+  - `GET /paper` returns a read-only summary. The API sees the stack only through `PaperView`, and `PAPER_EPOCH_SQL` is shared with ExposureTracker.
+  - The curve uses primary-key lookups: 1.7 ms at a year of minute snapshots, against 130–350 ms for a GROUP BY.
+  - The Positions panel drops paper rows, and the Scorecard paper columns are labelled all-epoch.
+  - Validation:
+    - suite 3918 passed;
+    - fixture screenshots of the built and not-built states;
+    - the summary run read-only on the live DB returns the not-built stub.
+- **Deploy a4a4e4c, 20:32–20:35:**
+  - Stopped (`engine_stopped` 20:32:16); `phase3` fast-forwarded 5f496be → a4a4e4c; live `dist` rebuilt. No migration.
+  - Started: `engine_ready` 20:35:04, post-arm ok, no ERROR lines. `GET /paper` without a token answers 401, and the new bundle is served.
+- **Engine stopped 20:35:37** (owner's standing instruction). `features_daily`, `nightly_review` and `tick_compact` for 10-07 catch up at the next boot.
 
 ## 2026-10-06 14:xx–23:4x — Plan for measure / honest card / paper autopilot / research (owner: "Plan the entire change process … Reiterate through the plan repeatedly … until you are sure it is implementation ready"); docs only, nothing deployed
 
