@@ -19,6 +19,7 @@ from typing import Any
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.core.log import get_logger
+from engine.core.scope import scope_sql
 from engine.marketdata.store import MarketStore
 from engine.strategy.scanners import brk20, hi52
 
@@ -193,7 +194,8 @@ async def _verdict(c: _Ctx) -> str:
     row = c.conn.execute(
         "SELECT v.verdict, v.payload, v.evaluated_at FROM verdicts v "
         "JOIN proposals p ON p.proposal_id = v.proposal_id "
-        "WHERE json_extract(p.payload, '$.tradingsymbol') = ? ORDER BY v.evaluated_at DESC LIMIT 1",
+        f"WHERE json_extract(p.payload, '$.tradingsymbol') = ? AND {scope_sql('real', 'v')} "
+        "ORDER BY v.evaluated_at DESC LIMIT 1",
         (c.sym,),
     ).fetchone()
     if row is None:

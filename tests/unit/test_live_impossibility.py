@@ -74,6 +74,23 @@ def test_orders_enabled_is_never_passed_outside_tests() -> None:
     assert offenders == []
 
 
+def test_kite_client_internals_are_touched_only_in_the_facade() -> None:
+    """No ``**`` splat into KiteClient(...); the D8 switch is reached only in kite_client.py and the raw
+    client only there and in session.py (its construction site), by attribute or getattr/setattr string."""
+    owners = {"_orders_enabled": {"src/engine/broker/kite_client.py"},
+              "_kc": {"src/engine/broker/kite_client.py", "src/engine/broker/session.py"}}
+    offenders = sorted(
+        rel for rel, tree in _TREES.items()
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Attribute) and rel not in owners.get(node.attr, {rel}))
+        or (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and rel not in owners.get(node.value, {rel}))
+        or (isinstance(node, ast.Call) and _callee(node) == "KiteClient"
+            and any(k.arg is None for k in node.keywords))
+    )
+    assert offenders == []
+
+
 class _Message:
     def __init__(self) -> None:
         self.sent: list[str] = []

@@ -36,7 +36,7 @@ def make_order(state: OrderState = OrderState.DRAFT, **kw) -> PlatformOrder:
         "broker_order_id": None,
         "position_id": "01JPOSITION00000000000000",
         "proposal_id": "01JPROPOSAL00000000000000",
-        "verdict_id": "01JVERDICT000000000000000",
+        "verdict_id": f"V{kw.get('order_id', '01JABCDEFGHJKMNPQRSTVWXYZ0')}",  # one entry per verdict (0016)
         "role": OrderRole.ENTRY,
         "is_paper": True,
         "state": state,
@@ -82,6 +82,13 @@ def test_insert_is_not_an_upsert(store: OrderStore) -> None:
     store.insert(order)
     with pytest.raises(sqlite3.IntegrityError):
         store.insert(order)
+
+
+def test_one_entry_order_per_verdict(store: OrderStore) -> None:
+    store.insert(make_order(order_id="01JA", verdict_id="V1"))
+    store.insert(make_order(order_id="01JB", verdict_id="V1", role=OrderRole.EXIT))
+    with pytest.raises(sqlite3.IntegrityError, match="verdict_id"):
+        store.insert(make_order(order_id="01JC", verdict_id="V1"))
 
 
 def test_record_persists_order_and_event_atomically(store: OrderStore) -> None:

@@ -98,7 +98,8 @@ def _seed_sqlite(conn, sym: str = "TCS", reasons: list[str] | None = None) -> No
         (json.dumps({"action": "enter", "tradingsymbol": sym}),),
     )
     conn.execute(
-        "INSERT INTO verdicts VALUES ('V1', 'PR1', 'reject', ?, '2026-06-16T09:31:05+05:30')",
+        "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at) "
+        "VALUES ('V1', 'PR1', 'reject', ?, '2026-06-16T09:31:05+05:30')",
         (json.dumps({"reasons": reasons or ["C3 edge below cost", "day cap"]}),),
     )
 
