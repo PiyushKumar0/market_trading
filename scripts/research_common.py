@@ -11,9 +11,9 @@ import json
 import os
 import statistics
 import sys
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -62,7 +62,7 @@ PURGE = EMBARGO = HORIZON
 HELD_OUT_FROM = date(2026, 1, 1)
 FULL_HISTORY_START = date(2000, 1, 1)
 BRK20_UNIVERSE_AS_OF = date(2026, 9, 11)   # universe_daily day the 2026-09-12 registration read
-INS_WINDOW_DAYS = 730                      # event_study.main's default window
+INS_REGISTERED_WINDOW = (date(2023, 8, 1), date(2026, 7, 16))   # event_study_20260814T023244 (C1 "the event study's window")
 ATR_PERIOD = 14
 MARKET_OPEN, MARKET_CLOSE = time(9, 15), time(15, 30)
 SURVIVORSHIP_LABEL = "SURVIVORSHIP-TAINTED PROXY (current membership applied backwards)"
@@ -229,21 +229,23 @@ def hi52_population(conn, db: Path, end: date, *, symbols=None, max_symbols=None
 
 
 def ins_population(conn, end: date, *, symbols=None, max_symbols=None) -> Population:
-    """``insider_net_buy`` events as ``event_study`` builds them: its universe, window and crossing."""
+    """``insider_net_buy`` events as the registered event study built them: its universe, its signal
+    window (``INS_REGISTERED_WINDOW``) and crossing; bars run to ``end`` so late signals keep T+20."""
     store = store_reader(conn)
-    names = es._resolve_symbols(store, end)
+    start, last = INS_REGISTERED_WINDOW
+    last = min(last, end)
+    names = es._resolve_symbols(store, last)
     threshold = load_settings().filings.insider_min_value_inr
-    start = end - timedelta(days=INS_WINDOW_DAYS)
     series = _series(conn, _restrict(names, symbols), end, max_symbols)
     structural = bb.load_structural_ex_dates(conn)
     counts: dict[str, int] = {}
     events: list[Event] = []
     for sym, s in series.items():
-        w0 = bisect_left(s.dates, start)
+        w0, w1 = bisect_left(s.dates, start), bisect_right(s.dates, last)
         if len(s) - w0 < es.VOL_WINDOW + max(es.HORIZONS) + 2:
             continue
         atr = _atr(s)
-        for t in es.insider_buy_events(s.dates[w0:], store.get_insider_trades(symbol=sym), threshold):
+        for t in es.insider_buy_events(s.dates[w0:w1], store.get_insider_trades(symbol=sym), threshold):
             i = w0 + t
             brk20._bump(counts, "signals")
             if i + 1 < len(s) and bb._unadjusted_at(structural.get(sym, []), s.dates[i + 1]):
@@ -251,7 +253,7 @@ def ins_population(conn, end: date, *, symbols=None, max_symbols=None) -> Popula
                 continue
             if _admitted(s, i, SPAN["ins"], atr, counts):
                 events.append(Event(sym, s, i, i + 1, px(s.open[i + 1]), float(atr[i])))
-    source = f"universe_daily included set as of the latest day <= {end}, window {start} -> {end}"
+    source = f"universe_daily included set as of the latest day <= {last}, signals {start} -> {last}"
     return Population("ins", source, len(series), events, counts, structural)
 
 

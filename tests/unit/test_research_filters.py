@@ -202,6 +202,7 @@ def _seed(tmp_path: Path, clock) -> Path:
 @pytest.mark.parametrize("mod", [c2, c3])
 def test_max_symbols_smoke_run(mod, tmp_path, clock, monkeypatch, capsys):
     monkeypatch.setattr(rc, "market_hours_refusal", lambda: None)
+    monkeypatch.setattr(rc, "INS_REGISTERED_WINDOW", (DATES[0], END))
     db = _seed(tmp_path, clock)
     out = tmp_path / "reports" / "study.json"
     assert mod.main(["--db", str(db), "--max-symbols", "1", "--end", str(END), "--out", str(out)]) == 0
