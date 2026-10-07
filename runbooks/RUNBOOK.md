@@ -398,3 +398,83 @@ bars are judged against owner-set state (the trade window) that moved during the
       samples** (are `originating` entries genuinely material catalysts?)". `[owner-manual]` — sample
       the dashboard news/watchlist panel or `catalyst_watchlist` grade=`originating` rows for two
       separate weeks and record the verdict (same shape as the G1 50-headline sample above).
+
+---
+
+# Paper autopilot (M4, plan Q4.13 / Q4.14)
+
+Paper trades every gate-approved proposal through the OMS against a simulated broker (`PaperBroker`) and its
+own GTT book. It never calls Kite. Real and paper rows share the tables, split by `is_paper`. It ships off:
+`paper.subsystem_enabled: false` in `config/settings.yaml` builds nothing.
+
+## /paper commands
+
+| Command | Effect |
+|---|---|
+| `/paper on` | Two-step (`/confirm <phrase>`). Refused unless `paper.subsystem_enabled` built the autopilot (false, or construction failed). Also refused while another confirmation is pending. |
+| `/paper off` | Immediate, no confirm. No new entries; exits, GTTs and the exit routine keep running. |
+| `/paper status` | Enabled flag, `epoch_started_at`, `reset_requested_at`, open positions, day P&L, active halts (`cause=rung`), boot counters. |
+| `/paper reset` | Two-step. Records the request; paper exits every open position, then on the first flat book (no held position, no working order) starts a new epoch: halts cleared, margin re-seeded, day baseline reset. Survives a restart. The scorecard keeps the old record. |
+
+## Halt rungs
+
+Paper has its own halts (`paper_halts`, rung stored as a `RiskState` value). They never write the real
+`mode_state`, `risk_state_causes` or `kill_state`. The paper entry state is the worse of the real risk state
+and the paper halts, so a real halt or kill blocks new paper entries; a real mode OFF or `/pause_entries`
+stops the pipeline before the analyst, so paper gets no proposals either (D9). None of these flattens paper.
+
+| Cause (rung stored) | Paper action | Clears | Owner action |
+|---|---|---|---|
+| daily soft loss (`FROZEN`) | new entries blocked | next session | none |
+| daily hard loss (`CLOSE_ONLY`) | new entries blocked; no flatten, GTTs stay | next session | none |
+| weekly drawdown (`CLOSE_ONLY`) | new entries blocked; no flatten | `/paper reset` | review, then reset |
+| equity floor (`CLOSE_ONLY`) | exit all, entries blocked | `/paper reset` | review, then reset |
+| cumulative floor (`KILLED`) | exit all, entries blocked | `/paper reset` | review, then reset |
+| reset pending (`CLOSE_ONLY`) | exit all until flat; then the epoch starts and all halts clear | self | none |
+
+Consecutive losses is not a halt row: it is the gate's rule, run on the paper tracker, so it shows as a
+paper reject.
+
+## Start behaviour
+
+1. **Construction** (boot): seed the order and GTT id counters past every stored paper id, close paper orders
+   a restart stranded, restore ACTIVE GTTs of held positions into the broker. Any failed step leaves paper
+   degraded (nothing forwarded, `PAPER_ALERT` once) until the next restart.
+2. **Session prep**, on the first in-session tick of each session and again when a tick arrives more than 5
+   minutes after the last observed one. Until it completes, ticks are dropped, paper entries are refused and
+   `paper_tick` does nothing. Prep applies the 1-minute bars of the unobserved window to each open position
+   (stop, target, time exit), voids a position held across an unadjusted ex-date or whose bars could not be
+   fetched, and re-sends exits still pending. It has a 120 s deadline; unfinished positions are voided.
+3. **Reconcile**: a pass after the first forwarded tick of each held symbol following every prep, and once
+   a session from 5 minutes before the close.
+
+While the engine is down or deaf (host sleep, restart, feed outage) no paper stop fires. On the next tick the
+catch-up applies what the 1-minute bars show, or voids the position.
+
+## Go-live (Q4.13, owner sign-off)
+
+1. Set `paper.subsystem_enabled: true` in `config/settings.yaml`. Restart `mt-engine` outside 09:15-15:30 IST.
+2. Check `/paper status` answers, then `/paper on` and `/confirm`.
+3. First 5 paper sessions, daily (log the result in WORKLOG):
+   - No real order row (state.db, read-only):
+     `SELECT count(*) FROM orders WHERE COALESCE(is_paper,0)=0` must stay 0.
+   - Every paper entry fill has a paper GTT created within 60 s of the fill (zero rows expected; a GTT that
+     has since triggered still counts, since only creation time is compared):
+     ```sql
+     SELECT o.order_id, o.position_id, o.updated_at AS filled_at
+     FROM orders o
+     WHERE o.is_paper = 1 AND o.role = 'entry' AND o.state = 'FILLED'
+       AND NOT EXISTS (SELECT 1 FROM gtts g
+                       WHERE g.is_paper = 1 AND g.position_id = o.position_id
+                         AND julianday(g.created_at) - julianday(o.updated_at) BETWEEN -0.0001 AND 60/86400.0);
+     ```
+   - No Kite order or GTT call, no surface violation (zero hits):
+     `Select-String -Path data\logs\engine.log -Pattern 'kite\.(call|ok|error).*(place_order|modify_order|cancel_order|place_gtt|modify_gtt|delete_gtt)','OrderSurfaceViolation'`
+   - Zero `PAPER_ALERT` messages in Telegram (or `Select-String data\logs\engine.log -Pattern 'paper_alert'`).
+   - Prep once per session, plus once per gap, with outcomes logged: `Select-String data\logs\engine.log
+     -Pattern 'paper_prep_started','paper_prep_done'`. A `failed=True` on `paper_prep_done` is a defect to look at.
+
+## Rollback floor
+
+Once `/paper on` has ever run, never roll the tree back below the M3 tip: older code counts paper rows as real
+money and could latch real floors. To stop paper use `/paper off`, or `paper.subsystem_enabled: false` and a restart.
