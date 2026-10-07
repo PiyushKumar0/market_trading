@@ -42,6 +42,9 @@
   - **C3:** several filters are `supported` by the registered rule, but that rule cannot separate a filter from a random subsample, so this is not evidence.
   - Protocol correction: ins first ran on a 730-day default window; it was re-run on the registered window. Both are reported.
   - Nothing changes live: every live consequence is owner work.
+- **Engine stopped 16:05 at the owner's request** ("Turn off the trade engine once this entire process is done").
+  - It is on the M0–M2 tree (3977dfc); tonight's EOD jobs, including the first `rec_outcomes` run and its 2026-08-26 backfill, catch up at the next boot.
+  - The `stop_forced` line after `engine_stopped` is the known NSSM stop-grace pattern.
 - **Q0.2 `bars_1d` check (snapshot):** muhurat (2024-11-01, 2025-10-21) and DR-drill Saturdays (2024-01-20, 03-02, 05-18) carry full daily rows, the same counts as regular sessions. So:
   - the rec/paper calendar convention skips those sessions (D2: not counted; a stop touched there is ignored);
   - the research convention counts them by bar position, as the registered backtests did.
