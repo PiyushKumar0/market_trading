@@ -837,6 +837,10 @@ class PaperBroker:
             "commodity": {"enabled": False},
         }
 
+    def reseed_margin(self, available: Decimal) -> None:
+        """A new paper epoch starts from the capital base (plan Q4.8)."""
+        self._available_margin = available
+
     # ---------------------------------------------------------------- BrokerSurface: GTT
     async def place_gtt(self, req: ReqLike) -> int:
         """Create a single or two-leg (OCO) GTT; returns the trigger id.

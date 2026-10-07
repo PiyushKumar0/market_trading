@@ -31,7 +31,7 @@ Clauses:
   ``feed_stale`` cause and the next HEALTHY clears it; the owner is paged by the two risk-state
   changes (CD-1, fixed 2026-09-24). ``test_a_slow_owner_page_never_stalls_the_feed``: a stuck page
   never stalls the frame reader.
-* "positions remain broker-protected" — Phase-3-gated (``test_positions_remain_broker_protected``).
+* "positions remain broker-protected" — skipped as broker-resident R3 (``test_positions_remain_broker_protected``).
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ from engine.risk.events import TOPIC_RISK_STATE
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 from tests.chaos._entry_gate_rig import INDEX_SYMBOL, LIMITS_YAML, build_entry_gate, entry_checks
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import BROKER_RESIDENT_R3
 
 SYMBOL = "RELIANCE"
 TOKENS = {738561: SYMBOL, 256265: INDEX_SYMBOL}
@@ -447,8 +447,7 @@ async def test_a_slow_owner_page_never_stalls_the_feed(feed_rig):
     telegram_down.set()
 
 
-# ------------------------------------------------------------------------------- Phase-3-gated
-@pytest.mark.skip(reason=f"'positions remain broker-protected' — {PHASE3_GATED}; missing: "
-                         "ProtectionManager (resting SL-M/GTT) — RECOMMEND holds no platform positions")
+# ------------------------------------------------------------------------------- kept skipped (plan Q4.5)
+@pytest.mark.skip(reason=f"'positions remain broker-protected' — {BROKER_RESIDENT_R3}")
 async def test_positions_remain_broker_protected():
     raise AssertionError("unreachable — skipped")

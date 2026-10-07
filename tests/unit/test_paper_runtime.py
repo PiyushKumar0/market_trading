@@ -16,15 +16,19 @@ from engine.core.contracts import ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC, 
 from engine.core.enums import Actor, RiskState
 from engine.core.protected_store import ProtectedStore
 from engine.core.types import Bar, OwnerConfirmation, Tick
+from engine.oms import prep as prep_mod
 from engine.oms.manager import OrderManager, PaperOrderBlocked, paper_order_guard
 from engine.oms.state import OrderState
 from engine.oms.store import OrderStore
 from engine.ops.paper_control import PaperControl
-from engine.ops.paper_runtime import PaperRuntime, PrepState
+from engine.ops.paper_risk import paper_effective_state
+from engine.ops.paper_runtime import PaperRuntime, PrepState, backfill_bars_fn, exit_sim_replay
 from engine.paper.broker import GTT_ID_BASE, ORDER_ID_BASE
 from engine.paper.fill_model import FillModelConfig, load_fill_model
 from engine.risk.limits import LimitsEngine
 from tests.unit.test_order_manager import seed_verdict
+from tests.unit.test_protection_manager import position, seed
+from tests.unit.test_session_prep import FakeBackfill, FakeStore, Stack, stacks
 
 D = dt.date(2026, 6, 17)
 S = OrderState
@@ -348,7 +352,8 @@ async def test_paper_frames_never_reach_order_update_and_a_real_frame_changes_no
     frames: dict[str, list] = {ORDER_UPDATE_TOPIC: [], PAPER_ORDER_UPDATE_TOPIC: []}
     for topic, sink in frames.items():
         bus.subscribe(topic, collector(sink))
-    manager = OrderManager(conn, clock, runtime.broker, order_guard=runtime.guard, on_fill=lambda *_: None)
+    manager = OrderManager(conn, clock, runtime.broker, order_guard=runtime.guard, sell_check=lambda *_: None,
+                           on_fill=lambda *_: None)
     manager.start(bus)
     try:
         order = await manager.submit(*seed_verdict(conn))
@@ -409,3 +414,222 @@ async def test_the_broker_is_built_from_the_real_limits_capital_base_and_fill_mo
     margins = await runtime.broker.margins()
     assert margins["equity"]["available"]["cash"] == Decimal("40000")
     assert not runtime.degraded
+
+
+# ---------------------------------------------------------------- paper_tick
+STEPS = ("protection", "exits", "equity")
+
+
+def wire_steps(runtime: PaperRuntime, *, raising: str | None = None) -> list[str]:
+    calls: list[str] = []
+
+    def step(name: str):
+        async def run() -> None:
+            calls.append(name)
+            if name == raising:
+                raise RuntimeError(f"{name} broke")
+
+        return run
+
+    runtime.set_tick_steps(**{name: step(name) for name in STEPS})
+    return calls
+
+
+def stored_observed(conn) -> str | None:
+    return conn.execute("SELECT last_observed_at FROM paper_state").fetchone()[0]
+
+
+async def test_paper_tick_waits_for_prep_guards_each_step_and_persists_last_observed(conn, bus, make_runtime, prep) -> None:
+    prep.gate = asyncio.Event()
+    runtime = await make_runtime()
+    calls = wire_steps(runtime, raising="protection")
+    for _ in range(2):
+        await runtime.paper_tick()
+        bus.publish("tick", tick(at(10, 0)))
+        await settle(bus)
+    assert calls == [] and stored_observed(conn) is None
+
+    prep.gate.set()
+    await settle(bus)
+    bus.publish("tick", tick(at(10, 0, 20)))
+    await settle(bus)
+    await runtime.paper_tick()
+    assert calls == ["protection", "exits", "equity"]
+    assert stored_observed(conn) == at(10, 0, 20).isoformat()
+
+
+async def test_the_close_reconcile_runs_once_a_session_from_close_less_5_and_nothing_runs_after_midnight(
+    bus, make_runtime, make_stack, now
+) -> None:
+    runtime = await prepped(bus, await make_runtime(**prep_fns()))
+    attach(runtime, make_stack, now)
+    calls = wire_steps(runtime)
+    passes = []
+    for wall in (at(15, 24, 59), at(15, 25), at(15, 29), at(15, 31), at(9, 20, d=D + dt.timedelta(days=1))):
+        now.value = wall
+        await runtime.paper_tick()
+        passes.append(runtime.reconciler.counters.passes)
+    assert calls == list(STEPS) * 4 and passes == [0, 1, 1, 1, 1]
+
+
+# ---------------------------------------------------------------- session prep and reconcile (Q4.7)
+NEXT = D + dt.timedelta(days=1)
+
+
+@pytest.fixture
+async def make_stack(conn, bus):
+    async with stacks(conn, bus) as build:
+        yield build
+
+
+async def no_corp(_ex_from: dt.date, _ex_to: dt.date | None) -> list:
+    return []
+
+
+def prep_fns(*, bars_fn=None, stored: list[Bar] = ()) -> dict:
+    calendar = NSECalendar(config_dir() / "calendar", Clock(time_source=lambda: at(10, 0)), strict=False)
+    return {"bars_fn": bars_fn or backfill_bars_fn(FakeBackfill(set()), FakeStore(list(stored)), calendar),
+            "replay_fn": exit_sim_replay, "corp_actions_fn": no_corp}
+
+
+def attach(runtime: PaperRuntime, make_stack, now) -> Stack:
+    stack = make_stack(broker=runtime.broker, now=now)
+    runtime.attach(orders=stack.mgr, book=stack.book, protection=stack.pm, exits=stack.em,
+                   pre_ex_mark_fn=stack.pre_ex_mark)
+    return stack
+
+
+async def send(bus, now, ts: dt.datetime, symbol: str = "TCS", volume: int = 1000) -> None:
+    now.value = ts
+    bus.publish("tick", tick(ts).model_copy(update={"tradingsymbol": symbol, "volume_traded": volume}))
+    await settle(bus)
+
+
+async def prep_done(runtime: PaperRuntime) -> None:
+    async with asyncio.timeout(2):
+        while runtime.prep_state is not PrepState.DONE:
+            await asyncio.sleep(0.01)
+
+
+async def held_position(bus, now, runtime: PaperRuntime, stack: Stack) -> str:
+    """Prep at 10:00 on an empty book, then a TCS entry filled at 10:00:20."""
+    await send(bus, now, at(10, 0))
+    await prep_done(runtime)
+    await send(bus, now, at(10, 0, 5))
+    now.value = at(10, 0, 10)
+    order = await stack.mgr.submit(*seed(stack.conn))
+    await send(bus, now, at(10, 0, 20), volume=5000)
+    await stack.settle()
+    assert position(stack.conn, order.position_id)["state"] == "OPEN"
+    return order.position_id
+
+
+@pytest.mark.parametrize(("stored", "boot", "ticks", "calls"), [
+    (at(15, 29, d=D - dt.timedelta(days=1)), at(8, 30), [at(9, 40), at(9, 40, 30)],
+     [(at(15, 29, d=D - dt.timedelta(days=1)), at(9, 40))]),
+    (at(10, 30), at(11, 0), [at(11, 0, 5), at(11, 0, 30)], [(at(10, 30), at(11, 0, 5))]),
+    (None, at(10, 0), [at(10, 0), at(10, 1), at(10, 40), at(10, 40, 30)], [(None, at(10, 0)), (at(10, 1), at(10, 40))]),
+], ids=["boot-before-login", "mid-session-restart", "host-sleep"])
+async def test_prep_runs_on_the_first_tick_after_login_restart_or_sleep(
+    conn, bus, clock, make_runtime, prep, now, stored, boot, ticks, calls
+) -> None:
+    if stored is not None:
+        PaperControl(conn, clock)
+        conn.execute("UPDATE paper_state SET last_observed_at = ?", (stored.isoformat(),))
+    now.value = boot
+    await make_runtime()
+    for ts in ticks:
+        await send(bus, now, ts)
+    assert prep.calls == calls
+
+
+async def test_attached_prep_skips_the_forming_minute_and_one_reconcile_follows_each_held_symbol_first_tick(
+    conn, bus, make_runtime, make_stack, now
+) -> None:
+    backfill = FakeBackfill(set())
+    calendar = NSECalendar(config_dir() / "calendar", Clock(time_source=lambda: at(10, 0)), strict=False)
+    stored = [bar(at(10, 0) + dt.timedelta(minutes=m)) for m in range(330)]
+    runtime = await make_runtime(**prep_fns(bars_fn=backfill_bars_fn(backfill, FakeStore(stored), calendar)))
+    stack = attach(runtime, make_stack, now)
+    pid = await held_position(bus, now, runtime, stack)
+
+    await send(bus, now, at(9, 15, 2, d=NEXT))
+    await prep_done(runtime)
+    assert backfill.calls == [(["TCS"], at(10, 0), at(15, 30))]
+    assert position(conn, pid)["state"] == "OPEN" and runtime.session_prep.counters.voids == 0
+
+    passes = []
+    for ts, symbol in ((at(9, 15, 10, d=NEXT), "INFY"), (at(9, 15, 20, d=NEXT), "TCS"), (at(9, 15, 30, d=NEXT), "TCS")):
+        await send(bus, now, ts, symbol)
+        await asyncio.gather(*runtime._reconcile_tasks)
+        passes.append(runtime.reconciler.counters.passes)
+    assert passes == [0, 1, 1]
+
+
+async def test_a_prep_timeout_voids_alerts_and_forwarding_resumes(
+    conn, bus, make_runtime, make_stack, now, alerts, monkeypatch
+) -> None:
+    monkeypatch.setattr(prep_mod, "PREP_DEADLINE_S", 0.05)
+
+    async def hangs(*_args) -> dict:
+        await asyncio.Event().wait()
+        return {}
+
+    runtime = await make_runtime(**prep_fns(bars_fn=hangs))
+    stack = attach(runtime, make_stack, now)
+    pid = await held_position(bus, now, runtime, stack)
+
+    await send(bus, now, at(10, 30))
+    await prep_done(runtime)
+    pos = position(conn, pid)
+    assert (pos["state"], pos["close_reason"], pos["close_basis"]) == ("CLOSED", "void", "prep_incomplete")
+    assert [key for key, _ in alerts] == ["prep"]
+    seen = spy(monkeypatch, runtime)
+    await send(bus, now, at(10, 30, 30))
+    assert [t.exchange_ts for t in seen] == [at(10, 30, 30)]
+
+
+# ---------------------------------------------------------------- paper risk seams (Q4.8)
+async def test_marks_come_through_the_prep_gate_and_never_move_back(bus, make_runtime, prep, now) -> None:
+    prep.gate = asyncio.Event()
+    runtime = await make_runtime()
+    bus.publish("tick", tick(at(10, 0), "90"))
+    await settle(bus)
+    assert runtime.mark("TCS") is None
+
+    prep.gate.set()
+    await settle(bus)
+    now.value = at(10, 2, 30)
+    for ts, ltp in ((at(10, 2), "101"), (at(9, 58), "97")):
+        bus.publish("tick", tick(ts, ltp))
+        await settle(bus)
+    assert runtime.mark("TCS") == Decimal("101") and runtime.mark("INFY") is None
+
+
+@pytest.mark.parametrize(("real", "halt", "blocked"), [
+    (RiskState.NORMAL, None, False),
+    (RiskState.FROZEN, None, True),
+    (RiskState.CLOSE_ONLY, None, True),
+    (RiskState.KILLED, None, True),
+    (RiskState.NORMAL, "FROZEN", True),
+])
+async def test_a_non_normal_state_arriving_during_an_in_flight_proposal_blocks_the_paper_entry(
+    conn, bus, clock, make_runtime, real, halt, blocked
+) -> None:
+    state = [RiskState.NORMAL]
+    runtime = await prepped(bus, await make_runtime(
+        order_guard=paper_order_guard(lambda: True, paper_effective_state(conn, lambda: state[0]))))
+    manager = OrderManager(conn, clock, runtime.broker, order_guard=runtime.guard, sell_check=lambda *_: None,
+                           on_fill=lambda *_: None)
+    manager.start(bus)
+    try:
+        proposal, verdict = seed_verdict(conn)          # the paper gate approved under NORMAL
+        state[0] = real
+        if halt is not None:
+            conn.execute("INSERT INTO paper_halts (cause, rung, set_at) VALUES ('daily_loss_soft', ?, ?)",
+                         (halt, at(10, 0).isoformat()))
+        order = await manager.submit(proposal, verdict)
+        assert (order.state is S.REJECTED) is blocked
+        assert (await runtime.broker.orders() == []) is blocked
+    finally:
+        await manager.stop()

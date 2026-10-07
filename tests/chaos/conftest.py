@@ -14,6 +14,13 @@ from __future__ import annotations
 import pytest
 
 PHASE3_GATED = "Phase-3-gated: needs WO-P3-5/P3-6 components (plan §8.4) — built with G2 + owner sign-off"
+#: The paper autopilot's classification of the PHASE3_GATED clauses it does not rewrite (plan Q4.5).
+MIS_OUT_OF_PAPER_SCOPE = "MIS out of paper scope: paper trades CNC only (plan §1.3)"
+REAL_BROKER_ONLY = "real-broker-only: paper never routes to a live broker (D8, plan §1.2)"
+BROKER_RESIDENT_R3 = ("broker-resident R3: paper protection is the in-process PaperBroker's GTT book, and unobserved "
+                      "time is the Q4.7 catch-up's (plan §1.7)")
+PHASE4_LIFECYCLE_HOOKS = ("lifecycle hooks reserved for Phase 4: the paper reconcile is its own pass, never a "
+                          "SessionLifecycle hook (plan §1.7, Q4.7)")
 
 
 def pytest_collection_modifyitems(config, items):

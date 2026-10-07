@@ -144,7 +144,14 @@ from engine.ops.lifecycle import SessionLifecycle
 from engine.ops.news_scoring import NewsScoringJob
 from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
 from engine.ops.paper_control import PaperControl
-from engine.ops.paper_runtime import PaperRuntime
+from engine.ops.paper_risk import PaperRisk, no_exit_routine, paper_effective_state
+from engine.ops.paper_runtime import (
+    PAPER_TICK_S,
+    PaperRuntime,
+    backfill_bars_fn,
+    exit_sim_replay,
+    store_corp_actions_fn,
+)
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.post_login import (
     PostLoginRecovery,
@@ -2271,9 +2278,19 @@ async def run() -> int:
             conn, clock, calendar, bus, settings.paper,
             capital_base_fn=lambda: limits_engine.load().capital_base_inr,
             tick_size_fn=tick_size_for,
-            order_guard=paper_order_guard(paper_control.enabled, mode.risk_state),
+            order_guard=paper_order_guard(paper_control.enabled, paper_effective_state(conn, mode.risk_state)),
+            bars_fn=backfill_bars_fn(backfill, store, calendar),
+            replay_fn=exit_sim_replay,
+            corp_actions_fn=store_corp_actions_fn(store),
         )
         await paper_runtime.start()
+        if not paper_runtime.degraded and paper_runtime.broker is not None:
+            paper_risk = PaperRisk(
+                conn, clock, calendar.session, paper_runtime.broker,
+                capital_base=_capital_base, mark_price=paper_runtime.mark,
+                limits_fn=limits_engine.load, flatten=no_exit_routine,
+            )
+            paper_runtime.set_tick_steps(equity=paper_risk.tick)
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)
@@ -2293,7 +2310,8 @@ async def run() -> int:
                    holdings_reconcile_tick=(
                        holdings_reconcile_tick if holdings_reconcile is not None else None
                    ),
-                   protection_reminder_tick=protection_reminder_tick)
+                   protection_reminder_tick=protection_reminder_tick,
+                   paper_tick=paper_runtime.paper_tick if paper_runtime is not None else None)
 
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
@@ -2658,7 +2676,7 @@ def _arm_live_jobs(
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
     scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
     window_sweep_tick=None, forward_drain_tick=None, holdings_reconcile_tick=None,
-    protection_reminder_tick=None,
+    protection_reminder_tick=None, paper_tick=None,
 ) -> None:
     """Interval jobs that run continuously while the engine is up (not calendar-gated): the coarse
     bar-finalization timer, the state-aware health check, the per-feed news poll cadences (§4.4 job 10),
@@ -2752,6 +2770,10 @@ def _arm_live_jobs(
         # Plan Q1.9: self-gates on the reminder window; not calendar-gated (a late-night /taken).
         scheduler.add_job(protection_reminder_tick, trigger=IntervalTrigger(seconds=300),
                           job_id="protection_reminder_tick", guard=False)
+    if paper_tick is not None:
+        # Plan Q4.6: armed only when the paper runtime exists; gated on its session prep.
+        scheduler.add_job(paper_tick, trigger=IntervalTrigger(seconds=PAPER_TICK_S),
+                          job_id="paper_tick", guard=False)
 
 
 # --------------------------------------------------------------------------- warm-up lift (§2.6/§7.1)

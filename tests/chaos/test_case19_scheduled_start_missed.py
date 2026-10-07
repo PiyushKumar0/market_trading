@@ -26,10 +26,9 @@ Clauses covered:
 (committed at §2.6 step 0, before recovery) — a boot that has started covers the period; a boot that
 started but wedged is the separate ``ENGINE_DOWN(reason=wedged)`` path (§2.2).
 
-Phase-3-gated (skipped, ``test_case19_open_mis_rides_backstop_and_reconcile_adopts``): "an open MIS
-rides to the broker 15:25 backstop; on eventual manual start, full reconcile adopts the broker
-square-off" — no platform MIS exists before AUTO(paper) routing (WO-P3-5) and the adopting Reconciler
-(``broker_squareoff_offline``) is WO-P3-6.
+Skipped (``test_case19_open_mis_rides_backstop_and_reconcile_adopts``): "an open MIS rides to the broker
+15:25 backstop; on eventual manual start, full reconcile adopts the broker square-off" — MIS is out of
+paper scope (plan §1.3), and the broker square-off it adopts exists only for MIS.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ import pytest
 from engine.core.clock import IST
 from engine.notify.catalog import MessageKind
 from tests.chaos._lifecycle_rig import EngineProcess, RigEnv, run_session
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import MIS_OUT_OF_PAPER_SCOPE
 
 TUE, WED, THU = date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18)
 SILENT = {"down_reason": None, "engine_down_sent": False, "killed_pid": None, "missed_start_sent": []}
@@ -138,7 +137,4 @@ async def test_case19_no_expected_start_on_weekend_or_nse_holiday(tmp_path, monk
 def test_case19_open_mis_rides_backstop_and_reconcile_adopts() -> None:
     """'an open MIS rides to the broker 15:25 backstop; on eventual manual start, full reconcile
     adopts the broker square-off' — needs a platform MIS and the adopting Reconciler."""
-    pytest.skip(
-        f"case 19 MIS/reconcile clauses: {PHASE3_GATED}; missing: AUTO(paper) MIS + Reconciler "
-        "(broker_squareoff_offline adoption)"
-    )
+    pytest.skip(f"case 19 MIS/reconcile clauses: {MIS_OUT_OF_PAPER_SCOPE}")

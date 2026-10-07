@@ -1,29 +1,26 @@
-"""Plan §9.4 cases whose every "Must hold" clause needs a Phase-3 component that does not exist yet.
+"""Plan §9.4 cases with no rewrite for the paper autopilot, each kept skipped with its reason (plan Q4.5).
 
-Each placeholder names the case and the missing component, so ``pytest -m chaos -rs`` lists the whole
-§9.4 table and the gap is visible. Replace a placeholder with a real ``test_case<NN>_<slug>.py`` when
-its component ships (WO-P3-5 AUTO(paper) routing, WO-P3-6 R3 managers — plan §8.4).
+Case 11 is rewritten for paper in ``test_case11_gtt_fired_rejected_or_unfilled.py``.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import MIS_OUT_OF_PAPER_SCOPE, REAL_BROKER_ONLY
 
-_GATED = {
-    "01_kill9_with_open_leveraged_mis": "ProtectionManager (resting SL-M), Reconciler adoption",
-    "02a_restart_before_window_end": "SquareOffScheduler re-arm + 15:05-15:10 backstop",
-    "02b_offline_across_window_end": "startup overdue-MIS square-off, broker_squareoff_offline reconcile",
-    "07_lower_circuit_lock_mis_long": "band-lock detection, MIS->CNC conversion (R3)",
-    "08_upper_circuit_lock_mis_short": "auction_settled pending state, reconciler T+1/T+2 tolerance",
-    "09_index_circuit_breaker_halt": "market-halt detection + square-off recompute",
-    "10_full_broker_outage": "post-outage full fill reconcile",
-    "11_gtt_fired_rejected_or_unfilled": "GTTManager re-arm + gtt_failure_exit",
-    "12_broker_rms_force_close": "broker_rms terminal state + protective-order cancel",
+_KEPT = {
+    "01_kill9_with_open_leveraged_mis": MIS_OUT_OF_PAPER_SCOPE,
+    "02a_restart_before_window_end": MIS_OUT_OF_PAPER_SCOPE,
+    "02b_offline_across_window_end": MIS_OUT_OF_PAPER_SCOPE,
+    "07_lower_circuit_lock_mis_long": MIS_OUT_OF_PAPER_SCOPE,
+    "08_upper_circuit_lock_mis_short": MIS_OUT_OF_PAPER_SCOPE,
+    "09_index_circuit_breaker_halt": f"{MIS_OUT_OF_PAPER_SCOPE} (the halt's square-off recompute)",
+    "10_full_broker_outage": REAL_BROKER_ONLY,
+    "12_broker_rms_force_close": REAL_BROKER_ONLY,
 }
 
 
-@pytest.mark.parametrize("case", sorted(_GATED))
+@pytest.mark.parametrize("case", sorted(_KEPT))
 def test_phase3_gated_case(case: str) -> None:
-    pytest.skip(f"case {case}: {PHASE3_GATED}; missing: {_GATED[case]}")
+    pytest.skip(f"case {case}: {_KEPT[case]}")

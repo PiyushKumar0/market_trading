@@ -698,8 +698,11 @@ def test_holdings_reconcile_is_not_armed_without_a_broker(clock, calendar) -> No
     assert "holdings_reconcile" not in {j.id for j in sched._sched.get_jobs()}
 
 
+@pytest.mark.parametrize(("keyword", "seconds"), [("protection_reminder_tick", 300), ("paper_tick", 30)])
 @pytest.mark.parametrize("wired", [True, False])
-def test_protection_reminder_tick_is_armed_every_300s_only_when_wired(clock, calendar, wired) -> None:
+def test_optional_interval_ticks_are_armed_at_their_cadence_only_when_wired(
+    clock, calendar, keyword, seconds, wired
+) -> None:
     sched = Scheduler(clock, calendar)
 
     async def _resolve_news(_hs) -> None:
@@ -711,12 +714,18 @@ def test_protection_reminder_tick_is_armed_every_300s_only_when_wired(clock, cal
     _arm_live_jobs(sched, load_settings(), bar_builder=None, health=None,
                    news_ingest=None, resolve_news=_resolve_news,
                    ticker=object(), calendar=calendar, clock=clock,
-                   protection_reminder_tick=_tick if wired else None)
+                   **{keyword: _tick if wired else None})
 
     jobs = {j.id: j for j in sched._sched.get_jobs()}
-    assert ("protection_reminder_tick" in jobs) is wired
+    assert (keyword in jobs) is wired
     if wired:
-        assert str(timedelta(seconds=300)) in str(jobs["protection_reminder_tick"].trigger)
+        assert str(timedelta(seconds=seconds)) in str(jobs[keyword].trigger)
+
+
+def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built() -> None:
+    src = inspect.getsource(opsmain.run)
+    assert "if settings.paper.subsystem_enabled:\n        paper_runtime = PaperRuntime(" in src
+    assert "paper_tick=paper_runtime.paper_tick if paper_runtime is not None else None" in src
 
 
 def test_nse_announcements_job_is_not_armed_when_disabled(clock, calendar) -> None:

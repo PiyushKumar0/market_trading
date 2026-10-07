@@ -7,31 +7,46 @@ restart's prep covers the unobserved time.
 
 The bridge forwards in-session ticks and finalized bars to the PaperBroker only while this
 session's prep has completed and none is due or running (plan §1.7).
+
+Session prep and the Reconciler (Q4.7) plug in through :meth:`PaperRuntime.attach`. A reconcile pass
+follows the first forwarded tick of each held paper symbol after every prep, and runs once a session
+from close - 5 min.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sqlite3
-from collections.abc import Awaitable, Callable
-from datetime import date, datetime, timedelta
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from engine.core.calendar import NSECalendar
-from engine.core.clock import Clock
+from engine.core.clock import IST, Clock
 from engine.core.config import PaperSettings
 from engine.core.contracts import PAPER_ORDER_UPDATE_TOPIC
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.core.types import Bar, Session, Tick
-from engine.oms.manager import OrderGuard, PaperOrderBlocked
-from engine.oms.state import OrderState, modify_rejected, transition
+from engine.learning.exit_sim import Held, SimBar, simulate
+from engine.oms.exits import CorpActionsFn, ExitManager, PreExMarkFn
+from engine.oms.manager import OrderGuard, OrderManager, PaperOrderBlocked
+from engine.oms.positions import PositionBook
+from engine.oms.prep import BarsFn, Replayed, ReplayFn, SessionPrep, Walk
+from engine.oms.protection import ProtectionManager
+from engine.oms.reconcile import Reconciler
+from engine.oms.state import CloseReason, OrderState, modify_rejected, transition
 from engine.oms.store import OrderStore
 from engine.paper.broker import GTT_ID_BASE, ORDER_ID_BASE, PaperBroker
 from engine.paper.fill_model import FillModelConfig, load_fill_model
+from engine.strategy.scanners.hi52 import UNADJUSTED_KINDS
+
+if TYPE_CHECKING:
+    from engine.marketdata.backfill import BackfillJob
+    from engine.marketdata.store import MarketStore
 
 _log = get_logger("engine.ops.paper_runtime")
 
@@ -47,6 +62,14 @@ PREP_BACKSTOP_S = 180.0
 PrepFn = Callable[[datetime | None, datetime], Awaitable[None]]
 #: ``alert(key, message)``: the PAPER_ALERT send; ``key`` is ``construct`` or ``prep``.
 PaperAlert = Callable[[str, str], Awaitable[None]]
+#: One ``paper_tick`` step; each runs guarded, so one failing step never starves the others.
+TickStep = Callable[[], Awaitable[Any]]
+
+PAPER_TICK_S = 30
+#: The close reconcile (Q4.7) runs once a session from this long before the close.
+CLOSE_RECONCILE_LEAD = timedelta(minutes=5)
+#: How far back a pre-ex mark is looked for; none found prices a void at ``avg_entry``.
+PRE_EX_LOOKBACK = timedelta(days=10)
 
 
 class PrepState(StrEnum):
@@ -69,6 +92,10 @@ _RESTART_PAYLOAD = {"platform_intent": "restart_close", "reject_reason": "strand
 
 async def no_prep(since: datetime | None, until: datetime) -> None:
     """Session prep until Q4.7 replaces it."""
+
+
+async def no_step() -> None:
+    """A ``paper_tick`` step not yet wired."""
 
 
 async def log_paper_alert(key: str, message: str) -> None:
@@ -122,6 +149,12 @@ def active_gtt_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def held_paper_symbols(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute(
+        f"SELECT symbol FROM positions WHERE {scope_sql('paper', has_origin=True)} AND {HELD_STATES_SQL['paper']}"
+    )}
+
+
 def load_last_observed(conn: sqlite3.Connection) -> datetime | None:
     row = conn.execute("SELECT last_observed_at FROM paper_state WHERE id = 1").fetchone()
     if row is None or row[0] is None:
@@ -130,6 +163,76 @@ def load_last_observed(conn: sqlite3.Connection) -> datetime | None:
     if at.tzinfo is None:
         raise ValueError(f"paper_state.last_observed_at {row[0]!r} is naive")
     return at
+
+
+def store_corp_actions_fn(store: MarketStore) -> CorpActionsFn:
+    """The ExitManager's ``corp_actions_fn``: ``corp_actions`` read through the store, never the
+    ``calendar.ex_dates`` stub, which always returns ``[]``."""
+
+    async def corp_actions(ex_from: date, ex_to: date | None) -> list[dict[str, Any]]:
+        rows = await store.arun(store.get_corp_actions, ex_from=ex_from, ex_to=ex_to)
+        return [r for r in rows if r["kind"] in UNADJUSTED_KINDS]
+
+    return corp_actions
+
+
+def store_pre_ex_mark_fn(store: MarketStore) -> PreExMarkFn:
+    """The ExitManager's ``pre_ex_mark_fn``: the close of the last stored 1m bar before the ex-date."""
+
+    async def pre_ex_mark(symbol: str, ex_date: date) -> Decimal | None:
+        end = datetime.combine(ex_date, time(0), tzinfo=IST)
+        bars = await store.arun(store.get_bars_1m, symbol, end - PRE_EX_LOOKBACK, end)
+        return bars[-1].close if bars else None
+
+    return pre_ex_mark
+
+
+def session_segments(calendar: NSECalendar, frm: datetime, to: datetime) -> Iterator[tuple[datetime, datetime]]:
+    """The session minutes of ``[frm, to)``, one segment per session."""
+    d, last = frm.astimezone(IST).date(), to.astimezone(IST).date()
+    while d <= last:
+        session = calendar.session(d)
+        if session is not None and max(frm, session.open) < min(to, session.close):
+            yield max(frm, session.open), min(to, session.close)
+        d += timedelta(days=1)
+
+
+def backfill_bars_fn(backfill: BackfillJob | None, store: MarketStore, calendar: NSECalendar) -> BarsFn:
+    """Session prep's ``bars_fn``: ``warmup_gap`` once per session segment (its coverage check assumes a
+    within-session range), then the stored bars. A symbol any segment failed to fetch gets None."""
+
+    async def bars(symbols: Sequence[str], frm: datetime, to: datetime) -> dict[str, list[Bar] | None]:
+        if backfill is None:
+            raise RuntimeError("no Kite session to backfill the unobserved window from")
+        failed: set[str] = set()
+        for seg_from, seg_to in session_segments(calendar, frm, to):
+            report = await backfill.warmup_gap(symbols, seg_from, seg_to)
+            failed |= {span.symbol for span in report.failed}
+        return {s: None if s in failed else await store.aget_bars_1m(s, frm, to) for s in symbols}
+
+    return bars
+
+
+_MINUTE = timedelta(minutes=1)
+_REASONS = {"stop": CloseReason.STOP, "target": CloseReason.TARGET, "time": CloseReason.TIME_STOP}
+
+
+def exit_sim_replay(bars: Sequence[Bar], walk: Walk) -> Replayed | None:
+    """Session prep's ``replay_fn``: ``exit_sim`` from an open position, stamped with its exit bar's time."""
+    # A Held start walks bars starting after it; one minute back admits the minute holding ``observed``.
+    start = walk.observed - _MINUTE
+    stream = [SimBar(b.ts_minute, b.open, b.high, b.low, b.close) for b in bars if start < b.ts_minute < walk.end]
+    out = simulate(stream, Held(walk.avg_entry, start), stop=walk.stop, target=walk.target,
+                   horizon=walk.exit_session, end=walk.end, cost_pct=Decimal(0))
+    if out.status != "exit":
+        return None
+    day = [b for b in stream if b.d == out.exit_d]
+    if out.reason == "time":
+        at = day[-1].at + _MINUTE
+    else:
+        at = next(b.at for b in day if (walk.stop is not None and b.low <= walk.stop)
+                  or (walk.target is not None and b.high >= walk.target))
+    return Replayed(out.exit_px, _REASONS[out.reason], at)
 
 
 class PaperRuntime:
@@ -153,7 +256,18 @@ class PaperRuntime:
         alert: PaperAlert = log_paper_alert,
         prep: PrepFn = no_prep,
         fill_model_fn: Callable[[], FillModelConfig] = load_fill_model,
+        bars_fn: BarsFn | None = None,
+        replay_fn: ReplayFn | None = None,
+        corp_actions_fn: CorpActionsFn | None = None,
     ) -> None:
+        self._bars_fn = bars_fn
+        self._replay_fn = replay_fn
+        self._corp_actions_fn = corp_actions_fn
+        self.session_prep: SessionPrep | None = None
+        self.reconciler: Reconciler | None = None
+        self._reconcile: TickStep = no_step
+        self._unreconciled: set[str] = set()
+        self._reconcile_tasks: set[asyncio.Task[None]] = set()
         self._conn = conn
         self._clock = clock
         self._calendar = calendar
@@ -172,6 +286,9 @@ class PaperRuntime:
         self._last_observed: datetime | None = None
         self._prep_task: asyncio.Task[None] | None = None
         self._session: tuple[date, Session | None] | None = None
+        self._marks: dict[str, tuple[Decimal, datetime]] = {}
+        self.set_tick_steps()
+        self._reconciled_for: date | None = None
 
     # ---------------------------------------------------------------- construction
     async def start(self) -> None:
@@ -188,9 +305,25 @@ class PaperRuntime:
     async def stop(self) -> None:
         self._bus.unsubscribe(TICK_TOPIC, self._tick_event)
         self._bus.unsubscribe(BAR_TOPIC, self._bar_event)
-        if self._prep_task is not None:
-            self._prep_task.cancel()
-            await asyncio.gather(self._prep_task, return_exceptions=True)
+        tasks = [t for t in (self._prep_task, *self._reconcile_tasks) if t is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def attach(
+        self, *, orders: OrderManager, book: PositionBook, protection: ProtectionManager, exits: ExitManager,
+        pre_ex_mark_fn: PreExMarkFn,
+    ) -> None:
+        """Plug in session prep and the reconcile passes over the managers built on :attr:`broker`."""
+        if self.broker is None or self._bars_fn is None or self._replay_fn is None or self._corp_actions_fn is None:
+            raise RuntimeError("session prep needs the broker and the injected bars, replay and corp-actions fns")
+        self.session_prep = SessionPrep(
+            self._conn, book=book, exit_fn=exits.exit_position, bars_fn=self._bars_fn, replay_fn=self._replay_fn,
+            corp_actions_fn=self._corp_actions_fn, pre_ex_mark_fn=pre_ex_mark_fn, mark_fn=self.mark,
+        )
+        self.reconciler = Reconciler(self._conn, self._clock, self.broker, orders=orders, protection=protection)
+        self._prep = self.session_prep.run
+        self._reconcile = self.reconciler.run
 
     def _construct(self) -> None:
         seqs = self._step("seed_counters", lambda: seeded_counters(self._conn))
@@ -252,11 +385,51 @@ class PaperRuntime:
             raise PaperOrderBlocked("paper session prep has not completed")
         self._order_guard(intent)
 
+    def mark(self, symbol: str) -> Decimal | None:
+        """The last price forwarded to the broker: paper equity never marks ahead of session prep."""
+        mark = self._marks.get(symbol)
+        return mark[0] if mark is not None else None
+
     def persist_observed(self) -> None:
         if self._last_observed is not None:
             self._conn.execute(
                 "UPDATE paper_state SET last_observed_at = ? WHERE id = 1", (self._last_observed.isoformat(),)
             )
+
+    # ---------------------------------------------------------------- paper_tick
+    def set_tick_steps(
+        self,
+        *,
+        protection: TickStep = no_step,
+        exits: TickStep = no_step,
+        equity: TickStep = no_step,
+    ) -> None:
+        """Wire the managers built on :attr:`broker`: ProtectionManager.tick, ExitManager.tick and the
+        Q4.8 equity snapshot and halts. The close reconcile comes with :meth:`attach`."""
+        self._steps = (("protection", protection), ("exits", exits), ("equity", equity))
+
+    async def paper_tick(self) -> None:
+        """The 30 s ``paper_tick`` job. Does nothing until this session's prep has completed; the
+        exit steps gate themselves to the session."""
+        if not self.prep_ready():
+            return
+        for name, step in self._steps:
+            await self._run_step(name, step)
+        now = self._clock.now()
+        session = self._current_session(now)
+        if session is not None and now >= session.close - CLOSE_RECONCILE_LEAD and self._reconciled_for != now.date():
+            self._reconciled_for = now.date()
+            await self._run_step("close_reconcile", self._reconcile)
+        try:
+            self.persist_observed()
+        except Exception:
+            _log.exception("paper_last_observed_not_persisted")
+
+    async def _run_step(self, name: str, step: TickStep) -> None:
+        try:
+            await step()
+        except Exception:
+            _log.exception("paper_tick_step_failed", step=name)
 
     # ---------------------------------------------------------------- bridge
     async def _tick_event(self, tick: Tick) -> None:
@@ -277,9 +450,17 @@ class PaperRuntime:
             self._start_prep(session, max(self._clock.now(), tick.exchange_ts))
         if self._state is not PrepState.DONE:
             return
+        mark = self._marks.get(tick.tradingsymbol)
+        if mark is None or tick.exchange_ts >= mark[1]:
+            self._marks[tick.tradingsymbol] = (tick.ltp, tick.exchange_ts)
         broker.on_tick(tick)
         if self._last_observed is None or tick.exchange_ts > self._last_observed:
             self._last_observed = tick.exchange_ts
+        if tick.tradingsymbol in self._unreconciled:
+            self._unreconciled.discard(tick.tradingsymbol)
+            task = asyncio.get_running_loop().create_task(self._run_step("reconcile", self._reconcile))
+            self._reconcile_tasks.add(task)
+            task.add_done_callback(self._reconcile_tasks.discard)
 
     def on_bar(self, bar: Bar) -> None:
         if self.prep_ready() and self.broker is not None and self._current_session(bar.ts_minute) is not None:
@@ -320,6 +501,10 @@ class PaperRuntime:
         # open would re-trigger prep on every tick.
         self._last_observed = until if self._last_observed is None else max(self._last_observed, until)
         self._ready_for = session_date
+        try:
+            self._unreconciled = held_paper_symbols(self._conn)
+        except Exception:
+            _log.exception("paper_held_symbols_unread")
         self._state = PrepState.DONE
         try:
             self.persist_observed()

@@ -12,7 +12,7 @@ from engine.core.clock import IST, Clock
 from engine.core.contracts import PAPER_ORDER_UPDATE_TOPIC, EnterAction, GateVerdict
 from engine.core.enums import Mode, RiskState
 from engine.core.types import Bar, Tick
-from engine.oms.manager import OrderManager
+from engine.oms.manager import OrderManager, SubmitRefused
 from engine.oms.positions import CloseDeferred, Oversell, PositionBook, PositionNotHeld
 from engine.oms.state import CloseReason, OrderRole, OrderState, PlatformOrder
 from engine.oms.store import OrderStore
@@ -72,14 +72,14 @@ async def rig(conn, bus):
         holder["rig"].costs.append((notional, product))
         return notional * COST_RATE
 
-    book = PositionBook(conn, clock, broker, hold_fn=lambda _s, _style: holder["rig"].hold,
-                        session_of=lambda ts: ts.date(), add_sessions=add_sessions, round_trip_fn=round_trip)
-
     def on_fill(order, qty, price, when) -> None:
         holder["rig"].fills.append((order.role, qty, price))
         book.on_fill(order, qty, price, when)
 
-    mgr = OrderManager(conn, clock, broker, order_guard=lambda _: None, on_fill=on_fill)
+    mgr = OrderManager(conn, clock, broker, order_guard=lambda _: None,
+                       sell_check=lambda pid, qty: book.check_sell(pid, qty), on_fill=on_fill)
+    book = PositionBook(conn, clock, broker, orders=mgr, hold_fn=lambda _s, _style: holder["rig"].hold,
+                        session_of=lambda ts: ts.date(), add_sessions=add_sessions, round_trip_fn=round_trip)
     mgr.start(bus)
     holder["rig"] = _Rig(broker, mgr, book, now)
     yield holder["rig"]
@@ -154,8 +154,8 @@ async def place_gtt(conn, rig: _Rig, position_id: str) -> int:
 
 # ------------------------------------------------------------------------------------- construction
 def test_ctor_takes_only_a_paper_broker(conn, clock) -> None:
-    with pytest.raises(TypeError):
-        PositionBook(conn, clock, object(), hold_fn=lambda *_: 20, session_of=lambda ts: ts.date(),
+    with pytest.raises(TypeError, match="PaperBroker only"):
+        PositionBook(conn, clock, object(), orders=None, hold_fn=lambda *_: 20, session_of=lambda ts: ts.date(),
                      add_sessions=lambda d, n: d, round_trip_fn=lambda *_: Decimal(0))
 
 
@@ -184,7 +184,6 @@ async def test_partial_entry_fills_open_then_accrete_and_exit_fills_close_throug
         60, avg, at(10, 1).isoformat(), "2026-07-06")
 
     rig.book.mark_pending_exit(entry.position_id, CloseReason.TIME_STOP)
-    rig.book.check_sell(entry.position_id, 60)
     rig.now.value = at(10, 3)
     await rig.mgr.submit_exit(entry.position_id, 60)
     for minute in range(4, 9):
@@ -251,17 +250,19 @@ def test_a_partial_exit_reduces_the_open_qty_and_accrues_gross(conn, rig) -> Non
 
 
 # ------------------------------------------------------------------------------------- oversell
-@pytest.mark.parametrize("qty, refused", [(7, False), (8, True), (0, True)])
-def test_a_sell_above_open_minus_working_sells_is_refused(conn, rig, qty, refused) -> None:
+@pytest.mark.parametrize("qty, error", [(7, None), (8, Oversell), (0, SubmitRefused)])
+async def test_an_exit_above_open_minus_working_sells_is_refused_by_the_order_manager(conn, rig, qty, error) -> None:
     pid = fill_entry(conn, rig)
     for oid, state, paper, filled in (("W", "PARTIALLY_FILLED", 1, 1), ("C", "CANCELLED", 1, 0), ("R", "ACKED", 0, 0)):
         conn.execute("INSERT INTO orders (order_id, position_id, role, is_paper, state, product, side, qty, filled_qty) "
                      "VALUES (?, ?, 'exit', ?, ?, 'CNC', 'SELL', 4, ?)", (oid, pid, paper, state, filled))
-    if refused:
-        with pytest.raises(Oversell):
-            rig.book.check_sell(pid, qty)
+    if error is None:
+        await rig.mgr.submit_exit(pid, qty)
+        assert len(await rig.broker.orders()) == 1
     else:
-        rig.book.check_sell(pid, qty)
+        with pytest.raises(error):
+            await rig.mgr.submit_exit(pid, qty)
+        assert await rig.broker.orders() == [] and conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 4
 
 
 # ------------------------------------------------------------------------------------- bookkeeping

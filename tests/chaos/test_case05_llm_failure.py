@@ -35,8 +35,8 @@ Clauses asserted:
 * control (non-vacuity): the same world with a healthy SDK DOES produce a recommendation —
   ``test_healthy_llm_control_produces_a_recommendation``
 
-Skipped: **square-offs unaffected** — ``SquareOffScheduler`` / window-end MIS square-off is WO-P3-6
-(PHASE3_GATED); in Phase 2 RECOMMEND no platform position exists to square off.
+Skipped: **square-offs unaffected** — ``SquareOffScheduler`` / window-end MIS square-off; MIS is out of
+paper scope (plan §1.3), so no platform position exists to square off.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ from engine.risk.limits import LimitsEngine
 from engine.risk.mode import ModeManager
 from engine.strategy.cost_model import CostModel
 from engine.strategy.types import RawLevels, SignalCandidate
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import MIS_OUT_OF_PAPER_SCOPE
 from tests.unit.test_budget_governor import PINNED_CFG
 
 NOW = datetime(2026, 6, 17, 10, 5, tzinfo=IST)        # Wed, inside the seeded 10:00–10:30 window
@@ -478,8 +478,7 @@ async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, co
 
 @pytest.mark.skip(reason=(
     "square-offs unaffected (R1): the window-end MIS square-off / 15:05-15:10 backstop is the "
-    "SquareOffScheduler (WO-P3-6); Phase-2 RECOMMEND holds no platform position to square off. "
-    + PHASE3_GATED
+    "SquareOffScheduler. " + MIS_OUT_OF_PAPER_SCOPE
 ))
 async def test_square_off_unaffected_with_the_llm_dead() -> None:
     """R1: with the SDK dead / DG4, the scheduled square-off still fires on time."""

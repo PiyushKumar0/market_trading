@@ -23,18 +23,15 @@ from engine.core.contracts import EnterAction
 from engine.core.db import transaction
 from engine.core.log import get_logger
 from engine.core.scope import HELD_STATES_SQL, scope_sql
+from engine.oms.manager import OrderManager
 from engine.oms.state import (
-    ALLOWED_TRANSITIONS,
     TERMINAL_ORDER_STATES,
     CloseReason,
     OrderRole,
-    OrderState,
     PlatformOrder,
     PositionState,
     ProtectionState,
-    transition,
 )
-from engine.oms.store import OrderStore
 from engine.paper.broker import TERMINAL_STATUSES, PaperBroker, PaperOrderError
 
 _log = get_logger("engine.oms.positions")
@@ -44,7 +41,7 @@ _PAPER_POSITION = scope_sql("paper", has_origin=True)
 _HELD = f"{_PAPER_POSITION} AND {HELD_STATES_SQL['paper']}"
 _WORKING = "state NOT IN ({})".format(", ".join(f"'{s.value}'" for s in sorted(TERMINAL_ORDER_STATES)))
 #: Leg index -> reason; leg 0 is the stop (``gtts.trigger_low``), leg 1 the target (Q4.2 restore order).
-_LEG_REASON = {0: CloseReason.STOP, 1: CloseReason.TARGET}
+LEG_REASON = {0: CloseReason.STOP, 1: CloseReason.TARGET}
 _LEG_TAG = re.compile(r"gtt:(\d+):(\d+)")
 _PRICE = Decimal("0.0001")
 _PAISA = Decimal("0.01")
@@ -82,7 +79,8 @@ def _iso(at: datetime) -> str:
     return at.astimezone(IST).isoformat()
 
 
-def _leg(tag: Any) -> tuple[int, int] | None:
+def leg_of(tag: Any) -> tuple[int, int] | None:
+    """``(gtt_id, leg index)`` from a fired leg's ``gtt:<id>:<leg>`` tag."""
     m = _LEG_TAG.fullmatch(str(tag or ""))
     return None if m is None else (int(m.group(1)), int(m.group(2)))
 
@@ -90,8 +88,8 @@ def _leg(tag: Any) -> tuple[int, int] | None:
 class PositionBook:
     """Seams:
 
-    * :meth:`on_fill` is the OrderManager's ``on_fill``.
-    * :meth:`check_sell` runs immediately before ``OrderManager.submit_exit``, with no ``await`` between.
+    * :meth:`on_fill` runs first in the OrderManager's ``on_fill`` (the ProtectionManager calls it).
+    * :meth:`check_sell` is the OrderManager's ``sell_check``.
     * :meth:`mark_pending_exit` names the close an exit order's fill will book.
     * :meth:`close_bookkeeping` / :meth:`void` close without a broker order.
     """
@@ -102,6 +100,7 @@ class PositionBook:
         clock: Clock,
         broker: PaperBroker,
         *,
+        orders: OrderManager,
         hold_fn: HoldFn,
         session_of: SessionOfFn,
         add_sessions: AddSessionsFn,
@@ -112,11 +111,11 @@ class PositionBook:
         self._conn = conn
         self._clock = clock
         self._broker = broker
+        self._orders = orders
         self._hold_fn = hold_fn
         self._session_of = session_of
         self._add_sessions = add_sessions
         self._round_trip = round_trip_fn
-        self._store = OrderStore(conn)
 
     # ---------------------------------------------------------------- fills
     def on_fill(self, order: PlatformOrder, qty: int, price: Decimal, at: datetime) -> None:
@@ -190,8 +189,8 @@ class PositionBook:
             return
         reason = row["close_reason"]
         if reason is None and order.role is OrderRole.GTT_LEG:
-            leg = _leg((order.raw_broker_payload or {}).get("tag"))
-            reason = _LEG_REASON.get(leg[1]) if leg else None
+            leg = leg_of((order.raw_broker_payload or {}).get("tag"))
+            reason = LEG_REASON.get(leg[1]) if leg else None
         if reason is None:
             _log.warning("paper_close_reason_unknown", order_id=order.order_id)
         self._close(row, realized, at, CloseReason(reason or CloseReason.EXTERNAL_UNKNOWN),
@@ -250,7 +249,7 @@ class PositionBook:
         known = self._broker_ids(position_id)
 
         def ours(book_row: dict[str, Any]) -> bool:
-            leg = _leg(book_row.get("tag"))
+            leg = leg_of(book_row.get("tag"))
             return book_row["order_id"] in known or (leg is not None and leg[0] in gtt_ids)
 
         async def armed() -> set[int]:
@@ -264,7 +263,7 @@ class PositionBook:
                 _log.warning("paper_bookkeeping_delete_refused", gtt_id=gtt_id, error=str(exc))
         for book_row in await self._broker.orders():
             if ours(book_row) and book_row["status"] not in TERMINAL_STATUSES:
-                await self._cancel(book_row["order_id"])
+                await self._orders.cancel(book_row["order_id"], reason="bookkeeping_close")
 
         book = [o for o in await self._broker.orders() if ours(o)]
         still_armed = await armed()
@@ -290,19 +289,6 @@ class PositionBook:
             (position_id,),
         ).fetchall()
         return {r["broker_order_id"]: int(r["filled_qty"] or 0) for r in rows}
-
-    async def _cancel(self, broker_order_id: str) -> None:
-        order = self._store.by_broker_id(broker_order_id)
-        if order is not None and order.is_paper and OrderState.CANCEL_PENDING in ALLOWED_TRANSITIONS[order.state]:
-            after, event = transition(
-                order, OrderState.CANCEL_PENDING,
-                payload={"platform_intent": "cancel", "reason": "bookkeeping_close"}, at=self._clock.now(),
-            )
-            self._store.record(order, after, event)
-        try:
-            await self._broker.cancel_order(broker_order_id)
-        except PaperOrderError as exc:
-            _log.warning("paper_bookkeeping_cancel_refused", broker_order_id=broker_order_id, error=str(exc))
 
     # ---------------------------------------------------------------- close
     def _close(self, row: sqlite3.Row, realized: Decimal, at: datetime, reason: CloseReason, basis: str) -> None:

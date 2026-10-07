@@ -36,21 +36,23 @@ Clauses covered:
   REGIME coverage is short ⇒ FROZEN-for-entries + ``WARMUP_FROZEN``; the post-login re-trigger (the
   same backfill hook + ``reapply_warmup_gate``) then fills the gap and lifts the freeze.
 
-Phase-3-gated (skipped, ``test_case17_ex_date_gtt_repair_and_resting_gtt_verify``): the ex-date GTT
-repair (re-derive trigger, cancel-and-replace, FROZEN-for-symbol + high-sev alert on a passed T-1) and
-"verifies open CNC GTTs still resting" — needs GTTManager + held-CNC protection (WO-P3-6); the
-corp-actions ex-date feed into ``NSECalendar.ex_dates`` is also still a stub.
+The GTT clauses, rewritten for paper (plan Q4.5,
+``test_case17_paper_gtt_across_the_gap_voids_on_an_ex_date_else_stays_resting``): paper never repairs a
+GTT across an ex-date; an ex-date in the unobserved window VOIDs the position in session prep, which
+deletes its restored GTT before any tick is forwarded. Without one, "open CNC GTTs still resting" — the
+restored GTT is the position's protection and fires on the first forwarded tick through the stop.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 
 import pytest
 
 from engine.core.calendar import NSECalendar
-from engine.core.clock import IST
-from engine.core.config import config_dir
+from engine.core.clock import IST, Clock
+from engine.core.config import PaperSettings, config_dir
 from engine.core.enums import RiskState
 from engine.marketdata.backfill import BackfillJob
 from engine.notify.catalog import MessageKind
@@ -66,10 +68,12 @@ from engine.ops.jobs import (
     JobClass,
 )
 from engine.ops.main import INDEX_SYMBOL, VIX_SYMBOL, _in_session_window
+from engine.ops.paper_runtime import PaperRuntime
 from engine.ops.post_login import regime_and_warmup_backfill
 from engine.ops.warmup import WarmupGate
+from engine.paper.fill_model import FillModelConfig
 from tests.chaos._lifecycle_rig import EngineProcess, RigEnv, run_session
-from tests.chaos.conftest import PHASE3_GATED
+from tests.unit.test_protection_manager import Now, Rig, orders, tick
 
 A_BOOT, A_STOP, B_BOOT = time(9, 30), time(15, 40), time(9, 30)
 #: The EOD jobs the plan names for the per-missed-day replay (§2.6 step 5 date-keyed list).
@@ -300,8 +304,51 @@ async def test_case17_tokenless_restart_enforces_warmup_until_gap_backfilled(tmp
     await b.stop()
 
 
-def test_case17_ex_date_gtt_repair_and_resting_gtt_verify() -> None:
-    """Ex-date-in-gap GTT repair (re-derive trigger, cancel-and-replace, FROZEN-for-symbol + high-sev
-    alert on a passed T-1) and 'verifies open CNC GTTs still resting'."""
-    pytest.skip(f"case 17 GTT clauses: {PHASE3_GATED}; missing: GTTManager + held-CNC protection "
-                "(corp-action ex-date GTT repair, resting-GTT verify)")
+@pytest.mark.parametrize("ex_date", [date(2026, 6, 12), None], ids=["ex-date-in-gap", "no-ex-date"])
+async def test_case17_paper_gtt_across_the_gap_voids_on_an_ex_date_else_stays_resting(conn, bus, ex_date) -> None:
+    """Paper's GTT clauses: an ex-date in the unobserved window VOIDs the position, and its restored GTT
+    is gone before any tick is forwarded; without one, the restored GTT still rests and fires."""
+    _prior, stop_day, restart_day, _missed, _off = GAPS["weekend"]
+    now = Now()
+    now.value = _t(stop_day, 10, 0)
+    before = Rig(conn, bus, now=now)
+    pid = await before.enter(ts=_t(stop_day, 10, 0, 1))
+    await before.mgr.stop()
+    conn.execute("INSERT INTO paper_state (id, enabled, last_observed_at) VALUES (1, 1, ?)",
+                 (_t(stop_day, 15, 29).isoformat(),))
+
+    now.value = _t(restart_day, 9, 30)
+    clock = Clock(time_source=now)
+    holder: dict[str, Rig] = {}
+
+    async def prep(since: datetime | None, until: datetime) -> None:
+        """The Q4.7 catch-up's ex-date rule, standing in until Q4.7 lands."""
+        if ex_date is not None and since is not None and since.date() < ex_date <= until.date():
+            await holder["rig"].book.void(pid, None, until, "corp_action")
+
+    runtime = PaperRuntime(conn, clock, NSECalendar(config_dir() / "calendar", clock, strict=False), bus,
+                           PaperSettings(), capital_base_fn=lambda: Decimal(40000), tick_size_fn=lambda _: Decimal("0.05"),
+                           order_guard=lambda _: None, prep=prep, fill_model_fn=FillModelConfig)
+    await runtime.start()
+    rig = holder["rig"] = Rig(conn, bus, broker=runtime.broker, now=now)
+    try:
+        [restored] = await rig.gtts()
+        for ts in (_t(restart_day, 9, 30), _t(restart_day, 9, 30, 5)):     # gapped below the 95 stop
+            now.value = ts
+            bus.publish("tick", tick(ts, "90.00"))
+            await rig.settle()
+        await rig.pm.verify_all()
+
+        assert runtime.prep_ready()
+        pos = conn.execute("SELECT * FROM positions WHERE position_id = ?", (pid,)).fetchone()
+        if ex_date is not None:
+            assert (pos["state"], pos["close_reason"], pos["close_basis"]) == ("CLOSED", "void", "corp_action")
+            assert await rig.gtts() == [] and orders(conn, "gtt_leg") == []
+            assert conn.execute("SELECT state FROM gtts").fetchone()["state"] == "deleted"
+        else:
+            [fired] = await rig.gtts()
+            assert (fired["id"], fired["status"], pos["state"]) == (restored["id"], "triggered", "PENDING_EXIT")
+            assert len(orders(conn, "gtt_leg")) == 1
+    finally:
+        await rig.mgr.stop()
+        await runtime.stop()

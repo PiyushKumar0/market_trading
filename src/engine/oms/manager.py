@@ -29,6 +29,7 @@ from engine.core.log import get_logger
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.oms.correlation import PendingCorrelation
 from engine.oms.state import (
+    ALLOWED_TRANSITIONS,
     OrderEvent,
     OrderRole,
     OrderState,
@@ -38,7 +39,7 @@ from engine.oms.state import (
 )
 from engine.oms.store import OrderStore
 from engine.oms.updates import NOOP_FLAGS, BrokerUpdate, apply_update, parse_postback
-from engine.paper.broker import PaperBroker
+from engine.paper.broker import TERMINAL_STATUSES, PaperBroker, PaperOrderError
 
 _log = get_logger("engine.oms.manager")
 
@@ -49,6 +50,8 @@ _PENDING_MAX_AGE_S = 300.0
 OrderGuard = Callable[[str], None]
 OnFill = Callable[[PlatformOrder, int, Decimal, datetime], Awaitable[None] | None]
 OnTransition = Callable[[PlatformOrder, OrderEvent], Awaitable[None] | None]
+#: ``sell_check(position_id, qty)`` raises unless the SELL fits the position (``PositionBook.check_sell``).
+SellCheck = Callable[[str, int], None]
 
 
 class SubmitRefused(ValueError):
@@ -148,6 +151,7 @@ class OrderManager:
     Seams:
 
     * ``order_guard``: the guard also installed on ``broker`` (both from :func:`paper_order_guard`).
+    * ``sell_check``: run by :meth:`submit_exit` before the order exists.
     * ``on_fill(order, qty, price, at)``: each fill; ``order`` is committed, ``price`` is this fill's.
     * ``on_transition(order, event)``: each committed postback transition, after its ``on_fill``.
     """
@@ -159,6 +163,7 @@ class OrderManager:
         broker: PaperBroker,
         *,
         order_guard: OrderGuard,
+        sell_check: SellCheck,
         on_fill: OnFill,
         on_transition: OnTransition | None = None,
     ) -> None:
@@ -170,6 +175,7 @@ class OrderManager:
         self._clock = clock
         self._broker = broker
         self._guard = order_guard
+        self._sell_check = sell_check
         self._on_fill = on_fill
         self._on_transition = on_transition
         self._store = OrderStore(conn)
@@ -233,7 +239,8 @@ class OrderManager:
         return await self._send(order, proposal.tradingsymbol)
 
     async def submit_exit(self, position_id: str, qty: int, *, price: Decimal | None = None) -> PlatformOrder:
-        """Place a paper CNC SELL against a held paper position: MARKET, or LIMIT at ``price``."""
+        """Place a paper CNC SELL against a held paper position: MARKET, or LIMIT at ``price``. Whatever
+        ``sell_check`` raises (an oversell) propagates with nothing persisted."""
         self._require_started()
         row = self._conn.execute(
             f"SELECT symbol, product FROM positions WHERE position_id = ? "
@@ -244,6 +251,7 @@ class OrderManager:
             raise SubmitRefused(f"{position_id} is not a held paper CNC position")
         if qty <= 0 or (price is not None and price <= 0):
             raise SubmitRefused(f"exit qty {qty} / price {price} for {position_id}")
+        self._sell_check(position_id, qty)
         now = self._clock.now()
         order = PlatformOrder(
             order_id=_new_id(),
@@ -260,6 +268,30 @@ class OrderManager:
         )
         self._store.insert(order)
         return await self._send(order, row["symbol"])
+
+    async def cancel(self, broker_order_id: str, *, reason: str) -> bool:
+        """Cancel a paper order at the broker, its OMS row (if any yet) first moved to CANCEL_PENDING
+        with the platform's intent. True once the broker reports the order terminal, which includes
+        filled or rejected before the cancel landed; the OMS row follows on its postback."""
+        order = self._store.by_broker_id(broker_order_id)
+        if order is not None:
+            if not order.is_paper:
+                raise SubmitRefused(f"broker order {broker_order_id} is a real order")
+            if OrderState.CANCEL_PENDING in ALLOWED_TRANSITIONS[order.state]:
+                self._move(order, OrderState.CANCEL_PENDING, {"platform_intent": "cancel", "reason": reason})
+        try:
+            await self._broker.cancel_order(broker_order_id)
+        except PaperOrderError as exc:
+            _log.warning("paper_cancel_refused", broker_order_id=broker_order_id, reason=reason, error=str(exc))
+        status = next((o["status"] for o in await self._broker.orders() if o["order_id"] == broker_order_id), None)
+        if status not in TERMINAL_STATUSES:
+            _log.error("paper_cancel_unverified", broker_order_id=broker_order_id, reason=reason, status=status)
+            return False
+        return True
+
+    def cancel_intended(self, order_id: str) -> bool:
+        """Whether :meth:`cancel` ever recorded a platform cancel intent on this order."""
+        return any(e.payload.get("platform_intent") == "cancel" for e in self._store.events(order_id))
 
     def _entry_qty(self, proposal: EnterAction, verdict: GateVerdict) -> int:
         if not isinstance(proposal, EnterAction):
@@ -334,7 +366,12 @@ class OrderManager:
 
     # ---------------------------------------------------------------- postbacks
     async def _on_frame(self, frame: OrderUpdateFrame) -> None:
-        self._queue.put_nowait(_Frame(dict(frame.data), self._clock.now()))
+        self.redeliver(frame.data)
+
+    def redeliver(self, data: dict[str, Any]) -> None:
+        """Queue a postback-shaped broker row behind the frames already queued: how the Reconciler (R5)
+        re-applies a lost postback or adopts an unseen leg."""
+        self._queue.put_nowait(_Frame(dict(data), self._clock.now()))
 
     async def _consume(self) -> None:
         while True:

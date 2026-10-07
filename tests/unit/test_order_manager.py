@@ -55,11 +55,22 @@ class _Flags:
     state: RiskState = RiskState.NORMAL
 
 
+class _Oversell(ValueError):
+    pass
+
+
 @dataclass
 class _Recorder:
     store: OrderStore
     fills: list[tuple] = field(default_factory=list)
     transitions: list[tuple] = field(default_factory=list)
+    sell_checks: list[tuple] = field(default_factory=list)
+    refuse_sell: bool = False
+
+    def sell_check(self, position_id, qty) -> None:
+        self.sell_checks.append((position_id, qty, len(self.store.open_orders())))
+        if self.refuse_sell:
+            raise _Oversell(position_id)
 
     async def on_fill(self, order, qty, price, when) -> None:
         persisted = self.store.get(order.order_id)
@@ -97,8 +108,8 @@ async def make_rig(conn, bus, flags):
         )
         rec = _Recorder(OrderStore(conn))
         mgr = OrderManager(
-            conn, Clock(time_source=now), broker,
-            order_guard=guard, on_fill=on_fill or rec.on_fill, on_transition=rec.on_transition,
+            conn, Clock(time_source=now), broker, order_guard=guard, sell_check=rec.sell_check,
+            on_fill=on_fill or rec.on_fill, on_transition=rec.on_transition,
         )
         mgr.start(bus)
         managers.append(mgr)
@@ -173,7 +184,8 @@ ENTRY_TO_FILLED = [(S.DRAFT, S.VALIDATED), (S.VALIDATED, S.SUBMITTED), (S.SUBMIT
 ], ids=["not-a-paper-broker", "paper-broker-on-the-real-topic"])
 def test_ctor_takes_only_a_paper_broker_on_the_paper_topic(conn, clock, make_broker, error) -> None:
     with pytest.raises(error):
-        OrderManager(conn, clock, make_broker(clock), order_guard=lambda _: None, on_fill=lambda *_: None)
+        OrderManager(conn, clock, make_broker(clock), order_guard=lambda _: None, sell_check=lambda *_: None,
+                     on_fill=lambda *_: None)
 
 
 @pytest.mark.parametrize("intent, enabled, state, blocked", [
@@ -338,6 +350,56 @@ async def test_an_exit_needs_a_held_paper_position(conn, rig, paper, state) -> N
     with pytest.raises(SubmitRefused):
         await rig.mgr.submit_exit(seed_position(conn, paper=paper, state=state), 10)
     assert count_orders(conn) == 0
+
+
+async def test_an_exit_runs_the_sell_check_before_anything_is_persisted(conn, rig) -> None:
+    rig.rec.refuse_sell = True
+    with pytest.raises(_Oversell):
+        await rig.mgr.submit_exit(seed_position(conn), 7)
+    assert rig.rec.sell_checks == [("POS1", 7, 0)]
+    assert count_orders(conn) == 0 and await rig.broker.orders() == []
+
+
+# ------------------------------------------------------------------------------------- cancel
+@pytest.mark.parametrize("broker_cancels", [True, False], ids=["cancelled", "cancel-not-taken"])
+async def test_cancel_records_the_intent_before_the_broker_call_and_verifies_the_terminal_state(
+    conn, bus, rig, monkeypatch, broker_cancels
+) -> None:
+    order = await rig.mgr.submit_exit(seed_position(conn), 10, price=Decimal(120))
+    await settle(bus, rig.mgr)
+    seen: list[OrderState] = []
+    cancel = rig.broker.cancel_order
+
+    async def spy(broker_order_id, *args, **kwargs):
+        seen.append(OrderStore(conn).get(order.order_id).state)
+        return await cancel(broker_order_id, *args, **kwargs) if broker_cancels else broker_order_id
+
+    monkeypatch.setattr(rig.broker, "cancel_order", spy)
+    assert await rig.mgr.cancel(order.broker_order_id, reason="test") is broker_cancels
+    await settle(bus, rig.mgr)
+
+    assert seen == [S.CANCEL_PENDING] and rig.mgr.cancel_intended(order.order_id)
+    tail = [(S.ACKED, S.CANCEL_PENDING)] + ([(S.CANCEL_PENDING, S.CANCELLED)] if broker_cancels else [])
+    assert transitions(conn, order.order_id)[4:] == tail
+
+
+async def test_a_fill_that_beat_the_cancel_is_terminal_and_still_lands(conn, bus, rig) -> None:
+    order = await rig.mgr.submit_exit(seed_position(conn), 10)
+    rig.now.value = at(10, 0, 1)
+    rig.broker.on_tick(tick(at(10, 0, 1), "100.00"))
+
+    assert await rig.mgr.cancel(order.broker_order_id, reason="test") is True
+    await settle(bus, rig.mgr)
+    assert OrderStore(conn).get(order.order_id).state is S.FILLED
+    assert [(o.role, qty) for o, qty, _, _ in rig.rec.fills] == [(OrderRole.EXIT, 10)]
+
+
+async def test_cancel_refuses_a_real_order(conn, rig) -> None:
+    conn.execute("INSERT INTO orders (order_id, broker_order_id, role, is_paper, state, product, side, qty) "
+                 "VALUES ('R', '900000000000001', 'exit', 0, 'ACKED', 'CNC', 'SELL', 1)")
+    with pytest.raises(SubmitRefused):
+        await rig.mgr.cancel("900000000000001", reason="test")
+    assert OrderStore(conn).get("R").state is S.ACKED
 
 
 # ------------------------------------------------------------------------------------- postbacks
