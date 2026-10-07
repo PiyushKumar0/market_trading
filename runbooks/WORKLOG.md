@@ -6,6 +6,22 @@
 - **M0 (wip/m0):** Q0.1 plan-of-record notes in `IMPLEMENTATION_PLAN.md` (22 §s, D8 verbatim + D9–D12 in §8.4, stale hi52 1.47 text now points at `settings.yaml`); Q0.2 `NSECalendar.add_sessions`; Q0.3 migration 0015; Q0.4 `CALENDAR_HORIZON` monitor (boot + daily `feed_freshness`), sent once per horizon value.
 - **Manager decision beyond the plan:** "outbox dedupe key" had no mechanism, so 0015 adds `notifications.dedupe_key` (partial UNIQUE index) and `CatalogMessage.dedupe_key`; a keyed message journals and sends at most once. Q4.10's paper alerts reuse it.
 - **Deferred:** the Q0.2 `bars_1d` muhurat / DR-drill check and the Q5.1 snapshot need `market.duckdb`, which the running engine holds; tick compaction was mid-pass at 01:42, so both move to the evening stop window.
+- **M1 + M2 (wip/m1 → tip `wip/m2` = 3977dfc):** every M1/M2 task (Q1.1–Q1.12, Q2.1–Q2.7), built by file-disjoint agent waves; each wave committed only after a full suite on a frozen copy (`..\mt_test`). Manager decisions:
+  - rsi2 keeps its analyst target. Only time-exit strategies with a registered edge (hi52, ins) drop it; dropping it for rsi2 would fail every rsi2 entry at C3.
+  - `/veto` treats a rec past `valid_until` that the 15:45 sweep has not reached yet as expired.
+  - The C1 pre-registration was clarified before any run: the veto window is per strategy (hi52 400 days).
+- **Review:** a 5-lens whole-branch review found 13 real findings (5 medium, 8 low; none refuted; none touch orders or risk). All 13 are fixed with failing-first tests. Mediums:
+  - the exit card said a long's stop was "above entry";
+  - the "re-anchored" clause printed for recs that were never re-anchored;
+  - nightly counts mixed vetoes into the expiries;
+  - protection reminder 2 skipped a session after an early-morning `/taken`;
+  - the EW benchmark lost the muhurat leg.
+- **Validation:** full suite on 3977dfc: 3545 passed, 22 skipped, chaos included. Dashboard checked on the fixture server (three changed panels; console clean apart from the fixture's `/ws/live` 404).
+- **M5 so far:** C1–C3 pre-registered in §6.1 (2208daa, clarified d21a0ea) before the study scripts existed (d09d543); nothing has run on real data yet.
+- **Ops notes:**
+  - Host in Modern Standby about 03:5x–06:26; the `%TEMP%` session scratchpad was wiped during it (nothing lost; state moved outside `%TEMP%`).
+  - 06:32 the engine was stop/started from outside this session (SIGINT, then a clean boot at 06:34 on the unchanged live tree).
+  - An orphaned chrome-devtools automation Chrome from 10-06 held the MCP profile and was closed.
 
 ## 2026-10-06 14:xx–23:4x — Plan for measure / honest card / paper autopilot / research (owner: "Plan the entire change process … Reiterate through the plan repeatedly … until you are sure it is implementation ready"); docs only, nothing deployed
 
