@@ -29,6 +29,15 @@
     - A late corporate-action void is priced at the pre-ex mark.
     - Broker-filled paper closes charge fees only, recorded at plan Q4.4.
 - **Not done by design:** Q4.13 go-live needs owner sign-off after reviewing M3/M4. M3/M4 are not merged into the live tree.
+- **Deploy M0–M2, 2026-10-07 15:47–15:53:**
+  - Stopped `mt-engine` after the 15:45 expiry job; `exit_clean`.
+  - `state.db` → `data\backups\pre_0015.db` (online backup API; integrity ok, 36 tables, 102 recs, schema 0014).
+  - Research snapshot `data\research\market_2026-10-07.duckdb`: 9 tables, every source/output count equal, 2.4 s.
+  - `phase3` fast-forwarded 012c452 → 3977dfc (`wip/m2`). Started: `migrations_applied_on_boot [0015_rec_feedback.sql]`, selftest ok, `engine_ready` 15:53:29, no ERROR lines; `time_exit_check` caught up for 10-07 (no open positions).
+  - Live dashboard `dist` rebuilt.
+- **Q0.2 `bars_1d` check (snapshot):** muhurat (2024-11-01, 2025-10-21) and DR-drill Saturdays (2024-01-20, 03-02, 05-18) carry full daily rows, the same counts as regular sessions. So:
+  - the rec/paper calendar convention skips those sessions (D2: not counted; a stop touched there is ignored);
+  - the research convention counts them by bar position, as the registered backtests did.
 - **Ops notes:**
   - Host in Modern Standby about 03:5x–06:26; the `%TEMP%` session scratchpad was wiped during it (nothing lost; state moved outside `%TEMP%`).
   - 06:32 the engine was stop/started from outside this session (SIGINT, then a clean boot at 06:34 on the unchanged live tree).
