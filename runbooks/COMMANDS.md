@@ -27,6 +27,25 @@ A second engine start now refuses outright — **exit 3** + `single_instance_ref
 holder pid (kernel lock on `data\engine.lock`; frees itself when the holder dies — kill the wedged
 holder pid, never delete the file).
 
+## Milestone deploy (plan-2026-10-06 §3.3) — outside 09:15–15:30 only
+
+```powershell
+Get-Date; Get-Content data\logs\engine.log -Tail 20          # no in-flight EOD job / compaction
+Stop-Service mt-engine
+# 1. Backup before the first boot on a new migration (online backup API, as _snapshot_backup does):
+.venv\Scripts\python.exe -c "import sqlite3; s=sqlite3.connect('data/state.db'); d=sqlite3.connect('data/backups/pre_0015.db'); s.backup(d); d.close(); s.close()"
+# 2. Research snapshot (same stop): copies the study tables READ_ONLY, prints row counts, exit 0 = all match
+.venv\Scripts\python.exe scripts\research_snapshot.py
+# 3. Fast-forward the live tree to the milestone tip (M0-M2 = wip/m2; M3/M4 only after owner review):
+git merge --ff-only wip/m2
+Start-Service mt-engine
+Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|migration_failed|engine_ready|FROZEN' | Select-Object -Last 5
+```
+
+Rollback: `git reset --hard <previous tip>` + restart (migrations are additive; never drop columns). A failed
+migration is recovered from `data\backups\pre_00NN.db`. Once `/paper on` has ever run, never roll back below
+the M3 tip (older code counts paper rows as real money): use `/paper off` or `paper.subsystem_enabled: false`.
+
 ## Service logs (NSSM mode)
 
 ```powershell
