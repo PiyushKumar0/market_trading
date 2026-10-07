@@ -623,7 +623,7 @@ Every task carries its own tests, and its `_COMMANDS`/COMMANDS/RUNBOOK lines whe
   - **First fill** creates the position: paper scope, OPEN, `PROTECTION_PENDING`. It sets `strategy_id` and `exit_session = add_sessions(session_of(first fill), N−1)` (NULL means pending), with N from `hold_fn`. Partial fills accrete.
   - **Oversell refused:** an exit SELL above the open qty minus working sells is refused, so paper CNC never goes short.
   - **Close** records:
-    - gross `realized_pnl`, plus costs via `round_trip_fn` at the entry notional
+    - gross `realized_pnl`, plus costs via `round_trip_fn` at the entry notional (*2026-10-07, M4 review:* a close priced by PaperBroker fills charges fees only, round trip minus its `spread` component, because the fill model already put the half-spread into both fill prices; bookkeeping closes priced off bars keep the full round trip)
     - a learning_ledger row: `is_paper=1`, `rec_id=NULL`, `proposal_id`, `verdict_id`, `strategy_id`
     - `close_reason` from the §3.5.2 vocabulary, including `RISK_FLATTEN` and `VOID`; update the `test_oms_state.py:112` pin
     - `close_basis`
