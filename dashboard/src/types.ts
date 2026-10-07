@@ -186,7 +186,7 @@ export interface ScorecardRecs {
   unscorable: number
 }
 
-/** Paper trades of the current epoch, voids excluded; `net` is rupees. */
+/** Paper trades of all paper epochs, voids excluded; `net` is rupees. */
 export interface ScorecardPaper {
   closed: number
   hit_rate: number | null
@@ -199,6 +199,115 @@ export interface ScorecardResponse {
   bench: Record<string, string>
   strategies: Record<string, { recs: ScorecardRecs; paper: ScorecardPaper }>
 }
+
+// --------------------------------------------------------------------------- GET /paper
+/** `latched` = held until `/paper reset`; otherwise the halt clears on the next session. */
+export interface PaperHalt {
+  cause: string
+  rung: string // FROZEN | CLOSE_ONLY | KILLED
+  set_at: string
+  latched: boolean
+}
+
+/** The latest equity snapshot of the epoch; `pnl` and `capital_base` come from the same row. */
+export interface PaperEquity {
+  at: string
+  equity: string
+  realized_pnl: string | null
+  open_mtm: string | null
+  day_mtm: string | null
+  positions_open: number | null
+  pnl: string
+  capital_base: string
+}
+
+/** Last snapshot of each IST day `d` since the epoch, ascending. */
+export interface PaperCurvePoint {
+  d: string
+  at: string
+  equity: string
+}
+
+/** `mark` null = no live mark (the symbol is also in `unmarked`); `unrealized` is gross, null without a mark. */
+export interface PaperPosition {
+  position_id: string
+  symbol: string
+  product: string | null
+  qty: number | null
+  avg_entry: string | null
+  stop: string | null
+  target: string | null
+  state: string | null // OPEN | PENDING_EXIT
+  protection_state: string | null
+  strategy_id: string | null
+  exit_session: string | null
+  opened_at: string | null
+  mark: string | null
+  unrealized: string | null
+}
+
+/** Working (non-terminal) paper orders; an unfilled entry's symbol/strategy come from its proposal. */
+export interface PaperOrder {
+  order_id: string
+  symbol: string | null
+  strategy_id: string | null
+  role: string | null
+  side: string | null
+  qty: number | null
+  filled_qty: number | null
+  price: string | null
+  trigger_price: string | null
+  state: string | null
+  created_at: string | null
+}
+
+export interface PaperClosed {
+  position_id: string | null
+  symbol: string | null
+  strategy_id: string | null
+  qty: number | null
+  entry_px: string | null
+  exit_px: string | null
+  net_pnl: string | null
+  close_reason: string | null
+  close_basis: string | null
+  outcome_label: string | null // win | loss | scratch | void
+  closed_at: string | null
+}
+
+/** Every close of the epoch: `closed`/`wins` exclude voids; `void_net` is their summed net. */
+export interface PaperTotals {
+  closed: number
+  wins: number
+  voids: number
+  void_net: string | null
+}
+
+export interface PaperSummary {
+  enabled: boolean
+  changed_at: string | null
+  changed_by: string | null
+  /** null = the first epoch: every paper row counts. */
+  epoch_started_at: string | null
+  reset_requested_at: string | null
+  subsystem_enabled: boolean
+  built: boolean
+  prep_ready: boolean | null
+  /** null = an entry would pass the paper order guard; "not built" when not built. */
+  entry_guard: string | null
+  unmarked: string[]
+  halts: PaperHalt[]
+  equity: PaperEquity | null
+  curve: PaperCurvePoint[]
+  positions: PaperPosition[]
+  orders: PaperOrder[]
+  closed: PaperClosed[]
+  totals: PaperTotals
+  counters: Record<string, number> | null
+}
+
+/** `{enabled: false}` alone when the engine has no paper control or store wired. */
+export type PaperResponse = PaperSummary | { enabled: false }
 
 // --------------------------------------------------------------------------- GET /risk/headroom
 export interface HeadroomCaps {
@@ -341,6 +450,7 @@ export interface Snapshot {
   budget: BudgetResponse | null
   tradeWindow: TradeWindowResponse | null
   watchlist: WatchlistResponse | null
+  paper: PaperResponse | null
 }
 
 export type ConnState = 'connecting' | 'open' | 'closed'

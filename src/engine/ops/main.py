@@ -90,7 +90,7 @@ from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_disabled, login_prompt
 from engine.oms.exits import ExitManager
-from engine.oms.manager import OrderManager, paper_order_guard
+from engine.oms.manager import OrderManager, PaperOrderBlocked, paper_order_guard
 from engine.oms.positions import PositionBook
 from engine.oms.prep import SessionPrep
 from engine.oms.protection import ProtectionManager
@@ -164,6 +164,7 @@ from engine.ops.paper_runtime import (
     store_last_mark_fn,
     store_pre_ex_mark_fn,
 )
+from engine.ops.paper_summary import PaperView
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.post_login import (
     PostLoginRecovery,
@@ -1691,7 +1692,8 @@ async def run() -> int:
     # --- dashboard API ---
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
                       protected_store=protected_store, exposure=exposure, governor=governor,
-                      limits_engine=limits_engine, market_store=store, paper_control=paper_control)
+                      limits_engine=limits_engine, market_store=store, paper_control=paper_control,
+                      paper_view=paper.view() if paper is not None else None)
     if not secrets.has(DASHBOARD_TOKEN):
         _log.warning("dashboard_token_missing", hint="run scripts/dpapi_set.py --generate-dashboard-token")
 
@@ -3551,6 +3553,17 @@ class PaperStack:
             "late_corp_actions": exits.late_corp_actions,
         }
 
+    def view(self) -> PaperView:
+        """The read-only slice the dashboard API sees (no write-capable manager crosses over)."""
+        def entry_guard() -> str | None:
+            try:
+                self.runtime.guard("entry")
+            except PaperOrderBlocked as exc:
+                return str(exc)
+            return None
+
+        return PaperView(self.runtime.prep_ready, entry_guard, self.runtime.mark, self.counters)
+
     async def stop(self) -> None:
         parts = (("runtime", self.runtime.stop), ("notifier", self.notifier.tick), ("orders", self.orders.stop))
         for part, stop in parts:
@@ -4426,13 +4439,13 @@ def _build_telegram(settings, secrets, clock, mode, kill, *, latch=None, governo
 
 def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protected_store=None,
                 exposure=None, governor=None, limits_engine=None, market_store=None,
-                paper_control=None):
+                paper_control=None, paper_view=None):
     from engine.api.app import create_app
 
     return create_app(session_manager=session, mode_manager=mode, kill_switch=kill,
                       secrets=secrets, clock=clock, bus=bus, conn=conn, store=protected_store,
                       exposure=exposure, governor=governor, limits_engine=limits_engine,
-                      market_store=market_store, paper_control=paper_control)
+                      market_store=market_store, paper_control=paper_control, paper_view=paper_view)
 
 
 async def _serve_api(app, settings):

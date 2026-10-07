@@ -33,14 +33,11 @@ from engine.core.clock import Clock
 from engine.core.db import transaction
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.log import get_logger
-from engine.core.scope import HELD_STATES_SQL, Scope, scope_sql
+from engine.core.scope import HELD_STATES_SQL, PAPER_EPOCH_SQL, Scope, scope_sql
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.risk.exposure")
-
-#: The paper book counts only its current epoch (Q3.2); no epoch yet ⇒ every paper row.
-_PAPER_EPOCH = "COALESCE((SELECT epoch_started_at FROM paper_state WHERE id = 1), '')"
 
 #: Rolling window for `weekly_drawdown` — TRADING sessions, not calendar days (§7.1).
 WEEKLY_DRAWDOWN_SESSIONS = 5
@@ -161,12 +158,12 @@ class ExposureTracker:
         self.scope = scope
         paper = scope == "paper"
         self._positions = scope_sql(scope, has_origin=True) + (
-            f" AND opened_at >= {_PAPER_EPOCH}" if paper else "")
+            f" AND opened_at >= {PAPER_EPOCH_SQL}" if paper else "")
         self._open = HELD_STATES_SQL[scope]
-        self._ledger = scope_sql(scope) + (f" AND closed_at >= {_PAPER_EPOCH}" if paper else "")
+        self._ledger = scope_sql(scope) + (f" AND closed_at >= {PAPER_EPOCH_SQL}" if paper else "")
         self._not_closes = "('no_action','void')" if paper else "('no_action')"
         self._snapshots = "paper_equity_snapshots" if paper else "equity_snapshots"
-        self._snapshot_epoch = f" AND at >= {_PAPER_EPOCH}" if paper else ""
+        self._snapshot_epoch = f" AND at >= {PAPER_EPOCH_SQL}" if paper else ""
 
     def _real_only(self) -> None:
         if self.scope != "real":

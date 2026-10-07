@@ -2,6 +2,7 @@
 //
 //   cd dashboard; npm run build; node fixture_server.mjs          # http://127.0.0.1:8499/
 //   NO_TODAY=1 node fixture_server.mjs                            # every ledger row is from an earlier day
+//   PAPER_OFF=1 node fixture_server.mjs                           # /paper = the not-built stub
 //
 // Serves dist/ at / and answers the read routes with canned rows spread across several IST days
 // (today, yesterday, older, a UTC-stamped row, an undated row), so the per-day folds, the IST day
@@ -16,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
 const PORT = Number(process.env.PORT ?? 8499)
 const NO_TODAY = process.env.NO_TODAY === '1'
+const PAPER_OFF = process.env.PAPER_OFF === '1'
 
 const istFmt = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Kolkata',
@@ -245,16 +247,125 @@ const scorecardFixture = {
   },
 }
 
+// GET /paper (plan "Response contract"). Six sessions on consecutive weekdays ending today; the epoch
+// opened on the first. The figures tie out: pnl = realized + open_mtm and capital_base = equity - pnl
+// on the latest snapshot; realized includes the void, the totals do not. The latest snapshot is 10:31:
+// HINDZINC lost its mark after that, so snapshots (and paper halts) are paused and its LLM exit waits
+// (PENDING_EXIT). Today's 1840.60 loss
+// against yesterday's close latched the daily soft halt, so the entry guard reports FROZEN.
+function weekdays(day, n) {
+  let d = day
+  for (let left = Math.abs(n); left > 0; ) {
+    d = shift(d, Math.sign(n))
+    if (![0, 6].includes(new Date(`${d}T12:00:00+05:30`).getUTCDay())) left -= 1
+  }
+  return d
+}
+const sessions = [5, 4, 3, 2, 1, 0].map((n) => weekdays(today, -n))
+const at = (day, hms) => `${day}T${hms}+05:30`
+const curveEquity = ['100042.10', '100318.65', '100905.40', '101420.75', '101953.90', '100113.30']
+
+const paperBuilt = {
+  enabled: true,
+  changed_at: at(sessions[0], '09:02:41'),
+  changed_by: 'telegram',
+  epoch_started_at: at(sessions[0], '09:20:00'),
+  reset_requested_at: null,
+  subsystem_enabled: true,
+  built: true,
+  prep_ready: true,
+  entry_guard: 'effective paper state is FROZEN',
+  unmarked: ['HINDZINC'],
+  halts: [{ cause: 'daily_loss_soft', rung: 'FROZEN', set_at: at(today, '10:29:00'), latched: false }],
+  equity: {
+    at: at(today, '10:31:00'),
+    equity: '100113.30',
+    realized_pnl: '-119.20',
+    open_mtm: '232.50',
+    day_mtm: '-1840.60',
+    positions_open: 2,
+    pnl: '113.30',
+    capital_base: '100000.00',
+  },
+  curve: sessions.map((d, i) => ({
+    d,
+    at: i === sessions.length - 1 ? at(d, '10:31:00') : at(d, '15:29:00'),
+    equity: curveEquity[i],
+  })),
+  positions: [
+    {
+      position_id: '01K6ZQ3N8V2C4D5E6F7G8H9J0K', symbol: 'JINDALSTEL', product: 'CNC', qty: 10,
+      avg_entry: '1012.40', stop: '968.00', target: null, state: 'OPEN', protection_state: 'PROTECTED',
+      strategy_id: 'hi52', exit_session: weekdays(sessions[2], 20), opened_at: at(sessions[2], '10:05:12'),
+      mark: '1031.75', unrealized: '193.50',
+    },
+    {
+      position_id: '01K71B7R2M3N4P5Q6R7S8T9V0W', symbol: 'HINDZINC', product: 'CNC', qty: 30,
+      avg_entry: '468.20', stop: '452.00', target: '497.00', state: 'PENDING_EXIT', protection_state: 'PROTECTED',
+      strategy_id: 'brk20', exit_session: weekdays(sessions[3], 10), opened_at: at(sessions[3], '13:12:40'),
+      mark: null, unrealized: null,
+    },
+  ],
+  // Unfilled entry: no positions row yet, so symbol/strategy come from the proposal payload.
+  orders: [
+    {
+      order_id: '01K74D9X5Y6Z7A8B9C0D1E2F3G', position_id: '01K74D9X4H5J6K7M8N9P0Q1R2S', symbol: 'TATAPOWER',
+      strategy_id: 'brk20', role: 'entry', side: 'BUY', qty: 45, filled_qty: 0, price: '412.30',
+      trigger_price: null, state: 'ACKED', created_at: at(today, '09:47:05'),
+    },
+  ],
+  closed: [
+    {
+      position_id: '01K6YA1B2C3D4E5F6G7H8J9K0M', symbol: 'TATASTEEL', strategy_id: 'brk20', qty: 40,
+      entry_px: '168.20', exit_px: '176.85', net_pnl: '307.50', close_reason: 'target', close_basis: 'fill',
+      outcome_label: 'win', closed_at: at(sessions[4], '15:16:30'),
+    },
+    {
+      position_id: '01K6XB2C3D4E5F6G7H8J9K0M1N', symbol: 'SAIL', strategy_id: 'brk20', qty: 60,
+      entry_px: '131.40', exit_px: '127.10', net_pnl: '-289.20', close_reason: 'stop', close_basis: 'fill',
+      outcome_label: 'loss', closed_at: at(sessions[3], '11:48:02'),
+    },
+    {
+      position_id: '01K6WC3D4E5F6G7H8J9K0M1N2P', symbol: 'CEIGALL', strategy_id: 'hi52', qty: 25,
+      entry_px: '302.00', exit_px: '296.50', net_pnl: '-137.50', close_reason: 'void',
+      close_basis: 'corp_action_relabel', outcome_label: 'void', closed_at: at(sessions[1], '14:02:11'),
+    },
+  ],
+  totals: { closed: 2, wins: 1, voids: 1, void_net: '-137.50' },
+  counters: { reconcile_mismatches: 0, voids: 0, late_corp_actions: 0 },
+}
+
+const paperOff = {
+  enabled: false,
+  changed_at: null,
+  changed_by: null,
+  epoch_started_at: null,
+  reset_requested_at: null,
+  subsystem_enabled: false,
+  built: false,
+  prep_ready: null,
+  entry_guard: 'not built',
+  unmarked: [],
+  halts: [],
+  equity: null,
+  curve: [],
+  positions: [],
+  orders: [],
+  closed: [],
+  totals: { closed: 0, wins: 0, voids: 0, void_net: null },
+  counters: null,
+}
+
 const routes = {
   '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: 'NORMAL' },
   '/positions': {
     positions: [
       pos('pos-1', 'JINDALSTEL', `${d1}T10:20:00+05:30`),
       pos('pos-2', 'TATASTEEL', null),
-      { ...pos('pos-3', 'SAIL', null), is_paper: 1, origin: 'platform', protection_state: 'PROTECTED' },
     ],
     as_of: new Date().toISOString(),
   },
+  '/paper': PAPER_OFF ? paperOff : paperBuilt,
   '/scorecard': scorecardFixture,
   '/decisions': { decisions },
   '/recommendations': { recommendations },
@@ -321,6 +432,6 @@ http
   })
   .listen(PORT, '127.0.0.1', () =>
     console.log(
-      `fixture server on http://127.0.0.1:${PORT}/  today=${today} d1=${d1} d3=${d3} d4=${d4}${NO_TODAY ? '  (NO_TODAY)' : ''}`,
+      `fixture server on http://127.0.0.1:${PORT}/  today=${today} d1=${d1} d3=${d3} d4=${d4}${NO_TODAY ? '  (NO_TODAY)' : ''}${PAPER_OFF ? '  (PAPER_OFF)' : ''}`,
     ),
   )

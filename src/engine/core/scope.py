@@ -19,6 +19,10 @@ HELD_STATES_SQL: dict[Scope, str] = {
 }
 
 
+#: The paper book counts only its current epoch (Q3.2); no epoch yet ⇒ every paper row.
+PAPER_EPOCH_SQL = "COALESCE((SELECT epoch_started_at FROM paper_state WHERE id = 1), '')"
+
+
 def scope_sql(scope: Scope, alias: str | None = None, *, has_origin: bool = False) -> str:
     """SQL predicate selecting ``scope``'s rows. ``has_origin`` adds the ``positions.origin`` leg:
     real = the platform's and the owner's confirmed recommendations (O5 excludes ``external``)."""

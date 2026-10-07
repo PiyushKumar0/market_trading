@@ -1,12 +1,13 @@
 /**
  * Panel — per-strategy scorecard (`GET /scorecard`, plan Q2.4/Q2.5). The `recs` columns are HINDSIGHT
  * outcomes of delivered entry recommendations on official bars, never platform equity; the engine's
- * own label is shown above the table. The `paper` columns are simulated trades of the current paper
- * epoch (voids excluded), net in rupees — not hindsight.
+ * own label is shown above the table. The `paper` columns are simulated trades of all paper epochs
+ * (voids excluded), net in rupees — not hindsight.
  */
 import type { ScorecardState } from '../hooks'
 import { Chip, Empty, Panel, dash } from './ui'
 
+const PAPER_SCOPE = 'all paper epochs, voids excluded'
 const pct = (v: number | null) => (v === null ? null : `${v.toFixed(2)}%`)
 const rupees = (v: number | null) => (v === null ? null : `₹${v.toFixed(0)}`)
 const rate = (v: number | null) => (v === null ? null : `${(v * 100).toFixed(0)}%`)
@@ -50,10 +51,10 @@ export function ScorecardPanel({ data, error, unauthorized }: ScorecardState) {
               <th className="num">T+20 net</th>
               <th className="num">excess</th>
               <th>owner action</th>
-              <th className="num">paper closed</th>
-              <th className="num">paper hit</th>
-              <th className="num">paper net ₹</th>
-              <th className="num">paper open</th>
+              <th className="num" title={PAPER_SCOPE}>paper closed</th>
+              <th className="num" title={PAPER_SCOPE}>paper hit</th>
+              <th className="num" title={PAPER_SCOPE}>paper net ₹</th>
+              <th className="num" title={PAPER_SCOPE}>paper open</th>
             </tr>
           </thead>
           <tbody>

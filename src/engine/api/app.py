@@ -44,6 +44,7 @@ from engine.core.log import get_logger
 from engine.core.scope import scope_sql
 from engine.core.secrets import DASHBOARD_TOKEN, Secrets
 from engine.intelligence.events import TOPIC_BUDGET_STATE
+from engine.ops.paper_summary import paper_summary
 from engine.ops.scorecard import LABEL, scorecard
 from engine.risk.events import TOPIC_KILL_STATE, TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_TRADE_WINDOW
 
@@ -199,6 +200,7 @@ def create_app(
     limits_engine: Any = None,
     market_store: Any = None,
     paper_control: Any = None,
+    paper_view: Any = None,
 ) -> FastAPI:
     """Construct the dashboard ``FastAPI`` app (§3.2.11).
 
@@ -229,6 +231,7 @@ def create_app(
     app.state.limits_engine = limits_engine
     app.state.market_store = market_store   # MarketStore (news watchlist); `store` is the ProtectedStore
     app.state.paper_control = paper_control
+    app.state.paper_view = paper_view
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
@@ -359,9 +362,12 @@ def create_app(
 
     @app.get("/paper")
     async def paper(_: Owner) -> dict[str, Any]:
-        """Paper autopilot control state only (plan Q4.0)."""
-        control = app.state.paper_control
-        return {"enabled": False} if control is None else control.state()
+        """Paper autopilot control state, equity, book and recent closes (read-only)."""
+        control, conn = app.state.paper_control, app.state.conn
+        if control is None or conn is None:
+            return {"enabled": False}
+        return paper_summary(conn, control, view=app.state.paper_view,
+                             subsystem_enabled=app.state.settings.paper.subsystem_enabled)
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:

@@ -29,8 +29,9 @@ goes on every request as `Authorization: Bearer`, and on the `/ws/live` handshak
 (a WebSocket handshake cannot carry a header — `_ws_authorized` accepts either).
 
 **Polling.** One 10 s cycle fetches, in parallel: `/mode`, `/positions`, `/decisions`,
-`/recommendations`, `/risk/headroom`, `/budget`, `/config/trade_window`, `/news/watchlist`. Results
-merge per-key, so one unwired collaborator never blanks the console. `/scorecard` and
+`/recommendations`, `/risk/headroom`, `/budget`, `/config/trade_window`, `/news/watchlist`, `/paper`.
+Results merge per-key, so one unwired collaborator never blanks the console. `/paper` rides this cycle
+rather than its own because the panel reads the header mode from the same poll. `/scorecard` and
 `/notifications` each poll on their own 60 s hook. `/ws/live` runs alongside and
 appends relayed state-change frames (mode / risk / kill / trade-window / budget) to the events feed;
 the engine's 15 s `ping` keepalive is filtered out.
@@ -38,9 +39,12 @@ the engine's 15 s `ping` keepalive is filtered out.
 **Panels.** Status header (mode / routing / risk_state, trade window, degrade tier, KILLED banner) ·
 Recommendations (exit date or "pending", risk to stop, stop ATR multiple, evidence, registered edge,
 thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action chip) · Positions
-(recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)"; paper ones a PAPER
-chip) · Scorecard (per-strategy hindsight outcomes, labelled as such, plus the paper columns: simulated
-trades of the current epoch, voids excluded, net in rupees) · Decision log (proposal → verdict → cited
+(real book only; recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)") ·
+Paper autopilot (simulated — built / ON / entry-guard / epoch / halt chips, equity, net and day P&L
+of the current epoch, the per-session equity line against the capital base, open paper positions with
+mark and gross unrealized, working orders, the epoch's newest 20 closes; the not-built states say so
+and nothing more) · Scorecard (per-strategy hindsight outcomes, labelled as such, plus the paper
+columns: simulated trades of all paper epochs, voids excluded, net in rupees) · Decision log (proposal → verdict → cited
 rules; the paper gate's verdict and rules sit beside the real ones) · Risk headroom · Agent budget ·
 Trade-window editor · Live events · Notifications (the day's Telegram transcript) · News/catalyst
 watchlist (originating vs context + digest freshness). The two ledgers — recommendations and the
@@ -70,7 +74,9 @@ engine serves `dist/`.
 rows for every read route, spread across several IST days — a UTC-stamped row and an undated one
 included — so the day folds and the panel order can be checked in a browser. Any token passes the
 gate; there is no `/ws/live`, so the events feed reads "closed". `NO_TODAY=1` drops today's ledger
-rows to show the "no … today" state. Dev-only: nothing from it is shipped.
+rows to show the "no … today" state. `/paper` answers a built, ON book by default (a daily FROZEN halt,
+one unmarked position, an unfilled entry order, a void among the closes); `PAPER_OFF=1` answers the
+not-built stub (subsystem disabled, nothing stored). Dev-only: nothing from it is shipped.
 
 ## Tests
 

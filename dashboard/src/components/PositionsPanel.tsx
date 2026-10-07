@@ -1,9 +1,10 @@
-/** Panel 2 — all-origin positions (platform / external / recommended), OPEN first (O5/R8). */
+/** Panel 2 — real-book positions of every origin (platform / external / recommended), OPEN first
+ *  (O5/R8). Paper rows are dropped here; the Paper autopilot panel owns them. */
 import type { PositionsResponse } from '../types'
 import { Chip, Empty, Panel, dash, hhmmss, toneFor } from './ui'
 
 export function PositionsPanel({ data }: { data: PositionsResponse | null }) {
-  const rows = data?.positions ?? []
+  const rows = (data?.positions ?? []).filter((p) => !p.is_paper)
   return (
     <Panel title="Positions" aside={data?.as_of ? `as of ${hhmmss(data.as_of)}` : undefined}>
       {rows.length === 0 ? (
@@ -38,7 +39,7 @@ export function PositionsPanel({ data }: { data: PositionsResponse | null }) {
                   <Chip v={p.state ?? '—'} tone={toneFor(p.state)} />
                 </td>
                 <td>
-                  {p.origin} {p.is_paper ? <Chip v="PAPER" tone="info" title="simulated position" /> : null}
+                  {p.origin}
                   {p.origin === 'recommended' && p.state === 'OPEN' ? (
                     <div>
                       {p.owner_protected_at ? (

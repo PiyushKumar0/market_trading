@@ -219,11 +219,11 @@ def test_positions_open_first_with_as_of(conn, clock) -> None:
 def test_paper_route_returns_control_state_and_is_owner_gated(conn, clock) -> None:
     control = PaperControl(conn, clock)
     control.set_enabled(True, "owner")
-    client = _client(paper_control=control)
+    client = _client(paper_control=control, conn=conn, clock=clock)
     assert client.get("/paper").status_code == 401
     body = client.get("/paper", headers=AUTH).json()
     assert body["enabled"] is True and body["changed_by"] == "owner"
-    assert set(body) == {"enabled", "changed_at", "changed_by", "epoch_started_at", "reset_requested_at"}
+    assert body["built"] is False and body["entry_guard"] == "not built"
 
 
 def test_orders_latest_100_first(conn, clock) -> None:

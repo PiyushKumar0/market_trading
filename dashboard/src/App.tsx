@@ -18,6 +18,7 @@ import { EventsPanel } from './components/EventsPanel'
 import { HeadroomPanel } from './components/HeadroomPanel'
 import { NewsPanel } from './components/NewsPanel'
 import { NotificationsPanel } from './components/NotificationsPanel'
+import { PaperPanel } from './components/PaperPanel'
 import { PositionsPanel } from './components/PositionsPanel'
 import { RecommendationsPanel } from './components/RecommendationsPanel'
 import { ScorecardPanel } from './components/ScorecardPanel'
@@ -116,6 +117,7 @@ export default function App() {
       <div className="grid">
         <RecommendationsPanel rows={snapshot.recommendations?.recommendations ?? []} />
         <PositionsPanel data={snapshot.positions} />
+        <PaperPanel data={snapshot.paper} mode={snapshot.mode?.mode ?? null} />
         <ScorecardPanel {...scorecard} />
         <DecisionsPanel rows={snapshot.decisions?.decisions ?? []} />
         <HeadroomPanel data={snapshot.headroom} />

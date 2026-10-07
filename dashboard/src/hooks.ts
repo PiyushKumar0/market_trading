@@ -11,6 +11,7 @@ import type {
   ModeResponse,
   NotificationRow,
   NotificationsResponse,
+  PaperResponse,
   PositionsResponse,
   RecommendationsResponse,
   ScorecardResponse,
@@ -23,7 +24,7 @@ export const POLL_INTERVAL_MS = 10_000
 
 /** The notification journal is a day's transcript, not a live tape — a minute of latency on a row
  *  that was already delivered to Telegram costs nothing, so it rides its own slow cycle instead of
- *  adding a ninth route to the 10 s poll. */
+ *  adding a tenth route to the 10 s poll. */
 export const NOTIFICATIONS_INTERVAL_MS = 60_000
 export const SCORECARD_INTERVAL_MS = 60_000
 
@@ -40,6 +41,7 @@ const EMPTY_SNAPSHOT: Snapshot = {
   budget: null,
   tradeWindow: null,
   watchlist: null,
+  paper: null,
 }
 
 /**
@@ -78,6 +80,7 @@ export function usePoll(token: string): {
         apiGet<BudgetResponse>('/budget'),
         apiGet<TradeWindowResponse>('/config/trade_window'),
         apiGet<WatchlistResponse>('/news/watchlist'),
+        apiGet<PaperResponse>('/paper'),
       ])
       if (cancelled) return
 
@@ -90,6 +93,7 @@ export function usePoll(token: string): {
         'budget',
         'tradeWindow',
         'watchlist',
+        'paper',
       ]
       const failures: string[] = []
       const fresh: Record<string, unknown> = {}

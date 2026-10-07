@@ -13,6 +13,7 @@
   --warn: #d29922;
   --bad: #f85149;
   --muted: #6e7681;
+  --series: #3987e5;
   font-family: ui-monospace, 'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', monospace;
   font-size: 13px;
   color-scheme: dark;
@@ -403,6 +404,101 @@ tr.day button.day {
 .notifs .nt pre.body.err {
   color: var(--bad);
   border-color: var(--bad);
+}
+
+/* Paper autopilot panel: chip row, figure tiles, equity line, section captions. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.banner.warn {
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 5px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.tile {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 10px;
+  min-width: 170px;
+}
+
+.tile .k,
+.caption {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.caption {
+  margin: 10px 0 4px;
+}
+
+.tile .v {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pos {
+  color: var(--ok);
+}
+
+.neg {
+  color: var(--bad);
+}
+
+.curve {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  margin: 8px 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.curve .ylab {
+  position: relative;
+  height: 130px;
+}
+
+.curve .ylab span {
+  position: absolute;
+  right: 8px;
+  transform: translateY(-50%);
+}
+
+.curve .ylab span.hi {
+  transform: translateY(-100%);
+}
+
+.curve .ylab span.lo {
+  transform: none;
+}
+
+.curve svg {
+  display: block;
+  width: 100%;
+  height: 130px;
+  overflow: visible;
+}
+
+.curve .xlab {
+  grid-column: 2;
+  display: flex;
+  justify-content: space-between;
 }
 
 .err {
