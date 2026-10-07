@@ -87,6 +87,7 @@ from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage, MessageKind, catalyst_disabled, login_prompt
+from engine.oms.manager import paper_order_guard
 from engine.ops.calendar_horizon import check_calendar_horizon
 from engine.ops.early_hydration import EarlyHydration
 from engine.ops.feed_freshness import FeedFreshnessJob, FeedFreshnessResult
@@ -143,6 +144,7 @@ from engine.ops.lifecycle import SessionLifecycle
 from engine.ops.news_scoring import NewsScoringJob
 from engine.ops.nightly_review import NightlyReviewJob, read_funnel_raw_counts
 from engine.ops.paper_control import PaperControl
+from engine.ops.paper_runtime import PaperRuntime
 from engine.ops.pipeline import RecommendationBook, RecommendationPipeline
 from engine.ops.post_login import (
     PostLoginRecovery,
@@ -2260,6 +2262,18 @@ async def run() -> int:
     if telegram is not None:
         telegram.set_scan_sweep_fn(run_scan_sweep)
         telegram.set_why_fn(make_why_fn(store=store, conn=conn, clock=clock, calendar=calendar))
+
+    # --- paper autopilot (plan Q4.1): nothing paper exists unless the subsystem is enabled. Built
+    #     before the scheduler arms and before the ticker starts, so the bridge sees the first tick. ---
+    paper_runtime: PaperRuntime | None = None
+    if settings.paper.subsystem_enabled:
+        paper_runtime = PaperRuntime(
+            conn, clock, calendar, bus, settings.paper,
+            capital_base_fn=lambda: limits_engine.load().capital_base_inr,
+            tick_size_fn=tick_size_for,
+            order_guard=paper_order_guard(paper_control.enabled, mode.risk_state),
+        )
+        await paper_runtime.start()
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock)

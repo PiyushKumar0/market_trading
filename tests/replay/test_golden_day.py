@@ -45,10 +45,19 @@ from typing import Any
 import duckdb
 import pytest
 
+from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
+from engine.core.config import PaperSettings, config_dir
 from engine.core.contracts import ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC, OrderUpdateFrame
+from engine.core.db import connect
+from engine.core.enums import RiskState
+from engine.core.eventbus import EventBus
+from engine.core.migrations import apply_migrations
 from engine.core.types import Bar, Tick
 from engine.marketdata.store import _TICK_COLUMNS
+from engine.oms.manager import paper_order_guard
+from engine.ops.paper_control import PaperControl
+from engine.ops.paper_runtime import PaperRuntime
 from engine.paper.broker import PaperBroker
 from engine.paper.fill_model import FillModelConfig
 from engine.paper.replay import (
@@ -794,6 +803,69 @@ def test_replay_is_fast_enough(synthetic_day: SyntheticDay, tmp_path: Path) -> N
     _, report, _ = _run(synthetic_day, tmp_path / "perf", order_id=ULID_A)
     assert report.ticks_read >= 6_000
     assert report.elapsed_s < 25.0
+
+
+def test_paper_bridge_keeps_the_day_fast_and_the_loop_free(
+    synthetic_day: SyntheticDay, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan Q4.1: the PaperRuntime bridge in front of a real PaperBroker, driven by the golden day,
+    stays inside the (i) wall-clock bound and never holds the loop for a second (f).
+
+    The slice is cut to ~3 stream minutes so session prep, which completes on a loop turn, ends
+    inside the 5-minute gap tolerance; at the shipped slice every prep spans hours of stream."""
+    from engine.paper import replay as replay_mod
+
+    monkeypatch.setattr(replay_mod, "_YIELD_EVERY_TICKS", 50)
+    harness = ReplayHarness(synthetic_day.root, tmp_path / "bridge")
+    conn = connect(str(tmp_path / "state.db"))
+    apply_migrations(conn)
+    PaperControl(conn, harness.clock)
+    preps: list[datetime] = []
+
+    async def prep(_since: datetime | None, until: datetime) -> None:
+        preps.append(until)
+
+    runtime = PaperRuntime(
+        conn, harness.clock, NSECalendar(config_dir() / "calendar", harness.clock, strict=False),
+        EventBus(), PaperSettings(),
+        capital_base_fn=lambda: Decimal("40000"), tick_size_fn=lambda _symbol: Decimal("0.05"),
+        order_guard=paper_order_guard(lambda: True, lambda: RiskState.NORMAL), fill_model_fn=FillModelConfig,
+        prep=prep,
+    )
+    harness.attach_broker(runtime)
+    forwarded: list[datetime] = []
+    beats: list[float] = []
+
+    async def _drive() -> ReplayReport:
+        await runtime.start()
+        broker_on_tick = runtime.broker.on_tick
+        runtime.broker.on_tick = lambda tick: (forwarded.append(tick.exchange_ts), broker_on_tick(tick))
+        stop = asyncio.Event()
+
+        async def _heartbeat() -> None:
+            while not stop.is_set():
+                beats.append(_time.perf_counter())
+                await asyncio.sleep(0.05)
+
+        pulse = asyncio.create_task(_heartbeat())
+        try:
+            return await harness.run([synthetic_day.day])
+        finally:
+            stop.set()
+            await pulse
+            await runtime.stop()
+
+    try:
+        report = _await(_drive())
+    finally:
+        harness.close()
+        conn.close()
+
+    assert report.elapsed_s < 25.0
+    assert max(b - a for a, b in zip(beats, beats[1:], strict=False)) < 1.0
+    assert len(preps) == 1
+    assert 0 < len(forwarded) < synthetic_day.session_ticks        # ticks during the prep are dropped
+    assert runtime.prep_ready() and runtime.last_observed_at == forwarded[-1]
 
 
 def test_hot_path_work_is_per_minute_not_per_tick(

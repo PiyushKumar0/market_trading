@@ -123,6 +123,8 @@ def test_close_reasons_are_the_3_5_2_list_verbatim() -> None:
         "gtt_failure_exit",
         "auction_settled",
         "external_unknown",
+        "risk_flatten",
+        "void",
     ]
 
 
@@ -174,8 +176,8 @@ _S = OrderState
 #: it passes for any widening of the table). Anything added to, or dropped from, the machine has to be
 #: re-transcribed here from the plan, so an unreviewed edge cannot reach the OMS.
 EXPECTED_DIAGRAM_TRANSITIONS = {
-    _S.DRAFT: {_S.VALIDATED},
-    _S.VALIDATED: {_S.SUBMITTED},
+    _S.DRAFT: {_S.VALIDATED, _S.REJECTED},          # REJECTED: 2026-10-06 amendment (abandoned)
+    _S.VALIDATED: {_S.SUBMITTED, _S.REJECTED},      # REJECTED: 2026-10-06 amendment (abandoned)
     _S.SUBMITTED: {_S.ACKED, _S.CANCEL_PENDING, _S.REJECTED},
     _S.ACKED: {_S.PARTIALLY_FILLED, _S.CANCEL_PENDING, _S.MODIFY_PENDING, _S.LAPSED},
     _S.PARTIALLY_FILLED: {_S.FILLED, _S.CANCEL_PENDING, _S.MODIFY_PENDING, _S.LAPSED},

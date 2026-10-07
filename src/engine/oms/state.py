@@ -129,6 +129,8 @@ class CloseReason(StrEnum):
     GTT_FAILURE_EXIT = "gtt_failure_exit"                       # A12
     AUCTION_SETTLED = "auction_settled"                         # C8
     EXTERNAL_UNKNOWN = "external_unknown"
+    RISK_FLATTEN = "risk_flatten"                               # 2026-10-06: paper equity-floor exit-all
+    VOID = "void"                                               # 2026-10-06: unmeasurable paper trade, closed at its mark
 
 
 class OrderRole(StrEnum):
@@ -244,10 +246,11 @@ class OrderEvent(BaseModel):
 # ---------------------------------------------------------------- the §3.5.1 transition table as data
 _S = OrderState
 
-#: The §3.5.1 diagram, edge for edge (platform-issued lifecycle).
+#: The §3.5.1 diagram, edge for edge (platform-issued lifecycle). DRAFT/VALIDATED -> REJECTED is the
+#: 2026-10-06 amendment: an order abandoned before the broker call.
 DIAGRAM_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
-    _S.DRAFT: frozenset({_S.VALIDATED}),
-    _S.VALIDATED: frozenset({_S.SUBMITTED}),
+    _S.DRAFT: frozenset({_S.VALIDATED, _S.REJECTED}),
+    _S.VALIDATED: frozenset({_S.SUBMITTED, _S.REJECTED}),
     _S.SUBMITTED: frozenset({_S.ACKED, _S.CANCEL_PENDING, _S.REJECTED}),
     _S.ACKED: frozenset({_S.PARTIALLY_FILLED, _S.CANCEL_PENDING, _S.MODIFY_PENDING, _S.LAPSED}),
     _S.PARTIALLY_FILLED: frozenset({_S.FILLED, _S.CANCEL_PENDING, _S.MODIFY_PENDING, _S.LAPSED}),

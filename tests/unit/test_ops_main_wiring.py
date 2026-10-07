@@ -14,6 +14,7 @@ integrator owns that ARE pure enough to assert without booting the whole engine:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
@@ -3480,3 +3481,21 @@ def test_the_sweep_decides_the_ins_consume_at_publication_from_the_real_risk_sta
     assert "frozen=_published_frozen" in src             # …consumed by the freeze-lift debounce…
     assert "published_frozen=_published_frozen)" in src  # …and by the consume decision
     assert "_ins_rows_to_consume(ins_read, in_window=batch_in_window," in src
+
+
+def test_nothing_paper_is_built_unless_the_subsystem_is_enabled() -> None:
+    """Plan §1.1/Q4.1: every paper construction in the composition root sits under the flag, and the
+    runtime is started before the scheduler arms."""
+    src = inspect.getsource(opsmain.run)
+    tree = ast.parse(src)
+    gated = {
+        id(inner)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "settings.paper.subsystem_enabled"
+        for inner in ast.walk(node)
+    }
+    builders = {"PaperRuntime", "PaperBroker", "OrderManager", "paper_order_guard"}
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and ast.unparse(n.func) in builders]
+    assert "PaperRuntime" in {ast.unparse(n.func) for n in calls}
+    assert [ast.unparse(n.func) for n in calls if id(n) not in gated] == []
+    assert src.index("await paper_runtime.start()") < src.index("_arm_registry_jobs(scheduler")
