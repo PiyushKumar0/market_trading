@@ -6,13 +6,14 @@ owner alerted with re-login link (R6)".
 Scenario: 10:05 IST on a trading day, entries open, the Kite access token dies mid-session (A5 —
 revoked / expired early). The next live broker call gets ``TokenException``. Composed exactly as
 ``engine.ops.main`` wires it: the real ``SessionManager`` (behavioural validity + one-shot circuit
-breaker), the real ``KiteClient`` built with ``on_token_rejected=session.on_token_rejected`` and the
-order-surface ``order_guard`` (predicate (a), §3.5.3), the §3.5.3 cause ledger, and the composition
-root's two hooks — ``_on_session_invalidated`` (freeze + critical alert + LOGIN_PROMPT with the login
-URL) and ``_clear_token_freeze`` (login hook). Those two hooks and ``order_guard`` are closures inside
-``engine.ops.main.run``; they are replicated here line-for-line and PINNED to the source by
-``test_replicated_wiring_matches_the_composition_root`` so the replica cannot drift silently.
-Faked: only pykiteconnect's ``KiteConnect`` (the Kite HTTP edge) and the Telegram sink.
+breaker), the real ``KiteClient`` built with ``on_token_rejected=session.on_token_rejected`` and
+``make_order_guard`` (predicate (a), §3.5.3; ``orders_enabled=True``, which production never passes,
+D8), the §3.5.3 cause ledger, and the composition root's two hooks — ``_on_session_invalidated``
+(freeze + critical alert + LOGIN_PROMPT with the login URL) and ``_clear_token_freeze`` (login hook).
+Those two hooks are closures inside ``engine.ops.main.run``; they are replicated here line-for-line
+and PINNED to the source by ``test_replicated_wiring_matches_the_composition_root`` so the replica
+cannot drift silently. Faked: only pykiteconnect's ``KiteConnect`` (the Kite HTTP edge) and the
+Telegram sink.
 
 Clauses:
 * "FROZEN" + "owner alerted with re-login link (R6)" —
@@ -108,7 +109,7 @@ def token_rig(conn, clock, tmp_path):
     Wed 2026-06-17, inside the seeded 10:00–10:30 trade window)."""
     calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn,
                            window_seed=WINDOW)
-    mode = ModeManager(conn, clock, None, calendar)
+    mode = ModeManager(conn, clock, None, calendar, paper_only=False)
     kill = KillSwitch(conn, clock)
     latch = RiskStateLatch(conn, clock, mode)
     kc = _FakeKiteConnect()
@@ -123,22 +124,6 @@ def token_rig(conn, clock, tmp_path):
 
     async def notify(msg) -> None:
         notified.append(msg)
-
-    # ---- main.py `order_guard` (order-surface predicate (a), §3.5.3), replicated line-for-line ----
-    def order_guard(intent: str) -> None:
-        if intent == "risk_reducing":
-            return
-        kill.assert_orders_allowed()
-        try:
-            start, end = calendar.trade_window(clock.today())
-            in_window = start <= clock.now() <= end
-        except ValueError:
-            in_window = False
-        if not mode.opening_orders_allowed(in_window):
-            raise OrderSurfaceViolation(
-                f"opening order blocked: mode={mode.mode().value} "
-                f"risk_state={mode.risk_state().value} in_window={in_window} (B7/§3.5.3)"
-            )
 
     # ---- main.py freeze seam + the two session hooks, replicated line-for-line ----
     async def freeze_entries(reason: str) -> None:
@@ -159,7 +144,8 @@ def token_rig(conn, clock, tmp_path):
     session.add_login_hook(_clear_token_freeze)
 
     kite = KiteClient(kc, RateLimiter(clock, burst=100), clock,
-                      on_token_rejected=session.on_token_rejected, order_guard=order_guard)
+                      on_token_rejected=session.on_token_rejected,
+                      order_guard=opsmain.make_order_guard(mode, kill, calendar, clock), orders_enabled=True)
     mode.seed_trade_window_if_absent(WINDOW)          # lifecycle step 1b's first-run seed
     store = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
     builder, gate = build_entry_gate(conn=conn, clock=clock, calendar=calendar, mode=mode, kill=kill,
@@ -270,20 +256,17 @@ async def test_protection_already_resting():
 
 # ----------------------------------------------------------------------------------- wiring pin
 def test_replicated_wiring_matches_the_composition_root():
-    """The hooks + guard above are copies of closures inside engine.ops.main.run — pin the lines
-    that carry the behaviour, so a change there fails HERE instead of leaving a stale replica."""
+    """The hooks above are copies of closures inside engine.ops.main.run — pin the lines that carry
+    the behaviour, so a change there fails HERE instead of leaving a stale replica."""
     src = inspect.getsource(opsmain.run)
     for line in (
-        'if intent == "risk_reducing":',
-        "kill.assert_orders_allowed()",
-        "start, end = calendar.trade_window(clock.today())",
-        "if not mode.opening_orders_allowed(in_window):",
         "await latch.set_cause(reason, RiskState.FROZEN, reason, Actor.RISK_GATE)",
         'await freeze_entries("kite_token_rejected")',
         "await notify(login_prompt(session.login_url()))",
         "session.set_invalidation_hook(_on_session_invalidated)",
         'await latch.clear_cause("kite_token_rejected", Actor.RISK_GATE)',
         "session.add_login_hook(_clear_token_freeze)",
-        "on_token_rejected=session.on_token_rejected, order_guard=order_guard",
+        "on_token_rejected=session.on_token_rejected,",
+        "order_guard=make_order_guard(mode, kill, calendar, clock))",
     ):
         assert line in src, f"engine.ops.main.run no longer contains: {line}"

@@ -797,6 +797,23 @@ async def test_protected_delegates_to_the_book_and_checks_arity(clock, msg):
 
 
 @pytest.mark.asyncio
+async def test_positions_puts_paper_rows_in_their_own_section(clock, conn, msg):
+    """Plan Q3.2: paper rows never join the real list; their section is absent while there are none."""
+    _insert_position(conn, "pos-real")
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
+    await bot._cmd_positions(_Update(msg), _Ctx())
+
+    _insert_position(conn, "pos-paper", symbol="PAPERCO", origin="platform", state="PENDING_EXIT")
+    _insert_position(conn, "pos-paper-closed", symbol="PAPERDONE", origin="platform", state="CLOSED")
+    conn.execute("UPDATE positions SET is_paper=1 WHERE position_id LIKE 'pos-paper%'")
+    await bot._cmd_positions(_Update(msg), _Ctx())
+
+    real, paper = msg.sent[1].split("\npaper positions: ")
+    assert real == msg.sent[0] and "paper" not in msg.sent[0]
+    assert paper.startswith("1\nPAPERCO ") and "PAPERDONE" not in paper
+
+
+@pytest.mark.asyncio
 async def test_positions_empty_book(clock, conn, msg):
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
     await bot._cmd_positions(_Update(msg), _Ctx())

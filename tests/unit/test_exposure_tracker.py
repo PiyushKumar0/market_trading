@@ -300,7 +300,7 @@ async def test_apply_floor_breach_routes_through_latch_when_wired(conn, clock):
 
     _equity_at(conn, Decimal("18000"))                 # −10% rung
     tracker = ExposureTracker(conn, clock, CAPITAL)
-    mm, ks = ModeManager(conn, clock), KillSwitch(conn, clock)
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
     latch = RiskStateLatch(conn, clock, mm)
     await _auto(mm)
     await latch.set_cause(CAUSE_OWNER_PAUSE, RiskState.FROZEN, "owner pause", Actor.OWNER)
@@ -320,7 +320,7 @@ async def test_apply_weekly_drawdown_forces_close_only_and_recommend(conn, clock
         _snapshot(conn, f"{d}T15:25:00+05:30", eq)
     _equity_at(conn, Decimal("20000"))
     tracker = ExposureTracker(conn, clock, CAPITAL)
-    mm, ks = ModeManager(conn, clock), KillSwitch(conn, clock)
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
     await _auto(mm)
 
     alerts: list[str] = []
@@ -341,7 +341,7 @@ async def test_apply_weekly_drawdown_forces_close_only_and_recommend(conn, clock
 async def test_apply_equity_floor_rung_flattens(conn, clock):
     _equity_at(conn, Decimal("18000"))
     tracker = ExposureTracker(conn, clock, CAPITAL)
-    mm, ks = ModeManager(conn, clock), KillSwitch(conn, clock)
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
     await _auto(mm)
 
     flattened: list[str] = []
@@ -360,7 +360,7 @@ async def test_apply_equity_floor_rung_flattens(conn, clock):
 async def test_apply_cumulative_floor_kills_and_forces_off(conn, clock):
     _equity_at(conn, Decimal("16000"))
     tracker = ExposureTracker(conn, clock, CAPITAL)
-    mm, ks = ModeManager(conn, clock), KillSwitch(conn, clock)
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
     await _auto(mm)
 
     flattened: list[str] = []
@@ -382,7 +382,7 @@ async def test_apply_cumulative_floor_kills_and_forces_off(conn, clock):
 async def test_apply_is_idempotent_and_never_relaxes_state(conn, clock):
     _equity_at(conn, Decimal("16000"))
     tracker = ExposureTracker(conn, clock, CAPITAL)
-    mm, ks = ModeManager(conn, clock), KillSwitch(conn, clock)
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
     await _auto(mm)
     breaches = tracker.evaluate_floors(FloorLimits())
 

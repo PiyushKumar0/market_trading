@@ -85,6 +85,7 @@ from engine.core.db import transaction
 from engine.core.enums import Mode, RiskState
 from engine.core.log import get_logger
 from engine.core.recommendations import recommendation_expired
+from engine.core.scope import scope_sql
 from engine.core.types import Bar
 from engine.features.snapshots import FEATURE_SET_VERSION
 from engine.intelligence.schemas import (
@@ -1732,7 +1733,8 @@ class RecommendationPipeline:
             rows = self._conn.execute(
                 "SELECT p.proposal_id AS proposal_id, p.action AS action, "
                 "p.created_at AS created_at "
-                "FROM proposals p LEFT JOIN verdicts v ON v.proposal_id = p.proposal_id "
+                "FROM proposals p LEFT JOIN verdicts v "
+                f"ON v.proposal_id = p.proposal_id AND {scope_sql('real', 'v')} "
                 "WHERE v.verdict_id IS NULL AND p.created_at < ? "
                 "ORDER BY p.created_at",
                 (cutoff.isoformat(),),
@@ -3541,7 +3543,7 @@ class RecommendationPipeline:
                 rows = [
                     row for row in self._conn.execute(
                         "SELECT position_id, symbol, product FROM positions "
-                        "WHERE state='OPEN' AND origin IN ('platform','recommended')"
+                        f"WHERE state='OPEN' AND {scope_sql('real', has_origin=True)}"
                     ).fetchall()
                     if str(row["position_id"]) in gone
                 ]

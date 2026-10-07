@@ -41,6 +41,7 @@ from engine.core.config import Settings, load_settings, repo_root
 from engine.core.db import transaction
 from engine.core.enums import Actor, Mode
 from engine.core.log import get_logger
+from engine.core.scope import scope_sql
 from engine.core.secrets import DASHBOARD_TOKEN, Secrets
 from engine.intelligence.events import TOPIC_BUDGET_STATE
 from engine.ops.scorecard import LABEL, scorecard
@@ -270,16 +271,20 @@ def create_app(
 
     @app.get("/decisions")
     async def decisions(_: Owner) -> dict[str, Any]:
-        """Latest 100 Tier-1 action proposals LEFT JOIN their verdict (R8 provenance-chain audit view)."""
+        """Latest 100 Tier-1 action proposals LEFT JOIN their verdict (R8 provenance-chain audit view).
+        One row per proposal: the real verdict, and the paper verdict beside it (plan Q3.2)."""
         conn = app.state.conn
         if conn is None:
             return {"decisions": []}
         rows = conn.execute(
-            """
+            f"""
             SELECT p.proposal_id, p.agent_id, p.action, p.payload AS proposal_payload, p.created_at,
-                   v.verdict_id, v.verdict AS verdict_outcome, v.payload AS verdict_payload, v.evaluated_at
+                   v.verdict_id, v.verdict AS verdict_outcome, v.payload AS verdict_payload, v.evaluated_at,
+                   pv.verdict_id AS paper_verdict_id, pv.verdict AS paper_outcome,
+                   pv.payload AS paper_payload, pv.evaluated_at AS paper_evaluated_at
             FROM proposals p
-            LEFT JOIN verdicts v ON v.proposal_id = p.proposal_id
+            LEFT JOIN verdicts v ON v.proposal_id = p.proposal_id AND {scope_sql('real', 'v')}
+            LEFT JOIN verdicts pv ON pv.proposal_id = p.proposal_id AND {scope_sql('paper', 'pv')}
             ORDER BY p.created_at DESC
             LIMIT 100
             """
@@ -289,6 +294,7 @@ def create_app(
         out = []
         for row, proposal, subject in zip(rows, proposals, subjects, strict=True):
             verdict_payload = json.loads(row["verdict_payload"]) if row["verdict_payload"] else None
+            paper_payload = json.loads(row["paper_payload"]) if row["paper_payload"] else {}
             out.append(
                 {
                     "proposal_id": row["proposal_id"],
@@ -301,6 +307,14 @@ def create_app(
                     "verdict": row["verdict_outcome"],
                     "reasons": (verdict_payload or {}).get("reasons", []),
                     "evaluated_at": row["evaluated_at"],
+                    "is_paper": False,
+                    "paper_verdict": None if row["paper_verdict_id"] is None else {
+                        "verdict_id": row["paper_verdict_id"],
+                        "verdict": row["paper_outcome"],
+                        "reasons": paper_payload.get("reasons", []),
+                        "evaluated_at": row["paper_evaluated_at"],
+                        "is_paper": True,
+                    },
                 }
             )
         return {"decisions": out}
@@ -343,13 +357,18 @@ def create_app(
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:
-        """Latest 100 gate-verdict payloads, most recently evaluated first (R8)."""
+        """Latest 100 gate-verdict payloads, most recently evaluated first (R8). One row per
+        proposal: the real verdict, and the paper verdict beside it (plan Q3.2)."""
         conn = app.state.conn
         if conn is None:
             return {"verdicts": []}
         rows = conn.execute(
-            "SELECT verdict_id, proposal_id, verdict, payload, evaluated_at FROM verdicts "
-            "ORDER BY evaluated_at DESC LIMIT 100"
+            "SELECT v.verdict_id, v.proposal_id, v.verdict, v.payload, v.evaluated_at, "
+            "pv.verdict_id AS paper_verdict_id, pv.verdict AS paper_outcome, "
+            "pv.payload AS paper_payload, pv.evaluated_at AS paper_evaluated_at "
+            "FROM verdicts v LEFT JOIN verdicts pv "
+            f"ON pv.proposal_id = v.proposal_id AND {scope_sql('paper', 'pv')} "
+            f"WHERE {scope_sql('real', 'v')} ORDER BY v.evaluated_at DESC LIMIT 100"
         ).fetchall()
         out = [
             {
@@ -358,6 +377,14 @@ def create_app(
                 "verdict": r["verdict"],
                 "payload": json.loads(r["payload"]),
                 "evaluated_at": r["evaluated_at"],
+                "is_paper": False,
+                "paper_verdict": None if r["paper_verdict_id"] is None else {
+                    "verdict_id": r["paper_verdict_id"],
+                    "verdict": r["paper_outcome"],
+                    "payload": json.loads(r["paper_payload"]),
+                    "evaluated_at": r["paper_evaluated_at"],
+                    "is_paper": True,
+                },
             }
             for r in rows
         ]

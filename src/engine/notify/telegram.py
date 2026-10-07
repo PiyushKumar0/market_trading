@@ -64,6 +64,7 @@ from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
 from engine.core.recommendations import recommendation_expired
+from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.notify import catalog
@@ -79,6 +80,7 @@ from engine.risk.events import (
     RiskStateChanged,
     TradeWindowChanged,
 )
+from engine.risk.mode import ModeRefused
 
 if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
     from engine.broker.session import SessionManager
@@ -1087,6 +1089,12 @@ class TelegramBot:
             return
 
         if target == Mode.AUTO:
+            try:
+                self._mode.check_allowed(Mode.AUTO)
+            except ModeRefused as exc:
+                await _reply(update, str(exc))
+                return
+
             async def _apply(confirmation: OwnerConfirmation) -> str:
                 await self._mode.request_transition(Mode.AUTO, Actor.OWNER, confirmation=confirmation)
                 return "mode → AUTO."
@@ -1464,20 +1472,20 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ read-only reports
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Open positions, straight off the state store (read-only, no broker call)."""
-        if self._conn is None:
+        """Open positions, straight off the state store (read-only, no broker call). Paper positions
+        get their own section, absent while there are none."""
+        conn = self._conn
+        if conn is None:
             await _reply(update, "/positions: state store not wired.")
             return
-        rows = self._conn.execute(
-            "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, origin, "
-            "protection_state, owner_protected_at FROM positions WHERE state='OPEN' ORDER BY opened_at"
-        ).fetchall()
-        _log.info("telegram_cmd_positions", count=len(rows))
-        if not rows:
-            await _reply(update, "no open positions.")
-            return
-        lines = [f"open positions: {len(rows)}"]
-        for row in rows:
+
+        def rows(where: str) -> list[Any]:
+            return conn.execute(
+                "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, origin, "
+                f"protection_state, owner_protected_at FROM positions WHERE {where} ORDER BY opened_at"
+            ).fetchall()
+
+        def line(row: Any) -> str:
             if row["protection_state"]:
                 protection = row["protection_state"]
             elif row["origin"] == "recommended":
@@ -1485,11 +1493,18 @@ class TelegramBot:
                               if row["owner_protected_at"] else "UNPROTECTED (unconfirmed)")
             else:
                 protection = "unprotected"
-            lines.append(
+            return (
                 f"{row['symbol']} {row['side']} {row['qty']} @ {row['avg_entry']} · "
                 f"{row['product'] or '-'} · stop {row['stop'] or '-'} · target {row['target'] or '-'} · "
                 f"{row['origin']} · {protection} · id {row['position_id']}"
             )
+
+        real = rows(f"state='OPEN' AND {scope_sql('real')}")
+        paper = rows(f"{HELD_STATES_SQL['paper']} AND {scope_sql('paper')}")
+        _log.info("telegram_cmd_positions", count=len(real), paper=len(paper))
+        lines = [f"open positions: {len(real)}", *map(line, real)] if real else ["no open positions."]
+        if paper:
+            lines += [f"paper positions: {len(paper)}", *map(line, paper)]
         await _reply(update, "\n".join(lines))
 
     async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -40,6 +40,7 @@ from engine.core.clock import Clock
 from engine.core.config import config_dir, load_yaml
 from engine.core.db import transaction
 from engine.core.log import get_logger
+from engine.core.scope import scope_sql
 from engine.intelligence.agents import nightly
 from engine.intelligence.context import AssembledContext
 from engine.intelligence.governor import BudgetGovernor
@@ -130,14 +131,14 @@ def _closed_trades(conn: sqlite3.Connection, d: date) -> list[sqlite3.Row]:
     ``no_action`` rows are expired or dismissed recommendations, not trades — see :func:`_expired_and_vetoed`.
     """
     return conn.execute(
-        """
+        f"""
         SELECT l.entry_id, l.rec_id, l.strategy_id, l.qty, l.entry_px, l.exit_px, l.net_pnl,
                l.outcome_label, l.close_reason, l.holding_minutes, l.is_paper, l.confidence,
                l.ex_date_effect, l.flagged_day, l.regime_label, l.thesis, p.symbol AS symbol
         FROM learning_ledger l
         LEFT JOIN positions p ON p.position_id = l.position_id
         WHERE l.closed_at IS NOT NULL AND substr(l.closed_at, 1, 10) = ?
-          AND l.outcome_label != 'no_action'
+          AND l.outcome_label != 'no_action' AND {scope_sql('real', 'l')}
         ORDER BY l.closed_at, l.entry_id
         """,
         (_day_prefix(d),),
@@ -219,7 +220,8 @@ def _verdict_lines(conn: sqlite3.Connection, d: date) -> list[str]:
         "SELECT COUNT(*) AS n FROM proposals WHERE substr(created_at, 1, 10) = ?", (day,)
     ).fetchone()["n"]
     rows = conn.execute(
-        "SELECT verdict, payload FROM verdicts WHERE substr(evaluated_at, 1, 10) = ?", (day,)
+        f"SELECT verdict, payload FROM verdicts WHERE substr(evaluated_at, 1, 10) = ? AND {scope_sql('real')}",
+        (day,),
     ).fetchall()
 
     by_verdict: dict[str, int] = {}
@@ -691,8 +693,8 @@ def _proposal_verdict_counts(conn: sqlite3.Connection, day: str) -> tuple[int, d
     ).fetchone()["n"]
     counts: dict[str, int] = {}
     for row in conn.execute(
-        "SELECT verdict, COUNT(*) AS n FROM verdicts WHERE substr(evaluated_at, 1, 10) = ? "
-        "GROUP BY verdict",
+        f"SELECT verdict, COUNT(*) AS n FROM verdicts WHERE substr(evaluated_at, 1, 10) = ? "
+        f"AND {scope_sql('real')} GROUP BY verdict",
         (day,),
     ).fetchall():
         counts[str(row["verdict"] or _UNKNOWN)] = int(row["n"])

@@ -19,7 +19,8 @@ part that touches I/O:
 ``engine.risk`` imports NOTHING from ``engine.intelligence`` (R1, AST-enforced by
 ``tests/unit/test_import_graph.py``): the action union and :class:`GateVerdict` come from
 ``engine.core.contracts``. Everything the builder only type-hints is imported under
-``TYPE_CHECKING`` so importing the gate costs nothing beyond ``engine.core`` + the limit table.
+``TYPE_CHECKING`` so importing the gate costs nothing beyond ``engine.core``, the OMS state
+vocabulary and the limit table.
 
 Verdict precedence (§3.2.7 monotone table): ``reject`` > ``owner_approval_required`` > ``shrink`` >
 ``approve``. The gate may only ever SHRINK an entry — :meth:`RiskGate.evaluate` asserts
@@ -59,7 +60,9 @@ from engine.core.contracts import (
 from engine.core.enums import Mode, RiskState
 from engine.core.log import get_logger
 from engine.core.recommendations import pending_entry_symbols
+from engine.core.scope import HELD_STATES_SQL, Scope, scope_sql
 from engine.core.types import TradeWindow
+from engine.oms.state import TERMINAL_ORDER_STATES
 from engine.risk.limits import LimitTable
 
 if TYPE_CHECKING:  # heavy/optional deps — type-hints only, so importing the gate stays cheap
@@ -205,6 +208,12 @@ _UNCLASSIFIED = "UNCLASSIFIED"
 
 #: ``orders.role`` values that are PROTECTIVE (R1/R3): never cancellable by a Tier-1 proposal.
 PROTECTIVE_ORDER_ROLES: frozenset[str] = frozenset({"protective_sl", "target", "gtt_leg"})
+
+#: ``orders.state NOT IN`` this ⇔ the order is still working (§3.5.1).
+TERMINAL_ORDER_STATES_SQL = "({})".format(",".join(f"'{s.value}'" for s in sorted(TERMINAL_ORDER_STATES)))
+
+#: Most-restrictive-wins (§3.5.3), as ``_RISK_RANK`` in ``engine.risk.causes``/``exposure``.
+_RISK_ORDER = (RiskState.NORMAL, RiskState.FROZEN, RiskState.CLOSE_ONLY, RiskState.KILLED)
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -1341,7 +1350,15 @@ class GateContextBuilder:
         The single sqlite connection (positions/orders/recommendations). Defaults to the one the
         :class:`~engine.risk.exposure.ExposureTracker` already holds so the composition root need
         not thread it twice.
+    scope:
+        ``"paper"`` builds the paper book's context (plan Q3.2) over a paper-scope ``exposure``:
+        paper positions and orders, working paper entry orders as pending, ``PENDING_EXIT`` as
+        exiting, no holdings journal, no margins, and the worse of the real risk state and the
+        active ``paper_halts`` (§1.5).
     """
+
+    #: Class default: a builder assembled without ``__init__`` (the stubbed tests) reads as real.
+    _scope: Scope = "real"
 
     def __init__(
         self,
@@ -1366,7 +1383,11 @@ class GateContextBuilder:
         missing_holdings_fn: Callable[[date], Collection[str]] | None = None,
         index_symbol: str = "NIFTY 50",
         corr_lookback_sessions: int = 20,
+        scope: Scope = "real",
     ) -> None:
+        if getattr(exposure, "scope", "real") != scope:
+            raise ValueError(f"a {scope} GateContextBuilder needs a {scope}-scope ExposureTracker")
+        self._scope = scope
         self._limits = limits_engine
         self._exposure = exposure
         self._instruments = instruments
@@ -1407,6 +1428,7 @@ class GateContextBuilder:
         bag of facts, but this fact now says which question it answered.
         """
         del side                 # documented above: assembly is side-agnostic
+        real = self._scope == "real"
         table = self._limits.load()
         now = self._clock.now()
 
@@ -1421,7 +1443,7 @@ class GateContextBuilder:
         day_mtm_pct = (day_mtm / base * _HUNDRED) if base > 0 else Decimal(0)
 
         universe_row = await self._universe_row(symbol, d)
-        pending = self._pending_entry_rec_symbols(now)
+        pending = self._pending_entry_rec_symbols(now) if real else self._paper_pending_entry_symbols()
         orders = self._orders()
 
         # Un-actioned recommendations occupy concentration room too (2026-07-28 review: in RECOMMEND
@@ -1435,15 +1457,18 @@ class GateContextBuilder:
             sector = sector_of.get(pending_symbol, _UNCLASSIFIED)
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
-        # O16 (2026-09-07): positions already recommended for EXIT hold no position-count or
-        # sector slot against a new BUY — see _exiting_symbols. open_symbols keeps them (one
-        # position per symbol) and deployed_capital keeps them (real cash).
-        exiting = _exiting_symbols(self._recommendations(), open_symbols, now)
-        # WO-D2 (2026-09-12): a position the broker has shown EMPTY on two consecutive sessions gets
-        # no exit recommendation any more, so it would age out of the window above and re-take a
-        # slot — it is excluded on the holdings journal instead (see _gone_symbols). A failing
-        # journal read excludes nothing: the conservative direction for a count is to keep it.
-        exiting = exiting | _gone_symbols(positions, self._missing_holdings())
+        if real:
+            # O16 (2026-09-07): positions already recommended for EXIT hold no position-count or
+            # sector slot against a new BUY — see _exiting_symbols. open_symbols keeps them (one
+            # position per symbol) and deployed_capital keeps them (real cash).
+            exiting = _exiting_symbols(self._recommendations(), open_symbols, now)
+            # WO-D2 (2026-09-12): a position the broker has shown EMPTY on two consecutive sessions gets
+            # no exit recommendation any more, so it would age out of the window above and re-take a
+            # slot — it is excluded on the holdings journal instead (see _gone_symbols). A failing
+            # journal read excludes nothing: the conservative direction for a count is to keep it.
+            exiting = exiting | _gone_symbols(positions, self._missing_holdings())
+        else:
+            exiting = frozenset(str(r["symbol"]) for r in positions if r["state"] == "PENDING_EXIT")
         open_total, open_mis, open_cnc, sector_counts = _active_counts(
             positions, exiting, sector_of,
             total=counts.total, mis=counts.mis, cnc=counts.cnc, sector_counts=sector_counts,
@@ -1452,7 +1477,7 @@ class GateContextBuilder:
         return GateContext(
             now=now,
             mode=self._mode.mode(),
-            risk_state=self._mode.risk_state(),
+            risk_state=self._risk_state(),
             killed=self._kill.is_killed(),
             degrade_tier=self._degrade_tier_fn() if self._degrade_tier_fn else "DG0",
             trade_window=self._mode.get_trade_window(),
@@ -1461,7 +1486,7 @@ class GateContextBuilder:
             equity=self._exposure.equity(),
             day_mtm_pct=day_mtm_pct,
             consecutive_losses=self._exposure.consecutive_losses(d),
-            entry_recs_today=self._entry_recs_today(d),
+            entry_recs_today=self._entry_recs_today(d) if real else self._paper_entries_today(d),
             open_total=open_total,
             open_mis=open_mis,
             open_cnc=open_cnc,
@@ -1487,7 +1512,7 @@ class GateContextBuilder:
             warmup_class=_warmup_class_of(style),
             regime_ready=self._regime_ready(),
             clock_skew_ok=self._clock_skew_ok_fn() if self._clock_skew_ok_fn else False,
-            available_margin=self._margins_fn() if self._margins_fn else None,
+            available_margin=self._margins_fn() if real and self._margins_fn else None,
             positions_known=frozenset(str(r["position_id"]) for r in positions),
             protective_order_ids=frozenset(
                 str(r["order_id"]) for r in orders
@@ -1522,14 +1547,47 @@ class GateContextBuilder:
             return ()
 
     def _open_positions(self) -> list[sqlite3.Row]:
-        """Open PLATFORM positions (O5 excludes the owner's own ``external`` trades)."""
+        """Open PLATFORM positions of this scope (O5 excludes the owner's own ``external`` trades)."""
         return self._rows(
-            "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target "
-            "FROM positions WHERE state='OPEN' AND origin IN ('platform','recommended')"
+            "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, state "
+            f"FROM positions WHERE {HELD_STATES_SQL[self._scope]} "
+            f"AND {scope_sql(self._scope, has_origin=True)}"
         )
 
     def _orders(self) -> list[sqlite3.Row]:
-        return self._rows("SELECT order_id, role FROM orders")
+        return self._rows(f"SELECT order_id, role FROM orders WHERE {scope_sql(self._scope)}")
+
+    def _paper_entry_orders(self, where: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        return self._rows(
+            "SELECT json_extract(p.payload, '$.tradingsymbol') AS symbol FROM orders o "
+            "LEFT JOIN proposals p ON p.proposal_id = o.proposal_id "
+            f"WHERE o.role = 'entry' AND {scope_sql('paper', 'o')} AND {where}",
+            params,
+        )
+
+    def _paper_pending_entry_symbols(self) -> frozenset[str]:
+        """Paper entry orders still working with nothing filled: a fill makes them a position."""
+        rows = self._paper_entry_orders(
+            f"o.state NOT IN {TERMINAL_ORDER_STATES_SQL} AND COALESCE(o.filled_qty, 0) = 0")
+        return frozenset(str(r["symbol"]) for r in rows if r["symbol"])
+
+    def _paper_entries_today(self, d: date) -> int:
+        """Paper entry orders submitted on ``d``, whatever became of them."""
+        return len(self._paper_entry_orders("substr(o.created_at, 1, 10) = ?", (d.isoformat(),)))
+
+    def _risk_state(self) -> RiskState:
+        """The real risk state; for paper, the worse of it and the active ``paper_halts`` (§1.5).
+        A rung that is not a ``RiskState`` value fails closed to KILLED."""
+        state = self._mode.risk_state()
+        if self._scope == "real":
+            return state
+        for row in self._rows("SELECT rung FROM paper_halts WHERE cleared_at IS NULL"):
+            try:
+                halt = RiskState(row["rung"])
+            except ValueError:
+                halt = RiskState.KILLED
+            state = max(state, halt, key=_RISK_ORDER.index)
+        return state
 
     def _recommendations(self) -> list[sqlite3.Row]:
         return self._rows("SELECT payload, human_action FROM recommendations")

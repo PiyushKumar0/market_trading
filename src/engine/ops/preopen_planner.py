@@ -59,6 +59,7 @@ from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.core.db import transaction
 from engine.core.log import get_logger
+from engine.core.scope import scope_sql
 from engine.intelligence.agents import preopen
 from engine.intelligence.context import ContextAssembler, sentiment_rail_note
 from engine.intelligence.governor import BudgetGovernor
@@ -395,7 +396,7 @@ class PreopenPlannerJob:
         """
         rows = self._conn.execute(
             "SELECT position_id, symbol, side, qty, avg_entry, stop, product "
-            "FROM positions WHERE state='OPEN'"
+            f"FROM positions WHERE state='OPEN' AND {scope_sql('real')}"
         ).fetchall()
         if not rows:
             return "none"

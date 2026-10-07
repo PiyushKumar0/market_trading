@@ -85,6 +85,7 @@ from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.core.db import transaction
 from engine.core.log import get_logger
+from engine.core.scope import scope_sql
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
 
@@ -107,8 +108,7 @@ _MAX_AGE_SCAN_DAYS = 400
 #: including it would page the owner about every paper trade the day paper trading goes live.
 _TRACKED_SQL = (
     "SELECT position_id, symbol, qty, opened_at FROM positions "
-    "WHERE state='OPEN' AND product='CNC' AND origin IN ('platform','recommended') "
-    "AND COALESCE(is_paper, 0) = 0"
+    f"WHERE state='OPEN' AND product='CNC' AND {scope_sql('real', has_origin=True)}"
 )
 
 #: One row per (position, trading day); re-running inside the same day REPLACES the day's reading,

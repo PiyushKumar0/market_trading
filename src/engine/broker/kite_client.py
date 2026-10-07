@@ -53,12 +53,12 @@ ReqLike = Any
 
 
 class OrderSurfaceViolation(RuntimeError):
-    """Raised by an injected ``order_guard`` to block a broker order call (§3.5.3 predicate (a), A7/B7).
+    """Raised to block a broker order call (§3.5.3 predicate (a), A7/B7; D8).
 
     ``KiteClient`` does not import ``engine.risk`` — the guard is a plain callback wired by ops (mode
     manager + kill switch live above this layer). This exception type is the uniform signal a blocked
-    call surfaces up the stack; ``KiteClient`` itself never raises it directly, only re-raises what the
-    guard raises.
+    call surfaces up the stack; ``KiteClient`` raises it itself only when built without
+    ``orders_enabled``.
     """
 
 
@@ -95,6 +95,10 @@ class KiteClient:
         in-window, plus the kill switch) belongs to the guard the wiring layer injects, since
         ``engine.broker`` may not import ``engine.risk``. Unwired (``None``) means no gating —
         unchanged behaviour for unit tests / scripts that construct a bare ``KiteClient``.
+    orders_enabled:
+        D8: while False (the default, and the only value production passes) every order/GTT method
+        raises :class:`OrderSurfaceViolation` before the guard and the rate limiter. Only tests pass
+        True.
     """
 
     def __init__(
@@ -105,12 +109,14 @@ class KiteClient:
         on_token_rejected: Callable[[], Awaitable[None]] | None = None,
         *,
         order_guard: Callable[[str], None] | None = None,
+        orders_enabled: bool = False,
     ) -> None:
         self._kc = kc
         self._rl = rate_limiter
         self._clock = clock
         self._on_token_rejected = on_token_rejected
         self._order_guard = order_guard
+        self._orders_enabled = orders_enabled
 
     async def _fire_token_rejected(self, exc: BaseException) -> None:
         """If ``exc`` is a :class:`TokenException` and the circuit breaker is wired, fire it once —
@@ -162,6 +168,8 @@ class KiteClient:
         order-placing/modifying/cancelling method routes through, so wiring the guard here covers all
         six (place_order, modify_order, cancel_order, place_gtt, modify_gtt, delete_gtt).
         """
+        if not self._orders_enabled:
+            raise OrderSurfaceViolation(f"{op} refused: KiteClient built without orders_enabled (D8)")
         if self._order_guard is not None:
             self._order_guard(intent)  # raises OrderSurfaceViolation to block; None return = allowed
         await self._rl.acquire(endpoint_class="orders", intent=intent)

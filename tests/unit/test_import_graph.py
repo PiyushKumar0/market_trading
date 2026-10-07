@@ -21,6 +21,9 @@ split: ``PAPER_MODULE_ALLOWED`` states each module's budget, and the modules' ow
 same thing in prose. A module added to the package with no entry there fails the coverage test.
 
 ``engine.ops`` is exempt: it is the composition root, the only module allowed to import everything (§3.2.12).
+
+D8 (plan Q3.1 (c)): ``engine.oms`` may import only ``core``, ``oms`` and ``paper``, and the transitive
+runtime closure of ``engine.oms`` + ``engine.paper`` never reaches ``engine.broker``.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ GUARDED_PACKAGES: dict[str, tuple[str, ...]] = {
     "paper": ("engine.intelligence", "engine.broker"),
 }
 FORBIDDEN_PREFIX = "engine.intelligence"
+OMS_ALLOWED: tuple[str, ...] = ("engine.core", "engine.oms", "engine.paper")
 
 
 def _py_files(pkg: str) -> list[Path]:
@@ -175,6 +179,74 @@ def test_no_paper_module_may_reach_the_llm_tier_or_the_live_broker(module: str) 
         if _is_under(imported, prefix)
     ]
     assert not banned, f"engine.paper.{module} imports {sorted(banned)}"
+
+
+# --------------------------------------------------------------------------- D8: oms / paper closure
+def test_oms_imports_only_core_oms_and_paper() -> None:
+    offenders = [
+        f"{path.name} imports {imported}"
+        for path in _py_files("oms")
+        for imported in _imports(path)
+        if _is_under(imported, "engine") and not any(_is_under(imported, a) for a in OMS_ALLOWED)
+    ]
+    assert not offenders, f"engine.oms may import only {list(OMS_ALLOWED)}: " + "; ".join(offenders)
+
+
+def _module_file(module: str) -> Path | None:
+    base = repo_root() / "src" / Path(*module.split("."))
+    for candidate in (base / "__init__.py", base.with_suffix(".py")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _module_name(path: Path) -> str:
+    parts = path.relative_to(repo_root() / "src").with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
+def _runtime_engine_imports(module: str) -> set[str]:
+    """Engine modules ``module`` can execute: every import statement (function-level included) except
+    ``if TYPE_CHECKING:`` bodies, plus each parent package ``__init__`` the import runs."""
+    path = _module_file(module)
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    for node in [n for n in ast.walk(tree) if isinstance(n, ast.If) and _is_type_checking(n.test)]:
+        node.body = []
+    pkg = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module if node.level == 0 else _resolve_relative(pkg, node.level, node.module)
+            names.update(f"{base}.{alias.name}" for alias in node.names)
+    prefixes = {".".join(n.split(".")[:i]) for n in names if _is_under(n, "engine") for i in range(1, n.count(".") + 2)}
+    return {p for p in prefixes if _module_file(p) is not None}
+
+
+def _runtime_closure(roots: set[str]) -> set[str]:
+    seen: set[str] = set()
+    todo = list(roots)
+    while todo:
+        module = todo.pop()
+        if module not in seen:
+            seen.add(module)
+            todo.extend(_runtime_engine_imports(module) - seen)
+    return seen
+
+
+def test_oms_and_paper_never_reach_the_live_broker_transitively() -> None:
+    roots = {_module_name(p) for pkg in ("oms", "paper") for p in _py_files(pkg)}
+    reached = _runtime_closure(roots)
+    assert "engine.marketdata.bar_builder" in reached        # the walk follows paper.replay's chain
+    assert "engine.broker.kite_client" in _runtime_closure({"engine.ops.main"})   # and would see broker
+    assert sorted(m for m in reached if _is_under(m, "engine.broker")) == []
 
 
 def test_guard_actually_scans_files() -> None:

@@ -9,8 +9,8 @@ import pytest
 from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState, Routing
 from engine.core.types import OwnerConfirmation, TradeWindow
-from engine.risk.events import TOPIC_TRADE_WINDOW, TradeWindowChanged
-from engine.risk.mode import ModeManager
+from engine.risk.events import TOPIC_MODE_CHANGED, TOPIC_TRADE_WINDOW, ModeChanged, TradeWindowChanged
+from engine.risk.mode import ModeManager, ModeRefused
 
 
 def test_defaults_are_safe(conn, clock):
@@ -30,7 +30,7 @@ async def test_owner_can_go_recommend_single_step(conn, clock):
 
 @pytest.mark.asyncio
 async def test_auto_requires_two_step_confirmation(conn, clock):
-    mm = ModeManager(conn, clock)
+    mm = ModeManager(conn, clock, paper_only=False)
     with pytest.raises(PermissionError):
         await mm.request_transition(Mode.AUTO, Actor.OWNER)  # no confirmation
     with pytest.raises(PermissionError):
@@ -45,6 +45,47 @@ async def test_auto_requires_two_step_confirmation(conn, clock):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("to", "routing"),
+    [(Mode.AUTO, None), (Mode.AUTO, Routing.PAPER), (Mode.AUTO, Routing.LIVE), (Mode.RECOMMEND, Routing.LIVE)],
+)
+async def test_paper_only_refuses_auto_and_live_routing(conn, clock, to, routing):
+    mm = ModeManager(conn, clock)  # paper_only defaults to True
+    with pytest.raises(ModeRefused):
+        await mm.request_transition(to, Actor.OWNER, OwnerConfirmation(actor=Actor.OWNER, confirmed=True), routing)
+    assert (mm.mode(), mm.routing()) == (Mode.OFF, None)
+    assert conn.execute("SELECT COUNT(*) FROM config_audit").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("persisted", "paper_only", "expected"),
+    [(Mode.AUTO, True, Mode.RECOMMEND), (Mode.AUTO, False, Mode.AUTO), (Mode.RECOMMEND, True, Mode.RECOMMEND)],
+)
+async def test_boot_downgrades_persisted_auto_while_paper_only(conn, clock, bus, persisted, paper_only, expected):
+    routing = Routing.LIVE.value if persisted == Mode.AUTO else None
+    conn.execute("UPDATE mode_state SET mode=?, routing=? WHERE id=1", (persisted.value, routing))
+    events: list[ModeChanged] = []
+
+    async def _capture(event: ModeChanged) -> None:
+        events.append(event)
+
+    bus.subscribe(TOPIC_MODE_CHANGED, _capture)
+    mm = ModeManager(conn, clock, bus, paper_only=paper_only)
+
+    await mm.enforce_paper_only()
+
+    assert mm.mode() == expected
+    if expected == persisted:
+        assert events == []
+    else:
+        assert mm.routing() is None
+        assert [(e.old_mode, e.new_mode, e.routing, e.actor) for e in events] == [
+            (Mode.AUTO, Mode.RECOMMEND, None, Actor.SYSTEM)
+        ]
+
+
+@pytest.mark.asyncio
 async def test_non_owner_cannot_transition(conn, clock):
     mm = ModeManager(conn, clock)
     with pytest.raises(PermissionError):
@@ -53,7 +94,7 @@ async def test_non_owner_cannot_transition(conn, clock):
 
 @pytest.mark.asyncio
 async def test_force_downgrade_only_lowers(conn, clock):
-    mm = ModeManager(conn, clock)
+    mm = ModeManager(conn, clock, paper_only=False)
     await mm.request_transition(Mode.AUTO, Actor.OWNER, OwnerConfirmation(actor=Actor.OWNER, confirmed=True))
     await mm.force_downgrade(Mode.RECOMMEND, "daily_loss_hard")
     assert mm.mode() == Mode.RECOMMEND
@@ -64,7 +105,7 @@ async def test_force_downgrade_only_lowers(conn, clock):
 
 @pytest.mark.asyncio
 async def test_opening_orders_predicate(conn, clock):
-    mm = ModeManager(conn, clock)
+    mm = ModeManager(conn, clock, paper_only=False)
     # OFF: never.
     assert mm.opening_orders_allowed(in_window=True) is False
     await mm.request_transition(Mode.AUTO, Actor.OWNER, OwnerConfirmation(actor=Actor.OWNER, confirmed=True))

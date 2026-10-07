@@ -253,6 +253,37 @@ def test_decisions_left_join_verdict_and_verdicts_route(conn, clock) -> None:
     assert verdicts[0]["payload"]["reasons"] == ["per_trade_risk_shrink"]
 
 
+def test_decisions_and_verdicts_keep_one_row_per_proposal_with_the_paper_verdict_beside_it(conn, clock) -> None:
+    """Plan Q3.2: the real gate's verdict stays where it was; the paper gate's is a separate field."""
+    _insert_proposal(conn, "prop-1", created_at="2026-06-17T09:20:00+05:30")
+    _insert_verdict(conn, "verd-1", "prop-1", verdict="reject", payload={"reasons": ["capital_cap"]})
+    _insert_proposal(conn, "prop-2", created_at="2026-06-17T09:25:00+05:30")
+    _insert_verdict(conn, "verd-2", "prop-2", verdict="approve", evaluated_at="2026-06-17T09:25:05+05:30")
+    client = _client(conn=conn, clock=clock)
+
+    decisions = client.get("/decisions", headers=AUTH).json()["decisions"]
+    verdicts = client.get("/verdicts", headers=AUTH).json()["verdicts"]
+    assert all(r["is_paper"] is False and r["paper_verdict"] is None for r in decisions + verdicts)
+
+    _insert_verdict(conn, "pv-1", "prop-1", verdict="approve", payload={"reasons": ["paper ok"]},
+                    evaluated_at="2026-06-17T09:20:06+05:30")
+    conn.execute("UPDATE verdicts SET is_paper=1 WHERE verdict_id='pv-1'")
+    paper_decisions = client.get("/decisions", headers=AUTH).json()["decisions"]
+    paper_verdicts = client.get("/verdicts", headers=AUTH).json()["verdicts"]
+
+    assert [d["proposal_id"] for d in paper_decisions] == ["prop-2", "prop-1"]
+    assert [v["verdict_id"] for v in paper_verdicts] == ["verd-2", "verd-1"]
+    real_part = {k: v for k, v in paper_decisions[1].items() if k != "paper_verdict"}
+    assert real_part == {k: v for k, v in decisions[1].items() if k != "paper_verdict"}
+    assert paper_decisions[1]["paper_verdict"] == {
+        "verdict_id": "pv-1", "verdict": "approve", "reasons": ["paper ok"],
+        "evaluated_at": "2026-06-17T09:20:06+05:30", "is_paper": True,
+    }
+    assert paper_verdicts[1]["verdict"] == "reject"
+    assert paper_verdicts[1]["paper_verdict"]["payload"] == {"reasons": ["paper ok"]}
+    assert paper_decisions[0] == decisions[0] and paper_verdicts[0] == verdicts[0]
+
+
 def test_decisions_subject_resolves_position_and_order_ids_to_symbols(conn, clock) -> None:
     """Owner-reported 2026-09-02: the decision log printed exit proposals as their position ULID. The
     proposal payload only carries the id (contracts: exit/modify-* → position_id, cancel → order_id), so

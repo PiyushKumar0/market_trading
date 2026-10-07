@@ -57,6 +57,7 @@ from engine.core.config import Settings
 from engine.core.db import transaction
 from engine.core.enums import Actor, RiskState
 from engine.core.log import get_logger
+from engine.core.scope import scope_sql
 from engine.core.types import TradeWindow
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
@@ -779,7 +780,7 @@ class SessionLifecycle:
     # ----------------------------------------------------------------- helpers
     def _open_positions_count(self) -> int:
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM positions WHERE state='OPEN' AND origin IN ('platform','recommended')"
+            f"SELECT COUNT(*) AS n FROM positions WHERE state='OPEN' AND {scope_sql('real', has_origin=True)}"
         ).fetchone()
         return int(row["n"]) if row else 0
 

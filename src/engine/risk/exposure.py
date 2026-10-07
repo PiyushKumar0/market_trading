@@ -33,14 +33,14 @@ from engine.core.clock import Clock
 from engine.core.db import transaction
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.log import get_logger
+from engine.core.scope import HELD_STATES_SQL, Scope, scope_sql
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.risk.exposure")
 
-#: Positions the platform is accountable for (O5). Inlined into SQL rather than parameterised: a
-#: fixed CHECK-constrained enum, no injection surface, and it keeps the predicate readable.
-_PLATFORM_ORIGINS = "origin IN ('platform','recommended')"
+#: The paper book counts only its current epoch (Q3.2); no epoch yet ⇒ every paper row.
+_PAPER_EPOCH = "COALESCE((SELECT epoch_started_at FROM paper_state WHERE id = 1), '')"
 
 #: Rolling window for `weekly_drawdown` — TRADING sessions, not calendar days (§7.1).
 WEEKLY_DRAWDOWN_SESSIONS = 5
@@ -136,7 +136,13 @@ class FloorBreach(BaseModel):
 
 
 class ExposureTracker:
-    """Platform equity + day-scoped risk counters, rebuilt from SQLite on every call (§7.1/§2.6)."""
+    """Platform equity + day-scoped risk counters, rebuilt from SQLite on every call (§7.1/§2.6).
+
+    ``scope="paper"`` reads the paper book instead (plan Q3.2): paper rows of the current epoch, a
+    ``PENDING_EXIT`` position still held, ``paper_equity_snapshots``, and ``void`` closes skipped by
+    the loss streak. It never applies a halt — ``apply_*`` raise, because paper must never write
+    the real mode, kill or cause state (§1.5).
+    """
 
     def __init__(
         self,
@@ -144,19 +150,34 @@ class ExposureTracker:
         clock: Clock,
         capital_base: Decimal,
         mark_price: MarkPrice | None = None,
+        *,
+        scope: Scope = "real",
     ) -> None:
         self._conn = conn
         self._clock = clock
         self._capital_base = capital_base
         self._mark_price = mark_price
         self._day_baseline: tuple[date, Decimal] | None = None
+        self.scope = scope
+        paper = scope == "paper"
+        self._positions = scope_sql(scope, has_origin=True) + (
+            f" AND opened_at >= {_PAPER_EPOCH}" if paper else "")
+        self._open = HELD_STATES_SQL[scope]
+        self._ledger = scope_sql(scope) + (f" AND closed_at >= {_PAPER_EPOCH}" if paper else "")
+        self._not_closes = "('no_action','void')" if paper else "('no_action')"
+        self._snapshots = "paper_equity_snapshots" if paper else "equity_snapshots"
+        self._snapshot_epoch = f" AND at >= {_PAPER_EPOCH}" if paper else ""
+
+    def _real_only(self) -> None:
+        if self.scope != "real":
+            raise RuntimeError("the paper ExposureTracker never applies a halt (plan §1.5)")
 
     # ----------------------------------------------------------------- platform equity (§7.1)
     def realized_net(self) -> Decimal:
         """Σ platform-attributed realized P&L net of costs. ``positions.realized_pnl`` is gross (the
         table carries a separate ``costs`` column, and §7.1 subtracts it explicitly)."""
         rows = self._conn.execute(
-            f"SELECT realized_pnl, costs FROM positions WHERE {_PLATFORM_ORIGINS}"
+            f"SELECT realized_pnl, costs FROM positions WHERE {self._positions}"
         ).fetchall()
         total = Decimal(0)
         for row in rows:
@@ -176,7 +197,7 @@ class ExposureTracker:
         """Mark-to-market of open platform positions: qty × (mark − avg_entry), signed by side."""
         rows = self._conn.execute(
             f"SELECT symbol, side, qty, avg_entry FROM positions "
-            f"WHERE state='OPEN' AND {_PLATFORM_ORIGINS}"
+            f"WHERE {self._open} AND {self._positions}"
         ).fetchall()
         total = Decimal(0)
         for row in rows:
@@ -209,7 +230,8 @@ class ExposureTracker:
         if self._day_baseline is not None and self._day_baseline[0] == d:
             return self._day_baseline[1]
         row = self._conn.execute(
-            "SELECT equity FROM equity_snapshots WHERE substr(at, 1, 10) < ? ORDER BY at DESC LIMIT 1",
+            f"SELECT equity FROM {self._snapshots} WHERE substr(at, 1, 10) < ?{self._snapshot_epoch} "
+            "ORDER BY at DESC LIMIT 1",
             (d.isoformat(),),
         ).fetchone()
         baseline = _dec(row["equity"]) if row is not None else self.equity() - self.realized_net_closed_on(d)
@@ -224,7 +246,7 @@ class ExposureTracker:
         """Net realized P&L of platform/recommended positions CLOSED on ``d`` (gross − costs)."""
         rows = self._conn.execute(
             "SELECT realized_pnl, costs FROM positions "
-            "WHERE origin IN ('platform','recommended') AND state = 'CLOSED' "
+            f"WHERE {self._positions} AND state = 'CLOSED' "
             "AND substr(closed_at, 1, 10) = ?",
             (d.isoformat(),),
         ).fetchall()
@@ -243,15 +265,16 @@ class ExposureTracker:
     def consecutive_losses(self, d: date | None = None) -> int:
         """Losing closes at the tail of today's ledger — count back from the latest close until a
         non-loss (§7.1 `consecutive_losses`). ``no_action`` rows are expired recommendations, not
-        closes (§3.6), so they are excluded rather than allowed to break the run.
+        closes (§3.6), so they are excluded rather than allowed to break the run; so are paper
+        ``void`` closes (Q4.4).
 
         Offline closes are folded in for free: reconcile writes their ledger rows before this runs.
         """
         d = d or self._clock.today()
         rows = self._conn.execute(
             "SELECT outcome_label FROM learning_ledger "
-            "WHERE substr(closed_at, 1, 10) = ? AND outcome_label IS NOT NULL "
-            "AND outcome_label != 'no_action' ORDER BY closed_at DESC",
+            f"WHERE substr(closed_at, 1, 10) = ? AND {self._ledger} AND outcome_label IS NOT NULL "
+            f"AND outcome_label NOT IN {self._not_closes} ORDER BY closed_at DESC",
             (d.isoformat(),),
         ).fetchall()
         count = 0
@@ -267,7 +290,7 @@ class ExposureTracker:
         d = d or self._clock.today()
         row = self._conn.execute(
             f"SELECT COUNT(*) AS n FROM positions "
-            f"WHERE substr(opened_at, 1, 10) = ? AND {_PLATFORM_ORIGINS}",
+            f"WHERE substr(opened_at, 1, 10) = ? AND {self._positions}",
             (d.isoformat(),),
         ).fetchone()
         return int(row["n"]) if row else 0
@@ -276,7 +299,7 @@ class ExposureTracker:
     def _open_rows(self) -> list[sqlite3.Row]:
         return self._conn.execute(
             f"SELECT symbol, side, product, qty, avg_entry FROM positions "
-            f"WHERE state='OPEN' AND {_PLATFORM_ORIGINS}"
+            f"WHERE {self._open} AND {self._positions}"
         ).fetchall()
 
     def open_position_counts(self) -> OpenCounts:
@@ -333,8 +356,8 @@ class ExposureTracker:
         )
         with transaction(self._conn):
             self._conn.execute(
-                """
-                INSERT OR REPLACE INTO equity_snapshots
+                f"""
+                INSERT OR REPLACE INTO {self._snapshots}
                     (at, equity, realized_pnl, open_mtm, day_mtm, positions_open)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
@@ -360,15 +383,16 @@ class ExposureTracker:
         """
         d = d or self._clock.today()
         sessions = self._conn.execute(
-            "SELECT DISTINCT substr(at, 1, 10) AS sd FROM equity_snapshots "
-            "WHERE substr(at, 1, 10) <= ? ORDER BY sd DESC LIMIT ?",
+            f"SELECT DISTINCT substr(at, 1, 10) AS sd FROM {self._snapshots} "
+            f"WHERE substr(at, 1, 10) <= ?{self._snapshot_epoch} ORDER BY sd DESC LIMIT ?",
             (d.isoformat(), WEEKLY_DRAWDOWN_SESSIONS),
         ).fetchall()
         if not sessions:
             return None
         oldest = sessions[-1]["sd"]
         rows = self._conn.execute(
-            "SELECT equity FROM equity_snapshots WHERE substr(at, 1, 10) BETWEEN ? AND ?",
+            f"SELECT equity FROM {self._snapshots} "
+            f"WHERE substr(at, 1, 10) BETWEEN ? AND ?{self._snapshot_epoch}",
             (oldest, d.isoformat()),
         ).fetchall()
         return max((_dec(r["equity"]) for r in rows), default=None)
@@ -434,6 +458,7 @@ class ExposureTracker:
         """Apply the §7.1 daily-loss actions through the cause ledger: soft ⇒ FROZEN (no new entries
         rest of day); hard ⇒ CLOSE_ONLY + AUTO→RECOMMEND + flatten-MIS (Phase-3 OMS; alert-only until
         then). Day-scoped: :meth:`RiskStateLatch.clear_stale_daily` re-arms them next session."""
+        self._real_only()
         if "daily_loss_hard" in rungs:
             reason = "daily_loss_hard: day MTM at/below the -7% hard line (§7.1)"
             await latch.set_cause("daily_loss_hard", RiskState.CLOSE_ONLY, reason, Actor.RISK_GATE)
@@ -469,6 +494,7 @@ class ExposureTracker:
         owner ``clear_cause`` on an unrelated cause can then never relax a floor-set CLOSE_ONLY.
         Floor causes clear only via explicit owner re-arm (they never auto-clear here).
         """
+        self._real_only()
         for breach in sorted(breaches, key=lambda b: _ACTION_RANK[b.action], reverse=True):
             reason = f"{breach.rung}: equity {breach.equity} vs {breach.threshold}"
             if breach.action == "kill_forced_off":

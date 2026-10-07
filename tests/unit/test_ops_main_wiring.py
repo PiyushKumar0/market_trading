@@ -3361,7 +3361,7 @@ def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set() -> Non
     assert "warmup_gate.set_symbols(watchlist_symbols())" in src
     assert "symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL" in src   # WarmupGate at boot
     # …while the FEED does carry them, after watchlist + held, on every sweep.
-    assert "watchlist=watchlist_symbols(), held=held_symbols(), batch_state=_batch_ticks," in src
+    assert "watchlist=watchlist_symbols(), held=_feed_symbols(conn), batch_state=_batch_ticks," in src
     assert "today=clock.today(), token_for_symbol=instruments.token_for_symbol," in src
     assert src.count("await ticker.update_subscriptions(ticker_tokens())") == 2  # job_universe + sweep
 

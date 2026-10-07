@@ -170,11 +170,11 @@ def write_proposal(conn, *, created_at, proposal_id: str | None = None, action: 
     return pid
 
 
-def write_verdict(conn, proposal_id: str, *, evaluated_at) -> None:
+def write_verdict(conn, proposal_id: str, *, evaluated_at, is_paper: int = 0) -> None:
     conn.execute(
-        "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (str(ULID()), proposal_id, "approve", "{}", evaluated_at.isoformat()),
+        "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at, is_paper) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (str(ULID()), proposal_id, "approve", "{}", evaluated_at.isoformat(), is_paper),
     )
 
 
@@ -469,6 +469,19 @@ async def test_a_proposal_that_reached_a_verdict_is_never_an_orphan(
     events = log_events(caplog, "proposal_orphaned")
     assert [e.proposal_id for e in events] == [stranded]
     assert len(orphan_alerts(parts)) == 1
+
+
+async def test_a_paper_verdict_never_completes_a_real_proposal(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    """Plan Q3.2: the sweep reads REAL verdicts only, so a paper verdict cannot hide a real orphan."""
+    pipeline, parts = build_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+    long_ago = NOW - timedelta(hours=3)
+    stranded = write_proposal(conn, created_at=long_ago)
+    write_verdict(conn, stranded, evaluated_at=long_ago, is_paper=1)
+
+    assert await pipeline.sweep_orphaned_proposals() == 1
+    assert [a.data["proposal_id"] for a in orphan_alerts(parts)] == [stranded]
 
 
 async def test_the_drain_tick_sweeps_on_a_five_minute_throttle(

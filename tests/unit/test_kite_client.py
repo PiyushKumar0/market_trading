@@ -85,7 +85,8 @@ async def test_token_exception_fires_hook_once_and_reraises(clock, rate_limiter)
     async def hook() -> None:
         fired.append(1)
 
-    client = KiteClient(_BoomKC(TokenException("bad token")), rate_limiter, clock, on_token_rejected=hook)
+    client = KiteClient(_BoomKC(TokenException("bad token")), rate_limiter, clock, on_token_rejected=hook,
+                        orders_enabled=True)
 
     with pytest.raises(TokenException):
         await client.historical(408065, _FRM, _TO, "minute")

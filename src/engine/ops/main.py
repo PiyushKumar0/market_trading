@@ -55,6 +55,7 @@ from engine.core.log import configure_logging, get_logger
 from engine.core.migrations import apply_migrations
 from engine.core.protected_store import IntegrityError, ProtectedStore
 from engine.core.recommendations import pending_entry_symbols
+from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.core.secrets import DASHBOARD_TOKEN, KITE_API_KEY, TELEGRAM_BOT_TOKEN, Secrets
 from engine.core.types import TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
@@ -167,7 +168,7 @@ from engine.ops.weekly_summary import WeeklySummaryJob
 from engine.ops.why import make_why_fn
 from engine.risk.causes import RiskStateLatch, feed_health_to_latch
 from engine.risk.exposure import ExposureTracker
-from engine.risk.gate import GateContextBuilder, RiskGate
+from engine.risk.gate import TERMINAL_ORDER_STATES_SQL, GateContextBuilder, RiskGate
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
@@ -448,6 +449,30 @@ def build_job_registry(
     return registry
 
 
+def make_order_guard(
+    mode: ModeManager, kill: KillSwitch, calendar: NSECalendar, clock: Clock
+) -> Callable[[str], None]:
+    """Order-surface predicate (a) (§3.5.3, A7/B7): a position-OPENING broker call requires
+    AUTO ∧ NORMAL ∧ inside the owner trade window; risk-reducing intent is NEVER gated (R3)."""
+
+    def order_guard(intent: str) -> None:
+        if intent == "risk_reducing":
+            return
+        kill.assert_orders_allowed()
+        try:
+            start, end = calendar.trade_window(clock.today())
+            in_window = start <= clock.now() <= end
+        except ValueError:                          # not a trading day ⇒ never in-window
+            in_window = False
+        if not mode.opening_orders_allowed(in_window):
+            raise OrderSurfaceViolation(
+                f"opening order blocked: mode={mode.mode().value} "
+                f"risk_state={mode.risk_state().value} in_window={in_window} (B7/§3.5.3)"
+            )
+
+    return order_guard
+
+
 async def run() -> int:
     settings = load_settings()
     configure_logging(level="INFO", logs_dir=settings.logs_dir())
@@ -511,7 +536,7 @@ async def run() -> int:
     )
     bus = EventBus()
     protected_store = ProtectedStore(config_dir(), conn, clock)
-    mode = ModeManager(conn, clock, bus, calendar)
+    mode = ModeManager(conn, clock, bus, calendar, paper_only=settings.feature_flags.paper_only)
     latch = RiskStateLatch(conn, clock, mode)
     limits_engine = LimitsEngine(protected_store)
     governor = BudgetGovernor.from_config(conn, clock, calendar, bus)
@@ -608,6 +633,8 @@ async def run() -> int:
         session=session, conn=conn, bus=bus,
     )
     telegram_holder["bot"] = telegram
+    # After _build_telegram subscribed to the bus, so the MODE_CHANGE alert is journalled.
+    await mode.enforce_paper_only()
 
     # --- Tier-1 harness (§3.2.6): the ONLY SDK call site. Consumed by the D11 sdk-smoke check and
     #     (second wiring pass) the recommendation pipeline / planner / news-scoring jobs. Defs load
@@ -671,23 +698,6 @@ async def run() -> int:
     )
 
     # Broker REST facade — only when credentials exist (fresh install stays runnable + FROZEN, §2.6).
-    def order_guard(intent: str) -> None:
-        """Order-surface predicate (a) (§3.5.3, A7/B7): a position-OPENING broker call requires
-        AUTO ∧ NORMAL ∧ inside the owner trade window; risk-reducing intent is NEVER gated (R3)."""
-        if intent == "risk_reducing":
-            return
-        kill.assert_orders_allowed()
-        try:
-            start, end = calendar.trade_window(clock.today())
-            in_window = start <= clock.now() <= end
-        except ValueError:                          # not a trading day ⇒ never in-window
-            in_window = False
-        if not mode.opening_orders_allowed(in_window):
-            raise OrderSurfaceViolation(
-                f"opening order blocked: mode={mode.mode().value} "
-                f"risk_state={mode.risk_state().value} in_window={in_window} (B7/§3.5.3)"
-            )
-
     kite: KiteClient | None = None
     if secrets.has(KITE_API_KEY):
         kc = session.kite_connect()
@@ -696,7 +706,8 @@ async def run() -> int:
             # broker call fires SessionManager.on_token_rejected → the invalidation hook (freeze +
             # alert), so a mid-day token death stops entries instead of failing silently (2026-07-21).
             kite = KiteClient(kc, RateLimiter(clock), clock,
-                              on_token_rejected=session.on_token_rejected, order_guard=order_guard)
+                              on_token_rejected=session.on_token_rejected,
+                              order_guard=make_order_guard(mode, kill, calendar, clock))
     else:
         _log.warning("kite_client_absent", hint="seed kite_api_key/secret; entries stay FROZEN until login")
 
@@ -1057,14 +1068,7 @@ async def run() -> int:
         return watchlist_symbols()
 
     def held_symbols() -> list[str]:
-        """Open platform/recommended position symbols — MUST stay in the feed even after the universe
-        drops them (2026-07-28 review: an unsubscribed holding marks at avg_entry, so its loss is
-        invisible to the §7.1 floor ladder and day-MTM rungs)."""
-        rows = conn.execute(
-            "SELECT DISTINCT symbol FROM positions WHERE state='OPEN' "
-            "AND origin IN ('platform','recommended')"
-        ).fetchall()
-        return [str(r["symbol"]) for r in rows]
+        return _held_symbols(conn)
 
     # --- batch-leg tick subscriptions (2026-09-11 forensics). The §7.1 gate's ONLY price source is
     #     the live tick cache (`mark_price` above): brk20/hi52/ins/cat originate over the whole
@@ -1079,13 +1083,13 @@ async def run() -> int:
     _batch_ticks: dict[str, Any] = {"day": None, "symbols": set()}
 
     def ticker_tokens() -> list[int]:
-        """Ticker subscription set: watchlist + HELD symbols + today's batch-admitted symbols +
+        """Ticker subscription set: watchlist + FEED symbols + today's batch-admitted symbols +
         NIFTY 50 + India VIX → tokens (A3). The composition — order, dedupe AND the midnight roll of
         the batch set — lives in :func:`_ticker_tokens` so a test exercises the production function
         instead of re-assembling the same list beside it (2026-09-11 review: a hand-rolled copy still
         passes after the real one drops the day roll and the subscription grows every session)."""
         return _ticker_tokens(
-            watchlist=watchlist_symbols(), held=held_symbols(), batch_state=_batch_ticks,
+            watchlist=watchlist_symbols(), held=_feed_symbols(conn), batch_state=_batch_ticks,
             today=clock.today(), token_for_symbol=instruments.token_for_symbol,
         )
 
@@ -3434,6 +3438,34 @@ _SHUTDOWN_LIFT_WAIT_S = 15.0
 #: allows and end in a kill; the next boot then replays the store's WAL.
 _SHUTDOWN_BUS_DRAIN_S = 5.0
 
+
+
+def _held_symbols(conn: sqlite3.Connection) -> list[str]:
+    """Open REAL platform/recommended position symbols: the retest skip and the sweep's held flag.
+    Paper never counts here (plan §1.4); it reaches the ticker through :func:`_feed_symbols`."""
+    rows = conn.execute(
+        "SELECT DISTINCT symbol FROM positions WHERE state='OPEN' "
+        f"AND {scope_sql('real', has_origin=True)}"
+    ).fetchall()
+    return [str(r["symbol"]) for r in rows]
+
+
+def _feed_symbols(conn: sqlite3.Connection) -> list[str]:
+    """The ticker's held leg, and nothing else's: real held symbols, then every paper position and
+    every working order or ACTIVE GTT. They MUST stay in the feed after the universe drops them —
+    an unsubscribed holding marks at avg_entry, so its loss is invisible to the §7.1 floor ladder and
+    day-MTM rungs (2026-07-28 review), and a paper order or GTT only fills on ticks."""
+    rows = conn.execute(
+        "SELECT symbol FROM positions "
+        f"WHERE {HELD_STATES_SQL['paper']} AND {scope_sql('paper', has_origin=True)} "
+        "UNION SELECT COALESCE(p.symbol, json_extract(pr.payload, '$.tradingsymbol')) FROM orders o "
+        "LEFT JOIN positions p ON p.position_id = o.position_id "
+        "LEFT JOIN proposals pr ON pr.proposal_id = o.proposal_id "
+        f"WHERE o.state NOT IN {TERMINAL_ORDER_STATES_SQL} "
+        "UNION SELECT symbol FROM gtts WHERE UPPER(state) = 'ACTIVE' "
+        "ORDER BY 1"
+    ).fetchall()
+    return [*_held_symbols(conn), *(str(r[0]) for r in rows if r[0])]
 
 
 def _subscription_tokens(symbols: Iterable[str], token_for_symbol: Callable[[str], int | None]) -> list[int]:

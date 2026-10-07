@@ -44,8 +44,16 @@ _MODE_RANK = {Mode.OFF: 0, Mode.RECOMMEND: 1, Mode.AUTO: 2}
 SquareOffCallback = Callable[[], Awaitable[None]]
 
 
+class ModeRefused(PermissionError):
+    """A transition to AUTO or live routing while ``feature_flags.paper_only`` (D8)."""
+
+
 class ModeManager:
-    """Sticky mode / routing / risk-state, plus the owner-set trade window (§3.2.7)."""
+    """Sticky mode / routing / risk-state, plus the owner-set trade window (§3.2.7).
+
+    ``paper_only`` defaults to True so a construction site that forgets it refuses AUTO; production
+    passes ``feature_flags.paper_only``.
+    """
 
     def __init__(
         self,
@@ -53,11 +61,14 @@ class ModeManager:
         clock: Clock,
         bus: EventBus | None = None,
         calendar: NSECalendar | None = None,
+        *,
+        paper_only: bool = True,
     ) -> None:
         self._conn = conn
         self._clock = clock
         self._bus = bus
         self._calendar = calendar
+        self._paper_only = paper_only
 
     # ----------------------------------------------------------------- reads (sticky)
     def _row(self) -> sqlite3.Row:
@@ -91,6 +102,11 @@ class ModeManager:
         return self.mode() == Mode.AUTO and self.risk_state() == RiskState.NORMAL and in_window
 
     # ----------------------------------------------------------------- transitions
+    def check_allowed(self, to: Mode, routing: Routing | None = None) -> None:
+        """Raise :class:`ModeRefused` for AUTO or ``Routing.LIVE`` while ``paper_only`` (D8)."""
+        if self._paper_only and (to == Mode.AUTO or routing == Routing.LIVE):
+            raise ModeRefused("AUTO and live routing are refused while feature_flags.paper_only is set (D8)")
+
     async def request_transition(
         self,
         to: Mode,
@@ -101,6 +117,7 @@ class ModeManager:
         """Owner-initiated mode change. →AUTO requires a two-step owner confirmation (R10)."""
         if who != Actor.OWNER:
             raise PermissionError("mode transitions are owner-only (R10)")
+        self.check_allowed(to, routing)
         if to == Mode.AUTO:
             if confirmation is None or not confirmation.confirmed or confirmation.actor != Actor.OWNER:
                 raise PermissionError("→AUTO requires an authenticated OWNER two-step confirmation (R10)")
@@ -116,6 +133,11 @@ class ModeManager:
             _log.info("force_downgrade_noop", current=current.value, requested=to.value, reason=reason)
             return
         await self._apply_mode(to, Actor.RISK_GATE, reason=reason, routing=None)
+
+    async def enforce_paper_only(self) -> None:
+        """Boot: a persisted AUTO while ``paper_only`` drops to RECOMMEND, which nulls routing."""
+        if self._paper_only and self.mode() == Mode.AUTO:
+            await self._apply_mode(Mode.RECOMMEND, Actor.SYSTEM, reason="paper_only", routing=None)
 
     async def _apply_mode(self, to: Mode, actor: Actor, *, reason: str, routing: Routing | None) -> bool:
         old = self.mode()

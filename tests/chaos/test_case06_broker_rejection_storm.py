@@ -9,8 +9,8 @@ Plan row (IMPLEMENTATION_PLAN.md §9.4, case 6), "Must hold", verbatim:
 Composition (as ``engine.ops.main`` wires it, main.py:601-626): the REAL ``RateLimiter(clock)`` with
 its shipped defaults (1 order call/s, burst 2, 70 entry calls/day), the REAL ``KiteClient`` facade,
 the REAL ``ModeManager`` / ``KillSwitch`` / ``RiskStateLatch`` (incl. the main.py:524-530 kill→latch
-bridge) and the composition root's ``order_guard`` closure reproduced verbatim (it is a closure
-inside ``build_engine`` and cannot be imported). The ONLY fake is the pykiteconnect ``KiteConnect``
+bridge) and the composition root's own ``make_order_guard``. The client is built with
+``orders_enabled=True``, which production never passes (D8). The ONLY fake is the pykiteconnect ``KiteConnect``
 object — the broker HTTP boundary — which answers from a script (429s, rejections, order ids).
 Time is a ticking controllable clock; ``asyncio.sleep`` advances it (the ``test_rate_limiter``
 idiom), so pacing is asserted on simulated time without real waits.
@@ -41,14 +41,13 @@ unbuilt Phase-3 component except the two skipped clauses.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
 from kiteconnect.exceptions import NetworkException
 
-from engine.broker.kite_client import KiteClient, OrderSurfaceViolation
+from engine.broker.kite_client import KiteClient
 from engine.broker.rate_limiter import EntryBudgetExhausted, RateLimiter
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
@@ -56,6 +55,7 @@ from engine.core.config import config_dir
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.types import OwnerConfirmation
+from engine.ops.main import make_order_guard
 from engine.risk.causes import RiskStateLatch
 from engine.risk.events import TOPIC_KILL_STATE
 from engine.risk.kill import KillSwitch, KillSwitchEngaged
@@ -127,34 +127,13 @@ class _ScriptedKiteConnect:
 
 
 # --------------------------------------------------------------------------- composition
-def _order_guard(mode: ModeManager, kill: KillSwitch, calendar: NSECalendar, clock: Clock) -> Callable[[str], None]:
-    """``engine.ops.main.build_engine``'s ``order_guard`` (main.py:601-616), reproduced verbatim."""
-
-    def order_guard(intent: str) -> None:
-        if intent == "risk_reducing":
-            return
-        kill.assert_orders_allowed()
-        try:
-            start, end = calendar.trade_window(clock.today())
-            in_window = start <= clock.now() <= end
-        except ValueError:
-            in_window = False
-        if not mode.opening_orders_allowed(in_window):
-            raise OrderSurfaceViolation(
-                f"opening order blocked: mode={mode.mode().value} "
-                f"risk_state={mode.risk_state().value} in_window={in_window} (B7/§3.5.3)"
-            )
-
-    return order_guard
-
-
 class _World:
     def __init__(self, conn, ticker: _Ticker, script: list[Any] | None = None) -> None:
         self.ticker = ticker
         self.clock = Clock(time_source=ticker)
         self.bus = EventBus()
         self.calendar = NSECalendar(config_dir() / "calendar", self.clock, sqlite_conn=conn)
-        self.mode = ModeManager(conn, self.clock, self.bus, self.calendar)
+        self.mode = ModeManager(conn, self.clock, self.bus, self.calendar, paper_only=False)
         self.latch = RiskStateLatch(conn, self.clock, self.mode)
         self.kill = KillSwitch(conn, self.clock, self.bus)
         # main.py:524-530 — the kill ⇄ cause-latch bridge, so risk_state reads KILLED after a kill.
@@ -170,7 +149,8 @@ class _World:
         self.kc = _ScriptedKiteConnect(ticker, script)
         self.client = KiteClient(
             self.kc, self.limiter, self.clock,
-            order_guard=_order_guard(self.mode, self.kill, self.calendar, self.clock),
+            order_guard=make_order_guard(self.mode, self.kill, self.calendar, self.clock),
+            orders_enabled=True,
         )
 
     async def go_auto(self) -> None:
