@@ -169,6 +169,18 @@ async def test_paper_rows_change_no_real_output(conn, clock) -> None:
     assert before["held"] == {SYMBOL} and before["lifecycle"] == 1
 
 
+async def test_working_paper_entries_commit_paper_capital_only(conn, clock) -> None:
+    seed_shared(conn)
+    seed_paper(conn)
+    tracker = ExposureTracker(conn, clock, CAPITAL, mark_price=MARKS.get, scope="paper")
+    base = (await _builder(conn, clock, tracker, "paper").build(SYMBOL, "BUY", "swing", TODAY)).deployed_capital
+    conn.execute("UPDATE orders SET price='1200' WHERE order_id IN ('o-part', 'o-pend', 'o-dead')")
+    ctx = await _builder(conn, clock, tracker, "paper").build(SYMBOL, "BUY", "swing", TODAY)
+    assert ctx.deployed_capital - base == Decimal(5 * 1200 + 10 * 1200)    # remainders; CANCELLED excluded
+    real = ExposureTracker(conn, clock, CAPITAL, mark_price=MARKS.get, scope="real")
+    assert (await _builder(conn, clock, real).build(SYMBOL, "BUY", "swing", TODAY)).deployed_capital == 0
+
+
 async def test_real_rows_change_no_paper_output(conn, clock) -> None:
     seed_shared(conn)
     seed_paper(conn)

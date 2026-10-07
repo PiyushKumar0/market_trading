@@ -18,6 +18,17 @@
   - the EW benchmark lost the muhurat leg.
 - **Validation:** full suite on 3977dfc: 3545 passed, 22 skipped, chaos included. Dashboard checked on the fixture server (three changed panels; console clean apart from the fixture's `/ws/live` 404).
 - **M5 so far:** C1–C3 pre-registered in §6.1 (2208daa, clarified d21a0ea) before the study scripts existed (d09d543); nothing has run on real data yet.
+- **M3 (`wip/m3` = c7609d0):** Q3.1 live-impossibility pins, Q3.2 scope isolation, Q3.3 migration 0016.
+  - `KiteClient(orders_enabled=False)` refuses every order and GTT call, before the guard. `ModeManager(paper_only=True)` refuses AUTO and live routing. The AST and import-closure pins are hardened after review.
+  - Unique-index precheck on the live `state.db`, read-only at 03:50: 0 orders, 0 gtts.
+  - Focused 3-lens review: 0 high or medium findings. The real-low ones are fixed.
+- **M4 (`wip/m4` tip):** Q4.0–Q4.12 and Q4.14.
+  - Built: OrderManager, PositionBook, ProtectionManager, ExitManager, session prep and Reconciler, paper equity and halts, the pipeline paper branch, every component composed under `paper.subsystem_enabled` (ships **false**), notifications, surfaces, the end-to-end replay (Kite double fails on any order call), and the RUNBOOK section.
+  - A 6-lens whole-branch review found 24 real findings, 0 high. All are fixed: restart mark seeding, resting entries cancelled when blocked, working paper entries counted in the D10 capital cap, cost double-count, alert dedupe, the scorecard label regression and others.
+  - Manager decisions:
+    - A late corporate-action void is priced at the pre-ex mark.
+    - Broker-filled paper closes charge fees only, recorded at plan Q4.4.
+- **Not done by design:** Q4.13 go-live needs owner sign-off after reviewing M3/M4. M3/M4 are not merged into the live tree.
 - **Ops notes:**
   - Host in Modern Standby about 03:5x–06:26; the `%TEMP%` session scratchpad was wiped during it (nothing lost; state moved outside `%TEMP%`).
   - 06:32 the engine was stop/started from outside this session (SIGINT, then a clean boot at 06:34 on the unchanged live tree).

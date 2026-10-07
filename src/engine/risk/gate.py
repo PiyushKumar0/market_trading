@@ -1497,7 +1497,8 @@ class GateContextBuilder:
             sector_of=sector_of,
             open_sector_counts=sector_counts,
             max_corr_with_open=await self._max_corr(symbol, open_symbols | pending, d),
-            deployed_capital=self._exposure.deployed_capital(),
+            deployed_capital=self._exposure.deployed_capital() + (
+                Decimal(0) if real else self._paper_committed_capital()),
             ltp=self._ltp_fn(symbol) if self._ltp_fn else None,
             tick_age_s=self._tick_age_fn(symbol) if self._tick_age_fn else None,
             index_tick_age_s=self._tick_age_fn(self._index_symbol) if self._tick_age_fn else None,
@@ -1559,7 +1560,8 @@ class GateContextBuilder:
 
     def _paper_entry_orders(self, where: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         return self._rows(
-            "SELECT json_extract(p.payload, '$.tradingsymbol') AS symbol FROM orders o "
+            "SELECT json_extract(p.payload, '$.tradingsymbol') AS symbol, o.qty, o.filled_qty, o.price "
+            "FROM orders o "
             "LEFT JOIN proposals p ON p.proposal_id = o.proposal_id "
             f"WHERE o.role = 'entry' AND {scope_sql('paper', 'o')} AND {where}",
             params,
@@ -1570,6 +1572,16 @@ class GateContextBuilder:
         rows = self._paper_entry_orders(
             f"o.state NOT IN {TERMINAL_ORDER_STATES_SQL} AND COALESCE(o.filled_qty, 0) = 0")
         return frozenset(str(r["symbol"]) for r in rows if r["symbol"])
+
+    def _paper_committed_capital(self) -> Decimal:
+        """D10: the unfilled remainder of working paper entry orders commits capital (LIMIT at its
+        price, MARKET at the live mark); the filled part is already a position."""
+        total = Decimal(0)
+        for r in self._paper_entry_orders(f"o.state NOT IN {TERMINAL_ORDER_STATES_SQL}"):
+            price = r["price"] or (self._ltp_fn(r["symbol"]) if self._ltp_fn and r["symbol"] else None)
+            if price:
+                total += Decimal(int(r["qty"] or 0) - int(r["filled_qty"] or 0)) * _dec(price)
+        return total
 
     def _paper_entries_today(self, d: date) -> int:
         """Paper entry orders submitted on ``d``, whatever became of them."""
