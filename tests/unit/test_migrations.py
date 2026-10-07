@@ -18,7 +18,7 @@ EXPECTED_TABLES = {
     "day_plans", "agent_calls", "equity_snapshots", "risk_state_causes", "nightly_reviews",
     "notifications", "prescreen_day_slots", "mom_rebalance_state", "ins_pending",
     "funnel_raw_counts", "holdings_observations", "brk20_resting_levels",
-    "rec_outcomes", "universe_ew_returns",
+    "rec_outcomes", "universe_ew_returns", "paper_state", "paper_equity_snapshots", "paper_halts",
 }
 
 

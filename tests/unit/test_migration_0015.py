@@ -83,7 +83,7 @@ def test_upgrade_from_populated_0014(db_path, monkeypatch):
                   "VALUES ('n1', 't', 'T', 'B')")
         c.commit()
 
-        monkeypatch.setattr(migrations, "discover", lambda: full)
+        monkeypatch.setattr(migrations, "discover", lambda: [p for p in full if p.name < "0016"])
         assert apply_migrations(c) == ["0015_rec_feedback.sql"]
 
         reminders = {r["position_id"]: r["protection_reminders"]
