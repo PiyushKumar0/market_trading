@@ -715,6 +715,16 @@ class TelegramBot:
             return notification_id
         except sqlite3.IntegrityError as exc:
             if getattr(msg, "dedupe_key", None) is not None:
+                try:   # an expired-undelivered row must not block its key forever
+                    with transaction(conn):
+                        conn.execute(
+                            "UPDATE notifications SET status='pending', attempts=0, last_error=NULL, "
+                            "created_at=? WHERE dedupe_key=? AND status='failed'",
+                            (now, msg.dedupe_key),
+                        )
+                except Exception as requeue_exc:  # noqa: BLE001 - see the clause below
+                    _log.warning("notification_journal_failed", op="requeue",
+                                 error=_error_label(requeue_exc))
                 raise _Deduped from exc
             _log.warning("notification_journal_failed", op="insert", error=_error_label(exc))
             return None
@@ -1335,6 +1345,10 @@ class TelegramBot:
         # ticker keeps such a row out of the MATCH set (it stays reachable by id, which is correct)
         # and stops an empty argument from resolving to it.
         matches = [rec for rec in recs if rec.instrument and rec.instrument.strip().upper() == wanted]
+        if decision and len(matches) > 1:
+            now = self._clock.now()
+            live = [rec for rec in matches if not recommendation_expired(rec.valid_until, now)]
+            matches = live if len(live) == 1 else matches   # a yesterday's expired rec must not shadow today's
         if len(matches) == 1:
             _log.info(
                 "telegram_rec_resolved",

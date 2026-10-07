@@ -697,9 +697,12 @@ class RecommendationBook:
             return False
         try:
             expiry = datetime.fromisoformat(str(data["valid_until"])).date()
-            return now.date() <= self._calendar.add_sessions(expiry, self._veto_window_sessions)
         except (KeyError, ValueError):
             return False
+        try:
+            return now.date() <= self._calendar.add_sessions(expiry, self._veto_window_sessions)
+        except ValueError:   # past the verified calendar horizon
+            return now.date() <= expiry + timedelta(days=7)
 
     @classmethod
     def _kind(cls, row: sqlite3.Row) -> str:
@@ -2319,8 +2322,9 @@ class RecommendationPipeline:
                 "enter_limit_price_defaulted", signal_id=candidate.signal_id,
                 symbol=candidate.symbol, strategy_id=candidate.strategy_id, entry_price=str(level),
             )
+        stop_anchor = None
         if payload.action == "enter":
-            payload = self._one_exit(payload, candidate)
+            payload, stop_anchor = self._one_exit(payload, candidate)
 
         try:
             verdict, gate_ctx = await self._gate_and_persist(
@@ -2347,7 +2351,8 @@ class RecommendationPipeline:
         reference = _dec(getattr(gate_ctx, "ltp", None) or entry_ref)
         extras = await self._collect_extras(payload, reference, d)
         rec = self.build_recommendation(
-            payload, verdict, reference, extras, raw_levels=candidate.raw_levels
+            payload, verdict, reference, extras, raw_levels=candidate.raw_levels,
+            stop_anchor=stop_anchor,
         )
         self._book.deliver(
             rec,
@@ -2468,6 +2473,7 @@ class RecommendationPipeline:
     def build_recommendation(
         self, action: EnterAction, verdict: GateVerdict, entry_ref: Decimal,
         extras: RecExtras | None = None, *, raw_levels: RawLevels | None = None,
+        stop_anchor: Decimal | None = None,
     ) -> Recommendation:
         """Build the §3.6 owner payload from an approved/shrunk ``enter`` proposal. No I/O.
 
@@ -2519,6 +2525,7 @@ class RecommendationPipeline:
             entry_type=action.entry_type,
             reference_entry=raw_levels.entry if raw_levels else None,
             reference_stop=raw_levels.stop if raw_levels else None,
+            stop_anchor=stop_anchor,
             hold_sessions=hold,
             exit_session=exit_session(self._calendar, created_at, hold) if hold else None,
             exit_kind="stop_target" if targets else "time",
@@ -2566,15 +2573,19 @@ class RecommendationPipeline:
         return (f"after entry fills, place a GTT OCO: stop ₹{stop} (limit ₹{limit}{why}) / "
                 f"target ₹{_dec(action.target_price)}")
 
-    def _one_exit(self, payload: EnterAction, candidate: SignalCandidate) -> EnterAction:
+    def _one_exit(
+        self, payload: EnterAction, candidate: SignalCandidate
+    ) -> tuple[EnterAction, Decimal | None]:
         """D3 stop re-anchoring and one exit per rec (plan Q1.2): a time-exit strategy with a
         registered edge loses any analyst-set target, so the gate prices that edge. Without one
-        (rsi2) the target stays: dropping it would make every entry fail C3."""
+        (rsi2) the target stays: dropping it would make every entry fail C3. Also returns the
+        anchor the stop was re-anchored to, ``None`` when the stop was left as proposed."""
         update: dict[str, Any] = {}
-        if payload.strategy_id in REANCHOR_STRATEGIES:
-            stop = self._reanchored_stop(payload, candidate)
-            if stop is not None:
-                update["stop_price"] = stop
+        anchor = None
+        if payload.strategy_id in REANCHOR_STRATEGIES and (
+            moved := self._reanchored_stop(payload, candidate)
+        ):
+            update["stop_price"], anchor = moved
         if (
             is_time_exit(payload.strategy_id) and payload.strategy_id in self._strategy_edge
             and payload.target_price is not None
@@ -2583,12 +2594,14 @@ class RecommendationPipeline:
                       strategy_id=payload.strategy_id, target=str(payload.target_price))
             update["target_price"] = None
         if not update:
-            return payload
-        return EnterAction.model_validate({**payload.model_dump(), **update})
+            return payload, None
+        return EnterAction.model_validate({**payload.model_dump(), **update}), anchor
 
-    def _reanchored_stop(self, payload: EnterAction, candidate: SignalCandidate) -> Decimal | None:
-        """``anchor × (1 − frac)``, ``frac = 1 − raw_stop/raw_entry``; the anchor is the LIMIT price,
-        else the live mark. ``None`` = leave the stop as proposed."""
+    def _reanchored_stop(
+        self, payload: EnterAction, candidate: SignalCandidate
+    ) -> tuple[Decimal, Decimal] | None:
+        """``(stop, anchor)`` with ``stop = anchor × (1 − frac)``, ``frac = 1 − raw_stop/raw_entry``;
+        the anchor is the LIMIT price, else the live mark. ``None`` = leave the stop as proposed."""
         raw = candidate.raw_levels
         if raw.stop is None or raw.entry <= 0:
             return None
@@ -2614,7 +2627,7 @@ class RecommendationPipeline:
             raw_stop=str(raw.stop), proposed_stop=str(payload.stop_price), stop=str(stop),
             entry_move_pct=str(_money((anchor / _dec(raw.entry) - 1) * _HUNDRED)),
         )
-        return stop
+        return stop, anchor
 
     async def _collect_extras(
         self, action: EnterAction, reference: Decimal, d: date

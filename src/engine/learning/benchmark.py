@@ -36,6 +36,8 @@ def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tup
     if not symbols:
         raise ValueError(f"universe_daily {u}: no eligible symbols")
     prev = calendar.previous_trading_day(d)
+    while calendar.session(prev).is_muhurat:   # type: ignore[union-attr]
+        prev = calendar.previous_trading_day(prev)
     closes_d = {b.symbol: b.close for b in store.get_bars_1d_for_day(d)}
     closes_prev = {b.symbol: b.close for b in store.get_bars_1d_for_day(prev)}
     structural = unadjusted_history(store.get_corp_actions(ex_from=d, ex_to=d))
@@ -61,15 +63,21 @@ def bench_pct(
 ) -> Decimal | None:
     """Compounded benchmark return in percent over the rec's window (:data:`BENCH_TIME` for a
     ``time`` exit, else :data:`BENCH_INTRASESSION`). ``None`` if any session in it is missing or
-    ``None`` in ``daily``; an empty window (same-day fill and stop) is 0.
+    ``None`` in ``daily`` or past the calendar horizon; an empty window (same-day fill and stop)
+    is 0.
     """
     include_exit = exit_reason == "time"
     growth = 1.0
-    s = calendar.add_sessions(fill_d, 1)
-    while s < exit_d or (include_exit and s == exit_d):
-        r = daily.get(s)
-        if r is None:
-            return None
-        growth *= 1 + r
-        s = calendar.add_sessions(s, 1)
+    s = fill_d
+    try:
+        while s < exit_d:
+            s = calendar.add_sessions(s, 1)
+            if s > exit_d or (s == exit_d and not include_exit):
+                break
+            r = daily.get(s)
+            if r is None:
+                return None
+            growth *= 1 + r
+    except ValueError:
+        return None
     return (Decimal(growth - 1) * 100).quantize(_PCT_Q, rounding=ROUND_HALF_UP)

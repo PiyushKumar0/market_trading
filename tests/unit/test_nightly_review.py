@@ -36,6 +36,7 @@ from engine.ops.nightly_review import (
     FUNNEL_TITLE,
     NightlyReviewJob,
     _closed_trades,
+    _expired_and_vetoed,
     build_analyst_declines,
     build_funnel_summary,
     build_review_context,
@@ -299,7 +300,13 @@ def test_context_empty_day_says_so_explicitly(conn) -> None:
 
 def test_expired_recs_are_counted_separately_from_closed_trades(conn) -> None:
     seed_day(conn)
-    for i in (2, 3):
+    for i, (action, payload) in enumerate(
+        [("expired", {}), ("dismissed", {}), ("expired", {"kind": "exit"})], start=2
+    ):
+        conn.execute(
+            "INSERT INTO recommendations (rec_id, payload, human_action) VALUES (?, ?, ?)",
+            (f"REC-{i}", json.dumps(payload), action),
+        )
         conn.execute(
             """
             INSERT INTO learning_ledger
@@ -313,7 +320,8 @@ def test_expired_recs_are_counted_separately_from_closed_trades(conn) -> None:
 
     assert [r["entry_id"] for r in _closed_trades(conn, D)] == ["LL-1"]
     assert "entry_id=LL-2" not in text
-    assert "recommendations expired unactioned (not trades): 2" in text
+    assert "recommendations expired unactioned (not trades): expired recs 1, vetoed 1" in text
+    assert _expired_and_vetoed(conn, D) == (1, 1)
 
 
 def test_context_is_byte_stable_for_the_same_rows(conn) -> None:
@@ -373,6 +381,7 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
     assert REVIEW["summary"] in msg.body
     assert msg.data["trades_closed"] == 1
     assert msg.data["recs_expired"] == 0
+    assert msg.data["recs_vetoed"] == 0
     assert msg.data["recommendations"] == 1
     assert msg.data["param_suggestions"] == 1
     assert msg.data["param_suggestions_dropped"] == 0

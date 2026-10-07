@@ -1560,6 +1560,26 @@ async def test_decision_reminder_message_has_one_line_per_rec_and_no_default_cod
     assert msg.data["rec_ids"] == [rec.rec_id]
 
 
+async def test_reminder_names_the_rec_id_only_for_a_repeated_symbol(conn, veto_book, cost_model):
+    from engine.notify.catalog import rec_decision_reminder
+
+    a = _expired_rec(conn, veto_book, cost_model)
+    b = _expired_rec(conn, veto_book, cost_model)
+    c = _expired_rec(conn, veto_book, cost_model, instrument="TCS")
+    body = rec_decision_reminder(veto_book.reminder_rows(NOW)).body
+    for rec_id in (a.rec_id, b.rec_id):
+        assert f"{SYMBOL} {rec_id} BUY" in body and f"/veto {rec_id} <" in body
+    assert "TCS BUY" in body and "/veto TCS <" in body and c.rec_id not in body
+
+
+@pytest.mark.parametrize("expiry", [datetime(2026, 12, 30, 15, 30, tzinfo=IST), datetime(2026, 12, 31, 15, 30, tzinfo=IST)])
+async def test_veto_window_survives_the_calendar_horizon(conn, veto_book, cost_model, expiry):
+    rec = make_rec(cost_model, valid_until=expiry)
+    veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
+    veto_book.expire_stale(expiry + timedelta(minutes=1))
+    assert [c["rec_id"] for c in veto_book.decision_candidates(SYMBOL, expiry + timedelta(hours=1))] == [rec.rec_id]
+
+
 async def test_expire_stale_does_not_return_already_expired_recs(conn, veto_book, cost_model):
     rec = make_rec(cost_model)
     veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
@@ -4289,12 +4309,34 @@ def test_one_exit_per_rec(
 ):
     pipeline, _ = q1_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
                               ltp_fn=lambda _s: None if ltp is None else Decimal(ltp))
-    out = pipeline._one_exit(
+    out, anchor = pipeline._one_exit(
         stamped(hi52_enter(strategy_id=strategy_id, **overrides)),
         hi52_candidate(strategy_id=strategy_id, raw_levels=raw),
     )
     assert out.stop_price == Decimal(stop)
     assert out.target_price == (None if target is None else Decimal(target))
+    assert (anchor is not None) == (out.stop_price != BHEL_RAW.stop)
+
+
+@pytest.mark.parametrize(
+    ("strategy_id", "overrides", "stop", "anchor"),
+    [("hi52", {"entry_type": "MARKET", "entry_price": None}, "418.30", "445.00"),
+     ("hi52", {}, "418.30", "445.00"),
+     ("brk20", {"stop_price": "410.00", "target_price": "470"}, "410.00", None)],
+    ids=["market", "limit", "not-reanchored"],
+)
+async def test_the_rec_carries_the_stop_anchor_only_when_the_stop_was_reanchored(
+    conn, pclock, calendar, book, limit_table, cost_model, strategy_id, overrides, stop, anchor,
+):
+    pipeline, _ = q1_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model,
+        ltp_fn=lambda _s: Decimal("445.00") if strategy_id == "hi52" else None,   # brk20's band screen
+        harness=FakeHarness(hi52_enter(strategy_id=strategy_id, quantity=9, **overrides)),
+    )
+    await publish_candidate(pipeline, hi52_candidate(strategy_id=strategy_id))
+
+    payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
+    assert (payload["stop"], payload["stop_anchor"]) == (stop, anchor)
 
 
 def test_stop_only_cnc_gtt_line_reads_the_shipped_recommend_settings(
@@ -4315,7 +4357,7 @@ def test_stop_only_cnc_gtt_line_reads_the_shipped_recommend_settings(
 
 def test_a_pre_q1_payload_still_parses(cost_model):
     new = {"strategy_id", "proposal_id", "entry_type", "reference_entry", "reference_stop",
-           "hold_sessions", "exit_session", "exit_kind", "risk_inr", "stop_atr_mult",
+           "stop_anchor", "hold_sessions", "exit_session", "exit_kind", "risk_inr", "stop_atr_mult",
            "gtt_instruction", "evidence", "registered_edge_pct"}
     old = {k: v for k, v in make_rec(cost_model).model_dump(mode="json").items() if k not in new}
     rec = Recommendation.model_validate(old)

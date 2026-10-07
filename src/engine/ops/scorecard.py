@@ -17,9 +17,10 @@ UNATTRIBUTED = "unattributed"
 
 # Entry recs only (rec_outcomes never scores exit recs); void_ca is excluded from every stat.
 _SQL = (
-    "SELECT o.strategy_id, o.status, o.fill_basis, o.net_pct, o.net_t20, o.excess_pct, "
-    "r.human_action, r.skip_reason "
+    "SELECT COALESCE(o.strategy_id, json_extract(r.payload, '$.strategy_id'), l.strategy_id), "
+    "o.status, o.fill_basis, o.net_pct, o.net_t20, o.excess_pct, r.human_action, r.skip_reason "
     "FROM recommendations r LEFT JOIN rec_outcomes o ON o.rec_id = r.rec_id "
+    "LEFT JOIN learning_ledger l ON l.rec_id = r.rec_id "
     "WHERE r.delivered_at IS NOT NULL "
     "AND COALESCE(json_extract(r.payload, '$.kind'), 'entry') = 'entry' "
     "AND COALESCE(o.status, '') != 'void_ca'"

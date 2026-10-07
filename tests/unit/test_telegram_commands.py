@@ -470,14 +470,23 @@ async def test_a_decided_expired_rec_is_not_vetoable_by_symbol(clock, conn, msg)
 
 
 @pytest.mark.asyncio
-async def test_a_live_and_an_expired_candidate_give_the_list_and_no_action(clock, conn, msg):
+async def test_a_live_rec_wins_over_an_expired_one_for_the_same_symbol(clock, conn, msg):
     _insert_rec(conn, REC_A, valid_until=DEAD_UNTIL, human_action="expired")
     _insert_rec(conn, REC_B, delivered_at="2026-06-17T09:58:00+05:30")
     book = _FakeBook()
     await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
+    assert book.calls == [("veto", REC_B, "price")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", [dict(valid_until=DEAD_UNTIL, human_action="expired"), {}])
+async def test_two_expired_or_two_live_candidates_give_the_list_and_no_action(clock, conn, msg, second):
+    _insert_rec(conn, REC_A, **second)
+    _insert_rec(conn, REC_B, **second)
+    book = _FakeBook()
+    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
     assert book.calls == []
     assert "2 recommendations match HDFCAMC" in msg.sent[0]
-    assert REC_A in msg.sent[0] and REC_B in msg.sent[0]
 
 
 @pytest.mark.asyncio
@@ -1066,7 +1075,7 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     assert message.kind == MessageKind.RECOMMENDATION
     for fragment in (
         "BUY RELIANCE", "intraday/MIS", "qty 5", "₹12250.00",
-        "entry 2449.00-2451.00", "stop ₹2400.00 = 2.1% below entry", "targets 2550.00 / 2600.00",
+        "entry 2449.00-2451.00", "stop ₹2400.00 = 2.0% below entry", "targets 2550.00 / 2600.00",
         "gate: shrunk 10→5",
         "breakeven 0.15%", "edge 3.0x",
         "after entry fills place SL-M at 2400.00", "square off by 10:30",
@@ -1220,7 +1229,7 @@ def _card(clock, *, bound: bool = True, failed: tuple[str, ...] = (), **update) 
         "instrument": "BHEL", "qty": 9, "notional": Decimal("4005.00"), "gate": gate, "targets": [],
         "entry_zone": (Decimal("445.00"), Decimal("445.00")), "stop": Decimal("418.30"),
         "reference_entry": Decimal("427.90"), "reference_stop": Decimal("402.25"),
-        "risk_inr": Decimal("241"), "stop_atr_mult": Decimal("2.14"), "hold_sessions": 20,
+        "stop_anchor": Decimal("445.00"), "risk_inr": Decimal("241"), "stop_atr_mult": Decimal("2.14"), "hold_sessions": 20,
         "exit_session": date(2026, 11, 3), "exit_kind": "time", "registered_edge_pct": Decimal("1.53"),
         "evidence": ["backtest: n 100, hit 60%"], "thesis": "52-week high", **update,
     }
@@ -1241,17 +1250,29 @@ def test_card_lines_follow_the_plan_order(clock):
 
 
 def test_card_prints_only_the_data_it_has(clock):
-    bare = {"risk_inr": None, "stop_atr_mult": None, "reference_stop": None, "hold_sessions": None,
+    bare = {"risk_inr": None, "stop_atr_mult": None, "stop_anchor": None, "hold_sessions": None,
             "exit_session": None, "exit_kind": None, "registered_edge_pct": None, "evidence": []}
     text = catalog.recommendation_message(_card(clock, **bare)).render()
     for absent in ("at risk", "ATR", "re-anchored", "sell by", "pending", "evidence", "registered edge"):
         assert absent not in text
 
 
+def test_a_market_card_measures_the_stop_from_the_mark_not_the_band_edge(clock):
+    rec = _card(clock, entry_zone=(Decimal("445.00"), Decimal("449.45")))
+    assert "stop ₹418.30 = 6.0% below entry" in catalog.recommendation_message(rec).render()
+
+
+@pytest.mark.parametrize("kind", ["exit", "adjust"])
+def test_exit_and_adjust_cards_state_the_plain_stop(clock, kind):
+    rec = _card(clock, kind=kind, side="SELL", exit_kind=None)
+    text = catalog.recommendation_message(rec).render()
+    assert "\nstop ₹418.30 · targets (none)\n" in text and "above entry" not in text
+
+
 @pytest.mark.parametrize(
     ("update", "clause"),
     [
-        ({"exit_session": None}, "exit date pending (NSE {y} calendar)"),
+        ({"exit_session": None},"exit date pending (NSE {y} calendar)"),
         ({"exit_kind": "stop_target", "exit_session": None, "targets": [Decimal("470.00")]},
          "stop ₹418.30 / target ₹470.00; time cap pending (NSE {y} calendar)"),
         ({"exit_kind": "stop_target", "targets": [Decimal("470.00")]},

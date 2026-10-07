@@ -202,6 +202,7 @@ class Recommendation(BaseModel):
     entry_type: Literal["LIMIT", "MARKET"] | None = None
     reference_entry: DecimalStr | None = None   # the scanner's raw levels
     reference_stop: DecimalStr | None = None
+    stop_anchor: DecimalStr | None = None       # the price the stop was re-anchored to; None = not re-anchored
     hold_sessions: int | None = None
     exit_session: date | None = None            # None with hold_sessions set = pending calendar
     exit_kind: Literal["time", "stop_target"] | None = None

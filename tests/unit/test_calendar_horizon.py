@@ -54,6 +54,17 @@ def test_dedupe_key_one_row_one_send(conn, clock):
     assert _rows(conn) == 1 and len(wire.sent) == 1
 
 
+def test_an_expired_failed_row_is_requeued_by_the_next_send(conn, clock):
+    bot, wire = _bot(conn, clock)
+    msg = catalog.calendar_horizon(date(2026, 7, 1), 10)
+    asyncio.run(bot.send(msg))
+    conn.execute("UPDATE notifications SET status='failed', attempts=5, last_error='boom'")
+    asyncio.run(bot.send(msg))
+    assert conn.execute("SELECT COUNT(*), status, attempts, last_error FROM notifications").fetchone()[:] == (
+        1, "pending", 0, None,
+    )
+
+
 @pytest.mark.parametrize(("through", "expected"), [("2026-07-15", 20), (None, 0)])
 def test_sessions_to_horizon(tmp_path, clock, through, expected):
     assert sessions_to_horizon(_calendar(tmp_path, clock, through), TODAY) == expected

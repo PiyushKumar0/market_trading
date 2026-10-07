@@ -127,7 +127,7 @@ def _day_prefix(d: date) -> str:
 def _closed_trades(conn: sqlite3.Connection, d: date) -> list[sqlite3.Row]:
     """Learning-ledger trades CLOSED on ``d`` (§6.5) with the position's symbol when it still exists.
 
-    ``no_action`` rows are expired recommendations, not trades — see :func:`_expired_count`.
+    ``no_action`` rows are expired or dismissed recommendations, not trades — see :func:`_expired_and_vetoed`.
     """
     return conn.execute(
         """
@@ -144,13 +144,21 @@ def _closed_trades(conn: sqlite3.Connection, d: date) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def _expired_count(conn: sqlite3.Connection, d: date) -> int:
-    """Recommendations that expired unactioned on ``d`` (``no_action`` ledger rows)."""
-    return conn.execute(
-        "SELECT COUNT(*) FROM learning_ledger "
-        "WHERE closed_at IS NOT NULL AND substr(closed_at, 1, 10) = ? AND outcome_label = 'no_action'",
+def _expired_and_vetoed(conn: sqlite3.Connection, d: date) -> tuple[int, int]:
+    """Entry recommendations that expired unactioned / were dismissed (``/veto``) on ``d``.
+
+    Exit-kind recs (the re-issued daily time exit) are excluded: they are reminders, not ideas.
+    """
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(r.human_action = 'expired'), 0), COALESCE(SUM(r.human_action = 'dismissed'), 0)
+        FROM learning_ledger l JOIN recommendations r ON r.rec_id = l.rec_id
+        WHERE l.closed_at IS NOT NULL AND substr(l.closed_at, 1, 10) = ? AND l.outcome_label = 'no_action'
+          AND COALESCE(json_extract(r.payload, '$.kind'), 'entry') = 'entry'
+        """,
         (_day_prefix(d),),
-    ).fetchone()[0]
+    ).fetchone()
+    return row[0], row[1]
 
 
 def _delivered_recommendations(conn: sqlite3.Connection, d: date) -> list[sqlite3.Row]:
@@ -747,7 +755,8 @@ def build_review_context(
     parts.append(
         f"{_TRADES_TITLE}: {_NO_TRADES}" if not trades else _section(_TRADES_TITLE, _trade_lines(trades))
     )
-    parts.append(f"recommendations expired unactioned (not trades): {_expired_count(conn, d)}")
+    expired, vetoed = _expired_and_vetoed(conn, d)
+    parts.append(f"recommendations expired unactioned (not trades): expired recs {expired}, vetoed {vetoed}")
     parts.append(_section(_RECS_TITLE, _rec_lines(recs)))
     parts.append(_section("proposals and gate verdicts", _verdict_lines(conn, d)))
     # WO-9: the reviewer cannot reason about "was the day's best idea even looked at?" from
@@ -925,7 +934,7 @@ class NightlyReviewJob:
         self._persist(d, stored)
 
         trades = len(_closed_trades(self._conn, d))
-        expired = _expired_count(self._conn, d)
+        expired, vetoed = _expired_and_vetoed(self._conn, d)
         recs = len(_delivered_recommendations(self._conn, d))
         _log.info(
             "nightly_review_persisted",
@@ -934,13 +943,14 @@ class NightlyReviewJob:
             call_id=result.call_id,
             trades=trades,
             expired=expired,
+            vetoed=vetoed,
             recommendations=recs,
             lessons=len(stored.lessons),
             process_errors=len(stored.process_errors),
             suggestions=len(kept),
             suggestions_dropped=len(dropped),
         )
-        await self._send(self._summary_message(d, stored, trades, expired, recs, len(dropped)))
+        await self._send(self._summary_message(d, stored, trades, expired, vetoed, recs, len(dropped)))
         return AdvisoryOutcome.RAN
 
     # ------------------------------------------------------------------ funnel telemetry (WO-9)
@@ -972,7 +982,7 @@ class NightlyReviewJob:
 
     # ------------------------------------------------------------------ owner messages (§3.2.11)
     def _summary_message(
-        self, d: date, review: NightlyReview, trades: int, expired: int, recs: int, dropped: int
+        self, d: date, review: NightlyReview, trades: int, expired: int, vetoed: int, recs: int, dropped: int
     ) -> CatalogMessage:
         """The end-of-day owner digest (``DAILY_SUMMARY``, R8 catalog).
 
@@ -984,7 +994,7 @@ class NightlyReviewJob:
             title=f"Nightly review {d.isoformat()}",
             body=(
                 f"{review.summary}\n"
-                f"trades closed {trades} (expired recs {expired}) · recommendations {recs} · lessons {len(review.lessons)} · "
+                f"trades closed {trades} (expired recs {expired}, vetoed {vetoed}) · recommendations {recs} · lessons {len(review.lessons)} · "
                 f"process errors {len(review.process_errors)} · "
                 f"parameter suggestions {len(review.param_suggestions)} (dropped {dropped})\n"
                 "Suggestions are suggestions: the owner sets parameters via /config/params (R4)."
@@ -994,6 +1004,7 @@ class NightlyReviewJob:
                 "d": d.isoformat(),
                 "trades_closed": trades,
                 "recs_expired": expired,
+                "recs_vetoed": vetoed,
                 "recommendations": recs,
                 "lessons": len(review.lessons),
                 "process_errors": len(review.process_errors),

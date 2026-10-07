@@ -20,6 +20,7 @@ carries the structured fields the bot/audit log persists alongside the rendered 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
@@ -446,11 +447,15 @@ def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
     from engine.notify.telegram import VETO_REASONS  # telegram imports this module
 
     codes = "|".join(VETO_REASONS)
-    lines = [
-        f"{r['instrument']} {r['side']} qty {r['qty']} (expired {str(r['valid_until'])[:10]}): "
-        f"/veto {r['instrument']} <{codes}>"
-        for r in rows
-    ]
+    counts = Counter(r["instrument"] for r in rows)
+    lines = []
+    for r in rows:
+        handle = r["instrument"] if counts[r["instrument"]] == 1 else r["rec_id"]
+        shown = r["instrument"] if handle == r["instrument"] else f"{r['instrument']} {handle}"
+        lines.append(
+            f"{shown} {r['side']} qty {r['qty']} (expired {str(r['valid_until'])[:10]}): "
+            f"/veto {handle} <{codes}>"
+        )
     return CatalogMessage(
         kind=MessageKind.REC_DECISION_REMINDER,
         title="Expired recommendations awaiting your reason",
@@ -1018,13 +1023,15 @@ def _exit_clause(rec: Recommendation) -> str:
 
 
 def _stop_line(rec: Recommendation, entry: Decimal, targets: str) -> str:
-    pct = abs(entry - rec.stop) / entry * 100
-    line = f"stop ₹{rec.stop} = {pct:.1f}% {'below' if rec.side == 'BUY' else 'above'} entry"
-    if rec.stop_atr_mult is not None:
-        line += f" · {rec.stop_atr_mult:.1f}× daily ATR"
-    if rec.reference_entry and rec.reference_stop and rec.reference_stop != rec.stop:
-        rule = abs(rec.reference_entry - rec.reference_stop) / rec.reference_entry * 100
-        line += f" · rule {rule:.1f}% re-anchored from ₹{rec.reference_entry} to ₹{entry}"
+    line = f"stop ₹{rec.stop}"
+    if rec.kind == "entry":
+        pct = abs(entry - rec.stop) / entry * 100
+        line += f" = {pct:.1f}% {'below' if rec.side == 'BUY' else 'above'} entry"
+        if rec.stop_atr_mult is not None:
+            line += f" · {rec.stop_atr_mult:.1f}× daily ATR"
+        if rec.stop_anchor and rec.reference_entry and rec.reference_stop:
+            rule = (1 - rec.reference_stop / rec.reference_entry) * 100
+            line += f" · rule {rule:.1f}% re-anchored from ₹{rec.reference_entry} to ₹{rec.stop_anchor}"
     if rec.exit_kind is None:
         line += f" · targets {targets}"
     return line
@@ -1072,7 +1079,7 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
         head[0] += f" · ₹{rec.risk_inr} at risk to the stop"
     if exit_text := _exit_clause(rec):
         head[0] += f" · {exit_text}"
-    head.append(_stop_line(rec, high, targets))
+    head.append(_stop_line(rec, low, targets))
     if ltp is not None and ltp > 0:
         gap = (low - ltp) / ltp * Decimal(100)
         head.append(

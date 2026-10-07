@@ -24,7 +24,7 @@ from engine.learning.benchmark import BENCH_INTRASESSION, BENCH_TIME, bench_pct,
 from engine.learning.exit_sim import Outcome, Pending, SimBar, simulate
 from engine.marketdata.store import MarketStore
 from engine.ops.holds import HoldFn, session_of
-from engine.ops.jobs import JOB_BHAVCOPY, JOB_DAILY_BARS
+from engine.ops.jobs import JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_REC_OUTCOMES
 from engine.strategy.cost_model import CostModel
 from engine.strategy.scanners.hi52 import UNADJUSTED_KINDS
 
@@ -83,6 +83,12 @@ class RecOutcomesJob:
             _log.info("rec_outcomes_unfinished", d=d.isoformat(), waiting_for=JOB_DAILY_BARS)
             return RecOutcomesResult(d, unfinished=True)
         ew = await self._ew_returns(d)
+        if self._conn.execute(
+            "SELECT 1 FROM job_runs WHERE job_id=? AND status='success' AND run_for_date>? LIMIT 1",
+            (JOB_REC_OUTCOMES, d.isoformat()),
+        ).fetchone():
+            _log.info("rec_outcomes_replay_skipped", d=d.isoformat(), reason="a later day already scored")
+            return RecOutcomesResult(d)
         rows = []
         for rec_id, data, delivered_at in self._open_entry_recs():
             row = await self._score(rec_id, data, delivered_at, d, ew)
@@ -179,7 +185,13 @@ class RecOutcomesJob:
         except (_Unscorable, ArithmeticError, LookupError, TypeError, ValueError) as exc:
             _log.warning("rec_outcome_unscorable", rec_id=rec_id, reason=str(exc))
             return row
-        hold = self._hold_fn(strategy_id, style)
+        try:
+            exit_s: date | None = date.fromisoformat(str(data["exit_session"]))
+        except (KeyError, ValueError):
+            exit_s = None
+        hold = data.get("hold_sessions")
+        if hold is None:
+            hold = self._hold_fn(strategy_id, style)
         n = hold if hold is not None else 1   # intraday: squared off on the fill session
 
         session = self._calendar.session(s)
@@ -190,7 +202,8 @@ class RecOutcomesJob:
         bars += [SimBar(b.d, b.open, b.high, b.low, b.close) for b in daily]
         common = dict(end=d, cost_pct=cost, add_sessions=self._calendar.add_sessions,
                       ex_dates=[r["ex_date"] for r in corp if r["kind"] in UNADJUSTED_KINDS])
-        main = simulate(bars, pending, stop=stop, target=target, horizon=n - 1, **common)
+        main = simulate(bars, pending, stop=stop, target=target,
+                        horizon=exit_s or n - 1, **common)
         fixed = {k: simulate(bars, pending, stop=None, target=None, horizon=k - 1, **common)
                  for k in FIXED_HORIZONS}
 
@@ -208,8 +221,9 @@ class RecOutcomesJob:
             bench_pct=_f(bench), excess_pct=_f(_minus(main.net_pct, bench)),
             excess_t20=_f(_minus(t20.net_pct, bench20)),
         )
-        pending_k = self._pending_horizons(main.fill_d, (n, *FIXED_HORIZONS)) \
-            if main.status == "open" else []
+        pending_k = self._pending_horizons(
+            main.fill_d, FIXED_HORIZONS if exit_s else (n, *FIXED_HORIZONS)
+        ) if main.status == "open" else []
         if pending_k:
             _log.info("rec_outcome_horizon_pending", rec_id=rec_id, sessions=pending_k)
         _log.info("rec_outcome", rec_id=rec_id, label="hindsight", status=row["status"],
@@ -258,7 +272,11 @@ class RecOutcomesJob:
     def _bench(self, ew: Mapping[date, float | None], o: Outcome) -> Decimal | None:
         if o.status != "exit":
             return None
-        return bench_pct(ew, o.fill_d, o.exit_d, o.reason, self._calendar)  # type: ignore[arg-type]
+        try:
+            return bench_pct(ew, o.fill_d, o.exit_d, o.reason, self._calendar)  # type: ignore[arg-type]
+        except (ValueError, ArithmeticError) as exc:
+            _log.warning("rec_outcome_bench_unavailable", error=str(exc))
+            return None
 
     def _pending_horizons(self, fill_d: date | None, ks: tuple[int, ...]) -> list[int]:
         if fill_d is None:

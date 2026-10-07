@@ -59,6 +59,15 @@ def test_missing_universe_row_uses_previous(store, cal):
     assert compute_ew_return(store, cal, WED) == pytest.approx((0.01, 1))
 
 
+def test_previous_session_skips_muhurat(store, cal):
+    fri, mon = date(2026, 11, 6), date(2026, 11, 9)
+    assert cal.previous_trading_day(mon) == date(2026, 11, 8)
+    _universe(store, mon, ["A"])
+    _closes(store, fri, {"A": "100"})
+    _closes(store, mon, {"A": "102"})
+    assert compute_ew_return(store, cal, mon) == pytest.approx((0.02, 1))
+
+
 def test_no_universe_row_within_five_sessions_is_gap(store, cal):
     _universe(store, date(2026, 9, 21), ["A"])
     assert compute_ew_return(store, cal, WED) is None
@@ -83,6 +92,9 @@ def test_empty_universe_raises(store, cal):
         ({}, TUE, TUE, "stop", Decimal("0")),
         ({TUE: 0.01}, MON, WED, "time", None),
         ({TUE: 0.01, WED: None}, MON, WED, "time", None),
+        ({date(2026, 12, 31): 0.01}, date(2026, 12, 30), date(2026, 12, 31), "time", Decimal("1.000000")),
+        ({}, date(2026, 12, 31), date(2026, 12, 31), "stop", Decimal("0")),
+        ({date(2026, 12, 31): 0.01}, date(2026, 12, 30), date(2027, 1, 4), "time", None),
     ],
 )
 def test_bench_pct_window(cal, daily, fill_d, exit_d, reason, expected):

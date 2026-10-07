@@ -51,6 +51,19 @@ def test_scorecard_aggregates_per_strategy_excluding_void_and_exit_recs(conn) ->
     assert (un["n"], un["closed"], un["hit_rate"], un["skip_reasons"]) == (1, 0, None, {"trust": 1})
 
 
+def test_unscored_recs_take_the_payload_then_ledger_strategy(conn) -> None:
+    for rec_id, payload in (("p", {"kind": "entry", "strategy_id": "cat"}), ("l", {"kind": "entry"}),
+                            ("n", {"kind": "entry"})):
+        conn.execute(
+            "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?, ?, 'x')",
+            (rec_id, json.dumps(payload)),
+        )
+    conn.execute("INSERT INTO learning_ledger (entry_id, rec_id, strategy_id) VALUES ('e1', 'l', 'brk20')")
+    assert {k: v["recs"]["n"] for k, v in scorecard(conn)["strategies"].items()} == {
+        "brk20": 1, "cat": 1, "unattributed": 1,
+    }
+
+
 def test_scorecard_empty_and_paper_stub_shape(conn) -> None:
     assert scorecard(conn)["strategies"] == {}
     _seed(conn)

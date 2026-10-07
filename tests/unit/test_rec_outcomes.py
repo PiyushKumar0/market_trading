@@ -213,6 +213,51 @@ async def test_a_horizon_past_the_calendar_stays_pending(
 
 
 @pytest.mark.parametrize(
+    ("fields", "exit_idx"),
+    [({"hold_sessions": 6, "exit_session": date(2026, 9, 8)}, 5), ({"hold_sessions": 2}, 1), ({}, 2)],
+    ids=["payload_exit_session", "payload_hold_sessions", "legacy_hold_fn"],
+)
+async def test_horizon_comes_from_the_payload_before_the_live_hold(
+    conn, store, cal, cost_model, clk, now, book, sess, fields, exit_idx
+):
+    assert sess[5] == date(2026, 9, 8)
+    rec = _deliver(book, now, cost_model, **fields)
+    _bars(store, "RELIANCE", sess)
+    _seed_ew(conn, sess[1:])
+    await _job(conn, store, cal, cost_model, clk).run(sess[24])
+    assert _rows(conn)[rec.rec_id]["exit_d"] == sess[exit_idx].isoformat()
+
+
+async def test_a_failing_benchmark_does_not_fail_the_run(
+    conn, store, cal, cost_model, clk, now, book, sess, monkeypatch
+):
+    def boom(*_a):
+        raise ValueError("calendar horizon")
+
+    monkeypatch.setattr("engine.ops.rec_outcomes.bench_pct", boom)
+    rec = _deliver(book, now, cost_model)
+    _bars(store, "RELIANCE", sess)
+    _seed_ew(conn, sess[1:])
+    await _job(conn, store, cal, cost_model, clk).run(sess[24])
+    row = _rows(conn)[rec.rec_id]
+    assert (row["status"], row["bench_pct"], row["net_pct"] is None) == ("closed", None, False)
+
+
+@pytest.mark.parametrize(("later_success", "scored"), [(False, 1), (True, 0)])
+async def test_replaying_an_earlier_day_after_a_later_one_does_not_rescore(
+    conn, store, cal, cost_model, clk, now, book, sess, later_success, scored
+):
+    _deliver(book, now, cost_model)
+    _bars(store, "RELIANCE", sess)
+    if later_success:
+        CatchUpRunner(conn, clk, cal, JobRegistry()).record_run(JOB_REC_OUTCOMES, sess[10])
+    await _job(conn, store, cal, cost_model, clk, was_run=lambda job_id, d: True).run(sess[3])
+    assert len(_rows(conn)) == scored
+    assert conn.execute("SELECT count(*) FROM universe_ew_returns WHERE d=?",
+                        (sess[3].isoformat(),)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
     ("ledger", "proposal_type", "zone", "expected"),
     [
         (True, None, ("100", "100"), ("closed", "hi52", "LIMIT", "100")),

@@ -35,12 +35,13 @@ class Harness:
 
     def add(self, pid="p1", opened=WED_1000, **cols) -> None:
         row = {"state": "OPEN", "origin": "recommended", "protection_reminders": 0,
-               "owner_protected_at": None, **cols}
+               "owner_protected_at": None,
+               "product": "CNC", **cols}
         self.conn.execute(
             "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, "
             "state, is_paper, origin, opened_at, protection_reminders, owner_protected_at) "
-            "VALUES (?, 'RELIANCE', 'BUY', 'swing', 'CNC', 5, '100', ?, 0, ?, ?, ?, ?)",
-            (pid, row["state"], row["origin"], opened.isoformat(), row["protection_reminders"],
+            "VALUES (?, 'RELIANCE', 'BUY', 'swing', ?, 5, '100', ?, 0, ?, ?, ?, ?)",
+            (pid, row["product"], row["state"], row["origin"], opened.isoformat(), row["protection_reminders"],
              row["owner_protected_at"]),
         )
 
@@ -103,6 +104,7 @@ async def test_confirmation_before_the_first_reminder_silences_it(h):
     {"state": "CLOSED"},
     {"protection_reminders": 2},                                # grandfathered by migration 0015
     {"origin": "platform"},
+    {"product": "MIS"},                                         # MIS protection is the SL-M
 ])
 async def test_positions_that_need_no_reminder_get_none(h, cols):
     h.add(**cols)
@@ -115,3 +117,33 @@ async def test_a_position_the_journal_shows_at_zero_is_skipped(h, monkeypatch):
     monkeypatch.setattr(pr, "positions_missing_from_holdings",
                         lambda conn, d, require_zero: {"p1": object()})
     assert await h.tick(at(18, 9, 30)) == 0 and h.counter() == 0
+
+
+@pytest.mark.asyncio
+async def test_taken_before_a_session_open_follows_that_mornings_open(h):
+    h.add(opened=at(18, 0, 20))
+    assert await h.tick(at(18, 8, 0)) == 1
+    assert await h.tick(at(18, 9, 16)) == 2
+
+
+@pytest.mark.asyncio
+async def test_past_the_calendar_horizon_only_the_first_reminder_is_due(h):
+    h.add(opened=datetime(2026, 12, 31, 10, 0, tzinfo=IST))
+    assert await h.tick(datetime(2026, 12, 31, 10, 31, tzinfo=IST)) == 1
+    assert h.counter() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failing_row_does_not_starve_later_rows(h, monkeypatch):
+    h.add("p1")
+    h.add("p2")
+    real, calls = h.reminders._due, []
+
+    def due(opened, now):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(opened, now)
+
+    monkeypatch.setattr(h.reminders, "_due", due)
+    assert await h.tick(at(17, 10, 31)) == 1 and h.counter("p1") == 0 and h.counter("p2") == 1
