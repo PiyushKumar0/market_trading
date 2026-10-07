@@ -35,6 +35,13 @@
   - Research snapshot `data\research\market_2026-10-07.duckdb`: 9 tables, every source/output count equal, 2.4 s.
   - `phase3` fast-forwarded 012c452 → 3977dfc (`wip/m2`). Started: `migrations_applied_on_boot [0015_rec_feedback.sql]`, selftest ok, `engine_ready` 15:53:29, no ERROR lines; `time_exit_check` caught up for 10-07 (no open positions).
   - Live dashboard `dist` rebuilt.
+- **M5 research (snapshot, after 15:53; RUN records in `IMPLEMENTATION_PLAN.md` §6.1):**
+  - Before the runs the brk20 baseline reproduced the registered report (test passes).
+  - **C1:** brk20 `neither`, hi52 `(iii)` (2.5×ATR14 catastrophe stop), ins `neither`. Every shipped stop destroys the measured edge (T+20 median net: brk20 −1.47% vs +0.70% time-only; hi52 −1.41% vs +1.70%; ins −3.42% vs +0.93%).
+  - **C2:** brk20 regime gate `supported` (2026 held-out contradicts); hi52 `not supported`; ins `insufficient`.
+  - **C3:** several filters are `supported` by the registered rule, but that rule cannot separate a filter from a random subsample, so this is not evidence.
+  - Protocol correction: ins first ran on a 730-day default window; it was re-run on the registered window. Both are reported.
+  - Nothing changes live: every live consequence is owner work.
 - **Q0.2 `bars_1d` check (snapshot):** muhurat (2024-11-01, 2025-10-21) and DR-drill Saturdays (2024-01-20, 03-02, 05-18) carry full daily rows, the same counts as regular sessions. So:
   - the rec/paper calendar convention skips those sessions (D2: not counted; a stop touched there is ignored);
   - the research convention counts them by bar position, as the registered backtests did.
