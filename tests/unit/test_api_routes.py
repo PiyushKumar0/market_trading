@@ -723,7 +723,7 @@ def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
 
     seed_paper(conn)
     paper = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()["strategies"]["hi52"]["paper"]
-    assert paper == {"closed": 2, "hit_rate": 0.5, "net": 60.25, "open": 2}
+    assert paper == {"closed": 3, "hit_rate": 2 / 3, "net": 560.25, "open": 2}     # full record, voids out
 
 
 def test_positions_and_orders_carry_is_paper(conn, clock) -> None:
