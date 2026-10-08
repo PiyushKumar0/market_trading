@@ -926,6 +926,8 @@ class TelegramBot:                                     # O8/R10; python-telegram
 
 **2026-10-06 amendment (plan-2026-10-06, Q0.1)** Migration 0015 also adds `notifications.dedupe_key` with a partial UNIQUE index; `CatalogMessage.dedupe_key` makes a keyed message send at most once (used by CALENDAR_HORIZON and the paper alerts).
 
+**2026-10-08 amendment (dashboard redesign, owner-directed).** The LAN dashboard (`dashboard/`, served by `engine.api` from `dashboard/dist`) becomes a tabbed, plain-language console — Overview / Recommendations / Paper trading / Performance / Activity / System — with a navbar holding the health pill (the worst active alert) and the same three owner writes: `POST /mode` (OFF | RECOMMEND), `POST /config/trade_window`, `POST /paper`. No API, route or owner-write change; →AUTO, kill reset, paper reset and `/taken` / `/closed` stay Telegram-only (R10). Every engine term is translated in one copy deck that keeps the engine's own name in a hint; times are IST; owner directives (IST day folds, Telegram above news, paper ON/OFF confirm rules) are preserved. Design and acceptance criteria: `runbooks/design-2026-10-08-dashboard-redesign.md`; implementation plan: `runbooks/plan-2026-10-08-dashboard-redesign.md`.
+
 #### 3.2.12 `engine.ops`
 
 **Responsibility:** composition root — scheduling, session lifecycle, health, self-test, service entrypoint. **Dependencies:** all packages (the only module allowed to import everything; it wires the graph).

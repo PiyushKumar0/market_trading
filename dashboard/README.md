@@ -20,9 +20,18 @@ service), then the legacy `web/dist` fallbacks. No build ⇒ the API just runs h
 
 ## Runtime shape
 
-Single page, dark, compact grid. Everything is self-contained — hand-rolled CSS, no UI framework, no
-webfont, **no CDN link of any kind**: the LAN page must render with zero external requests (R10).
+A tabbed, plain-language console (redesign 2026-10-08; design spec
+`runbooks/design-2026-10-08-dashboard-redesign.md`). Dark only, system fonts, hand-rolled CSS on design
+tokens (`src/styles/tokens.css`, every colour pair contrast-measured), no UI framework, no webfont,
+**no CDN link of any kind**: the LAN page must render with zero external requests (R10).
 `vite.config.ts` sets `base: './'` so assets resolve under the engine's static mount.
+
+**Layout.** A navbar (health pill = the worst active alert, engine mode Off | Recommend, paper autopilot
+switch, trading-hours editor, data freshness, sign-out) over six tabs kept in the URL hash
+(`#overview` … `#system`, so reload and Back work). Words first: every engine value is translated in
+`src/copy/glossary.ts` (label + one-line hint + the engine's own term), so Telegram and the logs can
+still be matched. Pure logic lives in `src/lib/` (`format` — rupees grouped on the string, every time
+in IST; `alerts` — what needs attention, the health pill and tab badges; `recs`; `paper`).
 
 **Auth.** The engine's `DASHBOARD_TOKEN` is entered once and kept in `localStorage['mt_token']`; it
 goes on every request as `Authorization: Bearer`, and on the `/ws/live` handshake as `?token=`
@@ -36,28 +45,30 @@ rather than its own because the panel reads the header mode from the same poll. 
 appends relayed state-change frames (mode / risk / kill / trade-window / budget) to the events feed;
 the engine's 15 s `ping` keepalive is filtered out.
 
-**Panels.** Status header (mode / routing / risk_state, trade window, degrade tier, KILLED banner) ·
-Recommendations (exit date or "pending", risk to stop, stop ATR multiple, evidence, registered edge,
-thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action chip) · Positions
-(real book only; recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)") ·
-Paper autopilot (simulated — built / ON / entry-guard / epoch / halt chips, a turn ON / turn OFF
-button while the autopilot is built or stored ON, equity, net and day P&L
-of the current epoch, the per-session equity line against the capital base, open paper positions with
-mark and gross unrealized, working orders, the epoch's newest 20 closes; the not-built states say so
-and nothing more) · Scorecard (per-strategy hindsight outcomes, labelled as such, plus the paper
-columns: simulated trades of all paper epochs, voids excluded, net in rupees) · Decision log (proposal → verdict → cited
-rules; the paper gate's verdict and rules sit beside the real ones) · Risk headroom · Agent budget ·
-Trade-window editor · Live events · Notifications (the day's Telegram transcript) · News/catalyst
-watchlist (originating vs context + digest freshness). The two ledgers — recommendations and the
-decision log — are folded by IST day (`ui.tsx` `useDayFolds`): today's fold starts open, earlier
-days start folded and open on click (owner-directed 2026-09-08).
+**Tabs.**
+- *Overview* — "Needs attention" (alerts, worst first, each with what to do), *Act now* (only LIVE
+  recommendations, as trade tickets: the plain instruction, levels, reasoning, your steps), your real
+  positions (the stop-loss-confirmed column second, so it is never scrolled out of view) beside the
+  simulated paper snapshot, and a *Today* strip linking to the other tabs.
+- *Recommendations* — the full ledger, folded by IST day (owner-directed 2026-09-08: today open,
+  earlier days folded, a day still holding a live recommendation open too); rows open into tickets.
+- *Paper trading* — status in words, paper limits in force, four figures, the equity-by-session chart
+  (crosshair, ←/→, table view), open positions, waiting orders, closed trades, health counters.
+  Everything here is simulated and says so once; paper cards carry a dashed violet border.
+- *Performance* — the per-strategy scorecard: hindsight-scored recommendations and paper trades.
+- *Activity* — risk checks (the decision log, day-folded, real and paper verdicts side by side),
+  Telegram messages (above News — owner-directed 2026-09-08 — chronological, pinned to the newest,
+  with delivery truth), the news watchlist, live updates in sentences (raw payload one click away).
+- *System* — engine status, risk limits as meters, the AI usage budget (week, level, per analyst).
 
 **Owner writes** are limited to `POST /mode` (OFF / RECOMMEND), `POST /config/trade_window` and
-`POST /paper` (paper autopilot ON / OFF, single-step; ON asks a browser confirm and is refused 409
-unless the autopilot is built). Deliberately absent, and not an oversight: →AUTO, kill-switch reset
-and paper reset are owner TWO-STEP transitions with no dashboard path (Telegram `/mode AUTO`,
-`/kill_reset`, `/paper reset`, each + `/confirm`), and recommendation outcomes (`/taken`, `/closed`)
-are Telegram-only (§3.5.3/§7.2/R10).
+`POST /paper` (paper autopilot ON / OFF, single-step; ON always asks, OFF asks only when waiting paper
+entry orders would be cancelled; ON is refused 409 unless the autopilot is built). They go through an
+in-page dialog with action-named buttons, and every result is a toast; the value shown always comes
+from the next poll, never from an optimistic guess. Switching the engine Off asks first. Deliberately
+absent, and not an oversight: →AUTO, kill-switch reset and paper reset are owner TWO-STEP transitions
+with no dashboard path (Telegram `/mode AUTO`, `/kill_reset`, `/paper reset`, each + `/confirm`), and
+recommendation outcomes (`/taken`, `/closed`) are Telegram-only (§3.5.3/§7.2/R10).
 
 ## Dev server
 
@@ -75,8 +86,8 @@ engine serves `dist/`.
 
 `node fixture_server.mjs` (after `npm run build`) serves `dist/` on http://127.0.0.1:8499/ with canned
 rows for every read route, spread across several IST days — a UTC-stamped row and an undated one
-included — so the day folds and the panel order can be checked in a browser. Any token passes the
-gate; there is no `/ws/live`, so the events feed reads "closed". `NO_TODAY=1` drops today's ledger
+included — so the day folds and every tab can be checked in a browser. Any token passes the
+gate; there is no `/ws/live`, so Live updates reads "Reconnecting" (and the console logs the 404). `NO_TODAY=1` drops today's ledger
 rows to show the "no … today" state. `/paper` answers a built, ON book by default (a daily FROZEN halt,
 one unmarked position, an unfilled entry order, a void among the closes); `PAPER_OFF=1` answers the
 not-built stub (subsystem disabled, nothing stored); `PAPER_IDLE=1` answers the go-live view (built,
@@ -90,6 +101,14 @@ served value; any other non-GET on a route answers 405. Dev-only: nothing from i
 
 ## Tests
 
-No JS unit tests in v1: every panel is a pure render over a typed API response, and the API contract
-itself is covered by `tests/unit/test_api_routes.py`. `npm run build` runs `tsc -b` first, so a shape
-drift between `src/types.ts` and a panel fails the build.
+- `npm test` — `node --test` over `tests/*.test.ts` (Node 22 strips the types; no test dependency):
+  the pure modules — rupee grouping and signs, IST days and times, the glossary and its fallbacks,
+  recommendation helpers, alert derivation (including "no false alarm" stub shapes), paper status.
+- `npm run build` runs `tsc -b` first (app, vite config and tests), so a shape drift between
+  `src/types.ts` and a view fails the build. The API contract itself is covered by
+  `tests/unit/test_api_routes.py`.
+- `tests/dom-checks.js` — layout and accessibility assertions evaluated in the page (paste into the
+  console, or chrome-devtools `evaluate_script`) against the fixture server: no sideways scroll, nothing
+  sticking out of a card, every target ≥ 24 px, text contrast ≥ 4.5:1 on the composited background.
+  Run it per scenario (default, `ALERTS=1`, `EMPTY=1`, `NO_TODAY=1`, `PAPER_OFF=1`, `PAPER_IDLE=1`) at
+  1440, 1024, 390 and 320 px wide.

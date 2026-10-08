@@ -262,7 +262,7 @@ term keeps its engine name in its hint ("Engine term: `FROZEN`"), so Telegram an
 matched. Formatting: rupees with Indian grouping done on the string (`100113.30` → `₹1,00,113.30`;
 never parsed to a float); signed P&L with a true minus (`−₹1,840.60`, `+₹113.30`); USD budget shown
 to cents with the exact string in the hint; times are IST `HH:MM` today and `Thu 8 Oct, 13:00`
-otherwise; day folds read `Today · Thu 8 Oct`, `Yesterday · Wed 7 Oct`, `Sun 4 Oct`.
+otherwise; day folds read `Today, Thu 8 Oct`, `Yesterday, Wed 7 Oct`, `Sun 4 Oct`.
 
 Glossary (visible label — hint — engine term). Implemented once in `src/copy/glossary.ts`; unknown
 values fall back to the raw value, humanised (`per_sector_exposure` → "per sector exposure").
@@ -272,7 +272,7 @@ values fall back to the raw value, humanised (`per_sector_exposure` → "per sec
 | mode OFF / RECOMMEND / AUTO | Off / Recommend / Auto | Off: no new trade ideas; exits and protective actions still run. Recommend: the engine proposes, you place trades in Kite. Auto: the engine places orders itself; switched on only from Telegram. |
 | routing paper / live | Auto orders go to: Paper / Live account | Only matters in Auto. |
 | risk NORMAL / FROZEN / CLOSE_ONLY / KILLED | Normal / New positions paused / Closing only / Kill switch on | see §5 bodies |
-| degrade DG0 … DG4 | Full / Pacing / Saving / Minimal / Stopped | DG1: spending ahead of the weekly pace, background check-ins slow down, recommendation quality unchanged. DG2: background AI checks reduced, recommendations continue. DG3: AI analysts paused, scanner alerts only. DG4: no AI calls until Thursday 14:00 IST. |
+| degrade DG0 … DG4 | Normal / Pacing / Saving / Minimal / Stopped | DG1: spending ahead of the weekly pace, background check-ins slow down, recommendation quality unchanged. DG2: background AI checks reduced, recommendations continue. DG3: AI analysts paused, scanner alerts only. DG4: no AI calls until Thursday 14:00 IST. |
 | forward cap | Candidates sent to the AI per day | the pre-screen cap at the current AI level |
 | verdict approve / shrink / reject / owner_approval_required | Approved / Approved, smaller / Blocked / Needs your OK | shrink: quantity reduced to fit a limit; reject: failed a risk check |
 | human_action pending / taken / expired / dismissed / closed | Waiting for you / You took it / Expired / You skipped it / Closed | set on Telegram (`/taken`, `/closed`) |
@@ -390,6 +390,28 @@ webfont, charts beyond the paper equity curve, per-user settings.
 | Hidden information behind tabs | alerts aggregate across tabs; badges on tabs; Overview shows everything actionable |
 | Owner muscle memory | same data and controls; tab in hash; Overview mirrors the old top-of-page |
 | Breaking the live page | all work in worktree `mt_dash`; live `dist` untouched until the deploy step |
+
+## 15. Implementation notes — where the build deviated from this spec, and why
+
+Each change below came from looking at the rendered page or from a validation finding (2026-10-08).
+
+| # | Change | Why |
+|---|---|---|
+| 1 | AI level DG0 reads **Normal**, not "Full" | "41% used, full" read as "the budget is full" |
+| 2 | Day labels use a comma: `Today, Thu 8 Oct` | middle-dot meta strings are a generic-template tell |
+| 3 | A defined term is its own toggletip (dotted underline); the ⓘ button remains only for standalone explanations | an ⓘ after every label and header was noisy and pushed the scorecard 260 px wider than its card |
+| 4 | The paper tab is labelled **Paper trading**; it says "Simulated" once at the top and its cards drop the per-card tag (Card `simTag`), keeping the dashed border | a tag on every card was redundant text |
+| 5 | The live ticket grid uses `auto-fit` and a container query (two columns inside a ticket ≥ 780 px wide) | one ticket used to sit in a third of the row, leaving two thirds empty |
+| 6 | Positions table: "Stop-loss confirmed" is the second column; side folds into the stock cell | with a long symbol the safety column was the one scrolled out of view |
+| 7 | Overview's positions + paper row stacks below 1200 px (not 1024) | at 1024 the positions table had to scroll |
+| 8 | Scorecard scrolls sideways under ~1250 px with a sticky Strategy column | 14 columns cannot fit a laptop; the row label stays visible |
+| 9 | On phones (< 640 px) tables drop their header row entirely and wrap a value under its label when it can't fit | a clipped header left its hint buttons focusable but invisible; a pill can't wrap at 320 px |
+| 10 | One "Loading the dashboard…" line until the first poll answers | panels popping in one by one measured a layout shift of 0.21 |
+| 11 | The equity chart's starting-capital label moved into a legend under the chart; the table toggle has its own row | the label collided with the end dot; the toggle collided with the card meta |
+| 12 | A lapsed recommendation with no recorded action reads **No action recorded** (`actionState`), not "Waiting for you" | after `valid_until` the old wording asked the owner to act on an expired idea |
+| 13 | Hints close 200 ms after the pointer leaves, unless it moves onto the bubble | WCAG 1.4.13 (hoverable) |
+| 14 | Sign colours in tables use `.dt .pos/.neg` | `.dt td` out-ranked `.pos`, so returns showed uncoloured |
+| 15 | Fixture server: `ALERTS=1`, `EMPTY=1`, `POST /mode`, `POST /config/trade_window`, 405 for other methods | the alert, first-boot and write paths needed something to run against |
 
 ## Appendix A — gate rule IDs in plain words
 
