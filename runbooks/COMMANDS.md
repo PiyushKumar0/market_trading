@@ -255,6 +255,10 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
   hard-stopped. A change to agents.yaml applies on the next engine boot — validate with the loader
   one-liner above first. The month column in `budget_ledger` is written but read by nothing.
 - Owner outcome capture: `/taken <rec_id> <qty> <price>`, `/closed <rec_id> <price>`, `/veto <rec_id>`.
+- `/rearm` (or the dashboard alert's Re-arm, `POST /risk/rearm`, 2026-10-08): lifts each floor stop
+  (`floor_weekly_drawdown`, `floor_equity_floor_rung`, `floor_cumulative_floor`) the engine's book is back
+  above; one still breached stays latched. A kill switch still needs `/kill_reset` + `/confirm`, and the
+  mode a floor forced down stays where it is.
 - `/protected <symbol|rec_id>`: confirm the stop order for a taken position. Until then `/positions`
   shows "UNPROTECTED (unconfirmed)" and `protection_reminder_tick` (300 s) sends at most two critical
   reminders (30 min after `/taken`, deferred to 08:00 if outside 08:00-22:00; again once the next

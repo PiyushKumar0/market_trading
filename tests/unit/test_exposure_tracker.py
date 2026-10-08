@@ -315,6 +315,24 @@ async def test_apply_floor_breach_routes_through_latch_when_wired(conn, clock):
 
 
 @pytest.mark.asyncio
+async def test_rearm_floors_clears_a_rung_only_once_equity_is_back_above_it(conn, clock):
+    from engine.risk.causes import RiskStateLatch
+
+    _equity_at(conn, Decimal("18000"))                 # −10% rung
+    tracker = ExposureTracker(conn, clock, CAPITAL)
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mm)
+    await tracker.apply_floor_breaches(tracker.evaluate_floors(FloorLimits()), mm, ks, latch=latch)
+
+    assert await tracker.rearm_floors(FloorLimits(), latch, Actor.OWNER) == ([], ["floor_equity_floor_rung"])
+    assert mm.risk_state() == RiskState.CLOSE_ONLY
+
+    conn.execute("UPDATE positions SET realized_pnl='-1000' WHERE position_id='pnl'")   # equity 19,000
+    assert await tracker.rearm_floors(FloorLimits(), latch, Actor.OWNER) == (["floor_equity_floor_rung"], [])
+    assert mm.risk_state() == RiskState.NORMAL
+
+
+@pytest.mark.asyncio
 async def test_apply_weekly_drawdown_forces_close_only_and_recommend(conn, clock):
     for d, eq in [("2026-06-10", "22000"), ("2026-06-16", "20400")]:
         _snapshot(conn, f"{d}T15:25:00+05:30", eq)

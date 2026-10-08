@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from engine.api.app import create_app
 from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_yaml
-from engine.core.enums import Actor, Mode
+from engine.core.enums import Actor, Mode, RiskState
 from engine.core.protected_store import ProtectedStore
 from engine.core.secrets import DASHBOARD_TOKEN
 from engine.core.types import OwnerConfirmation
@@ -407,6 +407,31 @@ def test_risk_headroom_wired_without_limits_engine_omits_caps(conn, clock, expos
     client = _client(conn=conn, clock=clock, exposure=exposure)
     r = client.get("/risk/headroom", headers=AUTH)
     assert "caps" not in r.json()["headroom"]
+
+
+async def test_rearm_clears_a_floor_stop_only_once_equity_is_back_above_it(
+    conn, clock, limits_engine, mode_manager,
+) -> None:
+    from engine.risk.causes import RiskStateLatch
+
+    exposure = ExposureTracker(conn, clock, Decimal("40000"))   # the real limits.yaml base
+    latch = RiskStateLatch(conn, clock, mode_manager)
+    await latch.set_cause("floor_equity_floor_rung", RiskState.CLOSE_ONLY, "test", Actor.RISK_GATE)
+    _insert_position(conn, "loss", state="CLOSED", closed_at="2026-06-17T11:00:00+05:30",
+                     realized_pnl="-5000", costs="0")              # equity 35,000: still at/below the −10% rung
+    client = _client(conn=conn, clock=clock, exposure=exposure, limits_engine=limits_engine, latch=latch)
+
+    assert client.get("/risk/headroom", headers=AUTH).json()["headroom"]["floors"] == {"floor_equity_floor_rung": False}
+    assert client.post("/risk/rearm", headers=AUTH).json() == {
+        "ok": True, "cleared": [], "still_breached": ["floor_equity_floor_rung"], "risk_state": "CLOSE_ONLY",
+    }
+
+    conn.execute("UPDATE positions SET realized_pnl='-1000' WHERE position_id='loss'")   # equity 39,000
+    assert client.get("/risk/headroom", headers=AUTH).json()["headroom"]["floors"] == {"floor_equity_floor_rung": True}
+    assert client.post("/risk/rearm", headers=AUTH).json() == {
+        "ok": True, "cleared": ["floor_equity_floor_rung"], "still_breached": [], "risk_state": "NORMAL",
+    }
+    assert _client().post("/risk/rearm", headers=AUTH).status_code == 501
 
 
 # --------------------------------------------------------------------------- budget

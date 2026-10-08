@@ -87,6 +87,17 @@ test('risk states map to their levels', () => {
   assert.equal(closeOnly[0].level, 'critical')
 })
 
+test('a floor stop offers Re-arm only once the account is back above its line', () => {
+  const closeOnly = (rearmable: boolean) =>
+    deriveAlerts(input({}, {
+      mode: { mode: 'RECOMMEND', routing: null, risk_state: 'CLOSE_ONLY' },
+      headroom: { headroom: { floors: { floor_equity_floor_rung: rearmable } } },
+    }))[0]
+  assert.equal(closeOnly(true).action, 'rearm')
+  assert.equal(closeOnly(false).action, undefined)
+  assert.match(closeOnly(false).body, /until the account is back above/)
+})
+
 test('an unprotected recommended position is named', () => {
   const alerts = deriveAlerts(input({}, { positions: { positions: [position()], as_of: null } }))
   assert.equal(alerts.length, 1)

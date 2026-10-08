@@ -522,6 +522,7 @@ const routes = {
           deployed_capital: '185000.00',
           open_positions: { total: 4, mis: 0, cnc: 4 },
           consecutive_losses: 2,
+          floors: { floor_cumulative_floor: true },   // the floor that set KILLED, account back above it
         })
       : headroom(),
   },
@@ -697,7 +698,17 @@ function setTradeWindow(req, res) {
   })
 }
 
-const posts = { '/paper': setPaper, '/mode': setMode, '/config/trade_window': setTradeWindow }
+// POST /risk/rearm as the engine answers it: clears the floors back above their line; a kill stays.
+function rearm(req, res) {
+  const h = routes['/risk/headroom'].headroom
+  const floors = h.floors ?? {}
+  const cleared = Object.keys(floors).filter((c) => floors[c])
+  const still = Object.keys(floors).filter((c) => !floors[c])
+  h.floors = Object.fromEntries(still.map((c) => [c, false]))
+  json(res, 200, { ok: true, cleared, still_breached: still, risk_state: routes['/mode'].risk_state })
+}
+
+const posts = { '/paper': setPaper, '/mode': setMode, '/config/trade_window': setTradeWindow, '/risk/rearm': rearm }
 
 http
   .createServer((req, res) => {

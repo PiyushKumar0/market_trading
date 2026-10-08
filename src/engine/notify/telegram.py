@@ -80,6 +80,7 @@ from engine.risk.events import (
     RiskStateChanged,
     TradeWindowChanged,
 )
+from engine.risk.limits import floor_limits_from
 from engine.risk.mode import ModeRefused
 
 if TYPE_CHECKING:  # avoid hard import cycles / heavy deps at import time
@@ -309,6 +310,9 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Pause new entries (risk_state FROZEN); risk-reducing exits continue.", True),
     _CommandSpec("resume_entries", "/resume_entries",
                  "Resume entries: clears the owner pause AND a rejection-storm freeze.", True),
+    _CommandSpec("rearm", "/rearm",
+                 "Re-arm floor stops (weekly drawdown, equity floor, total-loss floor) the account is back "
+                 "above; a stop still breached stays.", True),
     # --- RECOMMEND outcome capture (§3.6) ---
     _CommandSpec("taken", _USAGE_TAKEN,
                  "Confirm you took a recommendation at qty/price (origin=recommended). The symbol is "
@@ -966,6 +970,7 @@ class TelegramBot:
             "help": self._cmd_help,
             "pause_entries": self._cmd_pause_entries,
             "resume_entries": self._cmd_resume_entries,
+            "rearm": self._cmd_rearm,
             "taken": self._cmd_taken,
             "closed": self._cmd_closed,
             "veto": self._cmd_veto,
@@ -1307,6 +1312,21 @@ class TelegramBot:
         text = f"owner pause + rejection-storm freeze cleared — risk_state {state.value}."
         if remaining:
             text += " Still latched by: " + ", ".join(remaining) + "."
+        await _reply(update, text)
+
+    async def _cmd_rearm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Owner re-arm of floor stops (§7.1): clears only the rungs equity is back above."""
+        if self._latch is None or self._limits is None or self._exposure is None:
+            await _reply(update, "/rearm: exposure, limits or risk latch not wired.")
+            return
+        cleared, still = await self._exposure.rearm_floors(
+            floor_limits_from(self._limits.table()), self._latch, Actor.OWNER
+        )
+        _log.warning("telegram_cmd_rearm", cleared=cleared, still_breached=still)
+        text = (f"re-armed: {', '.join(cleared)}" if cleared else "no floor stop re-armed")
+        text += f" — risk_state {self._latch.resolved_state().value}."
+        if still:
+            text += " Still below the line: " + ", ".join(still) + "."
         await _reply(update, text)
 
     # ------------------------------------------------------------------ ticker → rec_id (WO-29)

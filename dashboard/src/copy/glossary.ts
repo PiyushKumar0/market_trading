@@ -74,14 +74,14 @@ const RISK: Table = {
     label: 'Closing only',
     hint:
       'Exits only, no new positions. A daily-loss stop lifts at the next day’s engine start. A weekly-drawdown or ' +
-      'equity-floor stop does not lift by itself.',
+      'equity-floor stop stays until the account is back above its line and you re-arm it (here or /rearm).',
   },
   KILLED: {
     label: 'Kill switch on',
     hint:
       'No new trades, real or paper. Open positions are not closed for you; exit alerts still arrive. Reset on ' +
       'Telegram: /kill_reset, then /confirm with the phrase the bot sends (within 2 minutes). If the total-loss floor ' +
-      'set it, the state stays on after the reset.',
+      'set it, that stop also needs a re-arm once the account is back above its line.',
   },
 }
 export const riskTerm = (v: string | null | undefined): Term => lookup(RISK, v)
@@ -531,6 +531,14 @@ export const COPY = {
       'cannot be switched back on from the dashboard.',
     confirm: 'Turn off',
     cancel: 'Keep Auto',
+  } satisfies DialogCopy,
+  rearm: {
+    title: 'Re-arm the floor stop?',
+    body:
+      'The account is back above the floor, so the stop it set can be lifted and new trades are allowed again. ' +
+      'A kill switch still needs /kill_reset on Telegram, and the engine mode stays as it is.',
+    confirm: 'Re-arm',
+    cancel: 'Keep stopped',
   } satisfies DialogCopy,
   paperOn: {
     title: 'Turn on the paper autopilot?',

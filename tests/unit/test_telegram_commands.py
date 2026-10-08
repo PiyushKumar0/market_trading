@@ -1080,6 +1080,22 @@ async def test_resume_entries_reports_a_cause_it_may_not_clear(clock, conn, latc
     assert "Still latched by: stale_feed" in msg.sent[0]
 
 
+async def test_rearm_clears_a_floor_stop_only_once_equity_is_back_above_it(
+    clock, conn, latch, exposure, limits_engine, msg,
+):
+    await latch.set_cause("floor_equity_floor_rung", RiskState.CLOSE_ONLY, "test", Actor.RISK_GATE)
+    below = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, latch=latch, limits_engine=limits_engine,
+                        exposure=exposure)                      # equity 20,000 vs the real ₹40,000 base
+    await below._cmd_rearm(_Update(msg), _Ctx())
+    assert msg.sent[0] == "no floor stop re-armed — risk_state CLOSE_ONLY. Still below the line: floor_equity_floor_rung."
+
+    above = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, latch=latch, limits_engine=limits_engine,
+                        exposure=ExposureTracker(conn, clock, Decimal("40000")))
+    await above._cmd_rearm(_Update(msg), _Ctx())
+    assert msg.sent[1] == "re-armed: floor_equity_floor_rung — risk_state NORMAL."
+    assert ModeManager(conn, clock).risk_state() == RiskState.NORMAL
+
+
 # --------------------------------------------------------------------------- owner approvals (§3.4)
 def _insert_approval(conn, approval_id: str, payload: str = '{"position_id": "pos-1", "new_stop": "2380.00"}',
                      status: str = "pending") -> None:

@@ -327,6 +327,8 @@ export interface Headroom {
   consecutive_losses?: number
   deployed_capital?: string
   caps?: HeadroomCaps
+  /** Each latched floor stop (`floor_<rung>`) → whether the account is back above its line (re-armable). */
+  floors?: Record<string, boolean>
 }
 
 export interface HeadroomResponse {

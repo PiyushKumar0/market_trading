@@ -48,6 +48,7 @@ from engine.intelligence.events import TOPIC_BUDGET_STATE
 from engine.ops.paper_summary import paper_summary
 from engine.ops.scorecard import LABEL, scorecard
 from engine.risk.events import TOPIC_KILL_STATE, TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_TRADE_WINDOW
+from engine.risk.limits import floor_limits_from
 
 _log = get_logger("engine.api.app")
 
@@ -208,6 +209,7 @@ def create_app(
     market_store: Any = None,
     paper_control: Any = None,
     paper_view: Any = None,
+    latch: Any = None,
 ) -> FastAPI:
     """Construct the dashboard ``FastAPI`` app (§3.2.11).
 
@@ -239,6 +241,7 @@ def create_app(
     app.state.market_store = market_store   # MarketStore (news watchlist); `store` is the ProtectedStore
     app.state.paper_control = paper_control
     app.state.paper_view = paper_view
+    app.state.latch = latch
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
@@ -436,7 +439,22 @@ def create_app(
                 "consecutive_losses_max_per_session": lim.consecutive_losses.max_per_session,
                 "max_new_trades_day": lim.max_new_trades_day.count,
             }
+            if app.state.latch is not None:
+                headroom["floors"] = exposure.latched_floors(floor_limits_from(limits_engine.table()), app.state.latch)
         return {"headroom": headroom}
+
+    @app.post("/risk/rearm")
+    async def risk_rearm(_: Owner) -> dict[str, Any]:
+        """Owner re-arm of floor stops (§7.1), single-step like ``POST /mode``: it clears only the rungs
+        equity is back above, so it can never relax a floor that is still breached."""
+        exposure, limits_engine, latch = app.state.exposure, app.state.limits_engine, app.state.latch
+        if exposure is None or limits_engine is None or latch is None:
+            return JSONResponse(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                content={"ok": False, "note": "phase-0 stub — exposure, limits or risk latch not wired"},
+            )
+        cleared, still = await exposure.rearm_floors(floor_limits_from(limits_engine.table()), latch, Actor.OWNER)
+        return {"ok": True, "cleared": cleared, "still_breached": still, "risk_state": latch.resolved_state().value}
 
     @app.get("/budget")
     async def budget(_: Owner) -> dict[str, Any]:

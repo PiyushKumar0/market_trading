@@ -513,6 +513,22 @@ class ExposureTracker:
             if alert is not None:
                 await alert(f"FLOOR BREACH {breach.rung}: {reason}")
 
+    def latched_floors(self, limits: Any, latch: Any) -> dict[str, bool]:
+        """Each latched ``floor_<rung>`` cause → whether equity is back above its rung (re-armable)."""
+        breached = {f"floor_{b.rung}" for b in self.evaluate_floors(limits)}
+        return {cause: cause not in breached
+                for cause, _state, _detail in latch.active_causes() if cause.startswith("floor_")}
+
+    async def rearm_floors(self, limits: Any, latch: Any, who: Actor) -> tuple[list[str], list[str]]:
+        """Owner re-arm (§7.1 "owner re-arm only"): clear each floor cause equity is back above; a
+        still-breached one stays latched. Returns ``(cleared, still_breached)``."""
+        self._real_only()
+        floors = self.latched_floors(limits, latch)
+        cleared = [cause for cause, ok in floors.items() if ok]
+        for cause in cleared:
+            await latch.clear_cause(cause, who)
+        return cleared, [cause for cause, ok in floors.items() if not ok]
+
     async def _escalate(self, mode_manager: ModeManager, to: RiskState, reason: str) -> None:
         """Set the risk state only if ``to`` is strictly MORE restrictive than the current one — a
         milder rung firing after a harsher one must never relax the state (§3.5.3)."""

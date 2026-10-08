@@ -63,7 +63,9 @@ the engine's 15 s `ping` keepalive is filtered out.
 
 **Owner writes** are limited to `POST /mode` (OFF / RECOMMEND), `POST /config/trade_window` and
 `POST /paper` (paper autopilot ON / OFF, single-step; ON always asks, OFF asks only when waiting paper
-entry orders would be cancelled; ON is refused 409 unless the autopilot is built). They go through an
+entry orders would be cancelled; ON is refused 409 unless the autopilot is built) and `POST /risk/rearm`
+(the alert's Re-arm button: lifts each floor stop the account is back above; a still-breached one stays,
+and so does a kill switch). They go through an
 in-page dialog with action-named buttons, and every result is a toast; the value shown always comes
 from the next poll, never from an optimistic guess. Switching the engine Off asks first. Deliberately
 absent, and not an oversight: →AUTO, kill-switch reset and paper reset are owner TWO-STEP transitions

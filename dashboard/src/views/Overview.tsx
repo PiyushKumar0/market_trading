@@ -23,6 +23,7 @@ export function Overview({
   onTab,
   onSignOut,
   onAck,
+  onRearm,
   errorDetail,
 }: {
   snapshot: Snapshot
@@ -32,6 +33,7 @@ export function Overview({
   onTab: (t: TabId) => void
   onSignOut: () => void
   onAck: (ids: string[]) => void
+  onRearm: () => void
   /** The poll's own failure text ("positions: 502 Bad Gateway | …") for the load-failure alerts. */
   errorDetail: string | null
 }) {
@@ -43,7 +45,14 @@ export function Overview({
     <>
       <h1 className="sr-only">Overview</h1>
       {alerts.length ? (
-        <AlertsCard alerts={alerts} onTab={onTab} onSignOut={onSignOut} onAck={onAck} detail={errorDetail} />
+        <AlertsCard
+          alerts={alerts}
+          onTab={onTab}
+          onSignOut={onSignOut}
+          onAck={onAck}
+          onRearm={onRearm}
+          detail={errorDetail}
+        />
       ) : null}
 
       <section className="act-now" aria-labelledby="act-now-title">

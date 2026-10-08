@@ -19,12 +19,14 @@ export function AlertsCard({
   onTab,
   onSignOut,
   onAck,
+  onRearm,
   detail,
 }: {
   alerts: Alert[]
   onTab: (t: TabId) => void
   onSignOut: () => void
   onAck: (ids: string[]) => void
+  onRearm: () => void
   /** Raw per-route failure text, shown behind a hint on the load-failure alerts. */
   detail?: string | null
 }) {
@@ -49,6 +51,11 @@ export function AlertsCard({
               <p className="alert-body">{a.body}</p>
             </div>
             <div className="alert-actions">
+              {a.action === 'rearm' ? (
+                <button type="button" className="btn btn-primary" onClick={onRearm}>
+                  Re-arm
+                </button>
+              ) : null}
               {a.action === 'signout' ? (
                 <button type="button" className="btn" onClick={onSignOut}>
                   Sign out

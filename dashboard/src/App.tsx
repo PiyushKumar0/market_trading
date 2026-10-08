@@ -1,8 +1,8 @@
 /**
  * Dashboard v2 (§3.2.11, O8/R8; redesign spec runbooks/design-2026-10-08-dashboard-redesign.md) — a
- * tabbed LAN console over the engine's read routes plus the three owner writes the dashboard is
- * allowed to make: `POST /mode` (OFF / RECOMMEND only), `POST /config/trade_window` and `POST /paper`
- * (paper autopilot ON / OFF, D13).
+ * tabbed LAN console over the engine's read routes plus the four owner writes the dashboard is
+ * allowed to make: `POST /mode` (OFF / RECOMMEND only), `POST /config/trade_window`, `POST /paper`
+ * (paper autopilot ON / OFF, D13) and `POST /risk/rearm` (floor stops the account is back above).
  *
  * Deliberately ABSENT from this surface, and not an oversight:
  *  - →AUTO and kill-switch RESET are owner TWO-STEP transitions with no dashboard path (Telegram
@@ -101,6 +101,17 @@ export default function App() {
     poll.refresh()
   }
 
+  async function rearm() {
+    if (!(await confirm(COPY.rearm))) return
+    try {
+      const r = await apiPost<{ cleared: string[] }>('/risk/rearm', {})
+      push(r.cleared.length ? 'good' : 'crit', r.cleared.length ? 'Floor stop re-armed.' : 'Not re-armed: the account is still below the line.')
+    } catch (e) {
+      push('crit', e instanceof NoAnswerError ? COPY.noAnswer('risk state') : `Couldn't re-arm: ${reason(e)}`)
+    }
+    poll.refresh()
+  }
+
   async function setHours(body: { start: string; end: string; squareoff_buffer_min: number | null }) {
     try {
       await apiPost<{ ok: boolean }>('/config/trade_window', body)
@@ -161,6 +172,7 @@ export default function App() {
         onTab={openTab}
         onSignOut={() => saveToken('')}
         onAck={ack}
+        onRearm={() => void rearm()}
         errorDetail={poll.error}
       />
     ),

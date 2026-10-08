@@ -1693,7 +1693,7 @@ async def run() -> int:
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
                       protected_store=protected_store, exposure=exposure, governor=governor,
                       limits_engine=limits_engine, market_store=store, paper_control=paper_control,
-                      paper_view=paper.view() if paper is not None else None)
+                      paper_view=paper.view() if paper is not None else None, latch=latch)
     if not secrets.has(DASHBOARD_TOKEN):
         _log.warning("dashboard_token_missing", hint="run scripts/dpapi_set.py --generate-dashboard-token")
 
@@ -4439,13 +4439,14 @@ def _build_telegram(settings, secrets, clock, mode, kill, *, latch=None, governo
 
 def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protected_store=None,
                 exposure=None, governor=None, limits_engine=None, market_store=None,
-                paper_control=None, paper_view=None):
+                paper_control=None, paper_view=None, latch=None):
     from engine.api.app import create_app
 
     return create_app(session_manager=session, mode_manager=mode, kill_switch=kill,
                       secrets=secrets, clock=clock, bus=bus, conn=conn, store=protected_store,
                       exposure=exposure, governor=governor, limits_engine=limits_engine,
-                      market_store=market_store, paper_control=paper_control, paper_view=paper_view)
+                      market_store=market_store, paper_control=paper_control, paper_view=paper_view,
+                      latch=latch)
 
 
 async def _serve_api(app, settings):

@@ -21,7 +21,7 @@ export interface Alert {
   body: string
   /** The tab that shows the detail. */
   tab?: TabId
-  action?: 'signout' | 'ack-telegram'
+  action?: 'signout' | 'ack-telegram' | 'rearm'
   /** For `ack-telegram`: every failed notification id shown now, to remember as seen. */
   ackIds?: string[]
 }
@@ -128,6 +128,15 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       body: 'No part of the page could refresh. Check that the engine is running; the page retries every 10 seconds.',
     })
   }
+  // A floor stop (weekly drawdown, equity floor, total-loss floor) stays until the owner re-arms it,
+  // which the engine allows only once the account is back above that floor's line (POST /risk/rearm).
+  const floors = Object.values(s.headroom?.headroom.floors ?? {})
+  const rearmable = floors.some(Boolean)
+  const floorNote = !floors.length
+    ? ''
+    : rearmable
+      ? ' The account is back above its floor: re-arm to allow new trades again.'
+      : ' A floor stop stays until the account is back above its line; then re-arm it here or with /rearm.'
   if (risk === 'KILLED') {
     add({
       id: 'killed',
@@ -135,8 +144,9 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       title: 'Kill switch is on — no new trades',
       body:
         'Open positions are not closed for you; exit alerts still arrive. Reset on Telegram: /kill_reset, then ' +
-        '/confirm with the phrase the bot sends. If the total-loss floor set it, it stays on after the reset.',
+        `/confirm with the phrase the bot sends.${floorNote}`,
       tab: 'system',
+      action: rearmable ? 'rearm' : undefined,
     })
   }
   if (risk === 'CLOSE_ONLY') {
@@ -144,10 +154,9 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'close-only',
       level: 'critical',
       title: 'Closing only — no new positions',
-      body:
-        'A risk limit allows exits only. A daily-loss stop lifts at the next day’s engine start; a weekly-drawdown ' +
-        'or equity-floor stop does not lift by itself.',
+      body: `A risk limit allows exits only. A daily-loss stop lifts at the next day’s engine start.${floorNote}`,
       tab: 'system',
+      action: rearmable ? 'rearm' : undefined,
     })
   }
   if (tier === 'DG4') {
