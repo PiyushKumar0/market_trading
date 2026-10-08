@@ -1,5 +1,50 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-08 — Dashboard paper toggle + paper go-live (owner: "Add button to toggle paper trade from dashboard itself"; chose "Toggle + go-live tonight")
+
+- **Owner decisions:**
+  - Asked whether to also go live, the owner chose toggle + go-live, with the autopilot left OFF until they turn it ON. This is recorded as **D13** in the 10-06 plan §0.
+  - The host then slept 02:30–07:41, so the restart moved past the 09:15 open.
+  - 09:33: "Run agents now" (market-hours agents approved for today).
+  - 13:2x: "Trading windows has been closed so you can proceed now". That was the go-ahead for a mid-session restart, waiving the RUNBOOK's outside-09:15–15:30 rule for this one go-live.
+- **Process:** plan `mt_build_notes\paper_toggle_plan.md`.
+  - Spec review: 4 lenses plus a critic, 37 findings; plan v2 records each disposition.
+  - Build: two agents in parallel.
+  - Diff review: 3 lenses plus an adversarial verifier, 8 findings. 5 real-low ones are fixed, 1 was refuted, and 2 high ones were the same environment hazard, below.
+- **b2dcee2 toggle:**
+  - `POST /paper {enabled}` is single-step under the bearer token, like `POST /mode` OFF/RECOMMEND (D8: no real-order path). ON answers 409 unless the autopilot is built.
+  - `PaperControl.set_enabled` writes only a change, and audits it to `config_audit` in the same transaction (`via` dashboard|telegram).
+  - The Paper panel has a turn ON / turn OFF button. ON asks a confirm; OFF asks only when resting paper entries would be cancelled. The guard chip shows only while ON.
+  - The OFF wording is aligned across Telegram, RUNBOOK and COMMANDS.
+  - The rollback floor is now an observable `is_paper` row-count check.
+  - Fixture screenshots: the go-live view, the ON/OFF round trip, and the OFF confirm.
+- **Environment hazard, fixed by the owner at 13:10:**
+  - `mt_wip\.venv` is a junction to the live venv. A review agent's `uv run pytest` (10:59) re-pointed the live editable install at `mt_wip\src`.
+  - The next engine start would have run uncommitted code with `mt_wip\config` and a fresh empty database.
+  - My `uv pip install --no-deps -e market_trading` was refused by the permission classifier; the owner ran it. Verified: the .pth points at `market_trading\src`, and a fresh interpreter imports from there.
+  - Rule: never `uv run`/`sync` in a worktree.
+- **d822d20 go-live:**
+  - `paper.subsystem_enabled: true`. The shipped-settings test pin is now flag-agnostic.
+  - Tests: 1055 settings-touching tests passed with the flag on; full suite on d822d20: 3921 passed, 20 skipped.
+- **Deploy, 13:49–13:52:**
+  - Pre-flight: 0 non-terminal orders, 0 paper rows, 0 real orders; the ancestor check passed; the .pth was correct.
+  - Backup `data\backups\pre_paper_golive.db`: integrity ok, 41 tables, schema 0016.
+  - One command: stop, `phase3` fast-forwarded 4842427 → d822d20, dashboard built, start.
+  - Boot:
+    - 13:50:13 `paper_runtime_constructed failures=[]`, then `paper_composed`;
+    - 13:50:15 `job_scheduled paper_tick`;
+    - 13:52:15 `paper_prep_started` (since None) → `paper_prep_done failed=False`, on the first in-session tick;
+    - 13:52:22 `engine_ready`; post-arm reported nothing failed.
+  - Health: 0 ERROR/CRITICAL lines, 0 paper_alert/step/compose failures, 0 Kite order/GTT calls.
+  - API: `GET /paper` and `POST /paper` answer 401 without a token; the served bundle matches `dist`.
+  - Real side unchanged: RECOMMEND, NORMAL, not killed, 0 real orders.
+  - Paper: OFF (`changed_at` NULL), `last_observed_at` advancing; first `paper_equity_snapshots` row 13:52 at ₹40,000 (the capital base).
+- **Engine left running,** per the owner's go-live decision (the 10-07 stop instruction was scoped to that build).
+- **Next:**
+  - The owner reloads the dashboard (Ctrl+F5) and presses turn ON in the Paper panel.
+  - From the first ON, the Q4.13 five-session checks run daily (RUNBOOK §Go-live step 3).
+  - Built-but-OFF writes flat equity snapshots each session; the first epoch's curve starts at go-live.
+
 ## 2026-10-07 01:28– — Implementing plan v5 (owner: "Implement and validate the plan … Avoid redundancy, over complication or unnecessary comments. Keep test cases concise")
 
 - **Where:** worktree `..\mt_wip`, branches `wip/m0` → `wip/m1` → … (one per milestone, plan §3.2). The live tree (`phase3`, engine running) is untouched until a milestone deploys.
