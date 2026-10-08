@@ -405,7 +405,7 @@ bars are judged against owner-set state (the trade window) that moved during the
 
 Paper trades every gate-approved proposal through the OMS against a simulated broker (`PaperBroker`) and its
 own GTT book. It never calls Kite. Real and paper rows share the tables, split by `is_paper`. Built only when
-`paper.subsystem_enabled` is true.
+`paper.subsystem_enabled` is true (true since 2026-10-08).
 
 ## /paper commands
 

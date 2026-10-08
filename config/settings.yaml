@@ -81,7 +81,7 @@ recommend:
   reminder_window_end: "22:00"
 
 paper:
-  subsystem_enabled: false
+  subsystem_enabled: true                 # go-live 2026-10-08 (Q4.13, D13); the autopilot stays OFF until turned ON
   seed: 20261006
   exit_minutes_before_close: 10
   exit_working_timeout_min: 5
