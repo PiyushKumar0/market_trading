@@ -1,0 +1,161 @@
+/* Paper trading tab: status, figures, the equity chart, the book. */
+
+.paper-stats {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+
+.paper-banner {
+  padding: var(--sp-3) var(--sp-4);
+  border-left: 4px solid var(--warn);
+  border-radius: var(--r-section);
+  background: var(--warn-tint);
+  color: var(--text-1);
+}
+
+.paper-subhead {
+  margin-bottom: var(--sp-2);
+  font-family: var(--font);
+  font-size: var(--fs-14);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.paper-halts ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.paper-halt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  color: var(--text-2);
+}
+
+.paper-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--warn);
+}
+
+.paper-note .icon {
+  margin-top: 3px;
+  flex: none;
+}
+
+.paper-counters {
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+
+/* ------------------------------------------------------------------- equity chart */
+
+.eq {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.eq-tools {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.eq-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5);
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+
+.eq-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.eq-plot {
+  position: relative;
+  width: 100%;
+  border-radius: var(--r-control);
+}
+
+.eq-plot svg {
+  display: block;
+  overflow: visible;
+  touch-action: pan-y;
+}
+
+.eq-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.eq-tick {
+  fill: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.eq-base {
+  stroke: var(--text-3);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+
+.eq-area {
+  fill: var(--sim);
+  opacity: 0.08;
+}
+
+.eq-line {
+  fill: none;
+  stroke: var(--sim);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.eq-cross {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.eq-dot {
+  fill: var(--sim);
+  stroke: var(--surface-1);
+  stroke-width: 2;
+}
+
+.eq-tip {
+  position: absolute;
+  top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 172px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-section);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-float);
+  pointer-events: none;
+}
+
+.eq-tip-v {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.eq-tip-k {
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+

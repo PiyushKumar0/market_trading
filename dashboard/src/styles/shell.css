@@ -138,7 +138,7 @@
   position: sticky;
   top: 0;
   z-index: 30;
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
 

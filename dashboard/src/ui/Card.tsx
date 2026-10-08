@@ -21,6 +21,7 @@ export function Card({
   children,
   className,
   titleTag = 'h2',
+  simTag = true,
 }: {
   title: ReactNode
   id?: string
@@ -30,6 +31,8 @@ export function Card({
   children?: ReactNode
   className?: string
   titleTag?: 'h2' | 'h3'
+  /** Show the "Simulated" tag on a simulated card (off where the page already says it once). */
+  simTag?: boolean
 }) {
   const hid = useId()
   const H = titleTag
@@ -45,7 +48,7 @@ export function Card({
           <H id={hid} className="card-title">
             {title}
           </H>
-          {tier === 'simulated' ? (
+          {tier === 'simulated' && simTag ? (
             <Pill tone="sim" icon="flask" title="Paper trading: simulated money, never a real order">
               Simulated
             </Pill>

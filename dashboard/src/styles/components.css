@@ -537,6 +537,15 @@
   text-align: right;
 }
 
+/* `.dt td` sets the cell colour, so sign colours need the same specificity to show in a table. */
+.dt .pos {
+  color: var(--good);
+}
+
+.dt .neg {
+  color: var(--crit);
+}
+
 .dt .nowrap {
   white-space: nowrap;
 }

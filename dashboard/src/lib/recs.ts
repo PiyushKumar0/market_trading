@@ -1,6 +1,27 @@
 /** Recommendation helpers shared by the Overview and Recommendations tabs. Pure and DOM-free. */
+import { actionTerm } from '../copy/glossary.ts'
 import type { RecommendationPayload, RecommendationRow } from '../types.ts'
 import { inr } from './format.ts'
+
+export interface ActionState {
+  label: string
+  hint?: string
+  term?: string
+  tone: 'good' | 'warn' | 'neutral'
+}
+
+/** Your recorded action, or — with none recorded — "waiting" only while the recommendation is live. */
+export function actionState(row: RecommendationRow, nowMs: number): ActionState {
+  if (row.human_action) {
+    return { ...actionTerm(row.human_action), tone: row.human_action === 'taken' ? 'good' : 'neutral' }
+  }
+  if (isLive(row, nowMs)) return { ...actionTerm(null), tone: 'warn' }
+  return {
+    label: 'No action recorded',
+    hint: 'Its validity passed without an action recorded on Telegram.',
+    tone: 'neutral',
+  }
+}
 
 /** A pending row whose `valid_until` is still ahead: actionable NOW, whichever day delivered it
  *  (WO-V 2026-09-13: a swing entry stays valid to the next session's close). */

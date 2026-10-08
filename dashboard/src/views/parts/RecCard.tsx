@@ -10,7 +10,6 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   FIELD,
-  actionTerm,
   kindTerm,
   productTerm,
   ruleTerm,
@@ -20,7 +19,7 @@ import {
   verdictTerm,
 } from '../../copy/glossary.ts'
 import { inr, istStamp, shortDate } from '../../lib/format.ts'
-import { instruction } from '../../lib/recs.ts'
+import { actionState, instruction } from '../../lib/recs.ts'
 import type { RecommendationRow } from '../../types'
 import { Hint, Labelled } from '../../ui/Hint'
 import { Icon } from '../../ui/Icon'
@@ -33,7 +32,6 @@ const VERDICT_TONE: Record<string, Tone> = {
   reject: 'crit',
   owner_approval_required: 'warn',
 }
-const ACTION_TONE: Record<string, Tone> = { taken: 'good' }
 const LONG_THESIS = 260
 
 function Level({ t, v }: { t: { label: string; hint?: string }; v: ReactNode }) {
@@ -47,7 +45,15 @@ function Level({ t, v }: { t: { label: string; hint?: string }; v: ReactNode }) 
   )
 }
 
-export function RecCard({ row, variant = 'live' }: { row: RecommendationRow; variant?: 'live' | 'history' }) {
+export function RecCard({
+  row,
+  nowMs,
+  variant = 'live',
+}: {
+  row: RecommendationRow
+  nowMs: number
+  variant?: 'live' | 'history'
+}) {
   const [more, setMore] = useState(false)
   const rec = row.recommendation
   if (!rec) {
@@ -61,7 +67,7 @@ export function RecCard({ row, variant = 'live' }: { row: RecommendationRow; var
   const side = (rec.side ?? '').toUpperCase()
   const gate = rec.gate
   const verdict = verdictTerm(gate?.verdict)
-  const action = actionTerm(row.human_action)
+  const action = actionState(row, nowMs)
   const shrunk = gate?.original_qty !== null && gate?.original_qty !== undefined && rec.qty !== undefined && gate.original_qty !== rec.qty
   const targets = rec.targets ?? []
   const timeExit = rec.exit_kind === 'time' || (targets.length === 0 && rec.hold_sessions !== null && rec.hold_sessions !== undefined)
@@ -157,9 +163,9 @@ export function RecCard({ row, variant = 'live' }: { row: RecommendationRow; var
             Risk check: {verdict.label}
           </Pill>
           {verdict.hint ? <Hint label="Risk check" term={verdict.term}>{verdict.hint}</Hint> : null}
-          <Pill tone={row.human_action ? ACTION_TONE[row.human_action] ?? 'neutral' : 'warn'}>{action.label}</Pill>
+          <Pill tone={action.tone}>{action.label}</Pill>
           <Hint label="Your action" term={row.human_action ?? undefined}>
-            {row.human_action ? action.hint : takenHint(rec.instrument, rec.qty)}
+            {action.tone === 'warn' ? takenHint(rec.instrument, rec.qty) : action.hint}
           </Hint>
           {rec.short_flag_higher_tail_risk ? (
             <Pill tone="crit" icon="alert">

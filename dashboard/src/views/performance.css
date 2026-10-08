@@ -1,0 +1,55 @@
+/* Performance: one scorecard table with a quiet group-header row above the column headers. */
+
+.perf-note {
+  margin: 0 0 var(--sp-3);
+  color: var(--text-2);
+}
+
+.perf-note .labelled {
+  margin-left: var(--sp-2);
+}
+
+.perf-table .perf-group {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  text-align: center;
+}
+
+.perf-table .perf-colhead {
+  text-align: left;
+}
+
+.perf-table th.perf-colhead:not(:first-child):not(:nth-child(10)) {
+  text-align: right;
+}
+
+.perf-actions {
+  min-width: 18ch;
+}
+
+.perf-strategy {
+  min-width: 13em;
+}
+
+@media (max-width: 639px) {
+  .perf-strategy {
+    min-width: 0;
+  }
+}
+
+.perf-error {
+  margin: 0;
+  color: var(--crit);
+}
+
+.perf-stale {
+  margin: var(--sp-3) 0 0;
+  color: var(--text-3);
+}
+
+@media (max-width: 639px) {
+  .perf-table .perf-group {
+    display: none;
+  }
+}

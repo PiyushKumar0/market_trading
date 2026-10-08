@@ -1,0 +1,31 @@
+/* System tab: engine status on top, risk limits and AI budget side by side. */
+
+.sys-meters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.sys-limit-line {
+  color: var(--text-2);
+}
+
+.sys-level {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.sys-sub {
+  display: block;
+  color: var(--text-3);
+  font-size: var(--fs-13);
+  font-weight: 400;
+}
+
+.sys-subhead {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-14);
+  font-weight: 600;
+  color: var(--text-2);
+}

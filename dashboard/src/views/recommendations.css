@@ -1,0 +1,132 @@
+/* Recommendations ledger: day folds holding one-line rows that open into tickets. */
+
+.view-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.view-sub {
+  color: var(--text-3);
+}
+
+.rec-ledger {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.rec-day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-section);
+  background: var(--surface-1);
+}
+
+.rec-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rec-row {
+  border-radius: var(--r-section);
+}
+
+.rec-row.open {
+  padding-bottom: var(--sp-2);
+}
+
+.rec-row-head {
+  display: grid;
+  grid-template-columns: auto 3.5em auto minmax(6em, max-content) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+}
+
+.rec-row-head:hover {
+  background: var(--surface-3);
+}
+
+.rec-row-time {
+  color: var(--text-3);
+}
+
+.rec-row-sym {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.rec-row-what {
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rec-row-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+}
+
+.rec-row-body {
+  padding: var(--sp-1) var(--sp-2) 0 var(--sp-6);
+}
+
+@media (max-width: 767px) {
+  .rec-row-head {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-areas:
+      'icon side sym'
+      '. time what'
+      '. pills pills';
+    row-gap: var(--sp-1);
+  }
+
+  .rec-row-head > .icon {
+    grid-area: icon;
+  }
+
+  .rec-row-head > .side {
+    grid-area: side;
+  }
+
+  .rec-row-sym {
+    grid-area: sym;
+  }
+
+  .rec-row-time {
+    grid-area: time;
+  }
+
+  .rec-row-what {
+    grid-area: what;
+    white-space: normal;
+  }
+
+  .rec-row-pills {
+    grid-area: pills;
+    justify-content: flex-start;
+  }
+
+  .rec-row-body {
+    padding-left: 0;
+  }
+}

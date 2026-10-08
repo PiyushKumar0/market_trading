@@ -1,6 +1,9 @@
-/** System tab — STUB, replaced in Task 10. Props are final. */
+/** System tab: engine status, risk limits and the AI usage budget, in plain language. */
 import type { BudgetResponse, ConnState, HeadroomResponse, ModeResponse, TradeWindowResponse } from '../types'
-import { EmptyState } from '../ui/Card'
+import { AiBudget } from './parts/AiBudget'
+import { EngineStatus } from './parts/EngineStatus'
+import { RiskLimits } from './parts/RiskLimits'
+import './system.css'
 
 export interface SystemProps {
   mode: ModeResponse | null
@@ -13,11 +16,14 @@ export interface SystemProps {
 }
 
 export function System(props: SystemProps) {
-  void props
   return (
     <>
       <h1 className="view-title">System</h1>
-      <EmptyState>This section is being rebuilt.</EmptyState>
+      <EngineStatus mode={props.mode} tradeWindow={props.tradeWindow} conn={props.conn} lastPollAt={props.lastPollAt} />
+      <div className="row-even">
+        <RiskLimits headroom={props.headroom} />
+        <AiBudget budget={props.budget} nowMs={props.nowMs} />
+      </div>
     </>
   )
 }

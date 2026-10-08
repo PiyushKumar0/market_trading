@@ -59,7 +59,7 @@ export function Overview({
         ) : live.length ? (
           <div className="tickets">
             {live.map((row) => (
-              <RecCard key={row.rec_id} row={row} variant="live" />
+              <RecCard key={row.rec_id} row={row} nowMs={nowMs} variant="live" />
             ))}
           </div>
         ) : (

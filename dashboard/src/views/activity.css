@@ -1,0 +1,168 @@
+/* Activity: four stacked sections. The Telegram transcript is the one nested scroll box on the page. */
+
+.act-jumps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.act-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+#act-risk,
+#act-telegram,
+#act-news,
+#act-live {
+  scroll-margin-top: calc(var(--appbar-h, 0px) + 64px);
+}
+
+.act-lede {
+  margin-bottom: var(--sp-3);
+}
+
+.act-none {
+  margin: 0 0 var(--sp-3);
+}
+
+.act-error {
+  margin: 0 0 var(--sp-3);
+  color: var(--crit);
+}
+
+/* ------------------------------------------------------------------- risk checks */
+
+.dt .act-fold-row td {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.act-stock {
+  overflow-wrap: anywhere;
+}
+
+.act-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+}
+
+.act-why {
+  min-width: 220px;
+}
+
+.act-why-paper {
+  margin-top: var(--sp-1);
+}
+
+@media (max-width: 639px) {
+  .dt .act-fold-row td {
+    display: block;
+  }
+
+  .dt .act-fold-row td::before {
+    content: none;
+  }
+
+  .act-result {
+    align-items: flex-end;
+  }
+
+  .act-why {
+    min-width: 0;
+  }
+}
+
+/* ------------------------------------------------------------------- telegram */
+
+.act-transcript {
+  max-height: 480px;
+  overflow: auto;
+}
+
+.act-msg-list,
+.act-events {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.act-msg,
+.act-event {
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.act-msg:last-child,
+.act-event:last-child {
+  border-bottom: 0;
+}
+
+.act-msg-head,
+.act-event-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+}
+
+.act-msg-time {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.act-msg-title {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.act-pre {
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-section);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--fs-13);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.act-pre-err {
+  color: var(--crit);
+}
+
+/* ------------------------------------------------------------------- news */
+
+.act-digest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.act-group + .act-group {
+  margin-top: var(--sp-4);
+}
+
+.act-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-16);
+  color: var(--text-1);
+}
+
+.act-count {
+  color: var(--text-3);
+  font-weight: 400;
+}
