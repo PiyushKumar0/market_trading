@@ -12,7 +12,18 @@ import { Icon } from './Icon'
 import { place } from './float'
 import type { Placement } from './float'
 
-export function Hint({ label, term, children }: { label: string; term?: string; children?: ReactNode }) {
+export function Hint({
+  label,
+  term,
+  children,
+  asTerm = false,
+}: {
+  label: string
+  term?: string
+  children?: ReactNode
+  /** Render the label itself as the trigger (dotted underline) instead of a trailing ⓘ. */
+  asTerm?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const pinned = useRef(false)
   const btn = useRef<HTMLButtonElement>(null)
@@ -53,15 +64,15 @@ export function Hint({ label, term, children }: { label: string; term?: string; 
     }
   }, [open])
 
-  if (!children && !term) return null
+  if (!children && !term) return asTerm ? <>{label}</> : null
 
   return (
     <>
       <button
         ref={btn}
         type="button"
-        className="hint-btn"
-        aria-label={`About ${label}`}
+        className={asTerm ? 'term-btn' : 'hint-btn'}
+        aria-label={asTerm ? undefined : `About ${label}`}
         aria-expanded={open}
         aria-describedby={open ? id : undefined}
         onClick={() => {
@@ -77,7 +88,7 @@ export function Hint({ label, term, children }: { label: string; term?: string; 
           if (!pinned.current) setOpen(false)
         }}
       >
-        <Icon name="hint" size={14} />
+        {asTerm ? label : <Icon name="hint" size={14} />}
       </button>
       {open
         ? createPortal(
@@ -102,18 +113,22 @@ export function Hint({ label, term, children }: { label: string; term?: string; 
   )
 }
 
-/** A glossary term as text, with its ⓘ hint when it has an explanation. A term with only an engine
- *  name gets a native tooltip instead — no extra button for nothing to read. */
+/** A glossary term as text. With an explanation, the word itself is the toggletip (dotted underline);
+ *  a term with only an engine name gets a native tooltip instead — no button for nothing to read. */
 export function Labelled({ t, className }: { t: Term; className?: string }) {
-  const nativeTitle = !t.hint && t.term && t.term !== t.label ? `Engine term: ${t.term}` : undefined
+  if (t.hint) {
+    return (
+      <span className={className ? `labelled ${className}` : 'labelled'}>
+        <Hint label={t.label} term={t.term} asTerm>
+          {t.hint}
+        </Hint>
+      </span>
+    )
+  }
+  const nativeTitle = t.term && t.term !== t.label ? `Engine term: ${t.term}` : undefined
   return (
     <span className={className ? `labelled ${className}` : 'labelled'} title={nativeTitle}>
       {t.label}
-      {t.hint ? (
-        <Hint label={t.label} term={t.term}>
-          {t.hint}
-        </Hint>
-      ) : null}
     </span>
   )
 }

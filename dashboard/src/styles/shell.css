@@ -1,0 +1,326 @@
+/* Navbar, tabs, token gate, popover form. */
+
+.appbar {
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.appbar-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--sp-2) var(--gutter);
+}
+
+.appbar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--target);
+  color: var(--text-1);
+  text-decoration: none;
+  border-radius: var(--r-control);
+}
+
+.brand-mark {
+  flex: none;
+}
+
+.brand-name {
+  font-family: var(--font-display);
+  font-size: var(--fs-16);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.health {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 12px 0 10px;
+  border: 0;
+  border-radius: var(--r-pill);
+  font-weight: 600;
+  font-size: var(--fs-13);
+  white-space: nowrap;
+}
+
+.health-good {
+  background: var(--good-tint);
+  color: var(--good);
+}
+.health-note {
+  background: var(--note-tint);
+  color: var(--note);
+}
+.health-warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+.health-crit {
+  background: var(--crit);
+  color: var(--accent-ink);
+}
+
+.appbar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+  margin-left: auto;
+}
+
+.appbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.ctl-label {
+  margin-right: var(--sp-1);
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+
+.hours-btn {
+  gap: 6px;
+  padding: 0 10px;
+  font-weight: 500;
+}
+
+.hours-k {
+  color: var(--text-3);
+}
+
+.hours-unset {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: var(--fs-13);
+  white-space: nowrap;
+}
+
+.conn-live {
+  color: var(--good);
+}
+
+.conn-off {
+  color: var(--text-disabled);
+}
+
+/* ------------------------------------------------------------------- tabs */
+
+.tabbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+
+.tabbar-inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.tabs {
+  display: flex;
+  gap: var(--sp-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 44px;
+  padding: 0 var(--sp-3);
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--text-1);
+}
+
+.tab[aria-selected='true'] {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.tab[aria-selected='true']::after {
+  content: '';
+  position: absolute;
+  left: var(--sp-3);
+  right: var(--sp-3);
+  bottom: 0;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--accent);
+}
+
+.tab:focus-visible {
+  outline-offset: -2px;
+}
+
+@media (min-width: 1200px) {
+  .appbar {
+    position: sticky;
+    top: 0;
+    z-index: 31;
+  }
+
+  .tabbar {
+    top: var(--appbar-h, 57px);
+  }
+}
+
+@media (max-width: 1199px) {
+  .appbar-meta {
+    margin-left: auto;
+  }
+
+  .appbar-controls {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    padding-top: var(--sp-1);
+    border-top: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 639px) {
+  .brand-name {
+    display: none;
+  }
+
+  .conn-text {
+    display: none;
+  }
+
+  .appbar-controls {
+    gap: var(--sp-2);
+  }
+
+  .ctl-label {
+    display: none;
+  }
+
+  .tabs {
+    margin: 0 calc(-1 * var(--gutter));
+    padding: 0 var(--gutter);
+    mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 24px), transparent 100%);
+  }
+}
+
+/* ------------------------------------------------------------------- popover form */
+
+.hours-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.popover-title {
+  font-size: var(--fs-16);
+}
+
+.popover-body {
+  color: var(--text-2);
+}
+
+.hours-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+
+.hours-grid .input {
+  width: 100%;
+}
+
+.input-short {
+  width: 96px;
+}
+
+.form-error {
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  background: var(--crit-tint);
+  color: var(--crit);
+}
+
+.popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* ------------------------------------------------------------------- token gate */
+
+.gate {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--gutter);
+}
+
+.gate-card {
+  width: min(440px, 100%);
+}
+
+.gate-brand {
+  margin-bottom: var(--sp-2);
+}
+
+.gate-title {
+  font-size: var(--fs-24);
+}
+
+.gate-body {
+  color: var(--text-2);
+}
+
+.gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.gate-form .input {
+  width: 100%;
+}

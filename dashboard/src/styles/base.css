@@ -98,6 +98,22 @@ kbd {
   border: 0;
 }
 
+.skip-link {
+  position: absolute;
+  left: var(--sp-3);
+  top: -100px;
+  z-index: 100;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.skip-link:focus {
+  top: var(--sp-3);
+}
+
 .num {
   font-variant-numeric: tabular-nums;
 }

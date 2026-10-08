@@ -69,7 +69,7 @@ const RISK: Table = {
 export const riskTerm = (v: string | null | undefined): Term => lookup(RISK, v)
 
 const TIER: Table = {
-  DG0: { label: 'Full', hint: 'AI analysts run normally.' },
+  DG0: { label: 'Normal', hint: 'AI analysts run normally.' },
   DG1: {
     label: 'Pacing',
     hint: 'AI spending is ahead of the weekly pace, so background check-ins slow down. Recommendation quality is unchanged.',
@@ -342,6 +342,34 @@ const MESSAGE_KIND: Table = {
   paper_alert: { label: 'Paper alert' },
 }
 export const messageKindTerm = (v: string | null | undefined): Term => lookup(MESSAGE_KIND, v)
+
+// ------------------------------------------------------------------------------------ field labels
+
+/** Labels for figures shown beside a value; the hint says what the number means. */
+export const FIELD = {
+  entry: { label: 'Entry', hint: 'The price, or price range, to enter at.' },
+  stop: { label: 'Stop-loss', hint: 'Exit if the price reaches this level.' },
+  target: { label: 'Target', hint: 'Take profit at this level.' },
+  amount: { label: 'Amount', hint: 'Quantity × entry price.' },
+  maxLoss: { label: 'Max loss if stopped', hint: 'Roughly what you lose if the stop-loss is hit.' },
+  plannedExit: { label: 'Planned exit', hint: 'The engine plans to exit after this many trading sessions.' },
+  validUntil: { label: 'Valid until', hint: 'After this the recommendation expires.' },
+  confidence: { label: 'Analyst confidence', hint: "The AI analyst's own score from 0 to 1. It is not a probability of profit." },
+  edge: {
+    label: 'Historical edge',
+    hint: "The average net return per trade in this strategy's registered study. It is not a forecast.",
+  },
+  stopDistance: {
+    label: 'Stop distance',
+    hint: "How far the stop-loss is from the entry, in multiples of the stock's average daily range (ATR).",
+  },
+  fill: { label: 'Your fill', hint: 'The price you reported on Telegram.' },
+} satisfies Record<string, Term>
+
+/** What to send on Telegram after acting on a live recommendation (telegram.py `/taken`: 3 arguments). */
+export function takenHint(symbol: string | undefined, qty: number | undefined): string {
+  return `After you place it in Kite, reply /taken ${symbol || 'SYMBOL'} ${qty ?? 'QTY'} PRICE on Telegram (PRICE = your fill).`
+}
 
 // ------------------------------------------------------------------------------------ fixed copy
 

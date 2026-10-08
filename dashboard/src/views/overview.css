@@ -1,0 +1,462 @@
+/* Overview: alerts band, Act-now tickets, positions + paper, today strip. The ticket's instruction is
+   the one loud element on the page; everything around it stays quiet. */
+
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.section-heading {
+  font-size: var(--fs-20);
+  color: var(--text-1);
+}
+
+.section-count {
+  color: var(--text-3);
+}
+
+.section-head .btn-quiet {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------------- alerts */
+
+.alerts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.alerts:focus {
+  outline: none;
+}
+
+.alerts:focus-visible .section-heading {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.alert-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-section);
+  border-left: 4px solid transparent;
+}
+
+.alert-critical {
+  background: var(--crit-tint);
+  border-left-color: var(--crit);
+}
+
+.alert-warning {
+  background: var(--warn-tint);
+  border-left-color: var(--warn);
+}
+
+.alert-notice {
+  background: var(--surface-1);
+  border-left-color: var(--border-strong);
+  padding-top: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+
+.alert-icon {
+  margin-top: 2px;
+}
+
+.alert-critical .alert-icon {
+  color: var(--crit);
+}
+.alert-warning .alert-icon {
+  color: var(--warn);
+}
+.alert-notice .alert-icon {
+  color: var(--note);
+}
+
+.alert-main {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.alert-title {
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.alert-body {
+  color: var(--text-2);
+}
+
+.alert-notice .alert-title {
+  font-weight: 500;
+}
+
+.alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-self: center;
+}
+
+/* ------------------------------------------------------------------- tickets */
+
+/* auto-fit: a lone ticket takes the whole row, and the container query below gives a wide ticket
+   two columns — no empty two-thirds of a row. */
+.tickets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+}
+
+.ticket-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
+}
+
+.ticket-main,
+.ticket-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+@container ticket (min-width: 780px) {
+  .ticket-body {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: var(--sp-6);
+  }
+
+  .ticket-side {
+    padding-left: var(--sp-6);
+    border-left: 1px solid var(--border);
+  }
+}
+
+.ticket {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-4) var(--sp-5) var(--sp-4) calc(var(--sp-5) + 2px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  container: ticket / inline-size;
+}
+
+.ticket::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--border-strong);
+}
+
+.ticket-buy::before {
+  background: var(--buy);
+}
+
+.ticket-sell::before {
+  background: var(--sell);
+}
+
+.ticket-history {
+  box-shadow: none;
+  background: var(--surface-1);
+}
+
+.ticket-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+}
+
+.ticket-symbol {
+  font-size: var(--fs-16);
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+}
+
+.ticket-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-3);
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+
+.ticket-valid {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: var(--fs-13);
+  white-space: nowrap;
+}
+
+.ticket-valid strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.ticket-instruction {
+  font-family: var(--font-display);
+  font-size: var(--fs-28);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+
+.ticket-note {
+  color: var(--warn);
+  font-size: var(--fs-13);
+}
+
+.ticket-levels,
+.ticket-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--sp-3) var(--sp-4);
+  margin: 0;
+}
+
+.ticket-levels {
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.lvl {
+  min-width: 0;
+}
+
+.lvl dt {
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+
+.lvl dd {
+  color: var(--text-1);
+  font-size: var(--fs-16);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ticket-facts .lvl dd {
+  font-size: var(--fs-14);
+  font-weight: 500;
+}
+
+.ticket-thesis-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.ticket-thesis {
+  color: var(--text-2);
+  max-width: 72ch;
+}
+
+.ticket-thesis.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.btn-inline {
+  min-height: 28px;
+  padding: 0 var(--sp-1);
+  margin-left: calc(-1 * var(--sp-1));
+}
+
+.ticket-subhead {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 4px;
+  font-family: var(--font);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.ticket-steps {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-section);
+  background: var(--surface-3);
+}
+
+.ticket-steps ol,
+.ticket-details-body ul {
+  margin: 0;
+  color: var(--text-1);
+}
+
+.ticket-steps li + li,
+.ticket-details-body li + li {
+  margin-top: 2px;
+}
+
+.ticket-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.ticket-status {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+}
+
+.ticket-details {
+  margin-top: calc(-1 * var(--sp-2));
+}
+
+.ticket-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+  color: var(--text-2);
+}
+
+.ref {
+  color: var(--text-3);
+  font-size: var(--fs-12);
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------- positions + paper */
+
+.row-alert td {
+  background: color-mix(in srgb, var(--crit) 6%, transparent);
+}
+
+.paper-line {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--text-1);
+}
+
+.paper-line .icon {
+  margin-top: 3px;
+}
+
+.paper-line-good .icon {
+  color: var(--good);
+}
+.paper-line-warn .icon {
+  color: var(--warn);
+}
+.paper-line-neutral .icon {
+  color: var(--text-3);
+}
+
+.spark {
+  display: block;
+  width: 100%;
+  height: 40px;
+}
+
+/* ------------------------------------------------------------------- today strip */
+
+.today {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.today-links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  border: 1px solid var(--border);
+  border-radius: var(--r-section);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+
+.today-link {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 64px;
+  padding: var(--sp-3) var(--sp-4);
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+}
+
+.today-link:last-child {
+  border-right: 0;
+}
+
+.today-link:hover {
+  background: var(--surface-3);
+}
+
+.today-k {
+  color: var(--text-3);
+  font-size: var(--fs-13);
+}
+
+.today-v {
+  font-weight: 600;
+}
+
+@media (max-width: 639px) {
+  .ticket {
+    padding: var(--sp-4) var(--sp-4) var(--sp-4) calc(var(--sp-4) + 4px);
+  }
+
+  .ticket-instruction {
+    font-size: var(--fs-24);
+  }
+
+  .ticket-valid {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .today-link {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .today-link:last-child {
+    border-bottom: 0;
+  }
+}

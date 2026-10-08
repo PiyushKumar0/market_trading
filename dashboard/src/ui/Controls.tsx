@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 export function Switch({
   checked,
   label,
+  shortLabel,
   stateText,
   disabled,
   busy,
@@ -12,6 +13,8 @@ export function Switch({
 }: {
   checked: boolean
   label: string
+  /** Shown instead of `label` under 640 px. */
+  shortLabel?: string
   /** Defaults to On / Off; e.g. "On (not running)". */
   stateText?: string
   disabled?: boolean
@@ -33,7 +36,14 @@ export function Switch({
       <span className="switch-track" aria-hidden="true">
         <span className="switch-thumb" />
       </span>
-      <span className="switch-label">{label}</span>
+      {shortLabel ? (
+        <span className="switch-label">
+          <span className="lbl-long">{label}</span>
+          <span className="lbl-short">{shortLabel}</span>
+        </span>
+      ) : (
+        <span className="switch-label">{label}</span>
+      )}
       <span className="switch-state">{stateText ?? (checked ? 'On' : 'Off')}</span>
     </button>
   )

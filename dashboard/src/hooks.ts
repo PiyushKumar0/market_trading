@@ -1,26 +1,31 @@
 /** Data plumbing for the dashboard: the 10 s REST poll cycle and the `/ws/live` event stream. */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, apiGet, liveSocketUrl } from './api'
+import { ALL_KEYS } from './lib/alerts.ts'
 import type {
-  BudgetResponse,
   ConnState,
-  DecisionsResponse,
-  HeadroomResponse,
   LiveEvent,
   LiveFrame,
-  ModeResponse,
   NotificationRow,
   NotificationsResponse,
-  PaperResponse,
-  PositionsResponse,
-  RecommendationsResponse,
   ScorecardResponse,
   Snapshot,
-  TradeWindowResponse,
-  WatchlistResponse,
 } from './types'
 
 export const POLL_INTERVAL_MS = 10_000
+
+/** The read route behind each snapshot key (fetched in parallel, merged per key). */
+const ROUTES: Record<(typeof ALL_KEYS)[number], string> = {
+  mode: '/mode',
+  positions: '/positions',
+  decisions: '/decisions',
+  recommendations: '/recommendations',
+  headroom: '/risk/headroom',
+  budget: '/budget',
+  tradeWindow: '/config/trade_window',
+  watchlist: '/news/watchlist',
+  paper: '/paper',
+}
 
 /** The notification journal is a day's transcript, not a live tape — a minute of latency on a row
  *  that was already delivered to Telegram costs nothing, so it rides its own slow cycle instead of
@@ -54,12 +59,16 @@ const EMPTY_SNAPSHOT: Snapshot = {
 export function usePoll(token: string): {
   snapshot: Snapshot
   error: string | null
+  /** Snapshot keys whose fetch failed in the latest cycle (empty on a clean cycle). */
+  failedKeys: string[]
   unauthorized: boolean
+  /** ISO-8601 instant of the latest completed cycle; null until the first one completes. */
   lastPollAt: string | null
   refresh: () => void
 } {
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT)
   const [error, setError] = useState<string | null>(null)
+  const [failedKeys, setFailedKeys] = useState<string[]>([])
   const [unauthorized, setUnauthorized] = useState(false)
   const [lastPollAt, setLastPollAt] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
@@ -71,51 +80,34 @@ export function usePoll(token: string): {
     let cancelled = false
 
     async function cycle() {
-      const results = await Promise.allSettled([
-        apiGet<ModeResponse>('/mode'),
-        apiGet<PositionsResponse>('/positions'),
-        apiGet<DecisionsResponse>('/decisions'),
-        apiGet<RecommendationsResponse>('/recommendations'),
-        apiGet<HeadroomResponse>('/risk/headroom'),
-        apiGet<BudgetResponse>('/budget'),
-        apiGet<TradeWindowResponse>('/config/trade_window'),
-        apiGet<WatchlistResponse>('/news/watchlist'),
-        apiGet<PaperResponse>('/paper'),
-      ])
+      // ALL_KEYS is the one list of polled keys (the alerts module counts failures against it).
+      const results = await Promise.allSettled(ALL_KEYS.map((key) => apiGet<unknown>(ROUTES[key])))
       if (cancelled) return
 
-      const keys: (keyof Snapshot)[] = [
-        'mode',
-        'positions',
-        'decisions',
-        'recommendations',
-        'headroom',
-        'budget',
-        'tradeWindow',
-        'watchlist',
-        'paper',
-      ]
       const failures: string[] = []
+      const failed: string[] = []
       const fresh: Record<string, unknown> = {}
       let denied = false
 
       // Merge is computed OUTSIDE the state updater: React may invoke an updater more than once, and
       // the failure list must be built exactly once per cycle.
       results.forEach((r, i) => {
-        const key = keys[i]
+        const key = ALL_KEYS[i]
         if (r.status === 'fulfilled') {
           fresh[key] = r.value
         } else {
           const reason = r.reason as unknown
           if (reason instanceof ApiError && reason.status === 401) denied = true
+          failed.push(key)
           failures.push(`${key}: ${reason instanceof Error ? reason.message : String(reason)}`)
         }
       })
 
       setSnapshot((prev) => ({ ...prev, ...fresh }))
       setUnauthorized(denied)
+      setFailedKeys(failed)
       setError(failures.length ? failures.join(' | ') : null)
-      setLastPollAt(new Date().toTimeString().slice(0, 8))
+      setLastPollAt(new Date().toISOString())
     }
 
     void cycle()
@@ -126,7 +118,7 @@ export function usePoll(token: string): {
     }
   }, [token, nonce])
 
-  return { snapshot, error, unauthorized, lastPollAt, refresh }
+  return { snapshot, error, failedKeys, unauthorized, lastPollAt, refresh }
 }
 
 /** What one `/notifications` cycle leaves behind for the panel to render. */
@@ -165,7 +157,7 @@ export function useNotifications(token: string): NotificationsState {
     let cancelled = false
 
     async function cycle() {
-      const at = () => new Date().toTimeString().slice(0, 8)
+      const at = () => new Date().toISOString() // shown in IST by the view, never the browser's zone
       try {
         const res = await apiGet<NotificationsResponse>('/notifications')
         if (cancelled) return

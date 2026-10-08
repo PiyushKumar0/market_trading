@@ -176,12 +176,14 @@ test('failed Telegram messages warn until acknowledged, then again on a newer fa
   assert.equal(first[0].id, 'telegram-failed')
   assert.equal(first[0].level, 'warning')
   assert.equal(first[0].title, '2 Telegram messages were not delivered')
+  assert.equal(first[0].body, 'You may have missed them — read them in Activity.')
   assert.equal(first[0].action, 'ack-telegram')
   assert.equal(first[0].ackId, 'n3')
   assert.deepEqual(ids(input({ notifications: rows, ackedFailureId: 'n3' })), [])
   const later = [...rows, note('n4', 'failed')]
   const again = deriveAlerts(input({ notifications: later, ackedFailureId: 'n3' }))
   assert.equal(again[0].title, '1 Telegram message was not delivered')
+  assert.equal(again[0].body, 'You may have missed it — read it in Activity.')
 })
 
 test('Telegram retries are a warning', () => {

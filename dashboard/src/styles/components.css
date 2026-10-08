@@ -54,6 +54,13 @@
   background: color-mix(in srgb, var(--crit) 88%, white);
 }
 
+.btn-primary:disabled,
+.btn-danger:disabled {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text-disabled);
+}
+
 .btn-quiet {
   background: transparent;
   border-color: transparent;
@@ -292,6 +299,29 @@
   background: var(--accent-tint);
 }
 
+/* A defined term: the word itself opens its explanation. */
+.term-btn {
+  display: inline;
+  padding: 3px 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline dotted;
+  text-decoration-color: var(--text-3);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+.term-btn:hover,
+.term-btn[aria-expanded='true'] {
+  color: var(--text-1);
+  text-decoration-color: var(--accent);
+}
+
 .hint-bubble {
   position: fixed;
   z-index: 60;
@@ -363,6 +393,20 @@
 .stat-caption {
   color: var(--text-3);
   font-size: var(--fs-13);
+}
+
+/* Three figures side by side in a narrow card. */
+.stats-compact {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 136px), 1fr));
+  gap: var(--sp-2);
+}
+
+.stats-compact .stat {
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.stats-compact .stat-value {
+  font-size: var(--fs-20);
 }
 
 .meter {
@@ -507,6 +551,11 @@
   font-size: var(--fs-12);
 }
 
+.dt .wrap-anywhere {
+  max-width: 16ch;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 639px) {
   .table-scroll {
     overflow-x: visible;
@@ -566,6 +615,10 @@
   .dt .nowrap {
     white-space: normal;
   }
+
+  .dt .wrap-anywhere {
+    max-width: none;
+  }
 }
 
 /* ------------------------------------------------------------------- controls */
@@ -620,6 +673,20 @@
 
 .switch-label {
   color: var(--text-2);
+}
+
+.lbl-short {
+  display: none;
+}
+
+@media (max-width: 639px) {
+  .lbl-long {
+    display: none;
+  }
+
+  .lbl-short {
+    display: inline;
+  }
 }
 
 .switch-state {

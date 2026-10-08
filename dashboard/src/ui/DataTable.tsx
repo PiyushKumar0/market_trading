@@ -14,6 +14,8 @@ export interface Column<R> {
   align?: 'left' | 'right'
   /** Keep the cell on one line (prices, times). */
   nowrap?: boolean
+  /** Extra class on the column's cells (e.g. `wrap-anywhere` for long symbols). */
+  className?: string
 }
 
 export function DataTable<R>({
@@ -32,7 +34,9 @@ export function DataTable<R>({
   rowClass?: (row: R) => string | undefined
 }) {
   if (rows.length === 0) return empty ? <EmptyState>{empty}</EmptyState> : null
-  const cls = (c: Column<R>) => [c.align === 'right' ? 'right num' : '', c.nowrap ? 'nowrap' : ''].filter(Boolean).join(' ') || undefined
+  const cls = (c: Column<R>) =>
+    [c.align === 'right' ? 'right num' : '', c.nowrap ? 'nowrap' : '', c.className ?? ''].filter(Boolean).join(' ') ||
+    undefined
   return (
     <div className="table-scroll" role="region" aria-label={caption} tabIndex={0}>
       <table className="dt">

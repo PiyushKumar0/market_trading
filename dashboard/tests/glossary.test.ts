@@ -20,6 +20,7 @@ import {
   severityTerm,
   strategyName,
   styleTerm,
+  takenHint,
   tierTerm,
   verdictTerm,
 } from '../src/copy/glossary.ts'
@@ -39,7 +40,7 @@ test('engine states translate to plain words and keep the engine term', () => {
 test('AI budget levels', () => {
   assert.deepEqual(
     ['DG0', 'DG1', 'DG2', 'DG3', 'DG4'].map((t) => tierTerm(t).label),
-    ['Full', 'Pacing', 'Saving', 'Minimal', 'Stopped'],
+    ['Normal', 'Pacing', 'Saving', 'Minimal', 'Stopped'],
   )
   assert.equal(tierTerm('DG2').term, 'DG2')
 })
@@ -115,6 +116,14 @@ test('unknown values fall back to words and never throw', () => {
   assert.equal(agentName('foo_bot').label, 'Foo bot')
   assert.equal(closeReasonTerm('broker_rms').label, 'Closed by the broker (RMS)')
   assert.equal(closeReasonTerm('weird_reason').label, 'Weird reason')
+})
+
+test('the /taken reply is spelled out with the symbol and quantity', () => {
+  assert.equal(
+    takenHint('TATASTEEL', 3),
+    'After you place it in Kite, reply /taken TATASTEEL 3 PRICE on Telegram (PRICE = your fill).',
+  )
+  assert.equal(takenHint(undefined, undefined), 'After you place it in Kite, reply /taken SYMBOL QTY PRICE on Telegram (PRICE = your fill).')
 })
 
 test('missing values render as a dash', () => {

@@ -189,7 +189,7 @@ export function deriveAlerts(i: AlertInput): Alert[] {
         id: 'telegram-failed',
         level: 'warning',
         title: `${fresh.length} Telegram ${plural(fresh.length, 'message was', 'messages were')} not delivered`,
-        body: 'You may have missed them — read them in Activity.',
+        body: plural(fresh.length, 'You may have missed it — read it in Activity.', 'You may have missed them — read them in Activity.'),
         tab: 'activity',
         action: 'ack-telegram',
         ackId: failures[failures.length - 1].notification_id,
