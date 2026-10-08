@@ -28,6 +28,8 @@ export function TokenGate({ onSet }: { onSet: (token: string) => void }) {
           <label className="field">
             <span className="field-label">Dashboard token</span>
             <input
+              id="dashboard-token"
+              name="dashboard-token"
               className="input"
               type="password"
               autoComplete="off"
