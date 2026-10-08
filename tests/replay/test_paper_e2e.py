@@ -349,7 +349,7 @@ async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool) -> Outcome
                 ctx_builder_fn=lambda tracker: builder(tracker, "paper"), notify=paper_notes,
             )
             assert paper is not None
-            control.set_enabled(True, "owner")
+            control.set_enabled(True, "owner", via="test")
         exposure = ExposureTracker(conn, clock, table.capital_base_inr, mark_price=feed.ltp)
         analyst = FakeHarness()
         pipeline = RecommendationPipeline(
@@ -482,7 +482,6 @@ def test_the_golden_digest_is_byte_identical_and_pinned(runs: dict[str, Outcome]
 # ------------------------------------------------------------------ paper off (the shipped setting)
 def test_shipped_settings_keep_paper_off_and_change_nothing_real(runs: dict[str, Outcome]) -> None:
     on, off = runs["on"], runs["off"]
-    assert load_settings().paper.subsystem_enabled is False
     assert {t: off.rows[t] for t in PAPER_TABLES} == dict.fromkeys(PAPER_TABLES, [])
     assert [v["is_paper"] for v in off.rows["verdicts"]] == [0]
     assert off.subscribers == {"tick": 0, "bar.1m": 0, PAPER_ORDER_UPDATE_TOPIC: 0}

@@ -102,7 +102,7 @@ def subscribers(bus) -> dict[str, int]:
 
 
 async def prepped(bus, now, stack) -> None:
-    stack.control.set_enabled(True, "owner")
+    stack.control.set_enabled(True, "owner", via="test")
     bus.publish("tick", tick(at(10, 0), "100"))           # the session's first tick runs prep
     await settle(bus, stack)
     assert stack.entries_open()
@@ -174,10 +174,10 @@ async def test_a_corporate_action_refusal_places_no_paper_order(conn, bus, now, 
 
 async def test_paper_entries_wait_for_the_switch_and_session_prep(conn, bus, now, compose):
     stack = await compose()
-    stack.control.set_enabled(True, "owner")
+    stack.control.set_enabled(True, "owner", via="test")
     assert not stack.entries_open()                        # no prep yet this session
     await prepped(bus, now, stack)
-    stack.control.set_enabled(False, "owner")
+    stack.control.set_enabled(False, "owner", via="test")
     assert not stack.entries_open()
 
 
@@ -190,7 +190,7 @@ async def test_a_resting_paper_entry_is_cancelled_once_entries_are_blocked(conn,
     await settle(bus, stack)
 
     if block == "paper off":
-        stack.control.set_enabled(False, "owner")
+        stack.control.set_enabled(False, "owner", via="test")
     elif block == "real kill":
         real[0] = RiskState.KILLED
     else:

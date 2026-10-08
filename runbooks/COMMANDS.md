@@ -43,8 +43,9 @@ Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|mi
 ```
 
 Rollback: `git reset --hard <previous tip>` + restart (migrations are additive; never drop columns). A failed
-migration is recovered from `data\backups\pre_00NN.db`. Once `/paper on` has ever run, never roll back below
-the M3 tip (older code counts paper rows as real money): use `/paper off` or `paper.subsystem_enabled: false`.
+migration is recovered from `data\backups\pre_00NN.db`. Below the M3 tip only while no `is_paper=1` row exists
+in orders, positions, verdicts, gtts or learning_ledger (older code counts paper rows as real money; query in
+RUNBOOK "Rollback floor"); otherwise paper OFF or `paper.subsystem_enabled: false` and a restart.
 
 ## Service logs (NSSM mode)
 
@@ -258,7 +259,10 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
   DuckDB read times out at 5 s and prints "<section>: unavailable"; no LLM, no `/scan_now`.
 - `/paper on|off|status|reset`: paper autopilot control. `on` and `reset` need `/confirm <phrase>` and are
   refused while an unexpired challenge is pending; `on` also needs `paper.subsystem_enabled: true` in
-  settings.yaml (shipped false). `off` stops new entries, exits continue. `GET /paper` returns control state.
+  settings.yaml. `off`: no new entries; resting paper entry orders are cancelled within one paper tick in
+  session (≤30 s; outside it they lapse at the next open; a partial fill keeps its filled part); exits and GTTs
+  continue. The dashboard Paper panel's turn ON / turn OFF
+  (`POST /paper`) sets the same flag single-step; `GET /paper` returns control state and the paper book.
 
 ## News-feed health (2026-08-04, after the MC-retirement remediation)
 

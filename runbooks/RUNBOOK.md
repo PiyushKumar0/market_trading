@@ -404,17 +404,18 @@ bars are judged against owner-set state (the trade window) that moved during the
 # Paper autopilot (M4, plan Q4.13 / Q4.14)
 
 Paper trades every gate-approved proposal through the OMS against a simulated broker (`PaperBroker`) and its
-own GTT book. It never calls Kite. Real and paper rows share the tables, split by `is_paper`. It ships off:
-`paper.subsystem_enabled: false` in `config/settings.yaml` builds nothing.
+own GTT book. It never calls Kite. Real and paper rows share the tables, split by `is_paper`. Built only when
+`paper.subsystem_enabled` is true.
 
 ## /paper commands
 
 | Command | Effect |
 |---|---|
 | `/paper on` | Two-step (`/confirm <phrase>`). Refused unless `paper.subsystem_enabled` built the autopilot (false, or construction failed). Also refused while another confirmation is pending. |
-| `/paper off` | Immediate, no confirm. No new entries; exits, GTTs and the exit routine keep running. |
+| `/paper off` | Immediate, no confirm. No new entries; resting paper entry orders are cancelled within one paper tick in session (≤30 s; outside it they lapse at the next open; a partial fill keeps its filled part); exits and GTTs continue. |
 | `/paper status` | Enabled flag, `epoch_started_at`, `reset_requested_at`, open positions, day P&L, active halts (`cause=rung`), boot counters. |
 | `/paper reset` | Two-step. Records the request; paper exits every open position, then on the first flat book (no held position, no working order) starts a new epoch: halts cleared, margin re-seeded, day baseline reset. Survives a restart. The scorecard keeps the old record. |
+| Dashboard Paper panel **turn ON / turn OFF** | Same flag as `/paper`, single-step (bearer token). ON asks a browser confirm and is refused (409) unless the autopilot is built; OFF as `/paper off`. Every change writes a `config_audit` row (`name='paper_state'`). |
 
 ## Halt rungs
 
@@ -454,7 +455,8 @@ catch-up applies what the 1-minute bars show, or voids the position.
 ## Go-live (Q4.13, owner sign-off)
 
 1. Set `paper.subsystem_enabled: true` in `config/settings.yaml`. Restart `mt-engine` outside 09:15-15:30 IST.
-2. Check `/paper status` answers, then `/paper on` and `/confirm`.
+2. Check `/paper status` answers, then `/paper on` and `/confirm`, or the Paper panel's turn ON (reload the
+   dashboard tab first).
 3. First 5 paper sessions, daily (log the result in WORKLOG):
    - No real order row (state.db, read-only):
      `SELECT count(*) FROM orders WHERE COALESCE(is_paper,0)=0` must stay 0.
@@ -476,5 +478,8 @@ catch-up applies what the 1-minute bars show, or voids the position.
 
 ## Rollback floor
 
-Once `/paper on` has ever run, never roll the tree back below the M3 tip: older code counts paper rows as real
-money and could latch real floors. To stop paper use `/paper off`, or `paper.subsystem_enabled: false` and a restart.
+Older code counts paper rows as real money and could latch real floors. Before rolling the tree below the M3
+tip, `SELECT (SELECT count(*) FROM orders WHERE is_paper=1)+(SELECT count(*) FROM positions WHERE is_paper=1)+(SELECT
+count(*) FROM verdicts WHERE is_paper=1)+(SELECT count(*) FROM gtts WHERE is_paper=1)+(SELECT count(*) FROM
+learning_ledger WHERE is_paper=1)` must be 0; otherwise stop paper with OFF or `paper.subsystem_enabled: false` and
+a restart instead.

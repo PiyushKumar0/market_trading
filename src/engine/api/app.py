@@ -18,7 +18,8 @@ Phase 0 scope shipped REAL wiring + REAL auth with shape-correct read-route plac
 bearer token itself is the owner authentication, §2.4). Every collaborator degrades to its Phase-0/1
 stub response shape when left ``None`` — composition (``engine.ops``) wires them for real. ``POST /mode
 AUTO`` and ``POST /kill/reset`` still require the owner TWO-STEP pattern, which has no dashboard path
-yet (Telegram-only, §3.5.3/§7.2) — they answer 409, not a stub.
+yet (Telegram-only, §3.5.3/§7.2) — they answer 409, not a stub. ``POST /paper`` turns the paper
+autopilot ON/OFF single-step (bearer); ``/paper reset`` stays a Telegram two-step.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from engine.api.kite_callback import build_kite_callback_router
 from engine.core.config import Settings, load_settings, repo_root
@@ -129,6 +130,12 @@ class ModeBody(BaseModel):
     mode: str
     confirmation_phrase: str | None = None
     routing: str | None = None
+
+
+class PaperBody(BaseModel):
+    """Owner paper-autopilot payload for ``POST /paper`` (single-step; D13)."""
+
+    enabled: StrictBool
 
 
 class KillBody(BaseModel):
@@ -811,6 +818,27 @@ def create_app(
                 "note": "two-step via Telegram /kill_reset + /confirm (no dashboard two-step in Phase 2)",
             },
         )
+
+    # ----------------------------------------------------------------- paper (POST, single-step; D13)
+    @app.post("/paper")
+    async def set_paper(body: PaperBody, _: Owner) -> dict[str, Any]:
+        """Paper autopilot ON/OFF, single-step (D8: paper cannot place a real order). ON is refused unless
+        the autopilot is built; OFF always applies. Reset stays Telegram two-step."""
+        control = app.state.paper_control
+        if control is None:
+            return JSONResponse(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                content={"ok": False, "note": "phase-0 stub — paper control not wired"},
+            )
+        if body.enabled and app.state.paper_view is None:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"ok": False, "note": "paper subsystem not built "
+                                              "(paper.subsystem_enabled is false or construction failed)"},
+            )
+        changed = control.set_enabled(body.enabled, Actor.OWNER.value, via="dashboard")
+        _log.warning("paper_set_via_api", enabled=body.enabled, changed=changed)
+        return {"ok": True, "enabled": body.enabled, "changed": changed}
 
     # ----------------------------------------------------------------- WS live stream (R8; Phase 2)
     @app.websocket("/ws/live")

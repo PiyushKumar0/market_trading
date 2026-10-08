@@ -41,11 +41,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   const res = await fetch(`${apiBase()}${path}`, { ...init, headers })
   if (!res.ok) {
-    // FastAPI puts the reason in `detail`; the two-step/stub refusals answer 409/501 with `note`.
+    // FastAPI puts the reason in `detail` (an array of `{msg}` on a 422); the two-step/stub refusals
+    // answer 409/501 with `note`.
     let detail = res.statusText
     try {
       const body = (await res.json()) as { detail?: unknown; note?: unknown }
-      detail = String(body.detail ?? body.note ?? detail)
+      detail = Array.isArray(body.detail)
+        ? body.detail.map((d) => d?.msg).join('; ')
+        : String(body.detail ?? body.note ?? detail)
     } catch {
       /* non-JSON body — keep the status text */
     }

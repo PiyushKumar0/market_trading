@@ -218,12 +218,35 @@ def test_positions_open_first_with_as_of(conn, clock) -> None:
 
 def test_paper_route_returns_control_state_and_is_owner_gated(conn, clock) -> None:
     control = PaperControl(conn, clock)
-    control.set_enabled(True, "owner")
+    control.set_enabled(True, "owner", via="test")
     client = _client(paper_control=control, conn=conn, clock=clock)
     assert client.get("/paper").status_code == 401
     body = client.get("/paper", headers=AUTH).json()
     assert body["enabled"] is True and body["changed_by"] == "owner"
     assert body["built"] is False and body["entry_guard"] == "not built"
+
+
+def test_post_paper_on_needs_the_built_autopilot_and_off_always_applies(conn, clock) -> None:
+    def post(client, enabled):
+        return client.post("/paper", headers=AUTH, json={"enabled": enabled})
+
+    assert _client().post("/paper", json={"enabled": True}).status_code == 401
+    assert post(_client(), True).status_code == 501
+    control = PaperControl(conn, clock)
+    unbuilt = _client(paper_control=control, conn=conn, clock=clock)
+    assert post(unbuilt, True).status_code == 409 and not control.enabled()
+    control.set_enabled(True, "owner", via="telegram")
+    r = post(unbuilt, False)
+    assert r.status_code == 200 and r.json() == {"ok": True, "enabled": False, "changed": True}
+    assert not control.enabled()
+    built = _client(paper_control=control, paper_view=object(), conn=conn, clock=clock)
+    assert post(built, True).json() == {"ok": True, "enabled": True, "changed": True}
+    assert post(built, True).json() == {"ok": True, "enabled": True, "changed": False}
+    assert control.enabled() and control.state()["changed_by"] == "owner"
+    diffs = conn.execute("SELECT diff FROM config_audit WHERE name = 'paper_state' ORDER BY id").fetchall()
+    assert [json.loads(d[0])["via"] for d in diffs] == ["telegram", "dashboard", "dashboard"]
+    assert json.loads(diffs[-1][0]) == {"enabled": True, "via": "dashboard"}
+    assert post(built, "yes").status_code == 422
 
 
 def test_orders_latest_100_first(conn, clock) -> None:

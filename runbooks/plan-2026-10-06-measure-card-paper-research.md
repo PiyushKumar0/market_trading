@@ -35,6 +35,7 @@
 | D10 | Paper capital and caps are the `limits.yaml` values (₹40,000 base, 4 CNC slots, ₹12,000 per stock, 2 per sector), counted separately from real positions. |
 | D11 | The regime tag stays off the card until study C2 reports. `GET /why` is deferred; the `/why` Telegram command ships. |
 | D12 | The C4 late-session study and the B2 ops digest are deferred along with the channel split. |
+| D13 | (2026-10-08) "Add button to toggle paper trade from dashboard itself"; go-live tonight with the autopilot OFF until the owner turns it ON. Dashboard paper ON/OFF (`POST /paper`) is single-step (bearer token), audited to `config_audit`; `/paper on` keeps its two-step, `/paper reset` stays Telegram-only. |
 
 ## 1. Design decisions
 
@@ -551,7 +552,7 @@ Every task carries its own tests, and its `_COMMANDS`/COMMANDS/RUNBOOK lines whe
     - `off`: no new entries; exits and GTTs continue.
     - `status`: enabled, epoch equity, open positions, day P&L, halts, and the counters (reconcile mismatches, voids, late corporate actions).
     - `reset` records `reset_requested_at`. Q4.8 carries it out: exit all, then a new epoch once the book is flat. The scorecard keeps the full record.
-  - `GET /paper` (`_: Owner`) returns control state only.
+  - `GET /paper` (`_: Owner`) returns control state only. (Later: a read-only paper summary, and `POST /paper` ON/OFF, D13.)
   - `PaperSettings` (`extra='forbid'`): `subsystem_enabled` (false), `seed`, `exit_minutes_before_close` (10), `exit_working_timeout_min` (5).
   - Capital and caps are the `limits.yaml` values, read-only (D10).
   - COMMANDS and RUNBOOK lines.

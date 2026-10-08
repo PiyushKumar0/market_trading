@@ -346,11 +346,14 @@ async def test_paper_on_and_reset_are_two_step(paper_bot):
 
 
 @pytest.mark.asyncio
-async def test_paper_off_applies_immediately(paper_bot):
+async def test_paper_off_applies_immediately(paper_bot, conn):
     b, control, _ = paper_bot
-    control.set_enabled(True, "owner")
-    assert "paper OFF" in await _paper(b, "off")
+    control.set_enabled(True, "owner", via="test")
+    assert await _paper(b, "off") == ("paper OFF: no new entries; resting paper entry orders are cancelled; "
+                                      "exits and GTTs continue.")
     assert not control.enabled()
+    last = conn.execute("SELECT diff FROM config_audit WHERE name = 'paper_state' ORDER BY id DESC").fetchone()
+    assert json.loads(last[0]) == {"enabled": False, "via": "telegram"}
 
 
 @pytest.mark.asyncio
@@ -376,7 +379,7 @@ async def test_paper_on_refused_without_the_autopilot(paper_bot):
 @pytest.mark.asyncio
 async def test_paper_status_uses_providers_else_na(paper_bot):
     b, control, _ = paper_bot
-    control.set_enabled(True, "owner")
+    control.set_enabled(True, "owner", via="test")
     text = await _paper(b, "status")
     assert "paper enabled: True" in text and "open positions: n/a" in text and "counters: n/a" in text
     b.set_paper(control, autopilot_built=lambda: True,
@@ -389,7 +392,7 @@ async def test_paper_status_uses_providers_else_na(paper_bot):
 @pytest.mark.asyncio
 async def test_paper_status_says_when_the_autopilot_is_not_built(paper_bot):
     b, control, _ = paper_bot
-    control.set_enabled(True, "owner")
+    control.set_enabled(True, "owner", via="test")
     assert "not built" not in await _paper(b, "status")
     b.set_paper(control, autopilot_built=lambda: False)
     first, second = (await _paper(b, "status")).splitlines()[:2]

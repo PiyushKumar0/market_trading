@@ -3,6 +3,8 @@ test_telegram_commands.py, GET /paper in test_api_routes.py."""
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from pydantic import ValidationError
 
@@ -21,15 +23,33 @@ def test_first_use_creates_the_disabled_row(conn, clock):
 
 def test_set_enabled_and_reset_request_are_recorded(conn, clock):
     control = PaperControl(conn, clock)
-    control.set_enabled(True, "owner")
+    control.set_enabled(True, "owner", via="test")
     assert control.enabled() and control.state()["changed_by"] == "owner"
     control.request_reset("owner")
     assert control.state()["reset_requested_at"] == clock.now().isoformat()
     assert control.enabled()
 
 
+def test_set_enabled_writes_and_audits_only_a_change(conn, clock):
+    control = PaperControl(conn, clock)
+    assert control.set_enabled(True, "owner", via="dashboard") is True
+    conn.execute("UPDATE paper_state SET changed_at = 'sentinel'")
+    assert control.set_enabled(True, "owner", via="telegram") is False
+    assert control.state()["changed_at"] == "sentinel"
+    rows = conn.execute("SELECT diff, actor, at FROM config_audit WHERE name = 'paper_state'").fetchall()
+    assert [tuple(r) for r in rows] == [('{"enabled": true, "via": "dashboard"}', "owner", clock.now().isoformat())]
+
+
+def test_a_failed_audit_write_rolls_the_flag_back(conn, clock):
+    control = PaperControl(conn, clock)
+    conn.execute("CREATE TEMP TRIGGER no_audit BEFORE INSERT ON config_audit BEGIN SELECT RAISE(ABORT, 'x'); END")
+    with pytest.raises(sqlite3.IntegrityError):
+        control.set_enabled(True, "owner", via="dashboard")
+    assert not control.enabled() and control.state()["changed_at"] is None
+
+
 def test_state_persists_across_a_new_control_on_the_same_conn(conn, clock):
-    PaperControl(conn, clock).set_enabled(True, "owner")
+    PaperControl(conn, clock).set_enabled(True, "owner", via="test")
     again = PaperControl(conn, clock)
     assert again.enabled()
     assert conn.execute("SELECT COUNT(*) FROM paper_state").fetchone()[0] == 1
@@ -43,8 +63,8 @@ def test_active_halts_excludes_cleared(conn, clock):
     assert [h["cause"] for h in control.active_halts()] == ["a"]
 
 
-def test_shipped_settings_load_with_the_subsystem_off():
-    assert load_settings().paper == PaperSettings(
+def test_shipped_paper_settings_apart_from_the_go_live_flag():
+    assert load_settings().paper.model_copy(update={"subsystem_enabled": False}) == PaperSettings(
         subsystem_enabled=False, seed=20261006, exit_minutes_before_close=10, exit_working_timeout_min=5
     )
 

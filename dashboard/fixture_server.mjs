@@ -3,10 +3,12 @@
 //   cd dashboard; npm run build; node fixture_server.mjs          # http://127.0.0.1:8499/
 //   NO_TODAY=1 node fixture_server.mjs                            # every ledger row is from an earlier day
 //   PAPER_OFF=1 node fixture_server.mjs                           # /paper = the not-built stub
+//   PAPER_IDLE=1 node fixture_server.mjs                          # /paper = built, OFF, no rows (go-live)
 //
 // Serves dist/ at / and answers the read routes with canned rows spread across several IST days
 // (today, yesterday, older, a UTC-stamped row, an undated row), so the per-day folds, the IST day
-// derivation and the panel order can be checked in a browser. Any bearer token is accepted; there is
+// derivation and the panel order can be checked in a browser. POST /paper flips the served paper
+// fixture's `enabled` (422 / 409 as the engine answers). Any bearer token is accepted; there is
 // no /ws/live, so the events feed shows "closed" and retries — expected. Never shipped: dist/ is built
 // from src/ only.
 import http from 'node:http'
@@ -18,6 +20,7 @@ const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
 const PORT = Number(process.env.PORT ?? 8499)
 const NO_TODAY = process.env.NO_TODAY === '1'
 const PAPER_OFF = process.env.PAPER_OFF === '1'
+const PAPER_IDLE = process.env.PAPER_IDLE === '1'
 
 const istFmt = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Kolkata',
@@ -356,6 +359,16 @@ const paperOff = {
   counters: null,
 }
 
+// The go-live view: built, autopilot OFF, prep not yet run, nothing stored.
+const paperIdle = {
+  ...paperOff,
+  subsystem_enabled: true,
+  built: true,
+  prep_ready: false,
+  entry_guard: 'paper session prep has not completed',
+  counters: { reconcile_mismatches: 0, voids: 0, late_corp_actions: 0 },
+}
+
 const routes = {
   '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: 'NORMAL' },
   '/positions': {
@@ -365,7 +378,7 @@ const routes = {
     ],
     as_of: new Date().toISOString(),
   },
-  '/paper': PAPER_OFF ? paperOff : paperBuilt,
+  '/paper': PAPER_OFF ? paperOff : PAPER_IDLE ? paperIdle : paperBuilt,
   '/scorecard': scorecardFixture,
   '/decisions': { decisions },
   '/recommendations': { recommendations },
@@ -412,14 +425,41 @@ const routes = {
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }
 
+function json(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(body))
+}
+
+// POST /paper as the engine answers it: 422 unless a JSON boolean, 409 for ON while not built.
+function setPaper(req, res) {
+  let raw = ''
+  req.on('data', (chunk) => (raw += chunk))
+  req.on('end', () => {
+    let body = null
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      /* falls through to the 422 */
+    }
+    const paper = routes['/paper']
+    if (typeof body?.enabled !== 'boolean') return json(res, 422, { detail: [{ msg: 'enabled must be a boolean' }] })
+    if (body.enabled && !paper.built) {
+      return json(res, 409, {
+        ok: false,
+        note: 'paper subsystem not built (paper.subsystem_enabled is false or construction failed)',
+      })
+    }
+    const changed = paper.enabled !== body.enabled
+    paper.enabled = body.enabled
+    json(res, 200, { ok: true, enabled: body.enabled, changed })
+  })
+}
+
 http
   .createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
-    if (url.pathname in routes) {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify(routes[url.pathname]))
-      return
-    }
+    if (req.method === 'POST' && url.pathname === '/paper') return setPaper(req, res)
+    if (url.pathname in routes) return json(res, 200, routes[url.pathname])
     const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1)
     const file = path.join(DIST, rel)
     if (file.startsWith(DIST) && fs.existsSync(file) && fs.statSync(file).isFile()) {
@@ -432,6 +472,6 @@ http
   })
   .listen(PORT, '127.0.0.1', () =>
     console.log(
-      `fixture server on http://127.0.0.1:${PORT}/  today=${today} d1=${d1} d3=${d3} d4=${d4}${NO_TODAY ? '  (NO_TODAY)' : ''}${PAPER_OFF ? '  (PAPER_OFF)' : ''}`,
+      `fixture server on http://127.0.0.1:${PORT}/  today=${today} d1=${d1} d3=${d3} d4=${d4}${NO_TODAY ? '  (NO_TODAY)' : ''}${PAPER_OFF ? '  (PAPER_OFF)' : ''}${PAPER_IDLE ? '  (PAPER_IDLE)' : ''}`,
     ),
   )

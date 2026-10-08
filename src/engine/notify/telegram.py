@@ -347,8 +347,8 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Where one symbol stands: universe status, trigger levels, flags, filings, last "
                  "recommendation, positions, last verdict. Read-only.", True),
     _CommandSpec("paper", _USAGE_PAPER,
-                 "Paper autopilot: on and reset need /confirm; off applies now (no new entries, exits "
-                 "continue); status is read-only.", True),
+                 "Paper autopilot: on and reset need /confirm; off applies now (no new entries; resting "
+                 "paper entry orders are cancelled; exits and GTTs continue); status is read-only.", True),
 )
 
 
@@ -1082,9 +1082,10 @@ class TelegramBot:
         if sub == "status":
             await _reply(update, self._paper_status_text())
         elif sub == "off":
-            paper.set_enabled(False, Actor.OWNER.value)
+            paper.set_enabled(False, Actor.OWNER.value, via="telegram")
             _log.warning("telegram_cmd_paper_off")
-            await _reply(update, "paper OFF: no new entries; exits and GTTs continue.")
+            await _reply(update, "paper OFF: no new entries; resting paper entry orders are cancelled; "
+                                 "exits and GTTs continue.")
         elif sub in ("on", "reset"):
             if sub == "on" and not self._paper_autopilot_built():
                 await _reply(update, "/paper on refused: the paper subsystem is not enabled "
@@ -1097,7 +1098,7 @@ class TelegramBot:
 
             async def _apply(confirmation: OwnerConfirmation) -> str:
                 if sub == "on":
-                    paper.set_enabled(True, Actor.OWNER.value)
+                    paper.set_enabled(True, Actor.OWNER.value, via="telegram")
                     return "paper ON."
                 paper.request_reset(Actor.OWNER.value)
                 return "paper reset requested: exits all, then a new epoch once the book is flat."

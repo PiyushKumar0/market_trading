@@ -5,10 +5,12 @@ The row is created disabled on first use. Reset is only recorded here; Q4.8 carr
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
 from engine.core.clock import Clock
+from engine.core.db import transaction
 
 
 class PaperControl:
@@ -20,11 +22,21 @@ class PaperControl:
     def enabled(self) -> bool:
         return bool(self._conn.execute("SELECT enabled FROM paper_state WHERE id = 1").fetchone()[0])
 
-    def set_enabled(self, on: bool, actor: str) -> None:
-        self._conn.execute(
-            "UPDATE paper_state SET enabled = ?, changed_at = ?, changed_by = ? WHERE id = 1",
-            (int(on), self._clock.now().isoformat(), actor),
-        )
+    def set_enabled(self, on: bool, actor: str, *, via: str) -> bool:
+        """Writes and audits only a change: nightly ``paper_line`` keys on ``changed_at``."""
+        now = self._clock.now().isoformat()
+        with transaction(self._conn):
+            changed = self._conn.execute(
+                "UPDATE paper_state SET enabled = ?, changed_at = ?, changed_by = ? "
+                "WHERE id = 1 AND enabled != ?",
+                (int(on), now, actor, int(on)),
+            ).rowcount > 0
+            if changed:
+                self._conn.execute(
+                    "INSERT INTO config_audit (name, diff, actor, at) VALUES (?, ?, ?, ?)",
+                    ("paper_state", json.dumps({"enabled": on, "via": via}), actor, now),
+                )
+        return changed
 
     def request_reset(self, actor: str) -> None:
         now = self._clock.now().isoformat()

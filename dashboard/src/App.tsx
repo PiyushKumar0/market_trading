@@ -1,11 +1,12 @@
 /**
  * Dashboard v1 (§3.2.11, O8/R8) — a single-page LAN console over the engine's read routes plus the
- * two owner writes the dashboard is allowed to make: `POST /mode` (OFF / RECOMMEND only) and
- * `POST /config/trade_window`.
+ * three owner writes the dashboard is allowed to make: `POST /mode` (OFF / RECOMMEND only),
+ * `POST /config/trade_window` and `POST /paper` (paper autopilot ON / OFF, D13).
  *
  * Deliberately ABSENT from this surface, and not an oversight:
  *  - →AUTO and kill-switch RESET are owner TWO-STEP transitions with no dashboard path (Telegram
  *    `/mode AUTO` + `/confirm`, `/kill_reset` + `/confirm`); the engine answers 409 for both (R10).
+ *  - Paper reset stays Telegram two-step (`/paper reset` + `/confirm`).
  *  - Recommendation outcomes (`/taken`, `/closed`) are Telegram-only — this console reads the
  *    recommendation ledger, it never writes to it.
  */
@@ -86,6 +87,16 @@ export default function App() {
     refresh()
   }
 
+  async function setPaper(enabled: boolean) {
+    try {
+      await apiPost<{ ok: boolean }>('/paper', { enabled })
+    } catch (e) {
+      // 409 = ON while the autopilot is not built; nothing was written.
+      window.alert(e instanceof ApiError ? `paper ${enabled ? 'ON' : 'OFF'}: ${e.status} ${e.message}` : String(e))
+    }
+    refresh()
+  }
+
   async function setTradeWindow(body: {
     start: string
     end: string
@@ -117,7 +128,7 @@ export default function App() {
       <div className="grid">
         <RecommendationsPanel rows={snapshot.recommendations?.recommendations ?? []} />
         <PositionsPanel data={snapshot.positions} />
-        <PaperPanel data={snapshot.paper} mode={snapshot.mode?.mode ?? null} />
+        <PaperPanel data={snapshot.paper} mode={snapshot.mode?.mode ?? null} onSetPaper={setPaper} />
         <ScorecardPanel {...scorecard} />
         <DecisionsPanel rows={snapshot.decisions?.decisions ?? []} />
         <HeadroomPanel data={snapshot.headroom} />

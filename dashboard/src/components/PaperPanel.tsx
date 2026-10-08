@@ -2,10 +2,23 @@
  * Panel — paper autopilot (`GET /paper`): control state, halts, equity of the current epoch, its
  * per-session curve, the open book, working orders and closed trades. Everything here is SIMULATED.
  * Money arrives as strings and is printed as sent; the curve parses it for geometry only.
+ *
+ * One owner write: the turn ON / turn OFF button (`POST /paper`, single-step, D13). Reset stays
+ * Telegram two-step.
  */
+import { useState } from 'react'
 import type { PaperCurvePoint, PaperResponse, PaperSummary } from '../types'
 import { Chip, Empty, Panel, dash, istDay, toneFor, todayIst } from './ui'
 import type { Tone } from './ui'
+
+type Props = { p: PaperSummary; mode: string | null; onSetPaper: (enabled: boolean) => Promise<void> }
+
+const OFF_MEANS =
+  'no new entries; resting paper entry orders are cancelled (within 30 s in session, else they lapse at the ' +
+  'next open; a partial fill keeps its filled part); exits and GTTs continue'
+const ON_CONFIRM =
+  'Turn the paper autopilot ON? Every CNC entry the analyst proposes is judged by the gate against the paper ' +
+  'book, and approved ones are simulated, including some the real gate rejects. It never places a real order.'
 
 const FLATTENING = new Set(['floor_equity_floor_rung', 'floor_cumulative_floor', 'reset_pending'])
 const ZERO = /^-?0+(\.0+)?$/
@@ -110,8 +123,26 @@ function Curve({ points, base }: { points: PaperCurvePoint[]; base: string }) {
   )
 }
 
-function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
+function Status({ p, mode, onSetPaper }: Props) {
+  const [busy, setBusy] = useState(false)
   const live = mode === 'RECOMMEND' || mode === 'AUTO'
+
+  async function toggle() {
+    const resting = p.built ? p.orders.filter((o) => o.role === 'entry').length : 0  // unbuilt: stranded, nothing cancels
+    const ok = !p.enabled
+      ? window.confirm(ON_CONFIRM)
+      : resting === 0 ||
+        window.confirm(`Turn paper OFF? ${resting} resting paper entry order(s) ${
+          p.prep_ready ? 'will be cancelled within 30 s' : 'will lapse at the next session open'}.`)
+    if (!ok) return
+    setBusy(true)
+    try {
+      await onSetPaper(!p.enabled)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="chips">
       {p.built ? null : p.subsystem_enabled ? (
@@ -123,9 +154,14 @@ function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
         k="autopilot"
         v={p.enabled ? (p.built ? 'ON' : 'stored ON (inactive)') : 'OFF'}
         tone={p.enabled && p.built ? 'ok' : 'neutral'}
-        title={!p.enabled && p.built ? 'no new entries; exits and GTTs continue' : undefined}
+        title={!p.enabled && p.built ? OFF_MEANS : undefined}
       />
-      {!p.built ? null : mode === null ? (
+      {p.built || p.enabled ? (
+        <button disabled={busy} onClick={() => void toggle()}>
+          turn {p.enabled ? 'OFF' : 'ON'}
+        </button>
+      ) : null}
+      {!p.built || !p.enabled ? null : mode === null ? (
         <Chip v="entries: mode unknown" title="the header mode has not loaded" />
       ) : !live ? (
         <Chip v={`idle — mode ${mode}`} title="paper rides the RECOMMEND pipeline" />
@@ -156,7 +192,8 @@ function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
   )
 }
 
-function Body({ p, mode }: { p: PaperSummary; mode: string | null }) {
+function Body(props: Props) {
+  const { p } = props
   const eq = p.equity
   const today = todayIst()
   const t = p.totals
@@ -164,7 +201,7 @@ function Body({ p, mode }: { p: PaperSummary; mode: string | null }) {
   if (!p.built && !stored && !eq && p.closed.length === 0) {
     return (
       <>
-        <Status p={p} mode={mode} />
+        <Status {...props} />
         <div className="dim">
           {p.subsystem_enabled
             ? 'The paper stack failed to build at boot; nothing is simulated until the engine restarts.'
@@ -175,7 +212,7 @@ function Body({ p, mode }: { p: PaperSummary; mode: string | null }) {
   }
   return (
     <>
-      <Status p={p} mode={mode} />
+      <Status {...props} />
       {!p.built && stored ? (
         <div className="banner warn">
           autopilot not running: {p.positions.length} held paper position{p.positions.length === 1 ? ' is' : 's are'}{' '}
@@ -339,12 +376,12 @@ function Body({ p, mode }: { p: PaperSummary; mode: string | null }) {
   )
 }
 
-export function PaperPanel({ data, mode }: { data: PaperResponse | null; mode: string | null }) {
+export function PaperPanel({ data, ...rest }: { data: PaperResponse | null } & Omit<Props, 'p'>) {
   const p = data && 'built' in data ? data : null
   const at = p?.equity?.at ?? null
   return (
     <Panel title="Paper autopilot" aside={`simulated — no real orders${at ? ` · as of ${stamp(at)}` : ''}`} wide>
-      {p ? <Body p={p} mode={mode} /> : <Empty what={data ? 'paper summary (the engine answered the stub)' : 'paper data'} />}
+      {p ? <Body p={p} {...rest} /> : <Empty what={data ? 'paper summary (the engine answered the stub)' : 'paper data'} />}
     </Panel>
   )
 }

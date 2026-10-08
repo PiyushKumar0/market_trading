@@ -40,7 +40,8 @@ the engine's 15 s `ping` keepalive is filtered out.
 Recommendations (exit date or "pending", risk to stop, stop ATR multiple, evidence, registered edge,
 thesis, entry zone, stop/targets, qty, gate verdict, manual checklist, human-action chip) · Positions
 (real book only; recommended ones show "owner-confirmed protected" or "UNPROTECTED (unconfirmed)") ·
-Paper autopilot (simulated — built / ON / entry-guard / epoch / halt chips, equity, net and day P&L
+Paper autopilot (simulated — built / ON / entry-guard / epoch / halt chips, a turn ON / turn OFF
+button while the autopilot is built or stored ON, equity, net and day P&L
 of the current epoch, the per-session equity line against the capital base, open paper positions with
 mark and gross unrealized, working orders, the epoch's newest 20 closes; the not-built states say so
 and nothing more) · Scorecard (per-strategy hindsight outcomes, labelled as such, plus the paper
@@ -51,10 +52,12 @@ watchlist (originating vs context + digest freshness). The two ledgers — recom
 decision log — are folded by IST day (`ui.tsx` `useDayFolds`): today's fold starts open, earlier
 days start folded and open on click (owner-directed 2026-09-08).
 
-**Owner writes** are limited to `POST /mode` (OFF / RECOMMEND) and `POST /config/trade_window`.
-Deliberately absent, and not an oversight: →AUTO and kill-switch reset are owner TWO-STEP
-transitions with no dashboard path (Telegram `/mode AUTO` + `/confirm`, `/kill_reset` + `/confirm`),
-and recommendation outcomes (`/taken`, `/closed`) are Telegram-only (§3.5.3/§7.2/R10).
+**Owner writes** are limited to `POST /mode` (OFF / RECOMMEND), `POST /config/trade_window` and
+`POST /paper` (paper autopilot ON / OFF, single-step; ON asks a browser confirm and is refused 409
+unless the autopilot is built). Deliberately absent, and not an oversight: →AUTO, kill-switch reset
+and paper reset are owner TWO-STEP transitions with no dashboard path (Telegram `/mode AUTO`,
+`/kill_reset`, `/paper reset`, each + `/confirm`), and recommendation outcomes (`/taken`, `/closed`)
+are Telegram-only (§3.5.3/§7.2/R10).
 
 ## Dev server
 
@@ -76,7 +79,9 @@ included — so the day folds and the panel order can be checked in a browser. A
 gate; there is no `/ws/live`, so the events feed reads "closed". `NO_TODAY=1` drops today's ledger
 rows to show the "no … today" state. `/paper` answers a built, ON book by default (a daily FROZEN halt,
 one unmarked position, an unfilled entry order, a void among the closes); `PAPER_OFF=1` answers the
-not-built stub (subsystem disabled, nothing stored). Dev-only: nothing from it is shipped.
+not-built stub (subsystem disabled, nothing stored); `PAPER_IDLE=1` answers the go-live view (built,
+OFF, prep not run, nothing stored). `POST /paper` flips the served fixture's `enabled` with the
+engine's 422 (non-boolean) and 409 (ON while not built) answers. Dev-only: nothing from it is shipped.
 
 ## Tests
 
