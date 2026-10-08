@@ -22,8 +22,11 @@ export function Card({
   className,
   titleTag = 'h2',
   simTag = true,
+  hint,
 }: {
   title: ReactNode
+  /** A Hint shown beside the title — outside the heading, so it never joins the card's name. */
+  hint?: ReactNode
   id?: string
   tier?: CardTier
   meta?: ReactNode
@@ -48,6 +51,7 @@ export function Card({
           <H id={hid} className="card-title">
             {title}
           </H>
+          {hint}
           {tier === 'simulated' && simTag ? (
             <Pill tone="sim" icon="flask" title="Paper trading: simulated money, never a real order">
               Simulated

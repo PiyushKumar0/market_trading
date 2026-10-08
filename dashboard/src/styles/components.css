@@ -280,11 +280,12 @@
 
 .hint-btn {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: 24px;
   height: 24px;
-  margin: -4px -2px -4px 0;
+  margin: -4px 0;
   padding: 0;
   border: 0;
   border-radius: var(--r-pill);
@@ -320,6 +321,16 @@
 .term-btn[aria-expanded='true'] {
   color: var(--text-1);
   text-decoration-color: var(--accent);
+}
+
+/* A pill's tighter line height would leave its term under the 24 px target floor. */
+.pill .term-btn {
+  padding: 4px 0;
+}
+
+.pill .term-btn:hover,
+.pill .term-btn[aria-expanded='true'] {
+  color: inherit;
 }
 
 .hint-bubble {
@@ -554,6 +565,10 @@
   background: rgb(255 255 255 / 2%);
 }
 
+.cell-v {
+  display: block;
+}
+
 .cell-sub {
   display: block;
   color: var(--text-3);
@@ -573,12 +588,15 @@
     background: none;
   }
 
+  /* Removed, not clipped: a clipped header would leave its hint buttons focusable but invisible.
+     Each cell prints its column name from data-label instead. */
   .dt thead {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
+    display: none;
+  }
+
+  .dt .cell-v {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .dt,

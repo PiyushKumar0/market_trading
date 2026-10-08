@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { RecommendationPayload, RecommendationRow } from '../src/types.ts'
-import { entryText, instruction, isLive, liveRecs } from '../src/lib/recs.ts'
+import { actionState, entryText, instruction, isLive, liveRecs } from '../src/lib/recs.ts'
 
 const NOW = Date.parse('2026-10-08T09:00:00Z') // Thu 14:30 IST
 
@@ -46,6 +46,20 @@ test('entryText shows one price or a range', () => {
   assert.equal(entryText({ entry_zone: ['2440.00', '2450.00'] }), '₹2,440.00 – ₹2,450.00')
   assert.equal(entryText({}), '—')
   assert.equal(entryText(null), '—')
+})
+
+test('your action: waiting only while still live', () => {
+  assert.deepEqual(
+    [actionState(row(), NOW).label, actionState(row(), NOW).tone],
+    ['Waiting for you', 'warn'],
+  )
+  const lapsed = actionState(row({}, { valid_until: '2026-10-08T14:00:00+05:30' }), NOW)
+  assert.equal(lapsed.label, 'No action recorded')
+  assert.equal(lapsed.tone, 'neutral')
+  assert.ok(lapsed.hint)
+  assert.equal(actionState(row({ human_action: 'taken' }), NOW).tone, 'good')
+  assert.equal(actionState(row({ human_action: 'dismissed' }), NOW).label, 'You skipped it')
+  assert.equal(actionState(row({ human_action: 'dismissed' }), NOW).tone, 'neutral')
 })
 
 test('instruction says what to do in one sentence', () => {

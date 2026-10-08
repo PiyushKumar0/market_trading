@@ -55,7 +55,8 @@ export function DataTable<R>({
             <tr key={rowKey(row, i)} className={rowClass?.(row)}>
               {columns.map((c) => (
                 <td key={c.key} data-label={c.label} className={cls(c)}>
-                  {c.cell(row)}
+                  {/* One wrapper: in the stacked phone layout the label and the value are exactly two items. */}
+                  <span className="cell-v">{c.cell(row)}</span>
                 </td>
               ))}
             </tr>

@@ -32,6 +32,18 @@
   min-width: 13em;
 }
 
+/* When the 14 columns must scroll sideways, the strategy name stays put. */
+@media (min-width: 640px) {
+  .perf-table thead tr:last-child th:first-child,
+  .perf-table td.perf-strategy {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--surface-2);
+    box-shadow: 1px 0 0 var(--border);
+  }
+}
+
 @media (max-width: 639px) {
   .perf-strategy {
     min-width: 0;

@@ -149,6 +149,11 @@ kbd {
   font-size: var(--fs-20);
 }
 
+.page-loading {
+  padding: var(--sp-6) 0;
+  color: var(--text-3);
+}
+
 .row-2 {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
@@ -163,7 +168,8 @@ kbd {
   align-items: start;
 }
 
-@media (max-width: 1023px) {
+/* Below 1200 px the positions table needs the full width more than it needs a neighbour. */
+@media (max-width: 1199px) {
   .row-2 {
     grid-template-columns: minmax(0, 1fr);
   }

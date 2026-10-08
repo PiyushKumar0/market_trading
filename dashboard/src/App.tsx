@@ -189,7 +189,9 @@ export default function App() {
       />
       <main id="main" className="page">
         <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="view">
-          {views[tab]()}
+          {/* Until the first poll answers there is nothing true to show: one quiet line, then the
+              whole page at once instead of panels jumping in one by one. */}
+          {poll.lastPollAt === null ? <p className="page-loading">Loading the dashboard…</p> : views[tab]()}
         </div>
       </main>
       {dialog}

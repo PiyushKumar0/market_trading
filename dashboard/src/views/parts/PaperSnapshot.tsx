@@ -74,12 +74,8 @@ export function PaperSnapshot({
   return (
     <Card
       tier="simulated"
-      title={
-        <span className="labelled">
-          Paper autopilot
-          <Hint label="Paper autopilot">{COPY.paperAbout}</Hint>
-        </span>
-      }
+      title="Paper autopilot"
+      hint={<Hint label="Paper autopilot">{COPY.paperAbout}</Hint>}
       meta={eq ? `Updated ${istStamp(eq.at)}` : undefined}
       action={action}
     >
