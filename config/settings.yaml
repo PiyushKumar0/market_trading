@@ -108,6 +108,9 @@ data:
                                           # 2026-09-07: first step of the staged raise toward the NIFTY 500
                                           # eligible set; measure stalls / late ticks / snapshot time /
                                           # warm-up on the next session before stepping to 400 and 480.
+                                          # O18 2026-10-08 (index -> NIFTY Total Market): owner chose to
+                                          # KEEP 300 - the widened names reach the batch legs and the gate,
+                                          # not the tick feed.
   min_median_traded_value_inr: 50000000   # ₹5cr median 20d traded value [tunable]
   backfill_daily_years: 2
   backfill_minute_years: 1
@@ -474,10 +477,18 @@ backfill:
 # constant: O15 (owner-directed 2026-09-04) widened the eligible universe NIFTY200 -> NIFTY 500.
 # The retired nifty200_* keys have NO aliases — UniverseCfg forbids extras, so a stale settings.yaml
 # fails loudly at boot instead of quietly presenting the wrong universe as live.
+# O18 (owner-directed 2026-10-08, "increase the universe to Nifty 1000" - NSE publishes no such index;
+# the owner chose NIFTY Total Market, ~750 = NIFTY 500 + Microcap 250): the index widens, and the CORE
+# index (NIFTY 500) marks the evidence population - hi52 / ins / cat / cat_reversal originate, and the
+# rec-outcome benchmark averages, over the core subset of the eligible set only. Rollback: put the
+# NIFTY 500 values back in the index_* keys (core_* identical => every index member is core).
 universe:
-  index_name: "NIFTY 500"                  # logged on universe_built; named in the fallback alert
-  index_source_url: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]
-  index_seed_path: "config/universe/nifty500_seed.csv"   # nifty200_seed.csv stays as history, unread
+  index_name: "NIFTY Total Market"         # logged on universe_built; named in the fallback alert
+  index_source_url: "https://archives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"  # [VERIFIED 2026-10-08]
+  index_seed_path: "config/universe/niftytotalmarket_seed.csv"   # nifty500_seed.csv is now the CORE seed
+  core_index_name: "NIFTY 500"
+  core_index_source_url: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]
+  core_index_seed_path: "config/universe/nifty500_seed.csv"
 
 # §10.1 scheduler fire-times (IST, trading days, R6). Fire-times only — every job is also §2.6
 # catch-up-eligible on the next startup if its fire-time passed while the engine was off.

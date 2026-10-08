@@ -510,17 +510,32 @@ class UniverseCfg(BaseModel):
     ``nifty200_source_url`` / ``nifty200_seed_path`` keys got no aliases, and a settings.yaml left
     on them must fail loudly at boot rather than be silently ignored while the defaults below
     present a different universe as live.
+
+    O18 (owner-directed 2026-10-08): the index is NIFTY Total Market (≈750 = NIFTY 500 + Microcap
+    250), and a second list — the CORE index, NIFTY 500 — marks the evidence population. Legs whose
+    registered edge or frozen shadow verdict was measured on NIFTY 500 (``hi52``, ``ins``, ``cat``,
+    ``cat_reversal``) originate from — and the rec-outcome benchmark averages over — the core subset
+    of the eligible set only (``MarketStore.get_core_eligible_symbols``); ``brk20``, the risk gate and the news/batch
+    layer read the full eligible set. Pointing ``core_index_source_url`` at the same URL as
+    ``index_source_url`` makes every index member core (the pre-O18 shape, the rollback line).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    index_name: str = "NIFTY 500"
+    index_name: str = "NIFTY Total Market"
     """Display name of the eligible-universe index — carried on the ``universe_built`` log line and
     in the fallback alert, so ops can see WHICH index a degraded build fell back to."""
     index_source_url: str = (
+        "https://archives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"  # [VERIFIED 2026-10-08]
+    )
+    index_seed_path: str = "config/universe/niftytotalmarket_seed.csv"
+    core_index_name: str = "NIFTY 500"
+    """O18: the evidence-population index (see the class docstring). Must be a SUBSET of the index
+    above; a core name that is not an index member is simply not eligible."""
+    core_index_source_url: str = (
         "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]
     )
-    index_seed_path: str = "config/universe/nifty500_seed.csv"
+    core_index_seed_path: str = "config/universe/nifty500_seed.csv"
 
 
 class JobTimesCfg(BaseModel):

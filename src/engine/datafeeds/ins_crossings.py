@@ -159,7 +159,9 @@ class InsCrossingsJob:
         #     this was an inline duplicate; `ins` deliberately stays on the ELIGIBLE set, NOT the
         #     batch-universe extended set, because its registered edge was measured on index members
         #     and its candidates must be gate-approvable.)
-        eligible = set(self._store.get_universe_eligible_symbols(d))
+        #     O18 (2026-10-08): the CORE (NIFTY 500) subset of the eligible set — the index widened
+        #     to NIFTY Total Market, and the registered edge was never measured on microcaps.
+        eligible = set(self._store.get_core_eligible_symbols(d))
         if not eligible:
             _log.warning("ins_crossings_no_universe", d=d.isoformat())
             return InsCrossingsResult(d=d, ok=False, reason="no universe_daily rows for the run day")

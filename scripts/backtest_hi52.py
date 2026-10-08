@@ -482,16 +482,21 @@ def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
 def load_index_members(db_path: Path, override: Path | None = None) -> tuple[set[str], str]:
     """CURRENT index membership + its provenance string (a survivorship-tainted proxy, see above).
 
-    Ladder: explicit ``--index-csv`` (alias ``--nifty200-csv``) -> the runtime cache beside the DB
-    (``<data>/universe/index_cached.csv``) -> the committed seed. Both file names, and the seed's
-    index, changed with O15 (2026-09-04) when the eligible index became config (NIFTY 500);
-    a run against an older DB tree simply falls through to the committed seed. Parsing reuses the
-    universe builder's own ``parse_index_constituents_csv`` (one CSV definition, never a copy).
+    Ladder: explicit ``--index-csv`` (alias ``--nifty200-csv``) -> the CORE-index runtime cache
+    beside the DB (``<data>/universe/core_index_cached.csv``) -> the committed NIFTY 500 seed. Both
+    file names, and the seed's index, changed with O15 (2026-09-04) when the eligible index became
+    config (NIFTY 500). O18 (2026-10-08) widened the eligible index to NIFTY Total Market, so
+    ``index_cached.csv`` no longer holds the population hi52's edge was measured on; this reads the
+    CORE list instead (``universe.core_index_*``, NIFTY 500), and a run against an older DB tree
+    simply falls through to the committed seed. Parsing reuses the universe builder's own
+    ``parse_index_constituents_csv`` (one CSV definition, never a copy).
     """
     candidates: list[tuple[Path, str]] = []
     if override is not None:
         candidates.append((Path(override), "explicit --index-csv"))
-    candidates.append((Path(db_path).parent / "universe" / "index_cached.csv", "runtime cache"))
+    candidates.append(
+        (Path(db_path).parent / "universe" / "core_index_cached.csv", "core runtime cache")
+    )
     candidates.append((repo_root() / "config" / "universe" / "nifty500_seed.csv", "committed seed"))
     for path, label in candidates:
         try:

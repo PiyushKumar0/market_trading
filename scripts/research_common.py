@@ -210,7 +210,8 @@ def brk20_population(conn, end: date, *, symbols=None, max_symbols=None) -> Popu
 
 def hi52_population(conn, db: Path, end: date, *, symbols=None, max_symbols=None) -> Population:
     """hi52 v2: ``backtest_hi52.discrete_signals`` at ``hi52.DEFAULT_PARAMS`` over the index members."""
-    # The snapshot sits in <data>/research; the ladder looks for <data>/universe/index_cached.csv.
+    # The snapshot sits in <data>/research; the ladder looks for <data>/universe/core_index_cached.csv
+    # (O18: the NIFTY 500 core list, not the widened index cache).
     members, source = bh.load_index_members(Path(db).resolve().parent)
     if not members:
         raise Refusal("no index membership list (hi52 population)")

@@ -217,6 +217,45 @@ def test_results_filings_legacy_db_gains_line_items_at(tmp_path, clock):
         s.close()
 
 
+def test_universe_daily_legacy_db_gains_core_index_and_null_reads_as_core(tmp_path, clock):
+    """O18 (2026-10-08): a pre-O18 ``universe_daily`` gets ``core_index`` on open. Legacy rows
+    (NULL) count as CORE — every pre-O18 index was a subset of NIFTY 500 — so hi52/ins/cat keep
+    their population across the migration; an explicit False is non-core; the eligible predicate
+    (included or watchlist_cap alone) still applies on top."""
+    db = tmp_path / "legacy.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(                                               # the pre-O18 shape, verbatim
+        "CREATE TABLE universe_daily (d DATE NOT NULL, symbol TEXT NOT NULL, included BOOLEAN NOT NULL, "
+        "mis_candidate BOOLEAN NOT NULL DEFAULT FALSE, exclusion_reasons TEXT[], "
+        "median_traded_value DECIMAL(18,2), PRIMARY KEY (d, symbol))"
+    )
+    con.execute("INSERT INTO universe_daily VALUES (DATE '2026-10-07', 'LEGACY', TRUE, FALSE, [], NULL)")
+    con.execute("INSERT INTO universe_daily VALUES (DATE '2026-10-07', 'LEGCAP', FALSE, FALSE, "
+                "['watchlist_cap'], NULL)")
+    con.close()
+
+    s = MarketStore(db, tmp_path / "parquet", clock)
+    s.open()                                                   # migrates
+    try:
+        s.init_schema()                                        # idempotent: the ALTER runs once
+        d = date(2026, 10, 7)
+        assert s.get_core_eligible_symbols(d) == ["LEGACY", "LEGCAP"]
+        s.upsert_universe_daily([
+            {"d": d, "symbol": "MICRO", "included": False, "exclusion_reasons": ["watchlist_cap"],
+             "core_index": False},
+            {"d": d, "symbol": "CORECAP", "included": False, "exclusion_reasons": ["watchlist_cap"],
+             "core_index": True},
+            {"d": d, "symbol": "CORELOW", "included": False,
+             "exclusion_reasons": ["below_min_traded_value"], "core_index": True},
+            {"d": d, "symbol": "EXT", "included": False, "exclusion_reasons": ["not_in_index"],
+             "core_index": False},
+        ])
+        assert s.get_core_eligible_symbols(d) == ["CORECAP", "LEGACY", "LEGCAP"]
+        assert s.get_universe_eligible_symbols(d) == ["CORECAP", "LEGACY", "LEGCAP", "MICRO"]
+    finally:
+        s.close()
+
+
 def test_bar_src_is_constrained(store, clock):
     # Model-level: BarSrc is a closed Literal.
     with pytest.raises(ValidationError):
@@ -815,10 +854,14 @@ def test_settings_load_with_new_phase1_keys():
     assert s.lifecycle.active_period_starts == [time(8, 0)]
     assert (s.lifecycle.start_grace_s, s.lifecycle.catchup_grace_s) == (900, 900)
     assert s.lifecycle.crashloop_window_s == 600
-    # O15 (2026-09-04): the eligible universe is the CONFIGURED index, NIFTY 500 since this date.
-    assert s.universe.index_name == "NIFTY 500"
-    assert s.universe.index_seed_path == "config/universe/nifty500_seed.csv"
-    assert s.universe.index_source_url.endswith("ind_nifty500list.csv")
+    # O15 (2026-09-04): the eligible universe is the CONFIGURED index. O18 (2026-10-08): NIFTY
+    # Total Market, with NIFTY 500 as the CORE (evidence-population) index.
+    assert s.universe.index_name == "NIFTY Total Market"
+    assert s.universe.index_seed_path == "config/universe/niftytotalmarket_seed.csv"
+    assert s.universe.index_source_url.endswith("ind_niftytotalmarket_list.csv")
+    assert s.universe.core_index_name == "NIFTY 500"
+    assert s.universe.core_index_seed_path == "config/universe/nifty500_seed.csv"
+    assert s.universe.core_index_source_url.endswith("ind_nifty500list.csv")
     assert s.jobs.reconcile_ist == time(15, 50) and s.jobs.catalyst_digest_ist == time(8, 35)
     assert s.jobs.sector_map_weekly_day == "SUN"
     # Pre-existing keys still load (additive-only change).

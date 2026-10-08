@@ -1,7 +1,7 @@
 """UniverseBuilder (§3.2.4): the pinned universe rule with per-symbol exclusion reasons (auditable
 ``universe_daily``), the top-N watchlist cap, ``mis_candidates ⊆ F&O`` (C7), the configured-index
-(NIFTY 500 since 2026-09-04, O15) download → cache → seed ladder (E5), and never-raise fail-closed
-behavior on total failure."""
+(NIFTY 500 since 2026-09-04, O15; NIFTY Total Market since 2026-10-08, O18) download → cache → seed
+ladder (E5), the O18 CORE-index stamp, and never-raise fail-closed behavior on total failure."""
 
 from __future__ import annotations
 
@@ -289,18 +289,126 @@ def test_parse_index_constituents_csv_requires_symbol_column():
 
 
 def test_committed_seed_is_real_and_parses():
-    """The shipped seed named by ``universe.index_seed_path`` must always parse as a usable
-    fallback — and it must be the NIFTY 500 file since O15 (2026-09-04), not the retired
-    NIFTY200 one that stays in the tree as history."""
-    assert Settings().universe.index_seed_path == "config/universe/nifty500_seed.csv"
-    text = (repo_root() / "config" / "universe" / "nifty500_seed.csv").read_text(encoding="utf-8")
-    symbols = parse_index_constituents_csv(text)
-    assert len(symbols) >= 400                          # a meaningful subset of the 500
-    assert len(symbols) == len(set(symbols))
+    """The shipped seeds must always parse as usable fallbacks. The CORE seed is the NIFTY 500
+    file (O15 2026-09-04 made it the index seed; O18 2026-10-08 moved it to the core role) and the
+    index seed is NIFTY Total Market since O18. The core list must sit inside the index list —
+    a core name outside the index could never be eligible, so a mismatch would silently shrink
+    every evidence-bound leg."""
+    s = Settings()
+    assert s.universe.core_index_seed_path == "config/universe/nifty500_seed.csv"
+    assert s.universe.index_seed_path == "config/universe/niftytotalmarket_seed.csv"
+    core = parse_index_constituents_csv(
+        (repo_root() / s.universe.core_index_seed_path).read_text(encoding="utf-8")
+    )
+    index = parse_index_constituents_csv(
+        (repo_root() / s.universe.index_seed_path).read_text(encoding="utf-8")
+    )
+    assert len(core) >= 400                             # a meaningful subset of the 500
+    assert len(index) >= 700                            # NIFTY 500 + Microcap 250, EQ series
+    assert len(core) == len(set(core)) and len(index) == len(set(index))
     # Stable blue-chips only — e.g. TATAMOTORS left the list when the 2025 demerger split it
     # into TMCV/TMPV, so index membership of any single name is never guaranteed forever.
     for well_known in ("RELIANCE", "TCS", "HDFCBANK", "SBIN", "ICICIBANK"):
-        assert well_known in symbols
+        assert well_known in core and well_known in index
+    # Both seeds are point-in-time snapshots (09-04 vs 10-08), so allow rebalance drift, not more.
+    assert len(set(core) - set(index)) <= 25
+
+
+# ------------------------------------------------------ O18: CORE index (2026-10-08)
+_CORE_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+
+def routing_transport(by_url: dict[str, str | None]) -> httpx.MockTransport:
+    """Serve each URL its own CSV; ``None`` (or an unlisted URL) fails like an unreachable NSE."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        text = by_url.get(str(request.url))
+        if text is None:
+            raise httpx.ConnectError("nse unreachable", request=request)
+        return httpx.Response(200, text=text)
+
+    return httpx.MockTransport(handler)
+
+
+def _core_setup(tmp_path, store, *, core_csv: str | None):
+    settings = make_settings(tmp_path, batch_universe_enabled=True, batch_universe_max=600)
+    settings.universe.core_index_seed_path = str(tmp_path / "missing_core_seed.csv")
+    for sym in ALL_SYMBOLS:
+        if sym == "LOWVAL":
+            seed_daily_bars(store, sym, close="100.00", volume=100)       # keep the fixture's shape
+        elif sym != "NODATA":
+            seed_daily_bars(store, sym, close="200.00", volume=500_000)
+    transport = routing_transport({
+        settings.universe.index_source_url: INDEX_CSV,
+        settings.universe.core_index_source_url: core_csv,
+    })
+    return settings, transport
+
+
+async def test_core_index_stamps_rows_and_scopes_the_core_view(tmp_path, store, clock):
+    """O18: the index seeds eligibility; the core list only MARKS rows. RELIANCE is core, TCS is an
+    eligible non-core (microcap-class) name: both stay eligible and gate-approvable, only RELIANCE
+    reaches the evidence-bound legs' view. Extended rows are never core."""
+    core_csv = "Company Name,Industry,Symbol,Series,ISIN Code\nReliance,Energy,RELIANCE,EQ,\n"
+    settings, transport = _core_setup(tmp_path, store, core_csv=core_csv)
+    assert settings.universe.core_index_source_url == _CORE_URL
+    leverages = {s: 5.0 for s in ALL_SYMBOLS if s != "NOMIS"} | {"EXTGOOD": 5.0}
+    seed_daily_bars(store, "EXTGOOD", close="300.00", volume=500_000)
+    builder = make_builder(
+        settings, store, clock, transport, leverages=leverages,
+        surveillance=surveillance_lists(
+            gsm={"GSMSTK"}, asm={"ASMSTK"}, t2t={"T2TSTK"}, esm={"ESMSTK"},
+            equity_master=frozenset({"EXTGOOD"}),
+        ),
+    )
+    universe = await builder.build(D)
+
+    assert universe.eligible == ("RELIANCE", "TCS")
+    assert universe.core_eligible == ("RELIANCE",)
+    assert universe.core_index_source == "download" and universe.degraded is False
+    rows = {r["symbol"]: r for r in store.get_universe_daily(D)}
+    assert rows["RELIANCE"]["core_index"] is True and rows["TCS"]["core_index"] is False
+    assert rows["GSMSTK"]["core_index"] is False                  # excluded rows are stamped too
+    assert rows["EXTGOOD"]["core_index"] is False
+    assert store.get_core_eligible_symbols(D) == ["RELIANCE"]
+    assert store.get_universe_eligible_symbols(D) == ["RELIANCE", "TCS"]
+    assert (settings.resolved_data_dir() / "universe" / "core_index_cached.csv").exists()
+
+
+async def test_core_index_unavailable_fails_closed_for_core_legs_only(tmp_path, store, clock):
+    """O18 fail-closed: core download, cache and seed all gone ⇒ every row non-core (the evidence
+    legs originate nothing) + a CRITICAL alert, while the build, the eligible set and the gate's
+    view carry on — degraded, never raised."""
+    settings, transport = _core_setup(tmp_path, store, core_csv=None)
+    msgs, sink = collect_alerts()
+    builder = make_builder(settings, store, clock, transport, notify=sink)
+    universe = await builder.build(D)
+
+    assert universe.eligible == ("RELIANCE", "TCS")
+    assert universe.core_eligible == () and universe.core_index_source == "none"
+    assert universe.degraded is True
+    assert store.get_core_eligible_symbols(D) == []
+    assert store.get_universe_eligible_symbols(D) == ["RELIANCE", "TCS"]
+    assert any(m.severity == "critical" and "core" in m.title.lower() for m in msgs)
+
+
+async def test_core_index_same_url_reuses_the_index_every_member_core(tmp_path, store, clock):
+    """The rollback line: core URL == index URL ⇒ no second download, every index member core,
+    the core view equals the eligible view (the pre-O18 shape)."""
+    settings, _ = _core_setup(tmp_path, store, core_csv=None)
+    settings.universe.core_index_source_url = settings.universe.index_source_url
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, text=INDEX_CSV)
+
+    builder = make_builder(settings, store, clock, httpx.MockTransport(handler))
+    universe = await builder.build(D)
+
+    assert calls == [settings.universe.index_source_url]
+    assert universe.core_eligible == universe.eligible == ("RELIANCE", "TCS")
+    assert universe.core_index_source == "download" and universe.degraded is False
+    assert store.get_core_eligible_symbols(D) == store.get_universe_eligible_symbols(D)
 
 
 # --------------------------------------------------------------------------- MIS leverage ingest (A8/E5)

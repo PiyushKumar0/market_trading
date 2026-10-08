@@ -195,7 +195,8 @@ def _seed(tmp_path: Path, clock) -> Path:
     finally:
         store.close()
     (tmp_path / "universe").mkdir()
-    (tmp_path / "universe" / "index_cached.csv").write_text("Symbol\nHIA\nZZZ\n", encoding="utf-8")
+    # O18: the hi52 population reads the CORE-index cache, not the widened index cache.
+    (tmp_path / "universe" / "core_index_cached.csv").write_text("Symbol\nHIA\nZZZ\n", encoding="utf-8")
     return db
 
 

@@ -3339,6 +3339,22 @@ def test_every_sweep_trigger_goes_through_the_single_flight_entry_point() -> Non
     assert "_lift_scan_sweep, _freeze_lift" in src                # the lift gets the queueing call
 
 
+def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_set() -> None:
+    """O18 (2026-10-08): with the index widened to NIFTY Total Market, hi52 and both cat legs
+    originate from the CORE (NIFTY 500) subset — their registered edge / frozen verdict population —
+    while brk20 keeps scanning the full eligible set. Pinned on the composition-root source because
+    the sweep body is a closure inside ``run`` (the established pattern in this file)."""
+    src = inspect.getsource(opsmain.run)
+    assert "eligible = store.get_universe_eligible_symbols(today)" in src
+    assert "core_eligible = store.get_core_eligible_symbols(today)" in src
+    assert "for sym in eligible:" in src                                   # brk20 histories
+    assert "store, trigger=trigger, eligible=core_eligible, today=today," in src   # hi52
+    assert "_core_set = set(core_eligible)" in src
+    assert "cat_rows = _watchlist_rows_for_symbols(cat_rows, _core_set)" in src
+    assert "cat_rev_rows = _watchlist_rows_for_symbols(cat_rev_rows, _core_set)" in src
+    assert "eligible=eligible, today=today" not in src                     # no hi52 call left on it
+
+
 def test_ticker_tokens_carry_todays_batch_symbols_until_the_day_rolls() -> None:
     """The §7.1 gate's only price source is the tick cache, and brk20/hi52/ins/cat originate over the
     ELIGIBLE set — 27 of 84 brk20 slots and 1 of 16 hi52 slots reached the gate with ltp=None and

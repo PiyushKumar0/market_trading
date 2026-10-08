@@ -398,7 +398,7 @@ class NewsWorld:
         start, end = self.calendar.trade_window(d)
         in_window = start <= self.clock.now() <= end
         cat_rows, _rev = _read_cat_watchlist(self.store, d)
-        cat_rows = _watchlist_rows_for_symbols(cat_rows, set(self.store.get_universe_eligible_symbols(d)))
+        cat_rows = _watchlist_rows_for_symbols(cat_rows, set(self.store.get_core_eligible_symbols(d)))
         raw = cat.sweep_watchlist(
             cat_rows, params={"stop_pct": SETTINGS.cat.stop_pct, "hold_sessions": SETTINGS.cat.hold_sessions},
         ) if cat_rows else []

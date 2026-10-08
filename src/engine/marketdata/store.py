@@ -256,6 +256,7 @@ _SCHEMA: tuple[str, ...] = (
         mis_candidate       BOOLEAN NOT NULL DEFAULT FALSE,
         exclusion_reasons   TEXT[],
         median_traded_value DECIMAL(18,2),
+        core_index          BOOLEAN,            -- O18: member of the CORE (evidence) index; NULL = pre-O18 row
         PRIMARY KEY (d, symbol)
     )
     """,
@@ -556,7 +557,8 @@ _TABLE_SPEC: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("d", "instrument_token"),
     ),
     "universe_daily": (
-        ("d", "symbol", "included", "mis_candidate", "exclusion_reasons", "median_traded_value"),
+        ("d", "symbol", "included", "mis_candidate", "exclusion_reasons", "median_traded_value",
+         "core_index"),
         ("d", "symbol"),
     ),
     "features_daily": (
@@ -1007,6 +1009,7 @@ class MarketStore:
             self._migrate_sentiment_measures(con)
             self._migrate_watchlist_reversal(con)
             self._migrate_results_line_items_at(con)
+            self._migrate_universe_core_index(con)
             for name in self._DROPPED_INDEXES:
                 con.execute(f"DROP INDEX IF EXISTS {name}")
 
@@ -1032,6 +1035,20 @@ class MarketStore:
         if "line_items_at" not in present:
             con.execute("ALTER TABLE results_filings ADD COLUMN line_items_at TIMESTAMPTZ")
             _log.info("results_filings_column_added", column="line_items_at")
+
+    def _migrate_universe_core_index(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Idempotently add the nullable ``universe_daily.core_index`` column (O18, 2026-10-08),
+        mirroring :meth:`_migrate_results_line_items_at`. NULL on every legacy row means "written
+        before the core marker existed", and :meth:`MarketStore.get_core_eligible_symbols` reads
+        that as core: every pre-O18 index (NIFTY200, then NIFTY 500) is a subset of the core index."""
+        present = {
+            r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'universe_daily'"
+            ).fetchall()
+        }
+        if "core_index" not in present:
+            con.execute("ALTER TABLE universe_daily ADD COLUMN core_index BOOLEAN")
+            _log.info("universe_daily_column_added", column="core_index")
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
@@ -1681,6 +1698,24 @@ class MarketStore:
         return sorted(
             r["symbol"] for r in rows
             if r["included"] or list(r["exclusion_reasons"] or []) == [_EXCL_CAP]
+        )
+
+    def get_core_eligible_symbols(self, d: date) -> list[str]:
+        """The CORE-eligible universe for ``d`` (O18, 2026-10-08): the eligible set (see
+        :meth:`get_universe_eligible_symbols`) restricted to members of the core (evidence) index,
+        ``universe.core_index_*`` — NIFTY 500 while the index is NIFTY Total Market.
+
+        This is the origination population of every leg whose registered edge or frozen shadow
+        verdict was measured on NIFTY 500 (``hi52``, ``ins``, ``cat``, ``cat_reversal``) and the
+        rec-outcome benchmark's averaging set: widening the index must not move those populations
+        onto names the evidence never covered (hi52's full-market cell measured −0.26% at T+20).
+        ``core_index`` NULL — a row written before the marker existed — counts as core; an explicit
+        False (a non-core index member, or a build whose core list was unavailable) does not."""
+        rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
+        return sorted(
+            r["symbol"] for r in rows
+            if (r["included"] or list(r["exclusion_reasons"] or []) == [_EXCL_CAP])
+            and r.get("core_index") is not False
         )
 
     def get_batch_universe_symbols(self, d: date) -> list[str]:

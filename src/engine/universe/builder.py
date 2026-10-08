@@ -28,6 +28,14 @@ the pre-open advisory through ``get_batch_universe_symbols``, invisible to the t
 rows plus ``watchlist_cap`` rows — and nothing marked ``not_in_index`` (O15, 2026-09-04: the cap
 governs ticks, not the RECOMMEND boundary). Failing non-index candidates get NO row.
 
+**O18 (owner-directed 2026-10-08):** the index is NIFTY Total Market (≈750 names = NIFTY 500 +
+Microcap 250), and a second list — the CORE index (``universe.core_index_*``, NIFTY 500) — is
+loaded through the same E5 ladder and stamped on every row as ``core_index``. The eligible set and
+the risk gate follow the index; the legs whose evidence was measured on NIFTY 500 read the core
+subset (``MarketStore.get_core_eligible_symbols``). A core list unavailable from download, cache AND
+seed stamps every row non-core — those legs originate nothing that day (fail closed) while the
+build itself, brk20 and the gate carry on. Same URL for both ⇒ every index member is core.
+
 Index membership is best-effort (E5): download the NSE indices constituents CSV
 (``settings.universe.index_source_url``) → on failure fall back to the runtime cached copy under
 ``data/universe/`` → then to the committed seed ``settings.universe.index_seed_path``
@@ -119,6 +127,10 @@ class Universe(BaseModel):
     #: included=False rows with exclusion_reasons=['not_in_index'] — the batch-rule / news-shadow /
     #: pre-open-advisory set beyond the index, never the tick watchlist and never gate-approvable.
     extended: tuple[str, ...] = ()
+    #: O18 (2026-10-08): the eligible symbols that are also CORE-index members (sorted) — the
+    #: origination population of the evidence-bound legs. Persisted per row as ``core_index``.
+    core_eligible: tuple[str, ...] = ()
+    core_index_source: IndexSource = "none"
 
 
 def parse_index_constituents_csv(text: str) -> list[str]:
@@ -199,6 +211,9 @@ class UniverseBuilder:
         # Index-agnostic cache name (O15, 2026-09-04): the file holds whatever index
         # ``universe.index_source_url`` points at, so it must not be named for one of them.
         self._cache_path = settings.resolved_data_dir() / "universe" / "index_cached.csv"
+        core_seed = Path(settings.universe.core_index_seed_path)
+        self._core_seed_path = core_seed if core_seed.is_absolute() else repo_root() / core_seed
+        self._core_cache_path = settings.resolved_data_dir() / "universe" / "core_index_cached.csv"
 
     async def build(self, d: date) -> Universe:
         """Build + persist day ``d``'s universe. NEVER raises into the scheduler (E5): a total
@@ -225,6 +240,17 @@ class UniverseBuilder:
         members, source = await self._load_index()
         if not members:
             raise ValueError(f"{index_name} membership unavailable from download, cache, and seed")
+        core_members, core_source = await self._load_core_index(members, source)
+        core_set = set(core_members)
+        if not core_set:
+            await self._alert(
+                title=f"{self._settings.universe.core_index_name} core list unavailable",
+                body="The core-index list failed from download, cache and seed. Every row is "
+                "stamped non-core: hi52, ins, cat and cat_reversal originate nothing today "
+                "(fail closed); brk20 and the risk gate use the full eligible set as usual (O18).",
+                severity="critical",
+                data={"job_id": "universe_build", "d": d.isoformat()},
+            )
 
         medians = await self._store.arun(self._median_traded_values, members, d)
         min_value = Decimal(self._settings.data.min_median_traded_value_inr)
@@ -270,6 +296,7 @@ class UniverseBuilder:
                 "median_traded_value": (
                     medians[symbol].quantize(_PAISE) if symbol in medians else None
                 ),
+                "core_index": symbol in core_set,
             }
             for symbol in members
         ]
@@ -306,6 +333,7 @@ class UniverseBuilder:
                     "mis_candidate": self._instruments.is_fno(symbol),
                     "exclusion_reasons": [EXCL_INDEX],
                     "median_traded_value": ext_medians[symbol].quantize(_PAISE),
+                    "core_index": False,
                 }
                 for symbol in extended
             )
@@ -316,7 +344,11 @@ class UniverseBuilder:
         # build's truth.
         await self._store.arun(self._store.replace_universe_daily, d, rows)
 
-        degraded = source != "download" or leverage.degraded or bool(surveillance.degraded_sources)
+        degraded = (
+            source != "download" or core_source not in ("download", "same")
+            or leverage.degraded or bool(surveillance.degraded_sources)
+        )
+        core_eligible = tuple(sorted(s for s in eligible if s in core_set))
         universe = Universe(
             d=d,
             symbols=tuple(watchlist),
@@ -329,6 +361,8 @@ class UniverseBuilder:
             index_source=source,
             degraded=degraded,
             extended=tuple(extended),
+            core_eligible=core_eligible,
+            core_index_source=source if core_source == "same" else core_source,
         )
         _log.info(
             "universe_built",
@@ -336,6 +370,10 @@ class UniverseBuilder:
             index_name=index_name,
             index_size=len(members),
             eligible=len(eligible),
+            core_index_name=self._settings.universe.core_index_name,
+            core_index_size=len(core_set),
+            core_eligible=len(core_eligible),
+            core_source=core_source,
             watchlist=len(watchlist),
             mis_candidates=len(mis_candidates),
             extended=len(extended),
@@ -346,16 +384,37 @@ class UniverseBuilder:
 
     # -------------------------------------------------------- configured-index membership (E5)
     async def _load_index(self) -> tuple[list[str], IndexSource]:
+        """The configured index through the E5 ladder (see :meth:`_load_list`)."""
+        u = self._settings.universe
+        return await self._load_list(
+            u.index_name, u.index_source_url, self._cache_path, self._seed_path
+        )
+
+    async def _load_core_index(
+        self, members: list[str], source: IndexSource
+    ) -> tuple[list[str], IndexSource | Literal["same"]]:
+        """O18: the CORE (evidence) index. When it is configured as the SAME list as the index the
+        index's own members are reused (``"same"`` — no second download, every member core: the
+        pre-O18 shape). Otherwise the same E5 ladder with its own cache file; ``([], "none")`` when
+        download, cache and seed all fail."""
+        u = self._settings.universe
+        if u.core_index_source_url == u.index_source_url:
+            return list(members), "same"
+        return await self._load_list(
+            u.core_index_name, u.core_index_source_url, self._core_cache_path, self._core_seed_path
+        )
+
+    async def _load_list(
+        self, index_name: str, url: str, cache_path: Path, seed_path: Path
+    ) -> tuple[list[str], IndexSource]:
         """Download → runtime cache → committed seed (E5 ladder). Alerts when not freshly downloaded."""
-        index_name = self._settings.universe.index_name
-        url = self._settings.universe.index_source_url
         try:
             resp = await self._http.get(url, timeout=self._timeout)
             resp.raise_for_status()
             symbols = parse_index_constituents_csv(resp.text)
             if not symbols:
                 raise ValueError(f"downloaded {index_name} CSV parsed to zero symbols")
-            self._write_cache(resp.text)
+            self._write_cache(cache_path, resp.text)
             return symbols, "download"
         except Exception as exc:  # noqa: BLE001 - E5: fall down the ladder, never raise
             _log.warning(
@@ -363,7 +422,7 @@ class UniverseBuilder:
                 index_name=index_name, url=url, error=f"{type(exc).__name__}: {exc}",
             )
 
-        for path, source in ((self._cache_path, "cache"), (self._seed_path, "seed")):
+        for path, source in ((cache_path, "cache"), (seed_path, "seed")):
             try:
                 if path.exists():
                     symbols = parse_index_constituents_csv(path.read_text(encoding="utf-8"))
@@ -380,12 +439,12 @@ class UniverseBuilder:
                 _log.exception("index_fallback_unreadable", path=str(path))
         return [], "none"
 
-    def _write_cache(self, text: str) -> None:
+    def _write_cache(self, cache_path: Path, text: str) -> None:
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_path.write_text(text, encoding="utf-8")
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(text, encoding="utf-8")
         except OSError:
-            _log.exception("index_cache_write_failed", path=str(self._cache_path))
+            _log.exception("index_cache_write_failed", path=str(cache_path))
 
     # ------------------------------------------------------------------ liquidity filter
     def _median_traded_values(self, symbols: list[str], d: date) -> dict[str, Decimal]:

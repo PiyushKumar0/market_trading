@@ -1920,6 +1920,12 @@ async def run() -> int:
             # batch universe and came back to it on 2026-09-09, before the 09-12 promotion made the
             # eligible population part of its registered rule.
             eligible = store.get_universe_eligible_symbols(today)
+            # O18 (2026-10-08): the index widened to NIFTY Total Market; brk20 (no registered edge —
+            # the C3 gate prices each candidate from its own levels) scans the full eligible set
+            # above. hi52, ins and both cat legs originate from the CORE (NIFTY 500) subset only:
+            # their registered edge / frozen shadow verdict was measured there, and hi52's
+            # full-market cell was negative (−0.26% at T+20).
+            core_eligible = store.get_core_eligible_symbols(today)
             histories: dict[str, list[brk20.DailyRow]] = {}
             hist_start = today - timedelta(days=70)   # comfortably ≥ lookback+2 sessions
             yesterday = today - timedelta(days=1)     # completed sessions only, never today's forming bar
@@ -2009,9 +2015,10 @@ async def run() -> int:
             # class) and burn the shared 2/day catalyst budget an index story may need. Extended
             # symbols' originating-grade rows still journal in catalyst_watchlist (analyzable later);
             # they just never become cat/cat_reversal candidates inside the frozen window.
-            _eligible_set = set(eligible)
-            cat_rows = _watchlist_rows_for_symbols(cat_rows, _eligible_set)
-            cat_rev_rows = _watchlist_rows_for_symbols(cat_rev_rows, _eligible_set)
+            # O18: pinned to the CORE subset for the same reason (the frozen populations are NIFTY 500).
+            _core_set = set(core_eligible)
+            cat_rows = _watchlist_rows_for_symbols(cat_rows, _core_set)
+            cat_rev_rows = _watchlist_rows_for_symbols(cat_rev_rows, _core_set)
             cat_raw: list = []
             if cat_rows:
                 cat_raw = cat.sweep_watchlist(
@@ -2050,7 +2057,7 @@ async def run() -> int:
             # HERE, before the admission below, because since the 2026-09-12 promotion its
             # candidates are part of that ONE ranked batch (see the leg's own docstring).
             hi52_raw = _hi52_daily_leg(
-                store, trigger=trigger, eligible=eligible, today=today,
+                store, trigger=trigger, eligible=core_eligible, today=today,
                 yesterday=yesterday, ex_map=ex_map,
             )
 

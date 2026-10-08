@@ -80,15 +80,21 @@ class _FakeStore:
         universe: list[str],
         filings: list[dict[str, Any]],
         closes: dict[str, dict[date, str]],
+        non_core: list[str] | None = None,
     ) -> None:
         self.universe = universe
+        self.non_core = list(non_core or [])
         self.filings = filings
         self.closes = closes
         self.bars_calls: list[str] = []
 
     def get_universe_eligible_symbols(self, d: date) -> list[str]:
-        # 2026-09-01: the job reads the centralized store method now (the inline predicate copy
-        # over get_universe_daily rows was retired with the batch-universe addendum).
+        # 2026-09-01: the predicate lives in the store. O18 (2026-10-08): the job no longer reads
+        # this view; it is kept so a regression back to it shows up as the non-core names leaking.
+        return sorted(self.universe + self.non_core)
+
+    def get_core_eligible_symbols(self, d: date) -> list[str]:
+        # O18: the CORE (NIFTY 500) subset of the eligible set — the job's population.
         return sorted(self.universe)
 
     def get_insider_trades(self, *, symbol=None, broadcast_from=None, broadcast_to=None):
@@ -295,6 +301,20 @@ def test_out_of_universe_symbols_are_ignored(conn, calendar):
     result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
     assert result.crossings_found == 0
     assert store.bars_calls == []                       # never even priced — narrowed before the read
+
+
+def test_eligible_but_non_core_symbols_are_ignored(conn, calendar):
+    """O18 (2026-10-08): the index widened to NIFTY Total Market, but the registered `ins` edge was
+    measured on NIFTY 500-class names, so an ELIGIBLE microcap (non-core) filing a ₹1.2cr buy never
+    becomes a crossing — the job reads the core view, not the eligible one."""
+    filings = [_buy(SESSIONS[-2], 6_000_000, symbol="MICRO"), _buy(SESSIONS[-1], 6_000_000, symbol="MICRO")]
+    store = _FakeStore(
+        universe=["AAA"], non_core=["MICRO"], filings=filings,
+        closes={"MICRO": {d: "100.00" for d in SESSIONS}},
+    )
+    result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
+    assert result.crossings_found == 0
+    assert store.bars_calls == []
 
 
 def test_missing_run_day_bar_is_counted_never_invented(conn, calendar):

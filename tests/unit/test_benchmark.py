@@ -52,6 +52,18 @@ def test_excludes_split_and_outlier_and_averages_rest(store, cal, clock):
     assert ret == pytest.approx(0.01)
 
 
+def test_averages_over_the_core_subset_only(store, cal):
+    """O18 (2026-10-08): an eligible but non-core (microcap) name never enters the benchmark, so the
+    series stays one population across the NIFTY Total Market widening."""
+    _universe(store, WED, ["A"])
+    store.upsert_universe_daily([{"d": WED, "symbol": "MICRO", "included": True,
+                                  "exclusion_reasons": None, "median_traded_value": Decimal("1"),
+                                  "core_index": False}])
+    _closes(store, TUE, {"A": "100", "MICRO": "100"})
+    _closes(store, WED, {"A": "101", "MICRO": "120"})
+    assert compute_ew_return(store, cal, WED) == pytest.approx((0.01, 1))
+
+
 def test_missing_universe_row_uses_previous(store, cal):
     _universe(store, MON, ["A"])
     _closes(store, TUE, {"A": "100"})

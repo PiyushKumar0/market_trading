@@ -32,7 +32,9 @@ def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tup
         u = calendar.previous_trading_day(u)
     else:
         return None
-    symbols = store.get_universe_eligible_symbols(u)
+    # O18 (2026-10-08): the CORE (NIFTY 500) subset, so the benchmark series stays one population
+    # across the NIFTY Total Market widening instead of picking up microcaps from that day on.
+    symbols = store.get_core_eligible_symbols(u)
     if not symbols:
         raise ValueError(f"universe_daily {u}: no eligible symbols")
     prev = calendar.previous_trading_day(d)
