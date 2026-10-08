@@ -72,9 +72,13 @@ export function Scorecard({ data }: { data: ScorecardResponse }) {
             <Th hint="Share of closed ones with a positive net return.">Win rate</Th>
             <Th hint="The middle net return per closed trade, after costs.">Median return</Th>
             <Th hint="Average net return per closed trade, after costs.">Average return</Th>
-            <Th hint="Average net return 20 trading sessions after entry.">20-session return</Th>
+            {/* rec_outcomes.py scores T+20 with stop=None, target=None; the excess is net minus the
+                equal-weight basket over the days held (benchmark.py). */}
+            <Th hint="Average net return if each filled recommendation had simply been held for 20 sessions (the entry day counts as 1), ignoring its stop-loss and target.">
+              20-session return
+            </Th>
             <Th
-              hint="Average return above or below an equal-weighted market basket over the same holding window."
+              hint="Net return minus an equal-weight basket of the stocks the engine can trade, over the days each trade was held (the entry day is left out)."
               term={bench.length ? bench.join('; ') : undefined}
             >
               vs market
@@ -115,8 +119,9 @@ export function Scorecard({ data }: { data: ScorecardResponse }) {
                 </td>
                 <RetCell label="Median return" v={recs.median_net} />
                 <RetCell label="Average return" v={recs.mean_net} />
-                <RetCell label="20-session return" v={recs.net_t20} />
-                <RetCell label="vs market" v={recs.mean_excess} />
+                {/* Phones drop the header row and its hints: these labels carry the meaning alone. */}
+                <RetCell label="If held 20 sessions" v={recs.net_t20} />
+                <RetCell label="vs market basket" v={recs.mean_excess} />
                 <td data-label="Your actions" className="perf-actions">
                   {why && acts ? (
                     <Hint label={acts} asTerm>
@@ -126,13 +131,13 @@ export function Scorecard({ data }: { data: ScorecardResponse }) {
                     dash(acts)
                   )}
                 </td>
-                <td data-label="Paper closed" className="right num">
+                <td data-label="Paper closed (all resets)" className="right num">
                   {paper.closed}
                 </td>
                 <td data-label="Paper win rate" className="right num">
                   {dash(ratePct(paper.hit_rate))}
                 </td>
-                <td data-label="Paper net P&L" className={`right num${tone(paper.net)}`}>
+                <td data-label="Paper net P&L (after costs)" className={`right num${tone(paper.net)}`}>
                   {paper.net === null ? '—' : dash(signedInr(paper.net.toFixed(2)))}
                 </td>
                 <td data-label="Paper open now" className="right num">

@@ -34,7 +34,7 @@ function input(over: Partial<AlertInput> = {}, snap: Partial<Snapshot> = {}): Al
     unauthorized: false,
     polled: true,
     notifications: [],
-    ackedFailureId: null,
+    ackedFailureIds: [],
     ...over,
   }
 }
@@ -66,11 +66,17 @@ test('a healthy engine raises nothing', () => {
   assert.deepEqual(health([]), { level: 'ok', text: 'All normal' })
 })
 
+test('before the first poll answers, the pill says so instead of "All normal"', () => {
+  assert.deepEqual(health([], false), { level: 'pending', text: 'Connecting…' })
+  assert.deepEqual(health([], true), { level: 'ok', text: 'All normal' })
+})
+
 test('the kill switch is a critical alert and names the pill', () => {
   const alerts = deriveAlerts(input({}, { mode: { mode: 'RECOMMEND', routing: null, risk_state: 'KILLED' } }))
   assert.equal(alerts[0].id, 'killed')
   assert.equal(alerts[0].level, 'critical')
-  assert.equal(alerts[0].title, 'Kill switch is on — all trading is stopped')
+  assert.equal(alerts[0].title, 'Kill switch is on — no new trades')
+  assert.match(alerts[0].body, /not closed for you/)
   assert.deepEqual(health(alerts), { level: 'critical', text: 'Kill switch on' })
 })
 
@@ -118,6 +124,18 @@ test('some routes failing lists them in words', () => {
   assert.equal(alerts[0].id, 'partial')
   assert.equal(alerts[0].level, 'warning')
   assert.equal(alerts[0].title, "Some data couldn't load: positions, AI budget")
+})
+
+test('a failure alert never claims data the page may not have', () => {
+  // A route that never answered has no "last values"; an engine that answered earlier did load something.
+  assert.equal(
+    deriveAlerts(input({ failedKeys: ['positions'] }))[0].body,
+    "Their cards keep the last values received, or say they couldn't load. The page retries every 10 seconds.",
+  )
+  assert.equal(
+    deriveAlerts(input({ failedKeys: [...ALL_KEYS] }))[0].body,
+    'No part of the page could refresh. Check that the engine is running; the page retries every 10 seconds.',
+  )
 })
 
 test('a rejected token asks to sign out and hides route failures', () => {
@@ -178,12 +196,30 @@ test('failed Telegram messages warn until acknowledged, then again on a newer fa
   assert.equal(first[0].title, '2 Telegram messages were not delivered')
   assert.equal(first[0].body, 'You may have missed them — read them in Activity.')
   assert.equal(first[0].action, 'ack-telegram')
-  assert.equal(first[0].ackId, 'n3')
-  assert.deepEqual(ids(input({ notifications: rows, ackedFailureId: 'n3' })), [])
+  const ack = first[0].ackIds ?? []
+  assert.equal(ack.length, 2)
+  assert.deepEqual(ids(input({ notifications: rows, ackedFailureIds: ack })), [])
   const later = [...rows, note('n4', 'failed')]
-  const again = deriveAlerts(input({ notifications: later, ackedFailureId: 'n3' }))
+  const again = deriveAlerts(input({ notifications: later, ackedFailureIds: ack }))
   assert.equal(again[0].title, '1 Telegram message was not delivered')
   assert.equal(again[0].body, 'You may have missed it — read it in Activity.')
+})
+
+test('a re-queued acknowledged message does not bring back the others', () => {
+  // The engine re-queues a failed row with a dedupe key as pending (telegram.py): it leaves the failed set.
+  const rows = [note('a', 'failed'), note('b', 'failed')]
+  const ack = deriveAlerts(input({ notifications: rows }))[0].ackIds ?? []
+  const requeued = [rows[0], { ...rows[1], status: 'pending' as const, attempts: 0, created_at: '2026-10-08T12:00:00+05:30' }]
+  assert.deepEqual(ids(input({ notifications: requeued, ackedFailureIds: ack })), [])
+})
+
+test('an acknowledged message that fails again after a re-queue warns again', () => {
+  // telegram.py re-queues the SAME row with a new created_at; it can expire to failed again (6 h).
+  const failed = note('k', 'failed')
+  const ack = deriveAlerts(input({ notifications: [failed] }))[0].ackIds ?? []
+  assert.deepEqual(ids(input({ notifications: [failed], ackedFailureIds: ack })), [])
+  const failedAgain = { ...failed, created_at: '2026-10-08T16:00:00+05:30' }
+  assert.deepEqual(ids(input({ notifications: [failedAgain], ackedFailureIds: ack })), ['telegram-failed'])
 })
 
 test('Telegram retries are a warning', () => {

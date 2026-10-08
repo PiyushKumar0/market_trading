@@ -8,6 +8,7 @@ import { Card, EmptyState } from '../../ui/Card'
 import { StatTile } from '../../ui/Figures'
 import { Hint } from '../../ui/Hint'
 import { Icon } from '../../ui/Icon'
+import { Loading } from '../../ui/Loading'
 
 const valueClass = (v: string | null | undefined) => {
   const s = signOf(v)
@@ -65,7 +66,11 @@ export function PaperSnapshot({
   if (!p) {
     return (
       <Card tier="simulated" title="Paper autopilot">
-        <EmptyState>{paper ? "The engine doesn't have paper trading connected." : 'Loading…'}</EmptyState>
+        {paper ? (
+          <EmptyState>The engine doesn&apos;t have paper trading connected.</EmptyState>
+        ) : (
+          <Loading route="paper" what="paper trading" />
+        )}
       </Card>
     )
   }

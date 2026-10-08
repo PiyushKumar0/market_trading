@@ -31,14 +31,17 @@ export function groupIndian(intDigits: string): string {
 interface Num {
   neg: boolean
   zero: boolean
-  body: string // grouped digits with the original fraction, no sign
+  body: string // grouped digits with the original fraction (a one-digit one padded to paise), no sign
 }
 
 function num(v: string): Num | null {
   const m = NUMERIC.exec(v.trim())
   if (!m) return null
   const digits = `${m[2]}${m[3] ?? ''}`
-  return { neg: m[1] === '-', zero: ZERO_DIGITS.test(digits), body: `${groupIndian(m[2])}${m[3] ?? ''}` }
+  // ".0" -> ".00": a float-born Decimal ("2445.0") would otherwise print as "₹2,445.0". Lossless —
+  // a trailing zero only; whole numbers and longer fractions keep the engine's digits.
+  const frac = m[3] && m[3].length === 2 ? `${m[3]}0` : (m[3] ?? '')
+  return { neg: m[1] === '-', zero: ZERO_DIGITS.test(digits), body: `${groupIndian(m[2])}${frac}` }
 }
 
 const missing = (v: string | null | undefined): v is null | undefined | '' => v === null || v === undefined || v.trim() === ''

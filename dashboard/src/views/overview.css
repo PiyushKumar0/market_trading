@@ -236,6 +236,10 @@
   font-size: var(--fs-13);
 }
 
+.ticket-note-plain {
+  color: var(--text-2);
+}
+
 .ticket-levels,
 .ticket-facts {
   display: grid;

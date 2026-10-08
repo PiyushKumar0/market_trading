@@ -40,7 +40,7 @@
   color: var(--accent-ink);
 }
 
-.btn-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled):not([aria-disabled='true']) {
   background: color-mix(in srgb, var(--accent) 88%, white);
 }
 
@@ -276,6 +276,15 @@
   display: inline-flex;
   align-items: center;
   gap: 2px;
+}
+
+/* A risk-check reason's own figures, under its plain label. */
+.reason-detail {
+  display: block;
+  color: var(--text-3);
+  font-size: var(--fs-13);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .hint-btn {
@@ -669,7 +678,7 @@
   color: var(--text-1);
 }
 
-.switch:hover:not(:disabled) {
+.switch:hover:not(:disabled):not([aria-disabled='true']) {
   background: var(--surface-3);
 }
 
@@ -745,6 +754,12 @@
   background: var(--surface-1);
 }
 
+/* Waiting for the engine's answer (aria-busy): a dashed outline, so a tap shows it registered. */
+.switch[aria-busy='true'] .switch-track,
+.seg[aria-busy='true'] {
+  border-style: dashed;
+}
+
 .seg-btn {
   min-height: calc(var(--target) - 6px);
   padding: 0 var(--sp-3);
@@ -755,7 +770,7 @@
   font-weight: 500;
 }
 
-.seg-btn:hover:not(:disabled) {
+.seg-btn:hover:not(:disabled):not([aria-disabled='true']) {
   color: var(--text-1);
   background: var(--surface-3);
 }

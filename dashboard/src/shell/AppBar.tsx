@@ -5,7 +5,7 @@
  */
 import { useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import type { Badge, Level, TabId } from '../lib/alerts.ts'
+import type { Badge, Health, TabId } from '../lib/alerts.ts'
 import { istTime } from '../lib/format.ts'
 import type { ConnState } from '../types'
 import { Hint } from '../ui/Hint'
@@ -25,14 +25,15 @@ export function BrandMark({ size = 28 }: { size?: number }) {
   )
 }
 
-const HEALTH: Record<Level | 'ok', { tone: string; icon: IconName }> = {
+const HEALTH: Record<Health['level'], { tone: string; icon: IconName }> = {
+  pending: { tone: 'pending', icon: 'dot' },
   ok: { tone: 'good', icon: 'check' },
   notice: { tone: 'note', icon: 'info' },
   warning: { tone: 'warn', icon: 'alert' },
   critical: { tone: 'crit', icon: 'x-circle' },
 }
 
-export function HealthPill({ health, onClick }: { health: { level: Level | 'ok'; text: string }; onClick: () => void }) {
+export function HealthPill({ health, onClick }: { health: Health; onClick: () => void }) {
   const h = HEALTH[health.level]
   return (
     <>
@@ -40,7 +41,13 @@ export function HealthPill({ health, onClick }: { health: { level: Level | 'ok';
         type="button"
         className={`health health-${h.tone}`}
         onClick={onClick}
-        title={health.level === 'ok' ? 'Nothing needs your attention' : 'Show what needs attention'}
+        title={
+          health.level === 'ok'
+            ? 'Nothing needs your attention'
+            : health.level === 'pending'
+              ? 'Waiting for the engine to answer'
+              : 'Show what needs attention'
+        }
       >
         <Icon name={h.icon} />
         <span>{health.text}</span>
@@ -52,25 +59,41 @@ export function HealthPill({ health, onClick }: { health: { level: Level | 'ok';
   )
 }
 
-export function Connection({ conn, lastPollAt }: { conn: ConnState; lastPollAt: string | null }) {
+export function Connection({
+  conn,
+  lastOkAt,
+  unreachable,
+}: {
+  conn: ConnState
+  /** When a refresh last brought back any data — never merely when one was attempted. */
+  lastOkAt: string | null
+  /** The latest refresh failed for every route: "Updated" would claim a refresh that didn't happen. */
+  unreachable: boolean
+}) {
   const live = conn === 'open'
   return (
-    <span className="conn">
-      <Icon name="dot" size={12} className={live ? 'conn-live' : 'conn-off'} />
+    <span className={unreachable ? 'conn conn-down' : 'conn'}>
+      <Icon name="dot" size={12} className={unreachable ? 'conn-bad' : live ? 'conn-live' : 'conn-off'} />
       <span className="conn-text">
-        {lastPollAt ? (
+        {unreachable ? (
+          "Can't reach the engine"
+        ) : lastOkAt ? (
           <>
-            Updated <span className="num">{istTime(lastPollAt, { seconds: true })}</span>
+            Updated <span className="num">{istTime(lastOkAt, { seconds: true })}</span>
           </>
         ) : (
           'Connecting…'
         )}
       </span>
-      <span className="sr-only">{live ? ', live updates connected' : ', live updates reconnecting'}</span>
+      <span className="sr-only">
+        {unreachable ? '' : live ? ', live updates connected' : ', live updates reconnecting'}
+      </span>
       <Hint label="Data updates">
-        {live
-          ? 'Live updates are connected. Everything else refreshes every 10 seconds.'
-          : 'Live updates are reconnecting on their own. Data still refreshes every 10 seconds.'}
+        {unreachable
+          ? `${lastOkAt ? `No answer from the engine since ${istTime(lastOkAt, { seconds: true })}.` : 'The engine has not answered yet.'} The figures shown are the last ones received; the page retries every 10 seconds.`
+          : live
+            ? 'Live updates are connected. Everything else refreshes every 10 seconds.'
+            : 'Live updates are reconnecting on their own. Data still refreshes every 10 seconds.'}
       </Hint>
     </span>
   )
@@ -81,17 +104,19 @@ export function AppBar({
   onHealth,
   controls,
   conn,
-  lastPollAt,
+  lastOkAt,
+  unreachable,
   onSignOut,
   tab,
   onTab,
   badges,
 }: {
-  health: { level: Level | 'ok'; text: string }
+  health: Health
   onHealth: () => void
   controls: ReactNode
   conn: ConnState
-  lastPollAt: string | null
+  lastOkAt: string | null
+  unreachable: boolean
   onSignOut: () => void
   tab: TabId
   onTab: (t: TabId) => void
@@ -115,9 +140,11 @@ export function AppBar({
       <header className="appbar" ref={header}>
         <div className="appbar-inner">
           <div className="appbar-brand">
+            {/* Below 640 px the name is hidden and the mark is decorative: the label keeps the link named. */}
             <a
               className="brand"
               href="#overview"
+              aria-label="Market Trading: go to the Overview"
               onClick={(e) => {
                 e.preventDefault()
                 onTab('overview')
@@ -130,7 +157,7 @@ export function AppBar({
           </div>
           <div className="appbar-controls">{controls}</div>
           <div className="appbar-meta">
-            <Connection conn={conn} lastPollAt={lastPollAt} />
+            <Connection conn={conn} lastOkAt={lastOkAt} unreachable={unreachable} />
             <button
               type="button"
               className="icon-btn"

@@ -54,11 +54,41 @@ export function entryText(rec: RecommendationPayload | null | undefined): string
   return `${lo} – ${hi}`
 }
 
-/** One sentence: "Buy 3 shares at ₹2,445.00". */
+/**
+ * "The risk check cut the quantity from 10 to 3" — only on an entry, and only when the approved
+ * quantity really is smaller. An exit or adjust carries the held position's own size (ops/pipeline.py
+ * `_manage_recommendation`), so its gate's `original_qty` says nothing about a cut.
+ */
+export function quantityCut(rec: RecommendationPayload | null | undefined): { from: number; to: number } | null {
+  if (!rec || rec.kind === 'exit' || rec.kind === 'adjust') return null
+  const from = rec.gate?.original_qty
+  const to = rec.qty
+  if (from === null || from === undefined || to === null || to === undefined || from <= to) return null
+  return { from, to }
+}
+
+/**
+ * One sentence saying what to do, by kind (ops/pipeline.py builds exits and adjusts from the held
+ * position):
+ *  - entry  → "Buy 3 shares at ₹2,445.00"
+ *  - exit   → "Sell all 3 shares at market": an exit's zone is the last price OR the position's own
+ *             entry price, and its checklist says "exit at market" — a price here would mislead;
+ *  - adjust → "Move the stop-loss on SAIL to ₹128.50": it places NO order and keeps the position's
+ *             side, so a "Buy …" headline would read as doubling the position.
+ */
 export function instruction(rec: RecommendationPayload | null | undefined): string {
   if (!rec) return '—'
-  const verb = rec.side === 'BUY' ? 'Buy' : rec.side === 'SELL' ? 'Sell' : 'Trade'
   const qty = rec.qty
+  if (rec.kind === 'adjust') {
+    const stop = inr(rec.stop)
+    return `Move the stop-loss on ${rec.instrument ?? 'this position'}${stop ? ` to ${stop}` : ''}`
+  }
+  if (rec.kind === 'exit') {
+    const verb = rec.side === 'BUY' ? 'Buy back' : 'Sell'
+    const what = qty !== null && qty !== undefined ? ` all ${qty} ${qty === 1 ? 'share' : 'shares'}` : ''
+    return `${verb}${what} at market`
+  }
+  const verb = rec.side === 'BUY' ? 'Buy' : rec.side === 'SELL' ? 'Sell' : 'Trade'
   const what = qty !== null && qty !== undefined ? ` ${qty} ${qty === 1 ? 'share' : 'shares'}` : ''
   const at = entryText(rec)
   return `${verb}${what}${at === '—' ? '' : ` at ${at}`}`

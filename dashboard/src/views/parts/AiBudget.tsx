@@ -6,6 +6,7 @@ import type { BudgetResponse } from '../../types'
 import { Card, EmptyState } from '../../ui/Card'
 import { KeyValue, Meter } from '../../ui/Figures'
 import { Hint, Labelled } from '../../ui/Hint'
+import { Loading } from '../../ui/Loading'
 import { Pill } from '../../ui/Pill'
 import type { Tone } from '../../ui/Pill'
 
@@ -51,6 +52,14 @@ export function AiBudget({ budget: data, nowMs }: { budget: BudgetResponse | nul
   )
   const levelKey: Term = { label: 'AI level', hint: 'How freely the AI analysts may spend this week’s budget.' }
 
+  // null = /budget has not answered; `{ budget: {} }` is the engine's stub for an unwired governor.
+  if (data === null) {
+    return (
+      <Card title="AI usage budget">
+        <Loading route="budget" what="the AI budget" />
+      </Card>
+    )
+  }
   if (!b || Object.keys(b).length === 0) {
     return (
       <Card title="AI usage budget">
@@ -68,7 +77,11 @@ export function AiBudget({ budget: data, nowMs }: { budget: BudgetResponse | nul
   const spentShown = usd(b.window_spend_usd)
   const creditShown = usd(b.credit_usd)
   const total = spentShown ? (creditShown ? `${spentShown} of ${creditShown}` : spentShown) : '—'
-  const exact = b.window_spend_usd ? `Exact: $${b.window_spend_usd}${b.credit_usd ? ` of $${b.credit_usd}` : ''}` : null
+  // governor.py prices calls at API list rates against a self-set weekly figure (agents.yaml): a
+  // pacing estimate, not a bill — the engine runs on the flat subscription.
+  const exact = b.window_spend_usd ? ` Exact: $${b.window_spend_usd}${b.credit_usd ? ` of $${b.credit_usd}` : ''}.` : ''
+  // At Minimal/Stopped the analyst is blocked, so the engine's forward cap (still 32) sends nothing.
+  const paused = tier === 'DG3' || tier === 'DG4'
   const reset = resetText(b.window_end, nowMs)
   const weekKey: Term = {
     label: 'Budget week',
@@ -81,8 +94,11 @@ export function AiBudget({ budget: data, nowMs }: { budget: BudgetResponse | nul
       <Meter
         label={
           <span className="labelled">
-            Spent this week
-            {exact ? <Hint label="Spent this week">{exact}</Hint> : null}
+            Spent this week (estimate)
+            <Hint label="Spent this week">
+              Estimated AI use, priced at API list rates against the weekly budget set in the engine. Your actual bill is
+              the flat subscription.{exact}
+            </Hint>
           </span>
         }
         used={usedOf(b.window_spend_usd, b.credit_usd)}
@@ -105,7 +121,10 @@ export function AiBudget({ budget: data, nowMs }: { budget: BudgetResponse | nul
                 (reset ?? '—')
               ),
           },
-          { k: <Labelled t={FORWARD_KEY} />, v: b.forward_cap !== undefined ? b.forward_cap : '—' },
+          {
+            k: <Labelled t={FORWARD_KEY} />,
+            v: paused ? 'None while the AI is paused' : b.forward_cap !== undefined ? b.forward_cap : '—',
+          },
         ]}
       />
       <h3 className="sys-subhead">Spend by analyst</h3>
@@ -117,7 +136,7 @@ export function AiBudget({ budget: data, nowMs }: { budget: BudgetResponse | nul
             const spentStr = spend[id] ?? '0'
             const alloc = allocations[id]
             const s = usd(spentStr) ?? '—'
-            const text = alloc ? `${s} of ${usd(alloc)}` : `${s} (no allocation)`
+            const shown = alloc ? `${s} of ${usd(alloc)}` : `${s} (no allocation)`
             const label = agentName(id)
             return (
               <Meter
@@ -125,8 +144,8 @@ export function AiBudget({ budget: data, nowMs }: { budget: BudgetResponse | nul
                 label={<Labelled t={label} />}
                 used={alloc ? usedOf(spentStr, alloc) : null}
                 limit={alloc && Number(alloc) > 0 ? Number(alloc) : null}
-                text={text}
-                ariaLabel={`${label.label}: ${text}`}
+                text={<span title={`Exact: $${spentStr}${alloc ? ` of $${alloc}` : ''}`}>{shown}</span>}
+                ariaLabel={`${label.label}: ${shown}`}
               />
             )
           })}

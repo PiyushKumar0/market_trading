@@ -57,7 +57,9 @@ function MessageRow({ row }: { row: NotificationRow }) {
   return (
     <li className="act-msg">
       <div className="act-msg-head">
-        <span className="act-msg-time">{istTime(row.created_at)}</span>
+        <span className="act-msg-time" title={istTime(row.created_at, { seconds: true })}>
+          {istTime(row.created_at)}
+        </span>
         <Pill tone={severityTone(row.severity)}>{severityTerm(row.severity).label}</Pill>
         <span className="act-msg-title">{row.title || '(no title)'}</span>
         <Labelled t={messageKindTerm(row.kind)} className="muted" />
@@ -113,7 +115,10 @@ export function TelegramMessages({ d, rows, loading, error, unauthorized, lastRe
 
   return (
     <Card id="act-telegram" title="Telegram messages" meta={meta}>
-      <p className="muted act-lede">Every message the engine sent you today, and whether Telegram confirmed it.</p>
+      <p className="muted act-lede">
+        Every message the engine sent you today, and whether Telegram confirmed it (replies to your commands aren&apos;t
+        listed).
+      </p>
       {unauthorized ? (
         <p className="act-error">Your dashboard token was rejected. Sign out (top right) and enter the current token.</p>
       ) : error ? (

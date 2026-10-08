@@ -14,8 +14,10 @@ function paper(over: Partial<PaperSummary> = {}): PaperSummary {
 
 test('entry guard reasons read as plain words', () => {
   assert.equal(entryGuardText('paper is off'), 'the autopilot is off')
-  assert.equal(entryGuardText('effective paper state is FROZEN'), 'a paper risk limit is active (new paper trades paused)')
-  assert.equal(entryGuardText('effective paper state is RiskState.CLOSE_ONLY'), 'a paper risk limit is active (closing only)')
+  // paper_risk.py: the paper guard uses the WORSE of the real risk state and the paper halts; with no
+  // paper halt in force (paperStatus checks halts first) the cause is the engine's own risk state.
+  assert.equal(entryGuardText('effective paper state is FROZEN'), "the engine's own risk state (new positions paused) also stops paper entries")
+  assert.equal(entryGuardText('effective paper state is RiskState.CLOSE_ONLY'), "the engine's own risk state (closing only) also stops paper entries")
   assert.equal(entryGuardText('paper session prep has not completed'), "today's paper setup hasn't finished yet")
   assert.equal(entryGuardText('not built'), 'the autopilot is not running')
   assert.equal(entryGuardText('something new'), 'something new')

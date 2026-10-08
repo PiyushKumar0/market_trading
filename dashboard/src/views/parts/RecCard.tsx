@@ -10,21 +10,21 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   FIELD,
+  actionHint,
   kindTerm,
   productTerm,
-  ruleTerm,
   strategyName,
   styleTerm,
-  takenHint,
   verdictTerm,
 } from '../../copy/glossary.ts'
-import { inr, istStamp, shortDate } from '../../lib/format.ts'
-import { actionState, instruction } from '../../lib/recs.ts'
-import type { RecommendationRow } from '../../types'
+import { inr, istStamp, istTime, shortDate } from '../../lib/format.ts'
+import { actionState, instruction, quantityCut } from '../../lib/recs.ts'
+import type { RecommendationPayload, RecommendationRow } from '../../types'
 import { Hint, Labelled } from '../../ui/Hint'
 import { Icon } from '../../ui/Icon'
 import { Pill, SideBadge } from '../../ui/Pill'
 import type { Tone } from '../../ui/Pill'
+import { ReasonText } from './ReasonText'
 
 const VERDICT_TONE: Record<string, Tone> = {
   approve: 'good',
@@ -42,6 +42,44 @@ function Level({ t, v }: { t: { label: string; hint?: string }; v: ReactNode }) 
       </dt>
       <dd className="num">{v}</dd>
     </div>
+  )
+}
+
+/**
+ * The levels row, by kind (ops/pipeline.py `_manage_recommendation`). An exit or adjust carries the
+ * held position's size and a reference price — the last price or the position's own entry — with no
+ * targets, so only the entry kind shows an amount, targets and a loss at the stop:
+ *  - exit   → the stop-loss recorded at /taken (a followed adjust never updates it);
+ *  - adjust → nothing: the new stop-loss is the headline and no order is placed.
+ */
+function Levels({ rec }: { rec: RecommendationPayload }) {
+  if (rec.kind === 'adjust') return null
+  if (rec.kind === 'exit') {
+    return (
+      <dl className="ticket-levels">
+        <Level t={FIELD.stopOnRecord} v={inr(rec.stop) ?? '—'} />
+      </dl>
+    )
+  }
+  const targets = rec.targets ?? []
+  const held = rec.hold_sessions !== null && rec.hold_sessions !== undefined
+  const timeExit = rec.exit_kind === 'time' || (targets.length === 0 && held)
+  const exit = rec.exit_session
+    ? `${shortDate(rec.exit_session)}${held ? ` (${rec.hold_sessions} sessions)` : ''}`
+    : held
+      ? 'Date pending'
+      : null
+  return (
+    <dl className="ticket-levels">
+      <Level t={FIELD.stop} v={inr(rec.stop) ?? '—'} />
+      <Level
+        t={targets.length > 1 ? { ...FIELD.target, label: 'Targets' } : FIELD.target}
+        v={targets.length ? targets.map((t) => inr(t)).join(', ') : timeExit ? 'None, exits on a date' : '—'}
+      />
+      <Level t={FIELD.amount} v={inr(rec.notional) ?? '—'} />
+      {rec.risk_inr ? <Level t={FIELD.maxLoss} v={inr(rec.risk_inr)} /> : null}
+      {exit ? <Level t={FIELD.plannedExit} v={exit} /> : null}
+    </dl>
   )
 }
 
@@ -68,14 +106,8 @@ export function RecCard({
   const gate = rec.gate
   const verdict = verdictTerm(gate?.verdict)
   const action = actionState(row, nowMs)
-  const shrunk = gate?.original_qty !== null && gate?.original_qty !== undefined && rec.qty !== undefined && gate.original_qty !== rec.qty
-  const targets = rec.targets ?? []
-  const timeExit = rec.exit_kind === 'time' || (targets.length === 0 && rec.hold_sessions !== null && rec.hold_sessions !== undefined)
-  const exit = rec.exit_session
-    ? `${shortDate(rec.exit_session)}${rec.hold_sessions !== null && rec.hold_sessions !== undefined ? ` (${rec.hold_sessions} sessions)` : ''}`
-    : rec.hold_sessions !== null && rec.hold_sessions !== undefined
-      ? 'Date pending'
-      : null
+  const cut = quantityCut(rec)
+  const stripe = rec.kind === 'adjust' ? 'other' : side === 'SELL' ? 'sell' : side === 'BUY' ? 'buy' : 'other'
   const thesis = rec.thesis ?? ''
   const steps = rec.manual_checklist ?? []
   const evidence = rec.evidence ?? []
@@ -98,9 +130,9 @@ export function RecCard({
   ) : null
 
   return (
-    <article className={`ticket ticket-${side === 'SELL' ? 'sell' : side === 'BUY' ? 'buy' : 'other'} ticket-${variant}`}>
+    <article className={`ticket ticket-${stripe} ticket-${variant}`}>
       <header className="ticket-head">
-        <SideBadge side={rec.side} />
+        <SideBadge side={rec.side} kind={rec.kind} />
         <h3 className="ticket-symbol">{rec.instrument ?? row.rec_id}</h3>
         <span className="ticket-tags">
           <Labelled t={kindTerm(rec.kind)} />
@@ -117,21 +149,17 @@ export function RecCard({
       <div className="ticket-body">
         <div className="ticket-main">
           <p className="ticket-instruction">{instruction(rec)}</p>
-          {shrunk ? (
-            <p className="ticket-note">
-              The risk check cut the quantity from {gate?.original_qty} to {rec.qty} to fit a limit.
+          {rec.kind === 'adjust' ? (
+            <p className="ticket-note ticket-note-plain">
+              No new order: change the stop-loss order you already have in Kite for this position.
             </p>
           ) : null}
-          <dl className="ticket-levels">
-            <Level t={FIELD.stop} v={inr(rec.stop) ?? '—'} />
-            <Level
-              t={targets.length > 1 ? { ...FIELD.target, label: 'Targets' } : FIELD.target}
-              v={targets.length ? targets.map((t) => inr(t)).join(', ') : timeExit ? 'None, exits on a date' : '—'}
-            />
-            <Level t={FIELD.amount} v={inr(rec.notional) ?? '—'} />
-            {rec.risk_inr ? <Level t={FIELD.maxLoss} v={inr(rec.risk_inr)} /> : null}
-            {exit ? <Level t={FIELD.plannedExit} v={exit} /> : null}
-          </dl>
+          {cut ? (
+            <p className="ticket-note">
+              The risk check cut the quantity from {cut.from} to {cut.to} to fit a limit.
+            </p>
+          ) : null}
+          <Levels rec={rec} />
         </div>
 
         {thesis || (live && steps.length) ? (
@@ -165,7 +193,7 @@ export function RecCard({
           {verdict.hint ? <Hint label="Risk check" term={verdict.term}>{verdict.hint}</Hint> : null}
           <Pill tone={action.tone}>{action.label}</Pill>
           <Hint label="Your action" term={row.human_action ?? undefined}>
-            {action.tone === 'warn' ? takenHint(rec.instrument, rec.qty) : action.hint}
+            {action.tone === 'warn' ? actionHint(rec) : action.hint}
           </Hint>
           {rec.short_flag_higher_tail_risk ? (
             <Pill tone="crit" icon="alert">
@@ -196,9 +224,9 @@ export function RecCard({
             <div>
               <h4 className="ticket-subhead">Risk check notes</h4>
               <ul>
-                {reasons.map((r) => (
-                  <li key={r}>
-                    <Labelled t={ruleTerm(r)} />
+                {reasons.map((r, i) => (
+                  <li key={`${i}-${r}`}>
+                    <ReasonText reason={r} />
                   </li>
                 ))}
               </ul>
@@ -212,7 +240,10 @@ export function RecCard({
             {rec.registered_edge_pct ? <Level t={FIELD.edge} v={`${rec.registered_edge_pct}% per trade`} /> : null}
             {rec.stop_atr_mult ? <Level t={FIELD.stopDistance} v={`${rec.stop_atr_mult}× ATR`} /> : null}
             {row.human_fill_price ? <Level t={FIELD.fill} v={inr(row.human_fill_price)} /> : null}
-            <Level t={{ label: 'Sent' }} v={istStamp(row.delivered_at)} />
+            <Level
+              t={{ label: 'Sent' }}
+              v={<span title={istTime(row.delivered_at, { seconds: true })}>{istStamp(row.delivered_at)}</span>}
+            />
             <Level t={{ label: 'Reference' }} v={<code className="ref">{row.rec_id}</code>} />
           </dl>
         </div>

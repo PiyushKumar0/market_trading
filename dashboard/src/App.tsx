@@ -13,7 +13,7 @@
  */
 import { useState } from 'react'
 import type { JSX } from 'react'
-import { ApiError, apiPost, getToken, setToken } from './api'
+import { ApiError, NoAnswerError, apiPost, getToken, setToken } from './api'
 import { COPY } from './copy/glossary.ts'
 import { useLiveEvents, useNotifications, usePoll, useScorecard } from './hooks'
 import { deriveAlerts, health, tabBadges } from './lib/alerts.ts'
@@ -23,6 +23,8 @@ import { AppBar } from './shell/AppBar'
 import { HoursControl, ModeControl, PaperSwitch } from './shell/Controls'
 import { TokenGate } from './shell/TokenGate'
 import { useConfirm } from './ui/Dialog'
+import { Icon } from './ui/Icon'
+import { FailedRoutes } from './ui/Loading'
 import { useToasts } from './ui/Toast'
 import { Activity } from './views/Activity'
 import { Overview } from './views/Overview'
@@ -31,20 +33,22 @@ import { Performance } from './views/Performance'
 import { Recommendations } from './views/Recommendations'
 import { System } from './views/System'
 
-/** The newest failed Telegram message the owner acknowledged ("Got it"); per browser, best effort. */
-const ACK_KEY = 'mt_ack_failed_notification'
+/** Failed Telegram messages the owner acknowledged ("Got it"); per browser, best effort, capped. */
+const ACK_KEY = 'mt_ack_failed_notifications'
+const ACK_CAP = 200
 
-function readAck(): string | null {
+function readAck(): string[] {
   try {
-    return localStorage.getItem(ACK_KEY)
+    const raw = JSON.parse(localStorage.getItem(ACK_KEY) ?? '[]') as unknown
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
   } catch {
-    return null
+    return []
   }
 }
 
-function writeAck(id: string): void {
+function writeAck(ids: string[]): void {
   try {
-    localStorage.setItem(ACK_KEY, id)
+    localStorage.setItem(ACK_KEY, JSON.stringify(ids.slice(-ACK_CAP)))
   } catch {
     /* storage blocked: the alert simply stays */
   }
@@ -61,7 +65,7 @@ export default function App() {
   const [tab, setTab] = useHashTab()
   const { confirm, dialog } = useConfirm()
   const { push, region } = useToasts()
-  const [acked, setAcked] = useState<string | null>(readAck)
+  const [acked, setAcked] = useState<string[]>(readAck)
 
   function saveToken(next: string) {
     setToken(next)
@@ -76,8 +80,9 @@ export default function App() {
       if (r.ok) push('good', mode === 'OFF' ? 'Engine turned off.' : 'Engine set to Recommend.')
       else push('crit', "The engine didn't change the mode.")
     } catch (e) {
-      // 409 (two-step only) / 501 (unwired) are answers, not crashes — say so and move on.
-      push('crit', `Couldn't change the mode: ${reason(e)}`)
+      // 409 (two-step only) / 501 (unwired) are answers, not crashes — say so and move on. No answer
+      // at all is not a refusal: the engine may still apply it (api.ts).
+      push('crit', e instanceof NoAnswerError ? COPY.noAnswer('mode') : `Couldn't change the mode: ${reason(e)}`)
     }
     poll.refresh()
   }
@@ -88,7 +93,10 @@ export default function App() {
       push('good', enabled ? 'Paper autopilot turned on.' : 'Paper autopilot turned off.')
     } catch (e) {
       // 409 = ON while the autopilot is not built; nothing was written.
-      push('crit', `Couldn't change the paper autopilot: ${reason(e)}`)
+      push(
+        'crit',
+        e instanceof NoAnswerError ? COPY.noAnswer('paper autopilot') : `Couldn't change the paper autopilot: ${reason(e)}`,
+      )
     }
     poll.refresh()
   }
@@ -96,12 +104,14 @@ export default function App() {
   async function setHours(body: { start: string; end: string; squareoff_buffer_min: number | null }) {
     try {
       await apiPost<{ ok: boolean }>('/config/trade_window', body)
-      poll.refresh()
       push('good', `Trading hours saved: ${body.start}–${body.end}`)
       return null
     } catch (e) {
       // 422 = rejected by ModeManager validation; the stored window is UNCHANGED (§3.2.7).
-      return e instanceof ApiError && e.status === 422 ? COPY.hoursRejected : `Not saved: ${reason(e)}`
+      if (e instanceof ApiError && e.status === 422) return COPY.hoursRejected
+      return e instanceof NoAnswerError ? COPY.noAnswer('trading hours') : `Not saved: ${reason(e)}`
+    } finally {
+      poll.refresh()
     }
   }
 
@@ -111,20 +121,33 @@ export default function App() {
     unauthorized: poll.unauthorized || notifications.unauthorized || scorecard.unauthorized,
     polled: poll.lastPollAt !== null,
     notifications: notifications.rows,
-    ackedFailureId: acked,
+    ackedFailureIds: acked,
   }
   const alerts = deriveAlerts(input)
   const nowMs = Date.now()
   const badges = tabBadges(input, nowMs)
+  const killed = alerts.some((a) => a.id === 'killed')
+  const unreachable = alerts.some((a) => a.id === 'unreachable')
 
-  const ack = (id: string) => {
-    writeAck(id)
-    setAcked(id)
+  const ack = (ids: string[]) => {
+    const next = [...new Set([...acked, ...ids])]
+    writeAck(next)
+    setAcked(next)
+    // The "Got it" button unmounts with its alert: keep keyboard focus in the alerts area (or the page).
+    window.requestAnimationFrame(() => (document.getElementById('alerts') ?? document.getElementById('main'))?.focus())
   }
 
   const showAlerts = () => {
     setTab('overview')
     window.requestAnimationFrame(() => document.getElementById('alerts')?.focus())
+  }
+
+  // In-page links to another tab (an alert's button, "All recommendations", "Open paper trading"):
+  // the clicked button leaves with the old view, so focus moves to the new panel instead of <body>.
+  // The tab bar itself keeps focus on the tab (WAI-ARIA tabs pattern), so it uses setTab directly.
+  const openTab = (t: TabId) => {
+    setTab(t)
+    window.requestAnimationFrame(() => document.getElementById(`panel-${t}`)?.focus({ preventScroll: true }))
   }
 
   const s = poll.snapshot
@@ -135,9 +158,10 @@ export default function App() {
         alerts={alerts}
         notifications={notifications.rows}
         nowMs={nowMs}
-        onTab={setTab}
+        onTab={openTab}
         onSignOut={() => saveToken('')}
         onAck={ack}
+        errorDetail={poll.error}
       />
     ),
     recommendations: () => <Recommendations data={s.recommendations} nowMs={nowMs} />,
@@ -159,7 +183,7 @@ export default function App() {
         headroom={s.headroom}
         budget={s.budget}
         conn={live.conn}
-        lastPollAt={poll.lastPollAt}
+        lastOkAt={poll.lastOkAt}
         nowMs={nowMs}
       />
     ),
@@ -167,32 +191,54 @@ export default function App() {
 
   return (
     <>
-      <a className="skip-link" href="#main">
+      {/* Not a hash link: "#main" is not a tab, and following it would add a history entry. */}
+      <a
+        className="skip-link"
+        href="#main"
+        onClick={(e) => {
+          e.preventDefault()
+          document.getElementById('main')?.focus()
+        }}
+      >
         Skip to content
       </a>
       <AppBar
-        health={health(alerts)}
+        health={health(alerts, poll.lastPollAt !== null)}
         onHealth={showAlerts}
         controls={
           <>
             <ModeControl mode={poll.snapshot.mode} onSetMode={setMode} confirm={confirm} />
             <PaperSwitch paper={poll.snapshot.paper} onSetPaper={setPaper} confirm={confirm} />
-            <HoursControl data={poll.snapshot.tradeWindow} onSave={setHours} />
+            <HoursControl
+              data={poll.snapshot.tradeWindow}
+              onSave={setHours}
+              onLateFailure={(message) => push('crit', message)}
+            />
           </>
         }
         conn={live.conn}
-        lastPollAt={poll.lastPollAt}
+        lastOkAt={poll.lastOkAt}
+        unreachable={unreachable}
         onSignOut={() => saveToken('')}
         tab={tab}
         onTab={setTab}
         badges={badges}
       />
-      <main id="main" className="page">
-        <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="view">
-          {/* Until the first poll answers there is nothing true to show: one quiet line, then the
-              whole page at once instead of panels jumping in one by one. */}
-          {poll.lastPollAt === null ? <p className="page-loading">Loading the dashboard…</p> : views[tab]()}
-        </div>
+      <main id="main" className="page" tabIndex={-1}>
+        {killed && tab !== 'overview' ? (
+          <div className="kill-banner" role="alert">
+            <Icon name="x-circle" />
+            <strong>Kill switch is on — no new trades.</strong>
+            <span>Open positions are not closed for you. The Overview says how to reset it.</span>
+          </div>
+        ) : null}
+        <FailedRoutes.Provider value={poll.failedKeys}>
+          <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="view" tabIndex={-1}>
+            {/* Until the first poll answers there is nothing true to show: one quiet line, then the
+                whole page at once instead of panels jumping in one by one. */}
+            {poll.lastPollAt === null ? <p className="page-loading">Loading the dashboard…</p> : views[tab]()}
+          </div>
+        </FailedRoutes.Provider>
       </main>
       {dialog}
       {region}

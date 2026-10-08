@@ -28,8 +28,10 @@ export function RecRow({ row, nowMs }: { row: RecommendationRow; nowMs: number }
     <div className={open ? 'rec-row open' : 'rec-row'}>
       <button type="button" className="rec-row-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <Icon name={open ? 'chevron-down' : 'chevron-right'} size={16} />
-        <span className="rec-row-time num">{istTime(row.delivered_at ?? rec?.created_at)}</span>
-        <SideBadge side={rec?.side} />
+        <span className="rec-row-time num" title={istTime(row.delivered_at ?? rec?.created_at, { seconds: true })}>
+          {istTime(row.delivered_at ?? rec?.created_at)}
+        </span>
+        <SideBadge side={rec?.side} kind={rec?.kind} />
         <span className="rec-row-sym">{rec?.instrument ?? row.rec_id}</span>
         <span className="rec-row-what">{instruction(rec)}</span>
         <span className="rec-row-pills">

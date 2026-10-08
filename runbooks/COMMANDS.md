@@ -230,11 +230,16 @@ Coverage checks: see scratch patterns in WORKLOG entries (bars/filings min/max/c
 ## Phase-2 surfaces (2026-07-28)
 
 ```powershell
-# Dashboard build (served by the engine at / from dashboard/dist):
+# Dashboard build (served by the engine at / from dashboard/dist; live on the next page load, no restart):
 cd dashboard; npm install; npm run build; cd ..
+# Dashboard unit tests (pure modules, Node's own runner; 2026-10-08):
+cd dashboard; npm test; cd ..
 # Dashboard preview WITHOUT the engine (dev only, 2026-09-08): dist + canned rows across several IST
-# days at http://127.0.0.1:8499/, any token passes; $env:NO_TODAY='1' drops today's ledger rows.
+# days at http://127.0.0.1:8499/, any token passes. Scenarios (one per process; $env:PORT picks the port):
+# NO_TODAY (no ledger rows today), PAPER_OFF, PAPER_IDLE, ALERTS (the loud state), EMPTY (first boot).
 cd dashboard; node fixture_server.mjs; cd ..
+$env:PORT='8497'; $env:ALERTS='1'; node dashboard\fixture_server.mjs
+# Layout/contrast sweep: paste dashboard\tests\dom-checks.js into the page console (README "Tests").
 # Phase-2 test slices:
 uv run pytest tests/unit/test_risk_gate.py tests/unit/test_reco_pipeline.py -q     # gate + pipeline
 uv run pytest tests/unit/test_budget_governor.py tests/unit/test_agent_harness.py -q  # LLM plumbing
@@ -261,7 +266,7 @@ uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py
   refused while an unexpired challenge is pending; `on` also needs `paper.subsystem_enabled: true` in
   settings.yaml. `off`: no new entries; resting paper entry orders are cancelled within one paper tick in
   session (≤30 s; outside it they lapse at the next open; a partial fill keeps its filled part); exits and GTTs
-  continue. The dashboard Paper panel's turn ON / turn OFF
+  continue. The dashboard's "Paper autopilot" switch in the top bar
   (`POST /paper`) sets the same flag single-step; `GET /paper` returns control state and the paper book.
 
 ## News-feed health (2026-08-04, after the MC-retirement remediation)

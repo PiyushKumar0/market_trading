@@ -34,35 +34,57 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** A request that never answers (engine host asleep, event loop blocked) must FAIL, not hang: a hung
+ *  poll would freeze the page on its last state while the health pill still read "All normal". */
+const READ_TIMEOUT_MS = 8_000
+const WRITE_TIMEOUT_MS = 15_000
+
+/** No answer in time. For a write this is not a refusal: the engine may still apply it. */
+export class NoAnswerError extends Error {
+  constructor(seconds: number) {
+    super(`no answer within ${seconds} s`)
+    this.name = 'NoAnswerError'
+  }
+}
+
+async function request<T>(path: string, init: RequestInit, timeoutMs: number): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${getToken()}`)
   if (init.body !== undefined) headers.set('Content-Type', 'application/json')
 
-  const res = await fetch(`${apiBase()}${path}`, { ...init, headers })
-  if (!res.ok) {
-    // FastAPI puts the reason in `detail` (an array of `{msg}` on a 422); the two-step/stub refusals
-    // answer 409/501 with `note`.
-    let detail = res.statusText
-    try {
-      const body = (await res.json()) as { detail?: unknown; note?: unknown }
-      detail = Array.isArray(body.detail)
-        ? body.detail.map((d) => d?.msg).join('; ')
-        : String(body.detail ?? body.note ?? detail)
-    } catch {
-      /* non-JSON body — keep the status text */
+  // The timeout also covers reading the body, so a stall after the headers is a NoAnswerError too.
+  try {
+    const res = await fetch(`${apiBase()}${path}`, { ...init, headers, signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) {
+      // FastAPI puts the reason in `detail` (an array of `{msg}` on a 422); the two-step/stub refusals
+      // answer 409/501 with `note`.
+      let detail = res.statusText
+      try {
+        const body = (await res.json()) as { detail?: unknown; note?: unknown }
+        detail = Array.isArray(body.detail)
+          ? body.detail.map((d) => d?.msg).join('; ')
+          : String(body.detail ?? body.note ?? detail)
+      } catch {
+        /* non-JSON (or unfinished) body — keep the status text */
+      }
+      throw new ApiError(res.status, detail)
     }
-    throw new ApiError(res.status, detail)
+    return (await res.json()) as T
+  } catch (e) {
+    if (e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      throw new NoAnswerError(Math.round(timeoutMs / 1000))
+    }
+    throw e
   }
-  return (await res.json()) as T
 }
 
 export function apiGet<T>(path: string): Promise<T> {
-  return request<T>(path, { method: 'GET' })
+  return request<T>(path, { method: 'GET' }, READ_TIMEOUT_MS)
 }
 
+/** A write that times out may still have been applied: callers refresh, and the next poll shows the truth. */
 export function apiPost<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: 'POST', body: JSON.stringify(body) })
+  return request<T>(path, { method: 'POST', body: JSON.stringify(body) }, WRITE_TIMEOUT_MS)
 }
 
 /** `/ws/live` URL with the bearer token as a query param (R10: header auth is impossible on a WS

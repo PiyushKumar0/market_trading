@@ -1,4 +1,8 @@
-/** Owner controls: an on/off switch and a segmented choice. */
+/**
+ * Owner controls: an on/off switch and a segmented choice. While a write is waiting for the engine
+ * (`busy`) a control is aria-disabled, not disabled: a disabled button drops keyboard focus, and the
+ * focus has just come back to it from the confirm dialog.
+ */
 import type { ReactNode } from 'react'
 
 export function Switch({
@@ -28,10 +32,13 @@ export function Switch({
       role="switch"
       aria-checked={checked}
       aria-busy={busy || undefined}
+      aria-disabled={busy || undefined}
       aria-describedby={describedBy}
       className="switch"
-      disabled={disabled || busy}
-      onClick={() => onChange(!checked)}
+      disabled={disabled}
+      onClick={() => {
+        if (!busy) onChange(!checked)
+      }}
     >
       <span className="switch-track" aria-hidden="true">
         <span className="switch-thumb" />
@@ -56,6 +63,7 @@ export function Segmented<V extends string>({
   value,
   options,
   disabled,
+  busy,
   onChange,
   extra,
 }: {
@@ -63,20 +71,22 @@ export function Segmented<V extends string>({
   value: V | null
   options: { value: V; label: string }[]
   disabled?: boolean
+  busy?: boolean
   onChange: (v: V) => void
   extra?: ReactNode
 }) {
   return (
-    <div className="seg" role="group" aria-label={label}>
+    <div className="seg" role="group" aria-label={label} aria-busy={busy || undefined}>
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
           className="seg-btn"
           aria-pressed={value === o.value}
+          aria-disabled={busy || undefined}
           disabled={disabled}
           onClick={() => {
-            if (value !== o.value) onChange(o.value)
+            if (!busy && value !== o.value) onChange(o.value)
           }}
         >
           {o.label}

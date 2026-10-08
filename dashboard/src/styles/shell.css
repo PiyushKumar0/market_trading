@@ -57,6 +57,11 @@
   white-space: nowrap;
 }
 
+.health-pending {
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
 .health-good {
   background: var(--good-tint);
   color: var(--good);
@@ -130,6 +135,27 @@
 
 .conn-off {
   color: var(--text-disabled);
+}
+
+.conn-bad,
+.conn-down .conn-text {
+  color: var(--crit);
+}
+
+/* Shown on every tab but Overview (which has the alert card) while the kill switch is on. */
+.kill-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-section);
+  background: var(--crit);
+  color: var(--accent-ink);
+}
+
+.kill-banner .icon {
+  flex: none;
 }
 
 /* ------------------------------------------------------------------- tabs */

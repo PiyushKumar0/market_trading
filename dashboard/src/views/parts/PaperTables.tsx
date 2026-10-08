@@ -44,7 +44,7 @@ const POSITION_COLUMNS: Column<PaperPosition>[] = [
       <>
         <strong>{r.symbol}</strong>
         <span className="cell-sub">
-          {r.product ? productTerm(r.product).label : null}
+          {r.product ? <Labelled t={productTerm(r.product)} /> : null}
           {r.state === 'PENDING_EXIT' ? (
             <>
               {r.product ? ', ' : ''}
@@ -74,7 +74,8 @@ const POSITION_COLUMNS: Column<PaperPosition>[] = [
         <Hint label="Open P&L">Before costs. Costs are charged when the position closes.</Hint>
       </span>
     ),
-    label: 'Open P&L',
+    // Phones drop the header (and its hint): the stacked label has to say "before costs" itself.
+    label: 'Open P&L (before costs)',
     align: 'right',
     nowrap: true,
     cell: (r) => <span className={signCls(r.unrealized)}>{signedInr(r.unrealized) ?? '—'}</span>,
@@ -136,7 +137,7 @@ const CLOSED_COLUMNS: Column<PaperClosed>[] = [
         <Hint label="Net P&L">After costs.</Hint>
       </span>
     ),
-    label: 'Net P&L',
+    label: 'Net P&L (after costs)',
     align: 'right',
     nowrap: true,
     cell: (c) => <span className={signCls(c.net_pnl)}>{signedInr(c.net_pnl) ?? '—'}</span>,
@@ -147,7 +148,7 @@ const CLOSED_COLUMNS: Column<PaperClosed>[] = [
     label: 'Why it closed',
     cell: (c) => (
       <span title={c.close_basis ? `Basis: ${humanize(c.close_basis)}` : undefined}>
-        <Labelled t={closeReasonTerm(c.close_reason)} />
+        <Labelled t={closeReasonTerm(c.close_reason, c.close_basis)} />
       </span>
     ),
   },

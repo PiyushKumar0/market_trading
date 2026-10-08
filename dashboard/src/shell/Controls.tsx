@@ -4,7 +4,7 @@
  * stay Telegram two-step (R10) — there is no path to them here. Every control waits for the engine's
  * answer: the value shown always comes from the next poll, never from an optimistic guess.
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { COPY, modeTerm, routingTerm } from '../copy/glossary.ts'
 import { isPaperSummary } from '../lib/alerts.ts'
@@ -13,7 +13,6 @@ import { Switch, Segmented } from '../ui/Controls'
 import type { ConfirmRequest } from '../ui/Dialog'
 import { Hint } from '../ui/Hint'
 import { Icon } from '../ui/Icon'
-import { Pill } from '../ui/Pill'
 import { Popover } from '../ui/Popover'
 
 type Confirm = (r: ConfirmRequest) => Promise<boolean>
@@ -37,20 +36,13 @@ export function ModeControl({
     </>
   )
 
-  if (current === 'AUTO') {
-    return (
-      <div className="ctl">
-        <span className="ctl-label">Engine</span>
-        <Pill tone="accent">Auto (set on Telegram)</Pill>
-        <Hint label="Engine mode" term="AUTO">
-          {explain}
-        </Hint>
-      </div>
-    )
-  }
+  const auto = current === 'AUTO'
 
+  // From Auto, Off and Recommend stay available: leaving Auto is the dashboard's brake on auto-trading
+  // (single-step, as the engine accepts it). Going INTO Auto stays Telegram two-step (R10).
   async function pick(v: 'OFF' | 'RECOMMEND') {
-    if (v === 'OFF' && !(await confirm(COPY.modeOff))) return
+    const ask = auto ? (v === 'OFF' ? COPY.autoOff : COPY.autoToRecommend) : v === 'OFF' ? COPY.modeOff : null
+    if (ask && !(await confirm(ask))) return
     setBusy(true)
     try {
       await onSetMode(v)
@@ -71,8 +63,22 @@ export function ModeControl({
           { value: 'OFF', label: 'Off' },
           { value: 'RECOMMEND', label: 'Recommend' },
         ]}
-        disabled={busy || current === null}
+        disabled={current === null}
+        busy={busy}
         onChange={(v) => void pick(v)}
+        extra={
+          auto ? (
+            <button
+              type="button"
+              className="seg-btn"
+              aria-pressed="true"
+              disabled
+              title="Auto can't be switched on or off here; pick Off or Recommend to leave it."
+            >
+              Auto
+            </button>
+          ) : null
+        }
       />
       <Hint label="Engine mode" term={current ?? undefined}>
         {current === null ? "The engine's mode hasn't loaded. " : null}
@@ -136,27 +142,49 @@ export function PaperSwitch({
   )
 }
 
+type SaveHours = (b: { start: string; end: string; squareoff_buffer_min: number | null }) => Promise<string | null>
+
 export function HoursControl({
   data,
   onSave,
+  onLateFailure,
 }: {
+  /** null = not answered yet (or the route failed): unknown, which is not the same as "not set". */
   data: TradeWindowResponse | null
-  onSave: (b: { start: string; end: string; squareoff_buffer_min: number | null }) => Promise<string | null>
+  onSave: SaveHours
+  /** A save that fails after the editor was closed has nowhere to show its error: raise it here. */
+  onLateFailure: (message: string) => void
 }) {
+  const known = data !== null
   const w = data?.trade_window ?? null
   return (
     <Popover
       title={COPY.hoursTitle}
       trigger={(t) => (
-        <button {...t} type="button" className={w ? 'btn hours-btn' : 'btn hours-btn hours-unset'}>
+        // Disabled until the hours are known: an editor opened now would start empty, and saving it
+        // could overwrite hours that already exist.
+        <button
+          {...t}
+          type="button"
+          className={!known || w ? 'btn hours-btn' : 'btn hours-btn hours-unset'}
+          disabled={!known}
+          title={known ? undefined : "The trading hours haven't loaded yet."}
+        >
           <Icon name="clock" />
           <span className="hours-k">Hours</span>
-          <span className="num">{w ? `${w.start}–${w.end}` : 'not set'}</span>
+          {known ? (
+            <span className="num">{w ? `${w.start}–${w.end}` : 'not set'}</span>
+          ) : (
+            <>
+              <span aria-hidden="true">…</span>
+              <span className="sr-only">not loaded yet</span>
+            </>
+          )}
           <Icon name="chevron-down" size={14} />
         </button>
       )}
     >
-      {(close) => <HoursForm current={w} onSave={onSave} onDone={close} />}
+      {(close) => <HoursForm current={w} onSave={onSave} onDone={close} onLateFailure={onLateFailure} />}
     </Popover>
   )
 }
@@ -165,11 +193,22 @@ function HoursForm({
   current,
   onSave,
   onDone,
+  onLateFailure,
 }: {
   current: TradeWindow | null
-  onSave: (b: { start: string; end: string; squareoff_buffer_min: number | null }) => Promise<string | null>
+  onSave: SaveHours
   onDone: () => void
+  onLateFailure: (message: string) => void
 }) {
+  // Esc or a click outside can close the editor while the save is still on its way.
+  // (Set on every mount: StrictMode's dev re-mount would otherwise leave it false.)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
   // Seeded once, when the popover opens: a 10 s poll can never overwrite what is being typed.
   const [start, setStart] = useState(current?.start ?? '')
   const [end, setEnd] = useState(current?.end ?? '')
@@ -183,6 +222,7 @@ function HoursForm({
 
   async function submit(e: FormEvent) {
     e.preventDefault()
+    if (busy) return
     setBusy(true)
     setError(null)
     const failure = await onSave({
@@ -190,6 +230,11 @@ function HoursForm({
       end,
       squareoff_buffer_min: buffer.trim() === '' ? null : Number(buffer),
     })
+    if (!alive.current) {
+      // Closed meanwhile: a success already has its toast, and focus must stay where the user went.
+      if (failure) onLateFailure(failure)
+      return
+    }
     setBusy(false)
     if (failure) setError(failure)
     else onDone()
@@ -229,7 +274,7 @@ function HoursForm({
         <button type="button" className="btn" onClick={onDone}>
           Cancel
         </button>
-        <button type="submit" className="btn btn-primary" disabled={busy || !start || !end}>
+        <button type="submit" className="btn btn-primary" disabled={!start || !end} aria-disabled={busy || undefined}>
           {busy ? 'Saving…' : 'Save hours'}
         </button>
       </div>

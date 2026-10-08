@@ -45,7 +45,8 @@ export function Tabs({
             type="button"
             role="tab"
             id={`tab-${t.id}`}
-            aria-controls={`panel-${t.id}`}
+            // Only the open tab's panel is rendered: the others would point at an id that doesn't exist.
+            aria-controls={selected ? `panel-${t.id}` : undefined}
             aria-selected={selected}
             tabIndex={selected ? 0 : -1}
             className="tab"

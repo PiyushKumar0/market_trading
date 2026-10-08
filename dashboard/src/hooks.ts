@@ -37,6 +37,9 @@ export const SCORECARD_INTERVAL_MS = 60_000
  *  the engine's own tables). */
 const MAX_EVENTS = 200
 
+/** No frame at all (the engine pings every 15 s) for this long = the socket is dead. */
+const STALE_SOCKET_MS = 45_000
+
 const EMPTY_SNAPSHOT: Snapshot = {
   mode: null,
   positions: null,
@@ -64,6 +67,8 @@ export function usePoll(token: string): {
   unauthorized: boolean
   /** ISO-8601 instant of the latest completed cycle; null until the first one completes. */
   lastPollAt: string | null
+  /** ISO-8601 instant of the latest cycle in which at least one route answered — what "Updated" means. */
+  lastOkAt: string | null
   refresh: () => void
 } {
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT)
@@ -71,6 +76,7 @@ export function usePoll(token: string): {
   const [failedKeys, setFailedKeys] = useState<string[]>([])
   const [unauthorized, setUnauthorized] = useState(false)
   const [lastPollAt, setLastPollAt] = useState<string | null>(null)
+  const [lastOkAt, setLastOkAt] = useState<string | null>(null)
   const [nonce, setNonce] = useState(0)
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
@@ -78,10 +84,19 @@ export function usePoll(token: string): {
   useEffect(() => {
     if (!token) return
     let cancelled = false
+    let inFlight = false
 
     async function cycle() {
-      // ALL_KEYS is the one list of polled keys (the alerts module counts failures against it).
-      const results = await Promise.allSettled(ALL_KEYS.map((key) => apiGet<unknown>(ROUTES[key])))
+      // One cycle at a time: a slow engine must not stack nine more requests every 10 s.
+      if (inFlight) return
+      inFlight = true
+      let results: PromiseSettledResult<unknown>[]
+      try {
+        // ALL_KEYS is the one list of polled keys (the alerts module counts failures against it).
+        results = await Promise.allSettled(ALL_KEYS.map((key) => apiGet<unknown>(ROUTES[key])))
+      } finally {
+        inFlight = false
+      }
       if (cancelled) return
 
       const failures: string[] = []
@@ -103,11 +118,13 @@ export function usePoll(token: string): {
         }
       })
 
+      const now = new Date().toISOString()
       setSnapshot((prev) => ({ ...prev, ...fresh }))
       setUnauthorized(denied)
       setFailedKeys(failed)
       setError(failures.length ? failures.join(' | ') : null)
-      setLastPollAt(new Date().toISOString())
+      setLastPollAt(now)
+      if (failed.length < ALL_KEYS.length) setLastOkAt(now)
     }
 
     void cycle()
@@ -118,7 +135,7 @@ export function usePoll(token: string): {
     }
   }, [token, nonce])
 
-  return { snapshot, error, failedKeys, unauthorized, lastPollAt, refresh }
+  return { snapshot, error, failedKeys, unauthorized, lastPollAt, lastOkAt, refresh }
 }
 
 /** What one `/notifications` cycle leaves behind for the panel to render. */
@@ -249,13 +266,18 @@ export function useLiveEvents(token: string): { events: LiveEvent[]; conn: ConnS
     let closed = false
     let socket: WebSocket | null = null
     let retry = 0
+    let lastFrameAt = Date.now()
 
     function open() {
       if (closed) return
       setConn('connecting')
       socket = new WebSocket(liveSocketUrl())
-      socket.onopen = () => setConn('open')
+      socket.onopen = () => {
+        lastFrameAt = Date.now()
+        setConn('open')
+      }
       socket.onmessage = (msg) => {
+        lastFrameAt = Date.now() // the ping counts here: it is the liveness signal
         let frame: LiveFrame
         try {
           frame = JSON.parse(String(msg.data)) as LiveFrame
@@ -274,10 +296,30 @@ export function useLiveEvents(token: string): { events: LiveEvent[]; conn: ConnS
       socket.onerror = () => socket?.close()
     }
 
+    // A half-open socket (engine host asleep, network gone) never fires `close`: three missed 15 s
+    // pings mean it is dead — say so at once and start over, instead of showing "live" forever.
+    const watchdog = window.setInterval(() => {
+      if (socket && socket.readyState === WebSocket.OPEN && Date.now() - lastFrameAt > STALE_SOCKET_MS) {
+        const dead = socket
+        socket = null
+        dead.onclose = null
+        dead.onmessage = null
+        dead.onerror = null
+        try {
+          dead.close()
+        } catch {
+          /* already gone */
+        }
+        setConn('closed')
+        if (!closed) retry = window.setTimeout(open, 5000)
+      }
+    }, 5000)
+
     open()
     return () => {
       closed = true
       window.clearTimeout(retry)
+      window.clearInterval(watchdog)
       socket?.close()
     }
   }, [token])

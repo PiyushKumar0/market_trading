@@ -86,7 +86,9 @@ engine serves `dist/`.
 
 `node fixture_server.mjs` (after `npm run build`) serves `dist/` on http://127.0.0.1:8499/ with canned
 rows for every read route, spread across several IST days — a UTC-stamped row and an undated one
-included — so the day folds and every tab can be checked in a browser. Any token passes the
+included — so the day folds and every tab can be checked in a browser. The live recommendations
+cover all three kinds (an exit, a stop-loss adjust, a shrunk entry), and the risk checks carry
+reasons in the gate's own "rule: value (limit …)" form plus one bare rule ID. Any token passes the
 gate; there is no `/ws/live`, so Live updates reads "Reconnecting" (and the console logs the 404). `NO_TODAY=1` drops today's ledger
 rows to show the "no … today" state. `/paper` answers a built, ON book by default (a daily FROZEN halt,
 one unmarked position, an unfilled entry order, a void among the closes); `PAPER_OFF=1` answers the
@@ -102,8 +104,10 @@ served value; any other non-GET on a route answers 405. Dev-only: nothing from i
 ## Tests
 
 - `npm test` — `node --test` over `tests/*.test.ts` (Node 22 strips the types; no test dependency):
-  the pure modules — rupee grouping and signs, IST days and times, the glossary and its fallbacks,
-  recommendation helpers, alert derivation (including "no false alarm" stub shapes), paper status.
+  the pure modules — rupee grouping and signs, IST days and times, the glossary and its fallbacks
+  (risk-check reasons, the Telegram reply per recommendation kind), recommendation helpers (per-kind
+  instruction, quantity cut), alert derivation (including "no false alarm" stub shapes), paper status,
+  and which URL hashes are tabs.
 - `npm run build` runs `tsc -b` first (app, vite config and tests), so a shape drift between
   `src/types.ts` and a view fails the build. The API contract itself is covered by
   `tests/unit/test_api_routes.py`.

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { RecommendationPayload, RecommendationRow } from '../src/types.ts'
-import { actionState, entryText, instruction, isLive, liveRecs } from '../src/lib/recs.ts'
+import { actionState, entryText, instruction, isLive, liveRecs, quantityCut } from '../src/lib/recs.ts'
 
 const NOW = Date.parse('2026-10-08T09:00:00Z') // Thu 14:30 IST
 
@@ -60,6 +60,33 @@ test('your action: waiting only while still live', () => {
   assert.equal(actionState(row({ human_action: 'taken' }), NOW).tone, 'good')
   assert.equal(actionState(row({ human_action: 'dismissed' }), NOW).label, 'You skipped it')
   assert.equal(actionState(row({ human_action: 'dismissed' }), NOW).tone, 'neutral')
+})
+
+test('an exit card says sell at market, never at a price', () => {
+  // pipeline.py: an exit's zone is the last price OR the position's own entry; the checklist is "exit at market".
+  assert.equal(instruction({ kind: 'exit', side: 'SELL', qty: 3, entry_zone: ['2445.00', '2445.00'] }), 'Sell all 3 shares at market')
+  assert.equal(instruction({ kind: 'exit', side: 'BUY', qty: 5 }), 'Buy back all 5 shares at market')
+})
+
+test('an adjust card moves the stop and places no order', () => {
+  // pipeline.py: an adjust keeps the position's side and places no new order.
+  assert.equal(
+    instruction({ kind: 'adjust', side: 'BUY', instrument: 'SAIL', qty: 3, stop: '128.50', entry_zone: ['130.00', '130.00'] }),
+    'Move the stop-loss on SAIL to ₹128.50',
+  )
+})
+
+test('the quantity-cut note is only for an entry the risk check made smaller', () => {
+  const gate = (original_qty: number | null) => ({ verdict: 'shrink', reasons: [], original_qty })
+  assert.deepEqual(quantityCut({ kind: 'entry', qty: 3, gate: gate(10) }), { from: 10, to: 3 })
+  // Not a cut: the same size, a smaller "original", no original, or an exit/adjust (whose quantity is
+  // the held position's own, pipeline.py _manage_recommendation).
+  assert.equal(quantityCut({ kind: 'entry', qty: 3, gate: gate(3) }), null)
+  assert.equal(quantityCut({ kind: 'entry', qty: 10, gate: gate(3) }), null)
+  assert.equal(quantityCut({ kind: 'entry', qty: 3, gate: gate(null) }), null)
+  assert.equal(quantityCut({ kind: 'adjust', qty: 3, gate: gate(10) }), null)
+  assert.equal(quantityCut({ kind: 'exit', qty: 3, gate: gate(10) }), null)
+  assert.equal(quantityCut(null), null)
 })
 
 test('instruction says what to do in one sentence', () => {

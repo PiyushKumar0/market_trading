@@ -11,7 +11,8 @@ export interface SystemProps {
   headroom: HeadroomResponse | null
   budget: BudgetResponse | null
   conn: ConnState
-  lastPollAt: string | null
+  /** When a refresh last brought back any data. */
+  lastOkAt: string | null
   nowMs: number
 }
 
@@ -19,7 +20,7 @@ export function System(props: SystemProps) {
   return (
     <>
       <h1 className="view-title">System</h1>
-      <EngineStatus mode={props.mode} tradeWindow={props.tradeWindow} conn={props.conn} lastPollAt={props.lastPollAt} />
+      <EngineStatus mode={props.mode} tradeWindow={props.tradeWindow} conn={props.conn} lastOkAt={props.lastOkAt} />
       <div className="row-even">
         <RiskLimits headroom={props.headroom} />
         <AiBudget budget={props.budget} nowMs={props.nowMs} />

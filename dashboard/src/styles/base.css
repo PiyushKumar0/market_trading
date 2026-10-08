@@ -114,6 +114,18 @@ kbd {
   top: var(--sp-3);
 }
 
+/* Programmatic focus targets (skip link, tab switch from an in-page button): the next Tab continues
+   from here; a ring around the whole page would only add noise. */
+#main:focus,
+.view:focus {
+  outline: none;
+}
+
+/* A control busy with the engine's answer keeps keyboard focus (aria-disabled, not disabled). */
+button[aria-disabled='true'] {
+  cursor: progress;
+}
+
 .num {
   font-variant-numeric: tabular-nums;
 }

@@ -20,9 +20,10 @@ import {
   severityTerm,
   strategyName,
   styleTerm,
-  takenHint,
   tierTerm,
   verdictTerm,
+  actionHint,
+  reasonTerm,
 } from '../src/copy/glossary.ts'
 
 test('engine states translate to plain words and keep the engine term', () => {
@@ -76,7 +77,7 @@ test('trade vocabulary', () => {
 
 test('gate rules read as the problem', () => {
   assert.equal(ruleTerm('per_trade_risk').label, 'Risk per trade over the limit')
-  assert.equal(ruleTerm('max_open_positions').label, 'Too many open positions')
+  assert.equal(ruleTerm('max_open_positions').label, 'Too many open positions (waiting recommendations count too)')
   assert.equal(ruleTerm('per_sector_exposure').label, 'Too much in one sector')
   assert.equal(ruleTerm('per_trade_risk').term, 'per_trade_risk')
 })
@@ -88,6 +89,14 @@ test('paper halts, outcomes and close reasons', () => {
   assert.equal(outcomeTerm('void').label, 'Voided')
   assert.equal(closeReasonTerm('stop').label, 'Stop-loss hit')
   assert.equal(closeReasonTerm('target').label, 'Target hit')
+})
+
+test('a flatten caused by /paper reset is not called a loss limit', () => {
+  // oms/exits.py closes every flatten as risk_flatten; paper_risk.py passes the basis "paper_reset".
+  assert.equal(closeReasonTerm('risk_flatten', 'paper_reset').label, 'Closed by your paper reset')
+  assert.equal(closeReasonTerm('risk_flatten', 'paper_reset').term, 'risk_flatten')
+  assert.equal(closeReasonTerm('risk_flatten', 'equity_floor').label, 'Closed by a paper loss limit')
+  assert.equal(closeReasonTerm('risk_flatten').label, 'Closed by a paper loss limit')
 })
 
 test('names of strategies and analysts', () => {
@@ -118,12 +127,35 @@ test('unknown values fall back to words and never throw', () => {
   assert.equal(closeReasonTerm('weird_reason').label, 'Weird reason')
 })
 
-test('the /taken reply is spelled out with the symbol and quantity', () => {
+test('the Telegram reply depends on the kind of recommendation (catalog.py footers)', () => {
   assert.equal(
-    takenHint('TATASTEEL', 3),
-    'After you place it in Kite, reply /taken TATASTEEL 3 PRICE on Telegram (PRICE = your fill).',
+    actionHint({ kind: 'entry', instrument: 'TATASTEEL', qty: 3 }),
+    'Placed it? Reply /taken TATASTEEL 3 PRICE (PRICE = your fill). Not taking it? Reply /veto TATASTEEL REASON (market, price, size, trust, away or other).',
   )
-  assert.equal(takenHint(undefined, undefined), 'After you place it in Kite, reply /taken SYMBOL QTY PRICE on Telegram (PRICE = your fill).')
+  assert.equal(
+    actionHint({ kind: 'exit', instrument: 'HDFCAMC', side: 'SELL' }),
+    'After you sell in Kite, reply /closed HDFCAMC PRICE (PRICE = your fill). Not exiting? Reply /veto HDFCAMC.',
+  )
+  assert.equal(
+    actionHint({ kind: 'adjust', instrument: 'SAIL' }),
+    "Move your existing stop-loss order in Kite to the new level; there's nothing to buy or sell. To decline, reply /veto SAIL.",
+  )
+  assert.match(actionHint(null), /\/taken SYMBOL QTY PRICE/)
+})
+
+test('risk-check reasons get a plain label and keep the engine numbers verbatim', () => {
+  // gate.py: a failed rule is reported as "<rule_id>: <value> (limit <limit>)".
+  const r = reasonTerm('daily_loss_soft: day MTM -5.123% (limit > -5.0%)')
+  assert.equal(r.label, "Today's loss limit reached")
+  assert.equal(r.detail, 'day MTM -5.123% (limit > -5.0%)')
+  assert.equal(r.term, 'daily_loss_soft')
+  assert.equal(reasonTerm('per_trade_risk').label, 'Risk per trade over the limit')
+  assert.equal(reasonTerm('per_trade_risk').detail, undefined)
+  const s = reasonTerm('shrink: qty 10 -> 3 (bound by per_trade_risk)')
+  assert.equal(s.label, 'Quantity reduced')
+  assert.equal(s.detail, 'qty 10 -> 3 (bound by per_trade_risk)')
+  assert.equal(reasonTerm('paper_open_positions').label, 'Paper open positions')
+  assert.equal(reasonTerm('Something odd: 3 > 2').label, 'Something odd: 3 > 2')
 })
 
 test('missing values render as a dash', () => {

@@ -13,6 +13,7 @@ import { Card, EmptyState } from '../ui/Card'
 import { KeyValue, StatTile } from '../ui/Figures'
 import { Hint, Labelled } from '../ui/Hint'
 import { Icon } from '../ui/Icon'
+import { Loading } from '../ui/Loading'
 import { Pill } from '../ui/Pill'
 import { EquityChart } from './parts/EquityChart'
 import { PaperClosedTrades, PaperOrders, PaperPositions } from './parts/PaperTables'
@@ -25,18 +26,21 @@ const valueClass = (v: string | null | undefined) => {
   return s === 1 ? 'pos' : s === -1 ? 'neg' : undefined
 }
 
+const ALLOWED = 'Allowed'
+
 function entriesText(p: PaperSummary, mode: string | null): string {
   if (!p.built) return 'Not running'
   if (!p.enabled) return 'Off'
   if (mode === null) return "Waiting for the engine's mode"
   if (mode !== 'RECOMMEND' && mode !== 'AUTO') return 'Idle: it follows the Recommend pipeline'
   if (p.halts.length) return 'Paused by a paper limit (below)'
-  return p.entry_guard ? `Blocked: ${entryGuardText(p.entry_guard)}` : 'Allowed'
+  return p.entry_guard ? `Blocked: ${entryGuardText(p.entry_guard)}` : ALLOWED
 }
 
 function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
   const line = paperStatus(p, mode)
   const stored = p.positions.length > 0 || p.orders.length > 0
+  const resetting = p.halts.some((h) => h.cause === 'reset_pending')
   return (
     <Card tier="simulated" simTag={false} title="Autopilot status">
       <p className={`paper-line paper-line-${line.tone}`}>
@@ -53,7 +57,15 @@ function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
       <KeyValue
         items={[
           { k: 'Autopilot', v: p.enabled ? (p.built ? 'On' : 'On, not running') : 'Off' },
-          { k: 'New paper trades', v: <span title={p.entry_guard ? `Engine term: ${p.entry_guard}` : undefined}>{entriesText(p, mode)}</span> },
+          {
+            k: 'New paper trades',
+            v:
+              entriesText(p, mode) === ALLOWED ? (
+                <Labelled t={{ label: ALLOWED, hint: COPY.paperEntriesOpen }} />
+              ) : (
+                <span title={p.entry_guard ? `Engine term: ${p.entry_guard}` : undefined}>{entriesText(p, mode)}</span>
+              ),
+          },
           {
             k: (
               <span className="labelled">
@@ -80,7 +92,16 @@ function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
                 </Pill>
                 <span>
                   {rungTerm(h.rung).label[0].toUpperCase() + rungTerm(h.rung).label.slice(1)}. Set {istStamp(h.set_at)};{' '}
-                  {h.latched ? 'stays until /paper reset on Telegram' : 'clears next session'}.
+                  {/* paper_risk.py: on the first flat book (no position, no working order) a new
+                      epoch starts and every paper halt clears. */}
+                  {h.cause === 'reset_pending'
+                    ? 'clears by itself once no paper position or order is left; then every paper limit clears'
+                    : h.latched
+                      ? resetting
+                        ? 'clears when the pending reset completes'
+                        : 'stays until /paper reset on Telegram'
+                      : 'clears next session'}
+                  .
                   {FLATTENING.has(h.cause) ? ' Open paper positions are being closed.' : ''}
                 </span>
               </li>
@@ -150,7 +171,7 @@ export function Paper({ paper, mode }: { paper: PaperResponse | null; mode: stri
       </div>
 
       {paper === null ? (
-        <EmptyState>Loading paper trading…</EmptyState>
+        <Loading route="paper" what="paper trading" />
       ) : !p ? (
         <EmptyState>The engine doesn&apos;t have paper trading connected.</EmptyState>
       ) : !p.built && !p.positions.length && !p.orders.length && !p.equity && !p.closed.length ? (

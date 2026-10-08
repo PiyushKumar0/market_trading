@@ -33,27 +33,37 @@ function lookup(table: Table, v: string | null | undefined, fallback: (v: string
 
 // ------------------------------------------------------------------------------------ engine state
 
+// Verified against the engine on 2026-10-08 (copy-accuracy review): in Recommend and Off the engine
+// places NO orders in Kite (telegram.py, pipeline.py "the platform places none in RECOMMEND"); exit and
+// stop-warning alerts fire in every mode; Auto is refused while settings say paper-only (mode.py).
 const MODE: Table = {
-  OFF: { label: 'Off', hint: 'The engine stops proposing new trades. Exits and protective actions still run.' },
+  OFF: {
+    label: 'Off',
+    hint:
+      'No new trade ideas. The engine still watches your open positions and sends exit alerts on Telegram; you place ' +
+      'the exits in Kite. Paper positions keep their simulated stops and exits.',
+  },
   RECOMMEND: {
     label: 'Recommend',
     hint: 'The engine proposes trades and sends them to you on Telegram; you place them in Kite yourself.',
   },
   AUTO: {
     label: 'Auto',
-    hint: 'The engine places orders itself. It can only be switched on from Telegram (/mode AUTO, then /confirm).',
+    hint:
+      'Auto-trading. It is switched off in this version (paper-only settings) and cannot be turned on from the ' +
+      'dashboard; the engine does not place orders in your Kite account.',
   },
 }
 export const modeTerm = (v: string | null | undefined): Term => lookup(MODE, v)
 
 const ROUTING: Table = {
-  paper: { label: 'Paper (simulated)', hint: 'In Auto, orders go to the simulated paper account — never to Kite.' },
-  live: { label: 'Live account', hint: 'In Auto, orders go to your real Kite account.' },
+  paper: { label: 'Paper (simulated)', hint: 'In Auto, orders would go to the simulated paper account — never to Kite.' },
+  live: { label: 'Live account', hint: 'Live routing is switched off in this version (paper-only settings).' },
 }
 export const routingTerm = (v: string | null | undefined): Term => lookup(ROUTING, v)
 
 const RISK: Table = {
-  NORMAL: { label: 'Normal', hint: 'No risk limit is blocking new trades.' },
+  NORMAL: { label: 'Normal', hint: 'No engine-wide pause; each new trade is still checked by the risk rules.' },
   FROZEN: {
     label: 'New positions paused',
     hint:
@@ -62,27 +72,48 @@ const RISK: Table = {
   },
   CLOSE_ONLY: {
     label: 'Closing only',
-    hint: 'A risk limit allows exits only — no new positions. It clears when its cause clears.',
+    hint:
+      'Exits only, no new positions. A daily-loss stop lifts at the next day’s engine start. A weekly-drawdown or ' +
+      'equity-floor stop does not lift by itself.',
   },
-  KILLED: { label: 'Kill switch on', hint: 'All trading is stopped. Reset only on Telegram: /kill_reset, then /confirm.' },
+  KILLED: {
+    label: 'Kill switch on',
+    hint:
+      'No new trades, real or paper. Open positions are not closed for you; exit alerts still arrive. Reset on ' +
+      'Telegram: /kill_reset, then /confirm with the phrase the bot sends (within 2 minutes). If the total-loss floor ' +
+      'set it, the state stays on after the reset.',
+  },
 }
 export const riskTerm = (v: string | null | undefined): Term => lookup(RISK, v)
 
 const TIER: Table = {
-  DG0: { label: 'Normal', hint: 'AI analysts run normally.' },
+  DG0: {
+    label: 'Normal',
+    hint: 'AI analysts run normally (an analyst that has used up its own weekly share still pauses; see Spend by analyst).',
+  },
   DG1: {
     label: 'Pacing',
-    hint: 'AI spending is ahead of the weekly pace, so background check-ins slow down. Recommendation quality is unchanged.',
+    hint:
+      'AI spending is ahead of the weekly pace: check-ins slow to every 45 minutes and about a third fewer scanner ' +
+      'candidates reach the AI each day. Each one is still analysed the same way.',
   },
+  // governor.py: heartbeats stop from DG2; the forward cap is cut at every level above DG0.
   DG2: {
     label: 'Saving',
-    hint: 'Background AI checks are reduced to stay within the weekly budget. Recommendations continue.',
+    hint:
+      'Background AI check-ins are off and about a third fewer scanner candidates reach the AI each day, to stay ' +
+      'within the weekly budget. Each one is still analysed the same way.',
   },
   DG3: {
     label: 'Minimal',
-    hint: 'AI analysts are paused; only scanner-based alerts are sent until the weekly reset (Thursday 14:00 IST).',
+    hint:
+      'AI analysts are paused until Thursday 14:00 IST: no new recommendations and no AI stop-loss warnings. ' +
+      'Planned-date exit alerts and your own stop orders in Kite still work.',
   },
-  DG4: { label: 'Stopped', hint: 'No AI calls until the weekly budget resets (Thursday 14:00 IST).' },
+  DG4: {
+    label: 'Stopped',
+    hint: 'No AI calls until the weekly budget resets (Thursday 14:00 IST), or a billing error was reported.',
+  },
 }
 export const tierTerm = (v: string | null | undefined): Term => lookup(TIER, v)
 
@@ -119,7 +150,7 @@ const RULE: Table = {
   daily_loss_hard: { label: "Today's hard loss limit reached" },
   consecutive_losses: { label: 'Too many losses in a row today' },
   max_new_trades_day: { label: 'Daily new-trade limit reached' },
-  max_open_positions: { label: 'Too many open positions' },
+  max_open_positions: { label: 'Too many open positions (waiting recommendations count too)' },
   per_stock_exposure: { label: 'Too much in one stock' },
   per_sector_exposure: { label: 'Too much in one sector' },
   co_movement_cap: { label: 'Too many positions that move together' },
@@ -133,12 +164,41 @@ const RULE: Table = {
   margin_buffer: { label: 'Not enough margin' },
   order_rate: { label: 'Broker order-rate limit reached' },
   order_modifications: { label: 'Too many changes to one order' },
-  min_viable_size: { label: 'Trade too small to beat its costs' },
+  min_viable_size: { label: "Expected gain doesn't beat costs, or the strategy has no validated edge yet" },
   weekly_drawdown: { label: 'Weekly loss limit reached' },
   equity_floor_rung: { label: 'Account fell below an equity floor' },
   cumulative_floor: { label: 'Total loss floor reached' },
 }
 export const ruleTerm = (ruleId: string): Term => lookup(RULE, ruleId)
+
+/** Non-rule prefixes the gate also writes into a verdict's reasons. */
+const REASON_PREFIX: Table = {
+  shrink: { label: 'Quantity reduced' },
+}
+
+export interface Reason extends Term {
+  /** The engine's own value/limit text, shown unchanged (never re-formatted). */
+  detail?: string
+}
+
+/**
+ * One risk-check reason in words. The gate writes a failed rule as "<rule_id>: <value> (limit <limit>)"
+ * (gate.py), plus lines like "shrink: qty 10 -> 3 (…)": the prefix becomes the plain label and the rest
+ * is kept verbatim — humanising it would strip the minus signs and decimal points from the numbers.
+ * A bare rule ID (older rows) maps to its label; any other sentence is shown as sent.
+ */
+export function reasonTerm(reason: string): Reason {
+  const text = reason.trim()
+  const m = /^([a-z][a-z0-9_]*):\s*(.+)$/.exec(text)
+  if (m) {
+    const [, id, detail] = m
+    const own = (t: Table) => (Object.prototype.hasOwnProperty.call(t, id) ? t[id] : undefined)
+    const hit = own(RULE) ?? own(REASON_PREFIX)
+    return { label: hit ? hit.label : humanize(id), detail, term: id }
+  }
+  if (/^[a-z][a-z0-9_]*$/.test(text)) return ruleTerm(text)
+  return { label: text }
+}
 
 const PROPOSAL_ACTION: Table = {
   enter: { label: 'Open' },
@@ -161,7 +221,7 @@ export function actionTerm(v: string | null | undefined): Term {
   if (v === null || v === undefined || v === '') {
     return {
       label: 'Waiting for you',
-      hint: 'No action recorded yet. Reply on Telegram (/taken, /closed) once you act.',
+      hint: 'No action recorded yet. Reply on Telegram when you act: /taken if you placed it, /veto if you are skipping it.',
     }
   }
   return lookup(ACTION, v)
@@ -200,7 +260,10 @@ export const originTerm = (v: string | null | undefined): Term => lookup(ORIGIN,
 const PROTECTION: Table = {
   PROTECTED: { label: 'Protected', hint: 'A stop-loss order is in place.' },
   PROTECTION_PENDING: { label: 'Being protected', hint: 'The stop-loss order is being placed.' },
-  PROTECTION_FAILED: { label: 'Protection failed', hint: 'The stop-loss order could not be placed.' },
+  PROTECTION_FAILED: {
+    label: 'Protection failed',
+    hint: "The simulated stop-loss couldn't be kept, so the autopilot exits the position at market.",
+  },
 }
 export const protectionTerm = (v: string | null | undefined): Term => lookup(PROTECTION, v)
 
@@ -220,7 +283,9 @@ const HALT: Table = {
   },
   daily_loss_hard: {
     label: 'Daily loss limit (hard)',
-    hint: "Today's paper loss passed the hard limit: closing only until the next session.",
+    hint:
+      "Today's paper loss passed the hard limit: no new paper trades until the next session. Open paper positions " +
+      'keep their stops and targets (nothing is closed).',
   },
   floor_weekly_drawdown: {
     label: 'Weekly drawdown limit',
@@ -251,8 +316,13 @@ export const rungTerm = (v: string | null | undefined): Term => lookup(RUNG, v, 
 const OUTCOME: Table = {
   win: { label: 'Win' },
   loss: { label: 'Loss' },
-  scratch: { label: 'Flat', hint: 'About break-even after costs.' },
-  void: { label: 'Voided', hint: 'Cancelled — for example by a corporate action — and left out of win rates.' },
+  scratch: { label: 'Flat', hint: 'Exactly zero after costs.' },
+  void: {
+    label: 'Voided',
+    hint:
+      "Closed at its last price because the result couldn't be measured fairly (for example engine downtime with no " +
+      'price data, or a corporate action). Its P&L stays in paper equity; it is left out of win rates.',
+  },
 }
 export const outcomeTerm = (v: string | null | undefined): Term => lookup(OUTCOME, v)
 
@@ -260,12 +330,20 @@ const CLOSE_REASON: Table = {
   target: { label: 'Target hit' },
   stop: { label: 'Stop-loss hit' },
   time: { label: 'Time exit', hint: 'The planned exit date was reached.' },
-  void: { label: 'Voided', hint: 'Cancelled — for example by a corporate action.' },
+  time_stop: { label: 'Time exit', hint: 'The planned exit date was reached.' },
+  risk_flatten: { label: 'Closed by a paper loss limit' },
+  gtt_failure_exit: { label: 'Stop order failed; closed at market' },
+  void: { label: 'Voided', hint: "Closed at its last price because the result couldn't be measured fairly." },
   square_off: { label: 'Squared off', hint: 'Closed before the market close.' },
   broker_rms: { label: 'Closed by the broker (RMS)' },
   manual_owner: { label: 'Closed by you' },
 }
-export const closeReasonTerm = (v: string | null | undefined): Term => lookup(CLOSE_REASON, v)
+/** `basis` refines a reason the engine shares between causes: every paper flatten closes as
+ *  risk_flatten (oms/exits.py), and a /paper reset passes the basis "paper_reset" (paper_risk.py). */
+export function closeReasonTerm(v: string | null | undefined, basis?: string | null): Term {
+  if (v === 'risk_flatten' && basis === 'paper_reset') return { label: 'Closed by your paper reset', term: v }
+  return lookup(CLOSE_REASON, v)
+}
 
 // ------------------------------------------------------------------------------------ names
 
@@ -273,8 +351,14 @@ const STRATEGY: Table = {
   hi52: { label: '52-week-high continuation', hint: 'Buys stocks closing near their 52-week high.' },
   brk20: { label: '20-day-high breakout', hint: 'Buys a daily close above the 20-day high.' },
   ins: { label: 'Insider buying', hint: 'Follows net buying by company insiders.' },
-  cat: { label: 'News catalyst', hint: 'Trades on scored news events.' },
-  cat_reversal: { label: 'News reversal', hint: "Trades a reversal in a news story's direction." },
+  cat: {
+    label: 'News catalyst',
+    hint: 'Scored news events. Still in validation: the risk check blocks its entries, so it is never recommended yet.',
+  },
+  cat_reversal: {
+    label: 'News reversal',
+    hint: "A reversal in a news story's direction. Still in validation: the risk check blocks its entries.",
+  },
   mom: { label: '4-week momentum', hint: 'Buys the strongest 4-week performers.' },
   orb: { label: 'Opening-range breakout', hint: "Intraday: trades a break of the opening minutes' range." },
   rsi2: { label: 'RSI-2 mean reversion', hint: 'Buys short dips in stocks above their 200-day average.' },
@@ -300,8 +384,14 @@ export const agentName = (id: string | null | undefined): Term => lookup(AGENT, 
 
 const DIGEST: Table = {
   fresh: { label: 'Up to date', hint: 'The news summary is recent enough to use.' },
-  stale: { label: 'Stale', hint: 'The news summary is too old: news-catalyst entries are off until it refreshes.' },
-  missing: { label: 'Missing', hint: 'There is no news summary: news-catalyst entries are off today.' },
+  stale: {
+    label: 'Stale',
+    hint: 'The news summary is too old: news-catalyst ideas (still in validation) pause until it refreshes. No recommendation depends on it.',
+  },
+  missing: {
+    label: 'Missing',
+    hint: 'There is no news summary today: news-catalyst ideas (still in validation) pause. No recommendation depends on it.',
+  },
 }
 export function digestTerm(v: string | null | undefined): Term {
   if (v === null || v === undefined || v === '') {
@@ -311,7 +401,10 @@ export function digestTerm(v: string | null | undefined): Term {
 }
 
 const GRADE: Table = {
-  originating: { label: 'Can start a trade', hint: 'May start a news-catalyst (cat) entry.' },
+  originating: {
+    label: 'Can start a trade idea',
+    hint: 'May start a news-catalyst (cat) trade idea. While cat is in validation, the risk check blocks it.',
+  },
   context: { label: 'Background only', hint: 'Shown for context; never starts a trade.' },
 }
 export const gradeTerm = (v: string | null | undefined): Term => lookup(GRADE, v)
@@ -337,7 +430,7 @@ export const severityTerm = (v: string | null | undefined): Term =>
 
 const MESSAGE_KIND: Table = {
   login_prompt: { label: 'Kite login needed' },
-  limit_breach: { label: 'Risk limit' },
+  limit_breach: { label: 'Risk or safety alert' },
   budget_warning: { label: 'AI budget' },
   paper_alert: { label: 'Paper alert' },
 }
@@ -349,15 +442,33 @@ export const messageKindTerm = (v: string | null | undefined): Term => lookup(ME
 export const FIELD = {
   entry: { label: 'Entry', hint: 'The price, or price range, to enter at.' },
   stop: { label: 'Stop-loss', hint: 'Exit if the price reaches this level.' },
+  // pipeline.py: an exit carries positions.stop, written once at /taken; a followed adjust never updates it.
+  stopOnRecord: {
+    label: 'Stop-loss on record',
+    hint: 'The stop-loss recorded when you confirmed the trade with /taken. If you have moved it in Kite since, your order in Kite is the one that counts.',
+  },
   target: { label: 'Target', hint: 'Take profit at this level.' },
   amount: { label: 'Amount', hint: 'Quantity × entry price.' },
-  maxLoss: { label: 'Max loss if stopped', hint: 'Roughly what you lose if the stop-loss is hit.' },
-  plannedExit: { label: 'Planned exit', hint: 'The engine plans to exit after this many trading sessions.' },
+  maxLoss: {
+    label: 'Loss at the stop (approx.)',
+    // pipeline.py: the adverse end of the zone — its top for a buy, its bottom for a sell.
+    hint:
+      'From the far end of the entry range (the top for a buy, the bottom for a sell) to the stop-loss, before costs. ' +
+      'A gap past the stop overnight can lose more.',
+  },
+  plannedExit: {
+    label: 'Latest exit date',
+    hint:
+      'If the stop-loss or target has not closed it by then, the engine tells you on Telegram to sell on this date ' +
+      '(the entry day counts as session 1). You place the sale.',
+  },
   validUntil: { label: 'Valid until', hint: 'After this the recommendation expires.' },
   confidence: { label: 'Analyst confidence', hint: "The AI analyst's own score from 0 to 1. It is not a probability of profit." },
   edge: {
     label: 'Historical edge',
-    hint: "The average net return per trade in this strategy's registered study. It is not a forecast.",
+    hint:
+      'The net gain per trade the engine registered for this strategy from its research (for hi52, a cautious ' +
+      'median-based figure). The risk check uses it to confirm a trade beats its costs. It is not a forecast.',
   },
   stopDistance: {
     label: 'Stop distance',
@@ -366,9 +477,25 @@ export const FIELD = {
   fill: { label: 'Your fill', hint: 'The price you reported on Telegram.' },
 } satisfies Record<string, Term>
 
-/** What to send on Telegram after acting on a live recommendation (telegram.py `/taken`: 3 arguments). */
-export function takenHint(symbol: string | undefined, qty: number | undefined): string {
-  return `After you place it in Kite, reply /taken ${symbol || 'SYMBOL'} ${qty ?? 'QTY'} PRICE on Telegram (PRICE = your fill).`
+const VETO_REASONS = 'market, price, size, trust, away or other' // telegram.py VETO_REASONS
+
+/**
+ * What to send on Telegram for a live recommendation, by kind — the same three footers the engine
+ * prints (notify/catalog.py): an entry is recorded with /taken or declined with /veto; an exit is
+ * reported with /closed (the bot refuses /taken on it); an adjust places no order, so only /veto.
+ */
+export function actionHint(
+  rec: { kind?: string | null; instrument?: string; qty?: number; side?: string } | null | undefined,
+): string {
+  const sym = rec?.instrument || 'SYMBOL'
+  if (rec?.kind === 'exit') {
+    const verb = rec.side === 'BUY' ? 'buy back' : 'sell'
+    return `After you ${verb} in Kite, reply /closed ${sym} PRICE (PRICE = your fill). Not exiting? Reply /veto ${sym}.`
+  }
+  if (rec?.kind === 'adjust') {
+    return `Move your existing stop-loss order in Kite to the new level; there's nothing to buy or sell. To decline, reply /veto ${sym}.`
+  }
+  return `Placed it? Reply /taken ${sym} ${rec?.qty ?? 'QTY'} PRICE (PRICE = your fill). Not taking it? Reply /veto ${sym} REASON (${VETO_REASONS}).`
 }
 
 // ------------------------------------------------------------------------------------ fixed copy
@@ -383,9 +510,27 @@ export interface DialogCopy {
 export const COPY = {
   modeOff: {
     title: 'Turn the engine off?',
-    body: 'The engine stops proposing new trades. Exits and protective actions keep running. You can switch back any time.',
+    body:
+      'No new trade ideas. The engine still watches your open positions and sends exit alerts on Telegram. You can ' +
+      'switch back any time.',
     confirm: 'Turn off',
     cancel: 'Keep recommending',
+  } satisfies DialogCopy,
+  autoToRecommend: {
+    title: 'Leave Auto?',
+    body:
+      'The engine goes back to sending you recommendations instead of trading by itself. Exit alerts keep coming. ' +
+      'Auto cannot be switched back on from the dashboard.',
+    confirm: 'Switch to Recommend',
+    cancel: 'Keep Auto',
+  } satisfies DialogCopy,
+  autoOff: {
+    title: 'Turn the engine off?',
+    body:
+      'No new trade ideas and no auto-trading. The engine still watches open positions and sends exit alerts. Auto ' +
+      'cannot be switched back on from the dashboard.',
+    confirm: 'Turn off',
+    cancel: 'Keep Auto',
   } satisfies DialogCopy,
   paperOn: {
     title: 'Turn on the paper autopilot?',
@@ -407,6 +552,9 @@ export const COPY = {
   },
   paperAbout:
     "Simulates the analyst's delivery (CNC) trades with paper money so they can be judged without risk. It never places a real order.",
+  paperEntriesOpen: 'Delivery (CNC) swing entries the analyst proposes in Recommend mode, inside your trading hours.',
+  noAnswer: (what: string) =>
+    `No answer from the engine in time. The ${what} may still change; the top bar shows the engine's value after the next refresh.`,
   hoursTitle: 'Trading hours (IST)',
   hoursBody: 'New trades are only proposed inside these hours. Exits are never blocked.',
   hoursBufferLabel: 'Stop intraday entries this many minutes before the end',
@@ -415,5 +563,7 @@ export const COPY = {
     'intraday entries). Your current hours are unchanged.',
   gateTitle: 'Connect to your trading engine',
   gateBody: "Enter the dashboard token. It's kept only in this browser.",
-  gateHint: "The engine's DASHBOARD_TOKEN (Windows DPAPI store). It is sent as a Bearer header on every request.",
+  gateHint:
+    "The engine's DASHBOARD_TOKEN (Windows DPAPI store). It is sent as a Bearer header on every request (and in the " +
+    'live-updates link).',
 } as const

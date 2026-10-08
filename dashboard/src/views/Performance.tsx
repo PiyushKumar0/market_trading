@@ -9,11 +9,12 @@ import { Hint } from '../ui/Hint'
 import { Scorecard } from './parts/Scorecard'
 
 export function Performance({ data, error, unauthorized }: ScorecardState) {
-  const hasRows = data !== null && Object.keys(data.strategies).length > 0
+  const count = data ? Object.keys(data.strategies).length : 0
+  const hasRows = count > 0
   return (
     <>
       <h1 className="view-title">Performance</h1>
-      <Card title="Strategy performance">
+      <Card title="Strategy performance" meta={hasRows ? `${count} ${count === 1 ? 'strategy' : 'strategies'}` : undefined}>
         {unauthorized ? (
           <p className="perf-error">Your dashboard token was rejected. Sign out (top right) and enter the current token.</p>
         ) : data === null ? (

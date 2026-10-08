@@ -59,6 +59,10 @@
   margin-top: var(--sp-1);
 }
 
+.act-reason + .act-reason {
+  margin-top: var(--sp-1);
+}
+
 @media (max-width: 639px) {
   .dt .act-fold-row td {
     display: block;

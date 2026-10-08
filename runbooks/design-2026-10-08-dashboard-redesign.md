@@ -413,6 +413,43 @@ Each change below came from looking at the rendered page or from a validation fi
 | 14 | Sign colours in tables use `.dt .pos/.neg` | `.dt td` out-ranked `.pos`, so returns showed uncoloured |
 | 15 | Fixture server: `ALERTS=1`, `EMPTY=1`, `POST /mode`, `POST /config/trade_window`, 405 for other methods | the alert, first-boot and write paths needed something to run against |
 
+### 15.1 Review round (2026-10-08, evening)
+
+Three whole-branch reviews ran on `9f965ad`: copy against the engine's code, runtime behaviour, and
+data parity with the old panels. These are the changes they led to.
+
+| # | Change | Why |
+|---|---|---|
+| 16 | Recommendation cards follow their kind. Entry: "Buy 3 shares at ₹X". Exit: "Sell all N shares at market", showing only the current stop-loss. Adjust: "Move the stop-loss on X to ₹Y", with a neutral **Stop-loss** badge, no levels and a no-new-order note | `ops/pipeline.py` `_manage_recommendation`: an exit's zone is the last price or the position's own entry; an adjust keeps the held side and places no order. The old headline read "Buy 10 shares" for a stop move |
+| 17 | The Telegram hint depends on the kind (`actionHint`): an entry takes `/taken` or `/veto`, an exit `/closed` or `/veto`, an adjust only `/veto` | `notify/catalog.py` footers; `/taken` refuses an exit |
+| 18 | A risk-check reason shows the rule in plain words and the engine's own figures beneath it, unchanged (`reasonTerm`, `ReasonText`) | `risk/gate.py` writes "rule: value (limit …)". The ID-only lookup never matched, and `humanize` dropped minus signs and decimal points |
+| 19 | Hints corrected. Closing only and the kill switch don't clear by themselves; the kill switch closes nothing; Off still sends exit alerts; Auto is refused while the engine is paper-only; Minimal (DG3) also stops AI stop-loss warnings; cat and cat_reversal are validation-only; the void and flat definitions; a reset-pending halt clears by itself | the copy audit found 15 wrong or overstated claims |
+| 20 | System figures say what they are. "Equity on record" is the engine's own book, not the Kite balance. The daily trade cap counts recommendations sent. Waiting recommendations take position slots. AI spend is an estimate at API list rates, with the exact USD in a hint. Candidates per day reads "None" at Minimal and Stopped. The hours hint gives the real intraday cutoff (end − buffer − 10 min) | the old labels described something the engine doesn't measure |
+| 21 | Positions: only `/taken` records a position; trades placed directly in Kite are not tracked. The stop-loss instruction depends on the product: GTT for delivery, SL-M for intraday | nothing else writes a real position (`pipeline.py`); the intraday checklist is SL-M |
+| 22 | Scorecard. The 20-session return is a plain 20-session hold that ignores the stop-loss and target. "vs market" is the net return minus an equal-weight basket of the stocks the engine can trade. Phone labels carry this meaning themselves | `rec_outcomes.py` and `benchmark.py`; below 640 px the header row and its hints are hidden |
+| 23 | A rupee figure with one decimal digit gets a second ("2445.0" → ₹2,445.00). Nothing is rounded | a Kite float becomes `Decimal("2445.0")` |
+| 24 | Each request times out (8 s for reads, 15 s for writes). A live socket that goes 45 s without a message is closed and reopened | a stalled engine left "All normal" and a frozen "Updated" on screen |
+| 25 | The health pill reads "Connecting…" until the first poll. "Updated" and "Last refresh" show the last refresh that brought back data (`lastOkAt`) | both used to look fresh while every request was failing |
+| 26 | The skip link focuses `<main>` without changing the hash. A hash that isn't a tab keeps the open tab (`tabOfHash`). Every tab opens at its top (`scrollRestoration = 'manual'`) | "Skip to content" switched five of the six tabs to the Overview |
+| 27 | An in-page link to another tab moves focus to that tab's panel; the tab bar keeps the standard tabs focus behaviour. A control waiting for the engine is `aria-disabled`, not `disabled`, so it keeps focus after a confirm | focus fell to `<body>` |
+| 28 | The Hours button is disabled and shows "…" until the hours are known (unknown is not "not set"). A save that fails after its editor was closed raises a toast | "Hours not set" showed during loading; a late 422 vanished |
+| 29 | A card whose route never answered says "Couldn't load …" instead of "Loading…" (`FailedRoutes` context) | it read "Loading…" forever |
+| 30 | Hints move with their button on scroll and close only once it leaves the screen. "Got it" stores the set of acknowledged messages. `aria-controls` is set only on the open tab. The brand link has a name below 640 px. The equity chart is `role="img"`, with its live readout outside the chart | runtime review #9–#14 |
+| 31 | Parity. A partial-failure alert says what failed. In Auto, Off and Recommend still work. Time cells show seconds in a tooltip. The product is a term with its engine name. Paper entries marked "Allowed" explain what that covers. The Performance card shows the strategy count. The news summary's age shows even without a limit | each was in the old panels and missing from the redesign |
+| 32 | The default fixture adds a live exit, a live stop-loss adjust, a shrunk entry, and gate reasons in the engine's real format | none of the per-kind or per-reason paths had anything to render |
+
+A fresh review of the fix diff itself found 12 more issues, all fixed:
+
+| # | Change | Why |
+|---|---|---|
+| 33 | A pinned hint closes once its button is hidden inside a scroll box (the Telegram transcript, a sideways table) or under the sticky tab bar, not only when it leaves the window | following the button on scroll could otherwise point at something out of sight |
+| 34 | The System cards say "Couldn't load …" when their route never answered. "Isn't connected" is kept for the engine's `{}` stub | `null` means no answer; `{}` is the unwired stub (`api/app.py`) |
+| 35 | The exit card's stop reads **Stop-loss on record** | the engine keeps the stop recorded at `/taken`; a followed adjust never updates it (`pipeline.py`) |
+| 36 | "Got it" acknowledges one failure of a message (id plus `created_at`), so a re-queued message that fails again warns again | `telegram.py` re-queues the same row with a new `created_at` |
+| 37 | Copy fixes. The open-positions meter counts positions only. A write with no answer may still apply, and the hours refresh either way. A flatten from `/paper reset` reads "Closed by your paper reset". The loss-at-stop hint covers sells. DG2 and DG4, the news grade and summary, the pending reset and the hours hint now match the engine | each contradicted `gate.py`, `api.ts`, `paper_risk.py`, `pipeline.py` or `governor.py` |
+| 38 | The equity chart is a slider over the sessions (`aria-valuetext` reads each one). Busy controls show a dashed outline | a focusable `img` never receives arrow keys in a screen reader; a busy switch gave no feedback for up to 15 s |
+| 39 | Fixture: reject and shrink reasons as the gate builds them, paper reasons from the same gate, no quantity on exit or adjust verdicts, the adjust's position present, routing reported only in Auto | the old rows could not occur in the engine |
+
 ## Appendix A — gate rule IDs in plain words
 
 Source: `src/engine/risk/gate.py` rule list (lines 104–133 on 2026-10-08) plus the out-of-gate causes

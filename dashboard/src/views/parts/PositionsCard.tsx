@@ -11,6 +11,7 @@ import { DataTable } from '../../ui/DataTable'
 import type { Column } from '../../ui/DataTable'
 import { Hint, Labelled } from '../../ui/Hint'
 import { Icon } from '../../ui/Icon'
+import { Loading } from '../../ui/Loading'
 import { Pill } from '../../ui/Pill'
 
 function Protection({ p }: { p: PositionRow }) {
@@ -31,7 +32,8 @@ function Protection({ p }: { p: PositionRow }) {
         Not protected
       </Pill>
       <Hint label="Not protected">
-        No stop-loss confirmed yet. Place its GTT stop-loss in Kite, then reply /protected {p.symbol} on Telegram.
+        No stop-loss confirmed yet. Place its {p.product === 'MIS' ? 'SL-M stop-loss order' : 'GTT stop-loss'} in Kite,
+        then reply /protected {p.symbol} on Telegram.
       </Hint>
     </span>
   )
@@ -50,7 +52,9 @@ const COLUMNS: Column<PositionRow>[] = [
       <>
         <strong>{p.symbol}</strong>
         <span className="cell-sub">
-          {[sideWord(p.side), p.product ? productTerm(p.product).label : null].filter(Boolean).join(', ')}
+          {sideWord(p.side)}
+          {p.side && p.product ? ', ' : null}
+          {p.product ? <Labelled t={productTerm(p.product)} /> : null}
         </span>
       </>
     ),
@@ -71,17 +75,17 @@ export function PositionsCard({ data }: { data: PositionsResponse | null }) {
   return (
     <Card
       title="Your positions"
-      meta={data?.as_of ? `Updated ${istTime(data.as_of)}` : undefined}
+      meta={data?.as_of ? <span title={istTime(data.as_of, { seconds: true })}>Updated {istTime(data.as_of)}</span> : undefined}
     >
       {data === null ? (
-        <p className="empty">Loading…</p>
+        <Loading route="positions" what="your positions" />
       ) : (
         <DataTable
           caption="Your open positions"
           columns={COLUMNS}
           rows={open}
           rowKey={(p) => p.position_id}
-          empty="No open positions. Positions you open from a recommendation, or hold in Kite, appear here."
+          empty="No open positions. Positions you record with /taken on Telegram appear here; trades made directly in Kite are not tracked."
           rowClass={(p) => (p.origin === 'recommended' && p.state === 'OPEN' && !p.owner_protected_at ? 'row-alert' : undefined)}
         />
       )}

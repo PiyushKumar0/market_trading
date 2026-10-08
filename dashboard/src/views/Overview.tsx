@@ -7,6 +7,7 @@ import type { Alert, TabId } from '../lib/alerts.ts'
 import { liveRecs } from '../lib/recs.ts'
 import type { NotificationRow, Snapshot } from '../types'
 import { EmptyState } from '../ui/Card'
+import { Loading } from '../ui/Loading'
 import { AlertsCard } from './parts/AlertsCard'
 import { PaperSnapshot } from './parts/PaperSnapshot'
 import { PositionsCard } from './parts/PositionsCard'
@@ -22,6 +23,7 @@ export function Overview({
   onTab,
   onSignOut,
   onAck,
+  errorDetail,
 }: {
   snapshot: Snapshot
   alerts: Alert[]
@@ -29,7 +31,9 @@ export function Overview({
   nowMs: number
   onTab: (t: TabId) => void
   onSignOut: () => void
-  onAck: (id: string) => void
+  onAck: (ids: string[]) => void
+  /** The poll's own failure text ("positions: 502 Bad Gateway | …") for the load-failure alerts. */
+  errorDetail: string | null
 }) {
   const all = snapshot.recommendations?.recommendations ?? []
   const live = liveRecs(all, nowMs)
@@ -38,7 +42,9 @@ export function Overview({
   return (
     <>
       <h1 className="sr-only">Overview</h1>
-      {alerts.length ? <AlertsCard alerts={alerts} onTab={onTab} onSignOut={onSignOut} onAck={onAck} /> : null}
+      {alerts.length ? (
+        <AlertsCard alerts={alerts} onTab={onTab} onSignOut={onSignOut} onAck={onAck} detail={errorDetail} />
+      ) : null}
 
       <section className="act-now" aria-labelledby="act-now-title">
         <div className="section-head">
@@ -55,7 +61,7 @@ export function Overview({
           ) : null}
         </div>
         {snapshot.recommendations === null ? (
-          <EmptyState>Loading recommendations…</EmptyState>
+          <Loading route="recommendations" what="recommendations" />
         ) : live.length ? (
           <div className="tickets">
             {live.map((row) => (
@@ -65,7 +71,7 @@ export function Overview({
         ) : (
           <EmptyState>
             {off
-              ? 'Nothing to act on. The engine is off, so no new recommendations will arrive.'
+              ? 'Nothing to act on. The engine is off: no new trade ideas, but exit alerts for open positions still arrive.'
               : 'Nothing to act on. New recommendations appear here and on Telegram.'}
           </EmptyState>
         )}

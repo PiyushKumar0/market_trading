@@ -26,7 +26,9 @@ export function Pill({
 }
 
 /** The BUY / SELL badge, in Kite's own colours (buy blue, sell orange). */
-export function SideBadge({ side }: { side: string | null | undefined }) {
+export function SideBadge({ side, kind }: { side: string | null | undefined; kind?: string | null }) {
+  // An adjust keeps the HELD side but places no order: "Buy" there would read as an instruction.
+  if (kind === 'adjust') return <span className="side side-unknown">Stop-loss</span>
   const s = (side ?? '').toUpperCase()
   if (s !== 'BUY' && s !== 'SELL') return <span className="side side-unknown">{side || '—'}</span>
   return <span className={`side side-${s.toLowerCase()}`}>{s === 'BUY' ? 'Buy' : 'Sell'}</span>

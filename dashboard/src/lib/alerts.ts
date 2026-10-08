@@ -22,9 +22,11 @@ export interface Alert {
   /** The tab that shows the detail. */
   tab?: TabId
   action?: 'signout' | 'ack-telegram'
-  /** For `ack-telegram`: the newest failed notification id to remember as seen. */
-  ackId?: string
+  /** For `ack-telegram`: every failed notification id shown now, to remember as seen. */
+  ackIds?: string[]
 }
+
+export type Health = { level: Level | 'ok' | 'pending'; text: string }
 
 export interface AlertInput {
   snapshot: Snapshot
@@ -35,8 +37,9 @@ export interface AlertInput {
   polled: boolean
   /** Today's Telegram journal, chronological (oldest first), as served. */
   notifications: NotificationRow[]
-  /** The newest failed notification the owner already acknowledged ("Got it"). */
-  ackedFailureId: string | null
+  /** Failed notifications the owner already acknowledged ("Got it"). A set, not a position in the
+   *  list: the engine re-queues a failed row with a dedupe key, which moves it out of the failed set. */
+  ackedFailureIds: string[]
 }
 
 export interface Badge {
@@ -87,6 +90,10 @@ function failedRows(rows: NotificationRow[]): NotificationRow[] {
   return rows.filter((r) => r.status === 'failed')
 }
 
+/** What "Got it" acknowledges: this failure of this row. telegram.py re-queues a failed keyed message
+ *  by rewriting the SAME row (new created_at), so a second failure gets a new key and warns again. */
+const ackKey = (r: NotificationRow) => `${r.notification_id}@${r.created_at ?? ''}`
+
 function retryingRows(rows: NotificationRow[]): NotificationRow[] {
   return rows.filter((r) => r.status === 'pending' && (r.attempts ?? 0) > 0)
 }
@@ -118,15 +125,17 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'unreachable',
       level: 'critical',
       title: "Can't reach the engine",
-      body: 'Nothing has loaded. Check that the engine is running; the page retries every 10 seconds.',
+      body: 'No part of the page could refresh. Check that the engine is running; the page retries every 10 seconds.',
     })
   }
   if (risk === 'KILLED') {
     add({
       id: 'killed',
       level: 'critical',
-      title: 'Kill switch is on — all trading is stopped',
-      body: 'Nothing new will be opened. Reset only on Telegram: /kill_reset, then /confirm.',
+      title: 'Kill switch is on — no new trades',
+      body:
+        'Open positions are not closed for you; exit alerts still arrive. Reset on Telegram: /kill_reset, then ' +
+        '/confirm with the phrase the bot sends. If the total-loss floor set it, it stays on after the reset.',
       tab: 'system',
     })
   }
@@ -135,7 +144,9 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'close-only',
       level: 'critical',
       title: 'Closing only — no new positions',
-      body: 'A risk limit allows exits only. It clears when its cause clears.',
+      body:
+        'A risk limit allows exits only. A daily-loss stop lifts at the next day’s engine start; a weekly-drawdown ' +
+        'or equity-floor stop does not lift by itself.',
       tab: 'system',
     })
   }
@@ -144,7 +155,8 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'ai-stopped',
       level: 'critical',
       title: 'AI analysis is stopped for the week',
-      body: 'The weekly AI budget is used up. It refills Thursday 14:00 IST.',
+      // governor.py: DG4 = spend at the weekly credit OR a billing error in this window; both end with it.
+      body: 'The weekly AI budget is used up, or the AI provider reported a billing error. AI calls resume Thursday 14:00 IST.',
       tab: 'system',
     })
   }
@@ -164,11 +176,13 @@ export function deriveAlerts(i: AlertInput): Alert[] {
   const bare = unprotected(s.positions?.positions ?? [])
   if (bare.length === 1) {
     const sym = bare[0].symbol
+    // pipeline.py checklists: delivery (CNC) protects with a GTT, intraday (MIS) with an SL-M order.
+    const order = bare[0].product === 'MIS' ? 'SL-M stop-loss order' : 'GTT stop-loss'
     add({
       id: 'unprotected',
       level: 'warning',
       title: `${sym} has no confirmed stop-loss`,
-      body: `Place its GTT stop-loss in Kite, then reply /protected ${sym} on Telegram.`,
+      body: `Place its ${order} in Kite, then reply /protected ${sym} on Telegram.`,
       tab: 'overview',
     })
   } else if (bare.length > 1) {
@@ -176,14 +190,14 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'unprotected',
       level: 'warning',
       title: `${bare.length} positions have no confirmed stop-loss`,
-      body: `${bare.map((p) => p.symbol).join(', ')} — place each GTT stop-loss in Kite, then reply /protected SYMBOL on Telegram.`,
+      body: `${bare.map((p) => p.symbol).join(', ')} — place each stop-loss order in Kite (a GTT for delivery), then reply /protected SYMBOL on Telegram.`,
       tab: 'overview',
     })
   }
   const failures = failedRows(i.notifications)
   if (failures.length) {
-    const seen = i.ackedFailureId ? failures.findIndex((r) => r.notification_id === i.ackedFailureId) : -1
-    const fresh = seen >= 0 ? failures.slice(seen + 1) : failures
+    const acked = new Set(i.ackedFailureIds)
+    const fresh = failures.filter((r) => !acked.has(ackKey(r)))
     if (fresh.length) {
       add({
         id: 'telegram-failed',
@@ -192,7 +206,7 @@ export function deriveAlerts(i: AlertInput): Alert[] {
         body: plural(fresh.length, 'You may have missed it — read it in Activity.', 'You may have missed them — read them in Activity.'),
         tab: 'activity',
         action: 'ack-telegram',
-        ackId: failures[failures.length - 1].notification_id,
+        ackIds: failures.map(ackKey),
       })
     }
   }
@@ -212,7 +226,8 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'partial',
       level: 'warning',
       title: `Some data couldn't load: ${names.join(', ')}`,
-      body: 'Showing the last values received. The page retries every 10 seconds.',
+      // A route that never answered has no last values: its card says it couldn't load (ui/Loading).
+      body: "Their cards keep the last values received, or say they couldn't load. The page retries every 10 seconds.",
     })
   }
   if (s.tradeWindow && s.tradeWindow.trade_window === null && s.mode?.mode) {
@@ -228,7 +243,9 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'ai-minimal',
       level: 'warning',
       title: 'AI analysts are paused',
-      body: 'Weekly AI spend is near the limit: only scanner alerts are sent until Thursday 14:00 IST.',
+      body:
+        'Weekly AI spend is near the limit: no new recommendations and no AI stop-loss warnings until Thursday 14:00 ' +
+        'IST. Planned-date exit alerts and your own stop orders in Kite still work.',
       tab: 'system',
     })
   }
@@ -239,7 +256,9 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'mode-off',
       level: 'notice',
       title: 'The engine is off',
-      body: 'No new trade ideas. Exits and protective actions still run. Switch to Recommend in the top bar to resume.',
+      body:
+        'No new trade ideas; exit alerts for your open positions still arrive. Switch to Recommend in the top bar to ' +
+        'resume.',
     })
   }
   if (tier === 'DG2') {
@@ -247,7 +266,7 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'ai-saving',
       level: 'notice',
       title: 'AI is in saving mode',
-      body: 'Some background AI checks are reduced to stay in budget. Recommendations continue.',
+      body: 'Background AI check-ins are off and fewer scanner candidates reach the AI, to stay in budget. Recommendations continue.',
       tab: 'system',
     })
   }
@@ -257,7 +276,7 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'news',
       level: 'notice',
       title: `News summary is ${digest}`,
-      body: 'News-catalyst (cat) entries are off until it refreshes.',
+      body: 'News-catalyst candidates (still in validation) pause until it refreshes; no recommendation depends on it.',
       tab: 'activity',
     })
   }
@@ -290,8 +309,9 @@ export function deriveAlerts(i: AlertInput): Alert[] {
     .map(({ a }) => a)
 }
 
-export function health(alerts: Alert[]): { level: Level | 'ok'; text: string } {
-  if (!alerts.length) return { level: 'ok', text: 'All normal' }
+/** `polled` false = no poll cycle has answered yet: "All normal" would be a claim about nothing. */
+export function health(alerts: Alert[], polled = true): Health {
+  if (!alerts.length) return polled ? { level: 'ok', text: 'All normal' } : { level: 'pending', text: 'Connecting…' }
   if (alerts.some((a) => a.id === 'killed')) return { level: 'critical', text: 'Kill switch on' }
   const level = alerts[0].level
   const urgent = alerts.filter((a) => a.level !== 'notice').length

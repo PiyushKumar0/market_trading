@@ -1,8 +1,9 @@
 /**
  * Toggletip: a small ⓘ button that explains a term in plain words, plus the engine's own name for it.
- * Opens on hover, keyboard focus or tap; a click/tap pins it open; Esc, an outside tap, scrolling or
- * resizing closes it. The bubble is portalled to <body> with fixed coordinates, so no scrolling table
- * or card can clip it.
+ * Opens on hover, keyboard focus or tap; a click/tap pins it open; Esc or an outside tap closes it.
+ * The bubble is portalled to <body> with fixed coordinates, so no scrolling table or card can clip it;
+ * on scroll or resize it follows its button (focusing a button below the fold scrolls the page, and
+ * the Telegram transcript scrolls itself), and closes once the button is out of sight.
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -11,6 +12,34 @@ import type { Term } from '../copy/glossary.ts'
 import { Icon } from './Icon'
 import { place } from './float'
 import type { Placement } from './float'
+
+/**
+ * The button's rect while any of it can be seen, else null. It is clipped by every scrolling ancestor
+ * (the Telegram transcript, a sideways table), by the window, and — for content below the header — by
+ * the sticky tab bar, so a pinned bubble never points at a button that has scrolled out of sight.
+ */
+function visibleRect(el: HTMLElement): DOMRect | null {
+  const r = el.getBoundingClientRect()
+  let { top, left, bottom, right } = r
+  for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+    const cs = getComputedStyle(p)
+    if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue
+    const c = p.getBoundingClientRect()
+    top = Math.max(top, c.top)
+    left = Math.max(left, c.left)
+    bottom = Math.min(bottom, c.bottom)
+    right = Math.min(right, c.right)
+  }
+  if (!el.closest('.appbar, .tabbar')) {
+    const bar = document.querySelector('.tabbar')
+    if (bar) top = Math.max(top, bar.getBoundingClientRect().bottom)
+  }
+  top = Math.max(top, 0)
+  left = Math.max(left, 0)
+  bottom = Math.min(bottom, window.innerHeight)
+  right = Math.min(right, window.innerWidth)
+  return bottom > top && right > left ? r : null
+}
 
 export function Hint({
   label,
@@ -67,15 +96,28 @@ export function Hint({
       const t = e.target as Node
       if (!btn.current?.contains(t) && !bubble.current?.contains(t)) close()
     }
+    let frame = 0
+    const follow = () => {
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        const b = btn.current
+        const bb = bubble.current
+        if (!b || !bb) return
+        const r = visibleRect(b)
+        if (r === null) close()
+        else setAt(place(r, bb.getBoundingClientRect()))
+      })
+    }
     document.addEventListener('keydown', onKey)
     document.addEventListener('pointerdown', onDown)
-    window.addEventListener('scroll', close, true)
-    window.addEventListener('resize', close)
+    window.addEventListener('scroll', follow, true)
+    window.addEventListener('resize', follow)
     return () => {
+      window.cancelAnimationFrame(frame)
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('pointerdown', onDown)
-      window.removeEventListener('scroll', close, true)
-      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', follow, true)
+      window.removeEventListener('resize', follow)
     }
   }, [open])
 

@@ -1,7 +1,7 @@
 /**
- * News watchlist: today's catalyst watchlist, split into news that can start a trade and background
+ * News watchlist: today's catalyst watchlist, split into news that can start a candidate and background
  * news, with the freshness of the news summary the engine keys its fail-safe off (a stale or missing
- * summary switches news-catalyst entries off for the day).
+ * summary pauses news-catalyst candidates, which are validation-only while `cat` is a shadow strategy).
  */
 import { digestTerm, gradeTerm } from '../../copy/glossary.ts'
 import { dayLabel, humanize, istStamp, price } from '../../lib/format.ts'
@@ -10,6 +10,7 @@ import { Card } from '../../ui/Card'
 import { DataTable } from '../../ui/DataTable'
 import type { Column } from '../../ui/DataTable'
 import { Hint, Labelled } from '../../ui/Hint'
+import { Loading } from '../../ui/Loading'
 import { Pill } from '../../ui/Pill'
 import type { Tone } from '../../ui/Pill'
 
@@ -51,7 +52,8 @@ const COLUMNS: Column<WatchlistRow>[] = [
   },
   {
     key: 'trigger',
-    header: head('Trigger price', 'A move past this price confirms the idea.'),
+    // Levels from the retired first news strategy (news_pipeline.py): shown for reference only.
+    header: head('Trigger price', 'A reference level from the news summary: a move past it would confirm the idea. No engine rule acts on it.'),
     label: 'Trigger price',
     align: 'right',
     nowrap: true,
@@ -59,7 +61,7 @@ const COLUMNS: Column<WatchlistRow>[] = [
   },
   {
     key: 'cancel',
-    header: head('Cancel price', 'A move past this price cancels the idea.'),
+    header: head('Cancel price', 'A reference level from the news summary: a move past it would cancel the idea. No engine rule acts on it.'),
     label: 'Cancel price',
     align: 'right',
     nowrap: true,
@@ -110,7 +112,7 @@ export function NewsWatchlist({ data }: { data: WatchlistResponse | null }) {
   return (
     <Card id="act-news" tier="secondary" title="News watchlist" meta={data?.d ? dayLabel(data.d) : undefined}>
       {data === null ? (
-        <p className="empty">Loading…</p>
+        <Loading route="watchlist" what="the news watchlist" />
       ) : (
         <>
           <div className="act-digest">
@@ -121,13 +123,13 @@ export function NewsWatchlist({ data }: { data: WatchlistResponse | null }) {
               </Hint>
             </span>
             {digest?.as_of ? <span className="muted">updated {istStamp(digest.as_of)}</span> : null}
-            {digest?.age_h != null && digest.stale_max_h != null ? (
+            {digest?.age_h != null ? (
               <span className="muted">
-                ({digest.age_h.toFixed(1)} hours old, limit {digest.stale_max_h} hours)
+                ({digest.age_h.toFixed(1)} hours old{digest.stale_max_h != null ? `, limit ${digest.stale_max_h} hours` : ''})
               </span>
             ) : null}
           </div>
-          <Group grade="originating" caption="News that can start a trade" rows={originating} />
+          <Group grade="originating" caption="News that can start a trade idea" rows={originating} />
           <Group grade="context" caption="Background news" rows={background} />
         </>
       )}

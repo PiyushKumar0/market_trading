@@ -68,7 +68,8 @@ function rec(id, day, hms, inst, side, kind, action, extra = {}) {
       notional: '7335.00',
       thesis: `Fixture thesis for ${inst} on ${day ?? 'undated'} — ${kind} ${side}.`,
       confidence: 0.86,
-      gate: { verdict: 'approve', reasons: [], original_qty: 3 },
+      // An exit's or adjust's verdict carries no proposed quantity (gate.py), an entry's does.
+      gate: { verdict: 'approve', reasons: [], original_qty: kind === 'exit' || kind === 'adjust' ? null : 3 },
       manual_checklist: ['exit at market: close now'],
       ...extra,
     },
@@ -80,7 +81,19 @@ function rec(id, day, hms, inst, side, kind, action, extra = {}) {
 }
 
 let recommendations = [
-  rec('r-t1', today, '10:15:03', 'HDFCAMC', 'SELL', 'exit', null),
+  // An exit is valid to the next session's close here, so it stays live at any hour of the day.
+  rec('r-t1', today, '10:15:03', 'HDFCAMC', 'SELL', 'exit', null, { valid_until: `${shift(today, 1)}T15:30:00+05:30` }),
+  // An adjust places NO order and keeps the held side (pipeline.py _manage_recommendation): the card
+  // must read as a stop-loss move, never as "Buy 10 shares".
+  rec('r-adj', today, '11:05:00', 'COALINDIA', 'BUY', 'adjust', null, {
+    valid_until: `${shift(today, 1)}T15:30:00+05:30`,
+    entry_zone: ['131.20', '131.20'],
+    stop: '128.50',
+    qty: 10,
+    notional: '1312.00',
+    thesis: 'Price is 1.5 ATR above the entry; trailing the stop locks in most of the breakout.',
+    manual_checklist: ['move the stop on COALINDIA to 128.50 (modify the existing SL-M/GTT)'],
+  }),
   rec('r-t2', today, '09:41:10', 'TATASTEEL', 'BUY', 'entry', null, {
     strategy_id: 'hi52',
     hold_sessions: 20,
@@ -105,6 +118,16 @@ let recommendations = [
   // yesterday's fold must start open and the `valid till` chip must carry the date.
   rec('r-live', d1, '14:47:00', 'JINDALSTEL', 'BUY', 'entry', null, {
     valid_until: `${shift(today, 1)}T15:30:00+05:30`,
+    // A shrunk entry: the card's quantity-cut note and its reasons with the engine's own figures.
+    gate: {
+      verdict: 'shrink',
+      reasons: [
+        'per_trade_risk: 10 x 162.40 = 1624.00 [1.5x stop distance from 2445.00 (daily-band leg unavailable in ' +
+          'Phase 2 — gap mult only)] (limit <= 1.5% of equity 40000.00 = 600.00)',
+        'shrink: qty 10 -> 3 (bound by per_trade_risk)',
+      ],
+      original_qty: 10,
+    },
   }),
   // UTC stamp late on d(-4) UTC = early d(-3) IST: must fold under d(-3).
   { ...rec('r-utc', d3, '01:00:00', 'UTCCHECK', 'BUY', 'enter', 'expired'), delivered_at: `${d4}T19:30:00Z` },
@@ -134,16 +157,32 @@ function dec(id, day, hms, agent, action, subject, verdict, reasons, paper = nul
   }
 }
 
+// Reasons are what gate.py writes: "<rule_id>: <value> (limit <limit>)" for a failed rule, plus
+// "shrink: qty A -> B (bound by …)"; a bare rule id (p-o2) stands for rows journalled before that.
 let decisions = [
   dec('p-t1', today, '10:14:58', 'swing_analyst', 'exit', 'HDFCAMC', 'approve', []),
-  // Real rejects, paper approves: the two verdicts sit side by side.
-  dec('p-t2', today, '09:41:01', 'swing_analyst', 'enter', 'TATASTEEL', 'reject', ['per_trade_risk'],
-    ['approve', []]),
-  dec('p-t3', today, '09:40:00', 'swing_analyst', 'enter', 'SAIL', 'approve', [], ['reject', ['paper_open_positions']]),
+  // Real rejects, paper approves: the two verdicts sit side by side. A shrinkable rule alone only
+  // rejects when nothing is approvable (gate.py "shrink floor").
+  dec('p-t2', today, '09:41:01', 'swing_analyst', 'enter', 'TATASTEEL', 'reject', [
+    'per_trade_risk: 10 x 812.40 = 8124.00 [1.5x stop distance from 2445.00 (daily-band leg unavailable in ' +
+      'Phase 2 — gap mult only)] (limit <= 1.5% of equity 40000.00 = 600.00)',
+    'shrink floor: implied max qty 0 — nothing approvable',
+  ], ['approve', []]),
+  // Paper verdicts come from the same gate, so their reasons are the same rule sentences.
+  dec('p-t3', today, '09:40:00', 'swing_analyst', 'enter', 'SAIL', 'approve', [], ['reject', [
+    'max_open_positions: total 3+0 pending+1 = 4; CNC 3+0+1 = 4 (limit total <= 3; MIS <= 2; CNC <= 3)',
+  ]]),
   dec('p-y1', d1, '13:00:10', 'swing_analyst', 'exit', 'HDFCAMC', 'approve', []),
   dec('p-y2', d1, '13:00:05', 'swing_analyst', 'exit', 'HINDZINC', 'approve', []),
-  dec('p-y3', d1, '10:01:50', 'swing_analyst', 'enter', 'CEIGALL', 'reject', ['max_open_positions', 'per_sector_exposure']),
-  dec('p-o1', d4, '11:11:00', 'intraday_analyst', 'enter', 'OLDNAME', 'shrink', ['per_trade_risk']),
+  dec('p-y3', d1, '10:01:50', 'swing_analyst', 'enter', 'CEIGALL', 'reject', [
+    'max_open_positions: total 5+1 pending+1 = 7; CNC 5+1+1 = 7 (limit total <= 6; MIS <= 2; CNC <= 6)',
+    'per_sector_exposure: Capital Goods: 2 open (limit < 2)',
+  ]),
+  dec('p-o1', d4, '11:11:00', 'intraday_analyst', 'enter', 'OLDNAME', 'shrink', [
+    'per_trade_risk: 10 x 210.00 = 2100.00 [stop distance from 980.00] (limit <= 1.5% of equity 40000.00 = 600.00)',
+    'shrink: qty 10 -> 2 (bound by per_trade_risk)',
+  ]),
+  dec('p-o2', d4, '10:20:00', 'intraday_analyst', 'enter', 'OLDNAME', 'reject', ['daily_loss_soft']),
   dec('p-u1', null, '00:00:00', 'intraday_analyst', 'enter', 'UNDATED', null, []),
 ]
 
@@ -461,11 +500,14 @@ const wlIrctc = wl('w3', 'IRCTC', 'context', null, 'rating_upgrade', {
 const digestAt = (hms, age_h, status) => ({ as_of: at(today, hms), age_h, stale_max_h: 6, status })
 
 const routes = {
-  '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: ALERTS ? 'KILLED' : 'NORMAL' },
+  // risk/mode.py reports routing only in AUTO.
+  '/mode': { mode: 'RECOMMEND', routing: null, risk_state: ALERTS ? 'KILLED' : 'NORMAL' },
   '/positions': {
     positions: [
       pos('pos-1', 'JINDALSTEL', `${d1}T10:20:00+05:30`),
       pos('pos-2', 'TATASTEEL', null),
+      // The position the live stop-loss adjust (r-adj) belongs to.
+      { ...pos('pos-4', 'COALINDIA', `${d1}T10:40:00+05:30`), qty: 10, avg_entry: '124.80', stop: '119.60' },
       ...(ALERTS ? [pos('pos-3', 'VERYLONGSYMBOLNAME20', null)] : []),
     ],
     as_of: new Date().toISOString(),

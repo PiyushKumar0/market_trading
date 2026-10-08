@@ -34,6 +34,16 @@ test('inr keeps the engine digits and adds grouping, symbol and a true minus', (
   assert.equal(inr('12345678.90'), '₹1,23,45,678.90')
 })
 
+test('a one-digit fraction is padded to paise; nothing is rounded or dropped', () => {
+  // A Kite last price arrives as a float and becomes Decimal("2445.0") in the engine: "₹2,445.0"
+  // reads like a typo. Adding a trailing zero is lossless; whole rupees and longer fractions stay.
+  assert.equal(inr('2445.0'), '₹2,445.00')
+  assert.equal(price('131.2'), '131.20')
+  assert.equal(signedInr('-5.5'), '−₹5.50')
+  assert.equal(inr('100'), '₹100')
+  assert.equal(inr('2445.125'), '₹2,445.125')
+})
+
 test('inr answers null for a missing value instead of inventing one', () => {
   assert.equal(inr(''), null)
   assert.equal(inr(null), null)

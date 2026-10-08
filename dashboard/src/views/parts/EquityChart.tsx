@@ -4,7 +4,7 @@
  * ring, a crosshair that finds the nearest session on hover or with ←/→, and a table twin. Money
  * strings are parsed for geometry only; every printed value is the engine's own string.
  */
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useId, useRef, useState } from 'react'
 import type { KeyboardEvent, PointerEvent } from 'react'
 import { inr, istDay, istStamp, istTime, shortDate, todayIst } from '../../lib/format.ts'
 import type { PaperCurvePoint } from '../../types'
@@ -26,6 +26,7 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
   const [active, setActive] = useState<number | null>(null)
   const [asTable, setAsTable] = useState(false)
   const ro = useRef<ResizeObserver | null>(null)
+  const summaryId = useId()
 
   // Measured in CSS pixels, so text and dots are never stretched (no preserveAspectRatio="none").
   const measure = useCallback((el: HTMLDivElement | null) => {
@@ -84,6 +85,7 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
   }
 
   const tipLeft = active === null ? 0 : Math.max(0, Math.min(w - 172, x(active) - 86))
+  const cur = active ?? last // what the keyboard reads: the crosshair's session, else the latest
 
   return (
     <div className="eq">
@@ -104,11 +106,19 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
           rowKey={(p) => p.at}
         />
       ) : (
+        // A slider over the sessions: screen readers pass ←/→ to it (a focusable "img" stays in browse
+        // mode and never gets the keys) and announce each session from aria-valuetext.
         <div
           className="eq-plot"
           ref={measure}
+          role="slider"
           tabIndex={0}
-          aria-label={`Paper equity by session, ${pts.length} sessions from ${shortDate(pts[0].d)} to ${when(last)}, now ${inr(pts[last].equity)}. Use the left and right arrow keys to read each session.`}
+          aria-label="Paper equity by session"
+          aria-describedby={summaryId}
+          aria-valuemin={0}
+          aria-valuemax={last}
+          aria-valuenow={cur}
+          aria-valuetext={`${when(cur)}: ${inr(pts[cur].equity)}`}
           onKeyDown={onKey}
           onBlur={() => setActive(null)}
         >
@@ -144,11 +154,13 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
               <span className="eq-tip-k">{when(active)}</span>
             </div>
           ) : null}
-          <span className="sr-only" aria-live="polite">
-            {active !== null ? `${when(active)}: ${inr(pts[active].equity)}` : ''}
-          </span>
         </div>
       )}
+      {!asTable ? (
+        <span id={summaryId} className="sr-only">
+          {`${pts.length} sessions from ${shortDate(pts[0].d)} to ${when(last)}. Use the left and right arrow keys to read each session.`}
+        </span>
+      ) : null}
       {!asTable ? (
         <div className="eq-legend" aria-hidden="true">
           <span className="eq-key">

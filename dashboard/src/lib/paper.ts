@@ -1,5 +1,5 @@
 /** The paper autopilot's state in one plain sentence (Overview snapshot and the Paper tab). Pure. */
-import { haltTerm, modeTerm, rungTerm } from '../copy/glossary.ts'
+import { haltTerm, modeTerm, riskTerm, rungTerm } from '../copy/glossary.ts'
 import type { PaperSummary } from '../types.ts'
 
 export interface PaperLine {
@@ -16,8 +16,10 @@ export function entryGuardText(raw: string): string {
   if (raw === 'paper is off') return 'the autopilot is off'
   if (raw === 'not built') return 'the autopilot is not running'
   if (raw === 'paper session prep has not completed') return "today's paper setup hasn't finished yet"
+  // paper_risk.py: the paper guard uses the WORSE of the engine's own risk state and the paper halts.
+  // Every caller shows paper halts first, so when this text is reached the cause is the engine's state.
   const m = /^effective paper state is (?:RiskState\.)?(\w+)$/.exec(raw)
-  if (m) return `a paper risk limit is active (${rungTerm(m[1]).label})`
+  if (m) return `the engine's own risk state (${riskTerm(m[1]).label.toLowerCase()}) also stops paper entries`
   return raw
 }
 

@@ -9,6 +9,7 @@ import { isLive } from '../lib/recs.ts'
 import type { RecommendationRow, RecommendationsResponse } from '../types'
 import { EmptyState } from '../ui/Card'
 import { DayFold, groupByDay, useDayFolds } from '../ui/DayFold'
+import { Loading } from '../ui/Loading'
 import { RecRow } from './parts/RecRow'
 import './recommendations.css'
 
@@ -38,7 +39,7 @@ export function Recommendations({ data, nowMs }: { data: RecommendationsResponse
       </div>
 
       {data === null ? (
-        <EmptyState>Loading recommendations…</EmptyState>
+        <Loading route="recommendations" what="recommendations" />
       ) : rows.length === 0 ? (
         <EmptyState>No recommendations yet. Every trade idea the engine sends you on Telegram is also kept here.</EmptyState>
       ) : (

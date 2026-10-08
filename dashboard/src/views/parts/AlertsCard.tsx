@@ -1,5 +1,6 @@
 /** "Needs attention": every active alert as icon + plain title + what to do, worst first (spec §5). */
 import type { Alert, Level, TabId } from '../../lib/alerts.ts'
+import { Hint } from '../../ui/Hint'
 import { Icon } from '../../ui/Icon'
 import type { IconName } from '../../ui/Icon'
 
@@ -18,11 +19,14 @@ export function AlertsCard({
   onTab,
   onSignOut,
   onAck,
+  detail,
 }: {
   alerts: Alert[]
   onTab: (t: TabId) => void
   onSignOut: () => void
-  onAck: (id: string) => void
+  onAck: (ids: string[]) => void
+  /** Raw per-route failure text, shown behind a hint on the load-failure alerts. */
+  detail?: string | null
 }) {
   const urgent = alerts.some((a) => a.level !== 'notice')
   return (
@@ -38,6 +42,9 @@ export function AlertsCard({
               <p className="alert-title">
                 <span className="sr-only">{WORD[a.level]}: </span>
                 {a.title}
+                {detail && (a.id === 'partial' || a.id === 'unreachable') ? (
+                  <Hint label="What failed">{detail}</Hint>
+                ) : null}
               </p>
               <p className="alert-body">{a.body}</p>
             </div>
@@ -52,8 +59,8 @@ export function AlertsCard({
                   {OPEN[a.tab]}
                 </button>
               ) : null}
-              {a.action === 'ack-telegram' && a.ackId ? (
-                <button type="button" className="btn btn-quiet" onClick={() => onAck(a.ackId as string)}>
+              {a.action === 'ack-telegram' && a.ackIds?.length ? (
+                <button type="button" className="btn btn-quiet" onClick={() => onAck(a.ackIds ?? [])}>
                   Got it
                 </button>
               ) : null}

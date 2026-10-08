@@ -6,14 +6,16 @@
  * start folded. One <tbody> per day, whose first row is the fold header, keeps the column header the
  * only header and the columns aligned across days.
  */
-import { agentName, proposalActionTerm, ruleTerm, verdictTerm } from '../../copy/glossary.ts'
+import { agentName, proposalActionTerm, verdictTerm } from '../../copy/glossary.ts'
 import { istDay, istTime, todayIst } from '../../lib/format.ts'
 import type { DecisionRow, DecisionsResponse, ProposalPayload } from '../../types'
 import { Card, EmptyState } from '../../ui/Card'
 import { DayFold, groupByDay, useDayFolds } from '../../ui/DayFold'
 import { Labelled } from '../../ui/Hint'
+import { Loading } from '../../ui/Loading'
 import { Pill } from '../../ui/Pill'
 import type { Tone } from '../../ui/Pill'
+import { ReasonText } from './ReasonText'
 
 /** Column count of the table below: the day-fold row spans all of them. */
 const COLUMNS = 6
@@ -42,8 +44,8 @@ function Reasons({ rules }: { rules: string[] }) {
   return (
     <>
       {rules.map((r, i) => (
-        <div key={`${i}-${r}`}>
-          <Labelled t={ruleTerm(r)} />
+        <div key={`${i}-${r}`} className="act-reason">
+          <ReasonText reason={r} />
         </div>
       ))}
     </>
@@ -58,7 +60,7 @@ function CheckRow({ d }: { d: DecisionRow }) {
   return (
     <tr>
       <td data-label="Time" className="nowrap">
-        {istTime(d.created_at)}
+        <span title={istTime(d.created_at, { seconds: true })}>{istTime(d.created_at)}</span>
       </td>
       <td data-label="Analyst">
         <Labelled t={agentName(d.agent_id)} />
@@ -103,9 +105,9 @@ export function RiskChecks({ decisions }: { decisions: DecisionsResponse | null 
       title="Risk checks"
       meta={rows.length ? `${todayCount} today, ${rows.length} shown` : undefined}
     >
-      <p className="muted act-lede">Every trade an analyst proposed, and what the risk check decided.</p>
+      <p className="muted act-lede">The latest trades the analysts proposed, and what the risk check decided.</p>
       {decisions === null ? (
-        <p className="empty">Loading…</p>
+        <Loading route="decisions" what="risk checks" />
       ) : rows.length === 0 ? (
         <EmptyState>No risk checks yet. Every trade an analyst proposes appears here with the risk check's answer.</EmptyState>
       ) : (
