@@ -4,11 +4,15 @@
 //   NO_TODAY=1 node fixture_server.mjs                            # every ledger row is from an earlier day
 //   PAPER_OFF=1 node fixture_server.mjs                           # /paper = the not-built stub
 //   PAPER_IDLE=1 node fixture_server.mjs                          # /paper = built, OFF, no rows (go-live)
+//   ALERTS=1 node fixture_server.mjs                              # KILLED, 20-char unprotected symbol, failed/pending notifications, DG3, stale watchlist, near-full headroom, long thesis
+//   EMPTY=1 node fixture_server.mjs                               # first boot: every route answers its stub/empty shape
 //
 // Serves dist/ at / and answers the read routes with canned rows spread across several IST days
 // (today, yesterday, older, a UTC-stamped row, an undated row), so the per-day folds, the IST day
 // derivation and the panel order can be checked in a browser. POST /paper flips the served paper
-// fixture's `enabled` (422 / 409 as the engine answers). Any bearer token is accepted; there is
+// fixture's `enabled` (422 / 409 as the engine answers). POST /mode ('OFF'|'RECOMMEND' 200, 'AUTO' 409,
+// else 422) and POST /config/trade_window (200 / 422 unchanged) change the served value; any other
+// non-GET on a route answers 405. Any bearer token is accepted; there is
 // no /ws/live, so the events feed shows "closed" and retries — expected. Never shipped: dist/ is built
 // from src/ only.
 import http from 'node:http'
@@ -21,6 +25,8 @@ const PORT = Number(process.env.PORT ?? 8499)
 const NO_TODAY = process.env.NO_TODAY === '1'
 const PAPER_OFF = process.env.PAPER_OFF === '1'
 const PAPER_IDLE = process.env.PAPER_IDLE === '1'
+const ALERTS = process.env.ALERTS === '1'
+const EMPTY = process.env.EMPTY === '1'
 
 const istFmt = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Kolkata',
@@ -141,6 +147,20 @@ let decisions = [
   dec('p-u1', null, '00:00:00', 'intraday_analyst', 'enter', 'UNDATED', null, []),
 ]
 
+// ALERTS: a long, realistic thesis on the live TATASTEEL entry (exercises wrapping / truncation).
+const LONG_THESIS =
+  'TATASTEEL closed at a fresh 52-week high on 1.8x its 20-day average volume, with the move led by ' +
+  'flat-steel realisations and a narrowing European loss after the Netherlands restructuring. Domestic ' +
+  'demand is firm into the infrastructure season, coking coal has eased for three straight weeks, and ' +
+  'the stock is a NIFTY 200 member with no results due inside the 20-session hold. The breakout is ' +
+  'ATR-sized rather than gap-driven, so the stop sits 2.5 ATR under the entry and risks about 1250 ' +
+  'rupees; size is fixed by that risk budget. Failure mode: a close back under the breakout level within three sessions.'
+if (ALERTS) {
+  recommendations = recommendations.map((r) =>
+    r.rec_id === 'r-t2' ? { ...r, recommendation: { ...r.recommendation, thesis: LONG_THESIS } } : r,
+  )
+}
+
 if (NO_TODAY) {
   const dayOf = (iso) => (iso ? istDay(new Date(iso)) : '')
   recommendations = recommendations.filter((r) => dayOf(r.delivered_at ?? r.recommendation.created_at) !== today)
@@ -201,6 +221,24 @@ const budgetFixture = {
     forward_cap: 48,
   },
   degrade_tier: 'DG0',
+}
+// ALERTS: the week's quota almost gone — DG3, no forward cap. Per-agent spend sums to 191.2000.
+if (ALERTS) {
+  budgetFixture.degrade_tier = 'DG3'
+  budgetFixture.budget = {
+    ...budgetFixture.budget,
+    window_spend_usd: '191.2000',
+    per_agent_spend_usd: {
+      intraday_analyst: '88.4000',
+      news_analyst: '89.6000',
+      preopen_planner: '7.9000',
+      nightly_reviewer: '4.3000',
+      weekly_researcher: '0.8000',
+      reserve: '0',
+      sdk_smoke: '0.2000',
+    },
+    forward_cap: 0,
+  }
 }
 
 function pos(id, symbol, protectedAt) {
@@ -369,12 +407,66 @@ const paperIdle = {
   counters: { reconcile_mismatches: 0, voids: 0, late_corp_actions: 0 },
 }
 
+const headroom = (over = {}) => ({
+  equity: '512340.55',
+  day_mtm: '2140.25',
+  open_positions: { total: 2, mis: 0, cnc: 2 },
+  consecutive_losses: 1,
+  deployed_capital: '14670.00',
+  caps: {
+    max_deployed_capital_inr: '200000',
+    max_open_positions_total: 5,
+    max_open_positions_mis: 2,
+    max_open_positions_cnc: 5,
+    consecutive_losses_max_per_session: 3,
+    max_new_trades_day: 6,
+  },
+  ...over,
+})
+
+function wl(id, symbol, grade, direction, eventType, o) {
+  return {
+    entry_id: id,
+    d: today,
+    symbol,
+    grade,
+    direction,
+    event_type: eventType,
+    cluster_refs: [],
+    materiality: o.materiality,
+    source_domain_count: o.sources,
+    event_age_h: o.age_h,
+    event_age_sessions: o.sessions,
+    confirm_trigger: o.confirm,
+    invalidation: o.invalid,
+    stop_band_low: o.stop[0],
+    stop_band_high: o.stop[1],
+    target_band_low: o.target[0],
+    target_band_high: o.target[1],
+    expires_at: at(shift(today, 1), '15:30:00'),
+  }
+}
+const wlBel = wl('w1', 'BEL', 'originating', 'long', 'order_win', {
+  materiality: 0.82, sources: 4, age_h: 3.2, sessions: 0, confirm: '312.40', invalid: '298.00',
+  stop: ['296.50', '299.00'], target: ['328.00', '335.00'],
+})
+const wlKpit = wl('w2', 'KPITTECH', 'originating', 'long', 'results_beat', {
+  materiality: 0.74, sources: 3, age_h: 7.5, sessions: 1, confirm: '1348.00', invalid: '1296.00',
+  stop: ['1290.00', '1300.00'], target: ['1410.00', '1440.00'],
+})
+const wlIrctc = wl('w3', 'IRCTC', 'context', null, 'rating_upgrade', {
+  materiality: 0.41, sources: 2, age_h: 5.1, sessions: 0, confirm: '812.50', invalid: '789.00',
+  stop: ['786.00', '791.00'], target: ['835.00', '850.00'],
+})
+const digestAt = (hms, age_h, status) => ({ as_of: at(today, hms), age_h, stale_max_h: 6, status })
+
 const routes = {
-  '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: 'NORMAL' },
+  '/mode': { mode: 'RECOMMEND', routing: 'paper', risk_state: ALERTS ? 'KILLED' : 'NORMAL' },
   '/positions': {
     positions: [
       pos('pos-1', 'JINDALSTEL', `${d1}T10:20:00+05:30`),
       pos('pos-2', 'TATASTEEL', null),
+      ...(ALERTS ? [pos('pos-3', 'VERYLONGSYMBOLNAME20', null)] : []),
     ],
     as_of: new Date().toISOString(),
   },
@@ -382,14 +474,20 @@ const routes = {
   '/scorecard': scorecardFixture,
   '/decisions': { decisions },
   '/recommendations': { recommendations },
-  '/risk/headroom': { headroom: {} },
+  '/risk/headroom': {
+    headroom: ALERTS
+      ? headroom({
+          deployed_capital: '185000.00',
+          open_positions: { total: 4, mis: 0, cnc: 4 },
+          consecutive_losses: 2,
+        })
+      : headroom(),
+  },
   '/budget': budgetFixture,
   '/config/trade_window': { trade_window: { start: '09:30', end: '15:00', squareoff_buffer_min: 10 } },
-  '/news/watchlist': {
-    d: today,
-    watchlist: [],
-    digest: { as_of: null, age_h: null, stale_max_h: null, status: 'missing' },
-  },
+  '/news/watchlist': ALERTS
+    ? { d: today, watchlist: [wlBel, wlKpit, wlIrctc], digest: digestAt('05:05:00', 9.5, 'stale') }
+    : { d: today, watchlist: [wlBel, wlIrctc], digest: digestAt('13:50:00', 0.6, 'fresh') },
   '/notifications': {
     d: today,
     rows: [
@@ -419,8 +517,63 @@ const routes = {
         last_error: null,
         last_attempt_at: null,
       },
+      ...(ALERTS
+        ? [
+            {
+              notification_id: 'n3',
+              created_at: at(today, '11:02:00'),
+              kind: 'limit_breach',
+              severity: 'critical',
+              title: 'Daily loss limit hit',
+              body: 'day MTM -5.2% <= -5% soft line',
+              status: 'failed',
+              attempts: 9,
+              delivered_at: null,
+              last_error: 'ConnectTimeout: api.telegram.org timed out after 10s',
+              last_attempt_at: at(today, '11:40:00'),
+            },
+            {
+              notification_id: 'n4',
+              created_at: at(today, '12:15:00'),
+              kind: 'recommendation',
+              severity: 'warning',
+              title: 'BUY SAIL',
+              body: 'Buy 3 SAIL at 131.40',
+              status: 'pending',
+              attempts: 3,
+              delivered_at: null,
+              last_error: 'ConnectTimeout',
+              last_attempt_at: at(today, '12:20:00'),
+            },
+          ]
+        : []),
     ],
   },
+}
+
+// First boot: every route answers its stub/empty shape (/paper keeps its POST handler's object).
+if (EMPTY) {
+  Object.assign(routes, {
+    '/mode': { mode: null, routing: null, risk_state: null },
+    '/positions': { positions: [], as_of: null },
+    '/decisions': { decisions: [] },
+    '/recommendations': { recommendations: [] },
+    '/risk/headroom': { headroom: {} },
+    '/budget': { budget: {}, degrade_tier: null },
+    '/config/trade_window': { trade_window: null },
+    '/news/watchlist': {
+      d: null,
+      watchlist: [],
+      digest: { as_of: null, age_h: null, stale_max_h: null, status: null },
+    },
+    '/paper': { enabled: false },
+    '/notifications': { d: today, rows: [] },
+    '/scorecard': {
+      label: 'hindsight on official bars — not platform equity',
+      bench: {},
+      strategies: {},
+    },
+  })
 }
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }
@@ -455,11 +608,63 @@ function setPaper(req, res) {
   })
 }
 
+function readJson(req, then) {
+  let raw = ''
+  req.on('data', (chunk) => (raw += chunk))
+  req.on('end', () => {
+    let body = null
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      /* body stays null: the handler answers 422 */
+    }
+    then(body)
+  })
+}
+
+// POST /mode as the engine answers it: OFF / RECOMMEND apply, AUTO is Telegram-only (409), else 422.
+function setMode(req, res) {
+  readJson(req, (body) => {
+    const mode = body?.mode
+    if (mode === 'OFF' || mode === 'RECOMMEND') {
+      routes['/mode'] = { ...routes['/mode'], mode }
+      return json(res, 200, { ok: true, mode })
+    }
+    if (mode === 'AUTO') return json(res, 409, { ok: false, note: 'two-step via Telegram /mode AUTO + /confirm' })
+    json(res, 422, { detail: [{ msg: 'unknown mode' }] })
+  })
+}
+
+// POST /config/trade_window: HH:MM start < end and a null / non-negative-integer buffer, else 422 unchanged.
+function setTradeWindow(req, res) {
+  readJson(req, (body) => {
+    const hhmm = /^\d{2}:\d{2}$/
+    const buf = body?.squareoff_buffer_min
+    const ok =
+      typeof body?.start === 'string' &&
+      typeof body?.end === 'string' &&
+      hhmm.test(body.start) &&
+      hhmm.test(body.end) &&
+      body.start < body.end &&
+      (buf === null || (Number.isInteger(buf) && buf >= 0))
+    if (!ok) return json(res, 422, { detail: 'invalid trade window (rejected, unchanged)' })
+    routes['/config/trade_window'] = {
+      trade_window: { start: body.start, end: body.end, squareoff_buffer_min: buf },
+    }
+    json(res, 200, { ok: true })
+  })
+}
+
+const posts = { '/paper': setPaper, '/mode': setMode, '/config/trade_window': setTradeWindow }
+
 http
   .createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
-    if (req.method === 'POST' && url.pathname === '/paper') return setPaper(req, res)
-    if (url.pathname in routes) return json(res, 200, routes[url.pathname])
+    if (req.method === 'POST' && url.pathname in posts) return posts[url.pathname](req, res)
+    if (url.pathname in routes) {
+      if (req.method !== 'GET') return json(res, 405, { detail: 'Method Not Allowed' })
+      return json(res, 200, routes[url.pathname])
+    }
     const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1)
     const file = path.join(DIST, rel)
     if (file.startsWith(DIST) && fs.existsSync(file) && fs.statSync(file).isFile()) {
@@ -472,6 +677,6 @@ http
   })
   .listen(PORT, '127.0.0.1', () =>
     console.log(
-      `fixture server on http://127.0.0.1:${PORT}/  today=${today} d1=${d1} d3=${d3} d4=${d4}${NO_TODAY ? '  (NO_TODAY)' : ''}${PAPER_OFF ? '  (PAPER_OFF)' : ''}${PAPER_IDLE ? '  (PAPER_IDLE)' : ''}`,
+      `fixture server on http://127.0.0.1:${PORT}/  today=${today} d1=${d1} d3=${d3} d4=${d4}${NO_TODAY ? '  (NO_TODAY)' : ''}${PAPER_OFF ? '  (PAPER_OFF)' : ''}${PAPER_IDLE ? '  (PAPER_IDLE)' : ''}${ALERTS ? '  (ALERTS)' : ''}${EMPTY ? '  (EMPTY)' : ''}`,
     ),
   )

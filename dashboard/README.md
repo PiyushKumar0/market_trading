@@ -80,8 +80,13 @@ gate; there is no `/ws/live`, so the events feed reads "closed". `NO_TODAY=1` dr
 rows to show the "no … today" state. `/paper` answers a built, ON book by default (a daily FROZEN halt,
 one unmarked position, an unfilled entry order, a void among the closes); `PAPER_OFF=1` answers the
 not-built stub (subsystem disabled, nothing stored); `PAPER_IDLE=1` answers the go-live view (built,
-OFF, prep not run, nothing stored). `POST /paper` flips the served fixture's `enabled` with the
-engine's 422 (non-boolean) and 409 (ON while not built) answers. Dev-only: nothing from it is shipped.
+OFF, prep not run, nothing stored). `ALERTS=1` answers the loud state (risk KILLED, a 20-character
+unprotected symbol, failed and pending notifications, DG3 budget, a stale watchlist digest, near-full
+headroom, a ~600-character thesis); `EMPTY=1` answers a first boot (every route its stub/empty shape).
+`POST /paper` flips the served fixture's `enabled` with the
+engine's 422 (non-boolean) and 409 (ON while not built) answers. `POST /mode` (`OFF`/`RECOMMEND` 200,
+`AUTO` 409, else 422) and `POST /config/trade_window` (200, or 422 with nothing changed) change the
+served value; any other non-GET on a route answers 405. Dev-only: nothing from it is shipped.
 
 ## Tests
 
