@@ -1,5 +1,48 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-08 18:06 — Dashboard redesign shipped (owner: "update the design of the dashboard to make it more user friendly … Review and validate each process"; chose "Tabbed workspace")
+
+- **What changed:**
+  - The single 12-panel page is now six tabs: Overview, Recommendations, Paper trading, Performance, Activity, System.
+  - A top bar holds the health pill, the engine mode (Off / Recommend), the paper autopilot switch and the trading hours.
+  - Copy is plain language, with each engine term in a toggletip. Cards come in three tiers: primary, secondary, simulated.
+  - Same routes and the same three owner writes; no engine code touched.
+  - Docs: spec `runbooks/design-2026-10-08-dashboard-redesign.md` (§15 gives every deviation and review fix with its reason), plan `runbooks/plan-2026-10-08-dashboard-redesign.md`, and the plan-of-record amendment in `IMPLEMENTATION_PLAN.md` §3.2.11.
+- **Process:**
+  - Worktree `..\mt_dash`, branch `wip/dashboard-redesign`. The live `dist` was untouched until the deploy.
+  - Built by me plus three agents, one each for the Performance, Activity and System views.
+- **Reviews:**
+  - Three whole-branch reviews on 9f965ad:
+    - copy against the engine's code: 15 wrong or overstated claims;
+    - runtime: 14 findings;
+    - data parity: every old field reachable, with small gaps.
+  - All of these are fixed in 9b47ec7.
+  - A fresh review of that fix diff found 12 more, all real and all fixed before the commit.
+- **Validation:**
+  - 73 unit tests, run under IST and America/New_York. `tsc -b` clean. Lighthouse accessibility 100.
+  - In-page sweep checks: no sideways scroll, nothing spilling out of a card, targets ≥ 24 px, contrast ≥ 4.5:1. Clean for the default, ALERTS and EMPTY scenarios at 1440, 390 and 320 px.
+  - Checked in the browser: skip link, tab focus, focus kept through a confirm, the Auto-mode control, failed-route states, hints on scroll.
+- **Before/after:** measured at 1440 px on the same fixture data, before the review round.
+  - Page height: 2,097 px (+730 px folded) → 1,071 px.
+  - Chips: 132 → 9. Words: 885 → 185.
+  - Overview: 11 panels → 3 cards.
+- **Deploy 18:06–18:08, no engine restart** (StaticFiles reads `dist` on each request):
+  - Previous `dist` backed up to `data\backups\dashboard-dist-pre-redesign-20261008`. Rollback: copy it back over `dashboard\dist`.
+  - `phase3` fast-forwarded e6a10f9 → b86760a: 13 commits, touching only `dashboard/`, `runbooks/` and `IMPLEMENTATION_PLAN.md`. Then `npm run build` in the main tree.
+  - Verified:
+    - the served index.html names `assets/index-B_1eGNpf.js` (200) and its CSS (200);
+    - `GET /mode` without a token answers 401;
+    - the live page makes 4 requests, all same-origin, and the console is clean;
+    - `mt-engine` was Running throughout.
+- **Engine gap found, not fixed (owner decision):** a real `floor_*` cause has no clear path.
+  - The causes are `floor_weekly_drawdown` and `floor_equity_floor_rung` (CLOSE_ONLY) and `floor_cumulative_floor` (KILLED), set at exposure.py:500/504.
+  - No clear path names them:
+    - `/resume_entries` clears only the owner pause and the rejection storm (telegram.py:1303-1304);
+    - kill reset clears only "kill" (main.py:647);
+    - the others are lifecycle, catch-up, token, feed-stale, and the daily causes at self-test.
+  - The engine's own note says "owner re-arm only" (exposure.py:492-493). The dashboard now says these stops don't lift by themselves.
+- **Next:** the owner reloads the dashboard (Ctrl+F5) to load the new bundle.
+
 ## 2026-10-08 — Dashboard paper toggle + paper go-live (owner: "Add button to toggle paper trade from dashboard itself"; chose "Toggle + go-live tonight")
 
 - **Owner decisions:**
