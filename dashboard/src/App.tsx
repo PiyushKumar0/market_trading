@@ -12,19 +12,24 @@
  *    recommendation ledger, it never writes to it.
  */
 import { useState } from 'react'
+import type { JSX } from 'react'
 import { ApiError, apiPost, getToken, setToken } from './api'
 import { COPY } from './copy/glossary.ts'
 import { useLiveEvents, useNotifications, usePoll, useScorecard } from './hooks'
 import { deriveAlerts, health, tabBadges } from './lib/alerts.ts'
 import type { AlertInput, TabId } from './lib/alerts.ts'
-import { TABS, useHashTab } from './lib/useHashTab.ts'
+import { useHashTab } from './lib/useHashTab.ts'
 import { AppBar } from './shell/AppBar'
 import { HoursControl, ModeControl, PaperSwitch } from './shell/Controls'
 import { TokenGate } from './shell/TokenGate'
-import { EmptyState } from './ui/Card'
 import { useConfirm } from './ui/Dialog'
 import { useToasts } from './ui/Toast'
+import { Activity } from './views/Activity'
 import { Overview } from './views/Overview'
+import { Paper } from './views/Paper'
+import { Performance } from './views/Performance'
+import { Recommendations } from './views/Recommendations'
+import { System } from './views/System'
 
 /** The newest failed Telegram message the owner acknowledged ("Got it"); per browser, best effort. */
 const ACK_KEY = 'mt_ack_failed_notification'
@@ -46,16 +51,6 @@ function writeAck(id: string): void {
 }
 
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e))
-
-function Pending({ tab }: { tab: TabId }) {
-  const name = TABS.find((t) => t.id === tab)?.label ?? tab
-  return (
-    <>
-      <h1 className="view-title">{name}</h1>
-      <EmptyState>This section is being rebuilt.</EmptyState>
-    </>
-  )
-}
 
 export default function App() {
   const [token, setTokenState] = useState(getToken())
@@ -132,6 +127,44 @@ export default function App() {
     window.requestAnimationFrame(() => document.getElementById('alerts')?.focus())
   }
 
+  const s = poll.snapshot
+  const views: Record<TabId, () => JSX.Element> = {
+    overview: () => (
+      <Overview
+        snapshot={s}
+        alerts={alerts}
+        notifications={notifications.rows}
+        nowMs={nowMs}
+        onTab={setTab}
+        onSignOut={() => saveToken('')}
+        onAck={ack}
+      />
+    ),
+    recommendations: () => <Recommendations data={s.recommendations} nowMs={nowMs} />,
+    paper: () => <Paper paper={s.paper} mode={s.mode?.mode ?? null} />,
+    performance: () => <Performance {...scorecard} />,
+    activity: () => (
+      <Activity
+        decisions={s.decisions}
+        notifications={notifications}
+        events={live.events}
+        conn={live.conn}
+        watchlist={s.watchlist}
+      />
+    ),
+    system: () => (
+      <System
+        mode={s.mode}
+        tradeWindow={s.tradeWindow}
+        headroom={s.headroom}
+        budget={s.budget}
+        conn={live.conn}
+        lastPollAt={poll.lastPollAt}
+        nowMs={nowMs}
+      />
+    ),
+  }
+
   return (
     <>
       <a className="skip-link" href="#main">
@@ -156,19 +189,7 @@ export default function App() {
       />
       <main id="main" className="page">
         <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} className="view">
-          {tab === 'overview' ? (
-            <Overview
-              snapshot={poll.snapshot}
-              alerts={alerts}
-              notifications={notifications.rows}
-              nowMs={nowMs}
-              onTab={setTab}
-              onSignOut={() => saveToken('')}
-              onAck={ack}
-            />
-          ) : (
-            <Pending tab={tab} />
-          )}
+          {views[tab]()}
         </div>
       </main>
       {dialog}
