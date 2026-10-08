@@ -1,5 +1,13 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-08 20:45 — O18: universe → NIFTY Total Market (owner: "Increase the universe to Nifty 1000")
+
+- **Premise check:** NSE has no Nifty 1000 (`ind_nifty1000list.csv` → 404). Owner picked **NIFTY Total Market** (~750) over "all criteria-passing NSE stocks" (~918), and **kept the tick cap at 300**.
+- **What:** eligible index → Total Market; a NIFTY 500 **core** list stamps `universe_daily.core_index`. hi52 / ins / cat / cat_reversal / the rec benchmark read `get_core_eligible_symbols` (their evidence population); brk20, the gate and the news/batch layer read the full eligible set. Plan of record: `IMPLEMENTATION_PLAN.md` O18 (after O15).
+- **Validation:** failing-first checks on the ins and benchmark pins (both fail against the old call sites); full suite 3932 passed, 19 skipped; ruff clean.
+- **Deploy 20:42–20:46:** commit 5237342. `nssm stop` → `scripts/build_universe.py --date 2026-10-09` (migration `universe_daily_column_added core_index`; `universe_built` index 745, **eligible 687** (was 478), core_eligible 478, watchlist 300, mis_candidates 198 (was 207), extended 237 (was 440), source download, not degraded) → `nssm start`. Boot clean: selftest all PASS, `startup_complete` 20:45:39, ticker 302 tokens, `engine_ready` 20:45:45, RECOMMEND, NORMAL, 0 ERROR/CRITICAL. The 08:30 job rebuilds 10-09 (replace-write).
+- **Open (owner):** the 300-name tick cap now ranks over Total Market, so high-turnover microcaps displace some NIFTY 500 names (mis_candidates −9). Not counted directly: the engine holds the DB. Offer: rank ticks over the core set only.
+
 ## 2026-10-08 19:50 — Floor re-arm shipped (owner: "Go with implementing first option and have the re-arm button on dashboard as well")
 
 - **What:** `/rearm`, `POST /risk/rearm` and the dashboard alert's Re-arm button clear each `floor_<rung>` cause the engine's book is back above (`ExposureTracker.rearm_floors`). A still-breached rung stays latched; the kill switch (`/kill_reset`) and a forced-down mode are untouched. `/risk/headroom` reports `floors` (cause → re-armable). Plan of record: `IMPLEMENTATION_PLAN.md` RiskState "Floor re-arm".
