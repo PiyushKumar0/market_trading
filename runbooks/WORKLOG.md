@@ -1,5 +1,13 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-09 03:00 — `hvol` abnormal-volume study: REFUTED (owner: "Do we consider stocks … high trade volumes?" → "Yes test it and validate")
+
+- **Answer to the question:** no rule originates on volume today; volume is only a confirmation gate in `orb` / `brk20` / `hi52` and analyst context.
+- **Pre-registered** in `IMPLEMENTATION_PLAN.md` (`hvol`, commit a0935b7) before any code; amendment A1 (exclude ETFs — 388 symbols, 62 of them above the ₹5cr floor; current NIFTY 500 list) committed b6df9fb before the full run. Harness `scripts/backtest_hvol.py` built by a designer-impl agent, audited (signal windows, benchmark, bootstrap), committed 275fbaf.
+- **Run** 02:51 on `data/research/market_2026-10-07.duckdb` (engine untouched): T+20 n=7,574, mean net +0.50% but matched-benchmark excess **−0.41% [−0.65, −0.17]**, median gross −0.12% < 0.32% cost. 4/8 criteria fail → **REFUTED**. All variants negative excess; results-day spikes −1.10%; smaller names worse.
+- **Verified** by an independent manager-written implementation: n, mean/median gross and the benchmark mean reproduced exactly.
+- No origination change. Delivery-% leg not tested (no stored delivery data).
+
 ## 2026-10-08 20:45 — O18: universe → NIFTY Total Market (owner: "Increase the universe to Nifty 1000")
 
 - **Premise check:** NSE has no Nifty 1000 (`ind_nifty1000list.csv` → 404). Owner picked **NIFTY Total Market** (~750) over "all criteria-passing NSE stocks" (~918), and **kept the tick cap at 300**.
