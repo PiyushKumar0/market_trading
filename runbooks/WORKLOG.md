@@ -1,5 +1,14 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-08 19:50 — Floor re-arm shipped (owner: "Go with implementing first option and have the re-arm button on dashboard as well")
+
+- **What:** `/rearm`, `POST /risk/rearm` and the dashboard alert's Re-arm button clear each `floor_<rung>` cause the engine's book is back above (`ExposureTracker.rearm_floors`). A still-breached rung stays latched; the kill switch (`/kill_reset`) and a forced-down mode are untouched. `/risk/headroom` reports `floors` (cause → re-armable). Plan of record: `IMPLEMENTATION_PLAN.md` RiskState "Floor re-arm".
+- **Validation:**
+  - failing-first tests: exposure, API route, Telegram command, dashboard alert;
+  - full suite 3925 passed, 19 skipped; dashboard 74 pass;
+  - browser (ALERTS fixture): button, confirm dialog, toast, alert after re-arm; layout sweep clean at 1440 and 320 px.
+- **Deploy 19:50–19:53:** commit 3037181, restart. Boot clean: `engine_ready` 19:53:32, RECOMMEND, NORMAL, not killed, `crash_recovered: false`, 0 ERROR/CRITICAL. `POST /risk/rearm` answers 401 without a token, and no causes are active, so the button stays hidden.
+
 ## 2026-10-08 18:06 — Dashboard redesign shipped (owner: "update the design of the dashboard to make it more user friendly … Review and validate each process"; chose "Tabbed workspace")
 
 - **What changed:**
