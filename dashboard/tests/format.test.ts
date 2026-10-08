@@ -101,8 +101,8 @@ test('istStamp shows only the time for today and the day otherwise', () => {
 
 test('dayLabel names today and yesterday', () => {
   const now = new Date('2026-10-08T09:00:00Z')
-  assert.equal(dayLabel('2026-10-08', now), 'Today · Thu 8 Oct')
-  assert.equal(dayLabel('2026-10-07', now), 'Yesterday · Wed 7 Oct')
+  assert.equal(dayLabel('2026-10-08', now), 'Today, Thu 8 Oct')
+  assert.equal(dayLabel('2026-10-07', now), 'Yesterday, Wed 7 Oct')
   assert.equal(dayLabel('2026-10-04', now), 'Sun 4 Oct')
   assert.equal(dayLabel('', now), 'Undated')
 })

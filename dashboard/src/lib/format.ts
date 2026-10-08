@@ -175,12 +175,12 @@ function shiftDay(day: string, days: number): string {
   return dayOf(at)
 }
 
-/** "Today · Thu 8 Oct" / "Yesterday · Wed 7 Oct" / "Sun 4 Oct" / "Undated". */
+/** "Today, Thu 8 Oct" / "Yesterday, Wed 7 Oct" / "Sun 4 Oct" / "Undated". */
 export function dayLabel(day: string, now: Date = new Date()): string {
   if (!day) return 'Undated'
   const today = todayIst(now)
-  if (day === today) return `Today · ${shortDate(day)}`
-  if (day === shiftDay(today, -1)) return `Yesterday · ${shortDate(day)}`
+  if (day === today) return `Today, ${shortDate(day)}`
+  if (day === shiftDay(today, -1)) return `Yesterday, ${shortDate(day)}`
   return shortDate(day)
 }
 

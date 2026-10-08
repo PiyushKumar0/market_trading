@@ -1,0 +1,90 @@
+/* Design tokens — design spec §6. Every text/status pair here was measured (WCAG 2.x) on 2026-10-08;
+   change a value and re-measure. Dark only. System fonts only: the LAN page makes zero external
+   requests (R10). */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces, darkest to lightest */
+  --bg: #0b0f15;
+  --surface-1: #11161e; /* secondary sections */
+  --surface-2: #151b25; /* primary cards */
+  --surface-3: #1c2431; /* controls, hover, table head */
+  --border: #232c3a; /* decorative hairline */
+  --border-strong: #2e394a; /* decorative, primary cards */
+  --control: #6b7a95; /* input / switch / button outline: >= 3:1 on every surface */
+
+  /* ink */
+  --text-1: #e7ecf3;
+  --text-2: #b3bfce;
+  --text-3: #93a1b5; /* labels and meta: >= 5.9:1 on every surface */
+  --text-disabled: #6a768a;
+
+  /* roles */
+  --accent: #6aa8ff;
+  --accent-ink: #0b0f15;
+  --good: #4cc764;
+  --warn: #e6b24c;
+  --crit: #ff7b72;
+  --note: #79b8ff;
+  --sim: #b39dfa; /* simulated (paper) money */
+  --buy: #6aa8ff; /* Kite's convention: buy blue, sell orange */
+  --sell: #ff9a62;
+
+  /* 14 % tints for pills, alert rows, badges */
+  --accent-tint: color-mix(in srgb, var(--accent) 14%, transparent);
+  --good-tint: color-mix(in srgb, var(--good) 14%, transparent);
+  --warn-tint: color-mix(in srgb, var(--warn) 14%, transparent);
+  --crit-tint: color-mix(in srgb, var(--crit) 14%, transparent);
+  --note-tint: color-mix(in srgb, var(--note) 14%, transparent);
+  --sim-tint: color-mix(in srgb, var(--sim) 14%, transparent);
+  --sell-tint: color-mix(in srgb, var(--sell) 14%, transparent);
+  --sim-border: color-mix(in srgb, var(--sim) 45%, transparent);
+
+  /* type */
+  --font: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Roboto, Arial, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace;
+  --fs-12: 0.75rem;
+  --fs-13: 0.8125rem;
+  --fs-14: 0.875rem;
+  --fs-16: 1rem;
+  --fs-20: 1.25rem;
+  --fs-24: 1.5rem;
+  --fs-28: 1.75rem;
+  --lh-body: 1.5;
+  --lh-tight: 1.25;
+
+  /* space, shape, depth, motion */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --r-control: 6px;
+  --r-section: 8px;
+  --r-card: 12px;
+  --r-pill: 999px;
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 8px 24px rgb(0 0 0 / 28%);
+  --shadow-float: 0 12px 32px rgb(0 0 0 / 45%);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 140ms;
+
+  /* sizes */
+  --target: 32px; /* designed control height; 24px is the asserted floor */
+  --content-max: 1440px;
+  --gutter: 24px;
+}
+
+@media (pointer: coarse) {
+  :root {
+    --target: 44px;
+  }
+}
+
+@media (max-width: 639px) {
+  :root {
+    --gutter: 16px;
+  }
+}
