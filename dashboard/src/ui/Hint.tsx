@@ -28,8 +28,23 @@ export function Hint({
   const pinned = useRef(false)
   const btn = useRef<HTMLButtonElement>(null)
   const bubble = useRef<HTMLSpanElement>(null)
+  const closing = useRef<number | null>(null)
   const [at, setAt] = useState<Placement | null>(null)
   const id = useId()
+
+  // WCAG 1.4.13 (hoverable): leaving the button starts a short close the bubble cancels, so the
+  // pointer can cross the gap and rest on the explanation.
+  const cancelClose = () => {
+    if (closing.current !== null) window.clearTimeout(closing.current)
+    closing.current = null
+  }
+  const scheduleClose = () => {
+    cancelClose()
+    closing.current = window.setTimeout(() => {
+      if (!pinned.current) setOpen(false)
+    }, 200)
+  }
+  useEffect(() => cancelClose, [])
 
   useLayoutEffect(() => {
     if (open && btn.current && bubble.current) {
@@ -79,9 +94,12 @@ export function Hint({
           pinned.current = !pinned.current
           setOpen(pinned.current)
         }}
-        onMouseEnter={() => setOpen(true)}
+        onMouseEnter={() => {
+          cancelClose()
+          setOpen(true)
+        }}
         onMouseLeave={() => {
-          if (!pinned.current) setOpen(false)
+          if (!pinned.current) scheduleClose()
         }}
         onFocus={() => setOpen(true)}
         onBlur={() => {
@@ -98,6 +116,10 @@ export function Hint({
               role="tooltip"
               className={`hint-bubble${at ? ` ${at.side}` : ''}`}
               style={at ? { top: at.top, left: at.left } : { top: 0, left: 0, visibility: 'hidden' }}
+              onMouseEnter={cancelClose}
+              onMouseLeave={() => {
+                if (!pinned.current) scheduleClose()
+              }}
             >
               {children ? <span className="hint-text">{children}</span> : null}
               {term ? (
