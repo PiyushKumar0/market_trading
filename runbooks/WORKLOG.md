@@ -1,5 +1,11 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-12 00:55 — Envelope #6 applied + re-signed; stale NSSM env cleared (owner: "Run the envelope patch. I have run the stale service variable remove command")
+
+- **NSSM:** owner ran `nssm reset mt-engine AppEnvironmentExtra`; verified — the Parameters key has no `AppEnvironmentExtra` (takes effect at the next service start).
+- **Envelope #6:** pre-flight (Mon 00:53, engine Stopped, clean tree, `git apply --check` exit 0) → `git apply runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch` (removes the unread `cat.confirm_vol_mult` + `cat.max_hold_days`) → `seed_protected_config.py --yes --reseed --note "review 2026-10-11 #6 …"`: envelope.yaml `67d9c1ea…` (new), limits.yaml `5d8b52cb…` (unchanged). The auto-mode classifier allowed the reseed this time (it refused one on 2026-09-23).
+- **Verified before any boot:** the self-test's `protected_store:*` check on the real config + state.db (read-only) → both PASS; `load_cat_params` still returns its full key set; 215 envelope-dependent tests green on the live tree. Engine NOT started.
+
 ## 2026-10-12 00:05 — The 11 open gaps from the stale-logic pass fixed (owner: "Fix the issues you had flagged but not done like: Analyst calls still receive extra context and the other gaps")
 
 - **Method:** 8 read-only investigators (one live-tested the CLI) → manager decisions → 6 worktree-isolated implementers + 1 dashboard agent → 3-way patch merge → full suite → 8-lens review → 2 fix rounds, each adversarially re-verified (incl. a 648-case old-vs-new decision-table probe of catch-up reporting). Engine stopped throughout (Sunday).

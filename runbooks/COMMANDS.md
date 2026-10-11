@@ -217,12 +217,12 @@ uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citi
 ```
 
 The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
-the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Last applied: O17 (e148a4e,
-2026-09-24, owner). **PENDING: `runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch`** (review
-2026-10-11 #6 — removes `cat.confirm_vol_mult` + `cat.max_hold_days`, unread since the 2026-08-18 cat v2
-redesign; verified in a scratch worktree, 261 envelope-loading tests green). Apply it with the shape below,
-`--note "review 2026-10-11 #6: retire unread cat v1 envelope rows (owner)"`. If the reseed errors, do NOT
-start the engine: `git checkout -- config/envelope.yaml` and re-run it. Since 2026-10-11 a later clean boot
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending. Last
+applied: review 2026-10-11 #6 (`runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch` — removed the
+unread `cat.confirm_vol_mult` + `cat.max_hold_days`), run 2026-10-12 00:55 on the owner's explicit
+instruction with the engine stopped; envelope.yaml re-signed `67d9c1ea…`, limits.yaml unchanged `5d8b52cb…`,
+both verified PASS by the self-test check before any boot. Before it: O17 (e148a4e, 2026-09-24, owner). If a
+reseed errors, do NOT start the engine: `git checkout -- config/envelope.yaml` and re-run it. Since 2026-10-11 a later clean boot
 clears a `protected_store_integrity` freeze by itself (lifecycle step 1c), but an unsigned file still
 FREEZES the boot it is found on. A prepared change follows this shape (outside 09:15-15:30, from the repo
 root, with a clean `git status`):
