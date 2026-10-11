@@ -18,7 +18,9 @@ Feature set v2 (§6.2, ``feature_set_version = 2`` stamped on every row):
 * **Volume/liquidity:** 20d median traded value (close x volume).
 * **Market context:** NIFTY 50 returns + trend state, India VIX level/delta (E5), universe
   advance-decline, expiry-day flag, results-day flag (``earnings_calendar``), ex-date proximity
-  (A12), surveillance status (A8), ``flagged_instrument_day`` (block deals). Sector "index" returns
+  (A12), surveillance status (A8, read from ``instruments_daily.surveillance``, which no job
+  populates — so ``surveillance``/``surveillance_flagged`` are None/False today; the universe build
+  is the A8 control), ``flagged_instrument_day`` (block deals). Sector "index" returns
   are the equal-weight mean return of the universe's same-sector constituents (``sector_map``) —
   a deterministic proxy; Phase 1 has no sectoral-index bar feed.
 * **Sentiment / catalyst (v2, §6.2):** decay-weighted ``sentiment_{symbol,sector,theme,market}``
@@ -394,6 +396,7 @@ class FeatureEngine:
         sector_ret5 = _sector_means(sector_of, ret5)
         results_today = {r["symbol"] for r in self._store.get_earnings_calendar(d, d)}
         days_to_ex = self._days_to_ex_date(d, universe)
+        # No job writes this column (see the module docstring): every value is None today.
         surveillance = {
             r["tradingsymbol"]: r.get("surveillance") for r in self._store.get_instruments_daily(d)
         }

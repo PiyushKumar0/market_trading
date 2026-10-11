@@ -5,7 +5,7 @@ defining invariant: **every startup is a full recovery** — scheduled or manual
 crash, after a gap of minutes or days — and the platform never breaks because it was off. Capital
 protection is broker-resident throughout (R3), so being off is safe.
 
-Phase-1 shape of the §2.6 sequence (steps that are OMS/broker-side land in Phase 3 as injected hooks):
+Phase-1 shape of the §2.6 sequence (steps that are OMS/broker-side land in Phase 4, real orders, as injected hooks):
 
 0. **Lifecycle boot (§2.2):** read the prior ``engine_lifecycle`` row. Prior ``state ∈ {RUNNING,
    STOPPING}`` with the prior pid ALIVE ⇒ **refuse to start** (:class:`SingleInstanceError` — another
@@ -17,8 +17,8 @@ Phase-1 shape of the §2.6 sequence (steps that are OMS/broker-side land in Phas
    all before step 1. Fast unclean boots inside ``lifecycle.crashloop_window_s`` coalesce into a
    single ``ENGINE_CRASHLOOP`` alert (§2.2/§10.7) instead of a page per respawn.
 1. Read sticky kill / mode / trade-window state (R10) + run the startup self-test (D11).
-2. Reconcile vs broker = truth (R5) — injected hook, TODO(Phase 3).
-3. Overdue-MIS startup square-off (§2.6 step 3) — injected hook, TODO(Phase 3).
+2. Reconcile vs broker = truth (R5) — injected hook, TODO(Phase 4, real orders).
+3. Overdue-MIS startup square-off (§2.6 step 3) — injected hook, TODO(Phase 4, real orders).
 4. Data-gap backfill (bars + NIFTY50/India-VIX history, §7.1 ``regime_data_ready``) — injected hook;
    the integrator wires ``BackfillJob.warmup_gap``.
 5. Missed-job catch-up — :class:`engine.ops.jobs.CatchUpRunner` (per-job ``job_runs`` watermarks,
@@ -34,7 +34,7 @@ Phase-1 shape of the §2.6 sequence (steps that are OMS/broker-side land in Phas
    the startup/recovery report.
 
 Clean stop (§2.2/§10.8): ``STOPPING`` FIRST (draws the planned-vs-crash line) → shutdown-guard hooks
-(cancel entries / flatten MIS / verify CNC PROTECTED / backup — Phase-3 seams) → ``STOPPED`` commit
+(cancel entries / flatten MIS / verify CNC PROTECTED / backup — Phase-4 seams) → ``STOPPED`` commit
 (**the point of no return** — nothing capital-critical runs after it) → heartbeat join → best-effort
 ``ENGINE_STOPPED``. A crash during STOPPING leaves ``state='STOPPING'`` ⇒ the watchdog fires
 ``ENGINE_DOWN`` and the next startup re-verifies — never silently mislabelled clean.
@@ -203,14 +203,14 @@ class SessionLifecycle:
         Private JSON file for crash-loop coalescing (§2.2). ``None`` disables tracking (tests /
         Phase-0 wiring); the integrator passes ``<data_dir>/lifecycle_boots.json``.
     reconcile_hook / overdue_squareoff_hook:
-        §2.6 steps 2–3 — OMS/broker-side. TODO(Phase 3): the integrator wires ReconcileJob /
+        §2.6 steps 2–3 — OMS/broker-side. TODO(Phase 4, real orders): the integrator wires ReconcileJob /
         SquareOffScheduler.run_window_squareoff; ``None`` logs the step as deferred.
     backfill_hook:
         §2.6 step 4 — the integrator wires ``BackfillJob.warmup_gap`` + NIFTY50/VIX history fill.
     rearm_schedules_hook / ticker_resume_hook:
         §2.6 step 7 — re-arm the §10.1 schedule and resume the ticker into WARMING.
     cancel_entries_hook / flatten_mis_hook / verify_cnc_protected_hook / backup_hook:
-        The §10.8 shutdown-guard seams, run in that order while STOPPING. TODO(Phase 3) for the
+        The §10.8 shutdown-guard seams, run in that order while STOPPING. TODO(Phase 4, real orders) for the
         order-touching three; backup is the §10.5 watermark snapshot.
     """
 
@@ -367,13 +367,9 @@ class SessionLifecycle:
         if report.frozen_reasons and not self._kill.is_killed():
             await self._freeze("startup_selftest", ",".join(report.frozen_reasons))
 
-        # 2c) Day-scoped risk-counter rebuild + continuous equity halt-ladder re-eval (§2.6) —
-        #     ledger/reconcile-dependent. TODO(Phase 2/3): wired with ExposureTracker + the ledger.
-        report.deferred_steps.append("equity_halt_ladder_reeval (§2.6 — TODO(Phase 2/3))")
-
-        # 2) Reconcile vs broker = truth (R5) — TODO(Phase 3): OMS reconcile + REC_FILL_SUSPECTED.
+        # 2) Reconcile vs broker = truth (R5) — TODO(Phase 4, real orders): OMS reconcile + REC_FILL_SUSPECTED.
         await self._run_hook("reconcile", self._reconcile, report)
-        # 3) Overdue-MIS startup square-off (§2.6 step 3) — TODO(Phase 3): SquareOffScheduler.
+        # 3) Overdue-MIS startup square-off (§2.6 step 3) — TODO(Phase 4, real orders): SquareOffScheduler.
         await self._run_hook("overdue_mis_squareoff", self._overdue_squareoff, report)
         # 4) Data-gap backfill incl. NIFTY50 + India VIX history (§2.6 step 4 / §7.1 regime_data_ready).
         await self._run_hook("data_gap_backfill", self._backfill, report)
@@ -421,7 +417,7 @@ class SessionLifecycle:
         Guard semantics (§10.8): cancel + verify every working/unfilled entry order; flatten an open
         MIS before its window-end completes (or ``owner_override`` accepts the broker 15:25 backstop);
         verify every open CNC is PROTECTED (live resting GTT); snapshot a backup if due. The
-        order-touching hooks are TODO(Phase 3) — ``None`` logs the step as deferred. A guard step
+        order-touching hooks are TODO(Phase 4, real orders) — ``None`` logs the step as deferred. A guard step
         that RAISES without ``owner_override`` blocks the stop (:class:`ShutdownBlockedError`) and
         the engine returns to RUNNING — never exit with an unprotected position (R3).
         """
@@ -429,12 +425,13 @@ class SessionLifecycle:
         open_count = self._open_positions_count()
         if open_count and not owner_override:
             _log.warning("shutdown_guard_open_positions", count=open_count,
-                         note="Phase 3 flattens MIS / verifies CNC GTTs before exit (§10.8)")
+                         note="Phase 4 (real orders) flattens MIS / verifies CNC GTTs before exit "
+                              "(§10.8); paper has no shutdown guard")
 
         guard_steps: tuple[tuple[str, Hook | None], ...] = (
-            ("cancel_entry_orders", self._cancel_entries),      # TODO(Phase 3) §10.8 (i)
-            ("flatten_open_mis", self._flatten_mis),            # TODO(Phase 3) §3.2.8 shutdown guard
-            ("verify_cnc_protected", self._verify_cnc),         # TODO(Phase 3) §10.8 (ii)
+            ("cancel_entry_orders", self._cancel_entries),      # TODO(Phase 4) §10.8 (i)
+            ("flatten_open_mis", self._flatten_mis),            # TODO(Phase 4) §3.2.8 shutdown guard
+            ("verify_cnc_protected", self._verify_cnc),         # TODO(Phase 4) §10.8 (ii)
             ("shutdown_backup", self._backup),                  # §10.5 watermark snapshot
         )
         for name, hook in guard_steps:

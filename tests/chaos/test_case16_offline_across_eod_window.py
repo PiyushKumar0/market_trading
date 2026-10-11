@@ -38,8 +38,9 @@ It now resolves the run that governs the next entries (``CatchUpRunner._governin
 missed EOD window.
 
 Unbuilt (skipped, ``test_case16_champion_challenger_eval_single_snapshot``): the champion/challenger
-evaluation (§6.4) — ``JOB_CHAMP_CHALL`` is a reserved watermark id only; no job is registered (the
-learning layer is Phase 2+ and not implemented).
+evaluation (§6.4) — ``JOB_CHAMP_CHALL`` is a reserved watermark id only; no job is registered
+(ChampionChallenger, §6.4, is not built; ``engine.learning`` otherwise holds research/validation code
+plus runtime helpers: exit_sim, benchmark, evidence, hi52_forward).
 """
 
 from __future__ import annotations
@@ -160,6 +161,6 @@ def test_case16_champion_challenger_eval_single_snapshot() -> None:
     """'champ/chall eval … single run-latest snapshot' — nothing to catch up: no champion/challenger
     job exists (``JOB_CHAMP_CHALL`` is a reserved id; ``build_job_registry`` registers no runner)."""
     pytest.skip(
-        "case 16 champ/chall clause: not built in Phase 2 — §6.4 champion/challenger evaluation is "
-        "unimplemented (engine.learning is empty; JOB_CHAMP_CHALL has no registered job)"
+        "case 16 champ/chall clause: §6.4 ChampionChallenger is unbuilt — JOB_CHAMP_CHALL "
+        "(ops/jobs.py:132) is a reserved watermark id with no registered job"
     )

@@ -42,11 +42,11 @@ SUN = date(2026, 6, 14)
 #: The §5.4 agents.yaml definition, built directly (agents.yaml loading is test_agent_defs' job).
 NEWS_DEF = AgentDef(
     agent_id="news_analyst",
-    model="haiku-4.5",
+    model="sonnet-5.5",
     shape="single_shot",
     tools_enabled=False,
     allowed_tools=[],
-    max_output_tokens=2000,
+    max_output_tokens=1500,
 )
 
 _ID_RE = re.compile(r"cluster_id=(\S+)")
@@ -525,7 +525,7 @@ async def test_scored_at_and_scorer_model_are_platform_stamped(store, make_job, 
 
     row = rows_by_id(store)["c-1"]
     assert row["scored_at"] == now_box[0]            # Clock.now(), tz-aware IST (§3.2)
-    assert row["scorer_model"] == "haiku-4.5"        # the def's model NAME, not the API id
+    assert row["scorer_model"] == "sonnet-5.5"       # the def's model NAME, not the API id
     assert row["scope"] == "sector"
     assert row["sentiment"] == pytest.approx(-0.4)
     assert row["materiality"] == pytest.approx(0.7)
@@ -666,7 +666,7 @@ async def test_a_cluster_rescored_mid_call_is_not_overwritten(store, make_job, n
     rows = rows_by_id(store)
     assert result.scored == 1
     assert rows["c-rescored"]["scorer_model"] == "rival-poll"   # this batch did not clobber it
-    assert rows["c-keep"]["scorer_model"] == "haiku-4.5"
+    assert rows["c-keep"]["scorer_model"] == "sonnet-5.5"
 
 
 async def test_a_poll_merge_during_the_model_call_survives_the_write_back(store, make_job, now_box):
@@ -711,7 +711,7 @@ async def test_a_poll_merge_during_the_model_call_survives_the_write_back(store,
     assert list(row["sectors"]) == ["BANKS"]         # advisory ∩ the FRESH step-3 tags
     assert list(row["themes"]) == ["EV"]
     assert row["scored_at"] is not None              # ... and the step-4 columns still landed
-    assert row["scorer_model"] == "haiku-4.5"
+    assert row["scorer_model"] == "sonnet-5.5"
 
 
 async def test_the_lock_is_free_during_every_chunk_of_a_multi_chunk_batch(store, make_job, now_box):

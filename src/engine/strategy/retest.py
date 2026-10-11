@@ -248,7 +248,7 @@ class RestingLevelBook:
 
         THE MECHANISM DEPENDS ON THIS. :meth:`due` bands the level against a LIVE price, and the
         engine's only price source is the tick cache: ``brk20`` originates over the whole ELIGIBLE
-        set (~480 symbols) while the feed carries the included watchlist (~300), and the sweep's
+        set (NIFTY Total Market since O18, 2026-10-08) while the feed carries the included watchlist (~300), and the sweep's
         ``_batch_ticks`` subscription ROLLS AT MIDNIGHT (yesterday's admissions are not today's
         universe). So on retest day 2..5 a level on a sub-cap symbol would read ``ltp is None`` and
         never be offered again — silently dead for exactly the population ``brk20`` exists to catch,

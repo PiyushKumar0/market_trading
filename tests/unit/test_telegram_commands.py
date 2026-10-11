@@ -659,9 +659,9 @@ async def test_an_unknown_symbol_replies_with_what_is_actually_open(clock, conn,
 
 @pytest.mark.asyncio
 async def test_a_listed_row_that_outlives_its_day_carries_both_dates(clock, conn, msg):
-    """WO-V (2026-09-13): a swing entry lives to the NEXT session's close, so a live row can be from
-    an earlier day and a bare HH:MM no longer says which. When delivery and expiry fall on different
-    IST days both stamps carry their day; a same-day row (the test above) renders exactly as before."""
+    """A row whose delivery and valid_until fall on different IST days (WO-V's next-session TTL,
+    withdrawn 2026-09-23, made this routine; the renderer stays date-aware for any such row) carries
+    both stamps; a same-day row (the test above) renders exactly as before."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", side="BUY", qty=12,
                 delivered_at="2026-06-17T14:47:00+05:30", valid_until="2026-06-18T15:30:00+05:30")
     book = _FakeBook()

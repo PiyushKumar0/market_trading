@@ -373,7 +373,7 @@ def orb_default_params(envelope: Mapping[str, dict[str, Any]] | None = None) -> 
 def orb_per_side_fee(cost_model: CostModel) -> float:
     """½ x round-trip STATUTORY-fee breakeven at Rs20,000 MIS, as a fraction — orb's ``fee`` input.
 
-    Mirrors ``SweepRunner._per_side_fee`` (sweep.py:331-340) exactly: FEES ONLY
+    Mirrors ``SweepRunner._per_side_fee`` (sweep.py) exactly: FEES ONLY
     (``fee_breakeven_pct``), because ``_signals_orb`` consumes it solely to compute its C3
     sub-cost-floor suppression (``min_risk_frac = 4 x fee``). Passing the spread-inclusive
     ``breakeven_pct`` here would silently tighten orb's entry filter and change the population.
@@ -557,7 +557,7 @@ def stop_level(ctx: EntryContext, config: StopConfig) -> float | None:
     """The stop PRICE for ``config`` on ``ctx``, or ``None`` for the NO-STOP rung.
 
     Anchored at the entry FILL, matching the house ``stop_entry_price='fillprice'`` convention WO-2
-    pinned (sweep.py:643-644): the signal bar's close is no longer the price paid once fills moved to
+    pinned (``stop_entry_price="fillprice"`` in the ``SweepRunner`` portfolio build, sweep.py): the signal bar's close is no longer the price paid once fills moved to
     the next bar's open.
     """
     if config.stop_source == STOP_SOURCE_NONE:

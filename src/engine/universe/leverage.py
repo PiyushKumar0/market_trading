@@ -2,11 +2,11 @@
 
 The Zerodha equity-margins file is the authority for which NSE stocks can be traded MIS and at what
 intraday leverage (the "MIS-eligible (Zerodha leverage file)" leg of the §3.2.4 universe rule). This
-module fetches and parses it; the :class:`~engine.universe.builder.UniverseBuilder` consumes the
-resulting :class:`MisLeverageMap`, and the 08:15 instruments job joins it into ``instruments_daily``
-(``mis_leverage`` / ``mis_eligible`` columns, §4.3 — wiring seam, not done here).
+module fetches and parses it; the :class:`~engine.universe.builder.UniverseBuilder` is its only
+consumer (the ``not_mis_eligible`` exclusion). Nothing writes it into ``instruments_daily``: the
+``mis_leverage`` / ``mis_eligible`` columns (§4.3) stay NULL.
 
-Best-effort source (E5, convention 11): injected ``httpx.AsyncClient``, [VERIFY]-marked URL, defensive
+Best-effort source (E5, convention 11): injected ``httpx.AsyncClient``, defensive
 parsing. On fetch/parse failure the last good file is reused from a runtime JSON cache under ``data/``
 ("reuse yesterday" — survives restarts) with ``degraded=True`` + an owner alert; with no cache at all
 the map is EMPTY, which fails CLOSED: every symbol reads as not-MIS-eligible and the universe rule
@@ -31,7 +31,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 _log = get_logger("engine.universe.leverage")
 
 #: Kite Connect public equity-margins endpoint (tradingsymbol + ``mis_multiplier``/``mis_margin``
-#: per stock). [VERIFY Phase-1] — endpoint + row shape re-checked at the G1 gate; parsing below is
+#: per stock). Parsed live every session since 2026-07-10 (``mis_margins_refreshed``); parsing below is
 #: defensive against both the array form and a ``{"data": [...]}`` wrapper.
 KITE_MIS_MARGINS_URL = "https://api.kite.trade/margins/equity"
 
@@ -198,8 +198,9 @@ class MisLeverageIngest:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Closest catalog kind for "daily data job not fresh" (the catalog is closed here;
-            # a dedicated FEED_DEGRADED kind is an integrator follow-up).
+            # Reused for "daily data job not fresh" at warning severity; this does not freeze
+            # entries. FEED_DEGRADED is the live tick-feed kind, not this. The kind is in
+            # telegram.CRITICAL_KINDS, so this alert never expires in the outbox.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="MIS leverage file degraded",
             body=f"{reason}. Universe MIS-eligibility fails closed until refreshed (A8/E5).",

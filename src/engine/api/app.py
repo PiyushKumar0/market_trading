@@ -52,7 +52,8 @@ from engine.risk.limits import floor_limits_from
 
 _log = get_logger("engine.api.app")
 
-# Path to the built React dashboard (served when present). Owner builds it into ``web/dist`` (R8).
+# Dirname of the built React dashboard: ``<repo>/dashboard/dist`` (see _mount_dashboard_if_present).
+# ``web/dist`` is the hand-written notifications page (/notifications-ui), not a build target.
 _DASHBOARD_DIST_DIRNAME = "dist"
 
 #: The protected-store name for the learnable-parameter envelope (§6.3), matching ``limits.py``'s
@@ -257,9 +258,9 @@ def create_app(
         for topic in _WS_RELAY_TOPICS:
             bus.subscribe(topic, _make_ws_relay_handler(app.state.ws_hub, topic))
 
-    # ----------------------------------------------------------------- read routes (bearer-auth stubs)
-    # Phase 0: each returns a shape-correct placeholder; live views over risk/oms/learning/intelligence
-    # state arrive in later phases. Every one is gated by ``Owner`` (R10).
+    # ----------------------------------------------------------------- read routes (bearer-auth)
+    # Each reads live SQLite/collaborator state and degrades to an empty, shape-correct payload when
+    # its collaborator is absent (None). Every one is gated by ``Owner`` (R10).
     @app.get("/positions")
     async def positions(_: Owner) -> dict[str, Any]:
         """All-origin positions (platform/external/recommended), OPEN first, + ``as_of`` (R8/O5)."""

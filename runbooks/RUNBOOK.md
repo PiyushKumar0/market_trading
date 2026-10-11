@@ -26,7 +26,7 @@ The Kite access token expires ~06:00 IST daily (A5). Each trading day:
    (the only unauthenticated route; it can only complete a login). The engine exchanges the checksum and
    stores the access token in Windows Credential Manager (DPAPI). Entries un-FREEZE once the token is valid.
 4. **Fallback** if the redirect can't reach the callback: copy the `request_token` from the URL and send
-   `/token <request_token>` to the Telegram bot (or paste it into the dashboard).
+   `/token <request_token>` to the Telegram bot.
 
 ### Login method — pick ONE and register its exact redirect URL
 
@@ -61,11 +61,13 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
   terminates the process mid-backup, so every stop 09-02..09-23 was recorded as a crash. A clean stop
   is confirmed by `engine_lifecycle.state = STOPPED` with `last_clean_stop_at` at the stop time, and no
   `stop_forced` line in `engine.log`. A wedged internal worker can
-  no longer leave a zombie process holding the lock. The shutdown guard (§2.6) will, from Phase 3,
+  no longer leave a zombie process holding the lock. The shutdown guard (§2.6) will, from Phase 4 (real orders),
   flatten an open MIS before window-end / verify CNC GTTs / cancel working entries — never leaving the
   PC dead with an unprotected position or a resting entry order.
-- A clean self-initiated stop is **not** auto-restarted (NSSM startup is manual/demand; restart-on-failure
-  is gated to an "I intend to run" sentinel, §2.2).
+- A clean self-initiated stop exits 0 and is **not** auto-restarted. Restart-on-failure is the NSSM
+  `AppExit` mapping (0 = Exit, Default = Restart after `AppRestartDelay` 15 s, throttled; see
+  `scripts/nssm_install.ps1`). The engine's own intend-to-run record is `engine_lifecycle.state`. A host
+  reboot is not recovered either (the service is DEMAND start, §2.2).
 
 ## Dead-platform manual fallback (R10, §10.6) — pre-stage BEFORE Phase 4
 
@@ -98,8 +100,9 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
      **`-Confirm` is mandatory** — without it the script only DRY-RUNS (prints the plan, changes nothing).
      Omit `-NssmPath` if `nssm.exe` is on PATH; preview safely by omitting `-Confirm` first.
   - Control: `scripts\nssm_install.ps1 -Action status | start | stop | remove` (`remove` also needs `-Confirm`).
-- Mint the Claude SDK OAuth token: `scripts/setup_token.ps1` (stores it in DPAPI; the engine injects it
-  into the SDK CLI child at startup, §2.2). Ensure **no** stray `ANTHROPIC_API_KEY` (it silently outranks
+- Mint the Claude SDK OAuth token: `scripts/setup_token.ps1` (stores it in DPAPI, but no engine code reads
+  it; the engine's pinned CLI, `llm.cli_path` in `config/agents.yaml`, authenticates with its own stored
+  login for the account the service runs as). Ensure **no** stray `ANTHROPIC_API_KEY` (it silently outranks
   the OAuth token, D2 — the startup self-test asserts its absence).
 - Power: disable Modern Standby network throttling; set Windows Update active hours; a wake-capable
   Scheduled Task wakes the PC for scheduled active periods incl. EOD jobs.
@@ -115,9 +118,11 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
 - [ ] Kill stickiness: set `/kill` → restart service → order path blocked on startup.
 - [ ] Claude Max ToS for headless use confirmed, or metered `ANTHROPIC_API_KEY` fallback configured (T8).
 
-> ⚠ Before Phase 1: **verify `config/calendar/2026.yaml`** against the official NSE holiday circular and
-> set `verified: true` + `verified_through` — the calendar ships `verified: false` and strict mode refuses
-> to trade until you do (R6, "no calendar, no trading").
+> 2026 calendar: `verified: true`, `verified_through: 2026-12-31` (NSE/CMTR/71775 + the 2026-01-15
+> modification; owner cross-check requested in the file header). Before the `CALENDAR_HORIZON` alert
+> fires (fewer than `clock.calendar_horizon_alert_sessions` = 40 verified sessions left), add
+> `config/calendar/2027.yaml` from the official NSE circular and set `verified: true` +
+> `verified_through` (R6, "no calendar, no trading").
 
 ---
 
@@ -134,26 +139,43 @@ Kite credentials exist — a fresh install stays runnable with entries FROZEN un
 
 These are **fire-times**, not a liveness assumption — each is also replayed as a startup catch-up if its
 time passed while the engine was off (`CatchUpRunner`, driven by the SAME `JobRegistry` the scheduler
-uses). Times are the `jobs:` block in `config/settings.yaml`.
+uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); times come from the
+`jobs:` block in `config/settings.yaml`, except `news_chain`, `daily_bars`, `features_daily`,
+`reco_expire` and `tick_compact` (constants in `main.py`) and `isin_map`, `results_line_items` and
+`feed_freshness` (`JobTimesCfg` defaults in `core/config.py`).
 
 | Time | Job (`job_runs` id) | Class | Notes |
 |---|---|---|---|
 | 08:15 | `instruments` | safety-critical | Kite dump + tick sizes (A10); stale ⇒ FROZEN-for-entries |
 | 08:20 | `surveillance` | safety-critical | GSM/ASM/T2T/ESM (A8); reuse-yesterday on source failure |
 | 08:25 | `news_chain` | run-latest | backfill → cluster → resolve (never entry-blocking, §2.7) |
-| 08:30 | `universe_build` | run-latest | NIFTY200 ∩ MIS ∩ ¬surveillance ∩ ≥₹5cr (A8/C7) |
+| 08:30 | `universe_build` | run-latest | index (`universe.index_name`, NIFTY Total Market since 2026-10-08, O18) ∩ MIS ∩ ¬surveillance ∩ ≥₹5cr (A8/C7); core subset = `universe.core_index_name` (NIFTY 500) |
 | 08:30 Sun | `sector_map` | run-latest | weekly `sector_map`+`theme_map` (fires Sunday, not a trading day) |
+| 08:35 | `catalyst_digest` | run-latest | pre-open catalyst digest (§2.7 step 5) |
+| 08:40 | `token_check` | not a registry job | pre-open token probe: pages the owner if the Kite token is rejected; no watermark, not catch-up-replayed |
+| 08:50 | `preopen_planner` | run-latest | §5.3 pre-open planner |
 | 09:30 | `time_exit_check` | run-latest | D2 time exit: an exit rec for every open recommended position at or past its exit session, every session until `/closed`; regular sessions only (never muhurat) |
+| 15:45 | `reco_expire` | run-latest | expired-unconfirmed recommendations → no_action (§3.6) |
 | 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift (A13); one run per missed day |
 | 18:00 | `bhavcopy` | date-keyed | UDiFF cross-check/fill of `bars_1d` |
 | 18:05 | `daily_bars` | date-keyed | nightly incremental official-candle backfill (watchlist + NIFTY 50 + India VIX) |
 | 18:30 | `earnings_calendar` | safety-critical | results/board-meeting dates (R2/O13) |
 | 18:30 | `rec_outcomes` | date-keyed | hindsight scoring of every delivered entry rec on official bars (fill, exit, net, T+5/10/20, excess over the equal-weight universe) into `rec_outcomes`; waits for that day's `daily_bars`; no scanner, threshold or promotion reads it |
+| 18:35 | `filings_pit` | date-keyed | insider trades (NSE PIT, historical; §2.8) |
+| 18:40 | `isin_map` | run-latest | symbol → ISIN → BSE scrip code (§2.8); before `filings_shp` |
+| 18:45 | `filings_results` | date-keyed | results + board-meeting dates (§2.8) |
+| 18:50 | `filings_shp` | run-latest | shareholding pattern + pledge (§2.8) |
+| 19:00 | `filings_pit_fresh` | date-keyed | BSE same-day fresh insider trades (§2.8) |
 | 19:00 | `weekly_summary` | date-keyed | owner digest on each week's last regular session (a missed one replays): recs delivered/taken/skipped/expired, hindsight value of skipped recs, cumulative net and excess per strategy; waits for that day's `rec_outcomes` |
+| 19:15 | `ins_crossings` | date-keyed | EOD insider net-buy crossing detection; must run after `filings_pit_fresh` |
+| 19:30 | `results_line_items` | run-latest | quarterly revenue/PAT from XBRL (§2.8.4) |
 | 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |
 | 20:30 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` (moved 18:45→20:30 2026-07-24) |
 | 20:45 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe (moved 18:50→20:45 2026-08-18 — MUST stay after `deals`/`corp_actions`, it reads both) |
+| 21:00 | `nightly_review` | date-keyed | nightly review (§5.5/§6.4) |
 | 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` (§10.5) |
+| 21:30 | `feed_freshness` | run-latest | daily census of every feed's newest data |
+| 22:30 | `tick_compact` | date-keyed | collapses each closed symbol-day's tick fragments into one file (§4.3); last in date-keyed order |
 
 Live (interval, not calendar-gated, run whenever the engine is up): `bar_advance` (5 s bar
 finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the news polls — one `news_poll_<name>`
@@ -220,7 +242,7 @@ ticker subscribes and writes before 09:15 instead of after.
    yourself, same discipline as the morning login flow above.
 2. **Scheduled (owner option, plan §14 Q14):** Q14 recorded manual-start-primary **deliberately** —
    this note documents the already-built option, it does not change that default. Register the
-   wake-capable engine-start Scheduled Task (§10.7 below): `\.scripts\schedule_tasks.ps1
+   wake-capable engine-start Scheduled Task (§10.7 below): `.\scripts\schedule_tasks.ps1
    -WithEngineStarts`, with a `lifecycle.active_period_starts` time at or before 09:05 IST. The
    watchdog (`scripts/watchdog.py`) already alerts (`SCHEDULED_START_MISSED`) if a scheduled start
    fails to fire, so a missed pre-open wake is caught the same day.
@@ -237,12 +259,12 @@ is dead, or wedged past `catchup_grace_s` — alert first, then force-kill so NS
 `state == STOPPED` is **silent** (intentional off is normal). A total power loss takes the watchdog with
 it (§2.2 limitation).
 
-- Register both tasks (elevated PowerShell, **run-as the mt-engine service account** so the per-user
-  DPAPI bot token decrypts):
-  - `\.scripts\schedule_tasks.ps1` — watchdog only (1-min repetition).
-  - `\.scripts\schedule_tasks.ps1 -WithEngineStarts` — also add wake-capable engine-start tasks, one
+- Register both tasks (from the repo root, elevated PowerShell, **run-as the mt-engine service
+  account** so the per-user DPAPI bot token decrypts):
+  - `.\scripts\schedule_tasks.ps1` — watchdog only (1-min repetition).
+  - `.\scripts\schedule_tasks.ps1 -WithEngineStarts` — also add wake-capable engine-start tasks, one
     per `lifecycle.active_period_starts` time (covers EOD jobs that fall outside a wake window).
-  - `\.scripts\schedule_tasks.ps1 -TaskUser "PC\mtsvc"` — set the run-as account explicitly.
+  - `.\scripts\schedule_tasks.ps1 -TaskUser "PC\mtsvc"` — set the run-as account explicitly.
 - Requires the `telegram_bot_token` DPAPI secret + `telegram.owner_chat_id` in settings, else the
   watchdog exits code 2 (it has nothing to alert through).
 
@@ -259,19 +281,29 @@ re-pointed, not left broken. Feed set is `config_audit`-tracked (owner-only chan
 - [x] **Hindu BusinessLine markets/companies, CNBC-TV18 market, NDTV Profit** —
       `news.feeds.rss.hbl_* / cnbctv18_market / ndtvprofit` (900 s). Verified live 2026-08-05
       (corroboration-pool widening 2→5 domains; both Livemint feeds are ONE domain). Rejected
-      2026-08-05: financialexpress (malformed XML), zeebiz + business-standard (WAF 403),
-      businesstoday (no parseable pubDates).
+      2026-08-05: financialexpress (malformed XML), zeebiz (WAF 403), businesstoday (no parseable
+      pubDates); business-standard (WAF 403 on 2026-08-05, re-probed and ADOPTED 2026-09-04).
+- [x] **Business Standard markets/companies RSS** — `news.feeds.rss.bs_*` (900 s). Verified live
+      2026-09-04 (sixth domain).
+- [ ] **NSE corporate announcements** — `news.feeds.nse_announcements` (300 s, shared `nse_http`; one
+      corroborating domain, nseindia.com; `enabled` is the owner off switch).
 - [ ] **GDELT DOC 2.0** — `GDELT_DOC_URL` + `news.feeds.gdelt_doc_query`, client-side filtered to
       `GDELT_DOMAIN_ALLOWLIST` (module-pinned in `datafeeds/news.py`; widening it is a code change).
 - [ ] **MIS leverage** — `KITE_MIS_MARGINS_URL` = `https://api.kite.trade/margins/equity` (fail-closed:
       empty ⇒ no symbol MIS-eligible).
 - [ ] **Surveillance** (`datafeeds`… `universe/surveillance.py`): NSE GSM/ASM/ESM report APIs, T2T from
-      `EQUITY_L.csv` (series BE/BZ), unsolicited-SMS list.
-- [ ] **Index membership** (`universe.index_name`, NIFTY 500 since 2026-09-04, O15) —
-      `universe.index_source_url` (archives host); falls back to `data/universe/index_cached.csv`
-      then the committed `universe.index_seed_path` (`config/universe/nifty500_seed.csv`).
+      `EQUITY_L.csv` (series BE/BZ). (Unsolicited-SMS list RETIRED 2026-07-28: NSE removed the
+      endpoint; `sms` is pinned empty, nothing to verify.)
+- [ ] **Index membership** (`universe.index_name`, NIFTY Total Market since 2026-10-08, O18; NIFTY 500
+      2026-09-04→10-08, O15) — `universe.index_source_url` (archives host); falls back to
+      `data/universe/index_cached.csv` then the committed `universe.index_seed_path`
+      (`config/universe/niftytotalmarket_seed.csv`). **Core index** (`universe.core_index_name`,
+      NIFTY 500) — `core_index_source_url`, then `data/universe/core_index_cached.csv`, then
+      `core_index_seed_path` (`config/universe/nifty500_seed.csv`).
 - [ ] **Bhavcopy** — `BHAVCOPY_URL_TEMPLATE` (UDiFF, archives host).
-- [ ] **Corp actions** — `https://www.nseindia.com/api/corporates-corporate-actions?index=equities`.
+- [ ] **Corp actions** — `NSE_CORP_ACTIONS_URL` (`https://www.nseindia.com/api/corporates-corporateActions?index=equities`,
+      camelCase since 2026-08-14; the job appends a from_date/to_date window via `corp_actions_url(d)`,
+      because the bare call returns only same-day ex-dates).
 - [ ] **Event calendar** — `https://www.nseindia.com/api/event-calendar`.
 - [ ] **Bulk/block deals** — `NSE_BULK_DEALS_URL_TEMPLATE` / `NSE_BLOCK_DEALS_URL_TEMPLATE`.
 - [ ] **Sector/theme** — `SECTOR_SOURCES` sectoral-index constituent CSVs (first-wins order is pinned).

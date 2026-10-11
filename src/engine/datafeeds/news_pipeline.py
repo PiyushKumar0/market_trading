@@ -94,8 +94,8 @@ LEGAL_SUFFIX_TOKENS: frozenset[str] = frozenset({
 
 #: Curated stoplist of seed aliases that are common English words — they would false-positive on
 #: ordinary headline text, so they are EXCLUDED from the alias seed (§3.2.4: TRENT/IDEA/…).
-#: TODO(owner review, Phase 1): the owner reviews and extends this list once against the real
-#: NIFTY200 instruments dump; additions beyond it arrive only via the §5.5 owner-approval loop.
+#: Owner-reviewed in Phase 1 (G1 gate, 2026-08-04); further additions arrive only via the §5.5
+#: owner-approval loop.
 ALIAS_STOPLIST: frozenset[str] = frozenset({
     "trent",      # Trent Ltd
     "idea",       # (curated) Vodafone Idea aliases
@@ -480,8 +480,9 @@ class EntityResolver:
     theme_map:
         ``theme -> keywords[]`` (§4.3 ``theme_map`` seeded from config/themes.yaml).
     universe:
-        Today's ELIGIBLE universe symbols (every rule-passing symbol, including beyond-cap rows —
-        the brk20/ins batch-rule set), NOT the top-100 focus watchlist, or None if not yet built.
+        Today's BATCH universe (``MarketStore.get_batch_universe_symbols``: eligible incl.
+        beyond-cap rows PLUS criteria-passing non-index rows), NOT the focus watchlist
+        (``data.universe_max_watchlist``), or None if not yet built.
         News visibility must not be watchlist-cap-contaminated (the 2026-08-04 BPCL lesson,
         re-found in the news layer 2026-08-18).
     """
@@ -1184,7 +1185,7 @@ class CatalystDigestJob:
     - ``market``-scope clusters contribute to the ``market`` row ONLY — never a symbol row and
       never a watchlist row (§2.7: market news feeds regime context, "**never** origination").
     - Sector/theme fan-out consumes the RESOLVER's tags (``sectors``/``themes``) and is intersected
-      with today's ELIGIBLE universe (rule-passing incl. beyond-cap rows, not just the top-100 focus
+      with today's BATCH universe (eligible + extended non-index rows, not just the focus
       watchlist) when one exists; with no universe row yet the raw constituents are used and the
       ``in_universe`` condition still blocks origination.
     - The ``market``/``market`` row is written on EVERY run (0.0 when no market cluster scored), so
@@ -1619,15 +1620,14 @@ class CatalystDigestJob:
         )
 
     def _levels(self, bars: Sequence[DailyBar]) -> dict[str, Decimal]:
-        """Deterministic §6.1 `cat` levels from bars strictly before ``d``; ``{}`` on thin history.
+        """v1 reference levels from bars strictly before ``d``; ``{}`` on thin history.
 
-        Only the PRICE leg of the §6.1 confirmation is computable at 08:35: ``confirm_trigger =
-        prior_close × (1 + cat.confirm_move_pct/100)``. The ``max()`` against the day's first-30-min
-        high and the relative-volume leg are LIVE scanner conditions — the trigger here is the floor
-        the scanner raises, never the whole rule. ``invalidation = prior_close``: a confirmation move
-        fully retraced voids the setup (documented decision — §2.7 pins the level set, not this
-        choice). Stop/target BANDS collapse to a point because ``entry == confirm_trigger`` is the
-        only entry price knowable pre-open; the live scanner recomputes both at the true entry.
+        These come from the retired v1 cat confirmation design (``confirm_trigger = prior_close ×
+        (1 + cat.confirm_move_pct/100)``, an ATR stop, an ``rr_target`` target; ``invalidation =
+        prior_close``; bands collapsed to a point). Cat v2 never reads them (it enters at the
+        reference close with a ``stop_pct`` disaster stop and no target) and no LLM prompt renders
+        them any more. They are still computed and persisted because the dashboard's news
+        watchlist table reads the columns.
         """
         if len(bars) < _MIN_LEVEL_BARS:
             return {}

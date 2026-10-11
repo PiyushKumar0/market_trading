@@ -20,7 +20,8 @@ produce an actionable swing recommendation):
 * VOLUME confirmation: ``volume(y) >= vol_mult × mean(volume of the lookback window)`` — the §6.1
   posture; the platform's backtests found unconfirmed momentum entries net-negative at retail
   costs. (BPCL 2026-08-03 broke out at 0.80× average volume — this rule would REFUSE it; that is
-  a deliberate default, owner-tunable via the §6.3 envelope.)
+  a deliberate default, a frozen code constant: ``envelope.yaml`` has no ``brk20`` rows today, and
+  plan §6.1 lists them as future §6.3 rows.)
 * A12 ex-date skip: any known ex-date within ``ex_skip_days`` CALENDAR days of ``today``.
 * Levels — LIMIT-AT-LEVEL (WO-4, 2026-08-13). ``raw_levels.entry`` is the BROKEN LEVEL ``H20``
   itself, never ``close(y)``: the level is the only price still actionable when the candidate is
@@ -47,7 +48,7 @@ produce an actionable swing recommendation):
   LENSKART 0.17% of entry — three of that day's four candidates. A swing stop thinner than the
   symbol's ROUTINE overnight gap is noise-level: it is taken out at the very next open with high
   probability while paying the full round trip, and §7.1 sizing INVERTS on it (notional ≈
-  risk_budget ÷ (2.5 × stop%), so the thinnest stops request the largest notionals). The §7.1
+  risk_budget ÷ (overnight_gap_mult × stop%), so the thinnest stops request the largest notionals). The §7.1
   ``entry_sanity_band`` is a backstop, not a fix — it rejects unfillable ENTRIES at evaluation
   time, never an unsurvivable STOP. So: ``gaps = |open_t/close_{t−1} − 1|`` over the last
   ``gap_lookback_sessions`` completed session-pairs ending at ``y`` (pairs with a non-finite or ≤0
@@ -77,7 +78,7 @@ from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 
 STRATEGY_ID = "brk20"
 
-DEFAULT_PARAMS: dict[str, float] = {   # §6.3 envelope defaults
+DEFAULT_PARAMS: dict[str, float] = {   # frozen rule defaults; no envelope.yaml rows (future §6.3)
     "lookback_days": 20,
     "vol_mult": 1.2,
     "rr_target": 2.0,
@@ -85,7 +86,7 @@ DEFAULT_PARAMS: dict[str, float] = {   # §6.3 envelope defaults
 }
 
 # WO-19 stop-geometry floor knobs — a SEPARATE mapping from DEFAULT_PARAMS on purpose. That dict is
-# the §6.3 learnable envelope; these are owner-only and NEVER learnable, because a learner shrinking
+# the future §6.3 learnable envelope; these are owner-only and NEVER learnable, because a learner shrinking
 # the floor re-opens exactly the degeneracy the floor exists to close. Keeping them out of the
 # envelope's dict makes the never-learnability structural rather than conventional — the learning
 # path cannot address a key it has no dict entry for. `gap_floor_mult` = 2.0 is a DESIGN constant,
@@ -230,7 +231,7 @@ def scan_daily(
         _bump(veto_counts, VETO_GAP_FLOOR)
         return None
 
-    target = round_to_tick(entry + int(p["rr_target"]) * (entry - stop))
+    target = round_to_tick(entry + Decimal(str(p["rr_target"])) * (entry - stop))
     score = min(1.0, 0.5 + 5.0 * (y.close / h20 - 1.0))
     return SignalCandidate(
         signal_id=str(ULID()),

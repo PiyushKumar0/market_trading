@@ -34,8 +34,8 @@ Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-
   §3.6 holdings journal has seen UNHELD on two consecutive observation days is excluded from this
   line and rendered in its own "SOLD OUTSIDE THE LEDGER" block instead — the plan must not reason
   about the overnight risk of a position the owner already sold (eleven plans did, 08-26 → 09-11).
-- **yesterday_review_summary** — latest ``nightly_reviews.payload["summary"]``, else "none" (the
-  nightly reviewer is a later Phase-2 wave; an empty table is the normal state today).
+- **yesterday_review_summary** — latest ``nightly_reviews.payload["summary"]``, else "none" ("none"
+  only when no review has been recorded yet: a fresh DB, or every prior review failed or was governor-blocked).
 
 **No pre-open gap-scan (decision).** The plan row (§5.3) still lists "gap scan vs prior close" as a
 context input and :meth:`ContextAssembler.for_planner` still accepts a ``gap_lines`` parameter, but
@@ -329,23 +329,13 @@ class PreopenPlannerJob:
 
     # ------------------------------------------------------------------ watchlist (§2.7 step 5(ii))
     def _watchlist_lines(self, d: date) -> list[str]:
-        """Graded watchlist rows for ``d``: grade, event_type, levels. An empty watchlist is a real
-        "no catalysts today" zero, not an outage — renders "none" via ``ContextAssembler._section``."""
-        lines: list[str] = []
-        for row in self._store.get_catalyst_watchlist(d):
-            levels = [
-                f"{key}={row[key]}"
-                for key in (
-                    "confirm_trigger", "invalidation",
-                    "stop_band_low", "stop_band_high", "target_band_low", "target_band_high",
-                )
-                if row.get(key) is not None
-            ]
-            line = f"{row.get('symbol')} {row.get('grade')} {row.get('event_type')}"
-            if levels:
-                line += " (" + ", ".join(levels) + ")"
-            lines.append(line)
-        return lines
+        """Graded watchlist rows for ``d``: symbol, grade, event_type (no price levels: the v1 cat
+        levels are retired). An empty watchlist is a real "no catalysts today" zero, not an outage —
+        renders "none" via ``ContextAssembler._section``."""
+        return [
+            f"{row.get('symbol')} {row.get('grade')} {row.get('event_type')}"
+            for row in self._store.get_catalyst_watchlist(d)
+        ]
 
     # ------------------------------------------------------------------ earnings today
     def _earnings_lines(self, d: date) -> list[str]:

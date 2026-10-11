@@ -258,10 +258,12 @@ async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -
 
 @pytest.mark.skip(reason=(
     "UNBUILT: no '>=3 broker rejects/60 s => FROZEN + alert' detector exists. "
-    "engine.risk.causes.CAUSE_REJECTION_STORM (causes.py:55) is declared and /resume_entries clears it "
-    "(notify/telegram.py:1150), but no code path counts broker rejects or calls "
+    "engine.risk.causes.CAUSE_REJECTION_STORM (causes.py:58) is declared and /resume_entries clears it "
+    "(the /resume_entries handler's clear_cause(CAUSE_REJECTION_STORM, ...) in notify/telegram.py), "
+    "but no code path counts broker rejects or calls "
     "RiskStateLatch.set_cause(CAUSE_REJECTION_STORM, ...) — grep of src/ finds only those two sites; "
-    "KiteClient re-raises rejects (kite_client.py:172-183) and the OMS executor/PaperBroker routing that "
+    "KiteClient re-raises rejects (KiteClient._order_call's except/re-raise) and the OMS "
+    "executor/PaperBroker routing that "
     "would observe REJECTED postbacks is not wired. " + PHASE3_GATED
 ))
 async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
@@ -270,8 +272,8 @@ async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
 
 @pytest.mark.skip(reason=(
     "UNBUILT: retry/backoff policy — KiteClient re-raises every broker error including HTTP 429 "
-    "(kite_client.py:172-183) and no caller retries or backs off; the OMS order executor that would own "
-    "the policy is WO-P3-5. The pacing half of the clause (every attempt inside the rate budget, no "
+    "(KiteClient._order_call's except/re-raise) and no caller retries or backs off; the OMS order "
+    "executor that would own the policy is WO-P3-5. The pacing half of the clause (every attempt inside the rate budget, no "
     "amplification) IS asserted by test_429_storm_every_attempt_is_paced_and_never_amplified. "
     + PHASE3_GATED
 ))

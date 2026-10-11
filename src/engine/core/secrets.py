@@ -1,9 +1,9 @@
 """Secrets via Windows Credential Manager / DPAPI (R10).
 
 Backed by ``keyring`` (DPAPI on Windows). Secrets NEVER live in the repo, YAML, or plaintext on disk
-(§2.4). Seed them once with ``scripts/dpapi_set.py``. The engine reads the Claude OAuth token from here
-at startup and injects it into the SDK CLI child's environment (§2.2) rather than persisting it in a
-service/user env var.
+(§2.4). Seed them once with ``scripts/dpapi_set.py``. The Claude OAuth token is stored here but no
+engine code reads it or puts it in any environment today: the harness passes the pinned CLI only
+``env={"DISABLE_AUTOUPDATER": "1"}``, and that CLI authenticates with its own stored login.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ KITE_API_SECRET = "kite_api_secret"
 KITE_ACCESS_TOKEN = "kite_access_token"          # rotates daily (~06:00 IST, A5)
 TELEGRAM_BOT_TOKEN = "telegram_bot_token"
 DASHBOARD_TOKEN = "dashboard_token"
-CLAUDE_CODE_OAUTH_TOKEN = "claude_code_oauth_token"  # D2; injected into the SDK CLI env at startup
+CLAUDE_CODE_OAUTH_TOKEN = "claude_code_oauth_token"  # D2; stored only, read by no engine code
 
 # Secrets that must be present for the engine to operate (checked by the startup self-test, D11).
 REQUIRED_AT_STARTUP = (

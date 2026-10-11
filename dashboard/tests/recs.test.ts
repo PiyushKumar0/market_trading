@@ -29,7 +29,7 @@ test('acted on, expired or undated recommendations are not live', () => {
   assert.equal(isLive({ ...row(), recommendation: null }, NOW), false)
 })
 
-test('a recommendation from yesterday valid into tomorrow is live (WO-V)', () => {
+test('a pending recommendation from an earlier day whose valid_until is still ahead is live (generic)', () => {
   const r = row({ delivered_at: '2026-10-07T14:47:00+05:30' }, { valid_until: '2026-10-09T15:30:00+05:30' })
   assert.equal(isLive(r, NOW), true)
 })

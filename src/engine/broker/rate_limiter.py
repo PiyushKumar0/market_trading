@@ -19,6 +19,9 @@ Design (load-bearing safety, R3):
         churny entry day must never be able to starve a kill-flatten / square-off / exit. There is
         deliberately **no** single "100/day total" cap; the only hard ceiling is the broker's
         5,000/day limit, made unreachable by the 1/s pace.
+      - ``intent="read"`` — non-placing calls on the order class (orders, positions, holdings,
+        margins, gtts). PACED behind the same bucket but never capped and never counted, so
+        orderbook/GTT polling cannot spend the entry budget.
 
 Pure-Python + asyncio only (no third-party deps) so the whole limiter is unit-testable at the bare
 test tier. ``clock.now()`` (the single sanctioned "now", R6) drives both daily-reset detection and
@@ -63,7 +66,7 @@ _DEFAULT_ENTRY_CALLS_PER_DAY = 70
 _ENTRY_BUDGET_ALERT_FRACTION = 0.80
 
 EndpointClass = Literal["quote", "historical", "orders"]
-Intent = Literal["entry", "risk_reducing"]
+Intent = Literal["entry", "risk_reducing", "read"]
 
 
 class EntryBudgetExhausted(RuntimeError):
@@ -203,6 +206,8 @@ class RateLimiter:
             first time usage reaches 80% of the budget.
           * ``intent="risk_reducing"`` is uncapped and **never** rejected on budget (R3) — it is only
             paced behind the 1/s order bucket so a churny entry day can never starve a flatten.
+          * ``intent="read"`` is pacing-only: no cap check and no counter (``orders_today`` excludes
+            it). ``KiteClient`` passes it for every non-placing call.
 
         ``intent`` is ignored for ``"quote"``/``"historical"`` (it only governs the order budget split).
         """
@@ -232,8 +237,8 @@ class RateLimiter:
                 break
             await asyncio.sleep(wait)
 
-        # --- Account the order call AFTER it has been paced/admitted (orders only).
-        if endpoint_class == "orders":
+        # --- Account the order call AFTER it has been paced/admitted (orders only; reads uncounted).
+        if endpoint_class == "orders" and intent != "read":
             if intent == "entry":
                 self._entry_calls += 1
                 threshold = self._entry_calls_per_day * _ENTRY_BUDGET_ALERT_FRACTION

@@ -106,10 +106,11 @@ class TelegramCfg(BaseModel):
 class LifecycleCfg(BaseModel):
     """Process-lifecycle notifications + liveness watchdog knobs (§2.2/§3.2.12).
 
-    The heartbeat writer + standalone watchdog + ENGINE_DOWN land in Phase 1; ``notify_started`` /
-    ``notify_planned_stop`` gate the Phase-0 ENGINE_STARTED / ENGINE_STOPPED sends (owner chose "notify
-    both", 2026-07-07). Modelled here so the settings.yaml ``lifecycle`` block is honored, not silently
-    dropped by pydantic's default extra-ignore.
+    The heartbeat writer (``ops/heartbeat.py``) and the standalone watchdog (``scripts/watchdog.py``,
+    which raises ENGINE_DOWN) read these knobs; ``notify_started`` / ``notify_planned_stop`` gate the
+    ENGINE_STARTED / ENGINE_STOPPED sends (owner chose "notify both", 2026-07-07). Modelled here so
+    the settings.yaml ``lifecycle`` block is honored, not silently dropped by pydantic's default
+    extra-ignore.
     """
 
     heartbeat_write_s: int = 20
@@ -117,7 +118,7 @@ class LifecycleCfg(BaseModel):
     watchdog_poll_s: int = 60
     notify_planned_stop: bool = True
     notify_started: bool = True
-    # --- Phase-1 active-period / catch-up knobs (§2.6/§10.1/§10.4) ---
+    # --- active-period / catch-up knobs (§2.6/§10.1/§10.4) ---
     active_period_starts: list[time] = Field(default_factory=lambda: [time(8, 0)])
     """Expected active-period start times (IST). The out-of-band watchdog raises
     SCHEDULED_START_MISSED when a start did not occur within ``start_grace_s`` (§2.6/§10.4)."""
@@ -160,7 +161,8 @@ class DataCfg(BaseModel):
     # review): criteria-passing NON-index symbols (MIS ∩ EQ-master ∩ not-surveillance ∩ ₹5cr median)
     # persisted included=False / exclusion_reasons=['not_in_index'] for BATCH rules, news shadow and
     # pre-open advisory only — the tick watchlist and the risk gate stay scoped to the configured
-    # index (NIFTY 500 since 2026-09-04, O15). The flag is the rollback: False restores the
+    # index (``universe.index_name``: NIFTY Total Market since O18, 2026-10-08; NIFTY 500 under O15
+    # before it). The flag is the rollback: False restores the
     # pre-addendum universe shape exactly.
     batch_universe_enabled: bool = False
     batch_universe_max: int = 600                 # top-N extended by median traded value (sanity cap)
@@ -304,13 +306,15 @@ class CatCfg(BaseModel):
     """
 
     fanout_weight: float = 0.5            # sector/theme fan-out multiplier (§2.7 step 5)
-    max_event_age_days: int = 2           # §2.7 HeadlineClusterer assignment window / `cat` catalyst
-                                          # age horizon (envelope default 2; owner-only, not learnable)
+    max_event_age_days: int = 2           # §2.7 HeadlineClusterer assignment window ONLY (calendar
+                                          # days). The `cat` digest age horizon is the envelope.yaml
+                                          # row cat.max_event_age_days (sessions), not this field.
     # --- v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18): the `ins` mechanics mirror.
     # Frozen for the whole shadow window — moving one re-opens multiplicity and restarts the clock.
     stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the
                                           # rule's real exit is TIME; 5 not 6 because the §7.1
-                                          # overnight_gap_mult (2.5x) arithmetic applies (ins, 08-17)
+                                          # overnight_gap_mult arithmetic applies (ins, 08-17; chosen
+                                          # at 2.5x, 2.0x since O17)
     hold_sessions: int = 20               # = the §7.1 swing max_holding cap — the EXISTING
                                           # max-holding machinery is the exit path
     # Deliberately NO expected_edge_pct: `cat` has no validated edge (measuring it IS the shadow), so
@@ -328,7 +332,8 @@ class CatReversalCfg(BaseModel):
 
     stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the
                                           # rule's real exit is TIME; the §7.1 overnight_gap_mult
-                                          # (2.5x) arithmetic applies to a swing entry (ins, 08-17)
+                                          # arithmetic applies to a swing entry (ins, 08-17; chosen
+                                          # at 2.5x, 2.0x since O17)
     hold_sessions: int = 10               # intended exit if the §8.6 gate ever opens = the longer
                                           # pre-registered horizon (T+10). INERT during the shadow:
                                           # nothing is held, because C3 rejects every candidate.
@@ -345,7 +350,7 @@ class FilingsCfg(BaseModel):
     dropped by pydantic's default extra-ignore (mirrors how ``news``/``cat`` are modelled)."""
 
     insider_min_value_inr: int = 10_000_000       # abs ₹ floor for an insider_net_buy event (§2.8.2)
-    insider_min_value_over_adv: float = 0.05      # AND value/20d-ADV floor (§2.8.2)
+    insider_min_value_over_adv: float = 0.05      # NOT applied anywhere (planned §2.8.2 AND floor)
     pledge_delta_min_pct: float = 5.0             # QoQ promoter-pledge %-point change to flag (§2.8.2)
 
 
@@ -363,7 +368,7 @@ class InsCfg(BaseModel):
     population, so moving it re-opens multiplicity.
     """
 
-    stop_pct: float = 6.0                 # disaster stop: §7.1 sizing needs a risk distance, and the
+    stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance, and the
                                           # validated design is stopless — this is the deliberate
                                           # deviation, wide enough to rarely interrupt the T+20 drift
     hold_sessions: int = 20               # = the §7.1 swing max_holding cap = the validated T+20
@@ -409,11 +414,12 @@ class Hi52Cfg(BaseModel):
     #:            ÷ (per_trade_risk.overnight_gap_mult × hi52 stop_pct/100)
     #:
     #: ``N`` is the §7.1 cap on a swing position's notional — implied by the sizing rule, never a
-    #: round number chosen by hand: equity/7.5 at a 2% swing budget, a 2.5× overnight gap multiplier
-    #: and hi52's 6% stop (₹5,333 at the ₹40,000 base, ₹5,234 at the 2026-09-11 equity, ₹4,800 at
-    #: the ``equity_floor_rung`` — the smallest equity the risk table still lets a position be
-    #: opened at). The floor RISES as the book shrinks, so the registration is derived at that worst
-    #: permitted book: 2.0336 − 0.5619 = 1.4717 ⇒ **1.47**, rounded DOWN.
+    #: round number chosen by hand: equity/6 at a 2% swing budget, the 2.0× overnight gap multiplier
+    #: (O17; 2.5× before it) and hi52's 6% stop (≈₹6,667 at the ₹40,000 base, ≈₹6,543 at the
+    #: 2026-09-11 equity, ₹6,000 at the ``equity_floor_rung`` — the smallest equity the risk table
+    #: still lets a position be opened at). The floor RISES as the book shrinks, so the registration
+    #: is derived at that worst permitted book: 2.0336 − 0.4982 = 1.5354 ⇒ **1.53**, rounded DOWN
+    #: (pre-O17: ₹4,800, 1.47).
     expected_edge_pct: float | None = None
 
 
@@ -421,7 +427,8 @@ class Brk20Cfg(BaseModel):
     """§6.1 ``brk20`` operational knobs — OWNER-ONLY, never learnable.
 
     The RULE's parameters (``lookback_days``, ``vol_mult``, ``rr_target``, ``ex_skip_days``) live in
-    ``brk20.DEFAULT_PARAMS`` (the §6.3 learnable envelope) and the WO-19 stop-geometry floor lives in
+    ``brk20.DEFAULT_PARAMS`` (frozen code defaults: ``envelope.yaml`` has no ``brk20`` rows today;
+    plan §6.1 lists them as future §6.3 rows) and the WO-19 stop-geometry floor lives in
     ``brk20.FLOOR_PARAMS`` (owner-only by construction). This block holds neither: it holds the ENTRY
     MECHANISM the 2026-09-12 pre-registered backtest selected, which is a property of how the level
     is OFFERED rather than of how it is derived.
@@ -493,7 +500,7 @@ class ReconcileCfg(BaseModel):
 class BackfillCfg(BaseModel):
     """§3.2.3 BackfillJob pacing + chunking (A2: ≤3 req/s; per-request range caps per Kite interval)."""
 
-    req_per_s: int = 3                    # A2 hard budget shared via broker.rate_limiter
+    req_per_s: int = 3                    # dry-run ESTIMATE only; real pacing is rate_limiter's A2 constant
     minute_chunk_days: int = 60           # Kite historical max range per minute-interval request
     day_chunk_days: int = 2000            # Kite historical max range per day-interval request
 
@@ -550,11 +557,11 @@ class JobTimesCfg(BaseModel):
     time_exit_check_ist: time = time(9, 30)     # D2 time exit (plan Q1.6)
     reconcile_ist: time = time(15, 50)          # §4.4 job 2 (A13)
     bhavcopy_ist: time = time(18, 0)            # §4.4 job 6
-    corp_actions_ist: time = time(18, 15)       # §4.4 job 7 (A12)
+    corp_actions_ist: time = time(20, 15)       # §4.4 job 7 (A12); 18:15→20:15 2026-07-24 (NSE maintenance)
     earnings_ist: time = time(18, 30)           # §4.4 job 8 (R2)
     rec_outcomes_ist: time = time(18, 30)       # plan Q2.3 — after daily_bars (18:05), whose run it waits for
     weekly_summary_ist: time = time(19, 0)      # plan Q2.6 — after rec_outcomes (18:30)
-    deals_ist: time = time(18, 45)            # §4.4 job 9 (flagged_instrument_days)
+    deals_ist: time = time(20, 30)              # §4.4 job 9 (flagged_instrument_days); 18:45→20:30 2026-07-24
     filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)
     filings_pit_fresh_ist: time = time(19, 0)   # §2.8 filings_pit_fresh (BSE fresh insider, date-keyed)
     ins_crossings_ist: time = time(19, 15)      # §6.1 ins_crossings — MUST stay after filings_pit_fresh
@@ -566,7 +573,7 @@ class JobTimesCfg(BaseModel):
     feed_freshness_ist: time = time(21, 30)     # feed census — after the EOD feeds (deals 20:30, features 20:45)
     nightly_review_ist: time = time(21, 0)      # §5.5/§6.4
     backup_ist: time = time(21, 0)              # §10.5 (watermark-driven)
-    sector_map_weekly_day: str = "SUN"          # §4.4 job 13 (sector_map + theme_map refresh)
+    sector_map_weekly_day: str = "SUN"          # §4.4 job 13; NOT read — the Sunday cadence is hard-coded in ops.main
 
 
 class TotpAutomationCfg(BaseModel):

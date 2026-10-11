@@ -374,6 +374,7 @@ const AGENT: Table = {
   preopen_planner: { label: 'Pre-open planner' },
   nightly_reviewer: { label: 'Nightly reviewer' },
   weekly_researcher: { label: 'Weekly researcher' },
+  platform: { label: 'Engine', hint: 'Proposals the engine raises itself, such as the time exit.' },
   swing_analyst: { label: 'Swing analyst' },
   reserve: { label: 'Reserve', hint: 'Spare budget not assigned to an analyst.' },
   sdk_smoke: { label: 'Health check', hint: 'A small test call that checks the AI connection works.' },

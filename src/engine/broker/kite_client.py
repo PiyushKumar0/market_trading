@@ -9,7 +9,8 @@ REST. It exists to enforce two cross-cutting invariants on *every* call, with no
   the caller's ``intent`` through the limiter so that the §7.1 ``order_rate`` split is honoured:
   ``intent="entry"`` calls hard-stop at the 70/day cap (B3/R3) while protective / exit / square-off
   callers pass ``intent="risk_reducing"`` to draw from the uncapped-but-paced reserved pool that is
-  *never* budget-rejected.
+  *never* budget-rejected. Reads (orders/positions/holdings/margins/gtts, quote, historical) pass
+  ``intent="read"``: paced, never capped or counted.
 * **R8 structured logging** — every call logs an intent/result event (and re-raises, never swallows,
   pykiteconnect errors after logging them).
 
@@ -23,8 +24,9 @@ applies its default protection band rather than letting a market order print at 
 This client is a pass-through — the *OMS* is responsible for setting ``market_protection`` on the
 request it hands to :meth:`KiteClient.place_order`; the client forwards the request fields verbatim.
 
-This is a Phase-0 skeleton: correct signatures, rate-limit/log wiring, and real call-through to
-pykiteconnect. Request validation / typed models / margin pre-checks (C6) live in the OMS and gate.
+Production builds this client with ``orders_enabled=False`` (D8), so only the read surface is live.
+Request validation / typed models live in the OMS and gate; the C6 pre-place margin check
+(``GateContextBuilder`` ``margins_fn``) is unwired until Phase 4 (live routing).
 """
 
 from __future__ import annotations
@@ -136,8 +138,11 @@ class KiteClient:
         ``fn`` is a zero-arg callable wrapping the pykiteconnect method invocation. Any exception is
         logged (with context) and re-raised — pykiteconnect errors are NEVER swallowed (R5/R8); the
         OMS/session layers above decide how to react (e.g. token-rejected → freeze entries).
+
+        Every caller is a non-placing read, so the limiter is acquired with ``intent="read"``:
+        paced on the endpoint bucket, never capped or counted against the §7.1 entry budget.
         """
-        await self._rl.acquire(endpoint_class=endpoint_class)
+        await self._rl.acquire(endpoint_class=endpoint_class, intent="read")
         loop = asyncio.get_running_loop()
         _log.info("kite.call", op=op, endpoint_class=endpoint_class, **log_fields)
         try:
@@ -275,7 +280,8 @@ class KiteClient:
         return await self._call("orders", "holdings", lambda: self._kc.holdings())
 
     async def margins(self) -> Any:
-        """Return account margins. Checked before EVERY order (C6) — the OMS calls this pre-place."""
+        """Return account margins (C6 source). Only the daily token probe calls this today; the
+        pre-place margin check (``GateContextBuilder`` ``margins_fn``) is unwired until Phase 4 (live routing)."""
         return await self._call("orders", "margins", lambda: self._kc.margins())
 
     # -- GTT (endpoint_class="orders") ------------------------------------------------------------

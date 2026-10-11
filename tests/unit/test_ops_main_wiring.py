@@ -108,6 +108,7 @@ def _all_noop_fns() -> dict:
         opsmain.JOB_RECONCILE, opsmain.JOB_BHAVCOPY, opsmain.JOB_DAILY_BARS,
         opsmain.JOB_DEALS, opsmain.JOB_FEATURES,
         opsmain.JOB_FILINGS_PIT, opsmain.JOB_FILINGS_RESULTS,   # §2.8 date-keyed
+        opsmain.JOB_FILINGS_PIT_FRESH, opsmain.JOB_INS_CROSSINGS,
         opsmain.JOB_TICK_COMPACT,                               # §4.3/WO-7 date-keyed
     }
     return {jid: (_noop_dated if jid in date_keyed else _noop) for jid in PHASE1_JOB_IDS}
@@ -296,7 +297,7 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
 
 def test_registry_classes_and_fire_times_match_the_schedule() -> None:
     """§10.1: instruments 08:15, surveillance 08:20, universe 08:30, reconcile 15:50, bhavcopy 18:00,
-    corp-actions 18:15, earnings 18:30, deals 18:45 — in their §2.6 step-5 classes."""
+    corp-actions 20:15, earnings 18:30, deals 20:30 — in their §2.6 step-5 classes."""
     settings = load_settings()
     by_id = {s.job_id: s for s in build_job_registry(settings, _all_noop_fns()).specs()}
 
@@ -385,7 +386,7 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
     market_store, clock, calendar, conn, monkeypatch
 ) -> None:
     """Composition-root regression (2026-08-13): ``engine.ops.main``'s ``job_bhavcopy`` closure
-    (main.py:832-834) MUST forward ``BhavcopyJob.run()``'s return value to ``spec.run`` — the
+    (``engine.ops.main.job_bhavcopy``) MUST forward ``BhavcopyJob.run()``'s return value to ``spec.run`` — the
     2026-08-12 live bug was exactly this closure discarding it (``await bhavcopy.run(d)`` with no
     ``return``), which meant the ``_job_result_ok`` watermark fix never saw the degraded result
     because ``spec.run`` was always ``None`` regardless of what the underlying job returned.
@@ -407,7 +408,7 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
     bhavcopy = BhavcopyJob(market_store, clock, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
     async def job_bhavcopy(d):
-        # Mirrors engine.ops.main:job_bhavcopy (main.py:832-834) verbatim — MUST stay in sync.
+        # Mirrors engine.ops.main.job_bhavcopy verbatim — MUST stay in sync.
         return await bhavcopy.run(d)
 
     fns = _all_noop_fns()
@@ -1027,7 +1028,7 @@ def test_a_pending_entry_recommendation_is_read_the_way_the_gate_reads_it(conn, 
 
 def test_the_composition_root_really_arms_the_retest_rearm() -> None:
     """Both halves of the mechanism are wirings inside `run`, so neither is assertable any other way
-    (the `hi52` promotion's lesson: a wiring that only exists inside build_engine silently
+    (the `hi52` promotion's lesson: a wiring that only exists inside run() silently
     disappears). Half one: every ADMITTED brk20 candidate starts resting. Half two: the 60 s drain
     tick re-offers it under the window predicate and publishes what admit accepted."""
     src = inspect.getsource(opsmain.run)
@@ -1082,6 +1083,14 @@ def test_the_composition_root_really_arms_the_retest_rearm() -> None:
     # The admission and the post-admit mint are the sweep's own, not a parallel path.
     assert "_attach_feature_snapshots(features, prescreen.admit(due, today, in_window=True))" in \
         inspect.getsource(_retest_republish)
+
+
+def test_the_unverified_limits_fallback_base_matches_the_shipped_limits_yaml() -> None:
+    """A boot on an unverified limit table builds the ExposureTracker on this constant; if it drifts
+    from the seeded base, a later in-run reseed compares a half-size equity against the verified
+    floor. Plain yaml read (read-only) — never the protected-store loader."""
+    raw = yaml.safe_load((config_dir() / "limits.yaml").read_text(encoding="utf-8"))
+    assert Decimal(str(raw["capital_base_inr"])) == opsmain._FALLBACK_CAPITAL_BASE_INR
 
 
 def test_the_shipped_retest_window_is_the_variant_the_backtest_selected() -> None:

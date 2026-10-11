@@ -13,7 +13,7 @@ import re
 import sqlite3
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from engine.core.calendar import NSECalendar
@@ -22,6 +22,7 @@ from engine.core.log import get_logger
 from engine.core.scope import Scope, scope_sql
 from engine.marketdata.store import MarketStore
 from engine.strategy.scanners import brk20, hi52
+from engine.universe.builder import EXCL_ASM, EXCL_ESM, EXCL_GSM, EXCL_T2T
 
 _log = get_logger("engine.ops.why")
 
@@ -30,6 +31,7 @@ SECTION_CAP = 400
 _RESULTS_HORIZON_DAYS = 10
 _HISTORY_DAYS = 400          # >= hi52's 252 sessions plus weekend/holiday margin
 _SYMBOL = re.compile(r"[A-Z0-9&-]{1,20}")
+_A8_CODES = frozenset({EXCL_GSM, EXCL_ASM, EXCL_T2T, EXCL_ESM})
 
 
 @dataclass(frozen=True)
@@ -44,32 +46,41 @@ class _Ctx:
         return await asyncio.wait_for(self.store.arun(fn, *args, **kwargs), READ_TIMEOUT_S)
 
 
-async def _universe(c: _Ctx) -> str:
+async def _universe_snapshot(c: _Ctx) -> tuple[date | None, list[dict[str, Any]], list[str]]:
+    """``(d, rows, tried)``: today's ``universe_daily`` snapshot, else the previous session's;
+    ``d`` is None when neither exists."""
     today = c.clock.today()
-    tried = []
+    tried: list[str] = []
     for d in (today, c.calendar.previous_trading_day(today)):
         rows = await c.read(c.store.get_universe_daily, d)
-        if not rows:
-            tried.append(d.isoformat())
-            continue
-        row = next((r for r in rows if r["symbol"] == c.sym), None)
-        if row is None:
-            return f"universe: not listed on {d}"
-        if row["included"]:
-            return f"universe: included on {d}"
-        return f"universe: excluded on {d}: {', '.join(row['exclusion_reasons'] or ['no reason recorded'])}"
-    return f"universe: no snapshot for {' or '.join(tried)}"
+        if rows:
+            return d, rows, tried
+        tried.append(d.isoformat())
+    return None, [], tried
+
+
+async def _universe(c: _Ctx) -> str:
+    d, rows, tried = await _universe_snapshot(c)
+    if d is None:
+        return f"universe: no snapshot for {' or '.join(tried)}"
+    row = next((r for r in rows if r["symbol"] == c.sym), None)
+    if row is None:
+        return f"universe: not listed on {d}"
+    if row["included"]:
+        return f"universe: included on {d}"
+    return f"universe: excluded on {d}: {', '.join(row['exclusion_reasons'] or ['no reason recorded'])}"
 
 
 async def _surveillance(c: _Ctx) -> str:
-    latest = await c.read(c.store.get_latest_instruments_daily)
-    if latest is None:
-        return "surveillance: no instrument snapshot"
-    d, rows = latest
-    row = next((r for r in rows if r["tradingsymbol"] == c.sym), None)
+    # The universe build is the A8 authority; instruments_daily.surveillance is never written.
+    d, rows, tried = await _universe_snapshot(c)
+    if d is None:
+        return f"surveillance: no universe snapshot for {' or '.join(tried)}"
+    row = next((r for r in rows if r["symbol"] == c.sym), None)
     if row is None:
-        return f"surveillance: not in the {d} instrument dump"
-    return f"surveillance: {row['surveillance'] or 'none'} ({d})"
+        return f"surveillance: not listed on {d}"
+    codes = [r for r in row["exclusion_reasons"] or [] if r in _A8_CODES]
+    return f"surveillance: {', '.join(codes) or 'none'} ({d})"
 
 
 async def _results(c: _Ctx) -> str:

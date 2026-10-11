@@ -53,11 +53,9 @@ def _bars(sym: str, n: int = 200, *, close: str = "90") -> list[DailyBar]:
 def _seed_duckdb(store: MarketStore, sym: str = "TCS") -> None:
     store.upsert_universe_daily([{
         "d": TODAY, "symbol": sym, "included": False, "mis_candidate": False,
-        "exclusion_reasons": ["surveillance_asm", "watchlist_cap"], "median_traded_value": None,
+        "exclusion_reasons": ["not_mis_eligible", "surveillance_asm", "surveillance_esm"],
+        "median_traded_value": None,
     }])
-    store.upsert_instruments_daily(
-        [{"d": TODAY, "instrument_token": 1, "tradingsymbol": sym, "surveillance": "ASM-1"}]
-    )
     store.upsert_earnings_calendar([{"symbol": sym, "event_date": TODAY + timedelta(days=3)}])
     store.upsert_bars_1d(_bars(sym))
     store.upsert_insider_trades([
@@ -123,8 +121,8 @@ async def test_every_section_present(store, conn, clock):
 
     assert out.splitlines()[0] == "why TCS - 2026-06-17 10:05 IST"
     for expected in (
-        "universe: excluded on 2026-06-17: surveillance_asm, watchlist_cap",
-        "surveillance: ASM-1 (2026-06-17)",
+        "universe: excluded on 2026-06-17: not_mis_eligible, surveillance_asm, surveillance_esm",
+        "surveillance: surveillance_asm, surveillance_esm (2026-06-17)",
         "results: next on 2026-06-20",
         "levels (daily close 90.00 on 2026-06-16):",
         "hi52: arms on a close >= 95.00 (+5.6%); 52w high 100.00",
@@ -148,7 +146,7 @@ async def test_every_section_absent_for_unknown_symbol(store, conn, clock):
     out = await _why(store, conn, clock)("NOSUCH")
 
     for expected in (
-        "universe: not listed on 2026-06-17", "surveillance: not in the 2026-06-17 instrument dump",
+        "universe: not listed on 2026-06-17", "surveillance: not listed on 2026-06-17",
         "results: none dated in the next 10 days", "levels: no daily bars", "insider: no filings",
         "pledge: no shareholding filings", "last rec: none", "positions: none open",
         "last verdict: none", "last paper verdict: none",
@@ -160,12 +158,28 @@ async def test_every_section_absent_for_unknown_symbol(store, conn, clock):
 async def test_empty_stores_and_short_history(store, conn, clock):
     why = _why(store, conn, clock)
     out = await why("TCS")
-    assert "universe: no snapshot for" in out and "surveillance: no instrument snapshot" in out
+    assert "universe: no snapshot for" in out and "surveillance: no universe snapshot for" in out
 
     store.upsert_bars_1d(_bars("TCS", 30))
     out = await why("TCS")
     assert "hi52: 30 sessions of history, needs 126" in out
     assert "brk20: needs a close above" in out
+
+
+@pytest.mark.asyncio
+async def test_surveillance_reads_the_universe_snapshot(store, conn, clock):
+    """The A8 codes come from the universe build (instruments_daily.surveillance is never written):
+    an eligible symbol shows none, and yesterday's snapshot is used when today's is missing."""
+    yesterday = date(2026, 6, 16)
+    store.upsert_universe_daily([
+        {"d": yesterday, "symbol": "TCS", "included": True, "mis_candidate": True,
+         "exclusion_reasons": [], "median_traded_value": None},
+        {"d": yesterday, "symbol": "INFY", "included": False, "mis_candidate": False,
+         "exclusion_reasons": ["watchlist_cap"], "median_traded_value": None},
+    ])
+    why = _why(store, conn, clock)
+    assert "surveillance: none (2026-06-16)" in await why("TCS")
+    assert "surveillance: none (2026-06-16)" in await why("INFY")
 
 
 @pytest.mark.asyncio
@@ -206,8 +220,9 @@ async def test_failed_or_hung_read_leaves_the_other_sections(store, conn, clock,
 
     out = await _why(broken, conn, clock)("TCS")
 
-    assert "universe: unavailable" in out and "levels: unavailable" in out
-    assert "surveillance: ASM-1" in out and "last verdict: reject" in out
+    assert "universe: unavailable" in out and "surveillance: unavailable" in out
+    assert "levels: unavailable" in out
+    assert "results: next on 2026-06-20" in out and "last verdict: reject" in out
 
 
 @pytest.mark.asyncio

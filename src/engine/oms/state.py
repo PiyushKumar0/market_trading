@@ -2,8 +2,8 @@
 
 Built 2026-09-10 as the foundation tranche of Phase 3 (§8.4 addendum). Pure Tier 3: this module
 imports ``core`` only — no broker, no store, no ``engine.intelligence`` (R1, guarded by
-``tests/unit/test_import_graph.py``). Nothing here places an order or is reachable from the
-RECOMMEND pipeline; it is data + one pure function.
+``tests/unit/test_import_graph.py``). Nothing here places an order; it is data + one pure
+function (shared by the paper OMS and the risk gate's terminal-state check).
 
 **What is pinned here and why**
 

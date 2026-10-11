@@ -9,8 +9,8 @@ different things (§2.6):
 - **feed-lost-while-running** — a real incident: ticks were flowing and stopped (R2 stale-data guard).
 - **intentionally-off** — the engine is deliberately stopped between active periods. NORMAL, no alarm.
 
-Also hosts the watchdog hook: alert if an expected scheduled active-period start did not occur (§2.6/§10.4).
-Phase 0 ships the framework + the real `check()`; richer alerting wiring lands with the OMS (Phase 3).
+Missed scheduled active-period starts are NOT detected here — the out-of-band ``scripts/watchdog.py`` owns
+SCHEDULED_START_MISSED (§2.6/§10.4); ``watchdog_missed_start`` has no production caller.
 """
 
 from __future__ import annotations
@@ -595,7 +595,10 @@ class HealthMonitor:
         return session.open <= now <= session.close
 
     async def watchdog_missed_start(self, expected: str) -> None:
-        """Alert that an expected scheduled active-period start did not occur (§2.6/§10.4)."""
+        """Alert that an expected scheduled active-period start did not occur (§2.6/§10.4).
+
+        No production caller; kept as an in-process seam — ``scripts/watchdog.py`` owns the live alert.
+        """
         msg = f"expected active-period start did not occur: {expected}; an open MIS rides to the broker 15:25 backstop"
         _log.warning("missed_active_period_start", expected=expected)
         if self._alert is not None:

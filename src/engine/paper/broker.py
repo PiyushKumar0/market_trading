@@ -4,8 +4,9 @@ WO-P3-2, 2026-09-10 (§8.4 Phase-3 decomposition addendum).
 
 ``PaperBroker`` implements :class:`~engine.paper.surface.BrokerSurface`, so the OMS routes to it or
 to :class:`~engine.broker.kite_client.KiteClient` without knowing which (§3.5.3 ``routing`` flag).
-It is pure Tier-3: nothing here is reachable from the RECOMMEND pipeline and no method can place a
-real broker order, so §8.3's zero-API-orders constraint is untouched.
+Since the paper autopilot (2026-10-08, D8) the RECOMMEND pipeline's paper branch routes to it through
+the OrderManager; no method can place a real broker order and the module imports nothing from
+``engine.broker``, so §8.3's zero-API-orders constraint is untouched.
 
 Design rules, all of them load-bearing:
 
@@ -61,7 +62,7 @@ Design rules, all of them load-bearing:
 **Known v1 simplifications** (documented rather than hidden, and all in the conservative direction):
 only ``variety="regular"`` and order types MARKET / LIMIT / SL-M are accepted — SL (limit-after-
 trigger), CO, AMO and iceberg are REJECTED rather than approximated; a GTT fire is not subject to
-injected rejection (A12's fired-but-rejected handling lands with GTTManager in WO-P3-6); margins are
+injected rejection (A12's fired-but-rejected handling lands with the paper ProtectionManager, engine.oms.protection, plan Q4.5); margins are
 a static stub, not a real span/exposure calculation (C6 pre-checks live in the OMS).
 
 Two more, each with a consumer that has to know:
@@ -69,7 +70,7 @@ Two more, each with a consumer that has to know:
 * **GTT status ``"failed"`` is PAPER-ONLY.** Kite's vocabulary is ``active`` / ``triggered`` /
   ``disabled`` / ``expired`` / ``deleted``; ``"failed"`` is this broker's terminal status for a
   trigger that fired and could not book its leg (see :class:`_Gtt` and :meth:`PaperBroker.gtts`).
-  WO-P3-6's GTTManager maps it to a PROTECTION_FAILED reason; live Kite simply never produces it,
+  the paper ProtectionManager (engine.oms.protection, plan Q4.5) maps it to a PROTECTION_FAILED reason; live Kite simply never produces it,
   which is why it can be added without colliding.
 * **A cumulative-volume re-baseline blacks the symbol out for the rest of the session.** The
   participation base is measured from a HIGH-WATER cumulative (A13), so a counter that restates
@@ -248,7 +249,7 @@ class _Gtt:
     #: terminal status, ``"failed"``: the trigger crossed and the leg could NOT be booked (an invalid
     #: or corrupted leg; see :meth:`PaperBroker._match_gtts`). Live Kite never emits it, so nothing
     #: downstream can be reading it from a real GTT — it is latched here rather than left ``active``
-    #: so the trigger is not retried on every later tick, and WO-P3-6's GTTManager maps it to a
+    #: so the trigger is not retried on every later tick, and the paper ProtectionManager maps it to a
     #: PROTECTION_FAILED reason (round 4, 2026-09-10: named here, at the field the consumer reads).
     status: str = "active"
 
@@ -932,8 +933,8 @@ class PaperBroker:
 
         ``status`` is ``"active"`` or ``"triggered"`` as Kite reports them, and — paper only — the
         terminal ``"failed"``: the trigger crossed but its leg could not be booked, so the
-        protection this GTT represented does NOT exist and was not retried. WO-P3-6's GTTManager
-        turns that into a PROTECTION_FAILED reason; a reader that only knows Kite's vocabulary must
+        protection this GTT represented does NOT exist and was not retried. The paper ProtectionManager
+        (engine.oms.protection, plan Q4.5) turns that into a PROTECTION_FAILED reason; a reader that only knows Kite's vocabulary must
         not silently bucket it with ``active`` (round 4, 2026-09-10).
         """
         return [
@@ -1344,8 +1345,8 @@ class PaperBroker:
                     # LATCH, do not retry (round-3 fix, 2026-09-10). Left "active" the same trigger
                     # is re-evaluated on every later tick through it: an exception-and-log storm on
                     # the hot path for the rest of the session, and — worse — a status that reads
-                    # to WO-P3-6's GTTManager as protection that is still armed. "failed" is a
-                    # DISTINCT terminal status: the GTTManager turns it into a PROTECTION_FAILED
+                    # to the paper ProtectionManager as protection that is still armed. "failed" is a
+                    # DISTINCT terminal status: the ProtectionManager turns it into a PROTECTION_FAILED
                     # reason, and only the GTT's owner may re-arm the trigger. CONDITIONAL (round-4
                     # review): a leg that already REGISTERED marked the GTT "triggered" before the
                     # guarded postback, and a later raise inside the same try (a logging sink, say)
@@ -1369,7 +1370,7 @@ class PaperBroker:
         ``_register`` books and rests the leg, the GTT is marked ``triggered``, and only THEN is the
         postback attempted, guarded. The old ``_book`` published in the middle of that pair, so an
         injected ``publish`` that threw unwound with the leg already resting and the GTT latched
-        ``"failed"`` by the caller — a resting leg the GTTManager (WO-P3-6) would read as failed
+        ``"failed"`` by the caller — a resting leg the paper ProtectionManager would read as failed
         protection, and, had the caller left it ``"active"`` instead, the SAME leg re-fired on the
         next tick through the trigger: a second exit on a position that already has one (the §3.2.8
         double-exit hazard).

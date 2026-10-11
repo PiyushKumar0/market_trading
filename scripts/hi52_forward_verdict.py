@@ -46,9 +46,10 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   (``breakeven_pct``, never the fees-only view), charged at the notional **§7.1 sizing actually
   produces for this rule** — never a round number chosen by hand. A swing position is capped by
   ``per_trade_risk``: ``swing_position_pct`` (2.0%) of equity, charged at ``overnight_gap_mult``
-  (2.5×) the stop distance, and ``hi52``'s stop is 6% — so ``notional <= equity × 2% / (2.5 × 6%)``
-  = ``equity / 7.5`` (:func:`sizing_notional`). It matters: at ₹8,000 the round trip is 0.4343% and
-  at the ₹5,234 the rule really gets it is 0.5357%, and under-charging by 0.1 pp biases BOTH demote
+  (2.0× since O17; 2.5× at registration) the stop distance, and ``hi52``'s stop is 6% — so
+  ``notional <= equity × 2% / (2.0 × 6%)`` = ``equity / 6`` (:func:`sizing_notional`). It matters:
+  at ₹8,000 the round trip is 0.4343% and at the ≈₹6,543 the rule gets at the 2026-09-11 equity it
+  is 0.4769%, and under-charging by ~0.04 pp (0.1 pp pre-O17) biases BOTH demote
   clauses toward keeping an unvalidated rule trading. The equity is the SMALLEST snapshot in the
   measured window (``state.db``), i.e. the tightest capital base any measured signal was sized
   under — the conservative reading, so a shrinking book raises the floor rather than hiding behind
@@ -59,9 +60,9 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   **ONE derivation, two readings:** :func:`registered_edge_pct` computes ``settings.hi52
   .expected_edge_pct`` from the SAME :func:`sizing_notional` + :func:`cost_floor_pct` pair, at the
   smallest equity the §7.1 table still lets the book open a position at (the ``equity_floor_rung``,
-  −10% of the ₹40,000 base ⇒ ₹36,000 ⇒ ₹4,800 ⇒ 0.5619% ⇒ 2.0336 − 0.5619 = **1.47**, rounded
-  DOWN). The registered edge and this script's floor therefore cannot drift apart: a unit test pins
-  ``registered_edge_pct() == load_settings().hi52.expected_edge_pct``, so an owner change to
+  −10% of the ₹40,000 base ⇒ ₹36,000 ⇒ ₹6,000 ⇒ 0.4982% ⇒ 2.0336 − 0.4982 = **1.53**, rounded
+  DOWN; pre-O17 at 2.5×: ₹4,800 ⇒ 1.47). The registered edge and this script's floor therefore
+  cannot drift apart: a unit test pins ``registered_edge_pct() == load_settings().hi52.expected_edge_pct``, so an owner change to
   ``limits.yaml``, to the stop, or to the cost tables fails that test instead of silently leaving a
   stale edge registered.
 * **Horizons are measured on their OWN event sets.** A signal old enough for T+10 but not yet for
@@ -185,7 +186,7 @@ def sizing_notional(
     ``qty_max = floor(position_pct% × equity / (gap_mult × stop_pct% × price))`` (``gate.py``
     ``_rule_per_trade_risk``), so ``qty_max × price <= position_pct% × equity / (gap_mult ×
     stop_pct%)`` — the price cancels and the cap is a pure function of these three numbers. The
-    other sizing rules do not bind here: ``capital_cap`` allows ₹40,000 deployed against this ₹5k.
+    other sizing rules do not bind here: ``capital_cap`` allows ₹40,000 deployed against this ~₹6.5k.
 
     Returns ``REFERENCE_EQUITY_INR``-based arithmetic only; a non-positive or non-finite input is a
     refusal (``ValueError``) rather than a silently tiny notional, because a tiny notional means a
@@ -200,7 +201,7 @@ def sizing_notional(
 
 
 #: The notional at the registration equity — what the report charges when the store shows nothing.
-#: ₹5,234 at ₹39,256.65 equity, a 2% swing budget, the 2.5× overnight gap multiplier and a 6% stop.
+#: ≈₹6,543 at ₹39,256.65 equity, a 2% swing budget, the 2.0× (O17) overnight gap multiplier and a 6% stop.
 REFERENCE_NOTIONAL = sizing_notional(
     REFERENCE_EQUITY_INR, position_pct=SWING_POSITION_PCT,
     gap_mult=OVERNIGHT_GAP_MULT, stop_pct=STOP_PCT,

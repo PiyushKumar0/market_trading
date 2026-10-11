@@ -11,7 +11,9 @@
 #   - Groww's legal name is "Billionbrains Garage Ventures Ltd." — no headline ever says that.
 #   - "SBI Card(s)" is how the press writes SBI Cards and Payment Services.
 #   - Lloyds Metals & Energy is OUT of the NIFTY200 universe: the alias exists so the resolver
-#     records it as out_of_universe (the §3.2.4 disposition) instead of a bare no_match.
+#     records it as out_of_universe (the §3.2.4 disposition) instead of a bare no_match. (Since
+#     O15 it is a NIFTY 500 member, so it now resolves in-universe when rule-passing; the alias
+#     stays as a press short form.)
 #   - "Kotak Bank" is the common short form (the full "Kotak Mahindra Bank" seeds from the dump).
 
 schema_version: 1
@@ -67,5 +69,7 @@ aliases:
   - { alias: "Grasim",           tradingsymbol: GRASIM }      # 3 bare-form hits to 08-13
   # Vikram Solar is OUT of the NIFTY200 universe: the LLOYDSME pattern — the alias exists so the
   # resolver records out_of_universe (the §3.2.4 disposition) instead of a bare no_match, keeping
-  # the 2026-08-17 probe's motivating name visible in the audit trail.
+  # the 2026-08-17 probe's motivating name visible in the audit trail. (Since O18 it is a NIFTY
+  # Total Market member, so it now resolves in-universe when rule-passing; the alias stays as a
+  # press short form.)
   - { alias: "Vikram Solar",     tradingsymbol: VIKRAMSOLR }

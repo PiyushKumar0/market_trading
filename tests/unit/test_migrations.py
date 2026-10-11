@@ -58,7 +58,7 @@ def test_engine_lifecycle_singleton_seeded(db_path):
 
 def test_funnel_raw_counts_table_upserts_absolute_values(db_path):
     """2026-08-21: the WO-9 RAW pre-screen counters get a DB home so a restart stops zeroing them
-    (the 22:35 review reported ``raw=None`` on 4 of the last 6 trade days). The PK is
+    (the nightly review reported ``raw=None`` on 4 of the last 6 trade days). The PK is
     (d, strategy_id) precisely because the flush re-writes the day's ABSOLUTE total whenever it
     changes — the write has to be idempotent no matter how many times the engine bounced."""
     conn = connect(db_path)

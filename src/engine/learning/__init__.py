@@ -1,1 +1,1 @@
-"""Learning ledger, online River models, champion/challenger lifecycle, validation (R4). Writes only its own tables + envelope_state. Phase 2+."""
+"""Validation/CPCV, sweep, reports, exit_sim/stop_geometry, benchmark, evidence, hi52_forward and research harnesses (R4). The ``learning_ledger`` TABLE is live (written by ops.pipeline and oms.positions/exits); only the plan's LearningLedger class (§3.2.10), River models and the champion/challenger lifecycle are unbuilt (plan §6.4; autonomous promotion is Phase 5)."""

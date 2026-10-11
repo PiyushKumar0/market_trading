@@ -626,7 +626,7 @@ def seed_raw_counts(conn, d: date = D, **fires: int) -> None:
 
 def test_funnel_raw_prefers_the_persisted_rows_over_a_restarted_counter(conn) -> None:
     """THE BUG (4 of the last 6 trade days): the pre-screen's raw counters are process memory, so a
-    mid-day restart zeroed them and the 22:35 line reported ``raw=None`` — or, worse, the handful of
+    mid-day restart zeroed them and the 21:00 line reported ``raw=None`` — or, worse, the handful of
     fires that happened after the bounce. The table holds the day's total across every process that
     ran it, so it WINS; ``raw_by_strategy`` here is the post-restart remnant it has to beat."""
     seed_funnel(conn)
@@ -685,7 +685,7 @@ def test_funnel_renders_a_day_where_everything_that_fired_was_parked(conn) -> No
 async def test_the_eod_funnel_line_reads_the_table_after_a_mid_day_restart(
     conn, gov, clock, calendar
 ) -> None:
-    """End to end at the job seam: the 22:35 review is correct after any number of restarts because
+    """End to end at the job seam: the 21:00 review is correct after any number of restarts because
     ``_log_funnel`` goes through the same table-first read."""
     seed_funnel(conn)
     seed_raw_counts(conn, orb=40, rsi2=6)

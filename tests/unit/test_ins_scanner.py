@@ -1,7 +1,7 @@
 """``ins`` scanner (§6.1 addendum, 2026-08-17) — crossing row -> SignalCandidate translation.
 
 PINNED worked example: a ₹1cr-threshold crossing worth ₹3cr on a symbol whose crossing-session close
-was 100.00, at the shipped 6% stop. All arithmetic is hand-computed and params are passed explicitly,
+was 100.00, at a 6% stop. All arithmetic is hand-computed and params are passed explicitly,
 so an owner settings change can never silently break these tests.
 """
 
@@ -11,6 +11,7 @@ import math
 from datetime import date
 from decimal import Decimal
 
+from engine.core.config import InsCfg, load_settings, repo_root
 from engine.strategy.scanners import ins
 from engine.strategy.scanners.ins import Crossing, scan_crossing, sweep_crossings
 
@@ -73,7 +74,7 @@ def test_stop_sits_the_configured_percent_below_entry_across_prices():
 
 def test_alternate_stop_pct_moves_only_the_stop():
     """`ins.stop_pct` is an owner knob (a FUTURE §6.3 envelope row, range [4-8]): the whole envelope
-    must produce coherent levels, not just the 6.0 default."""
+    must produce coherent levels, not just one value."""
     for stop_pct, expected in (("4.0", "96.00"), ("6.0", "94.00"), ("8.0", "92.00")):
         cand = scan_crossing(_crossing(), params={**P, "stop_pct": float(stop_pct)})
         assert cand is not None, stop_pct
@@ -87,7 +88,7 @@ def test_tick_rounding_degeneracy_emits_nothing():
     ``levels_coherent`` shape is then unsatisfiable and the rule must emit NOTHING rather than ship
     an incoherent plan (the brk20 convention: coherence is tested AFTER rounding, not before).
 
-    Hand-computed at the shipped 6%: 0.40 x 0.94 = 0.376, which is 7.52 ticks and rounds HALF-UP to
+    Hand-computed at a 6% stop: 0.40 x 0.94 = 0.376, which is 7.52 ticks and rounds HALF-UP to
     8 ticks = 0.40 — straight back onto the entry, leaving no risk distance at all."""
     assert scan_crossing(_crossing(close="0.40"), params=P) is None
     # Everything below it collapses the same way (the stop distance is sub-half-tick throughout).
@@ -96,7 +97,7 @@ def test_tick_rounding_degeneracy_emits_nothing():
 
 
 def test_tick_rounding_boundary_the_smallest_price_that_still_emits():
-    """The EXACT boundary of the degeneracy above, hand-computed at the shipped 6% stop:
+    """The EXACT boundary of the degeneracy above, hand-computed at a 6% stop:
 
     * entry 0.40 -> 0.376 = 7.52 ticks -> half-up 8 ticks = 0.40 == entry  => refuses (above).
     * entry 0.45 -> 0.423 = 8.46 ticks -> half-up 8 ticks = 0.40 <  entry  => emits, by one tick.
@@ -162,6 +163,8 @@ def test_sweep_of_nothing_is_empty_not_an_error():
 def test_defaults_match_the_shipped_settings_block():
     """``DEFAULT_PARAMS`` documents the same numbers ``config/settings.yaml``'s ``ins:`` block ships;
     a drift between the two would make the module docstring's pinned math a lie."""
-    assert ins.DEFAULT_PARAMS["stop_pct"] == 6.0
-    assert ins.DEFAULT_PARAMS["hold_sessions"] == 20
-    assert ins.DEFAULT_PARAMS["threshold_inr"] == 10_000_000.0
+    shipped = load_settings(repo_root() / "config").ins
+    assert ins.DEFAULT_PARAMS["stop_pct"] == shipped.stop_pct
+    assert ins.DEFAULT_PARAMS["hold_sessions"] == shipped.hold_sessions
+    assert ins.DEFAULT_PARAMS["threshold_inr"] == shipped.threshold_inr
+    assert InsCfg().stop_pct == shipped.stop_pct      # the pydantic fallback agrees too

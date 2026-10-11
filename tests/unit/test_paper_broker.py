@@ -1209,9 +1209,9 @@ async def test_a_broken_gtt_leg_never_raises_out_of_on_tick_and_latches_to_faile
     logged ONCE and the GTT LATCHED to a distinct terminal status.
 
     Left "active" the trigger is re-evaluated on every subsequent tick through it -- a per-tick
-    exception+log storm on the hot path for the rest of the session -- and it reads to WO-P3-6's
-    GTTManager as protection that is still armed. "failed" is neither: it stops the retry and it is
-    the status the GTTManager turns into a PROTECTION_FAILED reason.
+    exception+log storm on the hot path for the rest of the session -- and it reads to the paper
+    ProtectionManager as protection that is still armed. "failed" is neither: it stops the retry and it is
+    the status the ProtectionManager turns into a PROTECTION_FAILED reason.
     """
     now.set(at(10, 0, 0))
     gid = await broker.place_gtt(_oco("95.00", "110.00"))
@@ -1227,7 +1227,7 @@ async def test_a_broken_gtt_leg_never_raises_out_of_on_tick_and_latches_to_faile
     assert bus.frames == []
     assert (await broker.gtts())[0]["status"] == "failed"
 
-    # ...and not even repairing the leg re-arms it. Only the owner of the GTT (WO-P3-6) may.
+    # ...and not even repairing the leg re-arms it. Only the owner of the GTT (the paper ProtectionManager) may.
     broker._gtt_book[gid].orders[0]["quantity"] = 10
     broker.on_tick(tick(at(10, 0, 4), "92.00"))
     assert bus.frames == []
@@ -1244,7 +1244,7 @@ async def test_a_raising_publish_never_leaves_a_resting_leg_with_a_gtt_that_did_
     combination is a leg resting on the book with a GTT that is NOT ``triggered``: left ``active``
     the same trigger re-fires the leg on the next tick through it and puts a SECOND exit on a
     position that already has one (the 3.2.8 double-exit hazard), and latched ``failed`` it tells
-    WO-P3-6's GTTManager that protection failed while that protection is in fact resting.
+    the paper ProtectionManager that protection failed while that protection is in fact resting.
 
     (A leg that cannot be REGISTERED -- a corrupt leg, the case above -- still latches ``failed``:
     there, nothing is resting.)

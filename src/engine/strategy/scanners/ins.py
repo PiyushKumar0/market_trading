@@ -45,7 +45,7 @@ sweep admits the row. So three distinct prices are in play and only one of them 
 Levels, pre-registered in the plan:
 
 * ``entry`` = ``round_to_tick(reference_close)`` — the pre-open reference above.
-* ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **6%**. This is a **disaster
+* ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **5%**. This is a **disaster
   stop and a deliberate deviation from the stopless validated design**: §7.1 sizing needs a risk
   distance, so one has to exist. It is set wide enough that the T+10/T+20 drift capture is rarely
   interrupted; its interference is measurable in the ledger and reviewable. It is NOT the rule's
@@ -104,7 +104,7 @@ STRATEGY_ID = "ins"
 #: ``threshold_inr`` is owner-FIXED and never learnable at all: it defines the validated event
 #: population (§6.1 — moving it re-opens multiplicity).
 DEFAULT_PARAMS: dict[str, float] = {
-    "stop_pct": 6.0,             # disaster stop; deliberate deviation from the stopless validated design
+    "stop_pct": 5.0,             # disaster stop; deliberate deviation from the stopless validated design
     "hold_sessions": 20,         # = the §7.1 swing max_holding cap = the validated T+20 horizon
     "threshold_inr": 10_000_000.0,   # ₹1cr — the score denominator; the EVENT floor lives in the job
 }

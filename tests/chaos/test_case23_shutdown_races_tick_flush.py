@@ -10,7 +10,7 @@ Plan row (IMPLEMENTATION_PLAN.md §9.4, case 23), "Must hold":
     before store close; ENGINE_STOPPED still emitted"
 
 Composition (``tests/chaos/_lifecycle_rig.py``): the live tick path exactly as main.py wires it — a
-real ``MarketStore`` (``from_settings``: 60 s / 2000-tick batching) with a real ``BarBuilder``
+real ``MarketStore`` (``from_settings``: the store defaults, 60 s / 30,000-tick batching) with a real ``BarBuilder``
 subscribed to ``"tick"`` on the real ``EventBus``; ticks arrive by fire-and-forget ``bus.publish`` (as
 ``TickerSupervisor`` publishes them), so the due flush runs through ``BarBuilder.on_tick_event`` →
 ``MarketStore.aflush_ticks`` on the store's ``mt-flush`` thread. The flush is held mid-flight inside

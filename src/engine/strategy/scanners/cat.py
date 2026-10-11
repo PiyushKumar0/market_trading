@@ -54,9 +54,9 @@ Levels, pre-registered in the plan:
 
 * ``entry`` = ``round_to_tick(reference_close)`` — the pre-open reference above.
 * ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **5%**. A **disaster stop**:
-  §7.1 sizing needs a risk distance, so one has to exist. 5 rather than the ``ins`` 6 because the
-  §7.1 ``per_trade_risk.overnight_gap_mult`` (2.5x) arithmetic applies to a swing entry — the same
-  correction made to ``ins`` on 2026-08-17. It is NOT the rule's exit.
+  §7.1 sizing needs a risk distance, so one has to exist. 5 because the §7.1
+  ``per_trade_risk.overnight_gap_mult`` arithmetic applies to a swing entry (2.5x when chosen, 2.0x
+  since O17) — the same 6 -> 5 correction made to ``ins`` on 2026-08-17. It is NOT the rule's exit.
 * ``target`` = ``None``. The rule has no price target. The v1 ATR-anchored ``rr_target`` band belonged
   to the retired confirmation design; inventing a level to replace it would put a fabricated number
   into the gate's edge math.

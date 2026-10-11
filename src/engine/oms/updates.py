@@ -106,7 +106,8 @@ _WORKING_TARGETS: frozenset[OrderState] = frozenset(
 #: Payload flags that mark an event as a NO-OP: the order is returned UNCHANGED and the event is
 #: audited through :meth:`engine.oms.store.OrderStore.record_noop` (the only door onto a terminal
 #: row). Published as a set so a caller — and the §9.2 property test — can recognise a no-op without
-#: enumerating flags it does not know about; ``duplicate_reason`` carries the why for all three.
+#: enumerating flags it does not know about; ``duplicate_reason`` carries the why for ``duplicate`` and
+#: ``illegal_transition``; an ``intermediate`` no-op is explained by its ``broker_status``.
 NOOP_FLAGS: frozenset[str] = frozenset({"duplicate", "intermediate", "illegal_transition"})
 
 

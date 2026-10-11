@@ -7,9 +7,9 @@ part that touches I/O:
   §7.1 rule needs, already resolved. Because it holds no handles, :meth:`RiskGate.evaluate` is a pure
   function of ``(action, ctx)`` and the whole limit table is table-testable (§9.1).
 - :class:`GateContextBuilder` — assembles that bag from DETERMINISTIC broker/exchange sources ONLY
-  (R1): ``InstrumentStore`` (tick/lot, F&O flag), the ``universe_daily`` snapshot, the surveillance
-  columns, ``sector_map``, ``earnings_calendar``, ``ExposureTracker``, ``ModeManager`` (incl. the
-  owner-set trade window), ``KillSwitch``, ``NSECalendar``, live LTP/feed-age callbacks and the
+  (R1): ``InstrumentStore`` (tick/lot, F&O flag), the ``universe_daily`` snapshot (eligibility and
+  its A8 surveillance codes), ``sector_map``, ``earnings_calendar``, ``ExposureTracker``,
+  ``ModeManager`` (incl. the owner-set trade window), ``KillSwitch``, ``NSECalendar``, live LTP/feed-age callbacks and the
   margins API. §9.1 pins that the media/origination tables (headline store, cluster store, aggregated
   sentiment, the origination watchlist) are NOT readable from here — the §7.1 ``catalyst_guard`` block
   is stored in the protected table for governance but ENFORCED UPSTREAM in the deterministic
@@ -287,6 +287,8 @@ class GateContext(BaseModel):
 
     # -- session + owner-set window (§7.1 trade_window) ------------------------------------
     trade_window: TradeWindow | None = None
+    # Informational only: no rule reads these; window bounds are validated against the session
+    # when the owner sets them (ModeManager.validate_window).
     session_open: time | None = None
     session_close: time | None = None
 
@@ -1325,6 +1327,24 @@ def _eligible_universe_row(rows: Sequence[Mapping[str, Any]], symbol: str) -> di
     return None
 
 
+#: Prefix of the A8 exclusion codes (``engine.universe.builder.EXCL_GSM``…, written by
+#: ``SurveillanceLists.reasons_for``), duplicated for the same layering reason as ``_EXCL_CAP_ONLY``.
+_SURVEILLANCE_PREFIX = "surveillance_"
+
+
+def _surveillance_codes(rows: Sequence[Mapping[str, Any]], symbol: str) -> str | None:
+    """``symbol``'s A8 codes on its ``universe_daily`` row, comma-joined; ``None`` when unflagged or
+    absent. The universe build is the A8 authority (``instruments_daily.surveillance`` is never
+    written). A flagged row is never eligible, so the ``surveillance`` rule changes no verdict; it
+    makes an ineligible symbol's audit say why."""
+    for row in rows:
+        if row.get("symbol") == symbol:
+            codes = [str(r) for r in row.get("exclusion_reasons") or []
+                     if str(r).startswith(_SURVEILLANCE_PREFIX)]
+            return ",".join(codes) or None
+    return None
+
+
 class GateContextBuilder:
     """Assembles a :class:`GateContext` from DETERMINISTIC broker/exchange sources only (R1).
 
@@ -1442,7 +1462,8 @@ class GateContextBuilder:
         day_mtm = self._exposure.day_mtm(d)
         day_mtm_pct = (day_mtm / base * _HUNDRED) if base > 0 else Decimal(0)
 
-        universe_row = await self._universe_row(symbol, d)
+        universe_rows = await self._universe_rows(d)
+        universe_row = _eligible_universe_row(universe_rows, symbol)
         pending = self._pending_entry_rec_symbols(now) if real else self._paper_pending_entry_symbols()
         orders = self._orders()
 
@@ -1504,7 +1525,7 @@ class GateContextBuilder:
             index_tick_age_s=self._tick_age_fn(self._index_symbol) if self._tick_age_fn else None,
             in_universe=universe_row is not None,
             mis_candidate=bool(universe_row and universe_row.get("mis_candidate")),
-            surveillance_flag=await self._surveillance_flag(symbol, d),
+            surveillance_flag=_surveillance_codes(universe_rows, symbol),
             is_fno=self._instruments.is_fno(symbol),
             results_day_today=await self._results_day(symbol, d),
             expiry_day=self._expiry_day_fn(d) if self._expiry_day_fn else False,
@@ -1633,19 +1654,10 @@ class GateContextBuilder:
         return pending_entry_symbols(self._recommendations(), now)
 
     # ------------------------------------------------------------------ store reads (executor)
-    async def _universe_row(self, symbol: str, d: date) -> dict[str, Any] | None:
-        """``symbol``'s ``universe_daily`` row for ``d`` iff the symbol is ELIGIBLE — see
-        :func:`_eligible_universe_row` (O15, 2026-09-04)."""
-        rows = await self._store.arun(self._store.get_universe_daily, d)
-        return _eligible_universe_row(rows, symbol)
-
-    async def _surveillance_flag(self, symbol: str, d: date) -> str | None:
-        rows = await self._store.arun(self._store.get_instruments_daily, d)
-        for row in rows:
-            if row.get("tradingsymbol") == symbol:
-                flag = row.get("surveillance")
-                return str(flag) if flag else None
-        return None
+    async def _universe_rows(self, d: date) -> list[dict[str, Any]]:
+        """Day ``d``'s ``universe_daily`` rows: one read per candidate, feeding both
+        :func:`_eligible_universe_row` (O15) and :func:`_surveillance_codes` (A8)."""
+        return list(await self._store.arun(self._store.get_universe_daily, d))
 
     async def _results_day(self, symbol: str, d: date) -> bool:
         rows = await self._store.arun(

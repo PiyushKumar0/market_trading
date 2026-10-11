@@ -219,10 +219,12 @@ FORWARD_DRAIN_MODES = ("paced", "immediate")
 #: Minutes between paced drains — the window over which candidates ACCUMULATE before one of them is
 #: chosen. Constrained from three sides: strictly above the 60 s scheduler pulse that drives it (or
 #: the cadence would just be the pulse); small against ``TTL_INTRADAY_MIN`` (20) so a queued
-#: candidate gets several chances before its own levels go stale; and cap × pacing must fit the
-#: trade window (12 slots at DG0 ⇒ 36 min of drains, 4 at DG1+ ⇒ 12 min). A LONGER interval buys a
-#: better-populated queue at the cost of latency to the analyst — 3 min was chosen against the
-#: 2026-08-14 arrival rate (66 candidates by 10:13 ⇒ ~2 per pacing interval at the open).
+#: candidate gets several chances before its own levels go stale; and drains span
+#: ``prescreen_cap_per_day`` × ``FORWARD_PACING_MIN`` minutes, compared against the owner-set trade
+#: window (``trade_window_state``, seeded from settings.yaml ``trade_window``): whichever is shorter
+#: binds. A LONGER interval buys a better-populated queue at the cost of latency to the analyst —
+#: 3 min was chosen against the 2026-08-14 arrival rate (66 candidates by 10:13 ⇒ ~2 per pacing
+#: interval at the open).
 FORWARD_PACING_MIN = 3
 
 #: Wall-clock ceiling on ONE gate-context build inside :meth:`RecommendationPipeline._gate_and_persist`
@@ -1106,7 +1108,7 @@ class RecommendationPipeline:
         slot for day ``d`` — the conservative default for EVERY handler path; :meth:`_rearm_slot`
         flips it back for the never-evaluated drops. Boot rehydration (``engine.ops.main``) rebuilds
         the prescreen's in-memory dedupe/caps from these rows, so a restart no longer resets the
-        20/day bound. A journal failure degrades to the old in-memory-only behavior, never blocks
+        ``max_candidates_per_day`` bound. A journal failure degrades to the old in-memory-only behavior, never blocks
         the candidate.
 
         Stamps ``unsizeable`` from ``candidate.raw_levels.stop`` (2026-08-14 fix): this write happens
@@ -1658,7 +1660,7 @@ class RecommendationPipeline:
 
         THE BUG. The top of the WO-9 funnel — what the scanners PRODUCED, before dedupe and the
         §3.2.5 caps — was the one funnel number with no DB home, so every engine restart zeroed it
-        and the 22:35 ``funnel_utilization`` line reported ``raw=None`` ("unmeasured") for the whole
+        and the nightly ``funnel_utilization`` line reported ``raw=None`` ("unmeasured") for the whole
         day. That happened on 4 of the last 6 trade days, which is WO-9's own "the analyst never saw
         it vs nothing fired" ambiguity, re-introduced by the restart.
 
@@ -1963,7 +1965,7 @@ class RecommendationPipeline:
         Journalling is no longer untouched (D1 (c), 2026-09-11). The RE-QUEUE branch refunds the
         charge :meth:`_take_forward_slot` made, because the front entry it enqueues will be drained
         again and charged AGAIN — without the refund one candidate that blew up mid-call costs two
-        slots out of a cap that is four a day at DG1+. The LOST branch does not refund: nothing will
+        slots out of the day's forward cap. The LOST branch does not refund: nothing will
         charge for that candidate again, and WO-20d's reading still holds for the attempt that ends
         there — one candidate, one net charge. A lost candidate is never marked evaluated by any
         path here.
@@ -2004,7 +2006,7 @@ class RecommendationPipeline:
         THE BURN (2026-09-11). The charge and the journal row are written BEFORE the analyst call,
         so an infrastructure failure — timeout, SDK death, transport cancellation — spent a slot on
         a call that produced no verdict, no ``agent_calls`` row and no proposal: 110 charges burned
-        that way. At the DG1+ cap of four, one timeout is a quarter of the day. The §3.2.5 admission
+        that way (the DG1+ cap was a flat four then, so one timeout was a quarter of the day). The §3.2.5 admission
         slot was already refunded on this path (2026-07-29); this is the sibling refund for the
         analyst quota, and it is scoped to the same fact — NOTHING EVALUATED IT. A governor block, a
         no_action verdict and a gate rejection are all real outcomes and never reach here.
@@ -2183,7 +2185,8 @@ class RecommendationPipeline:
                          reason=getattr(decision, "reason", None))
             return
         # §5.2(a) forward cap (agents.yaml prescreen_cap_per_day at DG0 — 48 since 2026-08-18,
-        # was 12 from 2026-08-11, 6 before; 4 at DG1+ — §5.6): the governor owns the number, this
+        # was 12 from 2026-08-11, 6 before; floor(base × degraded_forward_cap_frac) at DG1+, the
+        # flat 4 retired 2026-09-12 — §5.6): the governor owns the number, this
         # counter the enforcement
         # (2026-07-28 review: it had no consumer, so a volatile day could burn 20 analyst calls).
         # Counts only calls that reach the harness; the coarse prescreen settings cap still bounds
@@ -2241,7 +2244,7 @@ class RecommendationPipeline:
         )
         proposal_id = str(ULID())
         # ENTRY evaluation (§5.2 trigger (a)): this is the stamp the delivered entry recommendation
-        # actually carries — :meth:`build_recommendation` only falls back to its own (WO-V).
+        # actually carries — :meth:`build_recommendation` only falls back to its own.
         valid_until = self._ttl(candidate.style)
         result = await self._harness.run_single_shot(
             self._agent_def(),
@@ -2942,7 +2945,7 @@ class RecommendationPipeline:
         proposal_id = str(ULID())
         style = str(position["style"] or "intraday")
         # A position event may only yield an exit or a stop tighten, so this stamp keeps TODAY's
-        # close (no ``entry=``): WO-D2's one-exit-per-session cadence needs yesterday's to be dead.
+        # close: WO-D2's one-exit-per-session cadence needs yesterday's to be dead.
         valid_until = self._ttl(style)
         result = await self._harness.run_single_shot(
             self._agent_def(),

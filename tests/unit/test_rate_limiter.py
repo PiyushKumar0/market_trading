@@ -56,6 +56,44 @@ async def test_risk_reducing_never_rejected_even_when_entry_exhausted():
 
 
 @pytest.mark.asyncio
+async def test_read_intent_is_pacing_only_never_capped_or_counted():
+    clock = Clock(time_source=lambda: datetime(2026, 6, 17, 10, 0, tzinfo=IST))
+    rl = RateLimiter(clock, sustained_per_s=1.0, burst=1000, entry_calls_per_day=70)
+
+    for _ in range(100):
+        await rl.acquire("orders", intent="read")
+    assert rl.orders_today() == (0, 0)
+
+    # The entry cap and the risk-reducing lane are untouched by the reads.
+    for _ in range(70):
+        await rl.acquire("orders", intent="entry")
+    with pytest.raises(EntryBudgetExhausted):
+        await rl.acquire("orders", intent="entry")
+    await rl.acquire("orders", intent="risk_reducing")
+    await rl.acquire("orders", intent="read")          # still admitted with the entry budget spent
+    assert rl.orders_today() == (70, 1)
+
+
+@pytest.mark.asyncio
+async def test_read_intent_still_paces_on_the_order_bucket(monkeypatch):
+    ft = _FakeTime(datetime(2026, 6, 17, 10, 0, tzinfo=IST))
+    clock = Clock(time_source=ft)
+
+    async def fake_sleep(secs: float) -> None:
+        ft.advance(secs)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    rl = RateLimiter(clock, sustained_per_s=1.0, burst=2, entry_calls_per_day=100)
+    await rl.acquire("orders", intent="read")
+    await rl.acquire("orders", intent="read")
+    t_before = ft.t
+    await rl.acquire("orders", intent="read")
+    assert ft.t >= t_before + timedelta(seconds=0.9)
+    assert rl.orders_today() == (0, 0)
+
+
+@pytest.mark.asyncio
 async def test_reset_day_zeroes_counters():
     clock = Clock(time_source=lambda: datetime(2026, 6, 17, 10, 0, tzinfo=IST))
     rl = RateLimiter(clock, sustained_per_s=1.0, burst=100, entry_calls_per_day=70)

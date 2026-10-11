@@ -323,7 +323,7 @@ def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     assert '"grade":"context"' in v
     assert '"event_type":"order_win"' in v
     assert '"materiality":0.72' in v
-    assert '"confirm_trigger":"1405.00"' in v
+    assert "confirm_trigger" not in v and "invalidation" not in v   # retired v1 levels stay out of prompts
     assert "sentiment symbol RELIANCE: +0.420" in v
     assert "sentiment sector Energy: +0.150" in v
     assert "sentiment market: -0.110" in v
@@ -564,7 +564,8 @@ def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_ta
     assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in lines
     assert f"  NOTE - {STRUCTURAL_MARKER}: {UNWATCHED} is outside the intraday tick" in lines
     assert "  watchlist, so it has no 1m bars this session and never will. The full-universe batch" in lines
-    assert "  rules (brk20, ins) deliberately originate for ANY eligible symbol, watchlist or not." in lines
+    assert "  rules (brk20, hi52, ins, cat, cat_reversal) deliberately originate for eligible symbols," in lines
+    assert "  watchlist or not." in lines
     assert "  Judge this swing candidate on the daily bars below - that is the series its rule fired" in lines
     assert "  on. An empty 1m tail here is neither missing evidence nor a feed outage." in lines
 
@@ -655,7 +656,7 @@ bars_1m last 30 (time o h l c vol, oldest first):
   10:04 1404.00 1405.00 1403.00 1404.50 1004
 session: day H 1405.00 / L 1399.00, +0.32% from open, +0.17% from VWAP, 50m elapsed
 catalyst (sentiment as of 08:35):
-  watchlist entry: {"confirm_trigger":"1405.00","direction":"long","event_type":"order_win","grade":"context","invalidation":"1388.00","materiality":0.72,"source_domain_count":3}
+  watchlist entry: {"direction":"long","event_type":"order_win","grade":"context","materiality":0.72,"source_domain_count":3}
   sentiment symbol RELIANCE: +0.420
   sentiment sector Energy: +0.150
   sentiment market: -0.110

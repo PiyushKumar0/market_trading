@@ -39,7 +39,9 @@ SETTLE_S = 5.0
 
 @dataclass
 class ReconcileCounters:
-    """Since boot, for ``/paper status``; ``mismatches`` sums the three kinds below it."""
+    """Since boot, for ``/paper status``. ``mismatches`` counts every logged mismatch (including orders
+    unknown at the broker and unusable broker rows); the three below break out re-deliveries, orphan
+    cancels and GTT disagreements."""
 
     passes: int = 0
     failures: int = 0

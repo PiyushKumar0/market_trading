@@ -566,7 +566,7 @@ def render(res: dict[str, Any]) -> str:
              f"news={fmt_pct(news['valid_pct_of_returned'])}, "
              f"intraday={fmt_pct(intra['valid_pct_of_returned'])}.")
     L.append("C3/C4 recs      : recommendations(delivered_at, payload, human_action). The payload has")
-    L.append("                  created_at + valid_until and NO valid_from (core/contracts.py:178), so")
+    L.append("                  created_at + valid_until and NO valid_from (core/contracts.py Recommendation), so")
     L.append("                  'delivered before the validity window opens' is measured as delivered")
     L.append("                  strictly before valid_until - the window opens at created_at, which is")
     L.append("                  <= delivered_at by construction in RecommendationBook.deliver().")

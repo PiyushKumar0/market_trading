@@ -19,8 +19,8 @@ _PCT_Q = Decimal("0.000001")
 
 
 def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tuple[float, int] | None:
-    """Mean ``close(d)/close(prev session) - 1`` over the eligible universe of the latest
-    ``universe_daily`` row on or before ``d``, and the number of names averaged.
+    """Mean ``close(d)/close(prev session) - 1`` over the CORE (NIFTY 500) eligible symbols of the
+    latest ``universe_daily`` row on or before ``d`` (O18), and the number of names averaged.
 
     ``None`` when no row exists within 5 sessions before ``d``. Raises ``ValueError`` when the
     universe, or every name's return, is empty.
@@ -36,7 +36,7 @@ def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tup
     # across the NIFTY Total Market widening instead of picking up microcaps from that day on.
     symbols = store.get_core_eligible_symbols(u)
     if not symbols:
-        raise ValueError(f"universe_daily {u}: no eligible symbols")
+        raise ValueError(f"universe_daily {u}: no core-eligible symbols")
     prev = calendar.previous_trading_day(d)
     while calendar.session(prev).is_muhurat:   # type: ignore[union-attr]
         prev = calendar.previous_trading_day(prev)
@@ -52,7 +52,7 @@ def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tup
         if abs(r) <= _MAX_ABS_RET:
             rets.append(r)
     if not rets:
-        raise ValueError(f"no usable returns for {d} over {len(symbols)} eligible symbols")
+        raise ValueError(f"no usable returns for {d} over {len(symbols)} core-eligible symbols")
     return sum(rets) / len(rets), len(rets)
 
 

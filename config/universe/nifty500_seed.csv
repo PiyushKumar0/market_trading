@@ -1,10 +1,10 @@
-# NIFTY 500 seed fallback (E5, §3.2.4) — the committed last-resort copy used by UniverseBuilder when
-# BOTH the NSE constituents download (universe.index_source_url) and the runtime cache under
+# NIFTY 500 CORE-index seed fallback (O18, E5, §3.2.4) — the committed last-resort copy used by UniverseBuilder when
+# BOTH the core-index download (universe.core_index_source_url) and the runtime cache under
 # data/universe/ are unavailable. A stale-but-real membership list beats an empty universe.
 #
 # OWNER TASK: refresh this file after NSE index rebalances (~March/September) from
 #   https://archives.nseindia.com/content/indices/ind_nifty500list.csv   [VERIFIED 2026-09-04: the
-#   engine downloads from this URL daily and mirrors it to data/universe/index_cached.csv]
+#   engine downloads from this URL daily and mirrors it to data/universe/core_index_cached.csv]
 # by replacing everything below this comment block with the downloaded CSV content.
 #
 # Snapshot: FULL NIFTY 500 list as of 2026-09-04 (O15 — eligible universe widened from NIFTY200),

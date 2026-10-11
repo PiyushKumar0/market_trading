@@ -1,7 +1,7 @@
 /**
  * IST day folds for the two ledgers (recommendations, risk checks) — owner directive 2026-09-08:
  * today's fold starts open, earlier days start folded and open on click. `alsoOpen` widens the default
- * for a day still holding a live recommendation (WO-V 2026-09-13). The default is re-derived every
+ * for a day still holding a live recommendation (normally today's; kept date-agnostic after WO-V's 2026-09-23 withdrawal). The default is re-derived every
  * render, so the midnight rollover moves the open fold to the new day on the next poll.
  */
 import { useState } from 'react'

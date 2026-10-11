@@ -8,15 +8,16 @@ NSE pages/APIs with the plan's ``[likely]`` anti-bot caveat (E5): injected ``htt
 
 Failure model (§4.4 job 5, pinned): on a per-source failure, REUSE yesterday's list for that source
 (runtime JSON cache under ``data/``, survives restarts) + alert + expose the affected symbols via
-``SurveillanceLists.unconfirmed_symbols`` — the Tier-2 gate refuses NEW entries in any symbol whose
-surveillance status cannot be confirmed (conservative default; the gate consumes this in Phase 2 —
-seam documented on :class:`SurveillanceLists`). A failed source can therefore never *shrink* the
-exclusion set: yesterday's flagged symbols stay excluded, and they are additionally unconfirmed.
+``SurveillanceLists.unconfirmed_symbols``. Unconfirmed symbols are refused new entries INDIRECTLY:
+the reused list keeps them flagged, so the 08:30 universe build excludes them and the Tier-2 gate
+refuses anything outside the eligible universe. No production code reads ``unconfirmed_symbols``;
+there is no direct gate seam. A failed source can therefore never *shrink* the exclusion set:
+yesterday's flagged symbols stay excluded, and they are additionally unconfirmed.
 
 Held-position migration (A8): "a held position migrated INTO a surveillance list" must alert
-immediately. TODO(Phase 2): the positions module does not exist yet — the diff seam is
-:meth:`SurveillanceLists.new_entries` (today's flagged minus a previous snapshot's), which the
-position-holding caller intersects with held symbols and alerts on.
+immediately. OPEN GAP (plan §2.6 step 5 / §4.4 job 5): that alert is unimplemented. The diff seam is
+:meth:`SurveillanceLists.new_entries` (today's flagged minus a previous snapshot's); nothing calls it
+yet. Positions live in ``engine.oms.positions``.
 """
 
 from __future__ import annotations
@@ -64,10 +65,10 @@ SURVEILLANCE_KEYS: tuple[str, ...] = ("gsm", "asm", "t2t", "esm")
 class SurveillanceLists(BaseModel):
     """One refresh's surveillance snapshot (A8) — the §3.2.4 universe-rule exclusion input.
 
-    ``unconfirmed_symbols`` is the Phase-2 gate seam: symbols whose CURRENT status could not be
-    confirmed because their source failed and yesterday's list was reused — the gate refuses NEW
-    entries there (conservative default, §4.4 job 5). ``degraded_sources`` names the failed sources
-    so the gate can choose an even broader stance if everything is down.
+    ``unconfirmed_symbols``: symbols whose CURRENT status could not be confirmed because their
+    source failed and yesterday's list was reused. They are already inside :meth:`flagged`, so the
+    universe exclusion refuses them; nothing reads this field directly. ``degraded_sources`` names
+    the failed sources (the universe build marks itself degraded on any).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -98,7 +99,7 @@ class SurveillanceLists(BaseModel):
 
     def new_entries(self, previous: SurveillanceLists) -> frozenset[str]:
         """Symbols newly flagged vs ``previous`` — the A8 held-position-migration diff input
-        (TODO(Phase 2): intersect with held symbols and alert immediately)."""
+        (OPEN GAP: no caller intersects it with held symbols or alerts; see the module docstring)."""
         return frozenset(self.flagged() - previous.flagged())
 
 

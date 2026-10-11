@@ -64,12 +64,11 @@ DAILY_BAR_TAIL = 20
 #: a holiday-heavy stretch without dragging in a second month of rows.
 DAILY_LOOKBACK_DAYS = 45
 
-#: Watchlist columns the catalyst block shows — grade/event/materiality plus the deterministic levels
-#: (§2.7 step 5(ii)). A NULL column is omitted rather than rendered as null.
+#: Watchlist columns the catalyst block shows — grade/event/materiality (§2.7 step 5(ii)); the v1
+#: price levels are persisted but deliberately not shown. A NULL column is omitted, not rendered null.
 _WATCHLIST_KEYS = (
     "grade", "event_type", "direction", "materiality", "source_domain_count",
-    "event_age_sessions", "confirm_trigger", "invalidation",
-    "stop_band_low", "stop_band_high", "target_band_low", "target_band_high",
+    "event_age_sessions",
 )
 
 _UNAVAILABLE = "unavailable"
@@ -199,7 +198,7 @@ class ContextAssembler:
         parts.append(self._strategy_contract_text(candidate.strategy_id))
         parts.append(f"features: {self._features_text(candidate.features_snapshot_id)}")
         parts.append(self._bars_text(bars))
-        if candidate.style == "swing":       # brk20/ins/rsi2/mom — daily-series rules (§6.1)
+        if candidate.style == "swing":       # batch legs brk20/hi52/ins/cat/cat_reversal + bar-driven rsi2/mom — daily-series rules (§6.1)
             parts.append(self._swing_daily_evidence_text(candidate.symbol, d, bars))
         parts.append(self._session_aggregates_text(d, bars))
         parts.append(self._catalyst_text(candidate.symbol, d))
@@ -517,7 +516,8 @@ class ContextAssembler:
         return [
             f"  NOTE - STRUCTURAL ABSENCE, NOT A DATA FAILURE: {symbol} is outside the intraday tick",
             "  watchlist, so it has no 1m bars this session and never will. The full-universe batch",
-            "  rules (brk20, ins) deliberately originate for ANY eligible symbol, watchlist or not.",
+            "  rules (brk20, hi52, ins, cat, cat_reversal) deliberately originate for eligible symbols,",
+            "  watchlist or not.",
             "  Judge this swing candidate on the daily bars below - that is the series its rule fired",
             "  on. An empty 1m tail here is neither missing evidence nor a feed outage.",
         ]

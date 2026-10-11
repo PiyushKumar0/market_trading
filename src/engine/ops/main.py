@@ -5,7 +5,7 @@ The ONLY module allowed to import everything — it wires the dependency graph a
 manual/demand or scheduled (§2.6); every startup runs the full §2.6 recovery sequence via
 ``SessionLifecycle.startup``.
 
-Phase-1 shape: the Phase-0 deterministic core (clock, calendar, secrets, protected store, sticky
+Current shape: the Phase-0 deterministic core (clock, calendar, secrets, protected store, sticky
 mode/kill, dashboard, lifecycle) PLUS the full **data plane** — the single-writer
 :class:`~engine.marketdata.store.MarketStore`, the tick→bar :class:`~engine.marketdata.bar_builder.BarBuilder`
 subscribed to the ``tick`` bus topic, the §4.4 daily jobs (instruments/surveillance/universe/news/
@@ -13,11 +13,14 @@ reconcile/bhavcopy/corp-actions/earnings/deals/sector-map/daily-bars/features) r
 :class:`~engine.ops.jobs.JobRegistry` and driven by BOTH the live :class:`~engine.ops.scheduler.Scheduler`
 and the startup :class:`~engine.ops.jobs.CatchUpRunner` (same registry), the cold-start
 :class:`~engine.ops.warmup.WarmupGate`, and the dedicated-thread
-:class:`~engine.ops.heartbeat.HeartbeatWriter`.
+:class:`~engine.ops.heartbeat.HeartbeatWriter`; plus the Tier-1 analyst harness, the Phase-2 RECOMMEND
+decision plane (pipeline / pre-open planner / digest / nightly reviewer), and the paper-autopilot OMS
+(OrderManager / PaperBroker / Protection / Exit managers, plan 2026-10-06).
 
 Everything broker-touching (instruments dump, backfill, reconcile, ticker) is built only when Kite
 credentials exist — a fresh install with no secrets stays runnable and safe (entries FROZEN until
-login), which is exactly the §2.6 posture. The Tier-1 harness / OMS / live routing land in later phases.
+login), which is exactly the §2.6 posture. Live AUTO routing and the real-order shutdown guard
+(Phase 4) are not wired.
 """
 
 from __future__ import annotations
@@ -215,6 +218,10 @@ VIX_SYMBOL = "INDIA VIX"
 #: engine.marketdata.reconcile.DEFAULT_TICK_SIZE; only ever loosens the reconcile close-drift check.
 _DEFAULT_TICK = Decimal("0.05")
 
+#: Capital base the ExposureTracker boots with when the protected limit table fails verification —
+#: keep in sync with limits.yaml capital_base_inr (O16).
+_FALLBACK_CAPITAL_BASE_INR = Decimal("40000")
+
 #: How far back to scan universe_daily for the current active watchlist (bounded, trading-day-agnostic).
 _WATCHLIST_LOOKBACK_DAYS = 15
 
@@ -255,7 +262,8 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
 
 #: Phase-2 additions (§8.3): digest → planner run pre-open in dependency order after the news chain;
 #: rec-expiry labels stale unconfirmed recommendations post-window; the nightly reviewer is date-keyed
-#: (one review per missed trading day, §2.6). Registered only when the owning object was built.
+#: (one review per missed trading day, §2.6). build_job_registry skips a None fn (tests); the
+#: composition root always passes a wrapper.
 PHASE2_JOB_IDS: tuple[str, ...] = (
     JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RECO_EXPIRE,   # run-latest
     JOB_TIME_EXIT_CHECK,                                         # run-latest (regular sessions)
@@ -437,8 +445,8 @@ def build_job_registry(
         JobSpec(JOB_TICK_COMPACT, JobClass.DATE_KEYED, _TICK_COMPACT_IST, fns[JOB_TICK_COMPACT], order=90),
     ):
         registry.register(spec)
-    # Phase-2 jobs (§8.3) register only when composition built their owning object (LLM tier may be
-    # disabled, D7). Catch-up dependency order within RUN_LATEST: universe(10) → news_chain(20) →
+    # Phase-2 jobs (§8.3): a None fn is skipped here (tests); the composition root always passes a
+    # wrapper (an unbuilt LLM-tier object makes it raise, D7). Catch-up dependency order within RUN_LATEST: universe(10) → news_chain(20) →
     # digest(25) → planner(28) — the digest needs scored clusters + today's universe; the planner
     # needs the digest (§2.7 steps 4-6).
     if calendar is None and any(fns.get(j) is not None for j in (JOB_TIME_EXIT_CHECK, JOB_WEEKLY_SUMMARY)):
@@ -585,12 +593,13 @@ async def run() -> int:
         return max(0.0, (clock.now() - cached[1]).total_seconds())
 
     # Capital base from the protected limit table; an unregistered/tampered store must not crash the
-    # boot (the self-test FAILs it to FROZEN separately) — fall back to the §7.1 starting value.
+    # boot (the self-test FAILs it to FROZEN separately) — fall back to the shipped base (O16).
     try:
         _capital_base = limits_engine.load().capital_base_inr
     except IntegrityError:
-        _log.warning("limits_unverified_at_boot", hint="scripts/seed_protected_config.py; using S7.1 default base")
-        _capital_base = Decimal("20000")
+        _log.warning("limits_unverified_at_boot",
+                     hint="scripts/seed_protected_config.py; using the shipped fallback capital base")
+        _capital_base = _FALLBACK_CAPITAL_BASE_INR
     exposure = ExposureTracker(conn, clock, _capital_base, mark_price=mark_price)
 
     # --- owner I/O alert sink (Telegram if configured, else log-only) ---
@@ -833,7 +842,7 @@ async def run() -> int:
         limits_engine, cost_model, clock,
         # The per-strategy C3 edge registrations — see :func:`_strategy_expected_edge_pct`, which is
         # this map and is module-level so BOTH halves of the hi52 promotion are assertable without
-        # booting an engine (a wiring that only exists inside build_engine silently disappears).
+        # booting an engine (a wiring that only exists inside run() silently disappears).
         strategy_expected_edge_pct=_strategy_expected_edge_pct(settings),
         # §2.7 news SHADOWS: C3 rejects these unconditionally, before target_price is even read, so
         # "signals are a measurement, never a recommendation" is ENFORCED at Tier 2 rather than
@@ -989,7 +998,7 @@ async def run() -> int:
         # gate. A raise here (unverifiable store) refuses cat candidates; the pre-screen handles it.
         catalyst_cap_fn=lambda: limits_engine.catalyst_guard().max_catalyst_entries_day,
         # 2026-08-21: the WO-9 RAW counters were the last piece of funnel state with no DB home, so
-        # every restart zeroed them and the 22:35 review reported `raw=None` for the whole day (4 of
+        # every restart zeroed them and the nightly review reported `raw=None` for the whole day (4 of
         # the last 6 trade days). Loaded on the first day roll of this process, flushed back by the
         # drain tick above — the two halves ship together or the flush would overwrite the day's
         # persisted total with this process's smaller one.
@@ -1130,8 +1139,9 @@ async def run() -> int:
         return _held_symbols(conn)
 
     # --- batch-leg tick subscriptions (2026-09-11 forensics). The §7.1 gate's ONLY price source is
-    #     the live tick cache (`mark_price` above): brk20/hi52/ins/cat originate over the whole
-    #     ELIGIBLE set (~480 symbols) while the feed carries the included watchlist (~300), so an
+    #     the live tick cache (`mark_price` above): brk20 originates over the whole ELIGIBLE set and
+    #     hi52/ins/cat over its NIFTY 500 core (since O18; ~480 eligible names at the time) while the
+    #     feed carries the included watchlist (~300), so an
     #     eligible-but-unticked candidate reached the gate with ltp=None and failed CLOSED
     #     (stale_data_guard "symbol no feed", entry_sanity_band "LIMIT with no usable LTP") — 27 of 84
     #     brk20 slots and 1 of 16 hi52 slots. The sweep records what the pre-screen ADMITTED and the
@@ -1165,7 +1175,8 @@ async def run() -> int:
         await instruments.refresh(_require_kite())
         # Persist today's dump so a restart after this job (whose watermark makes catch-up skip it) can
         # hydrate the token map pre-login instead of an unknown_token storm (§4.3, F1). Surveillance/MIS
-        # columns are left NULL here — the 08:20 surveillance job owns that join.
+        # columns are left NULL here and no job writes them: A8 is enforced by the 08:30 universe
+        # exclusion, and the gate and /why read the surveillance_* codes from universe_daily.
         today = clock.today()
         rows = instruments.snapshot_rows(today)
         persisted = await store.arun(store.upsert_instruments_daily, rows)
@@ -1363,8 +1374,9 @@ async def run() -> int:
     async def job_sector_map() -> SectorMapResult:
         # Forwarded (2026-08-13): sector_map degrades-without-raising (E5) — the watermark verdict
         # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
-        # O15 (2026-09-04): classify the BATCH universe, not the tick watchlist. The eligible set is
-        # now NIFTY 500 while universe_max_watchlist stays 200, so a watchlist-scoped run would
+        # O15 (2026-09-04): classify the BATCH universe, not the tick watchlist. The eligible set (the
+        # configured index, NIFTY Total Market since O18) is larger than universe_max_watchlist, so a
+        # watchlist-scoped run would
         # leave every capped and extended name without a sector_map row — and §7.1 caps the
         # UNCLASSIFIED bucket at 1 open position, which would gate-block the widened swing legs.
         # Only the UNCLASSIFIED fill-in list grows (~200 → ~800 set-membership checks against the
@@ -1499,8 +1511,9 @@ async def run() -> int:
         JOB_FEED_FRESHNESS: job_feed_freshness,
         JOB_INS_CROSSINGS: job_ins_crossings,
         JOB_TICK_COMPACT: job_tick_compact,
-        # Phase-2 (§8.3): digest always (deterministic, $0); planner/nightly/expire register even
-        # when the LLM tier is down — their fns no-op internally so the watermark records the skip.
+        # Phase-2 (§8.3): every Phase-2 fn is always registered; the wrappers whose object may be
+        # unbuilt (planner, nightly, time-exit) RAISE, so the watermark records a FAILURE and the §2.6
+        # sweep retries once the roster is fixed (2026-08-03).
         JOB_CATALYST_DIGEST: job_catalyst_digest,
         JOB_PREOPEN_PLANNER: job_preopen_planner,
         JOB_RECO_EXPIRE: job_reco_expire,
@@ -3415,7 +3428,7 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: accumulate a validation population and can never become a recommendation (see ``risk/gate.py``
 #: :data:`~engine.risk.gate._SHADOW_NO_EDGE` for why this is declared rather than inferred from a
 #: missing ``expected_edge_pct``). A module-level constant so the property is assertable without
-#: booting the engine — a wiring that only exists inside ``build_engine`` is a wiring that silently
+#: booting the engine — a wiring that only exists inside ``run`` is a wiring that silently
 #: disappears. Removing an id from here is the §8.6 owner promotion gate, never a refactor.
 #:
 #: ``cat`` joined 2026-08-28: it rested on the SAME indirect argument ``cat_reversal``'s docstring
@@ -3433,7 +3446,7 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: both, since either alone leaves a half-promoted rule (the shadow set wins a contradiction, but a
 #: dangling edge key reads as a live registration). BOTH edits are real edits: ``Hi52Cfg
 #: .expected_edge_pct`` defaults to ``None``, so deleting the settings key un-registers the edge in
-#: ``build_engine`` above rather than falling back to a value hidden in code.
+#: ``run`` above rather than falling back to a value hidden in code.
 NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
     {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID}
 )
@@ -3970,9 +3983,10 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
     """The `hi52` v2 daily leg (§6.1/§8.6): 52-week-high-proximity FRESH-CROSSES over COMPLETED daily
     sessions. Returns RAW candidates for the sweep's ONE ranked batch admission.
 
-    Scoped to the ELIGIBLE universe since 2026-09-09: the 09-03 full-market backtest measured the edge
-    as index-class only (extended names −0.26% net / 49% hit at T+20, n=13,922), so the extended-name
-    population is no longer originated. Swing thesis (T+5..T+20, George & Hwang drift; intraday
+    Scoped to the CORE (NIFTY 500) subset: the eligible universe from 2026-09-09, and since O18
+    (2026-10-08, eligible = NIFTY Total Market) the caller passes ``store.get_core_eligible_symbols``
+    — the 09-03 full-market backtest measured the edge as index-class only (extended names −0.26% net
+    / 49% hit at T+20, n=13,922), so the extended-name population is no longer originated. Swing thesis (T+5..T+20, George & Hwang drift; intraday
     capture is cost-refuted).
 
     PROMOTED 2026-09-12 (plan §8.6 addendum): until then this was a shadow whose own SECOND
@@ -4004,7 +4018,7 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
     hi52_unadjusted = hi52.unadjusted_history(
         store.get_corp_actions(ex_from=hi52_start, ex_to=yesterday)
     )
-    for sym in eligible:                       # the actionable legs' set (2026-09-09)
+    for sym in eligible:                       # the CORE subset (O18)
         frame = store.get_bars_1d_frame(sym, hi52_start, yesterday)
         if len(frame):
             hi52_histories[sym] = [
@@ -4357,7 +4371,9 @@ async def apply_tick_retention(store: MarketStore, result: TickCompactionResult)
 async def _snapshot_backup(conn: sqlite3.Connection, settings, clock: Clock) -> None:
     """Watermark-safe SQLite state snapshot (§10.5). Uses a fresh source connection inside the worker
     thread (the online-backup API over a second read handle is WAL-safe) so it never contends with the
-    engine's live connection. DuckDB market data has its own Parquet monthly archive (§4.3)."""
+    engine's live connection. DuckDB market data is NOT covered here: §10.5's DuckDB CHECKPOINT + file
+    copy is unimplemented, and ``MarketStore.export_bars_1m_month`` (the §4.3 monthly Parquet archive)
+    exists but nothing schedules it."""
     backups = settings.backups_dir()
     backups.mkdir(parents=True, exist_ok=True)
     dst = backups / f"state-{clock.now():%Y%m%dT%H%M%S}.db"

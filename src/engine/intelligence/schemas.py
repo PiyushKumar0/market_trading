@@ -14,7 +14,7 @@ Three locked conventions (Phase-0 deliverables, §8.1):
    never binary-float artifacts) and serialises to a JSON string. The exported schema types these
    fields as ``"string"`` too.
 2. **Temporal + identity fields are PLATFORM-STAMPED, never LLM-emitted.** ``proposal_id``, ``agent_id``,
-   ``valid_until``, ``inputs_digest`` are overwritten post-parse by :func:`stamp_proposal` using
+   ``valid_until``, ``inputs_digest`` are overwritten post-parse by :func:`parse_and_stamp` using
    ``Clock``-derived values — any value the model supplies is DISCARDED. The LLM never produces a
    date/time (§3.2 convention).
 3. **Constraints the SDK structured-output layer may reject** (``Field(gt=0)`` / ``min_length`` /

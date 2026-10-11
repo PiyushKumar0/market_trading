@@ -4,8 +4,11 @@ No credit-balance API exists (D6), so this ledger IS the platform's only view of
 result message's billed usage is priced at the D4 standard rates in ``config/agents.yaml``, appended to
 ``budget_ledger``, and the window-to-date total drives the degrade ladder. A tier change publishes on
 ``budget.state`` (§3.2.1) — the dashboard, the owner alert (R8), and the D6 mode-capability mapping all
-read that single signal. Reconciliation against the Anthropic console is a manual runbook step (§10.1);
-drift there is expected and is why the ladder trips well below the credit.
+read that single signal. The ledger dollar is a governor PROXY: billing is the subscription's weekly
+quota, so there is no console figure to reconcile (RUNBOOK G2 budget-discipline item, re-scoped
+2026-08-13). Systematic under-count (a timed-out call books only the per-turn usage streamed before
+the cutoff, often none, while the subscription bills the whole call) is why the ladder trips well
+below the credit.
 
 The budget period is the SUBSCRIPTION's quota week, not the calendar month (owner-directed 2026-09-12):
 the Agent SDK draws on a weekly quota that resets Thursday 14:00 IST, so a month-keyed ladder measured

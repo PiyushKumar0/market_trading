@@ -8,11 +8,14 @@ The PINNED universe rule (§3.2.4, zero latitude):
     ``data.universe_max_watchlist`` [tunable].
 
 **O15 (owner-directed 2026-09-04):** the index is CONFIG (``universe.index_name`` /
-``index_source_url`` / ``index_seed_path``), NIFTY 500 since this date — widened from NIFTY200.
+``index_source_url`` / ``index_seed_path``), NIFTY 500 since this date — widened from NIFTY200;
+NIFTY Total Market since O18 (2026-10-08), with NIFTY 500 kept as the CORE index.
 The focus cap is deliberately UNCHANGED at 200 and therefore BINDS again: eligible is now ~350–450
 names, so the tick watchlist is the top 200 by median traded value and the remainder audit as
 ``watchlist_cap``. Raising the cap is a separate, measured step (tick volume, bar building and
-per-minute feature snapshots all scale with it); every swing/batch leg reads the full eligible set.
+per-minute feature snapshots all scale with it); every swing/batch leg read the full eligible set
+until O18, which keeps hi52/ins/cat on the NIFTY 500 core subset.
+(Cap 200 -> 300 on 2026-09-07; kept at 300 by O18 — ``data.universe_max_watchlist``.)
 
 Every index symbol gets a ``universe_daily`` row with its per-symbol exclusion reasons (auditable,
 §4.3). ``included=True`` means "in today's ACTIVE watchlist" (≤ cap): symbols that pass every rule
@@ -240,7 +243,7 @@ class UniverseBuilder:
         members, source = await self._load_index()
         if not members:
             raise ValueError(f"{index_name} membership unavailable from download, cache, and seed")
-        core_members, core_source = await self._load_core_index(members, source)
+        core_members, core_source = await self._load_core_index(members)
         core_set = set(core_members)
         if not core_set:
             await self._alert(
@@ -273,8 +276,9 @@ class UniverseBuilder:
                 eligible.append(symbol)
 
         # Focus cap (§3.2.4): top-N eligible by median traded value desc, symbol asc tie-break.
-        # BINDING again since O15 (2026-09-04): the NIFTY 500 eligible set is ~350–450 names against
-        # a cap of 200, so the ranked tail below is real and its watchlist_cap rows are the audit.
+        # BINDING since O15 (2026-09-04): the eligible set of the configured index (NIFTY Total Market
+        # since O18) is larger than data.universe_max_watchlist, so the ranked tail below is real and
+        # its watchlist_cap rows are the audit.
         cap = int(self._settings.data.universe_max_watchlist)
         ranked = sorted(eligible, key=lambda s: (-medians[s], s))
         watchlist = sorted(ranked[:cap])
@@ -391,7 +395,7 @@ class UniverseBuilder:
         )
 
     async def _load_core_index(
-        self, members: list[str], source: IndexSource
+        self, members: list[str]
     ) -> tuple[list[str], IndexSource | Literal["same"]]:
         """O18: the CORE (evidence) index. When it is configured as the SAME list as the index the
         index's own members are reused (``"same"`` — no second download, every member core: the

@@ -192,8 +192,9 @@ ContextProvider = Callable[[Bar], ScanContext]
 ADMISSION_MODES = ("ranked", "arrival")
 
 #: Key in a ``max_per_strategy_day`` MAPPING that binds every strategy without its own entry. Not a
-#: strategy id (no scanner may ever be called "default") — it is the structural ceiling that makes
-#: the ≤40%-of-the-day guarantee hold for strategies added after the config was written.
+#: strategy id (no scanner may ever be called "default") — it is the structural ceiling (default
+#: sub-cap / max_candidates_per_day — a third of the day as shipped, settings.yaml) that binds
+#: strategies added after the config was written.
 DEFAULT_CAP_KEY = "default"
 
 #: FALLBACK for ``displacement_margin`` — how much better a later arrival must score to take a full
@@ -835,7 +836,7 @@ class SignalPreScreen:
         """Seed ``day``'s RAW counters from ``funnel_raw_counts`` (2026-08-21, lock held).
 
         The roll that matters is the FIRST one of a process: a mid-session restart used to reset the
-        raw row to zero, and the 22:35 review then reported ``raw=None`` for the whole day even
+        raw row to zero, and the nightly review then reported ``raw=None`` for the whole day even
         though the morning's scanners had fired hundreds of times. Loading the persisted total here
         makes the counter CONTINUE — the flush writes absolute values, so a hydrate/flush cycle is
         idempotent no matter how many times the engine bounces.

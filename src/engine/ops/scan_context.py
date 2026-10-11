@@ -78,18 +78,17 @@ to do it.
 the ``trade_window.changed`` bus event that :class:`~engine.risk.mode.ModeManager` has always
 published (the event existed; only telegram and the API relay listened). It refreshes ONE field
 rather than dropping the cache — a full rebuild would re-run the index/flagged/ex-date reads and the
-~100-symbol momentum preload on the event-loop's worker, which is precisely the per-bar read budget
-this cache exists to protect. This is the one piece of cross-thread state in the class (the flag is
+watchlist-wide momentum preload (up to ``universe_max_watchlist`` symbols) on the event-loop's
+worker, which is precisely the per-bar read budget this cache exists to protect. This is the one piece of cross-thread state in the class (the flag is
 set on the event loop, consumed on the pre-screen worker thread), hence the :class:`threading.Event`
 where nothing else here is synchronized.
 
 Known v1 gaps (deliberate, documented — not silent)
 ---------------------------------------------------
-* ``momentum_by_symbol`` spans the symbols CACHED SO FAR today, not the whole universe — the
-  cross-section fills in as symbols tick. Combined with the gap above, the first bars of a day can
-  rank a symbol against a partial cross-section. Pass ``momentum_universe`` (typically today's
-  included ``universe_daily`` symbols) to preload the full cross-section on the day's first call and
-  remove that skew; the cost is N daily reads once per day, in the worker thread.
+* Without ``momentum_universe`` (a provider built for tests/dev), ``momentum_by_symbol`` spans only
+  the symbols CACHED SO FAR today, so early bars rank against a partial cross-section. Production
+  wiring (``engine.ops.main``) passes the ``universe_daily`` watchlist closure, which preloads the
+  full cross-section on the day's first call (N daily reads, once, in the worker thread).
 """
 
 from __future__ import annotations

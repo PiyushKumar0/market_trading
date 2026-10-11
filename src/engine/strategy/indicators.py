@@ -132,8 +132,8 @@ def wilder_atr(
 ) -> pd.Series:
     """Wilder ATR (SMA seed over the first ``period`` TRs, then Wilder recursion).
 
-    Timeframe-agnostic — pass 1m bars for ATR(14,1m) (orb stops) or daily bars for ATR(14,1d)
-    (trend trail / cat stops). First value at index ``period − 1``.
+    Timeframe-agnostic — pass 1m bars for ATR(14,1m) (the atr14_1m feature) or daily bars for
+    ATR(14,1d) (trend trail, the atr14_1d feature, the rec card's stop-in-ATR extra). First value at index ``period − 1``.
     """
     h, lo, c = as_float_series(high), as_float_series(low), as_float_series(close)
     out = _empty_like(c)
@@ -223,8 +223,10 @@ def rolling_median_volume(volumes: Sequence[Any] | pd.Series, window: int = 20) 
 
 
 def rolling_max_high(highs: Sequence[Any] | pd.Series, n: int) -> pd.Series:
-    """Rolling max high over the trailing ``n`` bars (incl. current); NaN until a full window exists
-    (52-week / 20-day high proximity, §6.2 ``prox_52wk_high`` / ``prox_20d_high``)."""
+    """Rolling max high over the trailing ``n`` bars (incl. current); NaN until a full window exists.
+
+    Research primitive, no production caller; the live ``prox_*`` features use
+    ``features.engine._prox_high``."""
     s = as_float_series(highs)
     return s.rolling(n, min_periods=n).max()
 

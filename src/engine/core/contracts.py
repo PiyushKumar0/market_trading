@@ -18,8 +18,8 @@ Three locked conventions (Phase-0 deliverables, §8.1):
    never binary-float artifacts) and serialises to a JSON string. The exported schema types these
    fields as ``"string"`` too.
 2. **Temporal + identity fields are PLATFORM-STAMPED, never LLM-emitted.** ``proposal_id``, ``agent_id``,
-   ``valid_until``, ``inputs_digest`` are overwritten post-parse by :func:`stamp_proposal` using
-   ``Clock``-derived values — any value the model supplies is DISCARDED. The LLM never produces a
+   ``valid_until``, ``inputs_digest`` are overwritten post-parse by
+   ``engine.intelligence.schemas.parse_and_stamp`` using ``Clock``-derived values — any value the model supplies is DISCARDED. The LLM never produces a
    date/time (§3.2 convention).
 3. **Constraints the SDK structured-output layer may reject** (``Field(gt=0)`` / ``min_length`` /
    mandatory ``additionalProperties:false`` / no recursive schemas) are enforced CLIENT-SIDE by
@@ -79,7 +79,7 @@ class ActionBase(BaseModel):
     thesis: str = Field(min_length=20, max_length=600)        # 3–5 lines
     confidence: float = Field(ge=0.0, le=1.0)
     # PLATFORM-STAMPED: Clock.now() + per-style TTL (§3.2.1). The LLM never emits a date/time; any value
-    # it supplies is overwritten by stamp_proposal(). Optional on the wire so the model may omit it.
+    # it supplies is overwritten by parse_and_stamp(). Optional on the wire so the model may omit it.
     valid_until: AwareDatetime | None = None     # tz-aware IST only (§9.1 no-naive-datetime invariant)
     inputs_digest: str = ""      # PLATFORM-STAMPED: hash of AssembledContext for audit/replay (R8)
 

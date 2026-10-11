@@ -81,7 +81,8 @@ function rec(id, day, hms, inst, side, kind, action, extra = {}) {
 }
 
 let recommendations = [
-  // An exit is valid to the next session's close here, so it stays live at any hour of the day.
+  // Synthetic edge case: valid_until on the next day (the engine stamps today's close since WO-V's
+  // 2026-09-23 withdrawal), so this exit stays live at any hour of the day.
   rec('r-t1', today, '10:15:03', 'HDFCAMC', 'SELL', 'exit', null, { valid_until: `${shift(today, 1)}T15:30:00+05:30` }),
   // An adjust places NO order and keeps the held side (pipeline.py _manage_recommendation): the card
   // must read as a stop-loss move, never as "Buy 10 shares".
@@ -114,7 +115,8 @@ let recommendations = [
   rec('r-y1', d1, '13:00:19', 'HDFCAMC', 'SELL', 'exit', 'expired'),
   rec('r-y2', d1, '13:00:12', 'HINDZINC', 'SELL', 'exit', 'expired'),
   rec('r-y3', d1, '10:02:00', 'CEIGALL', 'BUY', 'enter', 'dismissed'),
-  // WO-V (2026-09-13): a swing ENTRY delivered YESTERDAY, still pending, valid to TOMORROW's close —
+  // Synthetic edge case (WO-V's next-session entry TTL was withdrawn 2026-09-23, so the engine no
+  // longer stamps this): an ENTRY delivered YESTERDAY, still pending, valid to TOMORROW's close —
   // yesterday's fold must start open and the `valid till` chip must carry the date.
   rec('r-live', d1, '14:47:00', 'JINDALSTEL', 'BUY', 'entry', null, {
     valid_until: `${shift(today, 1)}T15:30:00+05:30`,

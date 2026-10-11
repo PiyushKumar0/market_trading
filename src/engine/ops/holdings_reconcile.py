@@ -12,9 +12,10 @@ This job closes that hole with the cheapest possible question: does the broker s
 ``/closed <entry_rec_id> <price>`` reply.
 
 **Alert-only, never load-bearing (§3.6).** The platform never auto-closes a human-owned position (the
-close price is the owner's fact, §6.5 outcome labelling), never touches risk state, the gate or the
-prescreen, and a broker/token failure degrades to a WARNING log plus ``error`` on the result — the
-check is diagnostic, not a gate input. Every design choice here is biased against the FALSE positive
+close price is the owner's fact, §6.5 outcome labelling), never touches risk state or the prescreen,
+and a broker/token failure degrades to a WARNING log plus ``error`` on the result — the check itself
+is diagnostic; its only gate input is the two-day journal below, which releases §7.1 count capacity
+and never blocks anything. Every design choice here is biased against the FALSE positive
 "you sold this", because an owner who stops believing these alerts is worse off than one who never
 got them:
 
@@ -40,11 +41,13 @@ own ``/closed`` would not settle.
 ``holdings_observations`` row per trading day (upsert, last write of the day wins — see migration
 0013). That turns a per-run in-memory answer into a durable series, and
 :func:`positions_missing_from_holdings` reads it as "the two most recent observation days both read
-SHORT". Two consumers use that set to STOP DOING THINGS — the §5.2(b) position-event path stops
-spending analyst calls on the position, and the §5.3 pre-open planner moves it out of the
-overnight-risk line into its own "sold outside the ledger" block. Neither closes anything: §3.6 stays
-alert-only for CLOSING, and only the owner's ``/closed`` ends a human-owned position (§6.5). The
-authority this table grants is silence, never a state change — which is also why the missing rule
+SHORT". Every caller uses that set to STOP DOING THINGS — the §5.2(b) position-event path and the
+analyst positions summary stop treating the position as held, the §5.3 pre-open planner moves it out
+of the overnight-risk line into its own "sold outside the ledger" block, protection reminders stop
+nagging, and the gate drops it from the §7.1 position/sector counts (``gate._gone_symbols``, a
+deliberate capacity release). None of them closes anything: §3.6 stays alert-only for CLOSING, and
+only the owner's ``/closed`` ends a human-owned position (§6.5). The authority this table grants is
+silence plus that count release, never a position-state change — which is also why the missing rule
 needs TWO days: one bad observation (a settlement edge, a symbol rename, a partial broker payload)
 must never be enough to silence the platform about a real position.
 

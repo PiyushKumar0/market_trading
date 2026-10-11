@@ -127,12 +127,12 @@ class FakeQuery:
 
 @dataclass
 class FakeContext:
-    """Duck-typed AssembledContext (ContextAssembler lands separately)."""
+    """Duck-typed AssembledContext (stands in for engine.intelligence.context's output)."""
 
     prompt_text: str = "DAY PLAN / CANDIDATE / VOLATILE BLOCK LAST"
     system_prompt: str = "SYSTEM PROMPT (byte-stable)"
     inputs_digest: str = "digest-abc123"
-    call_class: str = "signal"
+    call_class: str = "signal_candidate"
 
     def prompt(self) -> str:
         return self.prompt_text
@@ -143,14 +143,15 @@ class FakeContext:
 TEST_AGENTS: dict[str, Any] = {
     "agents": {
         "intraday_analyst": {
-            "model": "sonnet-4.6",
+            "model": "sonnet-5.5",
             "shape": "single_shot",
             "tools_enabled": False,
             "max_output_tokens": 1200,
             "timeout_s": 45,
+            "effort": "medium",
         },
         "nightly_reviewer": {
-            "model": "sonnet-4.6",
+            "model": "sonnet-5.5",
             "shape": "agentic",
             "tools_enabled": True,
             "allowed_tools": ["mcp__state__query"],
@@ -264,7 +265,7 @@ def test_tools_enabled_without_explicit_allowlist_is_refused() -> None:
     # agent definition that lacks an explicit allowlist. This is the §9.1 allowlist test.
     cfg = {
         "agents": {
-            "rogue": {"model": "sonnet-4.6", "shape": "agentic", "tools_enabled": True, "max_turns": 4}
+            "rogue": {"model": "sonnet-5.5", "shape": "agentic", "tools_enabled": True, "max_turns": 4}
         }
     }
     with pytest.raises(ValueError, match="allowed_tools"):
@@ -363,12 +364,12 @@ async def test_single_shot_ok_persists_call_and_meters_budget(defs, gov, clock, 
     (row,) = rows(conn)
     assert row["call_id"] == result.call_id
     assert row["agent_id"] == "intraday_analyst"
-    assert row["trigger"] == "signal"              # context.call_class
-    assert row["model"] == "sonnet-4.6"            # yaml name — joins to budget_ledger.model
+    assert row["trigger"] == "signal_candidate"    # context.call_class
+    assert row["model"] == "sonnet-5.5"            # yaml name — joins to budget_ledger.model
     assert row["inputs_digest"] == "digest-abc123"
     assert row["ok"] == 1 and row["fail_reason"] is None
     assert (row["in_tokens"], row["out_tokens"], row["cache_read"]) == (1200, 300, 7000)
-    assert Decimal(row["cost_usd"]) == gov.price("sonnet-4.6", result.usage)
+    assert Decimal(row["cost_usd"]) == gov.price("sonnet-5.5", result.usage)
     assert row["at"] == clock.now().isoformat()
     assert row["duration_ms"] >= 0
     snapshot = gzip.decompress(row["context_gz"]).decode()
@@ -378,9 +379,9 @@ async def test_single_shot_ok_persists_call_and_meters_budget(defs, gov, clock, 
     # --- governor ledger (D6) ---
     (ledger,) = conn.execute("SELECT * FROM budget_ledger").fetchall()
     assert ledger["agent_id"] == "intraday_analyst"
-    assert ledger["model"] == "sonnet-4.6"
+    assert ledger["model"] == "sonnet-5.5"
     assert (ledger["in_tokens"], ledger["out_tokens"], ledger["cache_read"]) == (1200, 300, 7000)
-    assert gov.window_spend() == gov.price("sonnet-4.6", result.usage)
+    assert gov.window_spend() == gov.price("sonnet-5.5", result.usage)
 
 
 async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov, clock, conn) -> None:
@@ -391,7 +392,7 @@ async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov
                                   json_schema={"type": "object"})
 
     opts = fake.calls[0].options
-    assert opts.model == "claude-sonnet-4-6"       # D4: explicit API id, never an SDK default
+    assert opts.model == "claude-sonnet-5-5"       # D4: explicit API id, never an SDK default
     assert opts.setting_sources == []              # D10: load NOTHING from the filesystem
     assert opts.allowed_tools == []                # D5: single-shot agents get no tools
     assert "WebSearch" in opts.disallowed_tools and "Bash" in opts.disallowed_tools
@@ -429,7 +430,7 @@ async def test_usage_extraction_from_result_message_only(defs, gov, clock, conn)
     (ledger,) = conn.execute("SELECT * FROM budget_ledger").fetchall()
     assert (ledger["cache_read"], ledger["cache_write"]) == (4096, 2048)
     # Our D4 pricing owns the ledger; the SDK's own estimate is never written to it.
-    assert Decimal(ledger["cost_usd"]) == gov.price("sonnet-4.6", result.usage)
+    assert Decimal(ledger["cost_usd"]) == gov.price("sonnet-5.5", result.usage)
 
 
 async def test_missing_usage_fields_default_to_zero_and_book_nothing(defs, gov, clock, conn) -> None:
@@ -601,6 +602,51 @@ async def test_output_format_fallback_mapping_and_turn_bump(defs, gov, clock, co
     opts = fake.calls[0].options
     assert opts.output_format == {"type": "json_schema", "schema": {"type": "object"}}
     assert opts.max_turns == 4
+
+
+@dataclass
+class SdkToolsOptions:
+    """The shipped SDK's (0.2.x) tool surface: ``allowed_tools`` only auto-approves; ``tools`` is the
+    CLI's built-in base set, where [] means none (``--tools ""``)."""
+
+    model: str | None = None
+    system_prompt: str | None = None
+    setting_sources: list[str] | None = None
+    max_turns: int | None = None
+    tools: list[str] | None = None
+    allowed_tools: list[str] | None = None
+    disallowed_tools: list[str] | None = None
+    output_format: dict[str, Any] | None = None
+
+
+async def test_builtin_base_set_is_emptied_for_single_shot(defs, gov, clock, conn) -> None:
+    # 2026-10-09 transcripts: with only allowed_tools=[] sent, the pinned CLI still offered the
+    # news analyst Skill/ToolSearch/Workflow and deferred Cron*/SendMessage/RemoteTrigger.
+    fake = FakeQuery([FakeStructuredToolMessage(ENTER_PAYLOAD), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=SdkToolsOptions)
+
+    await harness.run_single_shot(
+        defs["intraday_analyst"], FakeContext(), enter_validator(clock), json_schema={"type": "object"}
+    )
+
+    opts = fake.calls[0].options
+    assert opts.tools == []
+    assert opts.allowed_tools == []
+    for name in ("Skill", "ToolSearch", "Workflow", "SendMessage", "CronCreate", "Bash", "WebFetch"):
+        assert name in opts.disallowed_tools
+
+
+async def test_builtin_base_set_is_emptied_for_agentic_mcp_allowlist(defs, gov, clock, conn) -> None:
+    # `tools` governs built-ins only; the §5.5 MCP allowlist still goes out through allowed_tools.
+    fake = FakeQuery([FakeAssistantMessage("{}"), FakeResultMessage({"input_tokens": 10, "output_tokens": 5})])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=SdkToolsOptions)
+
+    await harness.run_agentic(defs["nightly_reviewer"], "task", validate=json.loads)
+
+    opts = fake.calls[0].options
+    assert opts.tools == []
+    assert opts.allowed_tools == ["mcp__state__query"]
+    assert "mcp__state__query" not in opts.disallowed_tools
 
 
 async def test_effort_sent_and_thinking_never_pinned(defs, gov, clock, conn) -> None:
@@ -777,7 +823,7 @@ async def test_call_class_drives_admission(defs, gov, clock, conn, real_cfg, cal
     assert fake.calls == []
 
     allowed = await harness.run_single_shot(
-        defs["intraday_analyst"], FakeContext(call_class="signal"), enter_validator(clock)
+        defs["intraday_analyst"], FakeContext(call_class="signal_candidate"), enter_validator(clock)
     )
     assert allowed.ok and len(fake.calls) == 1
 

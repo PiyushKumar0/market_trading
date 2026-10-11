@@ -1,6 +1,6 @@
-﻿"""MarketStore (Â§4.1/Â§4.3/Â§4.5, E4): idempotent schema init for the full Â§4.3 table set, Decimal-exact
+﻿"""MarketStore (§4.1/§4.3/§4.5, E4): idempotent schema init for the full §4.3 table set, Decimal-exact
 bar/tick round-trips (incl. ``src`` provenance + the A14 ``auction_open``), partitioned tick Parquet
-batches, the Â§2.6 contiguous-coverage warm-up check, retention purges, and the Phase-1 additive
+batches, the §2.6 contiguous-coverage warm-up check, retention purges, and the Phase-1 additive
 settings keys + notify-catalog messages."""
 
 from __future__ import annotations
@@ -39,14 +39,14 @@ from engine.notify.catalog import (
 )
 from tests.conftest import FIXED_NOW
 
-# The complete Â§4.3 DuckDB table inventory. Adding a table to the schema without adding it here fails
+# The complete §4.3 DuckDB table inventory. Adding a table to the schema without adding it here fails
 # CI and vice-versa (the same lockstep guard as test_migrations for SQLite).
 PLAN_TABLES = {
     "bars_1m", "bars_1m_no_trade", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
     "universe_daily", "features_daily", "feature_snapshots", "news", "news_clusters",
     "entity_aliases", "unresolved_entities", "theme_map", "sentiment_agg", "catalyst_watchlist",
     "calendar", "corp_actions", "earnings_calendar", "flagged_instrument_days", "sector_map",
-    # Â§2.8 corporate-filings layer (O14)
+    # §2.8 corporate-filings layer (O14)
     "symbol_isin", "insider_trades", "shp_quarterly", "results_filings",
 }
 
@@ -85,7 +85,7 @@ def test_double_init_idempotent_and_persistent(tmp_path, clock):
     s.insert_bars_1m([_bar(FIXED_NOW.replace(second=0, microsecond=0))])
     s.close()
 
-    # Re-open the same file: schema init is IF NOT EXISTS â€” existing data survives.
+    # Re-open the same file: schema init is IF NOT EXISTS — existing data survives.
     s2 = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
     s2.open()
     assert PLAN_TABLES <= s2.table_names()
@@ -105,7 +105,7 @@ def test_bar_roundtrip_decimal_fidelity_src_auction_open(store, clock):
     got = store.get_bars_1m("RELIANCE", open_915, open_915 + timedelta(minutes=2))
     assert len(got) == 2
     b0, b1 = got
-    # Decimal-exact round-trip (Â§3.2 money convention; DECIMAL(12,2) documented choice).
+    # Decimal-exact round-trip (§3.2 money convention; DECIMAL(12,2) documented choice).
     assert isinstance(b0.open, Decimal) and b0.open == Decimal("2338.55")
     assert b0.close == Decimal("2339.90") and b0.volume == 12500
     assert b0.auction_open == Decimal("2338.10") and b1.auction_open is None
@@ -120,7 +120,7 @@ def test_bars_1m_upsert_official_replaces_self(store, clock):
     store.insert_bars_1m([_bar(minute, src="self")])
     store.insert_bars_1m([_bar(minute, src="kite_official", close=Decimal("2341.15"))])
     got = store.get_bars_1m("RELIANCE", minute, minute + timedelta(minutes=1))
-    assert len(got) == 1                               # upsert, not duplicate (Â§4.4 job 2 canonical)
+    assert len(got) == 1                               # upsert, not duplicate (§4.4 job 2 canonical)
     assert got[0].src == "kite_official" and got[0].close == Decimal("2341.15")
 
 
@@ -271,9 +271,9 @@ def test_bar_src_is_constrained(store, clock):
 
 def test_naive_datetime_rejected_by_models():
     with pytest.raises(ValidationError):
-        _bar(datetime(2026, 6, 17, 9, 15))             # naive ts_minute is a bug (Â§3.2)
+        _bar(datetime(2026, 6, 17, 9, 15))             # naive ts_minute is a bug (§3.2)
     with pytest.raises(ValidationError):
-        _tick(datetime(2026, 6, 17, 9, 15))            # naive exchange_ts is a bug (Â§3.2)
+        _tick(datetime(2026, 6, 17, 9, 15))            # naive exchange_ts is a bug (§3.2)
 
 
 def test_last_bar_time_and_coverage_gap_check(store, clock):
@@ -286,7 +286,7 @@ def test_last_bar_time_and_coverage_gap_check(store, clock):
 
     end = start + timedelta(minutes=5)
     assert store.coverage_gaps("RELIANCE", start, end) == [start + timedelta(minutes=2)]
-    assert store.has_contiguous_coverage("RELIANCE", start, end) is False  # Â§2.6 step-6 warm-up gate
+    assert store.has_contiguous_coverage("RELIANCE", start, end) is False  # §2.6 step-6 warm-up gate
     store.insert_bars_1m([_bar(start + timedelta(minutes=2))])
     assert store.has_contiguous_coverage("RELIANCE", start, end) is True
 
@@ -345,7 +345,7 @@ def test_bars_1d_upsert_and_query(store):
     assert got[0].close == Decimal("4121.00") and got[0].src == "bhavcopy"
 
 
-# --------------------------------------------------------------------------- ticks -> parquet (Â§4.3)
+# --------------------------------------------------------------------------- ticks -> parquet (§4.3)
 def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
     ts = clock.now()
     d = clock.today().isoformat()
@@ -356,7 +356,7 @@ def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
 
     files = store.flush_ticks()
     assert store.pending_tick_count == 0
-    # Partition layout: <root>/ticks/date=YYYY-MM-DD/symbol=X/<ulid>.parquet (Â§4.3).
+    # Partition layout: <root>/ticks/date=YYYY-MM-DD/symbol=X/<ulid>.parquet (§4.3).
     rel_dirs = {f.parent.relative_to(tmp_path / "parquet").as_posix() for f in files}
     assert rel_dirs == {f"ticks/date={d}/symbol=RELIANCE", f"ticks/date={d}/symbol=TCS"}
     assert all(f.suffix == ".parquet" and f.exists() for f in files)
@@ -560,8 +560,8 @@ def test_tick_autoflush_on_interval(tmp_path):
     s = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, flush_interval_s=5.0)
     s.open()
     try:
-        assert s.buffer_tick(_tick(FIXED_NOW)) == []           # 0s elapsed â€” buffered
-        current["now"] = FIXED_NOW + timedelta(seconds=6)      # past the ~5s batch window (Â§4.3)
+        assert s.buffer_tick(_tick(FIXED_NOW)) == []           # 0s elapsed — buffered
+        current["now"] = FIXED_NOW + timedelta(seconds=6)      # past the ~5s batch window (§4.3)
         files = s.buffer_tick(_tick(current["now"]))
         assert files and s.pending_tick_count == 0
     finally:
@@ -580,7 +580,7 @@ def test_compact_tick_partitions(store, clock):
     assert [t.volume_traded for t in store.get_ticks("RELIANCE", clock.today())] == [1, 2, 3]
 
 
-# --------------------------------------------------------------------------- retention (Â§4.5)
+# --------------------------------------------------------------------------- retention (§4.5)
 def test_retention_purges_expired_only(tmp_path):
     current = {"now": FIXED_NOW - timedelta(days=120)}          # start 120 days in the past
     clock = Clock(time_source=lambda: current["now"])
@@ -638,13 +638,13 @@ def test_news_insert_dedupes_on_url_and_clusters(store, clock):
          "url": "https://mc/1", "published_at": clock.now()},
     ]
     assert store.insert_news(rows) == 2
-    assert store.insert_news(rows) == 0                          # idempotent backfill (Â§4.4 job 10)
+    assert store.insert_news(rows) == 0                          # idempotent backfill (§4.4 job 10)
 
     assert store.existing_news_urls(["https://et/1", "https://et/2"]) == {"https://et/1"}
     assert store.existing_news_urls([]) == set()
 
     headlines = store.get_news(unclustered_only=True)
-    assert len(headlines) == 2 and all(h["untrusted"] for h in headlines)   # Â§2.4: always untrusted
+    assert len(headlines) == 2 and all(h["untrusted"] for h in headlines)   # §2.4: always untrusted
 
     store.set_news_cluster([h["headline_id"] for h in headlines], "01CLUSTER")
     assert store.get_news(unclustered_only=True) == []
@@ -676,14 +676,14 @@ def test_catalyst_watchlist_replace_is_idempotent_with_decimal_levels(store, clo
         "expires_at": d + timedelta(days=2),
     }
     store.replace_catalyst_watchlist(d, [row])
-    store.replace_catalyst_watchlist(d, [row])                   # digest re-run: no duplicates (Â§2.6)
+    store.replace_catalyst_watchlist(d, [row])                   # digest re-run: no duplicates (§2.6)
     got = store.get_catalyst_watchlist(d)
     assert len(got) == 1
     assert got[0]["grade"] == "originating" and got[0]["entry_id"]          # catalyst_ref minted
     assert got[0]["confirm_trigger"] == Decimal("4130.00")                  # deterministic levels exact
     assert store.get_catalyst_watchlist(d, grade="context") == []
 
-    store.replace_catalyst_watchlist(d, [])                       # empty-but-fresh digest (Â§2.7)
+    store.replace_catalyst_watchlist(d, [])                       # empty-but-fresh digest (§2.7)
     assert store.get_catalyst_watchlist(d) == []
 
 
@@ -699,7 +699,7 @@ def test_sector_map_snapshots_and_latest(store):
 
 def test_reconcile_log_checkpoints(store, clock):
     d = date(2026, 6, 16)
-    assert store.has_reconcile_entry(d) is False                  # Â§2.6: un-reconciled day detected
+    assert store.has_reconcile_entry(d) is False                  # §2.6: un-reconciled day detected
     store.append_reconcile_log([{
         "d": d, "symbol": "RELIANCE", "bars_self": 375, "bars_official": 375, "bars_compared": 370,
         "vol_drift_bars": 1, "close_drift_bars": 0, "offline_bars": 5, "bad_bar_fraction": 0.0027,
@@ -911,8 +911,8 @@ def test_new_catalog_messages_shapes():
 
 # --------------------------------------------------------------------------- torn-write guard (2026-07-21)
 def test_upsert_rows_is_transactional_rollback_on_midbatch_failure(store, clock):
-    """2026-07-21: a taskkill mid-executemany left instruments_daily HALF-written (the index tail â€”
-    exactly the regime tokens â€” lost). _upsert_rows now wraps the batch in one transaction: a mid-batch
+    """2026-07-21: a taskkill mid-executemany left instruments_daily HALF-written (the index tail —
+    exactly the regime tokens — lost). _upsert_rows now wraps the batch in one transaction: a mid-batch
     failure must leave the table exactly as before, and the connection must stay usable."""
     d = clock.today()
 

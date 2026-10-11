@@ -82,6 +82,16 @@ def test_pinned_breakout_math():
     assert abs(cand.score - 0.65) < 1e-9
 
 
+def test_fractional_rr_target_is_not_truncated():
+    """``target = entry + rr_target x (entry - stop)`` with a real-valued multiple: 1.5 x R=3 puts
+    the target at 104.50, never at the 103.00 an integer-truncated multiple would give."""
+    cand = scan_daily("BPCL", _series_with_breakout(), today=TODAY, params={**P, "rr_target": 1.5})
+    assert cand is not None
+    assert cand.raw_levels.entry == Decimal("100.00")
+    assert cand.raw_levels.stop == Decimal("97.00")
+    assert cand.raw_levels.target == Decimal("104.50")
+
+
 def test_entry_is_the_level_never_yesterdays_close():
     """WO-4/F5, the defect this rule existed to carry: ``entry`` must never be ``close(y)``.
 
@@ -160,7 +170,7 @@ def test_sweep_skips_unadjusted_history_symbols_and_counts_them():
     assert counts == {brk20.VETO_UNADJUSTED_HISTORY: 1}
 
 
-def test_default_params_are_the_envelope_defaults():
+def test_default_params_are_the_pinned_defaults():
     assert brk20.DEFAULT_PARAMS == {
         "lookback_days": 20, "vol_mult": 1.2, "rr_target": 2.0, "ex_skip_days": 10,
     }

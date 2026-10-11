@@ -16,8 +16,8 @@ Two load-bearing security properties ship here in Phase 0:
 Phase 2 completes the §3.2.11 command surface: every row of :data:`_COMMANDS` now has a real handler.
 The Phase-2 data sources arrive as **optional keyword dependencies** — ``reco_book``, ``latch``,
 ``governor``, ``limits_engine``, ``exposure``, ``session``, ``conn`` — each defaulting to ``None``, in
-which case its command replies "… not wired" instead of pretending to act. Composition (§3.2.12) wires
-them in a later wave; the bot itself never constructs a dependency and never originates an order.
+which case its command replies "… not wired" instead of pretending to act. ``engine.ops.main``
+composes them (§3.2.12); the bot itself never constructs a dependency and never originates an order.
 
 The §3.6 capture commands (``/taken``, ``/closed``, ``/veto``) speak **ticker, not rec_id** (WO-29):
 their first argument is resolved against the recommendation ledger, with the ULID id path kept intact
@@ -249,9 +249,10 @@ class RecoBook(Protocol):
     """The RECOMMEND outcome-capture seam (§3.6) — implemented by ``RecommendationBook``.
 
     Duck-typed on purpose (mirrors the ``FloorLimits`` seam in ``engine.risk.exposure``): the bot
-    depends on these three coroutines and nothing else, so the book can land independently. Each
-    returns an owner-facing summary string and raises :class:`ValueError` — with a message meant for
-    the owner — on an unknown ``rec_id`` or an invalid state transition.
+    depends on these methods (take/close/veto/protect + decision_candidates) and nothing else.
+    take/close/veto/protect each return an owner-facing summary string and raise :class:`ValueError`
+    — with a message meant for the owner — on an unknown ``rec_id`` or an invalid state transition;
+    ``decision_candidates`` returns the candidate rows (``list[dict]``) used to resolve a ticker.
 
     ``apply_approval`` is OPTIONAL and probed with ``hasattr``: in Phase 2 a stop-widen approval has
     no order side effect (the human owns their orders, B7), so a book that cannot apply one is fine.
@@ -335,7 +336,7 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Show open positions (qty, average entry, stop/target, origin).", True),
     _CommandSpec("pnl", "/pnl", "Show realised P&L today, day MTM and platform equity.", True),
     _CommandSpec("budget", "/budget",
-                 "Show month-to-date LLM spend per agent vs allocation and the degrade tier.", True),
+                 "Show quota-week-to-date LLM spend (Thu 14:00 IST window) per agent vs the weekly allocation and the degrade tier.", True),
     _CommandSpec("limits", "/limits",
                  "Show equity, day MTM, open counts, consecutive losses and the key caps.", True),
     # --- approvals + broker session ---
@@ -434,8 +435,9 @@ class _LedgerRec:
     qty: int
     kind: str
     delivered_at: str | None
-    #: WO-V (2026-09-13): a swing/position ENTRY lives to the NEXT session's close, so a live row can
-    #: be from an earlier day and the listing must be able to say so.
+    #: A listed row can be from an earlier day (an entry expired inside the veto window, or a taken
+    #: position), so the listing must be able to say so. WO-V's next-session entry TTL, once the
+    #: reason, was withdrawn 2026-09-23.
     valid_until: str | None = None
 
 
@@ -638,7 +640,7 @@ class TelegramBot:
         """Send a catalog message (§8/R8) or plain text to the owner chat.
 
         Accepts a ``CatalogMessage`` (rendered via its ``.render()`` / ``.text`` / ``str()``) or a raw
-        string — the catalog model itself lands in Phase 2 (§8). Outbound never blocks the engine: a
+        string. Outbound never blocks the engine: a
         send failure is logged, not raised, so an alert path can never take down a caller (R8).
 
         JOURNAL FIRST (WO-24d, 2026-08-21): the row lands in ``notifications`` BEFORE the wire is
@@ -1726,7 +1728,7 @@ class TelegramBot:
         """Stamp the approval row and report it. NO side effect beyond the row in Phase 2 — the human
         manages their own orders (B7). If the injected recommendation book knows how to push an
         approved stop onto a tracked position it is offered the approval (probe, never a requirement:
-        the book lands in a parallel task and may not implement it yet)."""
+        RecommendationBook deliberately has no apply_approval in Phase 2 — B7)."""
         verb = "approve" if status == "approved" else "reject"
         if self._conn is None:
             await _reply(update, f"/{verb}: state store not wired.")
@@ -1972,8 +1974,9 @@ def _rec_line(rec: _LedgerRec) -> str:
     The id is the tiebreak handle the owner types back when the ticker is ambiguous, and a truncated
     id is not a handle — this is the one place the internal id is deliberately shown.
 
-    A bare ``HH:MM`` was unambiguous only while every live row was delivered TODAY — the invariant
-    WO-V (2026-09-13) deleted: a swing/position entry now lives to the NEXT session's close. When the
+    A bare ``HH:MM`` is unambiguous only for a row delivered TODAY; a listed row can be from an
+    earlier day (an entry expired inside the veto window, or a taken position). The date-aware
+    rendering is kept generic after WO-V's next-session entry TTL was withdrawn (2026-09-23). When the
     delivery and the expiry fall on different IST days both stamps carry their day, so a Friday rec
     read on Monday says so; a same-day row renders exactly as before."""
     delivered, valid = _parse_iso(rec.delivered_at), _parse_iso(rec.valid_until)

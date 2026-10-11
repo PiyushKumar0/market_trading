@@ -149,7 +149,8 @@ class PaperNotifier:
             self._announced = set()
 
     async def alert(self, key: str, message: str) -> None:
-        """The ``PaperAlert``: ``key`` is ``<position_id>:<attempt>``, ``construct`` or ``prep``."""
+        """Serves both PaperRuntime's ``PaperAlert`` (``construct`` / ``prep``) and ProtectionManager's
+        ``PaperNotify`` (``<position_id>:<attempt>:<iso-ts>``)."""
         _log.critical("paper_alert", key=key, message=message)
         if key == "prep":
             return
@@ -250,7 +251,7 @@ def load_last_observed(conn: sqlite3.Connection) -> datetime | None:
 
 def store_corp_actions_fn(store: MarketStore) -> CorpActionsFn:
     """The ExitManager's ``corp_actions_fn``: ``corp_actions`` read through the store, never the
-    ``calendar.ex_dates`` stub, which always returns ``[]``."""
+    unimplemented ``calendar.ex_dates`` stub (it raises NotImplementedError)."""
 
     async def corp_actions(ex_from: date, ex_to: date | None) -> list[dict[str, Any]]:
         rows = await store.arun(store.get_corp_actions, ex_from=ex_from, ex_to=ex_to)

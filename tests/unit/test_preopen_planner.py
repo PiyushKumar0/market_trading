@@ -283,6 +283,37 @@ async def test_empty_tables_render_unavailable_without_raising(store, conn, asse
     assert "gap scan vs prior close:\n  - not computed: no trustworthy pre-open price source (A14" in volatile
 
 
+async def test_watchlist_renders_symbol_grade_event_without_the_retired_levels(
+    store, conn, assembler, agent_defs, clock, calendar
+):
+    """The v1 cat levels (confirm_trigger / invalidation / stop & target bands) are retired: a watchlist
+    row that still carries them renders only ``SYM grade event_type`` — no level text reaches the
+    planner (it would read as a binding level; the scanner owns those)."""
+    store.replace_catalyst_watchlist(
+        TODAY,
+        [{
+            "symbol": "RELIANCE",
+            "grade": "context",
+            "direction": "long",
+            "event_type": "order_win",
+            "materiality": 0.72,
+            "source_domain_count": 3,
+            "confirm_trigger": Decimal("1405.00"),
+            "invalidation": Decimal("1388.00"),
+            "stop_band_low": Decimal("1380.00"),
+            "stop_band_high": Decimal("1390.00"),
+            "target_band_low": Decimal("1450.00"),
+            "target_band_high": Decimal("1470.00"),
+        }],
+    )
+
+    volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
+
+    assert "RELIANCE context order_win" in volatile
+    assert "confirm_trigger" not in volatile
+    assert "invalidation" not in volatile
+
+
 # ------------------------------------------------- context provenance (2026-07-30 no_trade incident)
 async def test_context_filters_platform_bookkeeping_and_dates_the_review(
     store, conn, assembler, agent_defs, clock, calendar

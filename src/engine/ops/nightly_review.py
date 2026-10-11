@@ -520,7 +520,7 @@ def build_funnel_summary(
         (forwarded_scores if n_forwarded else unforwarded).setdefault(sid, []).append(score)
 
     # Persisted first, in-process second (2026-08-21): the table is the only source that survives a
-    # restart, and the review runs at 22:35 — hours after any bounce the day happened to take.
+    # restart, and the review runs at 21:00 — hours after any bounce the day happened to take.
     raw_map = read_funnel_raw_counts(conn, d) or dict(raw_by_strategy or {})
     # A strategy that FIRED but never reached the journal still gets its row (2026-09-12): a parked
     # strategy (``max_per_strategy_day`` 0, `orb` from this date) is refused before any slot is

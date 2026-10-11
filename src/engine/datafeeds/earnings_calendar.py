@@ -1,7 +1,7 @@
 """NSE results/board-meeting calendar → ``earnings_calendar`` (§4.4 job 8, 18:30 — R2, E5).
 
 Pulls upcoming results / board-meeting dates from the NSE event-calendar API and persists them to
-the DuckDB ``earnings_calendar`` table (§4.3). Two consumers, both later phases (DATA ONLY here):
+the DuckDB ``earnings_calendar`` table (§4.3). Two consumers (live in Phase 2; the features engine and pre-open planner also read it):
 
 1. **R2 no-trade windows** — "no entry in a symbol on its results day" (§7.1 ``no_trade_windows``,
    day T only), checked at gate time per instrument. The table is in the §2.6 step-5

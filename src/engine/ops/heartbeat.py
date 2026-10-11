@@ -118,8 +118,9 @@ class HeartbeatWriter:
     def _run(self) -> None:
         conn: sqlite3.Connection | None = None
         try:
-            # Own connection, opened inside the thread — never the loop's (§2.2). Default
-            # isolation_level autocommits are avoided: explicit commit per write.
+            # Own connection, opened inside the thread — never the loop's (§2.2). isolation_level=None
+            # = autocommit: each one-row UPDATE commits on its own, so no implicit transaction is
+            # ever left open across beats.
             conn = sqlite3.connect(self._db_path, timeout=5.0, isolation_level=None)
             conn.execute("PRAGMA busy_timeout=5000")
             while True:

@@ -29,9 +29,10 @@ flush), so neither can starve the other and nothing outside can starve either.
 Tick Parquet dataset (§4.3 ``ticks``): raw FULL-mode frames (cumulative volume + depth top, A13) are
 buffered in memory and flushed every ``flush_interval_s`` (60 s default) or ``max_buffered_ticks``, whichever
 first, into ``<parquet_root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<ulid>.parquet``. Each flush writes
-one file per (date, symbol) present in the batch; :meth:`compact_tick_partitions` coalesces a day's
-small batch files into one file per symbol (EOD job) so the 30-day retention window stays a sane file
-count. Timestamps are ``TIMESTAMPTZ`` with the session timezone pinned to Asia/Kolkata; every
+one file per (date, symbol) present in the batch; the nightly ``JOB_TICK_COMPACT``
+(``engine.marketdata.tick_compact.compact_ticks``, on its own connection) coalesces a day's small
+batch files so the 30-day retention window stays a sane file count. :meth:`compact_tick_partitions`
+does the same on the live store's lock but has no production caller. Timestamps are ``TIMESTAMPTZ`` with the session timezone pinned to Asia/Kolkata; every
 datetime returned by this API is normalized tz-aware IST (§3.2).
 
 Retention (§4.5): ticks 30 days rolling, news + clusters + sentiment 1 year, corrections 90 days —
@@ -202,8 +203,8 @@ _SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (symbol, d)
     )
     """,
-    # reconcile_log — nightly self-vs-official drift per (day, symbol) (A13); the per-day checkpoint
-    # driving the §2.6 startup catch-up ("any past trading day lacking a reconcile_log entry").
+    # reconcile_log — nightly self-vs-official drift per (day, symbol) (A13); the audit trail. The §2.6
+    # startup catch-up is driven by the job_runs DATE_KEYED watermark, not by this table.
     # offline_bars counts the span excluded from the drift denominator (gap-backfilled, not drift).
     """
     CREATE TABLE IF NOT EXISTS reconcile_log (
@@ -1536,7 +1537,9 @@ class MarketStore:
         return not self.coverage_gaps(symbol, start, end)
 
     def export_bars_1m_month(self, year: int, month: int) -> Path:
-        """Write the month's bars_1m to the Parquet monthly archive (§4.3) and return the file path."""
+        """Write the month's bars_1m to the Parquet monthly archive (§4.3) and return the file path.
+
+        No production caller: no job schedules the monthly archive today."""
         first = date(int(year), int(month), 1)
         nxt = date(first.year + (first.month == 12), (first.month % 12) + 1, 1)
         out_dir = self._parquet_root / "bars_1m"
@@ -1627,11 +1630,11 @@ class MarketStore:
         return self._upsert_rows("reconcile_log", stamped)
 
     def has_reconcile_entry(self, d: date) -> bool:
-        """§2.6 catch-up checkpoint: has day ``d`` been reconciled at all?"""
+        """Has day ``d`` been reconciled at all? No production caller (catch-up is watermark-driven)."""
         return bool(self._fetchall("SELECT 1 FROM reconcile_log WHERE d = ? LIMIT 1", [d]))
 
     def reconciled_days(self, start: date, end: date) -> set[date]:
-        """Distinct reconciled days in ``[start, end]`` — the startup scan for un-reconciled days."""
+        """Distinct reconciled days in ``[start, end]``. No production caller (diagnostic/test use)."""
         return {r[0] for r in self._fetchall(
             "SELECT DISTINCT d FROM reconcile_log WHERE d >= ? AND d <= ?", [start, end]
         )}
@@ -1691,7 +1694,7 @@ class MarketStore:
         the cap alone (``exclusion_reasons == ['watchlist_cap']``). This is the brk20/ins batch-rule
         universe (``src/engine/ops/main.py`` ``run_scan_sweep``), not the ``included_only`` focus
         watchlist — use it wherever "did this symbol clear the rules" matters more than "is it in
-        today's top 100" (the 2026-08-04 BPCL lesson: watchlist-cap-contaminated visibility silently
+        today's top-N focus watchlist" (data.universe_max_watchlist; the 2026-08-04 BPCL lesson: watchlist-cap-contaminated visibility silently
         drops otherwise-eligible symbols).
         """
         rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
@@ -2243,7 +2246,7 @@ class MarketStore:
 
     def buffer_tick(self, tick: Tick) -> list[Path]:
         """Buffer one tick; flush when the batch is due (~``flush_interval_s`` s or
-        ``max_buffered_ticks``, §4.3 "written in 5 s batches"). Returns files written (usually []).
+        ``max_buffered_ticks``, §4.3; 60 s batches since WO-7). Returns files written (usually []).
 
         Synchronous convenience for offline/test callers; the live path uses
         :meth:`stage_tick` + :meth:`aflush_ticks` so the flush never runs on the event loop."""
@@ -2406,8 +2409,10 @@ class MarketStore:
         ]
 
     def compact_tick_partitions(self, d: date) -> list[Path]:
-        """Coalesce day ``d``'s many small batch files into ONE file per symbol (EOD housekeeping —
-        keeps the 30-day window a sane file count). Idempotent; returns the compacted files."""
+        """Coalesce day ``d``'s many small batch files into ONE file per symbol. Idempotent; returns
+        the compacted files. No production caller: the nightly compaction is
+        ``engine.marketdata.tick_compact.compact_ticks`` (``JOB_TICK_COMPACT``), which runs on its own
+        connection instead of holding the live store's lock."""
         day_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}"
         if not day_dir.exists():
             return []

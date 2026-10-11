@@ -22,11 +22,11 @@ const signCls = (v: string | null | undefined) => {
 
 const ROLE: Record<string, string> = { entry: 'Entry', exit: 'Exit', stop: 'Stop-loss', target: 'Target' }
 const ORDER_STATE: Record<string, string> = {
+  SUBMITTED: 'Sent',
   ACKED: 'Accepted',
-  OPEN: 'Open',
-  PARTIAL: 'Partly filled',
-  TRIGGER_PENDING: 'Waiting for trigger',
-  PENDING: 'Pending',
+  PARTIALLY_FILLED: 'Partly filled',
+  CANCEL_PENDING: 'Cancelling',
+  MODIFY_PENDING: 'Modifying',
 }
 const OUTCOME_TONE: Record<string, Tone> = { win: 'good', loss: 'crit', void: 'warn' }
 

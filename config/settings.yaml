@@ -37,7 +37,7 @@ ticker:
 # Process-lifecycle notifications + liveness watchdog (§2.2/§3.2.12). Distinct from the ticker heartbeat above:
 # this is the ENGINE's own liveness marker (SQLite engine_lifecycle.last_alive_at) read by the OUT-OF-BAND watchdog.
 lifecycle:
-  heartbeat_write_s: 20                   # engine writes last_alive_at this often (HealthMonitor)
+  heartbeat_write_s: 20                   # engine writes last_alive_at this often (HeartbeatWriter thread, ops/heartbeat.py)
   down_stale_s: 90                         # watchdog: intend_to_run true AND heartbeat older than this => ENGINE_DOWN
                                           #   (> 3× heartbeat_write_s so a single slow tick never false-alarms)
   watchdog_poll_s: 60                     # scripts/watchdog.py Scheduled-Task cadence (non-wake, §10.7)
@@ -50,10 +50,11 @@ lifecycle:
   crashloop_window_s: 600                 # fast respawns inside this window => ENGINE_CRASHLOOP (§2.2/§10.7)
 
 broker:
-  kite_login_redirect_path: "/kite/callback"   # MUST match the Kite app registered redirect URL (R6)
-  token_expiry_ist: "06:00"               # A5 [RE-VERIFY: A5 06:00 vs forum 07:30]; token_valid() is
-                                          # driven off last successful call / 403s, NOT a hard clock
-  instruments_refresh_ist: "08:15"        # daily dump (A10/A8)
+  kite_login_redirect_path: "/kite/callback"   # MUST match the Kite app registered redirect URL (R6);
+                                               # documentation only — the route is hard-coded in kite_callback.py
+  token_expiry_ist: "06:00"               # A5 [RE-VERIFY: A5 06:00 vs forum 07:30]; NOT read by code —
+                                          # token_valid() is driven off last successful call / 403s, NOT a hard clock
+  instruments_refresh_ist: "08:15"        # NOT read by code; the schedule is jobs.instruments_ist
 
 # SEED default for the owner-set daily trade window (§7.1 trade_window). Live value is sticky in
 # SQLite, owner-adjustable via /trade_window and POST /config/trade_window (§3.2.7).
@@ -118,7 +119,8 @@ data:
                                           # criteria-passing NON-index symbols persisted included=False,
                                           # exclusion_reasons=['not_in_index'] — batch rules / news shadow /
                                           # pre-open advisory only; tick watchlist + risk gate stay scoped to
-                                          # the configured index (NIFTY 500 since 2026-09-04, O15).
+                                          # the configured index (universe.index_name: NIFTY Total Market
+                                          # since O18, 2026-10-08; NIFTY 500 under O15 before it).
                                           # false = exact pre-addendum universe shape (the rollback line).
   batch_universe_max: 600                 # top-N extended by median traded value (sanity cap)
 
@@ -199,8 +201,9 @@ news:
 cat:
   fanout_weight: 0.5             # §2.7 step 5: sector/theme fan-out multiplier on materiality AND |sentiment|
                                  # before threshold comparison. Owner-only, deliberately NOT learnable.
-  max_event_age_days: 2          # §2.7 HeadlineClusterer near-duplicate assignment window + `cat` catalyst
-                                 # age horizon (owner-only, NOT learnable; wired into HeadlineClusterer)
+  max_event_age_days: 2          # §2.7 HeadlineClusterer near-duplicate assignment window ONLY (calendar
+                                 # days; wired into HeadlineClusterer). The `cat` digest age horizon is
+                                 # the envelope.yaml row cat.max_event_age_days (sessions), not this key.
   # --- `cat` v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18). ins-mechanics mirror.
   # Deliberately NO expected_edge_pct: there is no validated edge (the shadow measures it), so the
   # §7.1 C3 gate fail-closed-rejects every cat candidate — signals are journalled at prescreen
@@ -224,11 +227,13 @@ cat_reversal:
                                  # INERT during the shadow — nothing is ever held
 
 # §2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
-# envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: read by NO decision
-# path yet (event typing §2.8.2 + catalyst wiring are later stages, gated on the §2.8.4 event study).
+# envelope-learnable parameters in stages 1–2). Research/validation inputs only: read by scripts
+# (event_study, filings_experiments, validate_insider, research_common), never by a live decision
+# path. The live insider leg is `ins` below; its floor is ins.threshold_inr (keep it equal).
 filings:
   insider_min_value_inr: 10000000    # abs ₹ floor for an insider_net_buy event (₹1cr, §2.8.2)
-  insider_min_value_over_adv: 0.05   # AND value/20d-ADV floor (§2.8.2)
+  insider_min_value_over_adv: 0.05   # NOT applied anywhere: the validated rule (live as `ins`) uses
+                                     # the absolute floor only (§2.8.2 planned an AND ADV floor)
   pledge_delta_min_pct: 5.0          # QoQ promoter-pledge %-point change to flag (§2.8.2)
 
 # §6.1 `ins` — insider net-BUY swing leg (owner-directed 2026-08-17, the first EVIDENCE-FIRST
@@ -273,9 +278,10 @@ ins:
   expected_edge_pct: 1.58      # the validated T+20 NET drift, fed to the C3 cost gate. `ins` ships
                                # target: None (the T+20 median +1.21% is INFORMATION, never an order
                                # level), so the gate cannot derive an edge from the levels — this is
-                               # the per-strategy input it uses instead. At default sizing (2% swing
-                               # risk / 6% stop ~ ₹6.7k notional) the CNC round trip is ~0.53% incl.
-                               # the DP flat charge => edge multiple ~3x. The exact CostModel
+                               # the per-strategy input it uses instead. At §7.1 sizing (notional <=
+                               # equity x 2% / (2.0 x 5%) = equity/5, ₹8,000 at the ₹40,000 base) the
+                               # CostModel CNC round trip is ~0.43% => edge multiple ~3.6x (~3.5x at
+                               # the ₹36,000 floor rung; CostModel 2026-10-11). The exact CostModel
                                # adjudicates per candidate; small notionals may be shrunk or rejected,
                                # and that is the gate doing its job.
 
@@ -319,7 +325,8 @@ hi52:
                                # number in code.
 
 # §6.1 `brk20` — the ENTRY MECHANISM, not the rule. The rule's own parameters live in
-# brk20.DEFAULT_PARAMS (the §6.3 learnable envelope) and the WO-19 stop-geometry floor in
+# brk20.DEFAULT_PARAMS (frozen code defaults: envelope.yaml has no brk20 rows today; plan §6.1
+# lists them as future §6.3 rows) and the WO-19 stop-geometry floor in
 # brk20.FLOOR_PARAMS (owner-only by construction); this block holds only how long the broken level
 # is offered for.
 brk20:
@@ -468,7 +475,8 @@ reconcile:
 
 # §3.2.3 BackfillJob pacing + Kite historical per-request range caps (A2).
 backfill:
-  req_per_s: 3                   # hard ≤3 req/s budget (A2), shared through broker.rate_limiter
+  req_per_s: 3                   # dry-run wall-time ESTIMATE only (scripts/backfill.py); real pacing is
+                                 # broker/rate_limiter.py _HISTORICAL_RATE_PER_S (A2), not this key
   minute_chunk_days: 60          # max span per minute-interval historical request
   day_chunk_days: 2000           # max span per day-interval historical request
 
@@ -492,6 +500,8 @@ universe:
 
 # §10.1 scheduler fire-times (IST, trading days, R6). Fire-times only — every job is also §2.6
 # catch-up-eligible on the next startup if its fire-time passed while the engine was off.
+# isin_map, results_line_items and feed_freshness are not listed: they fire at their JobTimesCfg
+# defaults (src/engine/core/config.py).
 jobs:
   instruments_ist: "08:15"       # §4.4 job 4 (A10/A8)
   surveillance_ist: "08:20"      # §4.4 job 5 (A8)
@@ -520,14 +530,15 @@ jobs:
   filings_shp_ist: "18:50"       # §2.8 filings_shp — SHP + pledge (run-latest)
   nightly_review_ist: "21:00"    # §5.5/§6.4
   backup_ist: "21:00"            # §10.5 (watermark-driven, not pinned to being up at 21:00)
-  sector_map_weekly_day: "SUN"   # §4.4 job 13 (sector_map + theme_map weekly refresh)
+  sector_map_weekly_day: "SUN"   # §4.4 job 13 (sector_map + theme_map weekly refresh). NOT read by code:
+                                 # the Sunday cadence is hard-coded (ops.main._is_sunday + its CronTrigger)
 
 auth:
   totp_automation:
     # OWNER-ACCEPTED RISK ITEM (A5/§7.3): scripted TOTP auto-login violates Zerodha policy
     # (account/API suspension risk). Default OFF; enabling is an explicit owner act.
-    enabled: false
+    enabled: false               # RESERVED: no code reads this key; flipping it has no effect
 
 feature_flags:
   paper_only: true                        # Phase 0–3: no live order routing possible
-  onedrive_backup_mirror: false           # §14 Q8 owner choice
+  onedrive_backup_mirror: false           # §14 Q8 owner choice. RESERVED: no code reads it; true does nothing

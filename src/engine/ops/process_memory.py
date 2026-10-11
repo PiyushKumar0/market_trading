@@ -68,22 +68,13 @@ class ProcessMemoryReader:
         if not self._is_windows:
             return None
         try:
-            fn = self._resolve()
-            if fn is None:
-                return None
-            return fn()
+            return self._resolve()()
         except Exception as exc:  # noqa: BLE001 - a memory-read failure must never crash the health loop
             _log.debug("process_memory_read_failed", reason=str(exc))
             return None
 
-    def _resolve(self) -> Callable[[], ProcessMemory] | None:
-        if self._get_process_memory_info is not None:
-            return self._get_process_memory_info
-        try:
-            return _read_via_win32
-        except Exception:  # noqa: BLE001 - ctypes/psapi unavailable ⇒ silently degrade to no-op
-            _log.debug("process_memory_ctypes_unavailable")
-            return None
+    def _resolve(self) -> Callable[[], ProcessMemory]:
+        return self._get_process_memory_info or _read_via_win32
 
 
 def _read_via_win32() -> ProcessMemory:

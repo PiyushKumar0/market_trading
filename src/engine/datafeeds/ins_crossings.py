@@ -151,8 +151,8 @@ class InsCrossingsJob:
     def _run_sync(self, d: date) -> InsCrossingsResult:
         window_start = d - timedelta(days=LOOKBACK_DAYS)
 
-        # --- ELIGIBLE universe: the FULL eligible set, exactly as brk20 reads it (§6.1: `ins` is a
-        #     batch rule over the whole eligible universe). A watchlist-cap exclusion is the ONE
+        # --- CORE-eligible universe (O18): the eligible set brk20 scans, restricted to core (NIFTY 500)
+        #     members via get_core_eligible_symbols (§6.1: `ins` is a batch rule). A watchlist-cap exclusion is the ONE
         #     exclusion that still leaves a symbol tradeable — it means "not in today's top-N focus
         #     list", not "ineligible" — and cap symbols have no 1m bars, which is precisely why a
         #     batch rule exists at all. (2026-09-01: predicate centralized in the store method —
@@ -164,11 +164,11 @@ class InsCrossingsJob:
         eligible = set(self._store.get_core_eligible_symbols(d))
         if not eligible:
             _log.warning("ins_crossings_no_universe", d=d.isoformat())
-            return InsCrossingsResult(d=d, ok=False, reason="no universe_daily rows for the run day")
+            return InsCrossingsResult(d=d, ok=False, reason="no core-eligible universe rows for the run day (no build, or core list unavailable)")
 
         # --- one bulk read of the filings window, grouped by symbol. A symbol with no filing inside
         #     the window cannot produce a crossing inside it (the trailing sum is 10 sessions), so
-        #     this is a lossless narrowing of ~200 universe symbols down to the handful that filed.
+        #     this is a lossless narrowing of the core-eligible universe down to the handful that filed.
         filings = self._store.get_insider_trades(
             broadcast_from=datetime.combine(window_start, time(0, 0), tzinfo=IST),
             broadcast_to=datetime.combine(d, time(23, 59, 59), tzinfo=IST),

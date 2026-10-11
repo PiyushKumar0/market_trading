@@ -6,8 +6,8 @@
     Plan refs: E7 (Windows ops via NSSM, SetThreadExecutionState, power-plan), D11 (service
     account + DPAPI secrets, no secrets in repo/env), IMPLEMENTATION_PLAN.md §2.2 (process model:
     one supervised asyncio engine; manual/demand start; restart-on-failure gated to a crash during
-    an active period; the engine itself loads CLAUDE_CODE_OAUTH_TOKEN from DPAPI and injects it into
-    its own process env before spawning the SDK CLI child), §2.6 (operating model: the engine is up
+    an active period; the engine spawns the pinned Claude Code CLI (agents.yaml llm.cli_path), which
+    authenticates with its own stored login; no engine code injects an OAuth token), §2.6 (operating model: the engine is up
     only during ACTIVE PERIODS and may be intentionally stopped between them; off outside an active
     period is NORMAL, not a fault, so a clean self-initiated stop MUST NOT be auto-restarted) and the
     authoritative service-setup text §10.7.
@@ -24,27 +24,20 @@
        or by the wake-capable Windows Scheduled Tasks registered by `scripts/schedule_tasks.ps1`
        (a separate optional helper, §10.7) — NOT by the service control manager.
 
-    2. RESTART-ON-FAILURE IS GATED TO AN "I INTEND TO RUN" SENTINEL.
+    2. RESTART-ON-FAILURE IS GATED BY THE `AppExit` MAPPING.
        NSSM's own exit handling distinguishes two outcomes via `AppExit`:
          - exit code 0  -> `AppExit 0 Exit`     : a CLEAN, self-initiated stop. NSSM does NOT
                                                    restart. This is the §2.6 "intentional stop ==
                                                    normal, not a crash" path (planned stop / shutdown
                                                    guard exit code, §10.8).
-         - any other    -> `AppExit Default Restart` : a CRASH. NSSM restarts ONLY IF the sentinel
-                                                   file (data\run\intend_to_run.flag) exists — the
-                                                   engine writes it when it begins an active period
-                                                   and DELETES it as the last step of a clean planned
-                                                   stop. Restart is therefore gated to "a crash while
-                                                   we intended to be running" (a crash during an
-                                                   active period), exactly per §2.2.
-       NSSM cannot read a file as a restart predicate, so the gate is EXIT-CODE-based at the NSSM
-       level: `AppExit 0 Exit` (a clean self-initiated stop is honoured, not restarted) and
-       `AppExit Default Restart` (a crash restarts), throttled by the crash-loop guard below. The
-       `MT_RESTART_SENTINEL` path is passed via `AppEnvironmentExtra` purely so the ENGINE can read it
-       on the *next* boot and, together with the sticky `engine_lifecycle` state (§2.6 step 0/1),
-       decide whether the previous exit was intended — it is NOT an NSSM-level AppEvents hook (this
-       script sets no `AppEvents` key). The AppExit codes are the always-present gate; the sentinel +
-       sticky state are the engine-side confirmation that a restart was wanted.
+         - any other    -> `AppExit Default Restart` : a CRASH. NSSM restarts after the 15 s
+                                                   `AppRestartDelay`, throttled by the crash-loop
+                                                   guard below.
+       NSSM cannot read a file or a database row as a restart predicate, so the exit code is the
+       only gate at the NSSM level. "I intend to run" is the engine's sticky `engine_lifecycle.state`
+       (migration 0001; intend-to-run == state != 'STOPPED', §2.6 step 0/1): the engine uses it on
+       the next boot to decide whether the previous exit was intended. There is no sentinel file and
+       no `AppEvents` hook (this script sets no `AppEvents` key).
 
     3. RESTART THROTTLE (crash-loop guard).
        `AppThrottle 60000`  : if the process exits inside 60 s of starting, NSSM treats it as a
@@ -58,10 +51,11 @@
                               never comes up at all.
 
     4. NO SECRETS IN THE SERVICE ENVIRONMENT (D11/§2.2/§2.4).
-       The engine loads CLAUDE_CODE_OAUTH_TOKEN and every other secret from DPAPI (Windows Credential
-       Manager via keyring) at startup and injects the OAuth token into its OWN process env before
-       spawning the SDK's bundled Claude Code CLI child. NSSM `AppEnvironmentExtra` for secrets is a
-       DOCUMENTED FALLBACK ONLY (see the commented block in Install-Service) and is deliberately NOT
+       The engine loads its secrets from DPAPI (Windows Credential Manager via keyring) at startup.
+       Injecting CLAUDE_CODE_OAUTH_TOKEN into the CLI child is NOT implemented: no engine code reads
+       that secret, and the pinned Claude Code CLI (agents.yaml llm.cli_path; the SDK's bundled CLI
+       only if that key is unset) authenticates with its own stored login. NSSM
+       `AppEnvironmentExtra` for secrets is a DOCUMENTED FALLBACK ONLY (see the commented block in Install-Service) and is deliberately NOT
        set by default — putting a token in the service env would violate R10 (secrets must live in an
        encrypted store) and would let a stray ANTHROPIC_API_KEY silently outrank the OAuth token (D2).
 
@@ -137,8 +131,7 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $PythonExe   = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 $LogsDir     = Join-Path $RepoRoot 'data\logs'           # core.log + service stdout/stderr (E7)
-$RunDir      = Join-Path $RepoRoot 'data\run'            # sentinel lives here (§2.2 restart gate)
-$Sentinel    = Join-Path $RunDir 'intend_to_run.flag'    # "I intend to run" flag (engine-managed)
+$RunDir      = Join-Path $RepoRoot 'data\run'
 $StdoutLog   = Join-Path $LogsDir 'service.out.log'
 $StderrLog   = Join-Path $LogsDir 'service.err.log'
 
@@ -208,7 +201,7 @@ function Install-Service {
     Write-Host "    AppDirectory  : $RepoRoot"
     Write-Host "    Stdout/Stderr : $StdoutLog | $StderrLog"
     Write-Host "    Start type    : SERVICE_DEMAND_START (manual; NOT auto-start)"
-    Write-Host "    Restart       : clean exit(0)=no restart; crash=restart, throttled, sentinel-gated"
+    Write-Host "    Restart       : clean exit(0)=no restart; crash=restart, throttled"
 
     # Preflight: the venv python must exist (owner runs `uv sync` first).
     if (-not (Test-Path -LiteralPath $PythonExe)) {
@@ -248,9 +241,8 @@ function Install-Service {
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'Start', 'SERVICE_DEMAND_START')
 
     # (2) Exit handling: clean exit(0) => stay stopped; anything else => restart (crash path).
-    #     The sentinel is the engine-side "I intend to run" confirmation (§2.2); NSSM cannot read a
-    #     file as a predicate, so the AppExit codes are the always-present gate and the engine
-    #     consumes the sentinel on next boot (§2.6 step 1).
+    #     NSSM cannot read a predicate, so the AppExit codes are the gate; the engine's sticky
+    #     engine_lifecycle.state is its own "intend to run" record (§2.6 step 1).
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppExit', 'Default', 'Restart')
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppExit', '0', 'Exit')
 
@@ -273,10 +265,6 @@ function Install-Service {
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppRotateOnline',  '1')
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppRotateBytes',   '10485760')        # 10 MiB
 
-    # (4) Restart sentinel path is exported so the engine knows where to write/delete its flag.
-    #     This is the ONLY env var we set -- it is a path, NOT a secret. Secrets stay in DPAPI.
-    Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppEnvironmentExtra', "MT_RESTART_SENTINEL=$Sentinel")
-
     # (6) Service account (D11 -- REQUIRED, not optional): the DPAPI secrets (Kite keys, Telegram
     #     bot token, Claude OAuth) were sealed under the OWNER's Windows profile. A service left on
     #     the LocalSystem default CANNOT decrypt them -- the engine boots secret-less and freezes.
@@ -296,8 +284,9 @@ function Install-Service {
     # ----------------------------------------------------------------------------------------------
     # DOCUMENTED FALLBACK ONLY -- DO NOT UNCOMMENT BY DEFAULT (D11/§2.2/§2.4, R10/D2).
     #
-    # If, and only if, the DPAPI-at-startup token injection (§2.2) is ever unavailable on this box,
-    # the OAuth token MAY be injected via the service environment as a stopgap. This is the
+    # If, and only if, the CLI's own stored login is ever unusable on this box (token injection from
+    # DPAPI is not implemented), the OAuth token MAY be injected via the service environment as a
+    # stopgap. This is the
     # NSSM-AppEnvironmentExtra path that D11 originally suggested and that §2.2 explicitly demotes to
     # a fallback. It is INSECURE relative to the default (the token sits in plaintext in the service
     # registry config) and risks a stray ANTHROPIC_API_KEY silently outranking it (D2). Prefer fixing
@@ -305,7 +294,7 @@ function Install-Service {
     # literal never lands in this file or in source control:
     #
     #   # $tok = (& "$PythonExe" -c "import keyring; print(keyring.get_password('market_trading','claude_code_oauth_token'))").Trim()
-    #   # Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppEnvironmentExtra', "MT_RESTART_SENTINEL=$Sentinel", "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+    #   # Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppEnvironmentExtra', "CLAUDE_CODE_OAUTH_TOKEN=$tok")
     #
     # Note: never set ANTHROPIC_API_KEY here unless the owner has deliberately enabled pay-as-you-go
     # overflow (D6) -- the startup self-test asserts it is absent (§2.2).
@@ -357,8 +346,8 @@ function Stop-Engine {
         Write-Host "    Service '$ServiceName' is not installed. Nothing to stop."
         return
     }
-    # A clean `nssm stop` lets the engine run its shutdown guard (flatten/verify protection, delete
-    # the sentinel, snapshot backup if due) and exit 0 -> AppExit 0 Exit -> NOT auto-restarted (§2.6).
+    # A clean `nssm stop` lets the engine run its shutdown guard (flatten/verify protection,
+    # snapshot backup if due) and exit 0 -> AppExit 0 Exit -> NOT auto-restarted (§2.6).
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('stop', $ServiceName)
     Write-Host "Stopped cleanly. Being off between active periods is NORMAL -- no auto-restart (§2.6)."
 }
@@ -385,13 +374,6 @@ function Show-Status {
         else {
             Write-Host ("    {0,-12} : {1}" -f $key, (& $Nssm get $ServiceName $key))
         }
-    }
-
-    if (Test-Path -LiteralPath $Sentinel) {
-        Write-Host "    Sentinel     : PRESENT ($Sentinel) -> engine intends to run (crash would be restarted)"
-    }
-    else {
-        Write-Host "    Sentinel     : absent -> a stop is treated as intentional (no restart, §2.6)"
     }
 }
 

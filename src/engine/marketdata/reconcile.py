@@ -1,8 +1,9 @@
 """Daily self-built-vs-official 1-minute bar reconciliation (§3.2.3, §4.4 job 2, A13, §2.6).
 
-Nightly (15:50) — and as the §2.6 startup catch-up for ANY past trading day lacking a
-``reconcile_log`` entry (``MarketStore.has_reconcile_entry`` is the per-day checkpoint; the
-scheduler/CatchUpRunner enumerates the missing days and calls :meth:`ReconcileJob.run` per day).
+Nightly (15:50) — and as the §2.6 startup catch-up for past trading days, driven by the
+``job_runs`` DATE_KEYED watermark of ``JOB_RECONCILE`` (the scheduler/CatchUpRunner calls
+:meth:`ReconcileJob.run` per missing day). ``reconcile_log`` is the per-(day, symbol) audit trail;
+``MarketStore.has_reconcile_entry`` / ``reconciled_days`` read it but have no production caller.
 
 For each actively-ticked symbol of day ``d``:
 
@@ -20,7 +21,7 @@ For each actively-ticked symbol of day ``d``:
 * **OFFLINE spans are NOT drift (§2.6):** an official minute with no self-built bar (the engine was
   off, or the row is already ``gap_backfilled``/official) is backfilled from the official candle
   and counted in ``offline_bars`` — EXCLUDED from the drift denominator, never a failure.
-* Results land in ``reconcile_log`` (per (d, symbol) — the catch-up checkpoint) and a
+* Results land in ``reconcile_log`` (per (d, symbol) — the audit trail) and a
   ``reconcile_drift`` catalog alert goes to the injected async ``notify`` sink when any symbol
   flags (A13 "alert on drift").
 
@@ -102,8 +103,9 @@ class ReconcileJob:
         ``None`` disables alerting. A notify failure is logged, never raised (the reconcile result
         is already persisted).
     session_open / session_close:
-        The session bounds used for the official fetch (defaults: regular 09:15–15:30; the
-        composition root passes the day's NSECalendar session for special days).
+        The session bounds used for the official fetch (defaults: regular 09:15–15:30). The
+        composition root passes neither, so the regular bounds apply every day; special sessions
+        (muhurat) are not wired.
     """
 
     def __init__(
@@ -159,7 +161,8 @@ class ReconcileJob:
                 # 2026-07-21: a rejected token fails every official fetch identically — stop
                 # processing the remaining symbols instead of hammering the broker (the KiteClient
                 # circuit breaker has already frozen entries). Symbols processed so far persist
-                # intact; if none did, the day is left un-checkpointed and re-runs after re-login.
+                # intact. The aborted day is NOT retried: job_reconcile returns None, which the
+                # job runner counts as ok, so the DATE_KEYED watermark still advances past it.
                 _log.warning(
                     "reconcile_aborted_token_rejected", d=d.isoformat(),
                     symbols_remaining=len(ordered) - i,

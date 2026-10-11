@@ -15,7 +15,7 @@ Semantics pinned by the plan:
 * **Trial count N** = the optimizer-reported count of every configuration evaluated
   (``SweepReport.trial_count_n``, §6.4 step 1) — NOT the count of surfaced ``param_sets`` rows.
   A report with **no cited N is not promotable** (E2). Promotable iff the CPCV fold-pass fraction
-  ≥ ``fold_pass_min(N)`` (§9.1) — plus, when a champion max-DD is supplied (Phase 2 seam), max DD
+  ≥ ``fold_pass_min(N)`` (§9.1) — plus, when a champion max-DD is supplied (seam; ``ChampionChallenger`` not yet built), max DD
   ≤ 1.25× champion's (§6.4 step 2).
 * **Margin floor** (WO-3, 2026-08-13) — a fold-pass FRACTION says how often the edge was positive,
   never by how much. Four rsi2 runs passed at exactly 12/15 = 80.0% with every passing split under
@@ -34,7 +34,8 @@ Semantics pinned by the plan:
   report artifact (md + json) is written via :mod:`engine.learning.reports`.
 
 The N here is per-validation-run; the §6.4 rolling-window / per-``feature_set_version`` N
-bookkeeping belongs to ``ChampionChallenger`` (Phase 2), which passes the windowed N in via
+bookkeeping belongs to ``ChampionChallenger`` (not yet built, plan §6.4; autonomous promotion is
+Phase 5), which passes the windowed N in via
 :class:`ParamSet`. skfolio is imported function-level only (native import-order guard,
 ``engine._preload``); the pipeline itself is pandas/numpy + stdlib.
 """
@@ -172,7 +173,7 @@ class ParamSet(BaseModel):
     """A candidate parameter set entering validation (§3.2.10 / §6.4 step 1).
 
     ``trial_count_n`` is the optimizer-reported evaluated-config count for this strategy's window
-    (``SweepReport.trial_count_n``; Phase-2 ``ChampionChallenger`` supplies the rolling-window N).
+    (``SweepReport.trial_count_n``; the not-yet-built ``ChampionChallenger``, plan §6.4, would supply the rolling-window N).
     ``None`` ⇒ the resulting report is not promotable (E2). ``sweep_stats`` optionally carries the
     sweep's trade-level stats for report context (never part of the promotion rule).
     """
@@ -521,7 +522,7 @@ def promotion_decision(
       margin_floor_days`` per day. FAIL-CLOSED — no cost floor supplied ⇒ not promotable, exactly
       like a missing N: a floor that silently no-ops when the caller forgets to pass it would
       re-open the near-zero-margin hole it exists to close;
-    * and, when a champion max-DD is provided (Phase-2 ``ChampionChallenger`` seam),
+    * and, when a champion max-DD is provided (``ChampionChallenger`` seam, not yet built — plan §6.4),
       max DD ≤ 1.25× champion's.
 
     Winner stability is NOT here on purpose — WO-3 makes it a report-level flag, not a gate.
@@ -625,7 +626,7 @@ class ValidationPipeline:
     splitter:
         CPCV splitter override (defaults to skfolio :func:`cpcv_splits` with the §6.4 knobs).
     champion_max_dd_provider:
-        ``strategy_id -> champion max-DD %`` (Phase-2 ``ChampionChallenger`` seam); ``None`` values
+        ``strategy_id -> champion max-DD %`` (``ChampionChallenger`` seam, not yet built — plan §6.4); ``None`` values
         skip the 1.25× DD comparison (no champion exists in Phase 1).
     cost_floor_provider:
         ``strategy_id -> round-trip friction %`` for the WO-3 margin floor. Defaults to

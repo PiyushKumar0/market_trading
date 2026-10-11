@@ -329,7 +329,7 @@ def test_same_bar_same_decision_modulo_signal_id():
 # ---------------------------------------------------------------------------- registry seam
 def test_registry_contains_exactly_the_phase1_price_baselines():
     assert set(SCANNER_REGISTRY) == {"mom", "orb", "rsi2", "trend"}
-    # The Phase-3 `cat` scanner plugs in here as a peer (§6.1 row 5) — deliberately absent now (§8.2).
+    # Batch rules (brk20/ins/hi52/cat/cat_reversal) are deliberately NOT registered: they enter via prescreen.admit.
     assert "cat" not in SCANNER_REGISTRY
 
 
@@ -462,7 +462,7 @@ def test_admit_batch_is_ranked_too():
 # ======================================================================== WO-1: per-strategy caps
 def test_per_strategy_cap_mapping_binds_per_strategy():
     """WO-1 (iii): the sub-cap becomes a per-strategy MAP; ``default`` binds any strategy without
-    its own line (the structural ≤40%-of-the-day guarantee for strategies added later)."""
+    its own line (the structural ceiling, a third of the day as shipped, for strategies added later)."""
     ps = _prescreen(
         [_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7}),
          _multi_stub("rsi2", {"D": 0.6, "E": 0.5, "F": 0.4}),
@@ -652,7 +652,7 @@ def test_funnel_counters_track_raw_published_and_suppressed():
 # ================================= raw counters survive a restart (2026-08-21, `funnel_raw_counts`)
 #
 # THE BUG this section pins. `raw` was the only WO-9 funnel number with no DB home, so a mid-session
-# restart zeroed it and the 22:35 `funnel_utilization` line reported `raw=None` ("unmeasured") for
+# restart zeroed it and the nightly `funnel_utilization` line reported `raw=None` ("unmeasured") for
 # the WHOLE day — on 4 of the last 6 trade days. That is WO-9's own "the analyst never saw it" vs
 # "nothing fired" ambiguity, re-introduced by the restart. The counters are now seeded on every day
 # roll (the first roll of a fresh process included) from what the drain tick flushed.

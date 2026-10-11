@@ -39,7 +39,8 @@ from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.risk.exposure")
 
-#: Rolling window for `weekly_drawdown` — TRADING sessions, not calendar days (§7.1).
+#: Rolling window for `weekly_drawdown` — TRADING sessions, not calendar days (§7.1). Mirrors
+#: limits.yaml ``weekly_drawdown.rolling_sessions``, which no code reads (a test pins the two equal).
 WEEKLY_DRAWDOWN_SESSIONS = 5
 
 FlattenCallback = Callable[[], Awaitable[None]]
@@ -80,7 +81,8 @@ def _pct(limits: Any, name: str) -> Decimal:
 
 
 class OpenCounts(BaseModel):
-    """Open platform-position counts for `max_open_positions` (3 total; ≤2 MIS; ≤2 CNC, §7.1)."""
+    """Open platform-position counts for `max_open_positions` (total / max_mis / max_cnc caps in
+    limits.yaml, §7.1)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -114,7 +116,7 @@ class FloorLimits(BaseModel):
     weekly_drawdown_pct: Decimal = Decimal("0.08")
     equity_floor_rung_pct: Decimal = Decimal("0.10")
     cumulative_floor_pct: Decimal = Decimal("0.15")
-    capital_base: Decimal | None = None      # None ⇒ the tracker's own base (O1, ₹20,000)
+    capital_base: Decimal | None = None      # None ⇒ the tracker's own base (O1, capital_base_inr)
 
 
 class FloorBreach(BaseModel):
@@ -319,7 +321,7 @@ class ExposureTracker:
         return counts
 
     def cnc_notional(self, symbol: str) -> Decimal:
-        """Open CNC notional in ``symbol`` (`per_stock_exposure`: ≤ ₹8,000/symbol, C4)."""
+        """Open CNC notional in ``symbol`` (`per_stock_exposure.cnc_notional_inr`, C4)."""
         total = Decimal(0)
         for row in self._open_rows():
             if row["symbol"] == symbol and (row["product"] or "").upper() == "CNC":
@@ -327,7 +329,7 @@ class ExposureTracker:
         return total
 
     def deployed_capital(self) -> Decimal:
-        """Deployed capital against `capital_cap` (≤ ₹20,000, O1).
+        """Deployed capital against `capital_cap.max_deployed_capital_inr` (O1).
 
         CNC is cash/notional. MIS is *margin* — but leverage lands in Phase 3, so Phase 2 charges MIS
         at full notional: conservative (never under-reports deployment), and the cap only tightens
@@ -398,7 +400,7 @@ class ExposureTracker:
         """Evaluate the continuous equity halt ladder, most-restrictive rung first (§7.1).
 
         Boundary semantics are exact and differ by rung: `equity_floor_rung` is "equity ≤ −10%" and
-        `cumulative_floor` is "equity < ₹17,000" (−15%) — so equity landing precisely on the −15%
+        `cumulative_floor` is "equity < base × (1 − 15%)" — so equity landing precisely on the −15%
         line does NOT kill, while precisely on the −10% line DOES trip the go-flat rung.
         """
         equity = self.equity()

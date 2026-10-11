@@ -18,7 +18,8 @@ llm:
   quota_window:
     reset_weekday: thursday
     reset_time_ist: "14:00"
-  # Pay-as-you-go overflow default OFF (D6). If owner enables, this hard monthly cap applies.
+  # Pay-as-you-go overflow default OFF (D6). overflow_cap_usd is NOT enforced by any code: the governor
+  # caps only at weekly_credit_usd (DG4). Implement a cap before enabling overflow.
   overflow_enabled: false
   overflow_cap_usd: 25
   # Auth path: Max-subscription OAuth (D2). A stray ANTHROPIC_API_KEY silently outranks it — the
@@ -40,8 +41,9 @@ llm:
 model_pricing_usd_per_mtok:
   haiku-4.5:  { input: 1,  output: 5 }
   sonnet-5: { input: 2,  output: 10 }   # 3/15 → 2/10 (owner-directed 2026-09-18; Anthropic first-party
-                                        # Sonnet 5 rate). Every enabled agent bills at this key since the
-                                        # 09-15 roster move, so the governor's proxy was ~50% high; the
+                                        # Sonnet 5 rate). Every enabled agent billed at this key from the
+                                        # 09-15 roster move until 2026-10-03 (now sonnet-5.5, same rate;
+                                        # this key prices historical rows), so the proxy was ~50% high; the
                                         # $200 weekly allocations were sized at the old rate — re-base
                                         # them if the ladder now trips too late for comfort.
   opus-5:   { input: 5,  output: 25 }
@@ -89,6 +91,8 @@ degrade_ladder:
 # measured duration — a slow call that completes is billed anyway, so cutting it off wastes the spend.
 # sonnet-5 → sonnet-5.5 roster-wide 2026-10-03 (owner-directed; WORKLOG has the replay evidence and the
 # cat v2 shadow-window caveat). news_analyst has no effort key by owner choice: the CLI default applies.
+# `triggers` and `schedule_ist` are documentary — no code reads them: call classes are code constants
+# and fire times are settings.yaml jobs.* (preopen_planner_ist, nightly_review_ist).
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call (D5/D10) ---
   intraday_analyst:

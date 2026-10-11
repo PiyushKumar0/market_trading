@@ -1,7 +1,8 @@
 """``FilingsEventBuilder`` (§2.8.2) — PURE mapping of stored ``insider_trades`` rows to typed candidate
-events. NO store writes, no catalyst-watchlist writing, no origination (all deferred to Phase 2's
-``CatalystDigestJob`` behind the §8.6 owner gate). In Phase 1 this library is consumed ONLY by tests
-and ``scripts/validate_insider.py``.
+events. NO store writes, no catalyst-watchlist writing; origination happens in
+``engine.datafeeds.ins_crossings`` (the §6.1 ``ins`` leg, 2026-08-17), not here. The module-level
+mapping is consumed live by ``ins_crossings`` and by ``scripts/validate_insider.py``;
+``FilingsEventBuilder`` and ``row_source`` are test-only helpers.
 
 Scope (stage 3): the ONE event type §2.8.4 cleared — ``insider_net_buy`` (the trailing-session
 open-market promoter/director BUY cluster, stage-2 verdict PASSED: T+10 net +0.75%, T+20 +1.61%,

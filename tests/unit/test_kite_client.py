@@ -58,6 +58,47 @@ async def test_instruments_forwards_exchange(clock: Clock, rate_limiter: RateLim
     assert fake_kc.last_exchange == "NSE"
 
 
+# --------------------------------------------------------------------------- order-class reads (§7.1)
+class _ReadKC:
+    """pykiteconnect stand-in for the non-placing order-class reads plus one entry placement."""
+
+    def orders(self) -> list:
+        return []
+
+    def positions(self) -> dict:
+        return {"net": [], "day": []}
+
+    def holdings(self) -> list:
+        return []
+
+    def margins(self) -> dict:
+        return {"equity": {"net": 0}}
+
+    def get_gtts(self) -> list:
+        return []
+
+    def place_order(self, variety, **params) -> str:
+        return "OID1"
+
+
+@pytest.mark.asyncio
+async def test_order_class_reads_never_spend_the_entry_budget(clock, rate_limiter) -> None:
+    """More than 70 reads on the "orders" class leave the entry counters at zero and never raise
+    EntryBudgetExhausted; an entry placement is still counted against the cap afterwards."""
+    client = KiteClient(_ReadKC(), rate_limiter, clock, orders_enabled=True)
+
+    for _ in range(15):
+        await client.orders()
+        await client.positions()
+        await client.holdings()
+        await client.margins()
+        await client.gtts()
+    assert rate_limiter.orders_today() == (0, 0)
+
+    assert await client.place_order({"tradingsymbol": "RELIANCE", "quantity": 1}) == "OID1"
+    assert rate_limiter.orders_today() == (1, 0)
+
+
 # --------------------------------------------------------------------------- TokenException breaker
 class _BoomKC:
     """pykiteconnect stand-in whose historical/order calls raise a configured exception."""

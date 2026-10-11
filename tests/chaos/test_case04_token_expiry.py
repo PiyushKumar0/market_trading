@@ -23,8 +23,9 @@ Clauses:
   gated (R3) and its broker error surfaces instead of passing silently.
 * Recovery (the §3.5.3 auto-recovery class "token invalid ⇒ clears on successful re-login"):
   ``test_relogin_clears_the_freeze_and_rearms_the_breaker``.
-* "protection already resting" — Phase-3-gated (``test_protection_already_resting``): no platform
-  positions or broker-resident SL-M/GTT exist in RECOMMEND; needs ProtectionManager (WO-P3-6).
+* "protection already resting" — real-side only (``test_protection_already_resting``): RECOMMEND
+  places no broker-resident SL-M/GTT (the paper ProtectionManager, oms/protection.py, protects paper
+  positions only).
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from engine.risk.causes import RiskStateLatch
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 from tests.chaos._entry_gate_rig import build_entry_gate, entry_checks
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import REAL_SIDE_ONLY
 from tests.unit.test_session_verify_token import _FakeSecrets
 
 LOGIN_URL = "https://kite.zerodha.com/connect/login?api_key=ak&v=3"
@@ -248,8 +249,7 @@ async def test_relogin_clears_the_freeze_and_rearms_the_breaker(token_rig):
 
 
 # ------------------------------------------------------------------------------- Phase-3-gated
-@pytest.mark.skip(reason=f"'protection already resting' — {PHASE3_GATED}; missing: ProtectionManager "
-                         "(broker-resident SL-M/GTT); RECOMMEND holds no platform positions")
+@pytest.mark.skip(reason=f"'protection already resting' — {REAL_SIDE_ONLY}")
 async def test_protection_already_resting():
     raise AssertionError("unreachable — skipped")
 

@@ -59,10 +59,11 @@ implementation detail:
    not a replay. Fire-and-forget bus tasks created by code under replay may still run at the yields
    (nothing forbids them), but nothing the digest covers is allowed to depend on WHEN they do.
 
-**Scope of v1.** The strategy → gate → OMS leg joins in WO-P3-5; there is no order origination here
-and nothing in this module is reachable from the RECOMMEND pipeline. ``config_overlay`` is accepted
-and recorded on the report for provenance but has no consumer yet — it is the seam that tranche will
-plug into, and carrying it now keeps the plan-pinned signature honest instead of adding it later.
+**Scope of v1.** The strategy → gate → OMS leg is driven from outside, through ``schedule()`` /
+``at_tick()`` (tests/replay/test_paper_e2e.py, plan Q4.12); there is no order origination here
+and nothing in this module is reachable from the RECOMMEND pipeline. ``config_overlay`` is kept only
+to match the §3.2.9 plan-pinned signature and is recorded on the report for provenance; nothing
+consumes it.
 Raw ticks are never re-persisted: they were just read FROM the Parquet dataset, so staging them back
 into a scratch copy of it is a pure round trip, and ``BarBuilder.on_tick`` only *stages* — the flush
 lives on the async ``on_tick_event`` seam the harness does not use, so a staged buffer would simply
@@ -217,8 +218,7 @@ def mask_ulids(text: str) -> str:
 class ReplayBroker(Protocol):
     """The duck-typed broker seam the harness drives.
 
-    Deliberately a Protocol and NOT an import of ``engine.paper.broker``: the PaperBroker (WO-P3-2)
-    is built concurrently, and the harness must be usable — and testable — with a stub. Two methods,
+    Deliberately a Protocol and NOT an import of ``engine.paper.broker``: the harness must be usable — and testable — with a stub. Two methods,
     and the contract around them:
 
     * ``on_tick`` receives **in-session prints only**. Pre-open (A14) and post-close (WO-5) ticks
@@ -305,7 +305,7 @@ class ReplayReport(BaseModel):
     elapsed_s: float
     digest: str
     symbols: list[str] | None = None
-    config_overlay: dict[str, Any] | None = None   # carried for provenance; consumed in WO-P3-5
+    config_overlay: dict[str, Any] | None = None   # provenance only (plan-pinned signature); no consumer
 
 
 def _canonical_bar(bar: Bar) -> str:

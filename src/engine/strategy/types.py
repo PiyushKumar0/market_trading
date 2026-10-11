@@ -6,7 +6,7 @@
      catalyst_ref: str | None}
 
 ``catalyst_ref`` is the ``catalyst_watchlist.entry_id`` audit link (§2.7/§6.5); it is ``None`` for
-every price baseline (orb/rsi2/trend/mom) and set only by the Phase-3 ``cat`` scanner. Prices are
+every price baseline (orb/rsi2/trend/mom) and set only by the cat/cat_reversal batch rules (``_shadow_catalyst.build_candidate``). Prices are
 ``Decimal`` (§3.2 money convention; pydantic serializes them as strings in JSON mode).
 
 ``ScanContext`` is the internal pre-screen → scanner seam (not a plan-pinned surface): the
@@ -68,7 +68,7 @@ class SignalCandidate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     signal_id: str                            # platform-minted ULID (§3.2 convention 6)
-    strategy_id: str                          # §6.1 id: orb | rsi2 | trend | mom (| cat, Phase 3)
+    strategy_id: str                          # §6.1 id: orb | rsi2 | trend | mom | brk20 | ins | hi52 | cat | cat_reversal
     symbol: str
     side: Side
     style: Style
@@ -128,7 +128,7 @@ class ScanContext(BaseModel):
 
     flagged: bool = False
     """Symbol appears in ``flagged_instrument_days`` for the PRIOR trading session (bulk/block
-    deal) — volume-breakout scanners suppress (§6.1 orb; Phase-3 cat). Prior session, not today:
+    deal) — volume-breakout scanners suppress (§6.1 orb). Prior session, not today:
     NSE publishes deals ~EOD and the deals job writes them at 20:30, so a day's own flags are
     unknowable while it trades (2026-08-18 fix — a today-read was structurally empty)."""
 

@@ -1,7 +1,7 @@
 """ORB / RSI(2) / trend / momentum baseline scanners (§6.1) + the scanner registry (§3.2.5).
 
-Importing this package registers the four Phase-1 price baselines in ``SCANNER_REGISTRY``. The
-``brk20``, ``ins``, ``cat`` and ``cat_reversal`` rules are deliberately NOT in it: they are EOD-batch
+Importing this package registers the four price baselines in ``SCANNER_REGISTRY``. The
+``brk20``, ``ins``, ``hi52``, ``cat`` and ``cat_reversal`` rules are deliberately NOT in it: they are EOD-batch
 rules with no per-bar condition, so they implement no ``Scanner`` protocol and are swept + admitted
 directly by the composition root (``prescreen.admit``), which binds them to the identical §3.2.5
 dedupe/caps.
@@ -50,7 +50,8 @@ def build_enabled_scanners(
     """Instantiate the enabled scanners in the given order, with per-strategy §6.3 param overrides.
 
     ``enabled`` comes from settings (the integrator wires it); ``params_by_id`` maps
-    ``strategy_id`` → bare param dict (see :func:`params_from_envelope` for envelope_state input).
+    ``strategy_id`` → bare param dict. ``engine.ops.main`` passes none today (code DEFAULT_PARAMS);
+    :func:`params_from_envelope` is the unwired Phase-5 seam for envelope_state input.
     Unknown strategy ids fail loud — a typo must not silently disable a baseline.
     """
     unknown = [sid for sid in enabled if sid not in SCANNER_REGISTRY]

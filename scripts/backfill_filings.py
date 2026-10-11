@@ -18,8 +18,8 @@ spaced ≥1.5 s (observed safe, §2.8). Resumable: each (feed, unit) checkpoint 
 re-fetching is safe anyway (all writes are idempotent upserts). Prints a summary and writes
 ``data/reports/filings_backfill_report.json``.
 
-BSE caveat (§2.8): the SHP detail endpoint shapes are UNVERIFIED (see ``filings_shp`` module docstring);
-the SHP leg is built defensively and degrades per-symbol without aborting the seed.
+BSE caveat (§2.8): the SHP detail endpoint shapes were LIVE-VERIFIED 2026-07-16 (see ``filings_shp``
+module docstring); the leg stays defensive and degrades per-symbol without aborting the seed.
 
 Exit codes: 0 = ran clean; 1 = some units failed for non-setup reasons (re-run to resume); 2 =
 setup error (no universe resolved, ``market.duckdb``/``state.db`` unavailable).
@@ -221,7 +221,7 @@ async def _seed_nse_windowed(
 
 async def _seed_shp(conn, store, http, clock, symbols: list[str], frm: date, to: date, summary: dict) -> None:
     """Per-symbol BSE SHP quarter loop (checkpoint per symbol). Requires ``symbol_isin`` scrip codes;
-    a symbol without one is skipped-and-counted. UNVERIFIED BSE shape — degrades per-symbol (§2.8)."""
+    a symbol without one is skipped-and-counted. BSE shape live-verified 2026-07-16; still degrades per-symbol (§2.8)."""
     isin_map = await store.asymbol_isin_map()
     for symbol in symbols:
         if _cp_done(conn, "shp", symbol):

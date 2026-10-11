@@ -26,7 +26,7 @@ full 300-symbol session-day replays in the same resident footprint as a single-s
 
 ``--symbols`` narrows the read to those partitions, which is the difference between seconds and
 minutes on a full archive day (the live dataset holds ~10⁵–10⁶ per-flush fragments per day until
-``compact_tick_partitions`` has run).
+the nightly ``JOB_TICK_COMPACT`` (``engine.marketdata.tick_compact.compact_ticks``) has run).
 
 Exit codes: 0 = replayed (even if the day had no partitions — an empty day is an answer, not an
 error); 2 = bad arguments / unreadable archive.

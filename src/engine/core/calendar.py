@@ -7,7 +7,8 @@ and the LLM loop burns credit on closed markets (R6).
 
 FAIL-SAFE (R6): "no calendar, no trading." In ``strict`` mode (prod), a date is a trading day only if
 its year's calendar is loaded, the calendar is ``verified: true``, and the date is at/before
-``verified_through``. ``ex_dates`` returns ``[]`` until the corp-actions feed lands (Phase 1).
+``verified_through``. ``ex_dates`` is unimplemented (raises): corp-action consumers read
+``MarketStore.get_corp_actions``.
 """
 
 from __future__ import annotations
@@ -193,10 +194,13 @@ class NSECalendar:
         horizons = [c.verified_through for c in self._years.values() if c.verified and c.verified_through]
         return max(horizons) if horizons else None
 
-    # ----------------------------------------------------------------- ex-dates (Phase 1 feed)
+    # ----------------------------------------------------------------- ex-dates (§2.6 / T12)
     def ex_dates(self, symbol: str, within_days: int) -> list[CorpAction]:
-        """Corporate actions for ``symbol`` within ``within_days`` (A12). Empty until the feed lands."""
-        return []
+        """Corporate actions for ``symbol`` within ``within_days`` (A12). No caller today; raises
+        rather than return a silent ``[]`` the planned GTT ex-date scan would read as "none due"."""
+        raise NotImplementedError(
+            "use MarketStore.get_corp_actions; implement before GTTManager.catch_up_ex_dates (T12)"
+        )
 
     # ----------------------------------------------------------------- trade window (§7.1/§3.2.7)
     def _sticky_window(self) -> TradeWindow:

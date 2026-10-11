@@ -69,8 +69,8 @@ at sweep time. So, identically to ``ins`` and ``cat``:
   for a next-open fill, never a limit the market owes us.
 * ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **5%**, from this strategy's OWN
   ``cat_reversal.stop_pct``. A **disaster stop**: §7.1 sizing needs a risk distance, so one must
-  exist, and the §7.1 ``per_trade_risk.overnight_gap_mult`` (2.5x) arithmetic applies to a swing
-  entry (the ``ins`` 2026-08-17 correction). It is NOT the rule's exit.
+  exist, and the §7.1 ``per_trade_risk.overnight_gap_mult`` arithmetic applies to a swing entry
+  (2.5x when chosen, 2.0x since O17; the ``ins`` 2026-08-17 correction). It is NOT the rule's exit.
 * ``target`` = ``None``. The rule has no price target and will not invent one.
 * **Exit is TIME**: hold ``cat_reversal.hold_sessions`` sessions; the D2 time exit
   (``RecommendationPipeline.time_exit_check``) is the exit path. No exit code lives here.

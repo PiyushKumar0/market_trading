@@ -9,9 +9,10 @@ Two orthogonal sticky machines plus a routing flag:
 The order-surface predicate (a) lives here as :meth:`opening_orders_allowed` — a position-OPENING call
 is permitted iff ``mode == AUTO ∧ risk_state == NORMAL ∧ in_window`` (§3.5.3). Risk-reducing actions
 (predicate b) are NEVER gated by this — they run in every mode/state (R3) and are not this class's
-concern. The full latch/recovery logic + the runtime square-off-on-shrink wiring land with the gate
-(Phase 2) and OMS (Phase 3); Phase 0 ships the sticky persistence, the transition guards, and the
-window setter's validate→persist→audit→publish path.
+concern. Per-cause latching, most-restrictive-wins composition and recovery live in
+:class:`engine.risk.causes.RiskStateLatch` (the single writer of ``risk_state``); no production caller
+passes ``on_shrink_squareoff`` yet. This module owns the sticky persistence, the transition guards,
+and the window setter's validate→persist→audit→publish path.
 """
 
 from __future__ import annotations
@@ -93,7 +94,8 @@ class ModeManager:
     def entries_allowed(self, in_window: bool) -> bool:
         """Entries/entry-recommendations require NORMAL risk state + inside the trade window, in AUTO
         or RECOMMEND (§3.5.3). Does NOT consider the kill switch (checked separately) or per-§7.1
-        limits (the gate's job)."""
+        limits (the gate's job). No production caller: the gate's ``mode_risk_state``/``trade_window``
+        rules evaluate this predicate themselves; only chaos case 13 asserts it."""
         return self.mode() in (Mode.AUTO, Mode.RECOMMEND) and self.risk_state() == RiskState.NORMAL and in_window
 
     def opening_orders_allowed(self, in_window: bool) -> bool:
@@ -157,8 +159,9 @@ class ModeManager:
         return True
 
     async def set_risk_state(self, to: RiskState, reason: str, who: Actor) -> None:
-        """Persist a risk-state transition (sticky). Most-restrictive-wins / latch logic is the gate's
-        (Phase 2); this is the durable setter + publisher."""
+        """Persist a risk-state transition (sticky): durable setter + publisher only. Composition and
+        latching are :class:`engine.risk.causes.RiskStateLatch`'s — route risk causes through its
+        ``set_cause``/``clear_cause``, not this method, or the next ``clear_cause`` relaxes the state."""
         old = self.risk_state()
         if old == to:
             return

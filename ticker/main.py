@@ -121,15 +121,12 @@ _MODE_FULL = "full"
 
 # --------------------------------------------------------------------------- structured stderr log
 def _log(event: str, **fields: Any) -> None:
-    """Emit one JSON line to **stderr** (the engine captures it).
+    """Emit one plain ``[mt-ticker] <event> k=v ...`` line to **stderr**.
 
-    A deliberately tiny, dependency-free echo of ``engine.core.log``'s shape (``ts``/``level``/
-    ``event`` + structured fields) — we cannot import ``engine.core.log`` (§2.2: no ``engine.*``
-    imports here). Timestamps use the wall clock for *logging only*; this process makes no trading
-    time decisions, so it does not need ``core.Clock``.
+    Not JSON and carries no level or timestamp: the supervisor drains it verbatim into
+    ``ticker_child_output`` at WARNING (``ticker_supervisor._drain_child_stream``). We cannot import
+    ``engine.core.log`` here (§2.2: no ``engine.*`` imports).
     """
-    # TODO(Phase 1): mirror engine.core.log's exact JSON field order/levels so the engine can ingest
-    # the child's stderr into the same structured log stream. For Phase 0 a readable line suffices.
     parts = " ".join(f"{k}={v!r}" for k, v in fields.items())
     print(f"[mt-ticker] {event} {parts}".rstrip(), file=sys.stderr, flush=True)
 
@@ -656,8 +653,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     cfg = _resolve_config(argv)
 
-    # Fail fast on a missing handshake secret — an unauthenticated link would let the OMS ingest
-    # frames from any local process (§2.4). Empty secret only ever legitimate in a Phase-0 harness.
+    # Warn (do not exit) on a missing handshake secret; it is only legitimate in a bare harness.
+    # Authentication is enforced engine-side: the supervisor drops any hello whose secret is not this
+    # spawn's token (ticker_supervisor._handle_child_connection, §2.4).
     if not cfg["shared_secret"]:
         _log("config.warning", msg="empty shared_secret; link is unauthenticated (Phase-0 only)")
 

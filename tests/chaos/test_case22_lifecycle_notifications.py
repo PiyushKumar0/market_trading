@@ -20,9 +20,9 @@ watchdog's Telegram sender and the OS process table are the faked boundary.
 
 Clauses covered: all of (a), (b), (c) as quoted, except the two below.
 
-Phase-3-gated / out of process scope (skipped, ``test_case22_capital_protection_unaffected``):
-"positions broker-protected (R3)" / "capital protection unaffected" needs resting SL-M/GTT orders
-(ProtectionManager/GTTManager, WO-P3-6) — in Phase 2 no platform position exists; the alerts'
+Real-side only / out of process scope (skipped, ``test_case22_capital_protection_unaffected``):
+"positions broker-protected (R3)" / "capital protection unaffected" needs broker-resident SL-M/GTT
+orders, which RECOMMEND does not place (the paper ProtectionManager covers paper positions only); the alerts'
 positions-protected WORDING is asserted here. "NSSM restart (gated to the true sentinel)" is the
 service manager's ``AppExit`` config (scripts/nssm_install.ps1), not engine code — the restart is
 modelled as the next boot of the same data dir.
@@ -37,7 +37,7 @@ import pytest
 from engine.core.clock import IST
 from engine.notify.catalog import MessageKind
 from tests.chaos._lifecycle_rig import INCIDENT_KINDS, EngineProcess, RigEnv, run_session
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import BROKER_RESIDENT_R3
 
 TUE, WED, THU = date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18)
 SILENT = {"down_reason": None, "engine_down_sent": False, "killed_pid": None, "missed_start_sent": []}
@@ -208,6 +208,7 @@ async def test_case22c_killed_after_intentional_stop_stays_silent(tmp_path, monk
 
 
 def test_case22_capital_protection_unaffected() -> None:
-    """'positions broker-protected (R3)' / 'capital protection unaffected' across (a)/(b)/(c) needs
-    resting SL-M/GTT protection to verify — no platform position exists before Phase 3."""
-    pytest.skip(f"case 22 capital-protection clause: {PHASE3_GATED}; missing: ProtectionManager/GTTManager")
+    """'positions broker-protected (R3)' / 'capital protection unaffected' across (a)/(b)/(c),
+    including a kill -9: real positions have no resting SL-M/GTT in RECOMMEND, and paper protection
+    across process death is the in-process GTT book plus the Q4.7 catch-up (case 03 skips the same)."""
+    pytest.skip(f"case 22 capital-protection clause: {BROKER_RESIDENT_R3}")

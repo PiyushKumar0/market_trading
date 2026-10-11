@@ -5,7 +5,7 @@ Personal, single-user, capital-preservation-first AI trading platform for Indian
 
 **The authoritative design is [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).** This README
 is a pointer + setup guide, not a spec. Every load-bearing decision in the code cites the plan's
-fact/decision/requirement IDs (`A1…E7`, `O1…O10`, `R1…R10`).
+fact/decision/requirement IDs (`A1…E7`, `O1…O18`, `R1…R10`, plus `D*`, `Q*` and `WO-*`).
 
 ## The one safety property to remember
 
@@ -19,17 +19,17 @@ the exchange (SL-M for MIS, GTT OCO for CNC), so capital protection survives pro
 
 ## Status
 
-**Phase 0 — Foundations** (skeleton, config, secrets, session workflow, calendar/clock, sticky
-mode/kill state, SQLite migrations v1, install smoke test). See §8.1 of the plan for the gate.
+**Phase 2 — RECOMMEND** (the engine proposes, the owner executes in Kite and reports via Telegram).
+Phase 3 OMS core, PaperBroker, ReplayHarness and the paper autopilot are built (autopilot live since
+2026-10-08, paper only); there is no AUTO/live order routing. See §8 of the plan for the gates.
 
 This is NOT a profit project in its early phases. Per SEBI's own data, ~71% of retail intraday
-traders lose money; fixed costs alone are ~3–4% of the ₹20,000 capital per month (C9, §1.2). The
+traders lose money; fixed costs alone are ≈₹550–675/month (~1.4–1.7% of the ₹40,000 capital; C9, §11.1). The
 Phase 0–3 success metric is **process quality + capital preservation**, not profit.
 
 ## Setup (owner, one time)
 
-The plan pins **Python 3.12.x** and uses [`uv`](https://docs.astral.sh/uv/). The dev machine here
-has 3.11.9; install 3.12 via uv:
+The plan pins **Python 3.12.x** and uses [`uv`](https://docs.astral.sh/uv/); install 3.12 via uv:
 
 ```powershell
 # 1. Install uv (https://docs.astral.sh/uv/getting-started/installation/), then:
@@ -39,9 +39,10 @@ uv sync --extra dev            # creates .venv, installs locked deps (writes uv.
 # 2. Seed secrets into Windows Credential Manager (DPAPI, R10) — never on disk:
 uv run python scripts/dpapi_set.py
 
-# 3. Mint the Claude Agent SDK OAuth token as the service user (D2):
-#    (run the CLI bundled with claude-agent-sdk; path recorded during the smoke test)
-#    claude setup-token   -> store output via scripts/dpapi_set.py (key: claude_code_oauth_token)
+# 3. Place a Claude Code CLI of the pinned version at `llm.cli_path` in config/agents.yaml
+#    (data/run/claude-cli/<ver>/claude.exe; data/ is gitignored, so copy it in) and sign it in
+#    as the service user. scripts/setup_token.ps1 can mint a long-lived OAuth token into DPAPI
+#    (D2), but no engine code reads that token today.
 
 # 4. Phase-0 install smoke test (A4) — imports + minimally runs every heavy dep:
 uv run python scripts/smoke_test.py

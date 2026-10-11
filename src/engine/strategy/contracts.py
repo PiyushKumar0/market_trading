@@ -2,7 +2,7 @@
 
 The analyst judges a candidate within its OWN strategy's frame — timeframe class, exit mechanism,
 reward basis, evidence status, entry-anchor semantics and the strategy's own disqualifier list —
-instead of inside a single intraday day-trade rubric that fits exactly one of the seven legs.
+instead of inside a single intraday day-trade rubric that fits exactly one of the legs (seven at the time).
 
 WHY THIS FILE EXISTS (the funnel autopsy, 08-13 -> 08-19). 63/63 analyst evaluations ended
 ``no_action``, zero proposals were ever created and the §7.1 risk gate has never been invoked. The
@@ -22,8 +22,8 @@ the platform validated:
   validated leg (``ins``) it re-imposed the exact discretionary filter the WO-16 validation removed.
 
 E1/E2 are fixed at render time in :mod:`engine.intelligence.context`; E3/E4 are fixed here plus in
-``intraday.SYSTEM_PROMPT`` rule 12/13. Evidence status is stated HONESTLY per leg — six of the seven
-are exploratory and say so, which is why the claim cannot live in the shared prompt any more.
+``intraday.SYSTEM_PROMPT`` rule 12/13. Evidence status is stated HONESTLY per leg — one validated (ins),
+one forward test (hi52), the rest exploratory (cat/cat_reversal as SHADOW) — which is why the claim cannot live in the shared prompt any more.
 
 PLAIN DATA. No imports beyond the stdlib-free module body itself: this is read by the context
 assembler on the hot path and must never drag a heavy module (store, pandas, numba) into an import
@@ -86,7 +86,7 @@ entry anchor: entry is the prior session's close — a stale-by-design pre-open 
 evidence status: exploratory, SHADOW — no validated edge; measuring one is the entire point. Pre-registered horizons T+5/T+10.
 gate note (2026-08-27): cat_reversal is registered as a no-edge SHADOW strategy, so the deterministic gate rejects EVERY proposal at the C3 cost check whatever target it carries. Your evaluation is recorded as validation evidence and cannot become a recommendation. Judge it honestly on its merits anyway — a thesis written to flatter a rule that cannot trade only corrupts the study."""
 
-_HI52 = """class: swing (CNC), long-only, 52-week-high-proximity fresh-cross over the eligible universe. Exit is TIME (the §7.1 max-holding path, 20 trading sessions — the horizon the edge was measured over); the 6% stop is a DISASTER stop, not the exit. target=None BY DESIGN — the drift was MEASURED over that horizon, never predicted to a level, so the gate consumes the strategy's registered expected edge exactly as it does for ins. Never decline for a missing target; never invent one.
+_HI52 = """class: swing (CNC), long-only, 52-week-high-proximity fresh-cross over the NIFTY 500 core of the eligible universe. Exit is TIME (the §7.1 max-holding path, 20 trading sessions — the horizon the edge was measured over); the 6% stop is a DISASTER stop, not the exit. target=None BY DESIGN — the drift was MEASURED over that horizon, never predicted to a level, so the gate consumes the strategy's registered expected edge exactly as it does for ins. Never decline for a missing target; never invent one.
 design: a pure EOD-batch rule off COMPLETED daily sessions (brk20's shape) — the entry reference is the trigger session's own close, a stale-by-design anchor for a next-open-style fill; entry below the live price does NOT mean 'bidding into weakness'. Judge breakout validity on the DAILY series (fresh cross into the proximity band, volume confirmation); intraday microstructure is context only. Thesis: the George & Hwang 52wk-high drift is a weeks-to-months phenomenon — intraday capture is cost-refuted in this book.
 approach shape is NOT a decline ground: the rule ITSELF already enforces the smooth approach (up-day fraction >= 0.55 and max single-day move <= 7% over the 20 sessions into the trigger) and no gap day (trigger session move <= 5%), so a candidate in front of you has passed both. The 2026-09-09 backtest additionally measured that judging approach shape beyond those filters adds nothing — inside the filtered population the smoother half did no better. Declining for 'the run-up looks extended/steep/too quiet' is second-guessing a gate that already ran.
 evidence status: PROMOTED 2026-09-12 as a FORWARD TEST, not a validated edge. The v2 backtest is CPCV-promotable (T+20 median net +1.71%, 58% hit, fold pass 86.7%), but it was validated on an INDEX population labelled by CURRENT membership applied backwards — survivorship-tainted — so live RECOMMEND is the measurement, at small size, under a written kill criterion (demote on 20+ signals with a non-positive T+20 median or a sub-50% hit rate). Treat it as a rule earning its evidence, neither as validated nor as a shadow.

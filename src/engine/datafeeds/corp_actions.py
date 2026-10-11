@@ -1,9 +1,11 @@
-"""NSE corporate-actions feed → ``corp_actions`` (§4.4 job 7, 18:15 — A12, E5 best-effort).
+"""NSE corporate-actions feed → ``corp_actions`` (§4.4 job 7, settings.jobs.corp_actions_ist — 20:15 since 2026-07-24 — A12, E5 best-effort).
 
 Pulls upcoming/recent corporate actions (ex-dates for dividends, splits, bonuses, rights, …) from
-the NSE corporates API and persists them to the DuckDB ``corp_actions`` table (§4.3). DATA ONLY in
-Phase 1: the consumers land later — ``GTTManager.adjust_for_ex_date`` (A12, Phase 3), ledger
-attribution tags, and ``NSECalendar.ex_dates`` (the §2.6 startup corp-action scan reads this table).
+the NSE corporates API and persists them to the DuckDB ``corp_actions`` table (§4.3). Consumers:
+brk20/hi52 ex-date and unadjusted-history vetoes (ops.main), ``ScanContext`` upcoming ex-dates, the
+features engine, the pre-open planner, rec_outcomes / learning benchmark, the paper ExitManager.
+Still to land (Phase 4, real orders): ``GTTManager.adjust_for_ex_date`` and the §2.6 startup scan via
+``NSECalendar.ex_dates``.
 
 Parsing is defensive (E5): the row list is located under common wrapper keys, per-row field names
 are matched case-insensitively, the free-text ``purpose`` ("Dividend - Rs 5 Per Share",
@@ -178,7 +180,7 @@ def parse_corp_actions(payload: Any) -> list[dict[str, Any]]:
 
 
 class CorpActionsJob:
-    """§4.4 job 7 — NSE corporate actions → ``corp_actions`` (A12 data; consumers in Phase 3)."""
+    """§4.4 job 7 — NSE corporate actions → ``corp_actions`` (A12 data)."""
 
     def __init__(
         self,

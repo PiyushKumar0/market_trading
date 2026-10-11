@@ -9,11 +9,12 @@ are auditable in code rather than prose:
   cumulative billed-token run budget enforced here mid-run (§5.5).
 - **Tool allowlisting is explicit and mandatory (D5/D10).** Every call passes an explicit allowed-tools
   list — empty for single-shot agents, the §5.5 read-only set for the agentic ones — and explicitly
-  disables the SDK's built-ins. ``tools_enabled: true`` NEVER means "SDK defaults": a definition with
+  disables the CLI's built-ins (``tools=[]`` plus a by-name deny list). ``tools_enabled: true`` NEVER
+  means "SDK defaults": a definition with
   tools enabled and no explicit allowlist is refused at load time (:func:`load_agent_defs`), and an
   options surface that exposes no tool knob at all is refused at call time. §9.1 tests both.
-- **``setting_sources=[]`` always (D10).** The service runs from a different working directory and must
-  not pick up a stray CLAUDE.md/settings. If the options surface cannot express that, we refuse to call
+- **``setting_sources=[]`` always (D10).** The service runs from the repo root (NSSM AppDirectory) and
+  must not pick up its CLAUDE.md/settings. If the options surface cannot express that, we refuse to call
   rather than call unconstrained.
 - **Model is always explicit (D4).** ``config/agents.yaml`` names the model; :data:`MODEL_API_IDS` maps
   that name to the API id. An unknown name is a loud load-time error — never a silent SDK default
@@ -24,7 +25,8 @@ are auditable in code rather than prose:
   a non-JSON response is a schema violation, full stop.
 - **Structured output (2026-07-28).** When a ``json_schema`` is sent, the CLI fulfils it by forcing a
   ``StructuredOutput`` TOOL call whose *input* is the validated payload; that round-trip counts as a
-  second turn, so the turn cap gets +1 exactly when the schema knob went out. The tool input is the
+  second turn, so the turn cap gets +3 exactly when the schema knob went out (the round-trip plus
+  room for ~two CLI-side schema retries, see ``_build_options``). The tool input is the
   authoritative answer (it can never be fenced or wrapped in prose), and client-side validation
   remains authoritative on top of it (§8.1). Thinking depth is the per-agent ``effort`` knob in
   agents.yaml; thinking is never disabled (the deprecated ``max_thinking_tokens=0`` did not stop it).
@@ -37,8 +39,9 @@ are auditable in code rather than prose:
   call" is as visible in the audit trail as "we called and it failed".
 
 Billed usage flows into :class:`~engine.intelligence.governor.BudgetGovernor` only when a call actually
-reported some — a timed-out call books nothing, which is exactly the systematic under-count the
-governor's docstring calls out and the reason the degrade ladder trips well below the credit.
+reported some — a timed-out call books only the per-turn usage streamed before the cutoff (often
+none), which is exactly the systematic under-count the governor's docstring calls out and the reason
+the degrade ladder trips well below the credit.
 """
 
 from __future__ import annotations
@@ -84,26 +87,47 @@ MODEL_API_IDS: dict[str, str] = {
     "fable-5.1": "claude-fable-5-1",
 }
 
-# The SDK's built-in tools, explicitly disabled on every call (§5.1) — "no filesystem, no network, no
-# order surface" is enforced in the options, not assumed from an empty allowlist.
+# The CLI's built-in tools, denied by name on every call (§5.1) — the second layer behind `tools=[]`
+# (_build_options): "no filesystem, no network, no order surface" is enforced in the options, not
+# assumed from an empty allowlist. Names observed in pinned-CLI 2.1.288 transcripts added 2026-10-11.
 BUILTIN_TOOLS: tuple[str, ...] = (
+    "Agent",
     "Bash",
     "BashOutput",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "DesignSync",
     "Edit",
+    "EnterWorktree",
+    "ExitWorktree",
     "Glob",
     "Grep",
     "KillShell",
+    "ListAgents",
+    "Monitor",
     "NotebookEdit",
+    "PowerShell",
+    "PushNotification",
     "Read",
+    "RemoteTrigger",
+    "ReportFindings",
+    "ScheduleWakeup",
+    "SendMessage",
+    "Skill",
     "Task",
+    "TaskOutput",
+    "TaskStop",
     "TodoWrite",
+    "ToolSearch",
     "WebFetch",
     "WebSearch",
+    "Workflow",
     "Write",
 )
 
 MAX_SCHEMA_RETRIES = 2      # D7: schema-invalid retries at most twice => at most 3 SDK calls per run
-DEFAULT_TIMEOUT_S = 45.0    # D7 single-shot default; the pre-open planner overrides to 60 in agents.yaml
+DEFAULT_TIMEOUT_S = 45.0    # D7 single-shot default; every enabled agent overrides it (agents.yaml timeout_s)
 
 RETRY_TAIL = (
     "Previous output failed validation: {err}. Emit ONLY valid JSON matching the schema."
@@ -348,9 +372,10 @@ class AgentResult(BaseModel):
 class AssembledContextLike(Protocol):
     """What the harness needs from an assembled context (duck-typed).
 
-    ``ContextAssembler`` (§3.2.6) lands separately; the harness deliberately does NOT import it, so the
-    two can be built and tested independently. ``call_class`` is read defensively with a ``schedule``
-    default — it is the governor's admission class, not part of the prompt.
+    ``ContextAssembler`` (§3.2.6, ``engine.intelligence.context``) is a separate module; the harness
+    deliberately does NOT import it, so the two can be built and tested independently. ``call_class``
+    is read defensively with a ``schedule`` default — it is the governor's admission class, not part
+    of the prompt.
     """
 
     system_prompt: str
@@ -1030,6 +1055,12 @@ class AgentHarness:
                 f"{cls.__name__} exposes no allowed-tools knob — cannot pin {agent_def.agent_id}'s "
                 "explicit allowlist (empty for single-shot); refusing to call (D5/D10, §5.1)"
             )
+        # `allowed_tools` only auto-approves; `tools` is the CLI's built-in base set, and [] removes
+        # every built-in (`--tools ""`). Without it the pinned CLI offered single-shot agents Skill,
+        # ToolSearch, Workflow, Cron*, SendMessage... (sdk transcripts, 2026-10-09). The §5.5 agentic
+        # set is MCP, which `tools` does not govern. StructuredOutput survives (verified 2026-10-11).
+        if tool_field != "tools" and "tools" in fields:
+            kwargs["tools"] = []
         if "disallowed_tools" in fields:
             kwargs["disallowed_tools"] = [t for t in BUILTIN_TOOLS if t not in agent_def.allowed_tools]
 
@@ -1049,8 +1080,9 @@ class AgentHarness:
             # turns of its own: the tool round-trip, a CLI-side schema-validation retry when the
             # payload misses, and a closing text turn after the ack (observed 2026-07-28: a clean run
             # is 2 turns, one schema retry makes 3 — a 1-turn cap killed every compliant call with
-            # error_max_turns). +3 covers ~two schema retries; with no other tools allowed the extra
-            # turns cannot be spent on anything else, and exhausting them still fails loudly.
+            # error_max_turns). +3 covers ~two schema retries; under `tools=[]` StructuredOutput is the
+            # only tool offered, so the extra turns cannot be spent on anything else, and exhausting
+            # them still fails loudly.
             kwargs["max_turns"] = max_turns + 3 if schema_sent else max_turns
 
         try:
@@ -1073,8 +1105,9 @@ class AgentHarness:
             return
         await self._governor.record(agent_def.agent_id, agent_def.model, usage)
         if sdk_cost_usd is not None:
-            # Ledger cost stays OURS (D4 rates, Decimal) — the SDK figure is logged for the §10.1
-            # monthly console reconciliation, never written to the ledger.
+            # Ledger cost stays OURS (D4 rates, Decimal) — the SDK's own figure is debug-logged for
+            # comparison only (there is no console figure to reconcile, D6 re-scope 2026-08-13),
+            # never written to the ledger.
             _log.debug(
                 "agent_call_sdk_cost", agent=agent_def.agent_id, sdk_cost_usd=str(sdk_cost_usd)
             )

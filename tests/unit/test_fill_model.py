@@ -235,7 +235,8 @@ def test_latency_timedelta(cfg: FillModelConfig) -> None:
 # --------------------------------------------------------------------------- loader default path
 # ``load_fill_model()`` with NO argument is how the engine actually calls it: it resolves
 # ``config_dir() / fill_model.yaml``. That branch is the one that ships, so both of its outcomes --
-# the file absent (the state of the repo until WO-P3-4 runs) and present -- are pinned here.
+# the file absent (e.g. an MT_CONFIG_DIR without the file, or the file deleted to roll back calibration)
+# and present -- are pinned here.
 def test_default_path_resolves_config_dir_and_defaults_when_the_file_is_absent(
     tmp_path, monkeypatch
 ) -> None:

@@ -6,8 +6,9 @@ reads NSE's same-day PIT V2.0 route too, and ``MarketStore.get_insider_trades`` 
 feeds carry once. BSE ``getCorp_Regulation_ng/w`` (found 2026-07-19 via browser network capture, plan
 §2.8 source table) serves the SAME structured PIT rows fresh on the disclosure day, with a full
 ``Fld_CreateDate`` broadcast timestamp. This feed pulls those rows into the SAME ``insider_trades``
-table the NSE feed writes, DATA ONLY (no decision path touched — the §2.8.2 event typing / §2.7
-catalyst wiring stay behind §8.6; this feed only makes the fresh rows AVAILABLE).
+table the NSE feed writes. Never entry-blocking (§2.8 rule iii), but on the origination path: the
+rows written here are a live input (with NSE's PIT V2.0 route since 2026-09-24) to the §6.1 ``ins``
+leg (``engine.datafeeds.ins_crossings``, 19:15). §2.7 catalyst wiring does not read them.
 
 **Two-surface fetch (re-measured 2026-09-12, plan §2.8 source table + §2.8.5):**
   * ``Isdefault=1`` -> the LATEST view (one call, no date filter) — the daily-pull surface, and the
@@ -113,7 +114,8 @@ BSE_FRESH_URL = "https://api.bseindia.com/BseIndiaAPI/api/getCorp_Regulation_ng/
 #: returned EXACTLY 25). A window returning >= this is assumed truncated and subdivided per-day.
 BSE_ROW_CAP = 25
 
-#: Belt-and-braces narrow-sweep lookback (days) behind the run day for the Isdefault=2 surface.
+#: Isdefault=2 recovery-sweep lookback (days) behind the run day — the ONLY missed-day recovery path
+#: (cap-bounded, see module docstring).
 FRESH_WINDOW_DAYS = 3
 
 #: Quiet period after a FAILED scrip-master fetch before another is attempted. This job is DATE_KEYED,
@@ -172,7 +174,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 def fresh_url(*, scrip: str = "", regulation: str = "", frm: str = "", to: str = "", isdefault: int = 1) -> str:
-    """BSE fresh-insider URL. ``frm``/``to`` are ``YYYYMMDD`` (empty for the Isdefault=1 rolling view)."""
+    """BSE fresh-insider URL. ``frm``/``to`` are ``YYYYMMDD`` (empty for the Isdefault=1 same-day latest view)."""
     return (
         f"{BSE_FRESH_URL}?scripCode={scrip}&Regulation={regulation}"
         f"&fromDT={frm}&ToDate={to}&Isdefault={isdefault}"
@@ -456,7 +458,7 @@ class FilingsPitFreshResult(BaseModel):
 
 class FilingsPitFreshJob:
     """§2.8 job ``filings_pit_fresh`` — BSE fresh insider disclosures -> ``insider_trades`` (date-keyed,
-    19:00 IST, E5 never entry-blocking). Two surfaces (Isdefault=1 rolling + Isdefault=2 narrow sweep
+    19:00 IST, E5 never entry-blocking). Two surfaces (Isdefault=1 same-day latest + Isdefault=2 narrow sweep
     with per-day subdivision on the ~25-row cap); rows deduped on the content-hash id, upserted."""
 
     def __init__(
@@ -512,7 +514,7 @@ class FilingsPitFreshJob:
             for row in parse.rows:
                 by_id[row["id"]] = row
 
-        # Surface 1: Isdefault=1 rolling latest view (one call).
+        # Surface 1: Isdefault=1 same-day latest view (one call).
         parse, err = await self._fetch_parse(fresh_url(isdefault=1), scrip_map)
         if err is not None:
             failed.append("isdefault1")

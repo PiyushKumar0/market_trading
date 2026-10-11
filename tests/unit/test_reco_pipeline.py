@@ -3243,7 +3243,7 @@ async def test_hot_path_stats_count_reads_avoided_against_reads_performed(
 # ================================ 2026-08-21: the WO-9 RAW counters survive a restart (funnel_raw_counts)
 #
 # THE BUG. `raw` — what the scanners PRODUCED, before dedupe and the caps — was the one funnel number
-# with no DB home, so every engine restart zeroed it and the 22:35 `funnel_utilization` line reported
+# with no DB home, so every engine restart zeroed it and the nightly `funnel_utilization` line reported
 # `raw=None` ("unmeasured") for the whole day. That happened on 4 of the last 6 trade days. The 60 s
 # drain tick now flushes the counters; the pre-screen loads them back on its first day roll.
 

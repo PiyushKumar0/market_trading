@@ -18,13 +18,13 @@ either gate; it only originates.
 were diagnostics only. Their thresholds are the registered ones, frozen in :data:`DEFAULT_PARAMS`
 and owner-only — never learnable, never retuned without a new pre-registration.
 
-**Architecture — a pure batch rule over the ELIGIBLE universe, like ``brk20``** (scoped down from
-the batch universe on 2026-09-09: the 09-03 full-market backtest measured the edge as index-class
+**Architecture — a pure batch rule over the CORE (NIFTY 500) eligible subset, unlike ``brk20``, which
+scans the full eligible set** (scoped down from the batch universe on 2026-09-09: the 09-03 full-market backtest measured the edge as index-class
 only, extended names −0.26% net at T+20). It is deliberately NOT
 a :class:`~engine.strategy.scanners.base.Scanner`: the §3.2.5 scanner protocol is (1m bar,
 ScanContext)-driven and only watched symbols ever produce bars, but a swing-horizon 52wk-proximity
 read has nothing per-bar to key off. This module scans COMPLETED daily bars (bhavcopy-final
-``bars_1d``) for every ELIGIBLE universe symbol — watchlist membership is irrelevant. The composition
+``bars_1d``) for every CORE-eligible symbol — watchlist membership is irrelevant. The composition
 root runs it from the window-open/``scan_now`` sweep and admits its candidates through
 ``SignalPreScreen.admit`` so the §3.2.5 dedupe/caps bind exactly as for bar-driven candidates.
 
@@ -67,8 +67,9 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   were SATISFIED at signal time, and an unknowable value did not satisfy them. A filter NEUTRALIZED
   to an infinite ceiling (:data:`V1_PARAMS`, the backtest's v1 path only) is not in the registration
   at all and so refuses nothing — an absent filter and an unfailable one are different things.
-* The third v2 filter — population = the eligible (index) universe — is NOT enforced here: the
-  composition root has fed this sweep the eligible set since 2026-09-10 (§3.2.4), and a scanner that
+* The third v2 filter — population = the CORE (NIFTY 500) eligible subset — is NOT enforced here:
+  the composition root feeds this sweep ``MarketStore.get_core_eligible_symbols`` (since O18,
+  2026-10-08; the full eligible set 2026-09-10..10-08), and a scanner that
   re-derived universe membership from its own rows would be a second, drifting definition of it.
 * The ex-date skip mirrors ``brk20``'s A12 calendar-horizon check, with one deliberate difference:
   it is COUNTED here as :data:`VETO_EX_DATE_SKIP`. ``brk20`` itself does NOT count its own ex-date

@@ -39,7 +39,8 @@ Clauses covered:
 The GTT clauses, rewritten for paper (plan Q4.5,
 ``test_case17_paper_gtt_across_the_gap_voids_on_an_ex_date_else_stays_resting``): paper never repairs a
 GTT across an ex-date; an ex-date in the unobserved window VOIDs the position in session prep, which
-deletes its restored GTT before any tick is forwarded. Without one, "open CNC GTTs still resting" — the
+deletes its restored GTT before any tick is forwarded (the prep here is a 3-line stand-in for
+``SessionPrep``'s ex-date rule). Without one, "open CNC GTTs still resting" — the
 restored GTT is the position's protection and fires on the first forwarded tick through the stop.
 """
 
@@ -322,7 +323,9 @@ async def test_case17_paper_gtt_across_the_gap_voids_on_an_ex_date_else_stays_re
     holder: dict[str, Rig] = {}
 
     async def prep(since: datetime | None, until: datetime) -> None:
-        """The Q4.7 catch-up's ex-date rule, standing in until Q4.7 lands."""
+        """Mirrors SessionPrep._catch_up's ex-date rule (oms/prep.py:149-157) so this case isolates the
+        PaperRuntime prep hook; the real rule is covered by tests/unit/test_session_prep.py::
+        test_an_ex_date_in_the_window_voids_at_the_pre_ex_mark_without_a_walk_and_no_gtt_fires."""
         if ex_date is not None and since is not None and since.date() < ex_date <= until.date():
             await holder["rig"].book.void(pid, None, until, "corp_action")
 

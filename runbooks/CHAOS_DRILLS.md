@@ -21,31 +21,36 @@ marker automatically. The flags list skip reasons (`-rs`) and pinned defects (`-
 - **Passing tests** compose the real components the way `engine/ops/main.py` wires them, over a
   temp database and a movable clock. Only the external edge is faked: Kite, the Claude SDK, feed
   HTTP, Telegram, and NTP.
-- **Skips** name what they wait for. `PHASE3_GATED` means the clause needs WO-P3-5/P3-6 components
-  (ProtectionManager, GTTManager, Reconciler, SquareOffScheduler, AUTO routing). Other skips mean
-  the behaviour is not built yet.
+- **Skips** name what they wait for. A skip carries one of six reasons from `tests/chaos/conftest.py`
+  (plan Q4.5): `PHASE3_GATED` (a live-broker/AUTO component is not built: live ProtectionManager,
+  GTTManager, Reconciler, SquareOffScheduler, AUTO routing), `MIS_OUT_OF_PAPER_SCOPE`,
+  `REAL_BROKER_ONLY`, `BROKER_RESIDENT_R3`, `REAL_SIDE_ONLY` (RECOMMEND places no broker-resident
+  SL-M/GTT; the paper ProtectionManager protects paper positions) and `PHASE4_LIFECYCLE_HOOKS`. Other skips mean the
+  behaviour is not built yet.
 - **`xfail(strict=True)`** marks a real defect (the CD-n list in §2). The test asserts the plan's
   behaviour, so fixing the defect makes it XPASS, which fails the run until the marker is removed.
 
-Status as of 2026-09-24: 64 passed, 21 skipped, 0 xfailed (every pinned defect, CD-1 to CD-7, fixed).
+Status as of 2026-10-11: 69 passed, 19 skipped, 0 xfailed (every pinned defect, CD-1 to CD-7, fixed).
 
 | # | Case | File | Asserted today | Skipped / pending | Defects |
 |---|---|---|---|---|---|
-| 1, 2a, 2b, 7–12 | Positions, protection, circuit, broker outage, GTT, RMS | `test_phase3_gated_cases.py` | — | all Phase-3-gated | — |
-| 3 | WebSocket drop | `test_case03_websocket_drop.py` | 10 s silence → STALE + kill/respawn + in-session `feed_stale` FROZEN cause, paged by its two risk-state changes; a slow page never stalls the feed; entries refused from 5 s tick age; resume only when HEALTHY and fresh | positions broker-protected (P3) | CD-1 (fixed) |
-| 4 | Token expiry mid-day | `test_case04_token_expiry.py` | FROZEN `kite_token_rejected` + one page with login link; opening order refused before broker; re-login clears | protection resting (P3) | — |
-| 5 | LLM timeout / garbage / quota | `test_case05_llm_failure.py` | no proposal + alert per failure mode; DG4 same path; deterministic time-stop exit still delivered | square-off unaffected (P3) | — |
+| 1, 2a, 2b, 7, 8, 9 | Positions, protection, circuit | `test_phase3_gated_cases.py` | — | MIS out of paper scope (paper trades CNC only) | — |
+| 10, 12 | Broker outage, RMS | `test_phase3_gated_cases.py` | — | real-broker-only | — |
+| 11 | GTT fired / rejected / unfilled | `test_case11_gtt_fired_rejected_or_unfilled.py` | paper: a failed GTT leg ends in one GTT-failure exit | — | — |
+| 3 | WebSocket drop | `test_case03_websocket_drop.py` | 10 s silence → STALE + kill/respawn + in-session `feed_stale` FROZEN cause, paged by its two risk-state changes; a slow page never stalls the feed; entries refused from 5 s tick age; resume only when HEALTHY and fresh | positions broker-protected (broker-resident R3) | CD-1 (fixed) |
+| 4 | Token expiry mid-day | `test_case04_token_expiry.py` | FROZEN `kite_token_rejected` + one page with login link; opening order refused before broker; re-login clears | protection already resting (real-side only: RECOMMEND places no broker-resident SL-M/GTT) | — |
+| 5 | LLM timeout / garbage / quota | `test_case05_llm_failure.py` | no proposal + alert per failure mode; DG4 same path; deterministic time-stop exit still delivered | square-off unaffected (MIS out of paper scope) | — |
 | 6 | Rejection storm / 429s | `test_case06_broker_rejection_storm.py` | 429s paced, never amplified; entry budget exhausted → risk-reducing lane still reaches broker | ≥3 rejects/60 s ⇒ FROZEN (unbuilt: `CAUSE_REJECTION_STORM` is never set); retry/backoff (unbuilt, WO-P3-5) | — |
 | 13 | Holiday start | `test_case13_holiday_start.py` | no session, no LLM calls, jobs skip and are not replayed, heartbeat-only health | — | — |
 | 14 | Clock skew > 2 s | `test_case14_clock_skew.py` | boot skew → FROZEN (held through the warm-up lift) + gate `clock_skew` refusal; resync + restart reopens | mid-session skew detection (skew is boot-only, accepted for Phase 2) | CD-2 (fixed) |
-| 15 | Clean stop + same-day restart | `test_case15_clean_stop_same_day_restart.py` | repeat stop signals ignored; STOPPED + `last_clean_stop_at` committed; one ENGINE_STOPPED; restart not crash-recovered; catch-up exact | restart reconcile (P3) | live drill failed 09-23, see §3 |
+| 15 | Clean stop + same-day restart | `test_case15_clean_stop_same_day_restart.py` | repeat stop signals ignored; STOPPED + `last_clean_stop_at` committed; one ENGINE_STOPPED; restart not crash-recovered; catch-up exact | restart reconcile (Phase-4 lifecycle hooks) | live drill failed 09-23, see §3 |
 | 16 | Offline across EOD | `test_case16_offline_across_eod_window.py` | each missed EOD job caught up once, idempotently, incl. the EOD safety-critical earnings run | champ/chall eval (unbuilt) | — |
-| 17 | Offline multi-day | `test_case17_offline_multi_day.py` | per-trading-day re-run (weekend + holiday skipped); candle gap backfilled; warm-up enforced | ex-date GTT repair (P3) | — |
+| 17 | Offline multi-day | `test_case17_offline_multi_day.py` | per-trading-day re-run (weekend + holiday skipped); candle gap backfilled; warm-up enforced; paper GTT: an ex-date in the gap VOIDs the position, else the GTT stays resting | live ex-date GTT repair (P3) | — |
 | 18 | Cold start too close to window | `test_case18_cold_start_warmup.py` | regime shortfall freezes until candles land; intraday-only shortfall refuses per candidate; daily-only per symbol | — | — |
-| 19 | Scheduled start missed | `test_case19_scheduled_start_missed.py` | one SCHEDULED_START_MISSED after grace, edge-triggered; none on weekend/holiday | open MIS rides backstop (P3) | — |
+| 19 | Scheduled start missed | `test_case19_scheduled_start_missed.py` | one SCHEDULED_START_MISSED after grace, edge-triggered; none on weekend/holiday | MIS/reconcile clauses (MIS out of paper scope) | — |
 | 20 | News down / DG3 pre-open | `test_case20_news_layer_down.py` | empty-but-fresh digest rung; digest failure, or no digest yet today at an in-window sweep → one CATALYST_DISABLED a day; no FROZEN; non-`cat` ranking identical; self-restores next day | — | CD-4 (fixed) |
 | 21 | Prompt-injection headlines (entry side) | `test_case21_adversarial_headlines.py` | schema-invalid scores dropped; single-source ⇒ `context` at most; syndicated PR = one cluster; other symbols unaffected, incl. model-emitted foreign entity strings | exit side (P3) | — |
-| 22 | Lifecycle notifications | `test_case22_lifecycle_notifications.py` | (a) clean stop: one ENGINE_STOPPED, watchdog silent; (b) crash: one ENGINE_DOWN, crash-recovered restart; (c) killed while off: silent | capital protection (P3) | — |
+| 22 | Lifecycle notifications | `test_case22_lifecycle_notifications.py` | (a) clean stop: one ENGINE_STOPPED, watchdog silent; (b) crash: one ENGINE_DOWN, crash-recovered restart; (c) killed while off: silent | capital protection unaffected (broker-resident R3: paper protection is the PaperBroker's in-process GTT book) | — |
 | 23 | Shutdown races tick flush | `test_case23_shutdown_races_tick_flush.py` | no deadlock; bus drained before store close; a late or wedged flush restages its unwritten batch with an explicit log | — | CD-6, CD-7 (fixed) |
 
 Note on the plan text: `engine_lifecycle` has no `intend_to_run` column. The watchdog and the
@@ -90,8 +95,8 @@ Fixed (2026-09-24):
 
 Other gaps the suite surfaced (not pinned as defects):
 - **No budget-tier message on billing-error DG4.** A billing-error DG4 is never published on
-  `budget.state`: `harness.py:843` calls `note_billing_error`, and `raise_billing_error` has no
-  caller.
+  `budget.state`: the billing-error branch of the SDK call in `harness.py` calls `note_billing_error`, and
+  `raise_billing_error` has no caller.
 - **Distinct PRs merged into one cluster.** The headline clusterer merged three different
   companies' PRs that shared a template into one cluster (template glue; the boilerplate list only
   covers earnings templates).
@@ -100,7 +105,7 @@ Other gaps the suite surfaced (not pinned as defects):
 
 ## 3. Live drills
 
-### Phase 2 (RECOMMEND, no platform positions): drillable now
+### Phase 2 (RECOMMEND, no real platform positions; paper positions are simulated): drillable now
 
 **Case 15 / 22a: planned stop and restart.** Run outside 09:15–15:30, when no job is in flight;
 check the `engine.log` tail first.

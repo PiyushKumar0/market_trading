@@ -4,15 +4,16 @@
 #
 # Plan refs: D2 (OAuth-token validity / ANTHROPIC_API_KEY outranks the token),
 #            D11 (token minted by `claude setup-token` as the SERVICE user, via
-#            the CLI bundled with claude-agent-sdk; one-off global install + remove
-#            fallback, D1 re-verified), and §2.2 (the engine loads the token from
-#            DPAPI at startup and injects it into the SDK's CLI child's process
-#            environment -- the token is NEVER persisted in a user/service env var).
+#            a Claude Code CLI; one-off global install + remove fallback, D1
+#            re-verified), and §2.2 (the token is NEVER persisted in a user/service
+#            env var). NOTE: the engine does NOT inject the stored token into the
+#            CLI child -- that is not implemented. The engine runs the pinned CLI
+#            at agents.yaml llm.cli_path, which authenticates with its own login.
 #
 # WHAT THIS IS: a documented, manual runbook you (the owner) run ONCE as the
-# Windows SERVICE account that NSSM will use for `mt-engine`, plus on the monthly
+# Windows SERVICE account that NSSM will use for `mt-engine`, plus on the
 # re-mint (D2: re-mint via `claude setup-token` once the token is older than
-# ~330 days; 1-year validity). It is mostly comments + a few commands. It is NOT
+# ~330 days; 1-year validity; the token-age check is monthly). It is mostly comments + a few commands. It is NOT
 # called by the engine. Run it interactively, in an elevated/`runas` shell that
 # is logged in as the SERVICE user, from the repo root.
 #
@@ -40,8 +41,9 @@ Write-Host ''
 # -----------------------------------------------------------------------------
 # STEP 1 - Ensure the venv exists (uv sync, or fall back to .venv).
 # -----------------------------------------------------------------------------
-# The claude-agent-sdk (and its BUNDLED Claude Code CLI -- D1 re-verified: the CLI
-# ships with the package, no separate Node install) lives in the service account's
+# The claude-agent-sdk (its _bundled Claude Code CLI ships with the package, no
+# separate Node install -- D1 re-verified; the engine itself runs the pinned CLI at
+# agents.yaml llm.cli_path) lives in the service account's
 # venv (D11). `uv sync` installs from the lockfile (pins the SDK version, which
 # pins the bundled CLI; auto-update disabled). If uv is unavailable, a plain
 # `.venv` is acceptable for this manual mint as long as claude-agent-sdk is present.
@@ -74,21 +76,23 @@ Write-Host ''
 
 
 # -----------------------------------------------------------------------------
-# STEP 2 - Mint the token with the Claude Code CLI bundled in claude-agent-sdk.
+# STEP 2 - Mint the token with a Claude Code CLI (venv entry, else `claude` on PATH).
 # -----------------------------------------------------------------------------
 # The mint command is:   claude setup-token
 # It opens a browser for the Anthropic OAuth consent flow and then PRINTS a
 # long-lived token (CLAUDE_CODE_OAUTH_TOKEN). Do this while logged in as the
 # SERVICE user so the token is bound to the account the service runs under (D11).
 #
-# RECORD THE INVOCATION PATH: the exact path/way the bundled CLI is invoked is
-# captured during the Phase-0 smoke test (scripts/smoke_test.py asserts the
-# bundled CLI works under the service account -- D1 re-verified). Use the SAME
-# invocation here. The CLI ships inside the installed claude-agent-sdk package;
-# below we try to locate it from the venv before falling back.
+# RECORD THE INVOCATION PATH: scripts/smoke_test.py asserts the engine's CLI
+# (agents.yaml llm.cli_path, data\run\claude-cli\<ver>\claude.exe) works under the
+# service account -- D1 re-verified. To mint with that pinned binary, run
+# `& <llm.cli_path> setup-token` yourself as the service user; this script's own
+# lookup (venv Scripts, then PATH, then npm global) does not use the pin. The venv
+# Scripts dir normally has no claude.exe, so the lookup usually falls through to
+# `claude` on PATH.
 Write-Host '--- Step 2: mint the OAuth token (claude setup-token) -------------------' -ForegroundColor Green
 
-# Choose the interpreter for locating the bundled CLI.
+# Choose the interpreter for locating the CLI.
 if ($uv) {
     # Prefer the venv python uv just synced; fall back to `uv run python`.
     if (Test-Path $VenvPython) { $Python = $VenvPython } else { $Python = $null }
@@ -96,19 +100,16 @@ if ($uv) {
     $Python = $VenvPython
 }
 
-# Try to discover the bundled CLI entry point shipped inside claude-agent-sdk.
-# This mirrors what the smoke test records; the exact attribute/name is verified
-# there. We only use it to print guidance + run the mint; we do not hardcode a
-# brittle path.
+# Look for a `claude` entry in the venv Scripts dir (not normally present; the SDK's
+# CLI lives in site-packages\claude_agent_sdk\_bundled). We only use it to print
+# guidance + run the mint; we do not hardcode a brittle path.
 $cliCmd = $null
 if ($Python) {
-    Write-Host 'Locating the bundled Claude Code CLI inside claude-agent-sdk...'
-    # The package exposes a `claude` console-script in the venv Scripts dir when
-    # installed; check there first (the recorded smoke-test invocation).
+    Write-Host 'Locating a Claude Code CLI in the venv...'
     $VenvClaude = Join-Path $VenvDir 'Scripts\claude.exe'
     if (Test-Path $VenvClaude) {
         $cliCmd = $VenvClaude
-        Write-Host ("Found bundled CLI: {0}" -f $cliCmd)
+        Write-Host ("Found venv CLI: {0}" -f $cliCmd)
     }
 }
 
@@ -123,7 +124,7 @@ if (-not $cliCmd) {
     # FALLBACK (D1 re-verified path): the package exposed no callable CLI entry
     # point on this box. A one-off GLOBAL CLI install is used SOLELY for minting,
     # then REMOVED below in Step 2b. This keeps the service venv pinned and clean.
-    Write-Host 'No bundled/`claude` CLI entry point found.' -ForegroundColor Yellow
+    Write-Host 'No venv/`claude` CLI entry point found.' -ForegroundColor Yellow
     Write-Host 'Falling back to a ONE-OFF global CLI install (solely to mint, then removed).' -ForegroundColor Yellow
     Write-Host 'Performing: npm install -g @anthropic-ai/claude-code'
     & npm install -g '@anthropic-ai/claude-code'
@@ -156,7 +157,7 @@ if ($DidGlobalInstall) {
     try {
         & npm uninstall -g '@anthropic-ai/claude-code'
         if ($?) {
-            Write-Host 'One-off global CLI removed. The pinned SDK-bundled CLI remains the only CLI.'
+            Write-Host 'One-off global CLI removed. The engine runs the pinned CLI at agents.yaml llm.cli_path.'
         } else {
             Write-Host 'npm uninstall reported a non-zero exit - remove it manually:' -ForegroundColor Yellow
             Write-Host '  npm uninstall -g @anthropic-ai/claude-code'
@@ -172,8 +173,8 @@ if ($DidGlobalInstall) {
 # -----------------------------------------------------------------------------
 # STEP 3 - Store the token in the DPAPI-encrypted protected store.
 # -----------------------------------------------------------------------------
-# The engine loads it from DPAPI at startup and injects it into the SDK CLI
-# child's process environment (Plan section 2.2). It is NEVER written to a
+# Stored for the engine's secrets (Plan section 2.2); injecting it into the CLI
+# child is NOT implemented (no engine code reads it). It is NEVER written to a
 # user/service env var, the registry, or NSSM AppEnvironmentExtra. The DPAPI
 # blob is bound to THIS service account, which is exactly why the mint and this
 # store step must run as the service user.
@@ -269,6 +270,6 @@ if ($found) {
 Write-Host ''
 
 Write-Host '=== Done. Next, as the service user: run `scripts/smoke_test.py` to verify the ===' -ForegroundColor Cyan
-Write-Host '=== bundled CLI (`claude --version`, D1); add `--live-llm` for the one cheap  ===' -ForegroundColor Cyan
+Write-Host '=== engine CLI (`--version`, D1); add `--live-llm` for the one cheap          ===' -ForegroundColor Cyan
 Write-Host '=== Haiku SDK round-trip that also spends credit + needs network (D11).       ===' -ForegroundColor Cyan
 Write-Host ''

@@ -20,7 +20,8 @@ Spec ambiguities resolved here (documented for the integrator):
 
 - The 30-minute age trigger is read from :meth:`BudgetGovernor.news_batch_cadence_min` rather than
   hard-coded, so the §5.6 DG2 row ("news-analyst batching coarsens 30 → 60 min") is actually load-
-  bearing instead of decorative. It returns 30 at DG0/DG1, which is the §5.4 default.
+  bearing instead of decorative. It returns the §5.4 default of 30 unless the platform is
+  at DG2+ or the news analyst is over its own share (per-agent degrade, 2026-09-12), when it returns 60.
 - The market-hours leg of the time gate requires a trading day (R6); the 19:00–22:00 sweep does not.
   Weekend/holiday news is eligible for the next session's digest (`cat.max_event_age_days` counts
   SESSIONS), so refusing to score it on a Sunday evening would only shove the whole weekend queue
@@ -125,7 +126,7 @@ class ScoringResult(BaseModel):
 
 
 class NewsScoringJob:
-    """§5.4 batched cluster scoring: queue → Haiku → ``news_clusters`` step-4 columns.
+    """§5.4 batched cluster scoring: queue → the Tier-1 news analyst (model per agents.yaml) → ``news_clusters`` step-4 columns.
 
     Parameters
     ----------

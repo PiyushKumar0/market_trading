@@ -72,7 +72,7 @@ from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 _log = get_logger("scripts.backfill")
 
-# INDEX_SYMBOL / VIX_SYMBOL are canonically DEFINED in engine.ops.main (lines 101-102) and nowhere
+# INDEX_SYMBOL / VIX_SYMBOL are canonically DEFINED in engine.ops.main and nowhere
 # else; importing that module would boot the whole composition graph, so the two names are duplicated
 # here (kept in sync with engine.ops.main.INDEX_SYMBOL / VIX_SYMBOL). They are the bars_1d symbols the
 # regime features read (§7.1 regime_data_ready): the seed's DAILY set includes them, the MINUTE set

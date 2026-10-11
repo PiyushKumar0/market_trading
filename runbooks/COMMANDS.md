@@ -32,12 +32,14 @@ holder pid, never delete the file).
 ```powershell
 Get-Date; Get-Content data\logs\engine.log -Tail 20          # no in-flight EOD job / compaction
 Stop-Service mt-engine
-# 1. Backup before the first boot on a new migration (online backup API, as _snapshot_backup does):
-.venv\Scripts\python.exe -c "import sqlite3; s=sqlite3.connect('data/state.db'); d=sqlite3.connect('data/backups/pre_0015.db'); s.backup(d); d.close(); s.close()"
+# 1. Backup before the first boot on a new migration (online backup API, as _snapshot_backup does);
+#    replace <NNNN> with the next migration number (latest on disk: pre_0016.db, 2026-10-07; check
+#    `Get-ChildItem data/backups -Filter pre*`). An existing file of the same name is OVERWRITTEN:
+.venv\Scripts\python.exe -c "import sqlite3; s=sqlite3.connect('data/state.db'); d=sqlite3.connect('data/backups/pre_<NNNN>.db'); s.backup(d); d.close(); s.close()"
 # 2. Research snapshot (same stop): copies the study tables READ_ONLY, prints row counts, exit 0 = all match
 .venv\Scripts\python.exe scripts\research_snapshot.py
-# 3. Fast-forward the live tree to the milestone tip (M0-M2 = wip/m2; M3/M4 only after owner review):
-git merge --ff-only wip/m2
+# 3. Fast-forward the live tree to the reviewed milestone tip (the 2026-10-06 plan's M0-M2 were wip/m2; later tips only after owner review):
+git merge --ff-only <reviewed tip>
 Start-Service mt-engine
 Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|migration_failed|engine_ready|FROZEN' | Select-Object -Last 5
 ```
@@ -181,27 +183,22 @@ uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citi
 ```
 
 The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
-the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Pending as of 2026-09-23:
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending; last applied: O17 (e148a4e, 2026-09-24, owner). A prepared change
+follows this shape (outside 09:15-15:30, from the repo root, with a clean `git status`):
 
 ```powershell
-# O17 sizing caps (plan §7.1 O17): overnight_gap_mult 2.5 -> 2.0, cnc_notional_inr 8000 -> 12000.
-# ONE combined patch (supersedes o17_limits_2026-09-13.patch): limits.yaml + the knock-ons that must
-# land in the same boot — hi52.expected_edge_pct 1.47 -> 1.53 (derived from the gap mult, pinned by a
-# test), the ins stop comment, hi52_forward_verdict fallbacks, 8 tests that encode limit arithmetic,
-# and the plan's O17 status. Full unit suite green on it in a scratch worktree (3076 passed, 09-23).
-# Run outside 09:15-15:30, from the repo root, with a clean `git status`.
 Stop-Service mt-engine
-git apply --check runbooks\briefs\o17_combined_2026-09-23.patch   # must print nothing
-git apply runbooks\briefs\o17_combined_2026-09-23.patch
-.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "O17 2026-09-23 owner-applied"
-Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
-git add -u; git commit -m "O17 applied (owner): combined patch + reseed"
+git apply --check <patch>                                        # must print nothing
+git apply <patch>
+.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "<why, citing the directive>"
+Start-Service mt-engine                                          # boot must show selftest protected_store:<file> PASS
+git add -u; git commit -m "<directive> applied (owner): patch + reseed"
 ```
 
 ## Tests / verification
 
 ```powershell
-uv run pytest tests/unit -q                     # full suite (~457 tests, ~2 min)
+uv run pytest tests/unit -q                     # full suite (several minutes; run inline, never two at once)
 uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_sweep_signals.py -q
 ```
 
@@ -388,13 +385,13 @@ backtest's anchor: the journal day is the session after the trigger, so this mea
 quantity the registered edge was measured as — the live fill lands later that morning, so realized
 results trail the metric by that intraday drift), exit = the close of the k-th SESSION of the hold
 (entry session first), net of one CNC round trip at the §7.1-SIZED notional
-(`swing_position_pct` / (`overnight_gap_mult` × the 6% stop) = equity/7.5, taken at the SMALLEST
-`equity_snapshots` reading in the window — ₹5,234 ⇒ 0.54% at the 2026-09-11 equity, and a
+(`swing_position_pct` / (`overnight_gap_mult` × the 6% stop) = equity/6 since O17 (2.0×; equity/7.5 at 2.5× before 2026-09-24), taken at the
+SMALLEST `equity_snapshots` reading in the window — ≈₹6,543 at the 2026-09-11 equity (₹39,256.65 / 6), and a
 drawn-down snapshot anywhere in the window gives a smaller notional and a HIGHER floor, which can
 only make DEMOTE easier; `--equity` overrides the equity and `--notional` skips the derivation
 outright and prints OVERRIDE, and the derivation prints with the verdict either way, so check which
 notional and floor it used before quoting a number). T+5 and T+10 print as DIAGNOSTICS and are
-labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.47) comes
+labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.53 since O17; 1.47 before) comes
 from the SAME derivation in this script (`registered_edge_pct()`, charged at the `equity_floor_rung`
 book) and a unit test pins the two together, so re-deriving by hand is never necessary.
 The 2026-09-14 boundary is an

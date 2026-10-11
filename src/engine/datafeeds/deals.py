@@ -1,4 +1,4 @@
-"""NSE bulk/block deals → ``flagged_instrument_days`` (§4.4 job 9, 18:45 — E5 best-effort).
+"""NSE bulk/block deals → ``flagged_instrument_days`` (§4.4 job 9, settings.jobs.deals_ist — 20:30 since 2026-07-24; E5 best-effort).
 
 A day with a bulk or block deal in a symbol distorts its volume profile: scanners must suppress
 volume-breakout signals on flagged (symbol, day)s ("fake-volume-breakout suppression", §4 spec /

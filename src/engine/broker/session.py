@@ -14,8 +14,7 @@ R6 device-flow (the sanctioned path)
    ``api_key + request_token + api_secret`` — done for us by ``kc.generate_session``), extracts the
    ``access_token``, persists it via :class:`Secrets` (DPAPI, R10), and confirms on Telegram.
 4. Fallbacks (§13 runbook): off-LAN, the owner copies the ``request_token`` from the browser address
-   bar and sends ``/token <value>`` on Telegram (or pastes it into the dashboard) — both routes land
-   in :meth:`complete_login`. PC-side login in any browser works identically.
+   bar and sends ``/token <value>`` on Telegram — both routes land in :meth:`complete_login`. PC-side login in any browser works identically.
 
 Token validity is tracked behaviourally, NOT off a hard clock (A5 note): we keep a ``_last_success``
 stamp (set on a successful login) and a ``_rejected`` flag (set by :meth:`on_token_rejected` when a
@@ -119,8 +118,9 @@ class SessionManager:
         """Return the Kite login URL the owner taps to start the daily flow (R6).
 
         Kite appends ``?request_token=...&action=login&status=success`` to the app's configured
-        redirect (``redirect_path``) on success; the redirect itself is configured in the Kite
-        developer console, not passed here — ``KiteConnect.login_url()`` only needs the api_key.
+        redirect on success; the redirect itself is configured in the Kite developer console, not
+        passed here — ``KiteConnect.login_url()`` only needs the api_key. ``redirect_path`` is stored
+        but read by nothing: the callback route is fixed at ``/kite/callback`` (api/kite_callback.py).
         """
         return self._connect().login_url()
 
@@ -237,12 +237,13 @@ class SessionManager:
 
         Deliberately NOT a hard clock: the gate must keep trading on a token the broker still honours
         and must stop the instant the broker rejects one — both signalled behaviourally
-        (``_last_success`` / ``_rejected``), never by comparing ``now()`` to a nominal 06:00 expiry.
+        (``_rejected``), never by comparing ``now()`` to a nominal 06:00 expiry.
         """
         return self._access_token is not None and not self._rejected
 
     def mark_success(self) -> None:
-        """Stamp a successful authenticated call (KiteClient calls this — keeps the token 'fresh')."""
+        """Stamp a successful authenticated call. Only the boot probe (:meth:`verify_token`) calls
+        this; ``_last_success`` is informational — :meth:`token_valid` ignores it."""
         self._last_success = self._clock.now()
 
     async def on_token_rejected(self) -> None:

@@ -44,7 +44,7 @@ SEEDABLE: dict[str, str] = {
     KITE_API_SECRET: "Zerodha Kite Connect API secret",
     TELEGRAM_BOT_TOKEN: "Telegram bot token (BotFather)",
     DASHBOARD_TOKEN: "Local dashboard bearer token (or use --generate-dashboard-token)",
-    CLAUDE_CODE_OAUTH_TOKEN: "Claude Code SDK OAuth token (D2; injected into the SDK CLI env)",
+    CLAUDE_CODE_OAUTH_TOKEN: "Claude Code SDK OAuth token (D2; stored only, not injected: the pinned CLI uses its own login)",
 }
 
 # Length, in URL-safe bytes, of an auto-generated dashboard token (~43 chars of entropy).

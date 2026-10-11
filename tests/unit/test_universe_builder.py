@@ -574,7 +574,8 @@ def _wide_index_csv() -> str:
 
 async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, store, clock):
     """O15 (2026-09-04): with the eligible set widened to NIFTY 500 the focus cap BINDS again —
-    ``universe_max_watchlist`` (200 in settings.yaml) is no longer ≥ the eligible set, as it was
+    ``universe_max_watchlist`` (a fixture cap of 200, the O15-era value; settings.yaml has been 300
+    since 2026-09-07) is no longer ≥ the eligible set, as it was
     for NIFTY200 since 2026-08-20. Exactly 200 rows come back ``included``, chosen top-down by
     median traded value, and every one of the other 300 rule-passing names is persisted with the
     single auditable reason ``watchlist_cap`` — never silently dropped (§4.3). The extended leg's

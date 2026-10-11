@@ -55,7 +55,8 @@ class Session(BaseModel):
 class CorpAction(BaseModel):
     """A corporate action with an ex-date (A12). Drives GTT ex-date adjustment + ledger attribution.
 
-    Phase 0 ships the type; the corp-actions feed (datafeeds) populates it in Phase 1.
+    Return type of ``NSECalendar.ex_dates`` (the planned §2.6/T12 GTT ex-date scan). The corp-actions
+    feed stores raw rows in the ``corp_actions`` table, not this type.
     """
 
     model_config = ConfigDict(frozen=True)

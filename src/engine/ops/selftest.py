@@ -15,10 +15,11 @@ warm-up sufficiency check (§7.1 ``warmup_ready``) rides the same surface via th
 lifecycle enforces freshness after step 5 and warm-up at step 6; a standalone/pre-entries re-run
 (``run()`` default) includes them.
 
-Still stubbed with explicit markers (surfaced as SKIP so the gate sequence is honest): the day-scoped
-risk-counter rebuild + continuous equity halt-ladder re-evaluation (§2.6 — TODO(Phase 2/3): needs the
-ledger + ExposureTracker + broker reconcile) and the one cheap Haiku SDK call (D11 — deduped per
-trading day, skipped on non-trading-day starts; TODO(Phase 1 intelligence harness)).
+Phase-2 additions (§2.6 step 2 / D11): the day-scoped risk-counter rebuild, the startup re-evaluation
+and application of the equity halt ladder plus daily-loss rungs, and the one cheap SDK smoke call
+(non-trading-day starts skipped, deduped per trading day via ``job_runs``). risk_counters_rebuild and
+equity_halt_ladder SKIP only when ExposureTracker/LimitsEngine is unwired; sdk_smoke SKIPs when its
+callable is unwired, on a non-trading-day start, or once already verified that trading day.
 
 This module REPORTS; the lifecycle applies the consequences (the §2.4 integrity rule: FROZEN-with-flat-book
 vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions (§2.6).

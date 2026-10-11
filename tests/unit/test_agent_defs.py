@@ -1,4 +1,4 @@
-"""Phase-2 agent definitions (§5.2–§5.4): prompt invariants + the LLM-side output schemas.
+"""Phase-2 agent definitions (§5.2–§5.5): prompt invariants + the LLM-side output schemas.
 
 Two families of assertion:
 
@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from engine.core.clock import IST
 from engine.core.config import config_dir
-from engine.intelligence.agents import intraday, news_analyst, preopen
+from engine.intelligence.agents import intraday, news_analyst, nightly, preopen
 from engine.intelligence.schemas import (
     CLUSTER_EVENT_TYPES,
     ClusterScoreBatch,
@@ -35,7 +35,7 @@ from engine.intelligence.schemas import (
     parse_intraday,
 )
 
-AGENT_MODULES = (intraday, preopen, news_analyst)
+AGENT_MODULES = (intraday, preopen, news_analyst, nightly)
 
 STAMP = dict(
     proposal_id="01J0PLATFORMULID",
@@ -88,7 +88,9 @@ def test_agent_ids_match_the_agents_yaml_keys():
     for module in AGENT_MODULES:
         assert module.AGENT_ID in roster["agents"], module.__name__
         assert module.AGENT_ID in roster["budget_allocations_usd"], module.__name__
-    assert {m.AGENT_ID for m in AGENT_MODULES} == {"intraday_analyst", "preopen_planner", "news_analyst"}
+    assert {m.AGENT_ID for m in AGENT_MODULES} == {
+        "intraday_analyst", "preopen_planner", "news_analyst", "nightly_reviewer",
+    }
 
 
 # --------------------------------------------------------------------------- prompt invariants (D8)

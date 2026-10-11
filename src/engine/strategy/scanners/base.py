@@ -1,4 +1,4 @@
-"""Scanner base class + registry (§3.2.5/§6.1) — the seam every baseline (and Phase-3 ``cat``) plugs into.
+"""Scanner base class + registry (§3.2.5/§6.1) — the seam every per-bar baseline plugs into.
 
 A ``Scanner`` is a PURE function of ``(bar, ScanContext, params)``: no Clock, no I/O, no mutable
 state — same inputs ⇒ same candidates (§9.6 determinism, modulo the platform-minted ``signal_id``
@@ -17,10 +17,10 @@ Params are injected as a plain dict whose keys mirror the §6.3 envelope rows fo
 ``ValueError`` (typo guard — a silently-ignored param would quietly detune a strategy).
 
 Registry: modules self-register via :func:`register` at import time; ``SCANNER_REGISTRY`` maps
-``strategy_id`` → class. The Phase-3 ``cat`` scanner (§6.1 row 5, §2.7) registers here as a PEER of
-the price baselines — same base class, same ``scan`` signature, ``catalyst_ref`` set to the
-``catalyst_watchlist.entry_id`` — with its per-day entry cap enforced in the pre-screen (§3.2.5).
-No ``cat`` code exists in Phase 1 (deliberately deferred, §8.2).
+``strategy_id`` → class. The four per-bar price baselines (orb/rsi2/trend/mom) self-register here.
+The EOD-batch rules (brk20, ins, hi52, cat, cat_reversal) are deliberately NOT Scanners; they enter
+via ``SignalPreScreen.admit``, where the catalyst cap for ``catalyst_ref`` candidates is enforced
+(§3.2.5).
 """
 
 from __future__ import annotations
@@ -83,8 +83,9 @@ class Scanner(abc.ABC):
     ) -> SignalCandidate:
         """Mint a §3.2.5 candidate (ULID ``signal_id``; score clamped to [0, 1]).
 
-        ``catalyst_ref`` stays ``None`` for every price baseline; only the Phase-3 ``cat`` peer
-        passes the watchlist entry id (§2.7 audit chain).
+        ``catalyst_ref`` is unused by every registered scanner (always ``None``); the batch rules
+        that carry a watchlist entry id build their candidates in ``_shadow_catalyst.build_candidate``
+        (§2.7 audit chain).
         """
         return SignalCandidate(
             signal_id=str(ULID()),
@@ -117,8 +118,10 @@ def register(cls: type[Scanner]) -> type[Scanner]:
 def params_from_envelope(strategy_id: str, envelope: Mapping[str, float]) -> dict[str, float]:
     """Strip a namespaced §6.3 envelope mapping (``orb.vol_mult`` …) down to one scanner's bare params.
 
-    The integrator reads live values from SQLite ``envelope_state`` (§6.5) keyed exactly like
-    ``config/envelope.yaml`` and feeds each scanner through this helper.
+    The intended Phase-5 seam for feeding SQLite ``envelope_state`` (§6.5, keyed like
+    ``config/envelope.yaml``) to each scanner; NOT wired today: ``engine.ops.main`` builds
+    orb/rsi2/trend/mom on code ``DEFAULT_PARAMS`` and ``envelope_state`` rows for those keys are
+    not read (see ``scan_context.py``).
     """
     prefix = strategy_id + "."
     return {k[len(prefix):]: float(v) for k, v in envelope.items() if k.startswith(prefix)}

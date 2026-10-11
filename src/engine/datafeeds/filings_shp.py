@@ -50,7 +50,7 @@ _log = get_logger("engine.datafeeds.filings_shp")
 #: NSE SHP daily-incremental master cross-section (equities). [VERIFY Phase-1]; probe-verified list shape.
 NSE_SHP_MASTER_URL = "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities"
 
-#: BSE SHP detail stack (§2.8). [VERIFY Phase-1 — shape UNVERIFIED, see module docstring].
+#: BSE SHP detail stack (§2.8) — endpoints and shape live-verified 2026-07-16 (module docstring).
 BSE_SHP_QUARTER_INDEX_URL = "https://api.bseindia.com/BseIndiaAPI/api/SHPQNewFormat/w?scripcode={code}"
 BSE_SHP_DETAIL_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/CorporatesSHPSecuritybeta/w?scripcode={code}&qtrid={qtrid}"
@@ -63,7 +63,6 @@ _sleep = asyncio.sleep
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 SOURCE_BSE = "bse"
-SOURCE_NSE = "nse"
 
 
 class FilingsShpResult(BaseModel):

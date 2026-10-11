@@ -490,8 +490,8 @@ class TickerSupervisor:
             _ENV_TCP_HOST: self._settings.ticker.tcp_host,
             _ENV_TCP_PORT: str(self._settings.ticker.tcp_port),
         }
-        # Inherit the parent environment (PATH, credential-manager access, OAuth token injected at
-        # startup per §2.4) and overlay the handshake/loopback vars.
+        # Inherit the parent environment (PATH, credential-manager access; no OAuth token is injected
+        # into it) and overlay the handshake/loopback vars.
         full_env = {**_os_environ(), **env}
 
         self._proc = await asyncio.create_subprocess_exec(

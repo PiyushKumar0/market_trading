@@ -479,8 +479,8 @@ def test_the_golden_digest_is_byte_identical_and_pinned(runs: dict[str, Outcome]
     assert runs["on"].report.digest == runs["again"].report.digest == GOLDEN
 
 
-# ------------------------------------------------------------------ paper off (the shipped setting)
-def test_shipped_settings_keep_paper_off_and_change_nothing_real(runs: dict[str, Outcome]) -> None:
+# ------------------------------------------------------------------ paper subsystem disabled (the rollback setting)
+def test_disabled_subsystem_changes_nothing_real(runs: dict[str, Outcome]) -> None:
     on, off = runs["on"], runs["off"]
     assert {t: off.rows[t] for t in PAPER_TABLES} == dict.fromkeys(PAPER_TABLES, [])
     assert [v["is_paper"] for v in off.rows["verdicts"]] == [0]

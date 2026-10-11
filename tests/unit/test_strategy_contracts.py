@@ -26,8 +26,8 @@ def test_every_shipped_strategy_has_exactly_one_contract():
 
 @pytest.mark.parametrize("strategy_id", sorted(EXPECTED_STRATEGIES))
 def test_each_contract_is_non_empty_and_states_its_evidence_status(strategy_id: str):
-    """Evidence status is stated per leg BECAUSE it differs per leg: one is validated and six are
-    exploratory. That is exactly why the claim could no longer live in the shared system prompt."""
+    """Evidence status is stated per leg BECAUSE it differs per leg (validated / forward test /
+    exploratory / shadow). That is exactly why the claim could no longer live in the shared system prompt."""
     text = STRATEGY_CONTRACTS[strategy_id]
     assert text.strip(), strategy_id
     assert "evidence status" in text, strategy_id

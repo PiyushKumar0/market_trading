@@ -42,10 +42,9 @@ from engine.core.log import get_logger
 
 _log = get_logger("engine.broker.instruments")
 
-# Kite reports F&O-bearing underlyings via the NFO exchange / FUT|OPT instrument types; an NSE-equity
-# row whose tradingsymbol also appears in those segments is treated as F&O-listed (C7). Phase 0 keeps a
-# conservative explicit flag on each ``Instrument`` (populated by :meth:`refresh`); the full NFO-join is
-# a Phase-1 concern alongside the DuckDB snapshot.
+# Derivative rows (these exchanges, FUT|CE|PE types) carry their underlying's tradingsymbol in
+# ``name``; an NSE equity whose tradingsymbol is such a ``name`` is F&O-listed (C7) — the NFO join
+# :meth:`InstrumentStore.refresh` performs (2026-07-31) and stamps on each ``Instrument.is_fno``.
 _FNO_EXCHANGES = frozenset({"NFO", "BFO", "CDS", "MCX"})
 _FNO_INSTRUMENT_TYPES = frozenset({"FUT", "CE", "PE"})
 
@@ -102,7 +101,7 @@ class InstrumentStore:
     async def refresh(self, kite_client: Any) -> int:
         """Pull the full instruments dump via ``kite_client`` and index it. Returns the row count.
 
-        Phase-0 skeleton: fetch the dump, build :class:`Instrument` rows, and index by
+        Fetch the dump, build :class:`Instrument` rows, and index by
         ``tradingsymbol``. ``kite_client.instruments()`` is the ``KiteClient``/pykiteconnect surface
         (sync or async — both are awaited defensively). The build replaces the prior snapshot
         atomically (a failed refresh leaves the previous day's store intact rather than half-loaded) —
@@ -115,10 +114,8 @@ class InstrumentStore:
 
         The daily snapshot is persisted to the DuckDB ``instruments_daily`` table by the 08:15 job
         (via :meth:`snapshot_rows`) so a later restart can :meth:`hydrate` the token map pre-login
-        (§4.3). TODO(Phase 1): join the Zerodha MIS-leverage + NSE surveillance files (A8) so
-        ``is_fno`` (C7), ``surveillance`` and per-stock leverage come from the real NFO/margins join
-        rather than the per-row heuristic below (that join is surveillance's own job — snapshot_rows
-        leaves those columns at their spec defaults).
+        (§4.3). TODO: no job writes ``instruments_daily.mis_leverage``/``mis_eligible``/
+        ``surveillance`` (see :meth:`snapshot_rows`); A8 is enforced by the universe build's exclusions.
         """
         raw = kite_client.instruments()
         if hasattr(raw, "__await__"):
@@ -220,9 +217,10 @@ class InstrumentStore:
 
         One dict per tradable :class:`Instrument` PLUS one per index token (the non-tradable
         ``INDICES`` seam), each carrying exactly the :attr:`_SNAPSHOT_COLUMNS` keys so the store's
-        pinned-column upsert accepts them. The A8 surveillance/MIS-leverage join is surveillance's own
-        job, so ``mis_leverage``/``mis_eligible``/``surveillance``/``extra`` are left at the table's
-        ``NULL`` default here — this writer persists only what the dump itself carries. ``name`` IS
+        pinned-column upsert accepts them. ``mis_leverage``/``mis_eligible``/``surveillance``/``extra``
+        are left at the table's ``NULL`` default — this writer persists only what the dump itself
+        carries, and no other job fills them: the MIS-leverage and surveillance lists feed only the
+        ``universe_daily`` exclusions (``engine.universe.builder``). ``name`` IS
         dump-carried and persists verbatim: it is the §3.2.4 alias-seed source (2026-08-03 G1 finding —
         a NULL name column left ``entity_aliases`` empty and every headline unresolved).
 
@@ -294,8 +292,8 @@ class InstrumentStore:
         A10 invariant is deliberately NOT weakened.
 
         Unlike :meth:`refresh`, ``is_fno`` is read from the stored ``fno`` column verbatim (not
-        re-derived) so hydrate stays a faithful inverse even once F&O membership comes from the A8 NFO
-        join rather than the exchange/type heuristic.
+        re-derived) so hydrate stays a faithful inverse, since F&O membership comes from the C7 NFO
+        join over the whole dump, which a stored equity row alone cannot reproduce.
         """
         indexed: dict[str, Instrument] = {}
         index_tokens: dict[str, int] = {}

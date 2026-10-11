@@ -107,6 +107,15 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.analyst_confidence_min == 0.55
 
 
+def test_weekly_drawdown_window_mirrors_the_signed_table(registered_store):
+    """``ExposureTracker.weekly_drawdown_peak`` uses the code constant, not the table's
+    ``rolling_sessions`` (nothing reads that key): a re-signed value must fail here, not be ignored."""
+    from engine.risk.exposure import WEEKLY_DRAWDOWN_SESSIONS
+
+    table = LimitsEngine(registered_store).load()
+    assert table.limits.weekly_drawdown.rolling_sessions == WEEKLY_DRAWDOWN_SESSIONS
+
+
 def test_load_caches(registered_store):
     engine = LimitsEngine(registered_store)
     first = engine.load()

@@ -51,11 +51,6 @@ _HELD = (f"SELECT position_id, symbol FROM positions "
 _WORKING = f"SELECT 1 FROM orders WHERE {scope_sql('paper')} AND state NOT IN {TERMINAL_ORDER_STATES_SQL} LIMIT 1"
 
 
-async def no_exit_routine(basis: str) -> int:
-    """``flatten`` until the ExitManager is composed; nothing can hold a paper position before then."""
-    raise RuntimeError(f"no paper exit routine is wired (flatten {basis})")
-
-
 def active_halts(conn: sqlite3.Connection) -> dict[str, RiskState]:
     """Uncleared paper halts; a rung that is not a ``RiskState`` value fails closed to KILLED."""
     halts: dict[str, RiskState] = {}

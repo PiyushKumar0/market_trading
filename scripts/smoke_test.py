@@ -18,14 +18,14 @@ What it covers (plan IDs in parentheses):
   - pykiteconnect: KiteConnect (REST) + KiteTicker importable; version startswith 5.2 (A4).
   - KiteTicker reactor: construct KiteTicker + start/stop a bare Twisted reactor in a subprocess (A4 —
     proves the reactor-in-a-child pattern works offline; the live connect is the ticker's Phase-1 job).
-  - bundled Claude Code CLI: `claude --version` from the venv/PATH exits 0 (D1 — the exact evidence
-    that token-minting + SDK subprocess calls work under the service account).
+  - engine Claude Code CLI (agents.yaml llm.cli_path, else the SDK's _bundled one): `--version`
+    exits 0 (D1 — the evidence that SDK subprocess calls work under the service account).
   - vectorbt+skfolio COEXISTENCE: both imported into ONE process (the real backtest+optimize
     pattern) followed by a cvxpy solve — guards the native OpenMP load-order conflict that
     segfaults the interpreter on Windows (0xC0000005) unless scikit-learn is imported first
     (enforced engine-side by engine._preload). Isolated in its own subprocess.
-  - claude-agent-sdk: importable; the model / max-output-token / turn / setting-source knobs
-    used for cost control are present on the options surface if introspectable (D9). A REAL
+  - claude-agent-sdk: importable; the model / turn / effort / allowed-tools / setting-source /
+    cli_path / env knobs the harness uses are present on the options surface if introspectable (D9). A REAL
     one-Haiku-call test is a SEPARATE owner step needing the OAuth token + network — it is
     GUARDED behind --live-llm (default OFF) so this script never spends credit by default.
   - river, duckdb, vectorbt, skfolio, pydantic, yaml, keyring, msgpack, structlog, ntplib,
@@ -234,26 +234,42 @@ def check_kiteticker_reactor() -> str:
     )
 
 
-def check_bundled_cli() -> str:
-    """D1: the Claude Code CLI bundled with ``claude-agent-sdk`` is invocable under this account.
+def _resolve_engine_cli() -> Path:
+    """The CLI the engine spawns: agents.yaml ``llm.cli_path`` (the pin; a relative value is taken from
+    the repo root, as ``harness.resolve_cli_path`` does), else the SDK's ``_bundled`` one. Plain yaml and
+    ``find_spec`` only: importing ``engine`` (sklearn preload) or the SDK here would break the
+    one-heavy-import-per-subprocess rule above."""
+    import importlib.util
 
-    Locate the CLI the way ``setup_token.ps1`` does (venv Scripts dir, then PATH) and run ``--version``,
-    asserting a clean exit — the exact D1 evidence that ``claude setup-token`` and every SDK subprocess
-    call will work under the service account. Records the resolved path so the Phase-0 invocation path
-    is documented. Offline (no network/credit), so it always runs.
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    cfg_dir = Path(os.environ["MT_CONFIG_DIR"]) if os.environ.get("MT_CONFIG_DIR") else root / "config"
+    cfg = yaml.safe_load((cfg_dir / "agents.yaml").read_text(encoding="utf-8")) or {}
+    raw = (cfg.get("llm") or {}).get("cli_path")
+    if raw:
+        path = Path(str(raw))
+        return path if path.is_absolute() else root / path
+    spec = importlib.util.find_spec("claude_agent_sdk")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("claude-agent-sdk is not installed and agents.yaml sets no llm.cli_path (D1)")
+    return Path(spec.origin).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
+
+
+def check_engine_cli() -> str:
+    """D1: the Claude Code CLI the engine spawns is invocable under this account.
+
+    Resolve it the way the harness does (agents.yaml ``llm.cli_path``; the SDK's ``_bundled`` CLI only
+    when that key is unset — the SDK's own PATH fallback is not checked), FAIL if the resolved file is
+    missing, and run ``--version`` asserting a
+    clean exit — the D1 evidence that every SDK subprocess call will work under the service account.
+    Records the resolved path. Offline (no network/credit), so it always runs.
     """
-    import shutil
-
-    venv_bin = Path(sys.executable).parent            # .venv/Scripts (win) or .venv/bin (posix)
-    candidates = [venv_bin / "claude.exe", venv_bin / "claude"]
-    on_path = shutil.which("claude")
-    if on_path:
-        candidates.append(Path(on_path))
-    cli = next((c for c in candidates if c.exists()), None)
-    if cli is None:
+    cli = _resolve_engine_cli()
+    if not cli.is_file():
         raise RuntimeError(
-            "bundled Claude Code CLI not found (looked in the venv Scripts dir + PATH). It ships with "
-            "claude-agent-sdk — ensure the SDK is installed in this venv (D1)."
+            f"engine Claude Code CLI missing at {cli} (agents.yaml llm.cli_path, else the SDK's "
+            "_bundled CLI) — the harness refuses to call without it (D1)."
         )
     proc = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
@@ -267,9 +283,11 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
 
     A real Haiku call is a SEPARATE owner step (§8.1) requiring the OAuth token + network and
     spending credit — so it is OFF by default and only attempted under --live-llm. By default we
-    assert importability and report which of the model / max-output-token / max-turn / setting-source
-    knobs are present on the options surface, so Phase 0 can confirm the agents.yaml knobs (D9) map
-    to real SDK parameters before any agent is wired up.
+    assert importability and report which of the model / max-turn / effort / allowed-tools /
+    setting-source / cli_path / env knobs are present on the options surface, so Phase 0 can confirm
+    the agents.yaml knobs (D9) map to real SDK parameters before any agent is wired up. The SDK has no
+    output-token cap option (agents.yaml ``max_output_tokens`` is not sent). Missing setting_sources,
+    cli_path, env or an allowed-tools knob FAILS, matching the harness refusals.
     """
 
     def _import_and_introspect() -> str:
@@ -294,14 +312,18 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
             # check on that alone — record what we saw so the owner can verify the knobs manually.
             return f"v{version} (query present; options class NOT found — verify D9 knobs manually)"
 
-        # Cost-control knobs from D9/§5.1: explicit model, output-token cap, turn cap, and the
-        # setting_sources control that prevents loading stray CLAUDE.md/settings (D10).
+        # Knobs the harness probes (D9/§5.1): explicit model, turn cap, effort, the tool allowlist,
+        # setting_sources (prevents loading stray CLAUDE.md/settings, D10) and cli_path/env (pinned CLI).
         knob_fields = {
             "model": ("model",),
-            "max_output_tokens": ("max_output_tokens", "max_tokens"),
             "max_turns": ("max_turns",),
             "setting_sources": ("setting_sources",),
+            "cli_path": ("cli_path",),
+            "env": ("env",),
+            "effort": ("effort",),
+            "allowed_tools": ("allowed_tools", "tools"),
         }
+        required = ("setting_sources", "cli_path", "env", "allowed_tools")
         annotations = getattr(options_cls, "__annotations__", {}) or {}
         # dataclass fields land in __annotations__; also probe a default instance for attributes.
         try:
@@ -317,6 +339,8 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
             )
             (found if present else missing).append(label)
 
+        absent = [k for k in required if k in missing]
+        assert not absent, f"{options_cls.__name__} exposes no {', '.join(absent)} knob — the harness refuses to call"
         detail = f"v{version} ({options_cls.__name__}); knobs found: {', '.join(found) or 'none'}"
         if missing:
             detail += f"; NOT introspectable: {', '.join(missing)} (verify D9 manually)"
@@ -349,11 +373,19 @@ def _live_haiku_call() -> str:
     if options_cls is None:
         raise RuntimeError("no ClaudeAgentOptions/ClaudeCodeOptions to configure a live call")
 
-    # Minimal, byte-stable prompt; cheapest model; no tools; load nothing from disk (D5/D10).
+    # Minimal, byte-stable prompt; cheapest model; no tools; load nothing from disk (D5/D10). The
+    # engine's CLI is passed the way harness._build_options does when the options class takes it.
+    cli = _resolve_engine_cli()
+    cli_kwargs: dict = {}
+    fields = set(getattr(options_cls, "__dataclass_fields__", {}) or {}) | set(
+        getattr(options_cls, "__annotations__", {}) or {}
+    )
+    if "cli_path" in fields and "env" in fields:
+        cli_kwargs = {"cli_path": str(cli), "env": {"DISABLE_AUTOUPDATER": "1"}}
     try:
-        options = options_cls(model="claude-haiku-4-5", setting_sources=[])
+        options = options_cls(model="claude-haiku-4-5", setting_sources=[], **cli_kwargs)
     except TypeError:
-        options = options_cls(model="claude-haiku-4-5")
+        options = options_cls(model="claude-haiku-4-5", **cli_kwargs)
 
     async def _run() -> str:
         chunks: list[str] = []
@@ -363,7 +395,7 @@ def _live_haiku_call() -> str:
 
     out = asyncio.run(_run())
     assert out, "live Haiku call returned no content"
-    return f"live call OK ({out!r})"
+    return f"live call OK ({out!r}) via {cli}"
 
 
 def check_zoneinfo_ist() -> str:
@@ -524,8 +556,8 @@ def main(argv: list[str] | None = None) -> int:
     # KiteTicker Twisted-reactor-in-a-subprocess pattern (A4) — offline construct + reactor start/stop.
     results.check("KiteTicker + Twisted reactor subprocess (A4)", check_kiteticker_reactor)
 
-    # Bundled Claude Code CLI invocable under this account (D1) — `claude --version` exits 0.
-    results.check("bundled Claude Code CLI --version (D1)", check_bundled_cli)
+    # Engine Claude Code CLI (llm.cli_path pin) invocable under this account (D1) — `--version` exits 0.
+    results.check("engine Claude Code CLI --version (D1)", check_engine_cli)
 
     # Time discipline — tzdata presence on Windows is mandatory for core.Clock/IST (R6).
     results.check("zoneinfo Asia/Kolkata (tzdata present, R6)", check_zoneinfo_ist)

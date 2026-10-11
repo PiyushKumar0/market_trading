@@ -23,8 +23,8 @@ exchange and stores the resulting access token via ``Secrets`` (DPAPI).
   checksum exchange rejects — surfaced here as an HTTP 400 with a manual-paste fallback hint.
 
 **Fallback (§10.1 step 4):** if the phone is off-LAN (so the redirect can't reach the PC), the owner
-copies the ``request_token`` out of the browser address bar and sends ``/token <value>`` on Telegram,
-or pastes it into the dashboard. The 400 page returned on failure repeats that hint.
+copies the ``request_token`` out of the browser address bar and sends ``/token <value>`` on Telegram.
+The 400 page returned on failure repeats that hint.
 
 This route is deliberately the *only* member of ``engine.api`` exempt from bearer auth.
 """
@@ -67,7 +67,7 @@ def _failure_html(detail: str) -> str:
         "<h2>Login failed</h2>"
         f"<p>{safe}</p>"
         "<p>Fallback: copy the <code>request_token</code> from this page's URL and send "
-        "<code>/token &lt;value&gt;</code> on Telegram (or paste it into the dashboard).</p>"
+        "<code>/token &lt;value&gt;</code> on Telegram.</p>"
         "</body></html>"
     )
 

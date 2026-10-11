@@ -217,10 +217,11 @@ BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 10, "MIS", Decimal("2"
 SHRUNK_BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 3, "MIS", Decimal("2"))
 
 #: A real §6.1 `ins` proposal (2026-08-17): CNC swing, long-only, entry on the pre-open reference,
-#: stop a flat 6% below it, and NO target — the exit is the §7.1 20-td time cap. qty 66 is what the
-#: shipped table actually allows: 2% swing risk on ₹20,000 = ₹400 budget / a ₹6 stop distance = 66
-#: units (₹6,600 notional, inside the ₹12,000/symbol CNC cap — ₹8,000 before O17) — the plan's
-#: "≈ ₹6.7k notional" sizing.
+#: stop a flat 6% below it, and NO target — the exit is the §7.1 20-td time cap. qty 66 is the plan's
+#: gap-unaware "≈ ₹6.7k notional" sizing (2% of this file's ₹20,000 equity = ₹400 budget / a ₹6 stop
+#: distance). The gate charges overnight_gap_mult x the stop distance, so its cap at this stop is
+#: floor(400 / 12) = 33 (see test_ins_stop_still_binds_per_trade_risk): INS_ACTION is an over-ask
+#: the gate shrinks, and tests that need an approvable shape override quantity.
 INS_ACTION: dict[str, Any] = {
     "style": "swing",
     "entry_type": "LIMIT",
@@ -1372,6 +1373,9 @@ def _stub_context_builder(limit_table: LimitTable, clock: Clock, warmup_status_f
     async def _false(*_a, **_k):
         return False
 
+    async def _no_rows(*_a, **_k):
+        return []
+
     builder = GateContextBuilder.__new__(GateContextBuilder)
     builder._limits = _StubLimits(limit_table)
     builder._clock = clock
@@ -1399,8 +1403,7 @@ def _stub_context_builder(limit_table: LimitTable, clock: Clock, warmup_status_f
     builder._sector_map = lambda _d: {}
     builder._pending_entry_rec_symbols = lambda _now: frozenset()
     builder._entry_recs_today = lambda _d: 0
-    builder._universe_row = _none
-    builder._surveillance_flag = _none
+    builder._universe_rows = _no_rows
     builder._results_day = _false
     builder._max_corr = _none
     builder._warmup_status_fn = warmup_status_fn
@@ -1527,3 +1530,56 @@ def test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist() 
     assert pick(rows, "OLDEXT") is None                         # legacy marker, same verdict
     assert pick(rows, "LOWVAL") is None                         # a real exclusion alongside the cap
     assert pick(rows, "ABSENT") is None
+
+
+@pytest.mark.asyncio
+async def test_surveillance_input_is_the_universe_rows_a8_codes(
+    gate: RiskGate, limit_table: LimitTable, gate_clock: Clock
+) -> None:
+    """No job writes ``instruments_daily.surveillance``; the universe build is the A8 authority. The
+    builder reads the ``surveillance_*`` codes off the candidate's ``universe_daily`` row (one read
+    shared with eligibility): a flagged symbol is ineligible AND its surveillance check names the
+    codes; an eligible symbol carries none."""
+    from engine.ops.warmup import WarmupStatus
+
+    rows = [
+        {"symbol": SYMBOL, "included": True, "exclusion_reasons": [], "mis_candidate": True},
+        {"symbol": "CAPPED", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+        {"symbol": "ASMCO", "included": False,
+         "exclusion_reasons": ["not_mis_eligible", "surveillance_asm", "surveillance_esm"]},
+    ]
+
+    async def _rows(_d):
+        return rows
+
+    builder = _stub_context_builder(limit_table, gate_clock, lambda: WarmupStatus(ready=True))
+    builder._universe_rows = _rows
+    eligible = await builder.build(SYMBOL, "BUY", "swing", NOW.date())
+    capped = await builder.build("CAPPED", "BUY", "swing", NOW.date())
+    flagged = await builder.build("ASMCO", "BUY", "swing", NOW.date())
+
+    assert eligible.in_universe and eligible.surveillance_flag is None
+    assert capped.in_universe and capped.surveillance_flag is None
+    assert not flagged.in_universe
+    assert flagged.surveillance_flag == "surveillance_asm,surveillance_esm"
+
+    verdict = gate.evaluate(
+        make_action(), make_ctx(in_universe=False, surveillance_flag=flagged.surveillance_flag)
+    )
+    check = check_of(verdict, "surveillance")
+    assert not check.passed and check.value == "surveillance_asm,surveillance_esm"
+    assert not check_of(verdict, "instrument_eligible").passed
+    assert check_of(gate.evaluate(make_action(), make_ctx()), "surveillance").value == "none"
+
+
+def test_gate_surveillance_prefix_matches_the_universe_codes() -> None:
+    """The gate duplicates the A8 code prefix rather than import the universe builder (layering, as
+    ``_EXCL_CAP_ONLY``); pin both producers to it so a rename cannot silently blank the rule."""
+    from engine.universe import builder
+    from engine.universe.surveillance import SurveillanceLists
+
+    prefix = gate_module._SURVEILLANCE_PREFIX
+    assert all(code.startswith(prefix) for code in (
+        builder.EXCL_GSM, builder.EXCL_ASM, builder.EXCL_T2T, builder.EXCL_ESM))
+    lists = SurveillanceLists(as_of=date(2026, 6, 17), gsm=frozenset({"X"}), t2t=frozenset({"X"}))
+    assert lists.reasons_for("X") == [builder.EXCL_GSM, builder.EXCL_T2T]

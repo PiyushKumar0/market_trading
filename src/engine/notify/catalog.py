@@ -1,7 +1,7 @@
 """Typed owner-message catalog (§3.2.11 / R8) — the single source of every notification the
 ``TelegramBot`` sends and ``HealthMonitor``/risk/oms surfaces raise.
 
-Phase-0 skeleton: this module defines the *shapes* (a :class:`MessageKind` enum + a single
+This module defines the *shapes* (a :class:`MessageKind` enum + a single
 :class:`CatalogMessage` Pydantic model) plus tiny pure constructor helpers that stamp the right
 ``kind``/``severity`` and assemble a human title/body. It deliberately contains NO transport (no
 python-telegram-bot, no formatting beyond plain f-strings) and NO ``Clock`` access — callers pass
@@ -100,7 +100,9 @@ class MessageKind(StrEnum):
     FEED_STALE = "feed_stale"
     """The live tick feed went silent while RUNNING past the staleness budget (§7.1
     ``stale_data_guard``: tick age 5 s / heartbeat silence 10 s ⇒ FROZEN + ticker respawn, A4/R2).
-    NOT raised during WARMING/intentionally-off (those are suppressed upstream, §2.6/§3.2.12)."""
+    NOT raised during WARMING/intentionally-off (those are suppressed upstream, §2.6/§3.2.12).
+    No production caller of :func:`feed_stale` today: staleness pages via RISK_STATE_CHANGE with
+    cause ``feed_stale`` (engine.risk.causes); the kind and helper are kept for the alert catalog."""
 
     FEED_DEGRADED = "feed_degraded"
     """The live tick feed went silent DURING market hours while the child's 1 s heartbeats keep it
@@ -158,7 +160,10 @@ class MessageKind(StrEnum):
     DATA_FRESHNESS_FROZEN = "data_freshness_frozen"
     """A safety/deadline-critical daily job (instruments/tick-size A10, surveillance A8, earnings
     calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
-    FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3)."""
+    FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3). Also reused
+    by the daily feed jobs (bhavcopy, deals, filings_*, sector/isin maps, leverage, universe,
+    feed_freshness) to report a stale or failed feed: the alert itself freezes nothing — the freeze
+    comes from ``engine.ops.jobs`` when a SAFETY_CRITICAL job fails."""
 
     MODE_CHANGE = "mode_change"
     """The engine mode moved ``OFF ↔ RECOMMEND ↔ AUTO`` (§10.3 ``MODE_CHANGE``). Owner-initiated or a
@@ -424,6 +429,8 @@ def rec_fill_suspected(
 ) -> CatalogMessage:
     """Reconciler matched a broker position to open RECOMMEND rec ``rec_id`` (R5/§3.6).
 
+    No production caller yet; reserved for the real-order Reconciler.
+
     Emits a one-tap ``/taken`` confirm pre-filled with the observed ``qty``/``price``. The owner's
     single tap routes through the same ``/taken`` command (§3.2.11) ⇒ ``origin='recommended'``;
     dismissing/expiring leaves it a ``no_action`` non-fill (unbiased training signal, §6.5).
@@ -609,6 +616,8 @@ def backfill_report(
     failures: list[str],
 ) -> CatalogMessage:
     """A ``BackfillJob`` run finished (§3.2.3; historical §4.4 job 3 or §2.6 warm-up gap-fill).
+
+    No production caller yet: BackfillJob does not notify; kept reserved for that wiring.
 
     ``frm``/``to`` are already-rendered IST strings (callers pass Clock-derived values; no Clock
     access here). Warning when any symbol failed — those symbols stay behind their checkpoint and the
@@ -849,6 +858,10 @@ STRATEGY_LABELS: dict[str, str] = {
     "trend": "swing trend-follow",
     "mom": "swing momentum",
     "cat": "news catalyst",
+    "hi52": "swing 52-week-high",
+    "brk20": "swing 20-day breakout",
+    "ins": "insider buying",
+    "cat_reversal": "news reversal",
 }
 
 _STYLE_HEADERS: dict[str, str] = {
@@ -1208,7 +1221,8 @@ def paper_position_closed(
 
 
 def paper_alert(key: str, message: str) -> CatalogMessage:
-    """The paper path failed. ``key`` is ``<position_id>:<attempt>`` or ``construct:<attempt>``."""
+    """The paper path failed. ``key`` is ``<position_id>:<attempt>:<at>`` or ``construct:<iso time>`` — unique per
+    failure across boots, so dedupe never swallows a later failure."""
     return CatalogMessage(
         kind=MessageKind.PAPER_ALERT,
         title="PAPER alert",

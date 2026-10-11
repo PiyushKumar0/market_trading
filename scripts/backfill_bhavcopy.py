@@ -137,7 +137,8 @@ def _candidate_urls(d: date) -> list[str]:
 
 
 # --------------------------------------------------------------------------- checkpoints (copied from
-# scripts/backfill_filings.py:129-153 — private to that script, so duplicated here rather than imported)
+# scripts/backfill_filings.py _cp_done/_cp_set — private to that script, so duplicated here rather
+# than imported)
 def _windows(frm: date, to: date, span_days: int) -> list[tuple[date, date]]:
     """Ascending <=``span_days`` windows covering ``[frm, to]`` inclusive."""
     out: list[tuple[date, date]] = []
@@ -338,7 +339,7 @@ def _print_summary(report: dict, path: Path) -> None:
 
 def _connect_ro(sqlite_path: Path) -> sqlite3.Connection | None:
     """Read-only SQLite connection, or None if state.db is missing/unreadable (mirrors
-    scripts/backfill.py:224-231 — --status must never create or migrate state.db)."""
+    scripts/backfill.py _connect_ro — --status must never create or migrate state.db)."""
     uri = f"file:{Path(sqlite_path).as_posix()}?mode=ro"
     try:
         return sqlite3.connect(uri, uri=True)

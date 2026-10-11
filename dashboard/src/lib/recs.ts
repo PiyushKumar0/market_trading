@@ -24,7 +24,8 @@ export function actionState(row: RecommendationRow, nowMs: number): ActionState 
 }
 
 /** A pending row whose `valid_until` is still ahead: actionable NOW, whichever day delivered it
- *  (WO-V 2026-09-13: a swing entry stays valid to the next session's close). */
+ *  (normally today: entries expire at today's close since WO-V's withdrawal on 2026-09-23; kept
+ *  date-agnostic on purpose). */
 export function isLive(row: RecommendationRow, nowMs: number): boolean {
   const until = row.recommendation?.valid_until
   if (row.human_action || !until) return false

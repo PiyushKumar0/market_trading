@@ -110,7 +110,8 @@ class AdvisoryRun:
         """Only a harness failure sinks the watermark; a governor block is a correct outcome."""
         return self.outcome is not AdvisoryOutcome.FAILED
 
-#: Freeze seam — the lifecycle wires this to ``ModeManager.set_risk_state(FROZEN, reason, RISK_GATE)``.
+#: Freeze seam — ``engine.ops.main`` wires this to the §3.5.3 cause ledger
+#: (``latch.set_cause(reason, FROZEN, reason, RISK_GATE)``); never a direct risk_state write.
 FreezeFn = Callable[[str], Awaitable[None]]
 NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
 
@@ -248,8 +249,7 @@ class CatchUpRunner:
 
     The ``job_runs`` watermark machinery (``record_run``/``was_run``) is Phase-0-stable; the Phase-1
     addition is the registry-driven replay. ``registry=None`` keeps the runner a pure watermark store
-    (the Phase-0 wiring in ``engine.ops.main`` builds it without a registry until the integrator
-    registers the real jobs).
+    (test-only; ``engine.ops.main`` always passes the registry).
 
     Parameters
     ----------

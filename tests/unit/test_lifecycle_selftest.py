@@ -259,8 +259,9 @@ async def test_selftest_frozen_on_stray_anthropic_key(conn, clock, temp_config, 
 
 @pytest.mark.asyncio
 async def test_selftest_surfaces_sdk_smoke_skip(conn, clock, temp_config, monkeypatch):
-    """The one-cheap-Haiku-call self-test (D11) is Phase-1-deferred but surfaced as a visible SKIP so the
-    gate sequence is honest (§3.2.12) — not silently omitted."""
+    """An UNWIRED D11 smoke seam (no harness) surfaces as a visible SKIP so the gate sequence stays
+    honest (§3.2.12), never silently omitted; chaos case 13 asserts the non-trading-day SKIP and the
+    trading-day PASS."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
     report = await lifecycle._selftest.run(check_skew=False)

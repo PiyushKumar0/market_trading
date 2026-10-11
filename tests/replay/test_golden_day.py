@@ -596,7 +596,7 @@ def test_run_never_blocks_the_event_loop(synthetic_day: SyntheticDay, tmp_path: 
 
     This is the streaming/cooperative-yield contract as the work order states it: the day is fed in
     bounded chunks with an ``await`` between them, so anything else on the loop keeps running, and
-    the paper-AUTO leg that joins in WO-P3-5 is async end to end.
+    the paper leg (test_paper_e2e) is async end to end.
 
     The 1 s bound is the CONTRACT, not a discriminating measurement: the synthetic day replays in
     well under a second, so a fully-blocking loop would also clear it here. What the yield actually

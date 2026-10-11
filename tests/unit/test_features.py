@@ -1,6 +1,7 @@
-"""FeatureEngine (§3.2.5/§6.2 v1): deterministic daily + intraday features on synthetic bars —
-same input => byte-identical rows (§9.6), the PINNED absent-news defaults, the v1 version stamp on
-every row/snapshot, market context wiring, and the canonical snapshot serialization contract."""
+"""FeatureEngine (§3.2.5/§6.2 v2): deterministic daily + intraday features on synthetic bars —
+same input => byte-identical rows (§9.6), the PINNED absent-news defaults, the v2 version stamp
+(sentiment/catalyst block) on every row/snapshot, market context wiring, and the canonical snapshot
+serialization contract."""
 
 from __future__ import annotations
 
@@ -104,6 +105,7 @@ def seeded(store, clock):
     store.upsert_sector_map(D, [{"symbol": "AAA", "sector": "IT"}, {"symbol": "BBB", "sector": "IT"}])
     store.upsert_instruments_daily([
         {"d": D, "instrument_token": 1, "tradingsymbol": "AAA"},
+        # Production never writes this column (A8 lives in universe_daily); seeded to pin the read.
         {"d": D, "instrument_token": 2, "tradingsymbol": "BBB", "surveillance": "GSM Stage 1"},
     ])
     store.upsert_earnings_calendar([{"symbol": "AAA", "event_date": D}])

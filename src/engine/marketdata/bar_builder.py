@@ -123,13 +123,13 @@ _log = get_logger("engine.marketdata.bar_builder")
 BAR_1M_TOPIC = "bar.1m"
 
 #: NSE continuous-session open (A14, pinned): ticks strictly before this wall time are pre-open.
-#: Constructor-overridable for special sessions (muhurat) — the composition root passes the
-#: NSECalendar session open for the day.
+#: Constructor-overridable, but the composition root passes no override, so the regular-session
+#: constants apply every day; special sessions (muhurat) are not wired.
 SESSION_OPEN_IST = time(9, 15)
 
 #: NSE continuous-session close (WO-5): ticks strictly AFTER this wall time are post-close and build
-#: no bar. Same trust model as ``SESSION_OPEN_IST`` — a constructor override for special sessions
-#: (muhurat / shortened days), the regular-session constant otherwise.
+#: no bar. Same trust model as ``SESSION_OPEN_IST`` — constructor-overridable, unwired in
+#: production, so the regular-session constant applies every day.
 SESSION_CLOSE_IST = time(15, 30)
 
 #: Finalize grace after minute close, seconds (§4.4 job 1, pinned "~5 s" — a constant, not a knob).
@@ -250,13 +250,14 @@ class BarBuilder:
         The day's continuous-session open (default 09:15 IST regular session, A14).
     session_close:
         The day's continuous-session close (default 15:30 IST regular session); ticks strictly after
-        it build no bar. Same trust model as ``session_open``: the composition root may pass the
-        NSECalendar session times for a special day, otherwise the plan-pinned constants stand.
+        it build no bar. Same trust model as ``session_open``: the composition root passes no
+        override, so the plan-pinned constants stand every day (special sessions not wired).
     grace_s:
         Finalize grace after minute close (plan-pinned ~5 s; constructor param for tests only).
     persist_raw_ticks:
         Buffer every tick (incl. pre-open) into the §4.3 tick Parquet dataset via
-        ``store.buffer_tick``. Disable only where another component owns raw persistence.
+        ``store.stage_tick`` (flushed off-loop by ``aflush_ticks``). Disable only where another
+        component owns raw persistence.
     notify:
         Injected async owner-alert sink (``CatalogMessage`` consumer, e.g. ``TelegramBot.send``);
         ``None`` leaves the WO-25a lag watchdog log-only. Dispatched from :meth:`on_tick_event` (the
@@ -335,7 +336,8 @@ class BarBuilder:
         self._roll_day(symbol, ts.date())
 
         if self._persist_raw_ticks:
-            # Raw frames (incl. pre-open) persist to the tick Parquet dataset (§4.3, ~5 s batches).
+            # Raw frames (incl. pre-open) persist to the tick Parquet dataset (§4.3, flushed every
+            # flush_interval_s, 60 s default since WO-7).
             # Stage only — the flush is DuckDB+Parquet work (~seconds at watchlist scale) and must
             # never run on the event loop (§2.2); on_tick_event offloads it via aflush_ticks.
             self._store.stage_tick(tick)
