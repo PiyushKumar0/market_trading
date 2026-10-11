@@ -19,9 +19,15 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
+from engine.core.log import get_logger
 from engine.core.protected_store import ProtectedStore
 
+_log = get_logger("engine.risk.limits")
+
 LIMITS_FILE = "limits.yaml"
+
+# Signed rolling_sessions values already reported by floor_limits_from (once-latch, per process).
+_invalid_sessions_logged: set[int] = set()
 
 
 # --------------------------------------------------------------------------- per-rule_id blocks (§7.1)
@@ -292,10 +298,22 @@ class LimitsEngine:
 
 def floor_limits_from(table: LimitTable) -> "FloorLimits":
     """Bridge the §7.1 yaml percentages (−10.0 == −10%, drawdown 8.0 == 8%) to the
-    :class:`~engine.risk.exposure.FloorLimits` fraction-of-1 convention (0.10, 0.08)."""
-    from engine.risk.exposure import FloorLimits  # local: keeps the module import graph acyclic
+    :class:`~engine.risk.exposure.FloorLimits` fraction-of-1 convention (0.10, 0.08), and carry
+    ``weekly_drawdown.rolling_sessions`` as the ladder's window (FloorLimits rejects < 1, so a
+    signed value < 1 is logged as an ERROR and replaced by ``WEEKLY_DRAWDOWN_SESSIONS``)."""
+    from engine.risk.exposure import WEEKLY_DRAWDOWN_SESSIONS, FloorLimits  # local: acyclic imports
 
     lim = table.limits
+    sessions = lim.weekly_drawdown.rolling_sessions
+    if sessions < 1:
+        # Raising here would skip the whole ladder, day-loss rungs included: keep the weekly rung
+        # live at the code default and say so.
+        # Once per process per bad value: this runs every minute tick, paper tick and headroom poll.
+        if sessions not in _invalid_sessions_logged:
+            _invalid_sessions_logged.add(sessions)
+            _log.error("weekly_drawdown_rolling_sessions_invalid", rolling_sessions=sessions,
+                       using=WEEKLY_DRAWDOWN_SESSIONS)
+        sessions = WEEKLY_DRAWDOWN_SESSIONS
 
     def frac(pct: float) -> Decimal:
         # str() first: a yaml float like 8.0 must never smuggle a binary artifact into a Decimal.
@@ -306,4 +324,5 @@ def floor_limits_from(table: LimitTable) -> "FloorLimits":
         equity_floor_rung_pct=frac(lim.equity_floor_rung.equity_pct_of_base),
         cumulative_floor_pct=frac(lim.cumulative_floor.equity_pct_of_base),
         capital_base=table.capital_base_inr,
+        weekly_drawdown_sessions=sessions,
     )

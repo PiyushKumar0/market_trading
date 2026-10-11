@@ -37,9 +37,10 @@ Spec-silent resolutions (documented):
   (state != STOPPED with a live pid): the active period is covered; §2.2 likewise does not re-emit
   ENGINE_STARTED when a running process rolls into a later active period.
 - Trading-day check: NSECalendar is not importable here (import allowlist above), so the calendar
-  YAML (weekday + full-day holidays) is read directly via ``core.config.load_yaml``. Missing year
-  file ⇒ treated as non-trading (silent) — "no calendar, no trading"-conservative for an alert-only
-  path. Muhurat/shortened special sessions never host a scheduled morning start.
+  YAML (weekday minus full-day holidays and ``special_sessions``) is read directly via
+  ``core.config.load_yaml``. Missing year file ⇒ treated as non-trading (silent) — "no calendar, no
+  trading"-conservative for an alert-only path. Special sessions (muhurat, weekday or weekend) are
+  closed days, matching the engine's calendar (``include_special=False``, 2026-10-11).
 
 The decision core (:func:`decide` / :func:`run_tick`) is PURE — state rows, pid prober, killer,
 sender and trading-day predicate are injected — so ``tests/unit/test_watchdog.py`` exercises crash
@@ -369,27 +370,32 @@ def save_debounce(path: Path, st: DebounceState) -> None:
 
 
 def make_trading_day_fn(calendar_dir: Path) -> TradingDayFn:
-    """Minimal trading-day predicate from the calendar YAML (weekday + full-day holidays) — the
-    watchdog's import allowlist excludes NSECalendar (see module docstring). Missing/unreadable
-    year file ⇒ non-trading (silent, conservative for an alert-only path)."""
+    """Minimal trading-day predicate from the calendar YAML (weekday minus full-day holidays and
+    special sessions) — the watchdog's import allowlist excludes NSECalendar (see module docstring).
+    It must agree with the engine's ``NSECalendar(include_special=False)``, else a weekday muhurat the
+    engine treats as closed pages SCHEDULED_START_MISSED. Missing/unreadable year file ⇒ non-trading
+    (silent, conservative for an alert-only path)."""
     cache: dict[int, set[date] | None] = {}
 
-    def _holidays(year: int) -> set[date] | None:
+    def _closed(year: int) -> set[date] | None:
         if year not in cache:
             try:
                 raw = load_yaml(calendar_dir / f"{year}.yaml")
                 cache[year] = {
-                    date.fromisoformat(h["date"]) for h in raw.get("holidays", []) if h.get("date")
+                    date.fromisoformat(h["date"])
+                    for key in ("holidays", "special_sessions")
+                    for h in raw.get(key) or []
+                    if h.get("date")
                 }
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 cache[year] = None
         return cache[year]
 
     def _is_trading_day(d: date) -> bool:
-        hols = _holidays(d.year)
-        if hols is None:
+        closed = _closed(d.year)
+        if closed is None:
             return False  # no calendar, no expectation — never alert blind
-        return d.weekday() < 5 and d not in hols
+        return d.weekday() < 5 and d not in closed
 
     return _is_trading_day
 

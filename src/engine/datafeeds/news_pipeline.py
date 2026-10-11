@@ -33,10 +33,13 @@ catalyst watchlist, so there is zero implementation latitude and NO LLM anywhere
 
 Spec ambiguities resolved here (documented for the integrator):
 
-- The clusterer's ``cat.max_event_age_days`` eligibility window is measured in CALENDAR days
-  relative to the headline being processed (``last_seen ≥ published_at − window``) — the
-  trading-SESSION age count applies to the §2.7 step-5 digest, not to clustering, and a
-  calendar-window clusterer stays deterministic without an ``NSECalendar`` dependency.
+- The clusterer's eligibility window is the ONE envelope row ``cat.max_event_age_days`` (read via
+  :func:`load_cat_params`, so ``envelope_state`` overrides apply — the same value the digest
+  uses), but the clusterer counts it in CALENDAR days relative to the headline being processed
+  (``last_seen ≥ published_at − window``) while the §2.7 step-5 digest counts the same number in
+  TRADING SESSIONS. A calendar-window clusterer stays deterministic without an ``NSECalendar``
+  dependency, and switching it to sessions would change cluster membership across weekends —
+  an upstream selection change for the frozen ``cat`` v2 shadow (owner decision, post-verdict).
 - ``cluster_id`` is derived from the joining headline's platform-assigned ULID
   (``"c-" + headline_id``) so the algorithm itself is a pure function of its input (§9.1
   golden-file byte-identity) — no ULID minted here.
@@ -347,8 +350,10 @@ class HeadlineClusterer:
     sim_threshold:
         ``news.cluster_sim_threshold`` (pinned default 0.75; owner-tunable in settings.yaml).
     max_event_age_days:
-        ``cat.max_event_age_days`` (envelope default 2) — only clusters with ``last_seen`` inside
-        this window are assignment candidates.
+        The envelope row ``cat.max_event_age_days`` (default 2; the boot passes
+        ``load_cat_params(envelope_state)``, so promotions apply) counted in CALENDAR days back from
+        each headline's ``published_at`` — only clusters with ``last_seen`` inside this window are
+        assignment candidates. The digest counts the same number in trading sessions (module note).
     """
 
     def __init__(
@@ -1562,8 +1567,8 @@ class CatalystDigestJob:
                     history = await self._history(symbol, d)
                 levels = self._levels(history)
                 if not levels:
-                    # Never blocks the grade: the scanner's live confirmation still needs its own
-                    # levels, and a thin-history symbol is caught by warmup_ready anyway (§7.1).
+                    # Never blocks the grade: these v1 levels are audit-only (no reader, see
+                    # _levels), and a thin-history symbol is caught by warmup_ready anyway (§7.1).
                     _log.warning(
                         "catalyst_levels_unavailable", symbol=symbol, d=str(d), bars=len(history)
                     )
@@ -1624,10 +1629,12 @@ class CatalystDigestJob:
 
         These come from the retired v1 cat confirmation design (``confirm_trigger = prior_close ×
         (1 + cat.confirm_move_pct/100)``, an ATR stop, an ``rr_target`` target; ``invalidation =
-        prior_close``; bands collapsed to a point). Cat v2 never reads them (it enters at the
-        reference close with a ``stop_pct`` disaster stop and no target) and no LLM prompt renders
-        them any more. They are still computed and persisted because the dashboard's news
-        watchlist table reads the columns.
+        prior_close``; bands collapsed to a point). They are persisted for the stored
+        ``catalyst_watchlist`` schema and the audit trail ONLY: since 2026-10-11 nothing reads them
+        — not the engine (cat v2 enters at the reference close with a ``stop_pct`` disaster stop and
+        no target), not an LLM prompt, not the dashboard (its level columns were dropped that day;
+        the API still passes the row through). Their envelope rows ``cat.confirm_move_pct``,
+        ``cat.stop_atr_mult`` and ``cat.rr_target`` still feed this computation (via ``self._params``).
         """
         if len(bars) < _MIN_LEVEL_BARS:
             return {}

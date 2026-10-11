@@ -45,6 +45,7 @@ from engine.notify.telegram import (
     CRITICAL_KINDS,
     TelegramBot,
     _build_request,
+    _is_critical,
     _wire_text,
 )
 
@@ -385,6 +386,28 @@ async def test_critical_rows_never_expire(conn, moving, kind, severity):
 
     assert _one(conn)["status"] == "pending"           # still queued, two days on
     assert sender.attempts == 1                        # and still being retried
+
+
+@pytest.mark.asyncio
+async def test_surveillance_migration_dedupes_across_bot_instances(conn, moving):
+    """A8: ``SurveillanceIngest`` re-raises the held-position alert on every refresh; the journal's
+    unique ``dedupe_key`` index is what makes it once per (position, list), across a restart. The
+    ``critical`` severity alone keeps it from ever expiring."""
+    def msg(status: str) -> CatalogMessage:
+        return catalog.surveillance_migration(
+            symbol="HELDX", position_id="P1", qty=10, list_key="asm", as_of="2026-06-17",
+            previous_as_of="2026-06-16", status=status, unconfirmed=False)
+
+    first, sender = _bot(conn, moving.clock)
+    await first.send(msg("new"))
+    moving.advance(days=3)
+    restarted, resender = _bot(conn, moving.clock)                  # same journal, new process
+    await restarted.send(msg("listed"))                              # same key, different wording
+
+    row = _one(conn)
+    assert (row["kind"], row["dedupe_key"]) == ("surveillance_migration", "surveillance_migration:P1:asm")
+    assert row["status"] == "delivered" and len(sender.sent) == 1 and resender.sent == []
+    assert row["severity"] == "critical" and _is_critical(row["severity"], row["kind"])
 
 
 def test_critical_kinds_covers_recommendation_and_the_login_freeze_kinds():

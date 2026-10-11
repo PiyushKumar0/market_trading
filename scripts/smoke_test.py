@@ -25,9 +25,10 @@ What it covers (plan IDs in parentheses):
     segfaults the interpreter on Windows (0xC0000005) unless scikit-learn is imported first
     (enforced engine-side by engine._preload). Isolated in its own subprocess.
   - claude-agent-sdk: importable; the model / turn / effort / allowed-tools / setting-source /
-    cli_path / env knobs the harness uses are present on the options surface if introspectable (D9). A REAL
-    one-Haiku-call test is a SEPARATE owner step needing the OAuth token + network — it is
-    GUARDED behind --live-llm (default OFF) so this script never spends credit by default.
+    cli_path / env / strict-MCP knobs the harness uses are present on the options surface if
+    introspectable (D9). A REAL one-Haiku-call test is a SEPARATE owner step needing the pinned
+    CLI's stored claude.ai login + network — it is GUARDED behind --live-llm (default OFF) so this
+    script never spends credit by default.
   - river, duckdb, vectorbt, skfolio, pydantic, yaml, keyring, msgpack, structlog, ntplib,
     fastapi, uvicorn, telegram (python-telegram-bot): importable, version printed.
   - zoneinfo.ZoneInfo("Asia/Kolkata"): resolves — asserts the tzdata wheel is present, which
@@ -234,6 +235,15 @@ def check_kiteticker_reactor() -> str:
     )
 
 
+# mirrors engine.intelligence.harness.ISOLATION_ENV (a literal: importing engine here would break the
+# one-heavy-import-per-subprocess rule; tests/unit/test_agent_harness.py pins the two equal).
+_ISOLATION_ENV = {
+    "DISABLE_AUTOUPDATER": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+}
+
+
 def _resolve_engine_cli() -> Path:
     """The CLI the engine spawns: agents.yaml ``llm.cli_path`` (the pin; a relative value is taken from
     the repo root, as ``harness.resolve_cli_path`` does), else the SDK's ``_bundled`` one. Plain yaml and
@@ -287,7 +297,7 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
     setting-source / cli_path / env knobs are present on the options surface, so Phase 0 can confirm
     the agents.yaml knobs (D9) map to real SDK parameters before any agent is wired up. The SDK has no
     output-token cap option (agents.yaml ``max_output_tokens`` is not sent). Missing setting_sources,
-    cli_path, env or an allowed-tools knob FAILS, matching the harness refusals.
+    cli_path, env, a strict-MCP knob or an allowed-tools knob FAILS, matching the harness refusals.
     """
 
     def _import_and_introspect() -> str:
@@ -313,17 +323,19 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
             return f"v{version} (query present; options class NOT found — verify D9 knobs manually)"
 
         # Knobs the harness probes (D9/§5.1): explicit model, turn cap, effort, the tool allowlist,
-        # setting_sources (prevents loading stray CLAUDE.md/settings, D10) and cli_path/env (pinned CLI).
+        # setting_sources (prevents loading stray CLAUDE.md/settings, D10), cli_path/env (pinned CLI,
+        # isolation env) and strict MCP (drops the account's claude.ai connectors, D10).
         knob_fields = {
             "model": ("model",),
             "max_turns": ("max_turns",),
             "setting_sources": ("setting_sources",),
             "cli_path": ("cli_path",),
             "env": ("env",),
+            "strict_mcp_config": ("strict_mcp_config", "extra_args"),
             "effort": ("effort",),
             "allowed_tools": ("allowed_tools", "tools"),
         }
-        required = ("setting_sources", "cli_path", "env", "allowed_tools")
+        required = ("setting_sources", "cli_path", "env", "strict_mcp_config", "allowed_tools")
         annotations = getattr(options_cls, "__annotations__", {}) or {}
         # dataclass fields land in __annotations__; also probe a default instance for attributes.
         try:
@@ -374,14 +386,18 @@ def _live_haiku_call() -> str:
         raise RuntimeError("no ClaudeAgentOptions/ClaudeCodeOptions to configure a live call")
 
     # Minimal, byte-stable prompt; cheapest model; no tools; load nothing from disk (D5/D10). The
-    # engine's CLI is passed the way harness._build_options does when the options class takes it.
+    # engine's CLI and D10 isolation are passed the way harness._build_options does.
     cli = _resolve_engine_cli()
     cli_kwargs: dict = {}
     fields = set(getattr(options_cls, "__dataclass_fields__", {}) or {}) | set(
         getattr(options_cls, "__annotations__", {}) or {}
     )
-    if "cli_path" in fields and "env" in fields:
-        cli_kwargs = {"cli_path": str(cli), "env": {"DISABLE_AUTOUPDATER": "1"}}
+    if "env" in fields:
+        cli_kwargs["env"] = dict(_ISOLATION_ENV)
+        if "cli_path" in fields:
+            cli_kwargs["cli_path"] = str(cli)
+    if "strict_mcp_config" in fields:
+        cli_kwargs["strict_mcp_config"] = True
     try:
         options = options_cls(model="claude-haiku-5-5", setting_sources=[], **cli_kwargs)
     except TypeError:

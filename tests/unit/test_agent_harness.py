@@ -27,6 +27,7 @@ from engine.core.config import config_dir, load_yaml
 from engine.core.enums import DegradeTier
 from engine.intelligence.governor import BudgetGovernor, TokenUsage
 from engine.intelligence.harness import (
+    ISOLATION_ENV,
     MODEL_API_IDS,
     AgentDef,
     AgentHarness,
@@ -712,7 +713,12 @@ async def test_pinned_cli_path_is_sent_with_updater_off(defs, gov, clock, conn, 
     assert result.ok
     opts = fake.calls[0].options
     assert opts.cli_path == str(cli)
-    assert opts.env == {"DISABLE_AUTOUPDATER": "1"}
+    assert opts.env == ISOLATION_ENV
+    # Literal names, so a rename of either knob in ISOLATION_ENV fails here (D10, CLI 2.1.288).
+    assert opts.env["DISABLE_AUTOUPDATER"] == "1"
+    assert opts.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert opts.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in opts.env   # auth stays the CLI's stored login
 
 
 async def test_missing_pinned_cli_fails_closed(defs, gov, clock, conn, tmp_path) -> None:
@@ -735,6 +741,127 @@ def test_resolve_cli_path(tmp_path) -> None:
     )
     absolute = str(tmp_path / "abs" / "claude.exe")
     assert resolve_cli_path({"llm": {"cli_path": absolute}}, tmp_path) == absolute
+
+
+# --------------------------------------------------------------------------- D10 isolation knobs
+@dataclass
+class StrictOptions(FakeOptions):
+    env: dict[str, str] | None = None
+    strict_mcp_config: bool = False
+
+
+@dataclass
+class ExtraArgsOptions(FakeOptions):
+    env: dict[str, str] | None = None
+    extra_args: dict[str, str | None] = field(default_factory=dict)
+
+
+async def test_isolation_env_sent_without_pinned_cli(defs, gov, clock, conn) -> None:
+    # The SDK-bundled CLI reads the same cwd-keyed auto-memory and the same account connectors.
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=CliOptions)
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert result.ok
+    opts = fake.calls[0].options
+    assert opts.cli_path is None
+    assert opts.env == ISOLATION_ENV
+    assert opts.env is not ISOLATION_ENV                # a copy: a mutating SDK cannot poison the next call
+
+
+async def test_strict_mcp_config_sent_single_shot_and_agentic(defs, gov, clock, conn) -> None:
+    payload = json.dumps({"summary": "flat day", "param_suggestions": []})
+    fake = FakeQuery(
+        [FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)],
+        [FakeAssistantMessage(payload), FakeResultMessage({"input_tokens": 10, "output_tokens": 5})],
+    )
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=StrictOptions)
+
+    single = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+    agentic = await harness.run_agentic(defs["nightly_reviewer"], "review", validate=json.loads)
+
+    assert single.ok and agentic.ok
+    one, many = fake.calls[0].options, fake.calls[1].options
+    assert one.strict_mcp_config is True and one.env == ISOLATION_ENV
+    assert many.strict_mcp_config is True and many.env == ISOLATION_ENV
+    assert many.allowed_tools == ["mcp__state__query"]   # strict MCP leaves the §5.5 allowlist alone
+
+
+async def test_strict_mcp_falls_back_to_extra_args(defs, gov, clock, conn) -> None:
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=ExtraArgsOptions)
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert result.ok
+    assert fake.calls[0].options.extra_args == {"strict-mcp-config": None}
+
+
+async def test_real_sdk_surface_translates_isolation_flags(defs, gov, clock, conn, tmp_path) -> None:
+    """Producer→consumer seam on the installed SDK: the harness's options become the CLI flags the
+    D10 fix depends on. Offline — the command is built, no subprocess is spawned."""
+    pytest.importorskip("claude_agent_sdk")
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"")
+    harness = AgentHarness(defs, gov, clock, conn, cli_path=str(cli))
+
+    options, prefix = harness._build_options(
+        defs["intraday_analyst"], system_prompt="SYSTEM", json_schema=None, max_turns=1
+    )
+    cmd = SubprocessCLITransport("p", options)._build_command()
+
+    assert prefix == ""
+    assert "--strict-mcp-config" in cmd
+    assert "--setting-sources=" in cmd
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert options.env == ISOLATION_ENV
+
+
+@pytest.mark.parametrize("missing", ["env", "strict"])
+async def test_real_options_class_without_isolation_knob_fails_closed(
+    defs, gov, clock, conn, monkeypatch, missing
+) -> None:
+    import sys
+    import types
+
+    @dataclass
+    class NoEnv(FakeOptions):
+        strict_mcp_config: bool = False
+
+    @dataclass
+    class NoStrict(FakeOptions):
+        env: dict[str, str] | None = None
+
+    sdk = types.ModuleType("claude_agent_sdk")
+    sdk.ClaudeAgentOptions = NoEnv if missing == "env" else NoStrict
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", sdk)
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
+    harness = make_harness(defs, gov, clock, conn, fake, options_cls=None)
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert not result.ok and result.reason == "sdk_error"
+    assert "strict-MCP" in (result.detail or "")
+    assert fake.calls == []                             # refused BEFORE any SDK call went out
+
+
+def test_smoke_test_mirrors_the_isolation_env() -> None:
+    # scripts/smoke_test.py may not import engine (one heavy import per subprocess), so it carries a
+    # literal copy; this keeps the two from drifting.
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[2] / "scripts" / "smoke_test.py").read_text(encoding="utf-8")
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_ISOLATION_ENV" for t in node.targets
+        ):
+            assert ast.literal_eval(node.value) == ISOLATION_ENV
+            return
+    pytest.fail("scripts/smoke_test.py has no _ISOLATION_ENV literal")
 
 
 # --------------------------------------------------------------------------- timeout / SDK failures
@@ -764,6 +891,17 @@ async def test_timeout_fails_without_retry(defs, gov, clock, conn, alert, alerts
         (RuntimeError("CLI subprocess died"), "sdk_error"),
         (RuntimeError("You've hit your session limit · resets 2:30pm (Asia/Kolkata)"), "overloaded"),
         (RuntimeError("error type rate_limit"), "overloaded"),
+        # The stored claude.ai login, verbatim from engine.log 2026-09-14 and 2026-09-25.
+        (RuntimeError("Claude Code returned an error result: Not logged in · Please run /login"),
+         "auth_failed"),
+        (RuntimeError("Failed to authenticate. API Error: 401 OAuth access token has been revoked."),
+         "auth_failed"),
+        (RuntimeError("Invalid API key · Please run /login"), "auth_failed"),
+        # Limit and billing keep their handling when an auth word co-occurs.
+        (RuntimeError("HTTP 429: too many authentication attempts"), "overloaded"),
+        (RuntimeError("You've hit your usage limit · please run /login to switch accounts"), "overloaded"),
+        (RuntimeError("billing error: OAuth account has no credit"), "credit_exhausted"),
+        (RuntimeError("CLI exited with code 4010"), "sdk_error"),
     ],
 )
 async def test_sdk_exceptions_map_to_failure_reasons(defs, gov, clock, conn, exc, reason) -> None:
@@ -788,6 +926,29 @@ async def test_credit_exhausted_trips_dg4(defs, gov, clock, conn) -> None:
     # The ledger only sees calls that SUCCEEDED, so the billing error is the only DG4 signal (§5.6).
     assert gov.degrade_tier() == DegradeTier.DG4
     assert gov.can_invoke("intraday_analyst").allowed is False
+
+
+async def test_auth_failed_is_recorded_and_alert_names_the_relogin(
+    defs, gov, clock, conn, alert, alerts, tmp_path
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"")
+    error = "Claude Code returned an error result: Not logged in · Please run /login"
+    fake = FakeQuery([FakeErrorResultMessage("Not logged in · Please run /login"), RuntimeError(error)])
+    harness = AgentHarness(defs, gov, clock, conn, query_fn=fake, alert=alert, options_cls=CliOptions,
+                           cli_path=str(cli))
+
+    result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
+
+    assert not result.ok and result.reason == "auth_failed"
+    assert len(fake.calls) == 1                        # never retried (D7)
+    (row,) = rows(conn)
+    assert row["fail_reason"] == "auth_failed"
+    ((_severity, message),) = alerts
+    assert "auth_failed" in message
+    assert f'& "{cli}" auth login --claudeai' in message and "service user" in message
+    # A dead login is not a billing error: no DG4 latch that would outlive the re-login.
+    assert gov.degrade_tier() != DegradeTier.DG4
 
 
 # --------------------------------------------------------------------------- governor admission

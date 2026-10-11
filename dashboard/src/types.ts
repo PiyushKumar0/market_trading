@@ -368,7 +368,7 @@ export interface TradeWindowResponse {
 }
 
 // --------------------------------------------------------------------------- GET /news/watchlist
-/** One `catalyst_watchlist` row (§2.7 step 5(ii)); levels are DETERMINISTIC §6.1 values as strings. */
+/** One `catalyst_watchlist` row (§2.7 step 5(ii)); retired v1 cat levels: persisted, not displayed. */
 export interface WatchlistRow {
   entry_id: string
   d: string

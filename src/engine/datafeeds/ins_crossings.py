@@ -354,7 +354,9 @@ async def _run_once(d: date | None = None) -> InsCrossingsResult:
     clock = Clock()
     store = MarketStore.from_settings(settings, clock).open()
     conn = connect(settings.sqlite_path())
-    calendar = NSECalendar(config_dir() / "calendar", clock, sqlite_conn=conn)
+    # Same calendar as the engine (ops.main, include_special=False), so for_session never names a
+    # special session the live sweep will not run on.
+    calendar = NSECalendar(config_dir() / "calendar", clock, sqlite_conn=conn, include_special=False)
     run_day = d or clock.today()
     try:
         return await InsCrossingsJob(

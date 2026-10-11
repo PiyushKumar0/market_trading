@@ -306,9 +306,8 @@ class CatCfg(BaseModel):
     """
 
     fanout_weight: float = 0.5            # sector/theme fan-out multiplier (§2.7 step 5)
-    max_event_age_days: int = 2           # §2.7 HeadlineClusterer assignment window ONLY (calendar
-                                          # days). The `cat` digest age horizon is the envelope.yaml
-                                          # row cat.max_event_age_days (sessions), not this field.
+    # No max_event_age_days here: the clusterer window and the digest horizon are both the envelope
+    # row cat.max_event_age_days (load_cat_params); a leftover settings key is ignored, not an error.
     # --- v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18): the `ins` mechanics mirror.
     # Frozen for the whole shadow window — moving one re-opens multiplicity and restarts the clock.
     stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the

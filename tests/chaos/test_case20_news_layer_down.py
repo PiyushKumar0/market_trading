@@ -78,7 +78,12 @@ from engine.core.eventbus import EventBus
 from engine.core.protected_store import ProtectedStore
 from engine.core.types import Bar, OwnerConfirmation
 from engine.datafeeds.news import Headline, NewsIngest
-from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
+from engine.datafeeds.news_pipeline import (
+    CatalystDigestJob,
+    EntityResolver,
+    HeadlineClusterer,
+    load_cat_params,
+)
 from engine.features.engine import ABSENT_NEWS_DEFAULTS, FeatureEngine
 from engine.features.snapshots import load_snapshot
 from engine.intelligence.context import ContextAssembler
@@ -277,7 +282,7 @@ class NewsWorld:
         self.ingest = NewsIngest(news_cfg, self.store, self.clock, self.http)
         self.clusterer = HeadlineClusterer(
             self.store, sim_threshold=SETTINGS.news.cluster_sim_threshold,
-            max_event_age_days=SETTINGS.cat.max_event_age_days,
+            max_event_age_days=int(load_cat_params()["max_event_age_days"]),
         )
         self.resolver = EntityResolver(self.store, self.clock)
         self.scoring = NewsScoringJob(

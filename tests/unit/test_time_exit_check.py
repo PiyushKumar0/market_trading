@@ -140,6 +140,36 @@ async def test_the_exit_fires_on_the_exit_session_not_before(
     assert _checklists(conn) == [f"{SYMBOL} x10 — sell before the close on {due.isoformat()}"]
 
 
+async def test_the_no_entry_rec_fallback_does_not_count_the_muhurat_session(
+    conn, ticker, pclock, pipeline
+):
+    """Live calendar (include_special=False): the 2026-11-08 muhurat session is a closed day, so it
+    is not a held session. Opened 10-12, cap 20 -> due 11-12 (10-13 is session 1)."""
+    pipeline._calendar = NSECalendar(CALENDAR_DIR, pclock, sqlite_conn=conn, include_special=False)
+    opened = _at(date(2026, 10, 12))
+    conn.execute(
+        "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, stop, "
+        "state, origin, opened_at) VALUES (?, ?, 'BUY', 'swing', 'CNC', 10, '100', '95', 'OPEN', "
+        "'recommended', ?)", (str(ULID()), SYMBOL, opened.isoformat()))
+    position = conn.execute("SELECT * FROM positions").fetchone()
+    assert pipeline._exit_due(position, "swing", 20) == date(2026, 11, 12)
+
+
+async def test_the_fallback_does_not_count_the_muhurat_session_on_the_default_calendar(
+    conn, pclock, calendar, pipeline
+):
+    """Default calendar (include_special=True, tests and research): the muhurat session is a trading
+    day, so only skipping it keeps the fallback at 11-12 (counting it gives 11-11)."""
+    assert calendar.is_trading_day(date(2026, 11, 8))            # sanity: muhurat is open here
+    opened = _at(date(2026, 10, 12))
+    conn.execute(
+        "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, stop, "
+        "state, origin, opened_at) VALUES (?, ?, 'BUY', 'swing', 'CNC', 10, '100', '95', 'OPEN', "
+        "'recommended', ?)", (str(ULID()), SYMBOL, opened.isoformat()))
+    position = conn.execute("SELECT * FROM positions").fetchone()
+    assert pipeline._exit_due(position, "swing", 20) == date(2026, 11, 12)
+
+
 async def test_a_pending_exit_session_is_recomputed_each_run_and_never_fires(
     conn, ticker, book, cost_model, pipeline, caplog
 ):

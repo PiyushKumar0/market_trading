@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
+import re
 import shutil
 import threading
 import time
@@ -91,6 +93,16 @@ _FLUSH_SKIP_LOG_EVERY_S = 60.0
 #: (seconds). It is the one caller that must not skip — the connection is about to go — but shutdown
 #: must not hang on a wedged flush either, so the wait is bounded and the give-up is logged.
 _CLOSE_FLUSH_WAIT_S = 15.0
+
+#: How long :meth:`MarketStore.close` keeps interrupting an in-flight :meth:`MarketStore.export_snapshot`
+#: (seconds). Closing the connection otherwise waits for the cursor's EXPORT to finish (measured: the
+#: parent ``close()`` blocks until it does), and a full export is ~45 s against NSSM's 30 s stop grace.
+_CLOSE_EXPORT_WAIT_S = 5.0
+
+#: One ``load.sql`` line of an ``EXPORT DATABASE``: ``COPY <table> FROM '<file>' (...)``. The table is
+#: double-quoted when it needs quoting; the file name is sanitized by DuckDB (``"Weird Name"`` →
+#: ``weird_name.parquet``), so the file a table maps to is read from here, never derived.
+_EXPORT_COPY_LINE = re.compile(r"""^COPY\s+("(?:[^"]|"")+"|\S+)\s+FROM\s+'((?:[^']|'')*)'""")
 
 #: Slow-statement telemetry threshold (seconds), §2.6 "Store slow-statement telemetry" (WO-24b
 #: follow-up). The 2026-09-08 11:47 mid-session stall's thread dump (store_stall_stacks) is taken
@@ -204,7 +216,8 @@ _SCHEMA: tuple[str, ...] = (
     )
     """,
     # reconcile_log — nightly self-vs-official drift per (day, symbol) (A13); the audit trail. The §2.6
-    # startup catch-up is driven by the job_runs DATE_KEYED watermark, not by this table.
+    # startup catch-up is driven by the job_runs DATE_KEYED watermark; within a day, ReconcileJob skips
+    # the symbols already logged here (per-(day, symbol) resume — a re-compare would overwrite drift).
     # offline_bars counts the span excluded from the drift denominator (gap-backfilled, not drift).
     """
     CREATE TABLE IF NOT EXISTS reconcile_log (
@@ -809,6 +822,29 @@ def _norm_scrip_code(raw: Any) -> str:
         return s
 
 
+def _verify_export(directory: Path, tables: Sequence[str]) -> int:
+    """Raise unless ``directory`` holds a complete ``EXPORT DATABASE`` of ``tables``: ``schema.sql``,
+    ``load.sql`` and, for every table, the data file its ``load.sql`` line names. Returns the bytes."""
+    for name in ("schema.sql", "load.sql"):
+        if not (directory / name).is_file():
+            raise RuntimeError(f"snapshot export incomplete: {name} missing")
+    if tables and "CREATE TABLE" not in (directory / "schema.sql").read_text(encoding="utf-8"):
+        raise RuntimeError("snapshot export incomplete: schema.sql creates no table")
+    files: dict[str, str] = {}
+    for line in (directory / "load.sql").read_text(encoding="utf-8").splitlines():
+        m = _EXPORT_COPY_LINE.match(line.strip())
+        if m is None:
+            continue
+        table = m.group(1)
+        if table.startswith('"'):
+            table = table[1:-1].replace('""', '"')
+        files[table] = Path(m.group(2).replace("''", "'")).name
+    missing = sorted(t for t in tables if t not in files or not (directory / files[t]).is_file())
+    if missing:
+        raise RuntimeError(f"snapshot export incomplete: no data file for {missing}")
+    return sum(p.stat().st_size for p in directory.iterdir() if p.is_file())
+
+
 class MarketStore:
     """Single-writer DuckDB/Parquet store for all §4.3 analytical data (E4).
 
@@ -868,6 +904,10 @@ class MarketStore:
         self._pool_lock = threading.Lock()
         self._store_executor: ThreadPoolExecutor | None = None
         self._flush_executor: ThreadPoolExecutor | None = None
+        # --- export_snapshot's cursor, held so close() can interrupt it; all three under the guard.
+        self._export_guard = threading.Lock()
+        self._export_cursor: duckdb.DuckDBPyConnection | None = None
+        self._export_closed = False
 
     @classmethod
     def from_settings(cls, settings: Settings, clock: Clock, **kwargs: Any) -> MarketStore:
@@ -891,6 +931,8 @@ class MarketStore:
             self.init_schema()
             self._con.execute(_TICK_STAGE_DDL)
             self._last_flush_at = self._clock.now()
+            with self._export_guard:
+                self._export_closed = False
         _log.info("market_store_opened", db=str(self._db_path), parquet=str(self._parquet_root))
         return self
 
@@ -904,7 +946,14 @@ class MarketStore:
         This is also the ONE caller that waits on an in-flight flush instead of skipping it
         (WO-26a): after this returns the connection is gone, so a skipped batch would have nowhere
         left to go. The wait is bounded by ``_CLOSE_FLUSH_WAIT_S`` — shutdown must not hang on a
-        wedged flush, which is the failure mode this work order exists to survive."""
+        wedged flush, which is the failure mode this work order exists to survive.
+
+        An in-flight :meth:`export_snapshot` is interrupted first and no new one can start: the
+        connection close below would otherwise wait out the whole export."""
+        with self._export_guard:
+            self._export_closed = True
+        if not self.interrupt_export(wait_s=_CLOSE_EXPORT_WAIT_S):
+            _log.warning("market_export_interrupt_timeout", waited_s=_CLOSE_EXPORT_WAIT_S)
         if self._con is None:
             self._shutdown_pools()
             return
@@ -1238,6 +1287,62 @@ class MarketStore:
         if not rows:
             return 0
         cols, pk = _TABLE_SPEC[table]
+        rows, conflict = self._prepare_upsert(table, rows)
+        # 2026-07-21 (third finding of the incident day): instruments_daily is ~113k rows/day and
+        # executemany binds row-at-a-time (~128 rows/s measured here) — the 08:15 persist and the
+        # degraded-snapshot heal each held the single-writer lock for ~12 MINUTES, starving every
+        # other store consumer (the 13:33 backfill silence). Large batches therefore take
+        # _bulk_write's registered-view INSERT…SELECT (~200x): its dtype=object frame keeps
+        # executemany's per-element semantics (Decimals stringified and cast per value against the
+        # REAL column type — the GMRAIRPORT lesson; None → NULL; ints stay ints), and its pk dedupe
+        # keeps last-wins for intra-batch duplicate keys, exactly like sequential upserts. The
+        # single INSERT…SELECT is one statement, so the torn-write guarantee holds (statement
+        # atomicity; a kill leaves the prior complete day).
+        if len(rows) >= self._VECTORIZED_UPSERT_MIN_ROWS:
+            self._bulk_write(
+                table, cols, [[row.get(c) for c in cols] for row in rows], pk=pk, conflict=conflict
+            )
+            return len(rows)
+        # SMALL free-form batches stay on executemany: dict rows can mix date/datetime or
+        # naive/aware values in one column, which per-row binding coerces per element but a single
+        # DataFrame column cannot (one inferred type per column). No small-batch caller needed the
+        # speed; a heterogeneous column that ever DID cross the threshold fails LOUD (ConversionException
+        # + rollback), never silently.
+        sql = self._upsert_sql(table, conflict)
+        # The whole transaction is the hold (2026-09-09 review): a batch that rolls back after 30 s
+        # starved every other caller for 30 s and must still name itself.
+        with self._timed_lock(f"upsert_rows:{table}:{len(rows)}"):
+            con = self._require_con()
+            # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
+            # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
+            # exactly the regime tokens were lost and every later boot hydrated a broken MAX(d) day).
+            # Autocommit applies per statement; one explicit transaction makes the batch all-or-nothing —
+            # a killed process leaves the PRIOR complete snapshot, never a torn one. BaseException so a
+            # KeyboardInterrupt/CancelledError mid-batch also rolls back and keeps the connection usable.
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.executemany(sql, [[row.get(c) for c in cols] for row in rows])
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT")
+        return len(rows)
+
+    @staticmethod
+    def _upsert_sql(table: str, conflict: str) -> str:
+        cols, _pk = _TABLE_SPEC[table]
+        placeholders = ", ".join("?" for _ in cols)
+        collist = ", ".join(f'"{c}"' for c in cols)
+        return f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) {conflict}"
+
+    @staticmethod
+    def _prepare_upsert(
+        table: str, rows: Sequence[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Validate ``rows`` against the pinned columns, apply the omitted-key defaults and build the
+        conflict clause — the statement-free half of :meth:`_upsert_rows`, shared with writers that
+        run the upsert inside a transaction of their own. Raises before any SQL runs."""
+        cols, pk = _TABLE_SPEC[table]
         colset = set(cols)
         defaults = _TABLE_DEFAULTS.get(table, {})
         for row in rows:
@@ -1261,47 +1366,7 @@ class MarketStore:
             # insider_trades re-upsert during catch-up; the FATAL invalidated the whole connection).
             # DO NOTHING is semantically exact for these tables and never touches the delete path.
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO NOTHING"
-        # 2026-07-21 (third finding of the incident day): instruments_daily is ~113k rows/day and
-        # executemany binds row-at-a-time (~128 rows/s measured here) — the 08:15 persist and the
-        # degraded-snapshot heal each held the single-writer lock for ~12 MINUTES, starving every
-        # other store consumer (the 13:33 backfill silence). Large batches therefore take
-        # _bulk_write's registered-view INSERT…SELECT (~200x): its dtype=object frame keeps
-        # executemany's per-element semantics (Decimals stringified and cast per value against the
-        # REAL column type — the GMRAIRPORT lesson; None → NULL; ints stay ints), and its pk dedupe
-        # keeps last-wins for intra-batch duplicate keys, exactly like sequential upserts. The
-        # single INSERT…SELECT is one statement, so the torn-write guarantee holds (statement
-        # atomicity; a kill leaves the prior complete day).
-        if len(rows) >= self._VECTORIZED_UPSERT_MIN_ROWS:
-            self._bulk_write(
-                table, cols, [[row.get(c) for c in cols] for row in rows], pk=pk, conflict=conflict
-            )
-            return len(rows)
-        # SMALL free-form batches stay on executemany: dict rows can mix date/datetime or
-        # naive/aware values in one column, which per-row binding coerces per element but a single
-        # DataFrame column cannot (one inferred type per column). No small-batch caller needed the
-        # speed; a heterogeneous column that ever DID cross the threshold fails LOUD (ConversionException
-        # + rollback), never silently.
-        placeholders = ", ".join("?" for _ in cols)
-        collist = ", ".join(f'"{c}"' for c in cols)
-        sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders}) {conflict}"
-        # The whole transaction is the hold (2026-09-09 review): a batch that rolls back after 30 s
-        # starved every other caller for 30 s and must still name itself.
-        with self._timed_lock(f"upsert_rows:{table}:{len(rows)}"):
-            con = self._require_con()
-            # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
-            # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
-            # exactly the regime tokens were lost and every later boot hydrated a broken MAX(d) day).
-            # Autocommit applies per statement; one explicit transaction makes the batch all-or-nothing —
-            # a killed process leaves the PRIOR complete snapshot, never a torn one. BaseException so a
-            # KeyboardInterrupt/CancelledError mid-batch also rolls back and keeps the connection usable.
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.executemany(sql, [[row.get(c) for c in cols] for row in rows])
-            except BaseException:
-                con.execute("ROLLBACK")
-                raise
-            con.execute("COMMIT")
-        return len(rows)
+        return list(rows), conflict
 
     # ================================================================== bars_1m (§3.2.3, A13/A14)
     def insert_bars_1m(self, bars: Sequence[Bar]) -> int:
@@ -1555,6 +1620,63 @@ class MarketStore:
             )
         return out
 
+    def export_snapshot(self, dest: str | Path) -> dict[str, int]:
+        """§10.5 DuckDB backup: ``EXPORT DATABASE`` of every table into directory ``dest`` (Parquet
+        per table plus ``schema.sql``/``load.sql``); ``IMPORT DATABASE '<dest>'`` restores it, primary
+        keys included. Returns ``{"tables": n, "bytes": total}``.
+
+        Runs on a CURSOR of the live connection and never takes ``_lock`` (precedent: ``/db/query``):
+        writers keep committing while it runs and the export sees one consistent snapshot. Written to
+        ``<dest>.tmp`` and renamed into place only after every table's file and both scripts are
+        present, so a ``market-*`` directory is always complete; the tmp is removed on any failure.
+        At most one export runs per store; :meth:`interrupt_export` and :meth:`close` end it.
+
+        Synchronous and long (~45 s on the live file): call it via :meth:`arun`."""
+        dest = Path(dest)
+        if dest.exists():
+            raise FileExistsError(f"export destination already exists: {dest}")
+        tmp = dest.with_name(dest.name + ".tmp")
+        with self._export_guard:
+            if self._export_closed:
+                raise RuntimeError("MarketStore is closing — no snapshot export")
+            if self._export_cursor is not None:
+                raise RuntimeError("a snapshot export is already in flight")
+            cur = self._require_con().cursor()
+            self._export_cursor = cur
+        try:
+            try:
+                shutil.rmtree(tmp, ignore_errors=True)
+                tables = [r[0] for r in cur.execute(
+                    "SELECT table_name FROM duckdb_tables() "
+                    "WHERE database_name = current_database() AND schema_name = 'main' AND NOT temporary"
+                ).fetchall()]
+                quoted = tmp.as_posix().replace("'", "''")
+                cur.execute(f"EXPORT DATABASE '{quoted}' (FORMAT parquet)")
+            finally:
+                with self._export_guard:
+                    self._export_cursor = None
+                    cur.close()
+            size = _verify_export(tmp, tables)
+            os.replace(tmp, dest)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        return {"tables": len(tables), "bytes": size}
+
+    def interrupt_export(self, *, wait_s: float = 0.0) -> bool:
+        """Interrupt an in-flight :meth:`export_snapshot`; True once none is running. With ``wait_s``
+        it re-interrupts until the export has let go of its cursor or the wait ends: an interrupt
+        that lands before the EXPORT statement starts is lost (DuckDB clears it at query start)."""
+        deadline = time.monotonic() + wait_s
+        while True:
+            with self._export_guard:
+                if self._export_cursor is None:
+                    return True
+                self._export_cursor.interrupt()
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
     # ================================================================== bars_1d
     def upsert_bars_1d(self, bars: Sequence[DailyBar]) -> int:
         if not bars:
@@ -1628,6 +1750,44 @@ class MarketStore:
         """Upsert per-(day, symbol) reconcile results; ``ran_at`` defaults to now if omitted."""
         stamped = [{**row, "ran_at": row.get("ran_at") or self._clock.now()} for row in rows]
         return self._upsert_rows("reconcile_log", stamped)
+
+    def commit_reconciled_symbol(self, bars: Sequence[Bar], log_row: dict[str, Any]) -> int:
+        """Upsert one symbol's canonical official ``bars`` AND its ``reconcile_log`` row in ONE
+        transaction (§3.2.3 / §2.6 per-(day, symbol) checkpoint). The row is the resume checkpoint:
+        bars made official without it would be re-compared on the retry against no self bars and
+        logged ``bars_compared=0``. Both land or neither does, whatever stops the run — an exception,
+        a cancel, a close (it waits on ``_lock`` for the commit) or a kill (no commit, no row, no
+        bars). Returns the bar count."""
+        stamped = {**log_row, "ran_at": log_row.get("ran_at") or self._clock.now()}
+        (row,), conflict = self._prepare_upsert("reconcile_log", [stamped])
+        cols, _pk = _TABLE_SPEC["reconcile_log"]
+        sql = self._upsert_sql("reconcile_log", conflict)
+        with self._timed_lock(f"reconcile_symbol:{row.get('symbol')}:{len(bars)}"):
+            con = self._require_con()
+            con.execute("BEGIN TRANSACTION")
+            try:
+                self.insert_bars_1m(bars)
+                self._execute_locked(con, sql, [row.get(c) for c in cols])
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT")
+        return len(bars)
+
+    def mark_reconcile_alerted(self, d: date, symbols: Sequence[str]) -> int:
+        """Set ``alerted`` on day ``d``'s rows for ``symbols`` — called only after the drift alert
+        naming them was handed to the notify sink. Returns the number of rows updated."""
+        names = sorted(set(symbols))
+        if not names:
+            return 0
+        with self._timed_lock(f"mark_reconcile_alerted:{len(names)}"):
+            cur = self._execute_locked(
+                self._require_con(),
+                "UPDATE reconcile_log SET alerted = TRUE WHERE d = ? AND list_contains(?, symbol)",
+                [d, names],
+            )
+            count = cur.fetchone()
+        return int(count[0]) if count else 0
 
     def has_reconcile_entry(self, d: date) -> bool:
         """Has day ``d`` been reconciled at all? No production caller (catch-up is watermark-driven)."""

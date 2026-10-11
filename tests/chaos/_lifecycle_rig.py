@@ -3,7 +3,7 @@
 Not a test module (no ``test_`` prefix, so pytest does not collect it). It composes the REAL engine
 components the way ``engine.ops.main.run`` wires them — ``SessionLifecycle`` + ``SelfTest`` + the
 ``RiskStateLatch`` cause ledger, a ``CatchUpRunner`` over the real ``build_job_registry`` inventory
-(``deferred=POST_ARM_JOB_IDS``) with ``tick_compact`` in its own ``CompactionLane``, the
+(``deferred=POST_ARM_JOB_IDS``) with the ``LANE_JOB_IDS`` in their own ``CompactionLane``, the
 dedicated-thread ``HeartbeatWriter``, the ``Scheduler`` armed by
 ``_arm_registry_jobs`` and started by ``start_scheduler_and_fire_post_arm``, the real
 ``_snapshot_backup`` shutdown hook, optionally a ``MarketStore`` + ``BarBuilder`` on the ``EventBus``
@@ -18,6 +18,8 @@ death (nothing after it runs).
 Only external boundaries are faked:
 
 * job BODIES (Kite / NSE / LLM work) — recorded per ``(job_id, run_for)`` instead of performed;
+  ``market_backup`` runs the real ``_market_backup`` (start gate, retry hold) and fakes only the
+  DuckDB export (:class:`FakeExportStore`);
 * Telegram — the notify/alert sinks and the watchdog's direct Bot-API sender record messages;
 * the DPAPI secrets store — :class:`FakeSecrets`;
 * the OS process table the watchdog probes (:class:`ProcessTable`) — every rig "process" runs inside
@@ -54,17 +56,21 @@ from engine.core.secrets import REQUIRED_AT_STARTUP
 from engine.core.types import OwnerConfirmation, TradeWindow
 from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.ops.heartbeat import HeartbeatWriter
-from engine.ops.jobs import JOB_TICK_COMPACT, CatchUpResult, CatchUpRunner
+from engine.ops.jobs import JOB_MARKET_BACKUP, CatchUpResult, CatchUpRunner
 from engine.ops.lifecycle import SessionLifecycle, StartupReport
 from engine.ops.main import (
     _SHUTDOWN_BUS_DRAIN_S,
     DEFER_POST_ARM_JOBS,
+    LANE_JOB_IDS,
     PHASE1_JOB_IDS,
     PHASE2_JOB_IDS,
     POST_ARM_JOB_IDS,
     CompactionLane,
+    MarketBackupResult,
+    MarketBackupRetry,
     _arm_registry_jobs,
     _catchup_sweep_once,
+    _market_backup,
     _snapshot_backup,
     build_job_registry,
     cancel_post_arm,
@@ -205,6 +211,27 @@ class Page:
     text: str
 
 
+class FakeExportStore:
+    """The ``MarketStore`` seams ``_market_backup`` uses (``arun`` + ``export_snapshot``). A STARTED
+    export is the job call the ledger records (``market_backup``, ``run_for=None``); ``fail`` makes it
+    raise the way an incomplete ``EXPORT DATABASE`` does."""
+
+    def __init__(self, env: RigEnv) -> None:
+        self._env = env
+        self.fail = False
+
+    async def arun(self, fn: Callable[..., Any], *args: Any) -> Any:
+        return fn(*args)
+
+    def export_snapshot(self, dest: Path) -> dict[str, int]:
+        self._env.job_calls.append(JobCall(JOB_MARKET_BACKUP, None, self._env.clock.now()))
+        if self.fail:
+            raise RuntimeError("snapshot export incomplete: no data file for ['bars_1m']")
+        dest.mkdir(parents=True)
+        (dest / "bars_1m.parquet").write_bytes(b"x")
+        return {"tables": 1, "bytes": 1}
+
+
 # --------------------------------------------------------------------------- the environment
 class RigEnv:
     """What survives across engine processes: the temp data dir (state.db, backups, the watchdog's
@@ -234,6 +261,7 @@ class RigEnv:
         self.force_kills: list[int] = []
         self.watchdog_state_path = self.data_dir / "watchdog_state.json"
         self._trading_day = load_watchdog().make_trading_day_fn(config_dir() / "calendar")
+        self.export_store = FakeExportStore(self)
 
     # ---- clock
     def at(self, when: datetime) -> None:
@@ -253,7 +281,7 @@ class RigEnv:
         return [str(s.msg.kind) for s in self.sent[since:]]
 
     # ---- job bodies (Kite / NSE / LLM boundary): recorded, not performed
-    def job_fns(self) -> dict[str, Callable[..., Awaitable[None]]]:
+    def job_fns(self) -> dict[str, Callable[..., Awaitable[object]]]:
         """A runner for every Phase-1 + Phase-2 registry id. DATE_KEYED runs receive ``run_for``;
         the others take no argument — ``*args`` serves both call shapes."""
 
@@ -263,7 +291,21 @@ class RigEnv:
 
             return run
 
-        return {job_id: recorder(job_id) for job_id in (*PHASE1_JOB_IDS, *PHASE2_JOB_IDS)}
+        fns = {job_id: recorder(job_id) for job_id in (*PHASE1_JOB_IDS, *PHASE2_JOB_IDS)}
+        fns[JOB_MARKET_BACKUP] = self._market_backup_fn()
+        return fns
+
+    def _market_backup_fn(self) -> Callable[[], Awaitable[MarketBackupResult]]:
+        """``market_backup`` as run() builds it: the REAL ``_market_backup`` (the 06:00-15:45
+        trading-day start gate, a per-process 6 h retry hold) over :class:`FakeExportStore`. Called
+        once per :class:`EngineProcess`, so the hold is process state, as in main.py."""
+        calendar = NSECalendar(config_dir() / "calendar", self.clock, strict=False)
+        retry = MarketBackupRetry()
+
+        async def run() -> MarketBackupResult:
+            return await _market_backup(self.export_store, self.settings, self.clock, calendar, retry=retry)
+
+        return run
 
     def calls(self, *, since: int = 0) -> list[tuple[str, date | None]]:
         return [(c.job_id, c.run_for) for c in self.job_calls[since:]]
@@ -377,14 +419,15 @@ class EngineProcess:
 
         self.registry = build_job_registry(s, env.job_fns(), calendar=self.calendar)
         self.catch_up = CatchUpRunner(
-            self.conn, clock, self.calendar, self.registry.select(lambda sp: sp.job_id != JOB_TICK_COMPACT),
+            self.conn, clock, self.calendar, self.registry.select(lambda sp: sp.job_id not in LANE_JOB_IDS),
             freeze=freeze_entries, notify=env.notify, clear=clear_entries_cause,
             deferred=POST_ARM_JOB_IDS if DEFER_POST_ARM_JOBS else (),
         )
         self.compaction_lane = CompactionLane(
             CatchUpRunner(self.conn, clock, self.calendar,
-                          self.registry.select(lambda sp: sp.job_id == JOB_TICK_COMPACT), notify=env.notify),
+                          self.registry.select(lambda sp: sp.job_id in LANE_JOB_IDS), notify=env.notify),
             clock, self.calendar,
+            interrupt=self.store.interrupt_export if self.store is not None else None,
         )
         self.warmup_gate = warmup_gate_factory(self) if warmup_gate_factory is not None else None
         self.self_test = SelfTest(
@@ -435,7 +478,8 @@ class EngineProcess:
         the compaction lane. Both post-arm tasks run in the background in main.py; the rig awaits them
         so a scenario's job ledger is complete when the boot returns."""
         self.env.processes.spawn(self.pid)
-        _arm_registry_jobs(self.scheduler, self.registry, self.catch_up, self.env.clock)
+        _arm_registry_jobs(self.scheduler, self.registry, self.catch_up, self.env.clock,
+                           lane=self.compaction_lane)
         self.report = await self.lifecycle.startup(check_skew=False)
         self.post_arm = start_scheduler_and_fire_post_arm(self.scheduler, self.catch_up, armed=asyncio.Event())
         self.compaction_lane.spawn("post_arm")
@@ -462,10 +506,12 @@ class EngineProcess:
 
     async def fire_scheduled(self, job_id: str) -> None:
         """Invoke the job exactly as APScheduler would at its fire-time: the armed job's own
-        callable (calendar guard + ``_scheduled_runner`` watermark wrapper)."""
+        callable (calendar guard + ``_scheduled_runner`` watermark wrapper; a lane job's fire starts
+        a lane pass, awaited here like the boot's)."""
         job = self.scheduler._sched.get_job(job_id)
         assert job is not None, f"{job_id} is not armed"
         await job.func()
+        await self._compaction_settled()
 
     async def heartbeat_synced(self) -> None:
         """Wait (bounded) until the heartbeat THREAD has written the current movable-clock time —

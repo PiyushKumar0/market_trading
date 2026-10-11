@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -718,6 +719,139 @@ def test_report_is_news_decision_table(conn, clock, calendar):
     assert news(jobs_failed=["deals:2026-06-16", "bhavcopy:2026-06-16"]) is True
     assert news(jobs_failed=["deals:2026-06-16 (gave up)"]) is True
     assert news() is False                                            # nothing happened
+
+
+def test_a_never_shown_held_failure_is_not_stored_as_alerted(conn, clock, calendar):
+    """2026-10-11 review: a fresh process's boot pass reports a caught-up compaction while the export
+    is held (its key in ``jobs_still_failed``) — that report never shows the held key, so it must not
+    be stored as alerted, or the export's next real failure would be suppressed as 'unchanged'."""
+    runner = _build_runner(conn, clock, calendar, JobRegistry())
+    mb_wed, tc_wed = "market_backup:2026-06-17", "tick_compact:2026-06-17"
+    boot = CatchUpResult(jobs_caught_up=[tc_wed], jobs_still_failed=[mb_wed])
+
+    assert runner._report_is_news(boot) is True                      # progress
+    from engine.ops.jobs import _failure_set
+    assert _failure_set(boot, runner._last_failed_alert) == []        # mb never shown => not kept
+    runner._last_failed_alert = _failure_set(boot, runner._last_failed_alert)
+    assert runner._report_is_news(CatchUpResult(jobs_failed=[mb_wed])) is True   # re-fail IS sent
+    # ...whereas a held key the owner WAS told about stays in the compared set (no flapping):
+    runner._last_failed_alert = [mb_wed]
+    assert runner._report_is_news(CatchUpResult(jobs_still_failed=[mb_wed])) is False
+    assert _failure_set(CatchUpResult(jobs_still_failed=[mb_wed]), [mb_wed]) == [mb_wed]
+
+
+def test_a_gave_up_entry_is_not_a_pending_recovery(conn, clock, calendar):
+    """A ``(gave up)`` entry is terminal: the job's next on-time quiet run is not a 'recovery' report."""
+    runner = _build_runner(conn, clock, calendar, JobRegistry())
+    runner._last_failed_alert = ["tick_compact:2026-06-08 (gave up)"]
+    on_time = CatchUpResult(jobs_caught_up=["tick_compact:2026-06-17"])
+    assert runner._report_is_news(on_time, quiet=frozenset({"tick_compact:2026-06-17"})) is False
+
+
+def test_report_is_news_with_quiet_entries(conn, clock, calendar):
+    """``quiet`` (an on-time scheduled lane fire's own ``job:day``): that entry alone is not news; any
+    other caught-up entry, a recovery, a freeze and a changed failure set still are."""
+    runner = _build_runner(conn, clock, calendar, JobRegistry())
+    tc_today, tc_tue = "tick_compact:2026-06-17", "tick_compact:2026-06-16"
+    mb_today, mb_tue = "market_backup:2026-06-17", "market_backup:2026-06-16"
+
+    def news(quiet=(tc_today,), **kw) -> bool:
+        return runner._report_is_news(CatchUpResult(**kw), quiet=frozenset(quiet))
+
+    assert news(jobs_caught_up=[tc_today]) is False
+    assert news(jobs_caught_up=[tc_tue]) is True                      # a missed day the same pass ran
+    assert news(jobs_caught_up=[tc_tue, tc_today]) is True
+    assert news(quiet=(), jobs_caught_up=[tc_today]) is True          # a sweep: progress is news
+    assert news(frozen_reasons=["data_freshness:instruments"]) is True
+    assert news(jobs_caught_up=[tc_today], jobs_failed=[mb_today]) is True
+    runner._last_failed_alert = [mb_today]
+    assert news(jobs_caught_up=[tc_today], jobs_failed=[mb_today]) is False
+    assert news() is False
+    # Recovery: the owner was told this job failed; its next success is news even when on time.
+    runner._last_failed_alert = [mb_tue]
+    assert news(quiet=(mb_today,), jobs_caught_up=[mb_today]) is True
+    # ...but not while the same job still has a failing day (no recovery happened).
+    runner._last_failed_alert = [tc_tue]
+    assert news(jobs_caught_up=[tc_today], jobs_failed=[tc_tue]) is False
+
+
+def test_report_is_news_counts_a_held_failure_as_unchanged(conn, clock, calendar):
+    """``jobs_still_failed`` (an unfinished run whose last attempt failed) joins the failure set for
+    the comparison only, in any order; on its own it is never a report."""
+    runner = _build_runner(conn, clock, calendar, JobRegistry())
+    mb, tc = "market_backup:2026-06-16", "tick_compact:2026-06-16"
+
+    def news(**kw) -> bool:
+        return runner._report_is_news(CatchUpResult(**kw))
+
+    assert news(jobs_still_failed=[mb]) is False
+    runner._last_failed_alert = [mb, tc]
+    assert news(jobs_failed=[tc], jobs_still_failed=[mb]) is False
+    assert news(jobs_failed=[tc, mb]) is False
+    assert news(jobs_failed=[tc]) is True
+    runner._last_failed_alert = [mb]
+    assert news(jobs_failed=[tc], jobs_still_failed=[mb]) is True
+
+
+@pytest.mark.asyncio
+async def test_a_held_run_latest_job_carries_its_failed_key(conn, clock, calendar):
+    """An unfinished RUN_LATEST run reports its last attempt's failed key in ``jobs_still_failed``
+    (never in ``jobs_failed``); after a success it carries nothing."""
+    state = {"outcome": "fail"}
+
+    async def job():
+        if state["outcome"] == "fail":
+            raise RuntimeError("boom")
+        return SimpleNamespace(unfinished=state["outcome"] == "held")
+
+    ticker = Ticker(datetime(2026, 6, 17, 10, 5, tzinfo=IST))
+    reg = JobRegistry()
+    reg.register(JobSpec(job_id="market_backup", job_class=JobClass.RUN_LATEST, at=time(8, 0), run=job))
+    runner = CatchUpRunner(conn, Clock(time_source=ticker), calendar, reg)
+    runner.record_run("market_backup", MON)
+
+    held = await runner.catch_up(scope=CatchUpScope.ALL)
+    assert held.jobs_failed == [f"market_backup:{WED.isoformat()}"] and held.jobs_still_failed == []
+    state["outcome"] = "held"
+    ticker.at += timedelta(minutes=30)
+    held = await runner.catch_up(scope=CatchUpScope.ALL)
+    assert held.jobs_failed == [] and held.jobs_still_failed == [f"market_backup:{WED.isoformat()}"]
+    state["outcome"] = "ok"
+    ticker.at += timedelta(minutes=30)
+    ok = await runner.catch_up(scope=CatchUpScope.ALL)
+    assert ok.jobs_caught_up == [f"market_backup:{WED.isoformat()}"]
+    state["outcome"] = "held"
+    ticker.at = datetime(2026, 6, 18, 10, 5, tzinfo=IST)               # Thu's 08:00 run is due
+    held = await runner.catch_up(scope=CatchUpScope.ALL)
+    assert held.jobs_failed == [] and held.jobs_still_failed == []
+
+
+@pytest.mark.asyncio
+async def test_catch_up_with_a_quiet_entry_sends_only_failures(conn, clock, calendar):
+    sent: list = []
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    outcome: dict = {"fail": False}
+
+    async def job() -> None:
+        if outcome["fail"]:
+            raise RuntimeError("boom")
+
+    reg = JobRegistry()
+    reg.register(JobSpec(job_id="market_backup", job_class=JobClass.RUN_LATEST, at=time(8, 0), run=job))
+    runner = CatchUpRunner(conn, clock, calendar, reg, notify=notify)
+    runner.record_run("market_backup", MON)
+    quiet = frozenset({f"market_backup:{WED.isoformat()}"})
+
+    result = await runner.catch_up(scope=CatchUpScope.ALL, quiet=quiet)
+    assert result.jobs_caught_up and sent == []
+    outcome["fail"] = True
+    conn.execute("DELETE FROM job_runs WHERE job_id='market_backup' AND run_for_date=?", (WED.isoformat(),))
+    result = await runner.catch_up(scope=CatchUpScope.ALL, quiet=quiet)
+    assert result.jobs_failed and len(sent) == 1
+    assert sent[0].data["jobs_failed"] == [f"market_backup:{WED.isoformat()}"]
 
 
 def test_no_registry_is_pure_watermark_store(conn, clock, calendar):

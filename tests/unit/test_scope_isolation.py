@@ -143,6 +143,7 @@ async def _outputs(conn, clock, scope) -> dict:
         held = set(opsmain._held_symbols(conn))
         out |= {
             "held": held,
+            "held_positions": opsmain._held_positions(conn),
             "retest": opsmain._retest_skip_reasons(
                 [SYMBOL, "PAPPART", "PAPPEND"], eligible={SYMBOL, "PAPPART", "PAPPEND"}, ex_skip=(),
                 held=held, pending=opsmain._pending_entry_rec_symbols(conn, NOW)),
@@ -167,6 +168,19 @@ async def test_paper_rows_change_no_real_output(conn, clock) -> None:
     assert ctx.exiting_symbols == {SYMBOL} and ctx.risk_state is RiskState.NORMAL
     assert ctx.known_order_ids == frozenset() and ctx.available_margin == Decimal("50000")
     assert before["held"] == {SYMBOL} and before["lifecycle"] == 1
+    assert before["held_positions"] == [("r-open", SYMBOL, 10)]
+
+
+def test_surveillance_alert_reads_open_real_positions_only(conn) -> None:
+    """A8 held-position alert input: OPEN real platform/recommended rows; never paper (D4), the
+    owner's external holdings (O5) or a closed position."""
+    _position(conn, "r-rec", "RECCO", is_paper=0, opened=_at("09:31"))
+    _position(conn, "r-plat", "PLATCO", is_paper=0, origin="platform", qty=None, opened=_at("09:32"))
+    _position(conn, "r-ext", "EXTCO", is_paper=0, origin="external")
+    _position(conn, "r-shut", "SHUTCO", is_paper=0, state="CLOSED", closed_at=_at("10:00"))
+    _position(conn, "p-open", "PAPCO", is_paper=1)
+    _position(conn, "p-exit", "PAPEXIT", is_paper=1, state="PENDING_EXIT")
+    assert opsmain._held_positions(conn) == [("r-rec", "RECCO", 10), ("r-plat", "PLATCO", 0)]
 
 
 async def test_working_paper_entries_commit_paper_capital_only(conn, clock) -> None:

@@ -152,10 +152,10 @@ def holiday_engine(conn, db_path, tmp_path, monkeypatch):
     fns = {jid: _recorder(jid) for jid in (*opsmain.PHASE1_JOB_IDS, *opsmain.PHASE2_JOB_IDS)}
     registry = opsmain.build_job_registry(settings, fns, calendar=calendar)
     catch_up = CatchUpRunner(conn, clock, calendar,
-                             registry.select(lambda s: s.job_id != opsmain.JOB_TICK_COMPACT),
+                             registry.select(lambda s: s.job_id not in opsmain.LANE_JOB_IDS),
                              deferred=opsmain.POST_ARM_JOB_IDS)
     compaction_lane = opsmain.CompactionLane(
-        CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id == opsmain.JOB_TICK_COMPACT)),
+        CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id in opsmain.LANE_JOB_IDS)),
         clock, calendar,
     )
     for spec in registry.specs():           # an engine that ran normally through Thursday

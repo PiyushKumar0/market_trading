@@ -201,9 +201,6 @@ news:
 cat:
   fanout_weight: 0.5             # §2.7 step 5: sector/theme fan-out multiplier on materiality AND |sentiment|
                                  # before threshold comparison. Owner-only, deliberately NOT learnable.
-  max_event_age_days: 2          # §2.7 HeadlineClusterer near-duplicate assignment window ONLY (calendar
-                                 # days; wired into HeadlineClusterer). The `cat` digest age horizon is
-                                 # the envelope.yaml row cat.max_event_age_days (sessions), not this key.
   # --- `cat` v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18). ins-mechanics mirror.
   # Deliberately NO expected_edge_pct: there is no validated edge (the shadow measures it), so the
   # §7.1 C3 gate fail-closed-rejects every cat candidate — signals are journalled at prescreen

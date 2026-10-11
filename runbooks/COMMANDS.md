@@ -68,6 +68,40 @@ nssm set mt-engine AppStopMethodConsole 30000
 nssm get mt-engine AppStopMethodConsole                  # want: 30000
 ```
 
+**Clear the stale MT_RESTART_SENTINEL service env (owner, ELEVATED PowerShell, once; nothing reads it,
+takes effect at the next service start):**
+
+```powershell
+& 'C:\tools\nssm\nssm.exe' reset mt-engine AppEnvironmentExtra
+& 'C:\tools\nssm\nssm.exe' get mt-engine AppEnvironmentExtra     # verify (non-elevated): prints nothing
+```
+
+## Re-login of the engine's Claude CLI (2026-10-11) — after an `auth_failed` alert or a `claude_login` WARN
+
+Run as the service user `piyush.kumar_atari` (the engine uses the pinned CLI's stored claude.ai login,
+shared with the owner's interactive Claude Code; IMPLEMENTATION_PLAN §2.2). `claude_login_check` (08:10 IST)
+warns from 7 days before `refreshTokenExpiresAt`; next hard expiry 2026-11-08 05:03 IST.
+
+```powershell
+& "C:\Users\piyush.kumar_atari\projects\personal\market_trading\data\run\claude-cli\2.1.288\claude.exe" auth login --claudeai
+& "C:\Users\piyush.kumar_atari\projects\personal\market_trading\data\run\claude-cli\2.1.288\claude.exe" auth status --json   # verify: logged in
+```
+
+## DuckDB restore drill (quarterly, §10.5) — safe with the engine running
+
+Reads only the newest `data\backups\market-*` export; needs ~5.7 GB free in `%TEMP%`, takes ~5 min.
+Run from the repo root.
+
+```powershell
+$snap = Get-ChildItem data\backups -Directory -Filter 'market-*' | Where-Object { $_.Name -notlike '*.tmp' } | Sort-Object Name | Select-Object -Last 1
+$scratch = "$env:TEMP\mt_restore_drill.duckdb"; if (Test-Path $scratch) { Remove-Item $scratch }
+.venv\Scripts\python.exe -c "import duckdb,sys; c=duckdb.connect(sys.argv[2]); c.execute('SET memory_limit=' + chr(39) + '8GB' + chr(39)); c.execute('IMPORT DATABASE ' + chr(39) + sys.argv[1].replace(chr(92), '/') + chr(39)); [print(t, c.execute('SELECT count(*) FROM ' + t).fetchone()[0]) for (t,) in c.execute('SELECT table_name FROM duckdb_tables() ORDER BY 1').fetchall()]" $snap.FullName $scratch
+```
+Compare the printed counts with the live store through `POST /db/query` (`SELECT count(*) FROM <table>`);
+rows written after the export's stamp are expected to differ. Then `Remove-Item $scratch`. The real restore
+(engine stopped or crashed; IMPORT + `scripts\rewind_after_market_restore.py`) is in RUNBOOK "Restore
+market.duckdb from backup".
+
 ## Universe symbol list (the canonical 200-name set for historical runs)
 
 ```powershell
@@ -183,8 +217,15 @@ uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citi
 ```
 
 The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
-the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending; last applied: O17 (e148a4e, 2026-09-24, owner). A prepared change
-follows this shape (outside 09:15-15:30, from the repo root, with a clean `git status`):
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Last applied: O17 (e148a4e,
+2026-09-24, owner). **PENDING: `runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch`** (review
+2026-10-11 #6 — removes `cat.confirm_vol_mult` + `cat.max_hold_days`, unread since the 2026-08-18 cat v2
+redesign; verified in a scratch worktree, 261 envelope-loading tests green). Apply it with the shape below,
+`--note "review 2026-10-11 #6: retire unread cat v1 envelope rows (owner)"`. If the reseed errors, do NOT
+start the engine: `git checkout -- config/envelope.yaml` and re-run it. Since 2026-10-11 a later clean boot
+clears a `protected_store_integrity` freeze by itself (lifecycle step 1c), but an unsigned file still
+FREEZES the boot it is found on. A prepared change follows this shape (outside 09:15-15:30, from the repo
+root, with a clean `git status`):
 
 ```powershell
 Stop-Service mt-engine
@@ -243,7 +284,8 @@ uv run pytest tests/unit/test_budget_governor.py tests/unit/test_agent_harness.p
 uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py -q   # news layer
 ```
 - RECOMMEND flow needs: mode RECOMMEND (`/mode RECOMMEND`), valid trade window, warm-up ready,
-  and the Claude OAuth token present (else the LLM tier is disabled and only scanners run).
+  and a live Claude CLI login (no code gates on it: a dead login makes every LLM call fail with
+  `auth_failed` while the scanners keep running; re-login steps above).
 - **Budget window is the subscription's QUOTA WEEK (2026-09-12):** Thursday 14:00 IST → next Thursday
   14:00 IST (`llm.quota_window` in agents.yaml; `weekly_credit_usd` + weekly per-agent allocations).
   `/budget` (Telegram or `GET /budget`) prints the window key (the start Thursday's date), the
@@ -341,6 +383,22 @@ it is safe to interrupt and resume across evenings. Kite-official rows are never
 Then re-run `scripts\backtest_hi52.py` (engine still off) — and note the backtest must apply the same
 unadjusted-history veto the live sweep applies (`hi52.unadjusted_history` over `corp_actions`), which
 the corp-actions leg makes possible for the 2022→2026 population.
+
+**Muhurat session 2026-11-08 (Sunday) — run after the day, any evening from 2026-11-08 night, engine OFF**
+(the live engine treats special sessions as closed, so its own jobs skip the day; plan NSECalendar
+special-sessions amendment):
+
+```powershell
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2026-11-08 --to 2026-11-08 --skip-corp-actions
+# verify (read-only): the run's own summary line, then the unit's checkpoint row and the bars it wrote
+#   state.db:      SELECT through_date FROM filings_backfill_checkpoints WHERE feed='bhavcopy_archive' AND unit='2026-11-08'
+#   market.duckdb: SELECT count(*) FROM bars_1d WHERE d='2026-11-08'  -- comparable to 2025-10-21 (2296 rows); 0 = treated as a holiday
+# (--status prints only totals and the first/last unit, so it cannot tell an ingested unit from a 'holiday' one)
+```
+`--skip-corp-actions` because that leg would otherwise sweep 400 days before `--from` in new window units
+(the live 20:15 `corp_actions` job already covers that window). If the archive 404s on both formats the unit
+is checkpointed `holiday`: delete that row (`filings_backfill_checkpoints` feed=`bhavcopy_archive`,
+unit=`2026-11-08`) and retry a day later.
 
 ## Phase 3 foundation (2026-09-10) — replay a recorded day / recalibrate the paper fill model
 

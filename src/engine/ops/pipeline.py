@@ -3057,7 +3057,9 @@ class RecommendationPipeline:
     def _exit_due(self, position: sqlite3.Row, style: str, cap: int) -> date | None:
         """The position's exit session: the entry rec's payload ``exit_session``, else the hold
         counted from the rec's delivery (never from ``opened_at``); with no entry rec, the first
-        session past the style ``cap`` counted from ``opened_at``. ``None`` = not computable yet."""
+        session past the style ``cap`` counted from ``opened_at``. ``None`` = not computable yet.
+        Under the live calendar (include_special=False) special sessions (muhurat) are closed days,
+        so they are not counted as held sessions."""
         entry = next(
             (row for row in self._conn.execute(
                 "SELECT r.payload, r.delivered_at, l.strategy_id FROM learning_ledger l "
@@ -3083,7 +3085,7 @@ class RecommendationPipeline:
                     pass
         try:
             opened = datetime.fromisoformat(str(position["opened_at"])).date()
-            return self._calendar.add_sessions(opened + timedelta(days=1), cap, count_special=True)
+            return self._calendar.add_sessions(opened + timedelta(days=1), cap)
         except ValueError:
             return None
 

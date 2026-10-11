@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import time, timedelta
+from datetime import date, time, timedelta
 from pathlib import Path
 
+from engine.core.calendar import NSECalendar
+from engine.core.clock import Clock
+from engine.core.config import config_dir
 from tests.conftest import FIXED_NOW
 
 _WATCHDOG_PATH = Path(__file__).resolve().parents[2] / "scripts" / "watchdog.py"
@@ -238,6 +241,30 @@ def test_debounce_state_roundtrip(tmp_path):
     assert wd.load_debounce(tmp_path / "absent.json") == wd.DebounceState()
     (tmp_path / "corrupt.json").write_text("{not json", encoding="utf-8")
     assert wd.load_debounce(tmp_path / "corrupt.json") == wd.DebounceState()
+
+
+# ------------------------------------------------------------------ trading-day predicate vs the engine
+def test_trading_day_predicate_agrees_with_the_live_engine_calendar():
+    """The watchdog reads the calendar YAML itself (import allowlist) and must agree with the engine's
+    NSECalendar(strict=True, include_special=False) on every shipped date, else it pages
+    SCHEDULED_START_MISSED on a day the engine treats as closed (2026-10-11: special sessions closed)."""
+    cal_dir = config_dir() / "calendar"
+    predicate = wd.make_trading_day_fn(cal_dir)
+    engine = NSECalendar(cal_dir, Clock(), strict=True, include_special=False)
+    days = [date(2024, 1, 1) + timedelta(days=i) for i in range(3 * 366)]
+    assert [d for d in days if predicate(d) != engine.is_trading_day(d)] == []
+    assert predicate(date(2025, 10, 21)) is False   # weekday muhurat
+    assert predicate(date(2026, 11, 8)) is False    # Sunday muhurat
+    assert predicate(date(2026, 11, 9)) is True
+
+
+def test_trading_day_predicate_tolerates_null_and_absent_special_sessions(tmp_path):
+    (tmp_path / "2026.yaml").write_text("year: 2026\nholidays:\nspecial_sessions:\n", encoding="utf-8")
+    (tmp_path / "2025.yaml").write_text("year: 2025\nholidays: []\n", encoding="utf-8")
+    predicate = wd.make_trading_day_fn(tmp_path)
+    assert predicate(date(2026, 6, 17)) is True
+    assert predicate(date(2025, 6, 18)) is True
+    assert predicate(date(2024, 6, 19)) is False   # no year file: never alert blind
 
 
 def test_read_snapshot_missing_db_is_silent(tmp_path):

@@ -70,10 +70,16 @@ def _job_result_ok(result: object) -> bool:
 
 def _job_unfinished(result: object) -> bool:
     """A result whose ``unfinished`` is True did not do the day's work (``TickCompactionResult``:
-    skipped for an in-flight run, or stopped at the session window / shutdown). Its runner records NO
+    skipped for an in-flight run, or stopped at the session window / shutdown; ``MarketBackupResult``:
+    not started in the trading-day window or the retry hold after a failed export). Its runner records NO
     watermark, so the day stays missed and a later pass replays it. Recording those as success left
     every ``tick_compact`` watermark from 2026-09-22 to 09-28 without a completed run behind it."""
     return getattr(result, "unfinished", False) is True
+
+
+def _entry_job(entry: str) -> str:
+    """The job id of a ``"job_id:YYYY-MM-DD[ (gave up)]"`` result entry."""
+    return entry.split(":", 1)[0]
 
 
 class AdvisoryOutcome(StrEnum):
@@ -151,7 +157,9 @@ JOB_TIME_EXIT_CHECK = "time_exit_check"          # D2 time exit (plan Q1.6) — 
 JOB_REC_OUTCOMES = "rec_outcomes"                # hindsight rec scoring (plan Q2.3) — date-keyed
 JOB_WEEKLY_SUMMARY = "weekly_summary"            # weekly owner summary (plan Q2.6) — date-keyed (week's last session)
 JOB_TICK_COMPACT = "tick_compact"               # §4.3 tick-partition compaction (WO-7) — date-keyed
+JOB_MARKET_BACKUP = "market_backup"              # §10.5 DuckDB leg: EXPORT DATABASE snapshot — run-latest
 JOB_INS_CROSSINGS = "ins_crossings"              # §6.1 `ins` insider net-buy crossings — date-keyed
+JOB_CLAUDE_LOGIN = "claude_login_check"          # CLI's stored claude.ai login health (D2/D11) — run-latest
 
 
 class JobClass(StrEnum):
@@ -238,10 +246,24 @@ class CatchUpResult(BaseModel):
 
     jobs_caught_up: list[str] = Field(default_factory=list)   # "job_id:YYYY-MM-DD" entries
     jobs_failed: list[str] = Field(default_factory=list)
+    #: RUN_LATEST jobs this pass held (unfinished) whose last attempt failed, as "job_id:YYYY-MM-DD" of
+    #: that failed row. Report suppression only: a held job must not drop out of the compared failure
+    #: set, or every hold/retry cycle re-sends an unchanged failure (the export's 6 h retry hold).
+    jobs_still_failed: list[str] = Field(default_factory=list)
     frozen_reasons: list[str] = Field(default_factory=list)   # safety-critical failures (§2.6)
     off_duration_s: float = 0.0
     #: WO-15 (ii): this pass did nothing because another pass was already in flight (single-flight).
     skipped_in_flight: bool = False
+
+
+def _failure_set(result: CatchUpResult, told: Sequence[str] | None) -> list[str]:
+    """The failure set the report suppression compares and stores: this pass's failures plus the
+    held ones the owner was ALREADY told about (``told`` = the last delivered set), order-free (a
+    held job's key moves from ``jobs_failed`` to ``jobs_still_failed`` and back). A held key never
+    shown — a fresh process, or a report whose send failed — stays out, so the next real failure
+    of that key still reads as a change and is sent."""
+    known = set(told or ())
+    return sorted([*result.jobs_failed, *(k for k in result.jobs_still_failed if k in known)])
 
 
 class CatchUpRunner:
@@ -367,6 +389,17 @@ class CatchUpRunner:
         ).fetchone()
         return date.fromisoformat(row["d"]) if row and row["d"] else None
 
+    def _last_attempt_failed_for(self, job_id: str) -> date | None:
+        """The day of ``job_id``'s most recently attempted row when that attempt failed, else None.
+        Latest by attempt time, not by day: a RUN_LATEST job's older failed rows outlive the gap a
+        later success covered, and only the last attempt says whether it is failing now."""
+        row = self._conn.execute(
+            "SELECT run_for_date, status FROM job_runs WHERE job_id=? "
+            "ORDER BY last_attempt_at DESC, run_for_date DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        return date.fromisoformat(row["run_for_date"]) if row and row["status"] == "failed" else None
+
     def last_success_at(self, job_id: str) -> str | None:
         row = self._conn.execute(
             "SELECT max(last_success_at) AS at FROM job_runs WHERE job_id=? AND status='success'",
@@ -425,8 +458,14 @@ class CatchUpRunner:
         *,
         off_since: datetime | None = None,
         scope: CatchUpScope = CatchUpScope.LOAD_BEARING,
+        quiet: frozenset[str] = frozenset(),
     ) -> CatchUpResult:
         """Replay every missed job in ``scope`` over the off-window, by class then dependency order.
+
+        ``quiet`` (an on-time scheduled lane fire, 2026-10-11): the fire's own ``"job_id:YYYY-MM-DD"``
+        entry was not missed, so its success alone is no CATCHUP_REPORT. Everything else the same pass
+        catches up, a recovery, failures and freezes report exactly as on any other pass
+        (:meth:`_report_is_news`).
 
         SINGLE-FLIGHT (WO-15 (ii)): a pass firing while another is still running is a logged no-op,
         never a second concurrent replay. Watermarks make a *later* pass a cheap no-op anyway, but
@@ -442,7 +481,7 @@ class CatchUpRunner:
             )
             return CatchUpResult(skipped_in_flight=True)
         async with self._pass_lock:
-            return await self._pass(off_since=off_since, scope=scope)
+            return await self._pass(off_since=off_since, scope=scope, quiet=quiet)
 
     # ------------------------------------------------------------------ early hydration (§2.6, 2026-09-09)
     async def hydrate_ahead(
@@ -553,7 +592,9 @@ class CatchUpRunner:
             self.record_run(spec.job_id, today, status="failed")
             return "failed"
 
-    async def _pass(self, *, off_since: datetime | None, scope: CatchUpScope) -> CatchUpResult:
+    async def _pass(
+        self, *, off_since: datetime | None, scope: CatchUpScope, quiet: frozenset[str] = frozenset(),
+    ) -> CatchUpResult:
         now = self._clock.now()
         result = CatchUpResult(
             off_duration_s=max(0.0, (now - off_since).total_seconds()) if off_since else 0.0
@@ -574,7 +615,7 @@ class CatchUpRunner:
             caught_up=result.jobs_caught_up, failed=result.jobs_failed,
             frozen=result.frozen_reasons, off_duration_s=result.off_duration_s,
         )
-        if self._notify is not None and self._report_is_news(result):
+        if self._notify is not None and self._report_is_news(result, quiet=quiet):
             try:
                 await self._notify(catalog.catchup_report(
                     off_duration_s=result.off_duration_s,
@@ -582,19 +623,32 @@ class CatchUpRunner:
                     jobs_failed=result.jobs_failed,
                 ))
                 # Only a DELIVERED report suppresses the next one — a failed send must retry.
-                self._last_failed_alert = list(result.jobs_failed)
+                self._last_failed_alert = _failure_set(result, self._last_failed_alert)
             except Exception:  # noqa: BLE001 - reporting must never fail the recovery
                 _log.exception("catchup_report_notify_failed")
         return result
 
-    def _report_is_news(self, result: CatchUpResult) -> bool:
+    def _report_is_news(self, result: CatchUpResult, *, quiet: frozenset[str] = frozenset()) -> bool:
         """Owner-report suppression (2026-08-18): progress (caught-up) and freeze events always send;
         a pure failure report sends only when the failure set CHANGED since the last one sent —
         an unchanged stuck failure re-reported every 30-min sweep is noise, and the pass's own
-        ``catch_up_complete`` log line keeps the full per-pass record either way."""
-        if result.jobs_caught_up or result.frozen_reasons:
+        ``catch_up_complete`` log line keeps the full per-pass record either way.
+
+        ``quiet`` entries (an on-time scheduled fire's own ``job:day``) are not progress. A quiet
+        entry is still news as a RECOVERY: its job is in the last failure set sent and has no failure
+        left in this pass's — the owner was told it failed. The compared failure set includes the
+        held jobs' ``jobs_still_failed``, so a hold never reads as a change; on its own a held failure
+        is never a report (nothing was attempted)."""
+        if result.frozen_reasons or any(e not in quiet for e in result.jobs_caught_up):
             return True
-        return bool(result.jobs_failed) and result.jobs_failed != self._last_failed_alert
+        failures = _failure_set(result, self._last_failed_alert)
+        if result.jobs_caught_up and self._last_failed_alert:
+            # A "(gave up)" entry is terminal, not outstanding: its job's next quiet run is no recovery.
+            alerted = {_entry_job(e) for e in self._last_failed_alert if not e.endswith(" (gave up)")}
+            failing = {_entry_job(e) for e in failures}
+            if any(_entry_job(e) in alerted - failing for e in result.jobs_caught_up):
+                return True
+        return bool(result.jobs_failed) and failures != sorted(self._last_failed_alert or ())
 
     def _in_scope(self, job_class: JobClass, scope: CatchUpScope) -> list[JobSpec]:
         """The class's specs in dependency order, filtered by the WO-15 deferred set."""
@@ -686,6 +740,12 @@ class CatchUpRunner:
         target = missed[-1]  # single run-latest covering the whole gap; recorded under the latest day
         try:
             outcome = await spec.run()  # type: ignore[call-arg]
+            if _job_unfinished(outcome):
+                _log.info("run_latest_unfinished", job_id=spec.job_id, run_for=target.isoformat())
+                failed_for = self._last_attempt_failed_for(spec.job_id)
+                if failed_for is not None:
+                    result.jobs_still_failed.append(f"{spec.job_id}:{failed_for.isoformat()}")
+                return
             if not _job_result_ok(outcome):
                 # degraded return = failure for the watermark; the job already alerted (E5)
                 _log.warning("run_latest_catchup_degraded", job_id=spec.job_id)

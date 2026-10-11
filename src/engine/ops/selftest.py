@@ -20,6 +20,7 @@ and application of the equity halt ladder plus daily-loss rungs, and the one che
 (non-trading-day starts skipped, deduped per trading day via ``job_runs``). risk_counters_rebuild and
 equity_halt_ladder SKIP only when ExposureTracker/LimitsEngine is unwired; sdk_smoke SKIPs when its
 callable is unwired, on a non-trading-day start, or once already verified that trading day.
+``claude_login`` reads the CLI's stored claude.ai login on every start (WARN only, never FROZEN).
 
 This module REPORTS; the lifecycle applies the consequences (the §2.4 integrity rule: FROZEN-with-flat-book
 vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions (§2.6).
@@ -27,14 +28,19 @@ vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions (§
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from engine import _preload
-from engine.core.clock import Clock, ClockSkewUnavailable
+from engine.core.clock import IST, Clock, ClockSkewUnavailable
 from engine.core.config import Settings, config_dir, load_yaml
 from engine.core.enums import Actor
 from engine.core.log import get_logger
@@ -88,6 +94,81 @@ class SelfTestReport(BaseModel):
         return [c.name for c in self.checks if c.implies == Implies.FROZEN]
 
 
+#: WARN this many days before the stored claude.ai login's hard refresh-token expiry. The CLI's own
+#: warning is interactive UI inside 3 days, which an unattended service never shows.
+CLAUDE_LOGIN_WARN_DAYS = 7
+
+CLAUDE_RELOGIN_HINT = (
+    "re-login the engine's Claude CLI as the service user: & <agents.yaml llm.cli_path> auth login --claudeai"
+)
+
+_SUBSCRIPTION_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+
+
+def claude_credentials_path() -> Path:
+    """The stored claude.ai login the engine's CLI authenticates with (D2 as built): the CLI reads
+    ``$CLAUDE_CONFIG_DIR`` when set, else ``~/.claude`` of the service user."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config) if config else Path.home() / ".claude"
+    return base / ".credentials.json"
+
+
+def check_claude_login(now: datetime, path: Path) -> SelfTestCheck:
+    """Read-only health of the CLI's stored claude.ai login. WARN, never FROZEN — LLM availability is
+    not a safety input (D7). The detail carries days left, the IST expiry and ``subscriptionType``
+    only: token text never reaches a detail or a log line."""
+    name = "claude_login"
+
+    def warn(detail: str) -> SelfTestCheck:
+        return SelfTestCheck(name=name, status=CheckStatus.WARN, detail=f"{detail}; {CLAUDE_RELOGIN_HINT}")
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return warn(f"no stored claude.ai login at {path} — every LLM call will fail auth")
+    except (OSError, ValueError) as exc:   # type name only: a decode error can quote file content
+        return warn(f"stored claude.ai login at {path} unreadable ({type(exc).__name__})")
+    oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
+    if not isinstance(oauth, dict):
+        return warn(f"no claudeAiOauth login in {path}")
+    sub = oauth.get("subscriptionType")
+    sub_txt = sub if isinstance(sub, str) and _SUBSCRIPTION_RE.fullmatch(sub) else "unknown"
+    refresh, access = oauth.get("refreshToken"), oauth.get("accessToken")
+    if not (isinstance(refresh, str) and refresh) or not (isinstance(access, str) and access):
+        # The CLI blanks both tokens when a refresh is rejected (invalid_grant): logged out for every
+        # CLI on the account until someone logs in again.
+        return warn(f"not logged in: stored claude.ai login is blank (subscription {sub_txt})")
+    expires_ms = oauth.get("refreshTokenExpiresAt")
+    if isinstance(expires_ms, bool) or not isinstance(expires_ms, (int, float)) or expires_ms <= 0:
+        return warn(f"refresh-token expiry not recorded — cannot judge (subscription {sub_txt})")
+    try:
+        expires = datetime.fromtimestamp(expires_ms / 1000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return warn(f"refresh-token expiry out of range (subscription {sub_txt})")
+    days_left = (expires - now).total_seconds() / 86400
+    when = expires.astimezone(IST).strftime("%Y-%m-%d %H:%M IST")
+    if days_left <= 0:
+        return warn(f"refresh token EXPIRED {when} (subscription {sub_txt})")
+    if days_left <= CLAUDE_LOGIN_WARN_DAYS:
+        return warn(f"refresh token expires in {days_left:.1f} days, {when} (subscription {sub_txt})")
+    return SelfTestCheck(
+        name=name, status=CheckStatus.PASS,
+        detail=f"refresh token expires in {days_left:.1f} days, {when} (subscription {sub_txt})",
+    )
+
+
+async def alert_claude_login(
+    now: datetime, path: Path, alert: Callable[[str, str], Awaitable[None]]
+) -> SelfTestCheck:
+    """The daily ``claude_login_check`` job: the boot check's read, so a long-running engine hears an
+    approaching expiry or a dead login. ONE warning per non-PASS run; PASS is logged only."""
+    check = check_claude_login(now, path)
+    _log.info("claude_login_check", status=check.status.value, detail=check.detail)
+    if check.status is not CheckStatus.PASS:
+        await alert("warning", f"Claude login: {check.detail}")
+    return check
+
+
 class SelfTest:
     """The every-startup self-test (D11)."""
 
@@ -111,6 +192,7 @@ class SelfTest:
         calendar=None,
         roster_quarantined: dict[str, str] | None = None,
         roster_loaded: int | None = None,
+        claude_credentials: Path | None = None,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -138,6 +220,9 @@ class SelfTest:
         # innocuous-looking sdk_smoke SKIP while every LLM job silently no-op'd).
         self._roster_quarantined = dict(roster_quarantined or {})
         self._roster_loaded = roster_loaded
+        # The CLI's stored claude.ai login file (claude_credentials_path() in composition); unwired
+        # ⇒ SKIP, so the hermetic test tier never reads the machine's real login.
+        self._claude_credentials = claude_credentials
 
     async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
@@ -154,6 +239,7 @@ class SelfTest:
         if include_freshness:
             report.checks.extend(await self.data_freshness_checks())
         report.checks.append(self._check_agent_roster())
+        report.checks.append(self._check_claude_login())
         report.checks.append(await self._check_sdk_smoke())
 
         for c in report.checks:
@@ -425,6 +511,13 @@ class SelfTest:
                                  detail="EMPTY roster — LLM tier disabled this run")
         return SelfTestCheck(name="agent_roster", status=CheckStatus.PASS,
                              detail=f"{self._roster_loaded} agent defs loaded")
+
+    def _check_claude_login(self) -> SelfTestCheck:
+        """D11 companion to sdk_smoke, on EVERY start (sdk_smoke is trading-day-only and deduped):
+        the stored login's dead-clear and hard expiry, read from disk — no call, no quota."""
+        if self._claude_credentials is None:
+            return self._stub("claude_login", "credentials path not wired")
+        return check_claude_login(self._clock.now(), self._claude_credentials)
 
     async def _check_sdk_smoke(self) -> SelfTestCheck:
         """D11: one cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading

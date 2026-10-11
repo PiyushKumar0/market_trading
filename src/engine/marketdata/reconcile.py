@@ -2,8 +2,23 @@
 
 Nightly (15:50) — and as the §2.6 startup catch-up for past trading days, driven by the
 ``job_runs`` DATE_KEYED watermark of ``JOB_RECONCILE`` (the scheduler/CatchUpRunner calls
-:meth:`ReconcileJob.run` per missing day). ``reconcile_log`` is the per-(day, symbol) audit trail;
-``MarketStore.has_reconcile_entry`` / ``reconciled_days`` read it but have no production caller.
+:meth:`ReconcileJob.run` per missing day). ``reconcile_log`` is the per-(day, symbol) audit trail
+AND the per-(day, symbol) resume checkpoint: a run skips every symbol already logged for ``d``. A
+logged symbol's bars are already canonical official, so re-comparing it finds no self bars and would
+overwrite its drift row with ``bars_compared=0`` (2026-09-15: 119 symbols after a mid-run 502;
+08-28, 10-05, 10-08: every symbol, the 15:50 fire racing the catch-up sweep). Runs are serialized
+per job, so a concurrent caller waits and then finds the day logged. ``MarketStore.has_reconcile_entry``
+/ ``reconciled_days`` have no production caller.
+
+Each symbol's canonical bars and its log row commit in ONE store transaction
+(``MarketStore.commit_reconciled_symbol``), so no exception, cancel, store close or kill can leave a
+symbol official but unlogged. A row's ``alerted`` is set only after the drift alert naming it was
+handed to the notify sink; a run that dies first (or whose send fails) leaves flagged rows
+``alerted=False``, and the next run of ``d`` carries them into its alert (``symbols_alert_carried``).
+
+The report is ok-bearing (E5): a run stopped by a rejected token reports ``ok=False``
+(``token_rejected``), so the DATE_KEYED watermark records the day ``failed`` and the §2.6 sweep
+retries it after re-login, resuming only the unlogged symbols.
 
 For each actively-ticked symbol of day ``d``:
 
@@ -31,6 +46,7 @@ datafeeds jobs). All DuckDB access goes through the single-writer :class:`Market
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -75,7 +91,13 @@ class SymbolReconcile(BaseModel):
 
 
 class ReconcileReport(BaseModel):
-    """Outcome of one :meth:`ReconcileJob.run` (§3.2.3)."""
+    """Outcome of one :meth:`ReconcileJob.run` (§3.2.3). Totals cover THIS run's symbols only.
+
+    ``ok`` is the watermark verdict (``_job_result_ok``): False only when the run stopped before
+    attempting every unlogged symbol — ``aborted_reason`` is ``'token_rejected'`` (a fetch raised
+    ``TokenException``) or ``'no_valid_token'`` (the composition-root gate; no broker call, no
+    store read, so ``symbols_remaining`` stays 0). Any other failure raises instead.
+    """
 
     d: date
     symbols: list[SymbolReconcile] = Field(default_factory=list)
@@ -83,7 +105,13 @@ class ReconcileReport(BaseModel):
     offline_bars: int = 0
     symbols_flagged: list[str] = Field(default_factory=list)
     bad_bar_fraction: float = 0.0        # aggregate: total bad / total compared
-    alerted: bool = False
+    #: Flagged symbols an EARLIER run of ``d`` logged but never alerted, included in this run's alert.
+    symbols_alert_carried: list[str] = Field(default_factory=list)
+    alerted: bool = False                # a drift alert went to the notify sink and its rows are marked
+    ok: bool = True
+    aborted_reason: str | None = None
+    symbols_remaining: int = 0           # unlogged symbols left unattempted by a token abort
+    symbols_already_done: int = 0        # requested symbols already in reconcile_log, skipped
 
 
 class ReconcileJob:
@@ -104,8 +132,9 @@ class ReconcileJob:
         is already persisted).
     session_open / session_close:
         The session bounds used for the official fetch (defaults: regular 09:15–15:30). The
-        composition root passes neither, so the regular bounds apply every day; special sessions
-        (muhurat) are not wired.
+        composition root passes neither: regular-session constants; the live calendar excludes
+        special sessions (include_special=False, 2026-10-11), so they hold on every day the engine
+        reconciles.
     """
 
     def __init__(
@@ -130,49 +159,68 @@ class ReconcileJob:
         self._notify = notify
         self._session_open = session_open
         self._session_close = session_close
+        # Blocking, not skip-if-busy: the 15:50 fire and a catch-up pass reach run(d) without knowing
+        # about each other, and a skipped caller would record a watermark for work it never saw end.
+        self._run_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ per-day entry point
 
     async def run(self, d: date, symbols: Sequence[str] | None = None) -> ReconcileReport:
-        """Reconcile day ``d`` (idempotent — safe to re-run; §2.6 catch-up calls this per missing day).
+        """Reconcile day ``d`` (§2.6 catch-up calls this per missing day). Idempotent per (day,
+        symbol): symbols already in ``reconcile_log`` for ``d`` are skipped, never re-fetched.
 
         ``symbols`` defaults to every symbol holding a ``bars_1m`` row on ``d`` (the
         actively-ticked set, plus anything already backfilled for the day).
         """
+        async with self._run_lock:
+            return await self._run_locked(d, symbols)
+
+    async def _run_locked(self, d: date, symbols: Sequence[str] | None) -> ReconcileReport:
         if symbols is None:
             symbols = await self._store.arun(self._symbols_for_day, d)
         cfg = self._settings.reconcile
         vol_pct = Decimal(str(cfg.vol_drift_pct))
         max_bad = float(cfg.max_bad_bar_fraction)
 
-        report = ReconcileReport(d=d)
-        log_rows: list[dict[str, Any]] = []
+        requested = set(symbols)
+        logged = await self._store.arun(self._store.get_reconcile_log, d)
+        done = {r["symbol"] for r in logged}
+        # Flagged by an earlier run of d whose alert never went out (it raised, was stopped, or the
+        # send failed): this run's alert covers them, once.
+        carried = [r for r in logged if not r["alerted"] and self._row_flagged(r, max_bad)]
+        report = ReconcileReport(
+            d=d, symbols_already_done=len(requested & done),
+            symbols_alert_carried=sorted(r["symbol"] for r in carried),
+        )
         total_bad = 0
         day_start = self._clock.combine(d, time(0, 0))
         day_end = self._clock.combine(d + timedelta(days=1), time(0, 0))
         open_minute = self._clock.combine(d, self._session_open)
 
-        ordered = sorted(set(symbols))
+        ordered = sorted(requested - done)
         for i, symbol in enumerate(ordered):
             existing = await self._store.aget_bars_1m(symbol, day_start, day_end)
             try:
                 official = await self._fetch_official(symbol, d)
             except TokenException:
                 # 2026-07-21: a rejected token fails every official fetch identically — stop
-                # processing the remaining symbols instead of hammering the broker (the KiteClient
-                # circuit breaker has already frozen entries). Symbols processed so far persist
-                # intact. The aborted day is NOT retried: job_reconcile returns None, which the
-                # job runner counts as ok, so the DATE_KEYED watermark still advances past it.
+                # instead of hammering the broker (the KiteClient circuit breaker has already
+                # frozen entries). ok=False sinks the DATE_KEYED watermark, so the §2.6 sweep
+                # retries the day after re-login and resumes at the first unlogged symbol.
+                report.ok = False
+                report.aborted_reason = "token_rejected"
+                report.symbols_remaining = len(ordered) - i
                 _log.warning(
                     "reconcile_aborted_token_rejected", d=d.isoformat(),
-                    symbols_remaining=len(ordered) - i,
+                    symbols_remaining=report.symbols_remaining,
                 )
                 break
 
             by_minute: dict[datetime, Bar] = {b.ts_minute: b for b in existing}
             self_bars = {m: b for m, b in by_minute.items() if b.src == "self"}
             tick_size = (
-                self._tick_size_for(symbol) if self._tick_size_for is not None else DEFAULT_TICK_SIZE
+                self._tick_size_for(symbol) if self._tick_size_for is not None
+                else DEFAULT_TICK_SIZE
             )
             close_threshold = tick_size * cfg.close_drift_ticks
 
@@ -182,8 +230,8 @@ class ReconcileJob:
                 oc = official[minute]
                 mine = self_bars.get(minute)
                 if mine is None:
-                    # §2.6: no self-built bar ⇒ offline span (or already gap-backfilled/official) —
-                    # fill from official, EXCLUDE from the drift denominator.
+                    # §2.6: no self-built bar ⇒ offline span (or already gap-backfilled/official)
+                    # — fill from official, EXCLUDE from the drift denominator.
                     offline += 1
                 else:
                     compared += 1
@@ -207,11 +255,19 @@ class ReconcileJob:
                     )
                 )
 
-            if canonical:
-                await self._store.ainsert_bars_1m(canonical)
-
             fraction = (bad / compared) if compared else 0.0
             flagged = compared > 0 and fraction > max_bad
+            # Bars and checkpoint row in one transaction: an unlogged official symbol would be
+            # re-compared on the retry against no self bars (compared=0).
+            await self._store.arun(
+                self._store.commit_reconciled_symbol, canonical,
+                {
+                    "d": d, "symbol": symbol, "bars_self": len(self_bars),
+                    "bars_official": len(official), "bars_compared": compared,
+                    "vol_drift_bars": vol_drift, "close_drift_bars": close_drift,
+                    "offline_bars": offline, "bad_bar_fraction": fraction, "alerted": False,
+                },
+            )
             total_bad += bad
             report.bars_compared += compared
             report.offline_bars += offline
@@ -225,30 +281,29 @@ class ReconcileJob:
             )
             if flagged:
                 report.symbols_flagged.append(symbol)
-            log_rows.append(
-                {
-                    "d": d, "symbol": symbol, "bars_self": len(self_bars),
-                    "bars_official": len(official), "bars_compared": compared,
-                    "vol_drift_bars": vol_drift, "close_drift_bars": close_drift,
-                    "offline_bars": offline, "bad_bar_fraction": fraction,
-                    "alerted": flagged,
-                }
-            )
 
         report.bad_bar_fraction = (total_bad / report.bars_compared) if report.bars_compared else 0.0
-        report.alerted = bool(report.symbols_flagged)
-        await self._store.arun(self._store.append_reconcile_log, log_rows)
 
-        if report.alerted:
+        to_alert = sorted({*report.symbols_alert_carried, *report.symbols_flagged})
+        if to_alert:
+            # The message aggregate spans this run's symbols plus the carried rows it names.
+            alert_compared = report.bars_compared + sum(int(r["bars_compared"]) for r in carried)
+            alert_bad = total_bad + sum(self._row_bad_bars(r) for r in carried)
+            alert_fraction = (alert_bad / alert_compared) if alert_compared else 0.0
             _log.warning(
                 "reconcile_drift", d=d.isoformat(), symbols_flagged=report.symbols_flagged,
-                bad_bar_fraction=report.bad_bar_fraction,
+                symbols_alert_carried=report.symbols_alert_carried, bad_bar_fraction=alert_fraction,
             )
-            await self._send_alert(report, max_bad)
+            if await self._send_alert(d, to_alert, alert_compared, alert_fraction, max_bad):
+                await self._store.arun(self._store.mark_reconcile_alerted, d, to_alert)
+                report.alerted = True
         _log.info(
             "reconcile_done", d=d.isoformat(), symbols=len(report.symbols),
             bars_compared=report.bars_compared, offline_bars=report.offline_bars,
-            flagged=len(report.symbols_flagged),
+            flagged=len(report.symbols_flagged), alert_carried=len(report.symbols_alert_carried),
+            alerted=report.alerted, ok=report.ok, aborted_reason=report.aborted_reason,
+            symbols_remaining=report.symbols_remaining,
+            symbols_already_done=report.symbols_already_done,
         )
         return report
 
@@ -289,20 +344,38 @@ class ReconcileJob:
             )
         return out
 
-    async def _send_alert(self, report: ReconcileReport, max_bad: float) -> None:
+    @staticmethod
+    def _row_flagged(row: dict[str, Any], max_bad: float) -> bool:
+        """The in-run flag rule (``compared > 0 and fraction > max_bad``) re-applied to a logged row:
+        the stored fraction is the same float, so the verdict is identical at equal thresholds."""
+        compared = row["bars_compared"] or 0
+        return compared > 0 and float(row["bad_bar_fraction"] or 0.0) > max_bad
+
+    @staticmethod
+    def _row_bad_bars(row: dict[str, Any]) -> int:
+        # bad_bar_fraction = bad / compared with both small ints, so the product rounds back exactly.
+        return round(float(row["bad_bar_fraction"] or 0.0) * int(row["bars_compared"] or 0))
+
+    async def _send_alert(
+        self, d: date, symbols: list[str], bars_compared: int, bad_bar_fraction: float,
+        max_bad: float,
+    ) -> bool:
+        """Hand the drift alert to the sink; True only when it accepted the message."""
         if self._notify is None:
-            return
+            return False
         msg = _reconcile_drift_msg(
-            d=report.d.isoformat(),
-            symbols_flagged=list(report.symbols_flagged),
-            bars_compared=report.bars_compared,
-            bad_bar_fraction=report.bad_bar_fraction,
+            d=d.isoformat(),
+            symbols_flagged=list(symbols),
+            bars_compared=bars_compared,
+            bad_bar_fraction=bad_bar_fraction,
             max_bad_bar_fraction=max_bad,
         )
         try:
             await self._notify(msg)
         except Exception:  # noqa: BLE001 - alerting must never fail the (already-persisted) job
-            _log.exception("reconcile_notify_failed", d=report.d.isoformat())
+            _log.exception("reconcile_notify_failed", d=d.isoformat())
+            return False
+        return True
 
     @staticmethod
     def _field(candle: Any, name: str) -> Any:

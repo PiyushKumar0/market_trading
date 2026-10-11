@@ -19,7 +19,9 @@ Clauses covered:
   bhavcopy, daily_bars, deals, features_daily, filings_pit, filings_pit_fresh, filings_results,
   ins_crossings, nightly_review, and tick_compact through the compaction lane) with ``run_for`` =
   Wed; the run-latest EOD set (reco_expire, filings_shp, corp_actions, backup) exactly once — backup
-  as ONE run-latest snapshot;
+  as ONE run-latest snapshot; the DuckDB ``market_backup`` export (a lane job behind the real
+  ``_market_backup`` start gate) NOT at the 08:05 boot but once, under Wed, in the first sweep after
+  15:45, which reports it;
 * idempotent — an immediate 30-min ``catchup_sweep`` pass (``_catchup_sweep_once``: ALL scope, then
   the compaction lane) and a further restart re-run nothing;
 * "startup report lists what was caught up" — ``StartupReport.jobs_caught_up`` and the owner's
@@ -59,6 +61,7 @@ from engine.ops.jobs import (
     JOB_CORP_ACTIONS,
     JOB_DEALS,
     JOB_EARNINGS,
+    JOB_MARKET_BACKUP,
     JOB_NIGHTLY_REVIEW,
     JOB_RECONCILE,
     JOB_TICK_COMPACT,
@@ -116,8 +119,13 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     calls = env.calls(since=calls_b)
     eod_date_keyed, eod_run_latest, eod_safety = _missed_eod(b)
     assert PLAN_NAMED_DATE_KEYED | {JOB_TICK_COMPACT} <= eod_date_keyed
-    assert {JOB_BACKUP, JOB_CORP_ACTIONS} <= eod_run_latest
+    assert {JOB_BACKUP, JOB_CORP_ACTIONS, JOB_MARKET_BACKUP} <= eod_run_latest
     assert JOB_EARNINGS in eod_safety
+    # The DuckDB export never STARTS 06:00-15:45 on a trading day (``_market_backup``): the 08:05 boot
+    # leaves it missed, with no watermark, for the first lane pass after 15:45 (asserted below).
+    assert JOB_MARKET_BACKUP not in {j for j, _ in calls}
+    assert not b.catch_up.was_run(JOB_MARKET_BACKUP, WED)
+    eod_run_latest -= {JOB_MARKET_BACKUP}
 
     # Date-keyed: exactly one run per missed trading day (Wed), run_for = Wed.
     for job_id in sorted(eod_date_keyed):
@@ -136,7 +144,7 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     # "startup report lists what was caught up": the boot pass (load-bearing scope) in the
     # StartupReport, and every pass — incl. the post-arm one-shot and the compaction lane — to the owner.
     everything = {f"{j}:{WED.isoformat()}" for j in eod_date_keyed | eod_run_latest | eod_safety}
-    boot_pass = everything - {f"{j}:{WED.isoformat()}" for j in (*opsmain.POST_ARM_JOB_IDS, JOB_TICK_COMPACT)}
+    boot_pass = everything - {f"{j}:{WED.isoformat()}" for j in (*opsmain.POST_ARM_JOB_IDS, *opsmain.LANE_JOB_IDS)}
     assert set(report.jobs_caught_up) == boot_pass
     catchup_reports = [m for m in env.messages(since=sent_b) if m.kind == MessageKind.CATCHUP_REPORT]
     owner_listed = {entry for m in catchup_reports for entry in m.data["jobs_caught_up"]}
@@ -154,6 +162,23 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     c = EngineProcess(env)
     report_c = await c.boot()
     assert report_c.jobs_caught_up == [] and env.calls(since=before) == []
+
+    # The first sweep after 15:45 runs the deferred export: ONE run-latest snapshot under Wed, reported
+    # by the lane runner. The main pass beside it only runs Thu's own due jobs (the rig fires none).
+    env.at(_t(THU, 15, 46))
+    sent_c = len(env.sent)
+    await c.sweep()
+    exports_since_b = [c_.at for c_ in env.job_calls[calls_b:] if c_.job_id == JOB_MARKET_BACKUP]
+    assert exports_since_b == [_t(THU, 15, 46)]
+    assert c.catch_up.was_run(JOB_MARKET_BACKUP, WED)
+    lane_reports = [m.data["jobs_caught_up"] for m in env.messages(since=sent_c)
+                    if m.kind == MessageKind.CATCHUP_REPORT
+                    and any(e.startswith(f"{JOB_MARKET_BACKUP}:") for e in m.data["jobs_caught_up"])]
+    assert lane_reports == [[f"{JOB_MARKET_BACKUP}:{WED.isoformat()}"]]
+    # Idempotent too: the next sweep exports nothing.
+    env.at(_t(THU, 16, 16))
+    await c.sweep()
+    assert [c_.job_id for c_ in env.job_calls[calls_b:]].count(JOB_MARKET_BACKUP) == 1
     await c.stop()
 
 

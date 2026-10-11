@@ -715,6 +715,50 @@ def test_reconcile_log_checkpoints(store, clock):
     assert corr["value"] == Decimal("2339.90") and corr["amended"] is True
 
 
+def _recon_row(d: date, symbol: str, **kw) -> dict:
+    return {"d": d, "symbol": symbol, "bars_self": 1, "bars_official": 1, "bars_compared": 1,
+            "vol_drift_bars": 0, "close_drift_bars": 1, "offline_bars": 0, "bad_bar_fraction": 1.0,
+            **kw}
+
+
+def test_commit_reconciled_symbol_writes_bars_and_log_row_in_one_transaction(store, clock):
+    d = clock.today()
+    m = clock.combine(d, time(9, 15))
+    store.insert_bars_1m([_bar(m), _bar(m, symbol="TCS")])
+    official = _bar(m, src="kite_official", close=Decimal("2340.00"))
+    assert store.commit_reconciled_symbol([official], _recon_row(d, "RELIANCE")) == 1
+    (got,) = store.get_bars_1m("RELIANCE", m, m + timedelta(minutes=1))
+    assert got.src == "kite_official" and got.close == Decimal("2340.00")
+    (row,) = store.get_reconcile_log(d)
+    assert row["symbol"] == "RELIANCE" and row["alerted"] is False and row["ran_at"] == clock.now()
+
+    # A log row that fails INSIDE the transaction rolls the canonical bars back with it: bars are
+    # never official while the symbol is unlogged.
+    bad_official = _bar(m, symbol="TCS", src="kite_official")
+    with pytest.raises(duckdb.ConversionException):
+        store.commit_reconciled_symbol([bad_official], _recon_row(d, "TCS", bars_self="not-an-int"))
+    (tcs,) = store.get_bars_1m("TCS", m, m + timedelta(minutes=1))
+    assert tcs.src == "self"
+    assert [r["symbol"] for r in store.get_reconcile_log(d)] == ["RELIANCE"]
+    with pytest.raises(ValueError, match="unknown column"):
+        store.commit_reconciled_symbol([bad_official], _recon_row(d, "TCS", bogus=1))
+    assert store.get_bars_1m("TCS", m, m + timedelta(minutes=1))[0].src == "self"
+
+    # The connection stays usable, and a symbol with no official candles still gets its row.
+    assert store.commit_reconciled_symbol([], _recon_row(d, "TCS", bars_official=0)) == 0
+    assert [r["symbol"] for r in store.get_reconcile_log(d)] == ["RELIANCE", "TCS"]
+
+
+def test_mark_reconcile_alerted_touches_only_the_named_rows_of_that_day(store):
+    d, other = date(2026, 6, 16), date(2026, 6, 17)
+    store.append_reconcile_log([_recon_row(d, "A"), _recon_row(d, "B"), _recon_row(other, "A")])
+    assert store.mark_reconcile_alerted(d, []) == 0
+    assert store.mark_reconcile_alerted(d, ["A", "ZZ"]) == 1
+    assert {r["symbol"]: r["alerted"] for r in store.get_reconcile_log(d)} == {"A": True, "B": False}
+    assert store.get_reconcile_log(other)[0]["alerted"] is False
+    assert store.get_reconcile_log(d)[0]["bars_compared"] == 1          # drift columns untouched
+
+
 def test_generic_upserts_reject_unknown_columns(store):
     with pytest.raises(ValueError, match="unknown column"):
         store.upsert_universe_daily([{"d": date(2026, 6, 17), "symbol": "TCS", "included": True,

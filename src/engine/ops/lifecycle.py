@@ -362,6 +362,12 @@ class SessionLifecycle:
             else:
                 await self._kill.trigger("protected_store_integrity_live_book", actor=Actor.RISK_GATE, flatten=True)
                 report.killed = True
+        elif self._latch is not None and not self._kill.is_killed():
+            # Inverse of the freeze above, same rule as the step-5 catch-up clear: every protected
+            # store just verified against its signed digest IS this cause's predicate, so an owner
+            # reseed after a failed one recovers on the next boot instead of needing a DB edit. The
+            # live-book kill is untouched: only /kill_reset ends a kill.
+            await self._latch.clear_cause("protected_store_integrity", Actor.RISK_GATE)
 
         # Other FROZEN-implying causes (secrets/clock/window/token) ⇒ FROZEN entries until cleared.
         if report.frozen_reasons and not self._kill.is_killed():

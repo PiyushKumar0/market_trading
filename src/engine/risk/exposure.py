@@ -27,7 +27,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from engine.core.clock import Clock
 from engine.core.db import transaction
@@ -39,8 +39,8 @@ from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.risk.exposure")
 
-#: Rolling window for `weekly_drawdown` — TRADING sessions, not calendar days (§7.1). Mirrors
-#: limits.yaml ``weekly_drawdown.rolling_sessions``, which no code reads (a test pins the two equal).
+#: Rolling window for `weekly_drawdown` — TRADING sessions, not calendar days (§7.1). The DEFAULT
+#: only: the live value is limits.yaml ``weekly_drawdown.rolling_sessions`` via ``floor_limits_from``.
 WEEKLY_DRAWDOWN_SESSIONS = 5
 
 FlattenCallback = Callable[[], Awaitable[None]]
@@ -108,7 +108,8 @@ class FloorLimits(BaseModel):
     """Reference shape for the :meth:`ExposureTracker.evaluate_floors` seam (§7.1 starting values).
 
     Percentages are FRACTIONS of 1 (``0.08`` = 8%), unlike ``config/costs.yaml``'s per-100 rates.
-    ``LimitsEngine`` may pass its own object instead — only these four attribute names are read.
+    ``LimitsEngine`` may pass its own object instead — only these five attribute names are read, and
+    an object without ``weekly_drawdown_sessions`` gets :data:`WEEKLY_DRAWDOWN_SESSIONS`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -117,6 +118,11 @@ class FloorLimits(BaseModel):
     equity_floor_rung_pct: Decimal = Decimal("0.10")
     cumulative_floor_pct: Decimal = Decimal("0.15")
     capital_base: Decimal | None = None      # None ⇒ the tracker's own base (O1, capital_base_inr)
+    # ge=1 HERE, never on limits.WeeklyDrawdown: a ValidationError at LimitTable parse escapes the
+    # boot's IntegrityError fallback. It guards direct constructors and duck-typed objects;
+    # floor_limits_from never trips it: a signed value < 1 is clamped to WEEKLY_DRAWDOWN_SESSIONS
+    # there, with an ERROR logged once per process.
+    weekly_drawdown_sessions: int = Field(default=WEEKLY_DRAWDOWN_SESSIONS, ge=1)
 
 
 class FloorBreach(BaseModel):
@@ -372,23 +378,29 @@ class ExposureTracker:
         return snap
 
     # ----------------------------------------------------------------- floor ladder (§7.1/§3.5.3)
-    def weekly_drawdown_peak(self, d: date | None = None) -> Decimal | None:
-        """Peak equity over the last :data:`WEEKLY_DRAWDOWN_SESSIONS` snapshotted sessions.
+    def weekly_drawdown_peak(
+        self, d: date | None = None, sessions: int = WEEKLY_DRAWDOWN_SESSIONS
+    ) -> Decimal | None:
+        """Peak equity over the last ``sessions`` snapshotted sessions (limits.yaml
+        ``weekly_drawdown.rolling_sessions``; default :data:`WEEKLY_DRAWDOWN_SESSIONS`).
 
         Sessions are read off the distinct snapshot dates rather than the calendar: snapshots exist
-        only for sessions the engine was up for, which is exactly the "last 5 sessions" the rolling
+        only for sessions the engine was up for, which is exactly the "last N sessions" the rolling
         drawdown is defined over — and it keeps the ladder independent of calendar availability (R6).
         MAX() is done in Python: the column is Decimal-as-TEXT, so SQL MAX would compare lexically.
         """
+        if sessions < 1:
+            # LIMIT 0 would silently disable the rung and SQLite reads LIMIT -1 as "no limit".
+            raise ValueError(f"weekly_drawdown sessions must be >= 1, got {sessions}")
         d = d or self._clock.today()
-        sessions = self._conn.execute(
+        dates = self._conn.execute(
             f"SELECT DISTINCT substr(at, 1, 10) AS sd FROM {self._snapshots} "
             f"WHERE substr(at, 1, 10) <= ?{self._snapshot_epoch} ORDER BY sd DESC LIMIT ?",
-            (d.isoformat(), WEEKLY_DRAWDOWN_SESSIONS),
+            (d.isoformat(), sessions),
         ).fetchall()
-        if not sessions:
+        if not dates:
             return None
-        oldest = sessions[-1]["sd"]
+        oldest = dates[-1]["sd"]
         rows = self._conn.execute(
             f"SELECT equity FROM {self._snapshots} "
             f"WHERE substr(at, 1, 10) BETWEEN ? AND ?{self._snapshot_epoch}",
@@ -422,7 +434,8 @@ class ExposureTracker:
                             action="forced_exit_close_only")
             )
 
-        peak = self.weekly_drawdown_peak()
+        sessions = int(getattr(limits, "weekly_drawdown_sessions", WEEKLY_DRAWDOWN_SESSIONS))
+        peak = self.weekly_drawdown_peak(sessions=sessions)
         if peak is not None and peak > 0:
             weekly = peak * (Decimal(1) - _pct(limits, "weekly_drawdown_pct"))
             if equity <= weekly:

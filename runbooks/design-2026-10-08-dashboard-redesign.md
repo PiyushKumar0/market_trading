@@ -306,7 +306,7 @@ values fall back to the raw value, humanised (`per_sector_exposure` → "per sec
 | notifications | Telegram messages | delivered / retrying (N) / not delivered |
 | digest fresh / stale / missing | News summary: up to date / stale / missing | stale or missing switches news-catalyst entries off for the day |
 | grade originating / context | Can start a trade / Background only | — |
-| materiality / source_domain_count / confirm_trigger / invalidation | Importance / Sources / Trigger price / Cancel price | — |
+| materiality / source_domain_count / confirm_trigger / invalidation | Importance / Sources / ~~Trigger price / Cancel price~~ | — (Trigger price, Cancel price, Stop range and Target range dropped 2026-10-11, see §15 #40) |
 | deployed capital / open positions / consecutive losses | Capital in use / Open positions / Losses in a row today | — |
 | strategies | hi52 52-week-high continuation · brk20 20-day-high breakout · ins Insider buying · cat News catalyst · cat_reversal News reversal · mom 4-week momentum · orb Opening-range breakout · rsi2 RSI-2 mean reversion · trend 20/50 EMA trend · unattributed Not linked to a strategy | — |
 | agents | intraday_analyst Intraday analyst · news_analyst News analyst · preopen_planner Pre-open planner · nightly_reviewer Nightly reviewer · weekly_researcher Weekly researcher · swing_analyst Swing analyst · reserve Reserve · sdk_smoke Health check | — |
@@ -346,7 +346,7 @@ Owner-write copy:
 | budget: tier, week, forward cap, spend vs credit, per-agent spend/alloc | kept |
 | live events: kind + payload | humanised sentence; raw payload under a details toggle |
 | notifications: everything incl. last error | kept |
-| watchlist: every column, digest age/limit | kept |
+| watchlist: every column, digest age/limit | kept, except the four retired v1 level columns (dropped 2026-10-11, §15 #40) |
 
 ## 11. Behaviour changes (beyond layout)
 
@@ -449,6 +449,7 @@ A fresh review of the fix diff itself found 12 more issues, all fixed:
 | 37 | Copy fixes. The open-positions meter counts positions only. A write with no answer may still apply, and the hours refresh either way. A flatten from `/paper reset` reads "Closed by your paper reset". The loss-at-stop hint covers sells. DG2 and DG4, the news grade and summary, the pending reset and the hours hint now match the engine | each contradicted `gate.py`, `api.ts`, `paper_risk.py`, `pipeline.py` or `governor.py` |
 | 38 | The equity chart is a slider over the sessions (`aria-valuetext` reads each one). Busy controls show a dashed outline | a focusable `img` never receives arrow keys in a screen reader; a busy switch gave no feedback for up to 15 s |
 | 39 | Fixture: reject and shrink reasons as the gate builds them, paper reasons from the same gate, no quantity on exit or adjust verdicts, the adjust's position present, routing reported only in Auto | the old rows could not occur in the engine |
+| 40 | The News watchlist drops the retired v1 cat levels (Trigger price, Cancel price, Stop range, Target range). The API still serves the fields | cat v2 enters at the reference close with a 5% disaster stop and no target (`cat.py:55-62`); nothing reads the levels, so the table showed numbers from a retired design |
 
 ## Appendix A — gate rule IDs in plain words
 

@@ -13,9 +13,13 @@ are auditable in code rather than prose:
   means "SDK defaults": a definition with
   tools enabled and no explicit allowlist is refused at load time (:func:`load_agent_defs`), and an
   options surface that exposes no tool knob at all is refused at call time. §9.1 tests both.
-- **``setting_sources=[]`` always (D10).** The service runs from the repo root (NSSM AppDirectory) and
-  must not pick up its CLAUDE.md/settings. If the options surface cannot express that, we refuse to call
-  rather than call unconstrained.
+- **Isolation from the owner's Claude Code (D10).** The service runs from the repo root (NSSM
+  AppDirectory) as the owner's own account, so the cwd alone isolates nothing. Isolation is
+  ``setting_sources=[]`` (no CLAUDE.md/settings) + :data:`ISOLATION_ENV` (cwd-keyed auto-memory off,
+  claude.ai connectors off, updater off) + strict MCP (only servers the harness passes itself). An
+  options surface that cannot express these is refused rather than called unconstrained.
+  KNOWN RESIDUAL, not a guarantee: the owner's email still reaches every call as the CLI's
+  ``session_context`` — the stored claude.ai OAuth login carries it and CLI 2.1.288 has no opt-out.
 - **Model is always explicit (D4).** ``config/agents.yaml`` names the model; :data:`MODEL_API_IDS` maps
   that name to the API id. An unknown name is a loud load-time error — never a silent SDK default
   (which is Opus on Max plans, 5× Haiku rates).
@@ -127,6 +131,16 @@ BUILTIN_TOOLS: tuple[str, ...] = (
     "Write",
 )
 
+# Sent as ``options.env`` on every call (D10). The SDK layers it OVER the inherited process env, so a
+# stray value in the service env cannot re-enable either leak. Names verified live on pinned CLI
+# 2.1.288 (2026-10-11): without them each call carried the repo's auto-memory MEMORY.md (~4.7K input
+# tokens) and fetched the account's claude.ai connector list, opening live connections to them.
+ISOLATION_ENV: dict[str, str] = {
+    "DISABLE_AUTOUPDATER": "1",                 # the pinned CLI must stay the pinned version
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",     # auto-memory is keyed by cwd; setting_sources skips it
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",     # skips the per-call connector fetch strict MCP still makes
+}
+
 MAX_SCHEMA_RETRIES = 2      # D7: schema-invalid retries at most twice => at most 3 SDK calls per run
 DEFAULT_TIMEOUT_S = 45.0    # D7 single-shot default; every enabled agent overrides it (agents.yaml timeout_s)
 
@@ -141,6 +155,7 @@ FailReason = Literal[
     "overloaded",
     "governor_blocked",
     "credit_exhausted",
+    "auth_failed",
 ]
 
 AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message) — ops idiom
@@ -309,8 +324,8 @@ def load_agent_roster(cfg: dict[str, Any]) -> RosterLoad:
 
 
 def resolve_cli_path(cfg: dict[str, Any], root: Path) -> str | None:
-    """agents.yaml ``llm.cli_path`` as an absolute path, a relative value taken from ``root`` (the
-    service's working directory is elsewhere, D10). None = the SDK's bundled CLI."""
+    """agents.yaml ``llm.cli_path`` as an absolute path, a relative value taken from ``root`` (never
+    from the process cwd). None = the SDK's bundled CLI."""
     raw = (cfg.get("llm") or {}).get("cli_path")
     if not raw:
         return None
@@ -627,6 +642,10 @@ async def _closing(stream: Any) -> Any:
                 pass
 
 
+#: Matched against the lowercased ``Type: message`` text (_classify).
+_AUTH_FAILED_RE = re.compile(r"not logged in|please run /login|\b401\b|oauth|revoked|authenticat")
+
+
 def _classify(exc: BaseException) -> tuple[FailReason, str]:
     """Map an SDK exception to a D7 failure reason (all of which resolve to no-action + alert)."""
     detail = f"{type(exc).__name__}: {exc}"
@@ -640,6 +659,11 @@ def _classify(exc: BaseException) -> tuple[FailReason, str]:
         return "overloaded", detail
     if "credit" in lowered or "billing" in lowered or "insufficient funds" in lowered:
         return "credit_exhausted", detail
+    # The CLI's stored claude.ai login is dead or revoked (2026-09-14/15 "Not logged in · Please run
+    # /login", 2026-09-25 "401 OAuth access token has been revoked"). Checked AFTER the limit and
+    # billing patterns so a limit message that mentions auth keeps its transient/DG4 handling.
+    if _AUTH_FAILED_RE.search(lowered):
+        return "auth_failed", detail
     return "sdk_error", detail
 
 
@@ -676,6 +700,12 @@ class AgentHarness:
         #: no-action and is still logged; what changes is how many times the owner's phone buzzes for
         #: one broken thing (an SDK outage used to alert on every call for hours).
         self._alert_episodes = AlertEpisodes()
+
+    def relogin_hint(self) -> str:
+        """The owner's fix for ``auth_failed``: the CLI authenticates with its own stored claude.ai
+        login, shared with every Claude Code on the service account (``claude auth login --help``)."""
+        cli = f'& "{self._cli_path}"' if self._cli_path is not None else "claude"
+        return f"re-login the engine's Claude CLI as the service user: {cli} auth login --claudeai"
 
     # ------------------------------------------------------------------ public API
     async def run_single_shot(
@@ -990,6 +1020,14 @@ class AgentHarness:
                 "claude_agent_sdk exposes no ClaudeAgentOptions/ClaudeCodeOptions — cannot set model, "
                 "setting_sources or the tool allowlist (D5/D10); refusing to call"
             )
+        # The D10 isolation knobs are probed-and-skipped for injected test classes, but the REAL SDK
+        # must carry them: a release that dropped one would silently reopen the memory/connector leak.
+        fields = _option_fields(cls)
+        if "env" not in fields or not fields & {"strict_mcp_config", "extra_args"}:
+            raise RuntimeError(
+                f"{cls.__name__} exposes no env or strict-MCP knob — cannot isolate the CLI from the "
+                "owner's auto-memory and claude.ai connectors (D10); refusing to call"
+            )
         self._options_cls = cls
         return cls
 
@@ -1016,16 +1054,26 @@ class AgentHarness:
                 "CLAUDE.md/settings from the filesystem (D10); refusing to call"
             )
 
+        # D10 isolation on every call, pinned CLI or bundled (the real SDK surface is required to take
+        # both knobs, _options_class). Strict MCP drops every server the harness did not pass itself
+        # — the account's claude.ai connectors included; the CLI-flag fallback covers an SDK that
+        # predates the typed field.
+        if "env" in fields:
+            kwargs["env"] = dict(ISOLATION_ENV)
+        if "strict_mcp_config" in fields:
+            kwargs["strict_mcp_config"] = True
+        elif "extra_args" in fields:
+            kwargs["extra_args"] = {"strict-mcp-config": None}
+
         # A pinned CLI that is missing, or an SDK that cannot take one, fails the call: falling back
         # would run whatever `claude` is on PATH (auto-updating, or absent for the service account).
-        # The pin is a full Claude Code build, so its own updater is switched off too.
+        # The pin is a full Claude Code build, so its own updater is switched off too (ISOLATION_ENV).
         if self._cli_path is not None:
             if "cli_path" not in fields or "env" not in fields:
                 raise RuntimeError(f"{cls.__name__} exposes no cli_path/env knob; refusing to call")
             if not Path(self._cli_path).is_file():
                 raise RuntimeError(f"pinned Claude Code CLI missing at {self._cli_path}; refusing to call")
             kwargs["cli_path"] = self._cli_path
-            kwargs["env"] = {"DISABLE_AUTOUPDATER": "1"}
 
         prefix = ""
         if system_prompt:
@@ -1059,7 +1107,8 @@ class AgentHarness:
         # `allowed_tools` only auto-approves; `tools` is the CLI's built-in base set, and [] removes
         # every built-in (`--tools ""`). Without it the pinned CLI offered single-shot agents Skill,
         # ToolSearch, Workflow, Cron*, SendMessage... (sdk transcripts, 2026-10-09). The §5.5 agentic
-        # set is MCP, which `tools` does not govern. StructuredOutput survives (verified 2026-10-11).
+        # set is MCP, which `tools` does not govern; under strict MCP its server must come from the
+        # harness's own options. StructuredOutput survives both (verified 2026-10-11).
         if tool_field != "tools" and "tools" in fields:
             kwargs["tools"] = []
         if "disallowed_tools" in fields:
@@ -1197,11 +1246,11 @@ class AgentHarness:
                     note="repeat inside the episode window; logged, not alerted (WO-25b)",
                 )
                 return result
+            message = f"agent {agent_def.agent_id} failed: {reason} ({detail[:200]}) call_id={call_id}"
+            if reason == "auth_failed":
+                message += f" — fix: {self.relogin_hint()}"
             try:
-                await self._alert(
-                    "error",
-                    f"agent {agent_def.agent_id} failed: {reason} ({detail[:200]}) call_id={call_id}",
-                )
+                await self._alert("error", message)
             except Exception as exc:  # noqa: BLE001 - alerting is best-effort; never masks the failure
                 _log.warning("agent_alert_failed", agent=agent_def.agent_id, error=str(exc))
         return result

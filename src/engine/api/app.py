@@ -492,7 +492,7 @@ def create_app(
     @app.get("/news/watchlist")
     async def news_watchlist(_: Owner) -> dict[str, Any]:
         """Today's §2.7 catalyst watchlist — ``originating`` vs ``context`` rows with their event type,
-        materiality and DETERMINISTIC §6.1 levels — plus the digest freshness the `cat` fail-safe ladder
+        materiality and the retired v1 levels (served as stored, not displayed) — plus the digest freshness the `cat` fail-safe ladder
         keys off (§2.7). READ-ONLY: this route mirrors the freshness label, it never gates anything.
 
         Duck-typed like every other read route: rows come off ``store`` when it exposes the news-layer

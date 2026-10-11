@@ -269,6 +269,53 @@ def test_weekly_drawdown_peak_window_is_five_sessions(conn, clock):
     assert tracker.evaluate_floors(FloorLimits()) == []
 
 
+def _six_sessions(conn) -> None:
+    for d, eq in [("2026-06-09", "25000"), ("2026-06-10", "21000"), ("2026-06-11", "20800"),
+                  ("2026-06-12", "20600"), ("2026-06-15", "20400"), ("2026-06-16", "20200")]:
+        _snapshot(conn, f"{d}T15:25:00+05:30", eq)
+
+
+def test_weekly_drawdown_window_follows_the_limits_object(conn, clock):
+    """``evaluate_floors`` takes the window from the limits object (limits.yaml ``rolling_sessions``
+    via ``floor_limits_from``), not the module constant."""
+    _six_sessions(conn)
+    _equity_at(conn, Decimal("20000"))
+    tracker = ExposureTracker(conn, clock, CAPITAL)
+    assert tracker.weekly_drawdown_peak(sessions=2) == Decimal("20400")
+    assert tracker.weekly_drawdown_peak(sessions=5) == Decimal("21000")
+    assert tracker.weekly_drawdown_peak(sessions=6) == Decimal("25000")
+    # 6 sessions reach the 25,000 peak: 20,000 ≤ 25,000 × 0.92 = 23,000 ⇒ the rung trips.
+    breaches = tracker.evaluate_floors(FloorLimits(weekly_drawdown_sessions=6))
+    assert [b.rung for b in breaches] == ["weekly_drawdown"]
+    assert breaches[0].threshold == Decimal("23000")
+    # 5 (the signed value) and 2 both stay below 8%.
+    assert tracker.evaluate_floors(FloorLimits(weekly_drawdown_sessions=5)) == []
+    assert tracker.evaluate_floors(FloorLimits(weekly_drawdown_sessions=2)) == []
+
+
+def test_floor_limits_window_default_duck_typing_and_bound(conn, clock):
+    from types import SimpleNamespace
+
+    from pydantic import ValidationError
+
+    from engine.risk.exposure import WEEKLY_DRAWDOWN_SESSIONS
+
+    assert FloorLimits().weekly_drawdown_sessions == WEEKLY_DRAWDOWN_SESSIONS == 5
+    with pytest.raises(ValidationError):
+        FloorLimits(weekly_drawdown_sessions=0)
+    _six_sessions(conn)
+    _equity_at(conn, Decimal("20000"))
+    tracker = ExposureTracker(conn, clock, CAPITAL)
+    # A duck-typed limits object without the attribute gets the 5-session default.
+    duck = SimpleNamespace(weekly_drawdown_pct=Decimal("0.08"), equity_floor_rung_pct=Decimal("0.10"),
+                           cumulative_floor_pct=Decimal("0.15"), capital_base=None)
+    assert tracker.evaluate_floors(duck) == tracker.evaluate_floors(FloorLimits()) == []
+    # A duck-typed 0 cannot silently disable the rung (LIMIT 0) or unbound it (LIMIT -1).
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="sessions must be >= 1"):
+            tracker.evaluate_floors(SimpleNamespace(**vars(duck), weekly_drawdown_sessions=bad))
+
+
 def test_weekly_drawdown_breach(conn, clock):
     for d, eq in [("2026-06-10", "22000"), ("2026-06-11", "21500"), ("2026-06-12", "21000"),
                   ("2026-06-15", "20800"), ("2026-06-16", "20400")]:

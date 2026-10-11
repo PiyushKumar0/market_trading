@@ -123,13 +123,15 @@ _log = get_logger("engine.marketdata.bar_builder")
 BAR_1M_TOPIC = "bar.1m"
 
 #: NSE continuous-session open (A14, pinned): ticks strictly before this wall time are pre-open.
-#: Constructor-overridable, but the composition root passes no override, so the regular-session
-#: constants apply every day; special sessions (muhurat) are not wired.
+#: Constructor-overridable, but the composition root passes no override and per-day bounds are not
+#: wired. Right on every regular day, and every special session (muhurat) is excluded by the live
+#: calendar (include_special=False, 2026-10-11). Shortened sessions, however, stay trading days:
+#: none is configured today, but wire per-day bounds before adding one.
 SESSION_OPEN_IST = time(9, 15)
 
 #: NSE continuous-session close (WO-5): ticks strictly AFTER this wall time are post-close and build
 #: no bar. Same trust model as ``SESSION_OPEN_IST`` — constructor-overridable, unwired in
-#: production, so the regular-session constant applies every day.
+#: production; right on every regular day (shortened sessions need per-day bounds first).
 SESSION_CLOSE_IST = time(15, 30)
 
 #: Finalize grace after minute close, seconds (§4.4 job 1, pinned "~5 s" — a constant, not a knob).
@@ -251,7 +253,9 @@ class BarBuilder:
     session_close:
         The day's continuous-session close (default 15:30 IST regular session); ticks strictly after
         it build no bar. Same trust model as ``session_open``: the composition root passes no
-        override, so the plan-pinned constants stand every day (special sessions not wired).
+        override, so the plan-pinned constants stand. Per-day bounds are not wired: the live calendar
+        excludes special sessions (include_special=False, 2026-10-11) but shortened sessions stay
+        trading days, so wire per-day bounds before adding any (none configured today).
     grace_s:
         Finalize grace after minute close (plan-pinned ~5 s; constructor param for tests only).
     persist_raw_ticks:

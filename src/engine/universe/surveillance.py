@@ -14,10 +14,14 @@ refuses anything outside the eligible universe. No production code reads ``uncon
 there is no direct gate seam. A failed source can therefore never *shrink* the exclusion set:
 yesterday's flagged symbols stay excluded, and they are additionally unconfirmed.
 
-Held-position migration (A8): "a held position migrated INTO a surveillance list" must alert
-immediately. OPEN GAP (plan §2.6 step 5 / §4.4 job 5): that alert is unimplemented. The diff seam is
-:meth:`SurveillanceLists.new_entries` (today's flagged minus a previous snapshot's); nothing calls it
-yet. Positions live in ``engine.oms.positions``.
+Held-position migration (A8, plan §2.6 step 5 / §4.4 job 5): every refresh alerts the owner, through
+``notify``, for each OPEN real position (the injected ``held_positions``) whose symbol is on a list.
+The alert is state-driven, not diff-driven: it fires on the first refresh that finds a held symbol
+listed, and the catalog ``dedupe_key`` (position, list) makes it once-only across restarts. The
+per-list diff (:meth:`SurveillanceLists.new_listings`) against the previous snapshot — the in-process
+one, else the on-disk cache as loaded, which spans any offline gap — only sets the wording. So a
+cache advanced by another writer, a missing cache, or a position opened on an already-listed symbol
+still alerts. Without ``held_positions`` (``scripts/build_universe.py``) nothing is sent.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from __future__ import annotations
 import csv
 import io
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -36,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from engine.core.clock import Clock
 from engine.core.log import get_logger
 from engine.core.nse_http import nse_get
-from engine.notify.catalog import CatalogMessage, MessageKind
+from engine.notify.catalog import CatalogMessage, MessageKind, surveillance_migration
 
 _log = get_logger("engine.universe.surveillance")
 
@@ -57,6 +61,8 @@ NSE_T2T_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"  
 _T2T_SERIES = frozenset({"BE", "BZ"})
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
+#: OPEN real positions as ``(position_id, symbol, qty)`` — paper is never passed in (paper plan D4).
+HeldFn = Callable[[], Sequence[tuple[str, str, int]]]
 
 #: Universe-rule sources (§3.2.4 pins these four) in canonical order; ``sms`` is carried separately.
 SURVEILLANCE_KEYS: tuple[str, ...] = ("gsm", "asm", "t2t", "esm")
@@ -98,9 +104,13 @@ class SurveillanceLists(BaseModel):
         return [f"surveillance_{key}" for key in SURVEILLANCE_KEYS if sym in getattr(self, key)]
 
     def new_entries(self, previous: SurveillanceLists) -> frozenset[str]:
-        """Symbols newly flagged vs ``previous`` — the A8 held-position-migration diff input
-        (OPEN GAP: no caller intersects it with held symbols or alerts; see the module docstring)."""
+        """Symbols newly flagged vs ``previous`` on the UNION of the lists — a move from one list to
+        another (ASM→GSM) is not in it; the A8 alert uses :meth:`new_listings`."""
         return frozenset(self.flagged() - previous.flagged())
+
+    def new_listings(self, previous: SurveillanceLists) -> dict[str, frozenset[str]]:
+        """Per list, symbols on it now and not on ``previous``'s copy (A8 wording input)."""
+        return {key: frozenset(getattr(self, key) - getattr(previous, key)) for key in SURVEILLANCE_KEYS}
 
 
 def _symbols_from_json(payload: Any) -> set[str]:
@@ -167,6 +177,9 @@ class SurveillanceIngest:
         source — the "yesterday's lists" reused per-source on failure, surviving restarts.
     notify:
         Optional owner-alert sink; any degraded source alerts through it (critical — A8 safety).
+    held_positions:
+        Optional OPEN real positions reader; each refresh alerts per held symbol on a list (A8, see
+        the module docstring). ``None`` = no held-position alert.
     """
 
     def __init__(
@@ -176,14 +189,19 @@ class SurveillanceIngest:
         cache_path: str | Path,
         *,
         notify: NotifySink | None = None,
+        held_positions: HeldFn | None = None,
         request_timeout_s: float = 15.0,
     ) -> None:
         self._clock = clock
         self._http = http
         self._cache_path = Path(cache_path)
         self._notify = notify
+        self._held_positions = held_positions
         self._timeout = float(request_timeout_s)
         self._current: SurveillanceLists | None = None
+        # Per-list date of the list ``_current`` actually holds (the cached copy's date for a failed
+        # source), the dating of the next refresh's in-process comparison.
+        self._current_used_as_of: dict[str, str | None] = {}
 
     async def current(self) -> SurveillanceLists:
         """The latest refreshed lists, refreshing once if never refreshed this process (§2.6)."""
@@ -199,10 +217,20 @@ class SurveillanceIngest:
         """
         today = self._clock.today()
         cache = self._load_cache()
+        # Captured before the fetch loop replaces cache entries: the over-the-gap comparison. Named
+        # ``prior`` because the failure branch below binds ``previous`` to one list.
+        try:
+            prior, prior_as_of = self._previous_snapshot(cache, today)
+        except Exception:  # noqa: BLE001 - E5: wording input only; every list then reads unknown
+            _log.exception("surveillance_previous_snapshot_failed")
+            prior, prior_as_of = SurveillanceLists(as_of=today), dict.fromkeys(SURVEILLANCE_KEYS)
         results: dict[str, frozenset[str]] = {}
         degraded: list[str] = []
         unconfirmed: set[str] = set()
         equity_master: frozenset[str] = frozenset()
+        # Date of the list each result actually is: today for a fresh download, the reused cache
+        # entry's date for a failed one (None = no dated copy).
+        used_as_of: dict[str, str | None] = dict.fromkeys(SURVEILLANCE_KEYS, today.isoformat())
 
         for key, coro in (
             ("gsm", self._fetch_json_symbols(NSE_GSM_URL)),
@@ -234,6 +262,9 @@ class SurveillanceIngest:
                 )
                 results[key] = previous
                 degraded.append(key)
+                entry = cache.get(key)
+                stamp = entry.get("as_of") if isinstance(entry, dict) else None
+                used_as_of[key] = stamp if isinstance(stamp, str) and stamp else None
                 unconfirmed |= previous
                 if key == "t2t":
                     equity_master = frozenset(cache.get("equity_master", {}).get("symbols") or [])
@@ -251,6 +282,7 @@ class SurveillanceIngest:
             equity_master=equity_master,
         )
         self._current = lists
+        self._current_used_as_of = used_as_of
         _log.info(
             "surveillance_refreshed",
             gsm=len(lists.gsm), asm=len(lists.asm), t2t=len(lists.t2t), esm=len(lists.esm),
@@ -258,7 +290,78 @@ class SurveillanceIngest:
         )
         if degraded:
             await self._alert(degraded=degraded, unconfirmed=len(unconfirmed))
+        try:
+            await self._alert_held_listings(lists, prior, prior_as_of, used_as_of)
+        except Exception:  # noqa: BLE001 - E5: a SAFETY_CRITICAL job's refresh never raises
+            _log.exception("surveillance_migration_check_failed")
         return lists
+
+    def _previous_snapshot(
+        self, cache: dict[str, Any], today: date
+    ) -> tuple[SurveillanceLists, dict[str, str | None]]:
+        """The snapshot this refresh is compared against, with each list's date (``None`` = no
+        earlier copy of that list, so its status is unknown). In-process snapshot first; after a
+        restart the loaded cache, whose per-list dates span any offline gap."""
+        cur = self._current
+        if cur is not None:
+            # Each list's own date: a failed source reused the cached copy, so naming ``cur.as_of``
+            # would date a list that was never downloaded. A failed source with nothing to reuse was
+            # never known (None), not known-empty.
+            return cur, {key: None if key in cur.degraded_sources and not getattr(cur, key)
+                         else self._current_used_as_of.get(key, cur.as_of.isoformat())
+                         for key in SURVEILLANCE_KEYS}
+        lists: dict[str, frozenset[str]] = {}
+        as_of: dict[str, str | None] = {}
+        for key in SURVEILLANCE_KEYS:
+            entry = cache.get(key)
+            symbols = entry.get("symbols") if isinstance(entry, dict) else None
+            stamp = entry.get("as_of") if isinstance(entry, dict) else None
+            if not isinstance(symbols, list) or not isinstance(stamp, str) or not stamp:
+                as_of[key] = None
+                continue
+            lists[key] = frozenset(str(s).upper() for s in symbols)
+            as_of[key] = stamp
+        # ``as_of`` here is a placeholder: the per-list dates above are the comparison's real dates.
+        return SurveillanceLists(as_of=today, **lists), as_of
+
+    async def _alert_held_listings(
+        self, lists: SurveillanceLists, previous: SurveillanceLists, previous_as_of: dict[str, str | None],
+        used_as_of: dict[str, str | None],
+    ) -> None:
+        """One critical alert per (held position, list it is on) — A8. Repeats every refresh by
+        design; the journal's ``dedupe_key`` index delivers each (position, list) once."""
+        if self._held_positions is None:
+            return
+        held = self._held_positions()
+        if not held:
+            return
+        new = lists.new_listings(previous)
+        for position_id, symbol, qty in held:
+            sym = str(symbol).upper()
+            for key in SURVEILLANCE_KEYS:
+                if sym not in getattr(lists, key):
+                    continue
+                prev_as_of = previous_as_of.get(key)
+                unconfirmed = key in lists.degraded_sources
+                if unconfirmed and prev_as_of == used_as_of.get(key):
+                    # Both sides are the same reused copy: a list compared with itself says nothing.
+                    prev_as_of = None
+                status = "unknown" if prev_as_of is None else ("new" if sym in new[key] else "listed")
+                _log.warning(
+                    "surveillance_held_listed", position_id=position_id, symbol=sym, list=key,
+                    status=status, previous_as_of=prev_as_of, unconfirmed=unconfirmed,
+                )
+                if self._notify is None:
+                    continue
+                msg = surveillance_migration(
+                    symbol=sym, position_id=str(position_id), qty=int(qty or 0), list_key=key,
+                    as_of=lists.as_of.isoformat(), previous_as_of=prev_as_of, status=status,
+                    unconfirmed=unconfirmed, list_as_of=used_as_of.get(key),
+                )
+                try:
+                    await self._notify(msg)
+                except Exception:  # noqa: BLE001 - one failed send must not skip the other holdings
+                    _log.exception("surveillance_migration_notify_failed", position_id=position_id, list=key)
 
     # ------------------------------------------------------------------ fetchers
     async def _fetch_json_symbols(self, url: str) -> set[str]:

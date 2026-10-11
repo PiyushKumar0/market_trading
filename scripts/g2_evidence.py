@@ -248,8 +248,8 @@ def criterion_schema(conn, d_from: date, d_to: date) -> dict[str, Any]:
                 si = n
             elif fail_reason == "timeout":
                 timeouts = n
-            elif fail_reason == "sdk_error":
-                sdk_err = n
+            elif fail_reason in ("sdk_error", "auth_failed"):   # auth split out of sdk_error 2026-10-11
+                sdk_err += n
         returned = total - timeouts - sdk_err            # calls that actually produced text
         out["agents"][agent] = {
             "calls": total, "schema_invalid": si, "timeouts": timeouts, "sdk_errors": sdk_err,

@@ -221,6 +221,12 @@ class MessageKind(StrEnum):
     """The paper path itself failed: a paper position lost its protection, or paper construction
     failed at boot. Always ``critical``; halts, voids and reconcile mismatches are not sent."""
 
+    SURVEILLANCE_MIGRATION = "surveillance_migration"
+    """An OPEN real position's symbol is on an exchange surveillance list (GSM/ASM/T2T/ESM) — A8,
+    §4.4 job 5 "held-position migrations alert immediately", §2.6 step 5 (diff over the gap), §10.3
+    ``SURVEILLANCE_MIGRATION(symbol)``. Raised by every ``SurveillanceIngest.refresh``; the journal's
+    ``dedupe_key`` delivers it once per (position, list). Always ``critical``; alert-only."""
+
 
 class CatalogMessage(BaseModel):
     """A single rendered, typed owner notification consumed by ``TelegramBot.send`` (§3.2.11).
@@ -1230,6 +1236,80 @@ def paper_alert(key: str, message: str) -> CatalogMessage:
         severity="critical",
         data={"is_paper": True, "key": key},
         dedupe_key=f"paper_alert:{key}",
+    )
+
+
+_SURVEILLANCE_LIST_NAMES: dict[str, str] = {
+    "gsm": "Graded Surveillance Measure",
+    "asm": "Additional Surveillance Measure",
+    "t2t": "trade-to-trade (series BE/BZ)",
+    "esm": "Enhanced Surveillance Measure",
+}
+
+
+def surveillance_migration(
+    *,
+    symbol: str,
+    position_id: str,
+    qty: int,
+    list_key: str,
+    as_of: str,
+    previous_as_of: str | None,
+    status: Literal["new", "listed", "unknown"],
+    unconfirmed: bool,
+    list_as_of: str | None = None,
+) -> CatalogMessage:
+    """A held REAL position is on surveillance list ``list_key`` (A8, §4.4 job 5).
+
+    ``status``: ``new`` = absent from the ``previous_as_of`` list (over an offline gap the two dates
+    show the span); ``listed`` = already on it; ``unknown`` = no earlier list to compare. The
+    dedupe key is per (position, list), not per date: the journal's unique index sends it once for
+    the life of the position whatever the wording, so a re-sent ``listed`` is dropped.
+
+    ``list_as_of`` is the date of the list actually used. When ``unconfirmed`` (today's download
+    failed) that is the cached copy's date and the wording names it; it is never dated ``as_of``
+    (today). Default ``None`` = ``as_of`` for a confirmed list."""
+    short = list_key.upper()
+    long_name = _SURVEILLANCE_LIST_NAMES.get(list_key, short)
+    lead = f"Your open position {symbol} x{qty}"
+    used = list_as_of if list_as_of is not None else (None if unconfirmed else as_of)
+    if unconfirmed:
+        where = f"on the last good {short} list ({used or 'date unknown'})"
+    else:
+        where = f"on the {long_name} list ({used})"
+    if status == "new":
+        title = f"{symbol} is now on the NSE {short} list (you hold it)"
+        if previous_as_of is not None and previous_as_of == used:
+            # Same-day re-refresh or restart: "on the D list and was not on the D list" is nonsense.
+            now_on = where if unconfirmed else f"on the {short} list now"
+            body = f"{lead} entered the {long_name} list: it is {now_on} and was not on it earlier on {used}."
+        else:
+            now_on = where if unconfirmed else f"on the {used} list"
+            body = (f"{lead} entered the {long_name} list: it is {now_on} and was not on the "
+                    f"{previous_as_of} list.")
+    elif status == "listed":
+        title = f"{symbol} is on the NSE {short} list (you hold it)"
+        body = f"{lead} is {where}; it was already listed on {previous_as_of}."
+    else:
+        title = f"{symbol} is on the NSE {short} list (you hold it)"
+        body = f"{lead} is {where}; there is no earlier list to compare against."
+    if unconfirmed:
+        body += f" Today's {short} download failed, so the status is unconfirmed."
+    body += (
+        f" New entries in {symbol} are refused while it is listed. The platform does not exit or change "
+        "this position. Check its margin and settlement terms in Kite."
+    )
+    return CatalogMessage(
+        kind=MessageKind.SURVEILLANCE_MIGRATION,
+        title=title,
+        body=body,
+        severity="critical",
+        data={
+            "symbol": symbol, "position_id": position_id, "qty": qty, "list_key": list_key,
+            "as_of": as_of, "previous_as_of": previous_as_of, "status": status, "unconfirmed": unconfirmed,
+            "list_as_of": used,
+        },
+        dedupe_key=f"surveillance_migration:{position_id}:{list_key}",
     )
 
 

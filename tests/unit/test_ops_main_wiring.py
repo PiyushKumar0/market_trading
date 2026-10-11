@@ -20,23 +20,30 @@ import inspect
 import json
 import logging
 import re
+import textwrap
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 import yaml
+from kiteconnect.exceptions import TokenException
 
 from engine.broker.instruments import InstrumentStore
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import Settings, config_dir, load_settings
+from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState
-from engine.core.types import TradeWindow
+from engine.core.migrations import apply_migrations
+from engine.core.types import Bar, TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob
+from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
 from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult
+from engine.notify.catalog import MessageKind
 from engine.ops import main as opsmain
 from engine.ops.jobs import (
     JOB_BHAVCOPY,
@@ -246,10 +253,12 @@ def test_registry_covers_every_phase1_job() -> None:
     # Phase-1 fns only ⇒ the Phase-2 specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 22   # +4 §2.8 filings, +1 WO-7 tick compaction,
+    assert len(reg) == len(PHASE1_JOB_IDS) == 24   # +4 §2.8 filings, +1 WO-7 tick compaction,
                                                    # +1 §6.1 ins_crossings (2026-08-17),
                                                    # +1 §2.8.4 results_line_items, +1 isin_map,
-                                                   # +1 feed_freshness (2026-09-24)
+                                                   # +1 feed_freshness (2026-09-24),
+                                                   # +1 claude_login_check (2026-10-11),
+                                                   # +1 §10.5 market_backup (2026-10-11)
 
 
 def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
@@ -327,12 +336,19 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_RESULTS_LINE_ITEMS: (JobClass.RUN_LATEST, time(19, 30)),
         opsmain.JOB_ISIN_MAP:          (JobClass.RUN_LATEST, time(18, 40)),
         opsmain.JOB_FEED_FRESHNESS:    (JobClass.RUN_LATEST, time(21, 30)),
+        # Stored claude.ai login health: before the 08:25 pre-open chain. Overnight news scoring and
+        # early hydration (~06:30) can hit a dead login first; their auth_failed alerts carry the hint.
+        opsmain.JOB_CLAUDE_LOGIN:      (JobClass.RUN_LATEST, time(8, 10)),
         # WO-7 storage housekeeping: post-EOD, after the nightly review's 21:00 slot.
         opsmain.JOB_TICK_COMPACT:      (JobClass.DATE_KEYED, time(22, 30)),
+        # §10.5 DuckDB export (2026-10-11): after the 21:00 SQLite backup, before compaction.
+        opsmain.JOB_MARKET_BACKUP:     (JobClass.RUN_LATEST, time(22, 0)),
     }
     for jid, (cls, at) in expected.items():
         assert by_id[jid].job_class == cls, jid
         assert by_id[jid].at == at, jid
+    assert opsmain.JOB_MARKET_BACKUP in PHASE1_JOB_IDS
+    assert opsmain.JOB_MARKET_BACKUP not in POST_ARM_JOB_IDS
 
     # Write→read dependencies as RELATIONS, not just literals — the 2026-07-24 reschedule moved
     # deals/corp_actions past features' 18:50 and the literal-only table above stayed green while
@@ -351,6 +367,7 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
     assert max(by_id[j].at for j in (opsmain.JOB_DEALS, opsmain.JOB_FEATURES, opsmain.JOB_CORP_ACTIONS)) \
         < by_id[opsmain.JOB_FEED_FRESHNESS].at
     assert opsmain.JOB_FEED_FRESHNESS in opsmain.POST_ARM_JOB_IDS
+    assert by_id[opsmain.JOB_CLAUDE_LOGIN].at < by_id[opsmain.JOB_NEWS_CHAIN].at
 
 
 def test_instruments_runs_before_surveillance_in_dependency_order() -> None:
@@ -429,10 +446,11 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
 
 
 #: The 9 composition-root closures forwarded (2026-08-13) so an ok-bearing job result reaches
-#: JobSpec.run instead of being discarded to None (the bhavcopy seam above, closed for 8 more jobs).
+#: JobSpec.run instead of being discarded to None (the bhavcopy seam above, closed for 8 more jobs),
+#: plus job_reconcile (2026-10-11: a token abort must sink the watermark, not record success).
 _FORWARDING_WRAPPERS: tuple[str, ...] = (
     "job_bhavcopy", "job_earnings", "job_corp_actions", "job_sector_map", "job_filings_shp",
-    "job_deals", "job_filings_pit", "job_filings_pit_fresh", "job_filings_results",
+    "job_deals", "job_filings_pit", "job_filings_pit_fresh", "job_filings_results", "job_reconcile",
 )
 
 
@@ -468,6 +486,135 @@ def test_ok_bearing_wrapper_forwards_return_value(wrapper_name: str) -> None:
     src = inspect.getsource(opsmain.run)
     body = _wrapper_body(src, wrapper_name)
     assert "return await" in body, f"{wrapper_name} does not forward its job's return value"
+
+
+# --------------------------------------------------------------------------- reconcile retry (2026-10-11)
+_RECONCILE_TOKENS = {"A": 1, "B": 2, "C": 3}
+
+
+def _real_wrapper(wrapper_name: str, namespace: dict):
+    """Compile one composition-root closure from ``engine.ops.main:run``'s REAL source, with its free
+    variables supplied by ``namespace`` — the seam itself, not a hand-kept mirror that can drift."""
+    body = _wrapper_body(inspect.getsource(opsmain.run), wrapper_name)
+    exec(textwrap.dedent("    " + body), namespace)
+    return namespace[wrapper_name]
+
+
+class _ReconcileKite:
+    """Official 09:15 candle per call; raises TokenException once more than ``dead_after`` calls
+    have been made (``None`` = healthy). ``calls`` records the instrument tokens fetched."""
+
+    def __init__(self, dead_after: int | None = None) -> None:
+        self.dead_after = dead_after
+        self.calls: list[int] = []
+
+    async def historical(self, token, frm, to, interval):
+        self.calls.append(token)
+        if self.dead_after is not None and len(self.calls) > self.dead_after:
+            raise TokenException("Incorrect api_key or access_token")
+        minute = datetime.combine(frm.date(), time(9, 15), tzinfo=IST)
+        return [{"date": minute, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 100}]
+
+
+def _reconcile_closure(market_store, clock, kite, session):
+    d = clock.today()
+    market_store.insert_bars_1m([
+        Bar(symbol=s, ts_minute=datetime.combine(d, time(9, 15), tzinfo=IST), open=Decimal("10"),
+            high=Decimal("10"), low=Decimal("10"), close=Decimal("10"), volume=100, src="self")
+        for s in _RECONCILE_TOKENS
+    ])
+    job = ReconcileJob(market_store, kite, clock, Settings(), token_for_symbol=_RECONCILE_TOKENS.get)
+    return _real_wrapper("job_reconcile", {
+        "reconcile": job, "session": session, "_log": opsmain._log, "ReconcileReport": ReconcileReport,
+    })
+
+
+def _reconcile_status(conn, d: date) -> str | None:
+    row = conn.execute(
+        "SELECT status FROM job_runs WHERE job_id=? AND run_for_date=?",
+        (opsmain.JOB_RECONCILE, d.isoformat()),
+    ).fetchone()
+    return row["status"] if row else None
+
+
+def test_reconcile_wrapper_gates_on_session_token() -> None:
+    body = _wrapper_body(inspect.getsource(opsmain.run), "job_reconcile")
+    assert 'ReconcileReport(d=d, ok=False, aborted_reason="no_valid_token")' in body
+    assert body.index("session.token_valid()") < body.index("reconcile.run(")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_composition_root_closure_records_failed_on_token_abort(
+    market_store, clock, calendar, conn
+) -> None:
+    """The live gap: job_reconcile discarded ReconcileJob.run's report, so a token abort recorded a
+    SUCCESS watermark and the rest of the day was never reconciled. Through the real closure, the
+    real registry and the real _scheduled_runner, the abort must record 'failed'; the next catch-up
+    pass after re-login retries the day and fetches ONLY the symbols the abort left."""
+    kite = _ReconcileKite(dead_after=1)
+    session = SimpleNamespace(token_valid=lambda: True)
+    fns = _all_noop_fns()
+    fns[opsmain.JOB_RECONCILE] = _reconcile_closure(market_store, clock, kite, session)
+    registry = build_job_registry(load_settings(), fns)
+    spec = next(s for s in registry.specs() if s.job_id == opsmain.JOB_RECONCILE)
+    today = clock.today()
+
+    await _scheduled_runner(spec, CatchUpRunner(conn, clock, calendar), clock)()
+    assert _reconcile_status(conn, today) == "failed"
+    assert [r["symbol"] for r in market_store.get_reconcile_log(today)] == ["A"]
+
+    kite.dead_after, kite.calls = None, []
+    after_eod = Clock(time_source=lambda: datetime.combine(today, time(16, 0), tzinfo=IST))
+    sweep = CatchUpRunner(
+        conn, after_eod, calendar, registry.select(lambda s: s.job_id == opsmain.JOB_RECONCILE),
+    )
+    result = await sweep.catch_up(scope=CatchUpScope.ALL)
+    assert result.jobs_caught_up == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
+    assert kite.calls == [_RECONCILE_TOKENS["B"], _RECONCILE_TOKENS["C"]]
+    assert _reconcile_status(conn, today) == "success"
+    assert all(r["bars_compared"] == 1 for r in market_store.get_reconcile_log(today))
+
+
+@pytest.mark.asyncio
+async def test_reconcile_dead_token_gate_no_broker_call_no_freeze_no_alert_storm(
+    market_store, clock, calendar, conn
+) -> None:
+    """A known-dead token: zero broker calls per sweep, the day stays 'failed' (DATE_KEYED never
+    freezes), the CATCHUP_REPORT goes out once for the unchanged failure, and the first sweep after
+    re-login reconciles the whole day."""
+    kite = _ReconcileKite()
+    valid = {"token": False}
+    session = SimpleNamespace(token_valid=lambda: valid["token"])
+    fns = _all_noop_fns()
+    fns[opsmain.JOB_RECONCILE] = _reconcile_closure(market_store, clock, kite, session)
+    registry = build_job_registry(load_settings(), fns).select(lambda s: s.job_id == opsmain.JOB_RECONCILE)
+    today = clock.today()
+    after_eod = Clock(time_source=lambda: datetime.combine(today, time(16, 0), tzinfo=IST))
+    freezes: list[str] = []
+    sent: list = []
+
+    async def freeze(reason: str) -> None:
+        freezes.append(reason)
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    sweep = CatchUpRunner(conn, after_eod, calendar, registry, freeze=freeze, notify=notify)
+    for _ in range(2):
+        result = await sweep.catch_up(scope=CatchUpScope.ALL)
+        assert result.jobs_failed == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
+        assert result.frozen_reasons == []
+    assert kite.calls == []
+    assert freezes == []
+    assert len(sent) == 1                                     # unchanged failure set is not re-sent
+    assert _reconcile_status(conn, today) == "failed"
+    assert market_store.get_reconcile_log(today) == []
+
+    valid["token"] = True
+    result = await sweep.catch_up(scope=CatchUpScope.ALL)
+    assert result.jobs_caught_up == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
+    assert kite.calls == list(_RECONCILE_TOKENS.values())
+    assert _reconcile_status(conn, today) == "success"
 
 
 # --------------------------------------------------------------------------- scheduled_runner watermark
@@ -726,6 +873,27 @@ def test_optional_interval_ticks_are_armed_at_their_cadence_only_when_wired(
 def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built() -> None:
     src = inspect.getsource(opsmain.run)
     assert "paper_tick=paper.runtime.paper_tick if paper is not None else None" in src
+
+
+def test_clusterer_and_digest_read_the_one_cat_envelope_row() -> None:
+    """The clusterer window and the digest horizon are the SAME envelope row
+    ``cat.max_event_age_days`` off the same boot ``envelope_state`` read (the settings key is gone)."""
+    from engine.datafeeds.news_pipeline import load_cat_params
+
+    src = inspect.getsource(opsmain.run)
+    assert "settings.cat.max_event_age_days" not in src
+    assert src.count('FROM envelope_state").fetchall()') == 1
+    read = src.index('FROM envelope_state").fetchall()')
+    params = src.index("_cat_params = load_cat_params(_envelope_state or None)")
+    clusterer = src.index("clusterer = HeadlineClusterer(")
+    assert read < params < clusterer
+    assert 'max_event_age_days=int(_cat_params["max_event_age_days"])' in src[clusterer:]
+    digest = "CatalystDigestJob(store, clock, calendar, protected_store, envelope=_envelope_state or None)"
+    assert digest in src
+    # No envelope_state row today ⇒ the envelope.yaml default, which equals the retired settings 2.
+    assert int(load_cat_params(None)["max_event_age_days"]) == 2
+    # A leftover settings.yaml key is ignored (CatCfg/Settings keep pydantic's extra="ignore").
+    assert not hasattr(Settings.model_validate({"cat": {"max_event_age_days": 2}}).cat, "max_event_age_days")
 
 
 def test_nse_announcements_job_is_not_armed_when_disabled(clock, calendar) -> None:
@@ -2124,7 +2292,7 @@ async def test_in_session_the_lane_starts_nothing_and_logs_it(conn, calendar, ca
     assert events == []
     skips = [r for r in caplog.records if r.getMessage() == "post_arm_skipped_in_session"]
     assert len(skips) == 1
-    assert skips[0].job_id == opsmain.JOB_TICK_COMPACT and skips[0].path == "sweep"
+    assert skips[0].job_ids == sorted(opsmain.LANE_JOB_IDS) and skips[0].path == "sweep"
     assert skips[0].now.startswith("2026-06-17T11:26")
     # A veto is not a watermark: nothing is recorded, so the first pass after the window owns it.
     assert conn.execute(
@@ -2366,10 +2534,327 @@ def test_run_gives_tick_compact_its_own_lane() -> None:
     runner never holds compaction, the lane runner holds nothing else, the lane starts behind the
     post-arm one-shot, and shutdown cancels it."""
     src = inspect.getsource(opsmain.run)
-    assert "registry.select(lambda s: s.job_id != JOB_TICK_COMPACT)" in src
-    assert "registry.select(lambda s: s.job_id == JOB_TICK_COMPACT)" in src
+    assert "registry.select(lambda s: s.job_id not in LANE_JOB_IDS)" in src
+    assert "registry.select(lambda s: s.job_id in LANE_JOB_IDS)" in src
     assert src.index("start_scheduler_and_fire_post_arm(") < src.index('compaction_lane.spawn("post_arm")')
     assert "await compaction_lane.cancel()" in src
+
+
+def test_market_backup_runs_in_compaction_lane_only(conn, clock, calendar) -> None:
+    """§10.5 DuckDB export (2026-10-11): a lane job — never in the boot catch-up (the main runner never
+    holds it), never on the stop path (the shutdown hook is the SQLite snapshot alone), and its 22:00
+    fire starts a lane pass, so it never overlaps the compaction it shares the lane with."""
+    assert opsmain.LANE_JOB_IDS == {opsmain.JOB_TICK_COMPACT, opsmain.JOB_MARKET_BACKUP}
+    registry = build_job_registry(load_settings(), _all_noop_fns())
+    main_ids = {s.job_id for s in registry.select(lambda s: s.job_id not in opsmain.LANE_JOB_IDS).specs()}
+    assert not main_ids & opsmain.LANE_JOB_IDS and main_ids
+    src = inspect.getsource(opsmain.run)
+    assert "_arm_registry_jobs(scheduler, registry, catch_up, clock, lane=compaction_lane)" in src
+    assert "interrupt=store.interrupt_export" in src
+    hook = src[src.index("async def backup_hook("):src.index("lifecycle = SessionLifecycle(")]
+    assert "_snapshot_backup(" in hook and "market" not in hook and "export" not in hook
+    # The job wrapper forwards the ok-bearing result (unfinished / ok=False must reach the runner).
+    body = _wrapper_body(src, "job_market_backup")
+    assert "return await _market_backup(" in body
+    # One retry hold per process, shared by every lane pass (the export's 6 h hold after a failure).
+    assert "retry=market_backup_retry" in body and src.count("MarketBackupRetry()") == 1
+
+
+class _SpawnLane:
+    def __init__(self) -> None:
+        self.paths: list[str] = []
+        self.quiet: list[frozenset[str]] = []
+
+    def spawn(self, path: str, *, quiet: frozenset[str] = frozenset()):
+        self.paths.append(path)
+        self.quiet.append(quiet)
+        return object()
+
+
+@pytest.mark.asyncio
+async def test_lane_job_fires_start_a_lane_pass_and_record_nothing_themselves(conn, clock, calendar) -> None:
+    settings = load_settings()
+    ran: list[str] = []
+
+    async def other() -> None:
+        ran.append("universe")
+
+    fns = _all_noop_fns() | {JOB_UNIVERSE: other}
+    reg = build_job_registry(settings, fns)
+    catch_up = CatchUpRunner(conn, clock, calendar, reg)
+    sched = Scheduler(clock, calendar)
+    lane = _SpawnLane()
+
+    _arm_registry_jobs(sched, reg, catch_up, clock, lane=lane)
+
+    for job_id in sorted(opsmain.LANE_JOB_IDS):
+        await sched._sched.get_job(job_id).func()
+    await sched._sched.get_job(JOB_UNIVERSE).func()
+    assert lane.paths == [f"scheduled:{j}" for j in sorted(opsmain.LANE_JOB_IDS)]
+    # Each fire is quiet about its own on-time entry only (the runner's "job_id:run_for" key).
+    today = clock.today().isoformat()
+    assert lane.quiet == [frozenset({f"{j}:{today}"}) for j in sorted(opsmain.LANE_JOB_IDS)]
+    assert ran == ["universe"]                                   # everything else: _scheduled_runner
+    recorded = {r[0] for r in conn.execute("SELECT job_id FROM job_runs").fetchall()}
+    assert recorded == {JOB_UNIVERSE}                            # the lane pass owns the lane watermarks
+
+
+@pytest.mark.asyncio
+async def test_lane_cancel_interrupts_a_running_export(conn, calendar) -> None:
+    calls: list[str] = []
+    gate = asyncio.Event()
+    clock = _clock_at(_EVENING)
+    reg = JobRegistry()
+
+    async def backup() -> None:
+        await gate.wait()
+
+    reg.register(JobSpec(opsmain.JOB_MARKET_BACKUP, JobClass.RUN_LATEST, time(19, 0), backup, order=95))
+    lane = CompactionLane(CatchUpRunner(conn, clock, calendar, reg), clock, calendar,
+                          interrupt=lambda: calls.append("interrupt"))
+
+    await lane.cancel()                                          # idle: nothing to interrupt
+    assert calls == []
+    task = lane.spawn("post_arm")
+    await asyncio.sleep(0)
+    await lane.cancel()
+    assert calls == ["interrupt"] and task.done()
+
+
+async def _compact_ok(_d: date) -> None:
+    return None
+
+
+def _armed_lane(
+    conn, calendar, now: dict, sent: list, backup, *, compact=_compact_ok, done: date = date(2026, 6, 16),
+) -> tuple[Scheduler, CompactionLane]:
+    """The real registry armed as run() arms it: lane jobs through a real CompactionLane whose runner
+    has a recording notify, the lane work through ``done`` (default Tue) already recorded."""
+    clock = Clock(time_source=lambda: now["t"])
+
+    async def notify(msg) -> None:
+        sent.append(msg)
+
+    reg = build_job_registry(load_settings(), _all_noop_fns() | {
+        opsmain.JOB_MARKET_BACKUP: backup, opsmain.JOB_TICK_COMPACT: compact})
+    runner = CatchUpRunner(conn, clock, calendar, reg.select(lambda s: s.job_id in opsmain.LANE_JOB_IDS),
+                           notify=notify)
+    for job_id in opsmain.LANE_JOB_IDS:
+        runner.record_run(job_id, done)
+    lane = CompactionLane(runner, clock, calendar)
+    main_runner = CatchUpRunner(conn, clock, calendar,
+                                reg.select(lambda s: s.job_id not in opsmain.LANE_JOB_IDS))
+    sched = Scheduler(clock, calendar)
+    _arm_registry_jobs(sched, reg, main_runner, clock, lane=lane)
+    return sched, lane
+
+
+async def _fire_lane_job(sched: Scheduler, lane: CompactionLane, job_id: str) -> None:
+    await sched._sched.get_job(job_id).func()
+    assert lane._task is not None
+    await asyncio.wait_for(lane._task, timeout=5)
+
+
+class _ExportStore:
+    """The two ``MarketStore`` seams ``_market_backup`` uses; ``fail`` makes the export raise."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.attempts: list[str] = []
+
+    async def arun(self, fn, *args):
+        return fn(*args)
+
+    def export_snapshot(self, dest):
+        self.attempts.append(dest.name)
+        if self.fail:
+            raise RuntimeError("snapshot export incomplete: no data file for ['bars_1m']")
+        dest.mkdir(parents=True)
+        (dest / "bars_1m.parquet").write_bytes(b"x")
+        return {"tables": 1, "bytes": 1}
+
+
+def _real_backup(tmp_path: Path, now: dict, calendar, store: _ExportStore,
+                 retry: opsmain.MarketBackupRetry | None):
+    """The lane's ``market_backup`` body as run() builds it: the real ``_market_backup`` (trading-day
+    start gate, retry hold) over a fake export store."""
+    clock = Clock(time_source=lambda: now["t"])
+    settings = SimpleNamespace(backups_dir=lambda: tmp_path / "backups",
+                               duckdb_path=lambda: tmp_path / "market.duckdb")
+
+    async def backup():
+        return await opsmain._market_backup(store, settings, clock, calendar, retry=retry)
+
+    return backup
+
+
+def _catchup_reports(sent: list) -> list:
+    return [m for m in sent if m.kind == MessageKind.CATCHUP_REPORT]
+
+
+@pytest.mark.asyncio
+async def test_on_time_lane_fires_send_no_catchup_report(conn, calendar) -> None:
+    """The 22:00 export and the 22:30 compaction ran on schedule: neither was missed, so neither is a
+    "Missed-job catch-up complete" message (two false reports every trading night otherwise)."""
+    now = {"t": datetime(2026, 6, 17, 22, 0, 1, tzinfo=IST)}       # Wed, a trading day
+    sent: list = []
+    exports: list[datetime] = []
+
+    async def backup() -> None:
+        exports.append(now["t"])
+
+    sched, lane = _armed_lane(conn, calendar, now, sent, backup)
+    await _fire_lane_job(sched, lane, opsmain.JOB_MARKET_BACKUP)
+    now["t"] = datetime(2026, 6, 17, 22, 30, 1, tzinfo=IST)
+    await _fire_lane_job(sched, lane, opsmain.JOB_TICK_COMPACT)
+
+    assert len(exports) == 1
+    assert lane._runner.was_run(opsmain.JOB_MARKET_BACKUP, date(2026, 6, 17))
+    assert lane._runner.was_run(opsmain.JOB_TICK_COMPACT, date(2026, 6, 17))
+    assert [m for m in sent if m.kind == MessageKind.CATCHUP_REPORT] == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_scheduled_export_still_reports_once(conn, calendar) -> None:
+    now = {"t": datetime(2026, 6, 17, 22, 0, 1, tzinfo=IST)}
+    sent: list = []
+
+    async def backup() -> None:
+        raise RuntimeError("snapshot export incomplete")
+
+    sched, lane = _armed_lane(conn, calendar, now, sent, backup)
+    await _fire_lane_job(sched, lane, opsmain.JOB_MARKET_BACKUP)
+    now["t"] = datetime(2026, 6, 17, 22, 30, 1, tzinfo=IST)
+    await _fire_lane_job(sched, lane, opsmain.JOB_TICK_COMPACT)  # retries the export: same failure set
+
+    reports = [m for m in sent if m.kind == MessageKind.CATCHUP_REPORT]
+    assert len(reports) == 1
+    assert reports[0].data["jobs_failed"] == [f"{opsmain.JOB_MARKET_BACKUP}:2026-06-17"]
+    assert lane._runner.was_run(opsmain.JOB_TICK_COMPACT, date(2026, 6, 17))
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_lane_pass_still_reports_what_it_caught_up(conn, calendar, tmp_path) -> None:
+    """Only the scheduled fire is quiet: a sweep's lane pass that replays a missed day is news. The
+    missed Wed export waits for the first pass after 15:45 (the real start gate), then reports."""
+    now = {"t": datetime(2026, 6, 18, 7, 0, tzinfo=IST)}            # Thu morning, 22:00 Wed missed
+    sent: list = []
+    store = _ExportStore()
+    backup = _real_backup(tmp_path, now, calendar, store, opsmain.MarketBackupRetry())
+
+    _sched, lane = _armed_lane(conn, calendar, now, sent, backup)
+    await asyncio.wait_for(lane.spawn("sweep"), timeout=5)
+
+    assert store.attempts == []                                     # deferred: no export, no watermark
+    assert not lane._runner.was_run(opsmain.JOB_MARKET_BACKUP, date(2026, 6, 17))
+    assert [m.data["jobs_caught_up"] for m in _catchup_reports(sent)] == [
+        [f"{opsmain.JOB_TICK_COMPACT}:2026-06-17"]]
+
+    now["t"] = datetime(2026, 6, 18, 16, 0, tzinfo=IST)             # the first sweep after 15:45
+    await asyncio.wait_for(lane.spawn("sweep"), timeout=5)
+
+    assert len(store.attempts) == 1
+    reports = _catchup_reports(sent)
+    assert len(reports) == 2
+    assert reports[1].data["jobs_caught_up"] == [f"{opsmain.JOB_MARKET_BACKUP}:2026-06-17"]
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_fire_reports_a_missed_earlier_compaction_day(conn, calendar) -> None:
+    """Quiet is per entry: the 22:00 fire's own export is not news, but the Wed compaction the same
+    pass replays (the host slept through Wed's lane work) is."""
+    now = {"t": datetime(2026, 6, 18, 22, 0, 1, tzinfo=IST)}        # Thu 22:00; Wed's lane work missed
+    sent: list = []
+    compacted: list[date] = []
+
+    async def backup() -> None:
+        return None
+
+    async def compact(d: date) -> None:
+        compacted.append(d)
+
+    sched, lane = _armed_lane(conn, calendar, now, sent, backup, compact=compact)
+    await _fire_lane_job(sched, lane, opsmain.JOB_MARKET_BACKUP)
+
+    assert compacted == [date(2026, 6, 17)]
+    reports = _catchup_reports(sent)
+    assert len(reports) == 1
+    assert reports[0].data["jobs_caught_up"] == [
+        f"{opsmain.JOB_MARKET_BACKUP}:2026-06-18", f"{opsmain.JOB_TICK_COMPACT}:2026-06-17"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_good_export_after_a_reported_failure_reports_the_recovery(
+    conn, calendar, tmp_path,
+) -> None:
+    """Wed 22:00 export fails (reported); the 22:30 fire is inside the retry hold (no repeat report);
+    Thu's on-time 22:00 export succeeds — the owner, told it failed, is told it recovered."""
+    now = {"t": datetime(2026, 6, 17, 22, 0, 1, tzinfo=IST)}
+    sent: list = []
+    store = _ExportStore(fail=True)
+    backup = _real_backup(tmp_path, now, calendar, store, opsmain.MarketBackupRetry())
+    sched, lane = _armed_lane(conn, calendar, now, sent, backup)
+
+    await _fire_lane_job(sched, lane, opsmain.JOB_MARKET_BACKUP)
+    now["t"] = datetime(2026, 6, 17, 22, 30, 1, tzinfo=IST)
+    await _fire_lane_job(sched, lane, opsmain.JOB_TICK_COMPACT)
+    assert len(store.attempts) == 1
+    assert [m.data["jobs_failed"] for m in _catchup_reports(sent)] == [
+        [f"{opsmain.JOB_MARKET_BACKUP}:2026-06-17"]]
+
+    store.fail = False
+    now["t"] = datetime(2026, 6, 18, 22, 0, 1, tzinfo=IST)
+    await _fire_lane_job(sched, lane, opsmain.JOB_MARKET_BACKUP)
+
+    assert len(store.attempts) == 2
+    reports = _catchup_reports(sent)
+    assert len(reports) == 2
+    assert reports[1].data["jobs_caught_up"] == [f"{opsmain.JOB_MARKET_BACKUP}:2026-06-18"]
+    assert reports[1].data["jobs_failed"] == []
+
+
+async def _weekend_of_failing_lane_jobs(tmp_path: Path, calendar, *, hold: bool) -> list[list[str]]:
+    """The export raising and a stuck ``tick_compact`` day together, Fri 22:00 through Sun 22:00 with
+    a lane pass every 30 min; returns the failure list of every CATCHUP_REPORT sent."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    conn = connect(tmp_path / "state.db")
+    apply_migrations(conn)
+    now = {"t": datetime(2026, 6, 19, 22, 0, 1, tzinfo=IST)}        # Fri 22:00 fire
+    sent: list = []
+    backup = _real_backup(tmp_path, now, calendar, _ExportStore(fail=True),
+                          opsmain.MarketBackupRetry() if hold else None)
+
+    async def compact(_d: date) -> TickCompactionResult:
+        return TickCompactionResult(ok=False, failures=["2026-06-19/RELIANCE: fragment merge refused"])
+
+    try:
+        sched, lane = _armed_lane(conn, calendar, now, sent, backup, compact=compact,
+                                  done=date(2026, 6, 18))
+        await _fire_lane_job(sched, lane, opsmain.JOB_MARKET_BACKUP)
+        now["t"] = datetime(2026, 6, 19, 22, 30, 1, tzinfo=IST)
+        await _fire_lane_job(sched, lane, opsmain.JOB_TICK_COMPACT)
+        t = datetime(2026, 6, 19, 22, 45, tzinfo=IST)
+        while t < datetime(2026, 6, 21, 22, 0, tzinfo=IST):
+            now["t"] = t
+            await asyncio.wait_for(lane.spawn("sweep"), timeout=5)
+            t += timedelta(minutes=30)
+    finally:
+        conn.close()
+    return [m.data["jobs_failed"] for m in _catchup_reports(sent)]
+
+
+@pytest.mark.asyncio
+async def test_the_export_retry_hold_does_not_flap_the_failure_report(calendar, tmp_path) -> None:
+    """A held export drops out of the pass's failures, but its failed key stays in the comparison
+    set, so the hold sends no more reports than retrying every pass would (2 for the weekend: the
+    export failure, then export + compaction)."""
+    held = await _weekend_of_failing_lane_jobs(tmp_path / "held", calendar, hold=True)
+    unheld = await _weekend_of_failing_lane_jobs(tmp_path / "unheld", calendar, hold=False)
+
+    mb, tc = f"{opsmain.JOB_MARKET_BACKUP}:2026-06-19", f"{opsmain.JOB_TICK_COMPACT}:2026-06-19"
+    assert unheld == [[mb], [mb, tc]]
+    assert held == [[mb], [tc]]                       # the export's failure was already reported
+    assert len(held) <= len(unheld)
 
 
 # =========================================================================== WO-25c boot contract
@@ -3401,6 +3886,15 @@ def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set() -> Non
     assert src.count("await ticker.update_subscriptions(ticker_tokens())") == 2  # job_universe + sweep
 
 
+def test_surveillance_ingest_is_wired_to_open_real_positions() -> None:
+    """A8: the held-position surveillance alert lives in ``SurveillanceIngest.refresh`` so every
+    refresh path (08:20 job, catch-up, early hydration, job_universe's first use) runs it; it only
+    fires when the engine passes the real-scoped held-positions reader."""
+    src = inspect.getsource(opsmain.run)
+    assert src.count("SurveillanceIngest(") == 1
+    assert "held_positions=lambda: _held_positions(conn)," in src
+
+
 def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour() -> None:
     """2026-09-15: OLAELEC entered the watchlist at 10:09 with a 57-session hole in bars_1d and froze
     the DAILY class for 12 h — the minute-only newcomer fill (mid-session-gated) never touched daily
@@ -3548,3 +4042,19 @@ def test_nothing_paper_is_built_unless_the_subsystem_is_enabled() -> None:
                  "paper_enabled_fn=paper.entries_open", "paper_tick=paper.runtime.paper_tick"):
         assert f"{seam} if paper is not None else None" in src
     assert "if paper is not None:\n        await paper.stop()" in src
+
+
+def test_every_live_engine_calendar_excludes_special_sessions() -> None:
+    """2026-10-11 decision: the live engine treats special sessions (muhurat) as closed days. Every
+    NSECalendar the engine package builds (the composition root and the ins_crossings --once CLI)
+    passes include_special=False, so for_session, the scheduler guard and the sweep all agree."""
+    engine_dir = Path(opsmain.__file__).resolve().parents[1]
+    sites: dict[str, list[object]] = {}
+    for path in sorted(engine_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))   # some modules carry a BOM
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "NSECalendar":
+                flag = next((k.value for k in node.keywords if k.arg == "include_special"), None)
+                rel = path.relative_to(engine_dir).as_posix()
+                sites.setdefault(rel, []).append(flag.value if isinstance(flag, ast.Constant) else flag)
+    assert sites == {"datafeeds/ins_crossings.py": [False], "ops/main.py": [False]}

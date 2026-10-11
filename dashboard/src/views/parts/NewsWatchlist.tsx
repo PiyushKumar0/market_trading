@@ -4,7 +4,7 @@
  * summary pauses news-catalyst candidates, which are validation-only while `cat` is a shadow strategy).
  */
 import { digestTerm, gradeTerm } from '../../copy/glossary.ts'
-import { dayLabel, humanize, istStamp, price } from '../../lib/format.ts'
+import { dayLabel, humanize, istStamp } from '../../lib/format.ts'
 import type { WatchlistResponse, WatchlistRow } from '../../types'
 import { Card } from '../../ui/Card'
 import { DataTable } from '../../ui/DataTable'
@@ -13,12 +13,6 @@ import { Hint, Labelled } from '../../ui/Hint'
 import { Loading } from '../../ui/Loading'
 import { Pill } from '../../ui/Pill'
 import type { Tone } from '../../ui/Pill'
-
-const range = (low: string | null, high: string | null): string => {
-  const a = price(low)
-  const b = price(high)
-  return a && b ? `${a}–${b}` : '—'
-}
 
 /** A column header whose word opens its one-line explanation (dotted underline, no ⓘ). */
 const head = (label: string, hint: string) => (
@@ -49,39 +43,6 @@ const COLUMNS: Column<WatchlistRow>[] = [
     label: 'Sources',
     align: 'right',
     cell: (r) => r.source_domain_count ?? '—',
-  },
-  {
-    key: 'trigger',
-    // Levels from the retired first news strategy (news_pipeline.py): shown for reference only.
-    header: head('Trigger price', 'A reference level from the news summary: a move past it would confirm the idea. No engine rule acts on it.'),
-    label: 'Trigger price',
-    align: 'right',
-    nowrap: true,
-    cell: (r) => price(r.confirm_trigger) ?? '—',
-  },
-  {
-    key: 'cancel',
-    header: head('Cancel price', 'A reference level from the news summary: a move past it would cancel the idea. No engine rule acts on it.'),
-    label: 'Cancel price',
-    align: 'right',
-    nowrap: true,
-    cell: (r) => price(r.invalidation) ?? '—',
-  },
-  {
-    key: 'stop',
-    header: 'Stop range',
-    label: 'Stop range',
-    align: 'right',
-    nowrap: true,
-    cell: (r) => range(r.stop_band_low, r.stop_band_high),
-  },
-  {
-    key: 'target',
-    header: 'Target range',
-    label: 'Target range',
-    align: 'right',
-    nowrap: true,
-    cell: (r) => range(r.target_band_low, r.target_band_high),
   },
 ]
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import time
 from decimal import Decimal
 from pathlib import Path
@@ -107,13 +108,50 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.analyst_confidence_min == 0.55
 
 
-def test_weekly_drawdown_window_mirrors_the_signed_table(registered_store):
-    """``ExposureTracker.weekly_drawdown_peak`` uses the code constant, not the table's
-    ``rolling_sessions`` (nothing reads that key): a re-signed value must fail here, not be ignored."""
+def test_floor_limits_from_threads_the_signed_table(registered_store):
+    """The signed table is the ladder's single source: ``rolling_sessions`` reaches
+    ``FloorLimits.weekly_drawdown_sessions`` (the window ``evaluate_floors`` uses), beside the pcts
+    and the base. At the signed 5 it equals the code default, so behaviour is unchanged."""
     from engine.risk.exposure import WEEKLY_DRAWDOWN_SESSIONS
+    from engine.risk.limits import floor_limits_from
 
     table = LimitsEngine(registered_store).load()
-    assert table.limits.weekly_drawdown.rolling_sessions == WEEKLY_DRAWDOWN_SESSIONS
+    fl = floor_limits_from(table)
+    assert fl.weekly_drawdown_sessions == table.limits.weekly_drawdown.rolling_sessions == 5
+    assert fl.weekly_drawdown_sessions == WEEKLY_DRAWDOWN_SESSIONS
+    assert fl.weekly_drawdown_pct == Decimal("0.08")
+    assert fl.equity_floor_rung_pct == Decimal("0.10")
+    assert fl.cumulative_floor_pct == Decimal("0.15")
+    assert fl.capital_base == Decimal("40000")
+
+
+@pytest.mark.parametrize(("sessions", "expected"), [(3, 3), (1, 1), (0, 5), (-2, 5)])
+def test_resigned_rolling_sessions_reaches_the_ladder(
+    store, tmp_path, caplog, sessions, expected
+):
+    """A re-signed window flows through; a signed value < 1 parses (no boot crash outside the
+    IntegrityError fallback) and ``floor_limits_from`` clamps it to the default with an ERROR, so
+    the weekly rung stays live and the day-loss rungs are still evaluated."""
+    from engine.risk import limits as limits_mod
+    from engine.risk.limits import floor_limits_from
+
+    limits_mod._invalid_sessions_logged.clear()   # process-wide once-latch; isolate from other cases
+    resigned = REAL_LIMITS_PATH.read_text(encoding="utf-8").replace(
+        "rolling_sessions: 5", f"rolling_sessions: {sessions}"
+    )
+    assert f"rolling_sessions: {sessions}" in resigned  # sanity: the replace actually matched
+    (tmp_path / "config" / "limits.yaml").write_text(resigned, encoding="utf-8")
+    store.register_initial("limits.yaml", OWNER_OK)
+
+    table = LimitsEngine(store).load()
+    assert table.limits.weekly_drawdown.rolling_sessions == sessions
+    with caplog.at_level(logging.ERROR, logger="engine.risk.limits"):
+        for _ in range(3):   # the minute tick re-evaluates: the clamp holds every call, logs once
+            assert floor_limits_from(table).weekly_drawdown_sessions == expected
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == (1 if sessions < 1 else 0)
+    if errors:
+        assert str(sessions) in errors[0].getMessage() + str(getattr(errors[0], "__dict__", {}))
 
 
 def test_load_caches(registered_store):

@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import sqlite3
 import threading
@@ -79,7 +80,12 @@ from engine.datafeeds.filings_shp import FilingsShpJob, FilingsShpResult
 from engine.datafeeds.ins_crossings import InsCrossingsJob, InsCrossingsResult
 from engine.datafeeds.isin_map import IsinMapJob, IsinMapResult
 from engine.datafeeds.news import NSE_ANN_KEY, Headline, NewsIngest
-from engine.datafeeds.news_pipeline import CatalystDigestJob, EntityResolver, HeadlineClusterer
+from engine.datafeeds.news_pipeline import (
+    CatalystDigestJob,
+    EntityResolver,
+    HeadlineClusterer,
+    load_cat_params,
+)
 from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
 from engine.features.engine import FeatureEngine
 from engine.intelligence.context import ContextAssembler
@@ -87,7 +93,7 @@ from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentHarness, load_agent_roster, resolve_cli_path, run_sdk_smoke
 from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.bar_builder import BarBuilder
-from engine.marketdata.reconcile import ReconcileJob
+from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
 from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult, compact_ticks
 from engine.notify import catalog
@@ -114,6 +120,7 @@ from engine.ops.jobs import (
     JOB_BACKUP,
     JOB_BHAVCOPY,
     JOB_CATALYST_DIGEST,
+    JOB_CLAUDE_LOGIN,
     JOB_CORP_ACTIONS,
     JOB_DAILY_BARS,
     JOB_DEALS,
@@ -127,6 +134,7 @@ from engine.ops.jobs import (
     JOB_INS_CROSSINGS,
     JOB_INSTRUMENTS,
     JOB_ISIN_MAP,
+    JOB_MARKET_BACKUP,
     JOB_NEWS_CHAIN,
     JOB_NIGHTLY_REVIEW,
     JOB_PREOPEN_PLANNER,
@@ -180,7 +188,7 @@ from engine.ops.protection_reminders import ProtectionReminders
 from engine.ops.rec_outcomes import RecOutcomesJob
 from engine.ops.scan_context import LiveScanContextProvider
 from engine.ops.scheduler import Scheduler
-from engine.ops.selftest import SelfTest
+from engine.ops.selftest import SelfTest, alert_claude_login, claude_credentials_path
 from engine.ops.single_instance import InstanceLock
 from engine.ops.token_check import TOKEN_CHECK_IST, TokenCheckJob
 from engine.ops.warmup import (
@@ -244,6 +252,17 @@ _FEATURES_IST = time(20, 45)
 #: compacts the closed date partitions up to D (never D itself — the writer still owns it).
 _TICK_COMPACT_IST = time(22, 30)
 
+#: Daily read of the CLI's stored claude.ai login (D2 as built): ahead of the 08:25 pre-open chain
+#: (news chain → digest → planner), so a WARN reaches the owner before that chain needs the login. Not
+#: the day's first LLM call: the 5-min news scoring tick runs at all hours and early hydration (~06:30)
+#: runs the planner, so either can hit a dead login first; their auth_failed alerts carry the
+#: re-login hint.
+_CLAUDE_LOGIN_CHECK_IST = time(8, 10)
+
+#: §10.5 DuckDB backup (``EXPORT DATABASE``, :func:`_market_backup`) — after every EOD data job and the
+#: 21:00 SQLite backup, ahead of the 22:30 compaction it shares :class:`CompactionLane` with.
+_MARKET_BACKUP_IST = time(22, 0)
+
 #: Async job-runner type: DATE_KEYED runners take the run-for ``date``; all others take no args.
 JobRunFn = Callable[..., Awaitable[None]]
 
@@ -253,11 +272,12 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
     JOB_INSTRUMENTS, JOB_SURVEILLANCE, JOB_EARNINGS,          # safety/deadline-critical
     JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CORP_ACTIONS, JOB_SECTOR_MAP, JOB_BACKUP,  # run-latest
     JOB_ISIN_MAP, JOB_FILINGS_SHP, JOB_RESULTS_LINE_ITEMS,                       # run-latest (§2.8)
-    JOB_FEED_FRESHNESS,                                                          # run-latest
+    JOB_FEED_FRESHNESS, JOB_CLAUDE_LOGIN,                                        # run-latest
     JOB_RECONCILE, JOB_BHAVCOPY, JOB_DAILY_BARS, JOB_DEALS, JOB_FEATURES,        # date-keyed
     JOB_FILINGS_PIT, JOB_FILINGS_PIT_FRESH, JOB_FILINGS_RESULTS,                 # date-keyed (§2.8)
     JOB_INS_CROSSINGS,                                                           # date-keyed (§6.1 `ins`)
     JOB_TICK_COMPACT,                                                            # date-keyed (§4.3/WO-7)
+    JOB_MARKET_BACKUP,                                                           # run-latest (§10.5)
 )
 
 #: Phase-2 additions (§8.3): digest → planner run pre-open in dependency order after the news chain;
@@ -285,11 +305,17 @@ _RECO_EXPIRE_IST = time(15, 45)
 #: reads — and ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them —
 #: and ``rec_outcomes`` + ``weekly_summary`` (hindsight scoring and its owner digest; nothing reads
 #: either at boot).
-#: Tick compaction is not a member: it runs in its own runner (:class:`CompactionLane`).
+#: The :data:`LANE_JOB_IDS` are not members: they run in their own runner (:class:`CompactionLane`).
 POST_ARM_JOB_IDS: tuple[str, ...] = (
     JOB_TIME_EXIT_CHECK, JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER,
     JOB_RESULTS_LINE_ITEMS, JOB_FEED_FRESHNESS, JOB_REC_OUTCOMES, JOB_WEEKLY_SUMMARY,
 )
+
+#: The jobs :class:`CompactionLane` runs, and nothing else does: idle-hours housekeeping that never
+#: starts inside the WO-21 window, never runs in boot catch-up and never overlaps another lane job
+#: (one single-flight pass runs them in order; their scheduled fires start a pass,
+#: :func:`_arm_registry_jobs`). The main runner never holds them.
+LANE_JOB_IDS: frozenset[str] = frozenset({JOB_TICK_COMPACT, JOB_MARKET_BACKUP})
 
 #: §2.6 early-hydration addendum (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
 #: (~06:30, before session open) pulls forward from its 08:20–08:50 clock, in registry order. The
@@ -425,6 +451,8 @@ def build_job_registry(
         JobSpec(JOB_FEED_FRESHNESS, JobClass.RUN_LATEST, settings.jobs.feed_freshness_ist,
                 fns[JOB_FEED_FRESHNESS], order=95),
         JobSpec(JOB_BACKUP, JobClass.RUN_LATEST, settings.jobs.backup_ist, fns[JOB_BACKUP], order=90),
+        JobSpec(JOB_CLAUDE_LOGIN, JobClass.RUN_LATEST, _CLAUDE_LOGIN_CHECK_IST, fns[JOB_CLAUDE_LOGIN],
+                order=97),
         # date-keyed backfill — one run per missed trading day, ascending
         JobSpec(JOB_RECONCILE, JobClass.DATE_KEYED, settings.jobs.reconcile_ist, fns[JOB_RECONCILE], order=10),
         JobSpec(JOB_BHAVCOPY, JobClass.DATE_KEYED, settings.jobs.bhavcopy_ist, fns[JOB_BHAVCOPY], order=20),
@@ -443,6 +471,9 @@ def build_job_registry(
         # §4.3 storage housekeeping (WO-7): collapse each closed symbol-day's ~7.5 K tick fragments
         # into one file. LAST in the date-keyed order — it reads no engine state and blocks nothing.
         JobSpec(JOB_TICK_COMPACT, JobClass.DATE_KEYED, _TICK_COMPACT_IST, fns[JOB_TICK_COMPACT], order=90),
+        # §10.5 DuckDB leg: one export covers the whole gap. A lane job (LANE_JOB_IDS), so RUN_LATEST
+        # ahead of DATE_KEYED puts it before compaction in a lane pass.
+        JobSpec(JOB_MARKET_BACKUP, JobClass.RUN_LATEST, _MARKET_BACKUP_IST, fns[JOB_MARKET_BACKUP], order=95),
     ):
         registry.register(spec)
     # Phase-2 jobs (§8.3): a None fn is skipped here (tests); the composition root always passes a
@@ -561,9 +592,13 @@ async def run() -> int:
         end=settings.trade_window.end_ist,
         squareoff_buffer_min=settings.trade_window.squareoff_buffer_min,
     )
+    # include_special=False (2026-10-11): the live engine treats special sessions (muhurat) as closed
+    # days. BarBuilder/ReconcileJob take no per-day session bounds, so a settings opt-in to trade
+    # them would be half-wired; there is deliberately no such key.
     calendar = NSECalendar(
         config_dir() / "calendar", clock,
         strict=(settings.env == "prod"), sqlite_conn=conn, window_seed=window_seed,
+        include_special=False,
     )
     bus = EventBus()
     protected_store = ProtectedStore(config_dir(), conn, clock)
@@ -763,7 +798,10 @@ async def run() -> int:
     # --- universe (A8/C7/E5): ingests refreshed 08:15/08:20, build 08:30 ---
     data_dir = settings.resolved_data_dir()
     leverage = MisLeverageIngest(clock, http, data_dir / "universe" / "mis_margins.json", notify=notify)
-    surveillance = SurveillanceIngest(clock, http, data_dir / "universe" / "surveillance.json", notify=notify)
+    surveillance = SurveillanceIngest(
+        clock, http, data_dir / "universe" / "surveillance.json", notify=notify,
+        held_positions=lambda: _held_positions(conn),
+    )
     universe_builder = UniverseBuilder(
         settings, store, instruments, leverage, surveillance, clock, http, notify=notify
     )
@@ -807,10 +845,20 @@ async def run() -> int:
     )
 
     # --- news pipeline data side (§2.7 steps 1-3) ---
+    # §6.5 envelope_state read at boot, same policy as `edge_multiple_min` below (re-read at boot;
+    # intra-run promotions land Phase 5). load_cat_params ignores every non-`cat` key, so the whole
+    # mapping goes in as-is; empty ⇒ None ⇒ the envelope.yaml/settings.yaml defaults. The clusterer
+    # and CatalystDigestJob read the ONE envelope row cat.max_event_age_days off this same dict —
+    # the clusterer counts it in CALENDAR days from the headline, the digest in trading sessions.
+    _envelope_state = {
+        r["parameter"]: r["value"]
+        for r in conn.execute("SELECT parameter, value FROM envelope_state").fetchall()
+    }
+    _cat_params = load_cat_params(_envelope_state or None)
     news_ingest = NewsIngest(settings.news, store, clock, http)
     clusterer = HeadlineClusterer(
         store, sim_threshold=settings.news.cluster_sim_threshold,
-        max_event_age_days=settings.cat.max_event_age_days,
+        max_event_age_days=int(_cat_params["max_event_age_days"]),
     )
     resolver = EntityResolver(store, clock)
 
@@ -1069,13 +1117,8 @@ async def run() -> int:
     bus.subscribe(TOPIC_TRADE_WINDOW, _refresh_scan_window)
 
     # --- Tier-1 jobs (all fail to no-output, never blocking — D7/E5) ---
-    # §6.5 envelope_state read at boot, same policy as `edge_multiple_min` above (re-read at boot;
-    # intra-run promotions land Phase 5). load_cat_params ignores every non-`cat` key, so the whole
-    # mapping goes in as-is; empty ⇒ None ⇒ the envelope.yaml/settings.yaml defaults.
-    _envelope_state = {
-        r["parameter"]: r["value"] for r in conn.execute("SELECT parameter, value FROM envelope_state").fetchall()
-    }
-    digest_job = CatalystDigestJob(store, clock, calendar, protected_store, envelope=_envelope_state or None)
+    # `_envelope_state` is the boot read shared with the clusterer (news pipeline block above).
+    digest_job =CatalystDigestJob(store, clock, calendar, protected_store, envelope=_envelope_state or None)
     catalyst_disabled_alert = _CatalystDisabledAlert(notify, clock)
     scoring_job = (
         NewsScoringJob(store, resolver, assembler, harness, agent_defs, governor, clock, calendar)
@@ -1438,6 +1481,9 @@ async def run() -> int:
             calendar, clock, settings.clock.calendar_horizon_alert_sessions, notify)
         return result
 
+    async def job_claude_login_check() -> None:
+        await alert_claude_login(clock.now(), claude_credentials_path(), alert)
+
     async def job_filings_shp() -> FilingsShpResult:
         # Forwarded (2026-08-13): filings_shp degrades-without-raising (E5) — the watermark verdict
         # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
@@ -1449,9 +1495,16 @@ async def run() -> int:
         # zero crossings on an evaluated day is ok=True — a real answer, not a failure.
         return await ins_crossings.run(d)
 
-    async def job_reconcile(d) -> None:
-        if reconcile is not None:
-            await reconcile.run(d)
+    async def job_reconcile(d) -> ReconcileReport | None:
+        # Ok-bearing (E5): a token abort is ok=False, so the watermark records the day failed and the
+        # §2.6 sweep retries it after re-login (run() resumes at the unlogged symbols). A known-dead
+        # token makes no doomed broker call — the breaker already alerted once (backfill_hook gate).
+        if reconcile is None:
+            return None
+        if not session.token_valid():
+            _log.info("reconcile_skipped_no_token", d=d.isoformat())
+            return ReconcileReport(d=d, ok=False, aborted_reason="no_valid_token")
+        return await reconcile.run(d)
 
     async def job_daily_bars(d) -> None:
         # §4.4 job 3 nightly incremental backfill: today's daily bar for the watchlist + regime symbols.
@@ -1483,6 +1536,14 @@ async def run() -> int:
         await apply_tick_retention(store, result)
         return result
 
+    market_backup_retry = MarketBackupRetry()
+
+    async def job_market_backup() -> MarketBackupResult:
+        # §10.5 DuckDB leg — a lane job only: never in boot catch-up, never on the stop path. Any lane
+        # pass may run it (the post-arm one at boot included), but it never starts 06:00-15:45 on a
+        # trading day and is held for 6 h after a failed export (``_market_backup``).
+        return await _market_backup(store, settings, clock, calendar, retry=market_backup_retry)
+
     # ``catch_up`` is bound below, before any job can run.
     rec_outcomes = RecOutcomesJob(conn, store, calendar, cost_model, hold_fn, clock,
                                   was_run=lambda job_id, d: catch_up.was_run(job_id, d))
@@ -1509,8 +1570,10 @@ async def run() -> int:
         JOB_RESULTS_LINE_ITEMS: job_results_line_items,
         JOB_ISIN_MAP: job_isin_map,
         JOB_FEED_FRESHNESS: job_feed_freshness,
+        JOB_CLAUDE_LOGIN: job_claude_login_check,
         JOB_INS_CROSSINGS: job_ins_crossings,
         JOB_TICK_COMPACT: job_tick_compact,
+        JOB_MARKET_BACKUP: job_market_backup,
         # Phase-2 (§8.3): every Phase-2 fn is always registered; the wrappers whose object may be
         # unbuilt (planner, nightly, time-exit) RAISE, so the watermark records a FAILURE and the §2.6
         # sweep retries once the roster is fixed (2026-08-03).
@@ -1568,15 +1631,15 @@ async def run() -> int:
     )
     heartbeat = HeartbeatWriter(settings.sqlite_path(), clock, interval_s=settings.lifecycle.heartbeat_write_s)
     catch_up = CatchUpRunner(conn, clock, calendar,
-                             registry.select(lambda s: s.job_id != JOB_TICK_COMPACT),
+                             registry.select(lambda s: s.job_id not in LANE_JOB_IDS),
                              freeze=freeze_entries, notify=notify, clear=clear_entries_cause,
                              # WO-15 (i): boot replays load-bearing data steps only; POST_ARM_JOB_IDS
                              # fire after scheduler.start() (rollback: DEFER_POST_ARM_JOBS = False).
                              deferred=POST_ARM_JOB_IDS if DEFER_POST_ARM_JOBS else ())
     compaction_lane = CompactionLane(
-        CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id == JOB_TICK_COMPACT),
+        CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id in LANE_JOB_IDS),
                       notify=notify),
-        clock, calendar,
+        clock, calendar, interrupt=store.interrupt_export,
     )
 
     self_test = SelfTest(
@@ -1587,6 +1650,7 @@ async def run() -> int:
         sdk_smoke=(None if harness is None else (lambda: run_sdk_smoke(harness))),
         calendar=calendar,
         roster_quarantined=roster_quarantined, roster_loaded=len(agent_defs),
+        claude_credentials=claude_credentials_path(),
     )
     # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
     # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.
@@ -2338,7 +2402,7 @@ async def run() -> int:
         telegram.set_why_fn(make_why_fn(store=store, conn=conn, clock=clock, calendar=calendar))
 
     # --- arm the schedule (calendar-guarded, R6) BEFORE recovery so a late startup still fires today ---
-    _arm_registry_jobs(scheduler, registry, catch_up, clock)
+    _arm_registry_jobs(scheduler, registry, catch_up, clock, lane=compaction_lane)
     # WO-21 (iii): pre-open token probe at 08:40. Wired only when a broker facade exists (no api_key
     # ⇒ nothing to authenticate); NOT a registry job — a pre-open check has no meaningful catch-up.
     if kite is not None:
@@ -2536,37 +2600,52 @@ class CompactionLane:
     caught up. This runner shares only the ``job_runs`` table with the main one, so a long compaction
     delays nothing but compaction. At most one lane pass runs at a time, and none starts inside the
     WO-21 window; a running one stops there by itself (``job_tick_compact``'s ``stop``).
+
+    Since 2026-10-11 it runs every :data:`LANE_JOB_IDS` job, the ``market_backup`` export included.
+    ``interrupt`` (``MarketStore.interrupt_export``) ends an export's worker thread on :meth:`cancel`.
     """
 
-    def __init__(self, runner: CatchUpRunner, clock: Clock, calendar: NSECalendar) -> None:
+    def __init__(
+        self, runner: CatchUpRunner, clock: Clock, calendar: NSECalendar,
+        *, interrupt: Callable[[], object] | None = None,
+    ) -> None:
         self._runner = runner
         self._clock = clock
         self._calendar = calendar
+        self._interrupt = interrupt
         self._task: asyncio.Task | None = None
 
-    def spawn(self, path: str) -> asyncio.Task | None:
+    def spawn(self, path: str, *, quiet: frozenset[str] = frozenset()) -> asyncio.Task | None:
         """Start a lane pass unless one is running or the WO-21 window vetoes it (``path`` names the
-        caller in the log). Returns the new task, or ``None`` when nothing was started."""
+        caller in the log). Returns the new task, or ``None`` when nothing was started.
+        ``quiet`` is the on-time scheduled fire's own entry (:func:`_lane_fire`): that entry's success
+        alone is no CATCHUP_REPORT (``CatchUpRunner.catch_up``)."""
         if self._task is not None and not self._task.done():
             return None
         if _in_session_window(self._clock, self._calendar):
-            _log.info("post_arm_skipped_in_session", job_id=JOB_TICK_COMPACT,
+            _log.info("post_arm_skipped_in_session", job_ids=sorted(LANE_JOB_IDS),
                       now=self._clock.now().isoformat(), path=path)
             return None
-        self._task = asyncio.create_task(self._pass(), name="compaction_lane")
+        self._task = asyncio.create_task(self._pass(quiet), name="compaction_lane")
         return self._task
 
-    async def _pass(self) -> None:
+    async def _pass(self, quiet: frozenset[str]) -> None:
         try:
-            await self._runner.catch_up(scope=CatchUpScope.ALL)
+            await self._runner.catch_up(scope=CatchUpScope.ALL, quiet=quiet)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - housekeeping must never surface into the scheduler loop
             _log.exception("compaction_lane_failed")
 
     async def cancel(self) -> None:
-        """Cancel + join a running lane pass on shutdown. Its worker thread cannot be cancelled; it
-        ends before its next symbol-day once the stop signal is set (``compact_ticks``'s ``stop``)."""
+        """Cancel + join a running lane pass on shutdown. Its worker thread cannot be cancelled: a
+        compaction ends before its next symbol-day once the stop signal is set (``compact_ticks``'s
+        ``stop``), an export when ``interrupt`` reaches it (``MarketStore.close`` repeats it)."""
+        if self._interrupt is not None and self._task is not None and not self._task.done():
+            try:
+                self._interrupt()
+            except Exception:  # noqa: BLE001 - teardown never raises; close() interrupts again
+                _log.exception("compaction_lane_interrupt_failed")
         await cancel_post_arm(self._task)
 
 
@@ -2642,12 +2721,20 @@ async def cancel_post_arm(task: asyncio.Task | None) -> None:
 
 # --------------------------------------------------------------------------- scheduler arming
 def _arm_registry_jobs(
-    scheduler: Scheduler, registry: JobRegistry, catch_up: CatchUpRunner, clock: Clock
+    scheduler: Scheduler, registry: JobRegistry, catch_up: CatchUpRunner, clock: Clock,
+    *, lane: CompactionLane | None = None,
 ) -> None:
     """Arm every registry job on the live scheduler (§10.1). Each fire records the ``job_runs``
-    watermark so the CatchUpRunner never re-runs a job the live scheduler already ran today."""
+    watermark so the CatchUpRunner never re-runs a job the live scheduler already ran today.
+
+    With ``lane``, a :data:`LANE_JOB_IDS` fire starts a lane pass instead of running its job: the
+    lane's single-flight pass is then the only runner of those jobs, so the 22:00 export can never
+    overlap a sweep's lane pass or the 22:30 compaction (2026-10-11)."""
     for spec in registry.specs():
-        fire = _scheduled_runner(spec, catch_up, clock)
+        if lane is not None and spec.job_id in LANE_JOB_IDS:
+            fire = _lane_fire(lane, spec.job_id, clock)
+        else:
+            fire = _scheduled_runner(spec, catch_up, clock)
         if spec.job_id == JOB_SECTOR_MAP:
             # Weekly Sunday cadence (not a trading day) — a plain day-of-week cron, calendar-unguarded.
             scheduler.add_job(
@@ -2657,6 +2744,19 @@ def _arm_registry_jobs(
             )
         else:
             scheduler.add_trading_day_job(fire, hour=spec.at.hour, minute=spec.at.minute, job_id=spec.job_id)
+
+
+def _lane_fire(lane: CompactionLane, job_id: str, clock: Clock):
+    """The scheduled fire of a lane job: start a lane pass, whose runner finds the job due and records
+    its watermark. A pass already in flight (or the WO-21 veto) starts nothing; the next sweep's pass
+    picks the job up. Only this fire's own run is quiet: the runner's ``job_id:<today>`` entry, the
+    run-for day of a lane job due today. Missed days the pass also replays still report."""
+    async def _fire() -> None:
+        quiet = frozenset({f"{job_id}:{clock.today().isoformat()}"})
+        started = lane.spawn(f"scheduled:{job_id}", quiet=quiet) is not None
+        _log.info("scheduled_lane_fire", job_id=job_id, started=started)
+
+    return _fire
 
 
 def _arm_token_check(scheduler: Scheduler, job: TokenCheckJob) -> None:
@@ -3700,6 +3800,16 @@ def _held_symbols(conn: sqlite3.Connection) -> list[str]:
     return [str(r["symbol"]) for r in rows]
 
 
+def _held_positions(conn: sqlite3.Connection) -> list[tuple[str, str, int]]:
+    """Open REAL platform/recommended positions as ``(position_id, symbol, qty)``: the A8
+    surveillance-migration alert's input. Paper never alerts the owner here (paper plan D4)."""
+    rows = conn.execute(
+        "SELECT position_id, symbol, qty FROM positions "
+        f"WHERE {HELD_STATES_SQL['real']} AND {scope_sql('real', has_origin=True)} ORDER BY opened_at"
+    ).fetchall()
+    return [(str(r["position_id"]), str(r["symbol"]), int(r["qty"] or 0)) for r in rows]
+
+
 def _feed_symbols(conn: sqlite3.Connection) -> list[str]:
     """The ticker's held leg, and nothing else's: real held symbols, then every paper position and
     every working order or ACTIVE GTT. They MUST stay in the feed after the universe drops them —
@@ -4371,9 +4481,10 @@ async def apply_tick_retention(store: MarketStore, result: TickCompactionResult)
 async def _snapshot_backup(conn: sqlite3.Connection, settings, clock: Clock) -> None:
     """Watermark-safe SQLite state snapshot (§10.5). Uses a fresh source connection inside the worker
     thread (the online-backup API over a second read handle is WAL-safe) so it never contends with the
-    engine's live connection. DuckDB market data is NOT covered here: §10.5's DuckDB CHECKPOINT + file
-    copy is unimplemented, and ``MarketStore.export_bars_1m_month`` (the §4.3 monthly Parquet archive)
-    exists but nothing schedules it."""
+    engine's live connection. DuckDB market data is not covered here: the nightly ``market_backup``
+    lane job covers it (:func:`_market_backup`, an ``EXPORT DATABASE`` — Windows cannot copy the open
+    file). ``MarketStore.export_bars_1m_month`` (the §4.3 monthly Parquet archive) exists but nothing
+    schedules it."""
     backups = settings.backups_dir()
     backups.mkdir(parents=True, exist_ok=True)
     dst = backups / f"state-{clock.now():%Y%m%dT%H%M%S}.db"
@@ -4424,6 +4535,161 @@ def _prune_retained_files(backups: Path, logs: Path, now: datetime) -> dict[str,
     for p in (*doomed, *logs_doomed):
         p.unlink(missing_ok=True)
     return {"snapshots_deleted": len(doomed), "service_logs_deleted": len(logs_doomed)}
+
+
+#: Retention for ``market-<stamp>`` DuckDB exports (~2.1 GB each, 2026-10): the newest 3, plus the
+#: newest of each ISO week for 4 weeks — about 7 generations. The newest always survives.
+MARKET_SNAPSHOT_KEEP_NEWEST = 3
+MARKET_SNAPSHOT_WEEKLY_DAYS = 28
+
+#: Free-space floor for an export, as a multiple of the newest export's size (the first export, with
+#: none to measure, needs market.duckdb's size instead).
+MARKET_BACKUP_FREE_FACTOR = 3
+
+_MARKET_SNAPSHOT_PREFIX = "market-"
+_MARKET_SNAPSHOT_STAMP = "%Y%m%dT%H%M%S"
+
+#: On a trading day no export STARTS from here to :data:`_IN_SESSION_END_IST`: early hydration
+#: (~06:30), the boot catch-up and the pre-open chain run in that span, and an export (~45 s, ~2.1 GB
+#: written) started just before 08:45 would run into the session window.
+_MARKET_BACKUP_DAY_START_IST = time(6, 0)
+
+#: After a failed export, later attempts in the same process wait this long. Every 30-min sweep's
+#: lane pass otherwise re-ran the whole export (~34 attempts, ~70 GB written per idle day).
+MARKET_BACKUP_RETRY_AFTER = timedelta(hours=6)
+
+
+@dataclass(frozen=True)
+class MarketBackupResult:
+    """One ``market_backup`` run, ok-bearing for the watermark. ``unfinished`` (not started: the
+    trading-day window or the retry hold) records nothing; ``ok=False`` (too little disk) records a
+    failure the sweep retries."""
+
+    ok: bool = True
+    unfinished: bool = False
+    path: str | None = None
+    bytes: int = 0
+
+
+@dataclass
+class MarketBackupRetry:
+    """When this process's last export failed (``None``: never, or a later export succeeded). In
+    memory on purpose: a restart allows one fresh attempt."""
+
+    failed_at: datetime | None = None
+
+
+def _market_snapshot_stamp(p: Path) -> tuple[datetime, bool] | None:
+    """``(stamp, is_tmp)`` for a ``market-<stamp>`` or ``market-<stamp>.tmp`` directory; None for
+    anything else, which the backup job never touches."""
+    if not p.name.startswith(_MARKET_SNAPSHOT_PREFIX) or not p.is_dir():
+        return None
+    body = p.name[len(_MARKET_SNAPSHOT_PREFIX):]
+    is_tmp = body.endswith(".tmp")
+    try:
+        stamp = datetime.strptime(body[:-len(".tmp")] if is_tmp else body, _MARKET_SNAPSHOT_STAMP)
+    except ValueError:
+        return None
+    return stamp, is_tmp
+
+
+def _market_backup_space(backups: Path, db_path: Path) -> tuple[int, int]:
+    """``(free, needed)`` bytes on the backups volume for the next export."""
+    exports = []
+    for p in backups.glob(f"{_MARKET_SNAPSHOT_PREFIX}*"):
+        parsed = _market_snapshot_stamp(p)
+        if parsed is not None and not parsed[1]:
+            exports.append((parsed[0], p))
+    if exports:
+        newest = max(exports)[1]
+        size = sum(f.stat().st_size for f in newest.iterdir() if f.is_file())
+        needed = MARKET_BACKUP_FREE_FACTOR * size
+    else:
+        needed = db_path.stat().st_size if db_path.exists() else 0
+    return shutil.disk_usage(backups).free, needed
+
+
+def _prune_market_snapshots(backups: Path, now: datetime) -> dict[str, int]:
+    """Delete ``market-<stamp>`` exports past retention (:data:`MARKET_SNAPSHOT_KEEP_NEWEST`, then the
+    newest per ISO week for :data:`MARKET_SNAPSHOT_WEEKLY_DAYS`) and every ``market-<stamp>.tmp`` left
+    by a killed export. Runs only after an export finished, so no tmp belongs to a live one."""
+    snapshots: list[tuple[datetime, Path]] = []
+    stale: list[Path] = []
+    for p in backups.glob(f"{_MARKET_SNAPSHOT_PREFIX}*"):
+        parsed = _market_snapshot_stamp(p)
+        if parsed is None:
+            continue
+        stamp, is_tmp = parsed
+        if is_tmp:
+            stale.append(p)
+        else:
+            snapshots.append((stamp.replace(tzinfo=now.tzinfo), p))
+    doomed: list[Path] = []
+    weeks_kept: set[tuple[int, int]] = set()
+    for i, (stamp, p) in enumerate(sorted(snapshots, reverse=True)):
+        week = stamp.isocalendar()[:2]
+        if i < MARKET_SNAPSHOT_KEEP_NEWEST:
+            weeks_kept.add(week)
+            continue
+        if now - stamp <= timedelta(days=MARKET_SNAPSHOT_WEEKLY_DAYS) and week not in weeks_kept:
+            weeks_kept.add(week)
+            continue
+        doomed.append(p)
+    for p in (*doomed, *stale):
+        shutil.rmtree(p, ignore_errors=True)
+    return {"market_snapshots_deleted": len(doomed), "market_tmp_deleted": len(stale)}
+
+
+async def _market_backup(
+    store: MarketStore, settings, clock: Clock, calendar: NSECalendar,
+    *, retry: MarketBackupRetry | None = None,
+) -> MarketBackupResult:
+    """§10.5 DuckDB leg: ``EXPORT DATABASE`` of the live store to ``<backups>/market-<stamp>``, then
+    retention. Never STARTS within :data:`_MARKET_BACKUP_DAY_START_IST`..:data:`_IN_SESSION_END_IST`
+    on a trading day, nor within :data:`MARKET_BACKUP_RETRY_AFTER` of a failed export recorded in
+    ``retry`` (both unfinished: a later lane pass runs it); never with free disk under the floor
+    (:func:`_market_backup_space`, failed + WARNING). Non-trading days are unrestricted. The export
+    holds no store lock (``MarketStore.export_snapshot``) and runs on the store's pool."""
+    now = clock.now()
+    if calendar.is_trading_day(now.date()) and (
+        _MARKET_BACKUP_DAY_START_IST <= now.time() <= _IN_SESSION_END_IST
+    ):
+        _log.info("market_backup_deferred_trading_day", now=now.isoformat(),
+                  not_before=_IN_SESSION_END_IST.isoformat())
+        return MarketBackupResult(unfinished=True)
+    if retry is not None and retry.failed_at is not None and (
+        now - retry.failed_at < MARKET_BACKUP_RETRY_AFTER
+    ):
+        _log.info("market_backup_retry_deferred", failed_at=retry.failed_at.isoformat(),
+                  retry_from=(retry.failed_at + MARKET_BACKUP_RETRY_AFTER).isoformat())
+        return MarketBackupResult(unfinished=True)
+    backups = settings.backups_dir()
+    backups.mkdir(parents=True, exist_ok=True)
+    free, needed = await asyncio.to_thread(_market_backup_space, backups, settings.duckdb_path())
+    if free < needed:
+        _log.warning("market_backup_skipped_low_disk", free_bytes=free, needed_bytes=needed,
+                     path=str(backups))
+        return MarketBackupResult(ok=False)
+    dest = backups / f"{_MARKET_SNAPSHOT_PREFIX}{clock.now():{_MARKET_SNAPSHOT_STAMP}}"
+    started = time_module.monotonic()
+    try:
+        report = await store.arun(store.export_snapshot, dest)
+    except Exception:
+        if retry is not None:
+            retry.failed_at = clock.now()
+        raise
+    if retry is not None:
+        retry.failed_at = None
+    _log.info("market_backup_written", path=str(dest),
+              duration_s=round(time_module.monotonic() - started, 1),
+              bytes=report["bytes"], tables=report["tables"])
+    try:
+        pruned = await asyncio.to_thread(_prune_market_snapshots, backups, clock.now())
+    except Exception as exc:  # noqa: BLE001 - housekeeping must not fail the backup job
+        _log.warning("market_backup_prune_failed", error=str(exc), error_type=type(exc).__name__)
+    else:
+        _log.info("market_backup_pruned", **pruned)
+    return MarketBackupResult(path=str(dest), bytes=report["bytes"])
 
 
 # --------------------------------------------------------------------------- builders (guarded)

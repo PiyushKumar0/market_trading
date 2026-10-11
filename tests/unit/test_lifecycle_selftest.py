@@ -6,6 +6,8 @@ secrets store (never touches the Windows Credential Manager). Clock-skew check d
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from engine.core.calendar import NSECalendar
@@ -396,3 +398,191 @@ async def test_startup_freezes_on_catchup_safety_failure(conn, clock, temp_confi
     assert "data_freshness:instruments" in report.frozen_reasons
     assert any(c == "catchup_safety_jobs" for c, _s, _d in latch.active_causes())
     assert mode.risk_state() == RiskState.FROZEN
+
+
+@pytest.mark.asyncio
+async def test_startup_clears_integrity_latch_once_stores_verify(conn, clock, temp_config, monkeypatch):
+    """§2.4 inverse: a boot whose protected stores all verify clears a prior boot's
+    protected_store_integrity latch (2026-10-11: the cause had a set site and no clear site, so a
+    botched owner reseed would have kept entries FROZEN across restarts until a hand DB edit)."""
+    from engine.risk.causes import CAUSE_OWNER_PAUSE
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    mode, _kill, latch, lifecycle = _build_with_latch(conn, clock, temp_config)
+    await latch.set_cause("protected_store_integrity", RiskState.FROZEN,
+                          "protected_store_integrity", Actor.RISK_GATE)
+    await latch.set_cause(CAUSE_OWNER_PAUSE, RiskState.FROZEN, "owner /pause_entries", Actor.OWNER)
+
+    report = await lifecycle.startup(check_skew=False)
+
+    assert report.integrity_ok is True
+    assert all(c != "protected_store_integrity" for c, _s, _d in latch.active_causes())
+    assert any(c == CAUSE_OWNER_PAUSE for c, _s, _d in latch.active_causes())   # cause-scoped
+
+
+@pytest.mark.asyncio
+async def test_startup_still_freezes_on_integrity_failure(conn, clock, temp_config, monkeypatch):
+    """Pin the fail-closed side: an unsigned edit on a flat book still latches the cause."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    mode, _kill, latch, lifecycle = _build_with_latch(conn, clock, temp_config)
+    path = temp_config / "envelope.yaml"
+    path.write_text(path.read_text(encoding="utf-8") + "\n# unsigned edit\n", encoding="utf-8")
+
+    report = await lifecycle.startup(check_skew=False)
+
+    assert report.integrity_ok is False
+    assert any(c == "protected_store_integrity" for c, _s, _d in latch.active_causes())
+    assert mode.risk_state() == RiskState.FROZEN
+
+
+# --------------------------------------------------------------------------- claude_login (D2/D11)
+SENTINEL = "sk-ant-SENTINEL-TOKEN-must-never-surface"
+
+
+def _creds(tmp_path, clock, *, days: float | None = 20, refresh=SENTINEL, access=SENTINEL,
+           sub="team", raw: str | None = None):
+    """A .credentials.json shaped like CLI 2.1.288's (claudeAiOauth, epoch-ms expiries)."""
+    from datetime import timedelta
+
+    path = tmp_path / ".credentials.json"
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8")
+        return path
+    oauth = {"accessToken": access, "refreshToken": refresh, "subscriptionType": sub,
+             "expiresAt": int((clock.now() + timedelta(hours=8)).timestamp() * 1000)}
+    if days is not None:
+        oauth["refreshTokenExpiresAt"] = int((clock.now() + timedelta(days=days)).timestamp() * 1000)
+    path.write_text(json.dumps({"claudeAiOauth": oauth}), encoding="utf-8")
+    return path
+
+
+def test_claude_login_pass_when_refresh_token_live(tmp_path, clock):
+    from engine.ops.selftest import Implies, check_claude_login
+
+    check = check_claude_login(clock.now(), _creds(tmp_path, clock, days=20))
+
+    assert check.name == "claude_login" and check.status.value == "PASS"
+    assert check.implies == Implies.NONE
+    assert "20.0 days" in check.detail and "subscription team" in check.detail and "IST" in check.detail
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"days": 3}, "expires in 3.0 days"),
+        ({"days": 7}, "expires in 7.0 days"),                       # the boundary is still a WARN
+        ({"days": -1}, "EXPIRED"),
+        ({"days": None}, "expiry not recorded"),
+        ({"refresh": "", "access": ""}, "not logged in"),           # the CLI's invalid_grant clear
+        ({"refresh": SENTINEL, "access": ""}, "not logged in"),
+        ({"raw": "{not json " + SENTINEL}, "unreadable (JSONDecodeError)"),
+        ({"raw": json.dumps({"other": 1})}, "no claudeAiOauth"),
+        ({"raw": json.dumps([SENTINEL])}, "no claudeAiOauth"),
+    ],
+)
+def test_claude_login_warns_never_freezes(tmp_path, clock, kwargs, needle):
+    from engine.ops.selftest import Implies, check_claude_login
+
+    check = check_claude_login(clock.now(), _creds(tmp_path, clock, **kwargs))
+
+    assert check.status.value == "WARN" and check.implies == Implies.NONE
+    assert needle in check.detail
+    assert "auth login --claudeai" in check.detail                 # the detail names the fix
+    assert "SENTINEL" not in check.detail
+
+
+@pytest.mark.asyncio
+async def test_claude_login_missing_file_warns_and_run_completes(
+    tmp_path, conn, clock, temp_config, monkeypatch
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=ProtectedStore(temp_config, conn, clock),
+                  kill_switch=KillSwitch(conn, clock), mode_manager=ModeManager(conn, clock, None, calendar),
+                  claude_credentials=tmp_path / "absent" / ".credentials.json")
+
+    report = await st.run(check_skew=False, include_freshness=False)
+
+    login = next(c for c in report.checks if c.name == "claude_login")
+    assert login.status.value == "WARN" and "no stored claude.ai login" in login.detail
+    assert "claude_login" not in report.frozen_reasons
+
+
+@pytest.mark.asyncio
+async def test_claude_login_unwired_is_skip(conn, clock, temp_config, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
+    report = await lifecycle._selftest.run(check_skew=False)
+    login = next(c for c in report.checks if c.name == "claude_login")
+    assert login.status.value == "SKIP"                              # the hermetic tier never reads ~/.claude
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [{"days": 20}, {"days": 2}, {"refresh": "", "access": SENTINEL},
+                                    {"raw": '{"claudeAiOauth": {"accessToken": "' + SENTINEL}])
+async def test_claude_login_never_leaks_token(tmp_path, conn, clock, temp_config, monkeypatch, caplog,
+                                              capsys, kwargs):
+    """The file holds live OAuth tokens: no detail, alert or log line may carry them."""
+    import logging
+
+    from engine.ops.selftest import alert_claude_login
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    caplog.set_level(logging.DEBUG)
+    path = _creds(tmp_path, clock, **kwargs)
+    calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
+    st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
+                  protected_store=ProtectedStore(temp_config, conn, clock),
+                  kill_switch=KillSwitch(conn, clock), mode_manager=ModeManager(conn, clock, None, calendar),
+                  claude_credentials=path)
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    report = await st.run(check_skew=False, include_freshness=False)
+    await alert_claude_login(clock.now(), path, alert)
+
+    def leaks(text: str) -> bool:   # a fragment counts: any slice of a token is a leak
+        return "SENTINEL" in text or "sk-ant-" in text
+
+    assert any(c.name == "claude_login" for c in report.checks)
+    assert not any(leaks(c.detail) for c in report.checks)
+    assert not any(leaks(m) for _s, m in alerts)
+    assert not leaks(caplog.text)
+    # structlog kwargs land as record attributes: the detail really is in what is scanned here.
+    assert any(getattr(r, "detail", None) for r in caplog.records if r.getMessage() == "claude_login_check")
+    assert not any(leaks(str(r.__dict__)) for r in caplog.records)
+    captured = capsys.readouterr()
+    assert not leaks(captured.out) and not leaks(captured.err)
+
+
+@pytest.mark.asyncio
+async def test_daily_login_job_alerts_once_on_warn_and_never_on_pass(tmp_path, clock):
+    from engine.ops.selftest import alert_claude_login
+
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    ok = await alert_claude_login(clock.now(), _creds(tmp_path, clock, days=20), alert)
+    assert ok.status.value == "PASS" and alerts == []
+
+    near = await alert_claude_login(clock.now(), _creds(tmp_path, clock, days=2), alert)
+    assert near.status.value == "WARN"
+    assert len(alerts) == 1 and alerts[0][0] == "warning"
+    assert "expires in 2.0 days" in alerts[0][1] and "auth login" in alerts[0][1]
+
+
+def test_claude_credentials_path_follows_the_cli(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from engine.ops.selftest import claude_credentials_path
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert claude_credentials_path() == tmp_path / "cfg" / ".credentials.json"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    assert claude_credentials_path() == tmp_path / "home" / ".claude" / ".credentials.json"

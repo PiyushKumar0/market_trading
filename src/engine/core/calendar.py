@@ -83,10 +83,16 @@ class NSECalendar:
         strict: bool = False,
         sqlite_conn: sqlite3.Connection | None = None,
         window_seed: TradeWindow | None = None,
+        include_special: bool = True,
     ) -> None:
+        """``include_special=False`` treats every ``special_sessions`` date (muhurat, DR-drill) as a
+        closed day, weekday or weekend: is_trading_day is False there, so session(), trade_window(),
+        next/previous_trading_day and add_sessions all skip it. The live engine passes False
+        (2026-10-11 decision); research, scripts and tests keep the default, which counts them."""
         self._dir = Path(calendar_dir)
         self._clock = clock
         self._strict = strict
+        self._include_special = include_special
         self._conn = sqlite_conn
         self._window_seed = window_seed or TradeWindow(start=time(10, 0), end=time(10, 30))
         self._years: dict[int, _YearCalendar] = {}
@@ -106,6 +112,8 @@ class NSECalendar:
         cal = self._years.get(d.year)
         if cal is None:
             return False  # no calendar, no trading (R6)
+        if d in cal.muhurat and not self._include_special:
+            return False  # special sessions excluded (live engine): closed on a weekday too
         if d.weekday() in _WEEKEND:
             return d in cal.muhurat  # muhurat sessions can fall on a weekend
         if d in cal.holidays:
@@ -158,7 +166,8 @@ class NSECalendar:
     def add_sessions(self, d: date, n: int, *, count_special: bool = False) -> date:
         """The ``n``-th counted session after ``d``; ``n=0`` is the first counted session on/after ``d``.
 
-        Muhurat/special sessions are skipped unless ``count_special``. Past the calendar horizon
+        Muhurat/special sessions are skipped unless ``count_special``; with ``include_special=False``
+        they are not trading days, so ``count_special`` cannot count them. Past the calendar horizon
         ``next_trading_day``'s ValueError propagates.
         """
         if n < 0:

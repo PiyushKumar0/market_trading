@@ -234,6 +234,24 @@ def test_job_persists_pending_rows_for_the_next_session(conn, calendar):
     assert row["consumed"] == 0
 
 
+def test_friday_crossings_target_monday_when_special_sessions_are_excluded(conn, clock):
+    """The live calendar (include_special=False, 2026-10-11) closes the Sunday 2026-11-08 muhurat, so
+    Friday 11-06's crossings are keyed to Monday 11-09, the next session the live sweep runs."""
+    friday = date(2026, 11, 6)
+    sessions = _sessions(30, end=friday)
+    store = _FakeStore(
+        universe=["AAA"],
+        filings=[_buy(sessions[-3], 6_000_000), _buy(sessions[-1], 6_000_000)],
+        closes={"AAA": {d: "100.00" for d in sessions}},
+    )
+    live = NSECalendar(config_dir() / "calendar", clock, strict=True, include_special=False)
+    result = _run(InsCrossingsJob(store, conn, _FrozenClock(), live, threshold_inr=THRESHOLD), friday)
+
+    assert result.ok is True
+    assert result.for_session == date(2026, 11, 9)
+    assert [r["for_session"] for r in _pending_rows(conn)] == ["2026-11-09"]
+
+
 def test_job_only_journals_crossings_dated_the_run_day(conn, calendar):
     """A crossing that happened earlier in the lookback window was journalled on ITS run day.
     Re-emitting it every night would re-originate stale events forever."""

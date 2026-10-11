@@ -434,6 +434,7 @@ const MESSAGE_KIND: Table = {
   limit_breach: { label: 'Risk or safety alert' },
   budget_warning: { label: 'AI budget' },
   paper_alert: { label: 'Paper alert' },
+  surveillance_migration: { label: 'Held stock on a surveillance list' },
 }
 export const messageKindTerm = (v: string | null | undefined): Term => lookup(MESSAGE_KIND, v)
 

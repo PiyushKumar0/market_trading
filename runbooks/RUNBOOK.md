@@ -69,6 +69,118 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
   `scripts/nssm_install.ps1`). The engine's own intend-to-run record is `engine_lifecycle.state`. A host
   reboot is not recovered either (the service is DEMAND start, §2.2).
 
+## Restore market.duckdb from backup (owner, engine stopped or crashed; §10.5, 2026-10-11)
+
+Backups are the nightly `market_backup` exports `data\backups\market-<stamp>\` (Parquet + `schema.sql` /
+`load.sql`; ignore any `*.tmp`). Rehearse first with the quarterly drill in `runbooks/COMMANDS.md`. Run
+every line below from the repo root, in ONE PowerShell window (`$snap` and `$scratch` carry between
+steps). Do it after the day's Kite login if you can: the replayed `daily_bars` and `bar_reconcile` days
+need a valid Kite session.
+
+1. Stop `mt-engine` cleanly (see "Planned stop / start"). If it crashed instead (a damaged file can
+   crash every boot, and NSSM restarts it after 15 s), stop the service anyway so NSSM cannot start it
+   again mid-restore. Then check that no engine process is left; the last line must print nothing:
+   ```powershell
+   Stop-Service mt-engine; Get-Service mt-engine
+   $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'"
+   $procs | Where-Object { $_.CommandLine -like '*engine.ops.main*' } | Select-Object ProcessId
+   ```
+2. Pick the export: the drill's `$snap = ...` line (the newest export), or an older one taken before the
+   damage began with `$snap = Get-Item data\backups\market-YYYYmmddTHHMMSS`. Then preview the rewind; it
+   changes nothing:
+   ```powershell
+   .venv\Scripts\python.exe scripts\rewind_after_market_restore.py --export $snap.Name
+   ```
+   Check the printed S and rows. The plan also lists today's `universe_build` and `instruments` success
+   rows it will delete, with the reason (see step 5). It prints `engine_lifecycle.state`:
+   - `STOPPED`: a clean stop. Use the plain `--apply` in step 5.
+   - `RUNNING` or `STOPPING`: the engine did not stop cleanly (a crash, a power loss, a forced second
+     Ctrl-C). If step 1 showed no engine process, carry on and use `--engine-crashed` in step 5.
+   Never edit `engine_lifecycle` by hand; that state is what makes the next boot crash-recover.
+3. Move the bad file aside together with its WAL. A stale `.wal` left beside the new file would be
+   replayed into it.
+   ```powershell
+   Rename-Item data\market.duckdb market.duckdb.bad
+   if (Test-Path data\market.duckdb.wal) { Rename-Item data\market.duckdb.wal market.duckdb.bad.wal }
+   ```
+4. Import. Point the drill at the live path instead of its scratch file, then run the drill's
+   `IMPORT DATABASE` line from COMMANDS.md verbatim (~5 min). Skip the drill's `Remove-Item` line. The
+   table counts it prints are the restored state.
+   ```powershell
+   $scratch = "data\market.duckdb"
+   ```
+5. Rewind `state.db`. It is not restored, so it still says every day after the export is done. Apply
+   the plan you previewed in step 2:
+   ```powershell
+   .venv\Scripts\python.exe scripts\rewind_after_market_restore.py --export $snap.Name --apply
+   ```
+   After a crash (step 2 printed `RUNNING` or `STOPPING`), run this instead:
+   ```powershell
+   $crashed = @('--export', $snap.Name, '--apply', '--engine-crashed')
+   .venv\Scripts\python.exe scripts\rewind_after_market_restore.py @crashed
+   ```
+   S is the stamp's date, inclusive. The script moves S earlier when a job success for an earlier day
+   was recorded after the export. It deletes the `job_runs` success rows from S on for the jobs it can
+   replay: `bhavcopy`, `daily_bars`, `deals`, `filings_pit`, `filings_pit_fresh`, `filings_results`,
+   `bar_reconcile` and `features_daily`. It leaves `ins_crossings` alone, because its output is in
+   `state.db`. It sets every `backfill_checkpoints` row at or past S back to S-1, for both intervals
+   and every symbol, NIFTY 50 and INDIA VIX included. It also deletes today's `universe_build` and
+   `instruments` success rows when the export was taken before them, so the boot rebuilds today's
+   universe and instruments snapshots. In session, `instruments` re-runs at boot; before a Kite login
+   that run fails and entries stay frozen (`data_freshness:instruments`) until a sweep after the login
+   succeeds. That is intended: today's snapshot really is missing. The docstring gives the code reason
+   for each choice. It takes `engine.lock` and holds it until it finishes, so an engine start in the
+   meantime is refused; if the lock is already held, an engine is running and it refuses. It refuses
+   unless the state is `STOPPED`, or with `--engine-crashed` also `RUNNING` / `STOPPING`; it never
+   changes that state, so the next boot still crash-recovers. It first writes
+   `data\state.db.pre-rewind-<stamp>`. A second run reports `nothing to change`. Keep the copy until
+   step 6 checks out. To undo before starting the engine, copy it back through SQLite (a plain file
+   copy can collide with a leftover `state.db-wal`):
+   ```powershell
+   $copy = (Get-ChildItem data\state.db.pre-rewind-* | Sort-Object Name | Select-Object -Last 1).FullName
+   .venv\Scripts\python.exe -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()" $copy data\state.db
+   ```
+   If it warns that S is more than 30 days back, those older days are outside the catch-up horizon and
+   must be refilled by hand (`scripts\backfill.py run --interval day`, `scripts\backfill_bhavcopy.py`).
+6. Start `mt-engine`, then check `data\logs\engine.log`:
+   - `market_store_opened` names `data\market.duckdb`.
+   - `catch_up_complete` lists in `caught_up` the replayed `bhavcopy:<day>`, `daily_bars:<day>`, `deals:<day>`
+     and filings days from S on. The `CATCHUP_REPORT` message lists the same days. When step 5
+     deleted today's rows it also lists `universe_build:<today>`, and `instruments:<today>` once that
+     run succeeds.
+   - After `--engine-crashed`, the boot's `startup_sticky_state` line shows `crash_recovered` true.
+   - `features_daily_skipped_empty_universe` is expected for every day after S.
+   - Before login, each replayed `bar_reconcile:<day>` shows as failed, and the sweep after login
+     clears it. `daily_bars` records success even when Kite refuses it, but its checkpoints only move
+     when candles arrive. The post-login re-trigger still refetches NIFTY 50 and INDIA VIX from S, and
+     `warmup_not_ready` then stops naming `regime:NIFTY 50`.
+
+What the engine recovers by itself after step 6 (the §2.6 catch-up runs once per trading day from S;
+at most 30 days back):
+- `bars_1d`. `bhavcopy` writes every EQ symbol, and `daily_bars` writes the watchlist plus NIFTY 50
+  and INDIA VIX. The boot regime fill and the post-login re-trigger refetch NIFTY 50 and INDIA VIX from S.
+- `flagged_instrument_days` (deals), `insider_trades` (filings_pit, filings_pit_fresh), and
+  `results_filings` plus the event calendar (filings_results).
+- For day S only, where the export holds the inputs: official 1-minute bars and `reconcile_log` for
+  symbols with self-built bars, and `features_daily` (it needs S's `universe_daily`).
+
+What is lost (nothing rebuilds it):
+- All `bars_1m` after the export: self-built, gap-filled and official. The engine's minute fills cover
+  today's session only. You can refetch the official candles by hand, from S to yesterday:
+  `scripts\backfill.py run --interval minute --from YYYY-MM-DD --to YYYY-MM-DD`. The rewound minute
+  checkpoints allow it without `--reset-checkpoints`. Raw ticks under `data\parquet` survive the
+  restore, but nothing rebuilds bars from them.
+- `universe_daily` and `instruments_daily` for past days, and therefore `features_daily` after S. Only
+  today's snapshots are rebuilt. On a restore after today's 08:15 and 08:30 fires from an export taken
+  before them, step 5 deletes today's rows and the boot rebuilds the universe. It rebuilds the
+  instruments snapshot too when it boots before the session close; after the close the engine uses the
+  export's instruments snapshot until the next 08:15, unless a fresh Kite login refreshes it sooner.
+- `news`, `news_clusters` and `sentiment_agg` (the LLM scores), `catalyst_watchlist`,
+  `feature_snapshots`, `reconcile_log` drift evidence and `bars_1m_no_trade`.
+- Run-latest tables (`corp_actions`, `sector_map`, `symbol_isin`, `shp_quarterly`, ...) refresh only
+  on their next scheduled run, within that job's own window. For `corp_actions` that is the run day
+  -7 to +35 days.
+
 ## Dead-platform manual fallback (R10, §10.6) — pre-stage BEFORE Phase 4
 
 If the platform and PC are dead with open positions, capital is still protected by the resting SL-M/GTT
@@ -100,10 +212,11 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
      **`-Confirm` is mandatory** — without it the script only DRY-RUNS (prints the plan, changes nothing).
      Omit `-NssmPath` if `nssm.exe` is on PATH; preview safely by omitting `-Confirm` first.
   - Control: `scripts\nssm_install.ps1 -Action status | start | stop | remove` (`remove` also needs `-Confirm`).
-- Mint the Claude SDK OAuth token: `scripts/setup_token.ps1` (stores it in DPAPI, but no engine code reads
-  it; the engine's pinned CLI, `llm.cli_path` in `config/agents.yaml`, authenticates with its own stored
-  login for the account the service runs as). Ensure **no** stray `ANTHROPIC_API_KEY` (it silently outranks
-  the OAuth token, D2 — the startup self-test asserts its absence).
+- Sign in the engine's pinned Claude CLI (`llm.cli_path` in `config/agents.yaml`) as the service user:
+  `& "<repo>\data\run\claude-cli\2.1.288\claude.exe" auth login --claudeai` (COMMANDS.md "Re-login of the
+  engine's Claude CLI"). That stored login is what every engine LLM call uses (plan §2.2 as built);
+  `scripts/setup_token.ps1` is retired — the DPAPI token it mints is read by no engine code. Ensure **no**
+  stray `ANTHROPIC_API_KEY` (it silently outranks the CLI login, D2 — the startup self-test asserts its absence).
 - Power: disable Modern Standby network throttling; set Windows Update active hours; a wake-capable
   Scheduled Task wakes the PC for scheduled active periods incl. EOD jobs.
 
@@ -141,13 +254,15 @@ These are **fire-times**, not a liveness assumption — each is also replayed as
 time passed while the engine was off (`CatchUpRunner`, driven by the SAME `JobRegistry` the scheduler
 uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); times come from the
 `jobs:` block in `config/settings.yaml`, except `news_chain`, `daily_bars`, `features_daily`,
-`reco_expire` and `tick_compact` (constants in `main.py`) and `isin_map`, `results_line_items` and
+`reco_expire`, `tick_compact`, `claude_login_check` and `market_backup` (constants in `main.py`) and
+`isin_map`, `results_line_items` and
 `feed_freshness` (`JobTimesCfg` defaults in `core/config.py`).
 
 | Time | Job (`job_runs` id) | Class | Notes |
 |---|---|---|---|
+| 08:10 | `claude_login_check` | run-latest | reads the pinned CLI's stored claude.ai login; one warning when the refresh token is within 7 days of expiry, blank or missing (re-login: COMMANDS.md) |
 | 08:15 | `instruments` | safety-critical | Kite dump + tick sizes (A10); stale ⇒ FROZEN-for-entries |
-| 08:20 | `surveillance` | safety-critical | GSM/ASM/T2T/ESM (A8); reuse-yesterday on source failure |
+| 08:20 | `surveillance` | safety-critical | GSM/ASM/T2T/ESM (A8); reuse-yesterday on source failure. A "`<SYM>` is now on the NSE `<LIST>` list (you hold it)" alert means an open real position is under exchange surveillance: the platform does not touch the position, and new entries in it are refused. Check margin and settlement (T2T = no intraday netting) in Kite. Each (position, list) alerts once; a restart does not repeat it |
 | 08:25 | `news_chain` | run-latest | backfill → cluster → resolve (never entry-blocking, §2.7) |
 | 08:30 | `universe_build` | run-latest | index (`universe.index_name`, NIFTY Total Market since 2026-10-08, O18) ∩ MIS ∩ ¬surveillance ∩ ≥₹5cr (A8/C7); core subset = `universe.core_index_name` (NIFTY 500) |
 | 08:30 Sun | `sector_map` | run-latest | weekly `sector_map`+`theme_map` (fires Sunday, not a trading day) |
@@ -175,12 +290,25 @@ uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); ti
 | 21:00 | `nightly_review` | date-keyed | nightly review (§5.5/§6.4) |
 | 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` (§10.5) |
 | 21:30 | `feed_freshness` | run-latest | daily census of every feed's newest data |
+| 22:00 | `market_backup` | run-latest | `EXPORT DATABASE` of market.duckdb to `data/backups/market-<stamp>/` (§10.5); CompactionLane. Never starts 06:00–15:45 on a trading day, never in the boot catch-up pass or on the stop path; a missed export runs in the next lane pass outside that window (incl. the post-boot pass); after a failure it waits 6 h before retrying |
 | 22:30 | `tick_compact` | date-keyed | collapses each closed symbol-day's tick fragments into one file (§4.3); last in date-keyed order |
 
 Live (interval, not calendar-gated, run whenever the engine is up): `bar_advance` (5 s bar
 finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the news polls — one `news_poll_<name>`
 job per `news.feeds.rss` entry at its own `poll_s` (2026-08-04 seed: `et` 300 s, `livemint_markets` /
 `livemint_companies` 900 s) plus `news_poll_gdelt` (`news.gdelt_poll_s`=3600 s).
+
+### Alert meanings (2026-10-11)
+
+- **`agent X failed: auth_failed (...) — fix: re-login ...`** — the stored claude.ai login of the CLI is
+  dead or revoked. Every LLM caller fails until the re-login (`runbooks/COMMANDS.md` "Re-login of the
+  engine's Claude CLI"); the deterministic engine and the risk gate are unaffected (D7). The alert repeats
+  per agent per episode window.
+- **`CATCHUP_REPORT` lists `bar_reconcile:<day>` as failed** — expected on a pre-login boot or while the
+  Kite token is dead; it clears on the first sweep after login. After 7 days of failure the day becomes
+  `skipped (gave up)`. A manual reconcile re-run of a fully logged day is a no-op: to recompute a day,
+  delete its `reconcile_log` rows first (and the comparison is meaningless unless self bars are rebuilt
+  from the tick parquet).
 
 ## Historical backfill procedure (A2, checkpointed & resumable)
 

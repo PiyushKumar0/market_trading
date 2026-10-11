@@ -68,7 +68,7 @@ from engine.ops.jobs import (
     JOB_WEEKLY_SUMMARY,
     JobClass,
 )
-from engine.ops.main import INDEX_SYMBOL, VIX_SYMBOL, _in_session_window
+from engine.ops.main import INDEX_SYMBOL, LANE_JOB_IDS, VIX_SYMBOL, _in_session_window
 from engine.ops.paper_runtime import PaperRuntime
 from engine.ops.post_login import regime_and_warmup_backfill
 from engine.ops.warmup import WarmupGate
@@ -130,7 +130,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     date_keyed = {s.job_id for s in reg.specs(JobClass.DATE_KEYED)} - {JOB_TICK_COMPACT, JOB_WEEKLY_SUMMARY}
     assert PLAN_NAMED_DATE_KEYED <= date_keyed
     assert all(s.at > A_STOP for s in reg.specs(JobClass.DATE_KEYED)), "stop day must be a missed EOD"
-    run_latest = {s.job_id for s in reg.specs(JobClass.RUN_LATEST)}
+    run_latest = {s.job_id for s in reg.specs(JobClass.RUN_LATEST)} - LANE_JOB_IDS
     morning_safety = {s.job_id for s in reg.specs(JobClass.SAFETY_CRITICAL) if s.at <= B_BOOT}
     eod_safety = {s.job_id for s in reg.specs(JobClass.SAFETY_CRITICAL) if s.at > A_STOP}
 
@@ -156,9 +156,10 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     # Sunday's weekly sector map fell inside the gap: one run, recorded under that Sunday.
     sunday = next(d for d in off_days if d.weekday() == 6)
     assert b.catch_up.was_run(JOB_SECTOR_MAP, sunday)
-    # tick_compact: the lane starts nothing in-session (WO-21) — the debt stays on the watermark for the
-    # first sweep after the window.
-    assert all(not b.catch_up.was_run(JOB_TICK_COMPACT, d) for d in missed)
+    # The lane jobs (tick_compact, market_backup): the lane starts nothing in-session (WO-21) — the
+    # debt stays on the watermark for the first sweep after the window.
+    assert all(not b.catch_up.was_run(job_id, d) for job_id in LANE_JOB_IDS for d in missed)
+    assert not {j for j, _ in calls} & LANE_JOB_IDS
 
     report = b.report
     assert report is not None and report.crash_recovered is False and report.jobs_failed == []

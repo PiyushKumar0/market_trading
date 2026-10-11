@@ -124,6 +124,57 @@ def test_add_sessions(cal, d, n, count_special, expected):
     assert cal.add_sessions(d, n, count_special=count_special) == expected
 
 
+WEEKDAY_SPECIAL = date(2025, 10, 21)   # Tuesday muhurat (13:45-14:45), not in 2025 holidays
+
+
+@pytest.fixture
+def live_cal(clock) -> NSECalendar:
+    # The composition root's flavour: strict, special sessions excluded (2026-10-11 decision).
+    return NSECalendar(CAL_DIR, clock, strict=True, include_special=False)
+
+
+def test_include_special_false_closes_the_2026_muhurat(live_cal):
+    assert live_cal.is_trading_day(MUHURAT) is False
+    assert live_cal.session(MUHURAT) is None
+    with pytest.raises(ValueError):
+        live_cal.trade_window(MUHURAT)
+    assert live_cal.next_trading_day(date(2026, 11, 6)) == date(2026, 11, 9)
+    assert live_cal.previous_trading_day(date(2026, 11, 9)) == date(2026, 11, 6)
+    # count_special cannot count a day the calendar does not trade.
+    assert live_cal.add_sessions(date(2026, 11, 6), 1, count_special=True) == date(2026, 11, 9)
+    assert live_cal.add_sessions(MUHURAT, 0, count_special=True) == date(2026, 11, 9)
+
+
+def test_include_special_false_closes_a_weekday_special_session(clock, live_cal):
+    assert WEEKDAY_SPECIAL.weekday() == 1
+    assert NSECalendar(CAL_DIR, clock, strict=True).is_trading_day(WEEKDAY_SPECIAL) is True
+    assert live_cal.is_trading_day(WEEKDAY_SPECIAL) is False
+    assert live_cal.session(WEEKDAY_SPECIAL) is None
+    assert live_cal.next_trading_day(date(2025, 10, 20)) == date(2025, 10, 23)  # 10-22 Balipratipada
+    assert live_cal.previous_trading_day(date(2025, 10, 23)) == date(2025, 10, 20)
+
+
+def test_include_special_false_changes_only_special_session_dates(clock, live_cal):
+    default = NSECalendar(CAL_DIR, clock, strict=True)
+    differing = [
+        d for i in range(3 * 366)
+        if default.is_trading_day(d := date(2024, 1, 1) + timedelta(days=i))
+        != live_cal.is_trading_day(d)
+    ]
+    assert differing == [
+        date(2024, 1, 20), date(2024, 3, 2), date(2024, 5, 18), date(2024, 11, 1),
+        WEEKDAY_SPECIAL, MUHURAT,
+    ]
+
+
+def test_default_calendar_still_counts_special_sessions(cal):
+    assert cal.is_trading_day(MUHURAT) is True
+    assert cal.session(MUHURAT).is_muhurat is True
+    assert cal.next_trading_day(date(2026, 11, 6)) == MUHURAT
+    assert cal.add_sessions(date(2026, 11, 6), 1, count_special=True) == MUHURAT
+    assert cal.is_trading_day(WEEKDAY_SPECIAL) is True
+
+
 def test_add_sessions_rejects_negative_and_raises_past_horizon(cal):
     with pytest.raises(ValueError):
         cal.add_sessions(WED, -1)
