@@ -383,9 +383,9 @@ def _live_haiku_call() -> str:
     if "cli_path" in fields and "env" in fields:
         cli_kwargs = {"cli_path": str(cli), "env": {"DISABLE_AUTOUPDATER": "1"}}
     try:
-        options = options_cls(model="claude-haiku-4-5", setting_sources=[], **cli_kwargs)
+        options = options_cls(model="claude-haiku-5-5", setting_sources=[], **cli_kwargs)
     except TypeError:
-        options = options_cls(model="claude-haiku-4-5", **cli_kwargs)
+        options = options_cls(model="claude-haiku-5-5", **cli_kwargs)
 
     async def _run() -> str:
         chunks: list[str] = []

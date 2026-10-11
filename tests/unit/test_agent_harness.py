@@ -678,6 +678,8 @@ def test_effort_loads_from_yaml_and_is_refused_on_haiku() -> None:
     cfg = {"agents": {"x": {"model": "sonnet-5", "shape": "single_shot", "tools_enabled": False,
                             "effort": "low"}}}
     assert load_agent_defs(cfg)["x"].effort == "low"
+    cfg["agents"]["x"]["model"] = "haiku-5.5"
+    assert load_agent_defs(cfg)["x"].effort == "low"
     cfg["agents"]["x"]["model"] = "haiku-4.5"
     with pytest.raises(Exception, match="effort is not supported"):
         load_agent_defs(cfg)

@@ -3,7 +3,7 @@
 # NOT a protected store (it is operational config, owner-editable), but the gate/learner never read
 # it — only engine.intelligence does. Model is ALWAYS set explicitly per agent: the SDK defaults to
 # Opus on Max plans and would burn credit at 5× Haiku rates (D4). The harness probes each knob against
-# the SDK's options surface; note `effort` does NOT exist on Haiku 4.5 (D9). `max_output_tokens` is NOT
+# the SDK's options surface; note `effort` does NOT exist on Haiku 4.5 (D9) — Haiku 5.5 does take it. `max_output_tokens` is NOT
 # enforced: claude-agent-sdk has no output-token option, so the values below are unsent (2026-10-03).
 
 schema_version: 1
@@ -54,6 +54,8 @@ model_pricing_usd_per_mtok:
   sonnet-5.5: { input: 2,  output: 10 }
   opus-5.5:   { input: 4,  output: 20 }
   fable-5.1:  { input: 10, output: 50 }
+  haiku-5.5:  { input: 0.10, output: 0.50 }   # 2026-10-11, prompts <=100K tokens ($0.50/$2.50 beyond);
+                                              # flat here — only the tiny sdk_smoke call uses it
 
 # WEEKLY allocation per agent [tunable] (§5.6) — one Thursday-14:00-IST quota window. Sum = $200.
 # Re-based 2026-09-12 (owner-directed) from the retired monthly split. Sized at ~2x the peak OBSERVED

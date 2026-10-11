@@ -85,6 +85,7 @@ MODEL_API_IDS: dict[str, str] = {
     "sonnet-5.5": "claude-sonnet-5-5",
     "opus-5.5": "claude-opus-5-5",
     "fable-5.1": "claude-fable-5-1",
+    "haiku-5.5": "claude-haiku-5-5",
 }
 
 # The CLI's built-in tools, denied by name on every call (§5.1) — the second layer behind `tools=[]`
@@ -214,7 +215,7 @@ class AgentDef(BaseModel):
                 f"{self.agent_id}: tools_enabled with an empty allowed_tools list is meaningless — "
                 "'tools_enabled: true' never means SDK defaults (D5/D10)"
             )
-        if self.effort is not None and self.model.startswith("haiku"):
+        if self.effort is not None and self.model == "haiku-4.5":   # Haiku 5.5 takes effort
             raise ValueError(f"{self.agent_id}: effort is not supported on {self.model} (D9)")
         return self
 
@@ -1220,7 +1221,7 @@ class _SmokeContext:
 
 SMOKE_AGENT_DEF = AgentDef(
     agent_id="sdk_smoke",
-    model="haiku-4.5",
+    model="haiku-5.5",
     shape="single_shot",
     tools_enabled=False,
     allowed_tools=[],

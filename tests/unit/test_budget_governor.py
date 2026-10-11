@@ -66,6 +66,7 @@ PINNED_CFG: dict = {
     },
     "model_pricing_usd_per_mtok": {
         "haiku-4.5": {"input": 1, "output": 5},
+        "haiku-5.5": {"input": 0.10, "output": 0.50},   # the sdk_smoke model
         "sonnet-4.6": {"input": 3, "output": 15},
         "sonnet-5.5": {"input": 2, "output": 10},       # the production roster (harness tests)
         "opus-4.8": {"input": 5, "output": 25},
