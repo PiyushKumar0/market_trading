@@ -1,5 +1,39 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-15 16:32 — D14 paper no-stop test (C5) and the ticker spawn-failure fix deployed (owner: "Go with option C and validate")
+
+- **Evidence before building (disclosed in C5):**
+  - On the same live recs the no-stop exit was not better so far: at T+10 the paired median was −0.21 pp (6 of 12 better); at T+20, 0 of 3 better (2 worse, 1 tie).
+  - Time-only excess over the EW benchmark was about 0 (T+5 −0.50%, T+10 +0.04%) while the benchmark fell 6.7% from 08-27 to 10-14.
+  - The 10-14 status claim that "the backtest and the live record agree" overstated the live evidence. The owner has been told.
+- **Pre-registered** C5 in `IMPLEMENTATION_PLAN.md` §6.1 (7f46bb9) before any code. A clarification followed before the deploy, at eligible n = 3: looks pinned to the first 20 and 40 eligible recs by fill date (look 2 supersedes), disclosure corrected, restart and end semantics defined.
+- **Built** on `wip/paper-no-stop` (worktree `..\mt_nostop`), 5b8b7bf:
+  - Migration 0017 adds `positions.exit_policy`, and `paper.no_stop_strategies` is `[hi52, ins, brk20]`.
+  - A listed strategy's paper position opens with no stop or target, `time_only` and `TIME_EXIT_ONLY`, but only when its exit session is known. Fills from 12-04 keep their stop until `2027.yaml` loads.
+  - ProtectionManager skips these positions. A NULL stop without the policy still fails closed.
+  - Copy updated in `GET /paper`, the dashboard and `/positions`. New `scripts\no_stop_verdict.py`.
+- **Ticker supervisor** (e0d3018, promised 10-14):
+  - The incident: on 10-12 at 20:12, CreateProcess was denied in Modern Standby, and ticker supervision died silently.
+  - Now a failed spawn goes STALE and retries with backoff. A denied terminate, the `start()` path and the backoff overflow are fixed too.
+- **Validation:**
+  - Failing-first tests. Full suite 4252 passed, 20 skipped (10m40s, run alone).
+  - Dashboard 76/76, `tsc` clean, fixture-server DOM sweep clean on every tab at desktop and phone width.
+  - Three-lens Opus review found 3 medium and a set of low findings, all fixed: unknown exit date, denied terminate, and optional stopping in the verdict's labels.
+  - The verdict run read-only on the live DB reproduces the interim figures and prints INSUFFICIENT (3 of 20).
+- **Q4.13 go-live checks complete:** 6 sessions (10-08 → 10-15) clean.
+  - 0 real orders, 0 Kite order/GTT calls, 0 PAPER_ALERT.
+  - Prep ran once per session plus once per gap, never failed.
+  - Each paper fill got its GTT within 0.02 s (MOTILALOFS 10-13, PVRINOX 10-15).
+- **Deploy:**
+  - 16:29:31 `exit_clean`. Backup `data\backups\pre_0017.db`: integrity ok, 41 tables, schema 0016.
+  - In the stop window, the hi52 forward verdict printed INSUFFICIENT: T+20 n 3, median net −7.89%, hit 0%; T+10 n 14, −5.12%; raw returns, no benchmark.
+  - `phase3` fast-forwarded 7f46bb9 → e0d3018 and `dist` rebuilt.
+  - Boot: `migrations_applied_on_boot [0017]` at 16:30:36, `paper_composed`, selftest all PASS, `startup_complete` 16:32:36, feed HEALTHY 16:32:38, `engine_ready` 16:32:43. Post-arm jobs had no failures; 0 ERROR lines since 16:30; `exit_policy` present; `GET /paper` without a token answers 401.
+- **Open:**
+  - MOTILALOFS (hi52) and PVRINOX (brk20) opened before the deploy and keep their stops; they are outside (P). The first test position is the next hi52/ins/brk20 paper fill from 10-16.
+  - Pre-existing: a running ticker never receives a new Kite token (moot with daily restarts).
+  - The worktree `..\mt_nostop` remains, with `.venv` and `node_modules` junctions; never `Remove-Item -Recurse` it.
+
 ## 2026-10-12 00:55 — Envelope #6 applied + re-signed; stale NSSM env cleared (owner: "Run the envelope patch. I have run the stale service variable remove command")
 
 - **NSSM:** owner ran `nssm reset mt-engine AppEnvironmentExtra`; verified — the Parameters key has no `AppEnvironmentExtra` (takes effect at the next service start).
