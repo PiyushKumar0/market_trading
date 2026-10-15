@@ -1168,3 +1168,174 @@ async def test_read_loop_cleanup_cannot_hang_on_a_child_that_will_not_let_go(clo
     await asyncio.wait_for(sup._cancel_read_task(), timeout=5.0)      # must not hang
 
     assert [ev for (_l, ev, _k) in rec.calls if ev == "ticker_server_close_timeout"]
+
+
+# --------------------------------------------------------------------------- a spawn that raises (2026-10-12)
+def _failing_spawn_sup(clock, monkeypatch, *, fail_first: int, bus: EventBus | None = None):
+    """A HEALTHY supervisor whose next ``fail_first`` spawns raise CreateProcess's WinError 5 (Modern
+    Standby, 2026-10-12 20:12); records spawn attempts and retry sleeps, and never touches a real process."""
+    import engine.broker.ticker_supervisor as mod
+
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=bus, api_key="k")
+    sup._access_token = "tok"
+    sup._set_state("HEALTHY")
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    async def fake_spawn():
+        attempts.append(1)
+        if len(attempts) <= fail_first:
+            raise PermissionError(13, "Access is denied")
+
+    async def fake_terminate():
+        sup._proc = None
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(sup, "_spawn_child", fake_spawn)
+    monkeypatch.setattr(sup, "_terminate_child", fake_terminate)
+    monkeypatch.setattr(mod, "_monitor_sleep", fake_sleep)
+    return sup, attempts, sleeps
+
+
+@pytest.mark.asyncio
+async def test_a_respawn_whose_spawn_raises_keeps_supervising_and_retries_with_backoff(clock, monkeypatch):
+    bus = EventBus()
+    states = _health_sink(bus)
+    sup, attempts, sleeps = _failing_spawn_sup(clock, monkeypatch, fail_first=2, bus=bus)
+
+    await sup._respawn(reason="heartbeat_silence")                     # must not raise
+    await bus.drain(1.0)
+    assert (sup.health().state, len(attempts), states) == ("STALE", 1, ["STALE"])
+    first = sup._monitor_task
+    assert first is not None and not first.done()                      # supervision survives the failure
+
+    await first                                                        # retry 1 fails, arms retry 2
+    await sup._monitor_task                                            # retry 2 spawns
+    assert (len(attempts), sleeps, sup._spawn_failures) == (3, [60.0, 120.0], 0)
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_a_pending_spawn_retry(clock, monkeypatch):
+    import engine.broker.ticker_supervisor as mod
+
+    sup, attempts, _ = _failing_spawn_sup(clock, monkeypatch, fail_first=99)
+
+    async def parked_sleep(_seconds: float) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mod, "_monitor_sleep", parked_sleep)
+    await sup._respawn(reason="child_exited")
+    retry = sup._monitor_task
+
+    await sup.stop()
+    assert retry.cancelled() and len(attempts) == 1 and sup.health().state == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_a_long_failure_streak_backs_off_at_the_cap_without_overflow(clock, monkeypatch):
+    sup, _, sleeps = _failing_spawn_sup(clock, monkeypatch, fail_first=1)
+    sup._spawn_failures = 5000                                         # ~17 days at the cap
+
+    await sup._respawn(reason="spawn_retry")
+    await sup._monitor_task
+    assert sleeps == [300.0]
+
+
+@pytest.mark.asyncio
+async def test_the_incident_through_the_real_monitor_terminate_and_spawn_paths(monkeypatch):
+    """10-12 end to end: heartbeat silence in the REAL monitor loop -> the old child's TerminateProcess is
+    denied -> the REAL _spawn_child binds its listener, then CreateProcess is denied. Supervision survives
+    as a retry, STALE is published and the half-made spawn's listener is cancelled."""
+    import engine.broker.ticker_supervisor as mod
+
+    now = _Now(_at(20, 12, 30))
+    sup = _monitor_sup(Clock(time_source=now), api_key="k")
+    sup._access_token = "tok"
+    states = _health_sink(sup._bus)
+
+    class _DeniedProc(_FakeProc):
+        stdin = None
+
+        def terminate(self) -> None:
+            raise PermissionError(13, "Access is denied")
+
+    class _Server:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def fake_start_server(*_a, **_kw):
+        return _Server()
+
+    async def denied_exec(*_a, **_kw):
+        raise PermissionError(13, "Access is denied", None, 5, None)
+
+    sup._proc = _DeniedProc()
+    monkeypatch.setattr(mod.asyncio, "start_server", fake_start_server)
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", denied_exec)
+
+    async def silent(_i: int) -> None:
+        now.set(now.value + dt.timedelta(seconds=1))
+
+    await _run_monitor(sup, monkeypatch, silent, cycles=30)
+
+    retry = sup._monitor_task
+    assert (sup.health().state, states[-1], sup._spawn_failures) == ("STALE", "STALE", 1)
+    assert sup._read_task is None and sup._proc is None
+    assert retry is not None and retry.get_name() == "ticker-spawn-retry" and not retry.done()
+    await sup.stop()
+    assert retry.cancelled() and sup.health().state == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_a_start_whose_spawn_raises_keeps_supervising(clock, monkeypatch):
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None, api_key="k")
+
+    async def denied_spawn():
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(sup, "_spawn_child", denied_spawn)
+    await sup.start([1, 2], "tok")                                     # must not raise
+
+    retry = sup._monitor_task
+    assert (sup.health().state, sup._spawn_failures) == ("STALE", 1)
+    assert retry is not None and retry.get_name() == "ticker-spawn-retry"
+    await sup.stop()
+    assert retry.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_start_cancels_a_pending_spawn_retry(clock, monkeypatch):
+    import engine.broker.ticker_supervisor as mod
+
+    sup, attempts, _ = _failing_spawn_sup(clock, monkeypatch, fail_first=1)
+
+    async def parked_sleep(_seconds: float) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mod, "_monitor_sleep", parked_sleep)
+    await sup._respawn(reason="child_exited")
+    retry = sup._monitor_task
+
+    await sup.start([1], "tok2")
+    assert retry.cancelled() and len(attempts) == 2 and sup._access_token == "tok2"
+
+
+@pytest.mark.asyncio
+async def test_a_long_wedge_streak_backs_off_at_the_cap_without_overflow(clock, monkeypatch):
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None, api_key="k")
+    sup._set_state("WARMING")
+    sup._started_at = clock.now() - dt.timedelta(seconds=299)
+    sup._wedge_respawns = 5000
+
+    respawned = []
+
+    async def fake_respawn(*, reason: str) -> None:
+        respawned.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+    assert await sup._check_warming_timeout(60.0, 300.0, 5) is False   # 299 s is inside the 300 s cap

@@ -361,6 +361,8 @@ class TickerSupervisor:
         #     one-shot owner escalation. Both reset on a successful WARMING->HEALTHY promotion. ---
         self._wedge_respawns = 0
         self._wedge_escalated = False
+        #: Consecutive respawns whose spawn raised (2026-10-12); reset by a spawn that returns.
+        self._spawn_failures = 0
 
         # --- feed_stats counters (R8 observability): zero-cost increments, drained by stats_snapshot() ---
         self._ticks_received = 0
@@ -389,7 +391,13 @@ class TickerSupervisor:
                 return
             self._tokens = list(tokens)
             self._access_token = access_token
-            await self._spawn_child()
+            await self._cancel_monitor_task()  # a pending spawn retry must not outlive (or race) this start
+            try:
+                await self._spawn_child()
+            except Exception as exc:  # noqa: BLE001 - a failed spawn must never end supervision
+                await self._spawn_failed(self._spawn_failure_logged("start", exc))
+                return
+            self._spawn_failures = 0
 
     async def update_subscriptions(self, tokens: list[int]) -> None:
         """Update the live subscription set via a control frame on the TCP link (no respawn).
@@ -642,9 +650,16 @@ class TickerSupervisor:
                 pass
 
         # 2) Graceful terminate, then hard kill if it ignores us (A4 — a wedged reactor must still die).
+        #    Windows can deny TerminateProcess (PermissionError while the child is still active; CreateProcess
+        #    was denied in Modern Standby on 2026-10-12). Stdin is already closed, so the child exits on its
+        #    own (§2.4 orphan protection); a denial is logged, never raised into a respawn or stop().
         try:
             proc.terminate()
         except ProcessLookupError:  # pragma: no cover - exited between checks
+            await self._cancel_output_tasks()
+            return
+        except PermissionError:
+            _log.error("ticker_terminate_denied", pid=proc.pid)
             await self._cancel_output_tasks()
             return
         try:
@@ -655,6 +670,10 @@ class TickerSupervisor:
                 proc.kill()
             except ProcessLookupError:  # pragma: no cover
                 pass
+            except PermissionError:
+                _log.error("ticker_kill_denied", pid=proc.pid)
+                await self._cancel_output_tasks()
+                return
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:  # pragma: no cover - OS-level wedge
@@ -1082,7 +1101,7 @@ class TickerSupervisor:
         WARMING→HEALTHY promotion resets the counter + escalation flag (see :meth:`_set_state`).
         """
         age = self._warming_age_s()
-        effective = min(timeout_s * (2 ** self._wedge_respawns), cap_s)
+        effective = _backoff(timeout_s, self._wedge_respawns, cap_s)
         if age is None or age <= effective:
             return False
         self._wedge_respawns += 1
@@ -1183,13 +1202,51 @@ class TickerSupervisor:
         """
         async with self._lock:
             _log.warning("ticker_respawn", reason=reason)
+            try:
+                await self._terminate_child()
+                await self._cancel_read_task()
+                if self._access_token is None:
+                    _log.error("ticker_respawn_no_access_token")
+                    self._set_state("STOPPED")
+                    return
+                await self._spawn_child()
+            except Exception as exc:  # noqa: BLE001 - a failed respawn must never end supervision
+                await self._spawn_failed(self._spawn_failure_logged(reason, exc))
+                return
+            self._spawn_failures = 0
+
+    def _spawn_failure_logged(self, where: str, exc: Exception) -> float:
+        """Count a failed (re)spawn and log it; returns the retry delay. Call it inside the ``except`` so
+        the first failure of a streak keeps its traceback (the 10-12 root cause was read off one)."""
+        self._spawn_failures += 1
+        cfg = self._settings.ticker
+        delay = _backoff(float(cfg.warming_timeout_s), self._spawn_failures - 1, float(cfg.warming_backoff_cap_s))
+        fields = {"where": where, "failures": self._spawn_failures, "retry_in_s": delay, "error": repr(exc)}
+        if self._spawn_failures == 1:
+            _log.exception("ticker_spawn_failed", **fields)
+        else:
+            _log.warning("ticker_spawn_failed", **fields)
+        return delay
+
+    async def _spawn_failed(self, delay_s: float) -> None:
+        """A (re)spawn that raised leaves no child and no monitor task. On 2026-10-12 20:12 CreateProcess was
+        denied in Modern Standby (WinError 5) and supervision ended silently: no ticker until the 02:24
+        stop, feed health still HEALTHY. Now the feed goes STALE (the stale-data guard, and in session its
+        page, see it), the half-made spawn is cleaned up, and a retry task stands in for the monitor
+        (``stop()`` cancels it), backing off like a WARMING wedge. A cancellation during the cleanup
+        propagates without arming a retry."""
+        self._set_state("STALE")
+        try:
             await self._terminate_child()
             await self._cancel_read_task()
-            if self._access_token is None:
-                _log.error("ticker_respawn_no_access_token")
-                self._set_state("STOPPED")
-                return
-            await self._spawn_child()
+            await self._publish_health()  # R2 — STALE transition for the stale-data guard
+        except Exception:  # noqa: BLE001 - cleanup must never cost the retry
+            _log.exception("ticker_spawn_failed_cleanup_error")
+        self._monitor_task = asyncio.create_task(self._retry_spawn(delay_s), name="ticker-spawn-retry")
+
+    async def _retry_spawn(self, delay_s: float) -> None:
+        await _monitor_sleep(delay_s)
+        await self._respawn(reason="spawn_retry")
 
     async def _cancel_read_task(self) -> None:
         """Cancel and await only the read loop (idempotent). Used on respawn, where cancelling the
@@ -1272,6 +1329,12 @@ class TickerSupervisor:
 # --------------------------------------------------------------------------- tiny stdlib indirections
 # Wrapped so the rest of the module reads cleanly and so tests can monkeypatch the process identity /
 # environment without importing ``os`` at call sites.
+
+def _backoff(base_s: float, n: int, cap_s: float) -> float:
+    """``base_s × 2ⁿ`` capped at ``cap_s``; the exponent is bounded so a days-long streak cannot overflow
+    the float conversion (``60.0 * 2**1100`` raises, which would end supervision like a failed spawn)."""
+    return min(base_s * (2 ** min(n, 32)), cap_s)
+
 
 async def _monitor_sleep(seconds: float) -> None:
     """One :meth:`TickerSupervisor._monitor_loop` cycle delay.
