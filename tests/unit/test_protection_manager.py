@@ -62,7 +62,7 @@ class Rig:
     stands in for the Q4.6 routine."""
 
     def __init__(self, conn, bus, *, broker: PaperBroker | None = None, now: Now | None = None,
-                 transitions: bool = True) -> None:
+                 transitions: bool = True, no_stop: frozenset[str] = frozenset(), hold: int | None = 20) -> None:
         self.conn, self.bus = conn, bus
         self.now = now or Now()
         clock = Clock(time_source=self.now)
@@ -77,9 +77,10 @@ class Rig:
             on_fill=lambda *a: self.pm.on_fill(*a),
             on_transition=(lambda *a: self.pm.on_transition(*a)) if transitions else None,
         )
-        self.book = PositionBook(conn, clock, self.broker, orders=self.mgr, hold_fn=lambda *_: 20,
+        self.book = PositionBook(conn, clock, self.broker, orders=self.mgr, hold_fn=lambda *_: hold,
                                  session_of=lambda ts: ts.date(), add_sessions=lambda d, n: d + dt.timedelta(n),
-                                 round_trip_fn=lambda notional, _p: notional * Decimal("0.003"))
+                                 round_trip_fn=lambda notional, _p: notional * Decimal("0.003"),
+                                 no_stop_strategies=frozenset(no_stop))
         self.pm = ProtectionManager(
             conn, clock, self.broker, orders=self.mgr, book=self.book, exit_fn=self.exit_routine,
             notify=self.notify, session_fn=session, ltp_fn=self.ltp.get, round_tick_fn=round_tick,

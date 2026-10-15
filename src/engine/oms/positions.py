@@ -26,6 +26,7 @@ from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.oms.manager import OrderManager
 from engine.oms.state import (
     TERMINAL_ORDER_STATES,
+    TIME_ONLY_POLICY,
     CloseReason,
     OrderRole,
     PlatformOrder,
@@ -106,6 +107,7 @@ class PositionBook:
         add_sessions: AddSessionsFn,
         round_trip_fn: RoundTripFn,
         fees_fn: RoundTripFn | None = None,
+        no_stop_strategies: frozenset[str] = frozenset(),
     ) -> None:
         if not isinstance(broker, PaperBroker):
             raise TypeError(f"PositionBook takes a PaperBroker only, got {type(broker).__name__} (D8)")
@@ -118,6 +120,7 @@ class PositionBook:
         self._add_sessions = add_sessions
         self._round_trip = round_trip_fn
         self._fees = fees_fn or round_trip_fn
+        self._no_stop = frozenset(no_stop_strategies)
 
     # ---------------------------------------------------------------- fills
     def on_fill(self, order: PlatformOrder, qty: int, price: Decimal, at: datetime) -> None:
@@ -148,20 +151,36 @@ class PositionBook:
     def _open(self, order: PlatformOrder, qty: int, price: Decimal, at: datetime) -> None:
         proposal = self._proposal(order.proposal_id)
         exit_session = self._exit_session(proposal, at)
+        time_only = self._time_only(proposal, exit_session)
+        stop = None if time_only else str(proposal.stop_price)
+        target = None if time_only or proposal.target_price is None else str(proposal.target_price)
+        protection = ProtectionState.TIME_EXIT_ONLY if time_only else ProtectionState.PROTECTION_PENDING
         self._conn.execute(
             "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, stop, target, "
-            "state, protection_state, is_paper, origin, opened_at, strategy_id, exit_session) "
-            "VALUES (?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?, ?, 1, 'platform', ?, ?, ?)",
+            "state, protection_state, is_paper, origin, opened_at, strategy_id, exit_session, exit_policy) "
+            "VALUES (?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?, ?, 1, 'platform', ?, ?, ?, ?)",
             (
                 order.position_id, proposal.tradingsymbol, proposal.style, order.product, qty,
-                str(price.quantize(_PRICE)), str(proposal.stop_price),
-                None if proposal.target_price is None else str(proposal.target_price),
-                PositionState.OPEN.value, ProtectionState.PROTECTION_PENDING.value, _iso(at),
+                str(price.quantize(_PRICE)), stop, target, PositionState.OPEN.value, protection.value, _iso(at),
                 proposal.strategy_id, None if exit_session is None else exit_session.isoformat(),
+                TIME_ONLY_POLICY if time_only else None,
             ),
         )
         _log.info("paper_position_opened", position_id=order.position_id, symbol=proposal.tradingsymbol,
-                  qty=qty, exit_session=exit_session)
+                  qty=qty, exit_session=exit_session, exit_policy=TIME_ONLY_POLICY if time_only else None)
+
+    def _time_only(self, proposal: EnterAction, exit_session: date | None) -> bool:
+        """D14: a listed strategy opens with no stop and no target, but only once its exit session is known
+        (a hold, and a calendar that reaches the 20th session), so a stopless position always has its exit;
+        otherwise it keeps the shipped levels and is outside the C5 population. The proposal keeps the
+        shipped levels either way (the C5 counterfactual)."""
+        if proposal.strategy_id not in self._no_stop:
+            return False
+        if exit_session is None:
+            _log.warning("paper_no_stop_kept_stop", proposal_id=proposal.proposal_id,
+                         strategy_id=proposal.strategy_id, why="exit session unknown (hold or calendar)")
+            return False
+        return True
 
     def _exit_session(self, proposal: EnterAction, at: datetime) -> date | None:
         """Session N of the hold, the first fill's session being 1; None = pending. A failure here never

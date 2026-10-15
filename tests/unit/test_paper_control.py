@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from engine.core.config import PaperSettings, Settings, load_settings
 from engine.ops.paper_control import PaperControl
+from engine.strategy.scanners import brk20, hi52, ins
 
 
 def test_first_use_creates_the_disabled_row(conn, clock):
@@ -65,7 +66,8 @@ def test_active_halts_excludes_cleared(conn, clock):
 
 def test_shipped_paper_settings_apart_from_the_go_live_flag():
     assert load_settings().paper.model_copy(update={"subsystem_enabled": False}) == PaperSettings(
-        subsystem_enabled=False, seed=20261006, exit_minutes_before_close=10, exit_working_timeout_min=5
+        subsystem_enabled=False, seed=20261006, exit_minutes_before_close=10, exit_working_timeout_min=5,
+        no_stop_strategies=(hi52.STRATEGY_ID, ins.STRATEGY_ID, brk20.STRATEGY_ID),   # D14, pre-registered C5
     )
 
 

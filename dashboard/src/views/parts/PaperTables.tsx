@@ -34,6 +34,9 @@ function Strategy({ id }: { id: string | null }) {
   return id ? <Labelled t={strategyName(id)} /> : <span className="muted">—</span>
 }
 
+// A time-only (D14 exit test) position has no stop or target by design; say so instead of a bare dash.
+const noLevel = (r: PaperPosition) => (r.exit_policy === 'time_only' ? <span className="muted">None (test)</span> : '—')
+
 const POSITION_COLUMNS: Column<PaperPosition>[] = [
   {
     key: 'symbol',
@@ -80,8 +83,8 @@ const POSITION_COLUMNS: Column<PaperPosition>[] = [
     nowrap: true,
     cell: (r) => <span className={signCls(r.unrealized)}>{signedInr(r.unrealized) ?? '—'}</span>,
   },
-  { key: 'stop', header: 'Stop-loss', label: 'Stop-loss', align: 'right', nowrap: true, cell: (r) => inr(r.stop) ?? '—' },
-  { key: 'target', header: 'Target', label: 'Target', align: 'right', nowrap: true, cell: (r) => inr(r.target) ?? '—' },
+  { key: 'stop', header: 'Stop-loss', label: 'Stop-loss', align: 'right', nowrap: true, cell: (r) => inr(r.stop) ?? noLevel(r) },
+  { key: 'target', header: 'Target', label: 'Target', align: 'right', nowrap: true, cell: (r) => inr(r.target) ?? noLevel(r) },
   {
     key: 'protection',
     header: 'Protection',
@@ -89,7 +92,7 @@ const POSITION_COLUMNS: Column<PaperPosition>[] = [
     cell: (r) =>
       r.protection_state === 'PROTECTION_FAILED' ? (
         <Pill tone="crit" icon="shield-off">
-          {protectionTerm(r.protection_state).label}
+          {r.exit_policy === 'time_only' ? 'Exit failed' : protectionTerm(r.protection_state).label}
         </Pill>
       ) : (
         <Labelled t={protectionTerm(r.protection_state)} />

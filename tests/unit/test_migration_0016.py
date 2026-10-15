@@ -95,7 +95,7 @@ def test_upgrade_from_populated_0015(db_path, monkeypatch):
                   "VALUES (7, 'p', 'active', '95', '110')")
         c.commit()
 
-        monkeypatch.setattr(migrations, "discover", lambda: full)
+        monkeypatch.setattr(migrations, "discover", lambda: [p for p in full if p.name < "0017"])
         assert apply_migrations(c) == ["0016_paper_book.sql"]
 
         assert c.execute("SELECT verdict, is_paper FROM verdicts").fetchone()[:] == ("approve", 0)

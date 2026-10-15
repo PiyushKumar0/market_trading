@@ -460,6 +460,28 @@ re-add `hi52` to `NO_EDGE_SHADOW_STRATEGIES` **and** delete `hi52.expected_edge_
 `settings.yaml`. First-20-signal outcomes are validation, not income — nothing else moves in
 response to them.
 
+## C5 no-stop verdict (D14, 2026-10-15) — read-only, safe with the engine running
+
+```powershell
+.venv\Scripts\python.exe scripts\no_stop_verdict.py                                    # as of today -> data\reports\no_stop_verdict_<date>.json
+.venv\Scripts\python.exe scripts\no_stop_verdict.py --market-db data\market.duckdb    # adds the paper counterfactual: engine OFF only
+```
+Pre-registration: `IMPLEMENTATION_PLAN.md` §6.1 C5 and its clarification.
+
+- **DECISION:** the signal-level verdict over `rec_outcomes` entry recs of hi52, ins and brk20 that are closed
+  under the shipped rule and have a T+20 no-stop outcome. It is pinned to two looks: look 1 = the first 20 eligible
+  recs by fill date, look 2 = the first 40, which supersedes look 1. Below 20 it reads INSUFFICIENT. Otherwise:
+  - NO-STOP SUPPORTED if D > 0 and E > 0;
+  - STOP NOT THE PROBLEM if D ≤ 0;
+  - NO EDGE EITHER WAY if D > 0 and E ≤ 0.
+
+  E = median `excess_t20`; D = median of `net_t20 − net_pct`.
+- **Decide nothing alone:** the `running` line (any other n), the confirmation slice (fills from 2026-10-16) and
+  the paper (P) section.
+- **Restarts:** the horizon or strategy set of the decision restarts the test; `paper.no_stop_strategies`
+  restarts only (P).
+- **Exit status:** always exits 0. It reads `rec_outcomes` as stored; `--as-of` bounds only the (P) walk.
+
 ## brk20 entry-mechanism backtest (R1, 2026-09-12) — three registered entry variants, engine OFF
 
 ```powershell

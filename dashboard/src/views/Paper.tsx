@@ -4,7 +4,7 @@
  * and every card carries the dashed "simulated" border. The ON/OFF switch lives in the top bar (D13).
  * Money arrives as strings and is printed as sent.
  */
-import { COPY, haltTerm, rungTerm } from '../copy/glossary.ts'
+import { COPY, haltTerm, rungTerm, strategyName } from '../copy/glossary.ts'
 import { isPaperSummary } from '../lib/alerts.ts'
 import { inr, istDay, istStamp, shortDate, signOf, signedInr, todayIst } from '../lib/format.ts'
 import { entryGuardText, paperStatus } from '../lib/paper.ts'
@@ -28,6 +28,12 @@ const valueClass = (v: string | null | undefined) => {
 
 const ALLOWED = 'Allowed'
 
+/** "A", "A and B", "A, B and C" from strategy ids, by friendly name. */
+function joinNames(ids: string[]): string {
+  const names = ids.map((id) => strategyName(id).label)
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
+}
+
 function entriesText(p: PaperSummary, mode: string | null): string {
   if (!p.built) return 'Not running'
   if (!p.enabled) return 'Off'
@@ -50,8 +56,8 @@ function Status({ p, mode }: { p: PaperSummary; mode: string | null }) {
       {!p.built && stored ? (
         <p className="paper-banner">
           The autopilot isn&apos;t running. {p.positions.length} paper{' '}
-          {p.positions.length === 1 ? 'position is' : 'positions are'} frozen at their last values, and their stop-losses
-          and targets aren&apos;t being simulated. When it next starts it replays or voids the gap.
+          {p.positions.length === 1 ? 'position is' : 'positions are'} frozen at their last values, and their exits
+          aren&apos;t being simulated. When it next starts it replays or voids the gap.
         </p>
       ) : null}
       <KeyValue
@@ -193,6 +199,13 @@ export function Paper({ paper, mode }: { paper: PaperResponse | null; mode: stri
             </Card>
           ) : null}
           <Card tier="simulated" simTag={false} title="Open paper positions" meta={p.positions.length ? `${p.positions.length} open` : undefined}>
+            {p.no_stop_strategies?.length ? (
+              <p className="paper-counters">
+                Exit test: new paper trades from {joinNames(p.no_stop_strategies)} have no stop-loss or target and sell near
+                the close of their planned exit day. Recommendation cards keep their stops. The test is judged across all
+                recommendations, not on this paper book.
+              </p>
+            ) : null}
             <PaperPositions rows={p.positions} />
           </Card>
           {p.orders.length ? (

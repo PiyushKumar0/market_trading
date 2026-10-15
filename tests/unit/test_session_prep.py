@@ -60,7 +60,8 @@ class Stack:
     """OrderManager -> ProtectionManager (PositionBook first) -> ExitManager, with SessionPrep and the
     Reconciler, over one PaperBroker; ``bars``/``corp``/``marks``/``pre_ex`` feed the injected fns."""
 
-    def __init__(self, conn, bus, *, broker: PaperBroker | None = None, now: Now | None = None) -> None:
+    def __init__(self, conn, bus, *, broker: PaperBroker | None = None, now: Now | None = None,
+                 no_stop: frozenset[str] = frozenset()) -> None:
         self.conn, self.bus = conn, bus
         self.now = now or Now()
         clock = Clock(time_source=self.now)
@@ -79,7 +80,8 @@ class Stack:
         )
         calendar = {"session_of": lambda ts: ts.date(), "add_sessions": weekdays}
         self.book = PositionBook(conn, clock, self.broker, orders=self.mgr, hold_fn=lambda *_: 5,
-                                 round_trip_fn=lambda notional, _p: notional * Decimal("0.003"), **calendar)
+                                 round_trip_fn=lambda notional, _p: notional * Decimal("0.003"),
+                                 no_stop_strategies=frozenset(no_stop), **calendar)
         self.em = ExitManager(conn, clock, self.broker, orders=self.mgr, book=self.book, session_fn=session,
                               hold_fn=lambda *_: 5, corp_actions_fn=self.corp_actions, pre_ex_mark_fn=self.pre_ex_mark,
                               settings=PaperSettings(), **calendar)

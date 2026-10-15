@@ -106,11 +106,17 @@ class ProtectionState(StrEnum):
 
     ``PROTECTION_FAILED`` is an emergency state: ProtectionManager market-exits rather than leave a
     leveraged position unprotected (R3). Owned by WO-P3-6; the vocabulary lands here.
+    ``TIME_EXIT_ONLY``: a paper ``exit_policy='time_only'`` position (D14), which has no stop by design.
     """
 
     PROTECTED = "PROTECTED"
     PROTECTION_PENDING = "PROTECTION_PENDING"
     PROTECTION_FAILED = "PROTECTION_FAILED"
+    TIME_EXIT_ONLY = "TIME_EXIT_ONLY"
+
+
+#: ``positions.exit_policy`` of a paper position opened with no stop and no target (D14).
+TIME_ONLY_POLICY = "time_only"
 
 
 class CloseReason(StrEnum):

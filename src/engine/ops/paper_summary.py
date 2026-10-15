@@ -7,7 +7,7 @@ never touch the write-capable managers: the built stack is seen only through :cl
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -22,7 +22,7 @@ _CENT = Decimal("0.01")
 
 _POSITIONS_SQL = (
     "SELECT position_id, symbol, product, qty, avg_entry, stop, target, state, protection_state, "
-    "strategy_id, exit_session, opened_at, side FROM positions "
+    "strategy_id, exit_session, exit_policy, opened_at, side FROM positions "
     f"WHERE {scope_sql('paper', has_origin=True)} AND {HELD_STATES_SQL['paper']} "
     f"AND opened_at >= {PAPER_EPOCH_SQL} ORDER BY opened_at"
 )
@@ -121,7 +121,8 @@ def _totals(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def paper_summary(
-    conn: sqlite3.Connection, control: PaperControl, *, view: PaperView | None, subsystem_enabled: bool
+    conn: sqlite3.Connection, control: PaperControl, *, view: PaperView | None, subsystem_enabled: bool,
+    no_stop_strategies: Sequence[str] = (),
 ) -> dict[str, Any]:
     snapshots = _snapshots(conn)
     positions = _positions(conn, view)
@@ -129,6 +130,7 @@ def paper_summary(
     return {
         **control.state(),
         "subsystem_enabled": subsystem_enabled,
+        "no_stop_strategies": list(no_stop_strategies),
         "built": view is not None,
         "prep_ready": view.prep_ready() if view is not None else None,
         "entry_guard": view.entry_guard() if view is not None else "not built",

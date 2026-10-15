@@ -32,6 +32,7 @@ from engine.oms.manager import OrderManager
 from engine.oms.positions import LEG_REASON, PositionBook, leg_of
 from engine.oms.state import (
     TERMINAL_ORDER_STATES,
+    TIME_ONLY_POLICY,
     CloseReason,
     OrderEvent,
     OrderRole,
@@ -177,6 +178,8 @@ class ProtectionManager:
         row = self._held_row(pid)
         if pid in self._queued or row is None or row["state"] != PositionState.OPEN.value:
             return
+        if row["exit_policy"] == TIME_ONLY_POLICY:
+            return                     # D14: no stop by design; the ExitManager's time exit is its exit
         gtt = self._conn.execute(
             f"SELECT * FROM gtts WHERE position_id = ? AND {_PAPER} ORDER BY gtt_id DESC LIMIT 1", (pid,)
         ).fetchone()

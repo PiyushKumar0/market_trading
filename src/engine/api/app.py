@@ -378,7 +378,8 @@ def create_app(
         if control is None or conn is None:
             return {"enabled": False}
         return paper_summary(conn, control, view=app.state.paper_view,
-                             subsystem_enabled=app.state.settings.paper.subsystem_enabled)
+                             subsystem_enabled=app.state.settings.paper.subsystem_enabled,
+                             no_stop_strategies=app.state.settings.paper.no_stop_strategies)
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:

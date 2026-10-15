@@ -935,6 +935,24 @@ async def test_positions_paper_line_shows_strategy_exit_session_and_gtt_state(cl
 
 
 @pytest.mark.asyncio
+async def test_positions_paper_line_names_a_no_stop_test_position(clock, conn, msg):
+    _insert_position(conn, "pos-p3", symbol="CCC", origin="platform", protection_state="TIME_EXIT_ONLY")
+    conn.execute("UPDATE positions SET is_paper=1, stop=NULL, target=NULL, strategy_id='brk20', "
+                 "exit_session='2026-11-12', exit_policy='time_only' WHERE position_id='pos-p3'")
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
+    await bot._cmd_positions(_Update(msg), _Ctx())
+
+    line = msg.sent[0].splitlines()[-1]
+    assert "stop - · target - · brk20 · exit session 2026-11-12 · no stop (exit test) · id" in line
+    assert "GTT" not in line
+
+    conn.execute("UPDATE positions SET protection_state='PROTECTION_FAILED' WHERE position_id='pos-p3'")
+    await bot._cmd_positions(_Update(msg), _Ctx())
+    line = msg.sent[1].splitlines()[-1]
+    assert "no stop (exit test) · EXIT FAILED" in line and "GTT" not in line
+
+
+@pytest.mark.asyncio
 async def test_positions_empty_book(clock, conn, msg):
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
     await bot._cmd_positions(_Update(msg), _Ctx())

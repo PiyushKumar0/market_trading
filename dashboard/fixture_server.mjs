@@ -358,6 +358,7 @@ const paperBuilt = {
   prep_ready: true,
   entry_guard: 'effective paper state is FROZEN',
   unmarked: ['HINDZINC'],
+  no_stop_strategies: ['hi52', 'ins', 'brk20'],
   halts: [{ cause: 'daily_loss_soft', rung: 'FROZEN', set_at: at(today, '10:29:00'), latched: false }],
   equity: {
     at: at(today, '10:31:00'),
@@ -377,13 +378,13 @@ const paperBuilt = {
   positions: [
     {
       position_id: '01K6ZQ3N8V2C4D5E6F7G8H9J0K', symbol: 'JINDALSTEL', product: 'CNC', qty: 10,
-      avg_entry: '1012.40', stop: '968.00', target: null, state: 'OPEN', protection_state: 'PROTECTED',
+      avg_entry: '1012.40', stop: null, target: null, state: 'OPEN', protection_state: 'TIME_EXIT_ONLY', exit_policy: 'time_only',
       strategy_id: 'hi52', exit_session: weekdays(sessions[2], 20), opened_at: at(sessions[2], '10:05:12'),
       mark: '1031.75', unrealized: '193.50',
     },
     {
       position_id: '01K71B7R2M3N4P5Q6R7S8T9V0W', symbol: 'HINDZINC', product: 'CNC', qty: 30,
-      avg_entry: '468.20', stop: '452.00', target: '497.00', state: 'PENDING_EXIT', protection_state: 'PROTECTED',
+      avg_entry: '468.20', stop: '452.00', target: '497.00', state: 'PENDING_EXIT', protection_state: 'PROTECTED', exit_policy: null,
       strategy_id: 'brk20', exit_session: weekdays(sessions[3], 10), opened_at: at(sessions[3], '13:12:40'),
       mark: null, unrealized: null,
     },

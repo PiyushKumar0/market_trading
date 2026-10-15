@@ -22,7 +22,7 @@ import pytest
 
 from engine.broker.kite_client import KiteClient
 from engine.core.calendar import NSECalendar
-from engine.core.clock import IST
+from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
 from engine.core.contracts import ORDER_UPDATE_TOPIC, PAPER_ORDER_UPDATE_TOPIC
 from engine.core.db import connect
@@ -181,7 +181,7 @@ class Feed:
 
 
 _R3_SQL = (
-    "SELECT p.position_id, p.state, p.protection_state, "
+    "SELECT p.position_id, p.state, p.protection_state, p.exit_policy, p.exit_session, "
     "EXISTS (SELECT 1 FROM gtts g WHERE g.position_id = p.position_id AND "
     f"{scope_sql('paper', 'g')} AND g.state = 'active' AND g.qty = p.qty) AS armed, "
     "EXISTS (SELECT 1 FROM orders x WHERE x.position_id = p.position_id AND "
@@ -194,7 +194,8 @@ _R3_SQL = (
 class R3:
     """Plan Q4.5's property, judged on every forwarded print from a paper entry's first broker fill until
     its position closes: the position has an ACTIVE GTT for its qty, or is PENDING_EXIT with a working
-    exit, or is PROTECTION_FAILED with its PAPER_ALERT sent. A lapse must heal within R3_TICKS prints."""
+    exit, or is PROTECTION_FAILED with its PAPER_ALERT sent, or (D14) is a time-only position with its
+    exit session set. A lapse must heal within R3_TICKS prints."""
 
     def __init__(self, conn: Any, alerts: Notes) -> None:
         self._conn = conn
@@ -219,7 +220,9 @@ class R3:
                 self.watched.discard(broker_id)
                 continue
             if row is not None and (row["armed"] or (row["state"] == "PENDING_EXIT" and row["exiting"])
-                                    or (row["protection_state"] == "PROTECTION_FAILED" and self._alerted(row))):
+                                    or (row["protection_state"] == "PROTECTION_FAILED" and self._alerted(row))
+                                    or (row["protection_state"] == "TIME_EXIT_ONLY"
+                                        and row["exit_policy"] == "time_only" and row["exit_session"])):
                 self.lapsed_at.pop(broker_id, None)
                 self.judged[row["state"]] = self.judged.get(row["state"], 0) + 1
                 continue
@@ -305,7 +308,7 @@ def _rows(conn: Any, sql: str) -> list[dict]:
     return [dict(r) for r in conn.execute(sql)]
 
 
-async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool) -> Outcome:
+async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool, no_stop: tuple[str, ...] = ()) -> Outcome:
     harness = ReplayHarness(day.root, scratch)
     clock = harness.clock
     conn = connect(str(scratch / "state.db"))
@@ -316,7 +319,7 @@ async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool) -> Outcome
     conn.set_trace_callback(lambda sql: writes.append(sql) if WRITE.match(sql) else None)
     try:
         shipped = load_settings()
-        paper_settings = shipped.paper.model_copy(update={"subsystem_enabled": enabled})
+        paper_settings = shipped.paper.model_copy(update={"subsystem_enabled": enabled, "no_stop_strategies": no_stop})
         settings = shipped.model_copy(update={"paper": paper_settings})
         limits = Limits()
         table = limits.load()
@@ -428,8 +431,10 @@ def runs(synthetic_day: SyntheticDay, tmp_path_factory: pytest.TempPathFactory) 
     out: dict[str, Outcome] = {}
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(replay_mod, "_YIELD_EVERY_TICKS", SLICE)
-        for name, enabled in (("on", True), ("again", True), ("off", False)):
-            out[name] = asyncio.run(_replay(synthetic_day, tmp_path_factory.mktemp(name), enabled=enabled))
+        for name, enabled, no_stop in (("on", True, ()), ("again", True, ()), ("off", False, ()),
+                                       ("no_stop", True, ("brk20",))):
+            out[name] = asyncio.run(_replay(synthetic_day, tmp_path_factory.mktemp(name), enabled=enabled,
+                                            no_stop=no_stop))
     return out
 
 
@@ -477,6 +482,28 @@ def test_no_real_order_and_no_real_state_write(runs: dict[str, Outcome]) -> None
 
 def test_the_golden_digest_is_byte_identical_and_pinned(runs: dict[str, Outcome]) -> None:
     assert runs["on"].report.digest == runs["again"].report.digest == GOLDEN
+
+
+# ------------------------------------------------------------------ D14: a listed strategy (brk20) with no stop
+def test_a_listed_strategy_is_held_without_a_stop_through_the_day(
+    runs: dict[str, Outcome], synthetic_day: SyntheticDay
+) -> None:
+    ns = runs["no_stop"]
+    rows = ns.rows
+    [entry] = rows["orders"]
+    [position] = rows["positions"]
+    assert (entry["role"], entry["state"], entry["filled_qty"]) == ("entry", "FILLED", QTY)
+    assert (position["stop"], position["target"], position["exit_policy"], position["protection_state"]) == (
+        None, None, "time_only", "TIME_EXIT_ONLY")
+    # The stop path closed this trade at 10:09:41; with no stop it is still held, to session 20 (fill = 1)
+    # by the production hold and calendar.
+    calendar = NSECalendar(config_dir() / "calendar", Clock(), strict=False)
+    assert position["state"] == "OPEN" and rows["gtts"] == []
+    assert position["exit_session"] == calendar.add_sessions(synthetic_day.day, 19).isoformat()
+    assert [(m.kind, m.data["is_paper"]) for m in ns.paper_messages] == [(MessageKind.FILL, True)]
+    assert ns.r3.violations == [] and ns.r3.judged.get("OPEN", 0) > 0
+    assert ns.kite_calls == [] and ns.real_rows == []
+    assert ns.real == runs["on"].real                                 # the real rec ignores the paper policy
 
 
 # ------------------------------------------------------------------ paper subsystem disabled (the rollback setting)

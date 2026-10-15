@@ -41,7 +41,7 @@ const MODE: Table = {
     label: 'Off',
     hint:
       'No new trade ideas. The engine still watches your open positions and sends exit alerts on Telegram; you place ' +
-      'the exits in Kite. Paper positions keep their simulated stops and exits.',
+      'the exits in Kite. Paper positions keep their simulated exits.',
   },
   RECOMMEND: {
     label: 'Recommend',
@@ -264,6 +264,10 @@ const PROTECTION: Table = {
     label: 'Protection failed',
     hint: "The simulated stop-loss couldn't be kept, so the autopilot exits the position at market.",
   },
+  TIME_EXIT_ONLY: {
+    label: 'No stop (test)',
+    hint: 'Paper exit test: this position has no stop-loss or target by design. It sells near the close of its planned exit day.',
+  },
 }
 export const protectionTerm = (v: string | null | undefined): Term => lookup(PROTECTION, v)
 
@@ -285,7 +289,7 @@ const HALT: Table = {
     label: 'Daily loss limit (hard)',
     hint:
       "Today's paper loss passed the hard limit: no new paper trades until the next session. Open paper positions " +
-      'keep their stops and targets (nothing is closed).',
+      'are not closed.',
   },
   floor_weekly_drawdown: {
     label: 'Weekly drawdown limit',
@@ -555,13 +559,13 @@ export const COPY = {
     const fate = prepReady ? 'will be cancelled within 30 seconds' : 'will lapse at the next market open'
     return {
       title: 'Turn off the paper autopilot?',
-      body: `No new paper trades will start. ${orders} ${fate} (a partly filled order keeps its filled part). Open paper positions keep their exits and stop-losses.`,
+      body: `No new paper trades will start. ${orders} ${fate} (a partly filled order keeps its filled part). Open paper positions keep their exits.`,
       confirm: 'Turn off',
       cancel: 'Keep on',
     }
   },
   paperAbout:
-    "Simulates the analyst's delivery (CNC) trades with paper money so they can be judged without risk. It never places a real order.",
+    "Simulates the analyst's delivery (CNC) trades with paper money, without risk. It never places a real order.",
   paperEntriesOpen: 'Delivery (CNC) swing entries the analyst proposes in Recommend mode, inside your trading hours.',
   noAnswer: (what: string) =>
     `No answer from the engine in time. The ${what} may still change; the top bar shows the engine's value after the next refresh.`,

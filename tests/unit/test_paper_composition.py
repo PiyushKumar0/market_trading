@@ -73,8 +73,10 @@ async def compose(conn, bus, now):
     async def build(*, store: Store | None = None, limits: Limits | None = None, real=lambda: RiskState.NORMAL,
                     notify=opsmain.no_notify):
         limits = limits or Limits()
+        shipped = load_settings()          # the stop path: these tests check the GTT wiring (D14 runs in paper e2e)
+        settings = shipped.model_copy(update={"paper": shipped.paper.model_copy(update={"no_stop_strategies": ()})})
         stack = await opsmain._compose_paper(
-            conn, clock, calendar, bus, load_settings(), control,
+            conn, clock, calendar, bus, settings, control,
             real_risk_state=real, limits=limits, tick_size_fn=lambda _s: Decimal("0.05"),
             round_tick_fn=round_tick, cost_model=CostModel.from_config(), hold_fn=lambda *_: 20,
             store=store or Store(), backfill=None,

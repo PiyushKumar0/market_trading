@@ -77,6 +77,18 @@ def test_first_epoch_counts_all_paper_history(conn, clock) -> None:
     assert s["totals"] == {"closed": 4, "wins": 2, "voids": 1, "void_net": "999.00"}
 
 
+def test_positions_carry_the_exit_policy_and_the_summary_the_no_stop_list(conn, clock) -> None:
+    _seed(conn)
+    conn.execute("UPDATE positions SET exit_policy = 'time_only', stop = NULL, target = NULL, "
+                 "protection_state = 'TIME_EXIT_ONLY' WHERE position_id = 'p0'")
+    s = paper_summary(conn, PaperControl(conn, clock), view=_VIEW, subsystem_enabled=True,
+                      no_stop_strategies=("hi52", "brk20"))
+    assert [(p["symbol"], p["exit_policy"], p["stop"]) for p in s["positions"]][0] == ("AAA", "time_only", None)
+    assert [p["exit_policy"] for p in s["positions"]][1:] == [None]
+    assert s["no_stop_strategies"] == ["hi52", "brk20"]
+    assert _summary(conn, clock)["no_stop_strategies"] == []
+
+
 def test_not_built_with_nothing_stored(conn, clock) -> None:
     s = _summary(conn, clock, view=None, subsystem_enabled=False)
     assert s["built"] is False and s["prep_ready"] is None and s["entry_guard"] == "not built"

@@ -239,6 +239,8 @@ export interface PaperPosition {
   target: string | null
   state: string | null // OPEN | PENDING_EXIT
   protection_state: string | null
+  /** "time_only" = paper exit test (no stop or target, sold near the close of `exit_session`); else null. */
+  exit_policy: string | null
   strategy_id: string | null
   exit_session: string | null
   opened_at: string | null
@@ -296,6 +298,8 @@ export interface PaperSummary {
   /** null = an entry would pass the paper order guard; "not built" when not built. */
   entry_guard: string | null
   unmarked: string[]
+  /** Strategies whose new paper trades carry no stop or target (D14); absent on older engines. */
+  no_stop_strategies?: string[]
   halts: PaperHalt[]
   equity: PaperEquity | null
   curve: PaperCurvePoint[]

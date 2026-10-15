@@ -70,6 +70,8 @@ test('trade vocabulary', () => {
   assert.equal(originTerm('external').label, 'Outside engine')
   assert.equal(originTerm('recommended').label, 'Recommendation')
   assert.equal(protectionTerm('PROTECTION_FAILED').label, 'Protection failed')
+  assert.equal(protectionTerm('TIME_EXIT_ONLY').label, 'No stop (test)')
+  assert.match(protectionTerm('TIME_EXIT_ONLY').hint ?? '', /no stop-loss or target/)
   assert.equal(positionStateTerm('PENDING_EXIT').label, 'Exiting')
   assert.equal(proposalActionTerm('modify-stop').label, 'Move stop-loss')
   assert.equal(proposalActionTerm('enter').label, 'Open')

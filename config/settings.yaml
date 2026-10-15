@@ -86,6 +86,12 @@ paper:
   seed: 20261006
   exit_minutes_before_close: 10
   exit_working_timeout_min: 5
+  # D14 (owner, 2026-10-15) no-stop test: paper positions of these strategies open with no stop and no target
+  # and sell near the close (exit_minutes_before_close) of their 20th session; a fill whose exit date is past the
+  # loaded calendar keeps its stop. IMPLEMENTATION_PLAN.md §6.1 C5 + clarification: this list drives the paper
+  # (P) part only, and changing it restarts (P). [] plus a restart ends it for new positions; open ones run to
+  # their exit session. Cards keep their stops.
+  no_stop_strategies: [hi52, ins, brk20]
 
 data:
   # A11 empirical answer (scripts/a11_check.py): are Kite minute candles corp-action adjusted?

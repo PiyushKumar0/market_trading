@@ -3749,6 +3749,7 @@ async def _compose_paper(
             round_trip_fn=lambda notional, product: cost_model.round_trip(notional, product).total_cost,
             fees_fn=lambda notional, product: (
                 (bd := cost_model.round_trip(notional, product)).total_cost - bd.components["spread"]),
+            no_stop_strategies=frozenset(settings.paper.no_stop_strategies),
             **sessions,
         )
         exits = ExitManager(

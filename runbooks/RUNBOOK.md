@@ -604,8 +604,9 @@ paper reject.
 2. **Session prep**, on the first in-session tick of each session and again when a tick arrives more than 5
    minutes after the last observed one. Until it completes, ticks are dropped, paper entries are refused and
    `paper_tick` does nothing. Prep applies the 1-minute bars of the unobserved window to each open position
-   (stop, target, time exit), voids a position held across an unadjusted ex-date or whose bars could not be
-   fetched, and re-sends exits still pending. It has a 120 s deadline; unfinished positions are voided.
+   (stop, target, time exit; only the time exit for a no-stop test position, below), voids a position held
+   across an unadjusted ex-date or whose bars could not be fetched, and re-sends exits still pending. It has a
+   120 s deadline; unfinished positions are voided.
 3. **Reconcile**: a pass after the first forwarded tick of each held symbol following every prep, and once
    a session from 5 minutes before the close.
 
@@ -621,11 +622,12 @@ catch-up applies what the 1-minute bars show, or voids the position.
    - No real order row (state.db, read-only):
      `SELECT count(*) FROM orders WHERE COALESCE(is_paper,0)=0` must stay 0.
    - Every paper entry fill has a paper GTT created within 60 s of the fill (zero rows expected; a GTT that
-     has since triggered still counts, since only creation time is compared):
+     has since triggered still counts, since only creation time is compared). No-stop test positions have no
+     GTT by design and are left out:
      ```sql
      SELECT o.order_id, o.position_id, o.updated_at AS filled_at
-     FROM orders o
-     WHERE o.is_paper = 1 AND o.role = 'entry' AND o.state = 'FILLED'
+     FROM orders o JOIN positions p ON p.position_id = o.position_id
+     WHERE o.is_paper = 1 AND o.role = 'entry' AND o.state = 'FILLED' AND p.exit_policy IS NULL
        AND NOT EXISTS (SELECT 1 FROM gtts g
                        WHERE g.is_paper = 1 AND g.position_id = o.position_id
                          AND julianday(g.created_at) - julianday(o.updated_at) BETWEEN -0.0001 AND 60/86400.0);
@@ -636,6 +638,33 @@ catch-up applies what the 1-minute bars show, or voids the position.
    - Prep once per session, plus once per gap, with outcomes logged: `Select-String data\logs\engine.log
      -Pattern 'paper_prep_started','paper_prep_done'`. A `failed=True` on `paper_prep_done` is a defect to look at.
 
+## No-stop exit test (D14, from 2026-10-15)
+
+Paper positions of the strategies in `paper.no_stop_strategies` (`[hi52, ins, brk20]`) opened from the
+2026-10-15 deploy carry **no stop and no target** and sell near the close of their exit session (the 20th, the
+fill session counting as 1). Cards and real positions keep their stops. The pre-registration is
+`IMPLEMENTATION_PLAN.md` §6.1 C5; the plan is `runbooks/plan-2026-10-15-paper-no-stop-test.md`.
+
+- **What a test position looks like:** `positions.exit_policy = 'time_only'`, `stop` and `target` NULL,
+  `protection_state = 'TIME_EXIT_ONLY'`, `exit_session` set, no `gtts` row. The dashboard shows "No stop (test)";
+  `/positions` shows "no stop (exit test)". The policy is fixed when the position opens. A fill whose 20th session
+  lies beyond the loaded calendar keeps its stop instead (from 2026-12-04 until `2027.yaml` loads).
+- **Its exits:**
+  - the time exit, 10 minutes before the close of its exit session;
+  - the −10% and −15% paper equity floors, and `/paper reset`, each of which exits every paper position (the
+    weekly-drawdown floor only blocks new entries);
+  - corporate-action and catch-up voids.
+
+  If its exit fails 4 times in a session it shows "Exit failed" and sends a PAPER_ALERT, then retries next session.
+- **Verdict:** `scripts\no_stop_verdict.py` (read-only). The decision source is signal level (`rec_outcomes`), at
+  two pinned looks: the first 20 and the first 40 eligible recs by fill date. Look 2 supersedes look 1; any other n
+  is interim, with no label. The paper book is diagnostic. Its counterfactual needs `--market-db`:
+  - `data\market.duckdb`, only with the engine stopped;
+  - or a research snapshot, which has daily bars only and is marked so.
+- **Ending it:** `paper.no_stop_strategies: []` and a restart; open test positions run to their exit session. That
+  ends the paper part only: the signal-level verdict reads `rec_outcomes`, which scores every card both ways
+  regardless. Changing the list restarts the paper population (C5 clarification).
+
 ## Rollback floor
 
 Older code counts paper rows as real money and could latch real floors. Before rolling the tree below the M3
@@ -643,3 +672,10 @@ tip, `SELECT (SELECT count(*) FROM orders WHERE is_paper=1)+(SELECT count(*) FRO
 count(*) FROM verdicts WHERE is_paper=1)+(SELECT count(*) FROM gtts WHERE is_paper=1)+(SELECT count(*) FROM
 learning_ledger WHERE is_paper=1)` must be 0; otherwise stop paper with OFF or `paper.subsystem_enabled: false` and
 a restart instead.
+
+Below the D14 change (migration 0017), the old ProtectionManager reads a no-stop test position's NULL stop as a
+protection failure: a PAPER_ALERT and a market exit for each, at the next tick. Check
+`SELECT count(*) FROM positions WHERE exit_policy = 'time_only' AND state IN ('OPEN','PENDING_EXIT')` first; if it
+is not 0, accept those exits or let the positions close before rolling back. Roll code and config back together
+(`git reset --hard <previous tip>`): the old `PaperSettings` forbids unknown keys, so old code under the new
+`settings.yaml` (`paper.no_stop_strategies`) does not boot at all.

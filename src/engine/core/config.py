@@ -149,6 +149,8 @@ class PaperSettings(BaseModel, extra="forbid"):
     seed: int = 20261006
     exit_minutes_before_close: int = 10
     exit_working_timeout_min: int = 5
+    #: D14: paper positions of these strategies open with no stop and no target and exit on time.
+    no_stop_strategies: tuple[str, ...] = ()
 
 
 class DataCfg(BaseModel):

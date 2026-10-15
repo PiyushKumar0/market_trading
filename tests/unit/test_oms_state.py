@@ -105,6 +105,7 @@ def test_position_and_protection_states_match_plan_3_5_2() -> None:
         "PROTECTED",
         "PROTECTION_PENDING",
         "PROTECTION_FAILED",
+        "TIME_EXIT_ONLY",                  # 2026-10-15 amendment (D14)
     ]
 
 

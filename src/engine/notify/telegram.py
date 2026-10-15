@@ -1586,7 +1586,7 @@ class TelegramBot:
         def rows(where: str) -> list[Any]:
             return conn.execute(
                 "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, origin, "
-                "protection_state, owner_protected_at, state, strategy_id, exit_session "
+                "protection_state, owner_protected_at, state, strategy_id, exit_session, exit_policy "
                 f"FROM positions WHERE {where} ORDER BY opened_at"
             ).fetchall()
 
@@ -1606,10 +1606,15 @@ class TelegramBot:
 
         def paper_line(row: Any) -> str:
             exiting = " · EXITING" if row["state"] == "PENDING_EXIT" else ""
+            if row["exit_policy"] == "time_only":          # D14: no GTT exists; an exit failing still shows
+                protection = "no stop (exit test)" + (" · EXIT FAILED" if row["protection_state"] == "PROTECTION_FAILED"
+                                                      else "")
+            else:
+                protection = f"GTT {row['protection_state'] or 'PENDING'}"
             return (
                 f"{row['symbol']} {row['side']} {row['qty']} @ {row['avg_entry']} · "
                 f"stop {row['stop'] or '-'} · target {row['target'] or '-'} · {row['strategy_id'] or '-'} · "
-                f"exit session {row['exit_session'] or '-'} · GTT {row['protection_state'] or 'PENDING'}"
+                f"exit session {row['exit_session'] or '-'} · {protection}"
                 f"{exiting} · id {row['position_id']}"
             )
 
