@@ -36,6 +36,7 @@
 | D11 | The regime tag stays off the card until study C2 reports. `GET /why` is deferred; the `/why` Telegram command ships. |
 | D12 | The C4 late-session study and the B2 ops digest are deferred along with the channel split. |
 | D13 | (2026-10-08) "Add button to toggle paper trade from dashboard itself"; go-live tonight with the autopilot OFF until the owner turns it ON. Dashboard paper ON/OFF (`POST /paper`) is single-step (bearer token), audited to `config_audit`; `/paper on` keeps its two-step, `/paper reset` stays Telegram-only. |
+| D14 | (2026-10-15) "Go with option C and validate": paper positions of hi52, ins and brk20 opened from the deploy carry **no stop and no target** and sell on the D2 time exit; cards and real paths keep their stops. This amends D2's "brk20 keeps its stop and target" and D3 for paper only. Plan `runbooks/plan-2026-10-15-paper-no-stop-test.md`; pre-registration `IMPLEMENTATION_PLAN.md` §6.1 C5. |
 
 ## 1. Design decisions
 
