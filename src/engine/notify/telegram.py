@@ -63,12 +63,14 @@ from engine.core.db import transaction
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
+from engine.core.money import pct_of
 from engine.core.recommendations import recommendation_expired
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.notify import catalog
 from engine.notify.catalog import _SEVERITY_GLYPH, MessageKind
+from engine.oms.state import TIME_ONLY_POLICY
 from engine.risk.causes import CAUSE_OWNER_PAUSE, CAUSE_REJECTION_STORM
 from engine.risk.events import (
     TOPIC_KILL_STATE,
@@ -1606,7 +1608,7 @@ class TelegramBot:
 
         def paper_line(row: Any) -> str:
             exiting = " · EXITING" if row["state"] == "PENDING_EXIT" else ""
-            if row["exit_policy"] == "time_only":          # D14: no GTT exists; an exit failing still shows
+            if row["exit_policy"] == TIME_ONLY_POLICY:     # D14: no GTT exists; an exit failing still shows
                 protection = "no stop (exit test)" + (" · EXIT FAILED" if row["protection_state"] == "PROTECTION_FAILED"
                                                       else "")
             else:
@@ -1639,17 +1641,22 @@ class TelegramBot:
         exp = self._exposure
         today = self._clock.today()
         lines = [f"P&L {today.isoformat()} (platform only; external excluded, O5)"]
+        base = exp.capital_base
+
+        def money(x: Any) -> str:
+            return f"{_inr(x)}{_pct_suffix(pct_of(x, base))}"
+
         realized_today = _realized_today(exp, today)
         if realized_today is not None:
-            lines.append(f"realised today: {_inr(realized_today)}")
-        lines.append(f"day MTM: {_inr(exp.day_mtm())}")
-        lines.append(f"realised all-time: {_inr(exp.realized_net())}")
+            lines.append(f"realised today: {money(realized_today)}")
+        lines.append(f"day MTM: {money(exp.day_mtm())}")
+        lines.append(f"realised all-time: {money(exp.realized_net())}")
         # No mark source ⇒ open_mtm() degrades to zero-at-entry — say so instead of presenting a
         # zero placeholder as a real mark-to-market.
         if not exp.has_mark_source():
             lines.append("open MTM: n/a offline (no mark source)")
         else:
-            lines.append(f"open MTM: {_inr(exp.open_mtm())}")
+            lines.append(f"open MTM: {money(exp.open_mtm())}")
         lines.append(f"equity: {_inr(exp.equity())} · open: {exp.open_position_counts().total}")
         _log.info("telegram_cmd_pnl")
         await _reply(update, "\n".join(lines))
@@ -1701,9 +1708,10 @@ class TelegramBot:
             return
         lim, exp = table.limits, self._exposure
         counts = exp.open_position_counts()
+        dm = exp.day_mtm()
         lines = [
             f"equity: {_inr(exp.equity())} (base {_inr(table.capital_base_inr)})",
-            f"day MTM: {_inr(exp.day_mtm())} "
+            f"day MTM: {_inr(dm)}{_pct_suffix(pct_of(dm, exp.capital_base))} "
             f"(soft {lim.daily_loss_soft.day_mtm_pct}% / hard {lim.daily_loss_hard.day_mtm_pct}%)",
             f"open: {counts.total}/{lim.max_open_positions.total} "
             f"(MIS {counts.mis}/{lim.max_open_positions.max_mis}, "
@@ -1884,7 +1892,12 @@ def _owner_only(
                 command=getattr(getattr(update, "message", None), "text", None),
             )
             return
-        await handler(update, context)
+        try:
+            await handler(update, context)
+        except Exception as exc:  # noqa: BLE001 - a raising command answers the owner, never goes silent
+            _log.exception("telegram_command_failed", handler=getattr(handler, "__name__", None))
+            with contextlib.suppress(Exception):
+                await _reply(update, f"command failed: {type(exc).__name__}: {exc}"[:400])
 
     return _guarded
 
@@ -1921,6 +1934,14 @@ def _parse_decimal(raw: str) -> Decimal | None:
 def _inr(value: Any) -> str:
     """Render a rupee amount for the owner. Display-only rounding — the stored value stays Decimal."""
     return f"₹{Decimal(value):,.2f}"
+
+
+def _pct_suffix(p: str | None) -> str:
+    """`` (+2.30%)`` after a rupee figure; nothing when there is no percent, no sign on zero."""
+    if p is None:
+        return ""
+    sign = "+" if Decimal(p) > 0 else ""
+    return f" ({sign}{p}%)"
 
 
 def _usd(value: Any) -> str:

@@ -6,7 +6,7 @@
  */
 import { COPY, haltTerm, rungTerm, strategyName } from '../copy/glossary.ts'
 import { isPaperSummary } from '../lib/alerts.ts'
-import { inr, istDay, istStamp, shortDate, signOf, signedInr, todayIst } from '../lib/format.ts'
+import { inr, istDay, istStamp, shortDate, pnlWithPct, signOf, todayIst } from '../lib/format.ts'
 import { entryGuardText, paperStatus } from '../lib/paper.ts'
 import type { PaperResponse, PaperSummary } from '../types'
 import { Card, EmptyState } from '../ui/Card'
@@ -138,21 +138,21 @@ function Figures({ p }: { p: PaperSummary }) {
   }
   const today = todayIst()
   const parts = [
-    `Booked ${signedInr(eq.realized_pnl) ?? '—'}`,
-    `open ${signedInr(eq.open_mtm) ?? '—'} before costs`,
-    ...(t.voids > 0 ? [`including voided ${signedInr(t.void_net) ?? '—'}`] : []),
+    `Booked ${pnlWithPct(eq.realized_pnl, eq.realized_pnl_pct) ?? '—'}`,
+    `open ${pnlWithPct(eq.open_mtm, eq.open_mtm_pct) ?? '—'} before costs`,
+    ...(t.voids > 0 ? [`including voided ${pnlWithPct(t.void_net, t.void_net_pct) ?? '—'}`] : []),
   ]
   return (
     <div className="stats paper-stats">
       <StatTile label="Paper equity" value={inr(eq.equity)} caption={`Started with ${inr(eq.capital_base) ?? '—'}`} />
       <StatTile
         label="Net since start"
-        value={<span className={valueClass(eq.pnl)}>{signedInr(eq.pnl) ?? '—'}</span>}
+        value={<span className={valueClass(eq.pnl)}>{pnlWithPct(eq.pnl, eq.pnl_pct) ?? '—'}</span>}
         caption={parts.join(', ')}
       />
       <StatTile
         label="Today"
-        value={<span className={valueClass(eq.day_mtm)}>{signedInr(eq.day_mtm) ?? '—'}</span>}
+        value={<span className={valueClass(eq.day_mtm)}>{pnlWithPct(eq.day_mtm, eq.day_mtm_pct) ?? '—'}</span>}
         caption={istDay(eq.at) === today ? undefined : `For ${shortDate(istDay(eq.at) || eq.at)}`}
       />
       <StatTile

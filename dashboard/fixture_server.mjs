@@ -317,14 +317,14 @@ const scorecardFixture = {
         mean_excess: 0.4, actions: { taken: 3, dismissed: 4, expired: 5 },
         skip_reasons: { 'too far': 2, 'no cash': 1 }, daily_basis: 2, unscorable: 1,
       },
-      paper: { closed: 4, hit_rate: 0.75, net: 1840.5, open: 2 },
+      paper: { closed: 4, hit_rate: 0.75, net: 1840.5, net_pct: 4.21, open: 2 },
     },
     unattributed: {
       recs: {
         n: 3, filled: 0, closed: 0, hit_rate: null, median_net: null, mean_net: null, net_t20: null,
         mean_excess: null, actions: { open: 3 }, skip_reasons: {}, daily_basis: 0, unscorable: 0,
       },
-      paper: { closed: 0, hit_rate: null, net: null, open: 0 },
+      paper: { closed: 0, hit_rate: null, net: null, net_pct: null, open: 0 },
     },
   },
 }
@@ -369,6 +369,10 @@ const paperBuilt = {
     positions_open: 2,
     pnl: '113.30',
     capital_base: '100000.00',
+    pnl_pct: '0.11',
+    realized_pnl_pct: '-0.12',
+    open_mtm_pct: '0.23',
+    day_mtm_pct: '-1.84',
   },
   curve: sessions.map((d, i) => ({
     d,
@@ -380,13 +384,13 @@ const paperBuilt = {
       position_id: '01K6ZQ3N8V2C4D5E6F7G8H9J0K', symbol: 'JINDALSTEL', product: 'CNC', qty: 10,
       avg_entry: '1012.40', stop: null, target: null, state: 'OPEN', protection_state: 'TIME_EXIT_ONLY', exit_policy: 'time_only',
       strategy_id: 'hi52', exit_session: weekdays(sessions[2], 20), opened_at: at(sessions[2], '10:05:12'),
-      mark: '1031.75', unrealized: '193.50',
+      mark: '1031.75', unrealized: '193.50', unrealized_pct: '1.91',
     },
     {
       position_id: '01K71B7R2M3N4P5Q6R7S8T9V0W', symbol: 'HINDZINC', product: 'CNC', qty: 30,
       avg_entry: '468.20', stop: '452.00', target: '497.00', state: 'PENDING_EXIT', protection_state: 'PROTECTED', exit_policy: null,
       strategy_id: 'brk20', exit_session: weekdays(sessions[3], 10), opened_at: at(sessions[3], '13:12:40'),
-      mark: null, unrealized: null,
+      mark: null, unrealized: null, unrealized_pct: null,
     },
   ],
   // Unfilled entry: no positions row yet, so symbol/strategy come from the proposal payload.
@@ -400,21 +404,21 @@ const paperBuilt = {
   closed: [
     {
       position_id: '01K6YA1B2C3D4E5F6G7H8J9K0M', symbol: 'TATASTEEL', strategy_id: 'brk20', qty: 40,
-      entry_px: '168.20', exit_px: '176.85', net_pnl: '307.50', close_reason: 'target', close_basis: 'fill',
+      entry_px: '168.20', exit_px: '176.85', net_pnl: '307.50', net_pnl_pct: '4.57', close_reason: 'target', close_basis: 'fill',
       outcome_label: 'win', closed_at: at(sessions[4], '15:16:30'),
     },
     {
       position_id: '01K6XB2C3D4E5F6G7H8J9K0M1N', symbol: 'SAIL', strategy_id: 'brk20', qty: 60,
-      entry_px: '131.40', exit_px: '127.10', net_pnl: '-289.20', close_reason: 'stop', close_basis: 'fill',
+      entry_px: '131.40', exit_px: '127.10', net_pnl: '-289.20', net_pnl_pct: '-3.67', close_reason: 'stop', close_basis: 'fill',
       outcome_label: 'loss', closed_at: at(sessions[3], '11:48:02'),
     },
     {
       position_id: '01K6WC3D4E5F6G7H8J9K0M1N2P', symbol: 'CEIGALL', strategy_id: 'hi52', qty: 25,
-      entry_px: '302.00', exit_px: '296.50', net_pnl: '-137.50', close_reason: 'void',
+      entry_px: '302.00', exit_px: '296.50', net_pnl: '-137.50', net_pnl_pct: '-1.82', close_reason: 'void',
       close_basis: 'corp_action_relabel', outcome_label: 'void', closed_at: at(sessions[1], '14:02:11'),
     },
   ],
-  totals: { closed: 2, wins: 1, voids: 1, void_net: '-137.50' },
+  totals: { closed: 2, wins: 1, voids: 1, void_net: '-137.50', void_net_pct: '-0.14' },
   counters: { reconcile_mismatches: 0, voids: 0, late_corp_actions: 0 },
 }
 
@@ -435,7 +439,7 @@ const paperOff = {
   positions: [],
   orders: [],
   closed: [],
-  totals: { closed: 0, wins: 0, voids: 0, void_net: null },
+  totals: { closed: 0, wins: 0, voids: 0, void_net: null, void_net_pct: null },
   counters: null,
 }
 
@@ -452,6 +456,7 @@ const paperIdle = {
 const headroom = (over = {}) => ({
   equity: '512340.55',
   day_mtm: '2140.25',
+  day_mtm_pct: '0.43',
   open_positions: { total: 2, mis: 0, cnc: 2 },
   consecutive_losses: 1,
   deployed_capital: '14670.00',

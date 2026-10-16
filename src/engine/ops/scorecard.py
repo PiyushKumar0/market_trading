@@ -11,6 +11,7 @@ from decimal import Decimal
 from statistics import mean, median
 from typing import Any
 
+from engine.core.money import pct_of
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.learning.benchmark import BENCH_INTRASESSION, BENCH_TIME
 
@@ -31,7 +32,7 @@ _SQL = (
 
 # Paper trades of every epoch (a /paper reset keeps the record); a void is excluded.
 _PAPER_CLOSED_SQL = (
-    "SELECT strategy_id, net_pnl FROM learning_ledger "
+    "SELECT strategy_id, net_pnl, qty, entry_px FROM learning_ledger "
     f"WHERE {scope_sql('paper')} AND closed_at IS NOT NULL AND COALESCE(outcome_label, '') != 'void'"
 )
 _PAPER_OPEN_SQL = (
@@ -59,22 +60,34 @@ def scorecard(conn: sqlite3.Connection, *, with_paper: bool = True) -> dict[str,
     }
 
 
-def _paper_stats(nets: list[Decimal], open_n: int) -> dict[str, Any]:
+def _paper_stats(nets: list[Decimal], open_n: int, basis: Decimal | None = None) -> dict[str, Any]:
+    """``basis`` is Σ(qty × entry_px) of the closed trades, None when any row lacks one (never partial)."""
+    net_pct = pct_of(sum(nets), basis) if nets else None
     return {
         "closed": len(nets),
         "hit_rate": sum(n > 0 for n in nets) / len(nets) if nets else None,
         "net": float(sum(nets)) if nets else None,
+        "net_pct": None if net_pct is None else float(net_pct),
         "open": open_n,
     }
 
 
 def _paper(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    """Per strategy: closed trades, hit rate, net rupees (a float) and open positions."""
+    """Per strategy: closed trades, hit rate, net rupees (a float), net % of cost and open positions."""
     nets: dict[str, list[Decimal]] = defaultdict(list)
-    for sid, net_pnl in conn.execute(_PAPER_CLOSED_SQL):
-        nets[sid or UNATTRIBUTED].append(Decimal(net_pnl))
+    bases: dict[str, Decimal | None] = defaultdict(Decimal)
+    for sid, net_pnl, qty, entry_px in conn.execute(_PAPER_CLOSED_SQL):
+        key = sid or UNATTRIBUTED
+        nets[key].append(Decimal(net_pnl))
+        if qty is None or entry_px is None or bases[key] is None:
+            bases[key] = None
+        else:
+            bases[key] += Decimal(str(qty)) * Decimal(str(entry_px))
     open_counts = Counter(sid or UNATTRIBUTED for (sid,) in conn.execute(_PAPER_OPEN_SQL))
-    return {sid: _paper_stats(nets[sid], open_counts[sid]) for sid in nets.keys() | open_counts.keys()}
+    return {
+        sid: _paper_stats(nets[sid], open_counts[sid], bases[sid] if sid in nets else None)
+        for sid in nets.keys() | open_counts.keys()
+    }
 
 
 def _strategy(rows: list[tuple], paper: dict[str, Any]) -> dict[str, Any]:

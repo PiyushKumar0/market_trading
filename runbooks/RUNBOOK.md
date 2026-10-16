@@ -657,8 +657,8 @@ fill session counting as 1). Cards and real positions keep their stops. The pre-
 
   If its exit fails 4 times in a session it shows "Exit failed" and sends a PAPER_ALERT, then retries next session.
 - **Verdict:** `scripts\no_stop_verdict.py` (read-only). The decision source is signal level (`rec_outcomes`), at
-  two pinned looks: the first 20 and the first 40 eligible recs by fill date. Look 2 supersedes look 1; any other n
-  is interim, with no label. The paper book is diagnostic. Its counterfactual needs `--market-db`:
+  two pinned looks: the first 20 and the first 40 filled recs by fill date, each formed once all of its recs are
+  eligible. Look 2 supersedes look 1; any other n is interim, with no label. The paper book is diagnostic. Its counterfactual needs `--market-db`:
   - `data\market.duckdb`, only with the engine stopped;
   - or a research snapshot, which has daily bars only and is marked so.
 - **Ending it:** `paper.no_stop_strategies: []` and a restart; open test positions run to their exit session. That

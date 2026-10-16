@@ -23,7 +23,7 @@ function niceStep(range: number, count: number): number {
 
 export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base: string }) {
   const [w, setW] = useState(720)
-  const [active, setActive] = useState<number | null>(null)
+  const [activeRaw, setActive] = useState<number | null>(null)
   const [asTable, setAsTable] = useState(false)
   const ro = useRef<ResizeObserver | null>(null)
   const summaryId = useId()
@@ -54,6 +54,8 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
   const plotW = w - PAD.left - PAD.right
   const plotH = H - PAD.top - PAD.bottom
   const last = pts.length - 1
+  // The crosshair survives a poll; a shorter curve (a paper reset) must not index past its end.
+  const active = activeRaw === null ? null : Math.min(activeRaw, last)
   const x = (i: number) => PAD.left + (plotW * i) / last
   const y = (v: number) => PAD.top + (plotH * (hi - v)) / (hi - lo)
   const step = niceStep(hi - lo, 4)

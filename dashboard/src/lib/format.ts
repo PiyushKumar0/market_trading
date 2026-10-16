@@ -63,6 +63,23 @@ export function signedInr(v: string | null | undefined): string | null {
   return `${n.neg ? MINUS : '+'}₹${n.body}`
 }
 
+/** An engine percent string: "+3.08%" / "−1.25%"; zero carries no sign; missing -> null; unparseable -> as sent. */
+export function signedPct(v: string | null | undefined): string | null {
+  if (missing(v)) return null
+  const n = num(v)
+  if (!n) return v
+  if (n.zero) return `${n.body}%`
+  return `${n.neg ? MINUS : '+'}${n.body}%`
+}
+
+/** Rupees with the engine's percent beside them: "+₹113.30 (+0.57%)"; rupees alone without a percent. */
+export function pnlWithPct(v: string | null | undefined, p: string | null | undefined): string | null {
+  const rupees = signedInr(v)
+  if (rupees === null) return null
+  const percent = signedPct(p)
+  return percent === null ? rupees : `${rupees} (${percent})`
+}
+
 /** 1 / -1 / 0 read off the string; null when missing or unparseable. */
 export function signOf(v: string | null | undefined): 1 | -1 | 0 | null {
   if (missing(v)) return null

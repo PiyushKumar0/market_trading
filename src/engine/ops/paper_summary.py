@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from engine.core.money import pct_of
 from engine.core.scope import HELD_STATES_SQL, PAPER_EPOCH_SQL, scope_sql
 from engine.ops.paper_control import PaperControl
 from engine.risk.gate import TERMINAL_ORDER_STATES_SQL
@@ -88,10 +89,13 @@ def _equity(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     pnl = _dec(row["realized_pnl"]) + _dec(row["open_mtm"])
+    base = _dec(row["equity"]) - pnl
     return {
         "at": row["at"], "equity": row["equity"], "realized_pnl": row["realized_pnl"],
         "open_mtm": row["open_mtm"], "day_mtm": row["day_mtm"], "positions_open": row["positions_open"],
-        "pnl": _money(pnl), "capital_base": _money(_dec(row["equity"]) - pnl),
+        "pnl": _money(pnl), "capital_base": _money(base),
+        "pnl_pct": pct_of(pnl, base), "realized_pnl_pct": pct_of(row["realized_pnl"], base),
+        "open_mtm_pct": pct_of(row["open_mtm"], base), "day_mtm_pct": pct_of(row["day_mtm"], base),
     }
 
 
@@ -100,13 +104,15 @@ def _positions(conn: sqlite3.Connection, view: PaperView | None) -> list[dict[st
     for row in conn.execute(_POSITIONS_SQL):
         mark = view.mark(row["symbol"]) if view is not None else None
         sign = -1 if (row["side"] or "").upper() in ("SELL", "SHORT") else 1
-        unrealized = _money(_dec(row["qty"]) * (mark - _dec(row["avg_entry"])) * sign) if mark is not None else None
+        raw = _dec(row["qty"]) * (mark - _dec(row["avg_entry"])) * sign if mark is not None else None
         out.append({**{k: row[k] for k in row.keys() if k != "side"},
-                    "mark": None if mark is None else str(mark), "unrealized": unrealized})
+                    "mark": None if mark is None else str(mark),
+                    "unrealized": None if raw is None else _money(raw),
+                    "unrealized_pct": pct_of(raw, _dec(row["qty"]) * _dec(row["avg_entry"]))})
     return out
 
 
-def _totals(conn: sqlite3.Connection) -> dict[str, Any]:
+def _totals(conn: sqlite3.Connection, base: Decimal | None) -> dict[str, Any]:
     closed = wins = voids = 0
     void_net = Decimal(0)
     for label, net_pnl in conn.execute(_TOTALS_SQL):
@@ -117,7 +123,18 @@ def _totals(conn: sqlite3.Connection) -> dict[str, Any]:
         else:
             closed += 1
             wins += net > 0
-    return {"closed": closed, "wins": wins, "voids": voids, "void_net": _money(void_net) if voids else None}
+    return {"closed": closed, "wins": wins, "voids": voids, "void_net": _money(void_net) if voids else None,
+            "void_net_pct": pct_of(void_net, base) if voids else None}
+
+
+def _closed_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    out = []
+    for row in conn.execute(_CLOSED_SQL):
+        d = dict(row)
+        basis = None if d["qty"] is None or d["entry_px"] is None else _dec(d["qty"]) * _dec(d["entry_px"])
+        d["net_pnl_pct"] = pct_of(d["net_pnl"], basis)
+        out.append(d)
+    return out
 
 
 def paper_summary(
@@ -125,6 +142,7 @@ def paper_summary(
     no_stop_strategies: Sequence[str] = (),
 ) -> dict[str, Any]:
     snapshots = _snapshots(conn)
+    equity = _equity(snapshots[0] if snapshots else None)
     positions = _positions(conn, view)
     unmarked = list(dict.fromkeys(p["symbol"] for p in positions if p["mark"] is None)) if view else []
     return {
@@ -136,11 +154,11 @@ def paper_summary(
         "entry_guard": view.entry_guard() if view is not None else "not built",
         "unmarked": unmarked,
         "halts": [{**h, "latched": bool(h["latched"])} for h in control.active_halts()],
-        "equity": _equity(snapshots[0] if snapshots else None),
+        "equity": equity,
         "curve": [{"d": r["at"][:10], "at": r["at"], "equity": r["equity"]} for r in reversed(snapshots)],
         "positions": positions,
         "orders": [dict(r) for r in conn.execute(_ORDERS_SQL)],
-        "closed": [dict(r) for r in conn.execute(_CLOSED_SQL)],
-        "totals": _totals(conn),
+        "closed": _closed_rows(conn),
+        "totals": _totals(conn, None if equity is None else _dec(equity["capital_base"])),
         "counters": view.counters() if view is not None else None,
     }

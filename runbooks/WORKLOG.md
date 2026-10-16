@@ -1,5 +1,27 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-16 18:10 — Review findings fixed, cleanup pass, P&L percentages (committed, NOT deployed)
+
+- **/code-review of the 30 commits ahead of origin (14 findings):**
+  - **Fixed:** reconcile retries a symbol logged with zero official bars; the C5 verdict looks are cut from the first 20/40 *filled* recs and form only when all are eligible (plan "C5 correction 2026-10-16", at eligible n = 4, before any look formed); a ticker child that outlives a denied terminate has its link closed; `/rearm` integrity guard; equity-chart crosshair clamp; re-arm toast; `TIME_ONLY_POLICY` constant; unknown `paper.no_stop_strategies` ids logged at boot; the login warning prints the resolved CLI path.
+  - **Skipped:**
+    - The auth regex was replayed over all 547 logged agent failures (91 log files): it matched exactly the 15 real auth failures.
+    - The two surveillance filters are identical today.
+    - The double universe read is about 1 read in 750 per sweep.
+    - The blocking `close()` is the last shutdown step.
+  - **Withdrawn after the cleanup review:** finding #4 (resend a failed reconcile alert). The production `notify` sink catches every exception and the Telegram outbox retries, so the fix was dead code.
+- **Cleanup pass (4 review angles):**
+  - The ticker link is closed once, in the read-loop teardown.
+  - One `IntegrityError` handler in the API answers 503 on every route; it also fixes `/risk/headroom` and `/config/params`.
+  - The Telegram owner guard replies `command failed: …` instead of going silent.
+  - The no-stop id check uses `SCANNER_REGISTRY` plus the batch legs; `rsi2` was a false positive.
+- **P&L percentages (owner-approved design):** every ₹ P&L figure carries its percent (`engine/core/money.py` `pct_of`).
+  - Account figures are % of capital base; trades are % of entry value; open positions stay labelled "before costs".
+  - Covered: the dashboard, Telegram `/pnl` and `/limits`, and the Scorecard paper net.
+- **Validation:** failing-first tests for each fix. Full suite 4283 passed, 19 skipped (13m36s, run alone). Dashboard 79/79, `tsc` clean.
+- **Not deployed:** the engine still runs 24bbe7c code, and `dashboard\dist` is not rebuilt. Both wait for the capital-change build (`runbooks/design-2026-10-16-dashboard-capital-change.md`).
+- **Found during the build:** on 2026-09-07 the mid-session base raise (20k → 40k at 12:55) moved recorded day MTM from −₹185 to +₹19,816 for the rest of the session. The −5% day-loss rung was effectively off that afternoon. The capital-change design fixes the cause (day loss and drawdown computed in P&L space).
+
 ## 2026-10-15 16:32 — D14 paper no-stop test (C5) and the ticker spawn-failure fix deployed (owner: "Go with option C and validate")
 
 - **Evidence before building (disclosed in C5):**

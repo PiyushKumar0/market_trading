@@ -1,7 +1,7 @@
 /** Overview's glance at the paper autopilot: one status sentence, three figures, a sparkline. Simulated. */
 import { COPY } from '../../copy/glossary.ts'
 import { isPaperSummary } from '../../lib/alerts.ts'
-import { inr, istStamp, signOf, signedInr } from '../../lib/format.ts'
+import { inr, istStamp, pnlWithPct, signOf } from '../../lib/format.ts'
 import { paperStatus } from '../../lib/paper.ts'
 import type { PaperCurvePoint, PaperResponse } from '../../types'
 import { Card, EmptyState } from '../../ui/Card'
@@ -92,8 +92,8 @@ export function PaperSnapshot({
         <>
           <div className="stats stats-compact">
             <StatTile label="Paper equity" value={inr(eq.equity)} caption={`Started with ${inr(eq.capital_base) ?? '—'}`} />
-            <StatTile label="Net since start" value={<span className={valueClass(eq.pnl)}>{signedInr(eq.pnl) ?? '—'}</span>} />
-            <StatTile label="Today" value={<span className={valueClass(eq.day_mtm)}>{signedInr(eq.day_mtm) ?? '—'}</span>} />
+            <StatTile label="Net since start" value={<span className={valueClass(eq.pnl)}>{pnlWithPct(eq.pnl, eq.pnl_pct) ?? '—'}</span>} />
+            <StatTile label="Today" value={<span className={valueClass(eq.day_mtm)}>{pnlWithPct(eq.day_mtm, eq.day_mtm_pct) ?? '—'}</span>} />
           </div>
           <Sparkline points={p.curve} label={`Paper equity over ${p.curve.length} sessions, now ${inr(eq.equity)}`} />
         </>

@@ -164,6 +164,15 @@ async def test_the_position_book_is_given_the_full_round_trip_and_the_spread_fre
     assert full.components["spread"] > 0
 
 
+def test_a_misspelled_no_stop_strategy_is_named_at_boot(caplog):
+    """PositionBook matches ids exactly, so ``hi_52`` would silently drop hi52 from the D14 test."""
+    caplog.set_level(logging.WARNING)
+    assert opsmain._unknown_no_stop_strategies(("hi_52", "ins", "brk20")) == ["hi_52"]
+    assert [r for r in caplog.records if r.getMessage() == "paper_no_stop_unknown_strategy"]
+    assert opsmain._unknown_no_stop_strategies(load_settings().paper.no_stop_strategies) == []
+    assert opsmain._unknown_no_stop_strategies(("rsi2", "cat")) == []      # a scanner and a batch leg
+
+
 @pytest.mark.parametrize("store", [Store(corp=[{"symbol": SYM, "ex_date": dt.date(2026, 6, 25), "kind": "bonus"}]),
                                    Store(broken=True)], ids=["ex-date in the hold", "unreadable"])
 async def test_a_corporate_action_refusal_places_no_paper_order(conn, bus, now, compose, store):

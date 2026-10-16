@@ -13,8 +13,10 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
   ``net_t20 - net_pct`` (no-stop minus the shipped rule's outcome).
 * n < 20 -> INSUFFICIENT; else NO-STOP SUPPORTED iff D > 0 AND E > 0; STOP NOT THE PROBLEM iff
   D <= 0; NO EDGE EITHER WAY iff D > 0 AND E <= 0.
-* Registered LOOKS (no optional stopping): eligible rows are ordered by (fill_d, rec_id); look 1 is
-  the first 20, look 2 the first 40 (supersedes look 1). The running all-n figures carry no label.
+* Registered LOOKS (no optional stopping): filled recs outside the excluded statuses are ordered by
+  (fill_d, rec_id); look 1 is the first 20 and forms once all 20 are eligible, look 2 the first 40
+  (supersedes look 1). A formed look is then the first 20 (40) eligible recs by fill date, and no
+  later row can move it. The running all-n figures carry no label.
 Everything else printed (T+5/T+10, bootstrap, sign test, confirmation slice, the paper-portfolio
 section and its counterfactual) is a diagnostic and decides nothing.
 
@@ -51,6 +53,7 @@ from engine.core.clock import IST, Clock  # noqa: E402
 from engine.core.config import config_dir, repo_root  # noqa: E402
 from engine.learning.benchmark import bench_pct  # noqa: E402
 from engine.learning.exit_sim import Held, Outcome, SimBar, simulate  # noqa: E402
+from engine.oms.state import TIME_ONLY_POLICY  # noqa: E402
 
 STRATEGIES = ("hi52", "ins", "brk20")
 MIN_N = 20
@@ -62,7 +65,7 @@ LOOKS = (("look1", 20), ("look2", 40))
 BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 20261015
 DIAG_HORIZONS = (5, 10)
-EXIT_POLICY = "time_only"
+EXIT_POLICY = TIME_ONLY_POLICY
 
 LABEL_INSUFFICIENT = "INSUFFICIENT"
 LABEL_SUPPORTED = "NO-STOP SUPPORTED"
@@ -212,13 +215,31 @@ def decision_block(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {"n": len(rows), "E": e, "D": d, "label": decide(len(rows), d, e)}
 
 
-def registered_looks(eligible: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Look 1 = the first 20 eligible rows, look 2 = the first 40 (``eligible`` is already ordered by
-    (fill_d, rec_id)); a look exists only once its row count is reached. Later rows never move it."""
+def look_cohort(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every filled rec outside the excluded statuses, ordered by (fill_d, rec_id): the order the looks
+    are cut from. A rec's place is fixed when it fills, and every later fill sorts after it."""
+    return sorted(
+        (r for r in rows if r["fill_d"] and r["status"] not in _FINAL),
+        key=lambda r: (r["fill_d"], r["rec_id"]),
+    )
+
+
+def registered_looks(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Look 1 = the first 20 recs of :func:`look_cohort`, look 2 = the first 40; a look forms once every
+    one of its recs is eligible. Cutting from the eligible rows instead let an early fill that finishes
+    late (a long shipped exit, a T+20 backfill) join a look already reached and push its 20th row out.
+    A formed look's rows are final, so later rows never move it."""
+    cohort, progress = look_cohort(rows), look_progress(rows)
     return {
-        name: decision_block(eligible[:size]) if len(eligible) >= size else None
+        name: decision_block(cohort[:size]) if progress[name]["eligible"] == size else None
         for name, size in LOOKS
     }
+
+
+def look_progress(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Eligible recs among each look's first fills, so a look held by one late fill is visible."""
+    cohort = look_cohort(rows)
+    return {name: {"eligible": sum(map(is_eligible, cohort[:size])), "of": size} for name, size in LOOKS}
 
 
 def build_signal_level(
@@ -226,7 +247,7 @@ def build_signal_level(
     today: date | None = None,
 ) -> dict[str, Any]:
     eligible, counts = split_population(rows, calendar, today)
-    looks = registered_looks(eligible)
+    looks = registered_looks(rows)
     binding = looks["look2"] or looks["look1"]
     running = {k: v for k, v in decision_block(eligible).items() if k != "label"}
     e_vals = [r["excess_t20"] for r in eligible]
@@ -234,6 +255,7 @@ def build_signal_level(
     out: dict[str, Any] = {
         "counts": counts,
         "looks": looks,
+        "look_progress": look_progress(rows),
         "running": running,
         "decision": binding["label"] if binding else LABEL_INSUFFICIENT,
         "review_due_at_40": len(eligible) >= REVIEW_N,
@@ -541,13 +563,14 @@ def render(doc: dict[str, Any]) -> str:
     look1, look2, run = s["looks"]["look1"], s["looks"]["look2"], s["running"]
     if look2:
         decision = (f"DECISION        : {look2['label']}   "
-                    "(look 2: first 40 eligible by fill date; supersedes look 1)")
+                    "(look 2: first 40 fills, all eligible; supersedes look 1)")
     elif look1:
-        decision = (f"DECISION        : {look1['label']}   (look 1: first 20 eligible by fill date; "
+        decision = (f"DECISION        : {look1['label']}   (look 1: first 20 fills, all eligible; "
                     f"E={_f(look1['E'])} pp, D={_f(look1['D'])} pp)")
     else:
+        p1 = s["look_progress"]["look1"]
         decision = (f"DECISION        : {LABEL_INSUFFICIENT}   "
-                    f"({run['n']} of 20 eligible for look 1)")
+                    f"(look 1: {p1['eligible']} of the first {p1['of']} fills eligible)")
     L = [bar, "C5 NO-STOP FORWARD-TEST VERDICT (owner D14: no stop + 20-session time exit)", bar,
          decision]
     if look1 and look2:

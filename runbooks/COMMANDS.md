@@ -469,8 +469,9 @@ response to them.
 Pre-registration: `IMPLEMENTATION_PLAN.md` §6.1 C5 and its clarification.
 
 - **DECISION:** the signal-level verdict over `rec_outcomes` entry recs of hi52, ins and brk20 that are closed
-  under the shipped rule and have a T+20 no-stop outcome. It is pinned to two looks: look 1 = the first 20 eligible
-  recs by fill date, look 2 = the first 40, which supersedes look 1. Below 20 it reads INSUFFICIENT. Otherwise:
+  under the shipped rule and have a T+20 no-stop outcome. It is pinned to two looks: look 1 = the first 20 filled
+  recs by fill date, formed once all 20 are eligible; look 2 = the first 40, which supersedes look 1 (correction
+  2026-10-16). Until look 1 forms it reads INSUFFICIENT. Otherwise:
   - NO-STOP SUPPORTED if D > 0 and E > 0;
   - STOP NOT THE PROBLEM if D ≤ 0;
   - NO EDGE EITHER WAY if D > 0 and E ≤ 0.

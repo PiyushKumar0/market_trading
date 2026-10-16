@@ -576,6 +576,24 @@ async def test_daily_login_job_alerts_once_on_warn_and_never_on_pass(tmp_path, c
     assert "expires in 2.0 days" in alerts[0][1] and "auth login" in alerts[0][1]
 
 
+@pytest.mark.asyncio
+async def test_login_warnings_carry_the_resolved_cli_command(tmp_path, clock):
+    """The composition root passes AgentHarness.relogin_hint(): the pinned CLI's real path, the same
+    command the auth_failed alert prints, instead of a placeholder the owner has to look up."""
+    from engine.ops.selftest import alert_claude_login, check_claude_login
+
+    hint = "re-login the engine's Claude CLI as the service user: & \"C:/x/claude.exe\" auth login --claudeai"
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    await alert_claude_login(clock.now(), _creds(tmp_path, clock, days=2), alert, hint=hint)
+    assert alerts[0][1].endswith(hint)
+    assert check_claude_login(clock.now(), tmp_path / "absent.json", hint=hint).detail.endswith(hint)
+    assert "<agents.yaml" in check_claude_login(clock.now(), tmp_path / "absent.json").detail
+
+
 def test_claude_credentials_path_follows_the_cli(tmp_path, monkeypatch):
     from pathlib import Path
 

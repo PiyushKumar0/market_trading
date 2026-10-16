@@ -219,6 +219,21 @@ async def test_unknown_token_yields_empty_official_row(store, clock):
     assert kite.calls == []                     # no token → no request, never a guess
 
 
+async def test_a_row_with_no_official_bars_is_no_checkpoint(store, clock):
+    """An empty official fetch (no token, or Kite returning []) converts nothing: the bars are still
+    self-built, so the next run of d fetches the symbol again instead of skipping it for good."""
+    store.insert_bars_1m([self_bar("A", at(9, 15), "10.00", 100)])
+    first = await _job(store, FakeKite({}), clock).run(D, ["A"])
+    assert first.symbols[0].bars_official == 0
+
+    kite = FakeKite({TOKENS["A"]: [official_candle(at(9, 15), 10.00, 100)]})
+    second = await _job(store, kite, clock).run(D, ["A"])
+    assert [c[0] for c in kite.calls] == [TOKENS["A"]] and second.symbols_already_done == 0
+    (row,) = store.get_reconcile_log(D)
+    assert row["bars_official"] == 1 and row["bars_compared"] == 1
+    assert {b.src for b in store.get_bars_1m("A", at(9, 15), at(9, 16))} == {"kite_official"}
+
+
 # --------------------------------------------------------------------------- TokenException abort (2026-07-21)
 class _KiteTokenAfter:
     """historical() returns ``ok`` candles for the first ``die_after`` calls, then a TokenException —

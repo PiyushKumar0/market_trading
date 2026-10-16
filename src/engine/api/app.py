@@ -42,6 +42,8 @@ from engine.core.config import Settings, load_settings, repo_root
 from engine.core.db import transaction
 from engine.core.enums import Actor, Mode
 from engine.core.log import get_logger
+from engine.core.money import pct_of
+from engine.core.protected_store import IntegrityError
 from engine.core.scope import scope_sql
 from engine.core.secrets import DASHBOARD_TOKEN, Secrets
 from engine.intelligence.events import TOPIC_BUDGET_STATE
@@ -246,6 +248,17 @@ def create_app(
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
+    @app.exception_handler(IntegrityError)
+    async def _protected_config_unverified(_request: Request, exc: IntegrityError) -> JSONResponse:
+        """An unverified protected store (edited without a reseed; the boot is FROZEN on it) is an
+        answer, not a 500, on every route that reads it (/risk/headroom, /risk/rearm, /config/params).
+        Nothing falls back to a stale table: R4 keeps raising, this only words the refusal."""
+        _log.warning("api_protected_config_unverified", error=str(exc))
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"ok": False, "note": f"protected config unverified: {exc}"},
+        )
+
     # ----------------------------------------------------------------- unauthenticated: Kite login (R6)
     # MUST be mounted WITHOUT the bearer dependency: Kite redirects the owner's browser here with a
     # ``request_token`` to complete the daily login, and that redirect cannot carry our bearer header.
@@ -423,9 +436,11 @@ def create_app(
         if exposure is None:
             return {"headroom": {}}
         counts = exposure.open_position_counts()
+        day_mtm = exposure.day_mtm()
         headroom: dict[str, Any] = {
             "equity": str(exposure.equity()),
-            "day_mtm": str(exposure.day_mtm()),
+            "day_mtm": str(day_mtm),
+            "day_mtm_pct": pct_of(day_mtm, exposure.capital_base),
             "open_positions": {"total": counts.total, "mis": counts.mis, "cnc": counts.cnc},
             "consecutive_losses": exposure.consecutive_losses(),
             "deployed_capital": str(exposure.deployed_capital()),

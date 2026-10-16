@@ -98,6 +98,7 @@ class SelfTestReport(BaseModel):
 #: warning is interactive UI inside 3 days, which an unattended service never shows.
 CLAUDE_LOGIN_WARN_DAYS = 7
 
+#: Fallback only: the composition root passes ``AgentHarness.relogin_hint()`` (the resolved CLI path).
 CLAUDE_RELOGIN_HINT = (
     "re-login the engine's Claude CLI as the service user: & <agents.yaml llm.cli_path> auth login --claudeai"
 )
@@ -113,14 +114,14 @@ def claude_credentials_path() -> Path:
     return base / ".credentials.json"
 
 
-def check_claude_login(now: datetime, path: Path) -> SelfTestCheck:
+def check_claude_login(now: datetime, path: Path, hint: str = CLAUDE_RELOGIN_HINT) -> SelfTestCheck:
     """Read-only health of the CLI's stored claude.ai login. WARN, never FROZEN — LLM availability is
     not a safety input (D7). The detail carries days left, the IST expiry and ``subscriptionType``
     only: token text never reaches a detail or a log line."""
     name = "claude_login"
 
     def warn(detail: str) -> SelfTestCheck:
-        return SelfTestCheck(name=name, status=CheckStatus.WARN, detail=f"{detail}; {CLAUDE_RELOGIN_HINT}")
+        return SelfTestCheck(name=name, status=CheckStatus.WARN, detail=f"{detail}; {hint}")
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -158,11 +159,12 @@ def check_claude_login(now: datetime, path: Path) -> SelfTestCheck:
 
 
 async def alert_claude_login(
-    now: datetime, path: Path, alert: Callable[[str, str], Awaitable[None]]
+    now: datetime, path: Path, alert: Callable[[str, str], Awaitable[None]],
+    hint: str = CLAUDE_RELOGIN_HINT,
 ) -> SelfTestCheck:
     """The daily ``claude_login_check`` job: the boot check's read, so a long-running engine hears an
     approaching expiry or a dead login. ONE warning per non-PASS run; PASS is logged only."""
-    check = check_claude_login(now, path)
+    check = check_claude_login(now, path, hint)
     _log.info("claude_login_check", status=check.status.value, detail=check.detail)
     if check.status is not CheckStatus.PASS:
         await alert("warning", f"Claude login: {check.detail}")
@@ -193,6 +195,7 @@ class SelfTest:
         roster_quarantined: dict[str, str] | None = None,
         roster_loaded: int | None = None,
         claude_credentials: Path | None = None,
+        claude_relogin_hint: str = CLAUDE_RELOGIN_HINT,
     ) -> None:
         self._conn = conn
         self._clock = clock
@@ -223,6 +226,7 @@ class SelfTest:
         # The CLI's stored claude.ai login file (claude_credentials_path() in composition); unwired
         # ⇒ SKIP, so the hermetic test tier never reads the machine's real login.
         self._claude_credentials = claude_credentials
+        self._claude_relogin_hint = claude_relogin_hint
 
     async def run(self, *, check_skew: bool = True, include_freshness: bool = True) -> SelfTestReport:
         report = SelfTestReport()
@@ -517,7 +521,7 @@ class SelfTest:
         the stored login's dead-clear and hard expiry, read from disk — no call, no quota."""
         if self._claude_credentials is None:
             return self._stub("claude_login", "credentials path not wired")
-        return check_claude_login(self._clock.now(), self._claude_credentials)
+        return check_claude_login(self._clock.now(), self._claude_credentials, self._claude_relogin_hint)
 
     async def _check_sdk_smoke(self) -> SelfTestCheck:
         """D11: one cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading

@@ -392,6 +392,7 @@ def test_risk_headroom_wired_with_exposure_and_caps(conn, clock, exposure, limit
     headroom = r.json()["headroom"]
     assert headroom["equity"] == "20000"          # no mark_price callback => open MTM falls back to 0
     assert headroom["day_mtm"] == "0"
+    assert headroom["day_mtm_pct"] == "0.00"      # of exposure.capital_base
     assert headroom["open_positions"] == {"total": 1, "mis": 1, "cnc": 0}
     assert headroom["consecutive_losses"] == 0
     assert headroom["deployed_capital"] == "1000"  # 10 * 100
@@ -432,6 +433,25 @@ async def test_rearm_clears_a_floor_stop_only_once_equity_is_back_above_it(
         "ok": True, "cleared": ["floor_equity_floor_rung"], "still_breached": [], "risk_state": "NORMAL",
     }
     assert _client().post("/risk/rearm", headers=AUTH).status_code == 501
+
+
+async def test_an_unverified_limit_table_is_an_answer_not_a_500(conn, clock, mode_manager) -> None:
+    from engine.core.protected_store import IntegrityError
+    from engine.risk.causes import RiskStateLatch
+
+    class _UnverifiedLimits:
+        def table(self):
+            raise IntegrityError("limits.yaml hash mismatch")
+
+    latch = RiskStateLatch(conn, clock, mode_manager)
+    await latch.set_cause("floor_equity_floor_rung", RiskState.CLOSE_ONLY, "test", Actor.RISK_GATE)
+    client = _client(conn=conn, clock=clock, exposure=ExposureTracker(conn, clock, Decimal("40000")),
+                     limits_engine=_UnverifiedLimits(), latch=latch)
+
+    unverified = {"ok": False, "note": "protected config unverified: limits.yaml hash mismatch"}
+    for r in (client.post("/risk/rearm", headers=AUTH), client.get("/risk/headroom", headers=AUTH)):
+        assert (r.status_code, r.json()) == (503, unverified)
+    assert [c for c, _s, _d in latch.active_causes()] == ["floor_equity_floor_rung"]
 
 
 # --------------------------------------------------------------------------- budget
@@ -766,12 +786,13 @@ def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
     )
     body = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()
     assert body["label"] == LABEL
-    assert body["strategies"]["hi52"]["paper"] == {"closed": 0, "hit_rate": None, "net": None, "open": 0}
+    assert body["strategies"]["hi52"]["paper"] == {
+        "closed": 0, "hit_rate": None, "net": None, "net_pct": None, "open": 0}
     assert body["strategies"]["hi52"]["recs"]["n"] == 1
 
     seed_paper(conn)
     paper = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()["strategies"]["hi52"]["paper"]
-    assert paper == {"closed": 3, "hit_rate": 2 / 3, "net": 560.25, "open": 2}     # full record, voids out
+    assert paper == {"closed": 3, "hit_rate": 2 / 3, "net": 560.25, "net_pct": None, "open": 2}   # voids out
 
 
 def test_positions_and_orders_carry_is_paper(conn, clock) -> None:

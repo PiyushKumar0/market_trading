@@ -729,7 +729,13 @@ class TickerSupervisor:
             await asyncio.Event().wait()  # serve until cancelled (stop/respawn)
         finally:
             self._server = None
-            self._child_writer = None
+            # Close the link, not just forget it: server.close() keeps accepted connections, so a child
+            # that outlived its terminate (denied in Modern Standby) would keep stamping liveness for the
+            # next spawn. Its handler sees EOF and exits; for a dead child the link is already at EOF.
+            writer, self._child_writer = self._child_writer, None
+            if writer is not None:
+                with contextlib.suppress(Exception):
+                    writer.close()
             server.close()  # releases the listening socket immediately (rebind-safe on its own)
             try:
                 await asyncio.wait_for(server.wait_closed(), timeout=_SERVER_CLOSE_TIMEOUT_S)

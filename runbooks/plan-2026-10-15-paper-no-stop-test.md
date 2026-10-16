@@ -58,8 +58,8 @@ Pre-registered in `IMPLEMENTATION_PLAN.md` §6.1, "C5 NO-STOP FORWARD TEST", bef
 
 - **Signal level, the decision source:** `rec_outcomes` scores every delivered entry rec twice, under the shipped
   rule (`net_pct`) and with no stop to T+20 (`net_t20`, `excess_t20`). The verdict is two pinned looks: the first
-  20 and the first 40 eligible recs by fill date (C5 clarification). Look 2 supersedes look 1, and any other n
-  is interim with no label.
+  20 and the first 40 filled recs by fill date (C5 clarification), each formed once all of its recs are eligible
+  (C5 correction 2026-10-16). Look 2 supersedes look 1, and any other n is interim with no label.
 - **Portfolio level, diagnostic:** the paper book's realized results under the no-stop policy, against the
   same fills under the shipped stop, the benchmark, slot-blocked entries and floor events.
 - **Tool:** `scripts/no_stop_verdict.py`, read-only.

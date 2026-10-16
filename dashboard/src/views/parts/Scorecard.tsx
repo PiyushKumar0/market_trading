@@ -4,7 +4,7 @@
  * outcomes on official prices; the paper columns are simulated trades.
  */
 import { strategyName } from '../../copy/glossary.ts'
-import { humanize, pct, ratePct, signOf, signedInr } from '../../lib/format.ts'
+import { humanize, pct, ratePct, pnlWithPct, signOf } from '../../lib/format.ts'
 import type { ScorecardRecs, ScorecardResponse } from '../../types'
 import { Hint, Labelled } from '../../ui/Hint'
 
@@ -138,7 +138,7 @@ export function Scorecard({ data }: { data: ScorecardResponse }) {
                   {dash(ratePct(paper.hit_rate))}
                 </td>
                 <td data-label="Paper net P&L (after costs)" className={`right num${tone(paper.net)}`}>
-                  {paper.net === null ? '—' : dash(signedInr(paper.net.toFixed(2)))}
+                  {paper.net === null ? '—' : dash(pnlWithPct(paper.net.toFixed(2), paper.net_pct == null ? null : paper.net_pct.toFixed(2)))}
                 </td>
                 <td data-label="Paper open now" className="right num">
                   {paper.open}

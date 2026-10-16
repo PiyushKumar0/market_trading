@@ -68,7 +68,7 @@ def test_scorecard_without_paper_activity_has_zeroed_paper_halves(conn) -> None:
     assert scorecard(conn)["strategies"] == {}
     _seed(conn)
     assert scorecard(conn)["strategies"]["hi52"]["paper"] == {
-        "closed": 0, "hit_rate": None, "net": None, "open": 0,
+        "closed": 0, "hit_rate": None, "net": None, "net_pct": None, "open": 0,
     }
 
 
@@ -112,8 +112,22 @@ def test_paper_half_keeps_pre_epoch_paper_trades_and_excludes_voids(conn) -> Non
     _seed(conn)
     seed_paper(conn)
     strategies = scorecard(conn)["strategies"]
-    assert strategies["hi52"]["paper"] == {"closed": 3, "hit_rate": 2 / 3, "net": 560.25, "open": 2}
-    assert strategies["paperonly"]["paper"] == {"closed": 1, "hit_rate": 0.0, "net": -10.0, "open": 0}
-    assert strategies["unattributed"]["paper"] == {"closed": 0, "hit_rate": None, "net": None, "open": 1}
+    assert strategies["hi52"]["paper"] == {
+        "closed": 3, "hit_rate": 2 / 3, "net": 560.25, "net_pct": None, "open": 2}      # no qty / entry_px stored
+    assert strategies["paperonly"]["paper"] == {
+        "closed": 1, "hit_rate": 0.0, "net": -10.0, "net_pct": None, "open": 0}
+    assert strategies["unattributed"]["paper"] == {
+        "closed": 0, "hit_rate": None, "net": None, "net_pct": None, "open": 1}
     assert strategies["paperonly"]["recs"]["n"] == 0
     assert strategies["hi52"]["recs"]["n"] == 5          # paper rows never reach the recs half
+
+
+def test_paper_net_pct_is_net_over_the_summed_cost_basis_never_a_partial_one(conn) -> None:
+    _seed(conn)
+    seed_paper(conn)
+    for entry_id, qty, px in [("e0", 10, "100"), ("e1", 5, "200"), ("e3", 2, "50")]:    # bases 1000, 1000, 100
+        conn.execute("UPDATE learning_ledger SET qty = ?, entry_px = ? WHERE entry_id = ?", (qty, px, entry_id))
+    paper = scorecard(conn)["strategies"]["hi52"]["paper"]
+    assert paper["net"] == 560.25 and paper["net_pct"] == 26.68      # 560.25 / 2100 = 26.678...
+    conn.execute("UPDATE learning_ledger SET entry_px = NULL WHERE entry_id = 'e3'")
+    assert scorecard(conn)["strategies"]["hi52"]["paper"]["net_pct"] is None

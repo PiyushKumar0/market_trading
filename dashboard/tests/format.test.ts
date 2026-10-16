@@ -9,11 +9,13 @@ import {
   istStamp,
   istTime,
   pct,
+  pnlWithPct,
   price,
   ratePct,
   shortDate,
   signOf,
   signedInr,
+  signedPct,
   todayIst,
   usd,
 } from '../src/lib/format.ts'
@@ -60,6 +62,27 @@ test('signedInr marks direction and never signs zero', () => {
   assert.equal(signedInr('-0.00'), '₹0.00')
   assert.equal(signedInr('0'), '₹0')
   assert.equal(signedInr(null), null)
+})
+
+test('signedPct marks direction with the engine digits and never signs zero', () => {
+  assert.equal(signedPct('3.08'), '+3.08%')
+  assert.equal(signedPct('-1.25'), '−1.25%')
+  assert.equal(signedPct('0.00'), '0.00%')
+  assert.equal(signedPct('-0.00'), '0.00%')
+  assert.equal(signedPct(null), null)
+  assert.equal(signedPct(undefined), null)
+  assert.equal(signedPct(''), null)
+  assert.equal(signedPct('n/a'), 'n/a')
+})
+
+test('pnlWithPct puts the engine percent next to the rupees and degrades to rupees alone', () => {
+  assert.equal(pnlWithPct('113.30', '0.57'), '+₹113.30 (+0.57%)')
+  assert.equal(pnlWithPct('-1840.60', '-4.60'), '−₹1,840.60 (−4.60%)')
+  assert.equal(pnlWithPct('0.00', '0.00'), '₹0.00 (0.00%)')
+  assert.equal(pnlWithPct('113.30', null), '+₹113.30')
+  assert.equal(pnlWithPct('113.30', undefined), '+₹113.30')
+  assert.equal(pnlWithPct(null, '0.57'), null)
+  assert.equal(pnlWithPct(undefined, undefined), null)
 })
 
 test('signOf reads the sign from the string', () => {

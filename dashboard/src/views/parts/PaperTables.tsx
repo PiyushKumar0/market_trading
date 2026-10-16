@@ -7,7 +7,7 @@ import {
   protectionTerm,
   strategyName,
 } from '../../copy/glossary.ts'
-import { humanize, inr, istDay, istStamp, price, shortDate, signOf, signedInr } from '../../lib/format.ts'
+import { humanize, inr, istDay, istStamp, price, shortDate, pnlWithPct, signOf } from '../../lib/format.ts'
 import type { PaperClosed, PaperOrder, PaperPosition } from '../../types'
 import { DataTable } from '../../ui/DataTable'
 import type { Column } from '../../ui/DataTable'
@@ -81,7 +81,7 @@ const POSITION_COLUMNS: Column<PaperPosition>[] = [
     label: 'Open P&L (before costs)',
     align: 'right',
     nowrap: true,
-    cell: (r) => <span className={signCls(r.unrealized)}>{signedInr(r.unrealized) ?? '—'}</span>,
+    cell: (r) => <span className={signCls(r.unrealized)}>{pnlWithPct(r.unrealized, r.unrealized_pct) ?? '—'}</span>,
   },
   { key: 'stop', header: 'Stop-loss', label: 'Stop-loss', align: 'right', nowrap: true, cell: (r) => inr(r.stop) ?? noLevel(r) },
   { key: 'target', header: 'Target', label: 'Target', align: 'right', nowrap: true, cell: (r) => inr(r.target) ?? noLevel(r) },
@@ -143,7 +143,7 @@ const CLOSED_COLUMNS: Column<PaperClosed>[] = [
     label: 'Net P&L (after costs)',
     align: 'right',
     nowrap: true,
-    cell: (c) => <span className={signCls(c.net_pnl)}>{signedInr(c.net_pnl) ?? '—'}</span>,
+    cell: (c) => <span className={signCls(c.net_pnl)}>{pnlWithPct(c.net_pnl, c.net_pnl_pct) ?? '—'}</span>,
   },
   {
     key: 'reason',

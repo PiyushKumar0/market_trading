@@ -104,8 +104,9 @@ export default function App() {
   async function rearm() {
     if (!(await confirm(COPY.rearm))) return
     try {
-      const r = await apiPost<{ cleared: string[] }>('/risk/rearm', {})
-      push(r.cleared.length ? 'good' : 'crit', r.cleared.length ? 'Floor stop re-armed.' : 'Not re-armed: the account is still below the line.')
+      const r = await apiPost<{ cleared: string[]; still_breached: string[] }>('/risk/rearm', {})
+      const res = COPY.rearmResult(r.cleared, r.still_breached)
+      push(res.tone, res.text)
     } catch (e) {
       push('crit', e instanceof NoAnswerError ? COPY.noAnswer('risk state') : `Couldn't re-arm: ${reason(e)}`)
     }

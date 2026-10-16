@@ -569,6 +569,14 @@ export const COPY = {
   paperEntriesOpen: 'Delivery (CNC) swing entries the analyst proposes in Recommend mode, inside your trading hours.',
   noAnswer: (what: string) =>
     `No answer from the engine in time. The ${what} may still change; the top bar shows the engine's value after the next refresh.`,
+  // POST /risk/rearm: nothing cleared AND nothing still breached means no floor stop was set any more
+  // (re-armed on Telegram before the next poll hid the button), not that the account is below a line.
+  rearmResult: (cleared: string[], stillBreached: string[]): { tone: 'good' | 'crit' | 'note'; text: string } =>
+    cleared.length
+      ? { tone: 'good', text: 'Floor stop re-armed.' }
+      : stillBreached.length
+        ? { tone: 'crit', text: 'Not re-armed: the account is still below the line.' }
+        : { tone: 'note', text: 'Nothing to re-arm: no floor stop is set.' },
   hoursTitle: 'Trading hours (IST)',
   hoursBody: 'New trades are only proposed inside these hours. Exits are never blocked.',
   hoursBufferLabel: 'Stop intraday entries this many minutes before the end',

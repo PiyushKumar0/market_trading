@@ -3,7 +3,7 @@
  * net P&L of trades recorded through the engine — never the Kite balance) against the enforced caps.
  */
 import type { Term } from '../../copy/glossary.ts'
-import { inr, signOf, signedInr } from '../../lib/format.ts'
+import { inr, pnlWithPct, signOf } from '../../lib/format.ts'
 import type { HeadroomResponse } from '../../types'
 import { Card, EmptyState } from '../../ui/Card'
 import { KeyValue, Meter, StatTile } from '../../ui/Figures'
@@ -95,7 +95,7 @@ export function RiskLimits({ headroom }: { headroom: HeadroomResponse | null }) 
         <StatTile label="Equity on record" value={inr(h.equity) ?? '—'} />
         <StatTile
           label="Today's P&L on record"
-          value={<span className={sign === 1 ? 'pos' : sign === -1 ? 'neg' : undefined}>{signedInr(h.day_mtm) ?? '—'}</span>}
+          value={<span className={sign === 1 ? 'pos' : sign === -1 ? 'neg' : undefined}>{pnlWithPct(h.day_mtm, h.day_mtm_pct) ?? '—'}</span>}
         />
       </div>
       {caps ? (

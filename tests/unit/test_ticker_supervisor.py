@@ -1291,6 +1291,41 @@ async def test_the_incident_through_the_real_monitor_terminate_and_spawn_paths(m
     assert retry.cancelled() and sup.health().state == "STOPPED"
 
 
+class _LinkWriter:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_read_loop_teardown_closes_the_child_link(clock, monkeypatch):
+    """A child that outlives a denied terminate/kill keeps its authenticated connection, which
+    server.close() does not drop: the read loop's teardown (every stop/respawn cancels it right after
+    _terminate_child) must close it, or its frames keep stamping liveness for the next spawn."""
+    import engine.broker.ticker_supervisor as mod
+
+    class _Server:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def fake_start_server(*_a, **_kw):
+        return _Server()
+
+    monkeypatch.setattr(mod.asyncio, "start_server", fake_start_server)
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
+    sup._read_task = asyncio.create_task(sup._read_loop())
+    await sup._wait_server_ready()
+    sup._child_writer = writer = _LinkWriter()
+
+    await sup._cancel_read_task()
+    assert writer.closed and sup._child_writer is None
+
+
 @pytest.mark.asyncio
 async def test_a_start_whose_spawn_raises_keeps_supervising(clock, monkeypatch):
     sup = TickerSupervisor(_FakeSettings(), clock, bus=None, api_key="k")

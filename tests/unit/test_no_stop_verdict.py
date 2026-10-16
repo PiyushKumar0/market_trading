@@ -181,6 +181,22 @@ def test_looks_fixed_and_look2_only_at_40():
     assert nsv.registered_looks(_eligible(19)) == {"look1": None, "look2": None}
 
 
+def test_a_look_waits_for_an_earlier_fill_instead_of_reforming_around_it(calendar):
+    """An early fill that finishes late (shipped exit still open, or T+20 awaiting a backfill) is in
+    look 1 from the start. Look 1 must not form without it and then change members when it lands."""
+    early = {**_eligible(1, d=-40.0, e=-9.0)[0], "rec_id": "early", "fill_d": "2026-08-31"}
+    pending = [{**early, "status": "open", "net_pct": None}, *_eligible(20)]
+    assert nsv.registered_looks(pending)["look1"] is None              # 20 eligible, first fill not final
+    out = nsv.build_signal_level(pending, {}, calendar, date(2026, 12, 1))
+    assert out["decision"] == nsv.LABEL_INSUFFICIENT and out["running"]["n"] == 20
+    assert out["look_progress"]["look1"] == {"eligible": 19, "of": 20}
+
+    landed = nsv.registered_looks([early, *_eligible(20)])["look1"]
+    assert landed == nsv.decision_block([early, *_eligible(19)])      # the first 20 fills, early included
+    unfilled = {**early, "rec_id": "nofill", "fill_d": None, "status": "open", "net_pct": None}
+    assert nsv.registered_looks([unfilled, *_eligible(20)])["look1"]["n"] == 20   # fills later: appends
+
+
 def test_looks_ordered_by_fill_date_then_rec_id(calendar):
     late = [{**r, "rec_id": f"late{i}", "fill_d": "2026-09-20", "net_t20": -50.0}
             for i, r in enumerate(_eligible(5))]

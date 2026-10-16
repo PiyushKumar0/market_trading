@@ -25,7 +25,7 @@ from engine.core.clock import Clock
 from engine.core.config import config_dir, load_yaml
 from engine.core.contracts import CheckResult, CostBreakdown, GateVerdict, Recommendation
 from engine.core.enums import Actor, DegradeTier, Mode, RiskState, Routing
-from engine.core.protected_store import ProtectedStore
+from engine.core.protected_store import IntegrityError, ProtectedStore
 from engine.core.types import OwnerConfirmation
 from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.intelligence.governor import BudgetGovernor
@@ -968,7 +968,9 @@ async def test_pnl_reports_realised_today_and_flags_a_missing_mark_source(clock,
 
     await bot._cmd_pnl(_Update(msg), _Ctx())
     text = msg.sent[0]
-    assert "realised today: ₹460.00" in text                # 500 gross - 40 costs, net (§7.1)
+    assert "realised today: ₹460.00 (+2.30%)" in text       # 500 gross - 40 costs, net (§7.1); 460 / 20,000 base
+    assert "realised all-time: ₹460.00 (+2.30%)" in text
+    assert "day MTM: ₹460.00 (+2.30%)" in text
     assert "open MTM: n/a offline (no mark source)" in text  # never a zero placeholder posing as a mark
     assert "equity: ₹20,460.00" in text and "open: 1" in text
     assert "2026-06-17" in text
@@ -989,6 +991,7 @@ async def test_limits_renders_usage_against_the_protected_caps(clock, conn, expo
     # O16 2026-09-07: base 40000 / caps 6-2-4 — read the cap off the loaded table.
     assert f"deployed capital: ₹12,250.00 / ₹{table.limits.capital_cap.max_deployed_capital_inr:,.2f}" in text
     assert "equity: ₹" in text and "day MTM: ₹" in text
+    assert f"day MTM: ₹0.00 (0.00%) (soft {table.limits.daily_loss_soft.day_mtm_pct}%" in text   # flat: no sign
     assert "{" not in text and "LimitTable" not in text
 
 
@@ -1112,6 +1115,22 @@ async def test_rearm_clears_a_floor_stop_only_once_equity_is_back_above_it(
     await above._cmd_rearm(_Update(msg), _Ctx())
     assert msg.sent[1] == "re-armed: floor_equity_floor_rung — risk_state NORMAL."
     assert ModeManager(conn, clock).risk_state() == RiskState.NORMAL
+
+
+class _UnverifiedLimits:
+    def table(self):
+        raise IntegrityError("limits.yaml hash mismatch")
+
+
+async def test_a_raising_command_answers_the_owner(clock, latch, exposure, msg):
+    """An edited-but-unsigned limits.yaml (boot FROZEN on integrity) made /rearm raise and the owner got
+    silence. The owner guard every command is registered through now replies with the failure."""
+    await latch.set_cause("floor_equity_floor_rung", RiskState.CLOSE_ONLY, "test", Actor.RISK_GATE)
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, latch=latch, limits_engine=_UnverifiedLimits(),
+                      exposure=exposure)
+    await _owner_only(bot, bot._cmd_rearm)(_Update(msg), _Ctx())
+    assert msg.sent == ["command failed: IntegrityError: limits.yaml hash mismatch"]
+    assert [c for c, _s, _d in latch.active_causes()] == ["floor_equity_floor_rung"]
 
 
 # --------------------------------------------------------------------------- owner approvals (§3.4)

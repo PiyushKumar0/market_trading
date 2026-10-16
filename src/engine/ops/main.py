@@ -188,7 +188,7 @@ from engine.ops.protection_reminders import ProtectionReminders
 from engine.ops.rec_outcomes import RecOutcomesJob
 from engine.ops.scan_context import LiveScanContextProvider
 from engine.ops.scheduler import Scheduler
-from engine.ops.selftest import SelfTest, alert_claude_login, claude_credentials_path
+from engine.ops.selftest import CLAUDE_RELOGIN_HINT, SelfTest, alert_claude_login, claude_credentials_path
 from engine.ops.single_instance import InstanceLock
 from engine.ops.token_check import TOKEN_CHECK_IST, TokenCheckJob
 from engine.ops.warmup import (
@@ -209,7 +209,15 @@ from engine.risk.mode import ModeManager
 from engine.strategy.cost_model import CostModel
 from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.retest import RestingLevelBook
-from engine.strategy.scanners import brk20, build_enabled_scanners, cat, cat_reversal, hi52, ins
+from engine.strategy.scanners import (
+    SCANNER_REGISTRY,
+    brk20,
+    build_enabled_scanners,
+    cat,
+    cat_reversal,
+    hi52,
+    ins,
+)
 from engine.strategy.types import SignalCandidate, round_to_tick
 from engine.universe.builder import UniverseBuilder
 from engine.universe.leverage import MisLeverageIngest
@@ -729,6 +737,8 @@ async def run() -> int:
             _log.error("agent_roster_empty", hint="config/agents.yaml — LLM tier disabled this run")
     except Exception:  # noqa: BLE001 - a bad roster must not stop the deterministic engine (D7)
         _log.exception("agent_roster_unloadable", hint="config/agents.yaml — LLM tier disabled this run")
+    # The login warnings print the same concrete command as the harness's auth_failed alert.
+    relogin_hint = harness.relogin_hint() if harness is not None else CLAUDE_RELOGIN_HINT
 
     # =========================================================================================
     # DATA PLANE (§2.5 / §3.2.3 / §4.4). Single-writer store + tick→bar builder + daily jobs.
@@ -1482,7 +1492,7 @@ async def run() -> int:
         return result
 
     async def job_claude_login_check() -> None:
-        await alert_claude_login(clock.now(), claude_credentials_path(), alert)
+        await alert_claude_login(clock.now(), claude_credentials_path(), alert, relogin_hint)
 
     async def job_filings_shp() -> FilingsShpResult:
         # Forwarded (2026-08-13): filings_shp degrades-without-raising (E5) — the watermark verdict
@@ -1650,7 +1660,7 @@ async def run() -> int:
         sdk_smoke=(None if harness is None else (lambda: run_sdk_smoke(harness))),
         calendar=calendar,
         roster_quarantined=roster_quarantined, roster_loaded=len(agent_defs),
-        claude_credentials=claude_credentials_path(),
+        claude_credentials=claude_credentials_path(), claude_relogin_hint=relogin_hint,
     )
     # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
     # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.
@@ -3752,6 +3762,7 @@ async def _compose_paper(
             no_stop_strategies=frozenset(settings.paper.no_stop_strategies),
             **sessions,
         )
+        _unknown_no_stop_strategies(settings.paper.no_stop_strategies)
         exits = ExitManager(
             conn, clock, broker, orders=orders, book=book, session_fn=calendar.session, hold_fn=hold_fn,
             corp_actions_fn=corp_actions, pre_ex_mark_fn=pre_ex_mark, settings=settings.paper, **sessions,
@@ -4055,6 +4066,17 @@ async def _freeze_lift_sweep(evt, clock: Clock, calendar: NSECalendar, mode: Mod
 _PUBLICATION_LEG_ORDER: tuple[str, ...] = (
     brk20.STRATEGY_ID, ins.STRATEGY_ID, cat.STRATEGY_ID, cat_reversal.STRATEGY_ID, hi52.STRATEGY_ID,
 )
+
+
+def _unknown_no_stop_strategies(names: Iterable[str]) -> list[str]:
+    """``paper.no_stop_strategies`` entries naming no strategy (a registered scanner or a batch leg),
+    logged at paper composition. The PositionBook matches ids exactly, so a typo would silently keep
+    that strategy's stop in the D14 test."""
+    known = {*SCANNER_REGISTRY, *_PUBLICATION_LEG_ORDER}
+    unknown = sorted(set(names) - known)
+    if unknown:
+        _log.warning("paper_no_stop_unknown_strategy", unknown=unknown, known=sorted(known))
+    return unknown
 
 
 def _publication_order(admitted: list) -> list:

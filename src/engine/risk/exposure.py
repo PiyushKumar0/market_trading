@@ -173,6 +173,11 @@ class ExposureTracker:
         self._snapshots = "paper_equity_snapshots" if paper else "equity_snapshots"
         self._snapshot_epoch = f" AND at >= {PAPER_EPOCH_SQL}" if paper else ""
 
+    @property
+    def capital_base(self) -> Decimal:
+        """The base every percentage limit and halt uses, §7.1."""
+        return self._capital_base
+
     def _real_only(self) -> None:
         if self.scope != "real":
             raise RuntimeError("the paper ExposureTracker never applies a halt (plan §1.5)")

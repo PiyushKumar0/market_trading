@@ -191,6 +191,8 @@ export interface ScorecardPaper {
   closed: number
   hit_rate: number | null
   net: number | null
+  /** Net % of the closed trades' cost (Σ qty × entry); null without a complete basis; absent on older engines. */
+  net_pct?: number | null
   open: number
 }
 
@@ -209,7 +211,10 @@ export interface PaperHalt {
   latched: boolean
 }
 
-/** The latest equity snapshot of the epoch; `pnl` and `capital_base` come from the same row. */
+/**
+ * The latest equity snapshot of the epoch; `pnl` and `capital_base` come from the same row.
+ * The `*_pct` fields are the engine's 2-dp percent strings of `capital_base`; absent on older engines.
+ */
 export interface PaperEquity {
   at: string
   equity: string
@@ -219,6 +224,10 @@ export interface PaperEquity {
   positions_open: number | null
   pnl: string
   capital_base: string
+  pnl_pct?: string | null
+  realized_pnl_pct?: string | null
+  open_mtm_pct?: string | null
+  day_mtm_pct?: string | null
 }
 
 /** Last snapshot of each IST day `d` since the epoch, ascending. */
@@ -246,6 +255,8 @@ export interface PaperPosition {
   opened_at: string | null
   mark: string | null
   unrealized: string | null
+  /** 2-dp percent of cost (qty × avg_entry); null without a mark. */
+  unrealized_pct?: string | null
 }
 
 /** Working (non-terminal) paper orders; an unfilled entry's symbol/strategy come from its proposal. */
@@ -275,6 +286,8 @@ export interface PaperClosed {
   close_basis: string | null
   outcome_label: string | null // win | loss | scratch | void
   closed_at: string | null
+  /** 2-dp percent of cost (qty × entry_px); null when any of the three is missing. */
+  net_pnl_pct?: string | null
 }
 
 /** Every close of the epoch: `closed`/`wins` exclude voids; `void_net` is their summed net. */
@@ -283,6 +296,8 @@ export interface PaperTotals {
   wins: number
   voids: number
   void_net: string | null
+  /** 2-dp percent of the equity row's `capital_base`. */
+  void_net_pct?: string | null
 }
 
 export interface PaperSummary {
@@ -327,6 +342,8 @@ export interface HeadroomCaps {
 export interface Headroom {
   equity?: string
   day_mtm?: string
+  /** 2-dp percent of the capital base the limits use (§7.1); absent on older engines. */
+  day_mtm_pct?: string
   open_positions?: { total: number; mis: number; cnc: number }
   consecutive_losses?: number
   deployed_capital?: string

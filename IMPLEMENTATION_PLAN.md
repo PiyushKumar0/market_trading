@@ -1524,6 +1524,11 @@ All signals respect the universe (trading scope), the cost gate (expected edge â
   - The counterfactual walks `bars_1m` plus daily bars, or daily bars only on a snapshot without `bars_1m`, and says which.
   - Paper quantities follow the same sizing rule as the card, against paper's own equity and caps (D10), so they can differ from the card.
 
+**C5 correction 2026-10-16, before any look formed (eligible n = 4, look 1 not formed; no threshold, statistic or population moves; from a code review):** (ii) claimed "each look is reproducible once formed". It was not. Cutting look 1 from the *eligible* rows let a rec that filled early but finished late (a shipped exit still open, or a T+20 waiting on a backfill) join a look that had already been reached and push out its 20th row. Its E, D and label could then change between runs, which is the optional stopping (ii) exists to prevent.
+- Look 1 is now the first 20 **filled** recs ordered by (`fill_d`, `rec_id`), leaving out `void_ca`, `unfilled` and `unscorable`. It forms only once all 20 are eligible. Look 2 is the same with 40.
+- At the moment a look forms, its rows are exactly the first 20 (40) eligible recs by fill date, so this is the row set (ii) named, read only once it can no longer change. A rec that has not filled yet sorts after every existing fill.
+- A cohort rec stuck at `t20_past_due` holds its look until it is scored. That is a data gap to fix, not a row to skip. The script prints how many of the first 20 fills are eligible.
+
 ### 6.2 Feature set (deterministic, versioned; `feature_set_version` stamped everywhere)
 
 - **Price/volatility:** returns (1/5/20 d), ATR(14) 1m+1d, realized vol 20d, gap stats, distance to 20/50/200-DMA, day range position.

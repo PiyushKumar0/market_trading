@@ -3,12 +3,13 @@
 Nightly (15:50) — and as the §2.6 startup catch-up for past trading days, driven by the
 ``job_runs`` DATE_KEYED watermark of ``JOB_RECONCILE`` (the scheduler/CatchUpRunner calls
 :meth:`ReconcileJob.run` per missing day). ``reconcile_log`` is the per-(day, symbol) audit trail
-AND the per-(day, symbol) resume checkpoint: a run skips every symbol already logged for ``d``. A
-logged symbol's bars are already canonical official, so re-comparing it finds no self bars and would
-overwrite its drift row with ``bars_compared=0`` (2026-09-15: 119 symbols after a mid-run 502;
-08-28, 10-05, 10-08: every symbol, the 15:50 fire racing the catch-up sweep). Runs are serialized
-per job, so a concurrent caller waits and then finds the day logged. ``MarketStore.has_reconcile_entry``
-/ ``reconciled_days`` have no production caller.
+AND the per-(day, symbol) resume checkpoint: a run skips every symbol already logged for ``d`` with
+official bars. A logged symbol's bars are already canonical official, so re-comparing it finds no self
+bars and would overwrite its drift row with ``bars_compared=0`` (2026-09-15: 119 symbols after a
+mid-run 502; 08-28, 10-05, 10-08: every symbol, the 15:50 fire racing the catch-up sweep). A row with
+``bars_official=0`` converted nothing, so it is no checkpoint: the next run of ``d`` fetches it again.
+Runs are serialized per job, so a concurrent caller waits and then finds the day logged.
+``MarketStore.has_reconcile_entry`` / ``reconciled_days`` have no production caller.
 
 Each symbol's canonical bars and its log row commit in ONE store transaction
 (``MarketStore.commit_reconciled_symbol``), so no exception, cancel, store close or kill can leave a
@@ -111,7 +112,7 @@ class ReconcileReport(BaseModel):
     ok: bool = True
     aborted_reason: str | None = None
     symbols_remaining: int = 0           # unlogged symbols left unattempted by a token abort
-    symbols_already_done: int = 0        # requested symbols already in reconcile_log, skipped
+    symbols_already_done: int = 0        # requested symbols already logged with official bars, skipped
 
 
 class ReconcileJob:
@@ -123,7 +124,8 @@ class ReconcileJob:
         The usual seams; thresholds come from ``settings.reconcile`` [tunable].
     token_for_symbol:
         tradingsymbol → instrument_token resolver. A symbol with no token gets an empty official
-        set (logged) — its row still lands in ``reconcile_log`` with ``bars_official=0``.
+        set (logged) — its row still lands in ``reconcile_log`` with ``bars_official=0``, which the
+        next run of the day retries.
     tick_size_for:
         Optional per-symbol tick size (A10 price-banded); defaults to ``DEFAULT_TICK_SIZE``.
     notify:
@@ -167,7 +169,8 @@ class ReconcileJob:
 
     async def run(self, d: date, symbols: Sequence[str] | None = None) -> ReconcileReport:
         """Reconcile day ``d`` (§2.6 catch-up calls this per missing day). Idempotent per (day,
-        symbol): symbols already in ``reconcile_log`` for ``d`` are skipped, never re-fetched.
+        symbol): symbols already in ``reconcile_log`` for ``d`` with official bars are skipped,
+        never re-fetched.
 
         ``symbols`` defaults to every symbol holding a ``bars_1m`` row on ``d`` (the
         actively-ticked set, plus anything already backfilled for the day).
@@ -184,7 +187,9 @@ class ReconcileJob:
 
         requested = set(symbols)
         logged = await self._store.arun(self._store.get_reconcile_log, d)
-        done = {r["symbol"] for r in logged}
+        # A row with no official bars converted nothing (unknown token, or an empty fetch): its bars
+        # are still self-built, so it is retried, not checkpointed.
+        done = {r["symbol"] for r in logged if r["bars_official"]}
         # Flagged by an earlier run of d whose alert never went out (it raised, was stopped, or the
         # send failed): this run's alert covers them, once.
         carried = [r for r in logged if not r["alerted"] and self._row_flagged(r, max_bad)]

@@ -24,7 +24,18 @@ import {
   verdictTerm,
   actionHint,
   reasonTerm,
+  COPY,
 } from '../src/copy/glossary.ts'
+
+test('the re-arm toast says below-the-line only when a floor is still breached', () => {
+  assert.equal(COPY.rearmResult(['floor_equity_floor_rung'], []).tone, 'good')
+  assert.deepEqual(COPY.rearmResult([], ['floor_equity_floor_rung']), {
+    tone: 'crit',
+    text: 'Not re-armed: the account is still below the line.',
+  })
+  // Nothing latched any more (re-armed from Telegram before the next poll hid the button): no false alarm.
+  assert.deepEqual(COPY.rearmResult([], []), { tone: 'note', text: 'Nothing to re-arm: no floor stop is set.' })
+})
 
 test('engine states translate to plain words and keep the engine term', () => {
   assert.equal(modeTerm('OFF').label, 'Off')
