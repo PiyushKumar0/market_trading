@@ -14,6 +14,8 @@ export interface SystemProps {
   /** When a refresh last brought back any data. */
   lastOkAt: string | null
   nowMs: number
+  onChangeCapital: (capital: number, expected: number) => Promise<void>
+  onCapitalLateFailure: (message: string) => void
 }
 
 export function System(props: SystemProps) {
@@ -22,7 +24,11 @@ export function System(props: SystemProps) {
       <h1 className="view-title">System</h1>
       <EngineStatus mode={props.mode} tradeWindow={props.tradeWindow} conn={props.conn} lastOkAt={props.lastOkAt} />
       <div className="row-even">
-        <RiskLimits headroom={props.headroom} />
+        <RiskLimits
+          headroom={props.headroom}
+          onChangeCapital={props.onChangeCapital}
+          onLateFailure={props.onCapitalLateFailure}
+        />
         <AiBudget budget={props.budget} nowMs={props.nowMs} />
       </div>
     </>

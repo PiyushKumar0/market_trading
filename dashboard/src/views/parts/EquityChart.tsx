@@ -11,6 +11,10 @@ import type { PaperCurvePoint } from '../../types'
 import { EmptyState } from '../../ui/Card'
 import { DataTable } from '../../ui/DataTable'
 
+// The engine plots each point as today's starting capital plus that point's P&L, so a capital change
+// leaves no cliff in the curve (design 2026-10-16 §7).
+const EQUITY_COL = "Paper equity at today's starting capital"
+
 const H = 220
 const PAD = { top: 16, right: 16, bottom: 30, left: 84 }
 
@@ -98,10 +102,10 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
       </div>
       {asTable ? (
         <DataTable
-          caption="Paper equity at each session close"
+          caption="Paper equity at each session close, at today's starting capital"
           columns={[
             { key: 'd', header: 'Session', label: 'Session', cell: (p) => shortDate(p.d) },
-            { key: 'eq', header: 'Paper equity', label: 'Paper equity', align: 'right', nowrap: true, cell: (p) => inr(p.equity) },
+            { key: 'eq', header: EQUITY_COL, label: EQUITY_COL, align: 'right', nowrap: true, cell: (p) => inr(p.equity) },
             { key: 'at', header: 'Recorded at', label: 'Recorded at', nowrap: true, cell: (p) => istStamp(p.at) },
           ]}
           rows={pts}
@@ -115,7 +119,7 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
           ref={measure}
           role="slider"
           tabIndex={0}
-          aria-label="Paper equity by session"
+          aria-label="Paper equity by session, at today's starting capital"
           aria-describedby={summaryId}
           aria-valuemin={0}
           aria-valuemax={last}
@@ -169,14 +173,14 @@ export function EquityChart({ points, base }: { points: PaperCurvePoint[]; base:
             <svg width="22" height="8">
               <line x1="1" x2="21" y1="4" y2="4" className="eq-line" />
             </svg>
-            Paper equity at each session close
+            Paper equity at each session close, at today&apos;s starting capital
           </span>
           {hasBase ? (
             <span className="eq-key">
               <svg width="22" height="8">
                 <line x1="1" x2="21" y1="4" y2="4" className="eq-base" />
               </svg>
-              Starting capital {inr(base)}
+              Today&apos;s starting capital {inr(base)}
             </span>
           ) : null}
         </div>

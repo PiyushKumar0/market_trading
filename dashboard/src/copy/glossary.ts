@@ -577,6 +577,25 @@ export const COPY = {
       : stillBreached.length
         ? { tone: 'crit', text: 'Not re-armed: the account is still below the line.' }
         : { tone: 'note', text: 'Nothing to re-arm: no floor stop is set.' },
+  // "Change capital" (O19): the engine refuses inside market hours, in Auto, and when a stop would trip.
+  capitalButton: 'Change capital',
+  capitalTitle: 'Change starting capital',
+  capitalIntro:
+    'Every limit on this page is a percent of this amount. It is not cash on hand and adds no money to your broker ' +
+    'account. A change can be at most double or half the current amount. It applies to the live and the paper ' +
+    'account straight away, and open paper positions stay open.',
+  capitalLabel: 'Starting capital (the base every limit is a percent of)',
+  capitalEquityAt: (equity: string) => `Equity at this capital: ${equity}`,
+  capitalSame: 'Enter a different amount to see what would change.',
+  capitalInvalid: 'Enter a whole number of rupees, like 60,000.',
+  capitalChecking: 'Checking with the engine…',
+  capitalLoadFailed: (why: string) => `Couldn't check this amount: ${why}`,
+  capitalCurrentFailed: (why: string) => `Couldn't load the current capital: ${why}`,
+  capitalConfirm: 'Set capital',
+  capitalCancel: 'Keep current capital',
+  capitalSetting: 'Setting…',
+  capitalSaved: (amount: string) => `Capital set to ${amount}. Commit config/limits.yaml to keep it.`,
+  capitalRejected: (why: string) => `Capital not changed: ${why}`,
   hoursTitle: 'Trading hours (IST)',
   hoursBody: 'New trades are only proposed inside these hours. Exits are never blocked.',
   hoursBufferLabel: 'Stop intraday entries this many minutes before the end',

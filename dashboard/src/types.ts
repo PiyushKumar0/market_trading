@@ -356,6 +356,40 @@ export interface HeadroomResponse {
   headroom: Headroom
 }
 
+// --------------------------------------------------------------------------- /config/capital
+/** Engine-formatted decimal strings (rupees unless named `_pct`); any key is null when unknown. */
+export interface CapitalFigures {
+  capital_inr: string | null
+  max_deployed_capital_inr: string | null
+  cnc_notional_inr: string | null
+  equity_inr: string | null
+  paper_equity_inr: string | null
+  risk_intraday_inr: string | null
+  risk_swing_inr: string | null
+  day_loss_soft_inr: string | null
+  day_loss_hard_inr: string | null
+  equity_floor_inr: string | null
+  cumulative_floor_inr: string | null
+  hi52_edge_pct: string | null
+}
+
+/** GET /config/capital[?proposed=n]; `proposed` is null without the query. */
+export interface CapitalPreview {
+  current: CapitalFigures
+  proposed: CapitalFigures | null
+  allowed: boolean
+  refusal: string | null
+  would_trip: string[]
+}
+
+/** POST /config/capital 200 (a refusal is an ApiError carrying the engine's `note`). */
+export interface CapitalChanged {
+  ok: true
+  old: CapitalFigures
+  new: CapitalFigures
+  commit_hint: string
+}
+
 // --------------------------------------------------------------------------- GET /budget
 /**
  * `{}` when `governor` is unwired. Spend/allocation are USD strings (§5.6). The period is the

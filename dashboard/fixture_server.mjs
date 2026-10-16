@@ -12,7 +12,7 @@
 // derivation and the panel order can be checked in a browser. POST /paper flips the served paper
 // fixture's `enabled` (422 / 409 as the engine answers). POST /mode ('OFF'|'RECOMMEND' 200, 'AUTO' 409,
 // else 422) and POST /config/trade_window (200 / 422 unchanged) change the served value; any other
-// non-GET on a route answers 405. Any bearer token is accepted; there is
+// non-GET on a route answers 405. GET/POST /config/capital: see the scenarios above setCapital. Any bearer token is accepted; there is
 // no /ws/live, so the events feed shows "closed" and retries — expected. Never shipped: dist/ is built
 // from src/ only.
 import http from 'node:http'
@@ -716,12 +716,72 @@ function rearm(req, res) {
   json(res, 200, { ok: true, cleared, still_breached: still, risk_state: routes['/mode'].risk_state })
 }
 
-const posts = { '/paper': setPaper, '/mode': setMode, '/config/trade_window': setTradeWindow, '/risk/rearm': rearm }
+// GET / POST /config/capital (O19). The engine computes every figure; the fixture scales its own numbers
+// from the 40,000 base. Scenarios: a proposal from 20,000 to 23,999 is refused (would trip the equity floor);
+// a POST for 77,777 answers 409 as if the capital changed under an open dialog; a POST whose
+// expected_current_inr is not the served capital does the same. Anything outside half..double is 422.
+let capitalNow = 40000
+const money = (n) => (Math.round(n * 100) / 100).toFixed(2)
+function capitalFigures(cap) {
+  const f = cap / 40000
+  return {
+    capital_inr: String(cap),
+    max_deployed_capital_inr: String(Math.floor(60000 * f)),
+    cnc_notional_inr: String(Math.floor(12000 * f)),
+    equity_inr: money(cap + 113.3),
+    paper_equity_inr: money(cap + 113.3),
+    risk_intraday_inr: money((cap + 113.3) * 0.015),
+    risk_swing_inr: money((cap + 113.3) * 0.015),
+    day_loss_soft_inr: money(cap * 0.05),
+    day_loss_hard_inr: money(cap * 0.075),
+    equity_floor_inr: money(cap * 0.9),
+    cumulative_floor_inr: money(cap * 0.85),
+    hi52_edge_pct: f < 1 ? money(1.53 * (0.7 + 0.3 * f)) : '1.53',
+  }
+}
+function capitalPreview(url) {
+  const raw = url.searchParams.get('proposed')
+  const n = raw === null ? null : Number(raw)
+  const current = capitalFigures(capitalNow)
+  if (n === null) return { current, proposed: null, allowed: false, refusal: null, would_trip: [] }
+  if (!Number.isInteger(n) || n < capitalNow / 2 || n > capitalNow * 2 || n === capitalNow) {
+    return { current, proposed: null, allowed: false, refusal: 'capital must be a whole number from half to double the current capital, and different from it', would_trip: [] }
+  }
+  const proposed = capitalFigures(n)
+  if (n < 24000) {
+    return {
+      current, proposed, allowed: false,
+      refusal: 'would trip: real:equity_floor_rung (₹18,000.00)',
+      would_trip: ['real:equity_floor_rung'],
+    }
+  }
+  return { current, proposed, allowed: true, refusal: null, would_trip: [] }
+}
+function setCapital(req, res) {
+  readJson(req, (body) => {
+    const n = body?.capital_inr
+    const expected = body?.expected_current_inr
+    if (!Number.isInteger(n) || !Number.isInteger(expected)) {
+      return json(res, 422, { detail: [{ msg: 'capital_inr and expected_current_inr must be whole numbers' }] })
+    }
+    if (n === 77777 || expected !== capitalNow) {
+      return json(res, 409, { ok: false, note: 'capital changed since the dialog opened' })
+    }
+    const preview = capitalPreview(new URL(`http://x/?proposed=${n}`))
+    if (!preview.allowed) return json(res, 422, { ok: false, note: preview.refusal })
+    const old = capitalFigures(capitalNow)
+    capitalNow = n
+    json(res, 200, { ok: true, old, new: capitalFigures(n), commit_hint: 'commit config/limits.yaml' })
+  })
+}
+
+const posts = { '/paper': setPaper, '/mode': setMode, '/config/trade_window': setTradeWindow, '/risk/rearm': rearm, '/config/capital': setCapital }
 
 http
   .createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
     if (req.method === 'POST' && url.pathname in posts) return posts[url.pathname](req, res)
+    if (req.method === 'GET' && url.pathname === '/config/capital') return json(res, 200, capitalPreview(url))
     if (url.pathname in routes) {
       if (req.method !== 'GET') return json(res, 405, { detail: 'Method Not Allowed' })
       return json(res, 200, routes[url.pathname])

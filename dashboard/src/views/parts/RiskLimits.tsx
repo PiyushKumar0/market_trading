@@ -2,13 +2,17 @@
  * System tab, risk limits: the engine's own book (risk/exposure.py: a configured capital base plus the
  * net P&L of trades recorded through the engine — never the Kite balance) against the enforced caps.
  */
+import { useState } from 'react'
+import { apiGet } from '../../api'
+import { COPY } from '../../copy/glossary.ts'
 import type { Term } from '../../copy/glossary.ts'
 import { inr, pnlWithPct, signOf } from '../../lib/format.ts'
-import type { HeadroomResponse } from '../../types'
+import type { CapitalPreview, HeadroomResponse } from '../../types'
 import { Card, EmptyState } from '../../ui/Card'
 import { KeyValue, Meter, StatTile } from '../../ui/Figures'
 import { Labelled } from '../../ui/Hint'
 import { Loading } from '../../ui/Loading'
+import { CapitalDialog } from './CapitalDialog'
 
 const MAX_TRADES: Term = {
   label: 'New trades allowed per day',
@@ -32,8 +36,39 @@ const num = (v: string | number | undefined): number | null => {
   return Number.isFinite(n) ? n : null
 }
 
-export function RiskLimits({ headroom }: { headroom: HeadroomResponse | null }) {
+export function RiskLimits({
+  headroom,
+  onChangeCapital,
+  onLateFailure,
+}: {
+  headroom: HeadroomResponse | null
+  /** A change that fails after its dialog was closed. */
+  onLateFailure: (message: string) => void
+  /** Resolves when the engine applied the change; rejects with its refusal (the dialog prints it). */
+  onChangeCapital: (capital: number, expected: number) => Promise<void>
+}) {
   const h = headroom?.headroom
+  // The capital on record, read when the button is pressed so the dialog opens on the engine's figure
+  // (the headroom route carries equity, not the base).
+  const [capital, setCapital] = useState<string | null>(null)
+  const [opening, setOpening] = useState(false)
+  const [openError, setOpenError] = useState<string | null>(null)
+
+  async function openDialog() {
+    if (opening) return
+    setOpening(true)
+    setOpenError(null)
+    try {
+      const p = await apiGet<CapitalPreview>('/config/capital')
+      if (p.current.capital_inr === null) setOpenError(COPY.capitalCurrentFailed('the engine has no figure for it'))
+      else setCapital(p.current.capital_inr)
+    } catch (e) {
+      setOpenError(COPY.capitalCurrentFailed(e instanceof Error ? e.message : String(e)))
+    } finally {
+      setOpening(false)
+    }
+  }
+
   const intro = (
     <p className="muted">
       How close the engine&apos;s own record is to the limits the risk check enforces. It starts from a configured amount
@@ -124,6 +159,24 @@ export function RiskLimits({ headroom }: { headroom: HeadroomResponse | null }) 
         <p className="sys-limit-line">
           <Labelled t={MAX_TRADES} />: <span className="num">{caps.max_new_trades_day}</span>
         </p>
+      ) : null}
+      <div className="sys-capital">
+        <button type="button" className="btn" aria-disabled={opening || undefined} onClick={() => void openDialog()}>
+          {COPY.capitalButton}
+        </button>
+        {openError ? (
+          <p className="form-error" role="alert">
+            {openError}
+          </p>
+        ) : null}
+      </div>
+      {capital !== null ? (
+        <CapitalDialog
+          current={capital}
+          onClose={() => setCapital(null)}
+          onConfirm={onChangeCapital}
+          onLateFailure={onLateFailure}
+        />
       ) : null}
     </Card>
   )

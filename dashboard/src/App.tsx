@@ -4,6 +4,9 @@
  * allowed to make: `POST /mode` (OFF / RECOMMEND only), `POST /config/trade_window`, `POST /paper`
  * (paper autopilot ON / OFF, D13) and `POST /risk/rearm` (floor stops the account is back above).
  *
+ * A fifth, `POST /config/capital` (System tab, Risk limits: "Change capital"), is the owner's starting
+ * capital edit; the engine refuses it in market hours, in Auto, and when a stop would trip (O19).
+ *
  * Deliberately ABSENT from this surface, and not an oversight:
  *  - →AUTO and kill-switch RESET are owner TWO-STEP transitions with no dashboard path (Telegram
  *    `/mode AUTO` + `/confirm`, `/kill_reset` + `/confirm`); the engine answers 409 for both (R10).
@@ -18,6 +21,8 @@ import { COPY } from './copy/glossary.ts'
 import { useLiveEvents, useNotifications, usePoll, useScorecard } from './hooks'
 import { deriveAlerts, health, tabBadges } from './lib/alerts.ts'
 import type { AlertInput, TabId } from './lib/alerts.ts'
+import { inr } from './lib/format.ts'
+import type { CapitalChanged } from './types'
 import { useHashTab } from './lib/useHashTab.ts'
 import { AppBar } from './shell/AppBar'
 import { HoursControl, ModeControl, PaperSwitch } from './shell/Controls'
@@ -127,6 +132,17 @@ export default function App() {
     }
   }
 
+  // The dialog is modal, so a toast behind it would not be seen: a refusal rejects and the dialog prints
+  // it (409 in market hours / Auto / a stale dialog, 422 out of bounds or a stop that would trip, 503/501).
+  async function changeCapital(capital: number, expected: number) {
+    try {
+      const r = await apiPost<CapitalChanged>('/config/capital', { capital_inr: capital, expected_current_inr: expected })
+      push('good', COPY.capitalSaved(inr(r.new.capital_inr) ?? String(capital)))
+    } finally {
+      poll.refresh()
+    }
+  }
+
   const input: AlertInput = {
     snapshot: poll.snapshot,
     failedKeys: poll.failedKeys,
@@ -198,6 +214,8 @@ export default function App() {
         conn={live.conn}
         lastOkAt={poll.lastOkAt}
         nowMs={nowMs}
+        onChangeCapital={changeCapital}
+        onCapitalLateFailure={(message) => push('crit', message)}
       />
     ),
   }

@@ -4,11 +4,64 @@
  * The cancel button comes first in the DOM, so it is what `showModal()` focuses — the safe default.
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import type { JSX } from 'react'
+import type { JSX, ReactNode } from 'react'
 import type { DialogCopy } from '../copy/glossary.ts'
 
 export interface ConfirmRequest extends DialogCopy {
   tone?: 'accent' | 'crit'
+}
+
+/**
+ * A modal with caller-supplied content (a form, a live preview) on the same native <dialog> and styles.
+ * Mount it to open it; Esc calls `onClose`. The caller owns the buttons and the title (`aria-labelledby`).
+ */
+export function Modal({
+  labelledBy,
+  onClose,
+  locked,
+  children,
+}: {
+  labelledBy: string
+  onClose: () => void
+  /** A write is on its way: Esc is ignored (and a native close undone) until it answers. */
+  locked?: boolean
+  children: ReactNode
+}) {
+  const ref = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    // Unmounting detaches the <dialog> before this cleanup runs, so close() cannot restore focus:
+    // remember the opener and return to it ourselves.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (el && !el.open) el.showModal()
+    return () => {
+      el?.close()
+      if (opener?.isConnected) opener.focus()
+    }
+  }, [])
+  return (
+    <dialog
+      ref={ref}
+      className="dialog"
+      aria-labelledby={labelledBy}
+      onCancel={(e) => {
+        e.preventDefault()
+        if (!locked) onClose()
+      }}
+      // A repeated Esc with no click between is a NON-cancelable `cancel` (close-watcher anti-trap), and
+      // Android Back closes natively too: the browser closes the <dialog> without telling React. While
+      // locked, put it back so the pending write can still show its answer; otherwise tell the parent so
+      // it unmounts (and can open the dialog again). `!el.open` skips StrictMode's dev re-mount close.
+      onClose={(e) => {
+        const el = e.currentTarget
+        if (el.open) return
+        if (locked) el.showModal()
+        else onClose()
+      }}
+    >
+      {children}
+    </dialog>
+  )
 }
 
 export function useConfirm(): { confirm: (r: ConfirmRequest) => Promise<boolean>; dialog: JSX.Element } {
