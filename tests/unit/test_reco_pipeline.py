@@ -1,4 +1,4 @@
-﻿"""RECOMMEND pipeline (Â§3.6 / Â§5.2 / Â§7.1 ``max_holding``) â€” book + trigger handlers.
+"""RECOMMEND pipeline (Â§3.6 / Â§5.2 / Â§7.1 ``max_holding``) â€” book + trigger handlers.
 
 The seams are faked exactly where a fake is the point (the Claude harness, the context assembler, the
 governor) and REAL everywhere the behaviour under test depends on real policy:
@@ -33,7 +33,7 @@ from ulid import ULID
 from engine.broker.instruments import UnknownInstrument
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
-from engine.core.config import load_settings
+from engine.core.config import config_dir, load_settings
 from engine.core.contracts import CheckResult, CostBreakdown, EnterAction, GateVerdict, Recommendation
 from engine.core.enums import Mode, RiskState
 from engine.core.types import Bar, TradeWindow
@@ -63,7 +63,7 @@ from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.types import RawLevels, SignalCandidate
 
 REPO = Path(__file__).resolve().parents[2]
-LIMITS_YAML = REPO / "config" / "limits.yaml"
+LIMITS_YAML = config_dir() / "limits.yaml"
 CALENDAR_DIR = REPO / "config" / "calendar"
 
 #: Wed 2026-06-17 10:05 IST â€” a real trading day inside the seeded 10:00â€“10:30 trade window.

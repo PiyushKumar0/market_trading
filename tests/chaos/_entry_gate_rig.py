@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from engine.broker.instruments import InstrumentStore
+from engine.core.config import config_dir
 from engine.core.contracts import CheckResult, EnterAction
 from engine.risk.exposure import ExposureTracker
 from engine.risk.gate import GateContextBuilder, RiskGate
@@ -28,7 +29,7 @@ from engine.risk.limits import LimitTable
 from engine.strategy.cost_model import CostModel, load_cost_rates
 
 REPO = Path(__file__).resolve().parents[2]
-LIMITS_YAML = REPO / "config" / "limits.yaml"
+LIMITS_YAML = config_dir() / "limits.yaml"
 COSTS_YAML = REPO / "config" / "costs.yaml"
 INDEX_SYMBOL = "NIFTY 50"
 

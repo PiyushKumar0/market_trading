@@ -11,7 +11,6 @@ import json
 import re
 from datetime import timedelta
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -37,7 +36,7 @@ from tests.unit.test_scorecard import seed_paper
 _TOKEN = "s3cret-dash-token"
 AUTH = {"Authorization": f"Bearer {_TOKEN}"}
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="test-registration")
-REAL_CONFIG = Path(__file__).resolve().parents[2] / "config"
+REAL_CONFIG = config_dir()
 
 
 class _FakeSecrets:

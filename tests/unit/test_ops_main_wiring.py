@@ -99,6 +99,7 @@ from engine.risk.events import RiskStateChanged
 from engine.strategy.retest import DEFAULT_RETEST_SESSIONS
 from engine.strategy.scanners import brk20, cat, hi52, ins
 from engine.strategy.types import RawLevels, SignalCandidate
+from tests.conftest import PINNED_CAPITAL
 from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
 
 
@@ -1254,12 +1255,11 @@ def test_the_composition_root_really_arms_the_retest_rearm() -> None:
         inspect.getsource(_retest_republish)
 
 
-def test_the_unverified_limits_fallback_base_matches_the_shipped_limits_yaml() -> None:
-    """A boot on an unverified limit table builds the ExposureTracker on this constant; if it drifts
-    from the seeded base, a later in-run reseed compares a half-size equity against the verified
-    floor. Plain yaml read (read-only) — never the protected-store loader."""
-    raw = yaml.safe_load((config_dir() / "limits.yaml").read_text(encoding="utf-8"))
-    assert Decimal(str(raw["capital_base_inr"])) == opsmain._FALLBACK_CAPITAL_BASE_INR
+def test_the_unverified_limits_fallback_base_is_the_registration_base() -> None:
+    """A boot on an unverified limit table builds the ExposureTracker on this constant; it must stay
+    the registration base. Since O19 the live base can differ (the owner changes it from the
+    dashboard); the fallback is display-only on a FROZEN boot and may lag the live value."""
+    assert Decimal(str(PINNED_CAPITAL["capital_base_inr"])) == opsmain._FALLBACK_CAPITAL_BASE_INR
 
 
 class _Limits:

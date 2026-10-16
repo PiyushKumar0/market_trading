@@ -30,11 +30,12 @@ fv = importlib.util.module_from_spec(_spec)
 sys.modules["mt_hi52_forward_verdict"] = fv
 _spec.loader.exec_module(fv)
 
+from engine.core.config import config_dir  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 
 COST_PCT = float(CostModel.from_config().breakeven_pct(fv.REFERENCE_NOTIONAL, fv.PRODUCT))
-#: The live §7.1 table, by repo root rather than by CWD — the derivation reads the real file.
-_LIMITS = fv.repo_root() / "config" / "limits.yaml"
+#: The §7.1 table from the pinned test config (conftest: registration capital, O19).
+_LIMITS = config_dir() / "limits.yaml"
 START = fv.PROMOTION_DATE               # Monday 2026-09-14
 
 

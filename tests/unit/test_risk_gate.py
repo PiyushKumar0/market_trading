@@ -29,6 +29,7 @@ from pydantic import ValidationError
 
 import engine.risk.gate as gate_module
 from engine.core.clock import IST, Clock
+from engine.core.config import config_dir
 from engine.core.contracts import (
     CancelAction,
     EnterAction,
@@ -50,7 +51,7 @@ from engine.risk.limits import LimitsBlock, LimitTable
 from engine.strategy.cost_model import CostModel, load_cost_rates
 
 REPO = Path(__file__).resolve().parents[2]
-LIMITS_YAML = REPO / "config" / "limits.yaml"
+LIMITS_YAML = config_dir() / "limits.yaml"
 COSTS_YAML = REPO / "config" / "costs.yaml"
 
 #: Wed 2026-06-17 10:05 IST — a real trading day, inside every baseline window.

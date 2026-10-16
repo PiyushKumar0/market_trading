@@ -610,7 +610,7 @@ def test_time_exit_needs_no_ins_specific_code():
         source = inspect.getsource(fn)
         assert '"ins"' not in source and "ins.STRATEGY_ID" not in source
 
-    limits_path = Path(__file__).resolve().parents[2] / "config" / "limits.yaml"
+    limits_path = config_dir() / "limits.yaml"
     table = LimitTable.model_validate(yaml.safe_load(limits_path.read_text(encoding="utf-8")))
     settings = load_settings()
     hold_fn = build_hold_fn(settings, SimpleNamespace(load=lambda: table))

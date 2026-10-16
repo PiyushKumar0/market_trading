@@ -10,7 +10,7 @@ import yaml
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST
-from engine.core.config import load_settings
+from engine.core.config import config_dir, load_settings
 from engine.ops.holds import TIME_EXIT_STRATEGIES, build_hold_fn, exit_session, session_of
 from engine.risk.limits import LimitTable
 
@@ -21,7 +21,7 @@ SETTINGS = load_settings()
 class _Limits:
     def __init__(self) -> None:
         self.table = LimitTable.model_validate(
-            yaml.safe_load((REPO / "config" / "limits.yaml").read_text(encoding="utf-8"))
+            yaml.safe_load((config_dir() / "limits.yaml").read_text(encoding="utf-8"))
         )
 
     def load(self) -> LimitTable:

@@ -16,7 +16,6 @@ import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
@@ -51,7 +50,7 @@ from engine.risk.mode import ModeManager
 
 OWNER_CHAT = 4242
 FOREIGN_CHAT = 999
-REAL_LIMITS_PATH = Path(__file__).resolve().parents[2] / "config" / "limits.yaml"
+REAL_LIMITS_PATH = config_dir() / "limits.yaml"
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="two-step")
 
 # --- WO-29 ticker resolution: real rec_id shapes. 26 chars of Crockford base32 (no I/L/O/U), which is

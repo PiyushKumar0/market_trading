@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 import yaml
@@ -24,7 +23,7 @@ from engine.strategy.cost_model import CostModel
 from tests.unit.test_protection_manager import SYM, Now, at, round_tick, seed, tick
 
 LIMITS = LimitTable.model_validate(
-    yaml.safe_load((Path(__file__).resolve().parents[2] / "config" / "limits.yaml").read_text(encoding="utf-8"))
+    yaml.safe_load((config_dir() / "limits.yaml").read_text(encoding="utf-8"))
 )
 TOPICS = ("tick", "bar.1m", PAPER_ORDER_UPDATE_TOPIC)
 

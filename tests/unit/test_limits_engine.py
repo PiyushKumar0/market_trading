@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from datetime import time
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from engine.core.config import config_dir
 from engine.core.enums import Actor
 from engine.core.protected_store import IntegrityError, ProtectedStore
 from engine.core.types import OwnerConfirmation
@@ -17,7 +17,7 @@ from engine.risk.limits import CatalystGuard, LimitsEngine, LimitTable
 
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="two-step")
 
-REAL_LIMITS_PATH = Path(__file__).resolve().parents[2] / "config" / "limits.yaml"
+REAL_LIMITS_PATH = config_dir() / "limits.yaml"
 
 
 @pytest.fixture
