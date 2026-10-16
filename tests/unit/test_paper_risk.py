@@ -6,6 +6,7 @@ import ast
 import datetime as dt
 import inspect
 import shutil
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
@@ -83,15 +84,15 @@ def make_risk(conn, clock, limits, marks, flattens, broker):
     """A fresh PaperRisk is a fresh process: nothing in memory survives, the tables do."""
     calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
     PaperControl(conn, clock)
-    conn.execute("INSERT INTO paper_equity_snapshots (at, equity) VALUES (?, '40000')",
-                 (at(15, 29, D - dt.timedelta(days=1)).isoformat(),))
+    conn.execute("INSERT INTO paper_equity_snapshots (at, equity, realized_pnl, open_mtm) "
+                 "VALUES (?, '40000', '0', '0')", (at(15, 29, D - dt.timedelta(days=1)).isoformat(),))
 
     async def flatten(basis: str) -> int:
         flattens.append(basis)
         return 1
 
-    def build() -> PaperRisk:
-        return PaperRisk(conn, clock, calendar.session, broker, capital_base=Decimal("40000"),
+    def build(capital_base: Decimal | Callable[[], Decimal] = Decimal("40000")) -> PaperRisk:
+        return PaperRisk(conn, clock, calendar.session, broker, capital_base=capital_base,
                          mark_price=marks.get, limits_fn=limits.load, flatten=flatten)
 
     return build
@@ -155,7 +156,8 @@ async def test_a_paper_floor_breach_latches_paper_halts_only_and_exits_the_book_
 
 
 async def test_no_snapshot_or_halt_while_a_held_paper_symbol_is_unmarked(conn, make_risk, marks) -> None:
-    conn.execute("UPDATE paper_equity_snapshots SET equity = '44000'")   # the baseline carried TCS at 440
+    # The baseline carried TCS at 440: open MTM 100 x (440 - 400) on the 40k base.
+    conn.execute("UPDATE paper_equity_snapshots SET equity = '44000', realized_pnl = '0', open_mtm = '4000'")
     position(conn)
     risk = make_risk()
 
@@ -241,7 +243,8 @@ def working_order(conn, order_id: str, state: str = "ACKED") -> None:
 async def test_a_reset_after_a_floor_breach_exits_the_book_and_opens_the_epoch_once_flat_across_a_restart(
     conn, clock, now, make_risk, marks, flattens, broker
 ) -> None:
-    conn.execute("UPDATE paper_equity_snapshots SET equity = '44000'")   # the old epoch's day baseline
+    # The old epoch's day baseline, +4,000 on the 40k base.
+    conn.execute("UPDATE paper_equity_snapshots SET equity = '44000', realized_pnl = '0', open_mtm = '4000'")
     position(conn)
     marks["TCS"] = Decimal("355")
     await make_risk().tick()
@@ -286,6 +289,21 @@ async def test_a_reset_on_a_flat_book_opens_the_epoch_without_a_halt(conn, clock
     await make_risk().tick()
     assert conn.execute("SELECT epoch_started_at FROM paper_state").fetchone()[0] == at(10, 0).isoformat()
     assert conn.execute("SELECT COUNT(*) FROM paper_halts").fetchone()[0] == 0 and flattens == []
+
+
+async def test_a_live_base_reaches_the_paper_tracker_and_the_epoch_reseed(conn, clock, make_risk, broker) -> None:
+    """O19 §2: the paper book reads the base per call, so a capital change needs no setter."""
+    base = {"v": Decimal("40000")}
+    risk = make_risk(lambda: base["v"])
+    assert risk.tracker.capital_base == Decimal("40000")
+    base["v"] = Decimal("60000")
+    assert risk.tracker.capital_base == Decimal("60000") and risk.tracker.equity() == Decimal("60000")
+
+    PaperControl(conn, clock).request_reset("owner")
+    await risk.tick()
+    assert conn.execute("SELECT epoch_started_at FROM paper_state").fetchone()[0] == at(10, 0).isoformat()
+    assert (await broker.margins())["equity"]["available"]["cash"] == Decimal("60000")
+    assert risk.tracker.day_baseline() == Decimal("60000") and risk.tracker.day_mtm() == Decimal("0")
 
 
 # ---------------------------------------------------------------- effective state

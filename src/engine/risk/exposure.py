@@ -21,6 +21,7 @@ seam is duck-typed (:class:`FloorLimits` is the reference shape) so the two can 
 
 from __future__ import annotations
 
+import copy
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date
@@ -68,6 +69,10 @@ def _dec(value: Any) -> Decimal:
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
+
+
+def _fixed(value: Decimal) -> Callable[[], Decimal]:
+    return lambda: value
 
 
 def _sign(side: str | None) -> Decimal:
@@ -147,21 +152,27 @@ class ExposureTracker:
     ``PENDING_EXIT`` position still held, ``paper_equity_snapshots``, and ``void`` closes skipped by
     the loss streak. It never applies a halt — ``apply_*`` raise, because paper must never write
     the real mode, kill or cause state (§1.5).
+
+    ``capital_base`` is a value or a zero-argument function read on every call, so a capital change
+    reaches every reader with no setter (O19 §2). The day baseline and the drawdown peak are held in
+    P&L space and the CURRENT base is added on read, so a base change is never day P&L (O19 §3.1).
     """
 
     def __init__(
         self,
         conn: sqlite3.Connection,
         clock: Clock,
-        capital_base: Decimal,
+        capital_base: Decimal | Callable[[], Decimal],
         mark_price: MarkPrice | None = None,
         *,
         scope: Scope = "real",
     ) -> None:
         self._conn = conn
         self._clock = clock
-        self._capital_base = capital_base
+        self._base_fn = capital_base if callable(capital_base) else _fixed(capital_base)
         self._mark_price = mark_price
+        self._what_if = False
+        #: (day, baseline P&L) — never baseline equity, which would carry the base it was taken at.
         self._day_baseline: tuple[date, Decimal] | None = None
         self.scope = scope
         paper = scope == "paper"
@@ -175,10 +186,23 @@ class ExposureTracker:
 
     @property
     def capital_base(self) -> Decimal:
-        """The base every percentage limit and halt uses, §7.1."""
-        return self._capital_base
+        """The base every percentage limit and halt uses, §7.1, read live on every call."""
+        return self._base_fn()
+
+    def with_capital_base(self, base: Decimal) -> ExposureTracker:
+        """A what-if twin at ``base`` (O19 §3.2 preview): same connection, marks and cached baseline
+        P&L. It reads only — every writer raises — and the original is untouched."""
+        twin = copy.copy(self)
+        twin._base_fn = _fixed(base)
+        twin._what_if = True
+        return twin
+
+    def _writable(self) -> None:
+        if self._what_if:
+            raise RuntimeError("a what-if ExposureTracker never writes (O19 §3.2)")
 
     def _real_only(self) -> None:
+        self._writable()
         if self.scope != "real":
             raise RuntimeError("the paper ExposureTracker never applies a halt (plan §1.5)")
 
@@ -220,19 +244,36 @@ class ExposureTracker:
         """Platform equity = capital base + realized net + open MTM (§7.1). The basis for every
         percentage limit and halt threshold; ``external`` positions and owner cash movements in the
         shared account are excluded (O5)."""
-        return self._capital_base + self.realized_net() + self.open_mtm()
+        return self.capital_base + self.pnl()
+
+    def pnl(self) -> Decimal:
+        """Platform P&L = realized net + open MTM: equity without the base."""
+        return self.realized_net() + self.open_mtm()
+
+    def _row_pnl(self, row: sqlite3.Row) -> Decimal:
+        """A snapshot row's P&L, ``realized_pnl + open_mtm``. A NULL or empty column falls back to
+        ``equity − current base``, which reproduces the pre-O19 equity read for that row."""
+        realized, open_mtm = row["realized_pnl"], row["open_mtm"]
+        if realized is None or realized == "" or open_mtm is None or open_mtm == "":
+            return _dec(row["equity"]) - self.capital_base
+        return _dec(realized) + _dec(open_mtm)
 
     # ----------------------------------------------------------------- day MTM + baseline (§2.6)
     def set_day_baseline(self, equity: Decimal, d: date | None = None) -> None:
-        """Pin the day's opening equity explicitly (session-start hook / tests)."""
-        self._day_baseline = (d or self._clock.today(), equity)
+        """Pin the day's opening equity explicitly (session-start hook / tests). Held as P&L at the
+        current base, so a later base change does not move it."""
+        self._day_baseline = (d or self._clock.today(), equity - self.capital_base)
 
     def day_baseline(self, d: date | None = None) -> Decimal:
-        """The day's opening equity, rebuilt on first use and cached in-memory for the day.
+        """The day's opening equity at the CURRENT base: base + :meth:`_baseline_pnl`."""
+        return self.capital_base + self._baseline_pnl(d)
+
+    def _baseline_pnl(self, d: date | None = None) -> Decimal:
+        """The day's opening P&L, rebuilt on first use and cached in-memory for the day.
 
         Rebuild rule (§2.6): the last ``equity_snapshots`` row strictly BEFORE ``d`` (i.e. the prior
-        session's final persist). With no prior snapshot (first-ever run), back the baseline out of
-        current equity MINUS today's already-realized net — a loss realized while the engine was off
+        session's final persist), read as P&L. With no prior snapshot (first-ever run), back it out of
+        current P&L MINUS today's already-realized net — a loss realized while the engine was off
         must still count toward ``daily_loss_soft``/``daily_loss_hard`` on the first run of the day
         (§2.6 step 2 folds offline closes into the day counters, and day-MTM is one of them).
         """
@@ -240,11 +281,11 @@ class ExposureTracker:
         if self._day_baseline is not None and self._day_baseline[0] == d:
             return self._day_baseline[1]
         row = self._conn.execute(
-            f"SELECT equity FROM {self._snapshots} WHERE substr(at, 1, 10) < ?{self._snapshot_epoch} "
-            "ORDER BY at DESC LIMIT 1",
+            f"SELECT equity, realized_pnl, open_mtm FROM {self._snapshots} "
+            f"WHERE substr(at, 1, 10) < ?{self._snapshot_epoch} ORDER BY at DESC LIMIT 1",
             (d.isoformat(),),
         ).fetchone()
-        baseline = _dec(row["equity"]) if row is not None else self.equity() - self.realized_net_closed_on(d)
+        baseline = self._row_pnl(row) if row is not None else self.pnl() - self.realized_net_closed_on(d)
         self._day_baseline = (d, baseline)
         return baseline
 
@@ -268,8 +309,9 @@ class ExposureTracker:
     def day_mtm(self, d: date | None = None) -> Decimal:
         """Day P&L on an MTM basis: realized net of everything CLOSED today + the open-MTM move since
         the day baseline. Both terms fall straight out of ``equity − baseline``, because the baseline
-        already contains every realization booked before today (§7.1 "MTM basis")."""
-        return self.equity() - self.day_baseline(d)
+        already contains every realization booked before today (§7.1 "MTM basis"). Computed in P&L
+        space, so the base cancels and a base change is never day P&L (O19 §3.1)."""
+        return self.pnl() - self._baseline_pnl(d)
 
     # ----------------------------------------------------------------- day-scoped counters (§2.6)
     def consecutive_losses(self, d: date | None = None) -> int:
@@ -354,14 +396,22 @@ class ExposureTracker:
     # ----------------------------------------------------------------- minute persistence (§7.1)
     def persist_snapshot(self) -> EquitySnapshot:
         """Write the current equity point, keyed at the minute (INSERT OR REPLACE ⇒ the last write in
-        a minute wins, so a reconcile-triggered re-evaluation never duplicates the row)."""
+        a minute wins, so a reconcile-triggered re-evaluation never duplicates the row).
+
+        Realized and open are read ONCE, so the stored row satisfies ``equity = base + realized_pnl +
+        open_mtm`` exactly even if marks move mid-call — the P&L columns are what later baselines
+        and drawdown peaks read (O19 §3.1)."""
+        self._writable()
         now = self._clock.now().replace(second=0, microsecond=0)
+        realized = self.realized_net()
+        open_mtm = self.open_mtm()
+        pnl = realized + open_mtm
         snap = EquitySnapshot(
             at=now,
-            equity=self.equity(),
-            realized_pnl=self.realized_net(),
-            open_mtm=self.open_mtm(),
-            day_mtm=self.day_mtm(),
+            equity=self.capital_base + pnl,
+            realized_pnl=realized,
+            open_mtm=open_mtm,
+            day_mtm=pnl - self._baseline_pnl(),
             positions_open=self.open_position_counts().total,
         )
         with transaction(self._conn):
@@ -387,7 +437,8 @@ class ExposureTracker:
         self, d: date | None = None, sessions: int = WEEKLY_DRAWDOWN_SESSIONS
     ) -> Decimal | None:
         """Peak equity over the last ``sessions`` snapshotted sessions (limits.yaml
-        ``weekly_drawdown.rolling_sessions``; default :data:`WEEKLY_DRAWDOWN_SESSIONS`).
+        ``weekly_drawdown.rolling_sessions``; default :data:`WEEKLY_DRAWDOWN_SESSIONS`), at the
+        CURRENT base: base + the peak row P&L, so a base change never fakes or hides a drawdown.
 
         Sessions are read off the distinct snapshot dates rather than the calendar: snapshots exist
         only for sessions the engine was up for, which is exactly the "last N sessions" the rolling
@@ -407,11 +458,12 @@ class ExposureTracker:
             return None
         oldest = dates[-1]["sd"]
         rows = self._conn.execute(
-            f"SELECT equity FROM {self._snapshots} "
+            f"SELECT equity, realized_pnl, open_mtm FROM {self._snapshots} "
             f"WHERE substr(at, 1, 10) BETWEEN ? AND ?{self._snapshot_epoch}",
             (oldest, d.isoformat()),
         ).fetchall()
-        return max((_dec(r["equity"]) for r in rows), default=None)
+        peak = max((self._row_pnl(r) for r in rows), default=None)
+        return None if peak is None else self.capital_base + peak
 
     def evaluate_floors(self, limits: Any) -> list[FloorBreach]:
         """Evaluate the continuous equity halt ladder, most-restrictive rung first (§7.1).
@@ -422,7 +474,7 @@ class ExposureTracker:
         """
         equity = self.equity()
         raw_base = getattr(limits, "capital_base", None)
-        base = _dec(raw_base) if raw_base is not None else self._capital_base
+        base = _dec(raw_base) if raw_base is not None else self.capital_base
         breaches: list[FloorBreach] = []
 
         cumulative = base * (Decimal(1) - _pct(limits, "cumulative_floor_pct"))
@@ -455,7 +507,7 @@ class ExposureTracker:
         returns the tripped rung names, hard first. 2026-07-28 review: `daily_loss_hard` had no
         enforcement locus at all — the equity floor ladder only covers the equity/weekly rungs."""
         d = d or self._clock.today()
-        pct = self.day_mtm(d) / self._capital_base * Decimal(100)
+        pct = self.day_mtm(d) / self.capital_base * Decimal(100)
         rungs: list[str] = []
         if pct <= _dec(hard_pct):
             rungs.append("daily_loss_hard")

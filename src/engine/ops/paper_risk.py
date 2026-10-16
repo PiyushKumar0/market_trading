@@ -82,7 +82,7 @@ class PaperRisk:
         session_fn: SessionFn,
         broker: PaperBroker,
         *,
-        capital_base: Decimal,
+        capital_base: Decimal | Callable[[], Decimal],
         mark_price: MarkPrice,
         limits_fn: Callable[[], LimitTable],
         flatten: FlattenFn,
@@ -94,7 +94,6 @@ class PaperRisk:
         self._clock = clock
         self._session_fn = session_fn
         self._broker = broker
-        self._capital_base = capital_base
         self._mark_price = mark_price
         self._limits_fn = limits_fn
         self._flatten = flatten
@@ -189,7 +188,8 @@ class PaperRisk:
                 (now.isoformat(),),
             )
             self._conn.execute("UPDATE paper_halts SET cleared_at = ? WHERE cleared_at IS NULL", (now.isoformat(),))
-        self._broker.reseed_margin(self._capital_base)
+        base = self.tracker.capital_base           # the one base source (O19 §2); read once
+        self._broker.reseed_margin(base)
         self.tracker.set_day_baseline(self.tracker.equity())
         self._flattened.clear()
-        _log.warning("paper_epoch_started", epoch_started_at=now.isoformat(), capital_base=str(self._capital_base))
+        _log.warning("paper_epoch_started", epoch_started_at=now.isoformat(), capital_base=str(base))

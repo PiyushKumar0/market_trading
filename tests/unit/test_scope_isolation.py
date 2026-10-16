@@ -76,7 +76,7 @@ def seed_real(conn) -> None:
     for pid in ("pr-real", "pr-part", "pr-pend", "pr-dead"):
         _insert(conn, "verdicts", verdict_id=f"v-{pid}", proposal_id=pid, verdict="reject", payload="{}",
                 evaluated_at=_at("09:21"))
-    _insert(conn, "equity_snapshots", at=_at("15:29", -1), equity="20100")
+    _insert(conn, "equity_snapshots", at=_at("15:29", -1), equity="20100", realized_pnl="100", open_mtm="0")
 
 
 def seed_paper(conn) -> None:
@@ -105,8 +105,10 @@ def seed_paper(conn) -> None:
             closed_at=_at("10:03"))
     _insert(conn, "verdicts", verdict_id="pv-part", proposal_id="pr-part", verdict="approve",
             payload="{}", evaluated_at=_at("09:22"), is_paper=1)
-    _insert(conn, "paper_equity_snapshots", at=_at("09:15"), equity="19000")
-    _insert(conn, "paper_equity_snapshots", at=_at("15:29", -1), equity="25000")    # pre-epoch
+    _insert(conn, "paper_equity_snapshots", at=_at("09:15"), equity="19000", realized_pnl="-1000",
+            open_mtm="0")
+    _insert(conn, "paper_equity_snapshots", at=_at("15:29", -1), equity="25000", realized_pnl="5000",
+            open_mtm="0")                                                           # pre-epoch
     _insert(conn, "paper_halts", cause="floor_equity_floor_rung", rung="CLOSE_ONLY", set_at=_at("09:16"),
             latched=1)
 

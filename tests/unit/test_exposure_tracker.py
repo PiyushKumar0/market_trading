@@ -52,11 +52,15 @@ def _ledger(conn, entry_id: str, outcome: str, closed_at: str) -> None:
     )
 
 
-def _snapshot(conn, at: str, equity: str) -> None:
+def _snapshot(conn, at: str, equity: str, realized: str | None = None, open_mtm: str = "0") -> None:
+    """One snapshot row. Without ``realized`` the row satisfies ``equity = CAPITAL + realized +
+    open_mtm`` (the identity every persisted row holds)."""
+    if realized is None:
+        realized = str(Decimal(equity) - CAPITAL - Decimal(open_mtm))
     conn.execute(
         "INSERT INTO equity_snapshots (at, equity, realized_pnl, open_mtm, day_mtm, positions_open) "
-        "VALUES (?, ?, '0', '0', '0', 0)",
-        (at, equity),
+        "VALUES (?, ?, ?, ?, '0', 0)",
+        (at, str(equity), str(realized), str(open_mtm)),
     )
 
 
@@ -136,6 +140,129 @@ def test_day_mtm_counts_offline_loss_on_first_run(conn, clock):
               closed_at=f"{TODAY.isoformat()}T09:20:00+05:30", realized_pnl="-900", costs="45")
     tracker = ExposureTracker(conn, clock, CAPITAL)
     assert tracker.day_mtm() == Decimal("-945")
+
+
+# ----------------------------------------------------------------- base-agnostic brakes (O19 §3.1)
+def test_a_base_change_is_not_day_pnl(conn, clock):
+    """2026-09-07 replay: the base moved 20k -> 40k mid-session. Day MTM is the P&L move only."""
+    base = {"v": Decimal("20000")}
+    t = ExposureTracker(conn, clock, lambda: base["v"])
+    _snapshot(conn, "2026-06-16T15:29:00+05:30", "19154.40", "0", "-845.60")   # prior session, base 20k
+    base["v"] = Decimal("40000")
+    # no positions on the fixture book: P&L now is 0, so day MTM is 0 - (-845.60), not +20,845.60
+    assert t.day_mtm(date(2026, 6, 17)) == Decimal("845.60")
+    assert t.day_baseline(date(2026, 6, 17)) == Decimal("40000") + Decimal("-845.60")
+
+
+def test_drawdown_peak_is_base_agnostic(conn, clock):
+    base = {"v": Decimal("40000")}
+    t = ExposureTracker(conn, clock, lambda: base["v"])
+    _snapshot(conn, "2026-06-15T15:29:00+05:30", "40500", "500", "0")
+    _snapshot(conn, "2026-06-16T15:29:00+05:30", "39850", "-150", "0")
+    assert t.weekly_drawdown_peak(date(2026, 6, 17)) == Decimal("40500")
+    base["v"] = Decimal("20000")
+    assert t.weekly_drawdown_peak(date(2026, 6, 17)) == Decimal("20500")
+
+
+def test_a_null_pnl_row_reads_like_before(conn, clock):
+    t = ExposureTracker(conn, clock, Decimal("40000"))
+    conn.execute("INSERT INTO equity_snapshots (at, equity) VALUES ('2026-06-16T15:29:00+05:30', '39000')")
+    assert t.day_baseline(date(2026, 6, 17)) == Decimal("39000")
+
+
+def test_a_half_null_pnl_row_falls_back_and_the_peak_reads_like_before(conn, clock):
+    """Either P&L column NULL ⇒ the row's P&L is ``equity − base`` (never a half-sum)."""
+    t = ExposureTracker(conn, clock, Decimal("40000"))
+    conn.execute("INSERT INTO equity_snapshots (at, equity, realized_pnl) "
+                 "VALUES ('2026-06-16T15:29:00+05:30', '39000', '-5000')")
+    assert t.day_baseline(date(2026, 6, 17)) == Decimal("39000")
+    assert t.weekly_drawdown_peak(date(2026, 6, 17)) == Decimal("39000")
+
+
+def test_with_capital_base_is_a_what_if_copy(conn, clock):
+    t = ExposureTracker(conn, clock, Decimal("40000"))
+    w = t.with_capital_base(Decimal("20000"))
+    assert (w.capital_base, t.capital_base) == (Decimal("20000"), Decimal("40000"))
+    assert w.equity() - t.equity() == Decimal("-20000")
+
+
+@pytest.mark.asyncio
+async def test_a_what_if_copy_never_writes(conn, clock):
+    from engine.risk.causes import RiskStateLatch
+
+    t = ExposureTracker(conn, clock, Decimal("40000"))
+    t.set_day_baseline(Decimal("39500"))
+    w = t.with_capital_base(Decimal("20000"))
+    assert w.day_baseline() == Decimal("19500") and w.day_mtm() == t.day_mtm() == Decimal("500")
+    mm, ks = ModeManager(conn, clock, paper_only=False), KillSwitch(conn, clock)
+    latch = RiskStateLatch(conn, clock, mm)
+    with pytest.raises(RuntimeError, match="what-if"):
+        w.persist_snapshot()
+    with pytest.raises(RuntimeError, match="what-if"):
+        await w.apply_floor_breaches([], mm, ks)
+    with pytest.raises(RuntimeError, match="what-if"):
+        await w.apply_day_loss([], mm, latch)
+    with pytest.raises(RuntimeError, match="what-if"):
+        await w.rearm_floors(FloorLimits(), latch, Actor.OWNER)
+    assert conn.execute("SELECT COUNT(*) FROM equity_snapshots").fetchone()[0] == 0
+    t.persist_snapshot()                                   # the original still writes
+    assert conn.execute("SELECT COUNT(*) FROM equity_snapshots").fetchone()[0] == 1
+
+
+def test_baseline_survives_a_restart_and_a_base_change(conn, clock):
+    """Review focus 4: a fresh tracker (restart) reads the same baseline from the P&L columns."""
+    _snapshot(conn, "2026-06-16T15:29:00+05:30", "39500", "-500", "0")
+    before = ExposureTracker(conn, clock, Decimal("40000")).day_mtm(date(2026, 6, 17))
+    after = ExposureTracker(conn, clock, Decimal("60000")).day_mtm(date(2026, 6, 17))
+    assert before == after == Decimal("500")
+
+
+def test_persisted_rows_satisfy_the_identity(conn, clock):
+    t = ExposureTracker(conn, clock, Decimal("40000"))
+    snap = t.persist_snapshot()
+    assert snap.equity == Decimal("40000") + snap.realized_pnl + snap.open_mtm
+
+
+def test_a_persisted_row_is_the_next_days_baseline_at_any_base(conn, clock):
+    """Seam: the real writer's row, read back by a restarted tracker after a base change."""
+    from datetime import datetime
+
+    from engine.core.clock import IST, Clock
+
+    _position(conn, "o1", qty=10, avg_entry="100", opened_at=f"{YESTERDAY.isoformat()}T09:30:00+05:30")
+    yesterday = Clock(time_source=lambda: datetime(2026, 6, 16, 15, 29, tzinfo=IST))
+    ExposureTracker(conn, yesterday, CAPITAL, mark_price=lambda _s: Decimal("110")).persist_snapshot()
+    today = ExposureTracker(conn, clock, Decimal("40000"), mark_price=lambda _s: Decimal("115"))
+    assert today.day_baseline() == Decimal("40100")       # 40k + yesterday's +100 open MTM
+    assert today.day_mtm() == Decimal("50")                # the mark move only, not the +20k base move
+
+
+def test_persist_snapshot_reads_the_marks_once(conn, clock):
+    """Marks moving mid-call cannot break the stored identity: realized and open are read once."""
+    _mixed_book(conn)
+    ticks = {"AAA": iter(Decimal(110 + 10 * i) for i in range(5)),
+             "BBB": iter(Decimal(190 - 10 * i) for i in range(5))}
+
+    t = ExposureTracker(conn, clock, CAPITAL, mark_price=lambda s: next(ticks[s]))
+    t.set_day_baseline(Decimal("20000"))
+    snap = t.persist_snapshot()
+    row = conn.execute("SELECT equity, realized_pnl, open_mtm, day_mtm FROM equity_snapshots").fetchone()
+    assert Decimal(row["equity"]) == CAPITAL + Decimal(row["realized_pnl"]) + Decimal(row["open_mtm"])
+    assert snap.open_mtm == Decimal("150")                 # the first read: AAA 110, BBB 190
+    assert snap.day_mtm == snap.equity - Decimal("20000") == Decimal(row["day_mtm"])
+
+
+def test_floors_and_day_loss_follow_a_live_base(conn, clock):
+    """``evaluate_floors`` (with no limits base) and ``evaluate_day_loss`` read the base per call."""
+    base = {"v": CAPITAL}
+    _equity_at(conn, Decimal("18000"))                     # P&L −2,000
+    t = ExposureTracker(conn, clock, lambda: base["v"])
+    t.set_day_baseline(CAPITAL)
+    assert [b.rung for b in t.evaluate_floors(FloorLimits())] == ["equity_floor_rung"]
+    assert t.evaluate_day_loss(Decimal("-5"), Decimal("-7")) == ["daily_loss_hard", "daily_loss_soft"]
+    base["v"] = Decimal("40000")                           # −2,000 on 40k: −5% day, equity 38,000
+    assert t.evaluate_floors(FloorLimits()) == []
+    assert t.evaluate_day_loss(Decimal("-5"), Decimal("-7")) == ["daily_loss_soft"]
 
 
 # ----------------------------------------------------------------- consecutive_losses rebuild (§7.1)
