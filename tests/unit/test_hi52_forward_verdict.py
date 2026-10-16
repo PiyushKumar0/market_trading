@@ -334,16 +334,27 @@ def test_the_sized_notional_is_the_7_1_cap_and_nothing_chosen_by_hand():
             fv.sizing_notional(kwargs.pop("equity"), **kwargs)
 
 
-def test_the_registered_edge_is_this_script_s_derivation():
+def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
     """The registered edge and the kill criterion's cost floor must come from ONE derivation or they
     drift apart silently — a stale `expected_edge_pct` is an edge the arithmetic no longer supports,
     read on every candidate for months. So `settings.yaml` carries only the OUTPUT of
     `registered_edge_pct()`, and this test is the pin: a change to limits.yaml, to hi52's stop or to
     the cost tables fails HERE instead of leaving the gate multiplying against a number nobody
     re-derived."""
+    import re
+
     from engine.core.config import load_settings
 
-    derived = fv.registered_edge_pct()
+    # Pinned at the REGISTRATION inputs (base 40,000), not the live file: the runtime cap
+    # (`engine.strategy.hi52_edge.StrategyEdges`) now carries the live-limits guard (O19), so a
+    # capital change must not break this pin.
+    pinned = tmp_path / "limits.yaml"
+    pinned.write_text(
+        re.sub(r"^capital_base_inr:.*$", "capital_base_inr: 40000",
+               _LIMITS.read_text(encoding="utf-8"), flags=re.M),
+        encoding="utf-8",
+    )
+    derived = fv.registered_edge_pct(limits_path=pinned)
     assert derived == Decimal("1.53")                                   # O17: 2.0x gap mult
     assert Decimal(str(load_settings().hi52.expected_edge_pct)) == derived
     # …and it IS gross-minus-floor, rounded DOWN: rounding an edge UP is the one direction that can

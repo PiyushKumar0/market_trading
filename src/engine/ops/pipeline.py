@@ -992,7 +992,10 @@ class RecommendationPipeline:
         self._round_tick = round_tick_fn or (lambda _symbol, price: round_to_tick(price))
         self._recommend = recommend or RecommendSettings()
         #: The registered-edge map the RiskGate is built with; shown only on targetless recs.
-        self._strategy_edge = dict(strategy_edge_pct or {})
+        # By reference, never copied: a live `StrategyEdges` re-derives hi52's cap when the limits move.
+        self._strategy_edge: Mapping[str, Decimal] = (
+            strategy_edge_pct if strategy_edge_pct is not None else {}
+        )
         #: Backtest reports the evidence line reads; unwired ⇒ no backtest line.
         self._reports_dir = reports_dir
         #: D1 paper seams; ``paper_enabled_fn`` None ⇒ paper is off and no paper verdict is written.

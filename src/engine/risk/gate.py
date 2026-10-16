@@ -414,7 +414,10 @@ class RiskGate:
         self._limits = limits_engine
         self._costs = cost_model
         self._clock = clock
-        self._strategy_edge = dict(strategy_expected_edge_pct or {})
+        # By reference, never copied: a live `StrategyEdges` re-derives hi52's cap when the limits move.
+        self._strategy_edge: Mapping[str, Decimal] = (
+            strategy_expected_edge_pct if strategy_expected_edge_pct is not None else {}
+        )
         self._shadow_no_edge = frozenset(no_edge_shadow_strategies or ())
 
     # ------------------------------------------------------------------ dispatch

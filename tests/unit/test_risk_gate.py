@@ -801,6 +801,27 @@ def test_ins_measured_edge_still_faces_the_cost_floor(
     assert verdict.verdict == "reject"
 
 
+def test_a_registered_edge_mapping_changed_after_construction_is_seen(
+    limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock
+) -> None:
+    """O19: the gate keeps the edges map by reference, so a live `StrategyEdges` whose limits
+    table moves (a capital change) re-derives hi52's cap without rebuilding the gate."""
+    from engine.strategy.hi52_edge import StrategyEdges
+
+    raw = yaml.safe_load(LIMITS_YAML.read_text(encoding="utf-8"))
+    holder = {"table": limit_table}
+    edges = StrategyEdges({"hi52": Decimal("1.53")}, table_fn=lambda: holder["table"])
+    live = RiskGate(_StubLimits(limit_table), cost_model, gate_clock,
+                    strategy_expected_edge_pct=edges)
+    action = {**INS_ACTION, "strategy_id": "hi52", "stop_price": Decimal("96"), "quantity": 40}
+    assert check_of(live.evaluate(make_action(**action), make_ctx()), "min_viable_size").passed
+
+    raw["capital_base_inr"] = 4000          # a tiny base: the derived edge turns non-positive
+    holder["table"] = LimitTable.model_validate(raw)
+    after = check_of(live.evaluate(make_action(**action), make_ctx()), "min_viable_size")
+    assert after.passed is False and after.value == gate_module._NO_TARGET
+
+
 def test_ins_edge_matches_the_shipped_settings_value() -> None:
     """The 1.58 asserted above is the validated WO-16 T+20 NET drift the settings file actually
     ships — the tests must not drift from the config the engine boots with."""

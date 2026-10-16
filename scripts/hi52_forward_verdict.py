@@ -101,7 +101,7 @@ import statistics
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -125,8 +125,14 @@ from engine.learning.hi52_forward import (  # noqa: E402
     measure_all,
     measure_signal,  # noqa: F401 - re-exported
 )
-from engine.strategy.cost_model import CostModel  # noqa: E402
-from engine.strategy.scanners.hi52 import DEFAULT_PARAMS, STRATEGY_ID  # noqa: E402
+from engine.strategy import hi52_edge  # noqa: E402
+from engine.strategy.hi52_edge import (  # noqa: E402,F401 - re-exported; ONE derivation, in the engine
+    MEASURED_T20_MEDIAN_GROSS_PCT,
+    PRODUCT,
+    STOP_PCT,
+    sizing_notional,
+)
+from engine.strategy.scanners.hi52 import STRATEGY_ID  # noqa: E402
 
 # =============================================================================== pinned constants
 #: Printed with every verdict, because the boundary is a PREDICTION about when the tranche deploys
@@ -163,41 +169,7 @@ REFERENCE_EQUITY_INR = Decimal("39256.65")
 CAPITAL_BASE_INR = Decimal("40000")
 EQUITY_FLOOR_RUNG_PCT = Decimal("-10.0")
 
-#: The v2 study's measured T+20 median GROSS drift — ``data/reports/backtest_hi52_v2_2026-09-09.json``
-#: (``geometry/discrete_fresh_cross/horizons/20/median_gross_pct``, n=1,794). GROSS on purpose: the
-#: study charged its own ₹20,000-reference round trip, a size this book never trades, so the net it
-#: reports is not this book's net. The cost floor below is what makes it one.
-MEASURED_T20_MEDIAN_GROSS_PCT = Decimal("2.0336")
-
-#: The rule's own disaster stop — read from the scanner, never re-typed: it is half the derivation
-#: (a wider stop shrinks the notional and RAISES the cost floor), so a change there must move this.
-STOP_PCT = Decimal(str(DEFAULT_PARAMS["stop_pct"]))
-
-PRODUCT = "CNC"          # swing/delivery; NSE cash cannot be held overnight under MIS
-
 _HUNDRED = Decimal("100")
-
-
-def sizing_notional(
-    equity: Decimal, *, position_pct: Decimal, gap_mult: Decimal, stop_pct: Decimal
-) -> Decimal:
-    """The §7.1 ``per_trade_risk`` cap on a swing position's NOTIONAL, in rupees.
-
-    ``qty_max = floor(position_pct% × equity / (gap_mult × stop_pct% × price))`` (``gate.py``
-    ``_rule_per_trade_risk``), so ``qty_max × price <= position_pct% × equity / (gap_mult ×
-    stop_pct%)`` — the price cancels and the cap is a pure function of these three numbers. The
-    other sizing rules do not bind here: ``capital_cap`` allows ₹40,000 deployed against this ~₹6.5k.
-
-    Returns ``REFERENCE_EQUITY_INR``-based arithmetic only; a non-positive or non-finite input is a
-    refusal (``ValueError``) rather than a silently tiny notional, because a tiny notional means a
-    huge cost floor and a spurious DEMOTE.
-    """
-    if equity <= 0 or position_pct <= 0 or gap_mult <= 0 or stop_pct <= 0:
-        raise ValueError(
-            f"sizing inputs must be positive: equity={equity} position_pct={position_pct} "
-            f"gap_mult={gap_mult} stop_pct={stop_pct}"
-        )
-    return (equity * position_pct / _HUNDRED) / (gap_mult * stop_pct / _HUNDRED)
 
 
 #: The notional at the registration equity — what the report charges when the store shows nothing.
@@ -211,12 +183,11 @@ REFERENCE_NOTIONAL = sizing_notional(
 def cost_floor_pct(notional: Decimal) -> Decimal:
     """One full CNC round trip at ``notional``, in percent — the repo's own ``CostModel``.
 
-    ``breakeven_pct``, never the fees-only view: the spread is the largest single component at this
-    size and a floor that omits it is not a floor. THE one place this script turns a notional into a
+    Delegates to :func:`engine.strategy.hi52_edge.cost_floor_pct`: THE one place a notional becomes a
     cost, so the registered edge (:func:`registered_edge_pct`) and the forward nets are charged by
     the same code against the same tables.
     """
-    return Decimal(str(CostModel.from_config().breakeven_pct(notional, PRODUCT)))
+    return hi52_edge.cost_floor_pct(notional)
 
 
 def registered_edge_pct(limits_path: Path | None = None) -> Decimal:
@@ -236,17 +207,15 @@ def registered_edge_pct(limits_path: Path | None = None) -> Decimal:
     ₹6,000 ⇒ 0.4982% at the rung, 2.0336 − 0.4982 = 1.5354 ⇒ **1.53** (pre-O17 at 2.5×: ₹4,800 ⇒
     0.5619%, 1.47).
 
-    This function IS the derivation; ``settings.yaml`` carries only its output, and
+    The arithmetic lives in :func:`engine.strategy.hi52_edge.edge_at` (the engine's live cap,
+    ``StrategyEdges``, uses it too); this function supplies the file reads and their fallbacks.
+    ``settings.yaml`` carries only its output, and
     ``tests/unit/test_hi52_forward_verdict.py`` pins the two together so they cannot drift apart.
     """
     path = limits_path or (repo_root() / "config" / "limits.yaml")
     position_pct, gap_mult, _ = load_sizing_limits(path)
-    equity, _ = load_registration_equity(path)
-    notional = sizing_notional(
-        equity, position_pct=position_pct, gap_mult=gap_mult, stop_pct=STOP_PCT
-    )
-    edge = MEASURED_T20_MEDIAN_GROSS_PCT - cost_floor_pct(notional)
-    return edge.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    base, rung_pct, _ = _load_base_and_rung(path)
+    return hi52_edge.edge_at(base, rung_pct, position_pct, gap_mult, stop_pct=STOP_PCT)
 
 
 VERDICT_DEMOTE = "DEMOTE"
@@ -333,17 +302,12 @@ def load_sizing_limits(path: Path) -> tuple[Decimal, Decimal, str]:
                 f"pinned defaults ({type(exc).__name__} reading {path})")
 
 
-def load_registration_equity(path: Path) -> tuple[Decimal, str]:
-    """``(equity, provenance)`` the REGISTERED edge is derived at: the ``equity_floor_rung``.
+def _load_base_and_rung(path: Path) -> tuple[Decimal, Decimal, str]:
+    """``(capital_base_inr, equity_floor_rung pct, provenance)``, or the pinned registration values.
 
-    ``capital_base_inr × (1 + limits.equity_floor_rung.equity_pct_of_base/100)`` through the same
-    repo loader :func:`load_sizing_limits` uses (and for the same reason — a report must never need
-    the protected-store hash). A rung that is not a real floor (non-positive, or at/above the base,
-    which would mean the book may never draw down at all) falls back to the pinned registration
-    values and says so: the point of this equity is that it is the WORST one, and a bad read must
-    not quietly make it the best one.
+    Same repo loader and same fallback discipline as :func:`load_sizing_limits`. A rung that is not a
+    real floor (non-positive equity, or at/above the base) falls back and says so.
     """
-    fallback = CAPITAL_BASE_INR * (Decimal("1") + EQUITY_FLOOR_RUNG_PCT / _HUNDRED)
     try:
         raw = load_yaml(path)
         base = Decimal(str(raw["capital_base_inr"]))
@@ -351,9 +315,26 @@ def load_registration_equity(path: Path) -> tuple[Decimal, str]:
         equity = base * (Decimal("1") + rung_pct / _HUNDRED)
         if base <= 0 or equity <= 0 or equity >= base:
             raise ValueError(f"implausible equity floor rung: base={base} pct={rung_pct}")
-        return equity, f"{path} equity_floor_rung ({base} x {100 + rung_pct}%)"
+        return base, rung_pct, f"{path}"
     except Exception as exc:  # noqa: BLE001 - every failure mode becomes one stated fallback
-        return fallback, f"pinned default ({type(exc).__name__} reading {path})"
+        return (CAPITAL_BASE_INR, EQUITY_FLOOR_RUNG_PCT,
+                f"pinned default ({type(exc).__name__} reading {path})")
+
+
+def load_registration_equity(path: Path) -> tuple[Decimal, str]:
+    """``(equity, provenance)`` the REGISTERED edge is derived at: the ``equity_floor_rung``.
+
+    ``capital_base_inr × (1 + limits.equity_floor_rung.equity_pct_of_base/100)`` through the same
+    repo loader :func:`load_sizing_limits` uses (and for the same reason — a report must never need
+    the protected-store hash). A rung that is not a real floor falls back to the pinned registration
+    values and says so: the point of this equity is that it is the WORST one, and a bad read must
+    not quietly make it the best one.
+    """
+    base, rung_pct, src = _load_base_and_rung(path)
+    equity = base * (Decimal("1") + rung_pct / _HUNDRED)
+    if src.startswith("pinned default"):
+        return equity, src
+    return equity, f"{path} equity_floor_rung ({base} x {100 + rung_pct}%)"
 
 
 def load_min_equity(conn: sqlite3.Connection, *, start: date, as_of: date) -> Decimal | None:
