@@ -390,9 +390,18 @@ def create_app(
         control, conn = app.state.paper_control, app.state.conn
         if control is None or conn is None:
             return {"enabled": False}
+        # The live base (O19 §7): history shown at today's starting capital. Unwired or unverified
+        # limits keep each snapshot's own stored base.
+        capital_base = None
+        if app.state.limits_engine is not None:
+            try:
+                capital_base = app.state.limits_engine.load().capital_base_inr
+            except IntegrityError:
+                capital_base = None
         return paper_summary(conn, control, view=app.state.paper_view,
                              subsystem_enabled=app.state.settings.paper.subsystem_enabled,
-                             no_stop_strategies=app.state.settings.paper.no_stop_strategies)
+                             no_stop_strategies=app.state.settings.paper.no_stop_strategies,
+                             capital_base=capital_base)
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:

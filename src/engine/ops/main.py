@@ -207,6 +207,7 @@ from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
 from engine.strategy.cost_model import CostModel
+from engine.strategy.hi52_edge import StrategyEdges
 from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.retest import RestingLevelBook
 from engine.strategy.scanners import (
@@ -234,8 +235,10 @@ VIX_SYMBOL = "INDIA VIX"
 #: engine.marketdata.reconcile.DEFAULT_TICK_SIZE; only ever loosens the reconcile close-drift check.
 _DEFAULT_TICK = Decimal("0.05")
 
-#: Capital base the ExposureTracker boots with when the protected limit table fails verification —
-#: keep in sync with limits.yaml capital_base_inr (O16).
+#: Boot fallback ONLY: the real tracker's base while the protected limit table fails verification,
+#: which also FREEZES the boot (self-test), so it prices no entry. Keep it at the shipped limits.yaml
+#: capital_base_inr (O16); a dashboard capital change (O19) moves the verified table, not this, so it
+#: may lag one until the next edit here.
 _FALLBACK_CAPITAL_BASE_INR = Decimal("40000")
 
 #: How far back to scan universe_daily for the current active watchlist (bounded, trading-day-agnostic).
@@ -635,15 +638,15 @@ async def run() -> int:
             return None
         return max(0.0, (clock.now() - cached[1]).total_seconds())
 
-    # Capital base from the protected limit table; an unregistered/tampered store must not crash the
-    # boot (the self-test FAILs it to FROZEN separately) — fall back to the shipped base (O16).
+    # Capital base read live from the protected limit table (O19 §2: a `LimitsEngine.reload()` reaches
+    # the real brakes with no setter); an unregistered/tampered store must not crash the boot (the
+    # self-test FAILs it to FROZEN separately) — `_limits_capital_base` falls back to the shipped base.
     try:
-        _capital_base = limits_engine.load().capital_base_inr
+        limits_engine.load()
     except IntegrityError:
         _log.warning("limits_unverified_at_boot",
                      hint="scripts/seed_protected_config.py; using the shipped fallback capital base")
-        _capital_base = _FALLBACK_CAPITAL_BASE_INR
-    exposure = ExposureTracker(conn, clock, _capital_base, mark_price=mark_price)
+    exposure = ExposureTracker(conn, clock, _limits_capital_base(limits_engine), mark_price=mark_price)
 
     # --- owner I/O alert sink (Telegram if configured, else log-only) ---
     telegram_holder: dict[str, object] = {"bot": None}
@@ -896,12 +899,17 @@ async def run() -> int:
             return Decimal("2.0")   # §6.3 default; the store failure is already FROZEN elsewhere
 
     cost_model = CostModel.from_config(instruments=instruments, edge_multiple_min=_edge_multiple_min())
+    # The per-strategy C3 edge registrations — see :func:`_strategy_expected_edge_pct`, which is this
+    # map and is module-level so BOTH halves of the hi52 promotion are assertable without booting an
+    # engine (a wiring that only exists inside run() silently disappears). ONE live object for the gate
+    # and the pipeline (O19 §3.3): hi52 reads min(registered, derived at the CURRENT verified limits),
+    # on the gate's own cost model, so the two can never disagree after a capital change.
+    strategy_edges = StrategyEdges(
+        _strategy_expected_edge_pct(settings), table_fn=limits_engine.load, cost_model=cost_model,
+    )
     gate = RiskGate(
         limits_engine, cost_model, clock,
-        # The per-strategy C3 edge registrations — see :func:`_strategy_expected_edge_pct`, which is
-        # this map and is module-level so BOTH halves of the hi52 promotion are assertable without
-        # booting an engine (a wiring that only exists inside run() silently disappears).
-        strategy_expected_edge_pct=_strategy_expected_edge_pct(settings),
+        strategy_expected_edge_pct=strategy_edges,
         # §2.7 news SHADOWS: C3 rejects these unconditionally, before target_price is even read, so
         # "signals are a measurement, never a recommendation" is ENFORCED at Tier 2 rather than
         # inferred from a missing expected_edge_pct (see risk/gate.py _SHADOW_NO_EDGE for why, and
@@ -1011,7 +1019,7 @@ async def run() -> int:
             hold_fn=hold_fn,
             round_tick_fn=_round_tick_fn(instruments),
             recommend=settings.recommend,
-            strategy_edge_pct=_strategy_expected_edge_pct(settings),   # the gate's own map
+            strategy_edge_pct=strategy_edges,   # the gate's own object, never a copy
             reports_dir=data_dir / "reports",
             # D1: None (subsystem disabled or failed to build) ⇒ no paper verdict, no paper order.
             paper_ctx_builder=paper.ctx_builder if paper is not None else None,
@@ -3590,6 +3598,28 @@ def _strategy_expected_edge_pct(settings: Settings) -> dict[str, Decimal]:
     return edges
 
 
+def _limits_capital_base(limits_engine: LimitsEngine) -> Callable[[], Decimal]:
+    """The real tracker's base, read through the verified limit table on every call (O19 §2;
+    ``load()`` is cached, so O(1)). ``IntegrityError`` ONLY (R9) returns
+    :data:`_FALLBACK_CAPITAL_BASE_INR` — the boot is FROZEN then — logged once per process: an
+    unverified table is never cached, so the next call after a reseed reads the verified base. Any
+    other error propagates; a malformed table must never be silently priced at the fallback."""
+    warned = False
+
+    def capital_base() -> Decimal:
+        nonlocal warned
+        try:
+            return limits_engine.load().capital_base_inr
+        except IntegrityError:
+            if not warned:
+                warned = True
+                _log.warning("limits_unverified_capital_fallback",
+                             capital_base=str(_FALLBACK_CAPITAL_BASE_INR))
+            return _FALLBACK_CAPITAL_BASE_INR
+
+    return capital_base
+
+
 def _round_tick_fn(instruments: InstrumentStore) -> Callable[[str, Decimal], Decimal]:
     """``instruments.round_to_tick``, falling back to the scanners' NSE tick (logged) for a symbol
     missing from today's dump."""
@@ -3775,7 +3805,7 @@ async def _compose_paper(
             settings=settings.paper,
         )
         risk = PaperRisk(
-            conn, clock, calendar.session, broker, capital_base=limits.load().capital_base_inr,
+            conn, clock, calendar.session, broker, capital_base=lambda: limits.load().capital_base_inr,
             mark_price=runtime.mark, limits_fn=limits.load, flatten=exits.flatten_all,
         )
         prep, reconciler = runtime.attach(

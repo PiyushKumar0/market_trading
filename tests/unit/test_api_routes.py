@@ -8,6 +8,7 @@ don't exist yet."""
 from __future__ import annotations
 
 import json
+import re
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -224,6 +225,47 @@ def test_paper_route_returns_control_state_and_is_owner_gated(conn, clock) -> No
     body = client.get("/paper", headers=AUTH).json()
     assert body["enabled"] is True and body["changed_by"] == "owner"
     assert body["built"] is False and body["entry_guard"] == "not built"
+
+
+def _paper_at_40k(conn, clock) -> PaperControl:
+    seed_paper(conn)
+    for at, equity, realized, mtm in [("2026-10-05T15:00:00+05:30", "40100.00", "60.00", "40.00"),
+                                      ("2026-10-06T15:00:00+05:30", "40200.00", "150.00", "50.00")]:
+        conn.execute("INSERT INTO paper_equity_snapshots (at, equity, realized_pnl, open_mtm) VALUES (?, ?, ?, ?)",
+                     (at, equity, realized, mtm))
+    return PaperControl(conn, clock)
+
+
+def test_paper_route_shows_history_at_the_live_capital_base(tmp_path, conn, clock) -> None:
+    """O19 §7: snapshots stored at 40,000, the verified limits now at 60,000 — the route reads the live base."""
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    text = (REAL_CONFIG / "limits.yaml").read_text(encoding="utf-8")
+    raised, n = re.subn(r"(?m)^capital_base_inr: \d+\b", "capital_base_inr: 60000", text)   # any shipped base
+    assert n == 1
+    (cfg / "limits.yaml").write_bytes(raised.encode("utf-8"))
+    store = ProtectedStore(cfg, conn, clock)
+    store.register_initial("limits.yaml", OWNER_OK)
+    engine = LimitsEngine(store)
+    assert engine.load().capital_base_inr == Decimal("60000")
+    client = _client(paper_control=_paper_at_40k(conn, clock), conn=conn, clock=clock, limits_engine=engine)
+    body = client.get("/paper", headers=AUTH).json()
+    assert (body["equity"]["capital_base"], body["equity"]["equity"]) == ("60000.00", "60200.00")
+    assert [c["equity"] for c in body["curve"]] == ["60100.00", "60200.00"]
+
+
+def test_paper_route_keeps_the_stored_base_when_the_limits_are_unverified_or_unwired(conn, clock) -> None:
+    from engine.core.protected_store import IntegrityError
+
+    class _UnverifiedLimits:
+        def load(self):
+            raise IntegrityError("limits.yaml hash mismatch")
+
+    control = _paper_at_40k(conn, clock)
+    for limits in (_UnverifiedLimits(), None):
+        body = _client(paper_control=control, conn=conn, clock=clock, limits_engine=limits).get(
+            "/paper", headers=AUTH).json()
+        assert (body["equity"]["capital_base"], body["equity"]["equity"]) == ("40000.00", "40200.00")
 
 
 def test_post_paper_on_needs_the_built_autopilot_and_off_always_applies(conn, clock) -> None:

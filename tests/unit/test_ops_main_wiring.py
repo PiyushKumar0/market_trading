@@ -38,6 +38,7 @@ from engine.core.config import Settings, config_dir, load_settings
 from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.migrations import apply_migrations
+from engine.core.protected_store import IntegrityError
 from engine.core.types import Bar, TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob
 from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
@@ -1259,6 +1260,125 @@ def test_the_unverified_limits_fallback_base_matches_the_shipped_limits_yaml() -
     floor. Plain yaml read (read-only) — never the protected-store loader."""
     raw = yaml.safe_load((config_dir() / "limits.yaml").read_text(encoding="utf-8"))
     assert Decimal(str(raw["capital_base_inr"])) == opsmain._FALLBACK_CAPITAL_BASE_INR
+
+
+class _Limits:
+    """``LimitsEngine.load`` stand-in: a base that can move, or an unverified table."""
+
+    def __init__(self, base: str | None = None, exc: Exception | None = None) -> None:
+        self.base, self.exc, self.loads = base, exc, 0
+
+    def load(self) -> SimpleNamespace:
+        self.loads += 1
+        if self.exc is not None:
+            raise self.exc
+        return SimpleNamespace(capital_base_inr=Decimal(self.base))
+
+
+def test_the_real_tracker_base_reads_through_the_limits_engine_on_every_call() -> None:
+    """O19 §2: no boot-time copy, so a ``LimitsEngine.reload()`` reaches the real brakes."""
+    limits = _Limits("40000")
+    base = opsmain._limits_capital_base(limits)
+    assert base() == Decimal("40000")
+    limits.base = "60000"
+    assert base() == Decimal("60000") and limits.loads == 2
+
+
+def test_an_unverified_limits_table_falls_back_and_says_so_once(caplog) -> None:
+    """R9: IntegrityError ONLY falls back (the boot is FROZEN by the self-test), logged once per process."""
+    limits = _Limits(exc=IntegrityError("limits.yaml hash mismatch"))
+    base = opsmain._limits_capital_base(limits)
+    with caplog.at_level(logging.WARNING, logger="engine.ops.main"):
+        assert [base(), base(), base()] == [opsmain._FALLBACK_CAPITAL_BASE_INR] * 3
+    assert [r.getMessage() for r in caplog.records].count("limits_unverified_capital_fallback") == 1
+    # A reseed in-run is read on the next call: the fallback is not latched.
+    limits.exc, limits.base = None, "60000"
+    assert base() == Decimal("60000")
+    # Anything else is a real defect and propagates — never silently priced at the fallback.
+    limits.exc = ValueError("bad table")
+    with pytest.raises(ValueError):
+        base()
+
+
+def _run_calls(name: str) -> list[ast.Call]:
+    run = ast.parse(textwrap.dedent(inspect.getsource(opsmain.run)))
+    return [n for n in ast.walk(run) if isinstance(n, ast.Call) and ast.unparse(n.func) == name]
+
+
+def _kw(call: ast.Call, arg: str) -> str:
+    return next(ast.unparse(k.value) for k in call.keywords if k.arg == arg)
+
+
+def test_the_real_tracker_is_built_on_the_live_base() -> None:
+    (tracker,) = _run_calls("ExposureTracker")
+    assert [ast.unparse(a) for a in tracker.args] == ["conn", "clock", "_limits_capital_base(limits_engine)"]
+    src = inspect.getsource(opsmain.run)
+    assert '_log.warning("limits_unverified_at_boot",' in src          # the boot warning stays
+    assert "_capital_base = " not in src                               # …and no boot-time copy remains
+
+
+def test_the_gate_and_the_pipeline_share_one_live_strategy_edges() -> None:
+    """O19 §3.3: ONE ``StrategyEdges`` on the hash-verified limits and the gate's own cost model, so
+    the gate's C3 edge and the pipeline's registered edge can never disagree after a capital change."""
+    run = ast.parse(textwrap.dedent(inspect.getsource(opsmain.run)))
+    assigns = {ast.unparse(t): n.value for n in ast.walk(run) if isinstance(n, ast.Assign) for t in n.targets}
+    edges = assigns["strategy_edges"]
+    assert isinstance(edges, ast.Call) and ast.unparse(edges.func) == "StrategyEdges"
+    assert [ast.unparse(a) for a in edges.args] == ["_strategy_expected_edge_pct(settings)"]
+    assert (_kw(edges, "table_fn"), _kw(edges, "cost_model")) == ("limits_engine.load", "cost_model")
+    assert ast.unparse(assigns["cost_model"].func) == "CostModel.from_config"
+    (gate,) = _run_calls("RiskGate")
+    assert ast.unparse(gate.args[1]) == "cost_model"
+    assert _kw(gate, "strategy_expected_edge_pct") == "strategy_edges"
+    (pipeline,) = _run_calls("RecommendationPipeline")
+    assert _kw(pipeline, "strategy_edge_pct") == "strategy_edges"
+    assert len(_run_calls("StrategyEdges")) == 1 and len(_run_calls("_strategy_expected_edge_pct")) == 1
+
+
+def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, conn, clock) -> None:
+    """The seam end to end on the real artefacts: the shipped limits.yaml through a ProtectedStore and
+    LimitsEngine, the shipped settings map, the gate's kind of cost model. An owner update plus ONE
+    ``reload()`` moves the real tracker's base and lowers hi52's edge; ins is untouched."""
+    from engine.core.protected_store import ProtectedStore
+    from engine.core.types import OwnerConfirmation
+    from engine.risk.exposure import ExposureTracker
+    from engine.risk.limits import LimitsEngine
+    from engine.strategy.cost_model import CostModel
+    from engine.strategy.hi52_edge import StrategyEdges
+
+    def at_base(inr: int) -> str:     # base-agnostic: the shipped base itself moves with O19 changes
+        text, n = re.subn(r"(?m)^capital_base_inr: \d+\b", f"capital_base_inr: {inr}", shipped)
+        assert n == 1
+        return text
+
+    owner = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="test")
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    shipped = (config_dir() / "limits.yaml").read_bytes().decode("utf-8")
+    (cfg / "limits.yaml").write_bytes(at_base(40000).encode("utf-8"))     # the registration base
+    store = ProtectedStore(cfg, conn, clock)
+    store.register_initial("limits.yaml", owner)
+    engine = LimitsEngine(store)
+    tracker = ExposureTracker(conn, clock, opsmain._limits_capital_base(engine))
+    edges = StrategyEdges(_strategy_expected_edge_pct(load_settings()), table_fn=engine.load,
+                          cost_model=CostModel.from_config(edge_multiple_min=Decimal("2.0")))
+    assert tracker.capital_base == Decimal("40000")
+    assert (edges[hi52.STRATEGY_ID], edges[ins.STRATEGY_ID]) == (Decimal("1.53"), Decimal("1.58"))
+
+    store.owner_update("limits.yaml", at_base(20000), owner)
+    assert tracker.capital_base == Decimal("40000")                    # cached until the reload
+    engine.reload()
+    assert tracker.capital_base == Decimal("20000")
+    assert (edges[hi52.STRATEGY_ID], edges[ins.STRATEGY_ID]) == (Decimal("1.27"), Decimal("1.58"))
+
+
+def test_paper_risk_reads_the_same_live_base_as_the_paper_runtime() -> None:
+    module = ast.parse(inspect.getsource(opsmain))
+    compose = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_compose_paper")
+    calls = {ast.unparse(n.func): n for n in ast.walk(compose) if isinstance(n, ast.Call)}
+    live = "lambda: limits.load().capital_base_inr"
+    assert _kw(calls["PaperRisk"], "capital_base") == live
+    assert _kw(calls["PaperRuntime"], "capital_base_fn") == live
 
 
 def test_the_shipped_retest_window_is_the_variant_the_backtest_selected() -> None:
@@ -3720,8 +3840,9 @@ def test_the_hi52_promotion_is_one_state_in_both_of_its_halves() -> None:
     }
     # …while the shadows it left behind stay shadows.
     assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal"}
-    assert "strategy_expected_edge_pct=_strategy_expected_edge_pct(settings)" in \
-        inspect.getsource(opsmain.run)
+    # …through the live StrategyEdges wrapper over this map (O19 §3.3; pinned in
+    # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52.
+    assert "strategy_expected_edge_pct=strategy_edges," in inspect.getsource(opsmain.run)
 
 
 def test_deleting_the_settings_key_really_un_registers_the_hi52_edge(tmp_path) -> None:

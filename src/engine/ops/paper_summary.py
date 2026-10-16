@@ -85,13 +85,31 @@ def _snapshots(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return rows
 
 
-def _equity(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def _has_pnl(row: sqlite3.Row) -> bool:
+    return all(row[k] is not None and row[k] != "" for k in ("realized_pnl", "open_mtm"))
+
+
+def _point_equity(row: sqlite3.Row, capital_base: Decimal | None) -> Any:
+    """A snapshot's equity at the live base (O19 §7: history in P&L space, so a capital change draws
+    no cliff); the stored equity when there is no live base or the row's P&L is NULL."""
+    if capital_base is None or not _has_pnl(row):
+        return row["equity"]
+    return _money(capital_base + _dec(row["realized_pnl"]) + _dec(row["open_mtm"]))
+
+
+def _equity(row: sqlite3.Row | None, capital_base: Decimal | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    pnl = _dec(row["realized_pnl"]) + _dec(row["open_mtm"])
-    base = _dec(row["equity"]) - pnl
+    if capital_base is None:
+        pnl = _dec(row["realized_pnl"]) + _dec(row["open_mtm"])
+        base = _dec(row["equity"]) - pnl
+    else:
+        # A NULL P&L column: equity − the live base, the brakes' own fallback (O19 §3.1).
+        base = capital_base
+        pnl = (_dec(row["realized_pnl"]) + _dec(row["open_mtm"]) if _has_pnl(row)
+               else _dec(row["equity"]) - base)
     return {
-        "at": row["at"], "equity": row["equity"], "realized_pnl": row["realized_pnl"],
+        "at": row["at"], "equity": _point_equity(row, capital_base), "realized_pnl": row["realized_pnl"],
         "open_mtm": row["open_mtm"], "day_mtm": row["day_mtm"], "positions_open": row["positions_open"],
         "pnl": _money(pnl), "capital_base": _money(base),
         "pnl_pct": pct_of(pnl, base), "realized_pnl_pct": pct_of(row["realized_pnl"], base),
@@ -140,9 +158,12 @@ def _closed_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def paper_summary(
     conn: sqlite3.Connection, control: PaperControl, *, view: PaperView | None, subsystem_enabled: bool,
     no_stop_strategies: Sequence[str] = (),
+    capital_base: Decimal | None = None,
 ) -> dict[str, Any]:
+    """``capital_base`` is the LIVE base (``LimitsEngine``): equity, the curve and every ``*_pct`` are
+    then shown at today's starting capital. None keeps each snapshot's own stored base."""
     snapshots = _snapshots(conn)
-    equity = _equity(snapshots[0] if snapshots else None)
+    equity = _equity(snapshots[0] if snapshots else None, capital_base)
     positions = _positions(conn, view)
     unmarked = list(dict.fromkeys(p["symbol"] for p in positions if p["mark"] is None)) if view else []
     return {
@@ -155,10 +176,12 @@ def paper_summary(
         "unmarked": unmarked,
         "halts": [{**h, "latched": bool(h["latched"])} for h in control.active_halts()],
         "equity": equity,
-        "curve": [{"d": r["at"][:10], "at": r["at"], "equity": r["equity"]} for r in reversed(snapshots)],
+        "curve": [{"d": r["at"][:10], "at": r["at"], "equity": _point_equity(r, capital_base)}
+                  for r in reversed(snapshots)],
         "positions": positions,
         "orders": [dict(r) for r in conn.execute(_ORDERS_SQL)],
         "closed": _closed_rows(conn),
-        "totals": _totals(conn, None if equity is None else _dec(equity["capital_base"])),
+        "totals": _totals(conn, capital_base if capital_base is not None
+                          else None if equity is None else _dec(equity["capital_base"])),
         "counters": view.counters() if view is not None else None,
     }

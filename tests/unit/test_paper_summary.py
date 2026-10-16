@@ -107,6 +107,66 @@ def test_positions_carry_the_exit_policy_and_the_summary_the_no_stop_list(conn, 
     assert _summary(conn, clock)["no_stop_strategies"] == []
 
 
+# at, equity, realized_pnl, open_mtm, day_mtm: stored at a 40,000 base, P&L +100 then +200
+_BASE_40K = [
+    ("2026-10-05T15:00:00+05:30", "40100.00", "60.00", "40.00", "100.00"),
+    ("2026-10-06T15:00:00+05:30", "40200.00", "150.00", "50.00", "30.00"),
+]
+
+
+def _seed_40k(conn, rows=_BASE_40K) -> None:
+    seed_paper(conn)
+    for row in rows:
+        conn.execute("INSERT INTO paper_equity_snapshots (at, equity, realized_pnl, open_mtm, day_mtm) "
+                     "VALUES (?, ?, ?, ?, ?)", row)
+
+
+def _live(conn, clock, capital_base) -> dict:
+    return paper_summary(conn, PaperControl(conn, clock), view=_VIEW, subsystem_enabled=True,
+                         capital_base=capital_base)
+
+
+def test_the_live_base_reprices_the_equity_and_the_curve_with_no_cliff(conn, clock) -> None:
+    """O19 §7: history in P&L space. A 40k → 60k change shows every point at today's base."""
+    _seed_40k(conn)
+    s = _live(conn, clock, Decimal("60000"))
+    assert s["equity"] == {
+        "at": "2026-10-06T15:00:00+05:30", "equity": "60200.00", "realized_pnl": "150.00", "open_mtm": "50.00",
+        "day_mtm": "30.00", "positions_open": None, "pnl": "200.00", "capital_base": "60000.00",
+        "pnl_pct": "0.33", "realized_pnl_pct": "0.25", "open_mtm_pct": "0.08", "day_mtm_pct": "0.05",
+    }
+    assert [c["equity"] for c in s["curve"]] == ["60100.00", "60200.00"]
+    assert s["totals"]["void_net"] == "999.00" and s["totals"]["void_net_pct"] == "1.67"   # 999 / 60,000
+
+
+def test_no_live_base_is_exactly_the_stored_view(conn, clock) -> None:
+    _seed_40k(conn)
+    s = _live(conn, clock, None)
+    assert json.dumps(s, sort_keys=True) == json.dumps(_summary(conn, clock), sort_keys=True)
+    assert s["equity"]["capital_base"] == "40000.00" and s["equity"]["equity"] == "40200.00"
+    assert [c["equity"] for c in s["curve"]] == ["40100.00", "40200.00"]
+    assert s["equity"]["pnl_pct"] == "0.50" and s["totals"]["void_net_pct"] == "2.50"     # 999 / 40,000
+
+
+def test_a_null_pnl_row_falls_back_to_its_stored_equity(conn, clock) -> None:
+    _seed_40k(conn, [
+        ("2026-10-05T15:00:00+05:30", "40100.00", "60.00", None, None),
+        ("2026-10-06T15:00:00+05:30", "40200.00", "", "50.00", None),
+    ])
+    s = _live(conn, clock, Decimal("60000"))
+    assert [c["equity"] for c in s["curve"]] == ["40100.00", "40200.00"]
+    # The latest row too: its stored equity, and its P&L is equity − the live base (O19 §3.1).
+    assert (s["equity"]["equity"], s["equity"]["capital_base"], s["equity"]["pnl"]) == (
+        "40200.00", "60000.00", "-19800.00")
+
+
+def test_the_void_percent_uses_the_live_base_even_before_the_first_snapshot(conn, clock) -> None:
+    _seed_40k(conn, [])
+    s = _live(conn, clock, Decimal("60000"))
+    assert (s["equity"], s["curve"]) == (None, [])
+    assert s["totals"]["void_net_pct"] == "1.67"
+
+
 def test_not_built_with_nothing_stored(conn, clock) -> None:
     s = _summary(conn, clock, view=None, subsystem_enabled=False)
     assert s["built"] is False and s["prep_ready"] is None and s["entry_guard"] == "not built"
