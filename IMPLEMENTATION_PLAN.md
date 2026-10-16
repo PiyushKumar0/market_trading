@@ -1719,6 +1719,33 @@ Every value `[tunable]` by the **owner only** — with exactly **one** deliberat
 
 **2026-10-06 amendment (plan-2026-10-06, Q0.1)** The paper halt ladder mirrors this table (CNC keeps protection except at the equity floor). Detail: `runbooks/plan-2026-10-06-measure-card-paper-research.md`.
 
+**O19 — capital changeable from the dashboard; base-agnostic brakes (owner-directed 2026-10-16: "Add option on the dashboard to update budget … Both paper and real trading capital, as they are tied to each other"; "fix the current logic that is budget agnostic … rather than creating a new table"). Design `runbooks/design-2026-10-16-dashboard-capital-change.md` v2 (after an independent adversarial review).**
+
+- **What changes.** One owner edit of `capital_base_inr`, which the real and paper books share. `capital_cap.max_deployed_capital_inr` and `per_stock_exposure.cnc_notional_inr` scale in proportion, floored to whole rupees.
+  - This reverses the O16 precedent on purpose: O16 held the per-symbol cap fixed while the base doubled.
+  - Scaling keeps per-symbol concentration at 30% of capital, and keeps O17's "binds only on tight stops" (about 1.8× the 6%-stop risk-sized notional).
+  - Every percentage limit is unchanged.
+- **When and with what checks.**
+  - Live, only outside the session on a trading day. Refused when the calendar does not cover today and in AUTO.
+  - One edit stays within ½× to 2× of the current base.
+  - The POST carries the base the dialog showed (`expected_current_inr`).
+- **Write path.** `config/limits.yaml` changes through the hardened `ProtectedStore.owner_update`:
+  - verified read, then a compare-and-swap of the signature;
+  - an atomic replace inside the transaction, with the old bytes restored on any failure;
+  - a structural check that only the three keys changed, to ints;
+  - the full old → new table in the `config_audit` note.
+  The trailing provenance comments are kept and appended to.
+- **One source for the base.** `ExposureTracker` (real and paper) and `PaperRisk` read the base through `limits_engine.load()` (cached), so a change is a single `LimitsEngine.reload()`. No copy can be left stale. A stale real copy after an 80k raise would have meant equity ₹39k against an ₹68k cumulative floor: a kill.
+- **Base-agnostic brakes (fixes a live defect).** The day-loss baseline and the 5-session drawdown peak compare P&L to P&L (`realized_pnl + open_mtm` of the stored snapshots) and then add the current base.
+  - On 2026-09-07 the 20k → 40k reseed at 12:56 turned recorded day MTM from −₹185 to +₹19,816 for the rest of the session, so the −5% rung was off that afternoon.
+  - A NULL P&L column falls back to `equity − current base`, which reproduces the old result.
+- **Brake refusal.** A change is refused if, at the proposed base, it would newly trip any floor, drawdown or day-loss rung in either scope.
+  - The floors measure lifetime P&L against the base: a cut while in loss could go flat or kill the real book.
+  - On paper, the same cut would flatten the book, latched until `/paper reset`.
+  - An already-tripped rung does not block a raise.
+- **hi52 edge.** The gate uses `min(registered, derived at the live limits)`. The derivation moves into the engine and the forward-verdict script imports it, so there is still one derivation. A cut lowers the edge automatically; raising the registered 1.53 stays an owner decision. The settings pin is tested at the registration inputs.
+- **Disclosures.** A capital change during C5 shifts the notional, and so the cost %, of later recs; the C5 rule is unchanged and change dates are in `config_audit`. The hi52 kill criterion's min-equity costing leans toward DEMOTE after a cut, which is its stated conservative design. The ₹ figures in other `limits.yaml` comments go stale after a change; a comments-only owner patch is the follow-up.
+
 ### 7.2 Kill-switch design (R10)
 
 - **Owner triggers:** Telegram `/kill` (single step — killing must be fast; only *reset* is two-step), dashboard button, or physical fallback below.
