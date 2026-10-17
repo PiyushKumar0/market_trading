@@ -471,10 +471,10 @@ export const FIELD = {
   validUntil: { label: 'Valid until', hint: 'After this the recommendation expires.' },
   confidence: { label: 'Analyst confidence', hint: "The AI analyst's own score from 0 to 1. It is not a probability of profit." },
   edge: {
-    label: 'Historical edge',
+    label: 'Edge the risk check uses',
     hint:
-      'The net gain per trade the engine registered for this strategy from its research (for hi52, a cautious ' +
-      'median-based figure). The risk check uses it to confirm a trade beats its costs. It is not a forecast.',
+      'The net gain per trade the risk check assumes for this strategy: its registered research edge, capped ' +
+      '(for hi52) by what costs allow at the current capital. Not a forecast.',
   },
   stopDistance: {
     label: 'Stop distance',
@@ -596,6 +596,11 @@ export const COPY = {
   capitalSetting: 'Setting…',
   capitalSaved: (amount: string) => `Capital set to ${amount}. Commit config/limits.yaml to keep it.`,
   capitalRejected: (why: string) => `Capital not changed: ${why}`,
+  // The write's outcome is unknown (timeout / network): never claim "not changed".
+  capitalNoAnswer:
+    "No answer from the engine in time. The capital may still have changed: reopen this dialog to see the engine's value.",
+  capitalUnconfirmed: (why: string) =>
+    `The engine did not confirm the change (${why}). Reopen this dialog to see the capital now.`,
   hoursTitle: 'Trading hours (IST)',
   hoursBody: 'New trades are only proposed inside these hours. Exits are never blocked.',
   hoursBufferLabel: 'Stop intraday entries this many minutes before the end',

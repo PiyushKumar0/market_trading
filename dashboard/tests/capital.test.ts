@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { CapitalFigures, CapitalPreview } from '../src/types.ts'
-import { capitalRows, parseCapitalInput, refusalText, tripText } from '../src/lib/capital.ts'
+import { ApiError, NoAnswerError } from '../src/api.ts'
+import { capitalRows, comparisonBase, failureText, parseCapitalInput, refusalText, tripText } from '../src/lib/capital.ts'
 
 const figures = (over: Partial<CapitalFigures> = {}): CapitalFigures => ({
   capital_inr: '40000',
@@ -11,8 +12,8 @@ const figures = (over: Partial<CapitalFigures> = {}): CapitalFigures => ({
   paper_equity_inr: '40113.30',
   risk_intraday_inr: '601.70',
   risk_swing_inr: '601.70',
-  day_loss_soft_inr: '2005.67',
-  day_loss_hard_inr: '3008.50',
+  day_loss_soft_inr: '-2005.67',
+  day_loss_hard_inr: '-3008.50',
   equity_floor_inr: '36000',
   cumulative_floor_inr: '34000',
   hi52_edge_pct: '1.53',
@@ -42,7 +43,7 @@ test('capitalRows gives every label in a fixed order', () => {
     "Today's hard loss limit",
     'Equity floor',
     'Total loss floor',
-    'Expected gain needed on 52-week-high trades',
+    'Edge the gate assumes for 52-week-high trades',
   ])
 })
 
@@ -58,8 +59,8 @@ test('capitalRows shows the engine figures old and new, rupees with grouping', (
 test('capitalRows prints the edge as a percent and unknown figures as a dash', () => {
   const rows = capitalRows(preview({ proposed: figures({ hi52_edge_pct: null, risk_swing_inr: null }) }))
   const get = (l: string) => rows.find((r) => r.label === l)
-  assert.equal(get('Expected gain needed on 52-week-high trades')?.old, '1.53%')
-  assert.equal(get('Expected gain needed on 52-week-high trades')?.new, '—')
+  assert.equal(get('Edge the gate assumes for 52-week-high trades')?.old, '1.53%')
+  assert.equal(get('Edge the gate assumes for 52-week-high trades')?.new, '—')
   assert.equal(get('Risk per swing trade')?.new, '—')
 })
 
@@ -90,6 +91,54 @@ test('refusalText puts rule ids into plain words and keeps the rupee line', () =
   assert.ok(!/(real|paper):|_/.test(two), two)
   assert.ok(two.includes('Paper account') && two.includes('₹2.00'))
   assert.equal(refusalText('capital changed since the dialog opened'), 'capital changed since the dialog opened')
+})
+
+test('failureText claims "not changed" only for refusals where nothing was written', () => {
+  for (const status of [409, 422, 501]) {
+    assert.equal(
+      failureText(new ApiError(status, 'would trip: real:equity_floor_rung (₹1.00)')),
+      'Capital not changed: would trip: Real account: Account fell below an equity floor (₹1.00)',
+      String(status),
+    )
+  }
+  assert.equal(
+    failureText(new ApiError(503, 'protected config unverified: hash mismatch')),
+    'Capital not changed: protected config unverified: hash mismatch',
+  )
+  assert.equal(
+    failureText(new ApiError(409, 'no price yet for held positions (X), so the brakes can\'t be checked; change capital after the next session\'s close')),
+    'Capital not changed: no price yet for held positions (X), so the brakes can\'t be checked; change capital after the next session\'s close',
+  )
+})
+
+test('failureText on a 503 after the write began never says "not changed"', () => {
+  const out = failureText(new ApiError(503, 'written, but the engine could not reload the limits'))
+  assert.equal(out, 'written, but the engine could not reload the limits')
+  assert.ok(!out.includes('not changed'))
+})
+
+test('failureText on no answer or a network failure says the outcome is unknown', () => {
+  const none = failureText(new NoAnswerError(10))
+  assert.equal(
+    none,
+    "No answer from the engine in time. The capital may still have changed: reopen this dialog to see the engine's value.",
+  )
+  assert.ok(!none.includes('top bar'))
+  const net = failureText(new TypeError('Failed to fetch'))
+  assert.equal(net, 'The engine did not confirm the change (Failed to fetch). Reopen this dialog to see the capital now.')
+  assert.ok(failureText('boom').includes('(boom)'))
+  assert.ok(!net.includes('not changed'))
+  // a status the engine does not use for refusals is not a "nothing written" claim either
+  assert.ok(failureText(new ApiError(500, 'oops')).startsWith('The engine did not confirm the change'))
+})
+
+test('comparisonBase prefers the latest preview base and falls back to the capital at open', () => {
+  assert.equal(comparisonBase('50000', 40000), 50000)
+  assert.equal(comparisonBase('50000.40', 40000), 50000)
+  assert.equal(comparisonBase(null, 40000), 40000)
+  assert.equal(comparisonBase(undefined, 40000), 40000)
+  assert.equal(comparisonBase('', 40000), 40000)
+  assert.equal(comparisonBase('n/a', 40000), 40000)
 })
 
 test('parseCapitalInput reads whole rupees', () => {

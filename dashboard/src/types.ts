@@ -212,8 +212,9 @@ export interface PaperHalt {
 }
 
 /**
- * The latest equity snapshot of the epoch; `pnl` and `capital_base` come from the same row.
- * The `*_pct` fields are the engine's 2-dp percent strings of `capital_base`; absent on older engines.
+ * The latest equity snapshot of the epoch; `pnl` comes from the same row.
+ * `capital_base` is the live starting capital when the engine's limits are verified (O19 §7), else the row's own base.
+ * The `*_pct` fields are the engine's 2-dp percent strings of `capital_base`, with the same base rule; absent on older engines.
  */
 export interface PaperEquity {
   at: string
@@ -296,7 +297,7 @@ export interface PaperTotals {
   wins: number
   voids: number
   void_net: string | null
-  /** 2-dp percent of the equity row's `capital_base`. */
+  /** 2-dp percent of `capital_base`: the live starting capital when the engine's limits are verified (O19 §7), else the row's own base. */
   void_net_pct?: string | null
 }
 

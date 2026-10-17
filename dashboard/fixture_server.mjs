@@ -719,7 +719,7 @@ function rearm(req, res) {
 // GET / POST /config/capital (O19). The engine computes every figure; the fixture scales its own numbers
 // from the 40,000 base. Scenarios: a proposal from 20,000 to 23,999 is refused (would trip the equity floor);
 // a POST for 77,777 answers 409 as if the capital changed under an open dialog; a POST whose
-// expected_current_inr is not the served capital does the same. Anything outside half..double is 422.
+// expected_current_inr is not the served capital does the same; a POST for 55,555 answers 503 (reload failed). Anything outside half..double is 422.
 let capitalNow = 40000
 const money = (n) => (Math.round(n * 100) / 100).toFixed(2)
 function capitalFigures(cap) {
@@ -732,8 +732,9 @@ function capitalFigures(cap) {
     paper_equity_inr: money(cap + 113.3),
     risk_intraday_inr: money((cap + 113.3) * 0.015),
     risk_swing_inr: money((cap + 113.3) * 0.015),
-    day_loss_soft_inr: money(cap * 0.05),
-    day_loss_hard_inr: money(cap * 0.075),
+    // Negative, as the engine reports them: base x config/limits.yaml day_mtm_pct (-5.0 soft, -7.0 hard).
+    day_loss_soft_inr: money(cap * -0.05),
+    day_loss_hard_inr: money(cap * -0.07),
     equity_floor_inr: money(cap * 0.9),
     cumulative_floor_inr: money(cap * 0.85),
     hi52_edge_pct: f < 1 ? money(1.53 * (0.7 + 0.3 * f)) : '1.53',
@@ -763,6 +764,10 @@ function setCapital(req, res) {
     const expected = body?.expected_current_inr
     if (!Number.isInteger(n) || !Number.isInteger(expected)) {
       return json(res, 422, { detail: [{ msg: 'capital_inr and expected_current_inr must be whole numbers' }] })
+    }
+    if (n === 55555) {
+      // The engine signed the file but could not reload it: the capital HAS changed, so the dialog must not say "not changed".
+      return json(res, 503, { ok: false, note: 'limits.yaml was changed and signed, but the engine could not reload it: fixture reload failure; restart the engine before the next session' })
     }
     if (n === 77777 || expected !== capitalNow) {
       return json(res, 409, { ok: false, note: 'capital changed since the dialog opened' })

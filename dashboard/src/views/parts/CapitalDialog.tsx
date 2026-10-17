@@ -5,9 +5,9 @@
  */
 import { useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { NoAnswerError, apiGet } from '../../api'
+import { apiGet } from '../../api'
 import { COPY } from '../../copy/glossary.ts'
-import { capitalRows, parseCapitalInput, refusalText } from '../../lib/capital.ts'
+import { capitalRows, comparisonBase, failureText, parseCapitalInput, refusalText } from '../../lib/capital.ts'
 import type { CapitalRow } from '../../lib/capital.ts'
 import { inr } from '../../lib/format.ts'
 import type { CapitalPreview } from '../../types'
@@ -50,8 +50,11 @@ export function CapitalDialog({
   const alive = useRef(true)
 
   const parsed = parseCapitalInput(text)
+  // "Same amount" is judged against the newest capital the engine reported (a 409 refresh or a change
+  // from another device moves it), not the one at open.
+  const base = comparisonBase(shown?.data.current.capital_inr, currentN)
   // The amount to ask the engine about; null = the current figures only.
-  const proposed = parsed !== null && parsed !== currentN ? parsed : null
+  const proposed = parsed !== null && parsed !== base ? parsed : null
 
   useEffect(() => {
     alive.current = true
@@ -97,7 +100,7 @@ export function CapitalDialog({
       await onConfirm(proposed, expected)
       if (alive.current) onClose()
     } catch (err) {
-      const failure = err instanceof NoAnswerError ? COPY.noAnswer('starting capital') : COPY.capitalRejected(refusalText(reason(err)))
+      const failure = failureText(err)
       // Closed meanwhile (the busy lock makes this a safety net): the dialog has nowhere to show it.
       if (!alive.current) return onLateFailure(failure)
       setError(failure)

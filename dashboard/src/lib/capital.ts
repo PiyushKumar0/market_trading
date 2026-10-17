@@ -1,6 +1,7 @@
 /** Pure helpers for the "Change capital" dialog. Every printed figure is the engine's own string. */
 import type { CapitalFigures, CapitalPreview } from '../types.ts'
-import { ruleTerm } from '../copy/glossary.ts'
+import { ApiError, NoAnswerError } from '../api.ts'
+import { COPY, ruleTerm } from '../copy/glossary.ts'
 import { inr } from './format.ts'
 
 export interface CapitalRow {
@@ -24,7 +25,7 @@ const ROWS: { key: keyof CapitalFigures; label: string; pct?: boolean }[] = [
   { key: 'day_loss_hard_inr', label: "Today's hard loss limit" },
   { key: 'equity_floor_inr', label: 'Equity floor' },
   { key: 'cumulative_floor_inr', label: 'Total loss floor' },
-  { key: 'hi52_edge_pct', label: 'Expected gain needed on 52-week-high trades', pct: true },
+  { key: 'hi52_edge_pct', label: 'Edge the gate assumes for 52-week-high trades', pct: true },
 ]
 
 const show = (v: string | null | undefined, pct?: boolean): string => {
@@ -51,6 +52,31 @@ export function tripText(id: string): string {
 /** The engine's refusal with each `real:`/`paper:` rule id put into plain words; its ₹ line is kept. */
 export function refusalText(raw: string): string {
   return raw.replace(/\b(?:real|paper):[a-z][a-z0-9_]*/g, (id) => tripText(id))
+}
+
+/**
+ * What a failed Confirm tells the owner. "Not changed" is claimed only when the engine said nothing was
+ * written (409/422/501, or 503 protected config unverified); a 503 after the write started, a timeout and a
+ * network failure leave the outcome unknown or changed, so those never say it.
+ */
+export function failureText(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 409 || err.status === 422 || err.status === 501) return COPY.capitalRejected(refusalText(err.message))
+    if (err.status === 503) {
+      return err.message.startsWith('protected config unverified')
+        ? COPY.capitalRejected(refusalText(err.message))
+        : refusalText(err.message)
+    }
+  }
+  if (err instanceof NoAnswerError) return COPY.capitalNoAnswer
+  return COPY.capitalUnconfirmed(err instanceof Error ? err.message : String(err))
+}
+
+/** The capital a proposal is compared against: the latest preview's own base, else the capital at open. */
+export function comparisonBase(latest: string | null | undefined, atOpen: number): number {
+  if (latest === null || latest === undefined || latest.trim() === '') return atOpen
+  const n = Math.round(Number(latest))
+  return Number.isFinite(n) ? n : atOpen
 }
 
 /** "60,000" -> 60000. Whole rupees only: anything else (empty, 0, negative, decimals, exponents) is null. */

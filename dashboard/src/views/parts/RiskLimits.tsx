@@ -60,7 +60,7 @@ export function RiskLimits({
     setOpenError(null)
     try {
       const p = await apiGet<CapitalPreview>('/config/capital')
-      if (p.current.capital_inr === null) setOpenError(COPY.capitalCurrentFailed('the engine has no figure for it'))
+      if (p.current.capital_inr === null) setOpenError(COPY.capitalCurrentFailed(p.refusal ?? 'the engine has no figure for it'))
       else setCapital(p.current.capital_inr)
     } catch (e) {
       setOpenError(COPY.capitalCurrentFailed(e instanceof Error ? e.message : String(e)))
