@@ -1,5 +1,5 @@
 diff --git a/config/limits.yaml b/config/limits.yaml
-index 9b8e901..afe6af9 100644
+index 9b8e901..0a4d0b7 100644
 --- a/config/limits.yaml
 +++ b/config/limits.yaml
 @@ -10,9 +10,11 @@
@@ -15,15 +15,7 @@ index 9b8e901..afe6af9 100644
  
  schema_version: 1
  
-@@ -21,23 +23,23 @@ capital_base_inr: 40000          # ₹40,000 hard cap (O1; 20,000 → 40,000 own
- 
- limits:
-   capital_cap:
--    # Deployed CAPITAL (margin for MIS, cash/notional for CNC) ≤ ₹40,000. Bounds deployed cash, NOT
--    # economic exposure (at 3× MIS, long exposure can reach ~₹80–120k; bounded by max_leverage). (O1)
-+    # Deployed CAPITAL (margin for MIS, cash/notional for CNC) ≤ max_deployed_capital_inr. Bounds deployed
-+    # cash, NOT economic exposure (at 3× MIS, long exposure can reach 2–3× this cap; bounded by max_leverage). (O1)
-     max_deployed_capital_inr: 40000  # 20,000 → 40,000 owner-directed 2026-09-07 (O16)
+@@ -27,17 +29,17 @@ limits:
      on_breach: reject_entry
  
    per_trade_risk:

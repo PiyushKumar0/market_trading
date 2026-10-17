@@ -77,7 +77,7 @@ A rung that is already tripped does not block. So raising capital to climb back 
 
   So no exit path leaves a new unsigned file, or a file the signature doesn't match. The only exception is a hard crash between `os.replace` and COMMIT, which fails closed as today: the next boot is FROZEN.
 - **Audit.** `OwnerConfirmation.note` carries the full old → new table. It lands in `config_audit.diff`, which `GET /config/audit` already shows, because `protected_config.content_snapshot` keeps only the latest file.
-- **Git.** `config/limits.yaml` is git-tracked, so a change leaves it modified. A stash, checkout or reset would revert the bytes and the next boot would FREEZE.
+- **Git.** `config/limits.yaml` is git-tracked, so a change leaves it modified. A stash, checkout or reset would revert the bytes. The next boot would then FREEZE with a flat real book, or KILL with a real position open (lifecycle step 1c; sticky until `/kill_reset`). That second case was a correction from the 2026-10-17 final review.
   - The toast and the Telegram message say "commit config/limits.yaml".
   - COMMANDS gets a recipe that restores the file from `protected_config.content_snapshot`.
   - The manager never stashes `config/`.

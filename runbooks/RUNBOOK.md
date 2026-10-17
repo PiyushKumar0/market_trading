@@ -581,17 +581,26 @@ Confirm is offered only when the engine allows the exact amount.
   - in AUTO mode;
   - when the base moved since the dialog opened, or another write signed the file first;
   - when the signed `limits.yaml` differs from the limits the engine has loaded. It was re-signed outside the
-    dashboard while the engine runs; restart the engine first.
-- **422** when the amount is not whole rupees, is more than double or less than half the current base, equals
-  it, or would **newly** trip a brake. A brake is a floor, the drawdown rung or a day-loss rung, in the real
-  or the paper book. The floors measure lifetime P&L against the base, so a cut while in loss can cross one;
-  the refusal names it. A brake already tripped does not block a raise, and a latched real floor still
-  needs `/rearm`.
+    dashboard while the engine runs; restart the engine first;
+  - when a held position, real or paper, has no price at all: no live price since the last restart and no
+    stored 1-minute bar. The note names the symbols. Change capital after the next session's close.
+- **422** in any of these cases:
+  - the amount is not whole rupees, is more than double or less than half the current base, or equals it;
+  - the change would **newly** trip a brake. A brake is a floor, the drawdown rung or a day-loss rung, in the
+    real or the paper book.
+    - Open positions are valued at their live price. After a restart outside the session they are valued at
+      their last stored 1-minute close, which is what the next session's first check starts from.
+    - The floors measure lifetime P&L against the base, so a cut while in loss can cross one; the refusal
+      names it.
+    - A brake already tripped does not block a raise, and a latched real floor still needs `/rearm`.
+  - `limits.yaml` is not in a layout the dashboard can rewrite (the note starts "limits.yaml layout:" or
+    "limits.yaml structure:"). Change it with the owner reseed flow instead (COMMANDS "Protected config").
 - **503** in any of these cases:
   - `limits.yaml` fails its signature check. An unsigned edit is never re-signed this way; nothing is written.
   - The write failed. The file may have been touched, so run `scripts\protected_config_status.py` before the
     next boot.
-  - The reload failed. The change is signed and the next boot applies it.
+  - The reload failed. The change is signed but NOT live: the engine still runs on the old capital. Restart
+    the engine before the next session, then commit `config/limits.yaml`.
 
 **What changes, at once, with no restart:**
 - every brake and both books read the new base on their next tick (`LimitsEngine.reload()`);
@@ -599,11 +608,24 @@ Confirm is offered only when the engine allows the exact amount.
 - the paper book keeps its epoch and open positions;
 - Telegram gets a `CAPITAL_CHANGED` message;
 - `config_audit` records the full old → new table;
-- hi52's registered edge is capped by its derivation at the new base (`min(registered 1.53, derived)`). A
-  cut lowers it automatically; raising the registered number stays an owner decision.
+- hi52's registered edge is capped by its derivation at the new base (`min(registered 1.53, derived)`).
+  - A cut lowers it automatically; raising the registered number stays an owner decision.
+  - Rec cards show this capped figure as "the edge the risk check uses".
+- the paper floors move with the base. For the D14 no-stop positions these floors (−10% go flat, −15% kill)
+  are the only loss exit:
+  - a raise widens the rupee drawdown the paper book may take before it is flattened;
+  - a cut narrows it.
+  - The change dates are in `config_audit`; read them alongside the D14 verdict.
 
-**Afterwards:** commit `config/limits.yaml` (COMMANDS "Capital change from the dashboard"). An uncommitted
-change reverted by git FREEZES the next boot. `scripts\protected_config_status.py` shows and repairs that.
+**Afterwards:** commit `config/limits.yaml` (COMMANDS "Capital change from the dashboard").
+
+An uncommitted change reverted by git (a stash, checkout, restore, reset or an editor's "discard") fails the
+next boot's signature check:
+- with no real position open, the boot FREEZES;
+- with one open, it KILLS: it flattens, and the kill stays until `/kill_reset` + `/confirm`.
+
+Never reseed to fix it: that signs the old bytes and undoes the change. `scripts\protected_config_status.py`
+shows the mismatch and restores the signed bytes.
 
 **Not changed:** money in the Kite account. The base is the platform's figure, so make sure the funds are
 there before raising it.
@@ -728,3 +750,7 @@ protection failure: a PAPER_ALERT and a market exit for each, at the next tick. 
 is not 0, accept those exits or let the positions close before rolling back. Roll code and config back together
 (`git reset --hard <previous tip>`): the old `PaperSettings` forbids unknown keys, so old code under the new
 `settings.yaml` (`paper.no_stop_strategies`) does not boot at all.
+
+The one exception since O19 is `config/limits.yaml`. A dashboard capital change is signed in state.db, so
+commit it before any rollback. If the two tips differ there, keep the signed bytes across the rollback (COMMANDS
+"Rollback", step 3); otherwise the boot FREEZES, or KILLS with a real position open.

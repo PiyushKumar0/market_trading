@@ -44,8 +44,15 @@ Start-Service mt-engine
 Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|migration_failed|engine_ready|FROZEN' | Select-Object -Last 5
 ```
 
-Rollback: `git reset --hard <previous tip>` + restart (migrations are additive; never drop columns). A failed
-migration is recovered from `data\backups\pre_00NN.db`. Below the M3 tip only while no `is_paper=1` row exists
+Rollback:
+1. Commit an uncommitted `config/limits.yaml` first: it is a dashboard capital change (O19), signed in state.db.
+2. Run `git reset --hard <previous tip>`, then restart. Migrations are additive; never drop columns.
+3. If `config/limits.yaml` differs between the two tips, put the signed bytes back BEFORE the restart:
+   `git checkout <tip you rolled back from> -- config/limits.yaml`. Otherwise the boot FREEZES, or KILLS with a
+   real position open (see "Capital change from the dashboard").
+   - This keeps the capital as signed. To take the capital back too, reseed afterwards ("Protected config").
+
+A failed migration is recovered from `data\backups\pre_00NN.db`. Below the M3 tip only while no `is_paper=1` row exists
 in orders, positions, verdicts, gtts or learning_ledger (older code counts paper rows as real money; query in
 RUNBOOK "Rollback floor"); otherwise paper OFF or `paper.subsystem_enabled: false` and a restart.
 
@@ -216,6 +223,10 @@ url index is dropped) and left 39 urls stored twice, one copy per cluster. A re-
 uv run python scripts\seed_protected_config.py --yes --reseed --note "<why, citing the directive>"
 ```
 
+This flow is not for a mismatch you did not cause. If the boot's `protected_store` check FAILs after a stash,
+checkout, restore or rollback reverted a dashboard capital change, a reseed would sign the old bytes and silently
+undo the change. Use the restore recipe under "Capital change from the dashboard" below.
+
 The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
 the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending. Last
 applied: review 2026-10-11 #6 (`runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch` — removed the
@@ -245,19 +256,27 @@ lines and re-signs the file in one step. The lines are `capital_base_inr`, `max_
 
 ```powershell
 git diff --stat -- config/limits.yaml                            # expect: 1 file, 3 lines changed
-git add config/limits.yaml; git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)"
+git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)" -- config/limits.yaml   # commits this file only
 ```
 
-Never `git stash`, `git checkout -- config/limits.yaml` or `git reset --hard` while that change is
-uncommitted. Each one puts the old bytes back under the new signature, and the next boot FREEZES on
-`protected_store_integrity`. If it happened anyway, check and restore the signed bytes. The tool never
-signs anything; it writes back only the snapshot that already hashes to the recorded signature:
+Never `git stash`, `git checkout -- config/limits.yaml`, `git restore`, `git reset --hard` or an editor's
+"discard changes" while that change is uncommitted. Roll back below a capital-change commit only as the
+Rollback note at the top says. Each of these puts the old bytes back under the new signature, and the next boot
+fails `protected_store_integrity`:
+- with no real position open, it FREEZES;
+- with one open, it KILLS: it flattens, and the kill stays until `/kill_reset` + `/confirm`.
+
+Do not reseed to "fix" it: a reseed signs the old bytes and silently undoes the capital change. Put the signed
+bytes back instead. The tool never signs anything; it writes back only the snapshot that already hashes to the
+recorded signature:
 
 ```powershell
-.venv\Scripts\python.exe scripts\protected_config_status.py                          # read-only; exit 1 = a mismatch
+.venv\Scripts\python.exe scripts\protected_config_status.py                          # read-only; exit 0 OK, 1 mismatch, 2 error
 Stop-Service mt-engine
 .venv\Scripts\python.exe scripts\protected_config_status.py --restore limits.yaml    # the signed bytes go back on disk
 Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
+# A boot that KILLED (protected_store_integrity_live_book) stays killed after the restore: /kill_reset, then /confirm.
+git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)" -- config/limits.yaml   # the restored change is uncommitted again
 ```
 
 The reseed flow above needs a clean `git status`. After a dashboard capital change, commit `limits.yaml`
@@ -266,17 +285,23 @@ first. A reseed that swept the change into an unrelated commit would hide it.
 **Owner follow-up, prepared and not applied:** `runbooks\briefs\limits_comments_base_relative_2026-10-16.patch`.
 It restates the rupee figures in the `limits.yaml` comments (₹36,000 go-flat, −₹2,000 freeze and the like)
 as percentages of the base, so they stay true when the base changes. Values do not change: the parsed YAML
-is identical and the file stays LF. It skips the three value lines the dashboard rewrites, so it applies
-before or after a capital change. Apply it inside the repo (`config/limits.yaml` is `eol=lf`; applied
-outside the repo with `core.autocrlf=true`, `git apply` writes CRLF and the hash changes):
+is identical and the file stays LF.
+
+No hunk edits or borders the three value lines the dashboard rewrites, so it applies before or after a capital
+change. This was checked 2026-10-17 on the committed file and after changes to 60,000 and 20,000. For that
+reason, the O1 comment directly above `max_deployed_capital_inr` keeps its historical ₹40,000 figure.
+
+Apply it inside the repo: `config/limits.yaml` is `eol=lf`, and applied outside the repo with
+`core.autocrlf=true`, `git apply` writes CRLF and the hash changes. The check is read-only, so it runs before
+the engine stops:
 
 ```powershell
+git apply --check runbooks\briefs\limits_comments_base_relative_2026-10-16.patch   # must print nothing; else stop here
 Stop-Service mt-engine
-git apply --check runbooks\briefs\limits_comments_base_relative_2026-10-16.patch   # must print nothing
 git apply runbooks\briefs\limits_comments_base_relative_2026-10-16.patch
 .venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "limits.yaml comments made base-relative (O19 follow-up, owner)"
 Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
-git add config/limits.yaml; git commit -m "limits.yaml comments base-relative (owner): patch + reseed"
+git commit -m "limits.yaml comments base-relative (owner): patch + reseed" -- config/limits.yaml
 ```
 
 ## Tests / verification
