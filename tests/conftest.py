@@ -28,7 +28,7 @@ _PIN_STATE: dict = {}
 
 def _pin_limits_text(text: str) -> str:
     for key, value in PINNED_CAPITAL.items():
-        text, n = re.subn(rf"(?m)^(\s*{key}:[ \t]*)\d+", lambda m, v=value: f"{m.group(1)}{v}", text)
+        text, n = re.subn(rf"(?m)^(\s*{key}:[ \t]*)\d+(?=[ \t]*(?:#|\r?$))", lambda m, v=value: f"{m.group(1)}{v}", text)
         assert n == 1, f"limits.yaml: expected exactly one `{key}:` line, found {n}"
     return text
 

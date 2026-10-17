@@ -1430,7 +1430,7 @@ def test_card_lines_follow_the_plan_order(clock):
     lines = catalog.recommendation_message(_card(clock)).render().splitlines()
     wanted = [
         "BUY BHEL", "stop ₹418.30 = 6.0% below entry · 2.1× daily ATR · rule 6.0% re-anchored from ₹427.90 to ₹445.00",
-        "evidence:", "registered edge 1.53% net ≈ ₹61 — not a forecast", "thesis:", "gate: shrunk 14→9 (bound by per_trade_risk)",
+        "evidence:", "edge 1.53% net ≈ ₹61 (the risk check's figure) — not a forecast", "thesis:", "gate: shrunk 14→9 (bound by per_trade_risk)",
         "cost:", "checklist",
     ]
     at = [next(i for i, ln in enumerate(lines) if ln.startswith(w)) for w in wanted]
@@ -1443,7 +1443,7 @@ def test_card_prints_only_the_data_it_has(clock):
     bare = {"risk_inr": None, "stop_atr_mult": None, "stop_anchor": None, "hold_sessions": None,
             "exit_session": None, "exit_kind": None, "registered_edge_pct": None, "evidence": []}
     text = catalog.recommendation_message(_card(clock, **bare)).render()
-    for absent in ("at risk", "ATR", "re-anchored", "sell by", "pending", "evidence", "registered edge"):
+    for absent in ("at risk", "ATR", "re-anchored", "sell by", "pending", "evidence", "risk check's figure"):
         assert absent not in text
 
 

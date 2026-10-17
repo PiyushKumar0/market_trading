@@ -96,7 +96,8 @@ class MessageKind(StrEnum):
     CAPITAL_CHANGED = "capital_changed"
     """The owner changed ``limits.yaml capital_base_inr`` from the dashboard (O19): the file was
     re-signed and reloaded, so every limit already uses the new base. Old → new for every figure that
-    moved, plus the reminder to commit the file (a revert would FREEZE the next boot)."""
+    moved, plus the reminder to commit the file (a stash or checkout would revert it, and the next boot would FREEZE, or KILL if a real
+    position is open)."""
 
     LOGIN_PROMPT = "login_prompt"
     """The daily Kite login is required — the owner must open the login URL and return the
@@ -895,7 +896,7 @@ def capital_changed(
             f"Starting capital changed by {actor}; every limit now uses it.\n"
             + "\n".join(lines)
             + "\nCommit config/limits.yaml to keep it (a stash or checkout would revert it, and the "
-            "next boot would FREEZE on integrity)."
+            "next boot would FREEZE, or KILL if a real position is open)."
         ),
         severity="warning",
         data={"old": dict(old), "new": dict(new), "actor": actor},
@@ -1185,7 +1186,8 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
     edge = []
     if rec.registered_edge_pct is not None:
         expected = (rec.notional * rec.registered_edge_pct / 100).quantize(Decimal(1), ROUND_HALF_UP)
-        edge.append(f"registered edge {rec.registered_edge_pct}% net ≈ ₹{expected} — not a forecast")
+        edge.append(f"edge {rec.registered_edge_pct}% net ≈ ₹{expected} "
+                    "(the risk check's figure) — not a forecast")
 
     tail = [
         *_gate_lines(rec),

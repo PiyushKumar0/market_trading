@@ -62,9 +62,9 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   smallest equity the §7.1 table still lets the book open a position at (the ``equity_floor_rung``,
   −10% of the ₹40,000 base ⇒ ₹36,000 ⇒ ₹6,000 ⇒ 0.4982% ⇒ 2.0336 − 0.4982 = **1.53**, rounded
   DOWN; pre-O17 at 2.5×: ₹4,800 ⇒ 1.47). The registered edge and this script's floor therefore
-  cannot drift apart: a unit test pins ``registered_edge_pct() == load_settings().hi52.expected_edge_pct``, so an owner change to
-  ``limits.yaml``, to the stop, or to the cost tables fails that test instead of silently leaving a
-  stale edge registered.
+  cannot drift apart: since O19 the unit tests (``test_hi52_edge.py``, ``test_hi52_forward_verdict.py``)
+  pin the registration INPUTS (the registered base, rung, stop and cost tables), so a change to any
+  of them fails a test instead of silently leaving a stale edge registered.
 * **Horizons are measured on their OWN event sets.** A signal old enough for T+10 but not yet for
   T+20 counts in the T+10 cell only. A forward test reads as its data arrives, so the cells have
   different ``n`` and are not comparable with each other — which is also why the verdict reads T+20

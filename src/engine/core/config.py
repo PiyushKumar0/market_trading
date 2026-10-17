@@ -406,9 +406,9 @@ class Hi52Cfg(BaseModel):
     #: ``None`` = NOT registered (the pre-promotion and post-demotion state). The live value lives in
     #: ``settings.yaml`` — one home, owner-visible — with its derivation; the learner never moves it.
     #:
-    #: DERIVATION (one formula, one home in code: ``scripts/hi52_forward_verdict.py``
-    #: ``registered_edge_pct()``, which a unit test pins against the shipped settings value so the
-    #: registered edge and the kill criterion's cost floor cannot drift apart)::
+    #: DERIVATION (one formula, one home in code: ``engine/strategy/hi52_edge.py``, which
+    #: ``scripts/hi52_forward_verdict.py`` delegates to, so the registered edge and the kill
+    #: criterion's cost floor cannot drift apart)::
     #:
     #:     edge = measured T+20 median GROSS − CostModel.breakeven_pct(N, "CNC")
     #:     N    = equity × per_trade_risk.swing_position_pct/100

@@ -298,7 +298,11 @@ class SelfTest:
             out.append(SelfTestCheck(
                 name=f"protected_store:{name}",
                 status=CheckStatus.PASS if ok else CheckStatus.FAIL,
-                detail="" if ok else "hash mismatch or unregistered (R4) — run scripts/seed_protected_config.py",
+                detail="" if ok else (
+                    "hash mismatch or unregistered (R4) — run scripts/protected_config_status.py "
+                    "(a reverted dashboard change: --restore limits.yaml); "
+                    "reseed only after an owner-reviewed edit"
+                ),
                 implies=Implies.NONE if ok else Implies.FROZEN,
             ))
         return out

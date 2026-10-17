@@ -21,6 +21,9 @@ htmlcov/
 data/
 !data/.gitkeep
 
+# Crash leftovers of the protected-config writers (ProtectedStore, protected_config_status --restore).
+config/.*.tmp
+
 # --- Secrets (R10: secrets live in Windows Credential Manager / DPAPI, never on disk) ---
 .env
 *.env

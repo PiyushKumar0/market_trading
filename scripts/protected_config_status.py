@@ -4,7 +4,8 @@
 signature in ``state.db`` ``protected_config``. A dashboard capital change (O19) re-signs
 ``limits.yaml`` and leaves it modified in the git working tree. A ``git stash`` / ``checkout`` /
 ``reset --hard`` before it is committed puts the OLD bytes back under the NEW signature, and the next
-boot FREEZES on integrity. This tool shows that state and repairs it without signing anything.
+boot FREEZES, or KILLS if a real position is open (then /kill_reset + /confirm), on integrity. This
+tool shows that state and repairs it without signing anything.
 
 * Default (read-only, ``state.db`` opened ``mode=ro``): for each file, print the recorded sha256, the
   sha256 of ``content_snapshot`` and of the on-disk bytes. Exit 0 when every on-disk file matches
@@ -12,6 +13,8 @@ boot FREEZES on integrity. This tool shows that state and repairs it without sig
 * ``--restore NAME``: write ``content_snapshot`` back to ``config/NAME``, but ONLY when the snapshot
   hashes to the recorded signature. It restores exactly the bytes the signature already covers, so
   it can never sign or launder an unreviewed edit. Owner-run, with the engine stopped.
+
+Exit codes: 0 OK, 1 mismatch, 2 error (a refusal, an unreadable state.db, a failed write).
 
 Usage::
 
@@ -72,24 +75,40 @@ def restore(conn: sqlite3.Connection, config_dir: Path, name: str) -> str:
     if path.exists() and _sha(path.read_bytes()) == rec[0]:
         return f"{name}: already matches its signature; nothing written"
     tmp = path.with_name(f".{path.name}.{os.getpid()}.restore.tmp")
-    tmp.write_bytes(snapshot)
-    os.replace(tmp, path)
+    try:
+        tmp.write_bytes(snapshot)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return f"{name}: restored the signed snapshot ({rec[0][:12]}…)"
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Protected-config signature status / snapshot restore.")
+    ap = argparse.ArgumentParser(
+        description="Protected-config signature status / snapshot restore.",
+        epilog="Exit codes: 0 OK, 1 mismatch, 2 error.",
+    )
     ap.add_argument("--state-db", type=Path, default=_REPO_ROOT / "data" / "state.db")
     ap.add_argument("--config-dir", type=Path, default=_REPO_ROOT / "config")
     ap.add_argument("--restore", metavar="NAME", default=None,
                     help="write the signed content_snapshot back to config/NAME (engine stopped)")
     args = ap.parse_args(argv)
-    if args.restore:
-        with sqlite3.connect(str(args.state_db), timeout=5.0) as conn:
-            print(restore(conn, args.config_dir, args.restore))
-        return 0
+    try:
+        return _run(args)
+    except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run(args: argparse.Namespace) -> int:
+    # Read-only for both paths: restore() only SELECTs, and a read-write open of a wrong path would
+    # make SQLite create an empty state.db there.
     conn = sqlite3.connect(f"file:{args.state_db.resolve().as_posix()}?mode=ro", uri=True, timeout=5.0)
     try:
+        if args.restore:
+            print(restore(conn, args.config_dir, args.restore))
+            return 0
         rows = status(conn, args.config_dir)
     finally:
         conn.close()

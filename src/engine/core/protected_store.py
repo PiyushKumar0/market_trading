@@ -168,8 +168,9 @@ class ProtectedStore:
         :class:`IntegrityError` and touch nothing. The new bytes go to a per-process temp file that is
         moved into place as the last step before COMMIT; on any exception the transaction is rolled
         back if still open and the file is set to match the recorded signature (see :meth:`_restore`),
-        so no exit path leaves a file its signature does not match. A hard crash between the move and
-        COMMIT is the one exception: the next load fails closed (§2.4).
+        so every exit leaves the file and its signature matched, except two cases: a hard crash
+        between the move and COMMIT, and a failed restore (logged CRITICAL). Both fail closed at the
+        next load (§2.4).
         """
         if not confirmation.confirmed or confirmation.actor != Actor.OWNER:
             raise UnauthorizedUpdate(

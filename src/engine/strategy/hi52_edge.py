@@ -51,7 +51,7 @@ def sizing_notional(
     stop_pct%)`` — the price cancels and the cap is a pure function of these three numbers. The
     other sizing rules do not bind here: ``capital_cap`` allows ₹40,000 deployed against this ~₹6.5k.
 
-    Returns ``REFERENCE_EQUITY_INR``-based arithmetic only; a non-positive or non-finite input is a
+    Returns arithmetic on the ``equity`` passed in only (no module constant); a non-positive or non-finite input is a
     refusal (``ValueError``) rather than a silently tiny notional, because a tiny notional means a
     huge cost floor and a spurious DEMOTE.
     """
