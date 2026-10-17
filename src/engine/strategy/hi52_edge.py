@@ -152,6 +152,23 @@ class StrategyEdges(Mapping[str, Decimal]):
             return registered
         return min(registered, derived)
 
+    def edge_for_table(self, sid: str, table: LimitTable) -> Decimal:
+        """The edge the gate would use for ``sid`` if ``table`` were live (O19 capital preview).
+
+        Same rule as a live read: registered for every strategy but ``hi52``, ``min(registered,
+        derived at table)`` for it, and the registered edge when the derivation fails. Leaves the live
+        read's per-table cache alone, so previewing a proposal never costs the gate a re-derivation.
+        """
+        registered = self._registered[sid]
+        if sid != hi52.STRATEGY_ID:
+            return registered
+        try:
+            derived = derived_edge_pct(table, self._cost_model)
+        except Exception as exc:  # noqa: BLE001 - mirrors the live read: never raise, never raise an edge
+            _log.warning("hi52_edge_derivation_failed", error=str(exc), at="edge_for_table")
+            return registered
+        return min(registered, derived)
+
     def __iter__(self) -> Iterator[str]:
         return iter(self._registered)
 

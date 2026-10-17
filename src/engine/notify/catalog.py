@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Mapping
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
@@ -91,6 +92,11 @@ class MessageKind(StrEnum):
     TRADE_WINDOW_CHANGED = "trade_window_changed"
     """The owner changed the trade window via ``/trade_window`` or the dashboard (§3.2.7/§7.1);
     sticky state written, audited, applied immediately and echoed back to the owner (line §3.2.4)."""
+
+    CAPITAL_CHANGED = "capital_changed"
+    """The owner changed ``limits.yaml capital_base_inr`` from the dashboard (O19): the file was
+    re-signed and reloaded, so every limit already uses the new base. Old → new for every figure that
+    moved, plus the reminder to commit the file (a revert would FREEZE the next boot)."""
 
     LOGIN_PROMPT = "login_prompt"
     """The daily Kite login is required — the owner must open the login URL and return the
@@ -830,6 +836,69 @@ def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -
         ),
         severity="info",
         data={"start": start, "end": end, "buffer_min": buffer_min, "actor": actor},
+    )
+
+
+#: ``CapitalChanger`` figure keys in the dashboard dialog's order and wording (redesign §15).
+_CAPITAL_FIGURES: tuple[tuple[str, str], ...] = (
+    ("capital_inr", "Starting capital"),
+    ("max_deployed_capital_inr", "Most capital in use at once"),
+    ("cnc_notional_inr", "Most in one stock"),
+    ("equity_inr", "Equity on record"),
+    ("paper_equity_inr", "Paper equity"),
+    ("risk_intraday_inr", "Risk per intraday trade"),
+    ("risk_swing_inr", "Risk per swing trade"),
+    ("day_loss_soft_inr", "Today's loss limit"),
+    ("day_loss_hard_inr", "Today's hard loss limit"),
+    ("equity_floor_inr", "Equity floor"),
+    ("cumulative_floor_inr", "Total loss floor"),
+    ("hi52_edge_pct", "Expected gain needed on 52-week-high trades"),
+)
+
+
+def _capital_figure(key: str, value: str | None, *, whole: bool = False) -> str:
+    """One engine figure string as owner text: ``₹40,000.00``, ``-₹2,000.00``, ``1.53%``, ``—``.
+    A string that is not a number is shown as given: this helper must never stop the message."""
+    if value is None or value == "":
+        return "—"
+    if key.endswith("_pct"):
+        return f"{value}%"
+    try:
+        amount = Decimal(value).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        sign = "-" if amount < 0 else ""
+        if whole and amount == amount.to_integral_value():
+            return f"{sign}₹{abs(amount):,.0f}"
+        return f"{sign}₹{abs(amount):,.2f}"
+    except (ArithmeticError, ValueError):
+        return value
+
+
+def capital_changed(
+    *, old: Mapping[str, str | None], new: Mapping[str, str | None], actor: str
+) -> CatalogMessage:
+    """The capital base was changed and is live (O19 ``CAPITAL_CHANGED``). ``old``/``new`` are the
+    ``CapitalChanger`` figure tables (decimal strings, ``None`` where unknown)."""
+    known = [key for key, _label in _CAPITAL_FIGURES]
+    extra = [key for key in (*old, *new) if key not in known]
+    labels = dict(_CAPITAL_FIGURES)
+    lines = [
+        f"{labels.get(key, key)}: {_capital_figure(key, old.get(key))} → {_capital_figure(key, new.get(key))}"
+        for key in (*known, *dict.fromkeys(extra))
+        if key in old or key in new
+    ]
+    title_old = _capital_figure("capital_inr", old.get("capital_inr"), whole=True)
+    title_new = _capital_figure("capital_inr", new.get("capital_inr"), whole=True)
+    return CatalogMessage(
+        kind=MessageKind.CAPITAL_CHANGED,
+        title=f"Capital {title_old} → {title_new}",
+        body=(
+            f"Starting capital changed by {actor}; every limit now uses it.\n"
+            + "\n".join(lines)
+            + "\nCommit config/limits.yaml to keep it (a stash or checkout would revert it, and the "
+            "next boot would FREEZE on integrity)."
+        ),
+        severity="warning",
+        data={"old": dict(old), "new": dict(new), "actor": actor},
     )
 
 

@@ -1546,6 +1546,15 @@ async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, m
          MessageKind.KILL, "critical", ("KILL SWITCH ENGAGED", "cumulative_floor")),
         (catalog.trade_window_changed(start="09:30", end="10:00", buffer_min=5, actor="owner"),
          MessageKind.TRADE_WINDOW_CHANGED, "info", ("09:30-10:00", "buffer 5m")),
+        (catalog.capital_changed(
+            old={"capital_inr": "40000.00", "day_loss_soft_inr": "-2000.00", "hi52_edge_pct": "1.53",
+                 "paper_equity_inr": None},
+            new={"capital_inr": "60000.00", "day_loss_soft_inr": "-3000.00", "hi52_edge_pct": "1.53",
+                 "paper_equity_inr": None},
+            actor="owner"),
+         MessageKind.CAPITAL_CHANGED, "warning",
+         ("Capital ₹40,000 → ₹60,000", "-₹2,000.00 → -₹3,000.00", "1.53% → 1.53%",
+          "Commit config/limits.yaml to keep it")),
     ],
 )
 def test_catalog_helpers_render_clean_owner_text(message, kind, severity, fragments):
