@@ -242,9 +242,9 @@ class ProtectedStore:
                 os.replace(tmp, path)  # must stay the last statement: COMMIT follows immediately
         except BaseException:
             try:
-                # transaction() does not ROLLBACK when COMMIT itself fails, and SQLite then keeps the
-                # transaction open; a later COMMIT on this shared connection would then record the new
-                # signature over the restored old bytes.
+                # transaction() rolls back a failed COMMIT itself. This guard remains for a ROLLBACK
+                # that failed there (logged CRITICAL): left open, a later COMMIT on this shared
+                # connection would record the new signature over the restored old bytes.
                 if not began_outside and self._conn.in_transaction:
                     try:
                         self._conn.execute("ROLLBACK")

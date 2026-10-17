@@ -168,6 +168,10 @@ class _FailOnEventInsert:
         self._real = real
         self.failures = 0
 
+    @property
+    def in_transaction(self) -> bool:      # read by core.db.transaction() before its ROLLBACK
+        return self._real.in_transaction
+
     def execute(self, sql, *args, **kw):
         if sql.lstrip().upper().startswith("INSERT INTO ORDER_EVENTS"):
             self.failures += 1
