@@ -75,7 +75,9 @@ A rung that is already tripped does not block. So raising capital to climb back 
   - the bytes go to a temp file, which is moved into place with `os.replace` inside the transaction, before COMMIT;
   - on any exception, the old bytes are restored and the temp file removed.
 
-  So no exit path leaves a new unsigned file, or a file the signature doesn't match. The only exception is a hard crash between `os.replace` and COMMIT, which fails closed as today: the next boot is FROZEN.
+  So no exit path leaves a new unsigned file, or a file the signature doesn't match. There are two exceptions, and both fail closed at the next boot, as today:
+  - a hard crash between `os.replace` and COMMIT;
+  - a failed restore, which is logged CRITICAL. The 2026-10-17 final review added this second case.
 - **Audit.** `OwnerConfirmation.note` carries the full old → new table. It lands in `config_audit.diff`, which `GET /config/audit` already shows, because `protected_config.content_snapshot` keeps only the latest file.
 - **Git.** `config/limits.yaml` is git-tracked, so a change leaves it modified. A stash, checkout or reset would revert the bytes. The next boot would then FREEZE with a flat real book, or KILL with a real position open (lifecycle step 1c; sticky until `/kill_reset`). That second case was a correction from the 2026-10-17 final review.
   - The toast and the Telegram message say "commit config/limits.yaml".

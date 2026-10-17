@@ -79,9 +79,10 @@ FIGURE_KEYS: tuple[str, ...] = (
 #: (``paper_runtime.store_last_mark_fn``; the same shape as its ``LastMarkFn``).
 LastMark = Callable[[str, datetime], Awaitable[tuple[Decimal, datetime] | None]]
 
-#: Bounds the stored-price prefetch as a whole (paper's restart seeding allows 30 s). Kept short: the
-#: prefetch and the notify wait together stay inside the dashboard's 15 s request abort.
-PREFETCH_S = 8.0
+#: Bounds the stored-price prefetch as a whole (paper's restart seeding allows 30 s). Kept short: a GET
+#: stays inside the dashboard's 8 s read abort, and a POST's prefetch plus the notify wait inside its
+#: 15 s write abort, so the owner sees the engine's own answer (dashboard/src/api.ts).
+PREFETCH_S = 5.0
 #: How long ``apply`` waits on the Telegram send before answering; the send itself keeps running.
 NOTIFY_WAIT_S = 5.0
 
@@ -92,7 +93,8 @@ _MERGE_TAG = "tag:yaml.org,2002:merge"
 
 class CapitalRefused(Exception):
     """A refused capital change: ``status`` is the HTTP status the route answers (409, 422 or 503),
-    ``note`` the owner-facing reason (the dashboard prints it after "Capital not changed:")."""
+    ``note`` the owner-facing reason. The dashboard prints it, after "Capital not changed:" only when nothing
+    was written (dashboard/src/lib/capital.ts ``failureText``)."""
 
     def __init__(self, status: int, note: str) -> None:
         super().__init__(note)
@@ -300,7 +302,7 @@ def _unpriced_refusal(unpriced: Mapping[str, list[str]]) -> CapitalRefused | Non
     held = "; ".join(f"{scope}: {', '.join(symbols)}" for scope, symbols in unpriced.items())
     return CapitalRefused(
         409, f"no price yet for held positions ({held}), so the brakes can't be checked; "
-             "change capital after the next session's close")
+             "retry in a minute, and if it persists, change capital after the next session's close")
 
 
 # --------------------------------------------------------------------------- the changer

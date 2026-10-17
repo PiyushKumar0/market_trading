@@ -646,7 +646,9 @@ async def run() -> int:
         limits_engine.load()
     except IntegrityError:
         _log.warning("limits_unverified_at_boot",
-                     hint="scripts/seed_protected_config.py; using the shipped fallback capital base")
+                     hint="scripts/protected_config_status.py (a reverted dashboard change: --restore "
+                          "limits.yaml); reseed only after an owner-reviewed edit; using the shipped "
+                          "fallback capital base")
     exposure = ExposureTracker(conn, clock, _limits_capital_base(limits_engine), mark_price=mark_price)
 
     # --- owner I/O alert sink (Telegram if configured, else log-only) ---

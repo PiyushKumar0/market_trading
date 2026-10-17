@@ -106,8 +106,8 @@ test('failureText claims "not changed" only for refusals where nothing was writt
     'Capital not changed: protected config unverified: hash mismatch',
   )
   assert.equal(
-    failureText(new ApiError(409, 'no price yet for held positions (X), so the brakes can\'t be checked; change capital after the next session\'s close')),
-    'Capital not changed: no price yet for held positions (X), so the brakes can\'t be checked; change capital after the next session\'s close',
+    failureText(new ApiError(409, 'no price yet for held positions (X), so the brakes can\'t be checked; retry in a minute, and if it persists, change capital after the next session\'s close')),
+    'Capital not changed: no price yet for held positions (X), so the brakes can\'t be checked; retry in a minute, and if it persists, change capital after the next session\'s close',
   )
 })
 

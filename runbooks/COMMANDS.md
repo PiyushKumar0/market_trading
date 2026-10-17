@@ -44,13 +44,17 @@ Start-Service mt-engine
 Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|migration_failed|engine_ready|FROZEN' | Select-Object -Last 5
 ```
 
-Rollback:
+Rollback (in this order; the restart comes last):
 1. Commit an uncommitted `config/limits.yaml` first: it is a dashboard capital change (O19), signed in state.db.
-2. Run `git reset --hard <previous tip>`, then restart. Migrations are additive; never drop columns.
-3. If `config/limits.yaml` differs between the two tips, put the signed bytes back BEFORE the restart:
-   `git checkout <tip you rolled back from> -- config/limits.yaml`. Otherwise the boot FREEZES, or KILLS with a
-   real position open (see "Capital change from the dashboard").
-   - This keeps the capital as signed. To take the capital back too, reseed afterwards ("Protected config").
+2. Note the tip you are leaving: `$from = git rev-parse HEAD`.
+3. `git reset --hard <previous tip>`. Do NOT restart yet. Migrations are additive; never drop columns.
+4. Check whether `config/limits.yaml` differs between the two tips:
+   `git diff --quiet <previous tip> $from -- config/limits.yaml` (exit 1 means it differs).
+   - If it differs, put the signed bytes back: `git checkout $from -- config/limits.yaml`, then commit them
+     (`git commit -m "..." -- config/limits.yaml`). Skip this and the boot FREEZES, or KILLS with a real
+     position open (see "Capital change from the dashboard").
+   - This keeps the capital as signed. To take the capital back too, reseed after the restart ("Protected config").
+5. Restart.
 
 A failed migration is recovered from `data\backups\pre_00NN.db`. Below the M3 tip only while no `is_paper=1` row exists
 in orders, positions, verdicts, gtts or learning_ledger (older code counts paper rows as real money; query in

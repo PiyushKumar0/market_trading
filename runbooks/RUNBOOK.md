@@ -470,7 +470,7 @@ An entry card, top to bottom (BHEL 10-06 as it now reads). A line is omitted whe
 BUY BHEL · swing/CNC · qty 9 (notional ₹4005.00) · level 445.00 (limit-at-level) · ₹241 at risk to the stop · sell by the close on 2026-11-03 (session 20)
 stop ₹418.30 = 6.0% below entry · 2.1× daily ATR · rule 6.0% re-anchored from ₹427.90 to ₹445.00
 evidence: backtest (fixed T+20 hold, no stop): n …, hit …, median net …
-registered edge 1.53% net ≈ ₹61 — not a forecast
+edge 1.53% net ≈ ₹61 (the risk check's figure) — not a forecast
 thesis: …
 gate: shrunk 14→9 (bound by per_trade_risk)
 cost: …
@@ -483,7 +483,8 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
   "stop / target; time cap <date>" instead.
 - **Stop:** hi52/ins re-anchor the stop to the delivered entry at the rule's percentage; the "re-anchored" tail
   shows the scanner's entry it moved from.
-- **Expected ₹:** shown only for registered edges, as notional × edge. It is a historical median, not a forecast.
+- **Expected ₹:** shown only for a strategy with an edge on record, as notional × the edge the risk check uses: the
+  registered research edge, which for hi52 is capped by what costs allow at the current capital (O19). It is not a forecast.
 - **Gate:** "shrunk A→B" means approved at the smaller size, the named rule bounding it. `(FAILED)` marks any other failed rule.
 - **Footer:** always last. `/veto` takes one reason code.
 - Confidence is not on the card (it stays in the payload and the gate).
@@ -583,7 +584,8 @@ Confirm is offered only when the engine allows the exact amount.
   - when the signed `limits.yaml` differs from the limits the engine has loaded. It was re-signed outside the
     dashboard while the engine runs; restart the engine first;
   - when a held position, real or paper, has no price at all: no live price since the last restart and no
-    stored 1-minute bar. The note names the symbols. Change capital after the next session's close.
+    stored 1-minute bar. The note names the symbols. The same refusal follows a stored-price read that failed or
+    took too long. Retry in a minute; if it persists, change capital after the next session's close.
 - **422** in any of these cases:
   - the amount is not whole rupees, is more than double or less than half the current base, or equals it;
   - the change would **newly** trip a brake. A brake is a floor, the drawdown rung or a day-loss rung, in the
@@ -752,5 +754,5 @@ is not 0, accept those exits or let the positions close before rolling back. Rol
 `settings.yaml` (`paper.no_stop_strategies`) does not boot at all.
 
 The one exception since O19 is `config/limits.yaml`. A dashboard capital change is signed in state.db, so
-commit it before any rollback. If the two tips differ there, keep the signed bytes across the rollback (COMMANDS
-"Rollback", step 3); otherwise the boot FREEZES, or KILLS with a real position open.
+commit it before any rollback. If the two tips differ there, keep the signed bytes across the rollback, before
+the restart (COMMANDS "Rollback", step 4); otherwise the boot FREEZES, or KILLS with a real position open.

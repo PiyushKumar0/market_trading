@@ -482,7 +482,7 @@ async def test_a_held_position_with_no_price_at_all_refuses_409(tmp_path, conn, 
     _open_position(conn, "P2", "CCC")
     _open_position(conn, "PO", "BBB", paper=True)
     note = ("no price yet for held positions (real: AAA, CCC; paper: BBB), so the brakes can't be "
-            "checked; change capital after the next session's close")
+            "checked; retry in a minute, and if it persists, change capital after the next session's close")
     before = (rig.limits_path.read_bytes(), rig.signature(), len(rig.audit_rows()))
     with pytest.raises(CapitalRefused) as exc:
         await rig.changer.apply(60000, 40000)
@@ -504,7 +504,8 @@ async def test_the_missing_price_note_names_only_the_unpriced_book(tmp_path, con
     _open_position(conn, "PO", "BBB", paper=True)
     preview = await rig.changer.preview(None)
     assert preview["refusal"] == ("no price yet for held positions (paper: BBB), so the brakes can't be "
-                                  "checked; change capital after the next session's close")
+                                  "checked; retry in a minute, and if it persists, change capital after the "
+                                  "next session's close")
     assert preview["current"]["equity_inr"] == "40000.00" and preview["current"]["paper_equity_inr"] is None
 
 
