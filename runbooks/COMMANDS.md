@@ -232,8 +232,13 @@ checkout, restore or rollback reverted a dashboard capital change, a reseed woul
 undo the change. Use the restore recipe under "Capital change from the dashboard" below.
 
 The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
-the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending. Last
-applied: review 2026-10-11 #6 (`runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch` — removed the
+the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending.
+
+Last applied: the O19 `limits.yaml` comments patch, run 2026-10-18 00:03 on the owner's explicit instruction
+with the engine stopped. limits.yaml was re-signed `2308f007…` (058e36e) with envelope.yaml unchanged, and both
+were verified PASS by the boot self-test.
+
+Before it: review 2026-10-11 #6 (`runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch` — removed the
 unread `cat.confirm_vol_mult` + `cat.max_hold_days`), run 2026-10-12 00:55 on the owner's explicit
 instruction with the engine stopped; envelope.yaml re-signed `67d9c1ea…`, limits.yaml unchanged `5d8b52cb…`,
 both verified PASS by the self-test check before any boot. Before it: O17 (e148a4e, 2026-09-24, owner). If a
@@ -286,7 +291,7 @@ git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)" -- config/
 The reseed flow above needs a clean `git status`. After a dashboard capital change, commit `limits.yaml`
 first. A reseed that swept the change into an unrelated commit would hide it.
 
-**Owner follow-up, prepared and not applied:** `runbooks\briefs\limits_comments_base_relative_2026-10-16.patch`.
+**Owner follow-up, APPLIED 2026-10-18 (058e36e; limits.yaml re-signed `2308f007…`):** `runbooks\briefs\limits_comments_base_relative_2026-10-16.patch`.
 It restates the rupee figures in the `limits.yaml` comments (₹36,000 go-flat, −₹2,000 freeze and the like)
 as percentages of the base, so they stay true when the base changes. Values do not change: the parsed YAML
 is identical and the file stays LF.

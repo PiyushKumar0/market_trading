@@ -1,5 +1,28 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-18 00:45 — limits.yaml comments patch applied, transaction() fixed, build worktrees removed (owner: "1. Apply limits.yaml patch 2. Fix the transactions() bug 3. Remove extra unnecessary worktrees")
+
+- **limits.yaml comments patch (058e36e):**
+  - applied with the engine stopped, after a read-only `git apply --check`;
+  - comments only: the parsed YAML and the LimitTable are identical, and the file is LF;
+  - reseed: `5d8b52cb` → `2308f007`; `protected_config_status` OK and `ProtectedStore.verify` True;
+  - envelope unchanged (`67d9c1ea`).
+- **`core.db.transaction()` (8045d60):**
+  - The defects:
+    - a failed COMMIT left the transaction open on the shared connection, so every later BEGIN failed (the kill switch's persist included);
+    - a ROLLBACK after SQLite's own rollback masked the real error ("no transaction is active").
+  - The fix: COMMIT moved inside the `try`; ROLLBACK runs only while `in_transaction`; a failing ROLLBACK is logged CRITICAL and never raised. BEGIN stays outside the `try`.
+  - Tests: 7 new, on real SQLite (a deferred FK fails the COMMIT); 3 of them fail on the old code. `test_oms_store`'s proxy forwards `in_transaction`.
+  - An independent opus review approved it: none of the 47 call sites depends on the old behaviour, and its minors are folded in.
+  - Full suite 4443 passed, 20 skipped (10m03s, run alone).
+  - Boot check 00:31: selftest all PASS (`protected_store:limits.yaml` on the new signature), `startup_complete`, `engine_ready`.
+  - Its one ERROR was a Telegram `TimedOut` on a shutdown-time send (network, unrelated).
+  - Engine **stopped** again at 00:40 (owner's state).
+- **Worktrees removed:** `mt_cap_probe`, `mt_cap_t1`, `mt_cap_t2`, `mt_cap_t3`, `mt_cap_t4`, `mt_cap_t5`, `mt_cap_t5b`, `mt_cap_t5c`, `mt_cap_t6`, `mt_capital`, `mt_nostop` and `mt_wip`.
+  - Every one was clean and fully contained in `phase3` (`git cherry`: 0 unpicked). The probe's only change was its throwaway 60k `limits.yaml`.
+  - Each `.venv` and `node_modules` junction was unlinked with `rmdir` first; the live venv and `node_modules` were verified intact.
+  - Their branches remain (all contained in `phase3`).
+
 ## 2026-10-17 23:50 — O19 capital change from the dashboard merged into phase3 (owner: "merge the changes to phase3")
 
 - **Built** on `wip/capital-change` (17 commits on 179cd45, now fast-forwarded into `phase3` at 2b74d77):
