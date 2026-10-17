@@ -35,7 +35,7 @@ import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from engine.api.kite_callback import build_kite_callback_router
 from engine.core.config import Settings, load_settings, repo_root
@@ -47,6 +47,7 @@ from engine.core.protected_store import IntegrityError
 from engine.core.scope import scope_sql
 from engine.core.secrets import DASHBOARD_TOKEN, Secrets
 from engine.intelligence.events import TOPIC_BUDGET_STATE
+from engine.ops.capital import CapitalRefused
 from engine.ops.paper_summary import paper_summary
 from engine.ops.scorecard import LABEL, scorecard
 from engine.risk.events import TOPIC_KILL_STATE, TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_TRADE_WINDOW
@@ -142,6 +143,14 @@ class PaperBody(BaseModel):
     enabled: StrictBool
 
 
+class CapitalBody(BaseModel):
+    """Owner capital change for ``POST /config/capital`` (O19). Strict whole rupees: ``60000.0`` and
+    ``"60000"`` are refused here, so the changer only ever sees an ``int``."""
+
+    capital_inr: StrictInt = Field(ge=1)
+    expected_current_inr: StrictInt = Field(ge=1)
+
+
 class KillBody(BaseModel):
     """Owner kill payload for ``POST /kill`` (single-step, fast; §7.2)."""
 
@@ -213,6 +222,7 @@ def create_app(
     paper_control: Any = None,
     paper_view: Any = None,
     latch: Any = None,
+    capital: Any = None,
 ) -> FastAPI:
     """Construct the dashboard ``FastAPI`` app (§3.2.11).
 
@@ -245,6 +255,7 @@ def create_app(
     app.state.paper_control = paper_control
     app.state.paper_view = paper_view
     app.state.latch = latch
+    app.state.capital = capital   # CapitalChanger (O19); None = the capital routes answer 501
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
@@ -705,6 +716,38 @@ def create_app(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid trade window (rejected, unchanged)")
         _log.warning("trade_window_set_via_api", start=body.start, end=body.end)
         return {"ok": True}
+
+    # ----------------------------------------------------------------- capital (O19, design 2026-10-16 §5)
+    def _capital_unwired() -> JSONResponse:
+        return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                            content={"ok": False, "note": "capital change not wired"})
+
+    @app.get("/config/capital")
+    async def get_capital(_: Owner, proposed: int | None = None) -> Any:
+        """The capital dialog's figures, and the verdict on ``proposed`` when given. Never writes."""
+        capital = app.state.capital
+        if capital is None:
+            return _capital_unwired()
+        try:
+            return capital.preview(proposed)
+        except CapitalRefused as e:
+            return JSONResponse(status_code=e.status, content={"ok": False, "note": e.note})
+
+    @app.post("/config/capital")
+    async def set_capital(body: CapitalBody, _: Owner) -> Any:
+        """Owner capital change. ``async def`` on purpose (ruling R7): ``apply`` runs the verified read
+        through the limits reload with no await, which only holds on the event loop; a sync route would
+        run it in a worker thread, interleaved with the ticks."""
+        capital = app.state.capital
+        if capital is None:
+            return _capital_unwired()
+        try:
+            return await capital.apply(body.capital_inr, body.expected_current_inr)
+        except CapitalRefused as e:
+            return JSONResponse(status_code=e.status, content={"ok": False, "note": e.note})
+        except Exception:
+            _log.exception("capital_change_failed")
+            raise
 
     # ----------------------------------------------------------------- params (GET + POST, §6.3)
     @app.get("/config/params")

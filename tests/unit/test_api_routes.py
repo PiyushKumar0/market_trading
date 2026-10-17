@@ -1013,3 +1013,111 @@ def test_db_query_market_connection_is_memory_bounded(clock, market_store) -> No
     value, unit = limit.split()
     assert unit in ("GiB", "GB"), limit
     assert float(value) <= 8.0, limit
+
+
+# --------------------------------------------------------------------------- /config/capital (O19 Task 5b)
+def _capital_client(tmp_path, conn, *, wired: bool = True, at=None):
+    """A client over a temp-config ProtectedStore + LimitsEngine (capital pinned at 40000), a clock
+    AFTER the 2026-06-17 close (the shared ``clock`` fixture sits inside the session) and a real
+    CapitalChanger. Returns (client, limits_engine)."""
+    from datetime import datetime
+
+    from engine.core.clock import IST, Clock
+    from engine.ops.capital import CapitalChanger
+
+    after_close = at or datetime(2026, 6, 17, 16, 0, tzinfo=IST)
+    cl = Clock(time_source=lambda: after_close)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    for name in ("limits.yaml", "envelope.yaml"):
+        (cfg / name).write_bytes((REAL_CONFIG / name).read_bytes())
+    ps = ProtectedStore(cfg, conn, cl)
+    ps.register_initial("limits.yaml", OWNER_OK)
+    ps.register_initial("envelope.yaml", OWNER_OK)
+    limits = LimitsEngine(ps)
+    changer = CapitalChanger(
+        conn=conn, clock=cl, calendar=NSECalendar(REAL_CONFIG / "calendar", cl), store=ps, limits=limits,
+        mode=ModeManager(conn, cl), real=ExposureTracker(conn, cl, lambda: limits.load().capital_base_inr),
+        paper_mark=None, edges=None, notify=None,
+    )
+    return _client(clock=cl, conn=conn, capital=changer if wired else None), limits
+
+
+def test_get_capital_shows_the_current_figures_and_the_verdict(tmp_path, conn) -> None:
+    client, _ = _capital_client(tmp_path, conn)
+    r = client.get("/config/capital", headers=AUTH)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["current"]["capital_inr"] == "40000.00"
+    assert {"allowed", "refusal"} <= body.keys()
+
+
+def test_get_capital_with_a_proposal_shows_the_proposed_figures(tmp_path, conn) -> None:
+    client, _ = _capital_client(tmp_path, conn)
+    body = client.get("/config/capital", params={"proposed": 60000}, headers=AUTH).json()
+    assert body["allowed"] is True
+    assert body["proposed"]["capital_inr"] == "60000.00"
+
+
+def test_post_capital_applies_and_the_next_get_shows_it(tmp_path, conn) -> None:
+    client, limits = _capital_client(tmp_path, conn)
+    r = client.post("/config/capital", headers=AUTH,
+                    json={"capital_inr": 60000, "expected_current_inr": 40000})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert limits.load().capital_base_inr == Decimal("60000")
+    assert client.get("/config/capital", headers=AUTH).json()["current"]["capital_inr"] == "60000.00"
+
+
+def test_post_capital_with_a_stale_expectation_is_409(tmp_path, conn) -> None:
+    client, limits = _capital_client(tmp_path, conn)
+    r = client.post("/config/capital", headers=AUTH,
+                    json={"capital_inr": 60000, "expected_current_inr": 50000})
+    assert r.status_code == 409
+    body = r.json()
+    assert body["ok"] is False and body["note"]
+    assert limits.load().capital_base_inr == Decimal("40000")
+
+
+@pytest.mark.parametrize("payload", [
+    {"capital_inr": 0, "expected_current_inr": 40000},
+    {"capital_inr": 60000, "expected_current_inr": 0},
+    {"capital_inr": -5, "expected_current_inr": 40000},
+    {"capital_inr": 60000.5, "expected_current_inr": 40000},
+    {"capital_inr": "60000", "expected_current_inr": 40000},
+])
+def test_post_capital_out_of_bounds_body_is_422(tmp_path, conn, payload) -> None:
+    client, _ = _capital_client(tmp_path, conn)
+    assert client.post("/config/capital", headers=AUTH, json=payload).status_code == 422
+
+
+def test_post_capital_a_refusal_from_the_changer_keeps_its_status(tmp_path, conn) -> None:
+    client, _ = _capital_client(tmp_path, conn)
+    r = client.post("/config/capital", headers=AUTH,
+                    json={"capital_inr": 90000, "expected_current_inr": 40000})   # more than double
+    assert r.status_code == 422 and r.json()["ok"] is False
+
+
+def test_capital_routes_unwired_are_501(tmp_path, conn) -> None:
+    client, _ = _capital_client(tmp_path, conn, wired=False)
+    for r in (client.get("/config/capital", headers=AUTH),
+              client.post("/config/capital", headers=AUTH,
+                          json={"capital_inr": 60000, "expected_current_inr": 40000})):
+        assert r.status_code == 501
+        assert r.json() == {"ok": False, "note": "capital change not wired"}
+
+
+def test_capital_routes_need_the_token(tmp_path, conn) -> None:
+    client, _ = _capital_client(tmp_path, conn)
+    assert client.post("/config/capital", json={"capital_inr": 60000,
+                                                "expected_current_inr": 40000}).status_code == 401
+    assert client.get("/config/capital").status_code == 401
+
+
+def test_post_capital_is_an_async_route() -> None:
+    """Ruling R7: a sync route would run in a worker thread, off the loop the ticks run on."""
+    import inspect
+
+    app = create_app(secrets=_FakeSecrets(_TOKEN))
+    route = next(r for r in app.routes if getattr(r, "path", "") == "/config/capital" and "POST" in r.methods)
+    assert inspect.iscoroutinefunction(route.endpoint)

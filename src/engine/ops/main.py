@@ -106,6 +106,7 @@ from engine.oms.protection import ProtectionManager
 from engine.oms.reconcile import Reconciler
 from engine.oms.state import PlatformOrder
 from engine.ops.calendar_horizon import check_calendar_horizon
+from engine.ops.capital import CapitalChanger
 from engine.ops.early_hydration import EarlyHydration
 from engine.ops.feed_freshness import FeedFreshnessJob, FeedFreshnessResult
 from engine.ops.health import HealthMonitor
@@ -1785,10 +1786,19 @@ async def run() -> int:
     session.add_login_hook(early_hydration.on_login)
 
     # --- dashboard API ---
+    # O19: the owner's capital change. ONE changer on the live tracker, the gate's own StrategyEdges
+    # and the paper book's mark (without it a cut could latch a paper floor unchecked).
+    capital = CapitalChanger(
+        conn=conn, clock=clock, calendar=calendar, store=protected_store, limits=limits_engine,
+        mode=mode, real=exposure,
+        paper_mark=paper.view().mark if paper is not None else None,
+        edges=strategy_edges, notify=notify,
+    )
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,
                       protected_store=protected_store, exposure=exposure, governor=governor,
                       limits_engine=limits_engine, market_store=store, paper_control=paper_control,
-                      paper_view=paper.view() if paper is not None else None, latch=latch)
+                      paper_view=paper.view() if paper is not None else None, latch=latch,
+                      capital=capital)
     if not secrets.has(DASHBOARD_TOKEN):
         _log.warning("dashboard_token_missing", hint="run scripts/dpapi_set.py --generate-dashboard-token")
 
@@ -4781,14 +4791,14 @@ def _build_telegram(settings, secrets, clock, mode, kill, *, latch=None, governo
 
 def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protected_store=None,
                 exposure=None, governor=None, limits_engine=None, market_store=None,
-                paper_control=None, paper_view=None, latch=None):
+                paper_control=None, paper_view=None, latch=None, capital=None):
     from engine.api.app import create_app
 
     return create_app(session_manager=session, mode_manager=mode, kill_switch=kill,
                       secrets=secrets, clock=clock, bus=bus, conn=conn, store=protected_store,
                       exposure=exposure, governor=governor, limits_engine=limits_engine,
                       market_store=market_store, paper_control=paper_control, paper_view=paper_view,
-                      latch=latch)
+                      latch=latch, capital=capital)
 
 
 async def _serve_api(app, settings):

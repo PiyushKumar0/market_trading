@@ -4179,3 +4179,20 @@ def test_every_live_engine_calendar_excludes_special_sessions() -> None:
                 rel = path.relative_to(engine_dir).as_posix()
                 sites.setdefault(rel, []).append(flag.value if isinstance(flag, ast.Constant) else flag)
     assert sites == {"datafeeds/ins_crossings.py": [False], "ops/main.py": [False]}
+
+
+def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_to_the_app() -> None:
+    """O19 Task 5b: ONE CapitalChanger, on the real tracker, the gate's StrategyEdges and the paper
+    book's mark, reaches the dashboard through ``_create_app``."""
+    (changer,) = _run_calls("CapitalChanger")
+    assert {k.arg: ast.unparse(k.value) for k in changer.keywords} == {
+        "conn": "conn", "clock": "clock", "calendar": "calendar", "store": "protected_store",
+        "limits": "limits_engine", "mode": "mode", "real": "exposure",
+        "paper_mark": "paper.view().mark if paper is not None else None",
+        "edges": "strategy_edges", "notify": "notify",
+    }
+    (app_call,) = _run_calls("_create_app")
+    assert _kw(app_call, "capital") == "capital"
+    forwarded = ast.parse(inspect.getsource(opsmain._create_app))
+    (create,) = [n for n in ast.walk(forwarded) if isinstance(n, ast.Call) and ast.unparse(n.func) == "create_app"]
+    assert _kw(create, "capital") == "capital"
