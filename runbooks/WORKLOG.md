@@ -1,5 +1,41 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-17 23:50 — O19 capital change from the dashboard merged into phase3 (owner: "merge the changes to phase3")
+
+- **Built** on `wip/capital-change` (17 commits on 179cd45, now fast-forwarded into `phase3` at 2b74d77):
+  - the "Change capital" dialog (System tab, Risk limits);
+  - `GET/POST /config/capital`;
+  - base-agnostic brakes in P&L space, with no new table;
+  - one live base through `LimitsEngine.reload()`;
+  - the hi52 edge capped at the live capital;
+  - a hardened, compare-and-swap `ProtectedStore.owner_update`.
+
+  Spec: `runbooks/design-2026-10-16-dashboard-capital-change.md`.
+- **Review:** every task was reviewed. Then a four-angle whole-branch review ran, followed by one fix wave and a scoped re-review.
+  - The critical catch: after an out-of-session restart, the brake check had priced open positions at entry. It now uses the live price, else the last stored 1m close, else a 409 refusal.
+  - Also fixed:
+    - `test_capital.py` no longer reads the live limits.yaml;
+    - the docs say a revert KILLS when a real position is open;
+    - the rollback recipe keeps the signed file;
+    - the comments patch applies after a change;
+    - POST no longer waits on Telegram.
+- **Validation:** the full suite at 2b74d77 gave 4436 passed, 20 skipped (11m00s, run alone). Dashboard 92/92 and `tsc` are clean. No browser check was possible: the MCP browser servers were unavailable.
+- **Deploy:**
+  - The engine had been stopped by the owner at 02:14.
+  - Backups: `data\backups\pre_o19_20261017.db` (integrity ok, 41 tables, limits 5d8b52cb, envelope 67d9c1ea) and `data\backups\dashboard-dist-pre-o19-20261017`.
+  - `phase3` was fast-forwarded and `dist` rebuilt.
+  - The boot at 23:47:
+    - selftest all PASS (`token_valid` WARN: weekend, login needed), including `protected_store:limits.yaml`;
+    - `paper_composed`, `startup_complete`, `engine_ready`;
+    - 0 ERROR lines;
+    - `/config/capital` and `/paper` answer 401 without a token.
+  - **The engine was stopped again** to keep the owner's state (ruling R14). Start it before Monday's session.
+- **Open:**
+  - The owner-applied `limits.yaml` comments patch (COMMANDS, "Capital change from the dashboard").
+  - Recommended as a separate change: `engine.core.db.transaction()` does not roll back when COMMIT raises.
+  - Rulings R1–R21 are in the build ledger, `..\mt_build_notes\sdd-capital\progress.md`.
+  - The task worktrees `..\mt_cap_*` and `..\mt_capital` remain. They hold `.venv` and `node_modules` junctions: remove each junction with `rmdir` first, never `Remove-Item -Recurse`.
+
 ## 2026-10-16 18:10 — Review findings fixed, cleanup pass, P&L percentages (committed, NOT deployed)
 
 - **/code-review of the 30 commits ahead of origin (14 findings):**
