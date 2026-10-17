@@ -1786,12 +1786,14 @@ async def run() -> int:
     session.add_login_hook(early_hydration.on_login)
 
     # --- dashboard API ---
-    # O19: the owner's capital change. ONE changer on the live tracker, the gate's own StrategyEdges
-    # and the paper book's mark (without it a cut could latch a paper floor unchecked).
+    # O19: the owner's capital change. ONE changer on the live tracker, the gate's own StrategyEdges,
+    # the paper book's mark, and the last stored 1m close for a held symbol neither live cache has
+    # priced (after an out-of-session restart both are empty until the next session).
     capital = CapitalChanger(
         conn=conn, clock=clock, calendar=calendar, store=protected_store, limits=limits_engine,
         mode=mode, real=exposure,
         paper_mark=paper.view().mark if paper is not None else None,
+        last_mark=store_last_mark_fn(store),
         edges=strategy_edges, notify=notify,
     )
     app = _create_app(session, mode, kill, secrets, clock, bus, conn=conn,

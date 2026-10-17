@@ -75,6 +75,15 @@ def _fixed(value: Decimal) -> Callable[[], Decimal]:
     return lambda: value
 
 
+def snapshot_pnl(row: sqlite3.Row | Mapping[str, Any]) -> Decimal | None:
+    """An equity-snapshot row's P&L, ``realized_pnl + open_mtm``; None when either column is NULL or
+    empty (a pre-O19 row). Every reader then falls back to ``equity − base`` its own way (O19 §3.1)."""
+    realized, open_mtm = row["realized_pnl"], row["open_mtm"]
+    if realized is None or realized == "" or open_mtm is None or open_mtm == "":
+        return None
+    return _dec(realized) + _dec(open_mtm)
+
+
 def _sign(side: str | None) -> Decimal:
     """Signed direction of a position's P&L. ``qty`` is stored unsigned; the side carries direction."""
     return Decimal(-1) if (side or "").upper() in ("SELL", "SHORT") else Decimal(1)
@@ -197,6 +206,15 @@ class ExposureTracker:
         twin._what_if = True
         return twin
 
+    def with_mark_price(self, mark_price: MarkPrice | None) -> ExposureTracker:
+        """A what-if twin on another mark source (O19 §3.2: the brake check prices held positions
+        as the next session will). Same connection, base and cached baseline P&L; read-only, like
+        :meth:`with_capital_base`, and the original is untouched."""
+        twin = copy.copy(self)
+        twin._mark_price = mark_price
+        twin._what_if = True
+        return twin
+
     def _writable(self) -> None:
         if self._what_if:
             raise RuntimeError("a what-if ExposureTracker never writes (O19 §3.2)")
@@ -227,6 +245,18 @@ class ExposureTracker:
         px = self._mark_price(symbol)
         return px if px is not None else avg_entry
 
+    def mark_of(self, symbol: str) -> Decimal | None:
+        """The wired source's mark for ``symbol``, or None: no ``avg_entry`` fallback."""
+        return None if self._mark_price is None else self._mark_price(symbol)
+
+    def held_symbols(self) -> list[str]:
+        """The sorted distinct symbols of this book's held positions (the rows :meth:`open_mtm` marks)."""
+        rows = self._conn.execute(
+            f"SELECT DISTINCT symbol FROM positions WHERE {self._open} AND {self._positions} "
+            "ORDER BY symbol"
+        ).fetchall()
+        return [row["symbol"] for row in rows]
+
     def open_mtm(self) -> Decimal:
         """Mark-to-market of open platform positions: qty × (mark − avg_entry), signed by side."""
         rows = self._conn.execute(
@@ -251,12 +281,10 @@ class ExposureTracker:
         return self.realized_net() + self.open_mtm()
 
     def _row_pnl(self, row: sqlite3.Row) -> Decimal:
-        """A snapshot row's P&L, ``realized_pnl + open_mtm``. A NULL or empty column falls back to
+        """A snapshot row's P&L (:func:`snapshot_pnl`). A NULL or empty column falls back to
         ``equity − current base``, which reproduces the pre-O19 equity read for that row."""
-        realized, open_mtm = row["realized_pnl"], row["open_mtm"]
-        if realized is None or realized == "" or open_mtm is None or open_mtm == "":
-            return _dec(row["equity"]) - self.capital_base
-        return _dec(realized) + _dec(open_mtm)
+        pnl = snapshot_pnl(row)
+        return _dec(row["equity"]) - self.capital_base if pnl is None else pnl
 
     # ----------------------------------------------------------------- day MTM + baseline (§2.6)
     def set_day_baseline(self, equity: Decimal, d: date | None = None) -> None:

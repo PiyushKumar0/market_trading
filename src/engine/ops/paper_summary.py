@@ -15,6 +15,7 @@ from typing import Any
 from engine.core.money import pct_of
 from engine.core.scope import HELD_STATES_SQL, PAPER_EPOCH_SQL, scope_sql
 from engine.ops.paper_control import PaperControl
+from engine.risk.exposure import snapshot_pnl
 from engine.risk.gate import TERMINAL_ORDER_STATES_SQL
 
 _CURVE_DAYS = 250
@@ -85,16 +86,13 @@ def _snapshots(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return rows
 
 
-def _has_pnl(row: sqlite3.Row) -> bool:
-    return all(row[k] is not None and row[k] != "" for k in ("realized_pnl", "open_mtm"))
-
-
 def _point_equity(row: sqlite3.Row, capital_base: Decimal | None) -> Any:
     """A snapshot's equity at the live base (O19 §7: history in P&L space, so a capital change draws
     no cliff); the stored equity when there is no live base or the row's P&L is NULL."""
-    if capital_base is None or not _has_pnl(row):
+    pnl = snapshot_pnl(row)
+    if capital_base is None or pnl is None:
         return row["equity"]
-    return _money(capital_base + _dec(row["realized_pnl"]) + _dec(row["open_mtm"]))
+    return _money(capital_base + pnl)
 
 
 def _equity(row: sqlite3.Row | None, capital_base: Decimal | None) -> dict[str, Any] | None:
@@ -106,8 +104,8 @@ def _equity(row: sqlite3.Row | None, capital_base: Decimal | None) -> dict[str, 
     else:
         # A NULL P&L column: equity − the live base, the brakes' own fallback (O19 §3.1).
         base = capital_base
-        pnl = (_dec(row["realized_pnl"]) + _dec(row["open_mtm"]) if _has_pnl(row)
-               else _dec(row["equity"]) - base)
+        stored = snapshot_pnl(row)
+        pnl = _dec(row["equity"]) - base if stored is None else stored
     return {
         "at": row["at"], "equity": _point_equity(row, capital_base), "realized_pnl": row["realized_pnl"],
         "open_mtm": row["open_mtm"], "day_mtm": row["day_mtm"], "positions_open": row["positions_open"],

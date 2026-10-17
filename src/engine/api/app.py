@@ -724,12 +724,13 @@ def create_app(
 
     @app.get("/config/capital")
     async def get_capital(_: Owner, proposed: int | None = None) -> Any:
-        """The capital dialog's figures, and the verdict on ``proposed`` when given. Never writes."""
+        """The capital dialog's figures, and the verdict on ``proposed`` when given. Never writes.
+        ``async def`` like the POST: ``preview`` awaits the stored-price prefetch on the loop."""
         capital = app.state.capital
         if capital is None:
             return _capital_unwired()
         try:
-            return capital.preview(proposed)
+            return await capital.preview(proposed)
         except CapitalRefused as e:
             return JSONResponse(status_code=e.status, content={"ok": False, "note": e.note})
 

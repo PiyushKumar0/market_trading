@@ -1038,9 +1038,26 @@ def _capital_client(tmp_path, conn, *, wired: bool = True, at=None):
     changer = CapitalChanger(
         conn=conn, clock=cl, calendar=NSECalendar(REAL_CONFIG / "calendar", cl), store=ps, limits=limits,
         mode=ModeManager(conn, cl), real=ExposureTracker(conn, cl, lambda: limits.load().capital_base_inr),
-        paper_mark=None, edges=None, notify=None,
+        paper_mark=None, last_mark=None, edges=None, notify=None,
     )
     return _client(clock=cl, conn=conn, capital=changer if wired else None), limits
+
+
+class _RefusingChanger:
+    """A changer whose every call refuses: the routes' CapitalRefused mapping, in isolation."""
+
+    def __init__(self, status: int, note: str) -> None:
+        self.status, self.note = status, note
+
+    async def preview(self, proposed=None):
+        from engine.ops.capital import CapitalRefused
+
+        raise CapitalRefused(self.status, self.note)
+
+    async def apply(self, capital_inr, expected_current_inr):
+        from engine.ops.capital import CapitalRefused
+
+        raise CapitalRefused(self.status, self.note)
 
 
 def test_get_capital_shows_the_current_figures_and_the_verdict(tmp_path, conn) -> None:
@@ -1114,10 +1131,39 @@ def test_capital_routes_need_the_token(tmp_path, conn) -> None:
     assert client.get("/config/capital").status_code == 401
 
 
-def test_post_capital_is_an_async_route() -> None:
-    """Ruling R7: a sync route would run in a worker thread, off the loop the ticks run on."""
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_both_capital_routes_are_async(method) -> None:
+    """Ruling R7: a sync route would run in a worker thread, off the loop the ticks run on; both
+    routes await the changer (GET: the stored-price prefetch)."""
     import inspect
 
     app = create_app(secrets=_FakeSecrets(_TOKEN))
-    route = next(r for r in app.routes if getattr(r, "path", "") == "/config/capital" and "POST" in r.methods)
+    (route,) = [r for r in app.routes if getattr(r, "path", "") == "/config/capital" and method in r.methods]
     assert inspect.iscoroutinefunction(route.endpoint)
+
+
+@pytest.mark.parametrize("status_code", [409, 422, 503])
+def test_get_capital_a_refusal_from_the_changer_keeps_its_status(status_code) -> None:
+    note = "no price yet for held positions (real: AAA), so the brakes can't be checked"
+    client = _client(capital=_RefusingChanger(status_code, note))
+    r = client.get("/config/capital", params={"proposed": 60000}, headers=AUTH)
+    assert r.status_code == status_code
+    assert r.json() == {"ok": False, "note": note}
+    r = client.post("/config/capital", headers=AUTH, json={"capital_inr": 60000, "expected_current_inr": 40000})
+    assert r.status_code == status_code and r.json() == {"ok": False, "note": note}
+
+
+@pytest.mark.parametrize("proposed", ["abc", "60000.5", "6e4", ""])
+def test_get_capital_a_non_int_proposal_is_422(tmp_path, conn, proposed) -> None:
+    client, _ = _capital_client(tmp_path, conn)
+    assert client.get("/config/capital", params={"proposed": proposed}, headers=AUTH).status_code == 422
+
+
+def test_get_capital_a_zero_proposal_is_refused_by_the_bounds(tmp_path, conn) -> None:
+    client, limits = _capital_client(tmp_path, conn)
+    r = client.get("/config/capital", params={"proposed": 0}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["allowed"] is False and body["proposed"] is None
+    assert body["refusal"] == "capital must be a whole number of rupees, at least ₹1"
+    assert limits.load().capital_base_inr == Decimal("40000")

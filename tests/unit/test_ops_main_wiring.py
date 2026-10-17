@@ -4182,15 +4182,21 @@ def test_every_live_engine_calendar_excludes_special_sessions() -> None:
 
 
 def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_to_the_app() -> None:
-    """O19 Task 5b: ONE CapitalChanger, on the real tracker, the gate's StrategyEdges and the paper
-    book's mark, reaches the dashboard through ``_create_app``."""
+    """O19 Task 5b: ONE CapitalChanger, on the real tracker, the gate's StrategyEdges, the paper
+    book's mark and the market store's last 1m close (the price a held symbol gets when neither live
+    cache has one), reaches the dashboard through ``_create_app``."""
     (changer,) = _run_calls("CapitalChanger")
     assert {k.arg: ast.unparse(k.value) for k in changer.keywords} == {
         "conn": "conn", "clock": "clock", "calendar": "calendar", "store": "protected_store",
         "limits": "limits_engine", "mode": "mode", "real": "exposure",
         "paper_mark": "paper.view().mark if paper is not None else None",
+        "last_mark": "store_last_mark_fn(store)",
         "edges": "strategy_edges", "notify": "notify",
     }
+    # ``store`` there is the run's MarketStore, the one paper prep seeds its marks from.
+    src = inspect.getsource(opsmain.run)
+    assert "    store = MarketStore.from_settings(settings, clock).open()" in src
+    assert "last_mark_fn=store_last_mark_fn(store)" in inspect.getsource(opsmain._compose_paper)
     (app_call,) = _run_calls("_create_app")
     assert _kw(app_call, "capital") == "capital"
     forwarded = ast.parse(inspect.getsource(opsmain._create_app))
