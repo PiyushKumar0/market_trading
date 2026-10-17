@@ -236,6 +236,49 @@ Start-Service mt-engine                                          # boot must sho
 git add -u; git commit -m "<directive> applied (owner): patch + reseed"
 ```
 
+## Capital change from the dashboard (O19, 2026-10-16)
+
+The dashboard's "Change capital" button (System tab, Risk limits card) rewrites three `config/limits.yaml`
+lines and re-signs the file in one step. The lines are `capital_base_inr`, `max_deployed_capital_inr` and
+`cnc_notional_inr`; the two caps scale with the base. Nothing needs reseeding afterwards. It leaves
+`config/limits.yaml` **modified in git**, so commit it on its own before any other git operation:
+
+```powershell
+git diff --stat -- config/limits.yaml                            # expect: 1 file, 3 lines changed
+git add config/limits.yaml; git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)"
+```
+
+Never `git stash`, `git checkout -- config/limits.yaml` or `git reset --hard` while that change is
+uncommitted. Each one puts the old bytes back under the new signature, and the next boot FREEZES on
+`protected_store_integrity`. If it happened anyway, check and restore the signed bytes. The tool never
+signs anything; it writes back only the snapshot that already hashes to the recorded signature:
+
+```powershell
+.venv\Scripts\python.exe scripts\protected_config_status.py                          # read-only; exit 1 = a mismatch
+Stop-Service mt-engine
+.venv\Scripts\python.exe scripts\protected_config_status.py --restore limits.yaml    # the signed bytes go back on disk
+Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
+```
+
+The reseed flow above needs a clean `git status`. After a dashboard capital change, commit `limits.yaml`
+first. A reseed that swept the change into an unrelated commit would hide it.
+
+**Owner follow-up, prepared and not applied:** `runbooks\briefs\limits_comments_base_relative_2026-10-16.patch`.
+It restates the rupee figures in the `limits.yaml` comments (₹36,000 go-flat, −₹2,000 freeze and the like)
+as percentages of the base, so they stay true when the base changes. Values do not change: the parsed YAML
+is identical and the file stays LF. It skips the three value lines the dashboard rewrites, so it applies
+before or after a capital change. Apply it inside the repo (`config/limits.yaml` is `eol=lf`; applied
+outside the repo with `core.autocrlf=true`, `git apply` writes CRLF and the hash changes):
+
+```powershell
+Stop-Service mt-engine
+git apply --check runbooks\briefs\limits_comments_base_relative_2026-10-16.patch   # must print nothing
+git apply runbooks\briefs\limits_comments_base_relative_2026-10-16.patch
+.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "limits.yaml comments made base-relative (O19 follow-up, owner)"
+Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
+git add config/limits.yaml; git commit -m "limits.yaml comments base-relative (owner): patch + reseed"
+```
+
 ## Tests / verification
 
 ```powershell

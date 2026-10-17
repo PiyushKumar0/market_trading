@@ -561,6 +561,55 @@ bars are judged against owner-set state (the trade window) that moved during the
 
 ---
 
+## Changing the trading capital (O19, 2026-10-16)
+
+`capital_base_inr` in `config/limits.yaml` is the base every risk limit is a percent of. The real and
+paper books share it.
+
+**Where:** dashboard, System tab, Risk limits card, "Change capital". The dialog shows the engine's old →
+new figures:
+- capital, the max deployed cap and the per-symbol CNC cap (both scale with the base);
+- equity, and risk per trade (a percent of equity);
+- the day-loss lines, and the equity floor and cumulative floor lines;
+- the hi52 edge the gate will use.
+
+Confirm is offered only when the engine allows the exact amount.
+
+**The engine refuses a change:**
+- **409** in any of these cases:
+  - during the session on a trading day (09:15–15:30), or when the calendar does not cover today;
+  - in AUTO mode;
+  - when the base moved since the dialog opened, or another write signed the file first;
+  - when the signed `limits.yaml` differs from the limits the engine has loaded. It was re-signed outside the
+    dashboard while the engine runs; restart the engine first.
+- **422** when the amount is not whole rupees, is more than double or less than half the current base, equals
+  it, or would **newly** trip a brake. A brake is a floor, the drawdown rung or a day-loss rung, in the real
+  or the paper book. The floors measure lifetime P&L against the base, so a cut while in loss can cross one;
+  the refusal names it. A brake already tripped does not block a raise, and a latched real floor still
+  needs `/rearm`.
+- **503** in any of these cases:
+  - `limits.yaml` fails its signature check. An unsigned edit is never re-signed this way; nothing is written.
+  - The write failed. The file may have been touched, so run `scripts\protected_config_status.py` before the
+    next boot.
+  - The reload failed. The change is signed and the next boot applies it.
+
+**What changes, at once, with no restart:**
+- every brake and both books read the new base on their next tick (`LimitsEngine.reload()`);
+- day loss and drawdown are computed in P&L space, so the change itself never reads as profit or loss;
+- the paper book keeps its epoch and open positions;
+- Telegram gets a `CAPITAL_CHANGED` message;
+- `config_audit` records the full old → new table;
+- hi52's registered edge is capped by its derivation at the new base (`min(registered 1.53, derived)`). A
+  cut lowers it automatically; raising the registered number stays an owner decision.
+
+**Afterwards:** commit `config/limits.yaml` (COMMANDS "Capital change from the dashboard"). An uncommitted
+change reverted by git FREEZES the next boot. `scripts\protected_config_status.py` shows and repairs that.
+
+**Not changed:** money in the Kite account. The base is the platform's figure, so make sure the funds are
+there before raising it.
+
+---
+
 # Paper autopilot (M4, plan Q4.13 / Q4.14)
 
 Paper trades every gate-approved proposal through the OMS against a simulated broker (`PaperBroker`) and its
