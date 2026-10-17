@@ -86,8 +86,10 @@ A rung that is already tripped does not block. So raising capital to climb back 
 
 `POST /config/capital {capital_inr, expected_current_inr}` runs in an `async def` route, synchronously from the read to the reload, with no await in between. No tick can interleave, and the shared SQLite connection is used only from the loop thread.
 
+**Pricing (final review 2026-10-17, ruling R16).** The one await before the read prefetches prices. Each held position is priced at its live mark, else at the close of its last stored 1m bar. The live caches are empty after an out-of-session restart, and pricing at entry would hide open losses from §3.2.
+
 **Refusals:**
-- **409** in the session window. Also when the engine calendar does not cover today (it fails open otherwise, review F16), when the mode is AUTO (in AUTO a raise would resize live orders in one POST; review F13), or when `expected_current_inr` ≠ the current base (a stale dialog or a second device; review F14).
+- **409** in the session window. Also when the engine calendar does not cover today (it fails open otherwise, review F16), when the mode is AUTO (in AUTO a raise would resize live orders in one POST; review F13), or when `expected_current_inr` ≠ the current base (a stale dialog or a second device; review F14). Also when a held position has no price at all, so §3.2 cannot be checked (final review 2026-10-17).
 - **422** when the value is not a whole number, is outside [old ÷ 2, old × 2], equals the current base, or would newly trip a brake (§3.2).
 - **503** when the file is unverified.
 
