@@ -1,5 +1,35 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-18 23:15 — Test audit: owner decisions applied on `wip/test-audit`, not merged (owner: "Proceed with D1, D2, D4, D5. Review and validate. … For D3, implement the change, and also keep such test cases separate from other rerunnable ones …")
+
+- **Branch `wip/test-audit`** (worktree `..\mt_testaudit`, phase3 still 3e6b811): 23 commits on top of the
+  audit. Report: `runbooks/test_audit/REPORT.md` "Owner decisions applied"; every test change with its evidence in
+  `runbooks/test_audit/LEDGER.md` rows 63-115. Nothing pushed or merged.
+- **Done:**
+  - D1: pytest-xdist in the dev extra; it replaces the shard runner.
+  - D2.1/D2.2/D2.3/D2.5/D2.7: repo_root cache; dead compaction method deleted; light stop-path module; lazy sklearn
+    guard; one copy of the backtest helpers.
+  - D2.4: `run()` split into compose/boot/shutdown; every source pin on it is now a behavioural test (76 mutants
+    caught).
+  - D2.8: the Defender exclusion is written down in COMMANDS, not applied.
+  - D3: `tests/offline` holds the tests of non-production code, run on demand; four refuted studies keep one
+    smoke test each.
+  - D4: a risk-gate pair merged. D5: rows re-validated by fault injection.
+- **Numbers:** the gate (a bare `pytest`) is 3,884 tests, all green; `tests/offline` 358 (357 passed, 1 skipped).
+  `pytest -n 8 --dist loadfile` median 177 s against the baseline suite's 271 s (−35%); serial 677 s against 768 s
+  (one 1,139 s run right after a standby resume, reported as host noise). A pytest process starts in ~4 s instead of
+  ~15. Every test change reconciles against the baseline nodeids (4,463 → 4,242); mypy and ruff: no new finding.
+- **Review:** three independent reviewers; every finding verified and fixed.
+  - The first lazy guard imported sklearn under CPython's global import lock (stall + deadlock reproduced; fixed).
+  - Production behaviour had been left pinned only offline (back in the gate).
+  - The reconcile tool could miss a dropped parametrized case (made strict).
+  - Eight replaced pins had let a mutant through (closed).
+- **Live venv:** pytest-xdist 3.8.0 + execnet 2.1.2 installed with `uv pip install` (the editable install
+  untouched).
+- **Not touched:** `mt-engine`, `data/`, `config/limits.yaml`, `config/envelope.yaml`, the live tree.
+- **Found, not changed:** a crash in `run()` exits without a traceback, because `main()`'s `os._exit` comes first
+  (REPORT D7).
+
 ## 2026-10-18 15:45 — Test audit: `wip/test-audit` ready for review, not merged (owner: "Read @TEST_AUDIT_PROMPT.md and work on optimising the test coverage")
 
 - **Branch `wip/test-audit`** (worktree `..\mt_testaudit`, on phase3 3e6b811 — phase3 has not moved): tests and

@@ -1,8 +1,9 @@
 # Test audit — report (2026-10-18)
 
 Branch `wip/test-audit` (worktree `C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit`), cut from `phase3`
-@ 3e6b811. Every change is a row in [LEDGER.md](LEDGER.md); the run history is in [STATE.md](STATE.md). Production
-code (`src/`, `scripts/`, `config/`, `web/`, `dashboard/src`), `pyproject.toml` and `uv.lock` are unchanged.
+@ 3e6b811. Every change is a row in [LEDGER.md](LEDGER.md); the run history is in [STATE.md](STATE.md). The audit
+itself (up to 10331d7) changed tests and runbooks only; the owner's decisions of the same evening then changed
+production code, `pyproject.toml` and `uv.lock` too — see [Owner decisions applied](#owner-decisions-applied-2026-10-18-evening).
 
 ## TLDR
 
@@ -13,7 +14,82 @@ code (`src/`, `scripts/`, `config/`, `web/`, `dashboard/src`), `pyproject.toml` 
   `test_import_graph.py` 62.8 → 3.3 s (Tier A, same assertions); the single-instance child 18.8 → 5.7 s.
 - **Protection up:** 28 tests that passed while blind to the fault they name were repaired, each shown to FAIL
   under it; 13 removed (survivors fault-checked); 17 copy-paste groups parametrized; 1 change withdrawn on review.
-- **Parallel today:** 8 file-shards (`tools/shard_run.py`, no xdist) ran the gate green in 223-340 s.
+- **After the owner decisions (same evening):** the gate is a bare `pytest` of 3,884 tests, all green, with 358
+  more on demand in `tests/offline`; `-n 8` runs it in ~3 min (median 177 s; the baseline suite 271 s); a pytest
+  process starts in ~4 s instead of ~15; the composition root's wiring is tested by behaviour (76 `main.py`
+  mutants, each caught), not by its source text; three independent reviews, every finding fixed.
+
+## Owner decisions applied (2026-10-18, evening)
+
+The owner: "Proceed with D1, D2, D4, D5. Review and validate. Avoid redundancy, over-optimisation or unwanted
+comments. For D3, implement the change, and also keep such test cases separate from other rerunnable ones as these
+test cases are not for production code and do not require to be run everytime. This apply to every such script and
+their test case which are not main production code."
+
+| item | done | commits | evidence |
+|---|---|---|---|
+| D1 | pytest-xdist 3.8.0 (+ execnet 2.1.2) in the dev extra and `uv.lock`; installed into the live venv with `uv pip install` at those versions (the editable install untouched); the shard runner and its weights are retired | f1308da, 42485a9 | every `-n 8 --dist loadfile` run green: final 199 / 169 / 177 s (a fourth, 182 s, overlapped standby), the baseline suite 264 / 271 / 352 s; 11 warnings = the serial 4 plus the testclient warning once per worker |
+| D2.1 | `repo_root()` cached | b8a6510 | ~17 ms per call before; nothing patches or clears it |
+| D2.2 | the dead `MarketStore.compact_tick_partitions` deleted with its test | 3334f93 | rows 64-65 |
+| D2.3 | the stop path is `engine/ops/stop_path.py` (stdlib + log only) | 876cfa7 | the hard-exit child: 12.3 → 8.3 s (median of 3) — and it now imports the tree under test, not the live tree its editable install pointed at |
+| D2.4 | `run()` = `run` / `compose` / `_boot` / `_shutdown`; `tests/_composition.py` composes the real graph (fake secrets, tmp data, DNS refused, LLM calls refused); every source pin on the composition root is a behavioural test | 876cfa7, 84d470e, ebfdf92 | an AST comparison of old `run()` against the four functions: identical apart from the two constructors that became `compose` arguments; 5 + 63 mutants caught, plus the review's 8 (rows 100-109, 113-115) |
+| D2.5 | the native import-order guard is lazy: scikit-learn loads on the first numba / llvmlite / vectorbt / cvxpy / skfolio import, in a wrapping loader — never under CPython's global import lock (review fix) | e017392, 1f16280 | `import engine.core.config` 11.91 → 2.13 s; `import engine` 0.15 s; a pytest process starts in ~4 s instead of ~15; no stall, no deadlock (both reproduced on the first version); rows 66, 99 |
+| D2.6 | vectorbt JIT — informational | — | every vectorbt test now lives in `tests/offline` |
+| D2.7 | one copy of the backtest helpers: `scripts/backtest_common.py` (a leaf module — `research_common` loads brk20 at import and would be re-entered) | 7038106 | AST-identical copies; rows 92-94 |
+| D2.8 | Defender exclusion: the narrowest command, its undo and the trade-off are in COMMANDS; not applied (owner / IT) | 42485a9 | — |
+| D3 | `tests/offline`, excluded by `testpaths`, holds the tests of non-production code; the four refuted studies keep one smoke test each | 7038106, cde43bc, 5a6f86d | rows 67-98, 110-112 |
+| D4 | the risk-gate pair merged | 620d912 | row 63 |
+| D5 | rows 17 / 31 / 36 re-validated | — | each passes clean and fails under its recorded fault again (`AssertionError: assert <RiskState.KILLED> is <RiskState.FROZEN>`; `assert -1.0 == 1.0`; `AssertionError: from engine.learning import validate`) |
+
+**The boundary** (COMMANDS, Tests / verification). The gate (a bare `pytest`) keeps everything the engine process
+and its scheduled tasks run, and the operational tools that write live stores or config (bhavcopy backfill, the
+restore rewind, protected-config status, fill-model calibration). `tests/offline` holds research, backtest,
+verdict and one-off scripts and the `engine.learning` modules only they reach. A test that pins production
+behaviour stays in the gate even when it reaches it through a script.
+
+**Review** (three independent read-only reviewers, every finding verified before acting):
+- *Production:* the first lazy guard imported sklearn inside `find_spec`, under CPython's global import lock — every
+  other thread's import waited ~8.4 s, and one mid-import of joblib deadlocked (both reproduced). Fixed by importing
+  in a wrapping loader (1f16280); a broken sklearn now fails loudly instead of silently skipping the guard while the
+  self-test said PASS. The `run()` split itself: no findings (name resolution of all 115 nested functions identical).
+- *Structure:* the D3 move had left production lines pinned only offline — the live hi52 band gate, the rec card's
+  forward-test arithmetic (`engine.learning.hi52_forward`), the sizing guard — now back in the gate as direct engine
+  tests (5a6f86d, 18 mutants). The fill-model calibration's tests returned to the gate (row 74 withdrawn). The
+  reconcile tool could report RECONCILED over a dropped parametrized case; new-side nodeids are now literal and
+  P1 rows must map one-for-one (be12b5b).
+- *Test honesty:* eight facts the old pins covered had slipped past the new tests, each proven by a `main.py` mutant
+  the suite let pass — an out-of-window `/scan_now` consuming the day's `ins` crossings, the retest's lock identity,
+  the newcomer fill's window, an order check that could never fail, a freeze_lift-only branch, a late signal-handler
+  install, a GUARDED drop that skipped as "not installed", and a poll that hung on its own regression. All eight now
+  fail (ebfdf92, rows 113-115); a composed engine also refuses any LLM call, so no test can spawn the real CLI on the
+  owner's login.
+
+**Numbers:**
+- Collected: 4,463 → 4,242 — 3,884 in the gate + 358 in `tests/offline`; `reconcile_nodeids.py` RECONCILED with
+  every ledger row applied in order.
+- The gate, green on every run (3,865 passed, 19 skipped — the baseline's 20 minus the live-data reference arm, now
+  offline — and the baseline's 4 warnings):
+  - `pytest -n 8 --dist loadfile`: 199 / 169 / 177 s, median 177 s, against the baseline suite (5788c34)
+    264 / 271 / 352 s, median 271 s — interleaved, standby-free: −35%.
+  - serial: 677 s against the baseline's 768 s run just before it (−12%). The first final serial run, right after a
+    standby resume, took 1,139 s with the host otherwise idle (the engine skipped its weekend jobs) — host noise,
+    reported rather than dropped.
+- `tests/offline`: 357 passed, 1 skipped in 82 s with xdist.
+- A pytest process starts in ~4 s instead of ~15; collecting the gate takes ~22 s instead of ~60; `import engine`
+  0.15 s.
+- mypy over the touched modules: 202 errors before and after, none new or gone; ruff: no new finding (13
+  pre-existing, all in untouched files). Raw runs: `..\mt_build_notes\test_audit\runs_final\`.
+
+**Left as is** (each with its reason):
+- Two source-level checks remain, both deliberate structural invariants rather than composition-root pins:
+  `test_paper_notifications.py::test_the_notifier_exists_only_inside_the_flagged_composition` (a module-wide AST
+  walk) and `test_every_live_engine_calendar_excludes_special_sessions` (an invariant over every module). The retest
+  record running on the loop thread has no single-site mutant (its order after the `ins` consume has one, and it is
+  caught).
+- The scripts' `ruff` findings at `scripts/backfill_filings.py:43` (I001) and `scripts/g2_evidence.py:401` (B007)
+  predate the branch; untouched files.
+- Found on the way, outside the decisions (D7 below): `main()` exits through `os._exit` before a crash in `run()`
+  can print — a boot crash leaves exit code 1 and only `exit_clean` in the log, no traceback (pre-existing).
 
 ## Speed table
 
@@ -54,10 +130,10 @@ What is left, and why it is not test-side (details under Owner decisions D2):
 - **File-system latency.** Defender real-time protection is on; `os.stat` 494 us, `Path.resolve` 3.9 ms, a 4 KB
   create+write+close 1.9 ms (medians of 200). Every per-test temp file pays it — the template copy still costs
   20.6 ms. An AV/EDR exclusion is probably the biggest remaining lever.
-- **Parallelism.** Without xdist, `tools/shard_run.py` packs test files onto N plain pytest processes (each pins
+- **Parallelism.** Without xdist, `tools/shard_run.py` packed test files onto N plain pytest processes (each pins
   its own config copy and basetemp): 8 shards ran the gate green in 223-340 s, 4 shards in 472 s (every process
   pays the ~15 s floor, and they contend for the AV-filtered disk). No shared-state failure appeared across 4 or
-  8 concurrent processes.
+  8 concurrent processes — the evidence D1 rested on. Superseded by pytest-xdist; the runner is retired.
 
 ## Changes by code and tier
 
@@ -97,7 +173,8 @@ under it). Examples:
 
 ## Owner decisions
 
-Each item: what, the evidence, my recommendation. Nothing below is applied on the branch.
+Each item: what, the evidence, my recommendation — as proposed at the audit's end. What was done with each is in
+[Owner decisions applied](#owner-decisions-applied-2026-10-18-evening).
 
 ### D1 — Parallel runs need the worktree venv first (pytest-xdist, pytest-cov)
 - `uv sync --frozen --extra dev` in the worktree was refused by the Claude Code auto-mode permission classifier
@@ -190,7 +267,11 @@ failing line and the revert are in each ledger row); the Phase 5 review re-injec
 - **Unhermetic test:** `test_research_studies.py::test_brk20_reference_arm_reproduces_the_registered_baseline`
   needs `data/research/market_*.duckdb` and `data/reports/backtest_brk20_2026-09-12.json` (live, untracked): it
   passes in the live tree (16.3 s) and skips in any clean checkout. Vendor a tiny fixture, or accept a
-  live-tree-only check.
+  live-tree-only check. (It now lives in `tests/offline`.)
+- **A boot crash leaves no traceback** (found by the production review, pre-existing): `main()` runs
+  `code = asyncio.run(run())` inside `try … finally: hard_exit(code)`, and `os._exit` fires before an exception
+  raised in `run()` can print — the log shows `exit_clean` and the process exits 1. An `except Exception:
+  _log.exception("engine_crashed")` before the `finally` would name the cause. Not changed: outside the decisions.
 
 ## Verification (Phase 5)
 
@@ -559,12 +640,16 @@ Rejected:
 ## Clean-up
 
 - Keep `C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit` (branch `wip/test-audit`) for the merge.
-  `phase3` was at 3e6b811 when the branch was cut; it had not moved at hand-off (checked 14:19), so no rebase was needed.
-- Remove the two helper worktrees (no junctions were created in any of them; never `Remove-Item -Recurse`):
+  `phase3` was at 3e6b811 when the branch was cut and had not moved at hand-off (checked 2026-10-18 23:15), so the
+  merge is a fast-forward.
+- **The merge changes the engine's boot path** (the `compose` / `_boot` / `_shutdown` split, the lazy import guard,
+  the stop-path module): the service runs the working tree, so it takes effect at the next `mt-engine` restart.
+  Restart outside 09:15-15:30 and check the boot log for `engine_ready` and the self-test's `native_preload` PASS.
+- The agents' helper worktrees (`mt_testaudit_b`, `_c2`, `_c4`, `_d`, `_e`) and their branches are already removed,
+  each after its files were verified identical on `wip/test-audit`. One remains, for timing comparisons (no
+  junctions; never `Remove-Item -Recurse`):
   ```powershell
   git worktree remove C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit_base   # detached @ 5788c34, clean
-  git worktree remove C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit_c2     # its work is on wip/test-audit
-  git branch -D wip/test-audit-c2
   ```
-- `..\mt_build_notes\test_audit\` holds the raw material (runs, sheets, inventory, footprints, briefs, patches);
-  delete it when no longer needed.
+- `..\mt_build_notes\test_audit\` holds the raw material (runs, sheets, inventory, footprints, briefs, patches, and
+  `e_mut\`, a private copy of src/tests/config the mutation runs used); delete it when no longer needed.

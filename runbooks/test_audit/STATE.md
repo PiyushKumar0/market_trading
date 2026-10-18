@@ -62,6 +62,14 @@ Resume rule (PROMPT.md §6): audit this file, LEDGER.md and `git log` against PR
 - [x] Phase 6 — `runbooks/test_audit/REPORT.md`, COMMANDS.md test section, WORKLOG entry, `shard_weights.csv`;
   phase3 had not moved (no rebase). Worktree left in place for the owner's merge; helper worktrees
   `mt_testaudit_base`, `mt_testaudit_c2` (+ branch `wip/test-audit-c2`) to remove after review (REPORT "Clean-up").
+- [x] Owner decisions (2026-10-18 evening: D1, D2, D4, D5, and D3 as an offline tier) — REPORT "Owner decisions
+  applied". Work ran in helper worktrees `mt_testaudit_b/_c2/_c4/_d/_e` (designer-impl agents; diffs applied here
+  with `git apply --3way`, each verified file-identical before its worktree and branch were removed). Three
+  read-only reviewers (production, structure, test honesty); every finding verified and fixed (1f16280, be12b5b,
+  cde43bc, 5a6f86d, ebfdf92). LEDGER rows 63-115. Final validation: the gate serial green ×2 (677 s; 1,139 s right
+  after a standby resume) against the baseline's 768 s; `-n 8` green ×4 (median 177 s against the baseline suite's
+  271 s, ×3); `tests/offline` green (82 s); RECONCILED 4,242; mypy and ruff: no new finding
+  (`..\mt_build_notes\test_audit\runs_final\`).
 
 ## Baseline (Phase 0)
 
@@ -106,4 +114,5 @@ until 07:50. `run_suite.ps1` logs `standby_entries` per run; a run with entries 
 
 ## Open questions
 
-- Owner: the worktree venv (uv sync) was refused by the auto-mode classifier — xdist and pytest-cov are parked.
+- None. (xdist was adopted with the owner's D1: installed into the live venv by `uv pip install`; pytest-cov was
+  not part of the decision and stays out.)
