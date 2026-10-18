@@ -133,7 +133,7 @@ class MovableTime:
 
 
 class FakeMonotonic:
-    """Injectable ``time.monotonic`` for the counted stop handler (``_make_stop_handler``)."""
+    """Injectable ``time.monotonic`` for the counted stop handler (``make_stop_handler``)."""
 
     def __init__(self) -> None:
         self.t = 1000.0

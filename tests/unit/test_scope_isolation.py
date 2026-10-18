@@ -288,7 +288,7 @@ def test_every_paper_position_working_order_and_active_gtt_is_in_the_feed(conn) 
 
 
 def test_the_retest_and_the_sweep_read_real_held_symbols_and_only_the_ticker_reads_the_feed() -> None:
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "return _held_symbols(conn)" in src
     assert "held=set(held_symbols())," in src and "held = set(held_symbols())" in src
     assert src.count("_feed_symbols(") == 1

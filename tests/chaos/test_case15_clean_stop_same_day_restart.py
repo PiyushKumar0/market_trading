@@ -11,7 +11,7 @@ process A boots 08:00, the owner arms RECOMMEND, the scheduler fires instruments
 news chain, then at 08:28 the owner runs ``nssm stop``. That stop delivers the console Ctrl-C MORE
 THAN ONCE (the 2026-09-02..23 regression: every stop logged ``stop_forced`` 0.85-1.4 s after
 ``stop_requested``, mid shutdown-backup, so the clean stop was never committed and every next boot
-was a "crash"). The repeats are delivered to the real counted stop handler (``_make_stop_handler``,
+was a "crash"). The repeats are delivered to the real counted stop handler (``make_stop_handler``,
 injectable monotonic) WHILE ``SessionLifecycle.shutdown`` is inside its backup hook. The engine is off
 08:28-09:05 (the universe / digest / planner fire-times pass while it is down), the out-of-band
 watchdog polls throughout, then process B restarts at 09:05.
@@ -50,6 +50,7 @@ from engine.core.clock import IST
 from engine.core.enums import RiskState
 from engine.notify.catalog import MessageKind
 from engine.ops import main as opsmain
+from engine.ops import stop_path
 from engine.ops.health import HealthMonitor
 from tests.chaos._lifecycle_rig import (
     INCIDENT_KINDS,
@@ -112,7 +113,7 @@ async def test_case15_nssm_stop_with_repeat_signals_then_same_day_restart(tmp_pa
     stop_event = asyncio.Event()
     exit_codes: list[int] = []
     mono = FakeMonotonic()
-    handler = opsmain._make_stop_handler(loop, stop_event, force_exit=exit_codes.append, monotonic=mono)
+    handler = stop_path.make_stop_handler(loop, stop_event, force_exit=exit_codes.append, monotonic=mono)
 
     handler(signal.SIGINT, None)                               # first Ctrl-C: graceful stop request
     await asyncio.sleep(0)                                     # call_soon_threadsafe lands

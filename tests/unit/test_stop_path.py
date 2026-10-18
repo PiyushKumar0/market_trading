@@ -6,23 +6,29 @@ handler → a raw ``KeyboardInterrupt`` at an arbitrary ``await`` (``main`` logg
 and the process then NEVER EXITED — pid 46332 lingered holding ``data/engine.lock`` until a manual
 taskkill. These tests pin the three seams the fix adds:
 
-  * :func:`engine.ops.main._make_stop_handler` — the COUNTED two-press handler (first press requests a
-    graceful stop, a second forces a hard exit), exercised WITHOUT raising real signals.
-  * :func:`engine.ops.main._hard_exit` — the ``os._exit`` backstop that a wedged non-daemon thread
+  * :func:`engine.ops.stop_path.make_stop_handler` — the COUNTED two-press handler (first press requests
+    a graceful stop, a second forces a hard exit), exercised WITHOUT raising real signals.
+  * :func:`engine.ops.stop_path.hard_exit` — the ``os._exit`` backstop that a wedged non-daemon thread
     cannot block (the interpreter's own atexit executor-join would hang forever).
-  * wiring order — signal installation precedes ``connect()`` so the WHOLE boot is interruptible.
+  * wiring order — signal installation precedes the composition (``connect()``) so the WHOLE boot is
+    interruptible.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+import engine
+from engine.core.config import load_settings
 from engine.ops import main as opsmain
+from engine.ops import stop_path
 
 
 # --------------------------------------------------------------------------- counted stop handler
@@ -47,7 +53,7 @@ async def test_stop_handler_first_requests_second_forces(args: tuple) -> None:
     stop_event = asyncio.Event()
     codes: list[int] = []
     mono = _FakeMonotonic()
-    handler = opsmain._make_stop_handler(loop, stop_event, force_exit=codes.append, monotonic=mono)
+    handler = stop_path.make_stop_handler(loop, stop_event, force_exit=codes.append, monotonic=mono)
 
     # FIRST signal — graceful: wakes the event (via call_soon_threadsafe), no force-exit.
     handler(*args)
@@ -56,7 +62,7 @@ async def test_stop_handler_first_requests_second_forces(args: tuple) -> None:
     assert stop_event.is_set() is True and codes == []
 
     # SECOND signal past the grace window — hard exit exactly once, with code 130.
-    mono.t += opsmain._REPEAT_SIGNAL_GRACE_S + 0.1
+    mono.t += stop_path.REPEAT_SIGNAL_GRACE_S + 0.1
     handler(*args)
     assert codes == [130]
 
@@ -70,12 +76,12 @@ async def test_stop_handler_ignores_repeat_signals_inside_grace_window() -> None
     stop_event = asyncio.Event()
     codes: list[int] = []
     mono = _FakeMonotonic()
-    handler = opsmain._make_stop_handler(loop, stop_event, force_exit=codes.append, monotonic=mono)
+    handler = stop_path.make_stop_handler(loop, stop_event, force_exit=codes.append, monotonic=mono)
 
     handler(2, None)
     mono.t += 1.1                               # the observed NSSM repeat gap
     handler(2, None)
-    mono.t += opsmain._REPEAT_SIGNAL_GRACE_S - 1.2   # still inside the window, measured from the FIRST
+    mono.t += stop_path.REPEAT_SIGNAL_GRACE_S - 1.2   # still inside the window, measured from the FIRST
     handler(21, None)                           # a SIGBREAK repeat is treated the same
     await asyncio.sleep(0)
     assert stop_event.is_set() is True
@@ -88,34 +94,83 @@ async def test_stop_handler_ignores_repeat_signals_inside_grace_window() -> None
 
 # --------------------------------------------------------------------------- hard-exit backstop
 def test_hard_exit_forces_exit_past_a_wedged_nondaemon_thread() -> None:
-    """A NON-daemon thread blocked forever must NOT be able to zombify the process: ``_hard_exit`` uses
+    """A NON-daemon thread blocked forever must NOT be able to zombify the process: ``hard_exit`` uses
     ``os._exit`` (skips the interpreter's executor/thread joins). The subprocess must exit code 7 within
     a bounded time — a plain ``sys.exit``/return there would hang on the thread join indefinitely."""
     script = (
-        "import threading, engine.ops.main as m\n"
+        "import threading, engine.ops.stop_path as m\n"
         "block = threading.Event()\n"
         "threading.Thread(target=block.wait, daemon=False).start()\n"   # non-daemon, blocks forever
-        "m._hard_exit(7)\n"
+        "m.hard_exit(7)\n"
     )
-    proc = subprocess.run([sys.executable, "-c", script], timeout=90, capture_output=True)
+    # The child imports the engine under test, not whatever copy the interpreter has installed.
+    env = {**os.environ, "PYTHONPATH": str(Path(engine.__file__).parents[1])}
+    proc = subprocess.run([sys.executable, "-c", script], timeout=90, capture_output=True, env=env)
     assert proc.returncode == 7
 
 
 # --------------------------------------------------------------------------- wiring order (regression)
-def test_signal_handlers_installed_before_connect() -> None:
-    """2026-07-21 regression guard: ``_install_signal_handlers`` must be wired BEFORE ``connect()`` (and
-    after the instance-lock acquire) so a wedged boot is interruptible. A runtime assertion would need a
-    full boot; a source-order check over ``run`` is the cheap, robust equivalent."""
-    src = inspect.getsource(opsmain.run)
-    i_lock = src.index("instance_lock.acquire")
-    i_install = src.index("_install_signal_handlers(stop_event)")
-    i_connect = src.index("conn = connect(")
-    assert i_lock < i_install < i_connect
-    # The late (post-startup) install site is GONE — the handler is installed exactly once, early.
-    assert src.count("_install_signal_handlers(stop_event)") == 1
+class _Composed(Exception):
+    """Ends ``run`` at the composition step."""
+
+
+@pytest.mark.asyncio
+async def test_signal_handlers_installed_before_connect(tmp_path, monkeypatch) -> None:
+    """2026-07-21 regression guard: the signal handlers must be wired BEFORE ``connect()`` — i.e. before
+    ``compose``, which opens every shared resource — and after the instance-lock acquire, so a wedged
+    boot is interruptible. ``run`` is driven for real up to ``compose``, which ends it."""
+    monkeypatch.setenv("MT_DATA_DIR", str(tmp_path / "data"))
+    settings = load_settings()
+    events: list[str] = []
+    installed: list[asyncio.Event] = []
+    composed: list[asyncio.Event] = []
+
+    class _Lock:
+        def __init__(self, path) -> None:
+            assert path == settings.resolved_data_dir() / "engine.lock"
+
+        def acquire(self) -> bool:
+            events.append("lock")
+            return True
+
+    class _Secrets:   # run() constructs the real one; it must never be built in a test
+        pass
+
+    def _install(stop_event: asyncio.Event) -> None:
+        events.append("signal_handlers")
+        installed.append(stop_event)
+
+    def _watchdog(state: dict):
+        events.append("watchdog")
+
+        async def _retired() -> None:
+            return None
+
+        return _retired()
+
+    async def _compose(_settings, *, secrets, clock, stop_event, boot_state):
+        events.append("compose")
+        assert _settings is settings and isinstance(secrets, _Secrets)
+        composed.append(stop_event)
+        raise _Composed
+
+    monkeypatch.setattr(opsmain, "load_settings", lambda: settings)
+    monkeypatch.setattr(opsmain, "configure_logging", lambda **_kw: None)
+    monkeypatch.setattr(opsmain, "InstanceLock", _Lock)
+    monkeypatch.setattr(opsmain, "Secrets", _Secrets)
+    monkeypatch.setattr(opsmain, "install_signal_handlers", _install)
+    monkeypatch.setattr(opsmain, "boot_contract_watchdog", _watchdog)
+    monkeypatch.setattr(opsmain, "compose", _compose)
+
+    with pytest.raises(_Composed):
+        await opsmain.run()
+    await asyncio.sleep(0)                      # let the stand-in watchdog task finish
+
+    assert events == ["lock", "signal_handlers", "watchdog", "compose"]
+    assert installed[0] is composed[0]           # the event the handlers set is the one run idles on
 
 
 def test_install_signal_handlers_defaults_to_os_exit() -> None:
     """The production default force-exit is ``os._exit`` (the injection seam only exists for tests)."""
-    sig = inspect.signature(opsmain._install_signal_handlers)
-    assert sig.parameters["force_exit"].default is __import__("os")._exit
+    sig = inspect.signature(stop_path.install_signal_handlers)
+    assert sig.parameters["force_exit"].default is os._exit

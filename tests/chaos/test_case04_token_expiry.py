@@ -258,7 +258,7 @@ async def test_protection_already_resting():
 def test_replicated_wiring_matches_the_composition_root():
     """The hooks above are copies of closures inside engine.ops.main.run — pin the lines that carry
     the behaviour, so a change there fails HERE instead of leaving a stale replica."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     for line in (
         "await latch.set_cause(reason, RiskState.FROZEN, reason, Actor.RISK_GATE)",
         'await freeze_entries("kite_token_rejected")',

@@ -41,6 +41,7 @@ from engine.core.migrations import apply_migrations
 from engine.core.protected_store import IntegrityError
 from engine.core.types import Bar, TradeWindow
 from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
+from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
 from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
 from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult
@@ -99,6 +100,7 @@ from engine.risk.events import RiskStateChanged
 from engine.strategy.retest import DEFAULT_RETEST_SESSIONS
 from engine.strategy.scanners import brk20, cat, hi52, ins
 from engine.strategy.types import RawLevels, SignalCandidate
+from tests._composition import composed_engine
 from tests.conftest import PINNED_CAPITAL
 from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
 
@@ -462,15 +464,34 @@ def _wrapper_body(src: str, wrapper_name: str) -> str:
     return src[start:end]
 
 
-def test_sector_map_wrapper_classifies_the_batch_universe() -> None:
+async def test_sector_map_wrapper_classifies_the_batch_universe(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """O15 (2026-09-04): ``job_sector_map`` must feed sector_map the day's BATCH universe, not the
     tick watchlist. With the eligible set at NIFTY 500 and ``universe_max_watchlist`` still 200, a
     watchlist-scoped run leaves every capped/extended name unclassified — and §7.1 caps the
-    UNCLASSIFIED bucket at 1 open position, so the widened swing legs would be gate-blocked.
-    Source-level, like the forwarding sweep above: no engine boot needed to pin the seam."""
-    body = _wrapper_body(inspect.getsource(opsmain.run), "job_sector_map")
-    assert "batch_universe_symbols()" in body
-    assert "universe_symbols=watchlist_symbols()" not in body
+    UNCLASSIFIED bucket at 1 open position, so the widened swing legs would be gate-blocked."""
+    received: list[tuple[date, list[str]]] = []
+
+    async def run(self, d: date, *, universe_symbols=None) -> SectorMapResult:
+        received.append((d, list(universe_symbols)))
+        return SectorMapResult(as_of=d, ok=False, reason="recorded")
+
+    monkeypatch.setattr(SectorMapJob, "run", run)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        today = c.engine.clock.today()
+        c.engine.store.upsert_universe_daily([
+            {"d": today, "symbol": "WATCHA", "included": True, "exclusion_reasons": None},
+            {"d": today, "symbol": "WATCHB", "included": True, "exclusion_reasons": None},
+            {"d": today, "symbol": "CAPPED", "included": False, "exclusion_reasons": ["watchlist_cap"]},
+            {"d": today, "symbol": "EXTENDED", "included": False, "exclusion_reasons": ["not_in_index"]},
+            {"d": today, "symbol": "ILLIQUID", "included": False, "exclusion_reasons": ["illiquid"]},
+        ])
+        spec = next(s for s in c.engine.registry.specs() if s.job_id == JOB_SECTOR_MAP)
+        result = await spec.run()
+
+    assert received == [(today, ["CAPPED", "EXTENDED", "WATCHA", "WATCHB"])]
+    assert result.reason == "recorded"           # the wrapper forwards the job's verdict
 
 
 @pytest.mark.parametrize("wrapper_name", _FORWARDING_WRAPPERS)
@@ -481,7 +502,7 @@ def test_ok_bearing_wrapper_forwards_return_value(wrapper_name: str) -> None:
     pins end-to-end for bhavcopy alone. A lightweight source-level sweep (rather than constructing all
     9 real job objects) for the remaining 8: fails loudly if a future edit reintroduces a bare
     ``await job.run(...)`` on any of them."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     body = _wrapper_body(src, wrapper_name)
     assert "return await" in body, f"{wrapper_name} does not forward its job's return value"
 
@@ -493,7 +514,7 @@ _RECONCILE_TOKENS = {"A": 1, "B": 2, "C": 3}
 def _real_wrapper(wrapper_name: str, namespace: dict):
     """Compile one composition-root closure from ``engine.ops.main:run``'s REAL source, with its free
     variables supplied by ``namespace`` — the seam itself, not a hand-kept mirror that can drift."""
-    body = _wrapper_body(inspect.getsource(opsmain.run), wrapper_name)
+    body = _wrapper_body(inspect.getsource(opsmain.compose), wrapper_name)
     exec(textwrap.dedent("    " + body), namespace)
     return namespace[wrapper_name]
 
@@ -863,7 +884,7 @@ def test_optional_interval_ticks_are_armed_at_their_cadence_only_when_wired(
 
 
 def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built() -> None:
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "paper_tick=paper.runtime.paper_tick if paper is not None else None" in src
 
 
@@ -872,7 +893,7 @@ def test_clusterer_and_digest_read_the_one_cat_envelope_row() -> None:
     ``cat.max_event_age_days`` off the same boot ``envelope_state`` read (the settings key is gone)."""
     from engine.datafeeds.news_pipeline import load_cat_params
 
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "settings.cat.max_event_age_days" not in src
     assert src.count('FROM envelope_state").fetchall()') == 1
     read = src.index('FROM envelope_state").fetchall()')
@@ -1191,7 +1212,7 @@ def test_the_composition_root_really_arms_the_retest_rearm() -> None:
     (the `hi52` promotion's lesson: a wiring that only exists inside run() silently
     disappears). Half one: every ADMITTED brk20 candidate starts resting. Half two: the 60 s drain
     tick re-offers it under the window predicate and publishes what admit accepted."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
 
     # Half one — the book exists, owner-configured, and the sweep records ADMITTED brk20 candidates
     # off the ONE ranked batch (`accepted` carries the post-admit `batch`), never the raw output.
@@ -1291,7 +1312,7 @@ def test_an_unverified_limits_table_falls_back_and_says_so_once(caplog) -> None:
 
 
 def _run_calls(name: str) -> list[ast.Call]:
-    run = ast.parse(textwrap.dedent(inspect.getsource(opsmain.run)))
+    run = ast.parse(textwrap.dedent(inspect.getsource(opsmain.compose)))
     return [n for n in ast.walk(run) if isinstance(n, ast.Call) and ast.unparse(n.func) == name]
 
 
@@ -1302,27 +1323,43 @@ def _kw(call: ast.Call, arg: str) -> str:
 def test_the_real_tracker_is_built_on_the_live_base() -> None:
     (tracker,) = _run_calls("ExposureTracker")
     assert [ast.unparse(a) for a in tracker.args] == ["conn", "clock", "_limits_capital_base(limits_engine)"]
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert '_log.warning("limits_unverified_at_boot",' in src          # the boot warning stays
     assert "_capital_base = " not in src                               # …and no boot-time copy remains
 
 
-def test_the_gate_and_the_pipeline_share_one_live_strategy_edges() -> None:
+async def test_the_gate_and_the_pipeline_share_one_live_strategy_edges(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """O19 §3.3: ONE ``StrategyEdges`` on the hash-verified limits and the gate's own cost model, so
     the gate's C3 edge and the pipeline's registered edge can never disagree after a capital change."""
-    run = ast.parse(textwrap.dedent(inspect.getsource(opsmain.run)))
-    assigns = {ast.unparse(t): n.value for n in ast.walk(run) if isinstance(n, ast.Assign) for t in n.targets}
-    edges = assigns["strategy_edges"]
-    assert isinstance(edges, ast.Call) and ast.unparse(edges.func) == "StrategyEdges"
-    assert [ast.unparse(a) for a in edges.args] == ["_strategy_expected_edge_pct(settings)"]
-    assert (_kw(edges, "table_fn"), _kw(edges, "cost_model")) == ("limits_engine.load", "cost_model")
-    assert ast.unparse(assigns["cost_model"].func) == "CostModel.from_config"
-    (gate,) = _run_calls("RiskGate")
-    assert ast.unparse(gate.args[1]) == "cost_model"
-    assert _kw(gate, "strategy_expected_edge_pct") == "strategy_edges"
-    (pipeline,) = _run_calls("RecommendationPipeline")
-    assert _kw(pipeline, "strategy_edge_pct") == "strategy_edges"
-    assert len(_run_calls("StrategyEdges")) == 1 and len(_run_calls("_strategy_expected_edge_pct")) == 1
+    built: dict[str, list[tuple[tuple, dict, object]]] = {}
+
+    def spy(name: str) -> None:
+        real = getattr(opsmain, name)
+
+        def build(*args, **kwargs):
+            obj = real(*args, **kwargs)
+            built.setdefault(name, []).append((args, kwargs, obj))
+            return obj
+
+        monkeypatch.setattr(opsmain, name, build)
+
+    for name in ("StrategyEdges", "RiskGate", "RecommendationPipeline"):
+        spy(name)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        settings = c.engine.settings
+
+    ((edges_args, edges_kw, edges),) = built["StrategyEdges"]
+    ((gate_args, gate_kw, gate),) = built["RiskGate"]
+    ((pipe_args, pipe_kw, _pipeline),) = built["RecommendationPipeline"]
+    limits_engine, cost_model = gate_args[0], gate_args[1]
+    assert edges_args == (opsmain._strategy_expected_edge_pct(settings),)
+    assert edges_kw["table_fn"] == limits_engine.load               # the hash-verified table, live
+    assert edges_kw["cost_model"] is cost_model                     # the gate's own cost model
+    assert gate_kw["strategy_expected_edge_pct"] is edges
+    assert pipe_kw["strategy_edge_pct"] is edges                    # the gate's object, never a copy
+    assert pipe_args[3] is gate
 
 
 def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, conn, clock) -> None:
@@ -1460,7 +1497,7 @@ async def test_orphan_resweep_abandons_headlines_older_than_four_days(market_sto
     )
     assert [r["headline_id"] for r in swept] == ["at-cutoff", "inside-cutoff"]
 
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "published_after=clock.now() - timedelta(days=4), unclustered_only=True" in src
     assert "][:500]" in src          # the oldest-first cap: repeated timeouts stay bounded
 
@@ -2124,7 +2161,7 @@ def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context() -> N
     ``warmup_ready`` verdict must be the SAME fact, or the pre-screen would re-arm candidates the
     gate would have approved (or spend analyst calls the gate then rejects). ONE snapshot function
     is wired to both seams in the composition root."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     # real ctx_builder + paper ctx_builder + pipeline
     assert src.count("warmup_status_fn=warmup_status_snapshot,") == 3
     assert "def warmup_status_snapshot() -> WarmupStatus:" in src
@@ -2500,7 +2537,7 @@ def test_advisory_wrapper_translates_the_tristate(wrapper_name: str) -> None:
     """Source-level sweep (same technique as the ok-bearing forwarding sweep above): the wrapper -
     not ``_job_result_ok`` - is where the tri-state becomes a watermark verdict. A future edit that
     reverts to a bare ``await job.run(...)`` (discarding the outcome) fails here."""
-    body = _wrapper_body(inspect.getsource(opsmain.run), wrapper_name)
+    body = _wrapper_body(inspect.getsource(opsmain.compose), wrapper_name)
     assert "return AdvisoryRun(await" in body, f"{wrapper_name} does not translate its outcome"
 
 
@@ -2626,7 +2663,7 @@ def test_tick_compact_closure_calls_retention_after_the_pass() -> None:
     """Source-level pin (same technique as the ok-bearing forwarding sweep): the wiring lives in the
     composition-root closure, which cannot be constructed without booting the engine. A future edit
     that drops the retention call — the exact defect WO-23 fixes — fails here."""
-    body = _wrapper_body(inspect.getsource(opsmain.run), "job_tick_compact")
+    body = _wrapper_body(inspect.getsource(opsmain.compose), "job_tick_compact")
     assert "await apply_tick_retention(store, result)" in body
     assert body.index("compact_ticks") < body.index("apply_tick_retention")   # AFTER the pass
     assert "return result" in body                          # and the job's own verdict is unchanged
@@ -2643,11 +2680,12 @@ def test_run_gives_tick_compact_its_own_lane() -> None:
     """Source-level pin of the 2026-09-29 wiring, which lives in the composition root: the main
     runner never holds compaction, the lane runner holds nothing else, the lane starts behind the
     post-arm one-shot, and shutdown cancels it."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "registry.select(lambda s: s.job_id not in LANE_JOB_IDS)" in src
     assert "registry.select(lambda s: s.job_id in LANE_JOB_IDS)" in src
-    assert src.index("start_scheduler_and_fire_post_arm(") < src.index('compaction_lane.spawn("post_arm")')
-    assert "await compaction_lane.cancel()" in src
+    boot = inspect.getsource(opsmain._boot)
+    assert boot.index("start_scheduler_and_fire_post_arm(") < boot.index('compaction_lane.spawn("post_arm")')
+    assert "await engine.compaction_lane.cancel()" in inspect.getsource(opsmain._shutdown)
 
 
 def test_market_backup_runs_in_compaction_lane_only(conn, clock, calendar) -> None:
@@ -2658,7 +2696,7 @@ def test_market_backup_runs_in_compaction_lane_only(conn, clock, calendar) -> No
     registry = build_job_registry(load_settings(), _all_noop_fns())
     main_ids = {s.job_id for s in registry.select(lambda s: s.job_id not in opsmain.LANE_JOB_IDS).specs()}
     assert not main_ids & opsmain.LANE_JOB_IDS and main_ids
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "_arm_registry_jobs(scheduler, registry, catch_up, clock, lane=compaction_lane)" in src
     assert "interrupt=store.interrupt_export" in src
     hook = src[src.index("async def backup_hook("):src.index("lifecycle = SessionLifecycle(")]
@@ -3166,16 +3204,53 @@ async def test_a_raising_owner_page_never_ends_the_watchdog(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_shutdown_cancels_the_boot_watchdog_cleanly() -> None:
-    """run()'s teardown retires it with the same helper it uses for the post-arm one-shot, BEFORE
-    scheduler.shutdown() — otherwise a slow stop would page a violation for a deliberate stop."""
+    """The teardown retires the watchdog BEFORE scheduler.shutdown() — otherwise a slow stop would page
+    a violation for a deliberate stop. Two more orders its comments rely on: paper stops before the
+    lifecycle guard's shutdown backup, and the bus drains before the market store closes."""
+    events: list[str] = []
     state = _boot_state(ready=False, armed=False)
-    task = asyncio.create_task(boot_contract_watchdog(state, deadline_s=60, recheck_s=60))
+    watchdog = asyncio.create_task(boot_contract_watchdog(state, deadline_s=60, recheck_s=60))
+    post_arm = asyncio.create_task(asyncio.sleep(3600))
+    hydration = asyncio.create_task(asyncio.sleep(3600))
     await asyncio.sleep(0.01)
-    await cancel_post_arm(task)                 # the exact call the teardown makes
-    assert task.done() and task.cancelled()
 
-    teardown = inspect.getsource(opsmain.run)
-    assert teardown.index("cancel_post_arm(boot_watchdog)") < teardown.index("scheduler.shutdown()")
+    def sync(name: str):
+        return lambda *_a, **_k: events.append(name)
+
+    def coro(name: str, result: object = None):
+        async def call(*_a, **_k):
+            events.append(name)
+            return result
+        return call
+
+    def scheduler_shutdown() -> None:
+        events.append("scheduler.shutdown" if watchdog.cancelled() else "scheduler.shutdown_under_watchdog")
+
+    engine = SimpleNamespace(
+        scheduler=SimpleNamespace(shutdown=scheduler_shutdown),
+        compaction_lane=SimpleNamespace(cancel=coro("compaction_lane.cancel")),
+        freeze_lift_tasks=set(),
+        bar_builder=SimpleNamespace(flush_all=sync("bar_builder.flush_all")),
+        ticker=SimpleNamespace(stop=coro("ticker.stop")),
+        paper=SimpleNamespace(stop=coro("paper.stop")),
+        lifecycle=SimpleNamespace(shutdown=coro("lifecycle.shutdown")),
+        telegram=SimpleNamespace(stop=coro("telegram.stop")),
+        http=SimpleNamespace(aclose=coro("http.aclose")),
+        bus=SimpleNamespace(drain=coro("bus.drain", 0)),
+        store=SimpleNamespace(close=sync("store.close")),
+        conn=SimpleNamespace(close=sync("conn.close")),
+    )
+    await opsmain._shutdown(engine, opsmain._BootTasks(None, post_arm, hydration), boot_watchdog=watchdog)
+
+    assert watchdog.cancelled() and post_arm.cancelled() and hydration.cancelled()
+    assert events[0] == "scheduler.shutdown"     # the watchdog was already retired when it ran
+    assert events.index("paper.stop") < events.index("lifecycle.shutdown")
+    assert events.index("bus.drain") < events.index("store.close")
+    assert sorted(events) == sorted([
+        "scheduler.shutdown", "compaction_lane.cancel", "bar_builder.flush_all", "ticker.stop",
+        "paper.stop", "lifecycle.shutdown", "telegram.stop", "http.aclose", "bus.drain",
+        "store.close", "conn.close",
+    ])
 
 
 @pytest.mark.asyncio
@@ -3498,7 +3573,7 @@ async def test_freeze_lift_does_not_sweep_before_the_boot_completes(calendar, ca
 
     # The flag the composition root feeds it is the boot contract's own, and it is raised only AFTER
     # the boot's last blocking step (seed_boot_snapshots) — the subscriber is armed long before that.
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose) + inspect.getsource(opsmain._boot)   # run()'s order
     assert 'ready=lambda: bool(boot_state["engine_ready"])' in src
     assert src.index("await seed_boot_snapshots(") \
         < src.index('boot_state["engine_ready"] = True')
@@ -3735,7 +3810,7 @@ def test_freeze_lift_takes_every_window_open_branch() -> None:
     # …and those candidates reach the pre-screen through the ONE ranked batch admit, not a second
     # leftover-capacity one (the §8.6 promotion: a rule that can reach RECOMMEND contests the same
     # slots as brk20/ins/cat). Exactly one admit call exists in the sweep.
-    run_src = inspect.getsource(opsmain.run)
+    run_src = inspect.getsource(opsmain.compose)
     assert "brk20_raw + ins_raw + cat_raw + cat_rev_raw + hi52_raw" in run_src
     assert run_src.count("prescreen.admit(") == 1
 
@@ -3744,7 +3819,7 @@ def test_freeze_lift_takes_every_window_open_branch() -> None:
     # …and no OTHER branch may key on the trigger. Any new comparison inside run() — `== "window_open"`,
     # `!= "freeze_lift"`, a dict dispatch spelled `in (...)` — fails this, which is the drift the work
     # order asked to be made impossible.
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
     assert re.findall(r"\btrigger\s*(?:[!=]=|(?:not )?in\b)\s*\S+", code) == \
         ['trigger != "scan_now":']
@@ -3807,7 +3882,7 @@ def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_order() 
     assert _publication_order([]) == []
     assert [c.symbol for c in _publication_order(ranked[:1])] == ["AAA"]
     # …and the sweep actually routes its one admission through it.
-    assert "_publication_order(prescreen.admit(" in inspect.getsource(opsmain.run)
+    assert "_publication_order(prescreen.admit(" in inspect.getsource(opsmain.compose)
 
 
 def test_the_hi52_promotion_is_one_state_in_both_of_its_halves() -> None:
@@ -3832,7 +3907,7 @@ def test_the_hi52_promotion_is_one_state_in_both_of_its_halves() -> None:
     assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal"}
     # …through the live StrategyEdges wrapper over this map (O19 §3.3; pinned in
     # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52.
-    assert "strategy_expected_edge_pct=strategy_edges," in inspect.getsource(opsmain.run)
+    assert "strategy_expected_edge_pct=strategy_edges," in inspect.getsource(opsmain.compose)
 
 
 def test_deleting_the_settings_key_really_un_registers_the_hi52_edge(tmp_path) -> None:
@@ -3927,7 +4002,7 @@ async def test_the_freeze_lift_queues_behind_an_in_flight_sweep_instead_of_being
 def test_every_sweep_trigger_goes_through_the_single_flight_entry_point() -> None:
     """One lock, one entry point: the window edge, the owner's /scan_now and the lift all resolve it,
     and the lift is the only one that waits instead of being skipped."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "_sweep_lock = asyncio.Lock()" in src
     assert "return await _single_flight_sweep(_sweep_lock, _scan_sweep, trigger," in src
     assert "queue=queue_behind_in_flight)" in src
@@ -3949,7 +4024,7 @@ def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_set() ->
     originate from the CORE (NIFTY 500) subset — their registered edge / frozen verdict population —
     while brk20 keeps scanning the full eligible set. Pinned on the composition-root source because
     the sweep body is a closure inside ``run`` (the established pattern in this file)."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "eligible = store.get_universe_eligible_symbols(today)" in src
     assert "core_eligible = store.get_core_eligible_symbols(today)" in src
     assert "for sym in eligible:" in src                                   # brk20 histories
@@ -3987,7 +4062,7 @@ def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set() -> Non
     """CONSTRAINT: ``warmup_gate.set_symbols`` stays on ``watchlist_symbols()``. A batch symbol in the
     warm-up coverage set means one missing bar on a name nobody trades FREEZES entries — the exact
     failure this work order exists to stop."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert src.count("set_symbols(") == 1
     assert "warmup_gate.set_symbols(watchlist_symbols())" in src
     assert "symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL" in src   # WarmupGate at boot
@@ -4001,7 +4076,7 @@ def test_surveillance_ingest_is_wired_to_open_real_positions() -> None:
     """A8: the held-position surveillance alert lives in ``SurveillanceIngest.refresh`` so every
     refresh path (08:20 job, catch-up, early hydration, job_universe's first use) runs it; it only
     fires when the engine passes the real-scoped held-positions reader."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert src.count("SurveillanceIngest(") == 1
     assert "held_positions=lambda: _held_positions(conn)," in src
 
@@ -4012,7 +4087,7 @@ def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour() -> None:
     history. The daily-history repair must run for every newcomer regardless of time of day (pre-open
     builds included — daily history is historical), so it must NOT be nested inside the mid-session
     ``clock.now() > session.open`` guard that still gates the minute fill."""
-    body = _wrapper_body(inspect.getsource(opsmain.run), "job_universe")
+    body = _wrapper_body(inspect.getsource(opsmain.compose), "job_universe")
     assert "backfill.daily_gap(added, sessions)" in body
     assert "warmup_gate.daily_window()" in body
     assert body.index("backfill.daily_gap(") < body.index("clock.now() > session.open")
@@ -4027,7 +4102,7 @@ def test_warmup_refresh_repair_confirms_upstream_empty_minutes() -> None:
     """2026-09-18: the 60 s self-heal is the path that closes a tradeless-minute hole (PTCIL 13:36
     on 09-16). Its repair lambda must pass ``confirm_until=to`` — ``to`` is already ``now − 2 min``
     and in-session, so a minute Kite has not published yet can never be confirmed."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "backfill.warmup_gap(watchlist_symbols(), frm, to," in src
     assert "confirm_until=to)" in src
 
@@ -4114,7 +4189,7 @@ def test_the_sweep_decides_the_ins_consume_at_publication_from_the_real_risk_sta
     """ONE read of the risk state serves both the freeze-lift debounce and the consume decision — if
     they disagreed, a sweep could be debounced away as "already done" after destroying the rows it
     was meant to re-publish."""
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "_published_frozen = mode.risk_state() != RiskState.NORMAL" in src
     assert src.count("_published_frozen = ") == 1        # ONE read of the state…
     assert "frozen=_published_frozen" in src             # …consumed by the freeze-lift debounce…
@@ -4135,7 +4210,7 @@ def test_nothing_paper_is_built_unless_the_subsystem_is_enabled() -> None:
     assert {ast.unparse(n.func) for n in calls} == builders - {"PaperBroker"}    # the runtime builds it
     assert [ast.unparse(n.func) for n in calls if id(n) not in inside] == []
 
-    run = ast.parse(inspect.getsource(opsmain.run))
+    run = ast.parse(inspect.getsource(opsmain.compose))
     gated = {
         id(inner)
         for node in ast.walk(run)
@@ -4146,13 +4221,13 @@ def test_nothing_paper_is_built_unless_the_subsystem_is_enabled() -> None:
     assert len(composes) == 1
     assert [id(n) in gated for n in ast.walk(run)
             if isinstance(n, ast.Call) and ast.unparse(n.func) == "_compose_paper"] == [True]
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert (src.index("paper = await _compose_paper(") < src.index("RecommendationPipeline(")
             < src.index("_arm_registry_jobs(scheduler"))
     for seam in ("paper_ctx_builder=paper.ctx_builder", "paper_submit=paper.submit",
                  "paper_enabled_fn=paper.entries_open", "paper_tick=paper.runtime.paper_tick"):
         assert f"{seam} if paper is not None else None" in src
-    assert "if paper is not None:\n        await paper.stop()" in src
+    assert "if engine.paper is not None:\n        await engine.paper.stop()" in inspect.getsource(opsmain._shutdown)
 
 
 def test_every_live_engine_calendar_excludes_special_sessions() -> None:
@@ -4184,7 +4259,7 @@ def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_to_the
         "edges": "strategy_edges", "notify": "notify",
     }
     # ``store`` there is the run's MarketStore, the one paper prep seeds its marks from.
-    src = inspect.getsource(opsmain.run)
+    src = inspect.getsource(opsmain.compose)
     assert "    store = MarketStore.from_settings(settings, clock).open()" in src
     assert "last_mark_fn=store_last_mark_fn(store)" in inspect.getsource(opsmain._compose_paper)
     (app_call,) = _run_calls("_create_app")

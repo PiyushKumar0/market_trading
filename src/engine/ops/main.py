@@ -15,7 +15,9 @@ and the startup :class:`~engine.ops.jobs.CatchUpRunner` (same registry), the col
 :class:`~engine.ops.warmup.WarmupGate`, and the dedicated-thread
 :class:`~engine.ops.heartbeat.HeartbeatWriter`; plus the Tier-1 analyst harness, the Phase-2 RECOMMEND
 decision plane (pipeline / pre-open planner / digest / nightly reviewer), and the paper-autopilot OMS
-(OrderManager / PaperBroker / Protection / Exit managers, plan 2026-10-06).
+(OrderManager / PaperBroker / Protection / Exit managers, plan 2026-10-06). ``run`` drives three
+phases: :func:`compose` builds that graph, :func:`_boot` recovers and arms it, :func:`_shutdown` tears
+it down.
 
 Everything broker-touching (instruments dump, backfill, reconcile, ticker) is built only when Kite
 credentials exist — a fresh install with no secrets stays runnable and safe (entries FROZEN until
@@ -26,19 +28,16 @@ login), which is exactly the §2.6 posture. Live AUTO routing and the real-order
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import shutil
-import signal
 import sqlite3
-import threading
 import time as time_module  # `time` itself is datetime.time here (below) — WO-25c needs monotonic()
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 import httpx
 from apscheduler.triggers.cron import CronTrigger
@@ -191,6 +190,7 @@ from engine.ops.scan_context import LiveScanContextProvider
 from engine.ops.scheduler import Scheduler
 from engine.ops.selftest import CLAUDE_RELOGIN_HINT, SelfTest, alert_claude_login, claude_credentials_path
 from engine.ops.single_instance import InstanceLock
+from engine.ops.stop_path import hard_exit, install_signal_handlers
 from engine.ops.token_check import TOKEN_CHECK_IST, TokenCheckJob
 from engine.ops.warmup import (
     CLASS_DAILY,
@@ -575,7 +575,7 @@ async def run() -> int:
     #     ANY shared resource is opened — covers the ENTIRE boot; a first Ctrl-C requests a graceful stop
     #     (honoured at await stop_event.wait()), a second forces a hard exit even if the boot is wedged. ---
     stop_event = asyncio.Event()
-    _install_signal_handlers(stop_event)
+    install_signal_handlers(stop_event)
 
     # --- WO-25c BOOT CONTRACT WATCHDOG, armed HERE — the first point at which this process is
     #     committed to running (the instance lock is held, signals are wired) and still ahead of every
@@ -590,6 +590,63 @@ async def run() -> int:
     boot_state: dict[str, Any] = {"engine_ready": False, "scheduler": None, "alert": None}
     boot_watchdog = asyncio.create_task(boot_contract_watchdog(boot_state), name="boot_contract")
 
+    engine = await compose(
+        settings, secrets=Secrets(), clock=Clock(ntp_servers=settings.clock.ntp_servers),
+        stop_event=stop_event, boot_state=boot_state,
+    )
+    tasks = await _boot(engine, boot_state)
+    # stop_event + signal handlers were installed EARLY (right after the instance lock) so a wedged boot
+    # is still interruptible; here we simply idle on it until the first signal requests a graceful stop.
+    await stop_event.wait()
+    await _shutdown(engine, tasks, boot_watchdog=boot_watchdog)
+    instance_lock.release()   # cosmetic tidiness — every non-clean exit is covered by the kernel
+    # releasing the OS lock on process death; this just frees it promptly on a graceful stop.
+    _log.info("engine_stopped")
+    return 0
+
+
+@dataclass
+class Engine:
+    """The composed object graph: what :func:`_boot` and :func:`_shutdown` drive, plus test seams."""
+
+    settings: Settings
+    conn: sqlite3.Connection
+    clock: Clock
+    calendar: NSECalendar
+    bus: EventBus
+    mode: ModeManager
+    session: SessionManager
+    kite: KiteClient | None
+    telegram: Any
+    app: Any
+    alert: Callable[[str, str], Awaitable[None]]
+    notify: Callable[[CatalogMessage], Awaitable[None]]
+    instruments: InstrumentStore
+    store: MarketStore
+    http: httpx.AsyncClient
+    bar_builder: BarBuilder
+    ticker: TickerSupervisor
+    paper: PaperStack | None
+    warmup_gate: WarmupGate
+    warmup_holder: dict[str, Any]
+    skew_holder: dict[str, bool]
+    warmup_refresh: Callable[[], Awaitable[None]]
+    health: HealthMonitor
+    lifecycle: SessionLifecycle
+    scheduler: Scheduler
+    scheduler_armed: asyncio.Event
+    catch_up: CatchUpRunner
+    compaction_lane: CompactionLane
+    early_hydration: EarlyHydration
+    freeze_lift_tasks: set[asyncio.Task]
+    registry: JobRegistry
+    scan_sweep: Callable[..., Awaitable[str]]
+
+
+async def compose(
+    settings: Settings, *, secrets: Secrets, clock: Clock, stop_event: asyncio.Event,
+    boot_state: dict[str, Any],
+) -> Engine:
     # --- persistence + migrations ---
     conn = connect(settings.sqlite_path())
     applied = apply_migrations(conn)
@@ -597,8 +654,6 @@ async def run() -> int:
         _log.info("migrations_applied_on_boot", files=applied)
 
     # --- deterministic core ---
-    clock = Clock(ntp_servers=settings.clock.ntp_servers)
-    secrets = Secrets()
     window_seed = TradeWindow(
         start=settings.trade_window.start_ist,
         end=settings.trade_window.end_ist,
@@ -904,7 +959,7 @@ async def run() -> int:
     cost_model = CostModel.from_config(instruments=instruments, edge_multiple_min=_edge_multiple_min())
     # The per-strategy C3 edge registrations — see :func:`_strategy_expected_edge_pct`, which is this
     # map and is module-level so BOTH halves of the hi52 promotion are assertable without booting an
-    # engine (a wiring that only exists inside run() silently disappears). ONE live object for the gate
+    # engine (a wiring that only exists inside compose() silently disappears). ONE live object for the gate
     # and the pipeline (O19 §3.3): hi52 reads min(registered, derived at the CURRENT verified limits),
     # on the gate's own cost model, so the two can never disagree after a capital change.
     strategy_edges = StrategyEdges(
@@ -2454,11 +2509,30 @@ async def run() -> int:
                    protection_reminder_tick=protection_reminder_tick,
                    paper_tick=paper.runtime.paper_tick if paper is not None else None)
 
+    return Engine(
+        settings=settings, conn=conn, clock=clock, calendar=calendar, bus=bus, mode=mode,
+        session=session, kite=kite, telegram=telegram, app=app, alert=alert, notify=notify,
+        instruments=instruments, store=store, http=http, bar_builder=bar_builder, ticker=ticker,
+        paper=paper, warmup_gate=warmup_gate, warmup_holder=warmup_holder, skew_holder=skew_holder,
+        warmup_refresh=warmup_refresh, health=health, lifecycle=lifecycle, scheduler=scheduler,
+        scheduler_armed=scheduler_armed, catch_up=catch_up, compaction_lane=compaction_lane,
+        early_hydration=early_hydration, freeze_lift_tasks=_freeze_lift_tasks,
+        registry=registry, scan_sweep=run_scan_sweep,
+    )
+
+
+class _BootTasks(NamedTuple):
+    server_task: asyncio.Task | None
+    post_arm_task: asyncio.Task | None
+    early_hydration_task: asyncio.Task
+
+
+async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
     # --- bring the owner alert channel up BEFORE recovery so startup notifications + any alert raised
     #     during recovery actually reach the owner instead of being dropped 'not_started' (§3.2.11). ---
-    if telegram is not None:
-        await telegram.start()
-    await check_calendar_horizon(calendar, clock, settings.clock.calendar_horizon_alert_sessions, notify)
+    if engine.telegram is not None:
+        await engine.telegram.start()
+    await check_calendar_horizon(engine.calendar, engine.clock, engine.settings.clock.calendar_horizon_alert_sessions, engine.notify)
 
     # --- BIND THE LOGIN CALLBACK API *BEFORE* startup recovery (2026-07-21 lockout). The owner's only
     #     browser login route (GET /kite/callback, :8400) is hosted by THIS uvicorn server, and it used
@@ -2469,12 +2543,12 @@ async def run() -> int:
     #     idempotent PostLoginRecovery hook. _serve_api binds the socket ITSELF (uvicorn's own bind
     #     paths sys.exit(1), which would kill the loop) and returns None on failure — the engine
     #     CONTINUES either way (Telegram /token still permits the daily login). ---
-    server_task = await _serve_api(app, settings)
+    server_task = await _serve_api(engine.app, engine.settings)
     _bound = getattr(server_task, "_mt_server", None)
     if _bound is None or not _bound.started:
-        await alert(
+        await engine.alert(
             "critical",
-            f"dashboard/login API failed to bind {settings.api.host}:{settings.api.port} — "
+            f"dashboard/login API failed to bind {engine.settings.api.host}:{engine.settings.api.port} — "
             "browser login unreachable; use Telegram /token",
         )
 
@@ -2483,11 +2557,11 @@ async def run() -> int:
     #     warm-up backfill on a dead token (2026-07-21). Probe it live ONCE here so token_valid() is
     #     truthful for the hydrate + startup below, and send the login link the instant we KNOW the token
     #     is rejected/absent (guarded on kite so login_url() never raises on a fresh, api-key-less install). ---
-    probe = await session.verify_token()
+    probe = await engine.session.verify_token()
     _log.info("token_probe", outcome=probe)
     login_prompt_sent = False
-    if probe in ("rejected", "absent") and telegram is not None and kite is not None:
-        await notify(login_prompt(session.login_url()))
+    if probe in ("rejected", "absent") and engine.telegram is not None and engine.kite is not None:
+        await engine.notify(login_prompt(engine.session.login_url()))
         login_prompt_sent = True
 
     # --- F2 cold-start token-map recovery: rebuild the in-memory instruments index (from the persisted
@@ -2496,7 +2570,7 @@ async def run() -> int:
     #     session_valid here is now the LIVE-probed truth (above), not a stale behavioural guess. ---
     try:
         instruments_source = await hydrate_instruments_at_startup(
-            instruments, store, kite, session_valid=session.token_valid(), clock=clock,
+            engine.instruments, engine.store, engine.kite, session_valid=engine.session.token_valid(), clock=engine.clock,
         )
     except Exception:  # noqa: BLE001 - a recovery step must never crash the boot (§2.6): degrade to
         # an empty token map (entries stay FROZEN via the warm-up gate) with a loud, named cause.
@@ -2510,12 +2584,12 @@ async def run() -> int:
     #     continues, so no tick body overlaps the post-boot warmup_refresh. ---
     _boot_ticks = asyncio.create_task(
         boot_phase_ticks(
-            lambda: refresh_warmup_snapshot(warmup_gate, warmup_holder),
-            lambda: health.check(check_skew=False),
+            lambda: refresh_warmup_snapshot(engine.warmup_gate, engine.warmup_holder),
+            lambda: engine.health.check(check_skew=False),
         )
     )
     try:
-        report = await lifecycle.startup(check_skew=True)
+        report = await engine.lifecycle.startup(check_skew=True)
     finally:
         _boot_ticks.cancel()
         try:
@@ -2528,7 +2602,7 @@ async def run() -> int:
               instruments=instruments_source)
     # Boot-scoped skew verdict for the gate's §7.1 clock_skew rule (self-test measured it above);
     # seed the warm-up snapshot immediately so the gate isn't blind until the first 60s refresh.
-    skew_holder["ok"] = "clock_skew" not in report.frozen_reasons
+    engine.skew_holder["ok"] = "clock_skew" not in report.frozen_reasons
     # WO-25c ROOT CAUSE. These two seeding refreshes used to be bare awaits sitting between
     # startup_complete and scheduler.start(), and on 2026-08-24 the 12:44:58 mid-session boot parked
     # in the first one FOREVER: the ticker came up 1.5 s earlier, the tick flush loop began taking
@@ -2544,65 +2618,61 @@ async def run() -> int:
     # correct trade is a hard deadline and carry on — losing a snapshot costs one fail-closed minute,
     # losing the scheduler costs the trading day.
     await seed_boot_snapshots(
-        warmup_refresh, lambda: health.check(check_skew=False), alert=alert,
+        engine.warmup_refresh, lambda: engine.health.check(check_skew=False), alert=engine.alert,
     )
 
-    # --- start remaining services + idle until a stop signal (§2.6: being up is an active period). The
-    #     login API is already bound (above); only prompt again here if startup still needs a login AND we
-    #     did not already send the link off the token probe (no double link). ---
+    # --- start remaining services; run() then idles until a stop signal (§2.6: being up is an active
+    #     period). The login API is already bound (above); only prompt again here if startup still needs
+    #     a login AND we did not already send the link off the token probe (no double link). ---
     # WO-15 (i)+(iii): arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it
     # as a background task. engine_ready (below) must not wait on the news chain — a wedged chain now
     # costs the digest, not the whole scheduled day (2026-08-10). Its own 600 s resolve cap bounds it.
-    post_arm_task = start_scheduler_and_fire_post_arm(scheduler, catch_up, armed=scheduler_armed)
-    compaction_lane.spawn("post_arm")
+    post_arm_task = start_scheduler_and_fire_post_arm(engine.scheduler, engine.catch_up, armed=engine.scheduler_armed)
+    engine.compaction_lane.spawn("post_arm")
     # §2.6 EARLY HYDRATION boot trigger (2026-09-21): a boot on a trading day before the open hydrates
     # under the same gates as an early login — the watermarks it leaves make a later login free.
-    early_hydration_task = asyncio.create_task(early_hydration.on_boot(), name="early_hydration_boot")
-    if telegram is not None and report.needs_login and not login_prompt_sent:
-        await notify(login_prompt(session.login_url()))
+    early_hydration_task = asyncio.create_task(engine.early_hydration.on_boot(), name="early_hydration_boot")
+    if engine.telegram is not None and report.needs_login and not login_prompt_sent:
+        await engine.notify(login_prompt(engine.session.login_url()))
 
-    # stop_event + signal handlers were installed EARLY (right after the instance lock) so a wedged boot
-    # is still interruptible; here we simply idle on it until the first signal requests a graceful stop.
-    _log.info("engine_ready", host=settings.api.host, port=settings.api.port, mode=mode.mode().value)
+    _log.info("engine_ready", host=engine.settings.api.host, port=engine.settings.api.port, mode=engine.mode.mode().value)
     boot_state["engine_ready"] = True   # WO-25c: the other half of the boot contract
-    await stop_event.wait()
+    return _BootTasks(server_task, post_arm_task, early_hydration_task)
 
+
+async def _shutdown(engine: Engine, tasks: _BootTasks, *, boot_watchdog: asyncio.Task) -> None:
     # --- graceful shutdown (§2.6/§10.8 shutdown guard): flatten in-flight bars, stop the ticker, run
     #     the lifecycle guard (backup + STOPPED commit + heartbeat join), then tear down the rest. ---
     _log.info("engine_stopping")
     await cancel_post_arm(boot_watchdog)      # WO-25c: retire the contract watchdog BEFORE the
     # scheduler stops — otherwise a slow teardown re-reads is_running()==False and pages a violation
     # for an engine that is deliberately shutting down.
-    scheduler.shutdown()                      # no new job fires can race the teardown
-    await cancel_post_arm(post_arm_task)      # a still-running post-arm one-shot never blocks a stop
-    await compaction_lane.cancel()            # …nor a compaction lane pass
-    await cancel_post_arm(early_hydration_task)  # a still-running boot hydration never blocks a stop
-    if _freeze_lift_tasks:
+    engine.scheduler.shutdown()                      # no new job fires can race the teardown
+    await cancel_post_arm(tasks.post_arm_task)      # a still-running post-arm one-shot never blocks a stop
+    await engine.compaction_lane.cancel()            # …nor a compaction lane pass
+    await cancel_post_arm(tasks.early_hydration_task)  # a still-running boot hydration never blocks a stop
+    if engine.freeze_lift_tasks:
         # …nor a detached freeze-lift re-sweep. WAIT it out first (a sweep is seconds): the task parks
         # in `asyncio.to_thread`, and cancelling the TASK does not stop the worker THREAD — it would
         # keep reading the store that `store.close()` below is about to take away. The cancel after
         # the wait is the bound: a stop can never hang on a wedged sweep.
-        await asyncio.wait(list(_freeze_lift_tasks), timeout=_SHUTDOWN_LIFT_WAIT_S)
-    for _lift_task in list(_freeze_lift_tasks):
+        await asyncio.wait(list(engine.freeze_lift_tasks), timeout=_SHUTDOWN_LIFT_WAIT_S)
+    for _lift_task in list(engine.freeze_lift_tasks):
         await cancel_post_arm(_lift_task)
-    bar_builder.flush_all()                   # finalize any open minute bars (EOD/shutdown, §4.4 job 1)
-    await ticker.stop()
-    if paper is not None:
-        await paper.stop()                    # no paper write may race the shutdown backup
-    await lifecycle.shutdown()                # runs backup hook, commits STOPPED, joins the heartbeat
-    if telegram is not None:
-        await telegram.stop()
-    await _stop_api(server_task)
-    await http.aclose()
-    undrained = await bus.drain(_SHUTDOWN_BUS_DRAIN_S)   # no handler may reach a closed store
+    engine.bar_builder.flush_all()                   # finalize any open minute bars (EOD/shutdown, §4.4 job 1)
+    await engine.ticker.stop()
+    if engine.paper is not None:
+        await engine.paper.stop()                    # no paper write may race the shutdown backup
+    await engine.lifecycle.shutdown()                # runs backup hook, commits STOPPED, joins the heartbeat
+    if engine.telegram is not None:
+        await engine.telegram.stop()
+    await _stop_api(tasks.server_task)
+    await engine.http.aclose()
+    undrained = await engine.bus.drain(_SHUTDOWN_BUS_DRAIN_S)   # no handler may reach a closed store
     if undrained:
         _log.warning("shutdown_bus_undrained", deliveries=undrained, waited_s=_SHUTDOWN_BUS_DRAIN_S)
-    store.close()
-    conn.close()
-    instance_lock.release()   # cosmetic tidiness — every non-clean exit is covered by the kernel
-    # releasing the OS lock on process death; this just frees it promptly on a graceful stop.
-    _log.info("engine_stopped")
-    return 0
+    engine.store.close()
+    engine.conn.close()
 
 
 # NOTE: ``hydrate_instruments_at_startup`` (the F2 cold-start ladder) now lives in
@@ -3560,7 +3630,7 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: accumulate a validation population and can never become a recommendation (see ``risk/gate.py``
 #: :data:`~engine.risk.gate._SHADOW_NO_EDGE` for why this is declared rather than inferred from a
 #: missing ``expected_edge_pct``). A module-level constant so the property is assertable without
-#: booting the engine — a wiring that only exists inside ``run`` is a wiring that silently
+#: booting the engine — a wiring that only exists inside ``compose`` is a wiring that silently
 #: disappears. Removing an id from here is the §8.6 owner promotion gate, never a refactor.
 #:
 #: ``cat`` joined 2026-08-28: it rested on the SAME indirect argument ``cat_reversal``'s docstring
@@ -3578,7 +3648,7 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: both, since either alone leaves a half-promoted rule (the shadow set wins a contradiction, but a
 #: dangling edge key reads as a live registration). BOTH edits are real edits: ``Hi52Cfg
 #: .expected_edge_pct`` defaults to ``None``, so deleting the settings key un-registers the edge in
-#: ``run`` above rather than falling back to a value hidden in code.
+#: ``compose`` above rather than falling back to a value hidden in code.
 NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
     {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID}
 )
@@ -4882,132 +4952,9 @@ async def _stop_api(task) -> None:
         _log.exception("api_server_task_failed")
 
 
-_REPEAT_SIGNAL_GRACE_S = 10.0
-
-
-def _make_stop_handler(
-    loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event, force_exit: Callable[[int], object],
-    *, monotonic: Callable[[], float] = time_module.monotonic,
-) -> Callable[..., None]:
-    """Build the COUNTED stop handler shared across every registered signal (extracted so the two-press
-    semantics are unit-testable WITHOUT raising real signals — the returned handler is called directly).
-
-    The same handler object is registered for SIGINT/SIGTERM/SIGBREAK, so its counter is shared across
-    them (a SIGINT then a SIGTERM is still "second signal"). It accepts ``*_args`` so it serves BOTH the
-    zero-arg :meth:`loop.add_signal_handler` callback and the ``(signum, frame)`` :func:`signal.signal`
-    fallback. It never raises — a signal handler that raised would surface at an arbitrary ``await``.
-
-    * FIRST signal: graceful — wake the idle ``await stop_event.wait()`` via
-      :meth:`loop.call_soon_threadsafe` (the ``signal.signal`` fallback runs in the main thread OUTSIDE
-      the loop callback context on Windows, so the threadsafe hand-off is the correct wake-up; the loop
-      is captured at install time). Honoured at the next safe point.
-    * REPEATS within ``_REPEAT_SIGNAL_GRACE_S`` of the first: logged and ignored. A single ``nssm stop``
-      delivers the console Ctrl-C more than once (2026-09-02..23: every stop logged ``stop_forced``
-      0.85-1.4 s after ``stop_requested``, mid shutdown-backup, so the clean stop was never committed).
-    * A signal AFTER the grace window: hard exit (the owner's deliberate second Ctrl-C for a wedged
-      stop). State stays RUNNING (never committed STOPPED) so the next boot runs crash recovery — that is
-      BY DESIGN; R3 protection is broker-resident, not process-local.
-    """
-    state: dict[str, float | int] = {"count": 0, "first_at": 0.0}
-
-    def _handler(*args: object) -> None:
-        state["count"] += 1
-        signum = args[0] if args else None
-        if state["count"] == 1:
-            state["first_at"] = monotonic()
-            _log.warning(
-                "stop_requested",
-                signum=signum,
-                hint=f"graceful stop — honoured at the next safe point; a Ctrl-C more than "
-                f"{_REPEAT_SIGNAL_GRACE_S:.0f} s later forces exit",
-            )
-            try:
-                loop.call_soon_threadsafe(stop_event.set)
-            except RuntimeError:
-                # Loop already closed (signal.signal fallback handlers are process-global and outlive
-                # asyncio.run on Windows): a stray signal in the post-run teardown window has nothing to
-                # wake — swallow so the "never raises" contract holds; _hard_exit is already imminent.
-                pass
-            return
-        since_first = monotonic() - state["first_at"]
-        if since_first < _REPEAT_SIGNAL_GRACE_S:
-            _log.warning(
-                "stop_signal_repeat_ignored",
-                count=state["count"], signum=signum, since_first_s=round(since_first, 3),
-            )
-            return
-        _log.critical(
-            "stop_forced",
-            count=state["count"], signum=signum, since_first_s=round(since_first, 3),
-            hint="repeat signal past the grace window — engine exits hard; state stays RUNNING so the "
-            "next boot runs crash recovery (R3 protection is broker-resident)",
-        )
-        try:
-            logging.shutdown()
-        except Exception:  # noqa: BLE001 - a hard-exit path must never raise out of a signal handler
-            pass
-        force_exit(130)
-
-    return _handler
-
-
-def _install_signal_handlers(stop_event: asyncio.Event, *, force_exit: Callable[[int], object] = os._exit) -> None:
-    """Install the graceful-stop signal handlers EARLY — before ``connect()``, so the WHOLE boot is
-    covered (2026-07-21 13:34 IST: Ctrl-C during a wedged ``lifecycle.startup`` hit Python's default
-    SIGINT handler → a raw ``KeyboardInterrupt`` at an arbitrary ``await`` with no ``lifecycle.shutdown``;
-    the process then lingered holding ``data/engine.lock`` — a zombie that blocks every future start).
-
-    ``force_exit`` is injectable so the second-press hard exit is unit-testable without killing the
-    interpreter (default :func:`os._exit`). The counted handler is SHARED across all registered signals.
-    """
-    loop = asyncio.get_running_loop()
-    handler = _make_stop_handler(loop, stop_event, force_exit)
-
-    signals = [signal.SIGINT, signal.SIGTERM]
-    if hasattr(signal, "SIGBREAK"):   # Windows console ctrl-break / NSSM stop → CTRL_BREAK_EVENT
-        signals.append(signal.SIGBREAK)
-    for sig in signals:
-        try:
-            loop.add_signal_handler(sig, handler)   # POSIX: runs inside the loop
-        except (NotImplementedError, RuntimeError):
-            # Windows ProactorEventLoop has no add_signal_handler; fall back to signal.signal (the
-            # handler accepts the (signum, frame) args and wakes the loop threadsafe from the main thread).
-            try:
-                signal.signal(sig, handler)
-            except (ValueError, OSError):
-                pass
-
-
-def _hard_exit(code: int) -> NoReturn:
-    """Force process exit that the interpreter's own shutdown CANNOT (2026-07-21 13:34 IST zombie).
-
-    After ``main()`` returns, interpreter shutdown joins non-daemon threads and ``concurrent.futures``'
-    atexit hook joins executor workers WITHOUT a timeout. A single wedged worker (blocked DuckDB op, a
-    long feature snapshot, a hung HTTP call) then hangs the process forever — still holding the §2.6
-    instance lock and heartbeat, a zombie that blocks every future start until it is killed by hand
-    (exactly what happened at 13:34). ``os._exit`` skips those joins entirely, so a wedged worker can
-    never zombify the process. Runs ONLY from ``main()`` (never at import), so tests import this module
-    freely without risk of exiting the test runner.
-    """
-    main_thread = threading.main_thread()
-    stragglers = [t.name for t in threading.enumerate() if not t.daemon and t is not main_thread]
-    if stragglers:
-        _log.warning(
-            "nondaemon_threads_at_exit", threads=stragglers,
-            hint="abandoned non-daemon threads would block interpreter shutdown; forcing os._exit",
-        )
-    else:
-        _log.info("exit_clean")
-    try:
-        logging.shutdown()
-    except Exception:  # noqa: BLE001 - flushing the log handlers must never block the forced exit
-        pass
-    os._exit(code)
-
-
 def main() -> NoReturn:
     # The interpreter MUST NOT be trusted to exit on its own after run() returns (abandoned executor
-    # workers, above), so BOTH the normal-return and the KeyboardInterrupt path funnel through the
+    # workers, see hard_exit), so BOTH the normal-return and the KeyboardInterrupt path funnel through the
     # os._exit backstop via `finally` — no path may fall through to a bare return. A raw KeyboardInterrupt
     # escaping asyncio.run (2026-07-21: run() wedged before its own handlers could honour the stop) is
     # still caught here and mapped to 130.
@@ -5018,7 +4965,7 @@ def main() -> NoReturn:
         _log.info("engine_interrupted")
         code = 130
     finally:
-        _hard_exit(code)
+        hard_exit(code)
 
 
 if __name__ == "__main__":

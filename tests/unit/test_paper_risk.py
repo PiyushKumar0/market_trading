@@ -207,7 +207,7 @@ def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick() -> No
     assert ast.unparse(guard) == "paper_order_guard(control.enabled, paper_effective_state(conn, real_risk_state))"
     flatten = next(k.value for k in calls["PaperRisk"].keywords if k.arg == "flatten")
     assert ast.unparse(flatten) == "exits.flatten_all"
-    tree = ast.parse(inspect.getsource(opsmain.run))
+    tree = ast.parse(inspect.getsource(opsmain.compose))
     assert "real_risk_state=mode.risk_state" in ast.unparse(tree)
     equity_tick = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "equity_tick")
     assert "paper" not in ast.unparse(equity_tick).lower()
