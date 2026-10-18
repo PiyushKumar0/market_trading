@@ -12,9 +12,9 @@ round-trip costs from :class:`~engine.strategy.cost_model.CostModel`. The sweep'
 
 The indicator math is the SAME pure ``engine.strategy.indicators`` the live scanners use (§6.1), so
 research and live cannot diverge (§9.6). vectorbt is imported **function-level** (native import-order
-guard, ``engine._preload`` — ``import engine`` establishes sklearn's OpenMP runtime before numba/vectorbt
-load); the module top level is pandas/numpy + stdlib only, so ``import engine.learning.sweep`` stays
-cheap for the pure-Python test tier.
+guard, ``engine._preload`` — ``import engine`` makes the first numba/vectorbt import load sklearn's OpenMP
+runtime first); the module top level is pandas/numpy + stdlib only, so ``import engine.learning.sweep``
+stays cheap for the pure-Python test tier.
 
 FILL MECHANICS — **next-bar OPEN** (WO-2, 2026-08-13; this is the one that invalidated every prior
 report). Signals are computed from bar *t*'s COMPLETED values, so no order derived from them can fill
