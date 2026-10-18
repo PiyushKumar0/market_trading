@@ -129,3 +129,30 @@ def test_migrations_idempotent(db_path):
         assert EXPECTED_TABLES <= _tables(conn)
     finally:
         conn.close()
+
+
+def test_conn_fixture_is_indistinguishable_from_a_fresh_migration(conn, tmp_path):
+    """tests/conftest.py's ``conn`` is a per-test copy of one session-migrated template. Every test
+    built on it assumes the engine's database, so the copy must match migrating a fresh file: schema,
+    user_version, the applied set, every seeded row (``applied_at`` is wall-clock, so not compared)."""
+    fresh = connect(tmp_path / "fresh.db")
+    try:
+        apply_migrations(fresh)
+
+        def rows(c, sql):
+            return [tuple(r) for r in c.execute(sql)]
+
+        for sql in (
+            "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name",
+            "PRAGMA user_version",
+            "SELECT filename FROM schema_migrations ORDER BY filename",
+        ):
+            assert rows(conn, sql) == rows(fresh, sql), sql
+        tables = [r[0] for r in fresh.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name != 'schema_migrations'")]
+        for table in tables:
+            sql = f'SELECT * FROM "{table}" ORDER BY rowid'
+            assert rows(conn, sql) == rows(fresh, sql), table
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        fresh.close()

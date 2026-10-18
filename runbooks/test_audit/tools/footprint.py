@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import types
 from array import array
 from pathlib import Path
 
@@ -28,16 +29,36 @@ _CANDIDATE_TOOL_IDS = (1, 3, 4)   # COVERAGE_ID first; 3 and 4 are unassigned by
 
 
 class _Recorder:
-    def __init__(self, root: Path, out: Path) -> None:
+    def __init__(self, root: Path, out: Path, mode: str = "scoped") -> None:
         self.root_prefix = os.path.normcase(str(root.resolve())) + os.sep
         self.prefixes = tuple(self.root_prefix + p + os.sep for p in (os.path.join("src", "engine"), "scripts"))
         self.out = out
+        self.mode = mode
         self.file_idx: dict[str, int | None] = {}
         self.paths: list[str] = []
         self.recording = False
         self.current: set[int] = set()
         self.results: dict[str, array] = {}
         self.tool_id: int | None = None
+        # Keyed by id(): a code object's hash is recomputed over its bytecode and constants on every
+        # call (uncached), which made a set of code objects the dominant cost. The values keep each
+        # armed code object alive, so its id cannot be reused.
+        self.armed: dict[int, types.CodeType] = {}
+
+    def on_start(self, code, offset):  # PY_START callback ("scoped" mode): arm LINE on in-scope code only
+        if id(code) not in self.armed:
+            fn = code.co_filename
+            idx = self.file_idx[fn] if fn in self.file_idx else self._idx(fn)
+            if idx is not None:
+                stack = [code]
+                while stack:
+                    c = stack.pop()
+                    if id(c) in self.armed:
+                        continue
+                    self.armed[id(c)] = c
+                    sys.monitoring.set_local_events(self.tool_id, c, sys.monitoring.events.LINE)
+                    stack.extend(k for k in c.co_consts if isinstance(k, types.CodeType))
+        return sys.monitoring.DISABLE
 
     def _idx(self, filename: str) -> int | None:
         norm = os.path.normcase(os.path.abspath(filename))
@@ -68,14 +89,23 @@ class _Recorder:
         if self.tool_id is None:
             raise RuntimeError("footprint: no free sys.monitoring tool id")
         mon.register_callback(self.tool_id, mon.events.LINE, self.on_line)
-        mon.set_events(self.tool_id, mon.events.LINE)
+        if self.mode == "global":
+            # Every line of every module fires once per test: simple, but slow (pytest, stdlib, deps).
+            mon.set_events(self.tool_id, mon.events.LINE)
+        else:
+            # Only in-scope code objects get LINE events; PY_START finds them (and their nested code).
+            mon.register_callback(self.tool_id, mon.events.PY_START, self.on_start)
+            mon.set_events(self.tool_id, mon.events.PY_START)
 
     def stop(self) -> None:
         if self.tool_id is None:
             return
         mon = sys.monitoring
         mon.set_events(self.tool_id, 0)
+        for c in self.armed.values():
+            mon.set_local_events(self.tool_id, c, 0)
         mon.register_callback(self.tool_id, mon.events.LINE, None)
+        mon.register_callback(self.tool_id, mon.events.PY_START, None)
         mon.free_tool_id(self.tool_id)
         self.tool_id = None
 
@@ -100,6 +130,8 @@ _REC: _Recorder | None = None
 
 def pytest_addoption(parser):
     parser.addoption("--footprint-out", default=None, help="write per-test engine line footprints here")
+    parser.addoption("--footprint-mode", default="scoped", choices=("scoped", "global"),
+                     help="scoped: LINE events on src/engine + scripts code only (fast); global: every line")
 
 
 def pytest_configure(config):
@@ -107,7 +139,7 @@ def pytest_configure(config):
     out = config.getoption("--footprint-out")
     if not out:
         return
-    _REC = _Recorder(Path(config.rootpath), Path(out))
+    _REC = _Recorder(Path(config.rootpath), Path(out), config.getoption("--footprint-mode"))
     _REC.start()
 
 

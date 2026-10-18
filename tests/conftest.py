@@ -81,10 +81,26 @@ def db_path(tmp_path):
     return str(tmp_path / "state.db")
 
 
+@pytest.fixture(scope="session")
+def migrated_db_template(tmp_path_factory) -> Path:
+    """One fully migrated SQLite file per session, checkpointed and closed so the main file holds
+    everything. ``conn`` copies it instead of re-running every migration per test; the per-test copy
+    keeps isolation per test. test_migrations.py still migrates from scratch and pins the copy to a
+    fresh migration (schema, user_version, applied set, seeded rows)."""
+    path = tmp_path_factory.mktemp("migrated_template") / "state.db"
+    c = connect(path)
+    try:
+        apply_migrations(c)
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        c.close()
+    return path
+
+
 @pytest.fixture
-def conn(db_path):
+def conn(db_path, migrated_db_template):
+    shutil.copyfile(migrated_db_template, db_path)
     c = connect(db_path)
-    apply_migrations(c)
     yield c
     c.close()
 
