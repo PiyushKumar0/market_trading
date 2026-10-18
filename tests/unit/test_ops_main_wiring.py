@@ -10,6 +10,10 @@ integrator owns that ARE pure enough to assert without booting the whole engine:
   * ``_scheduled_runner`` — the live-scheduler wrapper that records the ``job_runs`` watermark on every
     fire (so the CatchUpRunner never re-runs a job the scheduler already ran today) and marks a failed
     run so catch-up retries it, never crashing the loop.
+
+The wiring inside ``compose`` is asserted on a composed engine (``tests/_composition.py``: the real
+object graph, never booted) through its registry, its scheduler jobs, constructor spies and the
+recorded sweep legs (``_World``); ``_boot`` and ``_shutdown`` run against recording fake engines.
 """
 
 from __future__ import annotations
@@ -20,7 +24,8 @@ import inspect
 import json
 import logging
 import re
-import textwrap
+import threading
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -38,12 +43,11 @@ from engine.core.config import Settings, config_dir, load_settings
 from engine.core.db import connect
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.migrations import apply_migrations
-from engine.core.protected_store import IntegrityError
-from engine.core.types import Bar, TradeWindow
-from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
+from engine.core.protected_store import IntegrityError, ProtectedStore
+from engine.core.secrets import KITE_ACCESS_TOKEN
+from engine.core.types import Bar, OwnerConfirmation, Tick, TradeWindow
 from engine.datafeeds.sector_map import SectorMapJob, SectorMapResult
-from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import DailyBar, MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult
 from engine.notify.catalog import MessageKind
 from engine.ops import main as opsmain
@@ -95,13 +99,16 @@ from engine.ops.main import (
     seed_boot_snapshots,
     start_scheduler_and_fire_post_arm,
 )
+from engine.ops.pipeline import RecommendationPipeline
 from engine.ops.scheduler import Scheduler
-from engine.risk.events import RiskStateChanged
-from engine.strategy.retest import DEFAULT_RETEST_SESSIONS
-from engine.strategy.scanners import brk20, cat, hi52, ins
+from engine.risk.events import TOPIC_RISK_STATE, RiskStateChanged
+from engine.risk.limits import LimitsEngine
+from engine.strategy.prescreen import SignalPreScreen
+from engine.strategy.retest import DEFAULT_RETEST_SESSIONS, RestingLevelBook
+from engine.strategy.scanners import brk20, cat, cat_reversal, hi52, ins
 from engine.strategy.types import RawLevels, SignalCandidate
 from tests._composition import composed_engine
-from tests.conftest import PINNED_CAPITAL
+from tests.conftest import FIXED_NOW, PINNED_CAPITAL
 from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
 
 
@@ -405,63 +412,66 @@ def test_missing_job_fn_is_a_loud_wiring_error() -> None:
 # --------------------------------------------------------------------------- composition-root closure seam
 
 
-@pytest.mark.asyncio
-async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
-    market_store, clock, calendar, conn, instant_backoff
-) -> None:
-    """Composition-root regression (2026-08-13): ``engine.ops.main``'s ``job_bhavcopy`` closure
-    (``engine.ops.main.job_bhavcopy``) MUST forward ``BhavcopyJob.run()``'s return value to ``spec.run`` — the
-    2026-08-12 live bug was exactly this closure discarding it (``await bhavcopy.run(d)`` with no
-    ``return``), which meant the ``_job_result_ok`` watermark fix never saw the degraded result
-    because ``spec.run`` was always ``None`` regardless of what the underlying job returned.
+def _spec(engine: opsmain.Engine, job_id: str) -> JobSpec:
+    return next(s for s in engine.registry.specs() if s.job_id == job_id)
 
-    Unlike the machinery tests in ``test_catchup_runner.py``/this file's ``_scheduled_runner`` tests
-    (which hand-construct ``JobSpec.run`` to already return a meaningful object), this test goes
-    through the REAL pieces: a real ``BhavcopyJob`` degraded by a failing HTTP client, the REAL
-    ``job_bhavcopy`` closure compiled from ``engine.ops.main:run``'s own source (``_real_wrapper``),
-    registered via the real ``build_job_registry``, driven through the real ``_scheduled_runner`` —
-    pinning the exact seam that let the closure silently swallow the result."""
+
+def _spy(monkeypatch, name: str, built: dict[str, list], *, build=None) -> None:
+    """Constructor spy on ``opsmain.<name>`` (``compose`` looks it up at call time): records
+    ``(args, kwargs, obj)`` per construction and returns the real object, or ``build``'s."""
+    real = getattr(opsmain, name)
+
+    def construct(*args, **kwargs):
+        obj = (build or real)(*args, **kwargs)
+        built.setdefault(name, []).append((args, kwargs, obj))
+        return obj
+
+    monkeypatch.setattr(opsmain, name, construct)
+
+
+async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
+    tmp_path, monkeypatch, migrated_db_template, instant_backoff
+) -> None:
+    """Composition-root regression (2026-08-13): ``engine.ops.main``'s ``job_bhavcopy`` closure MUST
+    forward ``BhavcopyJob.run()``'s return value to ``spec.run`` — the 2026-08-12 live bug was exactly
+    this closure discarding it (``await bhavcopy.run(d)`` with no ``return``), which meant the
+    ``_job_result_ok`` watermark fix never saw the degraded result because ``spec.run`` was always
+    ``None`` regardless of what the underlying job returned.
+
+    Through the REAL pieces: the composed engine's own ``BhavcopyJob`` degraded by a failing network
+    under its shared HTTP client, its registry's ``job_bhavcopy``, the real ``_scheduled_runner``."""
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("nse unreachable", request=request)
 
-    bhavcopy = BhavcopyJob(market_store, clock, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-
-    job_bhavcopy = _real_wrapper("job_bhavcopy", {"bhavcopy": bhavcopy, "BhavcopyResult": BhavcopyResult})
-
-    fns = _all_noop_fns()
-    fns[opsmain.JOB_BHAVCOPY] = job_bhavcopy
-    registry = build_job_registry(load_settings(), fns)
-    spec = next(s for s in registry.specs() if s.job_id == opsmain.JOB_BHAVCOPY)
-
-    catch_up = CatchUpRunner(conn, clock, calendar)
-    await _scheduled_runner(spec, catch_up, clock)()
-
-    today = clock.today()
-    row = conn.execute(
-        "SELECT status FROM job_runs WHERE job_id=? AND run_for_date=?",
-        (opsmain.JOB_BHAVCOPY, today.isoformat()),
-    ).fetchone()
-    assert row["status"] == "failed"                                    # not the pre-fix "success"
-    assert catch_up.was_run(opsmain.JOB_BHAVCOPY, today) is False
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template,
+                               transport=httpx.MockTransport(handler)) as c:
+        e = c.engine
+        await _scheduled_runner(_spec(e, opsmain.JOB_BHAVCOPY), e.catch_up, e.clock)()
+        today = e.clock.today()
+        row = e.conn.execute(
+            "SELECT status FROM job_runs WHERE job_id=? AND run_for_date=?",
+            (opsmain.JOB_BHAVCOPY, today.isoformat()),
+        ).fetchone()
+        assert row["status"] == "failed"                                # not the pre-fix "success"
+        assert e.catch_up.was_run(opsmain.JOB_BHAVCOPY, today) is False
 
 
 #: The 9 composition-root closures forwarded (2026-08-13) so an ok-bearing job result reaches
 #: JobSpec.run instead of being discarded to None (the bhavcopy seam above, closed for 8 more jobs),
 #: plus job_reconcile (2026-10-11: a token abort must sink the watermark, not record success).
-_FORWARDING_WRAPPERS: tuple[str, ...] = (
-    "job_bhavcopy", "job_earnings", "job_corp_actions", "job_sector_map", "job_filings_shp",
-    "job_deals", "job_filings_pit", "job_filings_pit_fresh", "job_filings_results", "job_reconcile",
-)
-
-
-def _wrapper_body(src: str, wrapper_name: str) -> str:
-    """Isolate one composition-root closure's own source (blank-line + 4-space-indent separated
-    ``async def job_...`` closures inside ``engine.ops.main:run``) — same ``inspect.getsource``
-    technique this file already uses (see the news-chain re-sweep pin above)."""
-    start = src.index(f"async def {wrapper_name}(")
-    next_def = src.find("\n\n    async def ", start)
-    end = next_def if next_def != -1 else src.index("\n\n    registry = build_job_registry", start)
-    return src[start:end]
+#: wrapper -> (job id, the job class whose ``run`` it forwards, whether the job is date-keyed).
+_FORWARDING_WRAPPERS: dict[str, tuple[str, type, bool]] = {
+    "job_bhavcopy": (opsmain.JOB_BHAVCOPY, opsmain.BhavcopyJob, True),
+    "job_earnings": (opsmain.JOB_EARNINGS, opsmain.EarningsCalendarJob, False),
+    "job_corp_actions": (opsmain.JOB_CORP_ACTIONS, opsmain.CorpActionsJob, False),
+    "job_sector_map": (opsmain.JOB_SECTOR_MAP, opsmain.SectorMapJob, False),
+    "job_filings_shp": (opsmain.JOB_FILINGS_SHP, opsmain.FilingsShpJob, False),
+    "job_deals": (opsmain.JOB_DEALS, opsmain.DealsJob, True),
+    "job_filings_pit": (opsmain.JOB_FILINGS_PIT, opsmain.FilingsPitJob, True),
+    "job_filings_pit_fresh": (opsmain.JOB_FILINGS_PIT_FRESH, opsmain.FilingsPitFreshJob, True),
+    "job_filings_results": (opsmain.JOB_FILINGS_RESULTS, opsmain.FilingsResultsJob, True),
+    "job_reconcile": (opsmain.JOB_RECONCILE, opsmain.ReconcileJob, True),
+}
 
 
 async def test_sector_map_wrapper_classifies_the_batch_universe(
@@ -495,28 +505,31 @@ async def test_sector_map_wrapper_classifies_the_batch_universe(
 
 
 @pytest.mark.parametrize("wrapper_name", _FORWARDING_WRAPPERS)
-def test_ok_bearing_wrapper_forwards_return_value(wrapper_name: str) -> None:
-    """Composition-root regression (2026-08-13), swept over all 9 ok-bearing closures: each MUST
+async def test_ok_bearing_wrapper_forwards_return_value(
+    wrapper_name: str, tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """Composition-root regression (2026-08-13), swept over all ok-bearing closures: each MUST
     ``return await <job>.run(...)``, not a bare ``await`` that discards the result and always returns
     None to ``JobSpec.run`` — the exact seam ``test_bhavcopy_composition_root_closure_forwards_degraded_result``
-    pins end-to-end for bhavcopy alone. A lightweight source-level sweep (rather than constructing all
-    9 real job objects) for the remaining 8: fails loudly if a future edit reintroduces a bare
-    ``await job.run(...)`` on any of them."""
-    src = inspect.getsource(opsmain.compose)
-    body = _wrapper_body(src, wrapper_name)
-    assert "return await" in body, f"{wrapper_name} does not forward its job's return value"
+    pins end-to-end for bhavcopy alone. Here the composed engine's registry entry is run against its
+    job class's ``run`` returning a marker: the wrapper must hand back that very object."""
+    job_id, job_class, date_keyed = _FORWARDING_WRAPPERS[wrapper_name]
+    verdict = object()
+
+    async def run(self, *args, **kwargs):
+        return verdict
+
+    monkeypatch.setattr(job_class, "run", run)
+    # job_reconcile asks the broker only with a valid token (a known-dead one is answered locally).
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, kite=True,
+                               secrets={KITE_ACCESS_TOKEN: "token"}) as c:
+        spec = _spec(c.engine, job_id)
+        args = (c.engine.clock.today(),) if date_keyed else ()
+        assert await spec.run(*args) is verdict, f"{wrapper_name} does not forward its job's return value"
 
 
 # --------------------------------------------------------------------------- reconcile retry (2026-10-11)
 _RECONCILE_TOKENS = {"A": 1, "B": 2, "C": 3}
-
-
-def _real_wrapper(wrapper_name: str, namespace: dict):
-    """Compile one composition-root closure from ``engine.ops.main:run``'s REAL source, with its free
-    variables supplied by ``namespace`` — the seam itself, not a hand-kept mirror that can drift."""
-    body = _wrapper_body(inspect.getsource(opsmain.compose), wrapper_name)
-    exec(textwrap.dedent("    " + body), namespace)
-    return namespace[wrapper_name]
 
 
 class _ReconcileKite:
@@ -535,17 +548,25 @@ class _ReconcileKite:
         return [{"date": minute, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 100}]
 
 
-def _reconcile_closure(market_store, clock, kite, session):
-    d = clock.today()
-    market_store.insert_bars_1m([
-        Bar(symbol=s, ts_minute=datetime.combine(d, time(9, 15), tzinfo=IST), open=Decimal("10"),
-            high=Decimal("10"), low=Decimal("10"), close=Decimal("10"), volume=100, src="self")
-        for s in _RECONCILE_TOKENS
-    ])
-    job = ReconcileJob(market_store, kite, clock, Settings(), token_for_symbol=_RECONCILE_TOKENS.get)
-    return _real_wrapper("job_reconcile", {
-        "reconcile": job, "session": session, "_log": opsmain._log, "ReconcileReport": ReconcileReport,
-    })
+def _reconcile_world(monkeypatch, kite: _ReconcileKite):
+    """The composed engine's own ``ReconcileJob`` on the broker stand-in and a three-symbol token map,
+    with one 09:15 bar per symbol in its market store."""
+    real = opsmain.ReconcileJob
+
+    def build(store, _kite, clock, settings, **kwargs):
+        return real(store, kite, clock, settings, **{**kwargs, "token_for_symbol": _RECONCILE_TOKENS.get})
+
+    monkeypatch.setattr(opsmain, "ReconcileJob", build)
+
+    def market(store) -> None:
+        d = FIXED_NOW.date()
+        store.insert_bars_1m([
+            Bar(symbol=s, ts_minute=datetime.combine(d, time(9, 15), tzinfo=IST), open=Decimal("10"),
+                high=Decimal("10"), low=Decimal("10"), close=Decimal("10"), volume=100, src="self")
+            for s in _RECONCILE_TOKENS
+        ])
+
+    return market
 
 
 def _reconcile_status(conn, d: date) -> str | None:
@@ -556,78 +577,75 @@ def _reconcile_status(conn, d: date) -> str | None:
     return row["status"] if row else None
 
 
-@pytest.mark.asyncio
 async def test_reconcile_composition_root_closure_records_failed_on_token_abort(
-    market_store, clock, calendar, conn
+    tmp_path, monkeypatch, migrated_db_template
 ) -> None:
     """The live gap: job_reconcile discarded ReconcileJob.run's report, so a token abort recorded a
-    SUCCESS watermark and the rest of the day was never reconciled. Through the real closure, the
-    real registry and the real _scheduled_runner, the abort must record 'failed'; the next catch-up
-    pass after re-login retries the day and fetches ONLY the symbols the abort left."""
+    SUCCESS watermark and the rest of the day was never reconciled. Through the composed engine's
+    closure and registry and the real _scheduled_runner, the abort must record 'failed'; the next
+    catch-up pass after re-login retries the day and fetches ONLY the symbols the abort left."""
     kite = _ReconcileKite(dead_after=1)
-    session = SimpleNamespace(token_valid=lambda: True)
-    fns = _all_noop_fns()
-    fns[opsmain.JOB_RECONCILE] = _reconcile_closure(market_store, clock, kite, session)
-    registry = build_job_registry(load_settings(), fns)
-    spec = next(s for s in registry.specs() if s.job_id == opsmain.JOB_RECONCILE)
-    today = clock.today()
+    market = _reconcile_world(monkeypatch, kite)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, kite=True,
+                               secrets={KITE_ACCESS_TOKEN: "token"}, market=market) as c:
+        e = c.engine
+        today = e.clock.today()
+        await _scheduled_runner(_spec(e, opsmain.JOB_RECONCILE), CatchUpRunner(e.conn, e.clock, e.calendar),
+                                e.clock)()
+        assert _reconcile_status(e.conn, today) == "failed"
+        assert [r["symbol"] for r in e.store.get_reconcile_log(today)] == ["A"]
 
-    await _scheduled_runner(spec, CatchUpRunner(conn, clock, calendar), clock)()
-    assert _reconcile_status(conn, today) == "failed"
-    assert [r["symbol"] for r in market_store.get_reconcile_log(today)] == ["A"]
-
-    kite.dead_after, kite.calls = None, []
-    after_eod = Clock(time_source=lambda: datetime.combine(today, time(16, 0), tzinfo=IST))
-    sweep = CatchUpRunner(
-        conn, after_eod, calendar, registry.select(lambda s: s.job_id == opsmain.JOB_RECONCILE),
-    )
-    result = await sweep.catch_up(scope=CatchUpScope.ALL)
-    assert result.jobs_caught_up == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
-    assert kite.calls == [_RECONCILE_TOKENS["B"], _RECONCILE_TOKENS["C"]]
-    assert _reconcile_status(conn, today) == "success"
-    assert all(r["bars_compared"] == 1 for r in market_store.get_reconcile_log(today))
+        kite.dead_after, kite.calls = None, []
+        after_eod = Clock(time_source=lambda: datetime.combine(today, time(16, 0), tzinfo=IST))
+        sweep = CatchUpRunner(
+            e.conn, after_eod, e.calendar, e.registry.select(lambda s: s.job_id == opsmain.JOB_RECONCILE),
+        )
+        result = await sweep.catch_up(scope=CatchUpScope.ALL)
+        assert result.jobs_caught_up == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
+        assert kite.calls == [_RECONCILE_TOKENS["B"], _RECONCILE_TOKENS["C"]]
+        assert _reconcile_status(e.conn, today) == "success"
+        assert all(r["bars_compared"] == 1 for r in e.store.get_reconcile_log(today))
 
 
-@pytest.mark.asyncio
 async def test_reconcile_dead_token_gate_no_broker_call_no_freeze_no_alert_storm(
-    market_store, clock, calendar, conn
+    tmp_path, monkeypatch, migrated_db_template
 ) -> None:
     """A known-dead token: zero broker calls per sweep, the day stays 'failed' (DATE_KEYED never
     freezes), the CATCHUP_REPORT goes out once for the unchanged failure, and the first sweep after
     re-login reconciles the whole day."""
     kite = _ReconcileKite()
-    valid = {"token": False}
-    session = SimpleNamespace(token_valid=lambda: valid["token"])
-    fns = _all_noop_fns()
-    fns[opsmain.JOB_RECONCILE] = _reconcile_closure(market_store, clock, kite, session)
-    registry = build_job_registry(load_settings(), fns).select(lambda s: s.job_id == opsmain.JOB_RECONCILE)
-    today = clock.today()
-    after_eod = Clock(time_source=lambda: datetime.combine(today, time(16, 0), tzinfo=IST))
-    freezes: list[str] = []
-    sent: list = []
+    market = _reconcile_world(monkeypatch, kite)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, kite=True,
+                               market=market) as c:     # no access token: the session knows it is dead
+        e = c.engine
+        today = e.clock.today()
+        after_eod = Clock(time_source=lambda: datetime.combine(today, time(16, 0), tzinfo=IST))
+        freezes: list[str] = []
+        sent: list = []
 
-    async def freeze(reason: str) -> None:
-        freezes.append(reason)
+        async def freeze(reason: str) -> None:
+            freezes.append(reason)
 
-    async def notify(msg) -> None:
-        sent.append(msg)
+        async def notify(msg) -> None:
+            sent.append(msg)
 
-    sweep = CatchUpRunner(conn, after_eod, calendar, registry, freeze=freeze, notify=notify)
-    for _ in range(2):
+        registry = e.registry.select(lambda s: s.job_id == opsmain.JOB_RECONCILE)
+        sweep = CatchUpRunner(e.conn, after_eod, e.calendar, registry, freeze=freeze, notify=notify)
+        for _ in range(2):
+            result = await sweep.catch_up(scope=CatchUpScope.ALL)
+            assert result.jobs_failed == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
+            assert result.frozen_reasons == []
+        assert kite.calls == []
+        assert freezes == []
+        assert len(sent) == 1                                     # unchanged failure set is not re-sent
+        assert _reconcile_status(e.conn, today) == "failed"
+        assert e.store.get_reconcile_log(today) == []
+
+        monkeypatch.setattr(e.session, "token_valid", lambda: True)      # the owner re-logs in
         result = await sweep.catch_up(scope=CatchUpScope.ALL)
-        assert result.jobs_failed == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
-        assert result.frozen_reasons == []
-    assert kite.calls == []
-    assert freezes == []
-    assert len(sent) == 1                                     # unchanged failure set is not re-sent
-    assert _reconcile_status(conn, today) == "failed"
-    assert market_store.get_reconcile_log(today) == []
-
-    valid["token"] = True
-    result = await sweep.catch_up(scope=CatchUpScope.ALL)
-    assert result.jobs_caught_up == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
-    assert kite.calls == list(_RECONCILE_TOKENS.values())
-    assert _reconcile_status(conn, today) == "success"
+        assert result.jobs_caught_up == [f"{opsmain.JOB_RECONCILE}:{today.isoformat()}"]
+        assert kite.calls == list(_RECONCILE_TOKENS.values())
+        assert _reconcile_status(e.conn, today) == "success"
 
 
 # --------------------------------------------------------------------------- scheduled_runner watermark
@@ -883,26 +901,41 @@ def test_optional_interval_ticks_are_armed_at_their_cadence_only_when_wired(
         assert str(timedelta(seconds=seconds)) in str(jobs[keyword].trigger)
 
 
-def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built() -> None:
-    src = inspect.getsource(opsmain.compose)
-    assert "paper_tick=paper.runtime.paper_tick if paper is not None else None" in src
+async def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """The subsystem is enabled both times; with the limit table unverifiable the paper runtime fails
+    to build, and then no paper tick may be armed."""
+    for registered in (True, False):
+        async with composed_engine(tmp_path / str(registered), monkeypatch, db_template=migrated_db_template,
+                                   paper=True, registered=registered) as c:
+            job = c.engine.scheduler._sched.get_job("paper_tick")
+            assert (c.engine.paper is not None) is registered
+            assert (job is not None) is registered
+            if registered:
+                assert job.func == c.engine.paper.runtime.paper_tick
 
 
-def test_clusterer_and_digest_read_the_one_cat_envelope_row() -> None:
+async def test_clusterer_and_digest_read_the_one_cat_envelope_row(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """The clusterer window and the digest horizon are the SAME envelope row
     ``cat.max_event_age_days`` off the same boot ``envelope_state`` read (the settings key is gone)."""
     from engine.datafeeds.news_pipeline import load_cat_params
 
-    src = inspect.getsource(opsmain.compose)
-    assert "settings.cat.max_event_age_days" not in src
-    assert src.count('FROM envelope_state").fetchall()') == 1
-    read = src.index('FROM envelope_state").fetchall()')
-    params = src.index("_cat_params = load_cat_params(_envelope_state or None)")
-    clusterer = src.index("clusterer = HeadlineClusterer(")
-    assert read < params < clusterer
-    assert 'max_event_age_days=int(_cat_params["max_event_age_days"])' in src[clusterer:]
-    digest = "CatalystDigestJob(store, clock, calendar, protected_store, envelope=_envelope_state or None)"
-    assert digest in src
+    def promoted(conn) -> None:      # a §6.4 promotion moved the row off its envelope.yaml default
+        conn.execute("INSERT INTO envelope_state (parameter, value, bounds_sha256, set_by) "
+                     "VALUES ('cat.max_event_age_days', '5', 'x', 'promotion')")
+
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "HeadlineClusterer", built)
+    _spy(monkeypatch, "CatalystDigestJob", built)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, state_db=promoted):
+        pass
+    ((_, clusterer_kw, _),) = built["HeadlineClusterer"]
+    ((_, digest_kw, _),) = built["CatalystDigestJob"]
+    assert clusterer_kw["max_event_age_days"] == 5
+    assert int(load_cat_params(digest_kw["envelope"])["max_event_age_days"]) == 5
     # No envelope_state row today ⇒ the envelope.yaml default, which equals the retired settings 2.
     assert int(load_cat_params(None)["max_event_age_days"]) == 2
     # A leftover settings.yaml key is ignored (CatCfg/Settings keep pydantic's extra="ignore").
@@ -1207,59 +1240,242 @@ def test_a_pending_entry_recommendation_is_read_the_way_the_gate_reads_it(conn, 
     assert opsmain._pending_entry_rec_symbols(conn, now) == {"LIVE"}
 
 
-def test_the_composition_root_really_arms_the_retest_rearm() -> None:
-    """Both halves of the mechanism are wirings inside `run`, so neither is assertable any other way
-    (the `hi52` promotion's lesson: a wiring that only exists inside run() silently
-    disappears). Half one: every ADMITTED brk20 candidate starts resting. Half two: the 60 s drain
-    tick re-offers it under the window predicate and publishes what admit accepted."""
-    src = inspect.getsource(opsmain.compose)
+# --------------------------------------------------------------------------- the composed sweep world
+#: Today's universe: one included (watchlist) name, one capped NIFTY 500 name, one capped name outside
+#: the core index — so eligible = all three, core = the first two, watchlist = the first.
+_WATCH, _CORE, _WIDE = "WATCH", "CORE1", "WIDE1"
+_TOKENS = {_WATCH: 1, _CORE: 2, _WIDE: 3, "RESTER": 4, "PAPONLY": 5,
+           opsmain.INDEX_SYMBOL: 99, opsmain.VIX_SYMBOL: 98}
+#: Captured at import: a second world in one test must wrap the real admit, not the first world's spy.
+_REAL_ADMIT = SignalPreScreen.admit
 
-    # Half one — the book exists, owner-configured, and the sweep records ADMITTED brk20 candidates
-    # off the ONE ranked batch (`accepted` carries the post-admit `batch`), never the raw output.
-    assert "retest_book = RestingLevelBook(conn, calendar, clock," in src
-    assert "sessions=settings.brk20.retest_sessions" in src
-    assert "for _cand in accepted:" in src
-    assert "if _cand.strategy_id == brk20.STRATEGY_ID:" in src
-    assert "retest_book.record(_cand)" in src
 
-    # …on the LOOP thread. The connection is `isolation_level=None` / `check_same_thread=False`
-    # because the engine serialises its writes there (§4.1): a bare INSERT from the sweep WORKER can
-    # land inside a `core.db.transaction` the loop is holding and vanish with its ROLLBACK, silently,
-    # after `record` has already logged the level as resting for five sessions.
-    worker = src[src.index("def _collect_and_scan():"):src.index("accepted, pendings, batch_symbols")]
-    assert "retest_book.record(" not in worker
-    assert src.index("retest_book.record(_cand)") > src.index("_consume_ins_pending(")
+class _World:
+    """What a composed engine's scan sweeps did. Every batch leg is a recorder that emits one candidate
+    per symbol it was handed, so its INPUT is what the sweep chose to give it; every
+    ``SignalPreScreen.admit`` batch and every publication into the pipeline is recorded too."""
 
-    # …and the FEED follows a resting level. `_batch_ticks` rolls at midnight, so without this a
-    # level admitted on day 1 has no tick on days 2-5 and the band could never be evaluated — the
-    # mechanism would be silently dead for the sub-cap symbols brk20 exists to catch.
-    assert "[c.symbol for c in batch] + retest_book.resting_symbols(today)," in src
+    def __init__(self) -> None:
+        self.legs: dict[str, list[tuple[list[str], dict]]] = {}
+        self.admits: list[tuple[list[tuple[str, str]], bool]] = []
+        self.published: list[tuple[str, str]] = []
+        #: ``(strategy, symbol)`` pairs the admit refuses, as a binding cap would.
+        self.suppress: set[tuple[str, str]] = set()
+        #: When set, each publication waits on it — a sweep held AFTER its publication mark.
+        self.hold: asyncio.Event | None = None
 
-    # …plus the day's two narrowings, read by the sweep (which already has them) and armed only by an
-    # IN-WINDOW sweep — the one that can actually admit today's fresh crossing.
-    assert '"eligible": frozenset(eligible),' in worker
-    assert "if batch_in_window:" in src
-    assert "_retest_state.update(day=today, eligible=retest_ctx[\"eligible\"]," in src
 
-    # Half two — the drain tick, the retest predicate (the sweep window AND the states the pipeline
-    # is certain to drop AND no sweep in flight — 2026-09-12 review), the live tick cache + its AGE
-    # as the price source, and both limits read from the hash-verified table in ONE load.
-    assert "active=_retest_active(clock.now(), calendar, mode, kill, _sweep_lock)," in src
-    assert 'sweep_ready=_retest_state["day"] == clock.today(),' in src
-    assert "ltp_fn=mark_price, tick_age_fn=tick_age_s, limits_fn=_retest_limits," in src
-    assert "skip_fn=_retest_skip, today=clock.today()," in src
-    assert 'await bus.apublish("signal.candidate", cand)' in src
-    assert "return (float(lim.entry_sanity_band.cnc_pct), float(lim.stale_data_guard.max_tick_age_s))" \
-        in src
-    # …OFF the event loop. `prescreen.admit` takes the pre-screen lock and then mints a snapshot
-    # under `MarketStore._lock` — held 59 s by a partition COPY, ~14 minutes in the 2026-08-21 stall
-    # — so calling it inline would freeze the tick cache, the §2.2 heartbeat and the kill path with
-    # it. Every other caller of both seams is threaded for exactly this reason.
-    # …ahead of the drain, and in its OWN try/except so a retest failure never costs the drain.
-    body = src[src.index("async def forward_drain_tick"):]
-    body = body[:body.index("await pipeline.drain_forward_queue()")]
-    assert "await asyncio.to_thread(\n                _retest_republish," in body
-    assert 'except Exception:' in body
+def _patch_world(monkeypatch, world: _World) -> None:
+    async def on_candidate(self, cand) -> None:
+        world.published.append((cand.strategy_id, cand.symbol))
+        if world.hold is not None:
+            await world.hold.wait()
+
+    monkeypatch.setattr(RecommendationPipeline, "on_signal_candidate", on_candidate)
+
+    def leg(name: str, symbols_of, score: float = 0.5):
+        def run(rows, **kwargs):
+            symbols = symbols_of(rows)
+            world.legs.setdefault(name, []).append((symbols, kwargs))
+            return [_batch_cand(name, s, score) for s in symbols]
+        return run
+
+    def by_symbol(rows) -> list[str]:
+        return [r.symbol for r in rows]
+
+    monkeypatch.setattr(brk20, "sweep_daily", leg("brk20", sorted))
+    monkeypatch.setattr(ins, "sweep_crossings", leg("ins", by_symbol))
+    monkeypatch.setattr(cat, "sweep_watchlist", leg("cat", by_symbol))
+    monkeypatch.setattr(cat_reversal, "sweep_watchlist", leg("cat_reversal", by_symbol))
+    hi52_leg = leg("hi52", list, score=0.99)
+    monkeypatch.setattr(opsmain, "_hi52_daily_leg",
+                        lambda store, *, trigger, eligible, **_kw: hi52_leg(eligible, trigger=trigger))
+
+    def cat_rows(store, today):
+        rows = [dict(entry_id=f"e-{s}", symbol=s, grade="originating", direction="long",
+                     event_age_sessions=0, materiality=0.8, reference_close=Decimal("100"))
+                for s in (_CORE, _WIDE)]
+        return ([cat.WatchlistRow(**r) for r in rows],
+                [cat_reversal.WatchlistRow(**r, reversal_of="e-earlier") for r in rows])
+
+    monkeypatch.setattr(opsmain, "_read_cat_watchlist", cat_rows)
+
+    def admit(self, candidates, today, *, in_window=True):
+        world.admits.append(([(c.strategy_id, c.symbol) for c in candidates], in_window))
+        kept = [c for c in candidates if (c.strategy_id, c.symbol) not in world.suppress]
+        return _REAL_ADMIT(self, kept, today, in_window=in_window)
+
+    monkeypatch.setattr(SignalPreScreen, "admit", admit)
+
+
+def _seed_world_market(store) -> None:
+    today = FIXED_NOW.date()
+    store.upsert_universe_daily([
+        {"d": today, "symbol": _WATCH, "included": True, "exclusion_reasons": None},
+        {"d": today, "symbol": _CORE, "included": False, "exclusion_reasons": ["watchlist_cap"]},
+        {"d": today, "symbol": _WIDE, "included": False, "exclusion_reasons": ["watchlist_cap"],
+         "core_index": False},
+    ])
+    yesterday = today - timedelta(days=1)
+    store.upsert_bars_1d([
+        DailyBar(symbol=s, d=yesterday, open=Decimal("100"), high=Decimal("100"), low=Decimal("100"),
+                 close=Decimal("100"), volume=1000)
+        for s in (_WATCH, _CORE, _WIDE)
+    ])
+
+
+@asynccontextmanager
+async def _sweep_world(tmp_path, monkeypatch, db_template, *, state_db=None, **kwargs):
+    """A composed engine (default 10:05 on a session day, inside the 10:00-10:30 window) in RECOMMEND
+    with the window persisted, today's universe and yesterday's bars in its market store, one ``ins``
+    crossing pending for the core name, and every batch leg a recorder (:class:`_World`)."""
+    world = _World()
+    _patch_world(monkeypatch, world)
+
+    def seed(conn) -> None:
+        _seed_ins_pending(conn, FIXED_NOW.date(), _CORE)
+        if state_db is not None:
+            state_db(conn)
+
+    async with composed_engine(tmp_path, monkeypatch, db_template=db_template, market=_seed_world_market,
+                               state_db=seed, **kwargs) as c:
+        await c.engine.mode.request_transition(Mode.RECOMMEND, Actor.OWNER)
+        c.engine.mode.seed_trade_window_if_absent(TradeWindow(start=time(10, 0), end=time(10, 30)))
+        yield c, world
+
+
+def _watch_feed(monkeypatch, engine: opsmain.Engine) -> list[list[int]]:
+    """The ticker as a live feed recording every resubscription, over :data:`_TOKENS`."""
+    subscriptions: list[list[int]] = []
+
+    async def update(tokens) -> None:
+        subscriptions.append(list(tokens))
+
+    monkeypatch.setattr(engine.ticker, "health", lambda: SimpleNamespace(state="HEALTHY"))
+    monkeypatch.setattr(engine.ticker, "update_subscriptions", update)
+    monkeypatch.setattr(engine.instruments, "token_for_symbol", _TOKENS.get)
+    return subscriptions
+
+
+async def _job(engine: opsmain.Engine, job_id: str) -> None:
+    """Fire one armed scheduler job the way APScheduler would."""
+    await engine.scheduler._sched.get_job(job_id).func()
+
+
+async def _settle(engine: opsmain.Engine) -> None:
+    """Wait out the detached freeze-lift tasks a risk-state publication started."""
+    if engine.freeze_lift_tasks:
+        await asyncio.wait_for(asyncio.gather(*list(engine.freeze_lift_tasks)), timeout=10)
+
+
+def _resting_level(conn, symbol: str, signal_d: date, expires_d: date) -> None:
+    conn.execute(
+        "INSERT INTO brk20_resting_levels (symbol, signal_d, entry, stop, target, score, expires_d, "
+        "status, created_at, updated_at) VALUES (?, ?, '100', '94', NULL, 0.5, ?, 'resting', ?, ?)",
+        (symbol, signal_d.isoformat(), expires_d.isoformat(), signal_d.isoformat(), signal_d.isoformat()),
+    )
+
+
+async def test_the_composition_root_really_arms_the_retest_rearm(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """Both halves of the mechanism are wirings inside ``compose`` (the `hi52` promotion's lesson: a
+    wiring nothing exercises silently disappears). Half one: every ADMITTED brk20 candidate starts
+    resting, recorded on the loop thread, and the feed follows a resting level. Half two: the 60 s
+    drain tick re-offers under the window predicate, armed only by an in-window sweep, off the loop,
+    ahead of the drain and never at its expense, and publishes what admit accepted."""
+    loop_thread = threading.get_ident()
+    order: list[tuple] = []
+    real_record, real_consume = RestingLevelBook.record, opsmain._consume_ins_pending
+
+    def record(self, cand):
+        order.append(("record", cand.symbol, threading.get_ident()))
+        return real_record(self, cand)
+
+    def consume(*args, **kwargs):
+        order.append(("consume",))
+        return real_consume(*args, **kwargs)
+
+    monkeypatch.setattr(RestingLevelBook, "record", record)
+    monkeypatch.setattr(opsmain, "_consume_ins_pending", consume)
+    offers: list[tuple] = []
+    failing = {"on": False}
+
+    def republish(book, prescreen, features, **kwargs):
+        offers.append((book, kwargs, threading.get_ident()))
+        if failing["on"]:
+            raise RuntimeError("duckdb stall")
+        return [_batch_cand(brk20.STRATEGY_ID, "RESTER", 0.5)]
+
+    active_args: list[tuple] = []
+
+    def active(*args) -> bool:
+        active_args.append(args)
+        return True
+
+    drained: list[int] = []
+
+    async def drain(self) -> None:
+        drained.append(len(offers))
+
+    monkeypatch.setattr(opsmain, "_retest_republish", republish)
+    monkeypatch.setattr(opsmain, "_retest_active", active)
+    monkeypatch.setattr(RecommendationPipeline, "drain_forward_queue", drain)
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "RestingLevelBook", built)
+    prior = date(2026, 6, 16)                          # the session before FIXED_NOW's
+
+    def owner_window(settings) -> None:          # off the code default, so a hardcoded 5 cannot pass
+        settings.brk20.retest_sessions = 3
+
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template, paper=False,
+                            now=datetime(2026, 6, 17, 9, 50, tzinfo=IST), configure=owner_window,
+                            state_db=lambda conn: _resting_level(conn, "RESTER", prior, date(2026, 6, 23))
+                            ) as (c, w):
+        e = c.engine
+        feed = _watch_feed(monkeypatch, e)
+        await _job(e, "forward_drain_tick")
+        await e.scan_sweep("scan_now")                 # pre-window: admits nothing, arms nothing
+        await _job(e, "forward_drain_tick")
+        assert [o[1]["sweep_ready"] for o in offers] == [False, False]
+
+        c.time.set(FIXED_NOW)
+        w.suppress = {(brk20.STRATEGY_ID, _WIDE)}      # a raw fire the caps refuse
+        await e.scan_sweep("window_open")
+        resting = {r["symbol"] for r in e.conn.execute(
+            "SELECT symbol FROM brk20_resting_levels WHERE signal_d = ?", (FIXED_NOW.date().isoformat(),))}
+        assert resting == {_CORE, _WATCH}             # ADMITTED, never raw
+        records = [o for o in order if o[0] == "record"]
+        assert records and {o[2] for o in records} == {loop_thread}
+        assert order.index(("consume",)) < order.index(records[0])
+        assert _TOKENS["RESTER"] in feed[-1]           # the feed follows a level resting since 06-16
+
+        tick = Tick(instrument_token=2, tradingsymbol=_CORE, ltp=Decimal("101.50"), volume_traded=10,
+                    exchange_ts=FIXED_NOW - timedelta(seconds=3))
+        await e.bus.apublish("tick", tick)
+        published_before = len(w.published)
+        await _job(e, "forward_drain_tick")
+        book, kw, thread = offers[-1]
+        assert kw["sweep_ready"] is True and kw["active"] is True and kw["today"] == FIXED_NOW.date()
+        now, calendar, mode, kill, lock = active_args[-1]
+        assert (now, calendar, mode) == (FIXED_NOW, e.calendar, e.mode)
+        assert type(kill).__name__ == "KillSwitch" and isinstance(lock, asyncio.Lock)
+        ((_, book_kw, the_book),) = built["RestingLevelBook"]
+        assert book_kw["sessions"] == 3                                     # owner-configured
+        assert book is the_book and book.resting_symbols(FIXED_NOW.date()) == ["RESTER"]
+        assert kw["ltp_fn"](_CORE) == Decimal("101.50") and kw["tick_age_fn"](_CORE) == pytest.approx(3.0)
+        lim = LimitsEngine(ProtectedStore(config_dir(), e.conn, e.clock)).load().limits
+        assert kw["limits_fn"]() == (float(lim.entry_sanity_band.cnc_pct),
+                                     float(lim.stale_data_guard.max_tick_age_s))
+        skipped = kw["skip_fn"]([_CORE, "GONE"])
+        assert list(skipped) == ["GONE"] and "eligible universe" in skipped["GONE"]
+        assert thread != loop_thread                   # off the event loop
+        assert w.published[published_before:] == [(brk20.STRATEGY_ID, "RESTER")]
+        assert drained[-1] == len(offers)              # the drain ran after the offer
+
+        failing["on"] = True
+        await _job(e, "forward_drain_tick")
+        assert drained[-1] == len(offers)              # a failing retest never costs the drain
 
     # The admission and the post-admit mint are the sweep's own, not a parallel path.
     assert "_attach_feature_snapshots(features, prescreen.admit(due, today, in_window=True))" in \
@@ -1311,21 +1527,56 @@ def test_an_unverified_limits_table_falls_back_and_says_so_once(caplog) -> None:
         base()
 
 
-def _run_calls(name: str) -> list[ast.Call]:
-    run = ast.parse(textwrap.dedent(inspect.getsource(opsmain.compose)))
-    return [n for n in ast.walk(run) if isinstance(n, ast.Call) and ast.unparse(n.func) == name]
-
-
 def _kw(call: ast.Call, arg: str) -> str:
     return next(ast.unparse(k.value) for k in call.keywords if k.arg == arg)
 
 
-def test_the_real_tracker_is_built_on_the_live_base() -> None:
-    (tracker,) = _run_calls("ExposureTracker")
-    assert [ast.unparse(a) for a in tracker.args] == ["conn", "clock", "_limits_capital_base(limits_engine)"]
-    src = inspect.getsource(opsmain.compose)
-    assert '_log.warning("limits_unverified_at_boot",' in src          # the boot warning stays
-    assert "_capital_base = " not in src                               # …and no boot-time copy remains
+async def test_the_real_tracker_is_built_on_the_live_base(
+    tmp_path, monkeypatch, migrated_db_template, caplog
+) -> None:
+    """O19 §2: the composed tracker reads the verified table on every call — an owner update plus the
+    gate's ONE ``reload()`` moves it (no boot-time copy) — and an unverifiable table at boot warns
+    and falls back to the shipped base instead of crashing the boot."""
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "ExposureTracker", built)
+    _spy(monkeypatch, "RiskGate", built)
+    owner = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="test")
+    async with composed_engine(tmp_path / "verified", monkeypatch, db_template=migrated_db_template) as c:
+        ((tracker_args, _, tracker),) = built["ExposureTracker"]
+        ((gate_args, _, _),) = built["RiskGate"]
+        assert tracker_args[:2] == (c.engine.conn, c.engine.clock)
+        assert tracker.capital_base == Decimal(str(PINNED_CAPITAL["capital_base_inr"]))
+        shipped = (config_dir() / "limits.yaml").read_bytes().decode("utf-8")
+        moved, n = re.subn(r"(?m)^capital_base_inr: \d+\b", "capital_base_inr: 20000", shipped)
+        assert n == 1
+        ProtectedStore(config_dir(), c.engine.conn, c.engine.clock).owner_update("limits.yaml", moved, owner)
+        gate_args[0].reload()                                      # the gate's own LimitsEngine
+        assert tracker.capital_base == Decimal("20000")
+
+    built.clear()
+    with caplog.at_level(logging.WARNING, logger="engine.ops.main"):
+        async with composed_engine(tmp_path / "unverified", monkeypatch, db_template=migrated_db_template,
+                                   registered=False):
+            ((_, _, tracker),) = built["ExposureTracker"]
+            assert tracker.capital_base == opsmain._FALLBACK_CAPITAL_BASE_INR
+    assert [r.getMessage() for r in caplog.records].count("limits_unverified_at_boot") == 1
+
+
+async def test_the_prescreen_displacement_margin_is_the_owner_setting(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """2026-08-27 cap displacement: how much better a later candidate must score to take a full cap's
+    slot from an unevaluated incumbent is an owner knob in settings.yaml (§6.3) — the composed
+    pre-screen must be handed THAT value, not a constructor default."""
+    def owner_knob(settings) -> None:
+        settings.strategy.prescreen.displacement_margin = 0.37
+
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "SignalPreScreen", built)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, configure=owner_knob):
+        pass
+    ((_, kw, _),) = built["SignalPreScreen"]
+    assert kw["displacement_margin"] == 0.37
 
 
 async def test_the_gate_and_the_pipeline_share_one_live_strategy_edges(
@@ -1333,20 +1584,9 @@ async def test_the_gate_and_the_pipeline_share_one_live_strategy_edges(
 ) -> None:
     """O19 §3.3: ONE ``StrategyEdges`` on the hash-verified limits and the gate's own cost model, so
     the gate's C3 edge and the pipeline's registered edge can never disagree after a capital change."""
-    built: dict[str, list[tuple[tuple, dict, object]]] = {}
-
-    def spy(name: str) -> None:
-        real = getattr(opsmain, name)
-
-        def build(*args, **kwargs):
-            obj = real(*args, **kwargs)
-            built.setdefault(name, []).append((args, kwargs, obj))
-            return obj
-
-        monkeypatch.setattr(opsmain, name, build)
-
+    built: dict[str, list] = {}
     for name in ("StrategyEdges", "RiskGate", "RecommendationPipeline"):
-        spy(name)
+        _spy(monkeypatch, name, built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
         settings = c.engine.settings
 
@@ -1463,43 +1703,51 @@ async def test_resolve_news_bounded_completes_times_out_and_frees_the_lock() -> 
 _RESWEEP_ABANDON_DAYS = 4
 
 
-@pytest.mark.asyncio
-async def test_orphan_resweep_abandons_headlines_older_than_four_days(market_store, clock) -> None:
-    """2026-08-10 filed follow-up: pin the 4-day abandon cutoff. Behaviour first — the exact query
-    ``job_news_chain`` issues, with a headline one minute PAST the cutoff excluded and one minute
-    inside it swept (boundary itself inclusive, ``published_at >= published_after``), oldest-first,
-    already-clustered rows never re-swept. The constant lives inside ``run()``'s closure and cannot
-    be imported, so it is pinned over the source the way ``test_stop_path`` pins wiring order —
-    changing ``days=4`` (or dropping the 500 cap that keeps re-sweeps bounded) fails here."""
-    cutoff = clock.now() - timedelta(days=_RESWEEP_ABANDON_DAYS)
-    market_store.insert_news([
-        {"headline_id": "past-cutoff", "title": "Stale orphan a minute past the abandon horizon",
-         "source_domain": "economictimes.indiatimes.com",
-         "url": "https://economictimes.indiatimes.com/markets/past-cutoff.cms",
-         "published_at": cutoff - timedelta(minutes=1)},
-        {"headline_id": "at-cutoff", "title": "Orphan exactly on the abandon horizon",
-         "source_domain": "moneycontrol.com",
-         "url": "https://www.moneycontrol.com/news/at-cutoff.html",
-         "published_at": cutoff},
-        {"headline_id": "inside-cutoff", "title": "Orphan a minute inside the abandon horizon",
-         "source_domain": "livemint.com",
-         "url": "https://www.livemint.com/market/inside-cutoff.html",
-         "published_at": cutoff + timedelta(minutes=1)},
-        {"headline_id": "already-clustered", "title": "Fresh headline that already has a cluster",
-         "source_domain": "business-standard.com",
-         "url": "https://www.business-standard.com/markets/already-clustered.html",
-         "published_at": clock.now(), "cluster_id": "c-already"},
-    ])
+async def test_orphan_resweep_abandons_headlines_older_than_four_days(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """2026-08-10 filed follow-up: the 4-day abandon cutoff of ``job_news_chain``'s orphan re-sweep.
+    A headline one minute PAST the cutoff is abandoned, one exactly on it (inclusive) and everything
+    inside it is swept, oldest-first, already-clustered rows never, and at most 500 per run — the cap
+    that keeps repeated timeouts from growing the next attempt past its own deadline."""
+    now = FIXED_NOW
+    cutoff = now - timedelta(days=_RESWEEP_ABANDON_DAYS)
 
-    swept = await market_store.arun(
-        market_store.get_news,
-        published_after=clock.now() - timedelta(days=4), unclustered_only=True,
-    )
-    assert [r["headline_id"] for r in swept] == ["at-cutoff", "inside-cutoff"]
+    def row(hid: str, at: datetime, **extra) -> dict:
+        return {"headline_id": hid, "title": f"Orphan headline {hid}", "source_domain": "livemint.com",
+                "url": f"https://www.livemint.com/market/{hid}.html", "published_at": at, **extra}
 
-    src = inspect.getsource(opsmain.compose)
-    assert "published_after=clock.now() - timedelta(days=4), unclustered_only=True" in src
-    assert "][:500]" in src          # the oldest-first cap: repeated timeouts stay bounded
+    def news(store) -> None:
+        store.insert_news([
+            row("past-cutoff", cutoff - timedelta(minutes=1)), row("at-cutoff", cutoff),
+            row("inside-cutoff", cutoff + timedelta(minutes=1)),
+            row("already-clustered", now, cluster_id="c-already"),
+            *(row(f"bulk-{i:03d}", cutoff + timedelta(hours=1, minutes=i)) for i in range(499)),
+        ])
+
+    clustered: list[list[str]] = []
+
+    async def backfill(self) -> list:
+        return []
+
+    async def cluster(self, headlines) -> list:
+        clustered.append([h.headline_id for h in headlines])
+        return []
+
+    async def no_scoring(self, **_kw) -> None:
+        return None
+
+    monkeypatch.setattr(opsmain.NewsIngest, "backfill", backfill)
+    monkeypatch.setattr(opsmain.HeadlineClusterer, "run", cluster)
+    monkeypatch.setattr(opsmain.NewsScoringJob, "run_batch", no_scoring)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, market=news) as c:
+        await _spec(c.engine, opsmain.JOB_NEWS_CHAIN).run()
+
+    (swept,) = clustered
+    assert len(swept) == 500                                    # 501 eligible orphans, capped
+    assert swept[:2] == ["at-cutoff", "inside-cutoff"]          # oldest first, boundary inclusive
+    assert swept[-1] == "bulk-497" and "bulk-498" not in swept
+    assert "past-cutoff" not in swept and "already-clustered" not in swept
 
 
 # --------------------------------------------------------------------------- boot-phase safety ticks
@@ -2156,15 +2404,28 @@ def test_the_intraday_transition_memo_is_scoped_to_the_ist_day() -> None:
     assert notice is not None and notice[0] == "info" and "restored" in notice[1]
 
 
-def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context() -> None:
+async def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """CONSTRAINT (2026-09-13): the pre-screen's intraday-warm-up refusal and the gate's
     ``warmup_ready`` verdict must be the SAME fact, or the pre-screen would re-arm candidates the
     gate would have approved (or spend analyst calls the gate then rejects). ONE snapshot function
-    is wired to both seams in the composition root."""
-    src = inspect.getsource(opsmain.compose)
-    # real ctx_builder + paper ctx_builder + pipeline
-    assert src.count("warmup_status_fn=warmup_status_snapshot,") == 3
-    assert "def warmup_status_snapshot() -> WarmupStatus:" in src
+    is wired to the real gate context, the paper gate context and the pipeline."""
+    from engine.ops.warmup import WarmupStatus
+
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "GateContextBuilder", built)
+    _spy(monkeypatch, "RecommendationPipeline", built)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, paper=True) as c:
+        assert c.engine.paper is not None
+        fns = [kw["warmup_status_fn"] for _, kw, _ in built["GateContextBuilder"] + built["RecommendationPipeline"]]
+        assert [kw.get("scope", "real") for _, kw, _ in built["GateContextBuilder"]] == ["real", "paper"]
+        assert len(fns) == 3 and len(set(fns)) == 1
+        (snapshot,) = set(fns)
+        assert snapshot().ready is False                        # fail-closed until the first refresh
+        refreshed = WarmupStatus(ready=True)
+        c.engine.warmup_holder["status"] = refreshed
+        assert snapshot() is refreshed                          # the holder the boot and the 60 s job fill
 
 
 # =========================================================================== WO-15 boot ordering
@@ -2533,12 +2794,32 @@ class _FakeAdvisoryJob:
 
 
 @pytest.mark.parametrize("wrapper_name", ("job_preopen_planner", "job_nightly_review"))
-def test_advisory_wrapper_translates_the_tristate(wrapper_name: str) -> None:
-    """Source-level sweep (same technique as the ok-bearing forwarding sweep above): the wrapper -
-    not ``_job_result_ok`` - is where the tri-state becomes a watermark verdict. A future edit that
-    reverts to a bare ``await job.run(...)`` (discarding the outcome) fails here."""
-    body = _wrapper_body(inspect.getsource(opsmain.compose), wrapper_name)
-    assert "return AdvisoryRun(await" in body, f"{wrapper_name} does not translate its outcome"
+async def test_advisory_wrapper_translates_the_tristate(
+    wrapper_name: str, tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """The wrapper - not ``_job_result_ok`` - is where the tri-state becomes a watermark verdict: the
+    composed engine's registry entry hands back the job's outcome as an ``AdvisoryRun``, so a
+    governor block is ok and only a harness failure sinks the watermark. A bare ``await job.run(...)``
+    (discarding the outcome) fails here."""
+    job_id, job_class, date_keyed = {
+        "job_preopen_planner": (opsmain.JOB_PREOPEN_PLANNER, opsmain.PreopenPlannerJob, False),
+        "job_nightly_review": (opsmain.JOB_NIGHTLY_REVIEW, opsmain.NightlyReviewJob, True),
+    }[wrapper_name]
+    outcome = {"next": AdvisoryOutcome.RAN}
+
+    async def run(self, *_args) -> AdvisoryOutcome:
+        return outcome["next"]
+
+    monkeypatch.setattr(job_class, "run", run)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        spec = _spec(c.engine, job_id)
+        args = (c.engine.clock.today(),) if date_keyed else ()
+        for tristate, ok in ((AdvisoryOutcome.RAN, True), (AdvisoryOutcome.BLOCKED, True),
+                             (AdvisoryOutcome.FAILED, False)):
+            outcome["next"] = tristate
+            result = await spec.run(*args)
+            assert isinstance(result, AdvisoryRun) and result.outcome is tristate, wrapper_name
+            assert opsmain._job_result_ok(result) is ok
 
 
 @pytest.mark.asyncio
@@ -2659,53 +2940,88 @@ async def test_retention_is_gated_on_a_clean_pass(result: TickCompactionResult) 
     assert store.calls == 0
 
 
-def test_tick_compact_closure_calls_retention_after_the_pass() -> None:
-    """Source-level pin (same technique as the ok-bearing forwarding sweep): the wiring lives in the
-    composition-root closure, which cannot be constructed without booting the engine. A future edit
-    that drops the retention call — the exact defect WO-23 fixes — fails here."""
-    body = _wrapper_body(inspect.getsource(opsmain.compose), "job_tick_compact")
-    assert "await apply_tick_retention(store, result)" in body
-    assert body.index("compact_ticks") < body.index("apply_tick_retention")   # AFTER the pass
-    assert "return result" in body                          # and the job's own verdict is unchanged
-    # 2026-09-29: the run ends at the WO-21 window and on a stop signal — a worker thread still
-    # compacting at shutdown held the process past NSSM's grace on every stop during a run.
-    assert "stop=lambda: stop_event.is_set() or _in_session_window(clock, calendar)" in body
-    # ...and buffered ticks are written BEFORE compaction reads the partitions: a session tail left
-    # for the next morning's flush would land beside a date a post-midnight run already compacted.
-    assert (body.index("await asyncio.to_thread(store.flush_ticks, wait_s=")
-            < body.index("compact_ticks, settings.parquet_dir()"))
+async def test_tick_compact_closure_calls_retention_after_the_pass(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """WO-23: the composed engine's ``tick_compact`` job runs the retention sweep AFTER the pass and
+    hands back the pass's own verdict — the dropped retention call was the defect. Buffered ticks are
+    written BEFORE compaction reads the partitions (a session tail left for the next morning's flush
+    would land beside a date a post-midnight run already compacted), and the run stops at the WO-21
+    window and on a stop signal (2026-09-29: a worker still compacting at shutdown held the process
+    past NSSM's grace on every stop during a run)."""
+    events: list[tuple] = []
+    stops: list = []
+    verdict = TickCompactionResult(ok=True)
+
+    def compact(parquet_dir, *, upto, today, stop):
+        events.append(("compact", upto, today))
+        stops.append(stop)
+        return verdict
+
+    async def retention(store, result) -> None:
+        events.append(("retention", result))
+
+    monkeypatch.setattr(opsmain, "compact_ticks", compact)
+    monkeypatch.setattr(opsmain, "apply_tick_retention", retention)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        e = c.engine
+        monkeypatch.setattr(e.store, "flush_ticks", lambda *, wait_s: events.append(("flush", wait_s)))
+        run_for = e.clock.today() - timedelta(days=1)
+        assert await _spec(e, opsmain.JOB_TICK_COMPACT).run(run_for) is verdict
+        assert events == [("flush", 15.0), ("compact", run_for, e.clock.today()), ("retention", verdict)]
+        (stop,) = stops
+        assert stop() is True                       # 10:05 on a trading day: inside the WO-21 window
+        c.time.set(datetime.combine(e.clock.today(), time(22, 30), tzinfo=IST))
+        assert stop() is False
+        c.stop_event.set()
+        assert stop() is True                       # …and a stop signal ends it at any hour
 
 
-def test_run_gives_tick_compact_its_own_lane() -> None:
-    """Source-level pin of the 2026-09-29 wiring, which lives in the composition root: the main
-    runner never holds compaction, the lane runner holds nothing else, the lane starts behind the
-    post-arm one-shot, and shutdown cancels it."""
-    src = inspect.getsource(opsmain.compose)
-    assert "registry.select(lambda s: s.job_id not in LANE_JOB_IDS)" in src
-    assert "registry.select(lambda s: s.job_id in LANE_JOB_IDS)" in src
-    boot = inspect.getsource(opsmain._boot)
-    assert boot.index("start_scheduler_and_fire_post_arm(") < boot.index('compaction_lane.spawn("post_arm")')
-    assert "await engine.compaction_lane.cancel()" in inspect.getsource(opsmain._shutdown)
+async def test_run_gives_tick_compact_its_own_lane(tmp_path, monkeypatch, migrated_db_template) -> None:
+    """The 2026-09-29 wiring: the composed main runner never holds compaction and the lane runner holds
+    nothing else. (Its start behind the post-arm one-shot is ``_boot``'s order test; its cancel on
+    stop is ``test_shutdown_cancels_the_boot_watchdog_cleanly``'s.)"""
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        main_ids = {s.job_id for s in c.engine.catch_up._registry.specs()}
+        lane_ids = {s.job_id for s in c.engine.compaction_lane._runner._registry.specs()}
+        every = {s.job_id for s in c.engine.registry.specs()}
+    assert lane_ids == opsmain.LANE_JOB_IDS
+    assert main_ids == every - opsmain.LANE_JOB_IDS
 
 
-def test_market_backup_runs_in_compaction_lane_only(conn, clock, calendar) -> None:
+async def test_market_backup_runs_in_compaction_lane_only(tmp_path, monkeypatch, migrated_db_template) -> None:
     """§10.5 DuckDB export (2026-10-11): a lane job — never in the boot catch-up (the main runner never
     holds it), never on the stop path (the shutdown hook is the SQLite snapshot alone), and its 22:00
     fire starts a lane pass, so it never overlaps the compaction it shares the lane with."""
     assert opsmain.LANE_JOB_IDS == {opsmain.JOB_TICK_COMPACT, opsmain.JOB_MARKET_BACKUP}
-    registry = build_job_registry(load_settings(), _all_noop_fns())
-    main_ids = {s.job_id for s in registry.select(lambda s: s.job_id not in opsmain.LANE_JOB_IDS).specs()}
-    assert not main_ids & opsmain.LANE_JOB_IDS and main_ids
-    src = inspect.getsource(opsmain.compose)
-    assert "_arm_registry_jobs(scheduler, registry, catch_up, clock, lane=compaction_lane)" in src
-    assert "interrupt=store.interrupt_export" in src
-    hook = src[src.index("async def backup_hook("):src.index("lifecycle = SessionLifecycle(")]
-    assert "_snapshot_backup(" in hook and "market" not in hook and "export" not in hook
-    # The job wrapper forwards the ok-bearing result (unfinished / ok=False must reach the runner).
-    body = _wrapper_body(src, "job_market_backup")
-    assert "return await _market_backup(" in body
-    # One retry hold per process, shared by every lane pass (the export's 6 h hold after a failure).
-    assert "retry=market_backup_retry" in body and src.count("MarketBackupRetry()") == 1
+    exports: list[object] = []
+    snapshots: list[str] = []
+    verdict = object()
+
+    async def market_backup(store, settings, clock, calendar, *, retry):
+        exports.append(retry)
+        return verdict
+
+    async def snapshot(conn, settings, clock) -> None:
+        snapshots.append("sqlite")
+
+    monkeypatch.setattr(opsmain, "_market_backup", market_backup)
+    monkeypatch.setattr(opsmain, "_snapshot_backup", snapshot)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        e = c.engine
+        assert opsmain.JOB_MARKET_BACKUP not in {s.job_id for s in e.catch_up._registry.specs()}
+        spawned: list[str] = []
+        monkeypatch.setattr(e.compaction_lane, "spawn",
+                            lambda path, *, quiet=frozenset(): spawned.append(path))
+        await _job(e, opsmain.JOB_MARKET_BACKUP)                 # the 22:00 fire
+        assert spawned == [f"scheduled:{opsmain.JOB_MARKET_BACKUP}"] and exports == []
+        # The job forwards the ok-bearing result, on ONE retry hold shared by every lane pass.
+        spec = _spec(e, opsmain.JOB_MARKET_BACKUP)
+        assert await spec.run() is verdict and await spec.run() is verdict
+        assert len(exports) == 2 and exports[0] is exports[1]
+        assert e.compaction_lane._interrupt == e.store.interrupt_export
+        await e.lifecycle._backup()                             # the stop path's backup hook
+        assert snapshots == ["sqlite"] and len(exports) == 2
 
 
 class _SpawnLane:
@@ -3253,6 +3569,95 @@ async def test_shutdown_cancels_the_boot_watchdog_cleanly() -> None:
     ])
 
 
+class _RecordingState(dict):
+    """The boot-contract holder, recording every flag the boot raises into the shared event list."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(engine_ready=False, scheduler=None, alert=None)
+        self._events = events
+
+    def __setitem__(self, key, value) -> None:
+        self._events.append(f"boot_state[{key}]={value}")
+        super().__setitem__(key, value)
+
+
+async def test_boot_runs_its_steps_in_the_order_its_comments_state(monkeypatch) -> None:
+    """``_boot``'s own comments, as orders: the owner channel comes up before startup recovery (its
+    notifications must not be dropped); the login API binds before the token probe and before
+    ``lifecycle.startup`` (2026-07-21 lockout); the LIVE probe precedes the instruments hydrate,
+    which precedes startup (F2); the boot-phase ticks run alongside startup and are gone before the
+    seeding; the seeding follows startup; the scheduler is armed before the compaction lane is
+    spawned (the post-arm one-shot fires inside the arming, WO-15); and ``engine_ready`` is raised
+    last (WO-25c: the other half of the boot contract)."""
+    events: list[str] = []
+
+    def sync(name: str, result: object = None):
+        return lambda *_a, **_k: events.append(name) or result
+
+    def coro(name: str, result: object = None):
+        async def call(*_a, **_k):
+            events.append(name)
+            return result
+        return call
+
+    async def boot_ticks(*_fns) -> None:
+        events.append("boot_phase_ticks.start")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("boot_phase_ticks.cancelled")
+            raise
+
+    report = SimpleNamespace(sticky_mode="RECOMMEND", killed=False, needs_login=False, integrity_ok=True,
+                             jobs_caught_up=[], frozen_reasons=[])
+
+    async def startup(*, check_skew: bool):
+        await asyncio.sleep(0)                  # the recovery awaits; the ticks run alongside it
+        events.append("lifecycle.startup")
+        return report
+    monkeypatch.setattr(opsmain, "check_calendar_horizon", coro("check_calendar_horizon"))
+    monkeypatch.setattr(opsmain, "_serve_api",
+                        coro("_serve_api", SimpleNamespace(_mt_server=SimpleNamespace(started=True))))
+    monkeypatch.setattr(opsmain, "hydrate_instruments_at_startup", coro("hydrate_instruments", "snapshot"))
+    monkeypatch.setattr(opsmain, "boot_phase_ticks", boot_ticks)
+    monkeypatch.setattr(opsmain, "seed_boot_snapshots", coro("seed_boot_snapshots"))
+    monkeypatch.setattr(opsmain, "start_scheduler_and_fire_post_arm", sync("arm_scheduler_fire_post_arm"))
+    engine = SimpleNamespace(
+        telegram=SimpleNamespace(start=coro("telegram.start")),
+        calendar=object(), clock=object(), app=object(), instruments=object(), store=object(), kite=None,
+        settings=SimpleNamespace(clock=SimpleNamespace(calendar_horizon_alert_sessions=5),
+                                 api=SimpleNamespace(host="127.0.0.1", port=8400)),
+        notify=coro("notify"), alert=coro("alert"),
+        session=SimpleNamespace(verify_token=coro("verify_token", "valid"), token_valid=lambda: True,
+                                login_url=lambda: "https://kite.example/login"),
+        warmup_gate=object(), warmup_holder={}, skew_holder={}, warmup_refresh=coro("warmup_refresh"),
+        health=SimpleNamespace(check=coro("health.check")),
+        lifecycle=SimpleNamespace(startup=startup),
+        scheduler=object(), catch_up=object(), scheduler_armed=asyncio.Event(),
+        compaction_lane=SimpleNamespace(spawn=sync("compaction_lane.spawn")),
+        early_hydration=SimpleNamespace(on_boot=coro("early_hydration.on_boot")),
+        mode=SimpleNamespace(mode=lambda: Mode.RECOMMEND),
+    )
+    boot_state = _RecordingState(events)
+    tasks = await opsmain._boot(engine, boot_state)
+    await tasks.early_hydration_task
+
+    def before(a: str, b: str) -> bool:
+        return events.index(a) < events.index(b)
+
+    assert before("telegram.start", "lifecycle.startup")
+    assert before("_serve_api", "verify_token") and before("_serve_api", "lifecycle.startup")
+    assert before("verify_token", "hydrate_instruments") and before("hydrate_instruments", "lifecycle.startup")
+    assert before("boot_phase_ticks.start", "lifecycle.startup")
+    assert before("lifecycle.startup", "boot_phase_ticks.cancelled")
+    assert before("boot_phase_ticks.cancelled", "seed_boot_snapshots")
+    assert before("lifecycle.startup", "seed_boot_snapshots")
+    assert before("arm_scheduler_fire_post_arm", "compaction_lane.spawn")
+    assert [e for e in events if e.startswith("boot_state")] == ["boot_state[engine_ready]=True"]
+    assert events[-2:] == ["boot_state[engine_ready]=True", "early_hydration.on_boot"]  # the task runs after
+    assert boot_state["engine_ready"] is True and engine.skew_holder == {"ok": True}
+
+
 @pytest.mark.asyncio
 async def test_scheduler_is_running_reads_apscheduler_state(clock, calendar) -> None:
     """The watchdog must not be able to be lied to: is_running() reads APScheduler's own state, so a
@@ -3543,7 +3948,9 @@ async def test_freeze_lift_sweeps_on_the_frozen_to_normal_edge(calendar) -> None
     assert state["fired"] == (_IN_WINDOW.date(), 10, 5)
 
 
-async def test_freeze_lift_does_not_sweep_before_the_boot_completes(calendar, caplog) -> None:
+async def test_freeze_lift_does_not_sweep_before_the_boot_completes(
+    calendar, caplog, tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """The RECOVERY publishes lifts of its own — the self-test's ``clear_stale_daily`` (step 1c) and
     step 5's ``catchup_safety_jobs`` clear — ahead of step 4's data-gap backfill, step 5's daily_bars
     catch-up, step 6's warm-up gate and step 7's ticker resume. A sweep there reads a daily history
@@ -3571,14 +3978,21 @@ async def test_freeze_lift_does_not_sweep_before_the_boot_completes(calendar, ca
                              ready=lambda: ready["engine"])
     assert sweeps.calls == ["freeze_lift"]
 
-    # The flag the composition root feeds it is the boot contract's own, and it is raised only AFTER
-    # the boot's last blocking step (seed_boot_snapshots) — the subscriber is armed long before that.
-    src = inspect.getsource(opsmain.compose) + inspect.getsource(opsmain._boot)   # run()'s order
-    assert 'ready=lambda: bool(boot_state["engine_ready"])' in src
-    assert src.index("await seed_boot_snapshots(") \
-        < src.index('boot_state["engine_ready"] = True')
-    assert src.index("bus.subscribe(TOPIC_RISK_STATE, _on_risk_state_sweep)") \
-        < src.index("await seed_boot_snapshots(")
+    # The flag the composed engine's subscriber reads is the boot contract's own (raised by ``_boot``
+    # after its last blocking step — ``test_boot_runs_its_steps_in_the_order_its_comments_state``),
+    # and the subscriber is armed by ``compose``, ahead of the whole boot.
+    caplog.clear()
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template) as (c, w):
+        with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+            await c.engine.bus.apublish(TOPIC_RISK_STATE, _lift())
+            await _settle(c.engine)
+            assert [r.reason for r in caplog.records
+                    if r.getMessage() == "freeze_lift_sweep_skipped"] == ["boot_in_progress"]
+            assert w.admits == []
+            c.boot_state["engine_ready"] = True
+            await c.engine.bus.apublish(TOPIC_RISK_STATE, _lift())
+            await _settle(c.engine)
+        assert [kw["trigger"] for _, kw in w.legs["hi52"]] == ["freeze_lift"]
 
 
 @pytest.mark.parametrize(
@@ -3791,7 +4205,7 @@ def _hi52_branch(trigger: str) -> tuple:
             store.frames, store.corp_actions)
 
 
-def test_freeze_lift_takes_every_window_open_branch() -> None:
+async def test_freeze_lift_takes_every_window_open_branch(tmp_path, monkeypatch, migrated_db_template) -> None:
     """``freeze_lift`` IS the window_open sweep, re-run because a freeze swallowed the first one, so
     the once-per-session hi52 leg — the ONLY trigger-keyed branch — must fire for it too. Asserted
     on the leg's own candidates (2026-09-11 review: a source pin passes for any new branch spelled a
@@ -3807,30 +4221,33 @@ def test_freeze_lift_takes_every_window_open_branch() -> None:
     # /scan_now stays cheap: no candidates, no ~480×400-session history read.
     assert _hi52_branch("scan_now") == ([], [], [])
 
-    # …and those candidates reach the pre-screen through the ONE ranked batch admit, not a second
-    # leftover-capacity one (the §8.6 promotion: a rule that can reach RECOMMEND contests the same
-    # slots as brk20/ins/cat). Exactly one admit call exists in the sweep.
-    run_src = inspect.getsource(opsmain.compose)
-    assert "brk20_raw + ins_raw + cat_raw + cat_rev_raw + hi52_raw" in run_src
-    assert run_src.count("prescreen.admit(") == 1
-
     assert _FULL_SWEEP_TRIGGERS == {"window_open", "freeze_lift"}
     assert "scan_now" not in _FULL_SWEEP_TRIGGERS        # the owner's cadence stays cheap
-    # …and no OTHER branch may key on the trigger. Any new comparison inside run() — `== "window_open"`,
-    # `!= "freeze_lift"`, a dict dispatch spelled `in (...)` — fails this, which is the drift the work
-    # order asked to be made impossible.
-    src = inspect.getsource(opsmain.compose)
-    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-    assert re.findall(r"\btrigger\s*(?:[!=]=|(?:not )?in\b)\s*\S+", code) == \
-        ['trigger != "scan_now":']
-    assert not re.search(r"\btrigger\s*\.", code)        # …nor a `trigger.startswith(...)` dispatch
-    # Both fire sites resolve the SAME predicate, and the lift is actually subscribed.
-    assert "active = _sweep_window_active(clock.now(), calendar, mode)" in src
-    assert "bus.subscribe(TOPIC_RISK_STATE, _on_risk_state_sweep)" in src
     assert 'await sweep("freeze_lift")' in inspect.getsource(_freeze_lift_sweep)
-    # The debounce qualifier is fed from the real publication-time risk state, not a constant.
-    assert "_published_frozen = mode.risk_state() != RiskState.NORMAL" in src
-    assert "frozen=_published_frozen" in src
+
+    # …and in the composed engine, no OTHER branch keys on the trigger: a freeze_lift sweep hands every
+    # leg the same input, makes the same ONE ranked admission of all five legs (not a second
+    # leftover-capacity one — the §8.6 promotion: a rule that can reach RECOMMEND contests the same
+    # slots as brk20/ins/cat) and publishes the same candidates as a window_open sweep.
+    seen = {}
+    for trigger in ("window_open", "freeze_lift"):
+        async with _sweep_world(tmp_path / trigger, monkeypatch, migrated_db_template) as (c, w):
+            await c.engine.scan_sweep(trigger)
+            assert [kw.pop("trigger") for _, kw in w.legs["hi52"]] == [trigger]
+            seen[trigger] = (w.legs, w.admits, w.published)
+            if trigger == "freeze_lift":
+                # Both fire sites resolve the SAME predicate, and the lift is actually subscribed.
+                asked: list[tuple] = []
+                monkeypatch.setattr(opsmain, "_sweep_window_active",
+                                    lambda *args, asked=asked: asked.append(args) or False)
+                await _job(c.engine, "window_sweep_tick")
+                c.boot_state["engine_ready"] = True
+                await c.engine.bus.apublish(TOPIC_RISK_STATE, _lift())
+                await _settle(c.engine)
+                assert asked == [(FIXED_NOW, c.engine.calendar, c.engine.mode)] * 2
+    assert seen["freeze_lift"] == seen["window_open"]
+    ((admitted, in_window),) = seen["window_open"][1]
+    assert {sid for sid, _ in admitted} == set(_PUBLICATION_LEG_ORDER) and in_window is True
 
 
 def _batch_cand(strategy_id: str, symbol: str, score: float) -> SignalCandidate:
@@ -3843,7 +4260,9 @@ def _batch_cand(strategy_id: str, symbol: str, score: float) -> SignalCandidate:
     )
 
 
-def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_order() -> None:
+async def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_order(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """ADMISSION and PUBLICATION are two separable consequences of one ranked list, and the §8.6
     promotion deliberately bought `hi52` only the first (2026-09-12 review).
 
@@ -3881,11 +4300,17 @@ def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_order() 
     # Empty and single-leg batches are the ordinary quiet morning, not an edge case to guard.
     assert _publication_order([]) == []
     assert [c.symbol for c in _publication_order(ranked[:1])] == ["AAA"]
-    # …and the sweep actually routes its one admission through it.
-    assert "_publication_order(prescreen.admit(" in inspect.getsource(opsmain.compose)
+    # …and the composed sweep actually publishes its one admission that way: hi52 scores 0.99 against
+    # 0.5 for every other leg, and still publishes last.
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template) as (c, w):
+        await c.engine.scan_sweep("window_open")
+    legs = [sid for sid, _ in w.published]
+    assert [sid for i, sid in enumerate(legs) if i == 0 or legs[i - 1] != sid] == list(_PUBLICATION_LEG_ORDER)
 
 
-def test_the_hi52_promotion_is_one_state_in_both_of_its_halves() -> None:
+async def test_the_hi52_promotion_is_one_state_in_both_of_its_halves(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """The §8.6 promotion is TWO wirings and a demotion is two edits; either half alone leaves a
     half-promoted rule, so both halves are pinned here (2026-09-12 review — nothing asserted the
     promotion itself, and `NO_EDGE_SHADOW_STRATEGIES`' own docstring makes the case for a test).
@@ -3905,9 +4330,16 @@ def test_the_hi52_promotion_is_one_state_in_both_of_its_halves() -> None:
     }
     # …while the shadows it left behind stay shadows.
     assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal"}
-    # …through the live StrategyEdges wrapper over this map (O19 §3.3; pinned in
-    # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52.
-    assert "strategy_expected_edge_pct=strategy_edges," in inspect.getsource(opsmain.compose)
+    # …through the live StrategyEdges wrapper over this map (O19 §3.3; its identity is
+    # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52 —
+    # here as the composed gate actually holds both halves.
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "RiskGate", built)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template):
+        pass
+    ((_, gate_kw, _),) = built["RiskGate"]
+    assert gate_kw["strategy_expected_edge_pct"][hi52.STRATEGY_ID] == Decimal("1.53")
+    assert gate_kw["no_edge_shadow_strategies"] == NO_EDGE_SHADOW_STRATEGIES
 
 
 def test_deleting_the_settings_key_really_un_registers_the_hi52_edge(tmp_path) -> None:
@@ -3999,40 +4431,96 @@ async def test_the_freeze_lift_queues_behind_an_in_flight_sweep_instead_of_being
     assert calls == ["window_open", "freeze_lift"]        # sequential, never overlapping
 
 
-def test_every_sweep_trigger_goes_through_the_single_flight_entry_point() -> None:
+class _FakeTelegram:
+    """The bot's wiring surface ``compose`` uses; keeps what it was handed."""
+
+    def __init__(self) -> None:
+        self.scan_sweep_fn = None
+        self.sent: list = []
+
+    def set_paper(self, *_args, **_kwargs) -> None: ...
+    def set_reco_book(self, _book) -> None: ...
+    def set_why_fn(self, _fn) -> None: ...
+
+    def set_scan_sweep_fn(self, fn) -> None:
+        self.scan_sweep_fn = fn
+
+    async def send(self, msg) -> None:
+        self.sent.append(msg)
+
+
+async def test_every_sweep_trigger_goes_through_the_single_flight_entry_point(
+    tmp_path, monkeypatch, migrated_db_template, caplog
+) -> None:
     """One lock, one entry point: the window edge, the owner's /scan_now and the lift all resolve it,
-    and the lift is the only one that waits instead of being skipped."""
-    src = inspect.getsource(opsmain.compose)
-    assert "_sweep_lock = asyncio.Lock()" in src
-    assert "return await _single_flight_sweep(_sweep_lock, _scan_sweep, trigger," in src
-    assert "queue=queue_behind_in_flight)" in src
-    assert "return await run_scan_sweep(trigger, queue_behind_in_flight=True)" in src
-    assert src.count("queue_behind_in_flight=True") == 1          # ONLY the lift queues
-    # The lift's in-flight test is the lock itself, never the phase marks (2026-09-12 review).
-    assert "in_flight=_sweep_lock.locked" in src
-    assert 'await run_scan_sweep("window_open")' in src           # window edge: plain skip…
-    # …but the once-per-day edge is GIVEN BACK when the skip happens, so the next 60 s tick re-fires
-    # it. An owner /scan_now in flight is not a substitute: it skips the once-per-session hi52 leg.
-    assert 'if await run_scan_sweep("window_open") == _SWEEP_IN_FLIGHT_REPLY:' in src
-    assert '_window_active["was"] = False' in src
-    assert "telegram.set_scan_sweep_fn(run_scan_sweep)" in src    # /scan_now: plain skip
-    assert "_lift_scan_sweep, _freeze_lift" in src                # the lift gets the queueing call
+    and the lift is the only one that waits instead of being skipped. The window edge is a
+    once-per-day event, so a skipped edge is GIVEN BACK and the next 60 s tick re-fires it (an owner
+    /scan_now in flight is no substitute: it skips the once-per-session hi52 leg). The lift's
+    in-flight test is the lock itself, never the phase marks (2026-09-12 review)."""
+    telegram = _FakeTelegram()
+    monkeypatch.setattr(opsmain, "_build_telegram", lambda *_a, **_k: telegram)
+    entered, release = threading.Event(), threading.Event()
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template) as (c, w):
+        e = c.engine
+        recording_leg = brk20.sweep_daily
+
+        def held_leg(histories, **kwargs):                    # inside the worker, BEFORE publication
+            entered.set()
+            assert release.wait(10)
+            return recording_leg(histories, **kwargs)
+
+        monkeypatch.setattr(brk20, "sweep_daily", held_leg)
+        assert telegram.scan_sweep_fn is e.scan_sweep                        # /scan_now: the entry point
+        owner_sweep = asyncio.create_task(telegram.scan_sweep_fn("scan_now"))
+        assert await asyncio.to_thread(entered.wait, 10)
+        assert await e.scan_sweep("scan_now") == _SWEEP_IN_FLIGHT_REPLY      # a second /scan_now skips
+        await _job(e, "window_sweep_tick")                                   # the edge skips…
+        c.boot_state["engine_ready"] = True
+        with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+            await e.bus.apublish(TOPIC_RISK_STATE, _lift())                  # pre-publication: no redo
+            await _settle(e)
+        assert [r.reason for r in caplog.records if r.getMessage() == "freeze_lift_sweep_skipped"] \
+            == ["sweep_in_flight_pre_publication"]
+        release.set()
+        await owner_sweep
+        await _job(e, "window_sweep_tick")                                   # …and is given back
+        assert [kw["trigger"] for _, kw in w.legs["hi52"]] == ["scan_now", "window_open"]
+
+        # A lift landing while a sweep holds the lock AFTER publishing (into the freeze it lifts)
+        # queues behind it and re-sweeps once it is done.
+        c.time.set(FIXED_NOW + timedelta(minutes=3))
+        monkeypatch.setattr(brk20, "sweep_daily", recording_leg)
+        e.store.upsert_universe_daily([{"d": FIXED_NOW.date(), "symbol": "LATE", "included": True,
+                                        "exclusion_reasons": None}])
+        e.store.upsert_bars_1d([DailyBar(symbol="LATE", d=FIXED_NOW.date() - timedelta(days=1),
+                                         open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                                         close=Decimal("1"), volume=1)])
+        w.hold = asyncio.Event()
+        held = asyncio.create_task(e.scan_sweep("scan_now"))
+        while not w.published or w.published[-1] != (brk20.STRATEGY_ID, "LATE"):
+            await asyncio.sleep(0.01)
+        await e.bus.apublish(TOPIC_RISK_STATE, _lift())
+        await asyncio.sleep(0.05)
+        assert [kw["trigger"] for _, kw in w.legs["hi52"]][-1] == "scan_now"   # still queued
+        w.hold.set()
+        await held
+        await _settle(e)
+        assert [kw["trigger"] for _, kw in w.legs["hi52"]] == ["scan_now", "window_open", "scan_now",
+                                                               "freeze_lift"]
 
 
-def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_set() -> None:
+async def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_set(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """O18 (2026-10-08): with the index widened to NIFTY Total Market, hi52 and both cat legs
     originate from the CORE (NIFTY 500) subset — their registered edge / frozen verdict population —
-    while brk20 keeps scanning the full eligible set. Pinned on the composition-root source because
-    the sweep body is a closure inside ``run`` (the established pattern in this file)."""
-    src = inspect.getsource(opsmain.compose)
-    assert "eligible = store.get_universe_eligible_symbols(today)" in src
-    assert "core_eligible = store.get_core_eligible_symbols(today)" in src
-    assert "for sym in eligible:" in src                                   # brk20 histories
-    assert "store, trigger=trigger, eligible=core_eligible, today=today," in src   # hi52
-    assert "_core_set = set(core_eligible)" in src
-    assert "cat_rows = _watchlist_rows_for_symbols(cat_rows, _core_set)" in src
-    assert "cat_rev_rows = _watchlist_rows_for_symbols(cat_rev_rows, _core_set)" in src
-    assert "eligible=eligible, today=today" not in src                     # no hi52 call left on it
+    while brk20 keeps scanning the full eligible set."""
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template) as (c, w):
+        await c.engine.scan_sweep("window_open")
+    assert [symbols for symbols, _ in w.legs["brk20"]] == [[_CORE, _WATCH, _WIDE]]   # eligible
+    assert [symbols for symbols, _ in w.legs["hi52"]] == [[_CORE, _WATCH]]           # core
+    assert [symbols for symbols, _ in w.legs["cat"]] == [[_CORE]]                    # core rows only
+    assert [symbols for symbols, _ in w.legs["cat_reversal"]] == [[_CORE]]
 
 
 def test_ticker_tokens_carry_todays_batch_symbols_until_the_day_rolls() -> None:
@@ -4058,53 +4546,171 @@ def test_ticker_tokens_carry_todays_batch_symbols_until_the_day_rolls() -> None:
     assert state["symbols"] == set()
 
 
-def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set() -> None:
-    """CONSTRAINT: ``warmup_gate.set_symbols`` stays on ``watchlist_symbols()``. A batch symbol in the
-    warm-up coverage set means one missing bar on a name nobody trades FREEZES entries — the exact
-    failure this work order exists to stop."""
-    src = inspect.getsource(opsmain.compose)
-    assert src.count("set_symbols(") == 1
-    assert "warmup_gate.set_symbols(watchlist_symbols())" in src
-    assert "symbols=watchlist_symbols(), index_symbol=INDEX_SYMBOL" in src   # WarmupGate at boot
-    # …while the FEED does carry them, after watchlist + held, on every sweep.
-    assert "watchlist=watchlist_symbols(), held=_feed_symbols(conn), batch_state=_batch_ticks," in src
-    assert "today=clock.today(), token_for_symbol=instruments.token_for_symbol," in src
-    assert src.count("await ticker.update_subscriptions(ticker_tokens())") == 2  # job_universe + sweep
+def _positions(conn, *, real: str | None = None, paper: tuple[str, ...] = ()) -> None:
+    """An open REAL (recommended) position and open PAPER positions, in the current paper epoch."""
+    at = FIXED_NOW.replace(hour=9, minute=30).isoformat()
+    conn.execute("INSERT INTO paper_state (id, epoch_started_at) VALUES (1, ?)",
+                 (FIXED_NOW.replace(hour=9, minute=0).isoformat(),))
+    rows = [("r-1", real, 0, "recommended")] if real is not None else []
+    rows += [(f"p-{i}", symbol, 1, "platform") for i, symbol in enumerate(paper, 1)]
+    for pid, symbol, is_paper, origin in rows:
+        conn.execute(
+            "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, state, is_paper, "
+            "origin, opened_at) VALUES (?, ?, 'BUY', 'CNC', 10, '100', 'OPEN', ?, ?, ?)",
+            (pid, symbol, is_paper, origin, at),
+        )
 
 
-def test_surveillance_ingest_is_wired_to_open_real_positions() -> None:
+def _quiet_universe_job(monkeypatch) -> None:
+    """``job_universe``'s three network-backed steps as no-ops: the build keeps today's seeded rows."""
+    async def nothing(self, *_args, **_kwargs) -> None:
+        return None
+
+    for cls, method in ((opsmain.MisLeverageIngest, "refresh"), (opsmain.SurveillanceIngest, "current"),
+                        (opsmain.UniverseBuilder, "build")):
+        monkeypatch.setattr(cls, method, nothing)
+
+
+async def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """CONSTRAINT: the warm-up coverage set stays the WATCHLIST. A batch symbol in it means one missing
+    bar on a name nobody trades FREEZES entries — the exact failure this work order exists to stop —
+    while the FEED does carry the batch admissions, after watchlist + held, on every sweep and every
+    universe build."""
+    from engine.ops.warmup import WarmupGate
+
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "WarmupGate", built)
+    coverage: list[list[str]] = []
+    real_set = WarmupGate.set_symbols
+
+    def set_symbols(self, symbols) -> None:
+        coverage.append(list(symbols))
+        real_set(self, symbols)
+
+    monkeypatch.setattr(WarmupGate, "set_symbols", set_symbols)
+    _quiet_universe_job(monkeypatch)
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template,
+                            state_db=lambda conn: _positions(conn, paper=("PAPONLY",))) as (c, w):
+        e = c.engine
+        ((_, gate_kw, _),) = built["WarmupGate"]
+        assert gate_kw["symbols"] == [_WATCH]                 # the boot coverage set: the watchlist
+        feed = _watch_feed(monkeypatch, e)
+        await e.scan_sweep("window_open")
+        watch, held, batch, index = [1], [5], [2, 3], [99, 98]   # WATCH | PAPONLY | CORE1 WIDE1 | idx
+        assert feed == [watch + held + batch + index] and coverage == []
+        await _spec(e, JOB_UNIVERSE).run()
+        assert coverage == [[_WATCH]]
+        assert feed[-1] == watch + held + batch + index and len(feed) == 2
+
+
+async def test_surveillance_ingest_is_wired_to_open_real_positions(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """A8: the held-position surveillance alert lives in ``SurveillanceIngest.refresh`` so every
     refresh path (08:20 job, catch-up, early hydration, job_universe's first use) runs it; it only
     fires when the engine passes the real-scoped held-positions reader."""
-    src = inspect.getsource(opsmain.compose)
-    assert src.count("SurveillanceIngest(") == 1
-    assert "held_positions=lambda: _held_positions(conn)," in src
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "SurveillanceIngest", built)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template,
+                               state_db=lambda conn: _positions(conn, real="REALCO", paper=("PAPERCO",))) as c:
+        ((_, kw, _),) = built["SurveillanceIngest"]
+        assert kw["held_positions"]() == [("r-1", "REALCO", 10)]          # the real one, never paper
+        c.engine.conn.execute("UPDATE positions SET qty = 7 WHERE position_id = 'r-1'")
+        assert kw["held_positions"]() == [("r-1", "REALCO", 7)]           # read live, not at boot
 
 
-def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour() -> None:
+async def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """2026-09-15: OLAELEC entered the watchlist at 10:09 with a 57-session hole in bars_1d and froze
     the DAILY class for 12 h — the minute-only newcomer fill (mid-session-gated) never touched daily
     history. The daily-history repair must run for every newcomer regardless of time of day (pre-open
-    builds included — daily history is historical), so it must NOT be nested inside the mid-session
-    ``clock.now() > session.open`` guard that still gates the minute fill."""
-    body = _wrapper_body(inspect.getsource(opsmain.compose), "job_universe")
-    assert "backfill.daily_gap(added, sessions)" in body
-    assert "warmup_gate.daily_window()" in body
-    assert body.index("backfill.daily_gap(") < body.index("clock.now() > session.open")
-    assert "backfill.warmup_gap(" in body                                    # minute fill retained
-    assert "added, session.open, clock.now()," in body
-    # 2026-09-18: the newcomer minute fill CONFIRMS upstream-empty minutes too, clamped to the
-    # session close so a post-close build never marks after-hours minutes no-trade.
-    assert "confirm_until=min(session.close, clock.now() - timedelta(minutes=2))" in body
+    builds included — daily history is historical); the minute fill stays mid-session-only, and
+    (2026-09-18) CONFIRMS upstream-empty minutes clamped to the session close, so a post-close build
+    never marks after-hours minutes no-trade."""
+    fills: list[tuple] = []
+
+    async def daily_gap(self, symbols, sessions):
+        fills.append(("daily", list(symbols)))
+        return SimpleNamespace(bars_written=0, skipped_covered=0, failed=[])
+
+    async def warmup_gap(self, symbols, frm, to, *, confirm_until):
+        fills.append(("minute", list(symbols), frm, to, confirm_until))
+        return SimpleNamespace(bars_written=0)
+
+    newcomers = iter(["PREOPEN", "MIDDAY", "AFTERCLOSE"])
+    stores: list = []
+
+    async def build(self, d) -> None:
+        stores[0].upsert_universe_daily([{"d": d, "symbol": next(newcomers), "included": True,
+                                          "exclusion_reasons": None}])
+
+    async def nothing(self, *_args) -> None:
+        return None
+
+    monkeypatch.setattr(opsmain.BackfillJob, "daily_gap", daily_gap)
+    monkeypatch.setattr(opsmain.BackfillJob, "warmup_gap", warmup_gap)
+    monkeypatch.setattr(opsmain.UniverseBuilder, "build", build)
+    monkeypatch.setattr(opsmain.MisLeverageIngest, "refresh", nothing)
+    monkeypatch.setattr(opsmain.SurveillanceIngest, "current", nothing)
+    day = FIXED_NOW.date()
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, kite=True,
+                               now=datetime.combine(day, time(8, 30), tzinfo=IST)) as c:
+        e = c.engine
+        stores.append(e.store)
+        session = e.calendar.session(day)
+        await _spec(e, JOB_UNIVERSE).run()                              # 08:30, before the open
+        midday = datetime.combine(day, time(10, 5), tzinfo=IST)
+        c.time.set(midday)
+        await _spec(e, JOB_UNIVERSE).run()
+        after_close = datetime.combine(day, time(16, 0), tzinfo=IST)
+        c.time.set(after_close)
+        await _spec(e, JOB_UNIVERSE).run()
+    assert fills == [
+        ("daily", ["PREOPEN"]),
+        ("daily", ["MIDDAY"]),
+        ("minute", ["MIDDAY"], session.open, midday, midday - timedelta(minutes=2)),
+        ("daily", ["AFTERCLOSE"]),
+        ("minute", ["AFTERCLOSE"], session.open, after_close, session.close),
+    ]
 
 
-def test_warmup_refresh_repair_confirms_upstream_empty_minutes() -> None:
+async def test_warmup_refresh_repair_confirms_upstream_empty_minutes(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """2026-09-18: the 60 s self-heal is the path that closes a tradeless-minute hole (PTCIL 13:36
-    on 09-16). Its repair lambda must pass ``confirm_until=to`` — ``to`` is already ``now − 2 min``
-    and in-session, so a minute Kite has not published yet can never be confirmed."""
-    src = inspect.getsource(opsmain.compose)
-    assert "backfill.warmup_gap(watchlist_symbols(), frm, to," in src
-    assert "confirm_until=to)" in src
+    on 09-16). Its repair must pass ``confirm_until=to`` — ``to`` is already ``now − 2 min`` and
+    in-session, so a minute Kite has not published yet can never be confirmed — over today's
+    watchlist."""
+    from engine.ops.warmup import WarmupStatus
+
+    handed: dict = {}
+    repaired: list[tuple] = []
+
+    async def refresh(warmup_gate, holder, mode, lifecycle, *, alert=None, clock=None) -> None:
+        holder["status"] = WarmupStatus(ready=False, blockers=["intraday:hole 1/1"])
+
+    async def maybe_repair(status, state, *, clock, calendar, repair, token_valid=None, **_kw) -> bool:
+        handed.update(status=status, repair=repair, token_valid=token_valid)
+        return False
+
+    async def warmup_gap(self, symbols, frm, to, *, confirm_until):
+        repaired.append((list(symbols), frm, to, confirm_until))
+
+    monkeypatch.setattr(opsmain, "refresh_and_lift_warmup", refresh)
+    monkeypatch.setattr(opsmain, "maybe_repair_warmup_gaps", maybe_repair)
+    monkeypatch.setattr(opsmain.BackfillJob, "warmup_gap", warmup_gap)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, kite=True,
+                               market=_seed_world_market) as c:
+        e = c.engine
+        await e.warmup_refresh()
+        assert handed["status"] is e.warmup_holder["status"]
+        assert handed["token_valid"] == e.session.token_valid
+        frm, to = FIXED_NOW - timedelta(minutes=30), FIXED_NOW - timedelta(minutes=2)
+        await handed["repair"](frm, to)
+    assert repaired == [([_WATCH], frm, to, to)]
 
 
 # --- the `ins` leg's once-only bound: the one batch leg a re-sweep cannot re-derive -------------
@@ -4185,49 +4791,89 @@ def test_ins_rows_are_consumed_only_when_the_publication_could_be_evaluated(
                                 published_frozen=published_frozen) == expected
 
 
-def test_the_sweep_decides_the_ins_consume_at_publication_from_the_real_risk_state() -> None:
+async def test_the_sweep_decides_the_ins_consume_at_publication_from_the_real_risk_state(
+    tmp_path, monkeypatch, migrated_db_template, caplog
+) -> None:
     """ONE read of the risk state serves both the freeze-lift debounce and the consume decision — if
     they disagreed, a sweep could be debounced away as "already done" after destroying the rows it
-    was meant to re-publish."""
-    src = inspect.getsource(opsmain.compose)
-    assert "_published_frozen = mode.risk_state() != RiskState.NORMAL" in src
-    assert src.count("_published_frozen = ") == 1        # ONE read of the state…
-    assert "frozen=_published_frozen" in src             # …consumed by the freeze-lift debounce…
-    assert "published_frozen=_published_frozen)" in src  # …and by the consume decision
-    assert "_ins_rows_to_consume(ins_read, in_window=batch_in_window," in src
+    was meant to re-publish. Published into a freeze: the crossing stays pending AND a lift right
+    after re-sweeps; published under NORMAL: the crossing is consumed AND the same lift is a no-op."""
+    for state in (RiskState.FROZEN, RiskState.NORMAL):
+        async with _sweep_world(tmp_path / state.value, monkeypatch, migrated_db_template) as (c, w):
+            e = c.engine
+            reads: list[RiskState] = []
+            monkeypatch.setattr(e.mode, "risk_state",
+                                lambda reads=reads, state=state: reads.append(state) or state)
+            await e.scan_sweep("window_open")
+            assert reads == [state]                                       # ONE read, at publication
+            pending = [r.symbol for r in _read_ins_pending(e.conn, FIXED_NOW.date())]
+            assert pending == ([_CORE] if state is RiskState.FROZEN else [])
+            c.boot_state["engine_ready"] = True
+            c.time.set(FIXED_NOW + timedelta(seconds=30))
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+                await e.bus.apublish(TOPIC_RISK_STATE, _lift())
+                await _settle(e)
+            resweeps = [kw["trigger"] for _, kw in w.legs["hi52"]][1:]
+            if state is RiskState.FROZEN:
+                assert resweeps == ["freeze_lift"]                         # the redo
+            else:
+                assert resweeps == []
+                assert [r.reason for r in caplog.records if r.getMessage() == "freeze_lift_sweep_skipped"] \
+                    == ["sweep_finished_under_2min_ago"]
 
 
-def test_nothing_paper_is_built_unless_the_subsystem_is_enabled() -> None:
-    """Plan §1.1/Q4.1/Q4.9: every paper construction lives in ``_compose_paper``, which ``run`` calls
-    once, under the flag, before the pipeline and the scheduler. Disabled, every paper seam the
-    pipeline, the scheduler and the shutdown see is None."""
-    module = ast.parse(inspect.getsource(opsmain))
-    compose = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_compose_paper")
-    inside = {id(n) for n in ast.walk(compose)}
-    builders = {"PaperRuntime", "OrderManager", "PositionBook", "ExitManager", "ProtectionManager", "PaperRisk",
-                "paper_order_guard", "PaperBroker"}
-    calls = [n for n in ast.walk(module) if isinstance(n, ast.Call) and ast.unparse(n.func) in builders]
-    assert {ast.unparse(n.func) for n in calls} == builders - {"PaperBroker"}    # the runtime builds it
-    assert [ast.unparse(n.func) for n in calls if id(n) not in inside] == []
+#: Every paper manager the composition root may construct (the runtime builds the PaperBroker itself).
+_PAPER_BUILDERS = ("PaperRuntime", "OrderManager", "PositionBook", "ExitManager", "ProtectionManager",
+                   "PaperRisk", "paper_order_guard")
 
-    run = ast.parse(inspect.getsource(opsmain.compose))
-    gated = {
-        id(inner)
-        for node in ast.walk(run)
-        if isinstance(node, ast.If) and ast.unparse(node.test) == "settings.paper.subsystem_enabled"
-        for inner in ast.walk(node)
-    }
-    composes = [n for n in ast.walk(module) if isinstance(n, ast.Call) and ast.unparse(n.func) == "_compose_paper"]
-    assert len(composes) == 1
-    assert [id(n) in gated for n in ast.walk(run)
-            if isinstance(n, ast.Call) and ast.unparse(n.func) == "_compose_paper"] == [True]
-    src = inspect.getsource(opsmain.compose)
-    assert (src.index("paper = await _compose_paper(") < src.index("RecommendationPipeline(")
-            < src.index("_arm_registry_jobs(scheduler"))
-    for seam in ("paper_ctx_builder=paper.ctx_builder", "paper_submit=paper.submit",
-                 "paper_enabled_fn=paper.entries_open", "paper_tick=paper.runtime.paper_tick"):
-        assert f"{seam} if paper is not None else None" in src
-    assert "if engine.paper is not None:\n        await engine.paper.stop()" in inspect.getsource(opsmain._shutdown)
+
+async def test_nothing_paper_is_built_unless_the_subsystem_is_enabled(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """Plan §1.1/Q4.1/Q4.9: every paper construction lives in ``_compose_paper``, which the composition
+    calls once, under the flag, before the pipeline and the scheduler. Disabled, nothing paper is
+    constructed and every paper seam the pipeline, the scheduler and the shutdown see is None."""
+    events: list[str] = []
+    built: dict[str, list] = {}
+    for name in _PAPER_BUILDERS:
+        _spy(monkeypatch, name, built)
+    real = {name: getattr(opsmain, name) for name in
+            ("_compose_paper", "RecommendationPipeline", "_arm_registry_jobs")}
+
+    async def compose_paper(*args, **kwargs):
+        events.append("_compose_paper")
+        return await real["_compose_paper"](*args, **kwargs)
+
+    def recorded(name: str):
+        def call(*args, **kwargs):
+            events.append(name)
+            obj = real[name](*args, **kwargs)
+            built.setdefault(name, []).append((args, kwargs, obj))
+            return obj
+        return call
+
+    monkeypatch.setattr(opsmain, "_compose_paper", compose_paper)
+    monkeypatch.setattr(opsmain, "RecommendationPipeline", recorded("RecommendationPipeline"))
+    monkeypatch.setattr(opsmain, "_arm_registry_jobs", recorded("_arm_registry_jobs"))
+    for enabled in (False, True):
+        events.clear()
+        built.clear()
+        async with composed_engine(tmp_path / str(enabled), monkeypatch, db_template=migrated_db_template,
+                                   paper=enabled) as c:
+            e = c.engine
+            ((_, pipe_kw, _),) = built["RecommendationPipeline"]
+            seams = [pipe_kw[k] for k in ("paper_ctx_builder", "paper_submit", "paper_enabled_fn")]
+            paper_tick = e.scheduler._sched.get_job("paper_tick")
+            if not enabled:
+                assert events == ["RecommendationPipeline", "_arm_registry_jobs"]
+                assert [name for name in _PAPER_BUILDERS if name in built] == []
+                assert seams == [None, None, None] and paper_tick is None and e.paper is None
+            else:
+                assert events == ["_compose_paper", "RecommendationPipeline", "_arm_registry_jobs"]
+                assert set(_PAPER_BUILDERS) <= set(built)
+                assert seams == [e.paper.ctx_builder, e.paper.submit, e.paper.entries_open]
+                assert paper_tick is not None
 
 
 def test_every_live_engine_calendar_excludes_special_sessions() -> None:
@@ -4246,24 +4892,36 @@ def test_every_live_engine_calendar_excludes_special_sessions() -> None:
     assert sites == {"datafeeds/ins_crossings.py": [False], "ops/main.py": [False]}
 
 
-def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_to_the_app() -> None:
+async def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_to_the_app(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
     """O19 Task 5b: ONE CapitalChanger, on the real tracker, the gate's StrategyEdges, the paper
     book's mark and the market store's last 1m close (the price a held symbol gets when neither live
-    cache has one), reaches the dashboard through ``_create_app``."""
-    (changer,) = _run_calls("CapitalChanger")
-    assert {k.arg: ast.unparse(k.value) for k in changer.keywords} == {
-        "conn": "conn", "clock": "clock", "calendar": "calendar", "store": "protected_store",
-        "limits": "limits_engine", "mode": "mode", "real": "exposure",
-        "paper_mark": "paper.view().mark if paper is not None else None",
-        "last_mark": "store_last_mark_fn(store)",
-        "edges": "strategy_edges", "notify": "notify",
-    }
-    # ``store`` there is the run's MarketStore, the one paper prep seeds its marks from.
-    src = inspect.getsource(opsmain.compose)
-    assert "    store = MarketStore.from_settings(settings, clock).open()" in src
-    assert "last_mark_fn=store_last_mark_fn(store)" in inspect.getsource(opsmain._compose_paper)
-    (app_call,) = _run_calls("_create_app")
-    assert _kw(app_call, "capital") == "capital"
-    forwarded = ast.parse(inspect.getsource(opsmain._create_app))
-    (create,) = [n for n in ast.walk(forwarded) if isinstance(n, ast.Call) and ast.unparse(n.func) == "create_app"]
-    assert _kw(create, "capital") == "capital"
+    cache has one), reaches the dashboard through ``_create_app``; the paper runtime seeds its marks
+    from that same store."""
+    built: dict[str, list] = {}
+    for name in ("CapitalChanger", "ExposureTracker", "StrategyEdges", "RiskGate", "PaperRuntime"):
+        _spy(monkeypatch, name, built)
+    bar_at = FIXED_NOW.replace(hour=9, minute=59)
+
+    def last_close(store) -> None:
+        store.insert_bars_1m([Bar(symbol="HELD", ts_minute=bar_at, open=Decimal("10"), high=Decimal("10"),
+                                  low=Decimal("10"), close=Decimal("123.45"), volume=1, src="self")])
+
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, paper=True,
+                               market=last_close) as c:
+        e = c.engine
+        ((_, kw, changer),) = built["CapitalChanger"]
+        ((gate_args, _, _),) = built["RiskGate"]
+        ((_, _, tracker),) = built["ExposureTracker"]
+        ((_, _, edges),) = built["StrategyEdges"]
+        ((_, paper_kw, _),) = built["PaperRuntime"]
+        limits_engine = gate_args[0]
+        assert (kw["conn"], kw["clock"], kw["calendar"], kw["mode"]) == (e.conn, e.clock, e.calendar, e.mode)
+        assert kw["store"] is limits_engine._store and kw["limits"] is limits_engine
+        assert kw["real"] is tracker and kw["edges"] is edges and kw["notify"] is e.notify
+        assert kw["paper_mark"] == e.paper.view().mark
+        expected = (Decimal("123.45"), bar_at)
+        assert await kw["last_mark"]("HELD", FIXED_NOW) == expected               # the run's MarketStore
+        assert await paper_kw["last_mark_fn"]("HELD", FIXED_NOW) == expected      # …paper prep's too
+        assert e.app.state.capital is changer

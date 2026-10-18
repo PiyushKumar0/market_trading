@@ -4,7 +4,6 @@ and the scope predicate has one source (``engine.core.scope``)."""
 from __future__ import annotations
 
 import ast
-import inspect
 import json
 import re
 from datetime import timedelta
@@ -24,6 +23,7 @@ from engine.ops.pipeline import RecommendationBook
 from engine.risk.exposure import ExposureTracker, FloorLimits
 from engine.risk.gate import GateContextBuilder
 from engine.strategy.cost_model import CostModel
+from tests.unit.test_ops_main_wiring import _CORE, _TOKENS, _WIDE, _positions, _sweep_world, _watch_feed
 from tests.unit.test_reco_pipeline import LEDGER_FIELDS, NOW, SYMBOL, make_rec
 
 TODAY = NOW.date()
@@ -287,11 +287,28 @@ def test_every_paper_position_working_order_and_active_gtt_is_in_the_feed(conn) 
     assert opsmain._held_symbols(conn) == [SYMBOL]
 
 
-def test_the_retest_and_the_sweep_read_real_held_symbols_and_only_the_ticker_reads_the_feed() -> None:
-    src = inspect.getsource(opsmain.compose)
-    assert "return _held_symbols(conn)" in src
-    assert "held=set(held_symbols())," in src and "held = set(held_symbols())" in src
-    assert src.count("_feed_symbols(") == 1
+async def test_the_retest_and_the_sweep_read_real_held_symbols_and_only_the_ticker_reads_the_feed(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """In the composed engine: the sweep's "you HOLD this" flag and the retest's held skip read REAL
+    held positions only (paper never counts, plan §1.4), while the ticker — and only the ticker —
+    carries every paper position too."""
+    async with _sweep_world(tmp_path, monkeypatch, migrated_db_template,
+                            state_db=lambda conn: _positions(conn, real=_CORE, paper=(_WIDE, "PAPONLY"))
+                            ) as (c, w):
+        e = c.engine
+        feed = _watch_feed(monkeypatch, e)
+        offers: list[dict] = []
+        monkeypatch.setattr(opsmain, "_retest_republish", lambda *_a, **kw: offers.append(kw) or [])
+        body = await e.scan_sweep("window_open")
+        lines = body.splitlines()
+        held = {line.split()[1] for line in lines if "you HOLD this" in line}
+        assert held == {_CORE}                                       # the paper-held WIDE1 is not "held"…
+        assert any(line.split()[1:2] == [_WIDE] for line in lines)    # …though the sweep lists it
+        await e.scheduler._sched.get_job("forward_drain_tick").func()
+        skipped = offers[-1]["skip_fn"]([_CORE, _WIDE])
+        assert list(skipped) == [_CORE] and "already held" in skipped[_CORE]
+        assert _TOKENS["PAPONLY"] in feed[-1]        # a paper holding outside every universe still ticks
 
 
 # ------------------------------------------------------------------ scope_sql

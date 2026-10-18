@@ -11,23 +11,28 @@ registry, or a constructor spy (``monkeypatch.setattr(opsmain, "RiskGate", spy)`
 from __future__ import annotations
 
 import asyncio
+import functools
 import shutil
 import socket
-from collections.abc import AsyncIterator
+import sqlite3
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from engine.core.clock import Clock
-from engine.core.config import config_dir, load_settings
+from engine.core.config import Settings, config_dir, load_settings
 from engine.core.db import connect
 from engine.core.enums import Actor
 from engine.core.migrations import apply_migrations
 from engine.core.protected_store import ProtectedStore
 from engine.core.secrets import KITE_API_KEY, REQUIRED_AT_STARTUP, MissingSecretError
 from engine.core.types import OwnerConfirmation
+from engine.marketdata.store import MarketStore
 from engine.ops import main as opsmain
 from tests.chaos._lifecycle_rig import MovableTime
 from tests.conftest import FIXED_NOW
@@ -84,17 +89,27 @@ async def composed_engine(
     kite: bool = False,
     paper: bool | None = None,
     registered: bool = True,
+    secrets: Mapping[str, str] | None = None,
+    configure: Callable[[Settings], None] | None = None,
+    state_db: Callable[[sqlite3.Connection], None] | None = None,
+    market: Callable[[MarketStore], None] | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
 ) -> AsyncIterator[Composed]:
     """Compose the engine over ``tmp_path/"data"`` and release everything ``compose`` opened on exit.
 
     ``db_template``: the session ``migrated_db_template`` fixture — copied in as the state DB so
     ``apply_migrations`` has nothing to do (``None`` migrates from scratch). ``kite``: seed a fake
     ``KITE_API_KEY`` so the broker plane (KiteClient, backfill, reconcile, holdings reconcile, the
-    08:40 token check) is built; no access token, so nothing is ever authenticated. ``paper``:
+    08:40 token check) is built; no access token unless ``secrets`` adds one. ``paper``:
     override ``paper.subsystem_enabled`` (``None`` keeps the shipped value). ``registered``: sign
     ``limits.yaml``/``envelope.yaml`` in the tmp state DB as the owner's seeding does, so the limit
     table verifies (``False``: the unregistered store a fresh install boots FROZEN on — and the paper
     stack, which prices off the verified table, then degrades to ``None``).
+
+    What the engine finds when it boots: ``secrets`` (more credential-store entries), ``configure``
+    (edits the loaded settings), ``state_db`` (writes the migrated state DB) and ``market`` (writes
+    the market store) all run before ``compose``. ``transport`` replaces the network under the
+    engine's shared HTTP client.
     """
     data_dir = tmp_path / "data"
     monkeypatch.setenv("MT_DATA_DIR", str(data_dir))
@@ -107,19 +122,30 @@ async def composed_engine(
         assert data_dir in p.parents, f"composed path escaped tmp: {p}"
     if paper is not None:
         settings.paper.subsystem_enabled = paper
+    if configure is not None:
+        configure(settings)
     settings.sqlite_path().parent.mkdir(parents=True, exist_ok=True)
     if db_template is not None:
         shutil.copyfile(db_template, settings.sqlite_path())
     time = MovableTime(now)
-    if registered:
+    if registered or state_db is not None:
         conn = connect(settings.sqlite_path())
         try:
             apply_migrations(conn)
-            protected = ProtectedStore(cfg, conn, Clock(time_source=time))
-            for name in ("limits.yaml", "envelope.yaml"):
-                protected.register_initial(name, OwnerConfirmation(actor=Actor.OWNER, confirmed=True))
+            if registered:
+                protected = ProtectedStore(cfg, conn, Clock(time_source=time))
+                for name in ("limits.yaml", "envelope.yaml"):
+                    protected.register_initial(name, OwnerConfirmation(actor=Actor.OWNER, confirmed=True))
+            if state_db is not None:
+                state_db(conn)
         finally:
             conn.close()
+    if market is not None:
+        store = MarketStore.from_settings(settings, Clock(time_source=time)).open()
+        try:
+            market(store)
+        finally:
+            store.close()
 
     resolved: list[str] = []
     real_getaddrinfo = socket.getaddrinfo
@@ -133,13 +159,19 @@ async def composed_engine(
 
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
 
-    secrets = FakeSecrets({KITE_API_KEY: "test-api-key"} if kite else None)
+    fake_secrets = FakeSecrets({**({KITE_API_KEY: "test-api-key"} if kite else {}), **(secrets or {})})
     boot_state: dict[str, Any] = {"engine_ready": False, "scheduler": None, "alert": None}
     stop_event = asyncio.Event()
-    engine = await opsmain.compose(
-        settings, secrets=secrets, clock=Clock(time_source=time), stop_event=stop_event,
-        boot_state=boot_state,
-    )
+    real_client = httpx.AsyncClient
+    if transport is not None:
+        httpx.AsyncClient = functools.partial(real_client, transport=transport)
+    try:
+        engine = await opsmain.compose(
+            settings, secrets=fake_secrets, clock=Clock(time_source=time), stop_event=stop_event,
+            boot_state=boot_state,
+        )
+    finally:
+        httpx.AsyncClient = real_client
     async with AsyncExitStack() as stack:
         stack.callback(engine.conn.close)
         stack.callback(engine.store.close)
@@ -148,7 +180,7 @@ async def composed_engine(
         stack.push_async_callback(_cancel, engine.freeze_lift_tasks)
         if engine.paper is not None:
             stack.push_async_callback(engine.paper.stop)
-        yield Composed(engine, time, secrets, boot_state, stop_event, resolved)
+        yield Composed(engine, time, fake_secrets, boot_state, stop_event, resolved)
         assert resolved == [], f"the composed engine tried to reach the network: {resolved}"
 
 

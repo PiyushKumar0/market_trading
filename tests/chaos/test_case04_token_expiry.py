@@ -10,10 +10,10 @@ breaker), the real ``KiteClient`` built with ``on_token_rejected=session.on_toke
 ``make_order_guard`` (predicate (a), §3.5.3; ``orders_enabled=True``, which production never passes,
 D8), the §3.5.3 cause ledger, and the composition root's two hooks — ``_on_session_invalidated``
 (freeze + critical alert + LOGIN_PROMPT with the login URL) and ``_clear_token_freeze`` (login hook).
-Those two hooks are closures inside ``engine.ops.main.run``; they are replicated here line-for-line
-and PINNED to the source by ``test_replicated_wiring_matches_the_composition_root`` so the replica
-cannot drift silently. Faked: only pykiteconnect's ``KiteConnect`` (the Kite HTTP edge) and the
-Telegram sink.
+Those two hooks are closures inside ``engine.ops.main.compose``; they are replicated here, and
+``test_the_composed_engine_token_hooks_freeze_prompt_and_clear`` drives the composed engine's own
+copies through the same token death and re-login, so the replica cannot drift silently. Faked: only
+pykiteconnect's ``KiteConnect`` (the Kite HTTP edge) and the Telegram sink.
 
 Clauses:
 * "FROZEN" + "owner alerted with re-login link (R6)" —
@@ -31,7 +31,6 @@ Clauses:
 from __future__ import annotations
 
 import asyncio
-import inspect
 from datetime import time
 from types import SimpleNamespace
 
@@ -52,8 +51,10 @@ from engine.ops import main as opsmain
 from engine.risk.causes import RiskStateLatch
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
+from tests._composition import composed_engine
 from tests.chaos._entry_gate_rig import build_entry_gate, entry_checks
 from tests.chaos.conftest import REAL_SIDE_ONLY
+from tests.unit.test_ops_main_wiring import _FakeTelegram, _spy
 from tests.unit.test_session_verify_token import _FakeSecrets
 
 LOGIN_URL = "https://kite.zerodha.com/connect/login?api_key=ak&v=3"
@@ -254,19 +255,53 @@ async def test_protection_already_resting():
     raise AssertionError("unreachable — skipped")
 
 
-# ----------------------------------------------------------------------------------- wiring pin
-def test_replicated_wiring_matches_the_composition_root():
-    """The hooks above are copies of closures inside engine.ops.main.run — pin the lines that carry
-    the behaviour, so a change there fails HERE instead of leaving a stale replica."""
-    src = inspect.getsource(opsmain.compose)
-    for line in (
-        "await latch.set_cause(reason, RiskState.FROZEN, reason, Actor.RISK_GATE)",
-        'await freeze_entries("kite_token_rejected")',
-        "await notify(login_prompt(session.login_url()))",
-        "session.set_invalidation_hook(_on_session_invalidated)",
-        'await latch.clear_cause("kite_token_rejected", Actor.RISK_GATE)',
-        "session.add_login_hook(_clear_token_freeze)",
-        "on_token_rejected=session.on_token_rejected,",
-        "order_guard=make_order_guard(mode, kill, calendar, clock))",
-    ):
-        assert line in src, f"engine.ops.main.run no longer contains: {line}"
+# ------------------------------------------------------------------ the composition root itself
+async def test_the_composed_engine_token_hooks_freeze_prompt_and_clear(tmp_path, monkeypatch, migrated_db_template):
+    """The hooks the rig above replicates, as the composed engine really wires them: its KiteClient
+    fires the session's breaker on a TokenException and gates openings with ``make_order_guard`` over
+    the engine's own mode / kill switch / calendar / clock; the breaker freezes entries through the
+    ``kite_token_rejected`` cause, pages the owner critical and sends the login link; a re-login
+    clears that cause through the login hook."""
+    kc = _FakeKiteConnect()
+    monkeypatch.setattr("engine.broker.session.KiteConnect", lambda api_key: kc)
+    telegram = _FakeTelegram()
+    monkeypatch.setattr(opsmain, "_build_telegram", lambda *_a, **_k: telegram)
+    built: dict[str, list] = {}
+    _spy(monkeypatch, "KiteClient", built)
+    _spy(monkeypatch, "make_order_guard", built)
+
+    async def recovered(self) -> None:          # the post-login recovery / hydration touch the broker
+        return None
+
+    monkeypatch.setattr(opsmain.PostLoginRecovery, "run", recovered)
+    monkeypatch.setattr(opsmain.EarlyHydration, "on_login", recovered)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, kite=True,
+                               secrets={KITE_ACCESS_TOKEN: "tok-day1", KITE_API_SECRET: "as"}) as c:
+        e = c.engine
+
+        def causes() -> list[str]:
+            return [r["cause"] for r in e.conn.execute(
+                "SELECT cause FROM risk_state_causes WHERE cleared_at IS NULL")]
+
+        ((_, kite_kw, kite),) = built["KiteClient"]
+        ((guard_args, _, guard),) = built["make_order_guard"]
+        assert kite is e.kite and kite_kw["on_token_rejected"] == e.session.on_token_rejected
+        assert kite_kw["order_guard"] is guard
+        mode, kill, calendar, clock = guard_args
+        assert (mode, calendar, clock) == (e.mode, e.calendar, e.clock) and isinstance(kill, KillSwitch)
+        with pytest.raises(OrderSurfaceViolation):
+            guard("entry")                                        # OFF: openings refused
+        assert guard("risk_reducing") is None                     # R3: never gated
+
+        await _token_dies_mid_session(SimpleNamespace(kc=kc, kite=e.kite))
+        assert e.session.token_valid() is False
+        assert e.mode.risk_state() == RiskState.FROZEN and causes() == [CAUSE]
+        alerts = [m for m in telegram.sent if m.kind is MessageKind.LIMIT_BREACH]
+        assert [m.severity for m in alerts] == ["critical"] and "re-login" in alerts[0].body
+        prompts = [m for m in telegram.sent if m.kind is MessageKind.LOGIN_PROMPT]
+        assert len(prompts) == 1 and prompts[0].data["login_url"] == LOGIN_URL
+
+        await e.session.complete_login("req-token-from-redirect")
+        await asyncio.wait_for(asyncio.gather(*list(e.session._login_tasks)), timeout=5)
+        assert e.session.token_valid() is True
+        assert e.mode.risk_state() == RiskState.NORMAL and causes() == []
