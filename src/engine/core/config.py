@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # --------------------------------------------------------------------------- paths
+@lru_cache(maxsize=1)
 def repo_root() -> Path:
     """Locate the repository root by walking up to the dir containing ``pyproject.toml``."""
     here = Path(__file__).resolve()

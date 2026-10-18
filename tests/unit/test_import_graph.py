@@ -36,8 +36,6 @@ import pytest
 
 from engine.core.config import repo_root
 
-#: ``repo_root()`` resolves the path and walks its parents on every call (~17 ms on the dev box), and
-#: the transitive closure below asks thousands of times, so the root is read once.
 _SRC = repo_root() / "src"
 
 #: package under ``src/engine`` -> the import prefixes it may never contain.
