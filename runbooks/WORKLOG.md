@@ -1,5 +1,13 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-18 23:42 — `wip/test-audit` merged into phase3 (owner: "merge changes to phase3")
+
+- Fast-forward 3e6b811 → f9b9c0c (no merge commit; nothing pushed). The live tree imports the merged engine
+  (`engine.ops.main.compose` present, import guard armed).
+- mt-engine was left Running on the OLD code: the boot-path changes (compose / _boot / _shutdown, lazy sklearn guard,
+  stop_path) take effect at the next restart — do it outside 09:15-15:30 and check `engine_ready` and the self-test's
+  `native_preload` PASS.
+
 ## 2026-10-18 23:15 — Test audit: owner decisions applied on `wip/test-audit`, not merged (owner: "Proceed with D1, D2, D4, D5. Review and validate. … For D3, implement the change, and also keep such test cases separate from other rerunnable ones …")
 
 - **Branch `wip/test-audit`** (worktree `..\mt_testaudit`, phase3 still 3e6b811): 23 commits on top of the
