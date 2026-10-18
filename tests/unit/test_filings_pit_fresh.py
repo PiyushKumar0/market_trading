@@ -268,7 +268,7 @@ async def test_windowed_cap_triggers_per_day_subdivision(seeded_store, clock, se
 
 
 # =========================================================================== E5 degrade
-async def test_both_surfaces_fail_degrades_and_warns(seeded_store, clock, settings):
+async def test_both_surfaces_fail_degrades_and_warns(seeded_store, clock, settings, instant_backoff):
     msgs, sink = collect_alerts()
     result = await FilingsPitFreshJob(
         seeded_store, clock, failing_client(), settings=settings, notify=sink

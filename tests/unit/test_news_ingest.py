@@ -480,7 +480,7 @@ async def test_nse_ann_disabled_makes_no_request(store, clock):
     assert record == []
 
 
-async def test_nse_ann_dead_endpoint_degrades_to_zero_headlines(store, clock):
+async def test_nse_ann_dead_endpoint_degrades_to_zero_headlines(store, clock, instant_backoff):
     """E5: the announcements endpoint failing contributes nothing and never raises."""
     ingest, client = _ann_ingest(store, clock, response=httpx.Response(500))
     async with client:

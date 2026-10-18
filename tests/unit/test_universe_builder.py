@@ -103,17 +103,19 @@ def collect_alerts():
     return msgs, sink
 
 
-def seed_daily_bars(store: MarketStore, symbol: str, *, close: str, volume: int, days: int = 20) -> None:
+def daily_bars(symbol: str, *, close: str, volume: int, days: int = 20) -> list[DailyBar]:
     price = Decimal(close)
-    store.upsert_bars_1d(
-        [
-            DailyBar(
-                symbol=symbol, d=D - timedelta(days=i), open=price, high=price, low=price,
-                close=price, volume=volume,
-            )
-            for i in range(1, days + 1)
-        ]
-    )
+    return [
+        DailyBar(
+            symbol=symbol, d=D - timedelta(days=i), open=price, high=price, low=price,
+            close=price, volume=volume,
+        )
+        for i in range(1, days + 1)
+    ]
+
+
+def seed_daily_bars(store: MarketStore, symbol: str, *, close: str, volume: int, days: int = 20) -> None:
+    store.upsert_bars_1d(daily_bars(symbol, close=close, volume=volume, days=days))
 
 
 @pytest.fixture
@@ -585,9 +587,12 @@ async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, st
         tmp_path, universe_max_watchlist=200, batch_universe_enabled=True, batch_universe_max=600,
     )
     # Strictly descending traded value: SYM000 is the most liquid, SYM499 the least (still ≥ ₹5cr).
-    for i, sym in enumerate(_WIDE_SYMBOLS):
-        seed_daily_bars(store, sym, close="100.00", volume=1_000_000 - i * 1_000, days=3)
-    seed_daily_bars(store, "EXTONE", close="100.00", volume=1_000_000, days=3)
+    # One write for all 501 symbols: a store upsert per symbol cost seconds.
+    store.upsert_bars_1d([
+        *(bar for i, sym in enumerate(_WIDE_SYMBOLS)
+          for bar in daily_bars(sym, close="100.00", volume=1_000_000 - i * 1_000, days=3)),
+        *daily_bars("EXTONE", close="100.00", volume=1_000_000, days=3),
+    ])
 
     leverages = {s: 5.0 for s in _WIDE_SYMBOLS}
     leverages["EXTONE"] = 5.0

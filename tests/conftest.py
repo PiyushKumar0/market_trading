@@ -108,3 +108,25 @@ def conn(db_path, migrated_db_template):
 @pytest.fixture
 def bus() -> EventBus:
     return EventBus()
+
+
+_BACKOFF_SEAMS = (
+    "engine.core.nse_http._sleep",
+    "engine.core.bse_http._sleep",
+    "engine.datafeeds.filings_pit._sleep",
+    "engine.datafeeds.filings_results._sleep",
+    "engine.datafeeds.filings_shp._sleep",
+)
+
+
+@pytest.fixture
+def instant_backoff(monkeypatch) -> None:
+    """Retry backoff and request pacing complete instantly. Each module awaits a module-level
+    ``_sleep`` seam built for this, so a failing fake endpoint costs no real 1 s/2 s/4 s waits.
+    Opt-in: test_nse_http.py observes the backoff schedule through its own recorder."""
+
+    async def _instant(_delay: float) -> None:
+        return None
+
+    for seam in _BACKOFF_SEAMS:
+        monkeypatch.setattr(seam, _instant)

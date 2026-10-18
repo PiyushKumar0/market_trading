@@ -29,11 +29,16 @@ runtime closure of ``engine.oms`` + ``engine.paper`` never reaches ``engine.brok
 from __future__ import annotations
 
 import ast
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from engine.core.config import repo_root
+
+#: ``repo_root()`` resolves the path and walks its parents on every call (~17 ms on the dev box), and
+#: the transitive closure below asks thousands of times, so the root is read once.
+_SRC = repo_root() / "src"
 
 #: package under ``src/engine`` -> the import prefixes it may never contain.
 GUARDED_PACKAGES: dict[str, tuple[str, ...]] = {
@@ -46,14 +51,14 @@ OMS_ALLOWED: tuple[str, ...] = ("engine.core", "engine.oms", "engine.paper")
 
 
 def _py_files(pkg: str) -> list[Path]:
-    base = repo_root() / "src" / "engine" / pkg
+    base = _SRC / "engine" / pkg
     return list(base.rglob("*.py"))
 
 
 def _module_package(path: Path) -> str:
     """Dotted package of the module at ``path`` (e.g. src/engine/risk/kill.py -> 'engine.risk';
     src/engine/risk/__init__.py -> 'engine.risk'). Used to resolve relative imports absolutely."""
-    rel = path.relative_to(repo_root() / "src").with_suffix("")
+    rel = path.relative_to(_SRC).with_suffix("")
     parts = list(rel.parts)
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]          # a package's own __init__ resolves to the package itself
@@ -153,7 +158,7 @@ def test_every_paper_module_is_covered_by_the_per_module_allowlist() -> None:
 def test_paper_module_imports_only_its_declared_engine_dependencies(
     module: str, allowed: tuple[str, ...]
 ) -> None:
-    path = repo_root() / "src" / "engine" / "paper" / f"{module}.py"
+    path = _SRC / "engine" / "paper" / f"{module}.py"
     offenders = [
         imported
         for imported in _imports(path)
@@ -171,7 +176,7 @@ def test_no_paper_module_may_reach_the_llm_tier_or_the_live_broker(module: str) 
     # Restated per module rather than left to the package guard: the allowlist above is a positive
     # list, and a positive list is one careless edit away from admitting the two prefixes that
     # actually matter (R1's LLM ban and §3.2.9's pykiteconnect ban).
-    path = repo_root() / "src" / "engine" / "paper" / f"{module}.py"
+    path = _SRC / "engine" / "paper" / f"{module}.py"
     banned = [
         imported
         for imported in _imports(path)
@@ -192,8 +197,9 @@ def test_oms_imports_only_core_oms_and_paper() -> None:
     assert not offenders, f"engine.oms may import only {list(OMS_ALLOWED)}: " + "; ".join(offenders)
 
 
+@cache
 def _module_file(module: str) -> Path | None:
-    base = repo_root() / "src" / Path(*module.split("."))
+    base = _SRC / Path(*module.split("."))
     for candidate in (base / "__init__.py", base.with_suffix(".py")):
         if candidate.is_file():
             return candidate
@@ -201,7 +207,7 @@ def _module_file(module: str) -> Path | None:
 
 
 def _module_name(path: Path) -> str:
-    parts = path.relative_to(repo_root() / "src").with_suffix("").parts
+    parts = path.relative_to(_SRC).with_suffix("").parts
     return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
 
 
@@ -211,7 +217,8 @@ def _is_type_checking(test: ast.expr) -> bool:
     )
 
 
-def _runtime_engine_imports(module: str) -> set[str]:
+@cache
+def _runtime_engine_imports(module: str) -> frozenset[str]:
     """Engine modules ``module`` can execute: every import statement (function-level included) except
     ``if TYPE_CHECKING:`` bodies, plus each parent package ``__init__`` the import runs."""
     path = _module_file(module)
@@ -227,7 +234,7 @@ def _runtime_engine_imports(module: str) -> set[str]:
             base = node.module if node.level == 0 else _resolve_relative(pkg, node.level, node.module)
             names.update(f"{base}.{alias.name}" for alias in node.names)
     prefixes = {".".join(n.split(".")[:i]) for n in names if _is_under(n, "engine") for i in range(1, n.count(".") + 2)}
-    return {p for p in prefixes if _module_file(p) is not None}
+    return frozenset(p for p in prefixes if _module_file(p) is not None)
 
 
 def _runtime_closure(roots: set[str]) -> set[str]:
