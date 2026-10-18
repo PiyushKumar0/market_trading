@@ -27,7 +27,7 @@ row *t*'s return with it, and evaluates row *t*'s high/low against a stop that d
 Shifting the signals keeps the trade, its return and its stop all in the session the fill happened.)
 Previously ``price`` was left ``None`` ⇒ ``np.inf`` ⇒ the SAME row's close (verified in the installed
 ``vectorbt/portfolio/nb.py``: "upper bound is close"), i.e. a fill at the very close that generated
-the signal. Consequences pinned by ``tests/unit/test_sweep_smoke.py``:
+the signal. Consequences pinned by ``tests/offline/test_sweep_smoke.py``:
 
 * signals on the LAST row of the frame are dropped — there is no bar left to fill them in;
 * for ``orb`` (intraday) the shift is **session-aware**: a signal on a session's last bar is dropped,
@@ -1102,7 +1102,7 @@ def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
     # fill-row space that is ``momentum.shift(1)`` — the same "through d−1" window the live
     # MomentumScanner ranks on (ScanContext loads daily bars through d−1). Do NOT additionally shift
     # ``mom`` here: that would rank through t−1 and trade at t+1's open, a session staler than live.
-    # Pinned by tests/unit/test_sweep_signals.py::test_mom_ranking_window_excludes_the_traded_session.
+    # Pinned by tests/offline/test_sweep_signals.py::test_mom_ranking_window_excludes_the_traded_session.
     mom = close / close.shift(_MOM_LOOKBACK) - 1.0
     first_valid = mom.dropna(how="all")
     if first_valid.empty:

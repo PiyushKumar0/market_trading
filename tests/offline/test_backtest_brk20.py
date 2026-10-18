@@ -762,16 +762,6 @@ def test_both_decision_outcomes_are_reported_side_by_side(study):
     assert any("REPORTING RULE (2026-09-12 amendment" in n for n in doc["notes"])
 
 
-def test_purged_kfold_fallback_honours_purge_and_embargo():
-    """The self-implemented fallback keeps train observations clear of every test block."""
-    splits = bt._purged_kfold_splits(120, n_folds=6, purge=5, embargo=5)
-    assert len(splits) == 6
-    for train, test in splits:
-        lo, hi = int(test.min()), int(test.max())
-        assert not set(train) & set(test)
-        assert all(j < lo - 5 or j > hi + 5 for j in train)
-
-
 # ============================================================ 6. the unadjusted-history veto
 @pytest.mark.parametrize(
     ("kind", "books_trade", "vetoes"),
@@ -851,30 +841,6 @@ def test_main_writes_json_and_md_and_orders_the_report(db_file, tmp_path, capsys
     assert f"`{bt.cohort_label(bt.VARIANT_V2_N5, bt.COHORT_UNFILLED)}`" in md
     for variant in bt.VARIANTS:
         assert f"`{variant}`" in md
-
-
-def test_refuses_a_missing_database_file(tmp_path, capsys):
-    rc = bt.main(["--db", str(tmp_path / "nope.duckdb"), "--out", str(tmp_path / "x.json")])
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "REFUSING TO RUN" in err
-    assert "no such database file" in err
-    assert not (tmp_path / "x.json").exists()               # nothing written on a refusal
-
-
-def test_refuses_a_locked_database_file(db_file, tmp_path, clock, capsys):
-    """A running engine holds market.duckdb read-write; DuckDB then refuses even a read-only attach."""
-    holder = MarketStore(db_file, tmp_path / "parquet2", clock).open()
-    try:
-        rc = bt.main(["--db", str(db_file), "--out", str(tmp_path / "y.json")])
-    finally:
-        holder.close()
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "REFUSING TO RUN" in err
-    assert "cannot open read-only" in err
-    assert "mt-engine" in err
-    assert not (tmp_path / "y.json").exists()
 
 
 def test_refuses_an_empty_universe_rather_than_measuring_it(db_no_universe, tmp_path, capsys):

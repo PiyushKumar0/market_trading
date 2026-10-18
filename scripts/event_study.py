@@ -80,7 +80,7 @@ from engine.core.log import configure_logging, get_logger  # noqa: E402
 #     engine.datafeeds.filings_events used to carry, flagged in its own docstring). The dependency is
 #     inverted, not copied — this module still exports the same names at module scope, so
 #     `es.insider_buy_events(...)` and friends resolve exactly as before for
-#     scripts/filings_experiments.py and tests/unit/test_event_study_filings.py, and the study and the
+#     scripts/filings_experiments.py and tests/offline/test_event_study_filings.py, and the study and the
 #     live `ins_crossings` job run the SAME bytes. Editing the rule means editing
 #     engine/datafeeds/insider_crossings.py and re-running this study (§2.8.4 / WO-3 margin floor).
 from engine.datafeeds.insider_crossings import (  # noqa: E402

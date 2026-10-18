@@ -68,7 +68,9 @@ packages = ["src/engine"]
 package = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# tests/offline (research, backtest and one-off scripts, and the modules only they use) is left out
+# on purpose: it runs on demand with `pytest tests/offline`.
+testpaths = ["tests/unit", "tests/chaos", "tests/replay", "tests/property"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [

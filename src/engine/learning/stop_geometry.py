@@ -55,7 +55,7 @@ DESIGN REQUIREMENTS (manager-specified, beyond the WO text)
 5. **Report.** JSON + MD to ``data/reports/stop_geometry_<ts>.{json,md}``: the 10-config table, both
    diagnostics, the null hypothesis verbatim, a plain-language answer to the owner's question, the
    :data:`BANNER`, and a ``modelling_notes`` block reprinting every interpretation.
-6. **Unit-tested on synthetic 1m fixtures only** (``tests/unit/test_stop_geometry.py``); nothing here
+6. **Unit-tested on synthetic 1m fixtures only** (``tests/offline/test_stop_geometry.py``); nothing here
    opens the store.
 
 INTERPRETATIONS — where the WO text was under-determined

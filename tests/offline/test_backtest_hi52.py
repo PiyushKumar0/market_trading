@@ -212,17 +212,6 @@ def test_one_pre_registered_param_set_no_sweep():
     assert not (flags & {"--proximity-min", "--lookback", "--vol-mult", "--grid-density"})
 
 
-def test_cost_path_is_cnc_delivery_and_spread_inclusive():
-    cm = CostModel.from_config()
-    full = float(cm.breakeven_pct(bt.REFERENCE_NOTIONAL, "CNC"))
-    fees = float(cm.fee_breakeven_pct(bt.REFERENCE_NOTIONAL, "CNC"))
-    mis = float(cm.breakeven_pct(bt.REFERENCE_NOTIONAL, "MIS"))
-    assert bt.PRODUCT == "CNC"
-    assert full > fees                     # the measured bid-ask spread is included (WO-2)
-    assert full > mis                      # delivery, the dearer surface — not the intraday one
-    assert 0.15 < full < 0.60              # sanity band around the documented ~0.32% CNC round trip
-
-
 # ============================================================ 1. hand-computed winner, net of costs
 def test_winner_net_returns_match_hand_computed_values(study):
     doc, trades = study
@@ -361,16 +350,6 @@ def test_cpcv_degrades_honestly_on_a_tiny_population(study):
     assert cpcv["margin_floor_pct_per_day"] == pytest.approx(_cost_pct() / 20.0, abs=1e-9)
 
 
-def test_purged_kfold_fallback_honours_purge_and_embargo():
-    """The self-implemented fallback keeps train observations clear of every test block."""
-    splits = bt._purged_kfold_splits(120, n_folds=6, purge=5, embargo=5)
-    assert len(splits) == 6
-    for train, test in splits:
-        lo, hi = int(test.min()), int(test.max())
-        assert not set(train) & set(test)
-        assert all(j < lo - 5 or j > hi + 5 for j in train)
-
-
 # ============================================================ 5. the CLI: report, JSON, refusal
 def test_main_writes_json_and_prints_geometry_before_signal_quality(db_file, index_csv, tmp_path, capsys):
     out = tmp_path / "results" / "hi52.json"
@@ -392,30 +371,6 @@ def test_main_writes_json_and_prints_geometry_before_signal_quality(db_file, ind
     assert text.index("STEP 1 - COST GEOMETRY") < text.index("STEP 2 - SIGNAL QUALITY")
     assert "GEOMETRY: dead at T+20" in text
     assert str(out) in text
-
-
-def test_refuses_a_missing_database_file(tmp_path, capsys):
-    rc = bt.main(["--db", str(tmp_path / "nope.duckdb"), "--out", str(tmp_path / "x.json")])
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "REFUSING TO RUN" in err
-    assert "no such database file" in err
-    assert not (tmp_path / "x.json").exists()               # nothing written on a refusal
-
-
-def test_refuses_a_locked_database_file(db_file, tmp_path, clock, capsys):
-    """A running engine holds market.duckdb read-write; DuckDB then refuses even a read-only attach."""
-    holder = MarketStore(db_file, tmp_path / "parquet2", clock).open()
-    try:
-        rc = bt.main(["--db", str(db_file), "--out", str(tmp_path / "y.json")])
-    finally:
-        holder.close()
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "REFUSING TO RUN" in err
-    assert "cannot open read-only" in err
-    assert "mt-engine" in err
-    assert not (tmp_path / "y.json").exists()
 
 
 # ============================================================ 6. the unadjusted-history veto

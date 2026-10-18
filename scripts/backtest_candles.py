@@ -93,8 +93,7 @@ COSTS
 ``CostModel.breakeven_pct(notional, "MIS")`` - ONE full round trip, statutory fees PLUS the measured
 bid-ask spread (WO-2), at :data:`PARAMS`\\ ``["reference_notional_inr"]`` - plus ONE TICK of slippage
 on EACH side, charged as ``2 * tick / entry_px * 100`` percent, so the slippage term is larger for a
-cheap stock exactly as it is in life. MIS, never CNC. This is byte-for-byte the ``tdc`` treatment;
-``tests/unit/test_backtest_candles.py`` asserts the two functions agree numerically.
+cheap stock exactly as it is in life. MIS, never CNC. This is byte-for-byte the ``tdc`` treatment.
 
 ===============================================================================================
 INDEX PROXY (as tdc; recorded as a deviation from "NIFTY 50 1m")
@@ -119,8 +118,7 @@ rule or exit was added, no trade was added or removed, and no cell is selected.
 * **The cut.** Terciles of the full measured population, taken ONCE over the DISTINCT measured
   ``(symbol, signal day)`` pairs, so a symbol-day sits in the same cell in every rule x exit cell
   and the cells compare populations rather than cuts (``scripts/backtest_brk20.py``'s margin-tercile
-  posture, verbatim in force). ``tests/unit/test_backtest_candles.py`` asserts this harness's ATR
-  computation and tdc's agree numerically, exactly as it does for :func:`trade_cost_pct`.
+  posture, verbatim in force).
 * **DESCRIPTIVE, NOT TRADEABLE.** The cuts are full-sample statistics of the measured population and
   were unknowable at signal time - exactly the caveat ``hi52`` carries for its smooth/jumpy cut. A
   symbol-day with fewer than 14 prior daily sessions is labelled ``atr_pct_unclassified`` and kept,
@@ -158,6 +156,9 @@ from typing import Any
 _REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if _REPO_SRC not in sys.path:  # pragma: no cover - loose-script shim
     sys.path.insert(0, _REPO_SRC)
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:  # pragma: no cover - loose-script shim
+    sys.path.append(_SCRIPTS_DIR)
 
 import engine  # noqa: E402,F401,I001  native import-order guard: sklearn's OpenMP runtime MUST be
 #                                      established before skfolio/cvxpy loads (engine._preload). The
@@ -166,6 +167,7 @@ import engine  # noqa: E402,F401,I001  native import-order guard: sklearn's Open
 import duckdb  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from backtest_common import DbUnopenable, _purged_kfold_splits, open_readonly  # noqa: E402
 from engine.core.calendar import NSECalendar  # noqa: E402
 from engine.core.clock import IST, Clock  # noqa: E402
 from engine.core.config import config_dir, repo_root  # noqa: E402
@@ -404,37 +406,6 @@ class Trade:
     #: the sessions before the signal day, and the tercile cell it falls in (None = unclassified).
     atr_pct: float | None = None
     atr_cell: str | None = None
-
-
-# =============================================================================== read-only DB access
-class DbUnopenable(RuntimeError):
-    """The DuckDB file is missing, locked by the engine, or otherwise not readable."""
-
-
-def open_readonly(db_path: Path) -> duckdb.DuckDBPyConnection:
-    """Attach ``db_path`` READ-ONLY, or raise :class:`DbUnopenable` with an actionable message.
-
-    Same posture as ``scripts/backtest_tdc.py``: ``MarketStore.open()`` runs schema DDL and is a
-    writer, so it is never used here.
-    """
-    p = Path(db_path)
-    if not p.exists():
-        raise DbUnopenable(
-            f"no such database file: {p}\n"
-            "  Pass --db with the path to market.duckdb (default: <repo>/data/market.duckdb)."
-        )
-    if p.is_dir():
-        raise DbUnopenable(f"--db points at a directory, not a DuckDB file: {p}")
-    try:
-        return duckdb.connect(str(p), read_only=True)
-    except Exception as exc:  # noqa: BLE001 - every failure mode becomes one clear refusal
-        raise DbUnopenable(
-            f"cannot open read-only: {p}\n"
-            f"  reason: {type(exc).__name__}: {exc}\n"
-            "  DuckDB is single-writer and takes a file lock: if the mt-engine service is running it\n"
-            "  owns market.duckdb and nothing else can attach, even read-only. Stop the engine (or\n"
-            "  run this when it is stopped) and retry. This script NEVER opens the store read-write."
-        ) from exc
 
 
 # =============================================================================== time helpers
@@ -1023,9 +994,9 @@ def simulate_e2(
 def trade_cost_pct(cost_model: CostModel, params: dict[str, Any], entry_px: float) -> float:
     """One MIS round trip at the reference notional PLUS one tick of slippage on EACH side.
 
-    Byte-for-byte the ``scripts/backtest_tdc.py`` treatment (the test asserts the two agree). The
-    slippage term is price-relative on purpose: one tick is a bigger percentage of a Rs 90 stock than
-    of a Rs 4,000 one, and the study should feel that.
+    Byte-for-byte the ``scripts/backtest_tdc.py`` treatment. The slippage term is price-relative on
+    purpose: one tick is a bigger percentage of a Rs 90 stock than of a Rs 4,000 one, and the study
+    should feel that.
     """
     rt = float(cost_model.breakeven_pct(Decimal(params["reference_notional_inr"]), params["product"]))
     tick = float(Decimal(params["tick_size_inr"]))
@@ -1249,26 +1220,6 @@ def stamp_atr_terciles(
 
 
 # =============================================================================== metrics
-def _purged_kfold_splits(
-    n_obs: int, *, n_folds: int = 6, purge: int = 5, embargo: int = 5
-) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Fallback when skfolio is unavailable: contiguous K-fold test blocks with the same
-    purge/embargo guarantee ``cpcv_splits`` enforces (mirrors tdc and hi52)."""
-    if n_obs < n_folds * 2:
-        return []
-    out: list[tuple[np.ndarray, np.ndarray]] = []
-    for test in np.array_split(np.arange(n_obs), n_folds):
-        if test.size == 0:
-            continue
-        lo, hi = int(test.min()), int(test.max())
-        all_idx = np.arange(n_obs)
-        train = all_idx[(all_idx < lo - purge) | (all_idx > hi + embargo)]
-        if train.size == 0:
-            continue
-        out.append((train, test))
-    return out
-
-
 def daily_net_series(trades: Sequence[Trade]) -> tuple[list[date], np.ndarray]:
     """Per-SESSION mean net %. The CPCV observation unit is the session, not the trade: the day's
     picks share one regime and are not independent draws."""

@@ -82,7 +82,7 @@ DESIGN REQUIREMENTS (manager-specified, beyond the WO text — each stated here 
    carrying the stage-1 base rate, per-grid-point trade count / expectancy / win rate, the CPCV fold
    results + margin-floor verdict + ``promotable``, a ``modelling_notes`` block stating every
    pre-registered choice and every interpretation made, and the :data:`BANNER` at the top.
-6. **Unit-tested on synthetic 1m fixtures only** (``tests/unit/test_vwap_reversion.py``) — the trigger
+6. **Unit-tested on synthetic 1m fixtures only** (``tests/offline/test_vwap_reversion.py``) — the trigger
    threshold, the next-bar-open fill (pinned so a same-bar fill produces a detectably different
    number), each of the three exits, the entry-window boundary, the session-last-bar drop, and the
    abort path.
@@ -598,7 +598,7 @@ def simulate_session(
 ) -> list[Trade]:
     """Simulate ``config`` over ONE symbol-session. Pure and deterministic (§9.6).
 
-    Mechanics (design requirement 2, pinned by ``tests/unit/test_vwap_reversion.py``):
+    Mechanics (design requirement 2, pinned by ``tests/offline/test_vwap_reversion.py``):
 
     * signal on bar ``t`` (its CLOSE is at least ``stretch_min_pct`` below the session VWAP, and — when
       the filter is active — its relative volume is under ``rel_vol_max``);

@@ -1,7 +1,7 @@
 """scripts/backfill_bhavcopy.py: archive URL selection/fallback/holiday, checkpoint resume, and
 failure isolation (worklog 2026-09-01 follow-up — full-market bars_1d history for backtest_hi52.py).
 
-Loose-script import mechanism copied from tests/unit/test_backtest_cli.py (spec_from_file_location).
+Loose-script import mechanism copied from tests/offline/test_backtest_cli.py (spec_from_file_location).
 """
 
 from __future__ import annotations

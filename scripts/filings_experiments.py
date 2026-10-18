@@ -68,7 +68,7 @@ from engine.learning.sweep import (  # noqa: E402
 from engine.marketdata.store import MarketStore  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 
-# Load the event_study.py loose script by path (same pattern as tests/unit/test_event_study_filings.py)
+# Load the event_study.py loose script by path (same pattern as tests/offline/test_event_study_filings.py)
 # and reuse its PURE point-in-time / cluster / drift / cost functions -- import, never duplicate.
 _ES_PATH = Path(__file__).resolve().parent / "event_study.py"
 _spec = importlib.util.spec_from_file_location("mt_event_study", _ES_PATH)

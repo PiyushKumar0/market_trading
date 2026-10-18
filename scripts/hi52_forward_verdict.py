@@ -210,7 +210,7 @@ def registered_edge_pct(limits_path: Path | None = None) -> Decimal:
     The arithmetic lives in :func:`engine.strategy.hi52_edge.edge_at` (the engine's live cap,
     ``StrategyEdges``, uses it too); this function supplies the file reads and their fallbacks.
     ``settings.yaml`` carries only its output, and
-    ``tests/unit/test_hi52_forward_verdict.py`` pins the two together so they cannot drift apart.
+    ``tests/unit/test_hi52_edge.py`` pins the two together so they cannot drift apart.
     """
     path = limits_path or (repo_root() / "config" / "limits.yaml")
     position_pct, gap_mult, _ = load_sizing_limits(path)

@@ -10,7 +10,7 @@ contains a holiday gap.
 Costs come from the repo's own CostModel at the script's reference notional, never a frozen
 constant: a costs.yaml re-scrape must move the expected net with the model rather than break these
 tests for the wrong reason. The registered edge is pinned to the SAME derivation for the same
-reason — see ``test_the_registered_edge_is_this_script_s_derivation``.
+reason — see ``tests/unit/test_hi52_edge.py::test_the_registered_edge_is_this_script_s_derivation``.
 """
 
 from __future__ import annotations
@@ -333,37 +333,6 @@ def test_the_sized_notional_is_the_7_1_cap_and_nothing_chosen_by_hand():
                   "gap_mult": Decimal("2.5"), "stop_pct": Decimal("6.0"), **bad}
         with pytest.raises(ValueError):                   # a tiny notional is a spurious DEMOTE
             fv.sizing_notional(kwargs.pop("equity"), **kwargs)
-
-
-def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
-    """The registered edge and the kill criterion's cost floor must come from ONE derivation or they
-    drift apart silently — a stale `expected_edge_pct` is an edge the arithmetic no longer supports,
-    read on every candidate for months. So `settings.yaml` carries only the OUTPUT of
-    `registered_edge_pct()`, and this test is the pin: a change to limits.yaml, to hi52's stop or to
-    the cost tables fails HERE instead of leaving the gate multiplying against a number nobody
-    re-derived."""
-    import re
-
-    from engine.core.config import load_settings
-
-    # Pinned at the REGISTRATION inputs (base 40,000), not the live file: the runtime cap
-    # (`engine.strategy.hi52_edge.StrategyEdges`) now carries the live-limits guard (O19), so a
-    # capital change must not break this pin.
-    pinned = tmp_path / "limits.yaml"
-    pinned.write_text(
-        re.sub(r"^capital_base_inr:.*$", "capital_base_inr: 40000",
-               _LIMITS.read_text(encoding="utf-8"), flags=re.M),
-        encoding="utf-8",
-    )
-    derived = fv.registered_edge_pct(limits_path=pinned)
-    assert derived == Decimal("1.53")                                   # O17: 2.0x gap mult
-    assert Decimal(str(load_settings().hi52.expected_edge_pct)) == derived
-    # …and it IS gross-minus-floor, rounded DOWN: rounding an edge UP is the one direction that can
-    # buy a candidate a C3 pass it did not earn.
-    floor = fv.cost_floor_pct(Decimal("6000"))                          # Rs 36,000 x 2% / (2.0 x 6%)
-    assert floor == pytest.approx(Decimal("0.498167"), abs=Decimal("1e-6"))
-    assert fv.MEASURED_T20_MEDIAN_GROSS_PCT - floor > derived          # 1.5354 -> 1.53
-    assert fv.MEASURED_T20_MEDIAN_GROSS_PCT - floor - derived < Decimal("0.01")
 
 
 def test_the_registration_equity_is_the_go_flat_rung_and_falls_back_loudly(tmp_path):
