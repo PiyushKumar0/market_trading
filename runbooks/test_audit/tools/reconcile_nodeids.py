@@ -4,13 +4,17 @@ final collection. Anything else is a SILENT change and fails the check.
     python runbooks/test_audit/tools/reconcile_nodeids.py --baseline runbooks/test_audit/baseline_nodeids.txt \
         --final <file with the final `pytest --collect-only -q` nodeids> --ledger runbooks/test_audit/LEDGER.md
 
+The final file must hold BOTH collections: the default run and ``pytest tests/offline --collect-only -q``.
+
 Ledger conventions (the `nodeid(s)` column of the Verdicts table):
 - every nodeid is in backticks and written in full (``tests/...::name[id]``); backticked tokens without ``::``
-  (fixture names, files, bare case ids) are prose and ignored; a nodeid without ``[...]`` stands for all of that
+  (fixture names, bare case ids) are prose and ignored; a nodeid without ``[...]`` stands for all of that
   function's cases;
-- R-codes: the listed nodeids are REMOVED;
-- a row whose cell contains ``→``: nodeids before it are the old ones (removed or renamed away), nodeids after it
-  the new ones (must exist) — used by P1 merges and renames;
+- MV rows (the old test file → the new one, both backticked): the file moved; its baseline nodeids, and every
+  nodeid the ledger writes with the old path, are read under the new path;
+- R-codes: the listed nodeids are REMOVED; a backticked test FILE stands for all of its baseline nodeids;
+- a row whose cell contains ``→``: nodeids (or a file) before it are the old ones (removed or renamed away),
+  nodeids after it the new ones (must exist) — used by P1 merges, renames and R8 shrinks;
 - any other row whose nodeids are not in the baseline lists ADDED tests (must exist); rows whose nodeids are in
   the baseline and carry no ``→`` (P2-P5 repairs) change nothing in the collection.
 """
@@ -23,6 +27,7 @@ import sys
 from pathlib import Path
 
 _TICKED = re.compile(r"`([^`]+)`")
+_TEST_FILE = re.compile(r"tests/[\w/]+\.py")
 
 
 def _nodeids(text: str) -> set[str]:
@@ -30,8 +35,21 @@ def _nodeids(text: str) -> set[str]:
     return {t for t in _TICKED.findall(text) if "::" in t}
 
 
+def _files(text: str) -> set[str]:
+    return {t for t in _TICKED.findall(text) if _TEST_FILE.fullmatch(t)}
+
+
+def _moved(nid: str, moves: dict[str, str]) -> str:
+    path, sep, rest = nid.partition("::")
+    return moves.get(path, path) + sep + rest
+
+
+def _in_files(files: set[str], universe: set[str]) -> set[str]:
+    return {u for u in universe if u.partition("::")[0] in files}
+
+
 def _read_ids(path: Path) -> set[str]:
-    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if "::" in line}
+    return {line.strip() for line in path.read_text(encoding="utf-8-sig").splitlines() if "::" in line}
 
 
 def _expand(ids: set[str], universe: set[str]) -> set[str]:
@@ -62,14 +80,25 @@ def main() -> int:
     ap.add_argument("--final", type=Path, required=True)
     ap.add_argument("--ledger", type=Path, required=True)
     a = ap.parse_args()
-    baseline, final = _read_ids(a.baseline), _read_ids(a.final)
+    rows = list(_ledger_rows(a.ledger))
+    moves: dict[str, str] = {}
+    for _row, cell, code in rows:
+        if code == "MV":
+            old_part, new_part = cell.split("→", 1)
+            (old_file,), (new_file,) = _files(old_part), _files(new_part)
+            moves[old_file] = new_file
+    baseline = {_moved(n, moves) for n in _read_ids(a.baseline)}
+    final = _read_ids(a.final)
     removed: set[str] = set()
     added: set[str] = set()
     problems: list[str] = []
-    for row, cell, code in _ledger_rows(a.ledger):
+    for row, cell, code in rows:
+        if code == "MV":
+            continue
         if "→" in cell:
             old_part, new_part = cell.split("→", 1)
-            old = _expand(_nodeids(old_part), baseline)
+            old_files = {moves.get(f, f) for f in _files(old_part)}
+            old = _expand({_moved(n, moves) for n in _nodeids(old_part)}, baseline) | _in_files(old_files, baseline)
             new = _expand(_nodeids(new_part), final)
             removed |= old
             added |= new
@@ -77,9 +106,9 @@ def main() -> int:
             if missing_new:
                 problems.append(f"row {row}: new nodeids not collected: {sorted(missing_new)}")
             continue
-        ids = _nodeids(cell)
+        ids = {_moved(n, moves) for n in _nodeids(cell)}
         if code.startswith("R"):
-            exp = _expand(ids, baseline)
+            exp = _expand(ids, baseline) | _in_files({moves.get(f, f) for f in _files(cell)}, baseline)
             removed |= exp
             not_in_base = exp - baseline
             if not_in_base:
