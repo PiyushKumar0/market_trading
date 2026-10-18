@@ -94,11 +94,9 @@ async def test_the_early_hook_hydrates_once_the_scheduler_is_armed(
     """The whole point: a 06:32 login runs the pre-open chain hours ahead of its clock — but only
     behind an armed scheduler (WO-15), so it WAITS while the boot is still coming up.
 
-    The boot trigger (2026-09-21): 2026-09-16 the engine booted 06:58 with no Kite login until 10:04,
-    the PC slept 08:00-10:00 through the scheduled 08:20-08:50 fires, and the catalyst digest landed
-    10:18, after the open. ``on_boot`` runs the identical chain once at process boot, under the same
-    gates as an early login. A boot before the open runs the pre-open chain — but only behind an armed
-    scheduler (WO-15), so it WAITS while the boot is still coming up, same as an early login."""
+    ``on_boot`` (2026-09-21) runs the identical chain once at process boot, under the same gates: on
+    2026-09-16 the engine booted 06:58 with no Kite login until 10:04, the PC slept 08:00-10:00 through
+    the scheduled 08:20-08:50 fires, and the catalyst digest landed 10:18, after the open."""
     catch_up = _FakeCatchUp({"universe_build": "ran"})
     armed = asyncio.Event()
     hook = _hook(catch_up, calendar, at=EARLY, armed=armed)
@@ -359,10 +357,9 @@ async def test_owner_gets_exactly_one_summary_line(calendar) -> None:
 async def test_a_failing_hydration_never_escapes_the_early_hook(
     calendar, caplog, method: str, reason: str
 ) -> None:
-    """This runs inside ``SessionManager.complete_login``'s hook fan-out (PostLoginRecovery's guard
-    style): a raise here must never break the login path or the loop. The boot task is a
-    fire-and-forget ``asyncio.create_task`` too: a raise here must never propagate into the boot path,
-    same guard shape as ``on_login``."""
+    """``on_login`` runs inside ``SessionManager.complete_login``'s hook fan-out and ``on_boot`` as a
+    fire-and-forget task (PostLoginRecovery's guard style): a raise must never break the login path,
+    the boot path or the loop."""
     catch_up = _FakeCatchUp(boom=True)
     armed = asyncio.Event()
     armed.set()

@@ -539,7 +539,7 @@ async def test_reapply_lifts_with_one_class_still_short(
     conn, clock, temp_config, monkeypatch, blocker: str, cls: str
 ):
     """The LIFT is owed to the freezing classes: regime covered ⇒ the ``warmup_ready`` cause clears
-    through the latch even though the intraday class is still short. ``ready`` stays False (coverage
+    through the latch even though a non-freezing class is still short. ``ready`` stays False (coverage
     IS missing); the outcome names the state, and the blockers still ride the result so post-login
     detail keeps naming them. The boot freeze is a real regime-class one, so the lift is exercised
     against a cause the same lifecycle set — not a hand-planted latch row.

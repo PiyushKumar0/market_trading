@@ -132,12 +132,8 @@ async def test_bhavcopy_failure_degrades_and_alerts(store, clock):
 async def test_a_repeated_failure_alerts_once(store, clock, job_cls, severity: str):
     """2026-08-13 fix: with the watermark bug fixed, the 30-min catch-up sweeps genuinely re-run a
     still-failing day — alerting on EVERY attempt would storm during a long NSE outage. Two
-    consecutive failing runs for the same date must produce exactly one notify.
-
-    2026-08-13 (critical-severity representative, binary ok/fail shape — mirrors bhavcopy exactly):
-    with the watermark fix now forwarding this SAFETY_CRITICAL job's ok through the composition root,
-    same-day catch-up sweeps genuinely re-run a still-failing day — two consecutive failing runs for
-    the same date must produce exactly one notify."""
+    consecutive failing runs for the same date must produce exactly one notify, at the job's own
+    severity (earnings is SAFETY_CRITICAL)."""
     msgs, sink = collect_alerts()
     job = job_cls(store, clock, failing_client(), notify=sink)
     result1 = await job.run(D)

@@ -92,8 +92,7 @@ CONSTITUENTS_CSV = (
 
 @pytest.fixture(autouse=True)
 def _no_waits(instant_backoff):
-    """Collapse every backoff/pacing sleep so degrade-path + BSE-spacing tests never actually wait (the shared
-    ``instant_backoff`` fixture covers all five ``_sleep`` seams)."""
+    """Collapse every backoff/pacing sleep so degrade-path + BSE-spacing tests never actually wait."""
 
 
 @pytest.fixture
