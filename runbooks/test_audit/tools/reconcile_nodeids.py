@@ -1,5 +1,5 @@
-"""Phase 5 reconciliation: the baseline nodeids, with the ledger rows applied IN ROW ORDER, must equal the final
-collection. Anything else is a SILENT change and fails the check.
+"""Phase 5 reconciliation: the baseline nodeids, with the ledger rows applied in row-number order, must equal the
+final collection. Anything else is a SILENT change and fails the check.
 
     python runbooks/test_audit/tools/reconcile_nodeids.py --baseline runbooks/test_audit/baseline_nodeids.txt \
         --final <file with the final `pytest --collect-only -q` nodeids> --ledger runbooks/test_audit/LEDGER.md
@@ -8,15 +8,16 @@ The final file must hold BOTH collections: the default run and ``pytest tests/of
 
 Ledger conventions (the `nodeid(s)` column of the Verdicts table):
 - every nodeid is in backticks and written in full (``tests/...::name[id]``); backticked tokens without ``::``
-  (fixture names, bare case ids) are prose and ignored; a nodeid without ``[...]`` stands for all of that
-  function's cases;
+  (fixture names, bare case ids) are prose and ignored;
 - MV rows (the old test file → the new one, both backticked): the file moved; its baseline nodeids, and every
   nodeid the ledger writes with the old path, are read under the new path;
-- R-codes: the listed nodeids are REMOVED; a backticked test FILE stands for all of its nodeids at that row;
-- a row whose cell contains ``→``: nodeids (or a file) before it are the old ones (removed or renamed away),
-  nodeids after it the new ones — used by P1 merges, renames, R8 shrinks and MS moves between files;
-- any other row whose nodeids are not expected at that row lists ADDED tests; rows whose nodeids already are
-  (P2-P5 repairs) change nothing in the collection.
+- R-codes: the listed nodeids are REMOVED; a function nodeid without ``[...]`` stands for all of its cases at that
+  row, a backticked test FILE for all of its nodeids;
+- a row whose cell contains ``→``: nodeids (or a file) before it are the old ones, read like an R row; nodeids
+  after it are the new ones, LITERALLY — a parametrized test lists every case, so a lost or extra case cannot
+  hide behind a bare function name. P1 rows map one-for-one; MS rows keep every test name;
+- any other row: nodeids already expected are repairs (a bare function name covers its cases); the rest are
+  ADDED, literally. Citing a nodeid an earlier row removed is a ledger error, not a re-addition.
 """
 
 from __future__ import annotations
@@ -56,22 +57,24 @@ def _expand(ids: set[str], universe: set[str]) -> set[str]:
     """A function nodeid (no ``[``) stands for every parametrized case of it in ``universe``."""
     out: set[str] = set()
     for nid in ids:
-        if "[" in nid:
-            out.add(nid)
-            continue
-        cases = {u for u in universe if u == nid or u.startswith(nid + "[")}
+        cases = {u for u in universe if u == nid or ("[" not in nid and u.startswith(nid + "["))}
         out |= cases or {nid}
     return out
 
 
+def _name(nid: str) -> str:
+    return nid.partition("::")[2]
+
+
 def _ledger_rows(path: Path):
+    rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| ") or line.startswith("| #") or line.startswith("|---"):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) < 4 or not cells[0].isdigit():
-            continue
-        yield cells[0], cells[1], cells[3]
+        if len(cells) >= 4 and cells[0].isdigit():
+            rows.append((int(cells[0]), cells[1], cells[3]))
+    return sorted(rows)
 
 
 def main() -> int:
@@ -80,19 +83,22 @@ def main() -> int:
     ap.add_argument("--final", type=Path, required=True)
     ap.add_argument("--ledger", type=Path, required=True)
     a = ap.parse_args()
-    rows = list(_ledger_rows(a.ledger))
+    rows = _ledger_rows(a.ledger)
+    base_raw = _read_ids(a.baseline)
+    problems: list[str] = []
     moves: dict[str, str] = {}
-    for _row, cell, code in rows:
+    for row, cell, code in rows:
         if code == "MV":
             old_part, new_part = cell.split("→", 1)
             (old_file,), (new_file,) = _files(old_part), _files(new_part)
+            if new_file in moves.values() or _in_files({new_file}, base_raw):
+                problems.append(f"row {row}: MV target {new_file} is already taken")
             moves[old_file] = new_file
-    baseline = {_moved(n, moves) for n in _read_ids(a.baseline)}
+    baseline = {_moved(n, moves) for n in base_raw}
     final = _read_ids(a.final)
     expected = set(baseline)
     removed: set[str] = set()
     added: set[str] = set()
-    problems: list[str] = []
     for row, cell, code in rows:
         if code == "MV":
             continue
@@ -100,14 +106,21 @@ def main() -> int:
             old_part, new_part = cell.split("→", 1)
             old_files = {moves.get(f, f) for f in _files(old_part)}
             old = _expand({_moved(n, moves) for n in _nodeids(old_part)}, expected) | _in_files(old_files, expected)
-            new = _expand({_moved(n, moves) for n in _nodeids(new_part)}, final)
+            new = {_moved(n, moves) for n in _nodeids(new_part)}
+            if code == "P1" and len(new) != len(old):
+                problems.append(f"row {row}: P1 maps {len(old)} nodeids to {len(new)}")
+            if code == "MS" and {_name(n) for n in old} != {_name(n) for n in new}:
+                problems.append(f"row {row}: MS renames {sorted({_name(n) for n in old} ^ {_name(n) for n in new})}")
         else:
             ids = {_moved(n, moves) for n in _nodeids(cell)}
             if code.startswith("R"):
                 old = _expand(ids, expected) | _in_files({moves.get(f, f) for f in _files(cell)}, expected)
                 new = set()
             else:
-                old, new = set(), _expand(ids - expected, final)
+                old = set()
+                new = {n for n in ids if not _expand({n}, expected) & expected}
+                if new & removed:
+                    problems.append(f"row {row}: cites nodeids an earlier row removed: {sorted(new & removed)}")
         if old - expected:
             problems.append(f"row {row}: removed nodeids not expected at that row: {sorted(old - expected)}")
         expected = (expected - old) | new
