@@ -315,9 +315,40 @@ git commit -m "limits.yaml comments base-relative (owner): patch + reseed" -- co
 
 ## Tests / verification
 
+The gate is the whole `tests/` tree (`testpaths`): unit + chaos + replay + property, 4,456 tests. On this laptop
+(2026-10-18 test audit, `runbooks/test_audit/REPORT.md`): ~8-9 min serial, ~4-6 min as 8 file-shards. Every pytest
+start costs ~15 s before its first test (the first `import engine` loads sklearn via `engine._preload`, ~9.5 s),
+so put several files in ONE run rather than looping over them.
+
 ```powershell
-uv run pytest tests/unit -q                     # full suite (several minutes; run inline, never two at once)
+# Inner loop: one file or a few, in one run
 uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_sweep_signals.py -q
+# Unit tier without the 19 heavy-deps tests (vectorbt re-JITs ~24 s in every process)
+uv run pytest tests/unit -q -m "not needs_heavy_deps"
+# The gate (serial; run inline, never two at once) and its tiers on their own
+uv run pytest -q
+uv run pytest tests/unit -q
+uv run pytest -m chaos -q
+uv run pytest tests/replay -q
+uv run pytest tests/property -q
+cd dashboard; npm test; cd ..
+# The gate in parallel without pytest-xdist: test files packed onto 8 plain pytest processes (green on all four
+# shard runs, 2026-10-18: 223-340 s; prints per-shard counts; any failing shard exits 1). Refresh the weights from
+# a --durations=0 run when files are added (an unlisted test file is NOT run).
+.venv\Scripts\python.exe runbooks\test_audit\tools\shard_run.py -n 8 --weights runbooks\test_audit\shard_weights.csv --out-dir ..\mt_build_notes\shards
+```
+
+Test-audit tools (`runbooks/test_audit/tools/`; what each found is in `runbooks/test_audit/REPORT.md`):
+
+```powershell
+# Per-test inventory: tier guess, durations, asserts, patches, citations, AST shape hash (+ shape_groups.txt)
+.venv\Scripts\python.exe runbooks\test_audit\tools\inventory.py --nodeids <collect-only.txt> --junit <run.xml> [...] --durations-text <run --durations=0 output> [...] --memory-index <MEMORY.md> --out-dir <dir>
+# Per-test line footprints (sys.monitoring, ~4% overhead) and queries on them (R2's necessary condition)
+.venv\Scripts\python.exe -m pytest -p runbooks.test_audit.tools.footprint --footprint-out=<footprints.sqlite> -q
+.venv\Scripts\python.exe runbooks\test_audit\tools\footprint_query.py <footprints.sqlite> stats
+.venv\Scripts\python.exe runbooks\test_audit\tools\footprint_query.py <footprints.sqlite> check --removed <nodeid> --survivors <nodeid> ...
+# After removing/renaming tests: baseline minus ledgered removals, renames applied, must equal the collection
+.venv\Scripts\python.exe runbooks\test_audit\tools\reconcile_nodeids.py --baseline runbooks\test_audit\baseline_nodeids.txt --final <collect-only.txt> --ledger runbooks\test_audit\LEDGER.md
 ```
 
 After ANY edit to `config/agents.yaml`, validate through the engine's own loader BEFORE the

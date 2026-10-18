@@ -1,5 +1,28 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-18 15:45 — Test audit: `wip/test-audit` ready for review, not merged (owner: "Read @TEST_AUDIT_PROMPT.md and work on optimising the test coverage")
+
+- **Branch `wip/test-audit`** (worktree `..\mt_testaudit`, on phase3 3e6b811 — phase3 has not moved): tests and
+  runbooks only; `src/`, `scripts/`, `config/`, pyproject and uv.lock untouched. Report:
+  `runbooks/test_audit/REPORT.md`; every change with its evidence: `runbooks/test_audit/LEDGER.md` (62 rows).
+- **Numbers:** 4,463 → 4,456 tests; 84,240 → 84,208 test lines; the gate's serial median 622.5 → 534.7 s (−14%;
+  back-to-back pairs −10% and −27% on a busy host), 223-340 s as 8 file-shards; every run green (4,436 passed, 20
+  skipped — the baseline skip set — and the baseline's 4 warnings).
+- **What changed:** 13 tests removed (every survivor fault-checked), 28 repaired (each passed while blind to the
+  fault its name claims; each repair shown to fail under it), 17 copy-paste groups parametrized, 1 assert trim;
+  speed-ups: `conn` from a session-migrated SQLite template, cached import-graph lookups, a stub single-instance
+  child, a shared `instant_backoff`, a batched 501-symbol seed.
+- **Verification:** the reversed-order full run and the 91 `conn` files alone all green; nodeids reconciled; ruff
+  clean; chaos/replay/property and the dashboard's `npm test` run explicitly; a four-angle review found nothing,
+  and its side note withdrew one of my changes (row 32 — tests/conftest.py already pins the capital).
+- **Owner decisions** (REPORT): D1 xdist needs the venv (`uv sync` in the worktree was refused by the permission
+  classifier; the shard runner works without it); D2 eight production proposals (lazy sklearn preload ≈ −5.5 s per
+  pytest start, an ops.main wiring seam, the `repo_root()` cache, …); D3 shrink four refuted-research test files
+  (≈ −3,000 lines); D4 a risk-gate test merge the permission system refused; D7 an untested paper GTT touch trigger.
+- **Not touched:** `mt-engine` (Stopped all session, as found), `data/`, `config/limits.yaml`, the live venv.
+  Helper worktrees `mt_testaudit_base` and `mt_testaudit_c2` (+ branch `wip/test-audit-c2`) remain until review —
+  removal commands in REPORT "Clean-up".
+
 ## 2026-10-18 00:45 — limits.yaml comments patch applied, transaction() fixed, build worktrees removed (owner: "1. Apply limits.yaml patch 2. Fix the transactions() bug 3. Remove extra unnecessary worktrees")
 
 - **limits.yaml comments patch (058e36e):**

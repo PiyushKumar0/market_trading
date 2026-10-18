@@ -55,8 +55,13 @@ Resume rule (PROMPT.md §6): audit this file, LEDGER.md and `git log` against PR
   per-file-alone runs of the 91 `conn` files (in progress); 4-angle review: protection (6 fault re-injections, all
   survivors failed as recorded), hermeticity, scope/order, parametrization — no findings; the scope/order review's
   side note disproved ledger row 32's premise (tests/conftest.py already pins the capital) → row 32 WITHDRAWN and
-  reverted. To do: final interleaved round (full + unit), shard experiment.
-- [ ] Phase 6 — report
+  reverted (10331d7). Final round d (10331d7): full base 759.4 s vs audit 557.5 s, unit base 589.4 vs audit
+  560.6 s (noisy host), all green; shard experiment (no xdist): 4 shards 472.5 s, 8 shards 340.2 / 238.9 / 223.1 s,
+  all green (4,456 tests).
+- [x] Phase 5 — done (above).
+- [x] Phase 6 — `runbooks/test_audit/REPORT.md`, COMMANDS.md test section, WORKLOG entry, `shard_weights.csv`;
+  phase3 had not moved (no rebase). Worktree left in place for the owner's merge; helper worktrees
+  `mt_testaudit_base`, `mt_testaudit_c2` (+ branch `wip/test-audit-c2`) to remove after review (REPORT "Clean-up").
 
 ## Baseline (Phase 0)
 
