@@ -1,11 +1,9 @@
-"""scripts/backtest_candles.py - smoke test of the refuted candle battery on synthetic 1m bars.
+"""scripts/backtest_candles.py - smoke test of the refuted candle battery's CLI on synthetic 1m bars.
 
-The synthetic tape is a temp :class:`MarketStore` holding ONE session of 09:15..15:29 one-minute bars
-for a cast engineered so that EXACTLY ONE rule fires for each ``*_POS`` symbol, at the [10:05,10:10)
-bucket, and its ``*_NEG`` twin fails that rule by ONE clause; ``TWICE`` carries a second R1 setup
-that must not book a second trade, ``SHORTDAY`` sits under the ``medvol20`` floor and ``GAPPY`` has a
-bucket of two 1m bars. ``FILL000..FILL159`` are flat filler names that keep the session above the
-``session_min_symbols`` floor without overriding the pre-registered PARAMS.
+The tape is a temp :class:`MarketStore` holding ONE session of 09:15..15:29 one-minute bars for the
+cast below, flat filler names ``FILL000..FILL159`` (enough to clear ``session_min_symbols`` without
+overriding the pre-registered PARAMS) and 20 prior daily bars per measured symbol. The test checks the
+JSON document's conventions and shape, the ``R1|E1`` cell, and the ASCII report.
 """
 
 from __future__ import annotations
@@ -87,9 +85,10 @@ def _session(sym: str, segments, *, gappy_bk: int | None = None) -> list[Bar]:
 
 
 CAST: dict[str, list] = {
-    # R1: close 102 tops the prior 6 highs (100), volume 2.0x medvol20 (1000), close at the very top
-    # of the bar's range. Post-signal: 107 print (E1 target 106), then a 5m close under the prior
-    # bar's low (E2 trail), filled at the following 100.50 open.
+    # The R1|E1 cell books exactly two trades, both entered at 102.00: R1_POS out at the E1 target
+    # 106.00 (the 107 print) and TWICE once (one trade per symbol per day). R1_NEG (1.9x volume) and
+    # SHORTDAY (under the medvol20 floor) must not add a third. The R2..R5 pairs populate the other
+    # cells, whose outcomes the smoke test does not assert.
     "R1_POS": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 2000)),
                (11, 11, (102.0, 102.0, 102.0, 102.0, 1000)),
                (12, 12, (102.0, 107.0, 102.0, 103.0, 1000)),
@@ -97,9 +96,6 @@ CAST: dict[str, list] = {
                (14, 74, (100.5, 100.5, 100.5, 100.5, 1000))],
     "R1_NEG": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 1900)),
                (11, 74, (102.0, 102.0, 102.0, 102.0, 1000))],
-    # R2: three bullish bars, each closing above the prior bar's high; third bar 1.6x medvol20.
-    # Post-signal is dead flat, so BOTH exits reach the 15:15 squareoff - and the 200.00 tape after
-    # 15:15 must never be reachable.
     "R2_POS": [(0, 7, FLAT100), (8, 8, (100.1, 101.0, 100.1, 101.0, 1000)),
                (9, 9, (101.0, 102.0, 101.0, 102.0, 1000)),
                (10, 10, (102.0, 103.0, 102.0, 103.0, 1600)),
@@ -109,9 +105,6 @@ CAST: dict[str, list] = {
                (9, 9, (101.0, 102.0, 101.0, 102.0, 1000)),
                (10, 10, (102.0, 103.0, 102.0, 103.0, 1400)),
                (11, 74, (103.0, 103.0, 103.0, 103.0, 1000))],
-    # R3: session high 106 set at bucket 6 (>= 3 bars before the signal), three lower closes that
-    # stay above VWAP, then a bullish body engulf on 1.3x volume. Post-signal digs to 102.50, which
-    # is the E1 stop (the signal bar's low, 103.00); E2 trails out one bar later at 102.00.
     "R3_POS": [(0, 5, FLAT100), (6, 6, (100.0, 106.0, 100.0, 105.5, 1000)),
                (7, 7, (105.5, 105.5, 105.0, 105.0, 1000)),
                (8, 8, (105.0, 105.0, 104.0, 104.0, 1000)),
@@ -126,27 +119,22 @@ CAST: dict[str, list] = {
                (9, 9, (104.0, 104.0, 103.0, 103.0, 1000)),
                (10, 10, (103.0, 105.0, 103.0, 104.5, 1100)),
                (11, 74, (104.5, 104.5, 104.5, 104.5, 1000))],
-    # R4: six bars holding above a rising VWAP, then a dip to 100.60 (VWAP(bk10) = 100.6376, and
-    # 100.60 <= 100.6376 * 1.0015 = 100.7886) closing back up at 101.20.
     "R4_POS": [(0, 3, FLAT100), (4, 9, (101.0, 101.0, 101.0, 101.0, 1000)),
                (10, 10, (101.0, 101.2, 100.6, 101.2, 1000)),
                (11, 74, (101.2, 101.2, 101.2, 101.2, 1000))],
     "R4_NEG": [(0, 3, FLAT100), (4, 9, (101.0, 101.0, 101.0, 101.0, 1000)),
                (10, 10, (101.0, 101.2, 101.0, 101.2, 1000)),
                (11, 74, (101.2, 101.2, 101.2, 101.2, 1000))],
-    # R5: six bars closing under VWAP, then a reclaim to 100.50 on 1.6x volume.
     "R5_POS": [(0, 3, FLAT100), (4, 9, (99.0, 99.0, 99.0, 99.0, 1000)),
                (10, 10, (99.0, 100.5, 99.0, 100.5, 1600)),
                (11, 74, (100.5, 100.5, 100.5, 100.5, 1000))],
     "R5_NEG": [(0, 3, FLAT100), (4, 9, (99.0, 99.0, 99.0, 99.0, 1000)),
                (10, 10, (99.0, 100.5, 99.0, 100.5, 1400)),
                (11, 74, (100.5, 100.5, 100.5, 100.5, 1000))],
-    # two R1 setups in one session: the SECOND must be discarded by "one trade per symbol per day".
     "TWICE": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 2000)),
               (11, 19, (102.0, 102.0, 102.0, 102.0, 1000)),
               (20, 20, (102.0, 104.0, 102.0, 104.0, 3000)),
               (21, 74, (104.0, 104.0, 104.0, 104.0, 1000))],
-    # an R1-shaped bar at bucket 10 with only 4 prior valid bars: under the medvol20 floor.
     "SHORTDAY": [(6, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 2000)),
                  (11, 20, (102.0, 102.0, 102.0, 102.0, 1000))],
     "GAPPY": [(0, 74, FLAT100)],
@@ -164,7 +152,7 @@ def _tape() -> list[Bar]:
 
 # --------------------------------------------------------------------------- the DAILY tape (R3)
 #: Constant per-symbol daily bars around a close of 100.00, so every true range is the plain
-#: high-low and ATR% is the range itself: the six symbols that book trades carry ATR% 1..6.
+#: high-low and ATR% is the range itself: the six measured symbols carry ATR% 1..6.
 DAILY_ATR_PCT: dict[str, float] = {
     "R1_POS": 1.0, "R2_POS": 2.0, "R3_POS": 3.0, "R4_POS": 4.0, "R5_POS": 5.0, "TWICE": 6.0,
 }

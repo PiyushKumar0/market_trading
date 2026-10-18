@@ -51,11 +51,9 @@ from engine.ops import main as opsmain
 from engine.risk.causes import RiskStateLatch
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
-from tests._composition import composed_engine
+from tests._composition import FakeSecrets, FakeTelegram, composed_engine, spy
 from tests.chaos._entry_gate_rig import build_entry_gate, entry_checks
 from tests.chaos.conftest import REAL_SIDE_ONLY
-from tests.unit.test_ops_main_wiring import _FakeTelegram, _spy
-from tests.unit.test_session_verify_token import _FakeSecrets
 
 LOGIN_URL = "https://kite.zerodha.com/connect/login?api_key=ak&v=3"
 CAUSE = "kite_token_rejected"
@@ -115,7 +113,7 @@ def token_rig(conn, clock, tmp_path):
     kill = KillSwitch(conn, clock)
     latch = RiskStateLatch(conn, clock, mode)
     kc = _FakeKiteConnect()
-    session = SessionManager(_FakeSecrets({KITE_API_KEY: "ak", KITE_API_SECRET: "as",
+    session = SessionManager(FakeSecrets({KITE_API_KEY: "ak", KITE_API_SECRET: "as",
                                            KITE_ACCESS_TOKEN: "tok-day1"}), clock)
     session._connect = lambda: kc                    # the api_key-bound KiteConnect (test seam)
     alerts: list[tuple[str, str]] = []
@@ -264,11 +262,11 @@ async def test_the_composed_engine_token_hooks_freeze_prompt_and_clear(tmp_path,
     clears that cause through the login hook."""
     kc = _FakeKiteConnect()
     monkeypatch.setattr("engine.broker.session.KiteConnect", lambda api_key: kc)
-    telegram = _FakeTelegram()
+    telegram = FakeTelegram()
     monkeypatch.setattr(opsmain, "_build_telegram", lambda *_a, **_k: telegram)
     built: dict[str, list] = {}
-    _spy(monkeypatch, "KiteClient", built)
-    _spy(monkeypatch, "make_order_guard", built)
+    spy(monkeypatch, "KiteClient", built)
+    spy(monkeypatch, "make_order_guard", built)
 
     async def recovered(self) -> None:          # the post-login recovery / hydration touch the broker
         return None

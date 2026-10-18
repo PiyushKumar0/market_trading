@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import os
 import subprocess
@@ -45,11 +46,12 @@ def test_guard_loads_sklearn_only_on_first_guarded_import() -> None:
 @pytest.mark.parametrize("name", ["numba", "llvmlite", "vectorbt", "cvxpy", "skfolio"])
 def test_every_native_package_loads_through_the_sklearn_first_loader(name: str) -> None:
     """The five packages of the crash table: a fresh finder (``pending`` full, whatever this process has
-    imported) hands each the sklearn-first loader. Locating a spec imports nothing."""
-    spec = _preload._SklearnFirst().find_spec(name)
-    if spec is None:
+    imported) hands each the sklearn-first loader. Locating a spec imports nothing. Installed is decided
+    by the plain path finder: the guard's own ``None`` is also what dropping a name from GUARDED returns."""
+    if importlib.machinery.PathFinder.find_spec(name) is None:
         pytest.skip(f"{name} not installed")
-    assert isinstance(spec.loader, _preload._SklearnFirstLoader)
+    spec = _preload._SklearnFirst().find_spec(name)
+    assert spec is not None and isinstance(spec.loader, _preload._SklearnFirstLoader)
 
 
 def test_a_broken_sklearn_fails_the_guarded_import_instead_of_skipping_the_guard(monkeypatch) -> None:

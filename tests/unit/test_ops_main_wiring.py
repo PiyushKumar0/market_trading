@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import inspect
 import json
 import logging
 import re
@@ -107,7 +106,7 @@ from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.retest import DEFAULT_RETEST_SESSIONS, RestingLevelBook
 from engine.strategy.scanners import brk20, cat, cat_reversal, hi52, ins
 from engine.strategy.types import RawLevels, SignalCandidate
-from tests._composition import composed_engine
+from tests._composition import FakeTelegram, composed_engine, spy
 from tests.conftest import FIXED_NOW, PINNED_CAPITAL
 from tests.unit.test_instruments import NIFTY50_ROW, RELIANCE_ROW, FakeKite
 
@@ -414,19 +413,6 @@ def test_missing_job_fn_is_a_loud_wiring_error() -> None:
 
 def _spec(engine: opsmain.Engine, job_id: str) -> JobSpec:
     return next(s for s in engine.registry.specs() if s.job_id == job_id)
-
-
-def _spy(monkeypatch, name: str, built: dict[str, list], *, build=None) -> None:
-    """Constructor spy on ``opsmain.<name>`` (``compose`` looks it up at call time): records
-    ``(args, kwargs, obj)`` per construction and returns the real object, or ``build``'s."""
-    real = getattr(opsmain, name)
-
-    def construct(*args, **kwargs):
-        obj = (build or real)(*args, **kwargs)
-        built.setdefault(name, []).append((args, kwargs, obj))
-        return obj
-
-    monkeypatch.setattr(opsmain, name, construct)
 
 
 async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
@@ -928,8 +914,8 @@ async def test_clusterer_and_digest_read_the_one_cat_envelope_row(
                      "VALUES ('cat.max_event_age_days', '5', 'x', 'promotion')")
 
     built: dict[str, list] = {}
-    _spy(monkeypatch, "HeadlineClusterer", built)
-    _spy(monkeypatch, "CatalystDigestJob", built)
+    spy(monkeypatch,"HeadlineClusterer", built)
+    spy(monkeypatch,"CatalystDigestJob", built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, state_db=promoted):
         pass
     ((_, clusterer_kw, _),) = built["HeadlineClusterer"]
@@ -1368,6 +1354,16 @@ async def _settle(engine: opsmain.Engine) -> None:
         await asyncio.wait_for(asyncio.gather(*list(engine.freeze_lift_tasks)), timeout=10)
 
 
+async def _until(predicate, timeout_s: float = 5.0) -> None:
+    """Poll ``predicate``; a condition the code under test never reaches FAILS the test rather than
+    hanging it (pytest-timeout is not installed)."""
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(poll(), timeout_s)
+
+
 def _resting_level(conn, symbol: str, signal_d: date, expires_d: date) -> None:
     conn.execute(
         "INSERT INTO brk20_resting_levels (symbol, signal_d, entry, stop, target, score, expires_d, "
@@ -1398,6 +1394,14 @@ async def test_the_composition_root_really_arms_the_retest_rearm(
 
     monkeypatch.setattr(RestingLevelBook, "record", record)
     monkeypatch.setattr(opsmain, "_consume_ins_pending", consume)
+    sweep_locks: list[asyncio.Lock] = []
+    real_single_flight = opsmain._single_flight_sweep
+
+    async def single_flight(lock, *args, **kwargs):
+        sweep_locks.append(lock)
+        return await real_single_flight(lock, *args, **kwargs)
+
+    monkeypatch.setattr(opsmain, "_single_flight_sweep", single_flight)
     offers: list[tuple] = []
     failing = {"on": False}
 
@@ -1422,7 +1426,7 @@ async def test_the_composition_root_really_arms_the_retest_rearm(
     monkeypatch.setattr(opsmain, "_retest_active", active)
     monkeypatch.setattr(RecommendationPipeline, "drain_forward_queue", drain)
     built: dict[str, list] = {}
-    _spy(monkeypatch, "RestingLevelBook", built)
+    spy(monkeypatch,"RestingLevelBook", built)
     prior = date(2026, 6, 16)                          # the session before FIXED_NOW's
 
     def owner_window(settings) -> None:          # off the code default, so a hardcoded 5 cannot pass
@@ -1438,10 +1442,14 @@ async def test_the_composition_root_really_arms_the_retest_rearm(
         await e.scan_sweep("scan_now")                 # pre-window: admits nothing, arms nothing
         await _job(e, "forward_drain_tick")
         assert [o[1]["sweep_ready"] for o in offers] == [False, False]
+        # …and consumes no `ins` crossing: a window refusal is not an evaluation (2026-08-18).
+        assert [r.symbol for r in _read_ins_pending(e.conn, FIXED_NOW.date())] == [_CORE]
 
         c.time.set(FIXED_NOW)
         w.suppress = {(brk20.STRATEGY_ID, _WIDE)}      # a raw fire the caps refuse
+        order.clear()
         await e.scan_sweep("window_open")
+        assert _read_ins_pending(e.conn, FIXED_NOW.date()) == []
         resting = {r["symbol"] for r in e.conn.execute(
             "SELECT symbol FROM brk20_resting_levels WHERE signal_d = ?", (FIXED_NOW.date().isoformat(),))}
         assert resting == {_CORE, _WATCH}             # ADMITTED, never raw
@@ -1459,7 +1467,8 @@ async def test_the_composition_root_really_arms_the_retest_rearm(
         assert kw["sweep_ready"] is True and kw["active"] is True and kw["today"] == FIXED_NOW.date()
         now, calendar, mode, kill, lock = active_args[-1]
         assert (now, calendar, mode) == (FIXED_NOW, e.calendar, e.mode)
-        assert type(kill).__name__ == "KillSwitch" and isinstance(lock, asyncio.Lock)
+        assert type(kill).__name__ == "KillSwitch"
+        assert sweep_locks and all(taken is lock for taken in sweep_locks)   # the lock every sweep takes
         ((_, book_kw, the_book),) = built["RestingLevelBook"]
         assert book_kw["sessions"] == 3                                     # owner-configured
         assert book is the_book and book.resting_symbols(FIXED_NOW.date()) == ["RESTER"]
@@ -1476,10 +1485,6 @@ async def test_the_composition_root_really_arms_the_retest_rearm(
         failing["on"] = True
         await _job(e, "forward_drain_tick")
         assert drained[-1] == len(offers)              # a failing retest never costs the drain
-
-    # The admission and the post-admit mint are the sweep's own, not a parallel path.
-    assert "_attach_feature_snapshots(features, prescreen.admit(due, today, in_window=True))" in \
-        inspect.getsource(_retest_republish)
 
 
 def test_the_unverified_limits_fallback_base_is_the_registration_base() -> None:
@@ -1527,10 +1532,6 @@ def test_an_unverified_limits_table_falls_back_and_says_so_once(caplog) -> None:
         base()
 
 
-def _kw(call: ast.Call, arg: str) -> str:
-    return next(ast.unparse(k.value) for k in call.keywords if k.arg == arg)
-
-
 async def test_the_real_tracker_is_built_on_the_live_base(
     tmp_path, monkeypatch, migrated_db_template, caplog
 ) -> None:
@@ -1538,8 +1539,8 @@ async def test_the_real_tracker_is_built_on_the_live_base(
     gate's ONE ``reload()`` moves it (no boot-time copy) — and an unverifiable table at boot warns
     and falls back to the shipped base instead of crashing the boot."""
     built: dict[str, list] = {}
-    _spy(monkeypatch, "ExposureTracker", built)
-    _spy(monkeypatch, "RiskGate", built)
+    spy(monkeypatch,"ExposureTracker", built)
+    spy(monkeypatch,"RiskGate", built)
     owner = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="test")
     async with composed_engine(tmp_path / "verified", monkeypatch, db_template=migrated_db_template) as c:
         ((tracker_args, _, tracker),) = built["ExposureTracker"]
@@ -1572,7 +1573,7 @@ async def test_the_prescreen_displacement_margin_is_the_owner_setting(
         settings.strategy.prescreen.displacement_margin = 0.37
 
     built: dict[str, list] = {}
-    _spy(monkeypatch, "SignalPreScreen", built)
+    spy(monkeypatch,"SignalPreScreen", built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, configure=owner_knob):
         pass
     ((_, kw, _),) = built["SignalPreScreen"]
@@ -1586,7 +1587,7 @@ async def test_the_gate_and_the_pipeline_share_one_live_strategy_edges(
     the gate's C3 edge and the pipeline's registered edge can never disagree after a capital change."""
     built: dict[str, list] = {}
     for name in ("StrategyEdges", "RiskGate", "RecommendationPipeline"):
-        _spy(monkeypatch, name, built)
+        spy(monkeypatch,name, built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
         settings = c.engine.settings
 
@@ -1639,13 +1640,24 @@ def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, con
     assert (edges[hi52.STRATEGY_ID], edges[ins.STRATEGY_ID]) == (Decimal("1.27"), Decimal("1.58"))
 
 
-def test_paper_risk_reads_the_same_live_base_as_the_paper_runtime() -> None:
-    module = ast.parse(inspect.getsource(opsmain))
-    compose = next(n for n in module.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_compose_paper")
-    calls = {ast.unparse(n.func): n for n in ast.walk(compose) if isinstance(n, ast.Call)}
-    live = "lambda: limits.load().capital_base_inr"
-    assert _kw(calls["PaperRisk"], "capital_base") == live
-    assert _kw(calls["PaperRuntime"], "capital_base_fn") == live
+async def test_paper_risk_reads_the_same_live_base_as_the_paper_runtime(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """O19 §2 on the paper side: an owner update plus the gate's ONE ``reload()`` moves both."""
+    built: dict[str, list] = {}
+    for name in ("PaperRisk", "PaperRuntime", "RiskGate"):
+        spy(monkeypatch, name, built)
+    owner = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="test")
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, paper=True) as c:
+        ((_, risk_kw, _),) = built["PaperRisk"]
+        ((_, runtime_kw, _),) = built["PaperRuntime"]
+        ((gate_args, _, _),) = built["RiskGate"]
+        shipped = (config_dir() / "limits.yaml").read_bytes().decode("utf-8")
+        moved, n = re.subn(r"(?m)^capital_base_inr: \d+\b", "capital_base_inr: 20000", shipped)
+        assert n == 1
+        ProtectedStore(config_dir(), c.engine.conn, c.engine.clock).owner_update("limits.yaml", moved, owner)
+        gate_args[0].reload()
+        assert risk_kw["capital_base"]() == runtime_kw["capital_base_fn"]() == Decimal("20000")
 
 
 def test_the_shipped_retest_window_is_the_variant_the_backtest_selected() -> None:
@@ -1772,8 +1784,7 @@ async def test_boot_phase_ticks_run_survive_errors_and_cancel_cleanly() -> None:
         healths.append(1)
 
     task = asyncio.create_task(boot_phase_ticks(refresh, health_check, interval_s=0.01))
-    while len(refreshes) < 4:                                   # the raising tick #2 didn't end the loop
-        await asyncio.sleep(0.005)
+    await _until(lambda: len(refreshes) >= 4)                   # the raising tick #2 didn't end the loop
     task.cancel()
     try:
         await task
@@ -2414,8 +2425,8 @@ async def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context(
     from engine.ops.warmup import WarmupStatus
 
     built: dict[str, list] = {}
-    _spy(monkeypatch, "GateContextBuilder", built)
-    _spy(monkeypatch, "RecommendationPipeline", built)
+    spy(monkeypatch,"GateContextBuilder", built)
+    spy(monkeypatch,"RecommendationPipeline", built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, paper=True) as c:
         assert c.engine.paper is not None
         fns = [kw["warmup_status_fn"] for _, kw, _ in built["GateContextBuilder"] + built["RecommendationPipeline"]]
@@ -3482,8 +3493,7 @@ async def test_unarmed_scheduler_pages_once_repeats_then_resolves_when_it_arms_l
             boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01)
         )
         try:
-            while len(_records("boot_incomplete")) < 3:      # re-logs on the cadence
-                await asyncio.sleep(0.005)
+            await _until(lambda: len(_records("boot_incomplete")) >= 3)   # re-logs on the cadence
             incomplete = _records("boot_incomplete")
             assert all(r.levelno == logging.CRITICAL for r in incomplete)
             assert incomplete[0].missing == ["scheduler_running"]
@@ -3510,9 +3520,8 @@ async def test_a_raising_owner_page_never_ends_the_watchdog(caplog) -> None:
             boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01)
         )
         try:
-            while len([r for r in caplog.records
-                       if r.getMessage() == "boot_incomplete"]) < 3:
-                await asyncio.sleep(0.005)
+            await _until(lambda: len([r for r in caplog.records
+                                      if r.getMessage() == "boot_incomplete"]) >= 3)
         finally:
             await cancel_post_arm(task)
     assert [r for r in caplog.records if r.getMessage() == "boot_incomplete_alert_failed"]
@@ -3622,6 +3631,7 @@ async def test_boot_runs_its_steps_in_the_order_its_comments_state(monkeypatch) 
     monkeypatch.setattr(opsmain, "boot_phase_ticks", boot_ticks)
     monkeypatch.setattr(opsmain, "seed_boot_snapshots", coro("seed_boot_snapshots"))
     monkeypatch.setattr(opsmain, "start_scheduler_and_fire_post_arm", sync("arm_scheduler_fire_post_arm"))
+    monkeypatch.setattr(opsmain, "install_signal_handlers", sync("install_signal_handlers"))
     engine = SimpleNamespace(
         telegram=SimpleNamespace(start=coro("telegram.start")),
         calendar=object(), clock=object(), app=object(), instruments=object(), store=object(), kite=None,
@@ -3653,6 +3663,7 @@ async def test_boot_runs_its_steps_in_the_order_its_comments_state(monkeypatch) 
     assert before("boot_phase_ticks.cancelled", "seed_boot_snapshots")
     assert before("lifecycle.startup", "seed_boot_snapshots")
     assert before("arm_scheduler_fire_post_arm", "compaction_lane.spawn")
+    assert "install_signal_handlers" not in events      # `run` installs them once, before compose
     assert [e for e in events if e.startswith("boot_state")] == ["boot_state[engine_ready]=True"]
     assert events[-2:] == ["boot_state[engine_ready]=True", "early_hydration.on_boot"]  # the task runs after
     assert boot_state["engine_ready"] is True and engine.skew_holder == {"ok": True}
@@ -4223,18 +4234,33 @@ async def test_freeze_lift_takes_every_window_open_branch(tmp_path, monkeypatch,
 
     assert _FULL_SWEEP_TRIGGERS == {"window_open", "freeze_lift"}
     assert "scan_now" not in _FULL_SWEEP_TRIGGERS        # the owner's cadence stays cheap
-    assert 'await sweep("freeze_lift")' in inspect.getsource(_freeze_lift_sweep)
 
     # …and in the composed engine, no OTHER branch keys on the trigger: a freeze_lift sweep hands every
     # leg the same input, makes the same ONE ranked admission of all five legs (not a second
     # leftover-capacity one — the §8.6 promotion: a rule that can reach RECOMMEND contests the same
-    # slots as brk20/ins/cat) and publishes the same candidates as a window_open sweep.
+    # slots as brk20/ins/cat), publishes the same candidates, consumes the same `ins` crossings and
+    # arms the retest tick exactly as a window_open sweep. (The owner notification: the single-flight
+    # entry-point test.)
+    ready: list[bool] = []
+
+    def republish(*_args, sweep_ready, **_kwargs) -> list:
+        ready.append(sweep_ready)
+        return []
+
+    async def drain(self) -> None:
+        return None
+
+    monkeypatch.setattr(opsmain, "_retest_republish", republish)
+    monkeypatch.setattr(RecommendationPipeline, "drain_forward_queue", drain)
     seen = {}
     for trigger in ("window_open", "freeze_lift"):
+        ready.clear()
         async with _sweep_world(tmp_path / trigger, monkeypatch, migrated_db_template) as (c, w):
             await c.engine.scan_sweep(trigger)
             assert [kw.pop("trigger") for _, kw in w.legs["hi52"]] == [trigger]
-            seen[trigger] = (w.legs, w.admits, w.published)
+            await _job(c.engine, "forward_drain_tick")
+            pending = _read_ins_pending(c.engine.conn, FIXED_NOW.date())
+            seen[trigger] = (w.legs, w.admits, w.published, list(ready), pending)
             if trigger == "freeze_lift":
                 # Both fire sites resolve the SAME predicate, and the lift is actually subscribed.
                 asked: list[tuple] = []
@@ -4248,6 +4274,7 @@ async def test_freeze_lift_takes_every_window_open_branch(tmp_path, monkeypatch,
     assert seen["freeze_lift"] == seen["window_open"]
     ((admitted, in_window),) = seen["window_open"][1]
     assert {sid for sid, _ in admitted} == set(_PUBLICATION_LEG_ORDER) and in_window is True
+    assert seen["window_open"][3:] == ([True], [])          # the retest armed, the crossing consumed
 
 
 def _batch_cand(strategy_id: str, symbol: str, score: float) -> SignalCandidate:
@@ -4334,7 +4361,7 @@ async def test_the_hi52_promotion_is_one_state_in_both_of_its_halves(
     # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52 —
     # here as the composed gate actually holds both halves.
     built: dict[str, list] = {}
-    _spy(monkeypatch, "RiskGate", built)
+    spy(monkeypatch,"RiskGate", built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template):
         pass
     ((_, gate_kw, _),) = built["RiskGate"]
@@ -4383,7 +4410,7 @@ async def test_a_second_trigger_is_skipped_while_a_sweep_is_in_flight(caplog) ->
         return f"{trigger} body"
 
     first = asyncio.create_task(_single_flight_sweep(lock, body, "window_open"))
-    await running.wait()
+    await asyncio.wait_for(running.wait(), 5)
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
         assert await _single_flight_sweep(lock, body, "scan_now") == _SWEEP_IN_FLIGHT_REPLY
     assert calls == ["window_open"]                       # the body never ran a second time
@@ -4415,7 +4442,7 @@ async def test_the_freeze_lift_queues_behind_an_in_flight_sweep_instead_of_being
         return f"{trigger} body"
 
     first = asyncio.create_task(_single_flight_sweep(lock, body, "window_open"))
-    await running.wait()
+    await asyncio.wait_for(running.wait(), 5)
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
         queued = asyncio.create_task(_single_flight_sweep(lock, body, "freeze_lift", queue=True))
         await asyncio.sleep(0)                            # a chance to run, which it must not take
@@ -4431,24 +4458,6 @@ async def test_the_freeze_lift_queues_behind_an_in_flight_sweep_instead_of_being
     assert calls == ["window_open", "freeze_lift"]        # sequential, never overlapping
 
 
-class _FakeTelegram:
-    """The bot's wiring surface ``compose`` uses; keeps what it was handed."""
-
-    def __init__(self) -> None:
-        self.scan_sweep_fn = None
-        self.sent: list = []
-
-    def set_paper(self, *_args, **_kwargs) -> None: ...
-    def set_reco_book(self, _book) -> None: ...
-    def set_why_fn(self, _fn) -> None: ...
-
-    def set_scan_sweep_fn(self, fn) -> None:
-        self.scan_sweep_fn = fn
-
-    async def send(self, msg) -> None:
-        self.sent.append(msg)
-
-
 async def test_every_sweep_trigger_goes_through_the_single_flight_entry_point(
     tmp_path, monkeypatch, migrated_db_template, caplog
 ) -> None:
@@ -4457,7 +4466,7 @@ async def test_every_sweep_trigger_goes_through_the_single_flight_entry_point(
     once-per-day event, so a skipped edge is GIVEN BACK and the next 60 s tick re-fires it (an owner
     /scan_now in flight is no substitute: it skips the once-per-session hi52 leg). The lift's
     in-flight test is the lock itself, never the phase marks (2026-09-12 review)."""
-    telegram = _FakeTelegram()
+    telegram = FakeTelegram()
     monkeypatch.setattr(opsmain, "_build_telegram", lambda *_a, **_k: telegram)
     entered, release = threading.Event(), threading.Event()
     async with _sweep_world(tmp_path, monkeypatch, migrated_db_template) as (c, w):
@@ -4482,7 +4491,7 @@ async def test_every_sweep_trigger_goes_through_the_single_flight_entry_point(
         assert [r.reason for r in caplog.records if r.getMessage() == "freeze_lift_sweep_skipped"] \
             == ["sweep_in_flight_pre_publication"]
         release.set()
-        await owner_sweep
+        await asyncio.wait_for(owner_sweep, 10)
         await _job(e, "window_sweep_tick")                                   # …and is given back
         assert [kw["trigger"] for _, kw in w.legs["hi52"]] == ["scan_now", "window_open"]
 
@@ -4497,16 +4506,18 @@ async def test_every_sweep_trigger_goes_through_the_single_flight_entry_point(
                                          close=Decimal("1"), volume=1)])
         w.hold = asyncio.Event()
         held = asyncio.create_task(e.scan_sweep("scan_now"))
-        while not w.published or w.published[-1] != (brk20.STRATEGY_ID, "LATE"):
-            await asyncio.sleep(0.01)
-        await e.bus.apublish(TOPIC_RISK_STATE, _lift())
+        await _until(lambda: w.published[-1:] == [(brk20.STRATEGY_ID, "LATE")])
+        await asyncio.wait_for(e.bus.apublish(TOPIC_RISK_STATE, _lift()), 5)
         await asyncio.sleep(0.05)
         assert [kw["trigger"] for _, kw in w.legs["hi52"]][-1] == "scan_now"   # still queued
         w.hold.set()
-        await held
+        await asyncio.wait_for(held, 10)
         await _settle(e)
         assert [kw["trigger"] for _, kw in w.legs["hi52"]] == ["scan_now", "window_open", "scan_now",
                                                                "freeze_lift"]
+        # The owner hears the window edge and the lift; /scan_now's verdict is its direct reply.
+        assert [m.data["trigger"] for m in telegram.sent if m.kind is MessageKind.SCAN_SWEEP] == \
+            ["window_open", "freeze_lift"]
 
 
 async def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_set(
@@ -4581,7 +4592,7 @@ async def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set(
     from engine.ops.warmup import WarmupGate
 
     built: dict[str, list] = {}
-    _spy(monkeypatch, "WarmupGate", built)
+    spy(monkeypatch,"WarmupGate", built)
     coverage: list[list[str]] = []
     real_set = WarmupGate.set_symbols
 
@@ -4612,7 +4623,7 @@ async def test_surveillance_ingest_is_wired_to_open_real_positions(
     refresh path (08:20 job, catch-up, early hydration, job_universe's first use) runs it; it only
     fires when the engine passes the real-scoped held-positions reader."""
     built: dict[str, list] = {}
-    _spy(monkeypatch, "SurveillanceIngest", built)
+    spy(monkeypatch,"SurveillanceIngest", built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template,
                                state_db=lambda conn: _positions(conn, real="REALCO", paper=("PAPERCO",))) as c:
         ((_, kw, _),) = built["SurveillanceIngest"]
@@ -4633,7 +4644,7 @@ async def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour(
     fills: list[tuple] = []
 
     async def daily_gap(self, symbols, sessions):
-        fills.append(("daily", list(symbols)))
+        fills.append(("daily", list(symbols), list(sessions)))
         return SimpleNamespace(bars_written=0, skipped_covered=0, failed=[])
 
     async def warmup_gap(self, symbols, frm, to, *, confirm_until):
@@ -4661,6 +4672,7 @@ async def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour(
         e = c.engine
         stores.append(e.store)
         session = e.calendar.session(day)
+        window = e.warmup_gate.daily_window()                          # the gate's own coverage window
         await _spec(e, JOB_UNIVERSE).run()                              # 08:30, before the open
         midday = datetime.combine(day, time(10, 5), tzinfo=IST)
         c.time.set(midday)
@@ -4668,11 +4680,12 @@ async def test_universe_wrapper_repairs_newcomers_daily_history_at_any_hour(
         after_close = datetime.combine(day, time(16, 0), tzinfo=IST)
         c.time.set(after_close)
         await _spec(e, JOB_UNIVERSE).run()
+    assert len(window) > 1
     assert fills == [
-        ("daily", ["PREOPEN"]),
-        ("daily", ["MIDDAY"]),
+        ("daily", ["PREOPEN"], window),
+        ("daily", ["MIDDAY"], window),
         ("minute", ["MIDDAY"], session.open, midday, midday - timedelta(minutes=2)),
-        ("daily", ["AFTERCLOSE"]),
+        ("daily", ["AFTERCLOSE"], window),
         ("minute", ["AFTERCLOSE"], session.open, after_close, session.close),
     ]
 
@@ -4837,7 +4850,7 @@ async def test_nothing_paper_is_built_unless_the_subsystem_is_enabled(
     events: list[str] = []
     built: dict[str, list] = {}
     for name in _PAPER_BUILDERS:
-        _spy(monkeypatch, name, built)
+        spy(monkeypatch,name, built)
     real = {name: getattr(opsmain, name) for name in
             ("_compose_paper", "RecommendationPipeline", "_arm_registry_jobs")}
 
@@ -4901,7 +4914,7 @@ async def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_
     from that same store."""
     built: dict[str, list] = {}
     for name in ("CapitalChanger", "ExposureTracker", "StrategyEdges", "RiskGate", "PaperRuntime"):
-        _spy(monkeypatch, name, built)
+        spy(monkeypatch,name, built)
     bar_at = FIXED_NOW.replace(hour=9, minute=59)
 
     def last_close(store) -> None:

@@ -32,6 +32,19 @@ def test_open_readonly_refuses_a_missing_or_locked_database_file(tmp_path, clock
     assert "mt-engine" in str(exc.value)
 
 
+@pytest.mark.parametrize("script", ["backtest_brk20", "backtest_hi52", "backtest_tdc", "backtest_candles",
+                                    "backtest_fade"])
+def test_every_backtest_cli_refuses_a_missing_db_and_writes_nothing(script, tmp_path, capsys, monkeypatch):
+    spec = importlib.util.spec_from_file_location(f"mt_refusal_{script}", _SCRIPT.parent / f"{script}.py")
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, mod)
+    spec.loader.exec_module(mod)
+    out = tmp_path / "out" / "results.json"
+    assert mod.main(["--db", str(tmp_path / "absent.duckdb"), "--out", str(out)]) == 2
+    assert "REFUSING TO RUN" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_purged_kfold_fallback_honours_purge_and_embargo():
     """The self-implemented fallback keeps train observations clear of every test block."""
     splits = bc._purged_kfold_splits(120, n_folds=6, purge=5, embargo=5)

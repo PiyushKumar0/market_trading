@@ -32,6 +32,7 @@ from engine.core.migrations import apply_migrations
 from engine.core.protected_store import ProtectedStore
 from engine.core.secrets import KITE_API_KEY, REQUIRED_AT_STARTUP, MissingSecretError
 from engine.core.types import OwnerConfirmation
+from engine.intelligence.harness import AgentHarness
 from engine.marketdata.store import MarketStore
 from engine.ops import main as opsmain
 from tests.chaos._lifecycle_rig import MovableTime
@@ -66,6 +67,38 @@ class FakeSecrets:
 
     def missing_required(self) -> list[str]:
         return [k for k in REQUIRED_AT_STARTUP if k not in self.values]
+
+
+class FakeTelegram:
+    """The bot's wiring surface ``compose`` uses (``monkeypatch.setattr(opsmain, "_build_telegram",
+    lambda *_a, **_k: bot)``); keeps the sweep entry point it was handed and every message sent."""
+
+    def __init__(self) -> None:
+        self.scan_sweep_fn = None
+        self.sent: list = []
+
+    def set_paper(self, *_args, **_kwargs) -> None: ...
+    def set_reco_book(self, _book) -> None: ...
+    def set_why_fn(self, _fn) -> None: ...
+
+    def set_scan_sweep_fn(self, fn) -> None:
+        self.scan_sweep_fn = fn
+
+    async def send(self, msg) -> None:
+        self.sent.append(msg)
+
+
+def spy(monkeypatch: Any, name: str, built: dict[str, list], *, build: Callable | None = None) -> None:
+    """Constructor spy on ``opsmain.<name>`` (``compose`` looks it up at call time): records
+    ``(args, kwargs, obj)`` per construction and returns the real object, or ``build``'s."""
+    real = getattr(opsmain, name)
+
+    def construct(*args, **kwargs):
+        obj = (build or real)(*args, **kwargs)
+        built.setdefault(name, []).append((args, kwargs, obj))
+        return obj
+
+    monkeypatch.setattr(opsmain, name, construct)
 
 
 @dataclass
@@ -159,6 +192,16 @@ async def composed_engine(
 
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
 
+    # The composed harness carries the live tree's pinned CLI: a call would spend the owner's login
+    # and quota. Recorded as well as raised: the engine's job and bus wrappers swallow exceptions.
+    reached_llm: list[str] = []
+
+    async def no_llm(self: AgentHarness, agent_def: Any, **_kwargs: Any) -> Any:
+        reached_llm.append(agent_def.agent_id)
+        raise AssertionError("a composed test reached the LLM tier")
+
+    monkeypatch.setattr(AgentHarness, "_run", no_llm)
+
     fake_secrets = FakeSecrets({**({KITE_API_KEY: "test-api-key"} if kite else {}), **(secrets or {})})
     boot_state: dict[str, Any] = {"engine_ready": False, "scheduler": None, "alert": None}
     stop_event = asyncio.Event()
@@ -182,6 +225,7 @@ async def composed_engine(
             stack.push_async_callback(engine.paper.stop)
         yield Composed(engine, time, fake_secrets, boot_state, stop_event, resolved)
         assert resolved == [], f"the composed engine tried to reach the network: {resolved}"
+        assert reached_llm == [], f"a composed test reached the LLM tier: {reached_llm}"
 
 
 async def _cancel(tasks: set[asyncio.Task]) -> None:

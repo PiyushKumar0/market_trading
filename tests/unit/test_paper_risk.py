@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import datetime as dt
-import inspect
 import shutil
 from collections.abc import Callable
 from decimal import Decimal
@@ -18,7 +16,6 @@ from engine.core.contracts import PAPER_ORDER_UPDATE_TOPIC
 from engine.core.enums import Actor, RiskState
 from engine.core.protected_store import ProtectedStore
 from engine.core.types import OwnerConfirmation
-from engine.ops import main as opsmain
 from engine.ops.paper_control import PaperControl
 from engine.ops.paper_risk import PaperRisk, active_halts, paper_effective_state
 from engine.paper.broker import PaperBroker
@@ -28,7 +25,7 @@ from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
-from tests._composition import composed_engine
+from tests._composition import composed_engine, spy
 
 D = dt.date(2026, 6, 17)
 NEXT = dt.date(2026, 6, 18)
@@ -203,21 +200,13 @@ async def test_a_raising_paper_tracker_still_lets_the_real_apply_run(
 async def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    # ``_compose_paper`` runs only under the flag (test_ops_main_wiring pins that).
-    compose = ast.parse(inspect.getsource(opsmain._compose_paper))
-    calls = {ast.unparse(n.func): n for n in ast.walk(compose) if isinstance(n, ast.Call)}
-    guard = next(k.value for k in calls["PaperRuntime"].keywords if k.arg == "order_guard")
-    assert ast.unparse(guard) == "paper_order_guard(control.enabled, paper_effective_state(conn, real_risk_state))"
-    flatten = next(k.value for k in calls["PaperRisk"].keywords if k.arg == "flatten")
-    assert ast.unparse(flatten) == "exits.flatten_all"
-    # The composed engine hands paper the REAL risk state, and its minute equity tick (the real
-    # floor ladder) never touches the paper book: paper risk runs on the paper runtime's own tick.
-    handed: dict = {}
-    real_compose_paper = opsmain._compose_paper
-
-    async def compose_paper(*args, **kwargs):
-        handed.update(kwargs)
-        return await real_compose_paper(*args, **kwargs)
+    # ``_compose_paper`` runs only under the flag (test_ops_main_wiring pins that). The paper order
+    # guard is the owner's paper switch over the paper state derived from the REAL risk state, paper
+    # risk flattens through the paper exits, and the real minute equity tick (the real floor ladder)
+    # never touches the paper book: paper risk runs on the paper runtime's own tick.
+    built: dict[str, list] = {}
+    for name in ("paper_effective_state", "paper_order_guard", "PaperRuntime", "ExitManager", "PaperRisk"):
+        spy(monkeypatch, name, built)
 
     def must_not_persist(*_args, **_kwargs):
         raise AssertionError("the real equity tick reached the paper book")
@@ -225,11 +214,16 @@ async def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick(
     async def must_not_tick(*_args, **_kwargs):
         must_not_persist()
 
-    monkeypatch.setattr(opsmain, "_compose_paper", compose_paper)
     monkeypatch.setattr(PaperRisk, "tick", must_not_tick)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template, paper=True) as c:
         e = c.engine
-        assert handed["real_risk_state"] == e.mode.risk_state
+        ((state_args, _, effective_state),) = built["paper_effective_state"]
+        ((guard_args, _, guard),) = built["paper_order_guard"]
+        assert state_args == (e.conn, e.mode.risk_state)
+        assert guard_args == (e.paper.control.enabled, effective_state)
+        assert built["PaperRuntime"][0][1]["order_guard"] is guard
+        ((_, _, exits),) = built["ExitManager"]
+        assert built["PaperRisk"][0][1]["flatten"] == exits.flatten_all
         monkeypatch.setattr(e.paper.risk.tracker, "persist_snapshot", must_not_persist)
         persisted: list[int] = []
         monkeypatch.setattr(ExposureTracker, "persist_snapshot", lambda self: persisted.append(1))
