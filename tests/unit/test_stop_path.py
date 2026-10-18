@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 import subprocess
 import sys
@@ -174,3 +175,20 @@ def test_install_signal_handlers_defaults_to_os_exit() -> None:
     """The production default force-exit is ``os._exit`` (the injection seam only exists for tests)."""
     sig = inspect.signature(stop_path.install_signal_handlers)
     assert sig.parameters["force_exit"].default is os._exit
+
+
+def test_a_crash_in_run_is_logged_with_its_traceback_before_the_hard_exit(monkeypatch, caplog) -> None:
+    """``hard_exit`` ends the process with ``os._exit``, which skips the interpreter's own traceback print:
+    a crash in ``run()`` must be logged by ``main()`` itself, or a boot crash leaves only ``exit_clean``."""
+    async def crash() -> int:
+        raise RuntimeError("boom at boot")
+
+    codes: list[int] = []
+    monkeypatch.setattr(opsmain, "run", crash)
+    monkeypatch.setattr(opsmain, "hard_exit", codes.append)
+    with caplog.at_level(logging.ERROR, logger="engine.ops.main"):
+        opsmain.main()
+
+    assert codes == [1]
+    (crashed,) = [r for r in caplog.records if r.getMessage() == "engine_crashed"]
+    assert crashed.exc_info is not None and "boom at boot" in str(crashed.exc_info[1])

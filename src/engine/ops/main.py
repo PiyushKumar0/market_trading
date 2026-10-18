@@ -4957,13 +4957,16 @@ def main() -> NoReturn:
     # workers, see hard_exit), so BOTH the normal-return and the KeyboardInterrupt path funnel through the
     # os._exit backstop via `finally` — no path may fall through to a bare return. A raw KeyboardInterrupt
     # escaping asyncio.run (2026-07-21: run() wedged before its own handlers could honour the stop) is
-    # still caught here and mapped to 130.
+    # still caught here and mapped to 130. A crash is logged here: os._exit skips the interpreter's own
+    # traceback print, so without this a boot crash left only `exit_clean` in the log.
     code = 1
     try:
         code = asyncio.run(run())
     except KeyboardInterrupt:
         _log.info("engine_interrupted")
         code = 130
+    except Exception:
+        _log.exception("engine_crashed")
     finally:
         hard_exit(code)
 

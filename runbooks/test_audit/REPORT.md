@@ -88,8 +88,7 @@ behaviour stays in the gate even when it reaches it through a script.
   caught).
 - The scripts' `ruff` findings at `scripts/backfill_filings.py:43` (I001) and `scripts/g2_evidence.py:401` (B007)
   predate the branch; untouched files.
-- Found on the way, outside the decisions (D7 below): `main()` exits through `os._exit` before a crash in `run()`
-  can print — a boot crash leaves exit code 1 and only `exit_clean` in the log, no traceback (pre-existing).
+- Found on the way (D7 below): a boot crash left no traceback — fixed on the owner's request after the merge.
 
 ## Speed table
 
@@ -270,8 +269,9 @@ failing line and the revert are in each ledger row); the Phase 5 review re-injec
   live-tree-only check. (It now lives in `tests/offline`.)
 - **A boot crash leaves no traceback** (found by the production review, pre-existing): `main()` runs
   `code = asyncio.run(run())` inside `try … finally: hard_exit(code)`, and `os._exit` fires before an exception
-  raised in `run()` can print — the log shows `exit_clean` and the process exits 1. An `except Exception:
-  _log.exception("engine_crashed")` before the `finally` would name the cause. Not changed: outside the decisions.
+  raised in `run()` can print — the log showed `exit_clean` and the process exited 1. **Fixed (2026-10-19, owner's
+  request):** `main()` now logs `engine_crashed` with the traceback before the `finally`;
+  `test_stop_path.py::test_a_crash_in_run_is_logged_with_its_traceback_before_the_hard_exit` fails on the old code.
 
 ## Verification (Phase 5)
 

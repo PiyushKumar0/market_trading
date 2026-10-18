@@ -1,5 +1,12 @@
 # WORKLOG — autonomous operations log
 
+## 2026-10-19 00:10 — A boot crash now logs its traceback (owner: "Fix the issue of boot crash leaving no traceback")
+
+- `engine.ops.main.main()`: `except Exception: _log.exception("engine_crashed")` before the `finally: hard_exit(code)`;
+  `os._exit` had skipped the interpreter's traceback print, so a crash in `run()` left only `exit_clean` (REPORT D7).
+  Exit code stays 1. New test in `tests/unit/test_stop_path.py`; it fails on the old code. Takes effect at the next
+  mt-engine restart (still running the pre-merge code).
+
 ## 2026-10-18 23:42 — `wip/test-audit` merged into phase3 (owner: "merge changes to phase3")
 
 - Fast-forward 3e6b811 → f9b9c0c (no merge commit; nothing pushed). The live tree imports the merged engine
