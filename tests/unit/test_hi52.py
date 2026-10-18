@@ -88,6 +88,11 @@ def test_parked_above_the_band_does_not_refire():
     assert scan_daily("ALPHA", rows, today=TODAY, params=SMALL_P) is None
 
 
+def test_a_close_just_below_the_0_95_band_does_not_fire_and_one_at_it_does():
+    assert scan_daily("ALPHA", _fresh_cross_rows(close_y=94.99), today=TODAY, params=SMALL_P) is None
+    assert scan_daily("ALPHA", _fresh_cross_rows(close_y=95.0), today=TODAY, params=SMALL_P) is not None
+
+
 # ============================================================ 3. min_sessions gate (literal default)
 def test_min_sessions_gate_on_the_envelope_default():
     assert hi52.DEFAULT_PARAMS["min_sessions"] == 126

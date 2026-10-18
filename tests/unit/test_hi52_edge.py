@@ -10,14 +10,6 @@ from engine.risk.limits import LimitTable
 from engine.strategy import hi52_edge as he
 from engine.strategy.scanners import hi52
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "hi52_forward_verdict.py"
-_spec = importlib.util.spec_from_file_location("mt_hi52_forward_verdict", _SCRIPT)
-fv = importlib.util.module_from_spec(_spec)
-sys.modules["mt_hi52_forward_verdict"] = fv
-_spec.loader.exec_module(fv)
-
-_LIMITS = config_dir() / "limits.yaml"
-
 
 def _table(base):
     raw = load_yaml(config_dir() / "limits.yaml")
@@ -78,13 +70,20 @@ def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
 
     from engine.core.config import load_settings
 
+    script = Path(__file__).resolve().parents[2] / "scripts" / "hi52_forward_verdict.py"
+    spec = importlib.util.spec_from_file_location("mt_hi52_forward_verdict", script)
+    fv = importlib.util.module_from_spec(spec)
+    sys.modules["mt_hi52_forward_verdict"] = fv
+    spec.loader.exec_module(fv)
+    limits = config_dir() / "limits.yaml"
+
     # Pinned at the REGISTRATION inputs (base 40,000), not the live file: the runtime cap
     # (`engine.strategy.hi52_edge.StrategyEdges`) now carries the live-limits guard (O19), so a
     # capital change must not break this pin.
     pinned = tmp_path / "limits.yaml"
     pinned.write_text(
         re.sub(r"^capital_base_inr:.*$", "capital_base_inr: 40000",
-               _LIMITS.read_text(encoding="utf-8"), flags=re.M),
+               limits.read_text(encoding="utf-8"), flags=re.M),
         encoding="utf-8",
     )
     derived = fv.registered_edge_pct(limits_path=pinned)
