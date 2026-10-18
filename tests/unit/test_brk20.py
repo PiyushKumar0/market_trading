@@ -45,7 +45,7 @@ def _gapped(rows: list[DailyRow], gap_pct: float) -> list[DailyRow]:
     hand-computable. ``rows[0].open`` is untouched: it is only ever a pair's ``prev``, and a
     ``prev`` contributes its CLOSE."""
     out = [rows[0]]
-    for prev, cur in zip(rows, rows[1:]):
+    for prev, cur in zip(rows, rows[1:], strict=False):
         out.append(cur._replace(open=prev.close * (1.0 + gap_pct / 100.0)))
     return out
 

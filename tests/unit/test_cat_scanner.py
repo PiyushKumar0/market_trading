@@ -324,6 +324,7 @@ def test_shipped_cat_subcap_matches_catalyst_guard():
     2026-08-18 review: the coupling had no regression net; a drift would let one file's cap bind
     while the other's documentation lies. This is that net."""
     import yaml
+
     from engine.core.config import config_dir, load_settings
 
     settings_cat = load_settings().strategy.prescreen.max_per_strategy_day["cat"]

@@ -202,12 +202,12 @@ def test_smoothness_diagnostics_present_and_correctly_computed():
     for i in range(20):
         closes.append(closes[-1] + (5.0 if i % 2 == 0 else -2.0))
     highs = [c + 1.0 for c in closes]     # keep high strictly above close everywhere
-    rows = [DailyRow(high=h, close=c, volume=1000.0, open=c) for h, c in zip(highs, closes)]
+    rows = [DailyRow(high=h, close=c, volume=1000.0, open=c) for h, c in zip(highs, closes, strict=True)]
 
     diag = diagnostics_for(rows, params={"lookback_sessions": 21})
     assert diag is not None
 
-    pairs = list(zip(closes, closes[1:]))
+    pairs = list(zip(closes, closes[1:], strict=False))
     expected_up_frac = round(sum(1 for prev, cur in pairs if cur > prev) / len(pairs), 2)
     expected_max_move = round(max(abs(cur / prev - 1.0) for prev, cur in pairs), 4)
     expected_hi = max(highs)

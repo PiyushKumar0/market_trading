@@ -153,7 +153,7 @@ class Normalizer(ast.NodeTransformer):
         if self.rename is None or ident not in self.bound:
             return ident
         if ident not in self.rename:
-            self.rename[ident] = "v%d" % self.counter
+            self.rename[ident] = f"v{self.counter}"
             self.counter += 1
         return self.rename[ident]
 
@@ -220,7 +220,7 @@ def analyse(fn, classes, tree, lines, slugs, pm_module):
     if args.kwarg:
         params.append(args.kwarg.arg)
     fixtures = [p for p in params if p != "self"]
-    raises = mp = 0
+    raises = 0
     mps = []
     getsrc = 0
     caplog = 1 if "caplog" in params else 0
@@ -233,7 +233,7 @@ def analyse(fn, classes, tree, lines, slugs, pm_module):
             if (isinstance(f, ast.Attribute) and f.attr in MP_METHODS
                     and isinstance(f.value, ast.Name) and f.value.id == "monkeypatch"):
                 first = ast.unparse(n.args[0]) if n.args else ""
-                mps.append("%s:%s" % (f.attr, first))
+                mps.append(f"{f.attr}:{first}")
         if isinstance(n, ast.Attribute) and n.attr == "getsource":
             getsrc = 1
         if isinstance(n, ast.Name):
@@ -283,7 +283,7 @@ def tier(file, stem, text):
 
 
 def fmt(v):
-    return "" if v is None else ("%.4f" % v).rstrip("0").rstrip(".") if isinstance(v, float) else v
+    return "" if v is None else f"{v:.4f}".rstrip("0").rstrip(".") if isinstance(v, float) else v
 
 
 def main():
@@ -298,8 +298,8 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    nodeids = [l.strip() for l in Path(a.nodeids).read_text(encoding="utf-8").splitlines()
-               if l.strip()]
+    nodeids = [ln.strip() for ln in Path(a.nodeids).read_text(encoding="utf-8").splitlines()
+               if ln.strip()]
     known = set(nodeids)
     keymap = defaultdict(list)
     for n in nodeids:
@@ -330,7 +330,7 @@ def main():
                 lines = re.split(r"\r\n|\r|\n", src)
                 parsed[f] = (tree, lines, module_pytestmark(tree))
             except (OSError, SyntaxError, UnicodeDecodeError) as e:
-                parse_errors[f] = "%s: %s" % (type(e).__name__, e)
+                parse_errors[f] = f"{type(e).__name__}: {e}"
                 parsed[f] = None
         return parsed[f]
 
@@ -370,7 +370,7 @@ def main():
         times = [j[n][0] for j in junits if n in j]
         row["dur_total_s"] = fmt(statistics.median(times)) if times else ""
         for ph in ("setup", "call", "teardown"):
-            row["dur_%s_s" % ph] = fmt(statistics.median([d.get((n, ph), 0.0) for d in durs]))
+            row[f"dur_{ph}_s"] = fmt(statistics.median([d.get((n, ph), 0.0) for d in durs]))
         row["outcome"] = junits[0][n][1] if n in junits[0] else ""
         rows.append(row)
 
@@ -399,11 +399,11 @@ def main():
         return (-len(ms), ms[0]["file"], ms[0]["line"])
 
     def render(title, groups):
-        o = ["== %s: %d groups ==" % (title, len(groups)), ""]
+        o = [f"== {title}: {len(groups)} groups ==", ""]
         for h, m in sorted(groups, key=key):
-            o.append("%s  members=%d" % (h, len(m)))
+            o.append(f"{h}  members={len(m)}")
             for r in sorted(m, key=lambda r: (r["file"], r["line"])):
-                o.append("  %s:%s %s" % (r["file"], r["line"], r["function"].split("::", 1)[1]))
+                o.append(f"  {r['file']}:{r['line']} {r['function'].split('::', 1)[1]}")
             o.append("")
         return o
 
@@ -412,28 +412,28 @@ def main():
     (out / "shape_groups.txt").write_text("\n".join(lines_out), encoding="utf-8")
 
     # ---- summary
-    print("rows written: %d (nodeids in input: %d)" % (len(rows), len(nodeids)))
-    print("unmapped to a function definition: %d" % len(unmapped))
+    print(f"rows written: {len(rows)} (nodeids in input: {len(nodeids)})")
+    print(f"unmapped to a function definition: {len(unmapped)}")
     for n in unmapped:
         print("  " + n)
-    print("files that failed to read/parse: %d" % len(parse_errors))
+    print(f"files that failed to read/parse: {len(parse_errors)}")
     for f, e in parse_errors.items():
-        print("  %s -> %s" % (f, e))
-    for p, j in zip(a.junit, junits):
+        print(f"  {f} -> {e}")
+    for p, j in zip(a.junit, junits, strict=True):
         miss = [n for n in nodeids if n not in j]
-        print("missing from %s: %d" % (p, len(miss)))
+        print(f"missing from {p}: {len(miss)}")
         for n in miss:
             print("  " + n)
     cnt = defaultdict(int)
     for r in rows:
         cnt[r["tier_guess"]] += 1
-    print("tier_guess counts: " + ", ".join("%s=%d" % kv for kv in sorted(cnt.items())))
-    print("shape groups: strict=%d loose-only=%d" % (len(s_groups), len(l_groups)))
+    print("tier_guess counts: " + ", ".join(f"{k}={v}" for k, v in sorted(cnt.items())))
+    print(f"shape groups: strict={len(s_groups)} loose-only={len(l_groups)}")
     print("30 slowest by dur_total_s:")
     timed = [r for r in rows if r["dur_total_s"] != ""]
     for r in sorted(timed, key=lambda r: -float(r["dur_total_s"]))[:30]:
-        print("  %8s  %s" % (r["dur_total_s"], r["nodeid"]))
-    print("runtime: %.2fs" % (time.time() - t0))
+        print(f"  {r['dur_total_s']:>8}  {r['nodeid']}")
+    print(f"runtime: {time.time() - t0:.2f}s")
 
 
 if __name__ == "__main__":
