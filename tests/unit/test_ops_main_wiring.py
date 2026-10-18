@@ -405,7 +405,7 @@ def test_missing_job_fn_is_a_loud_wiring_error() -> None:
 
 @pytest.mark.asyncio
 async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
-    market_store, clock, calendar, conn, monkeypatch
+    market_store, clock, calendar, conn, instant_backoff
 ) -> None:
     """Composition-root regression (2026-08-13): ``engine.ops.main``'s ``job_bhavcopy`` closure
     (``engine.ops.main.job_bhavcopy``) MUST forward ``BhavcopyJob.run()``'s return value to ``spec.run`` — the
@@ -419,11 +419,6 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
     ``job_bhavcopy`` closure compiled from ``engine.ops.main:run``'s own source (``_real_wrapper``),
     registered via the real ``build_job_registry``, driven through the real ``_scheduled_runner`` —
     pinning the exact seam that let the closure silently swallow the result."""
-    async def _instant(_delay: float) -> None:
-        return None
-
-    monkeypatch.setattr("engine.core.nse_http._sleep", _instant)  # no retry backoff wait
-
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("nse unreachable", request=request)
 

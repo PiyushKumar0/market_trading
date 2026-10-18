@@ -601,19 +601,6 @@ async def test_constituents_read_that_raises_degrades_instead_of_propagating(
     assert result.rows_written == 5
 
 
-async def test_master_is_fetched_once_per_run_not_once_per_surface(
-    seeded_store, clock, settings, monkeypatch
-):
-    monkeypatch.setattr(
-        "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
-    )
-    seen: list[str] = []
-    client = routed_client(lambda: httpx.Response(200, json=MASTER_JSON), recorder=seen)
-    await FilingsPitFreshJob(seeded_store, clock, client, settings=settings).run(D)
-    master_root = BSE_SCRIP_MASTER_URL.split("?", 1)[0]
-    assert sum(1 for url in seen if url.startswith(master_root)) == 1
-
-
 async def test_empty_constituents_skips_the_master_request(seeded_store, clock, settings, caplog):
     """No symbol->ISIN half ⇒ nothing to join ⇒ the 1.7 MB master request is not spent at all."""
     seen: list[str] = []

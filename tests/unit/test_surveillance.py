@@ -26,14 +26,10 @@ NSE_HOMEPAGE = "https://www.nseindia.com/"
 
 
 @pytest.fixture(autouse=True)
-def _no_backoff_wait(monkeypatch):
+def _no_backoff_wait(instant_backoff):
     """A3/A4: nse_get retries transient failures with backoff — collapse the sleep so the reuse-yesterday
     (failing-source) tests don't actually wait. Backoff semantics are covered in test_nse_http.py."""
 
-    async def _instant(_delay):
-        return None
-
-    monkeypatch.setattr("engine.core.nse_http._sleep", _instant)
 
 # EQUITY_L-style securities master: header cells carry stray spaces (defensive lookup), BE/BZ = T2T.
 T2T_CSV = (

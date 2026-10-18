@@ -42,15 +42,10 @@ BLOCK_DEALS_JSON = json.loads((FIXTURES / "block_deals.json").read_text(encoding
 
 
 @pytest.fixture(autouse=True)
-def _no_backoff_wait(monkeypatch):
+def _no_backoff_wait(instant_backoff):
     """A3/A4: the feeds now fetch through nse_get, which retries transient failures with exponential
     backoff. Collapse the sleep so the degrade-path tests (failing clients) don't actually wait — the
     retry/backoff schedule itself is asserted in test_nse_http.py."""
-
-    async def _instant(_delay):
-        return None
-
-    monkeypatch.setattr("engine.core.nse_http._sleep", _instant)
 
 
 @pytest.fixture
@@ -149,23 +144,25 @@ async def test_bhavcopy_alert_rearms_after_success(store, clock):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("BhavCopy_NSE_CM_0_0_0_20260617_F_0000.csv", BHAVCOPY_CSV)
-    calls = {"n": 0}
+    up = {"now": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        if calls["n"] == 1:
+        if up["now"]:
             return httpx.Response(200, content=buf.getvalue())
-        raise httpx.ConnectError("nse unreachable", request=request)   # every attempt after the first
+        raise httpx.ConnectError("nse unreachable", request=request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     job = BhavcopyJob(store, clock, client, notify=sink)
 
-    ok_result = await job.run(D)
-    assert ok_result.ok is True
-    fail_result = await job.run(D)                        # same date, now failing
-    assert fail_result.ok is False
-    assert len(msgs) == 1                                 # the success discarded the dedup entry
-    assert msgs[0].data["d"] == D.isoformat()
+    assert (await job.run(D)).ok is False                 # a failing streak opens: one alert
+    assert (await job.run(D)).ok is False                 # ...a repeat inside it is deduped
+    assert len(msgs) == 1
+    up["now"] = True
+    assert (await job.run(D)).ok is True                  # the success discards the dedup entry
+    up["now"] = False
+    assert (await job.run(D)).ok is False                 # a fresh streak for the same date...
+    assert len(msgs) == 2                                 # ...alerts again
+    assert msgs[1].data["d"] == D.isoformat()
 
 
 # =========================================================================== corp actions (job 7)

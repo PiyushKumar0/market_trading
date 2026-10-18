@@ -305,6 +305,23 @@ async def test_slm_sell_triggers_at_or_below_the_stop_without_a_gap(
     assert "gap" not in filled["status_message"]
 
 
+async def test_slm_sell_triggers_on_a_touch_of_the_stop(
+    broker: PaperBroker, bus: _Bus, now: _Now
+) -> None:
+    """The SELL half of "a stop triggers on touch" (the BUY half is the next test): a print exactly AT a
+    long's protective stop fires it — with ``<`` for ``<=`` the stop would not protect at its own price."""
+    now.set(at(10, 0, 0))
+    oid = await broker.place_order(
+        order(order_type="SL-M", transaction_type="SELL", trigger_price=Decimal("95.00"))
+    )
+    bus.clear()
+    broker.on_tick(tick(at(10, 0, 1), "100.00"))
+    broker.on_tick(tick(at(10, 0, 2), "95.05"))
+    assert bus.frames == []
+    broker.on_tick(tick(at(10, 0, 3), "95.00"))         # at the trigger: a stop triggers on touch
+    assert bus.for_order(oid)[-1]["status"] == "COMPLETE"
+
+
 async def test_slm_buy_triggers_at_or_above_the_stop(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:

@@ -645,14 +645,18 @@ def test_shrink_bound_by_max_leverage(gate: RiskGate) -> None:
 
 def test_shrink_to_sub_viable_size_rejects_mis(gate: RiskGate) -> None:
     """R1/C3: shrink-then-recheck ends in REJECT when the shrunk size no longer clears costs."""
+    # O16 2026-09-07: base 40000 — 39900 keeps the pre-O16 Rs100 of headroom (it was 19900 under the old
+    # 20000 cap), so the capital cap shrinks the ask to 1 unit and min_viable_size re-runs at that size.
     verdict = gate.evaluate(
         make_action(target_price=Decimal("100.10")),
-        make_ctx(deployed_capital=Decimal("19900")),
+        make_ctx(deployed_capital=Decimal("39900")),
     )
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
+    assert check_of(verdict, "capital_cap").passed is False
     assert check_of(verdict, "min_viable_size").passed is False
     assert check_of(verdict, "min_viable_size").value.startswith("edge ")
+    assert "@ qty 1 " in check_of(verdict, "min_viable_size").value      # re-checked at the SHRUNK size
 
 
 def test_shrink_to_sub_viable_size_rejects_cnc(gate: RiskGate) -> None:
@@ -841,11 +845,13 @@ def test_zero_headroom_rejects_without_shrinking(gate: RiskGate) -> None:
 
 def test_hard_failure_beats_shrink(gate: RiskGate) -> None:
     """Verdict precedence: a non-shrinkable breach forces reject even when a shrink would fit."""
+    # O16 2026-09-07: base 40000 — 39900 leaves Rs100 of headroom, so a capital-cap shrink is pending.
     verdict = gate.evaluate(
-        make_action(), make_ctx(deployed_capital=Decimal("19900"), killed=True)
+        make_action(), make_ctx(deployed_capital=Decimal("39900"), killed=True)
     )
     assert verdict.verdict == "reject"
-    assert check_of(verdict, "kill_state").passed is False
+    assert check_of(verdict, "capital_cap").passed is False     # a shrink was on the table...
+    assert check_of(verdict, "kill_state").passed is False      # ...and the hard breach still wins
 
 
 def test_unpriceable_market_order_rejects(gate: RiskGate) -> None:

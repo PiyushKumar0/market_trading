@@ -506,7 +506,7 @@ def test_stoplisted_alias_is_filtered_on_load_not_only_at_seed(store, clock):
     venue = _cluster("Silverstorm Parks & Resorts IPO set for BSE SME debut", "t-venue")
     assert r.resolve(venue).symbols == []                 # stoplisted ⇒ never a venue false-positive
     real = _cluster("Swiggy contra view: brokerage downgrades the stock", "t-real")
-    assert "SWIGGY" in {s for u in [r.resolve(real)] for s in u.symbols} or r.resolve(real).symbols
+    assert "SWIGGY" in r.resolve(real).symbols          # the non-stoplisted alias still matches its own symbol
 
 
 def test_curated_aliases_seed_and_resolve(store, clock):

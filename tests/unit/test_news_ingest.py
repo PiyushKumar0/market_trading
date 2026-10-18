@@ -314,21 +314,21 @@ async def test_live_blog_page_titles_are_dropped_at_ingest(store, clock):
     Updates: ..." ticker-page titles are not news — dropped before dedupe/persist so they can never
     reach the clusterer or burn scorer budget. Real headlines pass untouched."""
     cfg = NewsCfg()
-    assert any("share price live updates" in p for p in cfg.drop_title_patterns)
-    ingest, client = _make_ingest(store, clock)
+    xml = b"""<?xml version="1.0"?><rss><channel>
+      <item><title>Tata Steel Share Price Live Updates: Tata Steel Shows Strong Momentum</title>
+        <link>https://economictimes.indiatimes.com/markets/tata-steel-live.cms</link>
+        <pubDate>Wed, 17 Jun 2026 03:30:00 GMT</pubDate></item>
+      <item><title>Tata Steel Q1 Results: Profit rises 15% to Rs 2,318 crore</title>
+        <link>https://economictimes.indiatimes.com/markets/tata-steel-q1.cms</link>
+        <pubDate>Wed, 17 Jun 2026 03:31:00 GMT</pubDate></item>
+    </channel></rss>"""
+    overrides = {cfg.feeds.rss["et"].url: httpx.Response(200, content=xml)}
+    ingest, client = _make_ingest(store, clock, overrides=overrides)
     async with client:
-        got = await ingest.poll()
-    assert got                                                       # fixture headlines all pass today
-    ingest2, client2 = _make_ingest(store, clock)
-    # Monkeypatch-free check of the filter itself: feed a synthetic batch through the same code path
-    # by asserting the pattern semantics on titles that WOULD arrive from ET live-blog pages.
-    dropped_title = "Tata Steel Share Price Live Updates: Tata Steel Shows Strong Momentum"
-    kept_title = "Tata Steel Q1 Results: Profit rises 15% to Rs 2,318 crore"
-    patterns = [p.lower() for p in cfg.drop_title_patterns]
-    assert any(p in dropped_title.lower() for p in patterns)
-    assert not any(p in kept_title.lower() for p in patterns)
-    async with client2:
-        pass
+        got = await ingest.poll(feeds=("et",))
+    assert [h.title for h in got] == ["Tata Steel Q1 Results: Profit rises 15% to Rs 2,318 crore"]
+    stored = {r["url"] for r in store.get_news(unclustered_only=True)}
+    assert stored == {"https://economictimes.indiatimes.com/markets/tata-steel-q1.cms"}    # never persisted
 
 
 # --------------------------------------------------------------------------- NSE announcements (nse_ann)

@@ -859,7 +859,9 @@ async def test_a_connect_seq_change_publishes_feed_health_exactly_once(clock, mo
     snapshot ticks land within ~50 ms of the child's re-subscribe, so the burst flaps BarBuilder's lag
     episode before the grace can arm. `connect_seq` rides a heartbeat emitted inside `_on_connect`
     itself, ahead of the subscribe — in-band and ordering-safe. Here: the first value seen is this
-    spawn's baseline, the repeat is steady state, and the bump is the reconnect."""
+    spawn's baseline, the repeat is steady state, and the bump is the reconnect. Every heartbeat carries
+    ``ws_connected=True``, so this is also gap (b): a sub-second drop (or an ``on_error`` path with no
+    ``on_close``) never produces a ``ws_connected=False`` heartbeat, and the seq bump alone must fire."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -889,24 +891,6 @@ async def test_a_connect_seq_change_publishes_feed_health_exactly_once(clock, mo
     reconnects = [kw for (_lvl, ev, kw) in rec.calls if ev == "ticker_ws_reconnected"]
     assert len(reconnects) == 1
     assert reconnects[0]["seq"] == 2 and reconnects[0]["via"] == "connect_seq"
-
-
-@pytest.mark.asyncio
-async def test_a_connect_seq_change_fires_even_with_no_ws_connected_edge(clock):
-    """Gap (b): a sub-second drop (or an `on_error` path with no `on_close`) never produces a
-    `ws_connected=False` heartbeat, so the False->True edge sees nothing at all. `connect_seq` is
-    bumped by `_on_connect` regardless of how the drop was reported, so it still fires."""
-    bus = EventBus()
-    states = _health_sink(bus)
-    sup = TickerSupervisor(_FakeSettings(), clock, bus)
-    sup._state = "HEALTHY"
-
-    await sup._handle_frame(_hb(True, connect_seq=4))   # baseline; ws_connected never goes False
-    await sup._handle_frame(_hb(True, connect_seq=5))   # reconnect visible ONLY in the seq
-    for _ in range(10):
-        await asyncio.sleep(0)
-
-    assert states == ["HEALTHY"]
 
 
 @pytest.mark.asyncio

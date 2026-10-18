@@ -459,13 +459,6 @@ def test_one_missing_day_is_not_enough(conn) -> None:
     assert set(positions_missing_from_holdings(conn, TODAY)) == set()
 
 
-def test_two_consecutive_missing_days_qualify(conn) -> None:
-    _observe(conn, "pos-m2", YESTERDAY, tracked=7, held=0)
-    _observe(conn, "pos-m2", TODAY, tracked=7, held=0)
-
-    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-m2"}
-
-
 def test_a_partial_holding_counts_as_short(conn) -> None:
     """Held 3 of 7 on both days: the tracked quantity is already fiction, and the day plan states
     the quantity the broker actually showed rather than assuming zero."""
@@ -518,7 +511,12 @@ def test_future_dated_observations_are_ignored(conn) -> None:
 
 def test_a_position_with_no_observations_is_never_missing(conn) -> None:
     """The load-bearing asymmetry: no evidence => the platform keeps managing the position."""
-    assert set(positions_missing_from_holdings(conn, TODAY)) == set()
+    _position(conn, "pos-unseen", "INFY", 7)                      # open and tracked, never observed
+    _position(conn, "pos-gone", "TCS", 7)
+    _observe(conn, "pos-gone", YESTERDAY, tracked=7, held=0)
+    _observe(conn, "pos-gone", TODAY, tracked=7, held=0)
+
+    assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-gone"}
 
 
 def test_zero_sessions_cannot_silence_everything(conn) -> None:

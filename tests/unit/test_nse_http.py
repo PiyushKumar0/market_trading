@@ -50,7 +50,10 @@ def recording_sleep(monkeypatch):
 
 # --------------------------------------------------------------------------- (a) priming once
 async def test_www_api_primes_homepage_once_across_two_calls():
+    received: list[httpx.Headers] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        received.append(request.headers)
         if request.url.path == "/":
             return httpx.Response(200)                      # homepage mints cookies
         return httpx.Response(200, json={"ok": True})
@@ -63,9 +66,11 @@ async def test_www_api_primes_homepage_once_across_two_calls():
     assert r1.status_code == 200 and r2.status_code == 200
     # Homepage fetched exactly once, BEFORE the first api GET; the second call skips priming.
     assert seen == [HOMEPAGE, WWW_API, WWW_API]
-    # The browser UA + Referer from NSE_HEADERS are applied on the fetch (single-source headers).
-    assert nse_http.NSE_HEADERS["Referer"] == HOMEPAGE
+    # The browser UA + Referer from NSE_HEADERS ride on every request (single-source headers).
     assert nse_http.NSE_HEADERS["User-Agent"].startswith("Mozilla/5.0")
+    assert len(received) == 3
+    assert all(h["user-agent"] == nse_http.NSE_HEADERS["User-Agent"] for h in received)
+    assert all(h["referer"] == HOMEPAGE for h in received)
 
 
 # --------------------------------------------------------------------------- (b) anti-bot 4xx

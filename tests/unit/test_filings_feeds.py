@@ -91,17 +91,9 @@ CONSTITUENTS_CSV = (
 
 
 @pytest.fixture(autouse=True)
-def _no_waits(monkeypatch):
-    """Collapse every backoff/pacing sleep so degrade-path + BSE-spacing tests never actually wait."""
-
-    async def _instant(_delay):
-        return None
-
-    monkeypatch.setattr("engine.core.nse_http._sleep", _instant)
-    monkeypatch.setattr("engine.core.bse_http._sleep", _instant)
-    monkeypatch.setattr("engine.datafeeds.filings_pit._sleep", _instant)
-    monkeypatch.setattr("engine.datafeeds.filings_results._sleep", _instant)
-    monkeypatch.setattr("engine.datafeeds.filings_shp._sleep", _instant)
+def _no_waits(instant_backoff):
+    """Collapse every backoff/pacing sleep so degrade-path + BSE-spacing tests never actually wait (the shared
+    ``instant_backoff`` fixture covers all five ``_sleep`` seams)."""
 
 
 @pytest.fixture

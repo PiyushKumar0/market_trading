@@ -220,13 +220,17 @@ async def test_real_rows_change_no_paper_output(conn, clock) -> None:
     assert before["tracker"][:4] == (Decimal("-320"), Decimal("-320"), 4, Decimal("19000"))
 
 
-@pytest.mark.parametrize("rung", ["KILLED", "not-a-state"])
-async def test_paper_risk_state_takes_the_worst_halt_and_fails_closed(conn, clock, rung) -> None:
+@pytest.mark.parametrize(
+    ("rung", "expected"),
+    [("KILLED", RiskState.KILLED), ("not-a-state", RiskState.KILLED), ("FROZEN", RiskState.FROZEN)],
+    ids=["KILLED", "not-a-state", "FROZEN-cleared-KILLED-ignored"],
+)
+async def test_paper_risk_state_takes_the_worst_halt_and_fails_closed(conn, clock, rung, expected) -> None:
     _insert(conn, "paper_halts", cause="x", rung=rung, set_at=_at("09:16"))
     _insert(conn, "paper_halts", cause="cleared", rung="KILLED", set_at=_at("09:00"), cleared_at=_at("09:05"))
     tracker = ExposureTracker(conn, clock, CAPITAL, scope="paper")
     ctx = await _builder(conn, clock, tracker, "paper").build(SYMBOL, "BUY", "swing", TODAY)
-    assert ctx.risk_state is RiskState.KILLED
+    assert ctx.risk_state is expected
 
 
 async def test_the_paper_tracker_never_applies_a_halt(conn, clock) -> None:
