@@ -35,31 +35,13 @@ class _FakeMonotonic:
 
 
 @pytest.mark.asyncio
-async def test_stop_handler_first_requests_second_forces() -> None:
+@pytest.mark.parametrize("args", [(), (2, None)], ids=["zero-arg", "signal-args"])
+async def test_stop_handler_first_requests_second_forces(args: tuple) -> None:
     """First call sets the stop event and does NOT force-exit; a second call AFTER the repeat-grace
     window calls force_exit(130) exactly once. Uses a stubbed ``force_exit`` (records the code) so no
-    real signal / process exit occurs."""
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
-    codes: list[int] = []
-    mono = _FakeMonotonic()
-    handler = opsmain._make_stop_handler(loop, stop_event, force_exit=codes.append, monotonic=mono)
+    real signal / process exit occurs.
 
-    # FIRST signal — graceful: wakes the event (via call_soon_threadsafe), no force-exit.
-    handler()
-    assert codes == []
-    await asyncio.sleep(0)                       # drain the loop so call_soon_threadsafe lands
-    assert stop_event.is_set() is True
-
-    # SECOND signal past the grace window — hard exit exactly once, with code 130.
-    mono.t += opsmain._REPEAT_SIGNAL_GRACE_S + 0.1
-    handler()
-    assert codes == [130]
-
-
-@pytest.mark.asyncio
-async def test_stop_handler_never_raises_and_accepts_signal_args() -> None:
-    """The handler serves BOTH the zero-arg add_signal_handler callback and the (signum, frame)
+    The handler serves BOTH the zero-arg add_signal_handler callback and the (signum, frame)
     signal.signal fallback, and never raises (a raising signal handler would surface at a random await)."""
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -67,11 +49,15 @@ async def test_stop_handler_never_raises_and_accepts_signal_args() -> None:
     mono = _FakeMonotonic()
     handler = opsmain._make_stop_handler(loop, stop_event, force_exit=codes.append, monotonic=mono)
 
-    handler(2, None)                            # (signum, frame) shape — first press
-    await asyncio.sleep(0)
+    # FIRST signal — graceful: wakes the event (via call_soon_threadsafe), no force-exit.
+    handler(*args)
+    assert codes == []
+    await asyncio.sleep(0)                       # drain the loop so call_soon_threadsafe lands
     assert stop_event.is_set() is True and codes == []
+
+    # SECOND signal past the grace window — hard exit exactly once, with code 130.
     mono.t += opsmain._REPEAT_SIGNAL_GRACE_S + 0.1
-    handler(2, None)                            # second press past the grace window forces
+    handler(*args)
     assert codes == [130]
 
 

@@ -454,41 +454,25 @@ async def test_lifecycle_freezes_when_a_not_ready_gate_renders_no_blocker(conn, 
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_does_not_freeze_on_intraday_only_shortfall(conn, clock, temp_config, monkeypatch):
+@pytest.mark.parametrize(
+    ("blocker", "cls", "note", "body_line"),
+    [
+        ("orb:COROMANDEL bars 113/114", "intraday", "warmup_intraday_not_ready",
+         "warm-up short: intraday (orb:COROMANDEL bars 113/114)"),
+        ("rsi2/trend/mom:OLAELEC daily bars 193/200", "daily", "warmup_daily_not_ready",
+         "warm-up short: daily (rsi2/trend/mom:OLAELEC daily bars 193/200)"),
+    ],
+    ids=["intraday", "daily"],
+)
+async def test_lifecycle_does_not_freeze_on_a_single_class_shortfall(
+    conn, clock, temp_config, monkeypatch, blocker: str, cls: str, note: str, body_line: str
+):
     """2026-09-13 plan change: one symbol's minute hole (09-04 11:09 COROMANDEL) or a market-wide
     one-bar hole after a reconnect (09-09 14:47) no longer freezes the daily-bar legs. Visible, not
     silent: no WARMUP_FROZEN page (nothing froze), so the OWNER-FACING notice is the STARTUP_REPORT
-    body itself — `frozen: none` with no coverage line is the silence this whole branch creates."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    sent = []
+    body itself — `frozen: none` with no coverage line is the silence this whole branch creates.
 
-    async def notify(msg):
-        sent.append(msg)
-
-    mode, _kill, store, lifecycle = _build(conn, clock, temp_config, notify=notify)
-    store.register_initial("limits.yaml", OWNER_OK)
-    store.register_initial("envelope.yaml", OWNER_OK)
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["orb:COROMANDEL bars 113/114"])
-
-    report = await lifecycle.startup(check_skew=False)
-    assert report.frozen_reasons == []
-    assert mode.risk_state() == RiskState.NORMAL
-    assert report.warmup_blockers == ["orb:COROMANDEL bars 113/114"]
-    assert report.warmup_classes_short == ["intraday"]
-    assert "warmup_intraday_not_ready" in report.notes
-    assert not any(str(m.kind) == "warmup_frozen" for m in sent)
-
-    # The owner's boot message NAMES the class and the blocker behind it — this is the only
-    # Telegram message this state produces, so it may not read as a clean boot.
-    startup = next(m for m in sent if str(m.kind) == "startup_report")
-    assert "warm-up short: intraday (orb:COROMANDEL bars 113/114)" in startup.body
-    assert "frozen: none" in startup.body
-    assert startup.data["warmup_classes_short"] == ["intraday"]
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_does_not_freeze_on_daily_only_shortfall(conn, clock, temp_config, monkeypatch):
-    """2026-09-17 plan change: DAILY stopped being a freezing class. On 2026-09-15 ONE symbol short
+    2026-09-17 plan change: DAILY stopped being a freezing class. On 2026-09-15 ONE symbol short
     of the 200-session lookback (``rsi2/trend/mom:OLAELEC daily bars 193/200``) set the GLOBAL
     ``warmup_ready`` FROZEN cause and held it for ~12 hours; its swing/position candidates are now
     refused one by one at the gate instead, and the book keeps trading. Visible, not silent: the
@@ -502,21 +486,22 @@ async def test_lifecycle_does_not_freeze_on_daily_only_shortfall(conn, clock, te
     mode, _kill, store, lifecycle = _build(conn, clock, temp_config, notify=notify)
     store.register_initial("limits.yaml", OWNER_OK)
     store.register_initial("envelope.yaml", OWNER_OK)
-    blocker = "rsi2/trend/mom:OLAELEC daily bars 193/200"
     lifecycle._warmup_gate = _FakeGate(ready=False, blockers=[blocker])
 
     report = await lifecycle.startup(check_skew=False)
     assert report.frozen_reasons == []
     assert mode.risk_state() == RiskState.NORMAL
     assert report.warmup_blockers == [blocker]
-    assert report.warmup_classes_short == ["daily"]
-    assert "warmup_daily_not_ready" in report.notes
+    assert report.warmup_classes_short == [cls]
+    assert note in report.notes
     assert not any(str(m.kind) == "warmup_frozen" for m in sent)
 
+    # The owner's boot message NAMES the class and the blocker behind it — this is the only
+    # Telegram message this state produces, so it may not read as a clean boot.
     startup = next(m for m in sent if str(m.kind) == "startup_report")
-    assert f"warm-up short: daily ({blocker})" in startup.body
+    assert body_line in startup.body
     assert "frozen: none" in startup.body
-    assert startup.data["warmup_classes_short"] == ["daily"]
+    assert startup.data["warmup_classes_short"] == [cls]
 
 
 @pytest.mark.asyncio
@@ -542,34 +527,24 @@ async def test_startup_report_says_nothing_about_warmup_when_every_class_is_cove
 
 
 @pytest.mark.asyncio
-async def test_reapply_lifts_with_intraday_still_short(conn, clock, temp_config, monkeypatch):
+@pytest.mark.parametrize(
+    ("blocker", "cls"),
+    [
+        ("orb:AAA bars 165/182", "intraday"),
+        ("rsi2/trend/mom:OLAELEC daily bars 193/200", "daily"),
+    ],
+    ids=["intraday", "daily"],
+)
+async def test_reapply_lifts_with_one_class_still_short(
+    conn, clock, temp_config, monkeypatch, blocker: str, cls: str
+):
     """The LIFT is owed to the freezing classes: regime covered ⇒ the ``warmup_ready`` cause clears
     through the latch even though the intraday class is still short. ``ready`` stays False (coverage
     IS missing); the outcome names the state, and the blockers still ride the result so post-login
     detail keeps naming them. The boot freeze is a real regime-class one, so the lift is exercised
-    against a cause the same lifecycle set — not a hand-planted latch row."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    from tests.unit.test_lifecycle_selftest import _build_with_latch
+    against a cause the same lifecycle set — not a hand-planted latch row.
 
-    mode, _kill, latch, lifecycle = _build_with_latch(conn, clock, temp_config)
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["regime:NIFTY 50 daily bars 0/200"])
-    await lifecycle.startup(check_skew=False)
-    assert mode.risk_state() == RiskState.FROZEN
-
-    # The regime history lands; the minute hole does not heal.
-    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=["orb:AAA bars 165/182"])
-    res = await lifecycle.reapply_warmup_gate()
-    assert res.outcome == "short_lifted"
-    assert res.ready is False and res.lifted is True and res.froze is False
-    assert res.blockers == ["orb:AAA bars 165/182"]
-    assert res.classes_short == ["intraday"]
-    assert mode.risk_state() == RiskState.NORMAL
-    assert all(c != "warmup_ready" for c, _s, _d in latch.active_causes())
-
-
-@pytest.mark.asyncio
-async def test_reapply_lifts_with_daily_still_short(conn, clock, temp_config, monkeypatch):
-    """2026-09-17: the DAILY class joined INTRADAY on the non-freezing side, so one symbol's daily
+    2026-09-17: the DAILY class joined INTRADAY on the non-freezing side, so one symbol's daily
     hole no longer holds the lift. (On 2026-09-15 ``rsi2/trend/mom:OLAELEC daily bars 193/200`` held
     the global FROZEN cause for ~12 hours.) Its candidates are refused per symbol at the gate."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -580,12 +555,13 @@ async def test_reapply_lifts_with_daily_still_short(conn, clock, temp_config, mo
     await lifecycle.startup(check_skew=False)
     assert mode.risk_state() == RiskState.FROZEN
 
-    lifecycle._warmup_gate = _FakeGate(
-        ready=False, blockers=["rsi2/trend/mom:OLAELEC daily bars 193/200"])
+    # The regime history lands; the non-freezing class's hole does not heal.
+    lifecycle._warmup_gate = _FakeGate(ready=False, blockers=[blocker])
     res = await lifecycle.reapply_warmup_gate()
     assert res.outcome == "short_lifted"
     assert res.ready is False and res.lifted is True and res.froze is False
-    assert res.classes_short == ["daily"]
+    assert res.blockers == [blocker]
+    assert res.classes_short == [cls]
     assert mode.risk_state() == RiskState.NORMAL
     assert all(c != "warmup_ready" for c, _s, _d in latch.active_causes())
 

@@ -82,8 +82,15 @@ until 07:50. `run_suite.ps1` logs `standby_entries` per run; a run with entries 
 - Batch A — LEDGER rows 1–14 — 4219e5d (7 removals, 6 repairs, 1 de-flake; every Tier B fault-injected).
 - Batch B — LEDGER rows 15–27 — 9126968 (3 removals, 9 repairs incl. one Tier A strengthening (row 17), 1 fixture
   consolidation; every Tier B fault-injected).
-- Batch C — LEDGER rows 28–45 — the commit after 9126968 (3 removals incl. 1 vacuous source pin replaced by a
-  behavioural round trip, 13 repairs incl. 3 Tier A (rows 31, 32, 36), 1 merge-parametrize, 1 assert trim).
+- Batch C — LEDGER rows 28–45 — 7b1f4f6 (3 removals incl. 1 vacuous source pin replaced by a behavioural round
+  trip, 13 repairs incl. 3 Tier A (rows 31, 32, 36), 1 merge-parametrize, 1 assert trim).
+- Lint — 085a24e: `ruff check tests conftest.py runbooks/test_audit/tools` clean (4 pre-existing test findings
+  + the inventory tool; the tool re-run on the Phase 1 inputs reproduces every non-duration column).
+- Batch D — LEDGER rows 46–61 (16 P1 merges of copy-paste pairs) + row 62 (the `conn`-template equivalence test,
+  added in 0d9433f, ledgered for the reconciliation) — the commit after 085a24e. Run by designer-impl in the
+  second worktree, diff applied here (`patches\batchD.patch`). A 17th pair (test_risk_gate.py
+  `test_modify_stop/target_unknown_position_rejects`) was NOT applied: the Claude Code permission system refused
+  the risk-gate test deletion ("[Security Test Removal]"); it was not retried — owner decision in REPORT.
 
 ## Open questions
 

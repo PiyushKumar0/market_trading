@@ -2412,30 +2412,30 @@ async def test_in_session_the_lane_starts_nothing_and_logs_it(conn, calendar, ca
 
 
 @pytest.mark.asyncio
-async def test_an_evening_lane_pass_runs_the_backlog(conn, calendar, caplog) -> None:
-    clock = _clock_at(_EVENING)
+@pytest.mark.parametrize(
+    ("when", "trading_day", "last_done", "expected_events"),
+    [
+        (_EVENING, True, date(2026, 6, 14), ["compact:2026-06-15", "compact:2026-06-16"]),
+        (_WEEKEND_MIDDAY, False, date(2026, 6, 17), ["compact:2026-06-18", "compact:2026-06-19"]),
+    ],
+    ids=["evening", "weekend"],
+)
+async def test_a_lane_pass_in_the_clock_window_runs_the_backlog(
+    conn, calendar, caplog, when: datetime, trading_day: bool, last_done: date,
+    expected_events: list[str],
+) -> None:
+    """The gate protects a SESSION, not a wall-clock range: a Saturday 11:26 recovery boot is
+    exactly when the fragment backlog should be collapsed."""
+    clock = _clock_at(when)
+    assert calendar.is_trading_day(clock.today()) is trading_day
     events: list[str] = []
-    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 14))
+    lane = _compaction_lane(conn, clock, calendar, events, last_done=last_done)
 
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
         await lane.spawn("post_arm")
 
-    assert events == ["compact:2026-06-15", "compact:2026-06-16"]
+    assert events == expected_events
     assert not [r for r in caplog.records if r.getMessage() == "post_arm_skipped_in_session"]
-
-
-@pytest.mark.asyncio
-async def test_a_weekend_lane_pass_in_the_clock_window_still_runs(conn, calendar) -> None:
-    """The gate protects a SESSION, not a wall-clock range: a Saturday 11:26 recovery boot is
-    exactly when the fragment backlog should be collapsed."""
-    clock = _clock_at(_WEEKEND_MIDDAY)
-    assert calendar.is_trading_day(clock.today()) is False
-    events: list[str] = []
-    lane = _compaction_lane(conn, clock, calendar, events, last_done=date(2026, 6, 17))
-
-    await lane.spawn("post_arm")
-
-    assert events == ["compact:2026-06-18", "compact:2026-06-19"]
 
 
 @pytest.mark.asyncio

@@ -260,15 +260,17 @@ async def test_selftest_frozen_on_stray_anthropic_key(conn, clock, temp_config, 
 
 
 @pytest.mark.asyncio
-async def test_selftest_surfaces_sdk_smoke_skip(conn, clock, temp_config, monkeypatch):
+@pytest.mark.parametrize("name", ["sdk_smoke", "claude_login"], ids=["sdk-smoke", "claude-login"])
+async def test_an_unwired_check_surfaces_as_skip(conn, clock, temp_config, monkeypatch, name: str):
     """An UNWIRED D11 smoke seam (no harness) surfaces as a visible SKIP so the gate sequence stays
     honest (§3.2.12), never silently omitted; chaos case 13 asserts the non-trading-day SKIP and the
-    trading-day PASS."""
+    trading-day PASS. An unwired claude_login check is a SKIP too: the hermetic tier never reads
+    ~/.claude."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
     report = await lifecycle._selftest.run(check_skew=False)
-    sdk = next((c for c in report.checks if c.name == "sdk_smoke"), None)
-    assert sdk is not None and sdk.status.value == "SKIP"
+    check = next((c for c in report.checks if c.name == name), None)
+    assert check is not None and check.status.value == "SKIP"
 
 
 def test_catch_up_watermarks(conn, clock):
@@ -507,15 +509,6 @@ async def test_claude_login_missing_file_warns_and_run_completes(
     login = next(c for c in report.checks if c.name == "claude_login")
     assert login.status.value == "WARN" and "no stored claude.ai login" in login.detail
     assert "claude_login" not in report.frozen_reasons
-
-
-@pytest.mark.asyncio
-async def test_claude_login_unwired_is_skip(conn, clock, temp_config, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
-    report = await lifecycle._selftest.run(check_skew=False)
-    login = next(c for c in report.checks if c.name == "claude_login")
-    assert login.status.value == "SKIP"                              # the hermetic tier never reads ~/.claude
 
 
 @pytest.mark.asyncio

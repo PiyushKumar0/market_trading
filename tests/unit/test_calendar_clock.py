@@ -88,13 +88,17 @@ def test_session_times(cal):
     assert cal.session(SAT) is None
 
 
-def test_next_trading_day_skips_weekend(cal):
-    assert cal.next_trading_day(FRI) == MON
-
-
-def test_next_trading_day_skips_holiday(cal):
-    # 2026-01-23 is a Friday; 24/25 weekend; 26 Republic Day => next trading day is 27 (Tue).
-    assert cal.next_trading_day(date(2026, 1, 23)) == date(2026, 1, 27)
+@pytest.mark.parametrize(
+    ("day", "expected"),
+    [
+        (FRI, MON),
+        # 2026-01-23 is a Friday; 24/25 weekend; 26 Republic Day => next trading day is 27 (Tue).
+        (date(2026, 1, 23), date(2026, 1, 27)),
+    ],
+    ids=["weekend", "holiday"],
+)
+def test_next_trading_day_skips_a_non_session(cal, day: date, expected: date):
+    assert cal.next_trading_day(day) == expected
 
 
 def test_previous_trading_day_skips_weekend_and_holiday(cal):

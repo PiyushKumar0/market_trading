@@ -231,20 +231,22 @@ def test_a_line_without_a_comment_gets_one():
     assert f"cnc_notional_inr: 18000  # owner via dashboard {STAMP}: 12000 → 18000\n" in new_text
 
 
-def test_a_duplicate_key_line_is_refused_422():
-    text = _sub1(r"^schema_version: 1\n", "schema_version: 1\ncapital_base_inr: 40000\n", _shipped_text())
-    with pytest.raises(CapitalRefused) as exc:
-        cap.rewrite_limits_text(
-            text, {cap.BASE_PATH: 40000}, {cap.BASE_PATH: 60000}, STAMP)
-    assert exc.value.status == 422
-    assert exc.value.note == "limits.yaml layout: capital_base_inr found 2 times"
-
-
-def test_a_missing_key_line_is_refused_422():
-    text = _sub1(r"^capital_base_inr: 40000\b", "capital_base_inr: 4e4", _shipped_text())
+@pytest.mark.parametrize(
+    ("pattern", "repl", "note"),
+    [
+        (r"^schema_version: 1\n", "schema_version: 1\ncapital_base_inr: 40000\n",
+         "limits.yaml layout: capital_base_inr found 2 times"),
+        (r"^capital_base_inr: 40000\b", "capital_base_inr: 4e4",
+         "limits.yaml layout: capital_base_inr is not a plain whole number"),
+    ],
+    ids=["duplicate-key", "missing-key"],
+)
+def test_a_malformed_key_line_is_refused_422(pattern: str, repl: str, note: str):
+    text = _sub1(pattern, repl, _shipped_text())
     with pytest.raises(CapitalRefused) as exc:
         cap.rewrite_limits_text(text, {cap.BASE_PATH: 40000}, {cap.BASE_PATH: 60000}, STAMP)
     assert exc.value.status == 422 and "capital_base_inr" in exc.value.note
+    assert exc.value.note == note
 
 
 def test_caps_are_floored_never_rounded_up():
@@ -259,20 +261,20 @@ def test_caps_are_floored_never_rounded_up():
     assert cap.scaled_values(table, 20001)[("limits", "per_stock_exposure", "cnc_notional_inr")] == 6000
 
 
-def test_check_structure_rejects_a_float_or_exponent_value():
+@pytest.mark.parametrize(
+    ("pattern", "repl", "note_part"),
+    [
+        (r"^capital_base_inr: 40000\b", "capital_base_inr: 6E+4", "expected the whole number"),
+        (r"^schema_version: 1\n", "schema_version: 1\ncapital_base_inr: 60000\n", "duplicate"),
+    ],
+    ids=["float-or-exponent", "duplicate-key"],
+)
+def test_check_structure_rejects_a_malformed_limits_text(pattern: str, repl: str, note_part: str):
     old_text = _shipped_text()
-    bad = _sub1(r"^capital_base_inr: 40000\b", "capital_base_inr: 6E+4", old_text)
+    bad = _sub1(pattern, repl, old_text)
     with pytest.raises(CapitalRefused) as exc:
         cap.check_structure(old_text, bad, {cap.BASE_PATH: 60000})
-    assert exc.value.status == 422
-
-
-def test_check_structure_rejects_a_duplicate_key():
-    old_text = _shipped_text()
-    dup = _sub1(r"^schema_version: 1\n", "schema_version: 1\ncapital_base_inr: 60000\n", old_text)
-    with pytest.raises(CapitalRefused) as exc:
-        cap.check_structure(old_text, dup, {cap.BASE_PATH: 60000})
-    assert exc.value.status == 422 and "duplicate" in exc.value.note
+    assert exc.value.status == 422 and note_part in exc.value.note
 
 
 def test_check_structure_rejects_any_other_change():
@@ -774,32 +776,30 @@ async def test_without_notify_the_change_still_applies(tmp_path, conn):
     assert out["ok"] is True
 
 
-async def test_a_cas_conflict_in_owner_update_is_409(tmp_path, conn, monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "status", "note"),
+    [
+        (IntegrityError("limits.yaml signature changed since it was read"), 409,
+         "limits.yaml changed since it was read; reopen the dialog"),
+        (OSError("disk full"), 503,
+         "limits.yaml write failed: disk full; check its integrity before the next boot"),
+    ],
+    ids=["cas-conflict-409", "other-failure-503"],
+)
+async def test_an_owner_update_write_failure_maps_to_its_status(
+    tmp_path, conn, monkeypatch, error: Exception, status: int, note: str
+):
     rig = _rig(tmp_path, conn)
 
-    def conflict(*args, **kwargs):
-        raise IntegrityError("limits.yaml signature changed since it was read")
+    def fail(*args, **kwargs):
+        raise error
 
-    monkeypatch.setattr(rig.store, "owner_update", conflict)
+    monkeypatch.setattr(rig.store, "owner_update", fail)
     with pytest.raises(CapitalRefused) as exc:
         await rig.changer.apply(60000, 40000)
-    assert exc.value.status == 409
-    assert exc.value.note == "limits.yaml changed since it was read; reopen the dialog"
+    assert exc.value.status == status
+    assert exc.value.note == note
     assert rig.limits.load().capital_base_inr == 40000 and rig.sent == []
-
-
-async def test_any_other_write_failure_is_503_and_says_to_check_integrity(tmp_path, conn, monkeypatch):
-    rig = _rig(tmp_path, conn)
-
-    def disk_full(*args, **kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(rig.store, "owner_update", disk_full)
-    with pytest.raises(CapitalRefused) as exc:
-        await rig.changer.apply(60000, 40000)
-    assert exc.value.status == 503
-    assert exc.value.note == "limits.yaml write failed: disk full; check its integrity before the next boot"
-    assert rig.sent == []
 
 
 async def test_a_signed_file_that_differs_from_the_loaded_limits_is_refused_409(tmp_path, conn):

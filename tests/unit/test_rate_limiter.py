@@ -75,37 +75,12 @@ async def test_read_intent_is_pacing_only_never_capped_or_counted():
 
 
 @pytest.mark.asyncio
-async def test_read_intent_still_paces_on_the_order_bucket(monkeypatch):
-    ft = _FakeTime(datetime(2026, 6, 17, 10, 0, tzinfo=IST))
-    clock = Clock(time_source=ft)
-
-    async def fake_sleep(secs: float) -> None:
-        ft.advance(secs)
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-    rl = RateLimiter(clock, sustained_per_s=1.0, burst=2, entry_calls_per_day=100)
-    await rl.acquire("orders", intent="read")
-    await rl.acquire("orders", intent="read")
-    t_before = ft.t
-    await rl.acquire("orders", intent="read")
-    assert ft.t >= t_before + timedelta(seconds=0.9)
-    assert rl.orders_today() == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_reset_day_zeroes_counters():
-    clock = Clock(time_source=lambda: datetime(2026, 6, 17, 10, 0, tzinfo=IST))
-    rl = RateLimiter(clock, sustained_per_s=1.0, burst=100, entry_calls_per_day=70)
-    await rl.acquire("orders", intent="entry")
-    await rl.acquire("orders", intent="risk_reducing")
-    assert rl.orders_today() == (1, 1)
-    rl.reset_day()
-    assert rl.orders_today() == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_pacing_waits_for_refill(monkeypatch):
+@pytest.mark.parametrize(
+    ("intent", "expected_today"),
+    [("read", (0, 0)), ("entry", (3, 0))],
+    ids=["read-intent", "entry-intent"],
+)
+async def test_pacing_waits_for_refill(monkeypatch, intent: str, expected_today: tuple[int, int]):
     # An advancing clock + a fake sleep that advances it => verify pacing without real-time waits.
     ft = _FakeTime(datetime(2026, 6, 17, 10, 0, tzinfo=IST))
     clock = Clock(time_source=ft)
@@ -117,9 +92,20 @@ async def test_pacing_waits_for_refill(monkeypatch):
 
     rl = RateLimiter(clock, sustained_per_s=1.0, burst=2, entry_calls_per_day=100)
     # Burst of 2 is instant; the 3rd must pace ~1 s (the fake sleep advances the clock so refill happens).
-    await rl.acquire("orders", intent="entry")
-    await rl.acquire("orders", intent="entry")
+    await rl.acquire("orders", intent=intent)
+    await rl.acquire("orders", intent=intent)
     t_before = ft.t
-    await rl.acquire("orders", intent="entry")   # forces a refill wait
+    await rl.acquire("orders", intent=intent)   # forces a refill wait
     assert ft.t >= t_before + timedelta(seconds=0.9)   # the limiter paced ~1 s of (simulated) time
-    assert rl.orders_today() == (3, 0)
+    assert rl.orders_today() == expected_today
+
+
+@pytest.mark.asyncio
+async def test_reset_day_zeroes_counters():
+    clock = Clock(time_source=lambda: datetime(2026, 6, 17, 10, 0, tzinfo=IST))
+    rl = RateLimiter(clock, sustained_per_s=1.0, burst=100, entry_calls_per_day=70)
+    await rl.acquire("orders", intent="entry")
+    await rl.acquire("orders", intent="risk_reducing")
+    assert rl.orders_today() == (1, 1)
+    rl.reset_day()
+    assert rl.orders_today() == (0, 0)

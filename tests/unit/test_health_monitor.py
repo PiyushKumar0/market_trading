@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
@@ -427,17 +429,30 @@ async def test_funnel_stall_after_first_forward_still_pages():
     assert any("forwarded stuck at 1" in m for _s, m in alerts)
 
 
-async def test_funnel_quiet_when_forward_cap_is_spent():
-    """A spent §5.6 daily forward cap is quiet BY DESIGN: slots keep publishing on a busy afternoon
-    but the governor is deliberately done forwarding — paging here would train the owner to ignore
-    the alarm (WO-25b lesson)."""
+def _spent_cap_funnel():
     calls = {"n": 0}
 
     def funnel():
         calls["n"] += 1
         return (50 + calls["n"], 6, 6)                        # published grows, cap 6 fully spent
 
-    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=funnel)
+    return funnel
+
+
+@pytest.mark.parametrize(
+    "make_funnel",
+    [_spent_cap_funnel, lambda: (lambda: (5, 0, 0))],
+    ids=["spent", "deliberately-zero"],
+)
+async def test_funnel_quiet_when_the_forward_cap_is_closed(make_funnel):
+    """A spent §5.6 daily forward cap is quiet BY DESIGN: slots keep publishing on a busy afternoon
+    but the governor is deliberately done forwarding — paging here would train the owner to ignore
+    the alarm (WO-25b lesson).
+
+    2026-09-02 review: a KNOWN cap of 0 (deliberate full pause on analyst spend) is spent from
+    minute one and must stay quiet - only cap=None (unreadable) falls back to the zero-forwarded
+    shape."""
+    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=make_funnel())
     for _ in range(130):
         ticker.at = ticker.at + timedelta(minutes=1)
         report = await mon.check(check_skew=False)
@@ -489,17 +504,3 @@ async def test_origination_watch_failures_never_break_the_pulse():
     report = await plain.check(check_skew=False)
     assert "entries_frozen_in_session" not in report.problems
     assert "funnel_zero_in_session" not in report.problems
-
-
-async def test_funnel_quiet_when_forward_cap_is_deliberately_zero():
-    """2026-09-02 review: a KNOWN cap of 0 (deliberate full pause on analyst spend) is spent from
-    minute one and must stay quiet - only cap=None (unreadable) falls back to the zero-forwarded
-    shape."""
-    from datetime import timedelta
-
-    mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=lambda: (5, 0, 0))
-    for _ in range(130):
-        ticker.at = ticker.at + timedelta(minutes=1)
-        report = await mon.check(check_skew=False)
-        assert "funnel_zero_in_session" not in report.problems
-    assert alerts == []

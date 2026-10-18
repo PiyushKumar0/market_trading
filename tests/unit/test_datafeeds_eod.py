@@ -124,16 +124,27 @@ async def test_bhavcopy_failure_degrades_and_alerts(store, clock):
     assert store.get_bars_1d("RELIANCE", D, D) == []     # keeps whatever it had (here: nothing)
 
 
-async def test_bhavcopy_repeated_failure_alerts_once(store, clock):
+@pytest.mark.parametrize(
+    ("job_cls", "severity"),
+    [(BhavcopyJob, "warning"), (EarningsCalendarJob, "critical")],
+    ids=["bhavcopy", "earnings"],
+)
+async def test_a_repeated_failure_alerts_once(store, clock, job_cls, severity: str):
     """2026-08-13 fix: with the watermark bug fixed, the 30-min catch-up sweeps genuinely re-run a
     still-failing day — alerting on EVERY attempt would storm during a long NSE outage. Two
-    consecutive failing runs for the same date must produce exactly one notify."""
+    consecutive failing runs for the same date must produce exactly one notify.
+
+    2026-08-13 (critical-severity representative, binary ok/fail shape — mirrors bhavcopy exactly):
+    with the watermark fix now forwarding this SAFETY_CRITICAL job's ok through the composition root,
+    same-day catch-up sweeps genuinely re-run a still-failing day — two consecutive failing runs for
+    the same date must produce exactly one notify."""
     msgs, sink = collect_alerts()
-    job = BhavcopyJob(store, clock, failing_client(), notify=sink)
+    job = job_cls(store, clock, failing_client(), notify=sink)
     result1 = await job.run(D)
     result2 = await job.run(D)
     assert result1.ok is False and result2.ok is False
     assert len(msgs) == 1
+    assert msgs[0].severity == severity
     assert msgs[0].data["d"] == D.isoformat()
 
 
@@ -207,14 +218,24 @@ async def test_corp_actions_run_persists_idempotently(store, clock):
     assert rel["recorded_at"] == FIXED_NOW               # Clock-stamped, tz-aware IST
 
 
-async def test_corp_actions_failure_alerts_critical(store, clock):
+@pytest.mark.parametrize(
+    ("job_cls", "job_id", "url", "url_suffix"),
+    [
+        (CorpActionsJob, "corp_actions", ca.NSE_CORP_ACTIONS_URL,
+         "/corporates-corporateActions?index=equities"),
+        (EarningsCalendarJob, "earnings_calendar", ec.NSE_EVENT_CALENDAR_URL, "/event-calendar"),
+    ],
+    ids=["corp-actions", "earnings"],
+)
+async def test_a_feed_failure_alerts_critical(store, clock, job_cls, job_id: str, url: str, url_suffix: str):
     msgs, sink = collect_alerts()
-    result = await CorpActionsJob(store, clock, failing_client(), notify=sink).run(D)
+    result = await job_cls(store, clock, failing_client(), notify=sink).run(D)
     assert result.ok is False and result.degraded is True
-    assert msgs and msgs[0].severity == "critical"       # A12 safety-critical set (§2.6 step 5)
-    assert msgs[0].data["job_id"] == "corp_actions"
-    assert ca.NSE_CORP_ACTIONS_URL.startswith("https://www.nseindia.com/")
-    assert ca.NSE_CORP_ACTIONS_URL.endswith("/corporates-corporateActions?index=equities")
+    # A12 (corp actions) / R2 (earnings) safety-critical set (§2.6 step 5)
+    assert msgs and msgs[0].severity == "critical"
+    assert msgs[0].data["job_id"] == job_id
+    assert url.startswith("https://www.nseindia.com/")
+    assert url.endswith(url_suffix)
 
 
 def test_corp_actions_url_windows_from_run_day():
@@ -272,30 +293,6 @@ async def test_earnings_run_persists_and_reads_back(store, clock):
     }
     tcs = store.get_earnings_calendar(date(2026, 7, 9), date(2026, 7, 9), symbol="TCS")
     assert len(tcs) == 1                                 # the R2 per-instrument gate-time lookup
-
-
-async def test_earnings_failure_alerts_critical(store, clock):
-    msgs, sink = collect_alerts()
-    result = await EarningsCalendarJob(store, clock, failing_client(), notify=sink).run(D)
-    assert result.ok is False and result.degraded is True
-    assert msgs and msgs[0].severity == "critical"       # R2 safety-critical set (§2.6 step 5)
-    assert msgs[0].data["job_id"] == "earnings_calendar"
-    assert ec.NSE_EVENT_CALENDAR_URL.startswith("https://www.nseindia.com/")
-
-
-async def test_earnings_repeated_failure_alerts_once(store, clock):
-    """2026-08-13 (critical-severity representative, binary ok/fail shape — mirrors bhavcopy exactly):
-    with the watermark fix now forwarding this SAFETY_CRITICAL job's ok through the composition root,
-    same-day catch-up sweeps genuinely re-run a still-failing day — two consecutive failing runs for
-    the same date must produce exactly one notify."""
-    msgs, sink = collect_alerts()
-    job = EarningsCalendarJob(store, clock, failing_client(), notify=sink)
-    result1 = await job.run(D)
-    result2 = await job.run(D)
-    assert result1.ok is False and result2.ok is False
-    assert len(msgs) == 1
-    assert msgs[0].severity == "critical"
-    assert msgs[0].data["d"] == D.isoformat()
 
 
 # =========================================================================== deals (job 9)
