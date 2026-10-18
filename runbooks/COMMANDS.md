@@ -315,18 +315,21 @@ git commit -m "limits.yaml comments base-relative (owner): patch + reseed" -- co
 
 ## Tests / verification
 
-The gate is a bare `pytest` (`testpaths`: unit + chaos + replay + property), 3,831 tests. Tests of NON-production
-code — research, backtest, verdict and one-off scripts, and the `engine.learning` modules only they reach — live in
-`tests/offline` (392 tests) and run on demand: after changing one of those scripts, `scripts/backtest_common.py` or
-`engine.learning`. A pytest process starts in ~4 s (scikit-learn loads only when numba/vectorbt/cvxpy/skfolio is
-imported); vectorbt still re-JITs in every process, so the `needs_heavy_deps` tests cost ~24 s per process. Put
-several files in ONE run rather than looping over them. Numbers: `runbooks/test_audit/REPORT.md`.
+The gate is a bare `pytest` (`testpaths`: unit + chaos + replay + property), 3,884 tests: everything the engine
+process and its scheduled tasks run, and the operational tools that write live stores or config (bhavcopy backfill,
+the restore rewind, protected-config status, fill-model calibration). `tests/offline` (353 tests) holds the tests
+of NON-production code — research, backtest, verdict and one-off scripts, and the `engine.learning` modules only
+they reach — and runs on demand: after changing one of those, or `scripts/backtest_common.py`. A test that pins
+production behaviour belongs in the gate even when it goes through a script. A pytest process starts in ~4 s
+(scikit-learn loads only when numba/vectorbt/cvxpy/skfolio is imported); the vectorbt tests (`needs_heavy_deps`,
+~24 s of JIT per process) are all offline. Put several files in ONE run rather than looping over them. Numbers:
+`runbooks/test_audit/REPORT.md`.
 
 ```powershell
 # Inner loop: one file or a few, in one run
 uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_prescreen.py -q
-# Unit tier without the heavy-deps tests
-uv run pytest tests/unit -q -m "not needs_heavy_deps"
+# Any run can skip the native-stack (numba / vectorbt) tests
+uv run pytest tests/offline -q -m "not needs_heavy_deps"
 # The gate in parallel (pytest-xdist: 8 workers, each takes whole files) — run inline, never two gates at once
 uv run pytest -n 8 --dist loadfile -q
 # The gate serial, and its tiers on their own
@@ -335,7 +338,7 @@ uv run pytest tests/unit -q
 uv run pytest -m chaos -q
 uv run pytest tests/replay -q
 uv run pytest tests/property -q
-# The offline tier (research / backtest / verdict scripts and engine.learning)
+# The offline tier
 uv run pytest tests/offline -n 8 --dist loadfile -q
 cd dashboard; npm test; cd ..
 ```
