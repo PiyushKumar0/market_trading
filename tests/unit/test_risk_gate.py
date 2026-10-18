@@ -1130,11 +1130,6 @@ def test_modify_stop_direction(gate: RiskGate, new_stop: str, pos: dict, expecte
     assert verdict.verdict == expected
 
 
-def test_modify_stop_unknown_position_rejects(gate: RiskGate) -> None:
-    verdict = gate.evaluate(_modify_stop("97"), make_ctx())
-    assert verdict.verdict == "reject"
-
-
 def test_modify_stop_without_a_known_current_stop_routes_to_owner(gate: RiskGate) -> None:
     """Fail-closed: a change whose direction cannot be verified is never auto-approved."""
     verdict = gate.evaluate(
@@ -1169,8 +1164,11 @@ def test_modify_target_direction(gate: RiskGate, new_target, pos: dict, expected
     assert verdict.verdict == expected
 
 
-def test_modify_target_unknown_position_rejects(gate: RiskGate) -> None:
-    assert gate.evaluate(_modify_target("105"), make_ctx()).verdict == "reject"
+@pytest.mark.parametrize(
+    ("action", "value"), [(_modify_stop, "97"), (_modify_target, "105")], ids=["stop", "target"]
+)
+def test_modify_on_an_unknown_position_rejects(gate: RiskGate, action, value: str) -> None:
+    assert gate.evaluate(action(value), make_ctx()).verdict == "reject"
 
 
 # --------------------------------------------------------------------------- cancel
