@@ -465,15 +465,14 @@ def test_slow_statement_flush_paths_and_silence_below_threshold(store, clock, mo
 
 def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypatch, caplog):
     """The statement helpers were instrumented first; the 2026-09-09 review found the coverage claim
-    overstated, because five methods take their OWN ``with self._lock:`` and run SQL inside it —
+    overstated, because four methods take their OWN ``with self._lock:`` and run SQL inside it —
     ``amend_bar_1m_extremes`` (live late-tick path), the ``_tick_stage`` DELETE at the head of a
-    flush, ``insert_news``, ``set_news_cluster`` and ``compact_tick_partitions``. Each is ONE hold
-    (``insert_news`` and ``compact_tick_partitions`` loop MANY statements inside one acquisition), so
-    each must emit exactly ONE event naming the hold — not one per statement, and not none at all."""
+    flush, ``insert_news`` and ``set_news_cluster``. Each is ONE hold (``insert_news`` loops MANY
+    statements inside one acquisition), so each must emit exactly ONE event naming the hold — not one
+    per statement, and not none at all."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
     ts = clock.now().replace(second=0, microsecond=0)
     store.insert_bars_1m([_bar(ts)])
-    today = clock.today()
 
     with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
         caplog.clear()                                   # (a) amend: SELECT + UPDATE + BEGIN/COMMIT
@@ -497,12 +496,6 @@ def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypa
         store.flush_ticks()
         flush = [r.label for r in _slow_events(caplog)]
 
-        store.buffer_tick(_tick(ts + timedelta(seconds=1), vol=7))
-        store.flush_ticks()                              # a 2nd partition file, so compaction runs
-        caplog.clear()                                   # (e) compact: whole per-symbol COPY loop
-        store.compact_tick_partitions(today)
-        compact = [r.label for r in _slow_events(caplog)]
-
     # One combined assertion so an uninstrumented hold shows up as a gap in the WHOLE census rather
     # than short-circuiting on whichever site happens to be checked first.
     assert {
@@ -510,20 +503,18 @@ def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypa
         "insert_news": news,
         "set_news_cluster": cluster,
         "flush_stage_delete": flush.count("flush_stage_delete"),
-        "compact": compact,                                     # ONE event, not one per symbol
     } == {
         "amend": ["amend_bar_1m:RELIANCE"],
         "insert_news": ["insert_news:2"],
         "set_news_cluster": ["set_news_cluster:2"],
         "flush_stage_delete": 1,
-        "compact": [f"compact_ticks:{today.isoformat()}"],
     }
     assert "copy_ticks:RELIANCE" in flush                                    # the pre-existing pair
     assert any(lbl.startswith("bulk_write:_tick_stage:") for lbl in flush)   # still one event each
 
 
 def test_slow_statement_hand_rolled_holds_are_silent_below_threshold(store, clock, monkeypatch, caplog):
-    """The other half of the contract for the five holds above: below the threshold they say nothing.
+    """The other half of the contract for the four holds above: below the threshold they say nothing.
     The sentinel is 1e9 s rather than the real 5.0 so a slow CI volume cannot make this flap."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 1e9)
     ts = clock.now().replace(second=0, microsecond=0)
@@ -536,9 +527,6 @@ def test_slow_statement_hand_rolled_holds_are_silent_below_threshold(store, cloc
         )
         store.set_news_cluster([h["headline_id"] for h in store.get_news()], "01CLUSTER")
         store.flush_ticks()
-        store.buffer_tick(_tick(ts + timedelta(seconds=1), vol=7))
-        store.flush_ticks()
-        store.compact_tick_partitions(clock.today())
     assert _slow_events(caplog) == []
 
 
@@ -566,18 +554,6 @@ def test_tick_autoflush_on_interval(tmp_path):
         assert files and s.pending_tick_count == 0
     finally:
         s.close()
-
-
-def test_compact_tick_partitions(store, clock):
-    ts = clock.now()
-    for i in range(3):                                          # 3 separate flushes = 3 small files
-        store.buffer_tick(_tick(ts + timedelta(seconds=i), vol=i + 1))
-        store.flush_ticks()
-    day_dir = store._parquet_root / "ticks" / f"date={clock.today().isoformat()}" / "symbol=RELIANCE"
-    assert len(list(day_dir.glob("*.parquet"))) == 3
-    store.compact_tick_partitions(clock.today())
-    assert len(list(day_dir.glob("*.parquet"))) == 1            # coalesced, data intact
-    assert [t.volume_traded for t in store.get_ticks("RELIANCE", clock.today())] == [1, 2, 3]
 
 
 # --------------------------------------------------------------------------- retention (§4.5)

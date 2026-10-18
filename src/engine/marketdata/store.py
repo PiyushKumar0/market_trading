@@ -31,9 +31,9 @@ buffered in memory and flushed every ``flush_interval_s`` (60 s default) or ``ma
 first, into ``<parquet_root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<ulid>.parquet``. Each flush writes
 one file per (date, symbol) present in the batch; the nightly ``JOB_TICK_COMPACT``
 (``engine.marketdata.tick_compact.compact_ticks``, on its own connection) coalesces a day's small
-batch files so the 30-day retention window stays a sane file count. :meth:`compact_tick_partitions`
-does the same on the live store's lock but has no production caller. Timestamps are ``TIMESTAMPTZ`` with the session timezone pinned to Asia/Kolkata; every
-datetime returned by this API is normalized tz-aware IST (§3.2).
+batch files so the 30-day retention window stays a sane file count. Timestamps are ``TIMESTAMPTZ``
+with the session timezone pinned to Asia/Kolkata; every datetime returned by this API is normalized
+tz-aware IST (§3.2).
 
 Retention (§4.5): ticks 30 days rolling, news + clusters + sentiment 1 year, corrections 90 days —
 :meth:`apply_retention` (plan-pinned constants, not tunables). 1-minute bars are kept 5 years and
@@ -114,8 +114,8 @@ _EXPORT_COPY_LINE = re.compile(r"""^COPY\s+("(?:[^"]|"")+"|\S+)\s+FROM\s+'((?:[^
 #: :meth:`MarketStore._bulk_write`, :meth:`MarketStore._upsert_rows` and the per-partition COPY in
 #: :meth:`MarketStore._flush_locked` — PLUS the hand-rolled holds that run SQL of their own:
 #: :meth:`MarketStore.amend_bar_1m_extremes`, the ``_tick_stage`` DELETE at the head of
-#: :meth:`MarketStore._flush_locked`, :meth:`MarketStore.insert_news`,
-#: :meth:`MarketStore.set_news_cluster` and :meth:`MarketStore.compact_tick_partitions`.
+#: :meth:`MarketStore._flush_locked`, :meth:`MarketStore.insert_news` and
+#: :meth:`MarketStore.set_news_cluster`.
 #: :meth:`MarketStore.init_schema` is the ONE hold left
 #: deliberately untimed (with the :meth:`MarketStore.open` hold that wraps it) — boot-only DDL that no
 #: trading-session caller can ever be queued behind, so a slow hold there has no victim to name.
@@ -2567,36 +2567,6 @@ class MarketStore:
             Tick(**{c: (_ist(v) if c == "exchange_ts" else v) for c, v in zip(_TICK_COLUMNS, r, strict=True)})
             for r in rows
         ]
-
-    def compact_tick_partitions(self, d: date) -> list[Path]:
-        """Coalesce day ``d``'s many small batch files into ONE file per symbol. Idempotent; returns
-        the compacted files. No production caller: the nightly compaction is
-        ``engine.marketdata.tick_compact.compact_ticks`` (``JOB_TICK_COMPACT``), which runs on its own
-        connection instead of holding the live store's lock."""
-        day_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}"
-        if not day_dir.exists():
-            return []
-        compacted: list[Path] = []
-        # ONE hold spans the whole per-symbol loop — ~200 COPYs plus their unlinks under a single
-        # _lock acquisition — so it gets ONE note for the whole hold (§2.6 hardening (iii),
-        # 2026-09-09), which is the number a stalled caller experienced. Per-symbol notes would say
-        # "everything was fast" about a hold that lasted minutes.
-        with self._timed_lock(f"compact_ticks:{d.isoformat()}"):
-            con = self._require_con()
-            for sym_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
-                files = sorted(sym_dir.glob("*.parquet"))
-                if len(files) <= 1:
-                    continue
-                out = sym_dir / f"compact-{ULID()!s}.parquet"
-                con.execute(
-                    f"COPY (SELECT * FROM read_parquet(?) ORDER BY exchange_ts) "
-                    f"TO '{out.as_posix()}' (FORMAT PARQUET)",
-                    [(sym_dir / "*.parquet").as_posix()],
-                )
-                for f in files:
-                    f.unlink()
-                compacted.append(out)
-        return compacted
 
     # ================================================================== retention (§4.5)
     def apply_retention(self) -> dict[str, int]:
