@@ -14,6 +14,7 @@ The load-bearing properties, in order of how expensive they are to get wrong:
 
 from __future__ import annotations
 
+import gzip
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -752,6 +753,20 @@ def test_every_signal_context_carries_its_strategy_contract(assembler, store):
         next(ln for ln in lines if ln.startswith("candidate: "))) + 1
     assert "  class: intraday (MIS), same-day squareoff" in v
     assert "  evidence status: exploratory" in v
+
+
+def test_the_nightly_review_reads_back_the_candidate_line(assembler, store):
+    """A cross-module coupling with no type to protect it: the nightly review identifies a DECLINE by
+    grepping the archived prompt for the ``candidate:`` line ``for_signal`` writes
+    (``nightly_review._candidate_from_context``). Archived the way the harness archives it (gzip of
+    system prompt + prompt), the line must parse back to the candidate — a renamed or reformatted line
+    would not break anything loudly, the review would just render every decline as "unknown"."""
+    from engine.ops.nightly_review import _candidate_from_context
+
+    seed_bars(store)
+    ctx = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
+    blob = gzip.compress(f"{ctx.system_prompt}\n\n{ctx.prompt()}".encode())
+    assert _candidate_from_context(blob) == CANDIDATE.model_dump(mode="json")
 
 
 def test_the_ins_contract_reaches_the_prompt_verbatim(assembler, store):

@@ -205,6 +205,12 @@ def test_looks_ordered_by_fill_date_then_rec_id(calendar):
     assert out["decision"] == nsv.LABEL_SUPPORTED
     assert out["running"]["n"] == 25
 
+    # ...and a fill-date TIE is cut by rec_id, whatever order the rows arrive in: forty rows on one date,
+    # the `b` group (D = -1) listed first, still leave look 1 to the `a` group (D = +1).
+    a = [{**r, "rec_id": f"a{i:02d}"} for i, r in enumerate(_eligible(20, d=1.0))]
+    b = [{**r, "rec_id": f"b{i:02d}"} for i, r in enumerate(_eligible(20, d=-1.0))]
+    assert nsv.registered_looks(b + a)["look1"]["D"] == 1.0
+
 
 def test_pending_split(conn, calendar):
     _add(conn, "past_due", fill_d="2026-08-03", net_t20=None, excess_t20=None)

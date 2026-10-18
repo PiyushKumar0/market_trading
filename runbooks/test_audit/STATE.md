@@ -30,20 +30,24 @@ Resume rule (PROMPT.md §6): audit this file, LEDGER.md and `git log` against PR
 - [x] Phase 0 — baseline (5788c34)
 - [x] Phase 1 — inventory (`mt_build_notes\test_audit\inventory.csv` + `shape_groups.txt`), per-test footprints
   (`mt_build_notes\test_audit\footprints.sqlite`, scoped sys.monitoring, ~4% overhead; full run `footprint_2`:
-  4,456 tests, 31,145 engine+script lines), candidate sheets G01–G13 and G15 done
-  (`mt_build_notes\test_audit\sheets\`), G12b (test_prescreen) in flight; G14 (refuted research scripts — R8
-  domain) not run: the R8 table in `notes_owner_decisions.md` is the owner's call either way.
+  4,456 tests, 31,145 engine+script lines), candidate sheets G01–G13, G12b, G15, G16 (chaos) done
+  (`mt_build_notes\test_audit\sheets\`), G17 (replay/property/backtest_cli+brk20+hi52) in flight; G14 (refuted
+  research scripts — R8 domain) not run: the R8 table in `notes_owner_decisions.md` is the owner's call.
 - [~] Phase 2 — structural speed-ups: conn template (0d9433f), single-instance child (46323a0), backoff seams +
-  import-graph cache + 501-symbol batch seed (54a3b39). Parked: xdist (no worktree venv), DuckDB template
-  (84 vs 118 ms per store, ~50 fixture files to touch — weigh after the batches). Measurements: `runs\runs.log`
+  import-graph cache + 501-symbol batch seed (54a3b39). Rejected: DuckDB template (~34 ms x ~600 stores ≈ 20 s
+  for ~50 fixture files + an equivalence guard). Parked: xdist (no worktree venv). Measurements: `runs\runs.log`
   (labels `ab_*`), A/B against the detached baseline worktree `C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit_base`
   (5788c34; no venv, no junctions — remove with `git worktree remove` when done).
-- [~] Phase 3 — verdicts: LEDGER rows 1–29 so far (28–29 queued for Batch C). Rejected candidates and why:
-  `mt_build_notes\test_audit\notes_rejected.md`; owner-decision inputs: `notes_owner_decisions.md`.
-- [~] Phase 4 — Batch A (rows 1–14) committed 4219e5d; Batch B (rows 15–27) committed with this file's update
-  (implementer, brief `mt_build_notes\test_audit\briefs\11_batchB.md`; every Tier B row fault-injected, `src`
-  clean). Its 28-min `test_ops_main_wiring.py` run was a lid-close Modern Standby (Kernel-Power 506/507
-  "Reason: Lid" 09:57:32–10:25:13), not the tests: the file's baseline is 11.9 s.
+- [~] Phase 3 — verdicts: LEDGER rows 1–45. Rejected candidates and why: `mt_build_notes\test_audit\notes_rejected.md`;
+  owner-decision inputs: `notes_owner_decisions.md`. §5 items 5–7: the 30 slowest reviewed; import floor
+  (`engine._preload` → sklearn, ~5.5 s per process) and vectorbt JIT are production-side (proposals 5, 6).
+- [~] Phase 4 — Batch A (rows 1–14) committed 4219e5d; Batch B (rows 15–27) 9126968 (its 28-min
+  `test_ops_main_wiring.py` run was a lid-close Modern Standby, Kernel-Power 506/507 "Reason: Lid"
+  09:57:32–10:25:13 — the file's baseline is 11.9 s). Batch C (rows 28–45) committed with this file's update:
+  two implementers in parallel, C1 in this worktree and C2 in a second worktree
+  `C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit_c2` (branch `wip/test-audit-c2` at 9126968; its diff
+  was applied here as `mt_build_notes\test_audit\patches\batchC2.patch` — remove that worktree and branch at the
+  end). Every row fault-injected (P1 row 37 excepted), `src` clean.
 - [ ] Phase 5 — verify (two serial full runs + interleaved base runs, chaos/replay/property/npm, reconcile_nodeids.py,
   ruff, scope-leak checks, 4-angle review); parallelism experiment with tools/shard_run.py.
 - [ ] Phase 6 — report
@@ -76,8 +80,10 @@ until 07:50. `run_suite.ps1` logs `standby_entries` per run; a run with entries 
 ## Batches done
 
 - Batch A — LEDGER rows 1–14 — 4219e5d (7 removals, 6 repairs, 1 de-flake; every Tier B fault-injected).
-- Batch B — LEDGER rows 15–27 — the commit after 54a3b39 (3 removals, 9 repairs incl. one Tier A strengthening
-  (row 17), 1 fixture consolidation; every Tier B fault-injected).
+- Batch B — LEDGER rows 15–27 — 9126968 (3 removals, 9 repairs incl. one Tier A strengthening (row 17), 1 fixture
+  consolidation; every Tier B fault-injected).
+- Batch C — LEDGER rows 28–45 — the commit after 9126968 (3 removals incl. 1 vacuous source pin replaced by a
+  behavioural round trip, 13 repairs incl. 3 Tier A (rows 31, 32, 36), 1 merge-parametrize, 1 assert trim).
 
 ## Open questions
 

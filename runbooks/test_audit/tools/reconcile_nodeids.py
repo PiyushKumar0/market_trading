@@ -5,7 +5,9 @@ final collection. Anything else is a SILENT change and fails the check.
         --final <file with the final `pytest --collect-only -q` nodeids> --ledger runbooks/test_audit/LEDGER.md
 
 Ledger conventions (the `nodeid(s)` column of the Verdicts table):
-- every nodeid is in backticks; a nodeid without ``[...]`` stands for all of that function's cases;
+- every nodeid is in backticks and written in full (``tests/...::name[id]``); backticked tokens without ``::``
+  (fixture names, files, bare case ids) are prose and ignored; a nodeid without ``[...]`` stands for all of that
+  function's cases;
 - R-codes: the listed nodeids are REMOVED;
 - a row whose cell contains ``→``: nodeids before it are the old ones (removed or renamed away), nodeids after it
   the new ones (must exist) — used by P1 merges and renames;
@@ -21,6 +23,11 @@ import sys
 from pathlib import Path
 
 _TICKED = re.compile(r"`([^`]+)`")
+
+
+def _nodeids(text: str) -> set[str]:
+    """The backticked NODEIDS in a ledger cell; other backticked tokens (fixtures, files, ids) are prose."""
+    return {t for t in _TICKED.findall(text) if "::" in t}
 
 
 def _read_ids(path: Path) -> set[str]:
@@ -62,15 +69,15 @@ def main() -> int:
     for row, cell, code in _ledger_rows(a.ledger):
         if "→" in cell:
             old_part, new_part = cell.split("→", 1)
-            old = _expand(set(_TICKED.findall(old_part)), baseline)
-            new = _expand(set(_TICKED.findall(new_part)), final)
+            old = _expand(_nodeids(old_part), baseline)
+            new = _expand(_nodeids(new_part), final)
             removed |= old
             added |= new
             missing_new = new - final
             if missing_new:
                 problems.append(f"row {row}: new nodeids not collected: {sorted(missing_new)}")
             continue
-        ids = set(_TICKED.findall(cell))
+        ids = _nodeids(cell)
         if code.startswith("R"):
             exp = _expand(ids, baseline)
             removed |= exp

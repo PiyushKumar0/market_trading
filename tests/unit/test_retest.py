@@ -289,6 +289,13 @@ def test_one_symbol_yields_one_candidate_even_with_two_resting_levels(book, rclo
     again = book.due(_ltp(AAA="100.50"), BAND, date(2026, 6, 22))
     assert [str(c.raw_levels.entry) for c in again] == ["101.00"]
 
+    # ...and the outranked level was never consumed: on a later session inside BOTH windows (06-17 -> 06-24,
+    # 06-18 -> 06-25), a price inside ITS band but outside the winner's offers it
+    # (|100.00 - 98.50| / 98.50 = 1.52% <= 2.0%; 101.00 is 2.54% away).
+    rclock.day = date(2026, 6, 23)
+    later = book.due(_ltp(AAA="98.50"), BAND, date(2026, 6, 23))
+    assert [str(c.raw_levels.entry) for c in later] == ["100.00"]
+
 
 # --------------------------------------------------------------------------- due(): tick freshness
 def test_a_stale_trigger_price_offers_nothing(book, rclock, caplog) -> None:

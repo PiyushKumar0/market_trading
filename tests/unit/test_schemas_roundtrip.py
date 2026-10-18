@@ -515,26 +515,18 @@ def test_exit_with_a_code_and_no_reason_key_at_all_parses() -> None:
     assert model.thesis == EXIT_2026_09_10["thesis"]
 
 
-def test_exit_without_exit_reason_still_fails_exactly_as_today() -> None:
-    """DOCUMENTED, not fixed: absent the code, prose in ``reason`` is never guessed into one (R1).
-    This is the live 09-10 failure, reproduced — one literal_error at exit.reason, nothing else."""
+@pytest.mark.parametrize(
+    "override", [{}, {"exit_reason": "horizon_expired"}], ids=["no-exit-reason", "out-of-enum-code"]
+)
+def test_an_exit_without_a_valid_code_dies_on_reason_alone(override) -> None:
+    """DOCUMENTED, not fixed: absent the code, prose in ``reason`` is never guessed into one (R1) — the
+    live 09-10 failure, reproduced. A confabulated code is not mapped either, nor does it become a foreign
+    key: it is dropped like any other advertised extra. Either way the payload dies on ``reason`` alone —
+    one literal_error at exit.reason, nothing else."""
     from engine.intelligence.schemas import parse_intraday
 
     with pytest.raises(ValidationError) as err:
-        parse_intraday(EXIT_2026_09_10, **STAMP)
-    errors = err.value.errors()
-    assert len(errors) == 1
-    assert errors[0]["type"] == "literal_error"
-    assert errors[0]["loc"][-1] == "reason"
-
-
-def test_out_of_enum_exit_reason_is_dropped_not_interpreted() -> None:
-    """A confabulated code is not mapped, nor does it become a foreign key: it is dropped like any
-    other advertised extra and the payload dies on ``reason`` exactly as the code-less one does."""
-    from engine.intelligence.schemas import parse_intraday
-
-    with pytest.raises(ValidationError) as err:
-        parse_intraday({**EXIT_2026_09_10, "exit_reason": "horizon_expired"}, **STAMP)
+        parse_intraday({**EXIT_2026_09_10, **override}, **STAMP)
     errors = err.value.errors()
     assert len(errors) == 1
     assert errors[0]["type"] == "literal_error"

@@ -84,18 +84,24 @@ def test_insider_after_hours_shifts_entry_to_next_session():
 
 
 # =========================================================================== trailing crossing + rearm
-def test_insider_trailing_crossing_and_rearm():
+@pytest.mark.parametrize(
+    ("third", "expected"),
+    [(18, [6, 18]), (15, [6]), (16, [6, 16])],
+    ids=["re-arm-then-cross", "session-6-still-in-window", "fresh-cross-after-re-arm"],
+)
+def test_insider_trailing_crossing_and_rearm(third, expected):
     sess = _sessions(30)
     filings = [
         {"txn_type": "Buy", "acq_mode": "Market", "value": Decimal("6000000"), "broadcast_dt": _bdt(sess[5], 10)},
         {"txn_type": "Buy", "acq_mode": "Market", "value": Decimal("6000000"), "broadcast_dt": _bdt(sess[6], 10)},
-        # after both age out of the 10-session window the sum falls below threshold (re-arm); a later
-        # single filing >= threshold then crosses again.
-        {"txn_type": "Buy", "acq_mode": "Market", "value": Decimal("15000000"), "broadcast_dt": _bdt(sess[18], 10)},
+        {"txn_type": "Buy", "acq_mode": "Market", "value": Decimal("15000000"),
+         "broadcast_dt": _bdt(sess[third], 10)},
     ]
-    # first crossing at 6 (60L+60L=120L>=100L), disarm; sum stays >=thr on 6 but does NOT re-fire;
-    # both age out by session 16 ⇒ re-arm; new crossing at 18.
-    assert es.insider_buy_events(sess, filings, 10_000_000) == [6, 18]
+    # First crossing at 6 (60L+60L=120L >= 100L), then disarmed while the trailing-10 sum stays >= thr.
+    # Session 5 leaves the window at 15 (sum 60L: re-arm), session 6 at 16. A third filing AT 15 lands
+    # while 6 is still inside (210L: still disarmed, no event); at 16 or later it is a fresh crossing.
+    # 15 and 16 pin the window at exactly 10 sessions: 9 would fire at 15, 11 would not fire at 16.
+    assert es.insider_buy_events(sess, filings, 10_000_000) == expected
 
 
 def test_insider_single_big_filing_fires_once_only():

@@ -174,6 +174,7 @@ def test_daily_cap_suppresses_after_limit():
 
 
 def test_per_strategy_cap_binds_before_daily_cap():
+    """The scalar form = the ``default``-only mapping (the shipped config used it before WO-1)."""
     ps = _prescreen([_stub("s1"), _stub("s2")], max_candidates_per_day=20, max_per_strategy_day=1)
     assert len(ps.on_bar(_bar(symbol="AAA"))) == 2        # each strategy takes its 1
     assert ps.on_bar(_bar(symbol="BBB", mm=1)) == []      # both strategies exhausted; day cap untouched
@@ -515,7 +516,7 @@ def test_parked_strategy_admits_nothing_and_charges_no_slot(caplog):
     slot the other strategies could use."""
     ps = _prescreen(
         [_multi_stub("orb", {"A": 0.9, "B": 0.8}), _multi_stub("rsi2", {"C": 0.7})],
-        max_candidates_per_day=48,
+        max_candidates_per_day=1,                        # ONE day slot: orb's refusals must leave it for C
         max_per_strategy_day={"default": 16, "orb": 0},
     )
     with caplog.at_level("INFO"):
@@ -532,17 +533,19 @@ def test_parked_strategy_admits_nothing_and_charges_no_slot(caplog):
     assert caplog.text.count("prescreen_strategy_disabled") == 1
 
 
-def test_parked_strategy_logs_again_on_the_next_day():
+def test_parked_strategy_logs_again_on_the_next_day(caplog):
     """Once per strategy per DAY: the day roll must clear both the counter and the log latch, or the
     §7.1 catchup_safety_jobs lesson (a latch with no symmetric clear) repeats in the log path."""
     from datetime import date as _date
     ps = _prescreen([_stub("orb")], max_per_strategy_day={"default": 16, "orb": 0})
-    ps.on_bar(_bar(symbol="AAA", day=17))
-    assert ps.funnel_counters()["suppressed_disabled"] == {"orb": 1}
-    ps.on_bar(_bar(symbol="AAA", day=18))
+    with caplog.at_level("INFO"):
+        ps.on_bar(_bar(symbol="AAA", day=17))
+        assert ps.funnel_counters()["suppressed_disabled"] == {"orb": 1}
+        ps.on_bar(_bar(symbol="AAA", day=18))
     counters = ps.funnel_counters()
     assert counters["d"] == _date(2026, 6, 18)
     assert counters["suppressed_disabled"] == {"orb": 1}  # rolled, not accumulated
+    assert caplog.text.count("prescreen_strategy_disabled") == 2   # the latch rolled too: once per day
 
 
 def test_parked_strategy_is_refused_ahead_of_the_window_gate():
@@ -623,13 +626,6 @@ def test_shipped_settings_park_orb():
     assert isinstance(caps, dict)
     assert caps["orb"] == 0
     assert caps["default"] >= 1                          # the park is orb's alone
-
-
-def test_scalar_per_strategy_cap_still_works():
-    """The scalar form is the ``default``-only mapping — the shipped config used it before WO-1."""
-    ps = _prescreen([_stub("s1"), _stub("s2")], max_candidates_per_day=20, max_per_strategy_day=1)
-    assert len(ps.on_bar(_bar(symbol="AAA"))) == 2
-    assert ps.on_bar(_bar(symbol="BBB", mm=1)) == []
 
 
 # ======================================================================== WO-9: funnel counters
@@ -728,10 +724,6 @@ def _already_closed(bar: Bar) -> ScanContext:
     """Window already SHUT for the scanned bar (10:10-13:45 — today's early close)."""
     return ScanContext(trade_window=_window(bar.ts_minute.day, start=(10, 10), end=(13, 45)),
                        session_open=datetime(2026, 6, bar.ts_minute.day, 9, 15, tzinfo=IST))
-
-
-def test_out_of_window_candidate_is_refused_before_the_open():
-    assert _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52)) == []
 
 
 def test_out_of_window_candidate_is_refused_after_the_close():
@@ -1095,6 +1087,7 @@ def test_a_declined_incumbent_is_displaceable_again():
     assert ps.claim_slot("IREDA", "orb") is True
     assert ps.admit([_scored("UNITDSPR", 0.97)], day) == []      # evaluated, in flight: untouchable
     assert ps.decline("IREDA", "orb") is True                     # the analyst RAN and said no
+    assert ps.admit([_scored("IREDA", 0.72)], day) == []          # stays SEEN: decline is not rearm
     assert ps.admit([_scored("KEI", 0.79)], day) == []            # 0.07 better: not materially
     assert [c.symbol for c in ps.admit([_scored("UNITDSPR", 0.97)], day)] == ["UNITDSPR"]
     assert ps.take_displaced() == [("IREDA", "orb")]
@@ -1230,13 +1223,14 @@ def test_hydrate_restores_the_catalyst_budget_across_a_restart():
     ps.hydrate(day, seen=[("HINDZINC", "cat")],
                charged=[("HINDZINC", "cat"), ("TCS", "orb")],
                catalyst_strategies=("cat", "cat_reversal"))
-    # The pre-restart STORY is reconstructed by symbol, so its other leg costs no second entry...
-    assert len(ps.admit([_scored("HINDZINC", 0.5, "cat_reversal", catalyst_ref="r1")], day)) == 1
-    # ...one of the two entries is left for a genuinely new story...
+    # The restored story already holds one of the two entries, so ONE genuinely new story fits...
     assert [c.symbol for c in ps.admit([_scored("TITAN", 0.5, "cat", catalyst_ref="r2")], day)] \
         == ["TITAN"]
-    # ...and the third is refused, exactly as it would have been without the restart.
+    # ...the next is refused, exactly as it would have been without the restart...
     assert ps.admit([_scored("LT", 0.5, "cat", catalyst_ref="r3")], day) == []
+    # ...and the pre-restart story is reconstructed by SYMBOL, so its other leg costs no second entry,
+    # even with the budget spent.
+    assert len(ps.admit([_scored("HINDZINC", 0.5, "cat_reversal", catalyst_ref="r1")], day)) == 1
 
 
 # ------------------------------------------ cap release schedule (owner-directed 2026-09-02)

@@ -690,18 +690,27 @@ def test_promotion_is_never_sought_the_module_cannot_reach_the_validation_pipeli
     """WO-17: promotion is NOT sought — so the promotion path must be UNREACHABLE, not merely unused.
 
     Checked structurally (the module's prose is allowed to DISCUSS the absence): no import of
-    ``engine.learning.validate``, and no ``ValidationPipeline`` / ``ParamSet`` name bound anywhere in
-    the module namespace. Nothing here can construct a candidate row or a CPCV verdict.
+    ``engine.learning.validate`` in any spelling (``import engine.learning.validate``, ``from
+    engine.learning.validate import ...``, ``from engine.learning import validate``, or a relative form),
+    and no ``ValidationPipeline`` / ``ParamSet`` name bound anywhere in the module namespace. Nothing here
+    can construct a candidate row or a CPCV verdict.
     """
     import ast
 
     from engine.learning import stop_geometry
 
+    banned_module = "engine.learning.validate"
     tree = ast.parse(Path(stop_geometry.__file__).read_text(encoding="utf-8"))
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            assert node.module != "engine.learning.validate", node.module
+            base = node.module or ""
+            if node.level:                                   # relative: against this module's package
+                package = "engine.learning".rsplit(".", node.level - 1)[0]
+                base = f"{package}.{base}" if base else package
+            assert base != banned_module, base
+            for a in node.names:
+                assert f"{base}.{a.name}" != banned_module, f"from {base} import {a.name}"
             imported.update(a.name for a in node.names)
         elif isinstance(node, ast.Import):
             imported.update(a.name for a in node.names)

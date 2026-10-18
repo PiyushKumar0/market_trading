@@ -290,13 +290,15 @@ def test_post_paper_on_needs_the_built_autopilot_and_off_always_applies(conn, cl
 
 
 def test_orders_latest_100_first(conn, clock) -> None:
-    _insert_order(conn, "o-1", created_at="2026-06-17T09:00:00+05:30")
-    _insert_order(conn, "o-2", created_at="2026-06-17T09:30:00+05:30")
+    """``/orders`` is the newest 100: with 101 on the book the oldest drops off, the rest newest first."""
+    for i in range(101):
+        _insert_order(conn, f"o-{i:03d}", created_at=f"2026-06-17T09:{i // 60:02d}:{i % 60:02d}+05:30")
     client = _client(conn=conn, clock=clock)
 
     r = client.get("/orders", headers=AUTH)
     assert r.status_code == 200
-    assert [o["order_id"] for o in r.json()["orders"]] == ["o-2", "o-1"]
+    ids = [o["order_id"] for o in r.json()["orders"]]
+    assert ids == [f"o-{i:03d}" for i in range(100, 0, -1)]     # newest first; o-000, the oldest, is cut
 
 
 # --------------------------------------------------------------------------- decisions / verdicts

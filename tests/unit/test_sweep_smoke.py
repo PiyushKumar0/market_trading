@@ -211,14 +211,9 @@ def test_daily_sweep_fills_entries_and_exits_at_the_next_sessions_open():
     assert pd.Timestamp(trade["Exit Timestamp"]) == idx[_EXIT_SIGNAL_ROW + 1]
     assert float(trade["Avg Entry Price"]) == pytest.approx(90.0 * (1.0 + half_spread))
     assert float(trade["Avg Exit Price"]) == pytest.approx(100.0 * (1.0 - half_spread))
-    # ...NOT the signal bar's close (100.0 both legs), which is what price=None resolves to
-    assert float(trade["Avg Entry Price"]) != pytest.approx(100.0, abs=1e-6)
 
-    # and the P&L difference is material, not a rounding artifact
+    # and the gain is material (~+11% gross; the old same-bar-close mechanics scored ~0% gross, negative net)
     assert float(trade["Return"]) > 0.10
-    same_bar_close_return = 0.0 - 2.0 * fee - 2.0 * half_spread   # what the old mechanics scored
-    assert same_bar_close_return < 0.0
-    assert float(trade["Return"]) - same_bar_close_return > 0.10
 
 
 def test_next_open_fill_charges_fees_and_half_the_spread_on_every_leg():
@@ -288,6 +283,12 @@ def test_hold_bars_counts_rows_between_the_entry_and_exit_FILLS():
     assert len(bars) == 1
     assert bars[0] == float(_EXIT_SIGNAL_ROW - _ENTRY_SIGNAL_ROW) == 2.0
     assert _hold_stats(bars) == (2.0, 2.0, 2.0)
+
+    # ROWS, not calendar days. The WO-2 fills above are Wed -> Fri, where the two agree; across a weekend
+    # they do not: a Friday entry and the next Monday's exit are one bar apart, three days.
+    week = pd.bdate_range("2024-01-01", periods=10)                     # Mon 01-01 .. Fri 01-12
+    weekend = pd.DataFrame({"Entry Timestamp": [week[4]], "Exit Timestamp": [week[5]]})   # Fri -> Mon
+    assert _trade_hold_bars(weekend, week).tolist() == [1.0]
 
 
 def test_an_open_trade_contributes_its_AGE_at_the_window_edge_not_a_realized_hold():

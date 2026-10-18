@@ -11,7 +11,6 @@ that config, not of a stub.
 from __future__ import annotations
 
 import gzip
-import inspect
 import json
 from dataclasses import dataclass
 from datetime import date
@@ -23,7 +22,6 @@ import pytest
 from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_yaml
 from engine.intelligence.agents import nightly
-from engine.intelligence.context import ContextAssembler
 from engine.intelligence.context import _json as _context_json
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentDef, AgentResult, load_agent_defs
@@ -738,14 +736,6 @@ def _context_blob(symbol: str, strategy_id: str) -> bytes:
         "features: unavailable",
     ])
     return gzip.compress(f"system prompt\n\n{prompt}".encode())
-
-
-def test_the_review_reads_the_candidate_line_the_assembler_actually_writes() -> None:
-    """A cross-module coupling with no type to protect it: the reader greps the archived prompt for
-    a line ``ContextAssembler.for_signal`` writes. Renaming or reformatting that line would not
-    break anything loudly — the review would just start rendering every decline as "unknown". This
-    is the tripwire that makes it break loudly instead."""
-    assert _CANDIDATE_LINE_PREFIX in inspect.getsource(ContextAssembler.for_signal)
 
 
 def seed_declines(conn, d: date = D) -> None:

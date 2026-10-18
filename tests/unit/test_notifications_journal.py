@@ -22,14 +22,14 @@ import asyncio
 import logging
 import re
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
 import pytest
 from fastapi.testclient import TestClient
 
 from engine.api.app import create_app
-from engine.core.clock import Clock
+from engine.core.clock import IST, Clock
 from engine.core.config import repo_root
 from engine.core.secrets import DASHBOARD_TOKEN
 from engine.notify import catalog
@@ -698,14 +698,16 @@ def test_notifications_route_returns_the_day_ascending(conn, clock):
     )
 
 
-def test_notifications_route_defaults_to_today_ist(conn, clock):
-    """No ``?d=`` ⇒ today off the app's clock (2026-06-17 in the frozen fixture), never the UTC day."""
-    _insert(conn, "a", "2026-06-17T10:00:00+05:30", title="today")
-    _insert(conn, "z", "2026-06-18T10:00:00+05:30", title="tomorrow")
+def test_notifications_route_defaults_to_today_ist(conn):
+    """No ``?d=`` ⇒ today off the app's clock, never the UTC day: at 02:00 IST on 06-18 the UTC date is
+    still 06-17, so a UTC default would serve yesterday's transcript."""
+    ist_clock = Clock(time_source=lambda: datetime(2026, 6, 18, 2, 0, tzinfo=IST))
+    _insert(conn, "a", "2026-06-17T23:00:00+05:30", title="yesterday")
+    _insert(conn, "z", "2026-06-18T01:00:00+05:30", title="today")
 
-    body = _client(conn=conn, clock=clock).get("/notifications", headers=AUTH).json()
+    body = _client(conn=conn, clock=ist_clock).get("/notifications", headers=AUTH).json()
 
-    assert body["d"] == "2026-06-17"
+    assert body["d"] == "2026-06-18"
     assert [r["title"] for r in body["rows"]] == ["today"]
 
 

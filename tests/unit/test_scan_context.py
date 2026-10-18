@@ -374,10 +374,12 @@ def test_upcoming_ex_dates_bucketed_per_symbol(store, provider):
 
 
 def test_ex_date_horizon_covers_the_mom_skip_window(store, provider):
-    # §6.1 mom skips on ex-dates within ceil(rebalance_days x 7/5) calendar days — 28 at the §6.3
-    # upper bound of 20. A shorter provider horizon would silently defeat the A12 skip.
-    store.upsert_corp_actions([{"symbol": "AAA", "ex_date": D + timedelta(days=27), "kind": "dividend"}])
-    assert provider(_bar("AAA")).upcoming_ex_dates == [D + timedelta(days=27)]
+    # §6.1 mom skips on ex-dates within ceil(rebalance_days x 7/5) calendar days, INCLUSIVE — 28 at the
+    # §6.3 upper bound of 20 (momentum.py). The provider must reach that window's LAST day, or the A12
+    # skip is silently defeated exactly there.
+    edge = D + timedelta(days=28)
+    store.upsert_corp_actions([{"symbol": "AAA", "ex_date": edge, "kind": "dividend"}])
+    assert provider(_bar("AAA")).upcoming_ex_dates == [edge]
 
 
 # --------------------------------------------------------------------------- calendar context
