@@ -1,5 +1,5 @@
-"""Phase 5 reconciliation: baseline nodeids, minus ledger removals, with ledger renames applied, must equal the
-final collection. Anything else is a SILENT change and fails the check.
+"""Phase 5 reconciliation: the baseline nodeids, with the ledger rows applied IN ROW ORDER, must equal the final
+collection. Anything else is a SILENT change and fails the check.
 
     python runbooks/test_audit/tools/reconcile_nodeids.py --baseline runbooks/test_audit/baseline_nodeids.txt \
         --final <file with the final `pytest --collect-only -q` nodeids> --ledger runbooks/test_audit/LEDGER.md
@@ -12,11 +12,11 @@ Ledger conventions (the `nodeid(s)` column of the Verdicts table):
   function's cases;
 - MV rows (the old test file → the new one, both backticked): the file moved; its baseline nodeids, and every
   nodeid the ledger writes with the old path, are read under the new path;
-- R-codes: the listed nodeids are REMOVED; a backticked test FILE stands for all of its baseline nodeids;
+- R-codes: the listed nodeids are REMOVED; a backticked test FILE stands for all of its nodeids at that row;
 - a row whose cell contains ``→``: nodeids (or a file) before it are the old ones (removed or renamed away),
-  nodeids after it the new ones (must exist) — used by P1 merges, renames and R8 shrinks;
-- any other row whose nodeids are not in the baseline lists ADDED tests (must exist); rows whose nodeids are in
-  the baseline and carry no ``→`` (P2-P5 repairs) change nothing in the collection.
+  nodeids after it the new ones — used by P1 merges, renames, R8 shrinks and MS moves between files;
+- any other row whose nodeids are not expected at that row lists ADDED tests; rows whose nodeids already are
+  (P2-P5 repairs) change nothing in the collection.
 """
 
 from __future__ import annotations
@@ -89,6 +89,7 @@ def main() -> int:
             moves[old_file] = new_file
     baseline = {_moved(n, moves) for n in _read_ids(a.baseline)}
     final = _read_ids(a.final)
+    expected = set(baseline)
     removed: set[str] = set()
     added: set[str] = set()
     problems: list[str] = []
@@ -98,25 +99,19 @@ def main() -> int:
         if "→" in cell:
             old_part, new_part = cell.split("→", 1)
             old_files = {moves.get(f, f) for f in _files(old_part)}
-            old = _expand({_moved(n, moves) for n in _nodeids(old_part)}, baseline) | _in_files(old_files, baseline)
-            new = _expand(_nodeids(new_part), final)
-            removed |= old
-            added |= new
-            missing_new = new - final
-            if missing_new:
-                problems.append(f"row {row}: new nodeids not collected: {sorted(missing_new)}")
-            continue
-        ids = {_moved(n, moves) for n in _nodeids(cell)}
-        if code.startswith("R"):
-            exp = _expand(ids, baseline) | _in_files({moves.get(f, f) for f in _files(cell)}, baseline)
-            removed |= exp
-            not_in_base = exp - baseline
-            if not_in_base:
-                problems.append(f"row {row}: removed nodeids not in the baseline: {sorted(not_in_base)}")
+            old = _expand({_moved(n, moves) for n in _nodeids(old_part)}, expected) | _in_files(old_files, expected)
+            new = _expand({_moved(n, moves) for n in _nodeids(new_part)}, final)
         else:
-            new_ids = ids - baseline
-            added |= _expand(new_ids, final)
-    expected = (baseline - removed) | added
+            ids = {_moved(n, moves) for n in _nodeids(cell)}
+            if code.startswith("R"):
+                old = _expand(ids, expected) | _in_files({moves.get(f, f) for f in _files(cell)}, expected)
+                new = set()
+            else:
+                old, new = set(), _expand(ids - expected, final)
+        if old - expected:
+            problems.append(f"row {row}: removed nodeids not expected at that row: {sorted(old - expected)}")
+        expected = (expected - old) | new
+        removed, added = (removed | old) - new, (added | new) - old
     silent_removals = sorted(expected - final)
     silent_additions = sorted(final - expected)
     still_present = sorted(removed & final)
