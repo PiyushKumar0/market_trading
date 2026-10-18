@@ -24,26 +24,21 @@ from engine.ops.single_instance import InstanceLock
 
 # A tiny program a child interpreter runs: construct InstanceLock on argv[1], try to acquire, print the
 # verdict, and EXIT WITHOUT releasing — so a subsequent parent re-acquire proves the KERNEL released
-# the lock on process death. The child registers ``engine`` as a bare package rooted at argv[2], THIS
-# process's engine directory: it imports exactly the code under test (not whichever tree the
-# interpreter's editable install points at), and skips ``engine/__init__``'s sklearn preload, ~7 s per
-# spawn that the lock never needs (the preload only orders native imports this child never makes).
+# the lock on process death. PYTHONPATH puts THIS process's ``src`` first, so the child imports exactly
+# the code under test (not whichever tree the interpreter's editable install points at).
 _CHILD = (
-    "import sys, types\n"
-    "pkg = types.ModuleType('engine')\n"
-    "pkg.__path__ = [sys.argv[2]]\n"
-    "sys.modules['engine'] = pkg\n"
+    "import sys\n"
     "from engine.ops.single_instance import InstanceLock\n"
     "lock = InstanceLock(sys.argv[1])\n"
     "print('RESULT=' + ('ACQUIRED' if lock.acquire() else 'REFUSED'))\n"
 )
-_ENGINE_DIR = str(Path(engine.__file__).parent)
+_SRC = str(Path(engine.__file__).parents[1])
 
 
 def _spawn(lock_path) -> str:
     proc = subprocess.run(
-        [sys.executable, "-c", _CHILD, str(lock_path), _ENGINE_DIR],
-        capture_output=True, text=True, timeout=60,
+        [sys.executable, "-c", _CHILD, str(lock_path)],
+        env={**os.environ, "PYTHONPATH": _SRC}, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"child failed rc={proc.returncode}: {proc.stdout!r} {proc.stderr!r}"
     return proc.stdout

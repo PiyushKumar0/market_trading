@@ -257,10 +257,11 @@ class SelfTest:
     def _check_native_preload(self) -> SelfTestCheck:
         # The vectorbt+skfolio native import-order guard (engine._preload): scikit-learn's OpenMP
         # runtime must be established before numba/vectorbt/cvxpy load, or the process segfaults on
-        # Windows (0xC0000005). engine/__init__ imports it first; here we surface that it took hold.
-        if _preload.PRELOADED:
+        # Windows (0xC0000005). engine/__init__ installs it; here we surface that it is in force.
+        if _preload.guard_armed():
             return SelfTestCheck(name="native_preload", status=CheckStatus.PASS,
-                                 detail="scikit-learn OpenMP runtime established (vectorbt+skfolio safe)")
+                                 detail="import guard loads scikit-learn before "
+                                        "numba/llvmlite/vectorbt/cvxpy/skfolio")
         return SelfTestCheck(name="native_preload", status=CheckStatus.WARN,
                              detail="scikit-learn absent — vectorbt+skfolio coexistence unguarded (engine._preload)")
 

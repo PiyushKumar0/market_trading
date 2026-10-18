@@ -4,9 +4,7 @@ A standalone, NON-wake Windows Scheduled Task run every ``lifecycle.watchdog_pol
 mt-engine service account (so the per-user DPAPI Telegram bot token decrypts). It exists to survive
 the engine's death, therefore it imports ONLY ``engine.core.secrets`` (bot token) +
 ``engine.core.config`` (owner chat_id + lifecycle knobs, non-secrets) + ``httpx`` + stdlib — never
-``engine.ops``/broker/notify. (Package-init caveat: importing ``engine.core.*`` runs
-``engine/__init__`` → ``engine._preload`` → a best-effort ``import sklearn`` — a load-order guard
-side effect, not a functional dependency; it adds ~1 s to a 60 s-cadence task.)
+``engine.ops``/broker/notify.
 
 Storage discipline (§2.2): opens ``state.db`` READ-ONLY (sqlite URI ``mode=ro``) and keeps its own
 debounce in a private file ``data/watchdog_state.json`` — it is NEVER a second writer to state.db
