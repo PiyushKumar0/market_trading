@@ -370,17 +370,7 @@ def test_the_registration_equity_is_the_go_flat_rung_and_falls_back_loudly(tmp_p
     """Derived at the WORST equity the risk table still lets a position be opened at (the
     `equity_floor_rung`), because the cost floor RISES as the book shrinks: deriving at the largest
     permitted book would register the flattering edge for exactly the drawdown it fails in."""
-    import re
-
-    # Pinned at the REGISTRATION base (40,000), not the live file: an O19 capital change rewrites
-    # `capital_base_inr` and must not break this pin (the edge pin above does the same).
-    pinned = tmp_path / "limits.yaml"
-    pinned.write_text(
-        re.sub(r"^capital_base_inr:.*$", "capital_base_inr: 40000",
-               _LIMITS.read_text(encoding="utf-8"), flags=re.M),
-        encoding="utf-8",
-    )
-    eq, src = fv.load_registration_equity(pinned)
+    eq, src = fv.load_registration_equity(_LIMITS)
     assert eq == Decimal("36000.0") and "equity_floor_rung" in src
     # An unreadable or implausible table falls back to the pinned rung and SAYS so — never to a
     # bigger book, which would quietly lower the floor and raise the registered edge.

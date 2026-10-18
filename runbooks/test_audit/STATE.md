@@ -48,8 +48,14 @@ Resume rule (PROMPT.md §6): audit this file, LEDGER.md and `git log` against PR
   `C:\Users\piyush.kumar_atari\projects\personal\mt_testaudit_c2` (branch `wip/test-audit-c2` at 9126968; its diff
   was applied here as `mt_build_notes\test_audit\patches\batchC2.patch` — remove that worktree and branch at the
   end). Every row fault-injected (P1 row 37 excepted), `src` clean.
-- [ ] Phase 5 — verify (two serial full runs + interleaved base runs, chaos/replay/property/npm, reconcile_nodeids.py,
-  ruff, scope-leak checks, 4-angle review); parallelism experiment with tools/shard_run.py.
+- [~] Phase 5 — verify. Done: interleaved full runs round c (audit 451.0 / 534.7 s vs base 596.1 s + Phase 0
+  622.5 s; base_c_1 void, lid standby), all green; tiers explicitly (chaos 69 passed / 19 skipped, replay 40,
+  property 2); dashboard `npm test` 92/92 (no node_modules junction needed); `ruff check tests` clean (085a24e);
+  reconcile_nodeids RECONCILED (4,463 → 4,456); reversed-order full run green (4,436 passed, 20 skipped);
+  per-file-alone runs of the 91 `conn` files (in progress); 4-angle review: protection (6 fault re-injections, all
+  survivors failed as recorded), hermeticity, scope/order, parametrization — no findings; the scope/order review's
+  side note disproved ledger row 32's premise (tests/conftest.py already pins the capital) → row 32 WITHDRAWN and
+  reverted. To do: final interleaved round (full + unit), shard experiment.
 - [ ] Phase 6 — report
 
 ## Baseline (Phase 0)
@@ -83,7 +89,8 @@ until 07:50. `run_suite.ps1` logs `standby_entries` per run; a run with entries 
 - Batch B — LEDGER rows 15–27 — 9126968 (3 removals, 9 repairs incl. one Tier A strengthening (row 17), 1 fixture
   consolidation; every Tier B fault-injected).
 - Batch C — LEDGER rows 28–45 — 7b1f4f6 (3 removals incl. 1 vacuous source pin replaced by a behavioural round
-  trip, 13 repairs incl. 3 Tier A (rows 31, 32, 36), 1 merge-parametrize, 1 assert trim).
+  trip, 13 repairs incl. 3 Tier A (rows 31, 32, 36), 1 merge-parametrize, 1 assert trim). Row 32 was later
+  WITHDRAWN and reverted (Phase 5): its premise was false.
 - Lint — 085a24e: `ruff check tests conftest.py runbooks/test_audit/tools` clean (4 pre-existing test findings
   + the inventory tool; the tool re-run on the Phase 1 inputs reproduces every non-duration column).
 - Batch D — LEDGER rows 46–61 (16 P1 merges of copy-paste pairs) + row 62 (the `conn`-template equivalence test,
