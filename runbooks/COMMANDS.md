@@ -315,27 +315,40 @@ git commit -m "limits.yaml comments base-relative (owner): patch + reseed" -- co
 
 ## Tests / verification
 
-The gate is the whole `tests/` tree (`testpaths`): unit + chaos + replay + property, 4,456 tests. On this laptop
-(2026-10-18 test audit, `runbooks/test_audit/REPORT.md`): ~8-9 min serial, ~4-6 min as 8 file-shards. Every pytest
-start costs ~15 s before its first test (the first `import engine` loads sklearn via `engine._preload`, ~9.5 s),
-so put several files in ONE run rather than looping over them.
+The gate is a bare `pytest` (`testpaths`: unit + chaos + replay + property), 3,831 tests. Tests of NON-production
+code — research, backtest, verdict and one-off scripts, and the `engine.learning` modules only they reach — live in
+`tests/offline` (392 tests) and run on demand: after changing one of those scripts, `scripts/backtest_common.py` or
+`engine.learning`. A pytest process starts in ~4 s (scikit-learn loads only when numba/vectorbt/cvxpy/skfolio is
+imported); vectorbt still re-JITs in every process, so the `needs_heavy_deps` tests cost ~24 s per process. Put
+several files in ONE run rather than looping over them. Numbers: `runbooks/test_audit/REPORT.md`.
 
 ```powershell
 # Inner loop: one file or a few, in one run
-uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_sweep_signals.py -q
-# Unit tier without the 19 heavy-deps tests (vectorbt re-JITs ~24 s in every process)
+uv run pytest tests/unit/test_filings_feeds.py tests/unit/test_prescreen.py -q
+# Unit tier without the heavy-deps tests
 uv run pytest tests/unit -q -m "not needs_heavy_deps"
-# The gate (serial; run inline, never two at once) and its tiers on their own
+# The gate in parallel (pytest-xdist: 8 workers, each takes whole files) — run inline, never two gates at once
+uv run pytest -n 8 --dist loadfile -q
+# The gate serial, and its tiers on their own
 uv run pytest -q
 uv run pytest tests/unit -q
 uv run pytest -m chaos -q
 uv run pytest tests/replay -q
 uv run pytest tests/property -q
+# The offline tier (research / backtest / verdict scripts and engine.learning)
+uv run pytest tests/offline -n 8 --dist loadfile -q
 cd dashboard; npm test; cd ..
-# The gate in parallel without pytest-xdist: test files packed onto 8 plain pytest processes (green on all four
-# shard runs, 2026-10-18: 223-340 s; prints per-shard counts; any failing shard exits 1). Refresh the weights from
-# a --durations=0 run when files are added (an unlisted test file is NOT run).
-.venv\Scripts\python.exe runbooks\test_audit\tools\shard_run.py -n 8 --weights runbooks\test_audit\shard_weights.csv --out-dir ..\mt_build_notes\shards
+```
+
+Optional host speed-up — an owner/IT decision, from an ELEVATED PowerShell (the audit did not apply it). Defender
+real-time scanning costs ~2 ms per temp file and ~0.5 ms per `stat` here. The narrowest useful exclusion is the venv
+(read on every import) and pytest's temp root; never `data/`, which holds downloaded third-party files. A managed
+laptop may refuse local exclusions (tamper protection / Intune), and an excluded folder is not scanned — weigh that.
+
+```powershell
+Add-MpPreference -ExclusionPath 'C:\Users\piyush.kumar_atari\projects\personal\market_trading\.venv', 'C:\Users\piyush.kumar_atari\AppData\Local\Temp\pytest-of-piyush.kumar_atari'
+Get-MpPreference | Select-Object -ExpandProperty ExclusionPath     # confirm; then time the gate again
+Remove-MpPreference -ExclusionPath 'C:\Users\piyush.kumar_atari\projects\personal\market_trading\.venv', 'C:\Users\piyush.kumar_atari\AppData\Local\Temp\pytest-of-piyush.kumar_atari'   # undo
 ```
 
 Test-audit tools (`runbooks/test_audit/tools/`; what each found is in `runbooks/test_audit/REPORT.md`):
@@ -347,8 +360,11 @@ Test-audit tools (`runbooks/test_audit/tools/`; what each found is in `runbooks/
 .venv\Scripts\python.exe -m pytest -p runbooks.test_audit.tools.footprint --footprint-out=<footprints.sqlite> -q
 .venv\Scripts\python.exe runbooks\test_audit\tools\footprint_query.py <footprints.sqlite> stats
 .venv\Scripts\python.exe runbooks\test_audit\tools\footprint_query.py <footprints.sqlite> check --removed <nodeid> --survivors <nodeid> ...
-# After removing/renaming tests: baseline minus ledgered removals, renames applied, must equal the collection
-.venv\Scripts\python.exe runbooks\test_audit\tools\reconcile_nodeids.py --baseline runbooks\test_audit\baseline_nodeids.txt --final <collect-only.txt> --ledger runbooks\test_audit\LEDGER.md
+# After removing, moving or renaming tests: the baseline with the ledger rows applied in order must equal the
+# collection of BOTH the default run and tests/offline
+.venv\Scripts\python.exe -m pytest --collect-only -q | Out-File -Encoding utf8 ..\mt_build_notes\collect.txt
+.venv\Scripts\python.exe -m pytest tests/offline --collect-only -q | Out-File -Encoding utf8 -Append ..\mt_build_notes\collect.txt
+.venv\Scripts\python.exe runbooks\test_audit\tools\reconcile_nodeids.py --baseline runbooks\test_audit\baseline_nodeids.txt --final ..\mt_build_notes\collect.txt --ledger runbooks\test_audit\LEDGER.md
 ```
 
 After ANY edit to `config/agents.yaml`, validate through the engine's own loader BEFORE the
