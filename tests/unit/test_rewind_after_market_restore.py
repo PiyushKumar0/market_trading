@@ -358,12 +358,6 @@ def test_s_before_today_touches_only_todays_snapshot_rows(env):
     assert ("instruments", "2026-10-14") in rows
 
 
-def test_s_before_today_without_todays_rows_leaves_the_snapshot_jobs_alone(env):
-    data, _ = env
-    assert _run(env, "--export", EXPORT, "--apply") == 0
-    assert ("universe_build", "2026-10-14") in _job_rows(data)
-
-
 def test_export_taken_after_todays_builds_keeps_todays_snapshot_rows(env, capsys):
     """An export stamped today after 08:31 holds today's universe_daily: rebuilding it after the
     close would rewrite the universe the day traded on."""

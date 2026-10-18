@@ -891,23 +891,13 @@ async def test_ttl_swing_and_position_are_todays_close(
     """_ttl is keyed on style alone: an entry, an exit, a stop adjust and the §5.2(a) forward-queue
     horizon all keep TODAY's close. WO-D2's one-exit-per-session cadence depends on it
     (``_delivered_exit_today`` screens today's deliveries only), and the forward queue is a
-    within-day structure."""
+    within-day structure. For entries this is the 2026-09-23 owner directive ("trade recommendations
+    should close automatically and free the gate count at the end of the day if no trade decision
+    were made"), which withdrew the 2026-09-13 (WO-V) next-session entry TTL: on 2026-09-21/22 four
+    untaken pending entry recs held the CNC ``max_open_positions`` cap of 4 across two sessions,
+    killing 12 of 19 gate verdicts."""
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
-    assert pipeline._ttl("swing") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
-    assert pipeline._ttl("position") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
-
-
-async def test_ttl_entry_expires_the_same_session_per_2026_09_23_owner_directive(
-    conn, pclock, ticker, calendar, book, limit_table, cost_model
-):
-    """2026-09-23 owner directive: "trade recommendations should close automatically and free the
-    gate count at the end of the day if no trade decision were made." This withdraws the 2026-09-13
-    (WO-V) next-session entry TTL -- on 2026-09-21/22 four untaken pending entry recs held the CNC
-    ``max_open_positions`` cap of 4 across two sessions, killing 12 of 19 gate verdicts. An entry's
-    TTL is TODAY's session close, the same as every other swing/position stamp."""
-    pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
-    ticker.at = datetime(2026, 6, 19, 10, 20, tzinfo=IST)             # Friday, a trading day
     assert pipeline._ttl("swing") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
     assert pipeline._ttl("position") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
 

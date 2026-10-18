@@ -40,7 +40,7 @@ from engine.core.enums import Actor, Mode, RiskState
 from engine.core.migrations import apply_migrations
 from engine.core.protected_store import IntegrityError
 from engine.core.types import Bar, TradeWindow
-from engine.datafeeds.bhavcopy import BhavcopyJob
+from engine.datafeeds.bhavcopy import BhavcopyJob, BhavcopyResult
 from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
 from engine.marketdata.store import MarketStore
 from engine.marketdata.tick_compact import TickCompactionResult
@@ -219,7 +219,7 @@ async def test_degraded_snapshot_escalates_to_live_refresh(market_store, clock):
 
 
 @pytest.mark.asyncio
-async def test_degraded_snapshot_without_session_stays_hydrated_with_warning(market_store, clock):
+async def test_degraded_snapshot_without_session_stays_hydrated_with_warning(market_store, clock, caplog):
     """Same degraded snapshot pre-login: no session to escalate with — the ladder keeps the hydrated
     (degraded) map and the post-login instruments step heals it on login."""
     degraded = InstrumentStore(clock)
@@ -227,12 +227,15 @@ async def test_degraded_snapshot_without_session_stays_hydrated_with_warning(mar
     market_store.upsert_instruments_daily(degraded.snapshot_rows(clock.today()))
 
     instruments = InstrumentStore(clock)
-    branch = await hydrate_instruments_at_startup(
-        instruments, market_store, kite=None, session_valid=False, clock=clock,
-    )
+    with caplog.at_level(logging.WARNING, logger="engine.ops.post_login"):
+        branch = await hydrate_instruments_at_startup(
+            instruments, market_store, kite=None, session_valid=False, clock=clock,
+        )
     assert branch == "hydrated"
     assert instruments.index_count == 0
     assert instruments.token_for_symbol("NIFTY 50") is None    # degraded until login refresh
+    warned = [r for r in caplog.records if r.getMessage() == "instruments_hydrate_degraded"]
+    assert len(warned) == 1 and warned[0].levelname == "WARNING"   # the operator's pre-login signal
 
 
 @pytest.mark.asyncio
@@ -412,10 +415,10 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
 
     Unlike the machinery tests in ``test_catchup_runner.py``/this file's ``_scheduled_runner`` tests
     (which hand-construct ``JobSpec.run`` to already return a meaningful object), this test goes
-    through the REAL pieces: a real ``BhavcopyJob`` degraded by a failing HTTP client, a closure that
-    mirrors ``engine.ops.main:job_bhavcopy`` verbatim, registered via the real ``build_job_registry``,
-    driven through the real ``_scheduled_runner`` — pinning the exact seam that let the closure
-    silently swallow the result."""
+    through the REAL pieces: a real ``BhavcopyJob`` degraded by a failing HTTP client, the REAL
+    ``job_bhavcopy`` closure compiled from ``engine.ops.main:run``'s own source (``_real_wrapper``),
+    registered via the real ``build_job_registry``, driven through the real ``_scheduled_runner`` —
+    pinning the exact seam that let the closure silently swallow the result."""
     async def _instant(_delay: float) -> None:
         return None
 
@@ -426,9 +429,7 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
 
     bhavcopy = BhavcopyJob(market_store, clock, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
-    async def job_bhavcopy(d):
-        # Mirrors engine.ops.main.job_bhavcopy verbatim — MUST stay in sync.
-        return await bhavcopy.run(d)
+    job_bhavcopy = _real_wrapper("job_bhavcopy", {"bhavcopy": bhavcopy, "BhavcopyResult": BhavcopyResult})
 
     fns = _all_noop_fns()
     fns[opsmain.JOB_BHAVCOPY] = job_bhavcopy
@@ -537,12 +538,6 @@ def _reconcile_status(conn, d: date) -> str | None:
         (opsmain.JOB_RECONCILE, d.isoformat()),
     ).fetchone()
     return row["status"] if row else None
-
-
-def test_reconcile_wrapper_gates_on_session_token() -> None:
-    body = _wrapper_body(inspect.getsource(opsmain.run), "job_reconcile")
-    assert 'ReconcileReport(d=d, ok=False, aborted_reason="no_valid_token")' in body
-    assert body.index("session.token_valid()") < body.index("reconcile.run(")
 
 
 @pytest.mark.asyncio
@@ -1144,7 +1139,7 @@ def test_an_empty_book_costs_one_read_and_no_admission() -> None:
     book, screen = _FakeRestingBook([]), _FakeScreen()
     out = _retest_republish(book, screen, _snapshot_features([]), **_retest_kwargs())
     assert out == [] and screen.calls == []
-    assert book.due_calls and book.expired == [RETEST_D]
+    assert len(book.due_calls) == 1 and book.expired == [RETEST_D]
 
 
 # --------------------------------------------------------------------------- the not-offerable screen

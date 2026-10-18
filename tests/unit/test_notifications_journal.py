@@ -483,21 +483,27 @@ async def test_no_state_store_means_no_drainer(clock):
 @pytest.mark.asyncio
 async def test_drain_loop_survives_a_bad_pass(conn, clock, monkeypatch):
     """The retry mechanism dying silently would restore exactly the failure it exists to remove, so
-    one exploding pass is logged and the loop continues."""
+    one exploding pass is logged and the loop continues. Event-driven: a fixed real-time budget
+    (it slept 80 ms) starved on a loaded Windows host, whose timer tick is ~15.6 ms."""
     from engine.notify import telegram as tg_mod
 
     monkeypatch.setattr(tg_mod, "_DRAIN_INTERVAL_S", 0.01)
     bot, _ = _bot(conn, clock)
     passes: list[int] = []
+    second = asyncio.Event()
 
     async def _boom(self):
         passes.append(1)
+        if len(passes) >= 2:
+            second.set()
         raise RuntimeError("drain blew up")
 
     monkeypatch.setattr(TelegramBot, "_drain_outbox_once", _boom)
     bot._start_outbox_drainer()
-    await asyncio.sleep(0.08)
-    await bot._stop_outbox_drainer()
+    try:
+        await asyncio.wait_for(second.wait(), timeout=5)   # a dead loop never sets it: TimeoutError
+    finally:
+        await bot._stop_outbox_drainer()
 
     assert len(passes) >= 2                            # it kept going after the first explosion
 

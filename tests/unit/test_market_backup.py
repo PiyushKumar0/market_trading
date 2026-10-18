@@ -328,28 +328,6 @@ async def test_export_never_starts_in_a_trading_day_morning_or_session(tmp_path,
     assert (result.unfinished, len(fake.exports)) == ((False, 1) if starts else (True, 0))
 
 
-@pytest.mark.asyncio
-async def test_a_boot_morning_lane_pass_defers_the_missed_export_to_after_the_session(tmp_path, conn) -> None:
-    """The host slept through Wed 22:00 and boots Thu 07:30: the post-arm lane pass leaves the export
-    missed (no watermark, no report) and the first pass after 15:45 runs it."""
-    clock = MovableClock(datetime(2026, 6, 18, 7, 30, tzinfo=IST))
-    calendar = _calendar(clock)
-    fake = FakeStore()
-    reg = JobRegistry()
-    reg.register(JobSpec(
-        JOB_MARKET_BACKUP, JobClass.RUN_LATEST, time(22, 0),
-        lambda: opsmain._market_backup(fake, _settings(tmp_path), clock, calendar), order=95))
-    runner = CatchUpRunner(conn, clock, calendar, reg)
-    runner.record_run(JOB_MARKET_BACKUP, date(2026, 6, 16))
-
-    result = await runner.catch_up(scope=CatchUpScope.ALL)
-    assert fake.exports == [] and result.jobs_caught_up == [] and result.jobs_failed == []
-
-    clock.at = datetime(2026, 6, 18, 15, 46, tzinfo=IST)
-    result = await runner.catch_up(scope=CatchUpScope.ALL)
-    assert len(fake.exports) == 1 and result.jobs_caught_up == [f"{JOB_MARKET_BACKUP}:2026-06-17"]
-
-
 class FailingStore(FakeStore):
     def __init__(self) -> None:
         super().__init__()

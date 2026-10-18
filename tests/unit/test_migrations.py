@@ -27,16 +27,6 @@ def _tables(conn) -> set[str]:
     return {r["name"] for r in rows}
 
 
-def test_migrations_create_full_table_set(db_path):
-    conn = connect(db_path)
-    try:
-        applied = apply_migrations(conn)
-        assert applied, "expected migration files to apply on a fresh db"
-        assert EXPECTED_TABLES <= _tables(conn)
-    finally:
-        conn.close()
-
-
 def test_engine_lifecycle_singleton_seeded(db_path):
     conn = connect(db_path)
     try:
@@ -125,7 +115,8 @@ def test_migrations_idempotent(db_path):
     try:
         first = apply_migrations(conn)
         second = apply_migrations(conn)
-        assert first and second == []          # nothing re-applied on the second pass
+        assert first, "expected migration files to apply on a fresh db"
+        assert second == []                     # nothing re-applied on the second pass
         assert EXPECTED_TABLES <= _tables(conn)
     finally:
         conn.close()

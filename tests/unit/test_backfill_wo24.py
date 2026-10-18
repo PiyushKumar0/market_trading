@@ -27,7 +27,9 @@ import threading
 import pytest
 from kiteconnect import KiteConnect
 
+from engine.broker.session import SessionManager
 from engine.core.config import Settings
+from engine.core.secrets import KITE_ACCESS_TOKEN, KITE_API_KEY
 from engine.marketdata.backfill import BackfillJob
 from engine.marketdata.store import MarketStore
 
@@ -96,11 +98,28 @@ async def test_a_hung_historical_fetch_never_blocks_a_concurrent_store_read(stor
     assert report.bars_written == 0
 
 
-def test_every_kite_historical_request_carries_an_explicit_timeout(monkeypatch):
+class _KeyOnlySecrets:
+    """Just enough of ``Secrets`` for ``SessionManager``: an api_key, no access token yet."""
+
+    def get(self, key: str) -> str:
+        if key == KITE_API_KEY:
+            return "k"
+        raise KeyError(key)
+
+    def has(self, key: str) -> bool:
+        return key == KITE_API_KEY
+
+    def get_optional(self, key: str) -> str | None:
+        assert key == KITE_ACCESS_TOKEN
+        return None
+
+
+def test_every_kite_historical_request_carries_an_explicit_timeout(monkeypatch, clock):
     """A hung fetch has to end by itself, and it does: pykiteconnect hands ``requests`` a timeout on
-    every call. Pinned end-to-end through ``historical_data`` rather than by reading the constant,
-    so removing the pass-through (or constructing the client with ``timeout=None``) fails here."""
-    kc = KiteConnect(api_key="k")
+    every call. Pinned end-to-end through the ENGINE's own client — ``SessionManager.kite_connect()``,
+    the instance the composition root hands ``KiteClient`` — and ``historical_data``, so an engine-side
+    timeout override, or pykiteconnect dropping the pass-through, fails here."""
+    kc = SessionManager(_KeyOnlySecrets(), clock).kite_connect()
     kc.set_access_token("t")
     seen: dict = {}
 

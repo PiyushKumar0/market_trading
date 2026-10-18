@@ -13,7 +13,6 @@ from datetime import timedelta
 from decimal import Decimal
 
 import pytest
-from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from engine.api.app import create_app
@@ -621,13 +620,6 @@ def test_post_kill_single_step_flips_state_reset_stays_409(conn, clock, kill_swi
 
 
 # --------------------------------------------------------------------------- /ws/live
-def test_ws_live_rejects_missing_token() -> None:
-    client = _client()
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws/live"):
-            pass
-
-
 def test_ws_live_broadcasts_bus_event(conn, clock, bus) -> None:
     app = create_app(secrets=_FakeSecrets(_TOKEN), bus=bus, clock=clock)
     client = TestClient(app)

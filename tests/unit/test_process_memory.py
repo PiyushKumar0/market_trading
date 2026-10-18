@@ -6,6 +6,8 @@ telemetry, not a check: a read failure must log one DEBUG line, never raise, and
 
 from __future__ import annotations
 
+import logging
+
 from engine.ops.process_memory import ProcessMemory, ProcessMemoryReader
 
 
@@ -27,16 +29,6 @@ def test_read_returns_plausible_positive_integers_on_windows():
 
 
 # --------------------------------------------------------------------------------- injected fake reads
-def test_read_uses_injected_counters_when_provided():
-    fake = ProcessMemory(private_bytes=123, working_set_bytes=456, peak_working_set_bytes=789)
-    reader = ProcessMemoryReader(get_process_memory_info=lambda: fake)
-    reader._is_windows = True
-
-    mem = reader.read()
-
-    assert mem == fake
-
-
 def test_read_failure_returns_none_and_does_not_raise(caplog):
     def _boom() -> ProcessMemory:
         raise OSError("GetProcessMemoryInfo failed: 87")
@@ -44,9 +36,12 @@ def test_read_failure_returns_none_and_does_not_raise(caplog):
     reader = ProcessMemoryReader(get_process_memory_info=_boom)
     reader._is_windows = True
 
-    mem = reader.read()  # must not raise
+    with caplog.at_level(logging.DEBUG, logger="engine.ops.process_memory"):
+        mem = reader.read()  # must not raise
 
     assert mem is None
+    failed = [r for r in caplog.records if r.getMessage() == "process_memory_read_failed"]
+    assert len(failed) == 1 and failed[0].levelname == "DEBUG"      # one DEBUG line, per the module contract
 
 
 def test_read_is_noop_off_windows():

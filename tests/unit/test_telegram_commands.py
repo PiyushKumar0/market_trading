@@ -1733,7 +1733,7 @@ async def test_a_hanging_send_is_bounded_and_dropped(clock, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_hanging_start_degrades_to_disabled_bot(clock, monkeypatch):
+async def test_a_hanging_start_degrades_to_disabled_bot(clock, monkeypatch, caplog):
     """2026-08-07: `start()` has four network awaits and used to run UNGUARDED in the boot path —
     a hang or error now degrades to a DISABLED bot (sends drop 'not_started') instead of holding
     or crashing the boot."""
@@ -1754,8 +1754,11 @@ async def test_a_hanging_start_degrades_to_disabled_bot(clock, monkeypatch):
 
     await asyncio.wait_for(bot.start(), timeout=5)             # returns; never raises
     assert bot._app is None                                    # disabled, half-started app not kept
-    assert bot._failed_app is not None                         # ...but RETAINED for teardown (a live
-    await bot.send("dropped")                                  # poller may have survived the timeout)
+    assert bot._failed_app is not None   # ...but RETAINED for teardown (a live poller may have survived)
+    with caplog.at_level(logging.WARNING, logger="engine.notify.telegram"):
+        await bot.send("dropped")
+    drops = [r for r in caplog.records if r.getMessage() == "telegram_send_dropped"]
+    assert len(drops) == 1 and drops[0].reason == "not_started"   # the disabled bot drops, never sends
 
 
 @pytest.mark.asyncio
