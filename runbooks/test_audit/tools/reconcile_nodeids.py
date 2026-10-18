@@ -17,7 +17,8 @@ Ledger conventions (the `nodeid(s)` column of the Verdicts table):
   after it are the new ones, LITERALLY — a parametrized test lists every case, so a lost or extra case cannot
   hide behind a bare function name. P1 rows map one-for-one; MS rows keep every test name;
 - any other row: nodeids already expected are repairs (a bare function name covers its cases); the rest are
-  ADDED, literally. Citing a nodeid an earlier row removed is a ledger error, not a re-addition.
+  ADDED, literally. Citing a nodeid an earlier row removed is a ledger error, not a re-addition;
+- ``withdrawn`` rows change nothing.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ def _ledger_rows(path: Path):
         if not line.startswith("| ") or line.startswith("| #") or line.startswith("|---"):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 4 and cells[0].isdigit():
+        if len(cells) >= 4 and cells[0].isdigit() and cells[3] != "withdrawn":
             rows.append((int(cells[0]), cells[1], cells[3]))
     return sorted(rows)
 
