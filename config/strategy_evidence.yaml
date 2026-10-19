@@ -9,7 +9,7 @@ strategies:
     hit: constructs.discrete_fresh_cross.cells.all.horizons.20.hit_rate_net
     median_net: constructs.discrete_fresh_cross.cells.all.horizons.20.median_net
     cpcv: constructs.discrete_fresh_cross.cpcv.20.fold_pass_fraction
-    caveat: shipped stop untested (study C1)
+    caveat: the shipped stop turned it negative (study C1)
   brk20:
     summary: 20-day breakout, limit at the broken level with a 5-session fill window
     measured_exit: limit fill within 5 sessions, fixed T+20 hold, no stop
@@ -18,7 +18,7 @@ strategies:
     hit: variants.V2_limit_at_H20_N5.cells.all.horizons.20.hit_rate_net
     median_net: variants.V2_limit_at_H20_N5.cells.all.horizons.20.median_net
     cpcv: variants.V2_limit_at_H20_N5.cpcv.20.fold_pass_fraction
-    caveat: shipped stop and target untested (study C1)
+    caveat: the shipped stop and target turned it negative (study C1)
   ins:
     summary: insider net buys of at least Rs 1 crore, T+20 swing
     measured_exit: next-open entry, fixed T+20 hold, no stop
@@ -26,4 +26,4 @@ strategies:
     n: aggregate.legs.insider_buy.horizons.20.n
     hit: aggregate.legs.insider_buy.horizons.20.hit_rate_net
     median_net: aggregate.legs.insider_buy.horizons.20.median_net
-    caveat: shipped stop untested (study C1)
+    caveat: the shipped stop turned it negative (study C1)

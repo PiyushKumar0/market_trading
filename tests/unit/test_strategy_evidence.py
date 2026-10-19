@@ -37,7 +37,7 @@ def test_line_renders_exactly(tmp_path):
     _write_hi52_report(tmp_path)
     assert evidence_line("hi52", tmp_path, _REGISTRY) == (
         "backtest (fixed T+20 hold, no stop): n 1794, hit 58.2%, median net 1.71%, "
-        "CPCV 86.7% fold pass — shipped stop untested (study C1)"
+        "CPCV 86.7% fold pass — the shipped stop turned it negative (study C1)"
     )
 
 
@@ -47,7 +47,7 @@ def test_missing_key_drops_only_its_part(tmp_path):
             "20": {"n": 4898, "median_net": 0.9168}}}}}}}), encoding="utf-8")
     assert evidence_line("brk20", tmp_path, _REGISTRY) == (
         "backtest (limit fill within 5 sessions, fixed T+20 hold, no stop): "
-        "n 4898, median net 0.92% — shipped stop and target untested (study C1)"
+        "n 4898, median net 0.92% — the shipped stop and target turned it negative (study C1)"
     )
 
 

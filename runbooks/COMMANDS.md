@@ -27,18 +27,18 @@ A second engine start now refuses outright — **exit 3** + `single_instance_ref
 holder pid (kernel lock on `data\engine.lock`; frees itself when the holder dies — kill the wedged
 holder pid, never delete the file).
 
-## Milestone deploy (plan-2026-10-06 §3.3) — outside 09:15–15:30 only
+## Deploy a reviewed tip — outside 09:15–15:30 only
 
 ```powershell
 Get-Date; Get-Content data\logs\engine.log -Tail 20          # no in-flight EOD job / compaction
 Stop-Service mt-engine
 # 1. Backup before the first boot on a new migration (online backup API, as _snapshot_backup does);
-#    replace <NNNN> with the next migration number (latest on disk: pre_0016.db, 2026-10-07; check
-#    `Get-ChildItem data/backups -Filter pre*`). An existing file of the same name is OVERWRITTEN:
+#    replace <NNNN> with the next migration number (check `Get-ChildItem data/backups -Filter pre*`).
+#    An existing file of the same name is OVERWRITTEN:
 .venv\Scripts\python.exe -c "import sqlite3; s=sqlite3.connect('data/state.db'); d=sqlite3.connect('data/backups/pre_<NNNN>.db'); s.backup(d); d.close(); s.close()"
-# 2. Research snapshot (same stop): copies the study tables READ_ONLY, prints row counts, exit 0 = all match
+# 2. Optional, same stop: a research snapshot (copies the study tables READ_ONLY, prints row counts, exit 0 = all match)
 .venv\Scripts\python.exe scripts\research_snapshot.py
-# 3. Fast-forward the live tree to the reviewed milestone tip (the 2026-10-06 plan's M0-M2 were wip/m2; later tips only after owner review):
+# 3. Fast-forward the live tree to the reviewed tip:
 git merge --ff-only <reviewed tip>
 Start-Service mt-engine
 Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|migration_failed|engine_ready|FROZEN' | Select-Object -Last 5
@@ -56,7 +56,7 @@ Rollback (in this order; the restart comes last):
    - This keeps the capital as signed. To take the capital back too, reseed after the restart ("Protected config").
 5. Restart.
 
-A failed migration is recovered from `data\backups\pre_00NN.db`. Below the M3 tip only while no `is_paper=1` row exists
+A failed migration is recovered from `data\backups\pre_00NN.db`. Below the paper autopilot (M3) only while no `is_paper=1` row exists
 in orders, positions, verdicts, gtts or learning_ledger (older code counts paper rows as real money; query in
 RUNBOOK "Rollback floor"); otherwise paper OFF or `paper.subsystem_enabled: false` and a restart.
 
@@ -70,27 +70,13 @@ Get-WinEvent -ProviderName nssm -MaxEvents 20 | Format-Table TimeCreated, Messag
 scripts\nssm_install.ps1 -Action status                # service config incl. ObjectName + log paths
 ```
 
-**Stop grace (2026-09-23, owner, ELEVATED shell, once):** NSSM's 1.5 s default console wait kills the
-engine mid-shutdown, so every stop records as a crash. Give it 30 s, then verify with a stop/start
-(runbooks/CHAOS_DRILLS.md §3, case 15):
-
-```powershell
-nssm set mt-engine AppStopMethodConsole 30000
-nssm get mt-engine AppStopMethodConsole                  # want: 30000
-```
-
-**Clear the stale MT_RESTART_SENTINEL service env (owner, ELEVATED PowerShell, once; nothing reads it,
-takes effect at the next service start):**
-
-```powershell
-& 'C:\tools\nssm\nssm.exe' reset mt-engine AppEnvironmentExtra
-& 'C:\tools\nssm\nssm.exe' get mt-engine AppEnvironmentExtra     # verify (non-elevated): prints nothing
-```
+NSSM's stop grace is `AppStopMethodConsole 30000` (its 1.5 s default killed the engine mid-shutdown, so every stop
+recorded as a crash); check it with `nssm get mt-engine AppStopMethodConsole` after any service reinstall.
 
 ## Re-login of the engine's Claude CLI (2026-10-11) — after an `auth_failed` alert or a `claude_login` WARN
 
 Run as the service user `piyush.kumar_atari` (the engine uses the pinned CLI's stored claude.ai login,
-shared with the owner's interactive Claude Code; IMPLEMENTATION_PLAN §2.2). `claude_login_check` (08:10 IST)
+shared with the owner's interactive Claude Code). `claude_login_check` (08:10 IST)
 warns from 7 days before `refreshTokenExpiresAt`; next hard expiry 2026-11-08 05:03 IST.
 
 ```powershell
@@ -98,7 +84,7 @@ warns from 7 days before `refreshTokenExpiresAt`; next hard expiry 2026-11-08 05
 & "C:\Users\piyush.kumar_atari\projects\personal\market_trading\data\run\claude-cli\2.1.288\claude.exe" auth status --json   # verify: logged in
 ```
 
-## DuckDB restore drill (quarterly, §10.5) — safe with the engine running
+## DuckDB restore drill (quarterly) — safe with the engine running
 
 Reads only the newest `data\backups\market-*` export; needs ~5.7 GB free in `%TEMP%`, takes ~5 min.
 Run from the repo root.
@@ -119,7 +105,7 @@ market.duckdb from backup".
 $syms = ((Get-Content data\reports\orb_sweep_20260712T033313.json | ConvertFrom-Json).symbols) -join ','
 ```
 
-## Backtests (sweep + CPCV validation, §8.2)
+## Backtests (sweep + CPCV validation)
 
 ```powershell
 # all four price baselines, canonical window (2026-H1 held out until needed):
@@ -163,21 +149,9 @@ and `win% (CLOSED)` is over the same round trips as `expectancy (CLOSED)`. In th
 `param_sets.validation_report`, the pre-fix key names `sweep_expectancy_pct` and `win_rate` are
 RETIRED rather than redefined — a query for them returns pre-2026-09-13 rows only; the post-fix rows
 carry `sweep_expectancy_closed_pct` / `sweep_expectancy_all_pct` / `win_rate_closed` / `win_rate_all`.
-The re-run that produced the post-fix record (engine Stopped; the CLI applies migrations and writes
-`param_sets` rows, its normal path):
+`orb` is parked (0/15 twice); its leg costs ≈ 90 min.
 
-```powershell
-# trend cell A at both denominators, then cell B (reporting-only, NEVER pooled with A):
-uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 20
-uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
-uv run python scripts\backtest.py trend --from 2024-01-01 --to 2026-09-12 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
-# the two swing legs at their documented defaults, for the record:
-uv run python scripts\backtest.py rsi2 --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
-uv run python scripts\backtest.py mom  --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
-```
-`orb` is deliberately NOT re-run: it is parked (plan §6.1, 0/15 twice) and its leg costs ≈ 90 min.
-
-## Event study (§2.7 proxy + §2.8.4 filings legs)
+## Event study (proxy + filings legs)
 
 ```powershell
 uv run python scripts\event_study.py --from 2023-08-01 --to 2026-07-16 --symbols $syms
@@ -208,19 +182,6 @@ uv run python scripts\backfill_filings.py seed --from 2023-07-01 --skip-pit --sk
 uv run python scripts\backfill_filings.py seed --from 2026-05-03 --skip-results --skip-integrated --skip-shp
 ```
 
-## News duplicate cleanup after the index fix (2026-09-24) - engine OFF, owner-run
-
-The engine's first boot on a968ca7 or later drops the store's five secondary indexes by itself.
-`dedupe_news.py` deletes the duplicate headlines the damaged url index let in. It drops the indexes
-first itself, so it can run before or after that boot. One command, so the engine is not left down:
-
-```powershell
-Stop-Service mt-engine; .venv\Scripts\python.exe scripts\dedupe_news.py; Start-Service mt-engine
-```
-
-On a copy of the 09-24 19:01 store it deleted 4,054 rows (a few more if duplicates arrive before the
-url index is dropped) and left 39 urls stored twice, one copy per cluster. A re-run is a no-op.
-
 ## Protected config (after ANY owner-directed edit to limits.yaml / envelope.yaml)
 
 ```powershell
@@ -231,21 +192,12 @@ This flow is not for a mismatch you did not cause. If the boot's `protected_stor
 checkout, restore or rollback reverted a dashboard capital change, a reseed would sign the old bytes and silently
 undo the change. Use the restore recipe under "Capital change from the dashboard" below.
 
-The platform cannot run this step (the auto-mode classifier refuses it as a shared-resource write, and
-the flow is owner-only by design, R4): it PREPARES the edit and hands it over. Nothing pending.
-
-Last applied: the O19 `limits.yaml` comments patch, run 2026-10-18 00:03 on the owner's explicit instruction
-with the engine stopped. limits.yaml was re-signed `2308f007…` (058e36e) with envelope.yaml unchanged, and both
-were verified PASS by the boot self-test.
-
-Before it: review 2026-10-11 #6 (`runbooks\briefs\envelope_retire_v1_cat_2026-10-11.patch` — removed the
-unread `cat.confirm_vol_mult` + `cat.max_hold_days`), run 2026-10-12 00:55 on the owner's explicit
-instruction with the engine stopped; envelope.yaml re-signed `67d9c1ea…`, limits.yaml unchanged `5d8b52cb…`,
-both verified PASS by the self-test check before any boot. Before it: O17 (e148a4e, 2026-09-24, owner). If a
-reseed errors, do NOT start the engine: `git checkout -- config/envelope.yaml` and re-run it. Since 2026-10-11 a later clean boot
-clears a `protected_store_integrity` freeze by itself (lifecycle step 1c), but an unsigned file still
-FREEZES the boot it is found on. A prepared change follows this shape (outside 09:15-15:30, from the repo
-root, with a clean `git status`):
+The flow is owner-only by design (R4): the platform PREPARES the edit and hands it over, and runs the reseed only
+on the owner's explicit instruction. If a reseed errors, do NOT start the engine: `git checkout --
+config/envelope.yaml` and re-run it. A later clean boot clears a `protected_store_integrity` freeze by itself
+(lifecycle step 1c), but an unsigned file still FREEZES the boot it is found on. A prepared change follows this
+shape (outside 09:15-15:30, from the repo root, with a clean `git status`; apply it inside the repo, because
+`config/*.yaml` is `eol=lf` and a CRLF copy changes the hash):
 
 ```powershell
 Stop-Service mt-engine
@@ -291,39 +243,16 @@ git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)" -- config/
 The reseed flow above needs a clean `git status`. After a dashboard capital change, commit `limits.yaml`
 first. A reseed that swept the change into an unrelated commit would hide it.
 
-**Owner follow-up, APPLIED 2026-10-18 (058e36e; limits.yaml re-signed `2308f007…`):** `runbooks\briefs\limits_comments_base_relative_2026-10-16.patch`.
-It restates the rupee figures in the `limits.yaml` comments (₹36,000 go-flat, −₹2,000 freeze and the like)
-as percentages of the base, so they stay true when the base changes. Values do not change: the parsed YAML
-is identical and the file stays LF.
-
-No hunk edits or borders the three value lines the dashboard rewrites, so it applies before or after a capital
-change. This was checked 2026-10-17 on the committed file and after changes to 60,000 and 20,000. For that
-reason, the O1 comment directly above `max_deployed_capital_inr` keeps its historical ₹40,000 figure.
-
-Apply it inside the repo: `config/limits.yaml` is `eol=lf`, and applied outside the repo with
-`core.autocrlf=true`, `git apply` writes CRLF and the hash changes. The check is read-only, so it runs before
-the engine stops:
-
-```powershell
-git apply --check runbooks\briefs\limits_comments_base_relative_2026-10-16.patch   # must print nothing; else stop here
-Stop-Service mt-engine
-git apply runbooks\briefs\limits_comments_base_relative_2026-10-16.patch
-.venv\Scripts\python.exe scripts\seed_protected_config.py --yes --reseed --note "limits.yaml comments made base-relative (O19 follow-up, owner)"
-Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
-git commit -m "limits.yaml comments base-relative (owner): patch + reseed" -- config/limits.yaml
-```
-
 ## Tests / verification
 
-The gate is a bare `pytest` (`testpaths`: unit + chaos + replay + property), 3,884 tests: everything the engine
-process and its scheduled tasks run, and the operational tools that write live stores or config (bhavcopy backfill,
-the restore rewind, protected-config status, fill-model calibration). `tests/offline` (353 tests) holds the tests
-of NON-production code — research, backtest, verdict and one-off scripts, and the `engine.learning` modules only
-they reach — and runs on demand: after changing one of those, or `scripts/backtest_common.py`. A test that pins
-production behaviour belongs in the gate even when it goes through a script. A pytest process starts in ~4 s
-(scikit-learn loads only when numba/vectorbt/cvxpy/skfolio is imported); the vectorbt tests (`needs_heavy_deps`,
-~24 s of JIT per process) are all offline. Put several files in ONE run rather than looping over them. Numbers:
-`runbooks/test_audit/REPORT.md`.
+The gate is a bare `pytest` (`testpaths`: unit + chaos + replay + property): everything the engine process and its
+scheduled tasks run, and the operational tools that write live stores or config (bhavcopy backfill, the restore
+rewind, protected-config status, fill-model calibration). `tests/offline` holds the tests of NON-production code —
+research, backtest, verdict and one-off scripts, and the `engine.learning` modules only they reach — and runs on
+demand: after changing one of those, or `scripts/backtest_common.py`. A test that pins production behaviour belongs
+in the gate even when it goes through a script. A pytest process starts in ~4 s (scikit-learn loads only when
+numba/vectorbt/cvxpy/skfolio is imported); the vectorbt tests (`needs_heavy_deps`, ~24 s of JIT per process) are
+all offline. Put several files in ONE run rather than looping over them.
 
 ```powershell
 # Inner loop: one file or a few, in one run
@@ -354,22 +283,6 @@ Get-MpPreference | Select-Object -ExpandProperty ExclusionPath     # confirm; th
 Remove-MpPreference -ExclusionPath 'C:\Users\piyush.kumar_atari\projects\personal\market_trading\.venv', 'C:\Users\piyush.kumar_atari\AppData\Local\Temp\pytest-of-piyush.kumar_atari'   # undo
 ```
 
-Test-audit tools (`runbooks/test_audit/tools/`; what each found is in `runbooks/test_audit/REPORT.md`):
-
-```powershell
-# Per-test inventory: tier guess, durations, asserts, patches, citations, AST shape hash (+ shape_groups.txt)
-.venv\Scripts\python.exe runbooks\test_audit\tools\inventory.py --nodeids <collect-only.txt> --junit <run.xml> [...] --durations-text <run --durations=0 output> [...] --memory-index <MEMORY.md> --out-dir <dir>
-# Per-test line footprints (sys.monitoring, ~4% overhead) and queries on them (R2's necessary condition)
-.venv\Scripts\python.exe -m pytest -p runbooks.test_audit.tools.footprint --footprint-out=<footprints.sqlite> -q
-.venv\Scripts\python.exe runbooks\test_audit\tools\footprint_query.py <footprints.sqlite> stats
-.venv\Scripts\python.exe runbooks\test_audit\tools\footprint_query.py <footprints.sqlite> check --removed <nodeid> --survivors <nodeid> ...
-# After removing, moving or renaming tests: the baseline with the ledger rows applied in order must equal the
-# collection of BOTH the default run and tests/offline
-.venv\Scripts\python.exe -m pytest --collect-only -q | Out-File -Encoding utf8 ..\mt_build_notes\collect.txt
-.venv\Scripts\python.exe -m pytest tests/offline --collect-only -q | Out-File -Encoding utf8 -Append ..\mt_build_notes\collect.txt
-.venv\Scripts\python.exe runbooks\test_audit\tools\reconcile_nodeids.py --baseline runbooks\test_audit\baseline_nodeids.txt --final ..\mt_build_notes\collect.txt --ledger runbooks\test_audit\LEDGER.md
-```
-
 After ANY edit to `config/agents.yaml`, validate through the engine's own loader BEFORE the
 restart that would apply it (an unmapped model name darkens the whole LLM tier — 2026-08-03):
 
@@ -383,7 +296,6 @@ restart that would apply it (an unmapped model name darkens the whole LLM tier �
 ```powershell
 uv run python -c "import duckdb; con = duckdb.connect(r'data\market.duckdb', read_only=True); print(con.execute('show tables').fetchall())"
 ```
-Coverage checks: see scratch patterns in WORKLOG entries (bars/filings min/max/count queries).
 
 ## Engine lock etiquette
 
@@ -392,7 +304,7 @@ Coverage checks: see scratch patterns in WORKLOG entries (bars/filings min/max/c
 - A backtest/backfill blocks engine startup for its duration — schedule long runs outside
   trading/EOD-job hours.
 
-## Phase-2 surfaces (2026-07-28)
+## Dashboard and Telegram surfaces
 
 ```powershell
 # Dashboard build (served by the engine at / from dashboard/dist; live on the next page load, no restart):
@@ -405,10 +317,6 @@ cd dashboard; npm test; cd ..
 cd dashboard; node fixture_server.mjs; cd ..
 $env:PORT='8497'; $env:ALERTS='1'; node dashboard\fixture_server.mjs
 # Layout/contrast sweep: paste dashboard\tests\dom-checks.js into the page console (README "Tests").
-# Phase-2 test slices:
-uv run pytest tests/unit/test_risk_gate.py tests/unit/test_reco_pipeline.py -q     # gate + pipeline
-uv run pytest tests/unit/test_budget_governor.py tests/unit/test_agent_harness.py -q  # LLM plumbing
-uv run pytest tests/unit/test_catalyst_digest.py tests/unit/test_news_scoring.py -q   # news layer
 ```
 - RECOMMEND flow needs: mode RECOMMEND (`/mode RECOMMEND`), valid trade window, warm-up ready,
   and a live Claude CLI login (no code gates on it: a dead login makes every LLM call fail with
@@ -460,28 +368,6 @@ uv run python -c "import duckdb, collections; con = duckdb.connect(r'data\market
 uv run python -c "import httpx, xml.etree.ElementTree as ET; r = httpx.get('https://www.livemint.com/rss/markets', headers={'User-Agent': 'Mozilla/5.0'}, follow_redirects=True, timeout=30); print(r.status_code, [i.findtext('pubDate') for i in ET.fromstring(r.content).findall('.//item')][:3])"
 ```
 
-## Gate G2 evidence (Phase 2 exit gate, §8.3)
-
-```powershell
-.venv\Scripts\python.exe scripts\g2_evidence.py --json data\reports\g2_evidence.json   # read-only state.db; safe with engine up
-```
-Read the SOURCES + COVERAGE CAVEATS block before quoting; RUNBOOK "Gate G2 evidence checklist" lists the owner-manual halves.
-
-## One-off ledger repair (2026-09-03) — expired→taken entry row stuck at 'no_action'
-
-Symptom: a recommendation /taken AFTER it expired keeps `expire_stale`'s `outcome_label='no_action'`
-on its ENTRY row, and `pipeline.close()` completes only `WHERE outcome_label IS NULL`, so the real
-outcome never lands. Fixed prospectively in `take()` (commit 2184a2a); rows taken before that need
-this repair. Run with the engine idle (health pulses only in the log tail). Find candidates first:
-
-```powershell
-.venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('file:data/state.db?mode=ro', uri=True); print(c.execute(\"SELECT l.entry_id, p.symbol, l.outcome_label, l.closed_at FROM learning_ledger l JOIN positions p ON p.position_id=l.position_id WHERE p.state='OPEN' AND l.strategy_id IS NOT NULL AND l.outcome_label IS NOT NULL\").fetchall())"
-# then, per entry_id, inside BEGIN IMMEDIATE with rowcount==1 asserted (script pattern: session scratchpad ledger_fix_hdfcamc.py):
-#   UPDATE learning_ledger SET outcome_label=NULL, closed_at=NULL
-#   WHERE entry_id=? AND outcome_label='no_action' AND exit_px IS NULL
-#     AND position_id IN (SELECT position_id FROM positions WHERE state='OPEN')
-```
-
 ## Universe build outside the engine (2026-09-06) — e.g. the first build after an index change
 
 Engine OFF (single DuckDB writer); no Kite session needed (index list, margins, surveillance are public
@@ -493,23 +379,16 @@ if the engine is up and rebuilds the same rows (idempotent). Exit 1 = built but 
 .venv\Scripts\python.exe scripts\build_universe.py --date 2026-09-07
 ```
 
-## Bhavcopy archive backfill (2026-09-03) — full-market bars_1d + corp-action history, 2022-07 → 2026-07-12
+## Bhavcopy archive backfill — full-market bars_1d + corp-action history
 
-Engine must be OFF (single DuckDB writer); ~1,000 sessions at ~1-2 s each, checkpointed per date in
+Engine must be OFF (single DuckDB writer); ~1-2 s per session, checkpointed per date in
 `filings_backfill_checkpoints` (feed `bhavcopy_archive`; `corp_actions_archive` per ≤35-day window), so
 it is safe to interrupt and resume across evenings. Kite-official rows are never overwritten (A11).
 
 ```powershell
 .venv\Scripts\python.exe scripts\backfill_bhavcopy.py --status          # read-only progress; safe with the engine live
-# FIRST (precondition for the live hi52 unadjusted-history veto, 2026-09-03): corp-action history over the
-# veto's 400-day lookback — the daily job only holds windowed rows since 2026-08-14 (call-date-only before):
-.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2025-06-01 --to 2026-08-14 --skip-bhavcopy
-.venv\Scripts\python.exe scripts\backfill_bhavcopy.py                   # default 2022-07-01..2026-07-12, both legs
-.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2024-07-01 --to 2024-12-31 --skip-corp-actions
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--skip-corp-actions | --skip-bhavcopy]
 ```
-Then re-run `scripts\backtest_hi52.py` (engine still off) — and note the backtest must apply the same
-unadjusted-history veto the live sweep applies (`hi52.unadjusted_history` over `corp_actions`), which
-the corp-actions leg makes possible for the 2022→2026 population.
 
 **Muhurat session 2026-11-08 (Sunday) — run after the day, any evening from 2026-11-08 night, engine OFF**
 (the live engine treats special sessions as closed, so its own jobs skip the day; plan NSECalendar
@@ -527,7 +406,7 @@ special-sessions amendment):
 is checkpointed `holiday`: delete that row (`filings_backfill_checkpoints` feed=`bhavcopy_archive`,
 unit=`2026-11-08`) and retry a day later.
 
-## Phase 3 foundation (2026-09-10) — replay a recorded day / recalibrate the paper fill model
+## Replay a recorded day / recalibrate the paper fill model
 
 Both read the tick Parquet archive with their OWN in-memory DuckDB and never open `market.duckdb`,
 so they are safe beside the live engine (I/O-modest; prefer compacted days).
@@ -542,16 +421,14 @@ so they are safe beside the live engine (I/O-modest; prefer compacted days).
 .venv\Scripts\python.exe -m pytest tests\unit\test_paper_broker.py tests\unit\test_fill_model.py tests\unit\test_broker_surface.py -q
 .venv\Scripts\python.exe -m pytest tests\replay -q                                                              # ~2 min, golden day
 ```
-Policy pins (plan §3.2.9 / §8.4 addendum): a calibration may only tighten the fill model; the
-calibrated half-spread is a PERCENT of mid floored at half a tick in the consumer.
 
-## hi52 backtest registrations (2026-09-09) — v1 and the pre-registered v2, engine OFF
+## hi52 backtest registrations — v1 and the pre-registered v2, engine OFF
 
 ```powershell
 .venv\Scripts\python.exe scripts\backtest_hi52.py --out data\reports\backtest_hi52_<date>.json                     # v1 (default)
 .venv\Scripts\python.exe scripts\backtest_hi52.py --registration v2 --out data\reports\backtest_hi52_v2_<date>.json  # v2: smooth + no-gap + index population, N=2
 ```
-v2 is a SEPARATE pre-registration (plan §6.1 hi52 addendum, thresholds fixed from the 09-03 medians),
+v2 is a SEPARATE pre-registration (thresholds fixed from the 09-03 medians),
 never a knob on v1: report the two side by side, never pooled; `fold_pass_min(2)` = 60% applies to v2.
 Since the 2026-09-12 promotion the v1 path scans `hi52.V1_PARAMS` (the live defaults with the three
 v2 thresholds neutralized) — v1 stays reproducible while the LIVE rule gates on them.
@@ -582,7 +459,7 @@ book) and a unit test pins the two together, so re-deriving by hand is never nec
 The 2026-09-14 boundary is an
 ASSUMPTION about the deploy date, printed as such — pass `--from` if the tranche shipped later. **Rule: DEMOTE if n ≥ 20 AND
 (median net at T+20 ≤ 0 OR hit rate at T+20 < 50%); HOLD otherwise; INSUFFICIENT below 20.** Run it
-at 20 and at 40 signals (plan §8.6 "hi52 KILL CRITERION"). A DEMOTE is two edits in one commit:
+at 20 and at 40 signals. A DEMOTE is two edits in one commit:
 re-add `hi52` to `NO_EDGE_SHADOW_STRATEGIES` **and** delete `hi52.expected_edge_pct` from
 `settings.yaml`. First-20-signal outcomes are validation, not income — nothing else moves in
 response to them.
@@ -593,7 +470,6 @@ response to them.
 .venv\Scripts\python.exe scripts\no_stop_verdict.py                                    # as of today -> data\reports\no_stop_verdict_<date>.json
 .venv\Scripts\python.exe scripts\no_stop_verdict.py --market-db data\market.duckdb    # adds the paper counterfactual: engine OFF only
 ```
-Pre-registration: `IMPLEMENTATION_PLAN.md` §6.1 C5 and its clarification.
 
 - **DECISION:** the signal-level verdict over `rec_outcomes` entry recs of hi52, ins and brk20 that are closed
   under the shipped rule and have a T+20 no-stop outcome. It is pinned to two looks: look 1 = the first 20 filled
@@ -610,7 +486,7 @@ Pre-registration: `IMPLEMENTATION_PLAN.md` §6.1 C5 and its clarification.
   restarts only (P).
 - **Exit status:** always exits 0. It reads `rec_outcomes` as stored; `--as-of` bounds only the (P) walk.
 
-## brk20 entry-mechanism backtest (R1, 2026-09-12) — three registered entry variants, engine OFF
+## brk20 entry-mechanism backtest (R1) — three registered entry variants, engine OFF
 
 ```powershell
 .venv\Scripts\python.exe scripts\backtest_brk20.py --out data\reports\backtest_brk20_<date>.json --verify-window 25
@@ -624,8 +500,7 @@ the registered study. Trial count is fixed at N=3 (V1 next-open, V2 limit-at-H20
 5 sessions); there is deliberately no fill-window or rule-parameter flag, because one would turn N=3
 into N=k silently.
 
-Re-run 2026-09-12 12:02 with the audit corrections (same command, same data, every headline number
-reproduced to 4 dp). What the artifacts now carry, and how to read them:
+How to read the artifacts:
 
 - **The three variants share a SIGNAL population but NOT a trade set** (8,292 / 4,230 / 4,898 trades):
   a V2 limit fills only when price returns to the level. Every pooled V1-vs-V2 number is therefore a
@@ -642,12 +517,12 @@ reproduced to 4 dp). What the artifacts now carry, and how to read them:
   mean-based CPCV gate while its MEDIAN net is ≤ 0 prints `GATES DISAGREE` and reads NOT promotable.
   Both decision-rule outcomes are printed — the registered gate (`decision`) and the tightened one
   (`decision_under_tightened_reporting_rule`) — with an explicit "does the tightening change the
-  registered outcome?" line. On the 2026-09-12 run it does not.
+  registered outcome?" line.
 
-## Sector map rebuild outside the engine (2026-09-21) - after a classification change, engine OFF
+## Sector map rebuild outside the engine - after a classification change, engine OFF
 
-The `sector_map` job is Sunday-only, so a new override or a classifier change (the 2026-09-21
-NSE-Industry fallback) otherwise waits a week. Same `SectorMapJob` the engine wires, same store.
+The `sector_map` job is Sunday-only, so a new override or a classifier change otherwise waits a week. Same
+`SectorMapJob` the engine wires, same store.
 
 ```powershell
 Stop-Service mt-engine                                   # single-writer DuckDB
@@ -655,6 +530,4 @@ Stop-Service mt-engine                                   # single-writer DuckDB
 Start-Service mt-engine
 ```
 
-First run 2026-09-21 02:37 IST: batch universe 910 (as of 09-18), snapshot 913 -> 926 rows,
-UNCLASSIFIED 750 -> 426 (the remainder = extended non-index names, never gate-approvable),
-`industry_classified=337`. `--dry-run` reports the current snapshot without writing.
+`--dry-run` reports the current snapshot without writing.

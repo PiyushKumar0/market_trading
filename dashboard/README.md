@@ -20,8 +20,7 @@ service), then the legacy `web/dist` fallbacks. No build ⇒ the API just runs h
 
 ## Runtime shape
 
-A tabbed, plain-language console (redesign 2026-10-08; design spec
-`runbooks/design-2026-10-08-dashboard-redesign.md`). Dark only, system fonts, hand-rolled CSS on design
+A tabbed, plain-language console (redesign 2026-10-08). Dark only, system fonts, hand-rolled CSS on design
 tokens (`src/styles/tokens.css`, every colour pair contrast-measured), no UI framework, no webfont,
 **no CDN link of any kind**: the LAN page must render with zero external requests (R10).
 `vite.config.ts` sets `base: './'` so assets resolve under the engine's static mount.

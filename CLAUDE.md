@@ -2,6 +2,8 @@
 
 **Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer that supplements this file. Where the two conflict, `FABLE_HANDOFF.md` wins.
 
+**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet. Documents removed once their work shipped (the original plan that code comments cite as `§x.y`, plan v5 with its `Q`/`D` IDs, `IMPROVEMENT_SPEC.md` with its `WO-`/`F` IDs, the runbooks' designs, briefs and reviews) are in git: `git show 417da77:<path>`.
+
 ## Model policy — Fable is the manager, not the workhorse
 
 The manager role runs on Fable. Fable is the most expensive model in the stack, so its time goes exclusively to work that requires judgement; everything else is delegated to cheaper models via the Agent tool.
@@ -18,7 +20,7 @@ Cost order, per token and in subscription-quota draw: Fable → Opus → Sonnet 
 
 ### Delegate down — cheapest model that clears the bar
 
-Subagents inherit the session model (Fable) **and the session effort level** by default — so grunt work bills at Fable rates and thinks at `xhigh`. **Delegate through the project agent types below**: each pins both `model` and `effort` in `.claude/agents/<name>.md` and carries the repo's hard rules (no engine control, no protected-store edits, git stays with the manager, tests inline).
+Subagents inherit the session model (Fable) **and the session effort level** by default — so grunt work bills at Fable rates and thinks at `xhigh`. **Delegate through the project agent types below**: each pins its `model` (and its `effort`, except `log-digger`, which inherits) in `.claude/agents/<name>.md` and carries the repo's hard rules (no engine control, no protected-store edits, git stays with the manager, tests inline).
 
 | Work | Agent type (`subagent_type`) | Model / effort |
 |---|---|---|

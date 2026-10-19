@@ -9,7 +9,7 @@
 #
 # Snapshot: FULL NIFTY 500 list as of 2026-09-04 (O15 — eligible universe widened from NIFTY200),
 # fetched verbatim from the URL above. Only the Symbol and Series columns are load-bearing for the
-# parser. The superseded config/universe/nifty200_seed.csv stays in the tree as history, unreferenced.
+# parser.
 Company Name,Industry,Symbol,Series,ISIN Code
 360 ONE WAM Ltd.,Financial Services,360ONE,EQ,INE466L01038
 3M India Ltd.,Diversified,3MINDIA,EQ,INE470A01017
