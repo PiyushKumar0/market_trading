@@ -16,6 +16,12 @@ export function entryGuardText(raw: string): string {
   if (raw === 'paper is off') return 'the autopilot is off'
   if (raw === 'not built') return 'the autopilot is not running'
   if (raw === 'paper session prep has not completed') return "today's paper setup hasn't finished yet"
+  // Prep starts on the first in-session tick: while none has arrived, the live feed is the thing to check.
+  if (raw === 'paper session prep is waiting for an in-session tick') {
+    return "today's paper setup starts on the first live market tick, and none has arrived yet"
+  }
+  const failed = /^paper construction failed \((.*)\)$/.exec(raw)
+  if (failed) return `paper failed to start (${failed[1]}) and stays off until the engine restarts`
   // paper_risk.py: the paper guard uses the WORSE of the engine's own risk state and the paper halts.
   // Every caller shows paper halts first, so when this text is reached the cause is the engine's state.
   const m = /^effective paper state is (?:RiskState\.)?(\w+)$/.exec(raw)

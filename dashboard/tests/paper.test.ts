@@ -19,6 +19,14 @@ test('entry guard reasons read as plain words', () => {
   assert.equal(entryGuardText('effective paper state is FROZEN'), "the engine's own risk state (new positions paused) also stops paper entries")
   assert.equal(entryGuardText('effective paper state is RiskState.CLOSE_ONLY'), "the engine's own risk state (closing only) also stops paper entries")
   assert.equal(entryGuardText('paper session prep has not completed'), "today's paper setup hasn't finished yet")
+  assert.equal(
+    entryGuardText('paper session prep is waiting for an in-session tick'),
+    "today's paper setup starts on the first live market tick, and none has arrived yet",
+  )
+  assert.equal(
+    entryGuardText('paper construction failed (build_broker, restore_gtts)'),
+    'paper failed to start (build_broker, restore_gtts) and stays off until the engine restarts',
+  )
   assert.equal(entryGuardText('not built'), 'the autopilot is not running')
   assert.equal(entryGuardText('something new'), 'something new')
 })

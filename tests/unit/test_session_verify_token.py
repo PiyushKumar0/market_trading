@@ -10,6 +10,9 @@ real :class:`Secrets` (has/get_optional/get/set)."""
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 from kiteconnect.exceptions import TokenException
 
@@ -100,6 +103,42 @@ async def test_verify_token_inconclusive_leaves_state_untouched(clock) -> None:
 
     assert await session.verify_token() == "inconclusive"
     assert session.token_valid() is True
+
+
+class _GatedKC(_FakeKC):
+    """``profile()`` blocks in its executor thread until released, so a login can land mid-probe."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.in_flight = threading.Event()
+        self.release = threading.Event()
+
+    def profile(self):
+        self.in_flight.set()
+        self.release.wait(5)
+        return super().profile()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raises", [TokenException("Incorrect `api_key` or `access_token`."), None])
+async def test_a_login_during_the_probe_discards_its_verdict(clock, raises) -> None:
+    """2026-10-21: the boot probe went out on the previous session's token, the owner's login landed at
+    09:07:21 while it was in flight, and its rejection (09:07:28) then marked the FRESH token dead:
+    post-login recovery skipped the ticker and the whole session ran with no ticks. A verdict belongs
+    to the token it probed; once a login replaced that token, it says nothing about the session."""
+    secrets = _FakeSecrets({KITE_API_KEY: "ak", KITE_API_SECRET: "as", KITE_ACCESS_TOKEN: "stale-tok"})
+    session = SessionManager(secrets, clock)
+    kc = _GatedKC(profile_raises=raises)
+    session._connect = lambda: kc
+
+    probe = asyncio.create_task(session.verify_token())
+    assert await asyncio.to_thread(kc.in_flight.wait, 5)
+    await session.complete_login("req-token")
+    kc.release.set()
+
+    assert await probe == "superseded"
+    assert session.token_valid() is True
+    assert session.access_token() == "fresh-tok"
 
 
 @pytest.mark.asyncio

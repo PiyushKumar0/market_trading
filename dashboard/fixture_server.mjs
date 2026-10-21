@@ -449,7 +449,7 @@ const paperIdle = {
   subsystem_enabled: true,
   built: true,
   prep_ready: false,
-  entry_guard: 'paper session prep has not completed',
+  entry_guard: 'paper session prep is waiting for an in-session tick',
   counters: { reconcile_mismatches: 0, voids: 0, late_corp_actions: 0 },
 }
 

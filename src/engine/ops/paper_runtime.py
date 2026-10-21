@@ -487,8 +487,17 @@ class PaperRuntime:
 
     def guard(self, intent: str) -> None:
         if intent == "entry" and not self.prep_ready():
-            raise PaperOrderBlocked("paper session prep has not completed")
+            raise PaperOrderBlocked(self._prep_blocker())
         self._order_guard(intent)
+
+    def _prep_blocker(self) -> str:
+        """Why entries still wait on prep. Prep starts only on an in-session tick, so "not started"
+        points at the feed, not at prep. The dashboard maps each text (dashboard/src/lib/paper.ts)."""
+        if self.failures:
+            return f"paper construction failed ({', '.join(self.failures)})"
+        if self._state is PrepState.RUNNING:
+            return "paper session prep has not completed"
+        return "paper session prep is waiting for an in-session tick"
 
     def mark(self, symbol: str) -> Decimal | None:
         """The last price forwarded to the broker, or the stored one prep seeded: paper equity never

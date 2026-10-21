@@ -207,25 +207,37 @@ class SessionManager:
           invalid, so ALL state is left untouched and the Fix-3 circuit breaker catches a truly dead
           token on the first real call.
         * ``"valid"`` — profile succeeded: :meth:`mark_success` stamps freshness.
+        * ``"superseded"`` — a :meth:`complete_login` replaced the token while the probe was in
+          flight, so the verdict (on whichever token the request carried) is discarded and all state
+          is left to the login. The callback route binds before this probe runs, so a boot-time login
+          can land mid-probe: on 2026-10-21 the old token's rejection arrived after the 09:07:21
+          login, marked the fresh token dead, and post-login recovery skipped the ticker all session.
 
         ``kc.profile()`` is sync ``requests`` I/O (pykiteconnect), so it runs in the default executor
         — the same pattern as :meth:`complete_login`.
         """
         if not self._secrets.has(KITE_API_KEY):
             return "no_api_key"
-        if self._access_token is None:
+        probed = self._access_token
+        if probed is None:
             return "absent"
         kc = self._connect()
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, lambda: kc.profile())
         except TokenException as exc:
+            if self._access_token != probed:
+                _log.warning("token_probe_superseded", outcome="rejected", error=str(exc))
+                return "superseded"
             self._rejected = True
             _log.warning("token_probe_rejected", error=str(exc))
             return "rejected"
         except Exception as exc:  # noqa: BLE001 - cannot verify != invalid; leave all state untouched
             _log.warning("token_probe_inconclusive", error=str(exc), error_type=type(exc).__name__)
             return "inconclusive"
+        if self._access_token != probed:
+            _log.info("token_probe_superseded", outcome="valid")
+            return "superseded"
         self.mark_success()
         _log.info("token_probe_ok")
         return "valid"

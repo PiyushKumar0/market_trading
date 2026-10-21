@@ -268,7 +268,7 @@ async def test_a_failed_construction_step_degrades_alerts_once_and_forwards_noth
     bus.publish("tick", tick(at(10, 0)))
     await settle(bus)
     assert prep.calls == [] and runtime.last_observed_at is None and not runtime.prep_ready()
-    with pytest.raises(PaperOrderBlocked):
+    with pytest.raises(PaperOrderBlocked, match=rf"^paper construction failed \({step}\)$"):
         runtime.guard("entry")
 
 
@@ -280,9 +280,11 @@ async def test_nothing_trades_and_the_gate_stays_shut_while_prep_is_due_or_runni
     runtime = await make_runtime()
     seen = spy(monkeypatch, runtime)
 
+    blockers = {PrepState.DUE: "paper session prep is waiting for an in-session tick",
+                PrepState.RUNNING: "paper session prep has not completed"}
     for state in (PrepState.DUE, PrepState.RUNNING):
         assert runtime.prep_state is state and not runtime.prep_ready()
-        with pytest.raises(PaperOrderBlocked):
+        with pytest.raises(PaperOrderBlocked, match=f"^{blockers[state]}$"):
             await runtime.broker.place_order(ENTRY)
         runtime.guard("risk_reducing")
         bus.publish("tick", tick(at(10, 0)))
