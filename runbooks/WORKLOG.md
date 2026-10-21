@@ -2,6 +2,30 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-21 18:20 — No ticks all session: a stale boot-probe verdict marked the fresh Kite token dead (3b0a5a0)
+
+- **Symptom (owner):** the Paper tab read "blocked: today's paper setup hasn't finished yet" all day with the engine up.
+- **Root cause:** the 09:06:47 boot binds `/kite/callback` before `SessionManager.verify_token` runs. The probe went
+  out on the 10-19 token, the owner's login landed at 09:07:21 mid-probe, and the rejection that came back at 09:07:28
+  set `_rejected` on the fresh token. `token_valid()` then read False all day: post-login recovery skipped the ticker
+  (`ticker_resume_skipped no valid Kite token`), a needless "Kite login required" prompt went out at 09:07:29, no tick
+  arrived, paper prep (which starts only on an in-session tick) never ran, and the 18:07 `bar_reconcile` skipped as
+  `no_valid_token`. Alternative ruled out: a bad new token. Historical calls (09:07:28), holdings (09:08:03) and
+  instruments (09:08:26) all succeeded on it after the rejection.
+- **Fix:** a probe whose token was replaced by a login mid-flight returns `superseded` and leaves state to the login.
+  The paper entry guard now names its blocker: construction failed / prep running / waiting for an in-session tick.
+  The dashboard maps each text.
+- **Tests:** race reproduced for both probe outcomes, seen failing first. Full gate 3868 passed / 19 skipped;
+  dashboard 92/92 + build.
+- **Deploy:** clock 18:11, log tail held only news polling and health pulses; stop 18:11:14 → boot 18:11:45. Verified:
+  `token_probe valid`, `ticker_resumed tokens=302`, `startup_complete needs_login=false frozen=[]`; live `/paper`
+  `entry_guard` = "paper session prep is waiting for an in-session tick". Catch-up re-ran `bar_reconcile:2026-10-21`
+  (~440 Kite calls ok) until one 7 s `ReadTimeout` from api.kite.trade. The 30-min `catchup_sweep` resumes it.
+- **Not fixed (latent, same shape):** the mid-day breaker `on_token_rejected` takes no token, so a live call in flight
+  on the old token that fails after a re-login would mark the new token dead too. The fix threads the request's token
+  through `KiteClient._call` → hook. Separately, health treats feed `STOPPED` in session as intentional (`problems=[]`
+  all day). A stopped feed during a RECOMMEND session paged nothing beyond the one login prompt.
+
 ## 2026-10-19 15:00 — Finished docs, research files and stale state removed (owner: "for files and their content which have been implemented, there should not be a need to keep them … remove those content rather than just marking them as done or moving to archive")
 
 - **Rule now:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only unbuilt work, pending
