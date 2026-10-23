@@ -58,6 +58,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -157,6 +158,14 @@ FailReason = Literal[
     "credit_exhausted",
     "auth_failed",
 ]
+
+#: Reasons that mean the ACCOUNT is failing, not one agent: every agent runs on the CLI's one stored
+#: claude.ai login, so a dead login fails them all at once. The harness alerts these as ONE account
+#: episode (first failure, then every :data:`ACCOUNT_REPEAT_AFTER`, plus a notice on the first good
+#: call); the job and pipeline alerters skip them. Keyed per agent, the 2026-10-22/23 dead login sent
+#: ~70 owner messages: five agents' 30-minute drips plus the planner, review and pipeline copies.
+ACCOUNT_FAIL_REASONS: frozenset[str] = frozenset({"auth_failed"})
+ACCOUNT_REPEAT_AFTER = timedelta(hours=2)
 
 AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message) — ops idiom
 QueryFn = Callable[..., AsyncIterator[Any]]
@@ -700,6 +709,9 @@ class AgentHarness:
         #: no-action and is still logged; what changes is how many times the owner's phone buzzes for
         #: one broken thing (an SDK outage used to alert on every call for hours).
         self._alert_episodes = AlertEpisodes()
+        #: The ONE episode for an account-wide failure (:data:`ACCOUNT_FAIL_REASONS`), whichever agent
+        #: hits it; the first good call by any agent closes it and says so.
+        self._account_episodes = AlertEpisodes(ACCOUNT_REPEAT_AFTER)
 
     def relogin_hint(self) -> str:
         """The owner's fix for ``auth_failed``: the CLI authenticates with its own stored claude.ai
@@ -905,6 +917,9 @@ class AgentHarness:
                 # A working agent closes every open alert episode it owns (WO-25b): the next failure,
                 # whatever its reason, is a NEW incident and must reach the owner immediately.
                 self._alert_episodes.reset(agent_def.agent_id)
+                if self._account_episodes.open_episodes():
+                    self._account_episodes.reset()   # before the await: one notice, however many succeed
+                    await self._alert_account_restored(agent_def, call_id)
                 return AgentResult.Ok(
                     call_id=call_id, payload=payload, usage=usage, raw_text=text, attempts=attempt
                 )
@@ -1230,30 +1245,69 @@ class AgentHarness:
         :data:`~engine.notify.episodes.REPEAT_AFTER` are logged as suppressed, and any successful call
         by that agent closes the episode (see :meth:`_run`). A dead SDK used to raise one owner alert
         per call for as long as it stayed dead, which is how a queue 200 deep gets built.
+        :data:`ACCOUNT_FAIL_REASONS` go to the one account episode instead, whichever agent hit them.
         """
         result = AgentResult.Failed(
             reason, detail, call_id=call_id, usage=usage, raw_text=raw_text, attempts=attempts
         )
-        if self._alert is not None:
-            if not self._alert_episodes.should_alert(
-                (agent_def.agent_id, str(reason)), self._clock.now()
-            ):
-                _log.info(
-                    "agent_alert_throttled",
-                    agent=agent_def.agent_id,
-                    reason=reason,
-                    call_id=call_id,
-                    note="repeat inside the episode window; logged, not alerted (WO-25b)",
-                )
-                return result
-            message = f"agent {agent_def.agent_id} failed: {reason} ({detail[:200]}) call_id={call_id}"
-            if reason == "auth_failed":
-                message += f" — fix: {self.relogin_hint()}"
-            try:
-                await self._alert("error", message)
-            except Exception as exc:  # noqa: BLE001 - alerting is best-effort; never masks the failure
-                _log.warning("agent_alert_failed", agent=agent_def.agent_id, error=str(exc))
+        if self._alert is None:
+            return result
+        if reason in ACCOUNT_FAIL_REASONS:
+            await self._alert_account_failure(agent_def, reason, detail, call_id)
+            return result
+        if not self._alert_episodes.should_alert(
+            (agent_def.agent_id, str(reason)), self._clock.now()
+        ):
+            _log.info(
+                "agent_alert_throttled",
+                agent=agent_def.agent_id,
+                reason=reason,
+                call_id=call_id,
+                note="repeat inside the episode window; logged, not alerted (WO-25b)",
+            )
+            return result
+        message = f"agent {agent_def.agent_id} failed: {reason} ({detail[:200]}) call_id={call_id}"
+        await self._send_alert(agent_def, "error", message)
         return result
+
+    async def _alert_account_failure(
+        self, agent_def: AgentDef, reason: FailReason, detail: str, call_id: str
+    ) -> None:
+        """One owner alert per account episode: the first failure, then one per
+        :data:`ACCOUNT_REPEAT_AFTER` while it lasts, carrying the fix."""
+        if not self._account_episodes.should_alert(("account", str(reason)), self._clock.now()):
+            _log.info(
+                "agent_alert_throttled",
+                agent=agent_def.agent_id,
+                reason=reason,
+                call_id=call_id,
+                note="account-wide failure already alerted; logged, not alerted",
+            )
+            return
+        hours = ACCOUNT_REPEAT_AFTER.total_seconds() / 3600
+        await self._send_alert(
+            agent_def,
+            "error",
+            f"Claude login failing ({reason}): agent {agent_def.agent_id} call_id={call_id} "
+            f"({detail[:200]}). Every LLM agent runs on this login, so expect them all to fail until "
+            f"it is fixed; repeats are logged and re-alerted every {hours:g} h — fix: {self.relogin_hint()}",
+        )
+
+    async def _alert_account_restored(self, agent_def: AgentDef, call_id: str) -> None:
+        await self._send_alert(
+            agent_def,
+            "info",
+            f"Claude login restored: agent {agent_def.agent_id} call_id={call_id} succeeded after the "
+            "login failures alerted earlier.",
+        )
+
+    async def _send_alert(self, agent_def: AgentDef, severity: str, message: str) -> None:
+        if self._alert is None:
+            return
+        try:
+            await self._alert(severity, message)
+        except Exception as exc:  # noqa: BLE001 - alerting is best-effort; never masks the failure
+            _log.warning("agent_alert_failed", agent=agent_def.agent_id, error=str(exc))
 
 
 # --------------------------------------------------------------------------- D11 smoke (S3.2.12)

@@ -29,7 +29,13 @@ import yaml
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
 from engine.intelligence.governor import TokenUsage
-from engine.intelligence.harness import AgentDef, AgentHarness, load_agent_defs
+from engine.intelligence.harness import (
+    ACCOUNT_FAIL_REASONS,
+    ACCOUNT_REPEAT_AFTER,
+    AgentDef,
+    AgentHarness,
+    load_agent_defs,
+)
 from engine.notify.episodes import REPEAT_AFTER, AlertEpisodes
 from engine.ops.pipeline import INTRADAY_AGENT_ID, RecommendationBook
 from engine.risk.limits import LimitTable
@@ -253,6 +259,94 @@ async def test_a_successful_call_closes_the_episode_and_the_next_failure_alerts(
     assert "c1" in alerts[0][1] and "c3" in alerts[1][1]
 
 
+# =========================================================================== a dead login (2026-10-23)
+#: The CLI's own error text from the 2026-10-22/23 outage — classified by ``_classify``, not asserted.
+DEAD_LOGIN = RuntimeError(
+    "Claude Code returned an error result: Failed to authenticate: OAuth session expired and could "
+    "not be refreshed"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_dead_login_is_one_alert_across_every_agent(conn, hclock, hticker):
+    """Every agent shares the CLI's stored claude.ai login, so ``auth_failed`` is the ACCOUNT failing,
+    not one agent. Keyed per agent it sent ~70 messages over the 2026-10-22/23 dead login: each agent's
+    own 30-minute drip plus the jobs' copies. One episode for the account, whoever hits it."""
+    alerts: list[tuple[str, str]] = []
+    harness = _harness(conn, hclock, alerts)
+    defs = load_agent_defs(TEST_AGENTS)
+
+    await harness._fail(defs[AGENT], "auth_failed", "OAuth session expired", call_id="c1")
+    hticker.at = NOW + timedelta(minutes=5)
+    await harness._fail(defs["nightly_reviewer"], "auth_failed", "OAuth session expired", call_id="c2")
+    hticker.at = NOW + REPEAT_AFTER + timedelta(minutes=1)          # past the per-agent window
+    await harness._fail(defs[AGENT], "auth_failed", "OAuth session expired", call_id="c3")
+
+    assert len(alerts) == 1
+    severity, message = alerts[0]
+    assert severity == "error"
+    assert "c1" in message and harness.relogin_hint() in message   # the fix rides on the one alert
+
+
+@pytest.mark.asyncio
+async def test_a_dead_login_reminds_every_two_hours(conn, hclock, hticker):
+    """Still dead is worth repeating, at the account cadence: a login stays dead until the owner acts,
+    so a 30-minute drip adds noise, not information."""
+    alerts: list[tuple[str, str]] = []
+    harness = _harness(conn, hclock, alerts)
+    agent = _agent_def()
+
+    await harness._fail(agent, "auth_failed", "OAuth session expired", call_id="c1")
+    hticker.at = NOW + ACCOUNT_REPEAT_AFTER - timedelta(minutes=1)
+    await harness._fail(agent, "auth_failed", "OAuth session expired", call_id="c2")
+    hticker.at = NOW + ACCOUNT_REPEAT_AFTER + timedelta(minutes=1)
+    await harness._fail(agent, "auth_failed", "OAuth session expired", call_id="c3")
+
+    assert ACCOUNT_REPEAT_AFTER == timedelta(hours=2)
+    assert len(alerts) == 2
+    assert "c1" in alerts[0][1] and "c3" in alerts[1][1]
+
+
+@pytest.mark.asyncio
+async def test_the_first_good_call_after_a_dead_login_announces_it_once(conn, hclock, hticker):
+    """Through the REAL run path: the CLI's dead-login error, then two good calls. The owner hears the
+    login is back exactly once, and a later dead login is a new incident that alerts at once."""
+    alerts: list[tuple[str, str]] = []
+    good = [FakeAssistantMessage(ENTER_JSON, None), FakeResultMessage(None, 0.0)]
+    fake = FakeQuery([DEAD_LOGIN], good, good, [DEAD_LOGIN])
+    harness = _harness(conn, hclock, alerts, query_fn=fake)
+    agent = _agent_def()
+
+    dead = await harness.run_single_shot(agent, FakeContext(), enter_validator(hclock))
+    assert dead.ok is False and dead.reason == "auth_failed"
+    assert (await harness.run_single_shot(agent, FakeContext(), enter_validator(hclock))).ok
+    assert (await harness.run_single_shot(agent, FakeContext(), enter_validator(hclock))).ok
+    hticker.at = NOW + timedelta(minutes=2)
+    await harness.run_single_shot(agent, FakeContext(), enter_validator(hclock))
+
+    assert [severity for severity, _ in alerts] == ["error", "info", "error"]
+    assert "restored" in alerts[1][1]
+
+
+@pytest.mark.asyncio
+async def test_a_good_call_with_no_dead_login_announces_nothing(conn, hclock, hticker):
+    """The restored notice closes an auth episode; with none open a good call is silent."""
+    alerts: list[tuple[str, str]] = []
+    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON, None), FakeResultMessage(None, 0.0)])
+    harness = _harness(conn, hclock, alerts, query_fn=fake)
+
+    await harness._fail(_agent_def(), "sdk_error", "connection reset", call_id="c1")
+    assert (await harness.run_single_shot(_agent_def(), FakeContext(), enter_validator(hclock))).ok
+
+    assert len(alerts) == 1 and "sdk_error" in alerts[0][1]
+
+
+def test_only_auth_failed_is_account_wide():
+    """Pinned so a new reason is a deliberate choice: the job and pipeline alerters stay silent for
+    these reasons and rely on the harness's one account alert."""
+    assert frozenset({"auth_failed"}) == ACCOUNT_FAIL_REASONS
+
+
 # =========================================================================== pipeline alerts (D7)
 @pytest.fixture
 def pticker() -> Ticker:
@@ -365,6 +459,19 @@ async def test_the_failure_is_logged_every_time_it_happens(pipeline, pticker, ca
     assert len([r for r in caplog.records if r.getMessage() == "intraday_agent_failed"]) == 2
     assert len([r for r in caplog.records
                 if r.getMessage() == "intraday_agent_alert_throttled"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_dead_login_is_left_to_the_harness_alert(pipeline, pticker, caplog):
+    """The harness already sent the one account-wide alert with the fix; "Intraday analyst
+    unavailable" on top of it was a second message for the same dead login. Still logged."""
+    pipe, parts = pipeline
+
+    with caplog.at_level("INFO", logger="engine.ops.pipeline"):
+        await pipe._alert_agent_failed("heartbeat", _failed("auth_failed"))
+
+    assert _agent_alerts(parts) == []
+    assert [r.getMessage() for r in caplog.records].count("intraday_agent_failed") == 1
 
 
 def test_the_pipeline_throttles_the_agent_it_actually_calls():

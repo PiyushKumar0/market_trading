@@ -89,6 +89,7 @@ from engine.core.recommendations import recommendation_expired
 from engine.core.scope import scope_sql
 from engine.core.types import Bar
 from engine.features.snapshots import FEATURE_SET_VERSION
+from engine.intelligence.harness import ACCOUNT_FAIL_REASONS
 from engine.intelligence.schemas import (
     NoActionOutput,
     intraday_guidance_json_schema,
@@ -3688,6 +3689,10 @@ class RecommendationPipeline:
         _log.warning("intraday_agent_failed", trigger=trigger, reason=getattr(result, "reason", None),
                      detail=getattr(result, "detail", None), call_id=getattr(result, "call_id", None))
         reason = str(getattr(result, "reason", "unknown"))
+        if reason in ACCOUNT_FAIL_REASONS:
+            _log.info("intraday_agent_alert_throttled", trigger=trigger, reason=reason,
+                      note="account-wide failure: the harness alerts it once for every agent")
+            return
         if not self._agent_alert_episodes.should_alert(
             (INTRADAY_AGENT_ID, reason), self._clock.now()
         ):

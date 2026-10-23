@@ -63,7 +63,7 @@ from engine.core.scope import scope_sql
 from engine.intelligence.agents import preopen
 from engine.intelligence.context import ContextAssembler, sentiment_rail_note
 from engine.intelligence.governor import BudgetGovernor
-from engine.intelligence.harness import AgentDef, AgentHarness
+from engine.intelligence.harness import ACCOUNT_FAIL_REASONS, AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
 from engine.marketdata.store import MarketStore
 from engine.ops.holdings_reconcile import (
@@ -205,7 +205,8 @@ class PreopenPlannerJob:
             _log.warning(
                 "preopen_planner_failed", d=d.isoformat(), reason=result.reason, call_id=result.call_id
             )
-            if self._notify is not None:
+            # An account-wide reason already reached the owner as the harness's one alert.
+            if self._notify is not None and result.reason not in ACCOUNT_FAIL_REASONS:
                 await self._notify(
                     "error",
                     f"pre-open planner failed for {d.isoformat()}: {result.reason} "

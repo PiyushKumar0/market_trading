@@ -44,7 +44,7 @@ from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.intelligence.agents import nightly
 from engine.intelligence.context import AssembledContext
 from engine.intelligence.governor import BudgetGovernor
-from engine.intelligence.harness import AgentDef, AgentHarness
+from engine.intelligence.harness import ACCOUNT_FAIL_REASONS, AgentDef, AgentHarness
 from engine.intelligence.schemas import NightlyReview, ParamSuggestion
 from engine.notify.catalog import CatalogMessage, MessageKind, inr
 from engine.ops.jobs import AdvisoryOutcome
@@ -942,7 +942,10 @@ class NightlyReviewJob:
                 detail=(result.detail or "")[:300],
                 call_id=result.call_id,
             )
-            await self._send(self._failure_message(d, result.reason, result.detail))
+            # An account-wide reason already reached the owner as the harness's one alert, naming
+            # the cause; the catch-up retry delivers the review once it clears.
+            if result.reason not in ACCOUNT_FAIL_REASONS:
+                await self._send(self._failure_message(d, result.reason, result.detail))
             return AdvisoryOutcome.FAILED
 
         review: NightlyReview = result.payload

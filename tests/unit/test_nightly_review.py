@@ -465,6 +465,22 @@ async def test_harness_failure_persists_nothing_and_still_tells_the_owner(
 
 
 @pytest.mark.asyncio
+async def test_a_dead_login_is_left_to_the_harness_alert(
+    conn, gov, clock, calendar, agent_defs, notify, sent
+) -> None:
+    # auth_failed already reached the owner as the harness's one account-wide alert, which names the
+    # cause; "review unavailable" repeated it on every catch-up retry (6 on 2026-10-23). The retry
+    # still runs, and the review arrives once the login is back.
+    harness = FakeHarness(
+        failure=AgentResult.Failed("auth_failed", "OAuth session expired", call_id="CALL-10", attempts=1)
+    )
+    job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
+
+    assert await job.run(D) is AdvisoryOutcome.FAILED
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_rerun_replaces_the_row_for_that_day(conn, gov, clock, calendar, agent_defs) -> None:
     # The §2.6 date-keyed catch-up may replay a missed day, and the owner may redo one. One row per
     # trading day; every call that produced either review stays in agent_calls (R8).

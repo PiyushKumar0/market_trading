@@ -190,6 +190,22 @@ async def test_harness_failure_returns_failed_and_persists_nothing(store, conn, 
     assert "schema_invalid" in alerts[0][1]
 
 
+async def test_a_dead_login_is_left_to_the_harness_alert(store, conn, assembler, agent_defs, clock, calendar):
+    """``auth_failed`` already reached the owner as the harness's one account-wide alert; this job's
+    copy repeated it on every 30-minute catch-up retry (14 on 2026-10-22/23). Still retryable."""
+    harness = FakeHarness(AgentResult.Failed("auth_failed", "OAuth session expired", call_id="c5"))
+    alerts: list[tuple[str, str]] = []
+
+    async def notify(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    job = _job(store, conn, assembler, harness, agent_defs, FakeGovernor(allowed=True), clock, calendar,
+               notify=notify)
+
+    assert await job.run(TODAY) is AdvisoryOutcome.FAILED
+    assert alerts == []
+
+
 async def test_harness_failure_with_no_notify_still_returns_failed(store, conn, assembler, agent_defs, clock, calendar):
     """``notify`` is optional (§5.3 step 3) — its absence must not raise."""
     harness = FakeHarness(AgentResult.Failed("timeout", "no complete response within 60s", call_id="c3"))

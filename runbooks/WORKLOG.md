@@ -2,6 +2,30 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-23 15:35 — LLM tier dark ~1.5 sessions: the shared Claude login was blanked; auth alerts collapsed to one episode (owner: "Getting oauth claude failure alerts in the engine. Check and fix")
+
+- **Symptom:** every agent call failed `auth_failed` ("OAuth session expired and could not be refreshed") from the
+  10-22 11:41 boot until 10-23 14:32: 103 failures on 10-22 and 70 on 10-23, including `evaluated: 0` in the 10-22
+  funnel. That sent about 70 owner messages. The two owner restarts (10-22 11:40, 10-23 12:59) could not help.
+- **Root cause:** the stored claude.ai login in `~/.claude/.credentials.json`, shared by the engine's CLI and every
+  interactive Claude Code, had both tokens blanked. The last PASS was 10-21 18:12, the last agent_call_ok 10-21 21:47,
+  and the 10-22 11:41 boot's `claude_login` check (it runs before `sdk_smoke`) already read blank. The engine made no
+  CLI call in that window, so a non-engine process blanked it: a refresh rejected for one of the four long-lived
+  VS Code CLI 2.1.301 processes (up since 10-19 / 10-21), or a server revocation that one of them discovered. Which of
+  the two is unconfirmed: no CLI debug logs exist, and reading the credentials file is refused by the auto-mode classifier.
+- **Recovery:** the owner's VS Code `/login` at 14:32:54 rewrote the file (refresh expiry now 2026-11-19 19:02 IST).
+  The engine needed no restart, since each call spawns a fresh CLI: agent_call_ok from 14:35:59 (news 32/32), and the
+  15:01 catch-up ran `preopen_planner:2026-10-23` + `nightly_review:2026-10-22`. `intraday_analyst` was already past
+  its heartbeat window, so its first post-login call is next session.
+- **Owner decisions:** keep the login shared (engine-owned `CLAUDE_CONFIG_DIR` and 1-year `setup-token` both
+  declined); collapse the auth alerts.
+- **Fix (alerts only):** `ACCOUNT_FAIL_REASONS = {auth_failed}` is one account-wide episode in the harness: the first
+  failure from any agent alerts with the re-login command, a reminder follows every 2 h, and the first good call sends
+  one "Claude login restored". The pipeline's "Intraday analyst unavailable", the planner's job alert and the nightly
+  "review unavailable" skip those reasons. The failure handling, logs and catch-up retries are unchanged.
+- **Tests:** 8 new tests, seen failing first. Full gate: 3876 passed, 19 skipped. Not deployed: the next engine boot
+  picks it up.
+
 ## 2026-10-21 18:20 — No ticks all session: a stale boot-probe verdict marked the fresh Kite token dead (3b0a5a0)
 
 - **Symptom (owner):** the Paper tab read "blocked: today's paper setup hasn't finished yet" all day with the engine up.
