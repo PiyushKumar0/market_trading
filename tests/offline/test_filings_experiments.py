@@ -257,8 +257,10 @@ def test_e1_runs_end_to_end_honest_empty(tmp_path, clock):
         assert res["round_trip_pct"] > 0.0                     # a real MIS round trip was modelled
         md = fe.render_e1(res)
         assert "Cohort stats" in md and "Discriminator" in md
-        if res["n_trades_total"] == 0:
-            assert "honest n=0" in md                          # empty cohorts reported honestly (C9)
+        # The name promises an EMPTY run: if the fixture ever yields trades this fails loudly instead
+        # of silently skipping the honest-n=0 check.
+        assert res["n_trades_total"] == 0
+        assert "honest n=0" in md                              # empty cohorts reported honestly (C9)
     finally:
         store.close()
 
@@ -292,7 +294,7 @@ def test_e2_runs_end_to_end_honest_empty(tmp_path, clock):
         assert set(res["cohorts"]) == {"ADVERSE", "FAVORABLE", "NEUTRAL"}
         md = fe.render_e2(res)
         assert "Cohort stats" in md and "Discriminator" in md
-        if res["n_trades_total"] == 0:
-            assert "honest n=0" in md
+        assert res["n_trades_total"] == 0                      # see e1: fail loudly, never skip
+        assert "honest n=0" in md
     finally:
         store.close()

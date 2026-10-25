@@ -775,6 +775,25 @@ def test_gap_move_rounds_to_the_same_4dp_as_max_day_move_at_the_smooth_boundary(
     assert t.max_day_move == pytest.approx(0.0700)
 
 
+def test_a_trigger_day_move_above_the_smooth_cap_is_the_smooth_veto_not_the_gap_veto():
+    """The v2 admission order is smooth, THEN gap: a trigger day moving +8% (over the 0.07 cap, and
+    over the 0.05 gap line too) books as `smooth`, so `gap` only ever counts (0.05, 0.07]. A trigger
+    just inside the cap (+6%) is the contrast: it passes smooth and is the gap veto."""
+    params = bt.PRE_REGISTERED_PARAMS
+    assert 0.08 > bt.V2_SMOOTH_MAX_DAY_MOVE_MAX
+
+    over: dict[str, int] = {}
+    series = _diag_series("OVERCAP", 0.08)
+    assert bt.signal_diag(series, 20, params).max_day_move > bt.V2_SMOOTH_MAX_DAY_MOVE_MAX
+    assert bt.v2_admits(series, 20, params, index_members={"OVERCAP"}, veto_counts=over) is False
+    assert over == {bt.V2_VETO_SMOOTH: 1}
+
+    inside: dict[str, int] = {}
+    series = _diag_series("INSIDECAP", 0.06)
+    assert bt.v2_admits(series, 20, params, index_members={"INSIDECAP"}, veto_counts=inside) is False
+    assert inside == {bt.V2_VETO_GAP: 1}
+
+
 def test_v1_gap_day_cell_unaffected_by_the_gap_move_rounding_for_existing_fixtures(study):
     """None of WINNER/GAPPER/SPIKER sits near the 5% GAP_DAY_PCT boundary at 4dp resolution, so the
     v1 gap_day classification (scripts/backtest_hi52.py:678) is exactly what it was before

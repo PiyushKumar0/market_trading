@@ -226,6 +226,9 @@ class _CapturingPipeline:
         _CapturingPipeline.kwargs = kwargs
 
 
+_RUNNER_KWARGS: dict = {}       # what main() constructed SweepRunner with (filled by the stub below)
+
+
 def _main_pipeline_kwargs(
     monkeypatch, tmp_path, extra_argv: list[str], *, strategy: str = "trend"
 ) -> dict:
@@ -267,7 +270,8 @@ def _main_pipeline_kwargs(
 
     class _Runner:
         def __init__(self, *a, **k) -> None:
-            pass
+            _RUNNER_KWARGS.clear()
+            _RUNNER_KWARGS.update(k)
 
         def returns_for(self, strategy_id, params):       # noqa: ANN001, ANN201
             raise AssertionError("no sweep should run in this test")
@@ -288,6 +292,17 @@ def _main_pipeline_kwargs(
     ]
     assert bt.main(argv) == 0
     return _CapturingPipeline.kwargs
+
+
+@pytest.mark.parametrize(
+    ("extra_argv", "expected"),
+    [([], "NIFTY 50"), (["--index-symbol", "NIFTY BANK"], "NIFTY BANK"), (["--index-symbol", ""], None)],
+)
+def test_index_symbol_reaches_the_sweep_runner(tmp_path, monkeypatch, extra_argv, expected):
+    """The default, an override and the explicit all-regime opt-out ("" -> None) all arrive at
+    ``SweepRunner`` as given: a parsed-but-unthreaded flag would silently drop the regime gate."""
+    _main_pipeline_kwargs(monkeypatch, tmp_path, extra_argv, strategy="rsi2")
+    assert _RUNNER_KWARGS == {"index_symbol": expected}
 
 
 def test_margin_floor_days_reaches_the_validation_pipeline(tmp_path, monkeypatch):
