@@ -90,7 +90,7 @@ from engine.features.engine import FeatureEngine
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import AgentHarness, load_agent_roster, resolve_cli_path, run_sdk_smoke
-from engine.marketdata.backfill import BackfillJob
+from engine.marketdata.backfill import BackfillJob, BackfillReport
 from engine.marketdata.bar_builder import BarBuilder
 from engine.marketdata.reconcile import ReconcileJob, ReconcileReport
 from engine.marketdata.store import MarketStore
@@ -1582,11 +1582,14 @@ async def compose(
             return ReconcileReport(d=d, ok=False, aborted_reason="no_valid_token")
         return await reconcile.run(d)
 
-    async def job_daily_bars(d) -> None:
+    async def job_daily_bars(d) -> BackfillReport | None:
         # §4.4 job 3 nightly incremental backfill: today's daily bar for the watchlist + regime symbols.
-        if backfill is not None:
-            symbols = [*watchlist_symbols(), INDEX_SYMBOL, VIX_SYMBOL]
-            await backfill.run(symbols, "day", d, d)
+        # Ok-bearing (BackfillReport.ok): a token abort or a broker/network failure records the day
+        # failed, so the §2.6 sweep retries it and rec_outcomes waits for the bars.
+        if backfill is None:
+            return None
+        symbols = [*watchlist_symbols(), INDEX_SYMBOL, VIX_SYMBOL]
+        return await backfill.run(symbols, "day", d, d)
 
     async def job_features(d) -> None:
         await asyncio.to_thread(features.daily_snapshot, d)

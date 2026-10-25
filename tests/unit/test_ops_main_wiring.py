@@ -444,7 +444,8 @@ async def test_bhavcopy_composition_root_closure_forwards_degraded_result(
 
 #: The 9 composition-root closures forwarded (2026-08-13) so an ok-bearing job result reaches
 #: JobSpec.run instead of being discarded to None (the bhavcopy seam above, closed for 8 more jobs),
-#: plus job_reconcile (2026-10-11: a token abort must sink the watermark, not record success).
+#: plus job_reconcile (2026-10-11: a token abort must sink the watermark, not record success) and
+#: job_daily_bars (2026-10-26: a run whose every fetch failed recorded success).
 #: wrapper -> (job id, the job class whose ``run`` it forwards, whether the job is date-keyed).
 _FORWARDING_WRAPPERS: dict[str, tuple[str, type, bool]] = {
     "job_bhavcopy": (opsmain.JOB_BHAVCOPY, opsmain.BhavcopyJob, True),
@@ -457,6 +458,7 @@ _FORWARDING_WRAPPERS: dict[str, tuple[str, type, bool]] = {
     "job_filings_pit_fresh": (opsmain.JOB_FILINGS_PIT_FRESH, opsmain.FilingsPitFreshJob, True),
     "job_filings_results": (opsmain.JOB_FILINGS_RESULTS, opsmain.FilingsResultsJob, True),
     "job_reconcile": (opsmain.JOB_RECONCILE, opsmain.ReconcileJob, True),
+    "job_daily_bars": (opsmain.JOB_DAILY_BARS, opsmain.BackfillJob, True),
 }
 
 
