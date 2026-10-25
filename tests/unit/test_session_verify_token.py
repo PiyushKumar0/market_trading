@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import datetime
 
 import pytest
 from kiteconnect.exceptions import TokenException
 
+from engine.broker.kite_client import KiteClient
+from engine.broker.rate_limiter import RateLimiter
 from engine.broker.session import SessionManager
+from engine.core.clock import IST
 from engine.core.secrets import KITE_ACCESS_TOKEN, KITE_API_KEY, KITE_API_SECRET
 
 
@@ -185,7 +189,7 @@ async def test_boot_probe_rejection_no_longer_suppresses_the_live_breaker(clock)
     assert await session.verify_token() == "rejected"
     assert fired == []                       # boot comms stay with the boot path (login_prompt)
 
-    await session.on_token_rejected()        # 11:26:40 — the real live rejection
+    await session.on_token_rejected(session.access_token())   # 11:26:40 — the real live rejection
     assert fired == [1]                      # pre-fix: [] (silently swallowed)
     assert session.token_valid() is False
 
@@ -196,9 +200,9 @@ async def test_live_rejection_burst_still_fires_once(clock) -> None:
     fired: list[int] = []
     session = _breaker_session(clock, _FakeKC(), fired)
 
-    await session.on_token_rejected()
-    await session.on_token_rejected()
-    await session.on_token_rejected()
+    await session.on_token_rejected(session.access_token())
+    await session.on_token_rejected(session.access_token())
+    await session.on_token_rejected(session.access_token())
     assert fired == [1]
 
 
@@ -209,13 +213,13 @@ async def test_relogin_rearms_the_breaker(clock) -> None:
     fired: list[int] = []
     session = _breaker_session(clock, _FakeKC(), fired)
 
-    await session.on_token_rejected()
+    await session.on_token_rejected(session.access_token())
     assert fired == [1]
 
     await session.complete_login("req-token")
     assert session.token_valid() is True
 
-    await session.on_token_rejected()
+    await session.on_token_rejected(session.access_token())
     assert fired == [1, 1]
 
 
@@ -229,3 +233,74 @@ async def test_boot_probe_rejection_alone_never_fires_the_breaker(clock) -> None
     assert await session.verify_token() == "rejected"
     assert fired == []
     assert session._breaker_fired is False   # nothing to dedup against later
+
+
+# ============================================ superseded-token rejection (mid-day breaker, 2026-10-21)
+# The boot probe's superseded rule, applied to the live breaker: a call sent on the OLD token that
+# fails after the owner's re-login must not mark the NEW token dead or fire freeze + login prompt.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale", ["stale-tok", None])
+async def test_rejection_of_a_superseded_token_is_ignored(clock, stale) -> None:
+    fired: list[int] = []
+    session = _breaker_session(clock, _FakeKC(), fired)
+
+    await session.on_token_rejected(stale)
+
+    assert session.token_valid() is True
+    assert fired == [] and session._breaker_fired is False
+
+
+@pytest.mark.asyncio
+async def test_rejection_of_the_current_token_fires_once(clock) -> None:
+    fired: list[int] = []
+    session = _breaker_session(clock, _FakeKC(), fired)
+
+    await session.on_token_rejected("tok")
+    assert session.token_valid() is False
+    assert fired == [1]
+
+    await session.on_token_rejected("tok")     # burst duplicate: still one page
+    assert fired == [1]
+
+    await session.on_token_rejected("stale-tok")   # a stale one never re-pages or re-arms anything
+    assert fired == [1]
+
+
+class _InFlightKC(_FakeKC):
+    """``historical_data`` blocks in its executor thread (a call on the old token in flight) until
+    released, then the broker rejects it — the real kc's ``access_token`` has meanwhile been replaced."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.access_token = "tok"
+        self.in_flight = threading.Event()
+        self.release = threading.Event()
+
+    def historical_data(self, instrument_token, from_date, to_date, interval):
+        self.in_flight.set()
+        self.release.wait(5)
+        raise TokenException("Incorrect `api_key` or `access_token`.")
+
+
+@pytest.mark.asyncio
+async def test_old_token_call_failing_after_a_login_leaves_the_session_valid(clock) -> None:
+    """End to end through the real KiteClient: the login lands while the call is in flight, the old
+    call then fails ⇒ token_valid() stays True and the freeze/login-prompt hook never fires."""
+    fired: list[int] = []
+    kc = _InFlightKC()
+    session = _breaker_session(clock, kc, fired)
+    client = KiteClient(kc, RateLimiter(clock, burst=100), clock, on_token_rejected=session.on_token_rejected)
+    frm = datetime(2026, 6, 17, 9, 15, tzinfo=IST)
+
+    call = asyncio.create_task(client.historical(408065, frm, frm, "minute"))
+    assert await asyncio.to_thread(kc.in_flight.wait, 5)
+    await session.complete_login("req-token")
+    kc.release.set()
+
+    with pytest.raises(TokenException):
+        await call
+    assert session.access_token() == "fresh-tok"
+    assert session.token_valid() is True
+    assert fired == []

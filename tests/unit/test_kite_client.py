@@ -123,7 +123,7 @@ async def test_token_exception_fires_hook_once_and_reraises(clock, rate_limiter)
     breaker exactly once, and the exception always propagates."""
     fired: list[int] = []
 
-    async def hook() -> None:
+    async def hook(token: str | None) -> None:
         fired.append(1)
 
     client = KiteClient(_BoomKC(TokenException("bad token")), rate_limiter, clock, on_token_rejected=hook,
@@ -142,7 +142,7 @@ async def test_token_exception_fires_hook_once_and_reraises(clock, rate_limiter)
 async def test_non_token_exception_does_not_fire_hook(clock, rate_limiter) -> None:
     fired: list[int] = []
 
-    async def hook() -> None:
+    async def hook(token: str | None) -> None:
         fired.append(1)
 
     client = KiteClient(_BoomKC(RuntimeError("network blip")), rate_limiter, clock, on_token_rejected=hook)
@@ -154,10 +154,48 @@ async def test_non_token_exception_does_not_fire_hook(clock, rate_limiter) -> No
 
 @pytest.mark.asyncio
 async def test_hook_failure_never_masks_the_original_token_exception(clock, rate_limiter) -> None:
-    async def hook() -> None:
+    async def hook(token: str | None) -> None:
         raise ValueError("hook itself blew up")
 
     client = KiteClient(_BoomKC(TokenException("bad token")), rate_limiter, clock, on_token_rejected=hook)
 
     with pytest.raises(TokenException):        # the ValueError is swallowed+logged, TokenException wins
         await client.historical(408065, _FRM, _TO, "minute")
+
+
+class _SwapTokenKC:
+    """A request that carries ``old-tok``; a re-login replaces ``access_token`` on the shared kc while
+    the call is still in its executor thread, then the broker rejects the (old) request."""
+
+    def __init__(self) -> None:
+        self.access_token: str | None = "old-tok"
+
+    def historical_data(self, instrument_token, from_date, to_date, interval):
+        self.access_token = "new-tok"
+        raise TokenException("bad token")
+
+    def place_order(self, variety, **params):
+        self.access_token = "new-tok"
+        raise TokenException("bad token")
+
+
+@pytest.mark.asyncio
+async def test_hook_receives_the_token_the_request_was_sent_with(clock, rate_limiter) -> None:
+    """The token is captured BEFORE the executor runs, so a login landing mid-call cannot relabel the
+    rejected request as the new token — on both the _call and the _order_call path."""
+    seen: list[str | None] = []
+
+    async def hook(token: str | None) -> None:
+        seen.append(token)
+
+    kc = _SwapTokenKC()
+    client = KiteClient(kc, rate_limiter, clock, on_token_rejected=hook, orders_enabled=True)
+
+    with pytest.raises(TokenException):
+        await client.historical(408065, _FRM, _TO, "minute")
+    assert kc.access_token == "new-tok" and seen == ["old-tok"]
+
+    kc.access_token = "old-tok"
+    with pytest.raises(TokenException):
+        await client.place_order({"tradingsymbol": "RELIANCE", "quantity": 1})
+    assert seen == ["old-tok", "old-tok"]

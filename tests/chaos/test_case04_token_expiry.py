@@ -116,6 +116,7 @@ def token_rig(conn, clock, tmp_path):
     session = SessionManager(FakeSecrets({KITE_API_KEY: "ak", KITE_API_SECRET: "as",
                                            KITE_ACCESS_TOKEN: "tok-day1"}), clock)
     session._connect = lambda: kc                    # the api_key-bound KiteConnect (test seam)
+    kc.access_token = "tok-day1"                     # what the real _connect arms; the breaker keys on it
     alerts: list[tuple[str, str]] = []
     notified: list = []
 

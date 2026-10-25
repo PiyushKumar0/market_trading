@@ -86,7 +86,9 @@ class KiteClient:
         at :meth:`~engine.broker.session.SessionManager.on_token_rejected` so a mid-day token death
         freezes entries + alerts the owner on the FIRST rejection instead of every subsequent call
         failing silently. The hook is awaited then the original error is ALWAYS re-raised (R5/R8 —
-        never swallow); a hook failure is logged and never masks the broker error.
+        never swallow); a hook failure is logged and never masks the broker error. The hook
+        receives the access token the failing request was sent with, so the session can ignore a
+        rejection of a token a re-login has since superseded.
     order_guard:
         Optional order-surface guard (A7, §3.5.3 predicate (a) / B7). Called synchronously with the
         caller's ``intent`` (``"entry"`` or ``"risk_reducing"``) BEFORE the rate limiter is acquired,
@@ -108,7 +110,7 @@ class KiteClient:
         kc: Any,
         rate_limiter: RateLimiter,
         clock: Clock,
-        on_token_rejected: Callable[[], Awaitable[None]] | None = None,
+        on_token_rejected: Callable[[str | None], Awaitable[None]] | None = None,
         *,
         order_guard: Callable[[str], None] | None = None,
         orders_enabled: bool = False,
@@ -120,13 +122,14 @@ class KiteClient:
         self._order_guard = order_guard
         self._orders_enabled = orders_enabled
 
-    async def _fire_token_rejected(self, exc: BaseException) -> None:
+    async def _fire_token_rejected(self, exc: BaseException, token: str | None) -> None:
         """If ``exc`` is a :class:`TokenException` and the circuit breaker is wired, fire it once —
         inside its own try/except so a hook failure NEVER masks the original broker error (R5/R8).
-        The caller re-raises ``exc`` unconditionally after this returns."""
+        ``token`` is the access token the failed request was sent with (captured before the
+        executor ran it). The caller re-raises ``exc`` unconditionally after this returns."""
         if isinstance(exc, TokenException) and self._on_token_rejected is not None:
             try:
-                await self._on_token_rejected()
+                await self._on_token_rejected(token)
             except Exception:  # noqa: BLE001 - a hook failure must never mask the broker error
                 _log.exception("token_rejected_hook_failed")
 
@@ -145,6 +148,7 @@ class KiteClient:
         await self._rl.acquire(endpoint_class=endpoint_class, intent="read")
         loop = asyncio.get_running_loop()
         _log.info("kite.call", op=op, endpoint_class=endpoint_class, **log_fields)
+        token = getattr(self._kc, "access_token", None)  # sent-with token; no await before the executor
         try:
             result = await loop.run_in_executor(None, fn)
         except Exception as exc:  # noqa: BLE001 - log + re-raise; do not swallow broker errors
@@ -156,7 +160,7 @@ class KiteClient:
                 error_type=type(exc).__name__,
                 **log_fields,
             )
-            await self._fire_token_rejected(exc)  # TokenException → freeze entries once (2026-07-21)
+            await self._fire_token_rejected(exc, token)  # TokenException → freeze entries once (2026-07-21)
             raise
         _log.info("kite.ok", op=op, endpoint_class=endpoint_class, **log_fields)
         return result
@@ -180,6 +184,7 @@ class KiteClient:
         await self._rl.acquire(endpoint_class="orders", intent=intent)
         loop = asyncio.get_running_loop()
         _log.info("kite.call", op=op, endpoint_class="orders", intent=intent, **log_fields)
+        token = getattr(self._kc, "access_token", None)  # sent-with token; no await before the executor
         try:
             result = await loop.run_in_executor(None, fn)
         except Exception as exc:  # noqa: BLE001 - log + re-raise; do not swallow broker errors
@@ -192,7 +197,7 @@ class KiteClient:
                 error_type=type(exc).__name__,
                 **log_fields,
             )
-            await self._fire_token_rejected(exc)  # TokenException → freeze entries once (2026-07-21)
+            await self._fire_token_rejected(exc, token)  # TokenException → freeze entries once (2026-07-21)
             raise
         _log.info("kite.ok", op=op, endpoint_class="orders", intent=intent, **log_fields)
         return result
