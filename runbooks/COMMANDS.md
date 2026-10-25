@@ -500,6 +500,32 @@ response to them.
   restarts only (P).
 - **Exit status:** always exits 0. It reads `rec_outcomes` as stored; `--as-of` bounds only the (P) walk.
 
+## cat v2 shadow verdict (WO-18, clock restarted 2026-08-28) — engine OFF
+
+```powershell
+.venv\Scripts\python.exe scripts\cat_shadow_verdict.py                                   # as of today
+.venv\Scripts\python.exe scripts\cat_shadow_verdict.py --as-of 2026-12-15 --json data\reports\cat_shadow_<date>.json
+.venv\Scripts\python.exe scripts\cat_shadow_verdict.py --notional 8000                   # what-if only: prints OVERRIDE
+```
+Read-only against `state.db` + `market.duckdb` (a running engine holds the DuckDB lock: `UNAVAILABLE`);
+always exits 0; `--as-of` bounds both stores (config files are read as they are today). The rule and every
+convention are in the script's docstring.
+- **Population:** published `cat` signals from 2026-08-29; 2026-08-18..28 is always excluded. Journal
+  symbols follow NSE renames, whether or not `scripts\rekey_symbol.py` ran.
+- **Measure:** entry = open of the journal day when the story was first seen before 09:15 IST that day,
+  else the next session's open; exit = close of the k-th session from the entry; net of one CNC round
+  trip at the §7.1-sized notional with `cat.stop_pct` (5%).
+- **Verdict:** INSUFFICIENT until ≥30 sessions, ≥20 admitted signals and a fully measured cohort (the
+  first 20 signals by day and symbol that are neither void nor duplicate; a store hole holds it). Then
+  **RETIRE** iff the cohort median net is ≤ cost × H / 20 at BOTH T+10 and T+20 (the WO-3 margin
+  floor), else **OWNER REVIEW**. The report changes nothing either way.
+- **Voids and duplicates:** a bonus/split/rights/demerger ex-date inside a signal's hold voids it (stored
+  bars are never re-adjusted); a signal sharing a news cluster with an earlier signal of the same symbol is
+  the same story twice. Both are listed and leave the cohort.
+- **Decide nothing:** the running cells, the O15 / sonnet-5.5 scorer segments, and the excess over the
+  equal-weight benchmark.
+- After a verdict, the held work in IMPLEMENTATION_PLAN §3 ("Waiting on the `cat` v2 verdict") is due.
+
 ## brk20 entry-mechanism backtest (R1) — three registered entry variants, engine OFF
 
 ```powershell

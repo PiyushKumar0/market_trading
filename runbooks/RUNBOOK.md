@@ -145,15 +145,14 @@ need a valid Kite session.
 6. Start `mt-engine`, then check `data\logs\engine.log`:
    - `market_store_opened` names `data\market.duckdb`.
    - `catch_up_complete` lists in `caught_up` the replayed `bhavcopy:<day>`, `daily_bars:<day>`, `deals:<day>`
-     and filings days from S on. The `CATCHUP_REPORT` message lists the same days. When step 5
+     and filings days from S on (on a pre-login boot `daily_bars` and `bar_reconcile` days fail instead; see below). The `CATCHUP_REPORT` message lists the same days. When step 5
      deleted today's rows it also lists `universe_build:<today>`, and `instruments:<today>` once that
      run succeeds.
    - After `--engine-crashed`, the boot's `startup_sticky_state` line shows `crash_recovered` true.
    - `features_daily_skipped_empty_universe` is expected for every day after S.
-   - Before login, each replayed `bar_reconcile:<day>` shows as failed, and the sweep after login
-     clears it. `daily_bars` records success even when Kite refuses it, but its checkpoints only move
-     when candles arrive. The post-login re-trigger still refetches NIFTY 50 and INDIA VIX from S, and
-     `warmup_not_ready` then stops naming `regime:NIFTY 50`.
+   - Before login, each replayed `bar_reconcile:<day>` and `daily_bars:<day>` shows as failed, and the
+     sweep after login clears them. The post-login re-trigger still refetches NIFTY 50 and INDIA VIX
+     from S, and `warmup_not_ready` then stops naming `regime:NIFTY 50`.
 
 What the engine recovers by itself after step 6 (the §2.6 catch-up runs once per trading day from S;
 at most 30 days back):
@@ -298,6 +297,10 @@ job per `news.feeds.rss` entry at its own `poll_s` (2026-08-04 seed: `et` 300 s,
   `skipped (gave up)`. A manual reconcile re-run of a fully logged day is a no-op: to recompute a day,
   delete its `reconcile_log` rows first (and the comparison is meaningless unless self bars are rebuilt
   from the tick parquet).
+- **`CATCHUP_REPORT` lists `daily_bars:<day>` as failed** — the day's Kite daily candles did not all
+  arrive: a pre-login boot or a dead token, a broker or network error, or an empty instrument-token map.
+  The sweep retries it every 30 min (after login, for a token failure) and gives up after 7 days.
+  `rec_outcomes` for that day waits on it. One symbol with no instrument token never fails the day.
 
 ## Historical backfill procedure (A2, checkpointed & resumable)
 
@@ -498,6 +501,7 @@ stops the pipeline before the analyst, so paper gets no proposals either (D9). N
 | equity floor (`CLOSE_ONLY`) | exit all, entries blocked | `/paper reset` | review, then reset |
 | cumulative floor (`KILLED`) | exit all, entries blocked | `/paper reset` | review, then reset |
 | reset pending (`CLOSE_ONLY`) | exit all until flat; then the epoch starts and all halts clear | self | none |
+| rejection storm (`FROZEN`): ≥3 paper broker rejects within 60 s | new entries blocked; exits and protection still place | next session | check `paper_order_refused` / `paper.order.rejected` in `engine.log` |
 
 Consecutive losses is not a halt row: it is the gate's rule, run on the paper tracker, so it shows as a
 paper reject.
