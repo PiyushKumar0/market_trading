@@ -159,6 +159,20 @@ class SymbolRename(BaseModel):
     effective_d: date
 
 
+class RekeyCount(BaseModel):
+    """One column's outcome in :meth:`MarketStore.rekey_symbol` (an array column counts the rows whose
+    array names the symbol)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    table: str
+    column: str
+    old_rows: int     # naming the old symbol, before
+    new_rows: int     # naming the new symbol, before
+    moved: int        # old rows now naming the new symbol
+    dropped: int      # old rows dropped: the new symbol already held the same row
+
+
 # ---------------------------------------------------------------------- §4.3 DDL (idempotent)
 # Every statement is CREATE ... IF NOT EXISTS so init_schema() is safely re-runnable on every open.
 _SCHEMA: tuple[str, ...] = (
@@ -722,6 +736,55 @@ _INSIDER_SOURCE_PREDICATE = {
     "bse": "id LIKE 'bse:%'",
 }
 
+#: Symbol columns :meth:`MarketStore.rekey_symbol` moves to a renamed symbol — the company's market
+#: data, features, filings, news resolution and ISIN map — as ``(table, column, row predicate)``.
+_REKEY_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("bars_1d", "symbol", ""),
+    ("bars_1m", "symbol", ""),
+    ("bars_1m_no_trade", "symbol", ""),
+    ("features_daily", "symbol", ""),
+    ("feature_snapshots", "symbol", ""),
+    ("corp_actions", "symbol", ""),
+    ("earnings_calendar", "symbol", ""),
+    ("flagged_instrument_days", "symbol", ""),
+    ("sector_map", "symbol", ""),
+    ("catalyst_watchlist", "symbol", ""),
+    ("symbol_isin", "symbol", ""),
+    ("insider_trades", "symbol", ""),
+    ("shp_quarterly", "symbol", ""),
+    ("results_filings", "symbol", ""),
+    ("entity_aliases", "tradingsymbol", ""),
+    ("news_clusters", "symbols", ""),
+    ("sentiment_agg", "scope_key", "scope = 'symbol'"),
+)
+
+#: Symbol columns the re-key leaves: records of what happened under the old name (instruments_daily is
+#: also what get_symbol_renames reads; universe_daily is what each build decided), or rewritten from
+#: their own source (theme_map, verbatim from config/themes.yaml every week).
+_REKEY_LEFT: tuple[tuple[str, str], ...] = (
+    ("instruments_daily", "tradingsymbol"),
+    ("universe_daily", "symbol"),
+    ("reconcile_log", "symbol"),
+    ("corrections_log", "symbol"),
+    ("unresolved_entities", "candidate_symbols"),
+    ("theme_map", "symbols"),
+)
+
+#: ``$old``'s ``insider_trades`` rows whose same-source twin ``$new`` already holds: equal on every
+#: input of the content-hash id (``filings_pit.insider_id``) except the symbol. Stored values cannot
+#: rebuild the id (a raw ``5002078`` reads back ``5002078.00``), so the inputs are compared instead.
+_INSIDER_TWIN_DELETE = (
+    "DELETE FROM insider_trades WHERE id IN ("
+    f"SELECT o.id FROM (SELECT *, {_INSIDER_SOURCE_PREDICATE['bse']} AS bse FROM insider_trades) AS o "
+    f"JOIN (SELECT *, {_INSIDER_SOURCE_PREDICATE['bse']} AS bse FROM insider_trades) AS n "
+    "ON n.symbol = $new AND n.bse = o.bse "
+    "AND coalesce(n.person_name, '') = coalesce(o.person_name, '') "
+    "AND n.broadcast_dt IS NOT DISTINCT FROM o.broadcast_dt "
+    "AND coalesce(n.txn_type, '') = coalesce(o.txn_type, '') "
+    "AND n.qty IS NOT DISTINCT FROM o.qty AND n.value IS NOT DISTINCT FROM o.value "
+    "WHERE o.symbol = $old)"
+)
+
 _TICK_STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _tick_stage (
         instrument_token BIGINT,
@@ -743,6 +806,20 @@ _TICK_COLUMNS = (
     "instrument_token", "tradingsymbol", "ltp", "volume_traded", "exchange_ts",
     "ohlc_open", "ohlc_high", "ohlc_low", "ohlc_close", "avg_price", "bid", "ask",
 )
+
+
+def _names(column: str, array: bool, param: str) -> str:
+    """SQL predicate: ``column`` names the symbol bound to ``param`` (an array column contains it)."""
+    return f'list_contains("{column}", {param})' if array else f'"{column}" = {param}'
+
+
+def _scoped(predicate: str) -> str:
+    return f" AND ({predicate})" if predicate else ""
+
+
+def _scalar(con: duckdb.DuckDBPyConnection, sql: str, params: Any = None) -> Any:
+    """First column of the one row ``sql`` returns (a count, or a DML statement's row count)."""
+    return con.execute(sql, params).fetchall()[0][0]
 
 
 def _ist(value: Any) -> Any:
@@ -1873,6 +1950,132 @@ class MarketStore:
             for old, new, token, eff in rows
         ]
 
+    def rename_trading_gap(self, old: str, new: str) -> int:
+        """Market sessions (days ``bars_1d`` holds for any symbol) strictly between ``old``'s last daily
+        bar and ``new``'s first: 0 for a plain rename, 10 for HEG→HEGAM, suspended around its demerger.
+        0 when either symbol has no bars."""
+        return self._fetchall(
+            "SELECT count(DISTINCT d) FROM bars_1d WHERE d > (SELECT max(d) FROM bars_1d WHERE symbol = ?) "
+            "AND d < (SELECT min(d) FROM bars_1d WHERE symbol = ?)",
+            [old, new],
+        )[0][0]
+
+    def rekey_symbol(
+        self, old: str, new: str, *, apply: bool, undo_dir: Path | None = None,
+    ) -> tuple[list[RekeyCount], dict[str, int]]:
+        """Move ``old``'s rows in :data:`_REKEY_COLUMNS` to ``new`` (an NSE rename, see
+        :meth:`get_symbol_renames`) in ONE transaction, each column verified before it ends — no row
+        names ``old``, ``new`` holds what it held plus what moved — so a mismatch rolls the whole move
+        back. ``apply=False`` runs the same statements and rolls back: its counts are the ones an apply
+        commits. A row ``new`` already holds (same key) wins over ``old``'s copy. Rows keyed by an id
+        (insider_trades, catalyst_watchlist, feature_snapshots) keep it; an ``old`` insider row is
+        dropped instead when ``new`` holds its same-source twin (:data:`_INSIDER_TWIN_DELETE`). With
+        ``apply`` and ``undo_dir``, the rows the move can change — those naming either symbol — are
+        first copied there as ``<table>.parquet``. Returns the counts and, per :data:`_REKEY_LEFT`
+        column, the rows still naming ``old``."""
+        if old == new:
+            raise ValueError(f"old and new symbol are both {old!r}")
+        both = {"old": old, "new": new}
+        with self._timed_lock(f"rekey_symbol:{old}->{new}"):
+            con = self._require_con()
+            if apply and undo_dir is not None:
+                undo_dir.mkdir(parents=True, exist_ok=True)
+                for table, column, pred in _REKEY_COLUMNS:
+                    array = self._is_array_column(con, table, column)
+                    target = str(undo_dir / f"{table}.parquet").replace("'", "''")
+                    con.execute(
+                        f"COPY (SELECT * FROM {table} WHERE ({_names(column, array, '$old')} OR "
+                        f"{_names(column, array, '$new')}){_scoped(pred)}) TO '{target}' (FORMAT parquet)",
+                        both,
+                    )
+            con.execute("BEGIN TRANSACTION")
+            try:
+                counts = [self._rekey_column(con, t, c, pred, old, new) for t, c, pred in _REKEY_COLUMNS]
+                left = {
+                    f"{t}.{c}": _scalar(
+                        con, f"SELECT count(*) FROM {t} WHERE {_names(c, self._is_array_column(con, t, c), '$old')}",
+                        {"old": old},
+                    )
+                    for t, c in _REKEY_LEFT
+                }
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            con.execute("COMMIT" if apply else "ROLLBACK")
+        return counts, left
+
+    @staticmethod
+    def _rekey_column(
+        con: duckdb.DuckDBPyConnection, table: str, column: str, pred: str, old: str, new: str,
+    ) -> RekeyCount:
+        """One :meth:`rekey_symbol` column, inside its transaction; raises when the move does not verify."""
+        array = MarketStore._is_array_column(con, table, column)
+        key = () if array else MarketStore._primary_key(con, table)
+        scope = _scoped(pred)
+        both = {"old": old, "new": new}
+
+        def naming(symbol: str) -> int:
+            return _scalar(con, f"SELECT count(*) FROM {table} WHERE {_names(column, array, '$s')}{scope}",
+                           {"s": symbol})
+
+        old_rows, new_rows = naming(old), naming(new)
+        if array:
+            dropped = _scalar(
+                con,
+                f"SELECT count(*) FROM {table} WHERE {_names(column, True, '$old')} "
+                f"AND {_names(column, True, '$new')}{scope}",
+                both,
+            )
+            con.execute(
+                f'UPDATE {table} SET "{column}" = CASE WHEN list_contains("{column}", $new) '
+                f'THEN list_filter("{column}", lambda x: x <> $old) '
+                f'ELSE list_transform("{column}", lambda x: CASE WHEN x = $old THEN $new ELSE x END) END '
+                f"WHERE {_names(column, True, '$old')}{scope}",
+                both,
+            )
+            moved = old_rows - dropped
+        elif column in key:
+            same_key = "".join(f' AND n."{k}" = o."{k}"' for k in key if k != column)
+            moved = _scalar(
+                con,
+                f'INSERT INTO {table} SELECT * REPLACE ($new AS "{column}") FROM {table} AS o '
+                f'WHERE o."{column}" = $old{scope} AND NOT EXISTS '
+                f'(SELECT 1 FROM {table} AS n WHERE n."{column}" = $new{same_key})',
+                both,
+            )
+            con.execute(f'DELETE FROM {table} WHERE "{column}" = $old{scope}', {"old": old})
+            dropped = old_rows - moved
+        else:
+            dropped = _scalar(con, _INSIDER_TWIN_DELETE, both) if table == "insider_trades" else 0
+            moved = _scalar(con, f'UPDATE {table} SET "{column}" = $new WHERE "{column}" = $old{scope}', both)
+        still_old, now_new = naming(old), naming(new)
+        if still_old or now_new != new_rows + moved:
+            raise RuntimeError(
+                f"{table}.{column}: {still_old} row(s) still name {old} and {now_new} name {new}, "
+                f"expected 0 and {new_rows} + {moved} moved"
+            )
+        return RekeyCount(
+            table=table, column=column, old_rows=old_rows, new_rows=new_rows, moved=moved, dropped=dropped
+        )
+
+    @staticmethod
+    def _is_array_column(con: duckdb.DuckDBPyConnection, table: str, column: str) -> bool:
+        return str(_scalar(
+            con,
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_catalog = current_database() AND table_name = ? AND column_name = ?",
+            [table, column],
+        )).endswith("[]")
+
+    @staticmethod
+    def _primary_key(con: duckdb.DuckDBPyConnection, table: str) -> tuple[str, ...]:
+        row = con.execute(
+            "SELECT constraint_column_names FROM duckdb_constraints() WHERE database_name = current_database() "
+            "AND table_name = ? AND constraint_type = 'PRIMARY KEY'",
+            [table],
+        ).fetchone()
+        return tuple(row[0]) if row else ()
+
     def get_latest_universe_symbols(self, on_or_before: date) -> set[str]:
         """Every symbol of the most recent ``universe_daily`` build on-or-before ``on_or_before``
         (empty when none exists)."""
@@ -2286,20 +2489,23 @@ class MarketStore:
         )
         return {r[0] for r in rows}
 
-    def latest_insider_broadcast(self, source: str | None = None) -> datetime | None:
+    def latest_insider_broadcast(
+        self, source: str | None = None, *, symbol: str | None = None
+    ) -> datetime | None:
         """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark (§2.8).
 
         ``source`` selects the partition by id tag (§2.8.5, 2026-09-13): ``'nse'`` = the bare-id
         ``corporates-pit`` rows, ``'bse'`` = the ``bse:``-prefixed fresh-feed rows, ``None`` = the
         whole table (the pre-2026-09-13 reading, kept for callers that want "any insider row").
-        Only ``'nse'`` has a production caller: ``filings_pit_fresh`` windows on DATES, never on
-        a watermark, so ``'bse'`` is the symmetric reading kept for a future one.
+        Only ``'nse'`` has an engine caller: ``filings_pit_fresh`` windows on DATES, never on a
+        watermark; ``scripts/rekey_symbol.py`` reads ``'bse'`` for one ``symbol``.
         WHOLE-TABLE IS WRONG FOR A PER-JOB WINDOW: the BSE feed writes same-day rows, which pins the
         NSE job's window to ``[d-1, d]`` and leaves a revived NSE route unable to reopen its own gap.
         An unknown tag RAISES rather than falling back to the whole table — a silent fallback is
         exactly that bug again.
         """
-        sql = "SELECT max(broadcast_dt) FROM insider_trades"
+        clauses: list[str] = []
+        params: list[Any] = []
         if source is not None:
             predicate = _INSIDER_SOURCE_PREDICATE.get(source.strip().lower())
             if predicate is None:
@@ -2307,8 +2513,14 @@ class MarketStore:
                     f"unknown insider source {source!r} "
                     f"(expected one of {sorted(_INSIDER_SOURCE_PREDICATE)} or None)"
                 )
-            sql += f" WHERE {predicate}"
-        row = self._fetchall(sql)[0]
+            clauses.append(predicate)
+        if symbol is not None:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        sql = "SELECT max(broadcast_dt) FROM insider_trades"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        row = self._fetchall(sql, params)[0]
         return _ist(row[0]) if row[0] is not None else None
 
     #: Newest data each feed has delivered — the ``feed_freshness`` census. News by INGESTION time

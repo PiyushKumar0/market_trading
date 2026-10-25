@@ -301,6 +301,27 @@ async def test_scrip_map_rebuild_resolves_rows_the_stored_map_alone_drops(
     assert "AIAENG" in symbols and len(symbols) == 5
 
 
+async def test_scrip_map_reads_a_lagging_constituents_csv_through_the_rename(
+    seeded_store, clock, settings, monkeypatch
+):
+    """2026-10-23: the index CSV kept naming ICICIPRULI after NSE renamed it ICICILIFE (same Kite
+    token), so the company's BSE filings resolved to the retired symbol."""
+    eq = {"exchange": "NSE", "segment": "NSE", "instrument_type": "EQ"}
+    seeded_store.upsert_instruments_daily([
+        {"d": D - timedelta(days=2), "instrument_token": 7, "tradingsymbol": "AIAOLD", **eq},
+        {"d": D - timedelta(days=1), "instrument_token": 7, "tradingsymbol": "AIAENG", **eq},
+    ])
+    monkeypatch.setattr(
+        "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: {"AIAOLD": "INE212H01026"}
+    )
+    client = routed_client(lambda: httpx.Response(200, json=MASTER_JSON))
+    result = await FilingsPitFreshJob(seeded_store, clock, client, settings=settings).run(D)
+
+    symbols = {r["symbol"] for r in seeded_store.get_insider_trades()}
+    assert "AIAENG" in symbols and "AIAOLD" not in symbols
+    assert result.scrip_shadowed == 0
+
+
 async def test_stored_code_wins_over_a_disagreeing_master(seeded_store, clock, settings, monkeypatch):
     """Precedence is stored-wins on a scrip key: the stored codes are the per-symbol PeerSmartSearch
     resolutions, so a master that claims 500325 for someone else must not silently re-point it."""

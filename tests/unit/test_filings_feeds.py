@@ -260,6 +260,28 @@ async def test_filings_pit_skips_a_failed_filing_and_retries_it_next_run(store, 
     assert {r["symbol"] for r in store.get_insider_trades()} == {"HCLTECH", "NAUKRI"}
 
 
+def _seed_rename(store, old: str, new: str, token: int) -> None:
+    """Kite snapshots: ``old`` on D-2, ``new`` on D-1 under the same token (an NSE rename)."""
+    eq = {"exchange": "NSE", "segment": "NSE", "instrument_type": "EQ"}
+    store.upsert_instruments_daily([
+        {"d": D - timedelta(days=2), "instrument_token": token, "tradingsymbol": old, **eq},
+        {"d": D - timedelta(days=1), "instrument_token": token, "tradingsymbol": new, **eq},
+    ])
+
+
+async def test_filings_pit_admits_a_renamed_constituent_the_csv_still_names_old(store, clock, monkeypatch):
+    """2026-10-23: NSE files ICICI Life's disclosures as ICICILIFE while the index CSV still says
+    ICICIPRULI; filtered on the CSV alone, every one counted out-of-universe and was never stored."""
+    _seed_rename(store, "HCLOLD", "HCLTECH", 7)
+    routes = {"corporates-pit-gg": lambda: httpx.Response(200, json=PIT_GG_JSON),
+              NAUKRI_XBRL_URL: lambda: httpx.Response(200, content=NAUKRI_XBRL),
+              HCL_XBRL_URL: lambda: httpx.Response(200, content=NAUKRI_XBRL)}
+    job = _pit_job(store, clock, monkeypatch, routed_client(routes),
+                   symbols={"NAUKRI": "INE663F01032", "HCLOLD": "INE860A01027"})
+    await job.run(D)
+    assert {r["symbol"] for r in store.get_insider_trades()} == {"HCLTECH", "NAUKRI"}
+
+
 async def test_filings_pit_every_xbrl_failing_degrades_and_alerts(store, clock, monkeypatch):
     routes = {"corporates-pit-gg": lambda: httpx.Response(200, json=PIT_GG_JSON),
               NAUKRI_XBRL_URL: lambda: httpx.Response(404), HCL_XBRL_URL: lambda: httpx.Response(404)}
@@ -994,6 +1016,16 @@ async def test_isin_map_maps_every_constituent_from_one_master_request(store, cl
     assert {r["as_of"] for r in rows} == {D}
     await job.run()                                              # every code stored: no request
     assert sum("ListofScripData" in u for u in urls) == 1
+
+
+async def test_isin_map_stamps_the_symbol_a_lagging_constituents_csv_renamed(store, clock, monkeypatch):
+    """The CSV still names TCS; Kite carries the token as TCSNEW — the row (and the newest as_of the
+    scrip reverse map trusts) belongs to TCSNEW."""
+    _seed_rename(store, "TCS", "TCSNEW", 99)
+    job, _ = _isin_job(store, clock, monkeypatch, httpx.Response(200, json=_SCRIP_MASTER))
+    await job.run()
+    assert {r["symbol"]: r["bse_scrip_code"] for r in store.get_symbol_isin()} == {
+        "RELIANCE": "500325", "TCSNEW": "532540"}
 
 
 async def test_isin_map_keeps_a_stored_code_when_the_isin_changes(store, clock, monkeypatch):

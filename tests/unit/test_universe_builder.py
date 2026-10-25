@@ -698,10 +698,48 @@ async def test_lagging_index_symbol_follows_the_rename(tmp_path, store, clock):
     renamed = [m for m in msgs if "OLDCO" in m.title]
     assert len(renamed) == 1
     assert "NEWCO" in renamed[0].title and "77" in renamed[0].body
+    assert "still name OLDCO" in renamed[0].body
+    assert "19 daily bars still sit under OLDCO" in renamed[0].body and "rekey_symbol.py OLDCO NEWCO" in renamed[0].body
 
     # Same-day rebuild: the latest persisted universe already names NEWCO ⇒ no second alert.
     await builder.build(D)
     assert len([m for m in msgs if "OLDCO" in m.title]) == 1
+
+
+async def test_rename_alert_fires_once_when_the_index_list_already_caught_up(tmp_path, store, clock):
+    """2026-10-26: NSE's lists named ICICILIFE before any build had remapped ICICIPRULI, so an alert tied
+    to the remap never told the owner. The alert follows the universe instead (previous build carried
+    the old symbol, this one the new) and says what the stored history needs — here nothing: a
+    two-session trading gap means the old bars stay and the new symbol counts as a fresh listing."""
+    settings = make_settings(tmp_path)
+    _seed_rename(store, old="OLDCO", new="NEWCO", token=77)
+    seed_daily_bars(store, "RELIANCE", close="200.00", volume=500_000, days=25)
+    store.upsert_bars_1d([
+        DailyBar(symbol="OLDCO", d=D - timedelta(days=i), open=Decimal("200"), high=Decimal("200"),
+                 low=Decimal("200"), close=Decimal("200"), volume=500_000)
+        for i in range(4, 21)
+    ])
+    store.upsert_bars_1d([
+        DailyBar(symbol="NEWCO", d=D - timedelta(days=1), open=Decimal("200"), high=Decimal("200"),
+                 low=Decimal("200"), close=Decimal("200"), volume=500_000),
+    ])
+    store.upsert_universe_daily([{
+        "d": D - timedelta(days=1), "symbol": "OLDCO", "included": True, "mis_candidate": True,
+        "exclusion_reasons": [], "core_index": True,
+    }])
+    msgs, sink = collect_alerts()
+    caught_up = _RENAME_CSV.replace("OLDCO", "NEWCO")
+    builder = _rename_builder(settings, store, clock, csv_text=caught_up,
+                              leverages={"RELIANCE": 5.0, "OLDCO": 5.0}, notify=sink)
+
+    universe = await builder.build(D)
+    await builder.build(D)
+
+    assert "NEWCO" in universe.symbols
+    renamed = [m for m in msgs if "OLDCO" in m.title]
+    assert len(renamed) == 1
+    assert "already names NEWCO" in renamed[0].body
+    assert "2-session trading gap" in renamed[0].body and "rekey_symbol" not in renamed[0].body
 
 
 async def test_lagging_surveillance_flag_follows_the_rename(tmp_path, store, clock):

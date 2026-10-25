@@ -99,6 +99,7 @@ from engine.datafeeds.insider_crossings import is_open_market_buy
 from engine.datafeeds.isin_map import (
     BSE_SCRIP_MASTER_URL,
     SCRIP_MASTER_TIMEOUT_S,
+    follow_renames,
     load_constituents_isin,
     parse_scrip_master,
 )
@@ -691,8 +692,9 @@ class FilingsPitFreshJob:
             # file, and a corrupt cache raises shapes load_constituents_isin does not catch
             # (csv.Error). This job's contract is degrade-never-raise, so nothing above may escape.
             stored = await self._store.abse_scrip_symbol_map()
+            renames = await self._store.arun(self._store.get_symbol_renames, self._clock.today())
             leg = "constituents_csv"
-            isin_by_symbol = load_constituents_isin(self._settings)
+            isin_by_symbol = follow_renames(load_constituents_isin(self._settings), renames)
             if not isin_by_symbol:
                 # No symbol->ISIN half ⇒ nothing to join the master to; do not spend the request.
                 _log.warning("filings_pit_fresh_constituents_missing")

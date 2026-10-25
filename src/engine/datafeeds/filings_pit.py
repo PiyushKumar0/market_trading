@@ -52,7 +52,7 @@ from engine.core.clock import IST, Clock
 from engine.core.config import Settings
 from engine.core.log import get_logger
 from engine.core.nse_http import nse_get
-from engine.datafeeds.isin_map import load_constituents_isin
+from engine.datafeeds.isin_map import follow_renames, load_constituents_isin
 from engine.marketdata.store import MarketStore
 from engine.notify.catalog import CatalogMessage, MessageKind
 
@@ -498,7 +498,10 @@ class FilingsPitJob:
         windows = 0
         stats = PitIngest()
         try:
-            symbols = load_constituents_isin(self._settings).keys()
+            symbols = follow_renames(
+                load_constituents_isin(self._settings),
+                await self._store.arun(self._store.get_symbol_renames, d),
+            ).keys()
             if not symbols:
                 raise RuntimeError("the index-constituents CSV gave no symbols")
             watermark = await self._store.alatest_insider_broadcast(source=NSE_SOURCE)

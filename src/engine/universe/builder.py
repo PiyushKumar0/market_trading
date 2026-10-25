@@ -48,9 +48,11 @@ Index membership is best-effort (E5): download the NSE indices constituents CSV
 NSE symbol change while the index lists and the Zerodha MIS file keep naming the retired symbol for
 days — which put a token-less name in the watchlist (no ticks, a warm-up blocker every minute). The
 build maps every retired symbol to its token's current one (``MarketStore.get_symbol_renames``);
-MIS eligibility, surveillance and the liquidity median read through the retired symbols; the owner
-is alerted once, on the first build that remaps a name the previous build still carried. Stored
-history is NOT re-keyed here — daily-lookback rules see the new symbol as a fresh listing.
+MIS eligibility, surveillance and the liquidity median read through the retired symbols. The owner
+is alerted once, on the first build whose index carries the new symbol where the previous build
+carried the old one (a remapped lagging list or one NSE already updated). Stored history is not
+re-keyed here: until ``scripts/rekey_symbol.py`` moves it, daily-lookback rules see the new symbol as a
+fresh listing.
 
 Resolved ambiguities (documented, plan-silent):
 - Median traded value uses ``close × volume`` over the last up-to-20 ``bars_1d`` rows strictly
@@ -410,8 +412,8 @@ class UniverseBuilder:
             )
 
         # Before the persist: the alert compares against the previous build's rows.
-        if remapped_lists:
-            await self._report_renames(d, renames, remapped_lists)
+        if renames:
+            await self._report_renames(d, renames, remapped_lists, members)
 
         # replace, not upsert (2026-09-01 review): stale extended rows from an earlier same-day
         # build (flag flipped off between retries, or a shrunken candidate set) must never survive —
@@ -470,43 +472,61 @@ class UniverseBuilder:
         return {r.old_symbol: r for r in renames}
 
     async def _report_renames(
-        self, d: date, renames: Mapping[str, SymbolRename], remapped_lists: Mapping[str, list[str]]
+        self, d: date, renames: Mapping[str, SymbolRename], remapped_lists: Mapping[str, list[str]],
+        members: Sequence[str],
     ) -> None:
-        """Log every remap; alert once — on the first build that remaps a symbol the previous build
-        still carried (a same-day rebuild finds this day's rows already naming the new symbol)."""
+        """Log every remap; alert once per rename — on the first build whose index carries the new
+        symbol where the previous build carried the old one, whether a lagging list was remapped or
+        NSE's list had already caught up (2026-10-26: it had, so a remap-only alert never fired). A
+        same-day rebuild finds this day's rows already naming the new symbol."""
         for old, lists in remapped_lists.items():
             r = renames[old]
             _log.warning(
                 "universe_symbol_renamed", old=old, new=r.new_symbol, token=r.instrument_token,
                 effective_d=r.effective_d.isoformat(), lists=lists,
             )
+        current = set(members)
+        candidates = [r for r in renames.values() if r.new_symbol in current]
+        if not candidates:
+            return
         try:
             previous = await self._store.arun(self._store.get_latest_universe_symbols, d)
-        except Exception:  # noqa: BLE001 - best-effort alert; the remap itself already applied
-            _log.exception("universe_previous_unreadable", d=d.isoformat())
+            first = [r for r in candidates if r.old_symbol in previous]
+            lines = [await self._rename_line(r, remapped_lists.get(r.old_symbol)) for r in first]
+        except Exception:  # noqa: BLE001 - best-effort alert; the universe itself is already built
+            _log.exception("universe_rename_alert_failed", d=d.isoformat())
             return
-        first = [old for old in remapped_lists if old in previous]
         if not first:
             return
-        lines = []
-        for old in first:
-            r = renames[old]
-            lists = remapped_lists[old]
-            named = f"the {' and '.join(lists)} list{'s' if len(lists) > 1 else ''} still name"
-            lines.append(
-                f"{old} → {r.new_symbol}: Kite token {r.instrument_token} carries {r.new_symbol} "
-                f"since {r.effective_d.isoformat()}; {named}{'' if len(lists) > 1 else 's'} {old}, "
-                f"so the universe uses {r.new_symbol}. Stored history before "
-                f"{r.effective_d.isoformat()} stays under {old} until it is re-keyed, so "
-                f"daily-lookback rules see {r.new_symbol} as a fresh listing."
-            )
-        pairs = ", ".join(f"{old} → {renames[old].new_symbol}" for old in first)
         await self._alert(
-            title=f"Symbol renamed: {pairs}",
+            title="Symbol renamed: " + ", ".join(f"{r.old_symbol} → {r.new_symbol}" for r in first),
             body="\n".join(lines),
             severity="warning",
-            data={"job_id": "universe_build", "d": d.isoformat(), "renamed": first},
+            data={"job_id": "universe_build", "d": d.isoformat(), "renamed": [r.old_symbol for r in first]},
         )
+
+    async def _rename_line(self, r: SymbolRename, lists: Sequence[str] | None) -> str:
+        """One renamed symbol for the owner: where the universe got the new symbol, and what the stored
+        history under the old one needs (moving, leaving across a trading gap, or nothing)."""
+        old, new = r.old_symbol, r.new_symbol
+        if lists:
+            where = (f"the {' and '.join(lists)} list{'s still name' if len(lists) > 1 else ' still names'} "
+                     f"{old}, so the universe uses {new}")
+        else:
+            where = f"the index list already names {new}"
+        _first_bar, bars = await self._store.adaily_bar_span(old)
+        history = ""
+        if bars:
+            gap = await self._store.arun(self._store.rename_trading_gap, old, new)
+            history = (
+                f" {bars} daily bars stay under {old}: the rename came with a {gap}-session trading gap, "
+                f"so {new} counts as a fresh listing."
+                if gap else
+                f" {bars} daily bars still sit under {old}: move them with "
+                f"`scripts/rekey_symbol.py {old} {new} --apply` (engine stopped)."
+            )
+        return (f"{old} → {new}: Kite token {r.instrument_token} carries {new} since "
+                f"{r.effective_d.isoformat()}; {where}.{history}")
 
     # -------------------------------------------------------- configured-index membership (E5)
     async def _load_index(self) -> tuple[list[str], IndexSource]:

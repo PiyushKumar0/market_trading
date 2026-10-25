@@ -379,6 +379,20 @@ if the engine is up and rebuilds the same rows (idempotent). Exit 1 = built but 
 .venv\Scripts\python.exe scripts\build_universe.py --date 2026-09-07
 ```
 
+## Symbol rename: move a renamed symbol's history (2026-10-26)
+
+After a "Symbol renamed: OLD → NEW" alert from the universe build (NSE renamed the symbol, Kite kept the
+token). Engine OFF: the script holds `engine.lock` for the whole run, and even the dry run opens DuckDB. The
+dry run executes the move and rolls it back, so its counts are what `--apply` commits. `--apply` writes an
+undo copy to `data\backups\rekey-OLD-NEW-<stamp>\` first. It is refused while a live position names OLD, or
+while OLD has a BSE insider row younger than 3 days (the message gives the re-run date).
+
+```powershell
+.venv\Scripts\python.exe scripts\rekey_symbol.py ICICIPRULI ICICILIFE           # dry run
+.venv\Scripts\python.exe scripts\rekey_symbol.py ICICIPRULI ICICILIFE --apply
+# rehearse on a copy: $env:MT_DATA_DIR = '<dir holding market.duckdb + state.db>'; then unset it
+```
+
 ## Bhavcopy archive backfill — full-market bars_1d + corp-action history
 
 Engine must be OFF (single DuckDB writer); ~1-2 s per session, checkpointed per date in

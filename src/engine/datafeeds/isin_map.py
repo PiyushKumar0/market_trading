@@ -27,7 +27,7 @@ from __future__ import annotations
 import csv
 import io
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,7 @@ from engine.core.clock import Clock
 from engine.core.config import Settings, repo_root
 from engine.core.log import get_logger
 from engine.core.nse_http import nse_get
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import MarketStore, SymbolRename
 from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.isin_map")
@@ -170,6 +170,18 @@ def load_constituents_isin(settings: Settings) -> dict[str, str]:
     return {}
 
 
+def follow_renames(isin_by_symbol: Mapping[str, str], renames: Iterable[SymbolRename]) -> dict[str, str]:
+    """``{symbol: isin}`` with each retired symbol replaced by its current one: the index CSV keeps
+    naming a renamed company's old ticker for days (2026-10-23 ICICIPRULI→ICICILIFE). A current symbol
+    the CSV already lists keeps its own ISIN."""
+    current = {r.old_symbol: r.new_symbol for r in renames}
+    out = {symbol: isin for symbol, isin in isin_by_symbol.items() if symbol not in current}
+    for old, isin in isin_by_symbol.items():
+        if old in current:
+            out.setdefault(current[old], isin)
+    return out
+
+
 class IsinMapJob:
     """§2.8 — build/refresh ``symbol_isin`` (CSV ISIN + announcements fallback + BSE bulk master)."""
 
@@ -210,7 +222,10 @@ class IsinMapJob:
         return result
 
     async def _run(self, symbols: list[str] | None) -> IsinMapResult:
-        isin_by_symbol = load_constituents_isin(self._settings)
+        isin_by_symbol = follow_renames(
+            load_constituents_isin(self._settings),
+            await self._store.arun(self._store.get_symbol_renames, self._clock.today()),
+        )
         degraded = not isin_by_symbol
         wanted = [s.strip().upper() for s in symbols if s.strip()] if symbols is not None else sorted(isin_by_symbol)
 
