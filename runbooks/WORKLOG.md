@@ -2,6 +2,47 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-26 01:15 — ICICIPRULI's history moved to ICICILIFE (stage 2, f7e5bb6); HEG left in place by design
+
+- **Built:** `scripts/rekey_symbol.py` and `MarketStore.rekey_symbol`, plus rename-aware `isin_map`,
+  `filings_pit` and `filings_pit_fresh`. Tests: 3910 passed, 19 skipped.
+- **Rehearsed on a copy:** the 10-23 16:00 export plus a backup-API copy of state.db, pointed at with
+  `MT_DATA_DIR`.
+  - The dry run's counts matched the apply's, and a second run moved nothing.
+  - Monday's universe built on the moved copy: ICICILIFE is included, F&O, core, and MIS-eligible (through
+    the Zerodha file's ICICIPRULI key). Its liquidity median is ₹54.7 cr over the full history.
+  - The alert read "the index list already names ICICILIFE".
+- **Live run:**
+  - Engine stopped 01:12:43 (exit_clean); `--apply` ran; engine started 01:13:44; `engine_ready` 01:14:50.
+  - Moved, with nothing dropped: bars_1d 1068 (ICICILIFE now holds 1069, including its own 10-23 bar),
+    bars_1m 11134, feature_snapshots 8577, features_daily 31, sentiment 25, earnings 18, catalyst 14,
+    news 13, results 12, sector 9, corp actions 6, aliases 2, insider 2, isin 1, backfill checkpoint 1.
+  - Left as records: instruments_daily 74, universe_daily 35, reconcile_log 30, corrections_log 71.
+  - Undo copy: `data\backups\rekey-ICICIPRULI-ICICILIFE-20261026T011324`.
+- **Boot:** `startup_report` shows risk NORMAL, integrity ok, not killed, no failed jobs. The warm-up reports
+  `rsi2/trend/mom:ICICIPRULI daily bars 0/200` (daily class, which does not freeze), because the 10-23
+  universe still lists ICICIPRULI. The 08:30 build switches the set to ICICILIFE, which covers all
+  200 sessions (measured on the copy with the engine's own session enumerator).
+- **HEG→HEGAM was not moved (departs from the spec's done-when):**
+  - 10 sessions, 2026-09-07 to 09-21, have no bar under either symbol: the suspension around the demerger
+    (ex 9-07).
+  - Moving HEG's 1037 bars would turn HEGAM, now a quiet young listing, into a 200-session series with
+    a hole. The warm-up would refuse it until mid-2027.
+  - hi52 vetoes HEGAM across the demerger either way.
+  - The script now refuses any rename with such a gap (`rename_trading_gap`).
+- **Found and fixed while validating:**
+  - NSE switched both index lists to ICICILIFE over the weekend, so the alert, which fired only on a
+    remap, would never have fired. It now fires on the first build that carries the new symbol where
+    the previous build carried the old one, and says what the history needs.
+  - `filings_pit` filtered on the lagging CSV, so ICICI Life's NSE filings since 10-23 were dropped as
+    out-of-universe. Its 7-day retry margin re-lists them on the next run.
+  - `isin_map` kept re-stamping ICICIPRULI.
+  - The Zerodha MIS file still named ICICIPRULI at 00:59.
+- **Check after the 08:30 build:**
+  - `universe_built` has ICICILIFE eligible.
+  - One "Symbol renamed: ICICIPRULI → ICICILIFE" alert arrives.
+  - `warmup_not_ready` no longer names ICICIPRULI.
+
 ## 2026-10-25 11:00 — ICICIPRULI renamed ICICILIFE: a watchlist name with no token; the universe now follows NSE renames (stage 1)
 
 - **Symptom (10-23):** from 13:01, `warmup_not_ready` logged `orb:ICICIPRULI bars 0/375` every minute, the gap repair
