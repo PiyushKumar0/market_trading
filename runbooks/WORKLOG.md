@@ -2,6 +2,63 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-26 05:10 — Section-3 fixes built on `wip/section3`, reviewed and validated; NOT merged (owner: "Yes, work on section 3. Review and validate them.")
+
+- **Branch `wip/section3`** (worktree `..\mt_s3`): 11 commits on phase3 3f82c40 (8678428..193457f). Nothing is
+  merged, pushed or deployed. It touches the paper OMS (`on_reject`), so it waits for owner review.
+  - 8678428 DG4: a billing error publishes its tier change on `budget.state`.
+  - deaa2dd, fc0b647 `daily_bars`: `BackfillReport.ok` is the watermark verdict. Retryable failures and an
+    all-unmapped token map fail the day; one unmapped symbol does not.
+  - aa62d90, fc0b647 boot watchdog: the arming contract is due 180 s after startup recovery returns, with a
+    3,600 s startup ceiling. The old 420 s rule falsely paged on 09-15, 10-20 and 10-23. One page per phase,
+    truthful texts, and an all-clear after a page.
+  - 6f163ef: the mid-day token breaker ignores a superseded token (the 10-21 race, live path).
+  - d2d8cd7, fc0b647 health: `feed_stopped_in_session` (armed, in session, 30 contiguous minutes), labelled
+    during startup recovery.
+  - c29ab67 paper rejection storm: ≥3 broker rejects in 60 s latch a daily FROZEN paper halt. The real path
+    waits for Phase 4.
+  - 196d4ec, d80a87c `scripts/cat_shadow_verdict.py`: the pre-registered `cat` v2 rule, with entry after the
+    news, duplicate stories, renames and voids. `store.symbol_renames` is extracted, unchanged.
+  - 434f14d: tests closing the plan's test gaps.
+  - 193457f: IMPLEMENTATION_PLAN, RUNBOOK and COMMANDS.
+- **Build:** five agents (2 Opus, 3 Sonnet), each in its own worktree, plus two fixes inline.
+  - Audits found a UTF-8 BOM and fully mangled non-ASCII in two agent-written test files; both repaired.
+  - The `cat` script went back twice: first for a copied cost function, then for the review's fixes.
+  - The agent worktrees and branches are removed.
+- **Review:** three independent reviewers covered the whole branch (line by line, cross-file, behaviour and text).
+  - Fixed:
+    - `cat` lookahead: a post-open age-0 story was entered at open(d), before the news.
+    - duplicate stories;
+    - renamed symbols;
+    - the void window running past the hold;
+    - an empty token map recording success;
+    - the feed alarm during a slow startup;
+    - the startup page text and the all-clear;
+    - RUNBOOK gaps.
+  - Recorded in IMPLEMENTATION_PLAN §4 instead: the 08:40 `token_check` superseded-token page, the DG4 latch's
+    restart gap, and the `cat` scanner's double origination.
+- **Validation:**
+  - full gate 3,956 passed, 19 skipped (3 min 11 s);
+  - changed offline tests 117 passed;
+  - dashboard 92/92, both `tsc` clean.
+  - One gate run under agent load failed `test_run_never_blocks_the_event_loop` (a 2.9 s loop stall). It
+    passes alone and passed both later gates.
+- **`cat` verdict smoke run** (live state.db read-only, plus a scratch copy of the 10-24 market export):
+  INSUFFICIENT, 16 admitted signals.
+  - 2 duplicates: TCS 08-31 repeats an 08-28 story; PERSISTENT 09-24 repeats 09-23.
+  - 7 of 14 measured.
+  - Interim only, decides nothing: T+20 median net −10.5% (n=7); excess vs EW −4.9%.
+- **Not touched:** `mt-engine` (running, healthy), the live tree's code, `data/`, `config/limits.yaml`,
+  `config/envelope.yaml`.
+- **Host:** the keep-awake helper was refused by the auto-mode classifier, and the host slept ~03:42–04:18.
+- **Owner:**
+  - Merge and deploy, outside 09:15–15:30.
+  - The `cat` verdict's review-driven clarifications (entry timing; duplicates, including against the
+    excluded 08-18..28 span) were made after interim numbers had been seen: accept or amend them before the
+    cohort forms.
+  - The cost floor's equity basis: the smallest snapshot in the window is ₹19,154, from the 20k-base era, so
+    the floor is 0.64%.
+
 ## 2026-10-26 01:15 — ICICIPRULI's history moved to ICICILIFE (stage 2, f7e5bb6); HEG left in place by design
 
 - **Built:** `scripts/rekey_symbol.py` and `MarketStore.rekey_symbol`, plus rename-aware `isin_map`,
