@@ -3895,12 +3895,13 @@ async def _compose_paper(
         broker = runtime.broker
         if runtime.degraded or broker is None:
             return None                       # start() alerted and subscribed nothing
-        # OrderManager, PositionBook and ProtectionManager need each other: the callbacks bind late.
+        # OrderManager, PositionBook, ProtectionManager and PaperRisk need each other: the callbacks bind late.
         orders = OrderManager(
             conn, clock, broker, order_guard=runtime.guard,
             sell_check=lambda position_id, qty: book.check_sell(position_id, qty),
             on_fill=lambda *fill: protection.on_fill(*fill),
             on_transition=lambda order, event: protection.on_transition(order, event),
+            on_reject=lambda _order, at: risk.note_reject(at),
         )
         sessions: dict[str, Any] = {
             "session_of": lambda ts: session_of(calendar, ts), "add_sessions": calendar.add_sessions,

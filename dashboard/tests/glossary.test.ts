@@ -98,6 +98,7 @@ test('gate rules read as the problem', () => {
 test('paper halts, outcomes and close reasons', () => {
   assert.equal(haltTerm('daily_loss_soft').label, 'Daily loss limit (soft)')
   assert.equal(haltTerm('floor_cumulative_floor').label, 'Total loss floor')
+  assert.equal(haltTerm('rejection_storm').label, 'Broker rejection storm')
   assert.equal(outcomeTerm('scratch').label, 'Flat')
   assert.equal(outcomeTerm('void').label, 'Voided')
   assert.equal(closeReasonTerm('stop').label, 'Stop-loss hit')

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import shutil
 from collections.abc import Callable
 from decimal import Decimal
@@ -205,7 +206,8 @@ async def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick(
     # risk flattens through the paper exits, and the real minute equity tick (the real floor ladder)
     # never touches the paper book: paper risk runs on the paper runtime's own tick.
     built: dict[str, list] = {}
-    for name in ("paper_effective_state", "paper_order_guard", "PaperRuntime", "ExitManager", "PaperRisk"):
+    for name in ("paper_effective_state", "paper_order_guard", "PaperRuntime", "ExitManager", "PaperRisk",
+                 "OrderManager"):
         spy(monkeypatch, name, built)
 
     def must_not_persist(*_args, **_kwargs):
@@ -224,6 +226,11 @@ async def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick(
         assert built["PaperRuntime"][0][1]["order_guard"] is guard
         ((_, _, exits),) = built["ExitManager"]
         assert built["PaperRisk"][0][1]["flatten"] == exits.flatten_all
+        # The paper OMS's broker rejections feed this PaperRisk's storm detector (§3.5.1).
+        noted: list[dt.datetime] = []
+        monkeypatch.setattr(e.paper.risk, "note_reject", noted.append)
+        built["OrderManager"][0][1]["on_reject"](None, at(10, 1))
+        assert noted == [at(10, 1)]
         monkeypatch.setattr(e.paper.risk.tracker, "persist_snapshot", must_not_persist)
         persisted: list[int] = []
         monkeypatch.setattr(ExposureTracker, "persist_snapshot", lambda self: persisted.append(1))
@@ -339,6 +346,119 @@ def test_the_effective_paper_state_is_the_worse_of_real_and_paper_halts(conn, re
     conn.execute("INSERT INTO paper_halts (cause, rung, set_at, cleared_at) VALUES ('old', 'KILLED', 'x', 'y')")
     assert paper_effective_state(conn, lambda: real)() is expected
     assert set(active_halts(conn)) == {f"c{i}" for i in range(len(rungs))}
+
+
+# ---------------------------------------------------------------- rejection storm (§3.5.1)
+def sec(h: int, m: int, s: int, d: dt.date = D) -> dt.datetime:
+    return dt.datetime.combine(d, dt.time(h, m, s), tzinfo=IST)
+
+
+def storm_sets(caplog) -> list:
+    return [r for r in caplog.records if r.getMessage() == "paper_halt_set" and r.cause == "rejection_storm"]
+
+
+async def test_three_rejects_inside_60s_latch_one_daily_frozen_storm(conn, now, make_risk, caplog) -> None:
+    risk = make_risk()
+    with caplog.at_level("WARNING", logger="engine.ops.paper_risk"):
+        for t in (sec(10, 0, 0), sec(10, 0, 20)):
+            risk.note_reject(t)
+        assert halts(conn) == {}
+        now.value = sec(10, 1, 1)                # the clock is past the window; broker times decide
+        risk.note_reject(sec(10, 0, 59))
+        assert halts(conn) == {"rejection_storm": ("FROZEN", 0)}
+        assert paper_effective_state(conn, lambda: R.NORMAL)() is R.FROZEN
+        set_at = conn.execute("SELECT set_at FROM paper_halts").fetchone()[0]
+        assert set_at == sec(10, 1, 1).isoformat()
+
+        for t in (sec(10, 1, 2), sec(10, 1, 3), sec(10, 1, 4)):
+            now.value = t
+            risk.note_reject(t)
+    assert conn.execute("SELECT COUNT(*), MAX(set_at) FROM paper_halts").fetchone()[:] == (1, set_at)
+    [record] = storm_sets(caplog)
+    assert record.rung == "FROZEN" and record.reason.startswith("3 paper broker rejects in 59 s (10:00:00-10:00:59")
+
+
+@pytest.mark.parametrize(("times", "storm"), [
+    ([sec(10, 0, 0), sec(10, 0, 30), sec(10, 1, 1)], False),          # a 3rd at 61 s
+    ([sec(10, 0, 0), sec(10, 0, 30), sec(10, 1, 1), sec(10, 1, 31)], False),
+    ([sec(10, 0, 0), sec(10, 0, 30), sec(10, 1, 0)], True),           # exactly 60 s: inside
+    ([sec(10, 0, 0)] * 3, True),                                      # one second-resolution stamp
+    ([sec(10, 0, 0), sec(10, 0, 1)], False),
+], ids=["third-at-61s", "sliding-61s", "span-60s", "same-second", "two"])
+def test_the_storm_needs_three_rejects_within_60s(conn, now, make_risk, times, storm) -> None:
+    now.value = sec(10, 5, 0)
+    risk = make_risk()
+    for t in times:
+        risk.note_reject(t)
+    assert halts(conn) == ({"rejection_storm": ("FROZEN", 0)} if storm else {})
+
+
+@pytest.mark.parametrize(("times", "storm"), [
+    ([sec(10, 5, 0), sec(10, 5, 30), sec(10, 3, 50)], False),         # late old reject 70 s before
+    ([sec(10, 5, 0), sec(10, 5, 50), sec(10, 4, 55)], True),          # late reject completes 55 s
+], ids=["late-old-reject-far-away", "late-reject-inside"])
+def test_arrival_order_neither_creates_nor_hides_a_storm(conn, now, make_risk, times, storm) -> None:
+    now.value = sec(10, 10, 0)
+    for order in itertools.permutations(times):
+        conn.execute("DELETE FROM paper_halts")
+        risk = make_risk()                       # a fresh process: no reject memory
+        for t in order:
+            risk.note_reject(t)
+        assert halts(conn) == ({"rejection_storm": ("FROZEN", 0)} if storm else {}), order
+
+
+async def test_a_storm_clears_on_the_next_session_and_yesterdays_rejects_never_count(conn, now, make_risk) -> None:
+    risk = make_risk()
+    now.value = sec(15, 29, 30)
+    for t in (sec(15, 29, 0), sec(15, 29, 10), sec(15, 29, 20)):
+        risk.note_reject(t)
+    assert halts(conn) == {"rejection_storm": ("FROZEN", 0)}
+    now.value = sec(16, 0, 0)
+    await risk.tick()                            # same day, after the close: still in force
+    assert halts(conn) == {"rejection_storm": ("FROZEN", 0)}
+
+    now.value = sec(9, 20, 0, NEXT)
+    await risk.tick()
+    assert halts(conn) == {}
+    risk.note_reject(sec(9, 20, 0, NEXT))        # with yesterday's three in memory: one today
+    risk.note_reject(sec(9, 20, 5, NEXT))
+    assert halts(conn) == {}
+
+
+def test_a_reject_dated_another_day_is_not_counted(conn, now, make_risk) -> None:
+    """A redelivered lost postback carries its broker time: yesterday's storm must not freeze today."""
+    risk = make_risk()
+    yesterday = D - dt.timedelta(days=1)
+    for t in (sec(15, 0, 0, yesterday), sec(15, 0, 1, yesterday), sec(15, 0, 2, yesterday)):
+        risk.note_reject(t)
+    assert halts(conn) == {}
+
+
+async def test_a_storm_before_the_first_tick_is_not_swallowed_by_yesterdays_halt(conn, now, make_risk) -> None:
+    conn.execute("INSERT INTO paper_halts (cause, rung, set_at, latched) VALUES ('rejection_storm', 'FROZEN', ?, 0)",
+                 (sec(15, 0, 0, D - dt.timedelta(days=1)).isoformat(),))
+    now.value = sec(9, 16, 0)
+    risk = make_risk()
+    for t in (sec(9, 15, 30), sec(9, 15, 40), sec(9, 15, 50)):
+        risk.note_reject(t)
+    await risk.tick()
+    assert halts(conn) == {"rejection_storm": ("FROZEN", 0)}
+    assert conn.execute("SELECT set_at FROM paper_halts").fetchone()[0] == sec(9, 16, 0).isoformat()
+
+
+def test_a_cleared_storm_is_not_re_found_by_a_later_lone_reject(conn, now, make_risk) -> None:
+    risk = make_risk()
+    for t in (sec(10, 0, 0), sec(10, 0, 10), sec(10, 0, 20)):
+        risk.note_reject(t)
+    conn.execute("UPDATE paper_halts SET cleared_at = ?", (sec(10, 5, 0).isoformat(),))   # a /paper reset
+    now.value = sec(10, 30, 0)
+    risk.note_reject(sec(10, 30, 0))
+    assert halts(conn) == {}
+
+
+def test_a_naive_reject_time_is_refused(make_risk) -> None:
+    with pytest.raises(ValueError, match="naive"):
+        make_risk().note_reject(dt.datetime(2026, 6, 17, 10, 0))
 
 
 def test_paper_risk_takes_a_paper_broker_only(conn, clock, limits) -> None:

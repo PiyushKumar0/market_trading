@@ -50,6 +50,8 @@ _PENDING_MAX_AGE_S = 300.0
 OrderGuard = Callable[[str], None]
 OnFill = Callable[[PlatformOrder, int, Decimal, datetime], Awaitable[None] | None]
 OnTransition = Callable[[PlatformOrder, OrderEvent], Awaitable[None] | None]
+#: ``on_reject(order, at)``: one BROKER rejection of a committed REJECTED order, at the broker's time.
+OnReject = Callable[[PlatformOrder, datetime], Awaitable[None] | None]
 #: ``sell_check(position_id, qty)`` raises unless the SELL fits the position (``PositionBook.check_sell``).
 SellCheck = Callable[[str, int], None]
 
@@ -154,6 +156,10 @@ class OrderManager:
     * ``sell_check``: run by :meth:`submit_exit` before the order exists.
     * ``on_fill(order, qty, price, at)``: each fill; ``order`` is committed, ``price`` is this fill's.
     * ``on_transition(order, event)``: each committed postback transition, after its ``on_fill``.
+    * ``on_reject(order, at)``: each broker rejection, after commit — a ``place_order`` that raised
+      (``at`` = now) or a REJECTED postback (``at`` = its broker time, so a redelivered postback counts
+      when it happened). Never for a guard abandon, a guard refusal at the broker, or any other ending:
+      a frozen book must not feed its own rejection storm (§3.5.1).
     """
 
     def __init__(
@@ -166,6 +172,7 @@ class OrderManager:
         sell_check: SellCheck,
         on_fill: OnFill,
         on_transition: OnTransition | None = None,
+        on_reject: OnReject | None = None,
     ) -> None:
         if not isinstance(broker, PaperBroker):
             raise TypeError(f"OrderManager takes a PaperBroker only, got {type(broker).__name__} (D8)")
@@ -178,6 +185,7 @@ class OrderManager:
         self._sell_check = sell_check
         self._on_fill = on_fill
         self._on_transition = on_transition
+        self._on_reject = on_reject
         self._store = OrderStore(conn)
         self._pending = PendingCorrelation()
         self._queue: asyncio.Queue[_Frame | _Resolve] = asyncio.Queue()
@@ -339,7 +347,11 @@ class OrderManager:
         except Exception as exc:
             _log.warning("paper_order_refused", order_id=order.order_id, error=repr(exc))
             refused = {"platform_intent": "place", "reject_reason": f"{type(exc).__name__}: {exc}"}
-            return self._move(self._reload(order), OrderState.REJECTED, refused)
+            rejected = self._move(self._reload(order), OrderState.REJECTED, refused)
+            # The broker's own copy of the guard refusing is the platform's refusal, not a broker's.
+            if self._on_reject is not None and not isinstance(exc, PaperOrderBlocked):
+                await _call("on_reject", self._on_reject, rejected, self._clock.now())
+            return rejected
         current = self._reload(order)
         bound = correlate(current, broker_order_id)
         event = OrderEvent(
@@ -465,3 +477,5 @@ class OrderManager:
                 await _call("on_fill", self._on_fill, applied.order, applied.fill_qty, applied.fill_price, applied.fill_at)
         if self._on_transition is not None:
             await _call("on_transition", self._on_transition, applied.order, applied.event)
+        if self._on_reject is not None and applied.event.to_state is OrderState.REJECTED:
+            await _call("on_reject", self._on_reject, applied.order, applied.fill_at)
