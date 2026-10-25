@@ -147,6 +147,18 @@ class DailyBar(BaseModel):
     src: str = "kite_official"     # kite_official | bhavcopy
 
 
+class SymbolRename(BaseModel):
+    """An NSE equity symbol change read off ``instruments_daily`` (:meth:`MarketStore.get_symbol_renames`).
+    ``effective_d`` is the first snapshot carrying ``new_symbol`` after ``old_symbol``'s last one."""
+
+    model_config = ConfigDict(frozen=True)
+
+    old_symbol: str
+    new_symbol: str
+    instrument_token: int
+    effective_d: date
+
+
 # ---------------------------------------------------------------------- §4.3 DDL (idempotent)
 # Every statement is CREATE ... IF NOT EXISTS so init_schema() is safely re-runnable on every open.
 _SCHEMA: tuple[str, ...] = (
@@ -1818,6 +1830,57 @@ class MarketStore:
         if d is None:
             return None
         return d, self.get_instruments_daily(d)
+
+    def get_symbol_renames(self, as_of: date, *, lookback_days: int = 120) -> list[SymbolRename]:
+        """NSE equity symbol changes visible in the ``instruments_daily`` snapshots of the
+        ``lookback_days`` up to ``as_of`` (2026-10-23 ICICIPRULI→ICICILIFE).
+
+        Kite keeps the instrument token across an NSE symbol change (every token→symbol change in
+        2026-07-20..10-23 was a genuine rename, HEG→HEGAM across a 17-day suspension) while the NSE
+        index lists and the Zerodha MIS file lag it by days. A symbol is RETIRED when it named an
+        NSE cash-equity token inside the window and names nothing in the latest snapshot; it maps to
+        that token's symbol in the latest snapshot. Series moves (``-BE``→``-BZ``) get a new token
+        and never match; a token gone from the latest snapshot maps nothing; a retired symbol that
+        named two different live tokens is ambiguous and dropped. Derived on every call — no state."""
+        rows = self._fetchall(
+            """
+            WITH eq AS (
+                SELECT d, instrument_token, tradingsymbol FROM instruments_daily
+                WHERE exchange = 'NSE' AND segment = 'NSE' AND instrument_type = 'EQ'
+                  AND d <= ? AND d >= ?
+            ),
+            cur AS (SELECT instrument_token, tradingsymbol FROM eq WHERE d = (SELECT max(d) FROM eq)),
+            pairs AS (
+                SELECT e.tradingsymbol AS old_symbol, c.tradingsymbol AS new_symbol,
+                       c.instrument_token, max(e.d) AS last_old_d
+                FROM eq e JOIN cur c ON c.instrument_token = e.instrument_token
+                WHERE e.tradingsymbol <> c.tradingsymbol
+                  AND e.tradingsymbol NOT IN (SELECT tradingsymbol FROM cur)
+                GROUP BY 1, 2, 3
+            )
+            SELECT p.old_symbol, p.new_symbol, p.instrument_token,
+                   (SELECT min(e2.d) FROM eq e2
+                     WHERE e2.instrument_token = p.instrument_token
+                       AND e2.tradingsymbol = p.new_symbol AND e2.d > p.last_old_d) AS effective_d
+            FROM pairs p
+            WHERE p.old_symbol IN (SELECT old_symbol FROM pairs GROUP BY 1 HAVING count(*) = 1)
+            ORDER BY effective_d, p.old_symbol
+            """,
+            [as_of, as_of - timedelta(days=lookback_days)],
+        )
+        return [
+            SymbolRename(old_symbol=old, new_symbol=new, instrument_token=token, effective_d=eff)
+            for old, new, token, eff in rows
+        ]
+
+    def get_latest_universe_symbols(self, on_or_before: date) -> set[str]:
+        """Every symbol of the most recent ``universe_daily`` build on-or-before ``on_or_before``
+        (empty when none exists)."""
+        return {r[0] for r in self._fetchall(
+            "SELECT symbol FROM universe_daily "
+            "WHERE d = (SELECT max(d) FROM universe_daily WHERE d <= ?)",
+            [on_or_before],
+        )}
 
     def upsert_universe_daily(self, rows: Sequence[dict[str, Any]]) -> int:
         return self._upsert_rows("universe_daily", rows)

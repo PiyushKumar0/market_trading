@@ -67,6 +67,45 @@ and the other removed design and research documents are in git at commit `417da7
 
 ## 4. Known defects and test gaps
 
+- **Symbol renames: stored history stays under the retired symbol** (stage 2 of the 2026-10-25 rename fix; this spec
+  waits for owner review before it is built). Stage 1 (`MarketStore.get_symbol_renames` plus the universe builder) makes
+  the universe, MIS eligibility, surveillance and the liquidity median follow an NSE rename. Every other symbol-keyed row
+  keeps the old ticker, so daily-lookback rules read the new symbol as a fresh listing: warm-up reports it
+  `young_excluded`, and hi52 needs 126 sessions. Live cases:
+  - ICICIPRULI→ICICILIFE (10-23): 1,068 daily bars under the old symbol.
+  - HEG→HEGAM (9-22, alongside a demerger ex 9-07): 1,037 bars under HEG and 22 under HEGAM.
+  - **Trigger:** a manual `scripts/rekey_symbol.py OLD NEW`, run with the engine stopped. It dry-runs by default,
+    printing per-table counts and collisions; `--apply` writes. It refuses any pair `get_symbol_renames` does not
+    show. It is not automatic on detection: one misfire (a reused token) would merge two companies' histories, and the
+    detector's clean record (every token→symbol change in 2026-07-20..10-23 was a real rename) is not proof.
+  - **Re-key** (the company's market data and fundamentals): `bars_1d`, `bars_1m`, `bars_1m_no_trade`,
+    `features_daily`, `feature_snapshots`, `corp_actions`, `earnings_calendar`, `results_filings`, `shp_quarterly`,
+    `insider_trades`, `flagged_instrument_days`, `sector_map`, `catalyst_watchlist`, `symbol_isin`,
+    `entity_aliases.tradingsymbol`, the array columns `news_clusters.symbols` and `theme_map.symbols`, and
+    `state.db` `backfill_checkpoints`.
+  - **Leave** (records of what happened under the old name): `instruments_daily` (the detector's input),
+    `universe_daily` (what each build decided), `reconcile_log`, `corrections_log`, `unresolved_entities`, every
+    `state.db` audit table, and the tick Parquet partitions (30-day retention).
+  - **Open for the owner:** a survivorship-aware study that joins as-of `universe_daily` to bars by symbol loses a
+    re-keyed name's pre-rename membership. Either map through `get_symbol_renames` in that join, or re-key
+    `universe_daily` too.
+  - **Collisions** (both symbols hold a row with the same key): keep the new-symbol row. The exception is `bars_1d`,
+    where `kite_official` beats `bhavcopy` whichever symbol holds it, matching the bhavcopy job's own precedence. The
+    dry run counts collisions.
+  - **Mechanics:** for each table, INSERT…SELECT under the new symbol (resolving collisions as above), then DELETE the
+    old rows, one transaction per table. Never UPDATE a primary-key column: DuckDB executes that as delete+insert, and
+    this file has lost index entries before (memory `duckdb-art-index-damage`). Check per table that
+    old + new − collisions = new after. Export a snapshot first, and run against a `data/backups/market-*` copy before
+    the live file.
+  - **Corporate actions move with the bars**, so hi52's unadjusted-history veto still sees HEG's demerger under HEGAM.
+    The re-key adjusts no prices.
+  - **Same root cause, separate fix:** `isin_map` builds `symbol_isin` from the cached index CSV, which lags renames.
+    As a result, fresh-insider and SHP filings for ICICI Life are keyed to ICICIPRULI and dropped (failing closed).
+    Apply `get_symbol_renames` there the way the builder does. This can ship before the re-key.
+  - **When it ships:** the builder's rename alert says history "stays under OLD until it is re-keyed". Point that text
+    at the script.
+  - **Done when:** ICICILIFE and HEGAM carry their full pre-rename history (warm-up no longer reports them
+    `young_excluded`), the leave-list tables are unchanged, and the before/after counts are in WORKLOG.
 - `job_daily_bars` records success even when every fetch failed (found 2026-10-11).
 - The `boot_incomplete` alarm fires on a fixed 420 s deadline, so a slow but healthy boot alerts falsely.
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).

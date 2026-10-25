@@ -2,6 +2,38 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-25 11:00 — ICICIPRULI renamed ICICILIFE: a watchlist name with no token; the universe now follows NSE renames (stage 1)
+
+- **Symptom (10-23):** from 13:01, `warmup_not_ready` logged `orb:ICICIPRULI bars 0/375` every minute, the gap repair
+  logged `warmup_gap_unknown_token` every 5 minutes, the 10-22 bar reconcile logged `reconcile_unknown_token`, and
+  `universe_daily` flipped ICICIPRULI's `mis_candidate` to False. The name received no ticks all session. Entries
+  were not frozen: since 09-17 an intraday shortfall refuses only that symbol.
+- **Root cause:** NSE renamed ICICIPRULI to ICICILIFE effective 10-23. Kite's 10-23 instrument dump carries the same
+  token, 4774913, under ICICILIFE, and the NSE equity master agrees. But the NSE index CSVs (NIFTY TM and NIFTY 500,
+  downloaded 10-23 12:13) and the Zerodha MIS margins file still name ICICIPRULI. The engine joined these sources by
+  tradingsymbol and had no rename handling, so a symbol with no token entered the 300-name watchlist.
+- **Ruled out:** a partial dump. The 10-23 dump has more NSE EQ rows than 10-22's, the token survives under the new
+  name, and ICICIPRULI was the only universe symbol missing.
+- **Measured** (`instruments_daily`, 07-20 to 10-23):
+  - 8 live token-continuous renames, all genuine. Series moves (`-BE`→`-BZ`) get new tokens, so they never match.
+  - HEG→HEGAM (9-22, alongside a demerger) kept its token across a 17-day absence. The index list already says HEGAM,
+    but the history is split: 1,037 HEG bars against 22 HEGAM.
+  - No position, rec or paper row references either symbol.
+- **Fix (stage 1, the scope the owner chose):**
+  - `MarketStore.get_symbol_renames` derives renames from `instruments_daily`; it adds no new state.
+  - The universe builder maps the lagging index and core lists to the current symbol, and reads MIS eligibility,
+    surveillance and the liquidity median through the retired symbol.
+  - It alerts once, on the first build that remaps a name.
+  - Tests: 9 store and 4 builder tests, each watched failing before the fix. Full suite: 3889 passed, 19 skipped.
+- **Checked on live data** (read-only, engine stopped), as of 10-26:
+  - Both lists map ICICIPRULI→ICICILIFE, with 745 and 496 members unchanged.
+  - ICICILIFE is MIS-eligible through the old margins key (False without it).
+  - Its liquidity median is ₹55.9 cr over 20 bars.
+  - The 10-23 universe still holds ICICIPRULI, so Monday's first build sends the alert once.
+  - Not yet observed in a live boot: the owner stopped the engine on 10-24 at 02:33, and this lands on the next start.
+- **Open (stage 2; spec in IMPLEMENTATION_PLAN §4, awaiting owner review):** re-key the stored history of ICICIPRULI
+  and HEG to the new symbols. Separately, `isin_map` still keys ICICI Life filings to ICICIPRULI.
+
 ## 2026-10-23 15:35 — LLM tier dark ~1.5 sessions: the shared Claude login was blanked; auth alerts collapsed to one episode (owner: "Getting oauth claude failure alerts in the engine. Check and fix")
 
 - **Symptom:** every agent call failed `auth_failed` ("OAuth session expired and could not be refreshed") from the

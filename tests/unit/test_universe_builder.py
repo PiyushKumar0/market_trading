@@ -621,3 +621,128 @@ async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, st
     assert rows["EXTONE"]["exclusion_reasons"] == [EXCL_INDEX]
     assert rows["SYM000"]["exclusion_reasons"] == []
     assert set(store.get_batch_universe_symbols(D)) == {*_WIDE_SYMBOLS, "EXTONE"}
+
+
+# --------------------------------------------------------------------------- symbol renames (2026-10-23)
+# NSE renamed ICICIPRULI → ICICILIFE; Kite kept the token, the index lists and the MIS file did not.
+_RENAME_CSV = (
+    "Company Name,Industry,Symbol,Series,ISIN Code\n"
+    "Reliance,Energy,RELIANCE,EQ,\n"
+    "Old Co,Financial Services,OLDCO,EQ,\n"
+)
+
+
+def _seed_rename(store, *, old: str, new: str, token: int) -> None:
+    """Kite snapshots: ``old`` on D-2, ``new`` on D-1, same token (RELIANCE keeps both days live)."""
+    eq = {"exchange": "NSE", "segment": "NSE", "instrument_type": "EQ"}
+    store.upsert_instruments_daily([
+        {"d": D - timedelta(days=2), "instrument_token": 1, "tradingsymbol": "RELIANCE", **eq},
+        {"d": D - timedelta(days=2), "instrument_token": token, "tradingsymbol": old, **eq},
+        {"d": D - timedelta(days=1), "instrument_token": 1, "tradingsymbol": "RELIANCE", **eq},
+        {"d": D - timedelta(days=1), "instrument_token": token, "tradingsymbol": new, **eq},
+    ])
+
+
+def _rename_builder(settings, store, clock, *, csv_text=_RENAME_CSV, leverages, surveillance=None,
+                    notify=None) -> UniverseBuilder:
+    instruments = InstrumentStore(clock)
+    instruments.seed([
+        Instrument(tradingsymbol=sym, instrument_token=token, exchange="NSE", segment="NSE",
+                   tick_size=Decimal("0.05"), lot_size=1, instrument_type="EQ", is_fno=True)
+        for sym, token in (("RELIANCE", 1), ("NEWCO", 77))
+    ])
+    return UniverseBuilder(
+        settings, store, instruments, FakeLeverage(leverages),
+        FakeSurveillance(surveillance or surveillance_lists()), clock,
+        httpx.AsyncClient(transport=serving_transport(csv_text)), notify=notify,
+    )
+
+
+def _seed_split_history(store) -> None:
+    """19 sessions under OLDCO at ₹10cr/day, then the first post-rename bar under NEWCO — a
+    deliberately tiny ₹10k, so a NEWCO-only median would fail the liquidity rule."""
+    seed_daily_bars(store, "RELIANCE", close="200.00", volume=500_000)
+    store.upsert_bars_1d([
+        DailyBar(symbol="OLDCO", d=D - timedelta(days=i), open=Decimal("200"), high=Decimal("200"),
+                 low=Decimal("200"), close=Decimal("200"), volume=500_000)
+        for i in range(2, 21)
+    ])
+    store.upsert_bars_1d([
+        DailyBar(symbol="NEWCO", d=D - timedelta(days=1), open=Decimal("100"), high=Decimal("100"),
+                 low=Decimal("100"), close=Decimal("100"), volume=100),
+    ])
+
+
+async def test_lagging_index_symbol_follows_the_rename(tmp_path, store, clock):
+    """The index lists and the MIS file still name OLDCO; the universe carries NEWCO — MIS through
+    the old key, liquidity over the history on both sides of the rename, F&O from today's master —
+    and the owner hears about it once, on the first build that remaps it."""
+    settings = make_settings(tmp_path)
+    _seed_rename(store, old="OLDCO", new="NEWCO", token=77)
+    _seed_split_history(store)
+    store.upsert_universe_daily([{
+        "d": D - timedelta(days=1), "symbol": "OLDCO", "included": True, "mis_candidate": True,
+        "exclusion_reasons": [], "core_index": True,
+    }])
+    msgs, sink = collect_alerts()
+    builder = _rename_builder(settings, store, clock, leverages={"RELIANCE": 5.0, "OLDCO": 5.0},
+                              notify=sink)
+
+    universe = await builder.build(D)
+
+    assert universe.symbols == ("NEWCO", "RELIANCE")
+    assert universe.mis_candidates == ("NEWCO", "RELIANCE")
+    assert universe.core_eligible == ("NEWCO", "RELIANCE")
+    assert universe.median_traded_value["NEWCO"] == Decimal("100000000.00")
+    assert {r["symbol"] for r in store.get_universe_daily(D)} == {"NEWCO", "RELIANCE"}
+    renamed = [m for m in msgs if "OLDCO" in m.title]
+    assert len(renamed) == 1
+    assert "NEWCO" in renamed[0].title and "77" in renamed[0].body
+
+    # Same-day rebuild: the latest persisted universe already names NEWCO ⇒ no second alert.
+    await builder.build(D)
+    assert len([m for m in msgs if "OLDCO" in m.title]) == 1
+
+
+async def test_lagging_surveillance_flag_follows_the_rename(tmp_path, store, clock):
+    settings = make_settings(tmp_path)
+    _seed_rename(store, old="OLDCO", new="NEWCO", token=77)
+    _seed_split_history(store)
+    builder = _rename_builder(
+        settings, store, clock, leverages={"RELIANCE": 5.0, "OLDCO": 5.0},
+        surveillance=surveillance_lists(asm={"OLDCO"}),
+    )
+
+    universe = await builder.build(D)
+
+    assert universe.exclusions["NEWCO"] == ("surveillance_asm",)
+
+
+async def test_leverage_entry_under_the_new_symbol_is_authoritative(tmp_path, store, clock):
+    settings = make_settings(tmp_path)
+    _seed_rename(store, old="OLDCO", new="NEWCO", token=77)
+    _seed_split_history(store)
+    builder = _rename_builder(
+        settings, store, clock, leverages={"RELIANCE": 5.0, "OLDCO": 5.0, "NEWCO": 1.0},
+    )
+
+    universe = await builder.build(D)
+
+    assert universe.exclusions["NEWCO"] == (EXCL_NOT_MIS,)
+
+
+async def test_extended_leg_reads_a_lagging_leverage_key_through_the_rename(tmp_path, store, clock):
+    settings = make_settings(tmp_path, batch_universe_enabled=True, batch_universe_max=600)
+    _seed_rename(store, old="OLDX", new="NEWX", token=99)
+    seed_daily_bars(store, "RELIANCE", close="200.00", volume=500_000)
+    seed_daily_bars(store, "NEWX", close="200.00", volume=500_000)
+    builder = _rename_builder(
+        settings, store, clock,
+        csv_text="Company Name,Industry,Symbol,Series,ISIN Code\nReliance,Energy,RELIANCE,EQ,\n",
+        leverages={"RELIANCE": 5.0, "OLDX": 5.0},
+        surveillance=surveillance_lists(equity_master=frozenset({"NEWX"})),
+    )
+
+    universe = await builder.build(D)
+
+    assert universe.extended == ("NEWX",)

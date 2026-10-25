@@ -44,6 +44,14 @@ Index membership is best-effort (E5): download the NSE indices constituents CSV
 ``data/universe/`` → then to the committed seed ``settings.universe.index_seed_path``
 (owner-refreshed). Non-download provenance alerts but never blocks the build.
 
+**Symbol renames (2026-10-23, ICICIPRULI→ICICILIFE):** Kite keeps the instrument token across an
+NSE symbol change while the index lists and the Zerodha MIS file keep naming the retired symbol for
+days — which put a token-less name in the watchlist (no ticks, a warm-up blocker every minute). The
+build maps every retired symbol to its token's current one (``MarketStore.get_symbol_renames``);
+MIS eligibility, surveillance and the liquidity median read through the retired symbols; the owner
+is alerted once, on the first build that remaps a name the previous build still carried. Stored
+history is NOT re-keyed here — daily-lookback rules see the new symbol as a fresh listing.
+
 Resolved ambiguities (documented, plan-silent):
 - Median traded value uses ``close × volume`` over the last up-to-20 ``bars_1d`` rows strictly
   BEFORE the build date (built pre-open; day ``d`` has no bar yet). A symbol with NO daily bars
@@ -60,7 +68,7 @@ from __future__ import annotations
 import csv
 import io
 import statistics
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -73,10 +81,10 @@ from engine.broker.instruments import InstrumentStore
 from engine.core.clock import Clock
 from engine.core.config import Settings, repo_root
 from engine.core.log import get_logger
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import DailyBar, MarketStore, SymbolRename
 from engine.notify.catalog import CatalogMessage, MessageKind
-from engine.universe.leverage import MisLeverageIngest
-from engine.universe.surveillance import SurveillanceIngest
+from engine.universe.leverage import MisLeverageIngest, MisLeverageMap
+from engine.universe.surveillance import SurveillanceIngest, SurveillanceLists
 
 _log = get_logger("engine.universe.builder")
 
@@ -164,6 +172,46 @@ def parse_index_constituents_csv(text: str) -> list[str]:
     return out
 
 
+def _follow_renames(
+    symbols: Sequence[str], renames: Mapping[str, SymbolRename]
+) -> tuple[list[str], list[SymbolRename]]:
+    """``symbols`` with every retired symbol replaced by its current one (order-preserving; a list
+    naming both keeps the first), plus the renames that applied."""
+    out: list[str] = []
+    seen: set[str] = set()
+    applied: list[SymbolRename] = []
+    for symbol in symbols:
+        rename = renames.get(symbol)
+        if rename is not None:
+            applied.append(rename)
+            symbol = rename.new_symbol
+        if symbol not in seen:
+            seen.add(symbol)
+            out.append(symbol)
+    return out, applied
+
+
+def _mis_eligible(
+    leverage: MisLeverageMap, symbol: str, aliases: Mapping[str, Sequence[str]]
+) -> bool:
+    """A8 MIS eligibility. A symbol absent from the (lagging) margins file reads through the retired
+    symbols it replaced; an entry under the current symbol is authoritative."""
+    if leverage.leverage(symbol) is not None:
+        return leverage.is_mis_eligible(symbol)
+    return any(leverage.is_mis_eligible(old) for old in aliases.get(symbol, ()))
+
+
+def _surveillance_reasons(
+    surveillance: SurveillanceLists, symbol: str, aliases: Mapping[str, Sequence[str]]
+) -> list[str]:
+    """A8 reasons for ``symbol`` AND every retired symbol it replaced — a list still naming the old
+    ticker must not wave the new one through (fail closed)."""
+    reasons = surveillance.reasons_for(symbol)
+    for old in aliases.get(symbol, ()):
+        reasons.extend(r for r in surveillance.reasons_for(old) if r not in reasons)
+    return reasons
+
+
 class UniverseBuilder:
     """§3.2.4 ``UniverseBuilder`` — runs 08:30 daily; persists the ``universe_daily`` snapshot.
 
@@ -243,7 +291,20 @@ class UniverseBuilder:
         members, source = await self._load_index()
         if not members:
             raise ValueError(f"{index_name} membership unavailable from download, cache, and seed")
+        renames = await self._symbol_renames(d)
+        aliases: dict[str, list[str]] = {}
+        for rename in renames.values():
+            aliases.setdefault(rename.new_symbol, []).append(rename.old_symbol)
+        members, remapped = _follow_renames(members, renames)
         core_members, core_source = await self._load_core_index(members)
+        core_members, core_remapped = _follow_renames(core_members, renames)
+        remapped_lists: dict[str, list[str]] = {}
+        for rename in remapped:
+            remapped_lists.setdefault(rename.old_symbol, []).append(index_name)
+        for rename in core_remapped:
+            remapped_lists.setdefault(rename.old_symbol, []).append(
+                self._settings.universe.core_index_name
+            )
         core_set = set(core_members)
         if not core_set:
             await self._alert(
@@ -255,16 +316,16 @@ class UniverseBuilder:
                 data={"job_id": "universe_build", "d": d.isoformat()},
             )
 
-        medians = await self._store.arun(self._median_traded_values, members, d)
+        medians = await self._store.arun(self._median_traded_values, members, d, aliases)
         min_value = Decimal(self._settings.data.min_median_traded_value_inr)
 
         exclusions: dict[str, list[str]] = {}
         eligible: list[str] = []
         for symbol in members:
             reasons: list[str] = []
-            if not leverage.is_mis_eligible(symbol):
+            if not _mis_eligible(leverage, symbol, aliases):
                 reasons.append(EXCL_NOT_MIS)
-            reasons.extend(surveillance.reasons_for(symbol))
+            reasons.extend(_surveillance_reasons(surveillance, symbol, aliases))
             median = medians.get(symbol)
             if median is None:
                 reasons.append(EXCL_NO_DATA)
@@ -315,14 +376,20 @@ class UniverseBuilder:
         extended: list[str] = []
         ext_medians: dict[str, Decimal] = {}
         if self._settings.data.batch_universe_enabled:
+            margin_symbols = {
+                renames[s].new_symbol if s in renames else s for s in leverage.leverages
+            }
             candidates = sorted(
-                (set(leverage.leverages) & set(surveillance.equity_master)) - set(members)
+                (margin_symbols & set(surveillance.equity_master)) - set(members)
             )
             screened = [
                 s for s in candidates
-                if leverage.is_mis_eligible(s) and not surveillance.reasons_for(s)
+                if _mis_eligible(leverage, s, aliases)
+                and not _surveillance_reasons(surveillance, s, aliases)
             ]
-            ext_medians = await self._store.arun(self._median_traded_values, screened, d)
+            ext_medians = await self._store.arun(
+                self._median_traded_values, screened, d, aliases
+            )
             passing = [
                 s for s in screened
                 if s in ext_medians and ext_medians[s] >= min_value
@@ -341,6 +408,10 @@ class UniverseBuilder:
                 }
                 for symbol in extended
             )
+
+        # Before the persist: the alert compares against the previous build's rows.
+        if remapped_lists:
+            await self._report_renames(d, renames, remapped_lists)
 
         # replace, not upsert (2026-09-01 review): stale extended rows from an earlier same-day
         # build (flag flipped off between retries, or a shrunken candidate set) must never survive —
@@ -381,10 +452,61 @@ class UniverseBuilder:
             watchlist=len(watchlist),
             mis_candidates=len(mis_candidates),
             extended=len(extended),
+            renamed=len(remapped_lists),
             source=source,
             degraded=degraded,
         )
         return universe
+
+    # ------------------------------------------------------------------ symbol renames
+    async def _symbol_renames(self, d: date) -> dict[str, SymbolRename]:
+        """``old_symbol -> rename`` as of ``d``. A failed read degrades to no renames — the pre-rename
+        behavior — never to a failed build."""
+        try:
+            renames = await self._store.arun(self._store.get_symbol_renames, d)
+        except Exception:  # noqa: BLE001 - E5: an auxiliary read must not fail the build
+            _log.exception("symbol_renames_unavailable", d=d.isoformat())
+            return {}
+        return {r.old_symbol: r for r in renames}
+
+    async def _report_renames(
+        self, d: date, renames: Mapping[str, SymbolRename], remapped_lists: Mapping[str, list[str]]
+    ) -> None:
+        """Log every remap; alert once — on the first build that remaps a symbol the previous build
+        still carried (a same-day rebuild finds this day's rows already naming the new symbol)."""
+        for old, lists in remapped_lists.items():
+            r = renames[old]
+            _log.warning(
+                "universe_symbol_renamed", old=old, new=r.new_symbol, token=r.instrument_token,
+                effective_d=r.effective_d.isoformat(), lists=lists,
+            )
+        try:
+            previous = await self._store.arun(self._store.get_latest_universe_symbols, d)
+        except Exception:  # noqa: BLE001 - best-effort alert; the remap itself already applied
+            _log.exception("universe_previous_unreadable", d=d.isoformat())
+            return
+        first = [old for old in remapped_lists if old in previous]
+        if not first:
+            return
+        lines = []
+        for old in first:
+            r = renames[old]
+            lists = remapped_lists[old]
+            named = f"the {' and '.join(lists)} list{'s' if len(lists) > 1 else ''} still name"
+            lines.append(
+                f"{old} → {r.new_symbol}: Kite token {r.instrument_token} carries {r.new_symbol} "
+                f"since {r.effective_d.isoformat()}; {named}{'' if len(lists) > 1 else 's'} {old}, "
+                f"so the universe uses {r.new_symbol}. Stored history before "
+                f"{r.effective_d.isoformat()} stays under {old} until it is re-keyed, so "
+                f"daily-lookback rules see {r.new_symbol} as a fresh listing."
+            )
+        pairs = ", ".join(f"{old} → {renames[old].new_symbol}" for old in first)
+        await self._alert(
+            title=f"Symbol renamed: {pairs}",
+            body="\n".join(lines),
+            severity="warning",
+            data={"job_id": "universe_build", "d": d.isoformat(), "renamed": first},
+        )
 
     # -------------------------------------------------------- configured-index membership (E5)
     async def _load_index(self) -> tuple[list[str], IndexSource]:
@@ -451,19 +573,29 @@ class UniverseBuilder:
             _log.exception("index_cache_write_failed", path=str(cache_path))
 
     # ------------------------------------------------------------------ liquidity filter
-    def _median_traded_values(self, symbols: list[str], d: date) -> dict[str, Decimal]:
+    def _median_traded_values(
+        self, symbols: list[str], d: date, aliases: Mapping[str, Sequence[str]] | None = None,
+    ) -> dict[str, Decimal]:
         """Median of ``close × volume`` over the last ≤20 daily bars strictly before ``d``.
+
+        A renamed symbol's window reads through the retired symbols in ``aliases`` (new → old): the
+        bars before the rename are stored under the old ticker, and the company's liquidity did not
+        change with it. A same-day bar under the current symbol wins.
 
         Sync (runs under ``store.arun``). Symbols with no history are absent from the result —
         the caller excludes them (``no_liquidity_data``)."""
         start = d - timedelta(days=_TRADED_VALUE_LOOKBACK_DAYS)
         end = d - timedelta(days=1)
+        aliases = aliases or {}
         out: dict[str, Decimal] = {}
         for symbol in symbols:
-            bars = self._store.get_bars_1d(symbol, start, end)
-            if not bars:
+            by_day: dict[date, DailyBar] = {}
+            for name in (*aliases.get(symbol, ()), symbol):     # current symbol last ⇒ it wins
+                for bar in self._store.get_bars_1d(name, start, end):
+                    by_day[bar.d] = bar
+            if not by_day:
                 continue
-            window = bars[-_TRADED_VALUE_BARS:]
+            window = [by_day[day] for day in sorted(by_day)][-_TRADED_VALUE_BARS:]
             out[symbol] = statistics.median([bar.close * bar.volume for bar in window])
         return out
 
