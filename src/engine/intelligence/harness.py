@@ -935,8 +935,9 @@ class AgentHarness:
             )
             if reason == "credit_exhausted":
                 # The ledger only ever sees calls that SUCCEEDED, so it can read healthy at the exact
-                # moment the credit ran out — the billing error is the only signal (§5.6 DG4).
-                self._governor.note_billing_error(detail[:200])
+                # moment the credit ran out — the billing error is the only signal (§5.6 DG4). Raised,
+                # not just noted: the tier change must reach budget.state (R8 owner alert, dashboard).
+                await self._governor.raise_billing_error(detail[:200])
             if reason != "schema_invalid":
                 return await self._fail(
                     agent_def, reason, detail, call_id=call_id, usage=usage, raw_text=text, attempts=attempt

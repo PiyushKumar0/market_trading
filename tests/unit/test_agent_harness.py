@@ -25,6 +25,8 @@ from ulid import ULID
 from engine.core.calendar import NSECalendar
 from engine.core.config import config_dir, load_yaml
 from engine.core.enums import DegradeTier
+from engine.core.eventbus import EventBus
+from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.intelligence.governor import BudgetGovernor, TokenUsage
 from engine.intelligence.harness import (
     ISOLATION_ENV,
@@ -916,7 +918,17 @@ async def test_sdk_exceptions_map_to_failure_reasons(defs, gov, clock, conn, exc
     assert row["ok"] == 0 and row["fail_reason"] == reason
 
 
-async def test_credit_exhausted_trips_dg4(defs, gov, clock, conn) -> None:
+async def test_credit_exhausted_trips_dg4(defs, clock, conn, calendar) -> None:
+    from tests.unit.test_budget_governor import PINNED_CFG
+
+    seen: list[BudgetStateChanged] = []
+
+    async def collect(event: BudgetStateChanged) -> None:
+        seen.append(event)
+
+    bus = EventBus()
+    bus.subscribe(TOPIC_BUDGET_STATE, collect)
+    gov = BudgetGovernor(conn, clock, calendar, PINNED_CFG, bus=bus)
     fake = FakeQuery([RuntimeError("credit balance exhausted")])
     harness = make_harness(defs, gov, clock, conn, fake)
 
@@ -926,6 +938,8 @@ async def test_credit_exhausted_trips_dg4(defs, gov, clock, conn) -> None:
     # The ledger only sees calls that SUCCEEDED, so the billing error is the only DG4 signal (§5.6).
     assert gov.degrade_tier() == DegradeTier.DG4
     assert gov.can_invoke("intraday_analyst").allowed is False
+    # ...and the tier change is published, so the owner and the dashboard hear of it (R8).
+    assert [(e.old_tier, e.new_tier) for e in seen] == [(DegradeTier.DG0, DegradeTier.DG4)]
 
 
 async def test_auth_failed_is_recorded_and_alert_names_the_relogin(

@@ -24,9 +24,9 @@ Clauses asserted:
 * **timeout ⇒ no-proposal + alert (D7)** — ``test_llm_timeout_fails_to_no_proposal_and_alerts``
 * **garbage output ⇒ no-proposal + alert; ≤ 2 schema retries, prose never salvaged (D7)** —
   ``test_garbage_output_fails_to_no_proposal_and_alerts`` (prose / out-of-schema JSON)
-* **credit/quota exhaustion ⇒ no-proposal + alert; a billing error latches DG4 ⇒ zero further SDK
-  calls** — ``test_quota_exhaustion_fails_to_no_proposal_and_alerts`` (SDK billing error / the
-  subscription "session limit" result of 2026-09-03)
+* **credit/quota exhaustion ⇒ no-proposal + alert; a billing error latches DG4, Telegram-alerted as a
+  tier change ⇒ zero further SDK calls** — ``test_quota_exhaustion_fails_to_no_proposal_and_alerts``
+  (SDK billing error / the subscription "session limit" result of 2026-09-03)
 * **DG4 ⇒ same path** (spend ≥ the weekly credit): tier change Telegram-alerted, every Tier-1 path
   refused with ZERO SDK calls, no proposal — ``test_dg4_takes_the_same_no_proposal_path``
 * **deterministic tiers unaffected (R1)**: mode/risk-state/kill untouched by every failure above, and
@@ -403,6 +403,8 @@ async def test_quota_exhaustion_fails_to_no_proposal_and_alerts(
     w.assert_deterministic_tiers_untouched()
 
     assert (w.governor.degrade_tier() == DegradeTier.DG4) is latches_dg4
+    budget_alerts = [m for m in w.owner_messages() if m[0] == MessageKind.BUDGET_WARNING.value]
+    assert (len(budget_alerts) == 1 and "DG4" in budget_alerts[0][1]) if latches_dg4 else not budget_alerts
     if latches_dg4:
         w.advance(minutes=4)                               # past FORWARD_PACING_MIN, still in window
         await w.offer(_candidate("TCS", "01SIGNAL2"))
