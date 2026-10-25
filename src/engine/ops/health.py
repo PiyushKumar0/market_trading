@@ -196,7 +196,7 @@ class HealthMonitor:
         #: count did not move". None ⇒ re-baseline on the next eligible pulse.
         self._funnel_baseline: tuple[int, int] | None = None
 
-    async def check(self, *, check_skew: bool = True) -> HealthReport:
+    async def check(self, *, check_skew: bool = True, booting: bool = False) -> HealthReport:
         report = HealthReport()
 
         # --- feed health (WARMING suppresses stale alarms; intentionally-off is not checked here) ---
@@ -249,7 +249,7 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
             _log.exception("origination_watch_failed")
         try:
-            self._check_feed_stopped(report)
+            self._check_feed_stopped(report, booting=booting)
         except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
             _log.exception("feed_stopped_watch_failed")
 
@@ -398,14 +398,16 @@ class HealthMonitor:
             self._funnel_zero_since = None
 
     # ------------------------------------------------------------- stopped feed in session (2026-10-21)
-    def _check_feed_stopped(self, report: HealthReport) -> None:
+    def _check_feed_stopped(self, report: HealthReport, *, booting: bool = False) -> None:
         """``feed_stopped_in_session`` — feed state STOPPED while the engine is armed
         (RECOMMEND/AUTO) and the session is open, for ``feed_stopped_alarm_after_min`` CONTIGUOUS
         minutes. The health pulse only runs while the engine is UP, so STOPPED here is never
         "intentionally off": it is no market data (2026-10-21: the ticker never started and health
-        logged ``problems=[]`` all session). The grace covers a slow in-session boot or a late login.
-        The clock resets QUIETLY on any other state, session close or disarm. Unwired
-        ``mode_manager`` ⇒ inert, like the origination alarms.
+        logged ``problems=[]`` all session). The grace covers a late login and most in-session boots;
+        a pulse from the boot-phase ticks (``booting``) says the ticker starts only once startup
+        recovery returns, so the page is not read as a dead ticker. The clock resets QUIETLY on any
+        other state, session close or disarm. Unwired ``mode_manager`` ⇒ inert, like the origination
+        alarms.
         """
         if self._mode_manager is None:
             return
@@ -428,6 +430,7 @@ class HealthMonitor:
         report.problems.append("feed_stopped_in_session")
         report.problem_details["feed_stopped_in_session"] = (
             f"ticker STOPPED for {round(stopped_min)}m (Kite token valid: {token})"
+            + ("; startup recovery is still running and the ticker starts after it" if booting else "")
         )
         _log.error("feed_stopped_in_session", stopped_min=round(stopped_min, 1), token_valid=token)
 

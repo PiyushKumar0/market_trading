@@ -2593,7 +2593,7 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
     _boot_ticks = asyncio.create_task(
         boot_phase_ticks(
             lambda: refresh_warmup_snapshot(engine.warmup_gate, engine.warmup_holder),
-            lambda: engine.health.check(check_skew=False),
+            lambda: engine.health.check(check_skew=False, booting=True),
         )
     )
     try:
@@ -3404,8 +3404,8 @@ async def boot_contract_watchdog(
     startup recovery returned (``boot_state["startup_done_at"]``; seeding + scheduler start took
     <= 66 s across 103 boots, the 2026-08-24 zombie wedged here); ``startup`` — startup recovery
     itself has not returned ``startup_ceiling_s`` after the watchdog began (honest catch-up took up to
-    1,397 s, so a restart here would only repeat it). Due and unmet ⇒ CRITICAL ``boot_incomplete``
-    (with ``phase``), ONE owner page per phase, then a re-log every ``recheck_s`` until it resolves.
+    1,397 s). Due and unmet ⇒ CRITICAL ``boot_incomplete`` (with ``phase``), ONE owner page per phase,
+    then a re-log every ``recheck_s`` until it resolves; a paged owner gets an all-clear when it does.
 
     Never crashes the boot: it is detached, and every failure inside it — including a raising alert
     sink — is swallowed. Cancelled at shutdown via :func:`cancel_post_arm`.
@@ -3420,6 +3420,13 @@ async def boot_contract_watchdog(
             elapsed = round(now - started, 1)
             if not missing:
                 _log.info("boot_contract_ok", elapsed_s=elapsed)
+                alert = boot_state.get("alert")
+                if paged_phases and alert is not None:   # a paged owner hears that it resolved
+                    try:
+                        await alert("info", f"BOOT COMPLETED after {elapsed / 60:.0f} min — the "
+                                            "engine is ready and scheduled jobs run again.")
+                    except Exception:  # noqa: BLE001 - the all-clear is best-effort
+                        _log.exception("boot_contract_ok_alert_failed")
                 return
             startup_done_at = boot_state.get("startup_done_at")
             phase: str | None = None
@@ -3441,12 +3448,12 @@ async def boot_contract_watchdog(
                             "No scheduled job (forward drains, health pulses, EOD jobs) can fire. "
                             "Restart the engine.")
                 else:
-                    hint = ("startup recovery (catch-up/backfill) has not returned: check engine.log "
-                            "for catch-up progress before restarting — a restart repeats it")
-                    text = (f"BOOT STILL IN STARTUP RECOVERY after {elapsed / 60:.0f} min — catch-up "
-                            "and backfill have not returned, so no scheduled job (forward drains, "
-                            "health pulses, EOD jobs) can fire yet. Check engine.log for recent "
-                            "catch-up progress before restarting: a restart repeats the catch-up.")
+                    hint = ("startup recovery has not returned: wait while engine.log shows catch-up "
+                            "or backfill progress (a restart repeats it); restart if it has gone quiet")
+                    text = (f"BOOT STILL IN STARTUP RECOVERY after {elapsed / 60:.0f} min — startup "
+                            "has not returned, so no scheduled job (forward drains, EOD jobs) can "
+                            "fire yet. If engine.log still shows catch-up or backfill progress, wait: "
+                            "a restart repeats it. If the log has gone quiet, restart the engine.")
                 _log.critical("boot_incomplete", missing=missing, elapsed_s=elapsed,
                               phase=phase, hint=hint)
                 if phase not in paged_phases:

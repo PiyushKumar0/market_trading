@@ -559,6 +559,17 @@ async def test_feed_stopped_detail_reports_the_token_verdict(probe, expected):
     assert report.problem_details["feed_stopped_in_session"].endswith(f"(Kite token valid: {expected})")
 
 
+async def test_feed_stopped_during_startup_recovery_says_the_ticker_waits_for_it():
+    """A boot-phase pulse: the ticker starts only after startup recovery, so the page says so."""
+    mon, _alerts, clock_at, _ = _stopped_monitor(token_valid=lambda: True)
+    for _ in range(31):
+        clock_at.at = clock_at.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False, booting=True)
+    assert report.problem_details["feed_stopped_in_session"] == (
+        "ticker STOPPED for 30m (Kite token valid: yes); startup recovery is still running and the "
+        "ticker starts after it")
+
+
 async def test_feed_stopped_clock_resets_when_the_feed_leaves_stopped():
     mon, alerts, clock_at, feed = _stopped_monitor()
     await _pulses(mon, clock_at, 25)

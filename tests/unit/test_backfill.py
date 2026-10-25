@@ -204,9 +204,9 @@ async def test_unknown_token_is_reported_failed_without_a_request(store, clock, 
     assert kite.calls == []
     assert len(report.failed) == 1
     assert report.failed[0].error == "unknown_instrument_token"
-    assert report.ok is True                    # no retry can fetch it: never sinks the day's job
+    assert report.ok is False                   # every symbol unmapped: an empty token map, retried
     report = await job.run(["NOSUCH", "RELIANCE"], "minute", dt.date(2026, 1, 1), dt.date(2026, 1, 10))
-    assert report.ok is True                    # ...beside a symbol that fetched fine
+    assert report.ok is True                    # one unmapped symbol: no retry can fetch it
 
 
 # ------------------------------------------------------------------ TokenException abort (2026-07-21)

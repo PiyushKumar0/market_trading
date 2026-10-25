@@ -3514,7 +3514,8 @@ async def test_unarmed_scheduler_pages_once_repeats_then_resolves_when_it_arms_l
         finally:
             await cancel_post_arm(task)
     assert len(_records("boot_contract_ok")) == 1
-    assert len(pages) == 1                                   # resolving never pages again
+    assert [s for s, _ in pages] == ["critical", "info"]     # resolving sends only the all-clear
+    assert pages[1][1].startswith("BOOT COMPLETED after ")
 
 
 @pytest.mark.asyncio
@@ -3580,7 +3581,7 @@ async def test_arming_stall_after_startup_pages_with_the_restart_text(caplog) ->
 
 
 @pytest.mark.asyncio
-async def test_startup_that_never_returns_pages_once_with_the_do_not_restart_text(caplog) -> None:
+async def test_startup_that_never_returns_pages_once_with_the_wait_or_restart_text(caplog) -> None:
     pages: list[tuple[str, str]] = []
     state = _boot_state(ready=False, armed=False, pages=pages, startup_done=False)
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
@@ -3592,11 +3593,11 @@ async def test_startup_that_never_returns_pages_once_with_the_do_not_restart_tex
             await cancel_post_arm(task)
     assert all(r.phase == "startup" for r in _incomplete(caplog))
     assert len(pages) == 1
-    assert "before restarting" in pages[0][1] and "Restart the engine." not in pages[0][1]
+    assert "wait: a restart repeats it" in pages[0][1] and "Restart the engine." not in pages[0][1]
 
 
 @pytest.mark.asyncio
-async def test_phase_change_pages_again_with_the_arming_text_then_resolves_quietly(caplog) -> None:
+async def test_phase_change_pages_again_with_the_arming_text_then_sends_one_all_clear(caplog) -> None:
     pages: list[tuple[str, str]] = []
     state = _boot_state(ready=False, armed=False, pages=pages, startup_done=False)
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
@@ -3604,7 +3605,7 @@ async def test_phase_change_pages_again_with_the_arming_text_then_resolves_quiet
             state, deadline_s=0.03, startup_ceiling_s=0.05, recheck_s=0.01, poll_s=0.005))
         try:
             await _until(lambda: len(pages) == 1)           # the startup-ceiling page
-            assert "before restarting" in pages[0][1]
+            assert "wait: a restart repeats it" in pages[0][1]
             state["startup_done_at"] = time_module.monotonic()     # startup returned; arming still unmet
             await _until(lambda: len(pages) == 2)
             assert "Restart the engine." in pages[1][1]
@@ -3614,7 +3615,7 @@ async def test_phase_change_pages_again_with_the_arming_text_then_resolves_quiet
             await asyncio.wait_for(task, timeout=5)
         finally:
             await cancel_post_arm(task)
-    assert len(pages) == 2                                  # resolving never pages again
+    assert [s for s, _ in pages] == ["critical", "critical", "info"]   # then only the all-clear
     assert len([r for r in caplog.records if r.getMessage() == "boot_contract_ok"]) == 1
 
 

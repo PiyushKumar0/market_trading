@@ -94,12 +94,17 @@ class BackfillReport(BaseModel):
 
     @property
     def ok(self) -> bool:
-        """The job watermark's verdict (``ops.jobs._job_result_ok``): False when a span failed for a
-        reason a later run can fix (a rejected token, a broker or network error), so catch-up retries
-        the day and fetches only what failed. A symbol with no instrument token never sinks it: no
-        retry can fetch it, and a failed ``daily_bars`` day holds ``rec_outcomes`` until the 7-day
-        give-up."""
-        return all(span.error == _UNKNOWN_TOKEN for span in self.failed)
+        """The job watermark's verdict (``ops.jobs._job_result_ok``): False when any span failed for
+        a reason other than a missing instrument token (a rejected token, a broker or network error),
+        so catch-up retries the day, until the 7-day give-up, for the symbols still behind their
+        checkpoint (a hole a later day's fetch stepped over is the boot/post-login ``daily_gap``
+        repair's). One symbol with no token never sinks the day: no retry can fetch it, and a failed
+        ``daily_bars`` day holds ``rec_outcomes``. EVERY requested symbol without one is an empty or
+        degraded token map that a later instruments refresh rebuilds, so that does."""
+        if any(span.error != _UNKNOWN_TOKEN for span in self.failed):
+            return False
+        unknown = {span.symbol for span in self.failed}
+        return not self.requested or not {span.symbol for span in self.requested} <= unknown
 
 
 def _candle_field(candle: Any, name: str) -> Any:
