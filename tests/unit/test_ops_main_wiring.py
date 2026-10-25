@@ -24,6 +24,7 @@ import json
 import logging
 import re
 import threading
+import time as time_module  # `time` is datetime.time below
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -3343,8 +3344,11 @@ async def test_the_export_retry_hold_does_not_flap_the_failure_report(calendar, 
 # job — it has to work when the scheduler is the broken thing) checks the boot contract and pages.
 
 
-def _boot_state(*, ready: bool, armed: bool, pages: list | None = None) -> dict:
-    """The late-bound holder run() hands the watchdog: engine_ready flag, scheduler, alert sink."""
+def _boot_state(
+    *, ready: bool, armed: bool, pages: list | None = None, startup_done: bool = True,
+) -> dict:
+    """The late-bound holder run() hands the watchdog: engine_ready flag, scheduler, alert sink, and
+    the monotonic time startup recovery returned (None = still in startup)."""
     scheduler = _FakeScheduler([])
     if armed:
         scheduler.start()
@@ -3353,7 +3357,10 @@ def _boot_state(*, ready: bool, armed: bool, pages: list | None = None) -> dict:
     async def alert(severity: str, message: str) -> None:
         sink.append((severity, message))
 
-    return {"engine_ready": ready, "scheduler": scheduler, "alert": alert}
+    return {
+        "engine_ready": ready, "scheduler": scheduler, "alert": alert,
+        "startup_done_at": time_module.monotonic() if startup_done else None,
+    }
 
 
 # --------------------------------------------------------------------------- layer 1: bounded seeding
@@ -3471,7 +3478,7 @@ async def test_boot_contract_ok_fires_once_when_the_boot_completed(caplog) -> No
     state = _boot_state(ready=True, armed=True)
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
         await asyncio.wait_for(
-            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01), timeout=5
+            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01, poll_s=0.005), timeout=5
         )
     oks = [r for r in caplog.records if r.getMessage() == "boot_contract_ok"]
     assert len(oks) == 1                        # once, then the task retires
@@ -3492,7 +3499,7 @@ async def test_unarmed_scheduler_pages_once_repeats_then_resolves_when_it_arms_l
 
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
         task = asyncio.create_task(
-            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01)
+            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01, poll_s=0.005)
         )
         try:
             await _until(lambda: len(_records("boot_incomplete")) >= 3)   # re-logs on the cadence
@@ -3516,10 +3523,11 @@ async def test_a_raising_owner_page_never_ends_the_watchdog(caplog) -> None:
     async def bad_alert(severity: str, message: str) -> None:
         raise RuntimeError("telegram outage")
 
-    state = {"engine_ready": False, "scheduler": None, "alert": bad_alert}
+    state = {"engine_ready": False, "scheduler": None, "alert": bad_alert,
+             "startup_done_at": time_module.monotonic()}
     with caplog.at_level(logging.INFO, logger="engine.ops.main"):
         task = asyncio.create_task(
-            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01)
+            boot_contract_watchdog(state, deadline_s=0.01, recheck_s=0.01, poll_s=0.005)
         )
         try:
             await _until(lambda: len([r for r in caplog.records
@@ -3529,6 +3537,87 @@ async def test_a_raising_owner_page_never_ends_the_watchdog(caplog) -> None:
     assert [r for r in caplog.records if r.getMessage() == "boot_incomplete_alert_failed"]
 
 
+def _incomplete(caplog) -> list:
+    return [r for r in caplog.records if r.getMessage() == "boot_incomplete"]
+
+
+@pytest.mark.asyncio
+async def test_slow_startup_recovery_below_the_ceiling_never_pages(caplog) -> None:
+    """2026-10-20: honest catch-up ran 1,397 s. Past the arming deadline but under the startup ceiling,
+    with startup still running, the watchdog stays silent and closes out with one boot_contract_ok."""
+    pages: list[tuple[str, str]] = []
+    state = _boot_state(ready=False, armed=False, pages=pages, startup_done=False)
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = asyncio.create_task(boot_contract_watchdog(
+            state, deadline_s=0.01, startup_ceiling_s=60, recheck_s=0.01, poll_s=0.005))
+        try:
+            await asyncio.sleep(0.15)                       # >> deadline_s, << ceiling
+            assert not _incomplete(caplog) and not pages
+            state["startup_done_at"] = time_module.monotonic()
+            state["engine_ready"] = True
+            state["scheduler"].start()
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            await cancel_post_arm(task)
+    assert len([r for r in caplog.records if r.getMessage() == "boot_contract_ok"]) == 1
+    assert not _incomplete(caplog) and not pages
+
+
+@pytest.mark.asyncio
+async def test_arming_stall_after_startup_pages_with_the_restart_text(caplog) -> None:
+    pages: list[tuple[str, str]] = []
+    state = _boot_state(ready=True, armed=False, pages=pages)    # startup returned, scheduler never started
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = asyncio.create_task(boot_contract_watchdog(
+            state, deadline_s=0.05, startup_ceiling_s=60, recheck_s=0.01, poll_s=0.005))
+        try:
+            await _until(lambda: len(_incomplete(caplog)) >= 2)
+        finally:
+            await cancel_post_arm(task)
+    first = _incomplete(caplog)[0]
+    assert first.levelno == logging.CRITICAL and first.phase == "arming"
+    assert len(pages) == 1 and "Restart the engine." in pages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_startup_that_never_returns_pages_once_with_the_do_not_restart_text(caplog) -> None:
+    pages: list[tuple[str, str]] = []
+    state = _boot_state(ready=False, armed=False, pages=pages, startup_done=False)
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = asyncio.create_task(boot_contract_watchdog(
+            state, deadline_s=0.01, startup_ceiling_s=0.05, recheck_s=0.01, poll_s=0.005))
+        try:
+            await _until(lambda: len(_incomplete(caplog)) >= 2)
+        finally:
+            await cancel_post_arm(task)
+    assert all(r.phase == "startup" for r in _incomplete(caplog))
+    assert len(pages) == 1
+    assert "before restarting" in pages[0][1] and "Restart the engine." not in pages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_phase_change_pages_again_with_the_arming_text_then_resolves_quietly(caplog) -> None:
+    pages: list[tuple[str, str]] = []
+    state = _boot_state(ready=False, armed=False, pages=pages, startup_done=False)
+    with caplog.at_level(logging.INFO, logger="engine.ops.main"):
+        task = asyncio.create_task(boot_contract_watchdog(
+            state, deadline_s=0.03, startup_ceiling_s=0.05, recheck_s=0.01, poll_s=0.005))
+        try:
+            await _until(lambda: len(pages) == 1)           # the startup-ceiling page
+            assert "before restarting" in pages[0][1]
+            state["startup_done_at"] = time_module.monotonic()     # startup returned; arming still unmet
+            await _until(lambda: len(pages) == 2)
+            assert "Restart the engine." in pages[1][1]
+            assert _incomplete(caplog)[-1].phase == "arming"
+            state["engine_ready"] = True
+            state["scheduler"].start()
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            await cancel_post_arm(task)
+    assert len(pages) == 2                                  # resolving never pages again
+    assert len([r for r in caplog.records if r.getMessage() == "boot_contract_ok"]) == 1
+
+
 @pytest.mark.asyncio
 async def test_shutdown_cancels_the_boot_watchdog_cleanly() -> None:
     """The teardown retires the watchdog BEFORE scheduler.shutdown() — otherwise a slow stop would page
@@ -3536,7 +3625,9 @@ async def test_shutdown_cancels_the_boot_watchdog_cleanly() -> None:
     lifecycle guard's shutdown backup, and the bus drains before the market store closes."""
     events: list[str] = []
     state = _boot_state(ready=False, armed=False)
-    watchdog = asyncio.create_task(boot_contract_watchdog(state, deadline_s=60, recheck_s=60))
+    watchdog = asyncio.create_task(
+        boot_contract_watchdog(state, deadline_s=60, startup_ceiling_s=60, recheck_s=60, poll_s=60)
+    )
     post_arm = asyncio.create_task(asyncio.sleep(3600))
     hydration = asyncio.create_task(asyncio.sleep(3600))
     await asyncio.sleep(0.01)
@@ -3584,7 +3675,7 @@ class _RecordingState(dict):
     """The boot-contract holder, recording every flag the boot raises into the shared event list."""
 
     def __init__(self, events: list[str]) -> None:
-        super().__init__(engine_ready=False, scheduler=None, alert=None)
+        super().__init__(engine_ready=False, scheduler=None, alert=None, startup_done_at=None)
         self._events = events
 
     def __setitem__(self, key, value) -> None:
@@ -3666,7 +3757,11 @@ async def test_boot_runs_its_steps_in_the_order_its_comments_state(monkeypatch) 
     assert before("lifecycle.startup", "seed_boot_snapshots")
     assert before("arm_scheduler_fire_post_arm", "compaction_lane.spawn")
     assert "install_signal_handlers" not in events      # `run` installs them once, before compose
-    assert [e for e in events if e.startswith("boot_state")] == ["boot_state[engine_ready]=True"]
+    flags = [e for e in events if e.startswith("boot_state")]
+    assert [f.split("=")[0] for f in flags] == ["boot_state[startup_done_at]", "boot_state[engine_ready]"]
+    assert flags[1] == "boot_state[engine_ready]=True"
+    # the watchdog's arming clock starts when startup returns: after it, before the seeding
+    assert before("lifecycle.startup", flags[0]) and before(flags[0], "seed_boot_snapshots")
     assert events[-2:] == ["boot_state[engine_ready]=True", "early_hydration.on_boot"]  # the task runs after
     assert boot_state["engine_ready"] is True and engine.skew_holder == {"ok": True}
 

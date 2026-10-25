@@ -587,7 +587,9 @@ async def run() -> int:
     #     job). This watchdog is a PLAIN asyncio task on purpose: it must stay alive precisely when the
     #     scheduler is the broken thing. `boot_state` is late-bound — the watchdog reads it at check
     #     time, so it can be armed before the alert sink / scheduler / engine_ready even exist. ---
-    boot_state: dict[str, Any] = {"engine_ready": False, "scheduler": None, "alert": None}
+    boot_state: dict[str, Any] = {
+        "engine_ready": False, "scheduler": None, "alert": None, "startup_done_at": None,
+    }
     boot_watchdog = asyncio.create_task(boot_contract_watchdog(boot_state), name="boot_contract")
 
     engine = await compose(
@@ -2599,6 +2601,7 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
             await _boot_ticks
         except asyncio.CancelledError:
             pass
+    boot_state["startup_done_at"] = time_module.monotonic()   # arms the watchdog's deadline clock
     _log.info("startup_complete", mode=report.sticky_mode, killed=report.killed,
               needs_login=report.needs_login, integrity_ok=report.integrity_ok,
               jobs_caught_up=len(report.jobs_caught_up), frozen=report.frozen_reasons,
@@ -3345,15 +3348,19 @@ async def seed_boot_snapshots(
 
 
 # --------------------------------------------------------------------------- boot contract (WO-25c)
-#: How long a boot may take before the contract is checked. The four healthy 2026-08-24 boots reached
-#: engine_ready in 22 s / 13 s / 15 s / 15 s — but the watchdog's FIRST live run (2026-08-25 01:26,
-#: a crash-recovery boot catching up a full missed EOD day: 14 jobs) took a legitimate 305 s and
-#: paged a false positive at 180 s. 420 s clears an honest heavy catch-up boot while still paging a
-#: real zombie (the 2026-08-24 one ran ELEVEN HOURS) within the same trading window it broke in.
-_BOOT_CONTRACT_DEADLINE_S = 420.0
+#: Arming deadline, measured from the END of startup recovery: seeding (capped at 45 s) +
+#: scheduler.start() + engine_ready took <= 66 s across the 103 boots since 2026-09-01.
+_BOOT_CONTRACT_DEADLINE_S = 180.0
+
+#: Startup-recovery ceiling, measured from watchdog start: catch-up + backfills legitimately took up
+#: to 1,397 s (2026-10-20, a 16-minute BSE scrape); a 420 s rule falsely paged on 09-15, 10-20, 10-23.
+_BOOT_STARTUP_CEILING_S = 3600.0
 
 #: Re-check/re-log cadence while the contract stands violated.
 _BOOT_CONTRACT_RECHECK_S = 300.0
+
+#: How often the contract is read.
+_BOOT_CONTRACT_POLL_S = 5.0
 
 
 def _boot_contract_missing(boot_state: Mapping[str, Any]) -> list[str]:
@@ -3371,7 +3378,9 @@ async def boot_contract_watchdog(
     boot_state: Mapping[str, Any],
     *,
     deadline_s: float = _BOOT_CONTRACT_DEADLINE_S,
+    startup_ceiling_s: float = _BOOT_STARTUP_CEILING_S,
     recheck_s: float = _BOOT_CONTRACT_RECHECK_S,
+    poll_s: float = _BOOT_CONTRACT_POLL_S,
 ) -> None:
     """Verify the boot actually COMPLETED, and page the owner when it did not (WO-25c).
 
@@ -3385,45 +3394,67 @@ async def boot_contract_watchdog(
     keep working when the scheduler is the broken component, which rules out an APScheduler job; the
     owner-notify path is likewise an asyncio send, independent of any trigger.
 
-    Contract: by ``deadline_s`` the boot must have reached ``engine_ready`` AND
-    ``Scheduler.is_running()`` must be True — read from APScheduler's own state, never from a flag the
-    boot path sets (see :meth:`engine.ops.scheduler.Scheduler.is_running`). Satisfied ⇒ one INFO
-    ``boot_contract_ok`` and the task retires. Violated ⇒ CRITICAL ``boot_incomplete`` naming what is
-    missing, ONE owner page, then a re-check + re-log every ``recheck_s`` until it resolves (a boot
-    that arms late still gets its ``boot_contract_ok``).
+    Contract: ``engine_ready`` AND ``Scheduler.is_running()`` True — read from APScheduler's own
+    state, never from a flag the boot path sets (see :meth:`engine.ops.scheduler.Scheduler.is_running`).
+    Polled every ``poll_s``; satisfied at any poll ⇒ one INFO ``boot_contract_ok`` and the task
+    retires. Two phases decide when an unmet contract is DUE: ``arming`` — ``deadline_s`` after
+    startup recovery returned (``boot_state["startup_done_at"]``; seeding + scheduler start took
+    <= 66 s across 103 boots, the 2026-08-24 zombie wedged here); ``startup`` — startup recovery
+    itself has not returned ``startup_ceiling_s`` after the watchdog began (honest catch-up took up to
+    1,397 s, so a restart here would only repeat it). Due and unmet ⇒ CRITICAL ``boot_incomplete``
+    (with ``phase``), ONE owner page per phase, then a re-log every ``recheck_s`` until it resolves.
 
     Never crashes the boot: it is detached, and every failure inside it — including a raising alert
     sink — is swallowed. Cancelled at shutdown via :func:`cancel_post_arm`.
     """
     started = time_module.monotonic()
+    paged_phases: set[str] = set()
+    last_logged: float | None = None
     try:
-        await asyncio.sleep(deadline_s)
-        paged = False
         while True:
+            now = time_module.monotonic()
             missing = _boot_contract_missing(boot_state)
-            elapsed = round(time_module.monotonic() - started, 1)
+            elapsed = round(now - started, 1)
             if not missing:
                 _log.info("boot_contract_ok", elapsed_s=elapsed)
                 return
-            _log.critical(
-                "boot_incomplete", missing=missing, elapsed_s=elapsed,
-                hint="the boot never finished arming (2026-08-24 WO-25c): no scheduled job can fire "
-                     "in this state — restart the engine",
-            )
-            if not paged:
-                paged = True   # ONE page per episode; the CRITICAL log carries the repeats
-                alert = boot_state.get("alert")
-                if alert is not None:
-                    try:
-                        await alert(
-                            "critical",
-                            f"BOOT INCOMPLETE after {elapsed:.0f}s — missing: {', '.join(missing)}. "
+            startup_done_at = boot_state.get("startup_done_at")
+            phase: str | None = None
+            if startup_done_at is not None:
+                if now - startup_done_at >= deadline_s:
+                    phase = "arming"
+            elif now - started >= startup_ceiling_s:
+                phase = "startup"
+            if phase is not None and (
+                phase not in paged_phases
+                or last_logged is None
+                or now - last_logged >= recheck_s
+            ):
+                last_logged = now
+                if phase == "arming":
+                    hint = ("the boot never finished arming (2026-08-24 WO-25c): no scheduled job can "
+                            "fire in this state — restart the engine")
+                    text = (f"BOOT INCOMPLETE after {elapsed:.0f}s — missing: {', '.join(missing)}. "
                             "No scheduled job (forward drains, health pulses, EOD jobs) can fire. "
-                            "Restart the engine.",
-                        )
-                    except Exception:  # noqa: BLE001 - a failed page must not end the watchdog
-                        _log.exception("boot_incomplete_alert_failed")
-            await asyncio.sleep(recheck_s)
+                            "Restart the engine.")
+                else:
+                    hint = ("startup recovery (catch-up/backfill) has not returned: check engine.log "
+                            "for catch-up progress before restarting — a restart repeats it")
+                    text = (f"BOOT STILL IN STARTUP RECOVERY after {elapsed / 60:.0f} min — catch-up "
+                            "and backfill have not returned, so no scheduled job (forward drains, "
+                            "health pulses, EOD jobs) can fire yet. Check engine.log for recent "
+                            "catch-up progress before restarting: a restart repeats the catch-up.")
+                _log.critical("boot_incomplete", missing=missing, elapsed_s=elapsed,
+                              phase=phase, hint=hint)
+                if phase not in paged_phases:
+                    paged_phases.add(phase)   # ONE page per phase; the CRITICAL log carries the repeats
+                    alert = boot_state.get("alert")
+                    if alert is not None:
+                        try:
+                            await alert("critical", text)
+                        except Exception:  # noqa: BLE001 - a failed page must not end the watchdog
+                            _log.exception("boot_incomplete_alert_failed")
+            await asyncio.sleep(poll_s)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 - the watchdog must never take the boot down with it
