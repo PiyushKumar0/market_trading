@@ -1763,6 +1763,9 @@ async def compose(
         # two whole sessions, zero pages): entries_frozen_in_session + funnel_zero_in_session ride
         # the same always-on pulse and the WO-25b episode cadence.
         mode_manager=mode, latch=latch, funnel_probe=_prescreen_funnel_today,
+        # feed_stopped_in_session (2026-10-21: the ticker never started, health said problems=[]):
+        # token_valid only qualifies the page (a dead token vs a ticker that never launched).
+        token_valid=session.token_valid,
     )
     scheduler = Scheduler(clock, calendar)
     boot_state["scheduler"] = scheduler   # WO-25c: the watchdog reads its REAL running state
