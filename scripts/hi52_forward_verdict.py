@@ -560,6 +560,8 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_cost_floor(
     *, limits_path: Path, equity_override: Decimal | None, min_equity: Decimal | None,
     notional_override: Decimal | None = None,
+    stop_pct: Decimal = STOP_PCT,
+    fallback_equity: tuple[Decimal, str] | None = None,
 ) -> tuple[float, dict[str, Any]]:
     """``(round-trip %, the derivation as a dict)`` — the ONE place the cost floor is decided.
 
@@ -572,6 +574,11 @@ def resolve_cost_floor(
     what-ifs ("what would this verdict have been at ₹8,000?") and it SHOUTS: the derivation string
     starts with ``OVERRIDE`` and the report prints it, because a hand-picked notional is exactly the
     defect the derivation was introduced to remove and a quoted number must never hide it.
+
+    ``stop_pct`` and ``fallback_equity`` let another rule (``scripts/cat_shadow_verdict.py``) be
+    charged by this SAME derivation at its own stop; ``fallback_equity`` = ``(equity, source)``
+    replaces the registration default in both the no-snapshot case and the non-positive refusal.
+    The defaults are this script's own behaviour.
     """
     position_pct, gap_mult, limits_src = load_sizing_limits(limits_path)
     if notional_override is not None:
@@ -586,7 +593,7 @@ def resolve_cost_floor(
             "equity_source": "OVERRIDE (--notional): no equity read",
             "swing_position_pct": str(position_pct),
             "overnight_gap_mult": str(gap_mult),
-            "stop_pct": str(STOP_PCT),
+            "stop_pct": str(stop_pct),
             "limits_source": limits_src,
             "override": True,
             "derivation": (
@@ -598,15 +605,24 @@ def resolve_cost_floor(
         equity, equity_src = equity_override, "--equity override"
     elif min_equity is not None:
         equity, equity_src = min_equity, "smallest equity_snapshots reading in the window"
+    elif fallback_equity is not None:
+        equity, equity_src = fallback_equity
     else:
         equity, equity_src = REFERENCE_EQUITY_INR, "registration default (no snapshot in window)"
     try:
         notional = sizing_notional(
-            equity, position_pct=position_pct, gap_mult=gap_mult, stop_pct=STOP_PCT
+            equity, position_pct=position_pct, gap_mult=gap_mult, stop_pct=stop_pct
         )
     except ValueError:
-        equity, equity_src = REFERENCE_EQUITY_INR, f"{equity_src} REFUSED (non-positive); default"
-        notional = REFERENCE_NOTIONAL
+        if fallback_equity is None:
+            equity, equity_src = REFERENCE_EQUITY_INR, f"{equity_src} REFUSED (non-positive); default"
+            notional = REFERENCE_NOTIONAL
+        else:
+            equity = fallback_equity[0]
+            equity_src = f"{equity_src} REFUSED (non-positive); {fallback_equity[1]}"
+            notional = sizing_notional(
+                equity, position_pct=position_pct, gap_mult=gap_mult, stop_pct=stop_pct
+            )
     cost_pct = float(cost_floor_pct(notional))
     return cost_pct, {
         "notional_inr": str(round(notional, 2)),
@@ -614,12 +630,12 @@ def resolve_cost_floor(
         "equity_source": equity_src,
         "swing_position_pct": str(position_pct),
         "overnight_gap_mult": str(gap_mult),
-        "stop_pct": str(STOP_PCT),
+        "stop_pct": str(stop_pct),
         "limits_source": limits_src,
         "override": False,
         "derivation": (
             f"§7.1 per_trade_risk cap: equity Rs {equity} x {position_pct}% / "
-            f"({gap_mult}x {STOP_PCT}% stop) = Rs {round(notional, 2)}  "
+            f"({gap_mult}x {stop_pct}% stop) = Rs {round(notional, 2)}  "
             f"[equity: {equity_src}; limits: {limits_src}] — integer-qty rounding lands the real "
             f"notional at or below this, so the floor is a lower bound"
         ),

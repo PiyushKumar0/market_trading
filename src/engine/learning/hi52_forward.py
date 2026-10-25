@@ -149,8 +149,11 @@ class StoreUnreadable(RuntimeError):
     """A store could not be opened/read. Carries the operator-facing reason."""
 
 
-def load_signal_rows(conn: sqlite3.Connection, *, start: date, as_of: date) -> list[Signal]:
-    """Published ``hi52`` signals in ``[start, as_of]``, ascending by (day, symbol).
+def load_signal_rows(
+    conn: sqlite3.Connection, *, start: date, as_of: date, strategy_id: str = STRATEGY_ID
+) -> list[Signal]:
+    """Published ``strategy_id`` signals (default ``hi52``) in ``[start, as_of]``, ascending by
+    (day, symbol).
 
     Every ``prescreen_day_slots`` row is a PUBLICATION, so the row set IS the signal population;
     ``evaluated``/``forwarded`` are deliberately not filtered on.
@@ -159,7 +162,7 @@ def load_signal_rows(conn: sqlite3.Connection, *, start: date, as_of: date) -> l
         rows = conn.execute(
             "SELECT d, symbol FROM prescreen_day_slots "
             "WHERE strategy_id = ? AND d >= ? AND d <= ? ORDER BY d, symbol",
-            (STRATEGY_ID, start.isoformat(), as_of.isoformat()),
+            (strategy_id, start.isoformat(), as_of.isoformat()),
         ).fetchall()
     except sqlite3.Error as exc:
         raise StoreUnreadable(f"state.db: {type(exc).__name__}: {exc}") from exc
