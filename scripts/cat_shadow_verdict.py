@@ -23,17 +23,17 @@ seeing the numbers)
   whatever ``--from`` says, and the report counts them.
 * **Sessions:** regular NSE trading sessions in [``--from``, ``as_of``], counted with the repo's
   ``NSECalendar`` over ``config/calendar/`` with special sessions (muhurat, DR drills) EXCLUDED.
-  ``as_of`` counts when it is a session, even if the run is before 15:30 — the session-count gate
-  never binds after the cohort gate below anyway (a measured T+20 needs 20 sessions of bars).
-* **Fixed verdict cohort (pinned-looks rule):** the FIRST :data:`COHORT_SIZE` non-VOID signals in
-  the window ordered by (``d``, ``symbol``) (VOID: see CONVENTIONS). The cohort is cut by publication order, never by maturity order:
-  an early signal that matures late HOLDS the verdict instead of being replaced by a later signal,
-  and no signal after the 20th ever enters it.
+  ``as_of`` counts when it is a session, even if the run is before 15:30.
+* **Fixed verdict cohort (pinned-looks rule):** the FIRST :data:`COHORT_SIZE` signals in the window
+  ordered by (``d``, ``symbol``) that are neither VOID nor DUPLICATE (both final; see CONVENTIONS).
+  The cohort is cut by publication order, never by maturity order: an early signal that matures
+  late HOLDS the verdict instead of being replaced by a later signal, and no signal after the 20th
+  ever enters it.
 * **Verdict** (:func:`verdict`, the one expression of the rule):
   ``INSUFFICIENT`` unless sessions >= :data:`MIN_SESSIONS` AND admitted signals >=
-  :data:`MIN_SIGNALS` AND the cohort has :data:`COHORT_SIZE` non-void members AND every one of them
-  has a measured T+10 and T+20. A member that cannot be
-  measured because of a store hole HOLDS the verdict too ("fix the data, never skip the row").
+  :data:`MIN_SIGNALS` AND the cohort has :data:`COHORT_SIZE` non-void, non-duplicate members AND
+  every one of them has a measured T+10 and T+20. A member that cannot be measured because of a
+  store hole HOLDS the verdict too ("fix the data, never skip the row").
   Then ``RETIRE`` iff cohort median net T+10 <= threshold_10 AND cohort median net T+20 <=
   threshold_20 (equality retires); otherwise ``OWNER REVIEW`` — clearing at either horizon sends
   ``cat`` to the §8.6 owner review, and nothing is wired by this result.
@@ -45,12 +45,32 @@ seeing the numbers)
 ===============================================================================================
 CONVENTIONS (pinned; each one is a choice, so each one is stated)
 ===============================================================================================
-* **Entry and exit are ``hi52``'s, through the same code** (``engine.learning.hi52_forward``).
-  Entry = the OPEN of the journal day ``d`` — the sweep that journals ``d`` runs on ``d``, so
-  ``open(d)`` is the next-session-open fill after the prior-session close the rule's entry level is
-  anchored on. Exit for horizon k = the CLOSE of the k-th session of the hold, entry session first:
-  ``close(d + k-1 sessions) / open(d) - 1``. Sessions are positions in the symbol's own ``bars_1d``
-  series. Horizons T+10 and T+20 only — nothing else is pre-registered, so nothing else is printed.
+* **Entry — the first session open at which the story was public** ("next-session-open fills").
+  Entry is ``open(d)`` when the story was first seen BEFORE 09:15 IST on ``d``, else the open of
+  the next regular session. The story's first sighting is ``min(news_clusters.first_seen)`` over the
+  ``cluster_refs`` of the ORIGINATING ``catalyst_watchlist`` rows for (``d``, symbol) — the rows
+  ``cat.is_eligible`` accepts (grade ``originating``, direction ``long``, session age 0..1); a row
+  of age >= 1 predates ``d`` by definition (``news_pipeline`` event age: trading days in
+  (first-seen date, ``d``]). A journal row with no originating watchlist row, or an age-0 story
+  whose clusters ``news_clusters`` no longer holds, is a HOLE: the entry session cannot be decided.
+  Why: ``hi52``'s ``open(d)`` is safe because its trigger is yesterday's bar, but a post-open digest
+  (an owner boot at 09:30-10:00) can grade an age-0 cluster first seen at 09:40 on ``d``, the 10:00
+  sweep journals it, and ``open(d)`` would book the announcement move the rule could never have
+  traded. **This is a review-driven clarification made 2026-10-26, before the verdict cohort formed
+  but after interim numbers from earlier runs of this report had been seen** — stated so a reader
+  can weigh the optional-stopping risk; it was motivated by a lookahead defect, not by an outcome.
+* **Hold and exit are ``hi52``'s, through the same code** (``engine.learning.hi52_forward``),
+  counted from the ENTRY session: exit for horizon k = the CLOSE of the k-th session of the hold,
+  entry session first: ``close(entry + k-1 sessions) / open(entry) - 1``. Sessions are positions in
+  the symbol's own ``bars_1d`` series. Horizons T+10 and T+20 only — nothing else is pre-registered.
+* **Renames are followed.** ``rekey_symbol.py`` moves ``bars_1d`` and ``corp_actions`` to the new
+  symbol and deliberately leaves ``prescreen_day_slots`` under the old one, so a signal journalled
+  under OLD would otherwise be a permanent ``no_bars`` hole whose "fix the data" remedy is wrong.
+  Renames come from ``engine.marketdata.store.symbol_renames`` (``instruments_daily`` token
+  continuity, the universe's own source) read as of the latest snapshot — identity metadata, not
+  price data; bars stay bounded by ``as_of``. A renamed signal's bars and corp actions are read
+  under EVERY name of the instrument and merged by date, the current name's row winning on a shared
+  date (rekey's rule), so it measures whether or not the rekey ran. Listed as ``OLD (now NEW)``.
 * **The 5% disaster stop and the 20-session time exit are not simulated.** The pre-registration
   measures net DRIFT at fixed horizons; ``cat.stop_pct`` enters only through the §7.1 sizing
   below (a wider stop means a smaller notional and a higher cost floor).
@@ -65,25 +85,36 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   open a position), stated. Integer-qty rounding lands a real notional at or below the cap, so the
   floor is a lower bound by a few hundredths of a pp. ``--equity`` / ``--notional`` are what-ifs;
   ``--notional`` prints ``OVERRIDE``.
-* **A cohort member is MEASURED, PENDING or a HOLE.** PENDING: ``d`` is after the last stored
-  session, or a horizon's calendar session is after it (the ordinary state of a forward test).
-  HOLE: no bars for the symbol, ``d`` missing from its series although the store has that session,
-  a malformed entry or exit bar, or a horizon whose calendar session the store holds for other
-  symbols while this symbol's series ends before it (``overdue`` — a halt or a missing bar; it
-  clears when the symbol's bar lands or its own session count catches up). Both hold the verdict;
-  they are listed separately because one waits and the other needs the data fixed.
+* **A cohort member is MEASURED, PENDING or a HOLE.** PENDING: the entry session is after the last
+  stored session, or a horizon's calendar session is after it (the ordinary state of a forward
+  test). HOLE: no bars for the symbol, the entry session missing from its series although the store
+  has that session, a malformed entry or exit bar, a horizon whose calendar session the store holds
+  for other symbols while this symbol's series ends before it (``overdue`` — a halt or a missing
+  bar; it clears when the symbol's bar lands or its own session count catches up), or an entry
+  session that cannot be decided (above). Both hold the verdict; they are listed separately because
+  one waits and the other needs the data fixed.
 * **VOID — an unadjusted corporate action inside the hold** (``engine.learning.exit_sim.simulate``'s
   rule, as ``rec_outcomes`` applies it). Stored ``bars_1d`` are never re-adjusted, so a bonus /
   split / rights / demerger ex-date inside the window reads as a crash. A signal is VOID
   (``void_ca``) when an ``engine.strategy.scanners.hi52.UNADJUSTED_KINDS`` ex-date ``x`` from
-  ``corp_actions`` (bounded by ``as_of``) satisfies ``d < x <= last``, where ``last`` is its T+20
-  exit session once measured, else the symbol's last stored session. An ex-date ON ``d`` does not
-  void: ``open(d)`` is already in the new unit. VOID is FINAL (the ``_FINAL`` rows of
-  ``scripts/no_stop_verdict.py look_cohort``): the cohort is the first 20 NON-void signals, voids
-  enter no running, segment or excess cell, and they are counted and listed with ex-date and kind.
-  It still counts as an ADMITTED signal (it was published). A corp-action row that lands after the
-  cohort formed can still void a member and pull the 21st non-void signal in — a data correction,
-  never a re-cut by outcome.
+  ``corp_actions`` (bounded by ``as_of``) satisfies ``entry < x <= last``. ``last`` = min(the
+  symbol's last stored session, the hold's end); the hold's end is the symbol's own T+20 position
+  when the entry is anchored and that position is stored, else the calendar's T+20 session (no
+  bound past the calendar horizon) — so an ex-date after a hole's would-be T+20 never voids it. An
+  ex-date ON the entry session does not void: ``open(entry)`` is already in the new unit.
+* **DUPLICATE — one story originated twice.** A story first seen on ``d`` before ``d``'s digest is
+  age 0 on ``d`` and age 1 on the next session, so the rule originates it on both (the prescreen
+  dedupes per day only; ``cat.MAX_EVENT_AGE_SESSIONS`` says a second origination double-counts the
+  story). A signal is DUPLICATE when an EARLIER journal row of the same instrument (renames
+  followed; rows before ``--from`` and in the excluded span count, read from
+  :data:`DUPLICATE_LOOKBACK_DAYS` before ``--from``) has an originating row sharing at least one
+  cluster id with this signal's originating rows. Cluster overlap is the identity on purpose:
+  consecutive rows built from different clusters stay separate signals, the registered letter.
+* **VOID and DUPLICATE are FINAL** (the ``_FINAL`` rows of ``scripts/no_stop_verdict.py
+  look_cohort``): out of the cohort and every running, segment and excess cell; counted and listed
+  (ex-date and kind; the signal repeated). Both still count as ADMITTED signals (they were
+  published). A corp-action row that lands after the cohort formed can still void a member and pull
+  the next valid signal in — a data correction, never a re-cut by outcome.
 * **The medians compare unrounded.** Rounding (4 dp) is display-only; the verdict compares the raw
   median against the raw threshold.
 
@@ -93,25 +124,25 @@ DIAGNOSTICS (each one decides nothing)
 * **Running cells** over ALL measured signals in the window (n, median/mean net, hit rate on net
   ``> 0``), each horizon on its own event set.
 * **Segments** (owner directive: split at the first NIFTY 500 universe build, O15, and at the news
-  scorer's switch to sonnet-5.5): pre-O15 [``--from``, :data:`O15_FIRST_SESSION` - 1], O15 +
-  Sonnet-5 scorer [:data:`O15_FIRST_SESSION`, S - 1], Sonnet-5.5 scorer [S, ``as_of``]. S = the
-  first trading session strictly after the IST date of the earliest ``news_clusters.scored_at``
-  with ``scorer_model = 'sonnet-5.5'`` (bounded by ``as_of``); when that cannot be read, or no such
-  row exists, S = :data:`SCORER_SWITCH_FALLBACK`, stated. Both boundaries are +-1-session
-  approximations: neither store records the deploy, and a signal on a boundary day may have been
-  graded by either side.
+  scorer's switch to sonnet-5.5), by journal day ``d``: pre-O15 [``--from``,
+  :data:`O15_FIRST_SESSION` - 1], O15 + Sonnet-5 scorer [:data:`O15_FIRST_SESSION`, S - 1],
+  Sonnet-5.5 scorer [S, ``as_of``]. S = the first trading session strictly after the IST date of the
+  earliest ``news_clusters.scored_at`` with ``scorer_model = 'sonnet-5.5'`` (bounded by ``as_of``);
+  when that cannot be read, or no such row exists, S = :data:`SCORER_SWITCH_FALLBACK`, stated. Both
+  boundaries are +-1-session approximations: neither store records the deploy, and a signal on a
+  boundary day may have been graded by either side.
 * **Excess over the equal-weight benchmark**: net minus
-  ``engine.learning.benchmark.bench_pct(daily, fill_d=d, exit_d=<exit session>, "time", calendar)``
-  with ``daily`` from ``state.db universe_ew_returns`` (bounded by ``as_of``). That window is
-  close(d) .. close(exit) while the trade's is open(d) .. close(exit), so the entry session's
-  intraday move is in the trade and not in the benchmark — the engine's own rec-outcome
+  ``engine.learning.benchmark.bench_pct(daily, fill_d=entry, exit_d=<exit session>, "time",
+  calendar)`` with ``daily`` from ``state.db universe_ew_returns`` (bounded by ``as_of``). That
+  window is close(entry) .. close(exit) while the trade's is open(entry) .. close(exit), so the entry
+  session's intraday move is in the trade and not in the benchmark — the engine's own rec-outcome
   convention, stated rather than re-derived. A signal whose window has a missing EW day is omitted
   from that cell and counted.
 
 Read-only by construction: SQLite through a ``file:...?mode=ro`` URI, DuckDB through
 ``read_only=True`` (which a running engine refuses — that refusal prints ``UNAVAILABLE``).
-``--as-of`` bounds both stores: journal rows, bars, EW returns, equity snapshots and the scorer
-switch lookup. Exit code is ALWAYS 0.
+``--as-of`` bounds both stores: journal rows, bars, corp actions, watchlist rows, cluster sightings,
+EW returns, equity snapshots and the scorer switch lookup. Exit code is ALWAYS 0.
 
 Usage:
     python scripts/cat_shadow_verdict.py
@@ -128,7 +159,7 @@ import os
 import sqlite3
 import statistics
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -153,9 +184,12 @@ from engine.learning.hi52_forward import (  # noqa: E402
     measure_signal,
 )
 from engine.learning.validate import MARGIN_FLOOR_DAYS, margin_floor_pct_per_day  # noqa: E402
+from engine.marketdata.store import symbol_renames  # noqa: E402
 from engine.strategy.hi52_edge import PRODUCT  # noqa: E402
 from engine.strategy.scanners import cat as cat_rule  # noqa: E402
 from engine.strategy.scanners.hi52 import UNADJUSTED_KINDS  # noqa: E402
+
+Fetch = Callable[[str, list[Any]], Sequence[Sequence[Any]]]
 
 
 def _load_script(name: str) -> ModuleType:
@@ -184,11 +218,18 @@ EXCLUDED_THROUGH = date(2026, 8, 28)
 
 MIN_SESSIONS = 30
 MIN_SIGNALS = 20
-#: The verdict cohort is the first MIN_SIGNALS signals — the pre-registered n, cut once.
+#: The verdict cohort is the first MIN_SIGNALS valid signals — the pre-registered n, cut once.
 COHORT_SIZE = MIN_SIGNALS
 
 #: Pre-registered horizons, in sessions of the hold. Both vote.
 HORIZONS: tuple[int, ...] = (10, 20)
+
+#: The regular session open: a story first seen before it on ``d`` was public at ``open(d)``.
+SESSION_OPEN_IST = time(9, 15)
+
+#: Journal rows read before ``--from`` for the duplicate check only (a repeat is at most one
+#: session after the first origination; 10 calendar days covers any holiday run).
+DUPLICATE_LOOKBACK_DAYS = 10
 
 #: Segment boundary 1 (owner directive): the first session on the NIFTY 500 universe (O15).
 O15_FIRST_SESSION = date(2026, 9, 7)
@@ -219,6 +260,9 @@ PENDING = "pending"
 HOLE = "hole"
 #: Final data-validity status (rec_outcomes / exit_sim name): never in the cohort or any cell.
 VOID = "void_ca"
+#: Final identity status: a second origination of one story. Never in the cohort or any cell.
+DUPLICATE = "duplicate"
+FINAL_STATUSES = frozenset({VOID, DUPLICATE})
 
 _HUNDRED = Decimal("100")
 
@@ -258,41 +302,115 @@ def fixed_cohort(signals: Sequence[Signal]) -> list[Signal]:
     return sorted(signals, key=lambda s: (s.d, s.symbol))[:COHORT_SIZE]
 
 
+class OrigRow(NamedTuple):
+    """One originating ``catalyst_watchlist`` row behind a journal row (``cat.is_eligible``)."""
+
+    entry_id: str
+    cluster_refs: tuple[str, ...]
+    event_age_sessions: int
+
+
 class Assessed(NamedTuple):
-    """One signal's measurement state. ``exits`` maps each measured horizon to its exit session."""
+    """One signal's measurement state. ``exits`` maps each measured horizon to its exit session;
+    ``entry`` is the entry session (``None`` when it could not be decided)."""
 
     signal: Signal
     status: str
     detail: str
     trade: Measured | None
     exits: dict[int, date]
+    entry: date | None = None
+
+
+def entry_session(
+    sig: Signal,
+    rows: Sequence[OrigRow],
+    first_seen: Mapping[str, datetime],
+    calendar: NSECalendar,
+) -> tuple[date | None, str]:
+    """``(entry session, why)`` — ``open(d)`` iff the story was public before 09:15 IST on ``d``."""
+    if not rows:
+        return None, "no originating catalyst_watchlist row"
+    if any(r.event_age_sessions >= 1 for r in rows):
+        return sig.d, "open(d): event age >= 1, the story predates d"
+    opens = datetime.combine(sig.d, SESSION_OPEN_IST, tzinfo=IST)
+    refs = sorted({c for r in rows for c in r.cluster_refs})
+    seen = [first_seen[c] for c in refs if c in first_seen]
+    first = min(seen) if seen else None
+    if first is not None and first < opens:
+        return sig.d, f"open(d): story first seen {first.astimezone(IST):%Y-%m-%d %H:%M} IST"
+    missing = [c for c in refs if c not in first_seen]
+    if first is None or missing:
+        # A missing cluster could be the EARLIER sighting: the entry cannot be decided.
+        return None, (f"story first_seen unreadable (cluster_refs {', '.join(missing) or 'none'} "
+                      "not in news_clusters)")
+    try:
+        nxt = calendar.next_trading_day(sig.d)
+    except ValueError:
+        return None, "next session is past the calendar horizon"
+    return nxt, (f"next-session open: story first seen {first.astimezone(IST):%H:%M} IST on d, "
+                 "at or after the 09:15 open")
+
+
+def find_duplicates(
+    signals: Iterable[Signal],
+    origination: Mapping[tuple[date, str], Sequence[OrigRow]],
+    canonical: Callable[[str], str],
+) -> dict[Signal, str]:
+    """``signal -> detail`` for every signal an EARLIER signal of the same instrument shares an
+    originating cluster id with (the earliest such signal is named)."""
+    ordered = sorted(set(signals), key=lambda s: (s.d, s.symbol))
+    refs = {s: {c for r in origination.get((s.d, s.symbol), ()) for c in r.cluster_refs}
+            for s in ordered}
+    out: dict[Signal, str] = {}
+    for i, s in enumerate(ordered):
+        if not refs[s]:
+            continue
+        for e in ordered[:i]:
+            if e.d < s.d and canonical(e.symbol) == canonical(s.symbol):
+                shared = refs[s] & refs[e]
+                if shared:
+                    out[s] = (f"duplicate of {e.d} {e.symbol} "
+                              f"(shared cluster {', '.join(sorted(shared))})")
+                    break
+    return out
 
 
 def assess(
     sig: Signal,
     series: Series | None,
     *,
+    entry: date,
     cost_pct: float,
     calendar: NSECalendar,
     stored_through: date | None,
     ex_dates: Sequence[tuple[date, str]] = (),
     horizons: Sequence[int] = HORIZONS,
 ) -> Assessed:
-    """Measure ``sig``; VOID it on an unadjusted corp action inside its measured window, else say
-    why any pre-registered horizon is missing (module docstring)."""
-    out = _measure_state(sig, series, cost_pct=cost_pct, calendar=calendar,
+    """Measure ``sig`` from ``entry``; VOID it on an unadjusted corp action inside its hold, else
+    say why any pre-registered horizon is missing (module docstring)."""
+    out = _measure_state(sig, series, entry=entry, cost_pct=cost_pct, calendar=calendar,
                          stored_through=stored_through, horizons=horizons)
-    # exit_sim.simulate's rule: an ex-date x voids when fill session < x <= bar session. The last
-    # bar session is the T+20 exit once measured, else the symbol's last stored session (<= as_of).
-    last = out.exits.get(max(horizons))
-    if last is None and series is not None and len(series):
-        last = series.dates[-1]
-    if last is not None:
-        inside = sorted((x, kind) for x, kind in ex_dates
-                        if kind in UNADJUSTED_KINDS and sig.d < x <= last)
-        if inside:
-            x, kind = inside[0]
-            return out._replace(status=VOID, detail=f"void_ca: {kind} ex-date {x}")
+    if series is None or not len(series):
+        return out
+    # exit_sim.simulate's rule: an ex-date x voids when fill session < x <= bar session, the bar
+    # sessions bounded by the hold's end: the symbol's own T+20 position when the entry is anchored
+    # and that bar is stored, else the calendar's T+20 session.
+    span = max(horizons) - 1
+    hold_end: date | None = None
+    if entry in series.dates and series.dates.index(entry) + span < len(series):
+        hold_end = series.dates[series.dates.index(entry) + span]
+    else:
+        try:
+            hold_end = calendar.add_sessions(entry, span)
+        except ValueError:
+            hold_end = None
+    last = series.dates[-1] if hold_end is None else min(series.dates[-1], hold_end)
+    inside = sorted((x, kind) for x, kind in ex_dates
+                    if kind in UNADJUSTED_KINDS and entry < x <= last)
+    if inside:
+        x, kind = inside[0]
+        return out._replace(status=VOID, detail=f"void_ca: {kind} ex-date {x}")
     return out
 
 
@@ -300,43 +418,47 @@ def _measure_state(
     sig: Signal,
     series: Series | None,
     *,
+    entry: date,
     cost_pct: float,
     calendar: NSECalendar,
     stored_through: date | None,
     horizons: Sequence[int],
 ) -> Assessed:
-    if stored_through is None or sig.d > stored_through:
-        return Assessed(sig, PENDING, "no_entry_yet: d is after the last stored session", None, {})
+    if stored_through is None or entry > stored_through:
+        return Assessed(sig, PENDING, "no_entry_yet: the entry session is after the last stored "
+                        "session", None, {}, entry)
     if series is None or not len(series):
         return Assessed(sig, HOLE, "no_bars: no bars_1d rows for this symbol in the window "
-                        "(renamed or delisted?)", None, {})
-    if sig.d not in series.dates:
-        return Assessed(sig, HOLE, f"unanchored: {sig.d} is not in this symbol's bars_1d "
-                        f"(store holds sessions through {stored_through})", None, {})
-    trade = measure_signal(series, sig.d, cost_pct=cost_pct, horizons=horizons)
+                        "(delisted?)", None, {}, entry)
+    if entry not in series.dates:
+        return Assessed(sig, HOLE, f"unanchored: entry session {entry} is not in this symbol's "
+                        f"bars_1d (store holds sessions through {stored_through})", None, {}, entry)
+    trade = measure_signal(series, entry, cost_pct=cost_pct, horizons=horizons)
     if trade is None:
-        return Assessed(sig, HOLE, "bad_entry_bar: the open of d is unusable", None, {})
-    i = series.dates.index(sig.d)
+        return Assessed(sig, HOLE, "bad_entry_bar: the open of the entry session is unusable",
+                        None, {}, entry)
+    i = series.dates.index(entry)
     exits = {k: series.dates[i + k - 1] for k in trade.net}
     status, detail = MEASURED, ""
     for k in sorted(horizons):
         if k in trade.net:
             continue
         if i + k - 1 < len(series):
-            return Assessed(sig, HOLE, f"bad_exit_bar: the T+{k} close is unusable", trade, exits)
+            return Assessed(sig, HOLE, f"bad_exit_bar: the T+{k} close is unusable", trade, exits,
+                            entry)
         try:
-            due = calendar.add_sessions(sig.d, k - 1)
+            due = calendar.add_sessions(entry, k - 1)
         except ValueError:
             due = None
         if due is not None and due <= stored_through:
             return Assessed(
                 sig, HOLE,
                 f"overdue_t{k}: calendar T+{k} session {due} is stored, this symbol's series ends "
-                f"{series.dates[-1]} (halt or missing bar)", trade, exits,
+                f"{series.dates[-1]} (halt or missing bar)", trade, exits, entry,
             )
         if status == MEASURED:
             status, detail = PENDING, f"awaiting_t{k}: due {due if due is not None else 'n/a'}"
-    return Assessed(sig, status, detail, trade, exits)
+    return Assessed(sig, status, detail, trade, exits, entry)
 
 
 def verdict(
@@ -357,7 +479,8 @@ def verdict(
     if admitted < MIN_SIGNALS:
         holds.append(f"{admitted} admitted signals, rule needs {MIN_SIGNALS}")
     if len(cohort) < COHORT_SIZE:
-        holds.append(f"{len(cohort)} of {COHORT_SIZE} cohort places filled by non-void signals")
+        holds.append(f"{len(cohort)} of {COHORT_SIZE} cohort places filled by non-void, "
+                     "non-duplicate signals")
     pending = sum(1 for a in cohort if a.status == PENDING)
     holes = sum(1 for a in cohort if a.status == HOLE)
     if pending:
@@ -401,7 +524,7 @@ def excess_cells(
             if a.trade is None or k not in a.trade.net:
                 continue
             try:
-                b = bench_pct(daily, a.signal.d, a.exits[k], "time", calendar)
+                b = bench_pct(daily, a.trade.entry_date, a.exits[k], "time", calendar)
             except (ValueError, TypeError, ArithmeticError):
                 b = None
             if b is None:
@@ -418,35 +541,67 @@ def excess_cells(
     return out
 
 
+# =============================================================================== renames
+def rename_families(renames: Mapping[str, str]) -> dict[str, tuple[str, ...]]:
+    """``name -> every name of that instrument``, the current name LAST (it wins a merge)."""
+    by_new: dict[str, list[str]] = {}
+    for old, new in renames.items():
+        by_new.setdefault(new, []).append(old)
+    out: dict[str, tuple[str, ...]] = {}
+    for new, olds in by_new.items():
+        names = (*sorted(olds), new)
+        for n in names:
+            out[n] = names
+    return out
+
+
+def merge_series(symbol: str, parts: Sequence[Series | None]) -> Series | None:
+    """One series from several names' rows, by date; a later part wins on a shared date."""
+    by_d: dict[date, tuple[float, float]] = {}
+    for s in parts:
+        if s is None:
+            continue
+        for d, o, c in zip(s.dates, s.open, s.close, strict=True):
+            by_d[d] = (o, c)
+    if not by_d:
+        return None
+    ds = sorted(by_d)
+    return Series(symbol, ds, [by_d[d][0] for d in ds], [by_d[d][1] for d in ds])
+
+
 # =============================================================================== stores and inputs
-def _ist_date(value: Any) -> date:
-    """The IST date of a DuckDB TIMESTAMPTZ (aware), a naive UTC instant, a date or an ISO string."""
+def _ist_dt(value: Any) -> datetime:
+    """A DuckDB TIMESTAMPTZ (aware), a naive UTC instant or an ISO string, as aware IST."""
     if isinstance(value, str):
         value = datetime.fromisoformat(value)
     if isinstance(value, datetime):
         aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        return aware.astimezone(IST).date()
-    if isinstance(value, date):
-        return value
+        return aware.astimezone(IST)
     raise TypeError(f"not a timestamp: {value!r}")
 
 
-def scorer_switch_session(
-    fetchall: Callable[[str, list[Any]], Sequence[Sequence[Any]]],
-    calendar: NSECalendar,
-    *,
-    as_of: date,
-) -> tuple[date, str]:
+def _ist_date(value: Any) -> date:
+    """The IST date of a DuckDB TIMESTAMPTZ (aware), a naive UTC instant, a date or an ISO string."""
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    return _ist_dt(value).date()
+
+
+def _end_of(as_of: date) -> datetime:
+    """00:00 IST after ``as_of`` — the exclusive bound of a timestamp read."""
+    return datetime.combine(as_of + timedelta(days=1), time(0, 0), tzinfo=IST)
+
+
+def scorer_switch_session(fetchall: Fetch, calendar: NSECalendar, *, as_of: date) -> tuple[date, str]:
     """``(S, provenance)`` — the first session after the earliest sonnet-5.5 ``scored_at``.
 
     Bounded by ``as_of`` (end of that IST day). Any read failure, or no such row, falls back to
     :data:`SCORER_SWITCH_FALLBACK` and says so.
     """
-    bound = datetime.combine(as_of + timedelta(days=1), time(0, 0), tzinfo=IST)
     try:
         rows = fetchall(
             "SELECT MIN(scored_at) FROM news_clusters WHERE scorer_model = ? AND scored_at < ?",
-            [SCORER_SWITCH_MODEL, bound],
+            [SCORER_SWITCH_MODEL, _end_of(as_of)],
         )
         first = rows[0][0] if rows else None
     except Exception as exc:  # noqa: BLE001 - every failure mode becomes one stated fallback
@@ -516,20 +671,20 @@ def cat_cost_floor(
     return cost_pct, {**sizing, "stop_source": stop_source}
 
 
+def _wanted(symbols: Iterable[str]) -> list[str]:
+    return sorted({s.strip().upper() for s in symbols if s and s.strip()})
+
+
 def load_ex_dates(
-    fetchall: Callable[[str, list[Any]], Sequence[Sequence[Any]]],
-    symbols: Sequence[str],
-    *,
-    start: date,
-    as_of: date,
+    fetchall: Fetch, symbols: Sequence[str], *, start: date, as_of: date,
 ) -> dict[str, list[tuple[date, str]]]:
     """``symbol -> [(ex_date, kind)]`` for ``UNADJUSTED_KINDS`` with ``start < ex_date <= as_of``.
 
-    An ex-date on or before ``start`` can void no signal (``d >= start`` and voiding needs
-    ``x > d``). An unreadable table is :class:`StoreUnreadable`: voids move cohort membership, so a
-    verdict without them would be a verdict on unchecked data.
+    An ex-date on or before ``start`` can void no signal (entry >= ``start`` and voiding needs
+    ``x > entry``). An unreadable table is :class:`StoreUnreadable`: voids move cohort membership,
+    so a verdict without them would be a verdict on unchecked data.
     """
-    wanted = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+    wanted = _wanted(symbols)
     if not wanted:
         return {}
     placeholders = ", ".join("?" for _ in wanted)
@@ -546,6 +701,74 @@ def load_ex_dates(
         x = x.date() if isinstance(x, datetime) else x
         out.setdefault(str(symbol), []).append((x, str(kind)))
     return out
+
+
+def load_origination(
+    fetchall: Fetch, symbols: Sequence[str], *, start: date, as_of: date,
+) -> dict[tuple[date, str], list[OrigRow]]:
+    """``(d, symbol) -> [OrigRow]``: the ``catalyst_watchlist`` rows ``cat.is_eligible`` accepts.
+
+    Unreadable is :class:`StoreUnreadable`: these rows decide the entry session and duplicates.
+    """
+    wanted = _wanted(symbols)
+    if not wanted:
+        return {}
+    placeholders = ", ".join("?" for _ in wanted)
+    sql = ("SELECT d, symbol, entry_id, grade, direction, event_age_sessions, cluster_refs "
+           f"FROM catalyst_watchlist WHERE symbol IN ({placeholders}) AND d >= ? AND d <= ? "
+           "AND grade = ? ORDER BY d, symbol, entry_id")
+    try:
+        rows = fetchall(sql, [*wanted, start, as_of, cat_rule.ORIGINATING_GRADE])
+    except Exception as exc:  # noqa: BLE001 - a missing/renamed table is one clear refusal
+        raise StoreUnreadable(f"catalyst_watchlist: {type(exc).__name__}: {exc}") from exc
+    out: dict[tuple[date, str], list[OrigRow]] = {}
+    for d, symbol, entry_id, grade, direction, age, refs in rows:
+        wr = cat_rule.WatchlistRow(
+            entry_id=str(entry_id), symbol=str(symbol), grade=str(grade),
+            direction=None if direction is None else str(direction),
+            event_age_sessions=None if age is None else int(age),
+            materiality=None, reference_close=None,
+        )
+        if not cat_rule.is_eligible(wr):
+            continue
+        day = d.date() if isinstance(d, datetime) else d
+        out.setdefault((day, wr.symbol), []).append(
+            OrigRow(wr.entry_id, tuple(str(c) for c in (refs or ())), int(age)))
+    return out
+
+
+def load_first_seen(
+    fetchall: Fetch, cluster_ids: Iterable[str], *, as_of: date,
+) -> dict[str, datetime]:
+    """``cluster_id -> first_seen`` (aware IST) for clusters first seen before the end of ``as_of``."""
+    ids = sorted(set(cluster_ids))
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    sql = (f"SELECT cluster_id, first_seen FROM news_clusters WHERE cluster_id IN ({placeholders}) "
+           "AND first_seen < ?")
+    try:
+        rows = fetchall(sql, [*ids, _end_of(as_of)])
+    except Exception as exc:  # noqa: BLE001 - a missing/renamed table is one clear refusal
+        raise StoreUnreadable(f"news_clusters: {type(exc).__name__}: {exc}") from exc
+    out: dict[str, datetime] = {}
+    for cid, seen in rows:
+        try:
+            out[str(cid)] = _ist_dt(seen)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def load_renames(fetchall: Fetch, *, start: date, as_of: date) -> dict[str, str]:
+    """``old -> new`` from :func:`symbol_renames` as of the latest snapshot (identity metadata:
+    reading it past ``as_of`` reads no price), with a lookback covering ``[start, as_of]``."""
+    upto = max(as_of, datetime.now(IST).date())
+    try:
+        found = symbol_renames(fetchall, upto, lookback_days=(upto - start).days)
+    except Exception as exc:  # noqa: BLE001 - a missing/renamed table is one clear refusal
+        raise StoreUnreadable(f"instruments_daily: {type(exc).__name__}: {exc}") from exc
+    return {r.old_symbol: r.new_symbol for r in found}
 
 
 # =============================================================================== report
@@ -569,23 +792,55 @@ def build_report(
     ew_note: str | None = None,
     sizing: Mapping[str, Any] | None = None,
     ex_dates: Mapping[str, Sequence[tuple[date, str]]] | None = None,
+    renames: Mapping[str, str] | None = None,
+    origination: Mapping[tuple[date, str], Sequence[OrigRow]] | None = None,
+    first_seen: Mapping[str, datetime] | None = None,
 ) -> dict[str, Any]:
-    kept, excluded = apply_exclusion([s for s in signals if start <= s.d <= as_of])
-    kept.sort(key=lambda s: (s.d, s.symbol))
+    """The report document. ``signals`` may include rows before ``start`` (the duplicate check's
+    context); only ``[start, as_of]`` is the population. ``origination=None`` (a pure call) skips the
+    entry-timing check and says so in ``meta.entry_timing``; ``main`` always supplies it."""
+    context = sorted({s for s in signals if s.d <= as_of}, key=lambda s: (s.d, s.symbol))
+    kept, excluded = apply_exclusion([s for s in context if s.d >= start])
+    renames = dict(renames or {})
+    families = rename_families(renames)
     # The loaders already bound bars and ex-dates at as_of; clipping again keeps a pure caller
     # lookahead-free too.
-    series_by_symbol = {sym: _clip(s, as_of) for sym, s in series_by_symbol.items()}
-    ex_by_symbol = {sym: [(x, k) for x, k in rows if x <= as_of]
-                    for sym, rows in (ex_dates or {}).items()}
-    ends = [s.dates[-1] for s in series_by_symbol.values() if len(s)]
+    clipped = {sym: _clip(s, as_of) for sym, s in series_by_symbol.items()}
+    ex_clipped = {sym: [(x, k) for x, k in rows if x <= as_of] for sym, rows in (ex_dates or {}).items()}
+    ends = [s.dates[-1] for s in clipped.values() if len(s)]
     stored_through = max(ends) if ends else None
-    assessed = [
-        assess(s, series_by_symbol.get(s.symbol), cost_pct=cost_pct, calendar=calendar,
-               stored_through=stored_through, ex_dates=ex_by_symbol.get(s.symbol, ()))
-        for s in kept
-    ]
-    # VOID is final (no_stop_verdict.look_cohort's _FINAL rows): out of the cohort and every cell.
-    valid = [a for a in assessed if a.status != VOID]
+
+    def names(sym: str) -> tuple[str, ...]:
+        return families.get(sym, (sym,))
+
+    def series_for(sym: str) -> Series | None:
+        return merge_series(sym, [clipped.get(n) for n in names(sym)])
+
+    def ex_for(sym: str) -> list[tuple[date, str]]:
+        return sorted({row for n in names(sym) for row in ex_clipped.get(n, ())})
+
+    dups = ({} if origination is None
+            else find_duplicates(context, origination, lambda s: renames.get(s, s)))
+    assessed: list[Assessed] = []
+    for s in kept:
+        if s in dups:
+            assessed.append(Assessed(s, DUPLICATE, dups[s], None, {}))
+            continue
+        if origination is None:
+            entry: date | None = s.d
+            why = ""
+        else:
+            entry, why = entry_session(s, origination.get((s.d, s.symbol), ()), first_seen or {},
+                                       calendar)
+        if entry is None:
+            assessed.append(Assessed(s, HOLE, why, None, {}))
+            continue
+        assessed.append(assess(s, series_for(s.symbol), entry=entry, cost_pct=cost_pct,
+                               calendar=calendar, stored_through=stored_through,
+                               ex_dates=ex_for(s.symbol)))
+    # VOID and DUPLICATE are final (no_stop_verdict.look_cohort's _FINAL rows): out of the cohort
+    # and every cell.
+    valid = [a for a in assessed if a.status not in FINAL_STATUSES]
     by_signal = {a.signal: a for a in valid}
     cohort = [by_signal[s] for s in fixed_cohort([a.signal for a in valid])]
     thr = {k: margin_threshold_pct(cost_pct, k) for k in HORIZONS}
@@ -602,7 +857,11 @@ def build_report(
             "horizons": h52v.summarize([a.trade for a in members if a.trade is not None], HORIZONS),
         }
     status_counts = {st: sum(1 for a in assessed if a.status == st)
-                     for st in (MEASURED, PENDING, HOLE, VOID)}
+                     for st in (MEASURED, PENDING, HOLE, VOID, DUPLICATE)}
+
+    def listed(status: str) -> list[str]:
+        return [f"{a.signal.d} {a.signal.symbol}: {a.detail}" for a in assessed if a.status == status]
+
     return {
         "meta": {
             "script": "scripts/cat_shadow_verdict.py",
@@ -625,10 +884,14 @@ def build_report(
                 f"= {cost_pct:.4f}% x H / {MARGIN_FLOOR_DAYS}: T+10 {thr[10]:.4f}%, "
                 f"T+20 {thr[20]:.4f}%"
             ),
-            "entry_convention": "OPEN of the journal day d (next-session-open fill after the "
-                                "prior-session-close anchor)",
+            "entry_convention": "OPEN of d when the story was first seen before 09:15 IST on d, "
+                                "else the next session's open (review-driven clarification of "
+                                "'next-session-open fills', 2026-10-26)",
+            "entry_timing": ("checked: catalyst_watchlist originating rows + news_clusters.first_seen"
+                             if origination is not None
+                             else "NOT CHECKED (pure call: no origination supplied; entry = open(d))"),
             "exit_convention": "CLOSE of the k-th session of the hold, entry session first: "
-                               "close(d + k-1 sessions) / open(d) - 1",
+                               "close(entry + k-1 sessions) / open(entry) - 1",
             "segment_bounds": {
                 "o15_first_session": O15_FIRST_SESSION.isoformat(),
                 "o15_provenance": O15_PROVENANCE,
@@ -647,8 +910,10 @@ def build_report(
         "cohort": {
             "members": [
                 {
-                    "d": a.signal.d.isoformat(), "symbol": a.signal.symbol, "status": a.status,
-                    "detail": a.detail,
+                    "d": a.signal.d.isoformat(), "symbol": a.signal.symbol,
+                    "renamed_to": renames.get(a.signal.symbol),
+                    "entry": None if a.entry is None else a.entry.isoformat(),
+                    "status": a.status, "detail": a.detail,
                     "net": {} if a.trade is None
                     else {str(k): round(x, 4) for k, x in sorted(a.trade.net.items())},
                 }
@@ -660,8 +925,10 @@ def build_report(
             "holes": [f"{a.signal.d} {a.signal.symbol}: {a.detail}" for a in cohort
                       if a.status == HOLE],
         },
-        "voids": [f"{a.signal.d} {a.signal.symbol}: {a.detail}" for a in assessed
-                  if a.status == VOID],
+        "voids": listed(VOID),
+        "duplicates": listed(DUPLICATE),
+        "renamed": sorted({f"{s.symbol} (now {renames[s.symbol]})" for s in kept
+                           if s.symbol in renames}),
         "verdict": v,
         "reason": reason,
         "diagnostics": {
@@ -684,6 +951,7 @@ def _hit(v: Any) -> str:
 def render(doc: Mapping[str, Any]) -> str:
     m, pop, coh, dg = doc["meta"], doc["population"], doc["cohort"], doc["diagnostics"]
     sb = m["segment_bounds"]
+    st = pop["status"]
     bar = "=" * 96
     lines = [
         bar,
@@ -701,24 +969,34 @@ def render(doc: Mapping[str, Any]) -> str:
         f"({m['sizing'].get('stop_source') or 'n/a'})",
         f"thresholds      : {m['threshold_derivation']}",
         f"entry           : {m['entry_convention']}",
+        f"  timing        : {m['entry_timing']}",
         f"exit            : {m['exit_convention']}",
         f"population      : {pop['signals_admitted']} admitted signals "
         f"({pop['signals_excluded_clock_restart']} excluded by the clock restart), "
-        f"{pop['sessions']} sessions; measured {pop['status'][MEASURED]}, pending "
-        f"{pop['status'][PENDING]}, holes {pop['status'][HOLE]}, void {pop['status'][VOID]}",
+        f"{pop['sessions']} sessions; measured {st[MEASURED]}, pending {st[PENDING]}, holes "
+        f"{st[HOLE]}, void {st[VOID]}, duplicate {st[DUPLICATE]}",
     ]
+    if doc["renamed"]:
+        lines.append(f"  renamed       : {', '.join(doc['renamed'])} (bars and corp actions merged "
+                     "across the names)")
     if doc["voids"]:
         lines.append("  VOID (unadjusted corp action inside the hold; out of the cohort and every "
                      "cell):")
         lines += [f"    {x}" for x in doc["voids"]]
+    if doc["duplicates"]:
+        lines.append("  DUPLICATE (the same story originated again; out of the cohort and every "
+                     "cell):")
+        lines += [f"    {x}" for x in doc["duplicates"]]
     lines += [
         "-" * 96,
-        f"COHORT (first {m['cohort_size']} non-void by (d, symbol); fixed once cut): "
+        f"COHORT (first {m['cohort_size']} non-void, non-duplicate by (d, symbol); fixed once cut): "
         f"{coh['measured']} of {len(coh['members'])} measured at T+10 and T+20",
     ]
     for mem in coh["members"]:
         nets = "  ".join(f"T+{k} {_pct(mem['net'].get(str(k)))}" for k in m["horizons_sessions"])
-        lines.append(f"  {mem['d']}  {mem['symbol']:<14} {mem['status']:<9} {nets}"
+        name = mem["symbol"] + (f" (now {mem['renamed_to']})" if mem.get("renamed_to") else "")
+        entry = mem.get("entry") or "n/a"
+        lines.append(f"  {mem['d']}  {name:<24} entry {entry:<10}  {mem['status']:<9} {nets}"
                      + (f"   {mem['detail']}" if mem["detail"] else ""))
     if coh["holes"]:
         lines.append("  HOLES (fix the data; each one holds the verdict):")
@@ -726,14 +1004,15 @@ def render(doc: Mapping[str, Any]) -> str:
     lines += [
         "-" * 96,
         f"RULE            : INSUFFICIENT unless sessions >= {m['min_sessions']} AND admitted >= "
-        f"{m['min_signals']} AND every cohort member measured; then RETIRE iff cohort median net "
+        f"{m['min_signals']} AND the first {m['cohort_size']} non-void, non-duplicate signals are "
+        "all measured at T+10 and T+20; then RETIRE iff cohort median net "
         f"T+10 <= {m['thresholds_pct']['10']:.4f}% AND T+20 <= {m['thresholds_pct']['20']:.4f}%, "
         "else OWNER REVIEW",
         f"VERDICT         : {doc['verdict']}   ({doc['reason']})",
     ]
     if doc["verdict"] == VERDICT_RETIRE:
-        lines.append("  => cat origination is retired; the watchlist stays context-only permanently "
-                     "(an owner-visible change citing this report).")
+        lines.append("  => the pre-registered rule retires cat origination; this report changes "
+                     "nothing (retiring is an owner-visible change citing it)")
     elif doc["verdict"] == VERDICT_OWNER_REVIEW:
         lines.append("  => §8.6 owner review (R4) before any live wiring; this result wires nothing.")
     lines += [
@@ -778,7 +1057,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="path to state.db (prescreen_day_slots, equity_snapshots, "
                          "universe_ew_returns)")
     ap.add_argument("--db", type=Path, default=repo_root() / "data" / "market.duckdb",
-                    help="path to market.duckdb (bars_1d, news_clusters)")
+                    help="path to market.duckdb (bars_1d, corp_actions, catalyst_watchlist, "
+                         "news_clusters, instruments_daily)")
     ap.add_argument("--as-of", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD",
                     help="bound BOTH stores at this date (default: today IST)")
     ap.add_argument("--from", dest="start", type=date.fromisoformat, default=CLOCK_RESTART_FROM,
@@ -804,11 +1084,14 @@ def main(argv: list[str] | None = None) -> int:
     if as_of < start:
         print(f"--as-of {as_of} is before --from {start}: no population.", file=sys.stderr)
     calendar = NSECalendar(config_dir() / "calendar", Clock(), include_special=False)
+    # Journal rows from before --from are read only as the duplicate check's context.
+    context_from = start - timedelta(days=DUPLICATE_LOOKBACK_DAYS)
 
     try:
         state = h52v.open_state_db(Path(args.state_db))
         try:
-            signals = load_signal_rows(state, start=start, as_of=as_of, strategy_id=STRATEGY_ID)
+            signals = load_signal_rows(state, start=context_from, as_of=as_of,
+                                       strategy_id=STRATEGY_ID)
             min_equity = h52v.load_min_equity(state, start=start, as_of=as_of)
             daily, ew_note = load_ew_daily(state, as_of=as_of)
         finally:
@@ -818,9 +1101,16 @@ def main(argv: list[str] | None = None) -> int:
             def fetch(sql: str, params: list[Any]) -> Sequence[Sequence[Any]]:
                 return market.execute(sql, params).fetchall()
 
-            symbols = [s.symbol for s in signals]
-            series = load_series(fetch, symbols, start=start, end=as_of)
-            ex_dates = load_ex_dates(fetch, symbols, start=start, as_of=as_of)
+            journal = sorted({s.symbol for s in signals})
+            renames = load_renames(fetch, start=context_from, as_of=as_of)
+            families = rename_families(renames)
+            symbols = sorted({n for s in journal for n in families.get(s, (s,))})
+            series = load_series(fetch, symbols, start=context_from, end=as_of)
+            ex_dates = load_ex_dates(fetch, symbols, start=context_from, as_of=as_of)
+            origination = load_origination(fetch, journal, start=context_from, as_of=as_of)
+            first_seen = load_first_seen(
+                fetch, {c for rows in origination.values() for r in rows for c in r.cluster_refs},
+                as_of=as_of)
             switch = scorer_switch_session(fetch, calendar, as_of=as_of)
         finally:
             market.close()
@@ -835,7 +1125,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     doc = build_report(signals, series, cost_pct=cost_pct, as_of=as_of, start=start,
                        calendar=calendar, scorer_switch=switch, daily=daily, ew_note=ew_note,
-                       sizing=sizing, ex_dates=ex_dates)
+                       sizing=sizing, ex_dates=ex_dates, renames=renames,
+                       origination=origination, first_seen=first_seen)
     print(render(doc))
     if args.json_path:
         Path(args.json_path).write_text(json.dumps(doc, indent=2), encoding="utf-8")

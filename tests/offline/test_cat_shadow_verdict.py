@@ -26,7 +26,7 @@ sys.modules["mt_cat_shadow_verdict"] = cv
 _spec.loader.exec_module(cv)
 
 from engine.core.calendar import NSECalendar  # noqa: E402
-from engine.core.clock import Clock  # noqa: E402
+from engine.core.clock import IST, Clock  # noqa: E402
 from engine.core.config import config_dir  # noqa: E402
 from engine.core.db import connect  # noqa: E402
 from engine.core.migrations import apply_migrations  # noqa: E402
@@ -200,7 +200,7 @@ def test_a_store_hole_in_the_cohort_holds_the_verdict_and_is_listed(cal):
                           calendar=cal)
     assert doc["verdict"] == cv.VERDICT_INSUFFICIENT
     assert doc["cohort"]["holes"] == [f"{sessions[0]} S03: no_bars: no bars_1d rows for this "
-                                      "symbol in the window (renamed or delisted?)"]
+                                      "symbol in the window (delisted?)"]
     assert "S03" in cv.render(doc) and "HOLES" in cv.render(doc)
 
 
@@ -213,7 +213,10 @@ def test_a_full_measured_cohort_retires_end_to_end_on_pure_inputs(cal):
     assert doc["population"]["sessions"] >= 30
     assert doc["verdict"] == cv.VERDICT_RETIRE                 # net = -cost at both horizons
     text = cv.render(doc)
-    assert "RETIRE" in text and "context-only" in text
+    assert ("=> the pre-registered rule retires cat origination; this report changes nothing "
+            "(retiring is an owner-visible change citing it)") in text
+    rule = next(line for line in text.splitlines() if line.startswith("RULE"))
+    assert "20 non-void, non-duplicate" in rule
     for line in text.splitlines():
         if line.startswith(("running", "pre-O15", "O15 +", "Sonnet-5.5", "excess vs EW")):
             assert "decides nothing" in line
@@ -353,7 +356,7 @@ def test_voids_shrinking_the_cohort_below_twenty_hold_the_verdict(cal):
     doc = cv.build_report(signals, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
                           calendar=cal, ex_dates={"S03": [(sessions[5], "bonus")]})
     assert doc["verdict"] == cv.VERDICT_INSUFFICIENT
-    assert "19 of 20 cohort places filled by non-void signals" in doc["reason"]
+    assert "19 of 20 cohort places filled by non-void, non-duplicate signals" in doc["reason"]
 
 
 def test_corp_actions_are_read_bounded_by_as_of_and_by_kind(tmp_path, clock):
@@ -442,7 +445,9 @@ def test_load_signal_rows_defaults_to_hi52_and_the_keyword_selects_cat(tmp_path)
 def _stores(tmp_path: Path, cal: NSECalendar, clock) -> tuple[Path, Path, list[date]]:
     """A migrated state.db and a real MarketStore DuckDB: 20 cat signals on the first session,
     one hi52 row, one cat row late in the window; bars +1% at T+10 and T+20; EW 0.1%/session; one
-    sonnet-5.5 cluster scored 2026-10-04 20:00 UTC (IST 10-05)."""
+    sonnet-5.5 cluster scored 2026-10-04 20:00 UTC (IST 10-05). S00 is renamed S00N at sessions[10]
+    WITHOUT a rekey (its later bars are stored under S00N). Every cat row has its originating
+    watchlist row: the S rows age 1, LATE age 0 with its cluster first seen 08:00 IST on d."""
     sessions = _sessions(cal, 45)
     state = tmp_path / "state.db"
     conn = connect(state)
@@ -464,9 +469,27 @@ def _stores(tmp_path: Path, cal: NSECalendar, clock) -> tuple[Path, Path, list[d
         for sym in [f"S{i:02d}" for i in range(20)] + ["LATE"]:
             for j, d in enumerate(sessions):
                 c = Decimal("101") if j in (9, 19) else Decimal("100")
-                bars.append(DailyBar(symbol=sym, d=d, open=Decimal("100"), high=c, low=c, close=c,
-                                     volume=1, src="bhavcopy"))
+                stored_as = "S00N" if sym == "S00" and j >= 10 else sym
+                bars.append(DailyBar(symbol=stored_as, d=d, open=Decimal("100"), high=c, low=c,
+                                     close=c, volume=1, src="bhavcopy"))
         store.upsert_bars_1d(bars)
+        store.upsert_instruments_daily([
+            {"d": d, "instrument_token": tok, "tradingsymbol": sym, "exchange": "NSE",
+             "segment": "NSE", "instrument_type": "EQ", "tick_size": Decimal("0.05"), "lot_size": 1}
+            for d, tok, sym in [(sessions[9], 1, "RELIANCE"), (sessions[9], 77, "S00"),
+                                (sessions[10], 1, "RELIANCE"), (sessions[10], 77, "S00N")]
+        ])
+        store.replace_catalyst_watchlist(sessions[0], [
+            {"symbol": f"S{i:02d}", "grade": "originating", "direction": "long",
+             "event_type": "order_win", "cluster_refs": [f"k{i:02d}"], "event_age_sessions": 1}
+            for i in range(20)])
+        store.replace_catalyst_watchlist(sessions[40], [
+            {"symbol": "LATE", "grade": "originating", "direction": "long", "event_type": "order_win",
+             "cluster_refs": ["kl"], "event_age_sessions": 0}])
+        seen = datetime.combine(sessions[40], datetime.min.time(), tzinfo=IST) + timedelta(hours=8)
+        store.upsert_news_clusters([{
+            "cluster_id": "kl", "representative": "r", "source_domains": ["a.com"],
+            "first_seen": seen, "last_seen": seen}])
         # After S05's T+20 exit (sessions[19]) and after the early --as-of: voids nothing.
         store.upsert_corp_actions([{"symbol": "S05", "ex_date": sessions[30], "kind": "bonus",
                                     "ratio": None, "amount": None, "source": "t",
@@ -512,12 +535,162 @@ def test_as_of_bounds_both_stores_end_to_end(tmp_path, cal, clock, capsys):
     assert cost < 0.66
     assert doc2["verdict"] == cv.VERDICT_OWNER_REVIEW
     assert doc2["population"]["status"][cv.VOID] == 0 and doc2["voids"] == []
+    # S00's post-rename bars are under S00N (no rekey): followed, merged, measured, and named.
+    assert doc2["cohort"]["members"][0]["status"] == cv.MEASURED
+    assert doc2["renamed"] == ["S00 (now S00N)"] and "S00 (now S00N)" in cv.render(doc2)
+    assert doc2["population"]["status"][cv.DUPLICATE] == 0
     sb = doc2["meta"]["segment_bounds"]
     assert sb["scorer_switch_session"] == "2026-10-06" and "FALLBACK" not in sb["scorer_switch_provenance"]
     assert doc2["diagnostics"]["excess_vs_ew"]["20"]["n"] == 20
     assert doc2["diagnostics"]["segments"]["pre_o15"]["signals"] == 20
     assert doc2["diagnostics"]["segments"]["sonnet55"]["signals"] == 1      # LATE
     assert doc2["meta"]["sizing"]["equity_inr"] == "38000"
+
+
+# ============================================================ 10. the void window is the hold
+def test_a_hole_is_not_voided_by_an_ex_date_after_its_would_be_t20(cal):
+    """Reviewer repro: S03 has no bar on d (and S04 a bad T+20 close); a bonus AFTER the would-be
+    T+20 must not void them — the hole stays, and the verdict stays INSUFFICIENT."""
+    sessions, signals, series = _void_population(cal)
+    s03 = series["S03"]
+    series["S03"] = Series("S03", s03.dates[1:], s03.open[1:], s03.close[1:])    # no bar on d
+    s04 = _series(cal, "S04", start=sessions[0], n=40, t10=103.0, t20=103.0)
+    s04.close[19] = float("nan")                                                # bad T+20 close
+    series["S04"] = s04
+    late_bonus = {"S03": [(sessions[25], "bonus")], "S04": [(sessions[25], "bonus")]}
+    doc = cv.build_report(signals, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, ex_dates=late_bonus)
+    assert doc["population"]["status"][cv.VOID] == 0
+    assert {h.split(": ")[0] for h in doc["cohort"]["holes"]} == {f"{sessions[0]} S03",
+                                                                  f"{sessions[0]} S04"}
+    assert doc["verdict"] == cv.VERDICT_INSUFFICIENT
+    # …while an ex-date INSIDE the would-be hold still voids the hole.
+    inside = {"S03": [(sessions[5], "bonus")]}
+    doc = cv.build_report(signals, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, ex_dates=inside)
+    assert doc["voids"] == [f"{sessions[0]} S03: void_ca: bonus ex-date {sessions[5]}"]
+
+
+# ============================================================ 11. renames
+def test_a_renamed_symbol_measures_whether_or_not_it_was_rekeyed(cal):
+    """Journalled under OLD, renamed to NEW at sessions[10]. Rekeyed: every bar is under NEW. Not
+    rekeyed: bars before the rename under OLD, after it under NEW. Both merge to one series."""
+    sessions = _sessions(cal, 40)
+    full = _series(cal, "X", start=sessions[0], n=40, t10=104.0, t20=108.0)
+
+    def part(sym, lo, hi):
+        return Series(sym, full.dates[lo:hi], full.open[lo:hi], full.close[lo:hi])
+
+    sig = [Signal(sessions[0], "OLD")]
+    for series in ({"NEW": part("NEW", 0, 40)},                               # rekeyed
+                   {"OLD": part("OLD", 0, 10), "NEW": part("NEW", 10, 40)}):  # not rekeyed
+        doc = cv.build_report(sig, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                              calendar=cal, renames={"OLD": "NEW"})
+        m = doc["cohort"]["members"][0]
+        assert m["status"] == cv.MEASURED and m["net"]["20"] == pytest.approx(8.0 - COST)
+        assert doc["renamed"] == ["OLD (now NEW)"]
+    # NEW's row wins on a date both names carry (rekey's rule).
+    both = {"OLD": part("OLD", 0, 40), "NEW": part("NEW", 0, 40)}
+    both["OLD"].close[19] = 50.0
+    doc = cv.build_report(sig, both, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, renames={"OLD": "NEW"})
+    assert doc["cohort"]["members"][0]["net"]["20"] == pytest.approx(8.0 - COST)
+    # Corp actions follow the rename too.
+    doc = cv.build_report(sig, {"NEW": part("NEW", 0, 40)}, cost_pct=COST, as_of=sessions[-1],
+                          start=FIRST, calendar=cal, renames={"OLD": "NEW"},
+                          ex_dates={"NEW": [(sessions[5], "split")]})
+    assert doc["population"]["status"][cv.VOID] == 1
+
+
+# ============================================================ 12. entry timing (lookahead)
+def _orig(age: int, *refs: str) -> list:
+    return [cv.OrigRow("e", tuple(refs), age)]
+
+
+def test_a_story_first_seen_after_the_open_enters_at_the_next_session(cal):
+    """A post-open digest can grade an age-0 cluster first seen 09:40 on d; open(d) would book the
+    announcement move. The entry moves to the next session's open, and the hold counts from there."""
+    sessions = _sessions(cal, 45)
+    d = sessions[0]
+    s = _series(cal, "A", start=d, n=45)
+    s.open[1] = 110.0                         # the announcement gap, booked only by an open(d) entry
+    s.close[20] = 121.0                       # T+20 from the NEXT session = close[1 + 19]
+    at = lambda h, m: datetime.combine(d, datetime.min.time(), tzinfo=IST) + timedelta(hours=h, minutes=m)  # noqa: E731
+    doc = cv.build_report([Signal(d, "A")], {"A": s}, cost_pct=COST, as_of=sessions[-1],
+                          start=FIRST, calendar=cal, origination={(d, "A"): _orig(0, "c1")},
+                          first_seen={"c1": at(9, 40)})
+    m = doc["cohort"]["members"][0]
+    assert m["entry"] == sessions[1].isoformat() and m["status"] == cv.MEASURED
+    assert m["net"]["20"] == pytest.approx((121.0 / 110.0 - 1) * 100 - COST)
+    # Before 09:15 on d (or an age-1 row, which predates d by definition): open(d).
+    for orig, seen in ((_orig(0, "c1"), {"c1": at(9, 14)}), (_orig(1, "zz"), {})):
+        doc = cv.build_report([Signal(d, "A")], {"A": s}, cost_pct=COST, as_of=sessions[-1],
+                              start=FIRST, calendar=cal, origination={(d, "A"): orig},
+                              first_seen=seen)
+        assert doc["cohort"]["members"][0]["entry"] == d.isoformat()
+
+
+def test_a_delayed_entry_starts_the_void_window_and_the_benchmark_at_the_entry_session(cal):
+    sessions = _sessions(cal, 45)
+    d = sessions[0]
+    s = _series(cal, "A", start=d, n=45)
+    late = datetime.combine(d, datetime.min.time(), tzinfo=IST) + timedelta(hours=11)
+    kw = dict(cost_pct=COST, as_of=sessions[-1], start=FIRST, calendar=cal,
+              origination={(d, "A"): _orig(0, "c1")}, first_seen={"c1": late})
+    # An ex-date ON the entry session (d+1) is already in the new unit: no void.
+    doc = cv.build_report([Signal(d, "A")], {"A": s}, ex_dates={"A": [(sessions[1], "bonus")]}, **kw)
+    assert doc["population"]["status"][cv.VOID] == 0
+    # The benchmark compounds entry+1 .. exit: 19 sessions of 0.1% from sessions[2] to sessions[20].
+    daily = {x: 0.001 for x in sessions[2:21]}
+    doc = cv.build_report([Signal(d, "A")], {"A": s}, daily=daily, **kw)
+    assert doc["diagnostics"]["excess_vs_ew"]["20"]["n"] == 1
+
+
+def test_no_originating_row_or_an_unreadable_first_seen_is_a_hole(cal):
+    sessions = _sessions(cal, 40)
+    d = sessions[0]
+    s = {"A": _series(cal, "A", start=d, n=40)}
+    doc = cv.build_report([Signal(d, "A")], s, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, origination={}, first_seen={})
+    assert doc["cohort"]["holes"] == [f"{d} A: no originating catalyst_watchlist row"]
+    doc = cv.build_report([Signal(d, "A")], s, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, origination={(d, "A"): _orig(0, "gone")}, first_seen={})
+    assert doc["cohort"]["holes"][0].startswith(f"{d} A: story first_seen unreadable")
+
+
+# ============================================================ 13. same-story duplicates
+def test_an_age0_then_age1_origination_of_one_story_is_a_duplicate(cal):
+    """First seen on d before d's digest: age 0 on d, age 1 on d+1, both originate. The second
+    shares a cluster with the first: DUPLICATE, out of the cohort, listed with the signal it repeats."""
+    sessions = _sessions(cal, 45)
+    signals = [Signal(sessions[0], f"S{i:02d}") for i in range(20)] + [Signal(sessions[1], "S03")]
+    series = {s.symbol: _series(cal, s.symbol, start=sessions[0], n=45, t10=103.0, t20=103.0)
+              for s in signals}
+    early = datetime.combine(sessions[0], datetime.min.time(), tzinfo=IST) + timedelta(hours=7)
+    orig = {(s.d, s.symbol): _orig(1, f"k{s.symbol}") for s in signals}
+    orig[(sessions[0], "S03")] = _orig(0, "story")
+    orig[(sessions[1], "S03")] = _orig(1, "story", "followup")
+    doc = cv.build_report(signals, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, origination=orig, first_seen={"story": early})
+    assert doc["population"]["status"][cv.DUPLICATE] == 1
+    assert doc["duplicates"] == [f"{sessions[1]} S03: duplicate of {sessions[0]} S03 "
+                                 "(shared cluster story)"]
+    assert len(doc["cohort"]["members"]) == 20
+    assert (sessions[1].isoformat(), "S03") not in {(m["d"], m["symbol"]) for m in doc["cohort"]["members"]}
+    assert doc["diagnostics"]["running"]["20"]["n"] == 20
+
+
+def test_consecutive_rows_from_disjoint_clusters_stay_separate_signals(cal):
+    """Same symbol, same event_type, consecutive days, no shared cluster: two stories by the
+    registered letter, both counted."""
+    sessions = _sessions(cal, 45)
+    signals = [Signal(sessions[0], "A"), Signal(sessions[1], "A")]
+    series = {"A": _series(cal, "A", start=sessions[0], n=45)}
+    orig = {(sessions[0], "A"): _orig(1, "c1"), (sessions[1], "A"): _orig(1, "c2")}
+    doc = cv.build_report(signals, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
+                          calendar=cal, origination=orig, first_seen={})
+    assert doc["population"]["status"][cv.DUPLICATE] == 0 and doc["duplicates"] == []
+    assert len(doc["cohort"]["members"]) == 2
 
 
 def test_the_script_is_read_only_by_construction():
