@@ -2,6 +2,31 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-26 07:05 — Section-3 fixes merged (c887080) and deployed; boot verified (owner: "Merge the changes and deploy")
+
+- **Before:** the clock read 06:57, the log tail held only news polling and health pulses, and the tree was clean.
+  `protected_config_status` showed both stores OK. The branch has no migration, dependency or config change, and
+  the editable install pointed at the live `src`. The engine was on the old code from a 06:50 restart; its token
+  probe was rejected then.
+- **Deploy:**
+  - Stopped at 06:59:01; `exit_clean` at 06:59:06.
+  - Merged `wip/section3` with `--no-ff`. That gives the merge commit c887080 and keeps the branch hashes cited
+    below; phase3 had gained only the WORKLOG commit bfb17f1. The tree matches the reviewed branch plus the
+    WORKLOG.
+  - Dashboard: 92/92 tests, rebuilt; the new bundle carries the `rejection_storm` label. The old dist is in
+    `data\backups\dashboard-dist-pre-section3-20261026`.
+  - Started at 07:02:15.
+- **Boot:**
+  - `engine_boot` 07:02:24, `paper_composed`, `token_probe valid`.
+  - Selftest: 13 PASS, including `native_preload` and both `protected_store` checks; `sdk_smoke` SKIP (deduped
+    for the day).
+  - `startup_complete` with needs_login=false and frozen=[]; `scheduler_started` and `engine_ready` at 07:02:50.
+  - `boot_contract_ok` at elapsed 20.9 s. That is the new watchdog: the old one could log it only after 420 s.
+  - `ticker_resumed tokens=302`, feed HEALTHY, 0 ERROR/CRITICAL lines.
+  - The dashboard serves the new bundle, and `/paper` answers 401 without a token.
+- **Cleanup:** the `..\mt_s3` worktree was removed (junctions unlinked first; the live venv and node_modules were
+  verified intact), and the `wip/section3` branch deleted. Not pushed.
+
 ## 2026-10-26 05:10 — Section-3 fixes built on `wip/section3`, reviewed and validated; NOT merged (owner: "Yes, work on section 3. Review and validate them.")
 
 - **Branch `wip/section3`** (worktree `..\mt_s3`): 11 commits on phase3 3f82c40 (8678428..193457f). Nothing is
