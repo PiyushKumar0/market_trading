@@ -52,6 +52,10 @@ _log = get_logger("engine.marketdata.backfill")
 KITE_MINUTE_CHUNK_DAYS = 60     # max span per minute-interval historical request
 KITE_DAY_CHUNK_DAYS = 2000      # max span per day-interval historical request
 
+#: The failed-span error of a symbol with no instrument token: no request is made, and no retry can
+#: fetch it until the universe or the instrument dump changes.
+_UNKNOWN_TOKEN = "unknown_instrument_token"
+
 
 class BackfillSpan(BaseModel):
     """One per-symbol span in a :class:`BackfillReport` (ISO strings; a report, not a query key)."""
@@ -87,6 +91,20 @@ class BackfillReport(BaseModel):
     #: across enough of the swept symbols to be a feed/vendor gap rather than thin symbols going
     #: quiet together, so it is left a hole (2026-09-18).
     no_trade_correlated_skipped: int = 0
+
+    @property
+    def ok(self) -> bool:
+        """The job watermark's verdict (``ops.jobs._job_result_ok``): False when any span failed for
+        a reason other than a missing instrument token (a rejected token, a broker or network error),
+        so catch-up retries the day, until the 7-day give-up, for the symbols still behind their
+        checkpoint (a hole a later day's fetch stepped over is the boot/post-login ``daily_gap``
+        repair's). One symbol with no token never sinks the day: no retry can fetch it, and a failed
+        ``daily_bars`` day holds ``rec_outcomes``. EVERY requested symbol without one is an empty or
+        degraded token map that a later instruments refresh rebuilds, so that does."""
+        if any(span.error != _UNKNOWN_TOKEN for span in self.failed):
+            return False
+        unknown = {span.symbol for span in self.failed}
+        return not self.requested or not {span.symbol for span in self.requested} <= unknown
 
 
 def _candle_field(candle: Any, name: str) -> Any:
@@ -197,7 +215,7 @@ class BackfillJob:
                 report.failed.append(
                     BackfillSpan(
                         symbol=symbol, frm=eff_start.isoformat(), to=end.isoformat(),
-                        error="unknown_instrument_token",
+                        error=_UNKNOWN_TOKEN,
                     )
                 )
                 _log.warning("backfill_unknown_token", symbol=symbol)
@@ -353,7 +371,7 @@ class BackfillJob:
                 report.failed.append(
                     BackfillSpan(
                         symbol=symbol, frm=frm.isoformat(), to=to.isoformat(),
-                        error="unknown_instrument_token",
+                        error=_UNKNOWN_TOKEN,
                     )
                 )
                 _log.warning("warmup_gap_unknown_token", symbol=symbol)
@@ -505,7 +523,7 @@ class BackfillJob:
                 report.failed.append(
                     BackfillSpan(
                         symbol=symbol, frm=oldest.isoformat(), to=newest.isoformat(),
-                        error="unknown_instrument_token",
+                        error=_UNKNOWN_TOKEN,
                     )
                 )
                 _log.warning("daily_gap_unknown_token", symbol=symbol)

@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from engine.marketdata.store import MarketStore, SymbolRename
+from engine.marketdata.store import MarketStore, SymbolRename, symbol_renames
 from tests.conftest import FIXED_NOW
 
 D = FIXED_NOW.date()
@@ -129,3 +129,23 @@ def test_lookback_window_and_as_of_bound_the_scan(store):
     assert store.get_symbol_renames(D, lookback_days=10) == []
     # Snapshots after as_of are ignored: on D the token is still NEWCO.
     assert [(r.old_symbol, r.new_symbol) for r in store.get_symbol_renames(D)] == [("OLDCO", "NEWCO")]
+
+
+def test_the_module_function_is_the_method_on_any_fetchall(store, tmp_path):
+    """``symbol_renames`` is the method's SQL behind a fetchall callable, so a read-only report
+    (scripts/cat_shadow_verdict.py) derives the same renames from a ``read_only=True`` connection."""
+    import duckdb
+
+    snapshots(store, {D - timedelta(days=2): [(77, "AAA")],
+                      D - timedelta(days=1): [(77, "BBB")],
+                      D: [(77, "CCC")]})
+    expected = store.get_symbol_renames(D)
+    store.close()
+    con = duckdb.connect(str(tmp_path / "market.duckdb"), read_only=True)
+    try:
+        got = symbol_renames(lambda sql, params: con.execute(sql, params).fetchall(), D)
+        assert got == expected and len(got) == 2
+        assert symbol_renames(lambda sql, params: con.execute(sql, params).fetchall(), D,
+                              lookback_days=0) == []
+    finally:
+        con.close()

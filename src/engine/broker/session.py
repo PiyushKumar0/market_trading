@@ -258,8 +258,13 @@ class SessionManager:
         this; ``_last_success`` is informational — :meth:`token_valid` ignores it."""
         self._last_success = self._clock.now()
 
-    async def on_token_rejected(self) -> None:
+    async def on_token_rejected(self, token: str | None) -> None:
         """Mid-day invalidation: a live call returned 403/TokenException (R6).
+
+        ``token`` is the access token the failing request was sent with. A rejection of a token that
+        is no longer the session's current one (a re-login landed while the call was in flight) is
+        ignored entirely — the same superseded rule as :meth:`verify_token`, mirroring the
+        2026-10-21 probe incident where an old token's rejection marked the fresh token dead.
 
         Marks the token invalid and fires the invalidation hook (which publishes a risk/feed event);
         the caller freezes entries and alerts the owner. Idempotent — repeated 403s in a burst only
@@ -274,6 +279,9 @@ class SessionManager:
         earlier. A boot-probe rejection now costs at most ONE redundant alert (the same deliberate
         redundancy posture as the 08:40 token_check job); silence costs a frozen, unexplained day.
         """
+        if token != self._access_token:
+            _log.warning("token_rejected_superseded")
+            return
         already = self._breaker_fired
         self._rejected = True
         _log.warning("token_rejected", at=self._clock.now().isoformat(), first=not already)

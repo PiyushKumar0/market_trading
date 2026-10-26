@@ -197,6 +197,22 @@ def test_the_population_is_hi52_rows_from_the_promotion_day_onward(tmp_path):
     ]
 
 
+def test_the_strategy_keyword_selects_another_strategy_s_rows_and_defaults_to_hi52(tmp_path):
+    """``scripts/cat_shadow_verdict.py`` reads ``cat``'s population through the same loader; the
+    default keeps every hi52 caller on hi52."""
+    path = _state_db(tmp_path, [
+        ("2026-09-14", "BHEL", "hi52"), ("2026-09-14", "TCS", "cat"), ("2026-09-15", "ABB", "cat"),
+    ])
+    conn = connect(path)
+    try:
+        window = {"start": PROMOTION_DATE, "as_of": date(2026, 9, 30)}
+        assert load_signal_rows(conn, **window) == [Signal(date(2026, 9, 14), "BHEL")]
+        assert load_signal_rows(conn, **window, strategy_id="cat") == [
+            Signal(date(2026, 9, 14), "TCS"), Signal(date(2026, 9, 15), "ABB")]
+    finally:
+        conn.close()
+
+
 def test_the_sized_notional_is_the_7_1_cap_and_nothing_chosen_by_hand():
     """§7.1 caps a swing position at `swing_position_pct`% of equity charged at `overnight_gap_mult`
     × the stop distance, so the notional is `equity × 2% / (2.5 × 6%)` = equity/7.5 — the price

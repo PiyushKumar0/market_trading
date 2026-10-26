@@ -307,6 +307,10 @@ const HALT: Table = {
     label: 'Reset in progress',
     hint: 'Closing every paper position; a fresh paper account starts once the book is flat.',
   },
+  rejection_storm: {
+    label: 'Broker rejection storm',
+    hint: 'Three or more paper orders were rejected within a minute: new paper trades pause until the next session.',
+  },
 }
 export const haltTerm = (cause: string): Term => lookup(HALT, cause)
 

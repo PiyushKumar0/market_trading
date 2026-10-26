@@ -159,6 +159,56 @@ class SymbolRename(BaseModel):
     effective_d: date
 
 
+def symbol_renames(
+    fetchall: Callable[[str, list[Any]], Sequence[Sequence[Any]]],
+    as_of: date,
+    *,
+    lookback_days: int = 120,
+) -> list[SymbolRename]:
+    """NSE equity symbol changes visible in the ``instruments_daily`` snapshots of the
+    ``lookback_days`` up to ``as_of`` (2026-10-23 ICICIPRULI→ICICILIFE). ``fetchall(sql, params)``
+    runs one DuckDB query — :meth:`MarketStore.get_symbol_renames` passes its own, a read-only
+    report its ``read_only=True`` connection's.
+
+    Kite keeps the instrument token across an NSE symbol change (every token→symbol change in
+    2026-07-20..10-23 was a genuine rename, HEG→HEGAM across a 17-day suspension) while the NSE
+    index lists and the Zerodha MIS file lag it by days. A symbol is RETIRED when it named an
+    NSE cash-equity token inside the window and names nothing in the latest snapshot; it maps to
+    that token's symbol in the latest snapshot. Series moves (``-BE``→``-BZ``) get a new token
+    and never match; a token gone from the latest snapshot maps nothing; a retired symbol that
+    named two different live tokens is ambiguous and dropped. Derived on every call — no state."""
+    rows = fetchall(
+        """
+        WITH eq AS (
+            SELECT d, instrument_token, tradingsymbol FROM instruments_daily
+            WHERE exchange = 'NSE' AND segment = 'NSE' AND instrument_type = 'EQ'
+              AND d <= ? AND d >= ?
+        ),
+        cur AS (SELECT instrument_token, tradingsymbol FROM eq WHERE d = (SELECT max(d) FROM eq)),
+        pairs AS (
+            SELECT e.tradingsymbol AS old_symbol, c.tradingsymbol AS new_symbol,
+                   c.instrument_token, max(e.d) AS last_old_d
+            FROM eq e JOIN cur c ON c.instrument_token = e.instrument_token
+            WHERE e.tradingsymbol <> c.tradingsymbol
+              AND e.tradingsymbol NOT IN (SELECT tradingsymbol FROM cur)
+            GROUP BY 1, 2, 3
+        )
+        SELECT p.old_symbol, p.new_symbol, p.instrument_token,
+               (SELECT min(e2.d) FROM eq e2
+                 WHERE e2.instrument_token = p.instrument_token
+                   AND e2.tradingsymbol = p.new_symbol AND e2.d > p.last_old_d) AS effective_d
+        FROM pairs p
+        WHERE p.old_symbol IN (SELECT old_symbol FROM pairs GROUP BY 1 HAVING count(*) = 1)
+        ORDER BY effective_d, p.old_symbol
+        """,
+        [as_of, as_of - timedelta(days=lookback_days)],
+    )
+    return [
+        SymbolRename(old_symbol=old, new_symbol=new, instrument_token=token, effective_d=eff)
+        for old, new, token, eff in rows
+    ]
+
+
 class RekeyCount(BaseModel):
     """One column's outcome in :meth:`MarketStore.rekey_symbol` (an array column counts the rows whose
     array names the symbol)."""
@@ -1910,45 +1960,9 @@ class MarketStore:
 
     def get_symbol_renames(self, as_of: date, *, lookback_days: int = 120) -> list[SymbolRename]:
         """NSE equity symbol changes visible in the ``instruments_daily`` snapshots of the
-        ``lookback_days`` up to ``as_of`` (2026-10-23 ICICIPRULI→ICICILIFE).
-
-        Kite keeps the instrument token across an NSE symbol change (every token→symbol change in
-        2026-07-20..10-23 was a genuine rename, HEG→HEGAM across a 17-day suspension) while the NSE
-        index lists and the Zerodha MIS file lag it by days. A symbol is RETIRED when it named an
-        NSE cash-equity token inside the window and names nothing in the latest snapshot; it maps to
-        that token's symbol in the latest snapshot. Series moves (``-BE``→``-BZ``) get a new token
-        and never match; a token gone from the latest snapshot maps nothing; a retired symbol that
-        named two different live tokens is ambiguous and dropped. Derived on every call — no state."""
-        rows = self._fetchall(
-            """
-            WITH eq AS (
-                SELECT d, instrument_token, tradingsymbol FROM instruments_daily
-                WHERE exchange = 'NSE' AND segment = 'NSE' AND instrument_type = 'EQ'
-                  AND d <= ? AND d >= ?
-            ),
-            cur AS (SELECT instrument_token, tradingsymbol FROM eq WHERE d = (SELECT max(d) FROM eq)),
-            pairs AS (
-                SELECT e.tradingsymbol AS old_symbol, c.tradingsymbol AS new_symbol,
-                       c.instrument_token, max(e.d) AS last_old_d
-                FROM eq e JOIN cur c ON c.instrument_token = e.instrument_token
-                WHERE e.tradingsymbol <> c.tradingsymbol
-                  AND e.tradingsymbol NOT IN (SELECT tradingsymbol FROM cur)
-                GROUP BY 1, 2, 3
-            )
-            SELECT p.old_symbol, p.new_symbol, p.instrument_token,
-                   (SELECT min(e2.d) FROM eq e2
-                     WHERE e2.instrument_token = p.instrument_token
-                       AND e2.tradingsymbol = p.new_symbol AND e2.d > p.last_old_d) AS effective_d
-            FROM pairs p
-            WHERE p.old_symbol IN (SELECT old_symbol FROM pairs GROUP BY 1 HAVING count(*) = 1)
-            ORDER BY effective_d, p.old_symbol
-            """,
-            [as_of, as_of - timedelta(days=lookback_days)],
-        )
-        return [
-            SymbolRename(old_symbol=old, new_symbol=new, instrument_token=token, effective_d=eff)
-            for old, new, token, eff in rows
-        ]
+        ``lookback_days`` up to ``as_of`` (2026-10-23 ICICIPRULI→ICICILIFE) — :func:`symbol_renames`
+        on this store's connection."""
+        return symbol_renames(self._fetchall, as_of, lookback_days=lookback_days)
 
     def rename_trading_gap(self, old: str, new: str) -> int:
         """Market sessions (days ``bars_1d`` holds for any symbol) strictly between ``old``'s last daily

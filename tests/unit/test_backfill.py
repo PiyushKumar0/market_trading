@@ -183,6 +183,7 @@ async def test_failure_keeps_checkpoint_and_resume_continues(store, clock, conn)
     assert len(report.failed) == 1
     assert report.failed[0].frm == "2026-03-02"                 # the abandoned span, with its error
     assert "kite says no" in report.failed[0].error
+    assert report.ok is False                                   # retryable: the day's job fails
     assert _checkpoint(conn, "RELIANCE", "minute") == "2026-03-01"   # last SUCCESS only
 
     kite2 = FakeKite(one_minute_candle)
@@ -192,7 +193,7 @@ async def test_failure_keeps_checkpoint_and_resume_continues(store, clock, conn)
         (dt.date(2026, 3, 2), dt.date(2026, 4, 30)),
         (dt.date(2026, 5, 1), dt.date(2026, 5, 10)),
     ]
-    assert not report2.failed
+    assert not report2.failed and report2.ok is True
     assert _checkpoint(conn, "RELIANCE", "minute") == end.isoformat()
 
 
@@ -203,6 +204,9 @@ async def test_unknown_token_is_reported_failed_without_a_request(store, clock, 
     assert kite.calls == []
     assert len(report.failed) == 1
     assert report.failed[0].error == "unknown_instrument_token"
+    assert report.ok is False                   # every symbol unmapped: an empty token map, retried
+    report = await job.run(["NOSUCH", "RELIANCE"], "minute", dt.date(2026, 1, 1), dt.date(2026, 1, 10))
+    assert report.ok is True                    # one unmapped symbol: no retry can fetch it
 
 
 # ------------------------------------------------------------------ TokenException abort (2026-07-21)
@@ -233,6 +237,7 @@ async def test_run_aborts_whole_run_on_token_rejection(store, clock, conn):
     assert by_symbol["TCS"] == "aborted_token_rejected"
     assert by_symbol["INFY"] == "aborted_token_rejected"
     assert report.fetched == []
+    assert report.ok is False                              # the sweep retries it after re-login
 
 
 async def test_run_non_token_error_only_fails_that_symbol_and_continues(store, clock, conn):
@@ -244,6 +249,7 @@ async def test_run_non_token_error_only_fails_that_symbol_and_continues(store, c
     assert [f.symbol for f in report.failed] == ["RELIANCE"]
     assert "RuntimeError" in report.failed[0].error
     assert [f.symbol for f in report.fetched] == ["TCS"]   # TCS proceeded after RELIANCE failed
+    assert report.ok is False                              # one retryable failure sinks the day
 
 
 async def test_warmup_gap_aborts_whole_run_on_token_rejection(store, clock, conn):

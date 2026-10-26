@@ -504,3 +504,126 @@ async def test_origination_watch_failures_never_break_the_pulse():
     report = await plain.check(check_skew=False)
     assert "entries_frozen_in_session" not in report.problems
     assert "funnel_zero_in_session" not in report.problems
+
+
+# ------------------------------------------ stopped feed in session (2026-10-21: ticker never started)
+# The health pulse only runs while the engine is UP, so an armed, in-session STOPPED feed is no market
+# data, not "intentionally off". health logged problems=[] all session on 10-21.
+def _stopped_monitor(*, state: str = "STOPPED", mode: str = "RECOMMEND", token_valid=None,
+                     at: datetime | None = None, mode_wired: bool = True):
+    clock_at = _Ticker(at or datetime(2026, 6, 17, 10, 0, tzinfo=IST))
+    clock = Clock(time_source=clock_at)
+    alerts: list[tuple[str, str]] = []
+
+    async def alert(severity: str, message: str) -> None:
+        alerts.append((severity, message))
+
+    feed = FakeTicker(state)
+    mon = HealthMonitor(clock, load_settings(), ticker_supervisor=feed, alert=alert,
+                        calendar=NSECalendar(config_dir() / "calendar", clock, strict=False),
+                        mode_manager=_FakeMode(mode, "NORMAL") if mode_wired else None,
+                        token_valid=token_valid)
+    return mon, alerts, clock_at, feed
+
+
+async def _pulses(mon, clock_at, minutes: int):
+    report = None
+    for _ in range(minutes):
+        clock_at.at = clock_at.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False)
+    return report
+
+
+async def test_feed_stopped_in_session_quiet_before_grace_then_pages_with_detail():
+    mon, alerts, clock_at, _ = _stopped_monitor(token_valid=lambda: True)
+
+    report = await _pulses(mon, clock_at, 30)             # observed minutes 1..30 -> clock at 29m
+    assert "feed_stopped_in_session" not in report.problems
+    assert alerts == []
+
+    report = await _pulses(mon, clock_at, 1)              # 30 contiguous minutes
+    assert "feed_stopped_in_session" in report.problems
+    assert "feed_stale" not in report.problems
+    assert report.problem_details["feed_stopped_in_session"] == (
+        "ticker STOPPED for 30m (Kite token valid: yes)")
+    assert any("feed_stopped_in_session" in m and "Kite token valid: yes" in m for _s, m in alerts)
+
+
+@pytest.mark.parametrize("probe,expected", [
+    (lambda: True, "yes"), (lambda: False, "no"), (None, "unknown"),
+    (lambda: (_ for _ in ()).throw(RuntimeError("boom")), "unknown"),
+])
+async def test_feed_stopped_detail_reports_the_token_verdict(probe, expected):
+    mon, _alerts, clock_at, _ = _stopped_monitor(token_valid=probe)
+    report = await _pulses(mon, clock_at, 31)
+    assert report.problem_details["feed_stopped_in_session"].endswith(f"(Kite token valid: {expected})")
+
+
+async def test_feed_stopped_during_startup_recovery_says_the_ticker_waits_for_it():
+    """A boot-phase pulse: the ticker starts only after startup recovery, so the page says so."""
+    mon, _alerts, clock_at, _ = _stopped_monitor(token_valid=lambda: True)
+    for _ in range(31):
+        clock_at.at = clock_at.at + timedelta(minutes=1)
+        report = await mon.check(check_skew=False, booting=True)
+    assert report.problem_details["feed_stopped_in_session"] == (
+        "ticker STOPPED for 30m (Kite token valid: yes); startup recovery is still running and the "
+        "ticker starts after it")
+
+
+async def test_feed_stopped_clock_resets_when_the_feed_leaves_stopped():
+    mon, alerts, clock_at, feed = _stopped_monitor()
+    await _pulses(mon, clock_at, 25)
+    feed._state = "HEALTHY"
+    await _pulses(mon, clock_at, 1)
+    feed._state = "STOPPED"                               # a NEW episode: 10 contiguous minutes only
+    report = await _pulses(mon, clock_at, 10)
+    assert "feed_stopped_in_session" not in report.problems
+    assert alerts == []
+
+
+async def test_feed_stopped_clock_resets_when_the_session_closes():
+    mon, alerts, clock_at, _ = _stopped_monitor(at=datetime(2026, 6, 17, 15, 20, tzinfo=IST))
+    await _pulses(mon, clock_at, 25)                      # 15:21..15:45: closes at 15:30
+    assert alerts == []
+    clock_at.at = datetime(2026, 6, 18, 9, 14, tzinfo=IST)   # next morning, pre-open
+    await mon.check(check_skew=False)
+    assert mon._feed_stopped_since is None
+    report = await _pulses(mon, clock_at, 10)             # 09:15..09:24 — only 10 in-session minutes
+    assert "feed_stopped_in_session" not in report.problems
+
+
+async def test_feed_stopped_clock_resets_when_the_mode_goes_off():
+    mon, alerts, clock_at, _ = _stopped_monitor()
+    await _pulses(mon, clock_at, 25)
+    mon._mode_manager = _FakeMode("OFF", "NORMAL")
+    await _pulses(mon, clock_at, 1)
+    assert mon._feed_stopped_since is None
+    mon._mode_manager = _FakeMode("RECOMMEND", "NORMAL")
+    report = await _pulses(mon, clock_at, 10)
+    assert "feed_stopped_in_session" not in report.problems
+    assert alerts == []
+
+
+async def test_feed_warming_never_triggers_feed_stopped():
+    mon, alerts, clock_at, _ = _stopped_monitor(state="WARMING")
+    report = await _pulses(mon, clock_at, 90)
+    assert report.problems == [] and alerts == []
+
+
+async def test_feed_stopped_is_inert_without_a_mode_manager():
+    mon, alerts, clock_at, _ = _stopped_monitor(mode_wired=False)
+    report = await _pulses(mon, clock_at, 60)
+    assert "feed_stopped_in_session" not in report.problems
+    assert alerts == []
+
+
+async def test_feed_stopped_watch_failure_never_breaks_the_pulse():
+    mon, _alerts, clock_at, _ = _stopped_monitor()
+
+    def boom():
+        raise RuntimeError("mode read failed")
+
+    mon._mode_manager.mode = boom
+    clock_at.at = clock_at.at + timedelta(minutes=1)
+    report = await mon.check(check_skew=False)            # must not raise
+    assert report.feed_state == "STOPPED"

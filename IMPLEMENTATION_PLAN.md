@@ -39,7 +39,8 @@ and the other removed design and research documents are in git at commit `417da7
   `settings.yaml` `hi52`).
 - **D14 paper no-stop test** (hi52, ins, brk20 paper positions carry no stop and exit at session 20). Verdict at the
   pinned looks 20 and 40: `scripts/no_stop_verdict.py`; operation and rollback in RUNBOOK "No-stop exit test".
-- **`cat` v2 shadow verdict — not yet run.** Pre-registered: at ≥30 sessions and ≥20 admitted signals, measure T+10 and
+- **`cat` v2 shadow verdict — not yet run.** Mechanical verdict: `scripts/cat_shadow_verdict.py` (conventions in the
+  script; COMMANDS "cat v2 shadow verdict"). Pre-registered: at ≥30 sessions and ≥20 admitted signals, measure T+10 and
   T+20 net drift at spread-inclusive CNC costs with the WO-3 margin floor. Net ≤ the cost floor at both horizons ⇒
   `cat` origination is retired and the watchlist stays context-only; clears ⇒ owner review for live (Phase 4 `cat`
   gate). Thresholds (`cat.materiality_min` and the rest) stay frozen for the whole window; moving one restarts the
@@ -67,30 +68,26 @@ and the other removed design and research documents are in git at commit `417da7
 
 ## 4. Known defects and test gaps
 
-- `job_daily_bars` records success even when every fetch failed (found 2026-10-11).
-- The `boot_incomplete` alarm fires on a fixed 420 s deadline, so a slow but healthy boot alerts falsely.
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
-- A billing-error DG4 is never published on `budget.state`: the harness calls `note_billing_error`, and
-  `governor.raise_billing_error` has no caller.
+- The 08:40 `token_check` sends a "token invalid, re-login" page when a login lands while its probe is in flight;
+  the mid-day breaker ignores such a superseded token, this job does not.
+- A billing-error DG4 latch lives in memory only: an engine restart clears it without a DG4 → DG0 alert (R8), and the
+  dashboard's DG4 hint says it lasts until the weekly reset.
+- `cat` scanner: a story first seen on d before d's digest originates at age 0 on d and again at age 1 on d+1
+  (prescreen dedupes per day only), which `cat.py` itself calls a double count. The verdict script drops the repeat;
+  fixing the scanner changes the shadow population mid-window, so it is an owner decision.
 - Per-cluster news-score drops are counted in the scoring log but leave no audit row.
 - The headline clusterer can merge different companies' PRs that share a template into one cluster (the
   boilerplate list covers earnings templates only).
-- Rejection storm: ≥3 rejects in 60 s should FROZEN (`CAUSE_REJECTION_STORM` is never set); clock skew is checked at
-  boot only, not mid-session.
+- Rejection storm, real path: paper latches its own daily `rejection_storm` halt at ≥3 broker rejects in 60 s, but
+  `CAUSE_REJECTION_STORM` on the real latch (owner `/resume_entries`) and the ≥3-storms-per-session kill land with the
+  Phase-4 live OMS. Clock skew is checked at boot only, not mid-session.
 - O19 capital change: a held symbol that stopped storing bars blocks every capital change with a 409 (the 10-day
   lookback of ruling R16); no unit test pins the warm-before-copy rule on the twin rows (only NULL-P&L rows care).
-- Paper GTT legs fire on a touch (`paper/broker.py`, `ltp <= trigger` / `>=`), but every GTT test fires on a cross,
-  so a `<`/`>` regression on the protective leg passes. A ~10-line test over both legs closes it.
-- `test_cat_scanner.py::test_defaults_match_the_shipped_settings_block` compares literals and never reads
-  `settings.yaml`; compare against `load_settings()` (the `cat` v2 thresholds are frozen, so drift matters).
-- `tests/offline/test_hi52_forward_verdict.py` freezes the ₹8,000 cost floor at 0.4343; compare with
-  `fv.cost_floor_pct(Decimal("8000"))` so a fee re-scrape does not break it.
-- `test_prescreen.py::test_displacement_margin_is_an_owner_knob_in_settings`: the hand-off of the settings value into
-  the pre-screen in `ops/main.py` is not pinned.
-- Research CLI tests (offline): `test_backtest_cli.py` never checks the `index_symbol` hand-off to `SweepRunner`;
-  `test_backtest_hi52.py` has no v2 trigger day above the 0.07 smooth cap; `test_filings_experiments.py` e1/e2 stop
-  checking `honest n=0` if the fixture ever yields trades; `test_research_studies.py`'s brk20 reference arm needs the
-  untracked research snapshot and report, so it skips in a clean checkout.
+- `tests/offline/test_research_studies.py`'s brk20 reference arm needs the untracked research snapshot and report, so
+  it skips in a clean checkout. A committed fixture closes it: a trimmed snapshot with a regenerated reference cell, or
+  synthetic bars with the cell computed from them (the registered cell is a full-universe number, so a trimmed
+  snapshot cannot reproduce it).
 
 ## 5. Gate G3 — paper → live AUTO
 

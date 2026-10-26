@@ -269,7 +269,7 @@ def test_the_notional_override_is_shouted_not_whispered(tmp_path):
     cost, sizing = fv.resolve_cost_floor(
         limits_path=_LIMITS, equity_override=None, min_equity=None,
         notional_override=Decimal("8000"))
-    assert cost == pytest.approx(0.4343, abs=1e-3)        # the ₹8,000 floor the review refuted
+    assert cost == pytest.approx(float(fv.cost_floor_pct(Decimal("8000"))))  # the ₹8,000 floor the review refuted
     assert sizing["override"] is True and sizing["derivation"].startswith("OVERRIDE")
     doc = _report(*_population(20, t20_close=103.0))
     doc["meta"]["sizing"] = sizing
@@ -280,6 +280,10 @@ def test_the_notional_override_is_shouted_not_whispered(tmp_path):
         limits_path=_LIMITS, equity_override=Decimal("36000"), min_equity=None)
     # Rs 36,000 x 2% / (2.0 x 6%) = Rs 6,000 (O17; Rs 4,800 at the pre-O17 2.5x)
     assert sizing2["override"] is False and Decimal(sizing2["notional_inr"]) == Decimal("6000")
+    # Another rule's stop (cat's 5%, scripts/cat_shadow_verdict.py) moves the notional: Rs 7,200.
+    assert Decimal(fv.resolve_cost_floor(
+        limits_path=_LIMITS, equity_override=Decimal("36000"), min_equity=None,
+        stop_pct=Decimal("5.0"))[1]["notional_inr"]) == Decimal("7200")
     assert cost2 > cost                                   # the real floor is HIGHER than ₹8,000's
     assert "[OVERRIDE]" not in fv.render(_report(*_population(20, t20_close=103.0)))
 

@@ -25,23 +25,32 @@ Clauses asserted here:
   spend the budget, the 71st is budget-rejected before the broker is touched, the kill switch is
   thrown, and exit / square-off / cancel / GTT calls still reach the broker, paced behind the SAME
   1/s bucket, including a retry after a 429: ``test_entry_budget_exhausted_flatten_lane_never_starved``.
+* **≥3 rejects/60 s ⇒ FROZEN + alert (§3.5.1), paper path** — the real ``PaperBroker`` rejects three
+  entries inside 60 s, the real paper ``OrderManager`` reports each broker rejection to the real
+  ``PaperRisk``, which latches the daily ``rejection_storm`` paper halt (FROZEN; the alert is the
+  ``paper_halt_set`` WARNING, paper plan D4); the next entry is refused by ``paper_order_guard``
+  before the broker while an exit still places, and the real risk latch is untouched:
+  ``test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place``.
 
 Clauses skipped (with the reason printed by ``-rs``):
 
-* **≥3 rejects/60 s ⇒ FROZEN + alert (§3.5.1)** — UNBUILT: the cause constant and its owner clear
-  path exist, nothing detects the storm (see ``test_three_rejects_in_60s_freeze_entries_and_alert``).
+* **≥3 rejects/60 s ⇒ FROZEN + alert (§3.5.1), real path** — lands with the Phase-4 live OMS:
+  ``CAUSE_REJECTION_STORM`` on the real ``RiskStateLatch``, its owner ``/resume_entries`` clear, and the
+  ≥3-storms-per-session kill (see ``test_three_rejects_in_60s_freeze_entries_and_alert``).
 * **retry/backoff policy** — UNBUILT: ``KiteClient`` re-raises every broker error and nothing above
   it retries; the pacing half of the clause is asserted above.
 
-Phase-2 reality: RECOMMEND mode places zero broker orders (B7), so this scenario runs the order
-surface in AUTO(paper routing) exactly as the Phase-3 OMS will drive it; nothing here depends on an
-unbuilt Phase-3 component except the two skipped clauses.
+Phase-2 reality: RECOMMEND mode places zero broker orders (B7), so the KiteClient scenarios run the
+order surface in AUTO(paper routing) exactly as the Phase-3 OMS will drive it; nothing here depends on
+an unbuilt component except the two skipped clauses.
 """
 
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -52,10 +61,17 @@ from engine.broker.rate_limiter import EntryBudgetExhausted, RateLimiter
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import config_dir
+from engine.core.contracts import PAPER_ORDER_UPDATE_TOPIC, EnterAction, GateVerdict
 from engine.core.enums import Actor, Mode, RiskState
 from engine.core.eventbus import EventBus
 from engine.core.types import OwnerConfirmation
+from engine.oms.manager import OrderManager, paper_order_guard
+from engine.oms.state import OrderState
+from engine.oms.store import OrderStore
 from engine.ops.main import make_order_guard
+from engine.ops.paper_risk import STORM_REJECTS, STORM_WINDOW, PaperRisk, active_halts, paper_effective_state
+from engine.paper.broker import PaperBroker
+from engine.paper.fill_model import FillModelConfig
 from engine.risk.causes import RiskStateLatch
 from engine.risk.events import TOPIC_KILL_STATE
 from engine.risk.kill import KillSwitch, KillSwitchEngaged
@@ -256,18 +272,123 @@ async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -
     assert lane_times[1] - lane_times[0] >= ONE_S - timedelta(milliseconds=1)
 
 
+# --------------------------------------------------------------------------- the paper path (§3.5.1)
+#: High enough that a short search finds a seed rejecting exactly the first ``STORM_REJECTS`` placements.
+_RATE = 0.9
+
+
+def _seed_rejecting_first(n: int) -> int:
+    """A PaperBroker seed whose injected-rejection draws reject placements 1..n and accept n+1. The
+    broker draws once per placement that passes its guard (``PaperBroker.place_order``), so the
+    sequence is a pure function of (seed, placement count)."""
+    for seed in range(10_000):
+        rng = random.Random(seed)
+        draws = [rng.random() for _ in range(n + 1)]
+        if all(d < _RATE for d in draws[:n]) and draws[n] >= _RATE:
+            return seed
+    raise AssertionError("no seed found")
+
+
+def _seed_verdict(conn, n: int) -> tuple[EnterAction, GateVerdict]:
+    proposal = EnterAction(
+        action="enter", proposal_id=f"P{n}", thesis="chaos case 6 paper storm thesis", confidence=0.6,
+        tradingsymbol="TCS", exchange="NSE", side="BUY", style="swing", entry_type="MARKET",
+        stop_price=Decimal("95"), quantity=10, signal_id="s", strategy_id="hi52", features_snapshot_id="f",
+    )
+    verdict = GateVerdict(
+        verdict_id=f"V{n}", proposal_id=proposal.proposal_id, verdict="approve", original_qty=10,
+        approved_qty=10, checks=[], mode=Mode.RECOMMEND, risk_state=RiskState.NORMAL,
+        degrade_tier="DG0", evaluated_at=START,
+    )
+    conn.execute("INSERT INTO proposals (proposal_id, agent_id, action, payload, inputs_digest, created_at) "
+                 "VALUES (?, 'a', 'enter', ?, 'd', ?)", (proposal.proposal_id, proposal.model_dump_json(),
+                                                       START.isoformat()))
+    conn.execute("INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at, is_paper) "
+                 "VALUES (?, ?, 'approve', ?, ?, 1)",
+                 (verdict.verdict_id, proposal.proposal_id, verdict.model_dump_json(), START.isoformat()))
+    return proposal, verdict
+
+
+async def _settle(bus: EventBus, orders: OrderManager) -> None:
+    for _ in range(3):
+        await bus.drain(1.0)
+        await orders.join()
+
+
+def _never(*_args: Any) -> Any:
+    raise AssertionError("the storm path never reads limits or flattens the book")
+
+
+async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place(
+    conn, bus, caplog
+) -> None:
+    """§3.5.1 on the paper OMS: three broker rejects inside 60 s ⇒ the daily ``rejection_storm`` paper
+    halt (FROZEN) + its WARNING; the next entry never reaches the broker, an exit still places, and
+    the real risk latch never moves (paper never writes it, §1.5)."""
+    ticker = _Ticker(START)
+    clock = Clock(time_source=ticker)
+    mode = ModeManager(conn, clock, paper_only=False)
+    RiskStateLatch(conn, clock, mode)
+    guard = paper_order_guard(lambda: True, paper_effective_state(conn, mode.risk_state))
+    broker = PaperBroker(clock, bus.publish, FillModelConfig(), lambda _s: Decimal("0.05"),
+                         _seed_rejecting_first(STORM_REJECTS), rejection_rate=_RATE, order_guard=guard,
+                         topic=PAPER_ORDER_UPDATE_TOPIC)
+    risk = PaperRisk(conn, clock, NSECalendar(config_dir() / "calendar", clock, strict=False).session, broker,
+                     capital_base=Decimal("40000"), mark_price=lambda _s: None, limits_fn=_never, flatten=_never)
+    orders = OrderManager(conn, clock, broker, order_guard=guard, sell_check=lambda *_: None,
+                          on_fill=lambda *_: None, on_reject=lambda _order, at: risk.note_reject(at))
+    store = OrderStore(conn)
+    orders.start(bus)
+    try:
+        with caplog.at_level("WARNING", logger="engine.ops.paper_risk"):
+            step = STORM_WINDOW / STORM_REJECTS                       # 20 s apart: all inside 60 s
+            for n in range(STORM_REJECTS):
+                assert active_halts(conn) == {}
+                ticker.at = START + n * step
+                entry = await orders.submit(*_seed_verdict(conn, n))
+                await _settle(bus, orders)
+                assert store.get(entry.order_id).state is OrderState.REJECTED
+                assert "injected rejection" in store.get(entry.order_id).reject_reason
+        assert active_halts(conn) == {"rejection_storm": RiskState.FROZEN}
+        assert paper_effective_state(conn, mode.risk_state)() is RiskState.FROZEN
+        [alert] = [r for r in caplog.records if r.getMessage() == "paper_halt_set"]
+        assert alert.cause == "rejection_storm" and alert.reason.startswith("3 paper broker rejects in 40 s")
+        assert mode.risk_state() is RiskState.NORMAL
+        assert conn.execute("SELECT COUNT(*) FROM risk_state_causes").fetchone()[0] == 0
+
+        # The next entry is refused by the paper guard before the broker: no fourth placement.
+        ticker.at = START + timedelta(seconds=55)
+        blocked = await orders.submit(*_seed_verdict(conn, STORM_REJECTS))
+        assert blocked.state is OrderState.REJECTED and "FROZEN" in (blocked.reject_reason or "")
+        assert [(e.from_state, e.to_state) for e in store.events(blocked.order_id)] == [
+            (OrderState.DRAFT, OrderState.REJECTED)]
+        assert len(await broker.orders()) == STORM_REJECTS
+
+        # A risk-reducing exit still passes the guard, reaches the broker and rests there.
+        conn.execute(
+            "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, stop, state, "
+            "protection_state, is_paper, origin, opened_at) VALUES ('POS1', 'TCS', 'BUY', 'CNC', 10, '100', '95', "
+            "'OPEN', 'PROTECTED', 1, 'platform', ?)", ((START - timedelta(days=1)).isoformat(),))
+        exit_order = await orders.submit_exit("POS1", 10, price=Decimal("120"))
+        await _settle(bus, orders)
+        assert store.get(exit_order.order_id).state is OrderState.ACKED
+        assert [o["transaction_type"] for o in await broker.orders()] == ["BUY"] * STORM_REJECTS + ["SELL"]
+        assert active_halts(conn) == {"rejection_storm": RiskState.FROZEN}    # one row, not re-latched
+    finally:
+        await orders.stop()
+
+
 @pytest.mark.skip(reason=(
-    "UNBUILT: no '>=3 broker rejects/60 s => FROZEN + alert' detector exists. "
-    "engine.risk.causes.CAUSE_REJECTION_STORM (causes.py:58) is declared and /resume_entries clears it "
-    "(the /resume_entries handler's clear_cause(CAUSE_REJECTION_STORM, ...) in notify/telegram.py), "
-    "but no code path counts broker rejects or calls "
-    "RiskStateLatch.set_cause(CAUSE_REJECTION_STORM, ...) — grep of src/ finds only those two sites; "
-    "KiteClient re-raises rejects (KiteClient._order_call's except/re-raise) and the OMS "
-    "executor/PaperBroker routing that "
-    "would observe REJECTED postbacks is not wired. " + PHASE3_GATED
+    "Real path, lands with the Phase-4 live OMS: real orders are structurally impossible today "
+    "(KiteClient refuses every order without orders_enabled=True, which production never passes; D8), "
+    "so CAUSE_REJECTION_STORM (engine.risk.causes) on the real RiskStateLatch, its owner /resume_entries "
+    "clear, and the >=3-storms-per-session kill escalation have no order path to observe. The PAPER path "
+    "is built and asserted by "
+    "test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place."
 ))
 async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
-    """§3.5.1: ≥3 broker rejects inside 60 s latch CAUSE_REJECTION_STORM (FROZEN) + owner alert."""
+    """§3.5.1 real path: ≥3 broker rejects inside 60 s latch CAUSE_REJECTION_STORM (FROZEN) + owner alert;
+    ≥3 storms in a session ⇒ kill."""
 
 
 @pytest.mark.skip(reason=(

@@ -1141,6 +1141,19 @@ async def test_gtt_oco_first_leg_to_trigger_places_its_limit_and_kills_the_other
     assert (await broker.gtts())[0]["status"] == "triggered"
 
 
+@pytest.mark.parametrize("ltp", ["95.00", "110.00"])      # stop leg, then target leg
+async def test_gtt_legs_fire_on_a_touch_not_only_on_a_cross(
+    broker: PaperBroker, bus: _Bus, now: _Now, ltp: str
+) -> None:
+    """The comparison is ``<=`` / ``>=``: an LTP exactly AT the trigger fires the leg."""
+    now.set(at(10, 0, 0))
+    await broker.place_gtt(_oco("95.00", "110.00"))
+    bus.clear()
+    broker.on_tick(tick(at(10, 0, 1), ltp))
+    assert [d["price"] for d in bus.data()] == [Decimal(ltp)]
+    assert (await broker.gtts())[0]["status"] == "triggered"
+
+
 async def test_gtt_single_leg_and_delete(broker: PaperBroker, bus: _Bus, now: _Now) -> None:
     now.set(at(10, 0, 0))
     gid = await broker.place_gtt(

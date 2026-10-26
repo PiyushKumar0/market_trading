@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from engine.core.config import load_settings
 from engine.strategy.prescreen import SignalPreScreen
 from engine.strategy.scanners import cat
 from engine.strategy.scanners.cat import WatchlistRow, is_eligible, scan_entry, sweep_watchlist
@@ -238,8 +239,10 @@ def test_sweep_of_nothing_is_empty_not_an_error():
 def test_defaults_match_the_shipped_settings_block():
     """``DEFAULT_PARAMS`` documents the same numbers ``config/settings.yaml``'s ``cat:`` block ships;
     a drift between the two would make the module docstring's pinned math a lie."""
-    assert cat.DEFAULT_PARAMS["stop_pct"] == 5.0
-    assert cat.DEFAULT_PARAMS["hold_sessions"] == 20
+    shipped = load_settings().cat       # the session-pinned copy of the shipped config/settings.yaml
+    assert cat.DEFAULT_PARAMS["stop_pct"] == shipped.stop_pct
+    assert cat.DEFAULT_PARAMS["hold_sessions"] == shipped.hold_sessions
+    # not a settings key: the event age is the envelope row cat.max_event_age_days, so a literal stays
     assert cat.MAX_EVENT_AGE_SESSIONS == 1
 
 

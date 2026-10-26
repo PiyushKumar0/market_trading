@@ -8,6 +8,8 @@ different things (§2.6):
   are SUPPRESSED (a fresh start has no recent ticks yet — that is not an incident).
 - **feed-lost-while-running** — a real incident: ticks were flowing and stopped (R2 stale-data guard).
 - **intentionally-off** — the engine is deliberately stopped between active periods. NORMAL, no alarm.
+  STOPPED never raises ``feed_stale``; but this pulse only runs while the engine is UP, so an armed,
+  in-session STOPPED feed means no market data and becomes ``feed_stopped_in_session`` after a grace.
 
 Missed scheduled active-period starts are NOT detected here — the out-of-band ``scripts/watchdog.py`` owns
 SCHEDULED_START_MISSED (§2.6/§10.4); ``watchdog_missed_start`` has no production caller.
@@ -120,6 +122,8 @@ class HealthMonitor:
         # or None when unreadable — None narrows the alarm to the unambiguous zero-forwarded shape)
         frozen_alarm_after_min: float = 30.0,
         funnel_zero_alarm_after_min: float = 120.0,
+        token_valid: Callable[[], bool] | None = None,   # detail only: Kite token verdict for the page
+        feed_stopped_alarm_after_min: float = 30.0,
     ) -> None:
         self._clock = clock
         self._settings = settings
@@ -182,6 +186,9 @@ class HealthMonitor:
         #: the gates.
         self._frozen_since: datetime | None = None
         self._funnel_zero_since: datetime | None = None
+        self._token_valid = token_valid
+        self._feed_stopped_alarm_after_min = float(feed_stopped_alarm_after_min)
+        self._feed_stopped_since: datetime | None = None
         #: (published-at-last-forward-progress, forwarded) — the funnel stall baseline. `forwarded`
         #: is day-cumulative and monotonic (pipeline upserts +1 per forward, never resets mid-day),
         #: so "zero forwarded" alone goes permanently mute after the day's FIRST forward (2026-09-01
@@ -189,7 +196,7 @@ class HealthMonitor:
         #: count did not move". None ⇒ re-baseline on the next eligible pulse.
         self._funnel_baseline: tuple[int, int] | None = None
 
-    async def check(self, *, check_skew: bool = True) -> HealthReport:
+    async def check(self, *, check_skew: bool = True, booting: bool = False) -> HealthReport:
         report = HealthReport()
 
         # --- feed health (WARMING suppresses stale alarms; intentionally-off is not checked here) ---
@@ -203,7 +210,8 @@ class HealthMonitor:
                 # midnight 2026-07-31 after the date rollover — never an incident. Calendar-less
                 # wiring returns False here, keeping a misconfigured deploy quiet, not noisy.
                 report.problems.append("feed_stale")
-            # WARMING / STOPPED raise no problem (§2.6: warming is expected, stopped is intentional-off).
+            # WARMING / STOPPED never raise feed_stale (§2.6: warming is expected). An armed,
+            # in-session STOPPED feed is paged separately: _check_feed_stopped, after its grace.
 
         # --- clock skew (R6) ---
         if check_skew:
@@ -240,6 +248,10 @@ class HealthMonitor:
             self._check_origination(report)
         except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
             _log.exception("origination_watch_failed")
+        try:
+            self._check_feed_stopped(report, booting=booting)
+        except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
+            _log.exception("feed_stopped_watch_failed")
 
         # --- in-session OS keep-awake (2026-07-23 sleep/resume wedge): while a trading session is open,
         #     keep the OS awake so it does not auto-sleep mid-session and freeze the tick feed; release
@@ -384,6 +396,43 @@ class HealthMonitor:
                            cap=cap, zero_min=round(zero_min, 1))
         else:
             self._funnel_zero_since = None
+
+    # ------------------------------------------------------------- stopped feed in session (2026-10-21)
+    def _check_feed_stopped(self, report: HealthReport, *, booting: bool = False) -> None:
+        """``feed_stopped_in_session`` — feed state STOPPED while the engine is armed
+        (RECOMMEND/AUTO) and the session is open, for ``feed_stopped_alarm_after_min`` CONTIGUOUS
+        minutes. The health pulse only runs while the engine is UP, so STOPPED here is never
+        "intentionally off": it is no market data (2026-10-21: the ticker never started and health
+        logged ``problems=[]`` all session). The grace covers a late login and most in-session boots;
+        a pulse from the boot-phase ticks (``booting``) says the ticker starts only once startup
+        recovery returns, so the page is not read as a dead ticker. The clock resets QUIETLY on any
+        other state, session close or disarm. Unwired ``mode_manager`` ⇒ inert, like the origination
+        alarms.
+        """
+        if self._mode_manager is None:
+            return
+        armed = self._mode_manager.mode() in (Mode.RECOMMEND, Mode.AUTO) and self._session_open()
+        if not (report.feed_state == "STOPPED" and armed):
+            self._feed_stopped_since = None
+            return
+        now = self._clock.now()
+        if self._feed_stopped_since is None:
+            self._feed_stopped_since = now
+        stopped_min = (now - self._feed_stopped_since).total_seconds() / 60.0
+        if stopped_min < self._feed_stopped_alarm_after_min:
+            return
+        token = "unknown"
+        if self._token_valid is not None:
+            try:
+                token = "yes" if self._token_valid() else "no"
+            except Exception:  # noqa: BLE001 - diagnostic detail, never the verdict
+                token = "unknown"
+        report.problems.append("feed_stopped_in_session")
+        report.problem_details["feed_stopped_in_session"] = (
+            f"ticker STOPPED for {round(stopped_min)}m (Kite token valid: {token})"
+            + ("; startup recovery is still running and the ticker starts after it" if booting else "")
+        )
+        _log.error("feed_stopped_in_session", stopped_min=round(stopped_min, 1), token_valid=token)
 
     # ------------------------------------------------------------------ problem-set episodes (WO-25b)
     async def _alert_problems(self, problems: list[str],

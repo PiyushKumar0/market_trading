@@ -22,7 +22,7 @@ from engine.core.types import Bar, Tick
 from engine.oms.manager import OrderManager, PaperOrderBlocked, SubmitRefused, paper_order_guard
 from engine.oms.state import OrderRole, OrderState
 from engine.oms.store import OrderStore
-from engine.paper.broker import PaperBroker
+from engine.paper.broker import PaperBroker, PaperOrderError
 from engine.paper.fill_model import FillModelConfig
 
 SYM = "TCS"
@@ -65,6 +65,7 @@ class _Recorder:
     fills: list[tuple] = field(default_factory=list)
     transitions: list[tuple] = field(default_factory=list)
     sell_checks: list[tuple] = field(default_factory=list)
+    rejects: list[tuple] = field(default_factory=list)
     refuse_sell: bool = False
 
     def sell_check(self, position_id, qty) -> None:
@@ -80,6 +81,10 @@ class _Recorder:
     def on_transition(self, order, event) -> None:
         assert self.store.get(order.order_id).state is order.state
         self.transitions.append((order.role, event.from_state, event.to_state))
+
+    async def on_reject(self, order, when) -> None:
+        assert order.state is S.REJECTED and self.store.get(order.order_id).state is S.REJECTED   # committed
+        self.rejects.append((order.order_id, when))
 
 
 @dataclass
@@ -99,7 +104,7 @@ def flags() -> _Flags:
 async def make_rig(conn, bus, flags):
     managers: list[OrderManager] = []
 
-    def build(*, rejection_rate: float = 0.0, on_fill=None) -> _Rig:
+    def build(*, rejection_rate: float = 0.0, on_fill=None, on_reject=None) -> _Rig:
         now = _Now()
         guard = paper_order_guard(lambda: flags.enabled, lambda: flags.state)
         broker = PaperBroker(
@@ -109,7 +114,7 @@ async def make_rig(conn, bus, flags):
         rec = _Recorder(OrderStore(conn))
         mgr = OrderManager(
             conn, Clock(time_source=now), broker, order_guard=guard, sell_check=rec.sell_check,
-            on_fill=on_fill or rec.on_fill, on_transition=rec.on_transition,
+            on_fill=on_fill or rec.on_fill, on_transition=rec.on_transition, on_reject=on_reject or rec.on_reject,
         )
         mgr.start(bus)
         managers.append(mgr)
@@ -343,6 +348,88 @@ async def test_a_blocked_entry_is_abandoned_before_the_broker_while_exits_still_
     exit_row = OrderStore(conn).get(exit_order.order_id)
     assert (exit_row.role, exit_row.is_paper, exit_row.state, exit_row.position_id) == (
         OrderRole.EXIT, True, S.ACKED, "POS1")
+
+
+# ------------------------------------------------------------------------------------- on_reject
+async def test_a_placement_the_broker_refuses_reports_one_reject_at_now(conn, bus, rig, monkeypatch) -> None:
+    async def refuse(req, intent):
+        raise PaperOrderError("paper: refused")
+
+    monkeypatch.setattr(rig.broker, "place_order", refuse)
+    rig.now.value = at(10, 0, 7)
+    order = await rig.mgr.submit(*seed_verdict(conn))
+    await settle(bus, rig.mgr)
+    assert order.state is S.REJECTED and transitions(conn, order.order_id)[-1] == (S.SUBMITTED, S.REJECTED)
+    assert rig.rec.rejects == [(order.order_id, at(10, 0, 7))]
+
+
+async def test_a_rejected_postback_reports_one_reject(conn, bus, make_rig) -> None:
+    rig = make_rig(rejection_rate=1.0)
+    rig.now.value = at(10, 0, 7)
+    order = await rig.mgr.submit(*seed_verdict(conn))
+    await settle(bus, rig.mgr)
+    assert OrderStore(conn).get(order.order_id).state is S.REJECTED
+    assert rig.rec.rejects == [(order.order_id, at(10, 0, 7))]
+
+
+async def test_a_redelivered_lost_rejection_counts_at_its_broker_time(conn, bus, rig) -> None:
+    order = await rig.mgr.submit(*seed_verdict(conn))
+    await settle(bus, rig.mgr)
+    [row] = await rig.broker.orders()
+    rig.now.value = at(10, 5)                    # the Reconciler finds it minutes later
+    rig.mgr.redeliver({**row, "status": "REJECTED", "order_timestamp": "2026-06-17 10:00:30"})
+    await settle(bus, rig.mgr)
+    assert OrderStore(conn).get(order.order_id).state is S.REJECTED
+    assert rig.rec.rejects == [(order.order_id, at(10, 0, 30))]
+    rig.mgr.redeliver({**row, "status": "REJECTED", "order_timestamp": "2026-06-17 10:00:31"})
+    await settle(bus, rig.mgr)                   # terminal absorbs the repeat: still one
+    assert len(rig.rec.rejects) == 1
+
+
+async def test_a_guard_abandon_and_a_cancel_report_no_reject(conn, bus, rig, flags) -> None:
+    flags.state = RiskState.FROZEN
+    abandoned = await rig.mgr.submit(*seed_verdict(conn))
+    assert abandoned.state is S.REJECTED
+    flags.state = RiskState.NORMAL
+    exit_order = await rig.mgr.submit_exit(seed_position(conn), 10, price=Decimal(120))
+    await settle(bus, rig.mgr)
+    assert await rig.mgr.cancel(exit_order.broker_order_id, reason="test") is True
+    await settle(bus, rig.mgr)
+    assert OrderStore(conn).get(exit_order.order_id).state is S.CANCELLED
+    assert rig.rec.rejects == []
+
+
+async def test_the_brokers_own_guard_refusal_is_no_broker_reject(conn, bus, rig, monkeypatch) -> None:
+    async def blocked(req, intent):
+        raise PaperOrderBlocked("effective paper state is FROZEN")
+
+    monkeypatch.setattr(rig.broker, "place_order", blocked)
+    order = await rig.mgr.submit(*seed_verdict(conn))
+    assert order.state is S.REJECTED and rig.rec.rejects == []
+
+
+async def test_a_raising_on_reject_never_breaks_submission_or_the_consumer(conn, bus, make_rig, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def broken(order, when) -> None:
+        calls.append(order.order_id)
+        raise RuntimeError("storm detector broke")
+
+    async def refuse(req, intent):
+        raise PaperOrderError("paper: refused")
+
+    rig = make_rig(rejection_rate=1.0, on_reject=broken)
+    by_postback = await rig.mgr.submit(*seed_verdict(conn))
+    await asyncio.wait_for(settle(bus, rig.mgr), 10)
+    place = rig.broker.place_order
+    monkeypatch.setattr(rig.broker, "place_order", refuse)
+    refused = await rig.mgr.submit(*seed_verdict(conn, n=2))           # returns, never raises
+    monkeypatch.setattr(rig.broker, "place_order", place)
+    after = await rig.mgr.submit(*seed_verdict(conn, n=3))
+    await asyncio.wait_for(settle(bus, rig.mgr), 10)                  # the consumer is still alive
+
+    assert calls == [by_postback.order_id, refused.order_id, after.order_id]
+    assert all(OrderStore(conn).get(o.order_id).state is S.REJECTED for o in (by_postback, refused, after))
 
 
 @pytest.mark.parametrize("paper, state", [(False, "OPEN"), (True, "CLOSED")], ids=["real", "closed"])
