@@ -2,6 +2,35 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-27 13:10 — TradingAgents review and system check: report only, nothing deployed (owner: "Review the provided trading agent branch … Check where we can improve our system or what we are currently doing wrong")
+
+- **Report:** `runbooks/tradingagents-review-2026-10-27.md`. Evidence scripts are in
+  `data/reports/tradingagents_review_2026-10-27/`; COMMANDS has a new "LLM analyst scorecard" entry.
+- **Method:**
+  - TauricResearch/TradingAgents v0.7.0 (e8f5503) was cloned read-only into the session scratchpad, and its core was
+    read in full.
+  - Our side: read-only queries of state.db (`mode=ro`), with forward returns from the 10-26 nightly export. The live
+    DuckDB was never opened.
+- **Agents** (owner: "Run agents now", asked at 12:21, inside the 10:30–14:30 trade window):
+  - one Sonnet research pass covering the paper, independent evaluations and all 1,547 GitHub issues and PRs;
+  - three read-only maps: the LLM layer, the decision pipeline, and learning plus data;
+  - a state.db pull sent to `log-digger` came back BLOCKED. Its definition forbids DB access (memory
+    `log-digger-no-db-access`), so those queries ran inline instead.
+- **Headlines:**
+  - TradingAgents is a research scaffold. It models no costs and has no risk limits or universe. Its paper's result
+    (AAPL +26.6%, Sharpe 8.21, one quarter) has never been reproduced, and costed independent tests find no edge over
+    buy-and-hold.
+  - On our side, the intraday analyst's enter/decline showed no selection skill on 585 candidates. Within-day,
+    approved minus declined was about 0 at T+5 and T+10, and −1.5 pp at T+20.
+  - The gate's 0.55 confidence floor is never shown to the model.
+  - For brk20, rsi2 and trend, the gate's edge check prices the LLM's own target, and the card shows the result as
+    "edge Nx".
+  - Live closed recs: 2 of 24 hit, median net −4.5%, median excess −2.8%, while the equal-weight benchmark fell
+    11.8%.
+  - brk20 and ins have no forward kill rule.
+- **Not touched:** mt-engine (running), the code, `config/` and both protected stores.
+- **Owner:** the decisions in report §9. None was applied.
+
 ## 2026-10-26 07:05 — Section-3 fixes merged (c887080) and deployed; boot verified (owner: "Merge the changes and deploy")
 
 - **Before:** the clock read 06:57, the log tail held only news polling and health pulses, and the tree was clean.

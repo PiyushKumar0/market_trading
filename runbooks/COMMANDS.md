@@ -500,6 +500,25 @@ response to them.
   restarts only (P).
 - **Exit status:** always exits 0. It reads `rec_outcomes` as stored; `--as-of` bounds only the (P) walk.
 
+## LLM analyst scorecard (hindsight, 2026-10-27) — read-only, safe with the engine running
+
+```powershell
+# forward returns come from the newest nightly export; the live market.duckdb is locked while the engine runs
+$exp = "data/backups/" + (Get-ChildItem data\backups -Directory -Filter 'market-*' | Sort-Object Name -Descending | Select-Object -First 1).Name
+$sc = "data\reports\tradingagents_review_2026-10-27"
+.venv\Scripts\python.exe -I "$sc\llm_filter_value.py" data/state.db $exp    # analyst enter vs decline, per strategy and within-day
+.venv\Scripts\python.exe -I "$sc\confidence_value.py" data/state.db $exp    # enter proposals split at the 0.55 confidence floor
+.venv\Scripts\python.exe -I "$sc\evidence.py" data/state.db                 # LLM usage, recs, rec_outcomes, ledger, funnel, gate
+```
+
+- **What it measures:** each scanner candidate the intraday analyst judged, at its first evaluation, parsed from the
+  `candidate: {...}` line of `agent_calls.context_gz`. Both arms use the same rule: entry at the next session's open,
+  exit at the close h sessions after the decision, and windows that contain a corporate action are dropped. The
+  within-day paired line is the robust read; the bootstrap CIs ignore same-day correlation.
+- **Interim, decides nothing:** it becomes a verdict only once a rule is pre-registered
+  (`runbooks/tradingagents-review-2026-10-27.md` §9 #2). The scripts live under the gitignored `data/`; copy them
+  into `scripts/` with tests before relying on them.
+
 ## cat v2 shadow verdict (WO-18, clock restarted 2026-08-28) — engine OFF
 
 ```powershell
