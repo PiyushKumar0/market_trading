@@ -155,6 +155,7 @@ JOB_CATALYST_DIGEST = "catalyst_digest"          # §2.7 step 5 / §4.4 job 14 �
 JOB_RECO_EXPIRE = "reco_expire"                  # §3.6 expired-unconfirmed → no_action — run-latest
 JOB_TIME_EXIT_CHECK = "time_exit_check"          # D2 time exit (plan Q1.6) — run-latest (regular sessions)
 JOB_REC_OUTCOMES = "rec_outcomes"                # hindsight rec scoring (plan Q2.3) — date-keyed
+JOB_SIGNAL_OUTCOMES = "signal_outcomes"          # hindsight signal scoring (review §9 #5/#6) — date-keyed
 JOB_WEEKLY_SUMMARY = "weekly_summary"            # weekly owner summary (plan Q2.6) — date-keyed (week's last session)
 JOB_TICK_COMPACT = "tick_compact"               # §4.3 tick-partition compaction (WO-7) — date-keyed
 JOB_MARKET_BACKUP = "market_backup"              # §10.5 DuckDB leg: EXPORT DATABASE snapshot — run-latest

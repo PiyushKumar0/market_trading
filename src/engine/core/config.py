@@ -562,6 +562,7 @@ class JobTimesCfg(BaseModel):
     corp_actions_ist: time = time(20, 15)       # §4.4 job 7 (A12); 18:15→20:15 2026-07-24 (NSE maintenance)
     earnings_ist: time = time(18, 30)           # §4.4 job 8 (R2)
     rec_outcomes_ist: time = time(18, 30)       # plan Q2.3 — after daily_bars (18:05), whose run it waits for
+    signal_outcomes_ist: time = time(18, 40)    # review §9 #5/#6 — after rec_outcomes, whose EW returns it reads
     weekly_summary_ist: time = time(19, 0)      # plan Q2.6 — after rec_outcomes (18:30)
     deals_ist: time = time(20, 30)              # §4.4 job 9 (flagged_instrument_days); 18:45→20:30 2026-07-24
     filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)

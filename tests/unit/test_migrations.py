@@ -19,6 +19,7 @@ EXPECTED_TABLES = {
     "notifications", "prescreen_day_slots", "mom_rebalance_state", "ins_pending",
     "funnel_raw_counts", "holdings_observations", "brk20_resting_levels",
     "rec_outcomes", "universe_ew_returns", "paper_state", "paper_equity_snapshots", "paper_halts",
+    "signal_outcomes", "brk20_regime_blocked",
 }
 
 
