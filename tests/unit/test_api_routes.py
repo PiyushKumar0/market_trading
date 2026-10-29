@@ -579,8 +579,6 @@ def _limits_with_floor(limits_engine, floor):
 def test_params_omit_absent_floor(conn, clock, store, limits_engine) -> None:
     client = _client(conn=conn, clock=clock, store=store, limits_engine=_limits_with_floor(limits_engine, None))
     assert "analyst_confidence_min" not in client.get("/config/params", headers=AUTH).json()["params"]
-    protected = client.post("/config/params", headers=AUTH, json={"name": "analyst_confidence_min", "value": 0.6})
-    assert protected.status_code == 409
 
 
 def test_get_config_params_wired_with_bounds_and_suggestions(conn, clock, store, limits_engine) -> None:

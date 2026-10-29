@@ -1134,7 +1134,8 @@ def _stop_line(rec: Recommendation, entry: Decimal, targets: str) -> str:
 
 def _gate_lines(rec: Recommendation) -> list[str]:
     """Verdict line plus headroom lines. A shrink's binding rule is its cause, not a failure; every
-    other failed check is always shown, passed ones only fill the remaining slots."""
+    other failed check is always shown, passed ones only fill the remaining slots (a bare "n/a" pass
+    carries no information, so it fills last)."""
     gate = rec.gate
     approved = gate.approved_qty if gate.approved_qty is not None else rec.qty
     bound: set[str] = set()
@@ -1144,7 +1145,7 @@ def _gate_lines(rec: Recommendation) -> list[str]:
         verdict = f"shrunk {gate.original_qty}→{approved}" + (f" (bound by {found[1]})" if found else "")
     else:
         verdict = f"{gate.verdict} (approved qty {approved})"
-    checks = sorted(gate.checks, key=lambda c: c.passed)
+    checks = sorted(gate.checks, key=lambda c: (c.passed, c.passed and c.value == "n/a"))
     failed = sum(not c.passed for c in checks)
     return [f"gate: {verdict}"] + [
         f"  • {c.rule_id}: {c.value} vs {c.limit} — headroom {c.headroom}"
@@ -1164,7 +1165,7 @@ def _cost_line(rec: Recommendation) -> str:
     if rec.registered_edge_pct is not None:
         return f"{line} · edge {cost.edge_multiple}x breakeven"
     if rec.targets:
-        return (f"{line} · target distance {cost.expected_edge_pct}% = {cost.edge_multiple}x breakeven "
+        return (f"{line} · target distance {Decimal(cost.expected_edge_pct):.2f}% = {cost.edge_multiple}x breakeven "
                 "(earned only if the target is hit; not an expected edge)")
     return line
 

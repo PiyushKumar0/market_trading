@@ -107,7 +107,6 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.min_viable_size.edge_multiple_min_default == 2.0
 
 
-
 def test_floor_limits_from_threads_the_signed_table(registered_store):
     """The signed table is the ladder's single source: ``rolling_sessions`` reaches
     ``FloorLimits.weekly_drawdown_sessions`` (the window ``evaluate_floors`` uses), beside the pcts

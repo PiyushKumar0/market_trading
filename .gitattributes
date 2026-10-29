@@ -3,3 +3,4 @@
 # core.autocrlf=true box cannot re-materialize CRLF and re-trigger a hash mismatch / FROZEN boot.
 config/*.yaml text eol=lf
 config/calendar/*.yaml text eol=lf
+runbooks/patches/*.patch text eol=lf

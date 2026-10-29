@@ -621,7 +621,7 @@ class RiskGate:
         if floor is None:
             led.add("analyst_confidence_min", True, "n/a", "no floor configured (review §9 #3)", "n/a")
             return
-        ok =action.confidence >= floor
+        ok = action.confidence >= floor
         led.add(
             "analyst_confidence_min", ok,
             f"confidence={action.confidence}",

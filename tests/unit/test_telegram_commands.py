@@ -1454,10 +1454,25 @@ def test_cost_line_target_priced(clock):
     )
 
 
+def test_cost_line_rounds_an_unrounded_target_distance(clock):
+    rec = _recommendation(clock)
+    rec = rec.model_copy(update={"cost": rec.cost.model_copy(
+        update={"expected_edge_pct": Decimal(100) * 100 / 2450})})
+    assert "target distance 4.08% = " in _cost_line_of(rec)
+
+
 @pytest.mark.parametrize("kind", ["exit", "adjust"])
 def test_cost_line_exit_has_no_edge_clause(clock, kind):
-    rec = _card(clock, kind=kind, side="SELL", exit_kind=None, registered_edge_pct=None)
+    rec = _recommendation(clock).model_copy(update={"kind": kind})
     assert _cost_line_of(rec) == "cost: breakeven 0.15% · total ₹18.20"
+
+
+def test_gate_lines_show_a_bare_na_pass_last(clock):
+    rec = _recommendation(clock)
+    na = CheckResult(rule_id="analyst_confidence_min", passed=True, value="n/a", limit="no floor", headroom="n/a")
+    gate = rec.gate.model_copy(update={"checks": [na, *(c for c in rec.gate.checks if c.passed)]})
+    text = catalog.recommendation_message(rec.model_copy(update={"gate": gate})).render()
+    assert "analyst_confidence_min" not in text
 
 
 def test_card_prints_only_the_data_it_has(clock):

@@ -625,6 +625,14 @@ def test_shipped_settings_park_orb():
     caps = load_settings().strategy.prescreen.max_per_strategy_day
     assert isinstance(caps, dict)
     assert caps["orb"] == 0
+
+
+def test_shipped_settings_park_trend():
+    from engine.core.config import load_settings
+
+    caps = load_settings().strategy.prescreen.max_per_strategy_day
+    assert isinstance(caps, dict)
+    assert caps["trend"] == 0
     assert caps["default"] >= 1                          # the park is orb's alone
 
 

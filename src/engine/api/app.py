@@ -754,7 +754,7 @@ def create_app(
     @app.get("/config/params")
     async def get_params(_: Owner) -> dict[str, Any]:
         """Live ``envelope_state`` values + ``envelope.yaml`` bounds (when ``store`` wired) +
-        ``analyst_confidence_min`` (when ``limits_engine`` wired) + the latest nightly-reviewer
+        ``analyst_confidence_min`` (when ``limits_engine`` wired and set) + the latest nightly-reviewer
         SUGGESTED values — the platform SUGGESTS, the owner SETS (§6.3/§5.5)."""
         conn = app.state.conn
         if conn is None:

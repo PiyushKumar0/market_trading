@@ -2209,9 +2209,9 @@ async def test_a_sold_outside_the_ledger_position_ages_out_of_the_O16_window(
     assert _exiting() == frozenset()      # ⇒ it occupies a §7.1 position/sector slot again
 
 
-def _due_swing_pipeline(conn, pclock, calendar, book, limit_table, cost_model, **held):
+def _due_swing_pipeline(conn, pclock, calendar, book, limit_table, cost_model, stop="95", **held):
     position_id = _open_position(
-        conn, pclock, style="swing", opened_at=datetime(2026, 3, 2, 10, 0, tzinfo=IST), stop="95"
+        conn, pclock, style="swing", opened_at=datetime(2026, 3, 2, 10, 0, tzinfo=IST), stop=stop
     )
     _observe_holding(conn, position_id, TODAY - timedelta(days=1), **held)
     _observe_holding(conn, position_id, TODAY, **held)
@@ -2233,6 +2233,21 @@ async def test_time_exit_skips_a_position_sold_outside_the_ledger(
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
     skipped = log_events(caplog, "time_exit_skipped_sold_outside_ledger")
     assert [r.position_id for r in skipped] == [position_id]
+
+
+async def test_time_exit_skip_has_its_own_memo_and_rearms_each_day(
+    conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    pipeline, _ = _due_swing_pipeline(conn, pclock, calendar, book, limit_table, cost_model, stop="99")
+    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await pipeline.on_bar(_near_bar())
+        await pipeline.time_exit_check(TODAY)
+        await pipeline.time_exit_check(TODAY + timedelta(days=1))
+
+    assert len(log_events(caplog, "position_event_skipped_sold_outside_ledger")) == 1
+    assert len(log_events(caplog, "time_exit_skipped_sold_outside_ledger")) == 2
 
 
 async def test_time_exit_still_fires_on_a_partial_holding(
