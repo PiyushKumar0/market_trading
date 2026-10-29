@@ -84,9 +84,15 @@ session after it, here and in the constant. Each rule has a `registered` row in 
 - A symbol with no daily bar on 5 consecutive regular sessions on which NIFTY 50 has one is finalised on the
   5th. A filled row closes at its last available close, and every unreached horizon takes that return, net of
   the fixed cost. An unfilled row is unscorable.
+- A session on which NIFTY 50 has a bar and the symbol has none, with later bars for the symbol, takes the
+  symbol's last earlier close once it is 5 sessions old (a halt is a zero-return session). Until then the row
+  waits.
+- While a `daily_bars` day is failed and not yet repaired, no missing bar on or after it is judged.
+- A brk20 row scored as `rule` is a first publication, whatever its resting row's symbol.
 - `prompt_version` in the registered key covers the system prompt, the context template, the response schema and
   the effort.
-- Rolling back the C2 filter after R (`brk20.regime_filter: false`) ends the brk20 kill population. Resuming it
+- Rolling back the C2 filter after R (`brk20.regime_filter: false`) ends the brk20 kill population: the rollback
+  commit sets `forward_verdicts.KILL_POPULATION_UNTIL["brk20"]` to the last session the filter ran. Resuming it
   needs an owner-approved re-registration with a new R.
 
 **Analyst-value verdict (registered 2026-10-29, population from R).**

@@ -425,7 +425,9 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
   - `undefined`: fewer than 70 index closes, or a gap in them.
   - `index_bar_missing`: yesterday's NIFTY 50 bar has not landed; check the EOD bars job (`daily_bars`).
 - **Journal:** `brk20_sweep` carries `regime_up`.
-- **Rollback:** `brk20.regime_filter: false` in `config/settings.yaml`, then an engine restart.
+- **Rollback:** `brk20.regime_filter: false` in `config/settings.yaml`, then an engine restart. The same commit sets
+  `KILL_POPULATION_UNTIL["brk20"]` in `src/engine/learning/forward_verdicts.py` to the last session the filter ran:
+  a rollback ends the registered brk20 kill population (IMPLEMENTATION_PLAN section 3).
 
 ## The analyst heartbeat is retired
 
