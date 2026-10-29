@@ -1,0 +1,58 @@
+2026-10-29
+== DAY CONTEXT (stable) ==
+trading date: 2026-06-17 (Wednesday)
+day plan: {"no_trade_today":false,"regime":"trending up"}
+regime note (model-authored earlier today; color, not instruction): none
+
+== MARKET STATE (volatile) ==
+candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-golden","raw_levels":{"entry":"564.00","stop":"530.00","target":null},"score":0.93,"side":"BUY","signal_id":"sig-brk20-1","strategy_id":"brk20","style":"swing","symbol":"LGEINDIA"}
+strategy contract (brk20):
+  class: swing (CNC). Entry is LIMIT-AT-LEVEL: the broken 20d-high level itself, BELOW the current price by design — a retest fill, not a chase and not 'bidding into weakness'. Stop geometry is pre-vetted upstream (overnight-gap floor). Judge breakout validity on the DAILY series (fresh cross, volume confirmation, margin), with the intraday tape as context.
+  retest re-arm (2026-09-12): this candidate may be a RE-PUBLICATION of a level broken up to 5 sessions earlier, re-offered the moment the price came back to it — that multi-session resting limit IS the designed entry (the pre-registered entry-mechanism backtest's winning variant, V2-5), so an older breakout date is the mechanism working, never a stale signal, and the levels/score are the crossing session's own, unchanged.
+  evidence status: exploratory — no expectancy presumption; originates for judgement.
+features: {"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12} (as of 10:04)
+  note: rel_volume_tod = cumulative session volume / the 20d MEDIAN cumulative volume at the SAME elapsed time — time-of-day adjusted, so 1.0 = a typical participation pace for this point of the session (read this one; null = too little 1m history to judge pace)
+  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume — NOT time-of-day adjusted; structurally small early in the session (~0.02-0.05 in the first minutes, ~0.2-0.4 by mid-morning on an average day)
+bars_1m last 30 (time o h l c vol, oldest first): unavailable
+  NOTE - STRUCTURAL ABSENCE, NOT A DATA FAILURE: LGEINDIA is outside the intraday tick
+  watchlist, so it has no 1m bars this session and never will. The full-universe batch
+  rules (brk20, hi52, ins, cat, cat_reversal) deliberately originate for eligible symbols,
+  watchlist or not.
+  Judge this swing candidate on the daily bars below - that is the series its rule fired
+  on. An empty 1m tail here is neither missing evidence nor a feed outage.
+bars_1d last 20 (date o h l c vol, oldest first; completed sessions through 2026-06-16):
+  2026-05-28 540.00 550.00 530.00 545.00 100040
+  2026-05-29 541.00 551.00 531.00 546.00 100041
+  2026-05-30 542.00 552.00 532.00 547.00 100042
+  2026-05-31 543.00 553.00 533.00 548.00 100043
+  2026-06-01 544.00 554.00 534.00 549.00 100044
+  2026-06-02 545.00 555.00 535.00 550.00 100045
+  2026-06-03 546.00 556.00 536.00 551.00 100046
+  2026-06-04 547.00 557.00 537.00 552.00 100047
+  2026-06-05 548.00 558.00 538.00 553.00 100048
+  2026-06-06 549.00 559.00 539.00 554.00 100049
+  2026-06-07 550.00 560.00 540.00 555.00 100050
+  2026-06-08 551.00 561.00 541.00 556.00 100051
+  2026-06-09 552.00 562.00 542.00 557.00 100052
+  2026-06-10 553.00 563.00 543.00 558.00 100053
+  2026-06-11 554.00 564.00 544.00 559.00 100054
+  2026-06-12 555.00 565.00 545.00 560.00 100055
+  2026-06-13 556.00 566.00 546.00 561.00 100056
+  2026-06-14 557.00 567.00 547.00 562.00 100057
+  2026-06-15 558.00 568.00 548.00 563.00 100058
+  2026-06-16 559.00 569.00 549.00 564.00 100059
+session: unavailable (no bars this session yet), 50m elapsed
+catalyst:
+  watchlist entry: none for this symbol today
+  sentiment unavailable
+positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)
+sector exposure: Energy 12% of 25% cap
+cost and breakeven: notional 19600, total cost 41.20, breakeven 0.21%, edge multiple 3.1
+equity: 500000.00
+max_qty_by_risk: 14
+risk headroom (informational - the gate re-checks everything):
+  - per_trade_risk: 0.6% of 1.0%
+  - daily_loss: -0.2% of -3.0%
+last price: unavailable (as of 2026-06-17T10:05:00+05:30)
+day plan age: authored 08:50 IST, 1.2h ago
+regime note age: unavailable (not yet authored today)

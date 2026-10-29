@@ -109,6 +109,11 @@ def sentiment_rail_note(row: Mapping[str, Any]) -> str:
     )
 
 
+#: Identity of the assembler's fixed prompt wording (stable-block text, absence notes, legends, the
+#: contract framing). Bump it with any such change; tests/unit/golden/for_signal_template.txt pins it.
+PROMPT_TEMPLATE_VERSION = "2026-10-29"
+
+
 def _digest(system_prompt: str, stable_block: str, volatile_block: str) -> str:
     """sha256 of the three blocks, NUL-separated so block boundaries cannot be forged by content."""
     joined = "\x00".join((system_prompt, stable_block, volatile_block))
@@ -125,15 +130,20 @@ class AssembledContext(BaseModel):
     volatile_block: str
     call_class: str             # the agents.yaml trigger name: signal_candidate|position_event|...
     inputs_digest: str          # sha256 hex of system+stable+volatile
+    template: str               # PROMPT_TEMPLATE_VERSION + NUL + the call's fixed per-strategy text
 
     @classmethod
-    def build(cls, *, system_prompt: str, stable_block: str, volatile_block: str, call_class: str) -> AssembledContext:
+    def build(
+        cls, *, system_prompt: str, stable_block: str, volatile_block: str, call_class: str,
+        template: str = "",
+    ) -> AssembledContext:
         return cls(
             system_prompt=system_prompt,
             stable_block=stable_block,
             volatile_block=volatile_block,
             call_class=call_class,
             inputs_digest=_digest(system_prompt, stable_block, volatile_block),
+            template=f"{PROMPT_TEMPLATE_VERSION}\x00{template}",
         )
 
     def prompt(self) -> str:
@@ -195,7 +205,8 @@ class ContextAssembler:
         bars = self._bars(candidate.symbol, d)      # read ONCE: the bar tail and the LTP line share it
         parts: list[str] = ["== MARKET STATE (volatile) =="]
         parts.append(f"candidate: {_json(candidate.model_dump(mode='json'))}")
-        parts.append(self._strategy_contract_text(candidate.strategy_id))
+        contract = self._strategy_contract_text(candidate.strategy_id)
+        parts.append(contract)
         parts.append(f"features: {self._features_text(candidate.features_snapshot_id)}")
         parts.append(self._bars_text(bars))
         if candidate.style == "swing":       # batch legs brk20/hi52/ins/cat/cat_reversal + bar-driven rsi2/mom — daily-series rules (§6.1)
@@ -217,6 +228,7 @@ class ContextAssembler:
             stable_block=self._stable_block(d),
             volatile_block="\n".join(parts),
             call_class="signal_candidate",
+            template=contract,
         )
 
     # ------------------------------------------------------------------ trigger (b): position event

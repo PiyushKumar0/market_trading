@@ -17,6 +17,7 @@ from __future__ import annotations
 import gzip
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +26,7 @@ from engine.core.clock import IST
 from engine.core.config import config_dir
 from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
-from engine.intelligence.context import BAR_TAIL, ContextAssembler
+from engine.intelligence.context import BAR_TAIL, PROMPT_TEMPLATE_VERSION, ContextAssembler
 from engine.intelligence.schemas import EXIT_REASON_CODES
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.strategy.types import RawLevels, SignalCandidate
@@ -33,6 +34,7 @@ from engine.strategy.types import RawLevels, SignalCandidate
 # conftest's frozen clock: Wed 2026-06-17 10:05 IST, a real trading day.
 TODAY = date(2026, 6, 17)
 SYMBOL = "RELIANCE"
+GOLDEN = Path(__file__).parent / "golden" / "for_signal_template.txt"
 
 CANDIDATE = SignalCandidate(
     signal_id="sig-1",
@@ -753,6 +755,33 @@ def test_every_signal_context_carries_its_strategy_contract(assembler, store):
         next(ln for ln in lines if ln.startswith("candidate: "))) + 1
     assert "  class: intraday (MIS), same-day squareoff" in v
     assert "  evidence status: exploratory" in v
+
+
+def test_signal_context_carries_its_contract_as_template(assembler):
+    brk20 = CANDIDATE.model_copy(update={"strategy_id": "brk20"})
+    other_brk20 = brk20.model_copy(update={"signal_id": "sig-3", "score": 0.4})
+    hi52 = brk20.model_copy(update={"strategy_id": "hi52"})
+
+    template = assembler.for_signal(brk20, **SIGNAL_KW).template
+    assert template.startswith(f"{PROMPT_TEMPLATE_VERSION}\x00strategy contract (brk20):")
+    assert assembler.for_signal(other_brk20, **SIGNAL_KW).template == template
+    assert assembler.for_signal(hi52, **SIGNAL_KW).template != template
+
+
+def test_for_signal_fixed_text_matches_golden(assembler, store, conn):
+    """Any change to the assembler's wording fails here until the golden file AND
+    ``PROMPT_TEMPLATE_VERSION`` (its first line) are updated together."""
+    seed_daily_bars(store, symbol=UNWATCHED)
+    seed_day_plan(conn)
+    store.insert_feature_snapshot(
+        "fs-golden", UNWATCHED, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
+        '{"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12}',
+    )
+    cand = SWING_CANDIDATE.model_copy(update={"features_snapshot_id": "fs-golden"})
+
+    version, _, body = GOLDEN.read_text(encoding="utf-8").partition("\n")
+    assert version == PROMPT_TEMPLATE_VERSION
+    assert assembler.for_signal(cand, **SIGNAL_KW).prompt() == body
 
 
 def test_the_nightly_review_reads_back_the_candidate_line(assembler, store):

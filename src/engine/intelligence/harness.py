@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 import re
 import sqlite3
@@ -655,6 +656,12 @@ async def _closing(stream: Any) -> Any:
 _AUTH_FAILED_RE = re.compile(r"not logged in|please run /login|\b401\b|oauth|revoked|authenticat")
 
 
+def _prompt_version(system_prompt: str, template: str) -> str:
+    """Template identity of a call, unlike the per-call ``inputs_digest``: the system prompt plus the
+    assembler's fixed text (``AssembledContext.template``)."""
+    return hashlib.sha256(f"{system_prompt}\x00{template}".encode()).hexdigest()[:16]
+
+
 def _classify(exc: BaseException) -> tuple[FailReason, str]:
     """Map an SDK exception to a D7 failure reason (all of which resolve to no-action + alert)."""
     detail = f"{type(exc).__name__}: {exc}"
@@ -744,6 +751,7 @@ class AgentHarness:
             system_prompt=getattr(context, "system_prompt", "") or "",
             base_prompt=context.prompt(),
             inputs_digest=getattr(context, "inputs_digest", "") or "",
+            template=getattr(context, "template", "") or "",
             validate=validate,
             json_schema=json_schema,
             max_turns=1,
@@ -774,6 +782,7 @@ class AgentHarness:
             system_prompt=system_prompt,
             base_prompt=task,
             inputs_digest=inputs_digest,
+            template="",
             validate=validate,
             json_schema=json_schema,
             max_turns=effective.max_turns,
@@ -806,12 +815,14 @@ class AgentHarness:
         system_prompt: str,
         base_prompt: str,
         inputs_digest: str,
+        template: str,
         validate: Callable[[str], Any] | None,
         json_schema: dict[str, Any] | None,
         max_turns: int | None,
         timeout_s: float,
         budget: _RunBudget | None,
     ) -> AgentResult:
+        prompt_version = _prompt_version(system_prompt, template)
         decision = self._governor.can_invoke(agent_def.agent_id, trigger)
         if not decision.allowed:
             # NO SDK call — but the audit trail still records that the agent was asked and refused (R8).
@@ -819,6 +830,7 @@ class AgentHarness:
                 agent_def,
                 trigger=trigger,
                 inputs_digest=inputs_digest,
+                prompt_version=prompt_version,
                 system_prompt=system_prompt,
                 prompt=base_prompt,
                 output=decision.reason or "blocked",
@@ -843,6 +855,7 @@ class AgentHarness:
                 agent_def,
                 trigger=trigger,
                 inputs_digest=inputs_digest,
+                prompt_version=prompt_version,
                 system_prompt=system_prompt,
                 prompt=base_prompt,
                 output=str(exc),
@@ -893,6 +906,7 @@ class AgentHarness:
                 agent_def,
                 trigger=trigger,
                 inputs_digest=inputs_digest,
+                prompt_version=prompt_version,
                 system_prompt=system_prompt,
                 prompt=prompt,
                 output=text if text else (failure[1] if failure else ""),
@@ -1184,6 +1198,7 @@ class AgentHarness:
         *,
         trigger: str,
         inputs_digest: str,
+        prompt_version: str,
         system_prompt: str,
         prompt: str,
         output: str,
@@ -1203,8 +1218,8 @@ class AgentHarness:
                 INSERT INTO agent_calls
                     (call_id, agent_id, trigger, model, inputs_digest, context_gz, output_json, ok,
                      fail_reason, in_tokens, out_tokens, cache_read, cache_write, cost_usd,
-                     duration_ms, at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     duration_ms, at, prompt_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     call_id,
@@ -1223,6 +1238,7 @@ class AgentHarness:
                     str(cost),                  # TEXT column: decimal-as-string (§8.1), never a float
                     duration_ms,
                     self._clock.now().isoformat(),
+                    prompt_version,
                 ),
             )
         return call_id

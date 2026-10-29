@@ -34,6 +34,7 @@ from engine.intelligence.harness import (
     AgentDef,
     AgentHarness,
     RunCaps,
+    _prompt_version,
     load_agent_defs,
 )
 from engine.intelligence.schemas import parse_and_stamp
@@ -136,6 +137,7 @@ class FakeContext:
     system_prompt: str = "SYSTEM PROMPT (byte-stable)"
     inputs_digest: str = "digest-abc123"
     call_class: str = "signal_candidate"
+    template: str = "v1\x00contract"
 
     def prompt(self) -> str:
         return self.prompt_text
@@ -981,6 +983,36 @@ async def test_governor_block_makes_no_sdk_call(defs, gov, clock, conn, alert, a
     assert row["in_tokens"] == 0 and Decimal(row["cost_usd"]) == Decimal(0)
     assert conn.execute("SELECT COUNT(*) c FROM budget_ledger").fetchone()["c"] == 0
     assert alerts and "governor_blocked" in alerts[0][1]
+
+
+def test_prompt_version_ignores_the_digest_and_moves_with_system_prompt_or_template() -> None:
+    base = _prompt_version("sys", "v1\x00contract")
+    assert len(base) == 16
+    assert base == _prompt_version("sys", "v1\x00contract")
+    assert len({base, _prompt_version("sys2", "v1\x00contract"), _prompt_version("sys", "v2\x00contract"),
+                _prompt_version("sys", "v1\x00other")}) == 4
+
+
+async def test_every_persisted_call_has_a_prompt_version(defs, gov, clock, conn) -> None:
+    agentic = json.dumps({"summary": "flat day", "param_suggestions": []})
+    fake = FakeQuery(
+        [FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)],
+        [FakeAssistantMessage(agentic), FakeResultMessage({"input_tokens": 1, "output_tokens": 1})],
+    )
+    harness = make_harness(defs, gov, clock, conn, fake)
+    ctx = FakeContext()
+
+    await harness.run_single_shot(defs["intraday_analyst"], ctx, enter_validator(clock))
+    await harness.run_agentic(defs["nightly_reviewer"], "review", validate=json.loads, system_prompt="nightly")
+    gov.note_billing_error("test")
+    await harness.run_single_shot(defs["intraday_analyst"], ctx, enter_validator(clock))
+
+    versions = [r["prompt_version"] for r in rows(conn)]
+    assert [r["fail_reason"] for r in rows(conn)] == [None, None, "governor_blocked"]
+    assert versions == [
+        _prompt_version(ctx.system_prompt, ctx.template), _prompt_version("nightly", ""),
+        _prompt_version(ctx.system_prompt, ctx.template),
+    ]
 
 
 async def test_call_class_drives_admission(defs, gov, clock, conn, real_cfg, calendar) -> None:
