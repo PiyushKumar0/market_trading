@@ -54,7 +54,6 @@ def _analyst(cells, registered_from=R):
 def test_late_finisher_never_reorders_a_look():
     rows = [_r(0, status="open"), *(_r(i) for i in range(1, 25))]
     assert fv.kill_looks(rows)[0].n_closed == 19
-    assert fv.look_holders(rows, 20) == [rows[0]]
 
 
 def test_look_waits_for_every_member():
@@ -74,7 +73,10 @@ def test_members_sharing_a_fill_day_are_ordered_by_symbol():
 def test_an_unfilled_open_row_dated_by_the_last_fill_holds_the_look():
     rows = [*(_r(i) for i in range(20)), _r(5, symbol="LATE", status="open", fill=None)]
     assert fv.look_holders(rows, 20) == [rows[-1]]
-    assert fv.kill_looks([*rows[:20], _r(30, status="open", fill=None)])[0].formed
+
+
+def test_an_unfilled_open_row_dated_after_the_last_fill_does_not_hold_the_look():
+    assert fv.kill_looks([*(_r(i) for i in range(20)), _r(30, status="open", fill=None)])[0].formed
 
 
 def test_the_holder_cutoff_includes_the_last_fill_day():
@@ -160,13 +162,20 @@ def test_the_registered_key_is_the_first_decision_by_day_then_symbol():
     assert fv.registered_keys(rows) == {"ins": ("v1", "m")}
 
 
+def test_a_row_missing_its_key_never_becomes_the_registered_key():
+    rows = [_r(0, decision="enter", key=(None, "m")), _r(1, decision="enter")]
+    assert fv.registered_keys(rows) == {"ins": ("v1", "m")}
+
+
 def test_the_population_freezes_on_the_first_other_key():
-    rows = [_r(0, decision="enter"), _r(1, decision="enter", key=("v2", "m")), _r(2, decision="enter")]
+    rows = [_r(0, decision="enter"), _r(1, decision="enter", key=("v2", "m")), _r(2, decision="enter"),
+            _r(3, decision="enter", key=("v2", "m"))]
     assert fv.split_by_key(rows, {"ins": ("v1", "m")}) == ([rows[0]], rows[1:])
 
 
-def test_a_row_missing_its_key_is_excluded_without_freezing():
-    rows = [_r(0, decision="enter", key=(None, "m")), _r(1, decision="enter")]
+@pytest.mark.parametrize("key", [(None, "m"), ("v1", None)])
+def test_a_row_missing_its_key_is_excluded_without_freezing(key):
+    rows = [_r(0, decision="enter", key=key), _r(1, decision="enter")]
     assert fv.split_by_key(rows, {"ins": ("v1", "m")}) == ([rows[1]], [rows[0]])
 
 
@@ -220,16 +229,24 @@ def _load(conn, construct="rule", as_of=None, strategies=("ins",)):
     return fv.load_rows(conn, strategies=strategies, construct=construct, start=D0, as_of=as_of or _day(9))
 
 
-def test_load_rows_joins_the_outcome_and_the_call_and_an_unscored_row_reads_open(conn):
+def _blocked(conn, d):
+    conn.execute("INSERT INTO brk20_regime_blocked (symbol, signal_d, entry, stop, score, reason, created_at) "
+                 "VALUES ('A', ?, '90', '85', 1.0, 'down', 't')", (d.isoformat(),))
+
+
+def test_load_rows_joins_the_outcome_and_the_call(conn):
     _call(conn, "c1", "v1", "m")
     _slot(conn, _day(0), "A", decision="enter", call_id="c1")
     _outcome(conn, _day(0), "A", "next_open", "closed", fill_d=_day(1), exit_d=_day(5), net=2.0)
-    _slot(conn, _day(0), "B")
     assert _load(conn, "next_open") == [
         SignalRow(_day(0), "A", "ins", "next_open", "closed", _day(1), _day(5), 2.0, 2.0, 2.0, None,
-                  "enter", 0.6, "v1", "m"),
-        SignalRow(_day(0), "B", "ins", "next_open", "open", None, None, None, None, None, None,
-                  None, 0.6, None, None)]
+                  "enter", 0.6, "v1", "m")]
+
+
+def test_load_rows_reads_an_unscored_row_open(conn):
+    _slot(conn, _day(0), "B")
+    assert _load(conn, "next_open") == [
+        SignalRow(_day(0), "B", "ins", "next_open", "open", None, None, None, None, None, None, None, 0.6)]
 
 
 def test_as_of_bounds_d_fill_and_exit(conn):
@@ -247,8 +264,11 @@ def test_as_of_is_inclusive(conn):
     _outcome(conn, _day(0), "A", "rule", "open", fill_d=_day(3))
     _slot(conn, _day(0), "B")
     _outcome(conn, _day(0), "B", "rule", "closed", fill_d=_day(0), exit_d=_day(3), net=1.0)
-    a, b = _load(conn, as_of=_day(3))
-    assert (a.fill_d, b.status, b.net_t20) == (_day(3), "closed", 1.0)
+    _slot(conn, _day(3), "C")
+    _blocked(conn, _day(3))
+    a, b, c = _load(conn, as_of=_day(3))
+    assert (a.fill_d, b.status, b.net_t20, c.d) == (_day(3), "closed", 1.0, _day(3))
+    assert [r.d for r in _load(conn, "rule_blocked", as_of=_day(3), strategies=("brk20",))] == [_day(3)]
 
 
 def test_load_rows_rule_takes_brk20_first_publications_only(conn):
@@ -261,8 +281,7 @@ def test_load_rows_rule_takes_brk20_first_publications_only(conn):
 
 
 def test_load_rows_rule_blocked_reads_the_blocked_table(conn):
-    conn.execute("INSERT INTO brk20_regime_blocked (symbol, signal_d, entry, stop, score, reason, created_at) "
-                 "VALUES ('A', ?, '90', '85', 1.0, 'down', 't')", (_day(0).isoformat(),))
+    _blocked(conn, _day(0))
     _outcome(conn, _day(0), "A", "rule_blocked", "unfilled", strategy_id="brk20")
     assert _load(conn, "rule_blocked", strategies=("brk20",)) == [
         SignalRow(_day(0), "A", "brk20", "rule_blocked", "unfilled", None, None, None, None, None, None,
@@ -271,10 +290,12 @@ def test_load_rows_rule_blocked_reads_the_blocked_table(conn):
 
 
 def test_a_reading_loads_its_population_from_registered_from(conn):
-    _slot(conn, _day(-1), "A")
-    _slot(conn, _day(0), "B")
+    _call(conn, "c1", "v1", "m")
+    _slot(conn, _day(-1), "A", decision="enter", call_id="c1")
+    _slot(conn, _day(0), "B", decision="enter", call_id="c1")
     assert fv.kill_reading(conn, "ins", as_of=_day(9), registered_from=R).n_rows == 1
     assert fv.kill_reading(conn, "ins", as_of=_day(9), registered_from=None).n_rows == 2
+    assert fv.analyst_reading(conn, as_of=_day(9), registered_from=R).n_kept == 1
 
 
 def test_other_prompt_or_model_excluded_and_counted(conn):

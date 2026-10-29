@@ -80,9 +80,10 @@ class SignalRow:
 
 @dataclass(frozen=True)
 class Look:
-    """A kill look over rows read as of a day. ``formed``, the counts and the net T+20 figures reconstruct
-    exactly what that day knew; ``median_excess_t20`` is a diagnostic and may include benchmark scoring
-    done after it."""
+    """A kill look over rows read as of a day. ``formed``, the counts and the net T+20 figures are exact as
+    of that day, except that a row still open then and finalised since (a healed data hole) reads final:
+    a past reading can show a look FORMED that read "holding" that day. ``median_excess_t20`` is a
+    diagnostic and may include later scoring."""
 
     size: int
     formed: bool

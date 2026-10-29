@@ -176,8 +176,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--rule", required=True, choices=(*fv.KILL_RULES, "analyst"))
     ap.add_argument("--db", type=Path, default=repo_root() / "data" / "state.db")
     ap.add_argument("--as-of", type=date.fromisoformat, default=None, metavar="YYYY-MM-DD",
-                    help="read outcomes as known on this day (default: today IST). The verdict figures are "
-                         "reconstructed exactly; diagnostics (T+5/T+10, excess) may include scoring done after it")
+                    help="read outcomes as known on this day (default: today IST). Verdict figures are exact "
+                         "as of the day, except that a row still open then and finalised since (a healed data "
+                         "hole) reads final, so a past reading can show a look FORMED that read holding that "
+                         "day. Diagnostics (T+5/T+10, excess) may include later scoring")
     ap.add_argument("--json", type=Path, default=None, metavar="PATH", help="also write the reading as JSON")
     args = ap.parse_args(argv)
     as_of = args.as_of or datetime.now(IST).date()
