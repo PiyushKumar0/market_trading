@@ -646,12 +646,19 @@ class RecommendationBook:
         """``/veto <rec_id> [reason]`` — the owner declines. A live rec is recorded as ``dismissed`` + a
         ``no_action`` label: a decline and a silent non-fill are different facts, both training signal
         (§6.5). An expired entry rec keeps ``expired`` and gains only the reason (its ledger row is
-        already ``no_action``); a second reason is refused, never overwrites the first."""
+        already ``no_action``); a second reason is refused, never overwrites the first, and so is one
+        given after the veto window the reminder runs in (:meth:`_in_veto_window`): by then the
+        outcome may be visible, and a reason chosen in hindsight would taint the skip record."""
         row = self._rec_row(rec_id)
         now = self._clock.now()
         if self._expired(row, now) and reason is not None and self._kind(row) == "entry":
             if row["skip_reason"]:
                 raise ValueError(f"reason already recorded: {row['skip_reason']}")
+            data = self._rec_payload(row)
+            if not self._in_veto_window(data, now):
+                raise ValueError(
+                    f"too late to record a reason (expired {str(data.get('valid_until'))[:10]})"
+                )
             with transaction(self._conn):
                 self._conn.execute(
                     "UPDATE recommendations SET skip_reason=?, skip_reason_at=? WHERE rec_id=?",
@@ -698,7 +705,7 @@ class RecommendationBook:
                 "rec_id": str(row["rec_id"]), "instrument": instrument,
                 "side": str(data.get("side") or "?"), "qty": int(data.get("qty") or 0),
                 "kind": "entry", "delivered_at": row["delivered_at"],
-                "valid_until": data.get("valid_until"),
+                "valid_until": data.get("valid_until"), "strategy_id": data.get("strategy_id"),
             })
         return out
 

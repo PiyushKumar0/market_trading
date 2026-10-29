@@ -260,8 +260,8 @@ async def test_split_message_is_one_notification_not_five(conn, clock):
 _BUTTONS = [[{"text": "skip: market", "command": "/veto 01M0H8ZXM3PYNAVXF54A5TDGV0 market"}]]
 
 
-def _with_buttons(body: str = "B") -> CatalogMessage:
-    return CatalogMessage(kind=MessageKind.RECOMMENDATION, title="T", body=body, buttons=_BUTTONS)
+def _with_buttons(body: str = "B", buttons=_BUTTONS) -> CatalogMessage:
+    return CatalogMessage(kind=MessageKind.RECOMMENDATION, title="T", body=body, buttons=buttons)
 
 
 def _callbacks(markup) -> list[list[str]]:
@@ -287,6 +287,13 @@ async def test_drainer_retry_reattaches_buttons(conn, moving):
 
     assert _one(conn)["status"] == "delivered"
     assert _callbacks(sender.markups[0]) == [["/veto 01M0H8ZXM3PYNAVXF54A5TDGV0 market"]]
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_button_ships_the_text_alone_and_the_row_is_delivered(conn, clock):
+    bot, sender = _bot(conn, clock)
+    await bot.send(_with_buttons(buttons=[[{"text": "x", "command": "/veto " + "A" * 60}]]))
+    assert sender.markups == [None] and _one(conn)["status"] == "delivered"
 
 
 @pytest.mark.asyncio

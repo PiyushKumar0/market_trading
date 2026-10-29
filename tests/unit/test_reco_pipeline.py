@@ -1550,6 +1550,15 @@ async def test_veto_refuses_a_second_reason(conn, veto_book, cost_model):
     assert tuple(_row(conn, rec.rec_id))[:2] == ("expired", "market")
 
 
+async def test_veto_refuses_a_reason_after_the_reminder_window(conn, veto_book, cost_model, ticker):
+    rec = _expired_rec(conn, veto_book, cost_model)
+    ticker.at = datetime(2026, 6, 23, 9, 0, tzinfo=IST)       # 4th session after Wed 06-17
+    assert veto_book.reminder_rows(ticker.at) == []
+    with pytest.raises(ValueError, match=r"^too late to record a reason \(expired 2026-06-17\)$"):
+        await veto_book.veto(rec.rec_id, "market")
+    assert _row(conn, rec.rec_id)["skip_reason"] is None
+
+
 async def test_a_lapsed_rec_the_sweep_has_not_reached_vetoes_as_expired(conn, veto_book, cost_model):
     rec = make_rec(cost_model, valid_until=NOW - timedelta(minutes=1))
     veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))

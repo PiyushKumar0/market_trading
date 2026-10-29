@@ -124,23 +124,29 @@ def test_paper_half_keeps_pre_epoch_paper_trades_and_excludes_voids(conn) -> Non
     assert strategies["hi52"]["recs"]["n"] == 5          # paper rows never reach the recs half
 
 
-def _rec(conn, rec_id, day, *, symbol="BHEL", kind="entry", strategy="hi52", status=None, **outcome):
+def _rec(conn, rec_id, day, *, symbol="BHEL", kind="entry", strategy="hi52", payload_strategy=None,
+         outcome_strategy=None, status=None, delivered=True, **outcome):
+    """``strategy`` is the ledger's; ``payload_strategy`` outranks it, ``outcome_strategy`` both."""
+    payload = {"kind": kind, "instrument": symbol, "strategy_id": payload_strategy}
     conn.execute(
         "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?, ?, ?)",
-        (rec_id, json.dumps({"kind": kind, "instrument": symbol}), f"{day}T10:00:00+05:30"),
+        (rec_id, json.dumps(payload), f"{day}T10:00:00+05:30" if delivered else None),
     )
     conn.execute("INSERT INTO learning_ledger (entry_id, rec_id, strategy_id) VALUES (?, ?, ?)",
                  (f"e-{rec_id}", rec_id, strategy))
     if status:
-        conn.execute("INSERT INTO rec_outcomes (rec_id, status, net_pct, exit_reason, updated_at) "
-                     "VALUES (?, ?, ?, ?, 'x')", (rec_id, status, outcome.get("net"), outcome.get("reason")))
+        conn.execute("INSERT INTO rec_outcomes (rec_id, strategy_id, status, net_pct, exit_reason, updated_at) "
+                     "VALUES (?, ?, ?, ?, ?, 'x')",
+                     (rec_id, outcome_strategy, status, outcome.get("net"), outcome.get("reason")))
 
 
 def test_history_line_lists_earlier_entry_recs_newest_first(conn) -> None:
-    _rec(conn, "a", "2026-08-27", status="open")
-    _rec(conn, "b", "2026-09-10", strategy="brk20", status="closed", net=-4.1234, reason="stop")
+    _rec(conn, "a", "2026-08-27", strategy="ledger", payload_strategy="hi52", status="open")
+    _rec(conn, "b", "2026-09-10", strategy="ledger", payload_strategy="payload", outcome_strategy="brk20",
+         status="closed", net=-4.1234, reason="stop")
     _rec(conn, "x", "2026-09-11", kind="exit", status="closed", net=9.0, reason="time")
     _rec(conn, "o", "2026-09-12", symbol="TCS", status="open")
+    _rec(conn, "u", "2026-09-13", status="open", delivered=False)
     assert symbol_history_line(conn, "BHEL") == (
         "same-ticker history (hindsight): 2026-09-10 brk20 closed -4.12% (stop); 2026-08-27 hi52 open")
 

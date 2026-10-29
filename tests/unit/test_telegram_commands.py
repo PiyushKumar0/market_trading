@@ -19,6 +19,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from telegram.ext import CallbackQueryHandler
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
@@ -30,6 +31,7 @@ from engine.core.types import OwnerConfirmation
 from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.intelligence.governor import BudgetGovernor
 from engine.notify import catalog
+from engine.notify import telegram as tg_mod
 from engine.notify.catalog import MessageKind
 from engine.notify.telegram import _USAGE_VETO, VETO_REASONS, TelegramBot, _inline_markup, _owner_only
 from engine.ops.paper_control import PaperControl
@@ -585,15 +587,19 @@ async def test_typed_veto_refuses_a_second_reason(clock, conn, msg):
 
 # ------------------------------------------------------------------- one-tap skip buttons (T13)
 class _Query:
-    def __init__(self, data: str | None, markup=None, *, edit_fails: bool = False) -> None:
+    def __init__(self, data: str | None, markup=None, *, edit_fails: bool = False,
+                 answer_fails: bool = False) -> None:
         self.data = data
         self.message = SimpleNamespace(reply_markup=markup)
         self.answers: list[tuple] = []
         self.edits: list = []
         self._edit_fails = edit_fails
+        self._answer_fails = answer_fails
 
     async def answer(self, text=None, show_alert=None) -> None:
         self.answers.append((text, show_alert))
+        if self._answer_fails:
+            raise RuntimeError("Query is too old")
 
     async def edit_message_reply_markup(self, reply_markup=None) -> None:
         if self._edit_fails:
@@ -602,13 +608,18 @@ class _Query:
 
 
 async def _tap(clock, book, query, chat_id: int = OWNER_CHAT) -> None:
+    """Through the handler ``_register_handlers`` actually registers, owner guard included."""
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)
+    handlers: list = []
+    bot._register_handlers(SimpleNamespace(add_handler=handlers.append))
+    (tap,) = [h.callback for h in handlers if isinstance(h, CallbackQueryHandler)]
     update = SimpleNamespace(effective_chat=_Chat(chat_id), callback_query=query, effective_message=None)
-    await _owner_only(bot, bot._on_button)(update, _Ctx())
+    await tap(update, _Ctx())
 
 
 def _reminder_markup():
-    return _inline_markup(catalog.rec_decision_reminder(_reminder_rows(2)).buttons)
+    rows = _reminder_rows(("HDFCAMC", "hi52", "09:20"), ("TCS", "hi52", "09:20"))
+    return _inline_markup(catalog.rec_decision_reminder(rows).buttons)
 
 
 @pytest.mark.asyncio
@@ -637,6 +648,16 @@ async def test_edit_failure_still_answers(clock):
 
 
 @pytest.mark.asyncio
+async def test_a_failing_answer_after_a_recorded_veto_is_not_a_command_failure(clock, caplog):
+    book = _FakeBook()
+    query = _Query(f"/veto {REC_A} market", _reminder_markup(), answer_fails=True)
+    with caplog.at_level(logging.WARNING, logger="engine.notify.telegram"):
+        await _tap(clock, book, query)
+    assert book.calls == [("veto", REC_A, "market")] and len(query.edits) == 1
+    assert not [r for r in caplog.records if r.getMessage() == "telegram_command_failed"]
+
+
+@pytest.mark.asyncio
 async def test_non_owner_tap_ignored_and_logged(clock, caplog):
     book, query = _FakeBook(), _Query(f"/veto {REC_A} market")
     with caplog.at_level(logging.WARNING, logger="engine.notify.telegram"):
@@ -646,15 +667,30 @@ async def test_non_owner_tap_ignored_and_logged(clock, caplog):
         f"/veto {REC_A} market"]
 
 
+_UNLISTED = "this button is not allowed"
+_MALFORMED = "malformed button"
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("data", [
-    f"/taken {REC_A} 5 100", f"/veto {REC_A} nope", f"/veto {REC_A}", "/veto HDFCAMC market",
-    f"veto {REC_A} market", f"/veto {REC_A} market x", "", None,
+@pytest.mark.parametrize(("data", "answer"), [
+    (f"/taken {REC_A} market", _UNLISTED), (f"/closed {REC_A} price", _UNLISTED),
+    (f"/taken {REC_A} 5 100", _UNLISTED), (f"xveto {REC_A} market", _UNLISTED),
+    (f"veto {REC_A} market", _UNLISTED), ("", _UNLISTED), (None, _UNLISTED),
+    (f"/veto {REC_A} nope", _MALFORMED), (f"/veto {REC_A}", _MALFORMED),
+    ("/veto HDFCAMC market", _MALFORMED), (f"/veto {REC_A} market x", _MALFORMED),
 ])
-async def test_unlisted_or_malformed_command_refused(clock, data):
+async def test_unlisted_or_malformed_command_refused(clock, data, answer):
     book, query = _FakeBook(), _Query(data)
     await _tap(clock, book, query)
-    assert book.calls == [] and len(query.answers) == 1 and query.answers[0][1] is True
+    assert book.calls == [] and query.answers == [(answer, True)]
+
+
+@pytest.mark.asyncio
+async def test_a_listed_verb_runs_only_its_own_action(clock, monkeypatch):
+    monkeypatch.setattr(tg_mod, "_BUTTON_COMMANDS", frozenset({"veto", "taken"}))
+    book, query = _FakeBook(), _Query(f"/taken {REC_A} market")
+    await _tap(clock, book, query)
+    assert book.calls == [] and query.answers == [(_MALFORMED, True)]
 
 
 @pytest.mark.asyncio
@@ -1508,15 +1544,19 @@ def test_exit_card_has_no_buttons(clock, kind):
     assert catalog.recommendation_message(rec).buttons is None
 
 
-def _reminder_rows(n: int) -> list[dict]:
-    return [{"rec_id": f"01M0H8ZXM3PYNAVXF54A5TDGV{i}", "instrument": f"SYM{i}", "side": "BUY", "qty": 1,
-             "valid_until": DEAD_UNTIL} for i in range(n)]
+def _reminder_rows(*recs: tuple[str, str, str]) -> list[dict]:
+    """One row per ``(symbol, strategy, HH:MM delivered)``."""
+    return [{"rec_id": f"01M0H8ZXM3PYNAVXF54A5TDGV{i}", "instrument": sym, "strategy_id": sid,
+             "delivered_at": f"2026-06-17T{hhmm}:00+05:30", "side": "BUY", "qty": 1,
+             "valid_until": DEAD_UNTIL} for i, (sym, sid, hhmm) in enumerate(recs)]
 
 
 def test_reminder_rows_label_the_symbol_and_cap_at_4_recs():
-    buttons = catalog.rec_decision_reminder(_reminder_rows(5)).buttons
-    assert len(buttons) == 8
-    assert buttons[0][0] == {"text": "SYM0: market", "command": f"/veto {REC_A} market"}
+    rows = _reminder_rows(("BHEL", "hi52", "09:20"), ("BHEL", "brk20", "09:31"), ("BHEL", "brk20", "10:02"),
+                          ("TCS", "hi52", "09:20"), ("INFY", "hi52", "09:20"))
+    buttons = catalog.rec_decision_reminder(rows).buttons
+    assert [row[0]["text"] for row in buttons[::2]] == [
+        "BHEL hi52: market", "BHEL brk20 09:31: market", "BHEL brk20 10:02: market", "TCS: market"]
     assert {b["command"].split()[1] for row in buttons for b in row} == {
         f"01M0H8ZXM3PYNAVXF54A5TDGV{i}" for i in range(4)}
 

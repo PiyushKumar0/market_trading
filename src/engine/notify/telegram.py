@@ -30,7 +30,8 @@ exposes ``apply_approval`` — probed, never required).
 
 The command catalog is the single source of truth for handler registration, ``/help``, and the
 Telegram ``/`` autocomplete menu (``setMyCommands``, owner-chat-scoped), so the three never drift.
-:meth:`TelegramBot.attach_bus` subscribes the outbound owner alerts (mode / risk-state / kill /
+One more handler sits outside it: inline-button taps, owner-guarded the same way, run only the verbs
+in :data:`_BUTTON_COMMANDS`. :meth:`TelegramBot.attach_bus` subscribes the outbound owner alerts (mode / risk-state / kill /
 trade-window / budget-tier) to the §3.2.1 topics, rendering them through the §8 catalog (R8).
 
 All owner-confirmed state changes use :data:`Actor.OWNER`. All times come from :class:`Clock` — the
@@ -303,6 +304,7 @@ class _CommandSpec:
 
 # Ordered so ``/help`` and the menu read top-to-bottom in a sensible sequence (control plane first).
 # Editing this tuple is the ONLY place to add/relabel a command — registration + help + menu follow.
+# A tap on an inline button is not a command here; it may run only the verbs in _BUTTON_COMMANDS.
 _COMMANDS: tuple[_CommandSpec, ...] = (
     # --- sticky control plane (mode / kill / window) ---
     _CommandSpec("status", "/status",
@@ -1018,6 +1020,7 @@ class TelegramBot:
         """Wire every command in :data:`_COMMANDS` to its handler (all owner-guarded, R10).
 
         Live commands use their bound handler; Phase-2 stubs register a logged not-implemented reply.
+        Inline-button taps get one owner-guarded :meth:`_on_button`.
         """
         live = self._live_handlers()
         for spec in _COMMANDS:
@@ -1026,29 +1029,31 @@ class TelegramBot:
         app.add_handler(CallbackQueryHandler(_owner_only(self, self._on_button)))
 
     async def _on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """One inline-button tap: an allow-listed ``/veto <rec_id> <reason>`` goes to the book, and on
-        success the tapped rec's buttons leave the message. The query is always answered, because
-        Telegram spins the button until it is; a refusal is an alert the owner must dismiss."""
+        """One inline-button tap runs its command when the verb is allow-listed and dispatched; only
+        ``/veto <rec_id> <reason>`` is. The query is always answered, because Telegram spins the
+        button until it is: a refusal as an alert the owner must dismiss, a recorded veto before the
+        tapped rec's buttons leave the message, so a failing edit or answer never reads as a failure."""
         query = update.callback_query
-        parsed = _button_veto(query.data)
-        if parsed is None:
-            _log.warning("telegram_button_refused", command=query.data)
+        command = _button_command(query.data)
+        if command is None:
+            _log.warning("telegram_button_refused", command=query.data, reason="unlisted")
             await query.answer("this button is not allowed", show_alert=True)
+            return
+        verb, args = command
+        veto = _veto_args(args) if verb == "veto" else None
+        if veto is None:
+            _log.warning("telegram_button_refused", command=query.data, reason="malformed")
+            await query.answer("malformed button", show_alert=True)
             return
         if self._reco_book is None:
             await query.answer("recommendation book not wired", show_alert=True)
             return
-        rec_id, reason = parsed
+        rec_id, reason = veto
         _log.warning("telegram_button_veto", rec_id=rec_id, reason=reason)
-        try:
-            text = await self._reco_book.veto(rec_id, reason)
-        except ValueError as exc:
-            _log.warning("telegram_reco_book_rejected", error=str(exc))
-            await query.answer(str(exc)[:_ANSWER_MAX_CHARS], show_alert=True)
-            return
-        except Exception as exc:  # noqa: BLE001 - the tap is answered whatever the book does (R8)
-            _log.exception("telegram_reco_book_failed")
-            await query.answer(f"failed: {exc}"[:_ANSWER_MAX_CHARS], show_alert=True)
+        ok, text = await _book_result(self._reco_book.veto(rec_id, reason))
+        with contextlib.suppress(Exception):
+            await query.answer(text[:_ANSWER_MAX_CHARS], show_alert=None if ok else True)
+        if not ok:
             return
         try:
             await query.edit_message_reply_markup(
@@ -1056,7 +1061,6 @@ class TelegramBot:
             )
         except Exception:  # noqa: BLE001 - the veto is recorded; stale buttons refuse a second tap
             _log.exception("telegram_button_edit_failed", rec_id=rec_id)
-        await query.answer(text[:_ANSWER_MAX_CHARS])
 
     def _stub(self, name: str) -> Callable[..., Awaitable[None]]:
         """A Phase-0 handler that logs the command and replies that it is not yet implemented."""
@@ -1560,7 +1564,8 @@ class TelegramBot:
         if rec_id is None:
             return                              # unresolvable: _resolve_rec_arg already replied
         _log.warning("telegram_cmd_taken", arg=args[0], rec_id=rec_id, qty=qty, price=str(price))
-        await _reply(update, await _book_result(self._reco_book.take(rec_id, qty, price)))
+        _, text = await _book_result(self._reco_book.take(rec_id, qty, price))
+        await _reply(update, text)
 
     async def _cmd_closed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner marks a taken recommendation closed at ``price`` (§3.6 outcome capture).
@@ -1582,7 +1587,8 @@ class TelegramBot:
         if rec_id is None:
             return
         _log.warning("telegram_cmd_closed", arg=args[0], rec_id=rec_id, price=str(price))
-        await _reply(update, await _book_result(self._reco_book.close(rec_id, price)))
+        _, text = await _book_result(self._reco_book.close(rec_id, price))
+        await _reply(update, text)
 
     async def _cmd_veto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner declines a recommendation. Recorded as vetoed — never silently as a non-fill,
@@ -1603,7 +1609,8 @@ class TelegramBot:
             await _reply(update, f"usage: /veto {args[0].upper()} <{'|'.join(VETO_REASONS)}>")
             return
         _log.warning("telegram_cmd_veto", arg=args[0], rec_id=rec_id, reason=reason)
-        await _reply(update, await _book_result(self._reco_book.veto(rec_id, reason)))
+        _, text = await _book_result(self._reco_book.veto(rec_id, reason))
+        await _reply(update, text)
 
     async def _cmd_protected(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner confirms the protective stop order is placed (D6)."""
@@ -1615,7 +1622,8 @@ class TelegramBot:
             await _reply(update, f"usage: {_USAGE_PROTECTED}")
             return
         _log.warning("telegram_cmd_protected", arg=args[0])
-        await _reply(update, await _book_result(self._reco_book.protect(args[0])))
+        _, text = await _book_result(self._reco_book.protect(args[0]))
+        await _reply(update, text)
 
     async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Exit guidance — the v1 answer, and an honest one: in RECOMMEND the platform places ZERO API
@@ -1985,13 +1993,19 @@ def _loads_buttons(raw: str | None) -> list[list[dict[str, str]]] | None:
         return None
 
 
-def _button_veto(data: str | None) -> tuple[str, str] | None:
-    """``(rec_id, reason)`` of an allow-listed ``/veto <rec_id> <reason>`` tap, else None."""
+def _button_command(data: str | None) -> tuple[str, list[str]] | None:
+    """``(verb, args)`` of a tapped ``/<verb> …`` command whose verb is allow-listed, else None."""
     parts = (data or "").split()
-    if len(parts) != 3 or not parts[0].startswith("/") or parts[0][1:] not in _BUTTON_COMMANDS:
+    if not parts or not parts[0].startswith("/") or parts[0][1:] not in _BUTTON_COMMANDS:
         return None
-    rec_id, reason = parts[1:]
-    return (rec_id, reason) if _is_ulid(rec_id) and reason in VETO_REASONS else None
+    return parts[0][1:], parts[1:]
+
+
+def _veto_args(args: list[str]) -> tuple[str, str] | None:
+    """``(rec_id, reason)`` of a tapped veto: a rec id, never a ticker a tap could resolve wrongly."""
+    if len(args) != 2 or not _is_ulid(args[0]) or args[1] not in VETO_REASONS:
+        return None
+    return args[0], args[1]
 
 
 def _markup_without(markup: InlineKeyboardMarkup | None, rec_id: str) -> InlineKeyboardMarkup | None:
@@ -2052,20 +2066,20 @@ def _usd(value: Any) -> str:
     return f"${Decimal(value):,.4f}"
 
 
-async def _book_result(call: Awaitable[str]) -> str:
-    """Await a :class:`RecoBook` call and turn any failure into an owner-facing line.
+async def _book_result(call: Awaitable[str]) -> tuple[bool, str]:
+    """Await a :class:`RecoBook` call: ``(True, summary)``, or ``(False, owner-facing failure line)``.
 
     ``ValueError`` is the book's contract for "unknown rec / invalid transition" and already carries a
     message written for the owner, so it is surfaced verbatim; anything else is a bug, logged with a
     traceback and reported — a bad book call must never take down the control plane (R8)."""
     try:
-        return await call
+        return True, await call
     except ValueError as exc:
         _log.warning("telegram_reco_book_rejected", error=str(exc))
-        return str(exc)
+        return False, str(exc)
     except Exception as exc:  # noqa: BLE001 - report, never crash the bot (R8)
         _log.exception("telegram_reco_book_failed")
-        return f"failed: {exc}"
+        return False, f"failed: {exc}"
 
 
 # ---------------------------------------------------------------------- ticker resolution (WO-29)

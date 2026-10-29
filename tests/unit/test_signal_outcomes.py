@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from datetime import date, datetime
@@ -16,6 +17,7 @@ from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.ops.jobs import JOB_DAILY_BARS, JOB_SIGNAL_OUTCOMES, CatchUpRunner, JobRegistry
+from engine.ops.pipeline import RecommendationPipeline
 from engine.ops.signal_outcomes import SignalOutcomesJob
 from engine.risk.limits import LimitTable
 from engine.strategy.cost_model import CostModel
@@ -424,8 +426,14 @@ async def test_only_signal_strategies_are_scored(conn, store, job, sess):
     assert _rows(conn) == {}
 
 
-def test_no_decision_path_reads_signal_outcomes():
+def test_no_decision_path_reads_hindsight():
+    """The one exception is the card's same-ticker line, an owner-facing extra in ``_fill_extras``."""
     paths = [*(SRC / p for p in ("strategy", "risk", "intelligence")), SRC / "ops" / "pipeline.py"]
     files = [f for p in paths for f in (p.rglob("*.py") if p.is_dir() else [p])]
     assert len(files) > 20
-    assert [f for f in files if re.search("signal_outcomes|forward_verdicts", f.read_text(encoding="utf-8"))] == []
+    hindsight = re.compile("signal_outcomes|forward_verdicts|rec_outcomes|scorecard|symbol_history_line")
+    hits = [(f.name, line.strip()) for f in files
+            for line in f.read_text(encoding="utf-8").splitlines() if hindsight.search(line)]
+    call = "extras.evidence.append(symbol_history_line(self._conn, symbol))"
+    assert hits == [("pipeline.py", "from engine.ops.scorecard import symbol_history_line"), ("pipeline.py", call)]
+    assert call in inspect.getsource(RecommendationPipeline._fill_extras)

@@ -21,13 +21,14 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from engine.core.clock import IST
 from engine.core.contracts import Recommendation
 
 # Severity is a closed vocabulary shared by every kind; "critical" maps to the loud/alert path.
@@ -479,12 +480,29 @@ def _veto_buttons(rec_id: str, label: str) -> list[list[dict[str, str]]]:
     return [buttons[:3], buttons[3:]]
 
 
+def _reminder_labels(rows: list[dict[str, Any]]) -> list[str]:
+    """The shortest label telling each rec apart: the symbol, then its strategy, then its IST
+    delivery time."""
+    by_symbol = Counter(r["instrument"] for r in rows)
+    by_strategy = Counter((r["instrument"], r.get("strategy_id")) for r in rows)
+    labels = []
+    for r in rows:
+        label = r["instrument"]
+        if by_symbol[label] > 1:
+            label += f" {r.get('strategy_id') or '?'}"
+            if by_strategy[(r["instrument"], r.get("strategy_id"))] > 1:
+                label += f" {datetime.fromisoformat(r['delivered_at']).astimezone(IST):%H:%M}"
+        labels.append(label)
+    return labels
+
+
 def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
     """Expired recommendations still undecided: one ``/veto`` line each, with no default reason, and
-    skip buttons labelled by symbol for the first :data:`REMINDER_BUTTON_RECS`."""
+    skip buttons for the first :data:`REMINDER_BUTTON_RECS`, labelled by :func:`_reminder_labels`."""
     from engine.notify.telegram import VETO_REASONS  # telegram imports this module
 
     codes = "|".join(VETO_REASONS)
+    tapped = rows[:REMINDER_BUTTON_RECS]
     counts = Counter(r["instrument"] for r in rows)
     lines = []
     for r in rows:
@@ -499,8 +517,8 @@ def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
         title="Expired recommendations awaiting your reason",
         body="\n".join(lines),
         data={"rec_ids": [r["rec_id"] for r in rows]},
-        buttons=[row for r in rows[:REMINDER_BUTTON_RECS]
-                 for row in _veto_buttons(r["rec_id"], r["instrument"])] or None,
+        buttons=[row for r, label in zip(tapped, _reminder_labels(tapped), strict=True)
+                 for row in _veto_buttons(r["rec_id"], label)] or None,
     )
 
 
