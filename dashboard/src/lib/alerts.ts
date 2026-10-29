@@ -275,7 +275,7 @@ export function deriveAlerts(i: AlertInput): Alert[] {
       id: 'ai-saving',
       level: 'notice',
       title: 'AI is in saving mode',
-      body: 'News is scored less often and fewer scanner candidates reach the AI, to stay in budget. Recommendations continue.',
+      body: 'Small news batches wait longer and fewer scanner candidates reach the AI, to stay in budget. Recommendations continue.',
       tab: 'system',
     })
   }

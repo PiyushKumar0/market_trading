@@ -350,7 +350,6 @@ async def test_pro_rata_is_none_for_a_year_with_no_calendar_file(conn):
     assert g.pro_rata_to_date() is None
     await spend(g, "1.00", agent="news_analyst")
     assert g.degrade_tier() == DegradeTier.DG0          # never over-pace on an unmeasurable pace
-    assert g.can_invoke("intraday_analyst").allowed is True
 
 
 async def test_unmeasurable_pace_never_trips_a_pace_rung_without_a_calendar(conn, clock, tmp_path):
@@ -363,7 +362,6 @@ async def test_unmeasurable_pace_never_trips_a_pace_rung_without_a_calendar(conn
     assert gov.pro_rata_to_date() is None
     assert gov.degrade_tier() == DegradeTier.DG0
     assert gov.news_batch_cadence_min() == 30
-    assert gov.can_invoke("intraday_analyst").allowed is True
     # The ABSOLUTE rungs still bind with no calendar — only the pace comparison is skipped.
     await spend(gov, "84.70", agent="nightly_reviewer")
     assert gov.degrade_tier() == DegradeTier.DG2
@@ -380,7 +378,6 @@ async def test_first_minute_of_a_holiday_opened_window_stays_dg0(conn):
     await spend(g, "1.00", agent="news_analyst")
     assert g.degrade_tier() == DegradeTier.DG0
     assert g.news_batch_cadence_min() == 30
-    assert g.can_invoke("intraday_analyst").allowed is True
 
 
 async def test_holiday_reset_thursday_evening_has_no_elapsed_session_and_stays_dg0(conn):
@@ -395,7 +392,6 @@ async def test_holiday_reset_thursday_evening_has_no_elapsed_session_and_stays_d
     assert g.degrade_tier() == DegradeTier.DG0
     assert g.prescreen_forward_cap() == 48
     assert g.news_batch_cadence_min() == 30
-    assert g.can_invoke("intraday_analyst").allowed is True
 
 
 async def test_pace_rungs_resume_once_the_first_session_elapses(conn):

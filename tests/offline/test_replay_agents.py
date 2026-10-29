@@ -32,15 +32,20 @@ NEWS = {"scores": [{"cluster_id": "c1", "materiality": 0.6, "sentiment": 0.1, "e
 def folder(tmp_path, monkeypatch):
     t = tmp_path / "transcripts"
     t.mkdir()
-    monkeypatch.setattr(replay, "transcripts_dir", lambda: t)
     monkeypatch.setattr(replay, "OUT_ROOT", tmp_path / "out")
     return t
 
 
 def sample(tmp_path, *args) -> dict:
     out = tmp_path / "samples.json"
-    replay.main(["sample", "--preopen", "0", "--nightly", "0", *args, "--out", str(out)])
+    replay.main(["sample", "--preopen", "0", "--nightly", "0", *args, "--out", str(out),
+                 "--transcripts-dir", str(tmp_path / "transcripts")])
     return json.loads(out.read_text(encoding="utf-8"))["agents"]
+
+
+def test_transcripts_dir_option_overrides_the_checkout_default(tmp_path):
+    assert replay.transcripts_dir(str(tmp_path)) == tmp_path
+    assert replay.transcripts_dir().parent == Path.home() / ".claude" / "projects"
 
 
 def test_a_replay_of_a_live_prompt_is_not_sampled_as_live(folder, tmp_path):
@@ -56,12 +61,21 @@ def test_a_replay_of_a_live_prompt_is_not_sampled_as_live(folder, tmp_path):
 
 def test_intraday_keeps_one_acted_call_when_the_newest_are_no_action(folder, tmp_path):
     for i in range(3):
-        transcript(folder, f"quiet{i}", f"Q{i}", {"action": "no_action"}, "m", 3_000 + i)
-    transcript(folder, "acted", "E", {"action": "enter"}, "m", 1_000)
+        transcript(folder, f"quiet{i}", f'candidate: {{"signal_id":"Q{i}"}}', {"action": "no_action"}, "m", 3_000 + i)
+    transcript(folder, "acted", 'candidate: {"signal_id":"E"}', {"action": "enter"}, "m", 1_000)
 
     got = sample(tmp_path, "--news", "0", "--intraday", "2")
 
     assert [e["action"] for e in got["intraday"]] == ["no_action", "enter"]
+
+
+def test_intraday_samples_only_signal_candidate_prompts(folder, tmp_path):
+    transcript(folder, "event", "event: stop_proximity", {"action": "exit"}, "m", 2_000)
+    transcript(folder, "cand", 'candidate: {"signal_id":"C"}', {"action": "no_action"}, "m", 1_000)
+
+    got = sample(tmp_path, "--news", "0", "--intraday", "2")
+
+    assert [e["file"] for e in got["intraday"]] == ["cand.jsonl"]
 
 
 def test_news_scores_unwraps_a_schema_retry_wrapper():

@@ -2138,7 +2138,9 @@ async def compose(
             if settings.brk20.regime_filter:
                 try:
                     regime_keep, idx_regime, regime_reason = _brk20_regime_gate(
-                        store.get_bars_1d_frame(regime.INDEX_SYMBOL, today - timedelta(days=150), yesterday),
+                        store.get_bars_1d_frame(
+                            regime.INDEX_SYMBOL, today - timedelta(days=regime.LOOKBACK_DAYS), yesterday
+                        ),
                         calendar, today,
                     )
                 except Exception:  # noqa: BLE001 - an unreadable regime costs brk20 alone, never the sweep

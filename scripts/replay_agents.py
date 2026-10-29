@@ -21,6 +21,8 @@ on trading days (CLAUDE.md, Operations) unless ``--force``. Results land in
     python scripts/replay_agents.py run --samples data/reports/replays/samples-<ts>.json \\
         --baseline --model sonnet-5.5 --effort medium
     python scripts/replay_agents.py run --samples ... --repeat 3          # production run-to-run noise
+
+From a worktree, pass ``--transcripts-dir`` the live tree's transcript folder to both commands.
 """
 
 from __future__ import annotations
@@ -65,7 +67,10 @@ OUT_ROOT = repo_root() / "data" / "reports" / "replays"
 
 
 # --------------------------------------------------------------------------- transcripts
-def transcripts_dir() -> Path:
+def transcripts_dir(override: str | None = None) -> Path:
+    """``override``, else this checkout's folder — a worktree's slug differs from the live tree's."""
+    if override:
+        return Path(override)
     # Claude Code names a project's transcript folder after its path with every other character as '-'.
     return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(repo_root()))
 
@@ -107,7 +112,7 @@ def cmd_sample(args: argparse.Namespace) -> None:
     depth = {a: n * 20 if a == "intraday" else n for a, n in want.items()}
     # A replay re-sends an earlier live prompt, so only the EARLIEST transcript of each prompt is live.
     originals: dict[str, tuple[float, str, dict[str, Any]]] = {}
-    for path in transcripts_dir().glob("*.jsonl"):
+    for path in transcripts_dir(args.transcripts_dir).glob("*.jsonl"):
         entrypoint, prompt, output, model = read_call(path)
         agent = classify(output) if entrypoint == "sdk-py" and prompt else None
         if agent == "intraday" and "candidate: {" not in (prompt or ""):
@@ -258,7 +263,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     for agent in agents:
         options_by_condition = {c: build_options(defs, agent, cli_path, o) for c, o in conditions}
         for entry in samples[agent]:
-            _, prompt, live, live_model = read_call(transcripts_dir() / entry["file"])
+            _, prompt, live, live_model = read_call(transcripts_dir(args.transcripts_dir) / entry["file"])
             if prompt is None:
                 print(f"  skip {entry['file']}: transcript gone (Claude Code prunes after cleanupPeriodDays)")
                 continue
@@ -339,13 +344,15 @@ def vs_live(agent: str, group: list[dict[str, Any]]) -> str:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
+    transcripts = argparse.ArgumentParser(add_help=False)
+    transcripts.add_argument("--transcripts-dir", help="transcript folder (default: this checkout's)")
 
-    s = sub.add_parser("sample", help="pin a sample set of live calls")
+    s = sub.add_parser("sample", parents=[transcripts], help="pin a sample set of live calls")
     for agent, default in (("news", 4), ("intraday", 3), ("preopen", 2), ("nightly", 1)):
         s.add_argument(f"--{agent}", type=int, default=default, help=f"live {agent} calls (default {default})")
     s.add_argument("--out", help="sample file (default data/reports/replays/samples-<ts>.json)")
 
-    r = sub.add_parser("run", help="replay a pinned sample set")
+    r = sub.add_parser("run", parents=[transcripts], help="replay a pinned sample set")
     r.add_argument("--samples", required=True)
     r.add_argument("--agents", help="comma list of news,intraday,preopen,nightly (default: all in the set)")
     r.add_argument("--baseline", action="store_true", help="also replay production options, paired")

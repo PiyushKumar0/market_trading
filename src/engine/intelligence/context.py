@@ -64,10 +64,6 @@ DAILY_BAR_TAIL = 20
 #: a holiday-heavy stretch without dragging in a second month of rows.
 DAILY_LOOKBACK_DAYS = 45
 
-#: Calendar-day lookback for the index regime read — the brk20 sweep's window, so the line and the C2
-#: gate judge the same closes.
-REGIME_LOOKBACK_DAYS = 150
-
 #: Sessions the core equal-weight return in the regime line compounds over.
 EW_SESSIONS = 20
 
@@ -375,7 +371,7 @@ class ContextAssembler:
         name = regime.INDEX_SYMBOL
         try:
             frame = self._store.get_bars_1d_frame(
-                name, d - timedelta(days=REGIME_LOOKBACK_DAYS), d - timedelta(days=1)
+                name, d - timedelta(days=regime.LOOKBACK_DAYS), d - timedelta(days=1)
             )
             idx, why = regime.session_regime(frame, self._calendar, d)
             last = frame.index[-1].date() if len(frame) else None
@@ -387,6 +383,8 @@ class ContextAssembler:
             return "read_failed", "index regime: unavailable (index read failed)"
         if idx is None:
             need = regime.INDEX_SMA + regime.RISING_LOOKBACK
+            if len(frame) >= need:                       # a NULL/NaN close inside the SMA window
+                return last, f"index regime: unavailable ({name} closes have gaps)"
             return last, f"index regime: unavailable ({len(frame)} of {need} {name} sessions)"
         side = "above" if idx.close > idx.sma else "below" if idx.close < idx.sma else "at"
         trend = "rising" if idx.rising else "not rising"

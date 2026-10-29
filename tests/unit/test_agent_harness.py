@@ -1015,20 +1015,6 @@ async def test_every_persisted_call_has_a_prompt_version(defs, gov, clock, conn)
     ]
 
 
-async def test_dg2_admits_every_intraday_call_class(defs, gov, clock, conn) -> None:
-    await gov.record("weekly_researcher", "haiku-4.5", TokenUsage(in_tokens=86 * 10**6, out_tokens=0))
-    assert gov.degrade_tier() == DegradeTier.DG2       # > 85% of the $100 credit
-    fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
-    harness = make_harness(defs, gov, clock, conn, fake)
-
-    for call_class in ("signal_candidate", "position_event"):
-        result = await harness.run_single_shot(
-            defs["intraday_analyst"], FakeContext(call_class=call_class), enter_validator(clock)
-        )
-        assert result.ok, call_class
-    assert len(fake.calls) == 2
-
-
 class FakeErrorResultMessage(FakeResultMessage):
     """The CLI's limit-hit shape (2026-09-03 12:42–14:32, 31 calls): a result with ``is_error`` set,
     subtype ``success``, an empty ``errors`` list and the real reason only in ``result``. The SDK

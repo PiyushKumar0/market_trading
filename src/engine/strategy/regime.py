@@ -24,6 +24,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 INDEX_SYMBOL = "NIFTY 50"
 INDEX_SMA = 50
 RISING_LOOKBACK = 20
+#: Calendar days of index bars a live reader fetches before today: the 70 sessions plus holiday room.
+LOOKBACK_DAYS = 150
 
 
 @dataclass(frozen=True)
@@ -79,4 +81,7 @@ def session_regime(
     return r, None if r is not None else "undefined"
 
 
-__all__ = ["INDEX_SMA", "INDEX_SYMBOL", "RISING_LOOKBACK", "IndexRegime", "index_regime", "session_regime"]
+__all__ = [
+    "INDEX_SMA", "INDEX_SYMBOL", "LOOKBACK_DAYS", "RISING_LOOKBACK", "IndexRegime", "index_regime",
+    "session_regime",
+]

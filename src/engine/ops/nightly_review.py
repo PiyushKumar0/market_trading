@@ -564,7 +564,7 @@ def build_funnel_summary(
 
 def _analyst_evaluations(conn: sqlite3.Connection, day: str) -> int:
     """Forwarded candidates the analyst actually ANSWERED — the step between "we spent a slot" and
-    "a proposal exists". Heartbeat/position-event calls are a different trigger and excluded."""
+    "a proposal exists". Position-event calls are a different trigger and excluded."""
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM agent_calls "
         "WHERE agent_id = ? AND trigger = ? AND ok = 1 AND substr(at, 1, 10) = ?",

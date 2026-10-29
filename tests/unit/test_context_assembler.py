@@ -306,32 +306,58 @@ def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
 
 # --------------------------------------------------------------------------- the regime line (T6)
 @pytest.mark.parametrize(
-    ("closes", "end", "rets", "expected"),
+    ("closes", "end", "rets", "expected", "warnings"),
     [
-        (UP, PREV, EW_OK, UP_LINE + EW_LINE),
+        (UP, PREV, EW_OK, UP_LINE + EW_LINE, []),
         (DOWN, PREV, EW_OK,
          "index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 close 24100.00 "
-         "below SMA50 24500.00; SMA50 not rising over 20 sessions" + EW_LINE),
+         "below SMA50 24500.00; SMA50 not rising over 20 sessions" + EW_LINE, []),
         (AT, PREV, EW_OK,
          "index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 close 24500.00 "
-         "at SMA50 24500.00; SMA50 not rising over 20 sessions" + EW_LINE),
+         "at SMA50 24500.00; SMA50 not rising over 20 sessions" + EW_LINE, []),
         (UP, date(2026, 6, 15), EW_OK,
-         "index regime: unavailable (no NIFTY 50 bar for 2026-06-16)" + EW_LINE),
-        ([24500] * 69, PREV, EW_OK, "index regime: unavailable (69 of 70 NIFTY 50 sessions)" + EW_LINE),
+         "index regime: unavailable (no NIFTY 50 bar for 2026-06-16)" + EW_LINE, []),
+        ([24500] * 69, PREV, EW_OK, "index regime: unavailable (69 of 70 NIFTY 50 sessions)" + EW_LINE, []),
         (UP, PREV, [0.0] * 18 + [None, -0.0342],
-         UP_LINE + "; core equal-weight 20-session return: unavailable (19 of 20 sessions)"),
-        (None, PREV, EW_OK, "index regime: unavailable (index read failed)" + EW_LINE),
+         UP_LINE + "; core equal-weight 20-session return: unavailable (19 of 20 sessions)", []),
+        (UP, PREV, [0.0] * 19 + [0.0123],
+         UP_LINE + "; core equal-weight return over the 20 sessions through 2026-06-16: +1.23%", []),
+        (None, PREV, EW_OK, "index regime: unavailable (index read failed)" + EW_LINE,
+         ["index_regime_unavailable"]),
+        (UP, PREV, None, UP_LINE + "; core equal-weight 20-session return: unavailable (read failed)",
+         ["regime_ew_unavailable"]),
     ],
-    ids=["up", "down", "at", "bar_missing", "short_history", "ew_short", "read_failed"],
+    ids=["up", "down", "at", "bar_missing", "short_history", "ew_short", "ew_positive", "read_failed",
+         "ew_read_failed"],
 )
-def test_regime_line_renderings(assembler, store, conn, calendar, monkeypatch, closes, end, rets, expected):
+def test_regime_line_renderings(
+    assembler, store, conn, calendar, monkeypatch, caplog, closes, end, rets, expected, warnings
+):
     if closes is None:
         monkeypatch.setattr(store, "get_bars_1d_frame", _boom)
     else:
         seed_index(store, calendar, closes, end)
-    seed_ew(conn, calendar, rets)
+    if rets is None:
+        conn.execute("DROP TABLE universe_ew_returns")
+    else:
+        seed_ew(conn, calendar, rets)
 
-    assert assembler._regime_text(TODAY) == expected
+    with caplog.at_level(logging.WARNING, logger="engine.intelligence.context"):
+        assert assembler._regime_text(TODAY) == expected
+    assert [r.getMessage() for r in caplog.records] == warnings
+
+
+def test_index_closes_with_a_gap_render_unavailable(assembler, store, calendar, monkeypatch):
+    seed_index(store, calendar, UP)
+    read = store.get_bars_1d_frame
+
+    def with_gap(*args):
+        frame = read(*args)
+        frame.iloc[-5, frame.columns.get_loc("close")] = float("nan")
+        return frame
+
+    monkeypatch.setattr(store, "get_bars_1d_frame", with_gap)
+    assert assembler._regime_text(TODAY).startswith("index regime: unavailable (NIFTY 50 closes have gaps);")
 
 
 def test_index_read_failure_warns_once_per_day(assembler, store, monkeypatch, caplog):

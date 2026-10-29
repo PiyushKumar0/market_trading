@@ -97,12 +97,13 @@ const TIER: Table = {
       'AI spending is ahead of the weekly pace: about a third fewer scanner candidates reach the AI each day. ' +
       'Each one is still analysed the same way.',
   },
-  // governor.py: news batches slow to hourly from DG2; the forward cap is cut at every level above DG0.
+  // governor.py: from DG2 a news batch under 8 clusters waits 60 min for its oldest cluster, not 30; the
+  // forward cap is cut at every level above DG0.
   DG2: {
     label: 'Saving',
     hint:
-      'News is scored hourly instead of every 30 minutes and about a third fewer scanner candidates reach the AI ' +
-      'each day, to stay within the weekly budget. Each one is still analysed the same way.',
+      'Small news batches wait up to an hour instead of 30 minutes, and about a third fewer scanner candidates ' +
+      'reach the AI each day, to stay within the weekly budget. Each candidate is still analysed the same way.',
   },
   DG3: {
     label: 'Minimal',
