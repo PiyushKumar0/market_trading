@@ -1153,6 +1153,22 @@ def _gate_lines(rec: Recommendation) -> list[str]:
     ]
 
 
+def _cost_line(rec: Recommendation) -> str:
+    """The cost multiple, named for what it is. For a target-priced entry it is the distance to the
+    analyst's target over breakeven — earned only on a hit, with no probability behind it; an exit or
+    adjust carries no edge, so no clause."""
+    cost = rec.cost
+    line = f"cost: breakeven {cost.breakeven_pct}% · total ₹{cost.total_cost}"
+    if rec.kind != "entry":
+        return line
+    if rec.registered_edge_pct is not None:
+        return f"{line} · edge {cost.edge_multiple}x breakeven"
+    if rec.targets:
+        return (f"{line} · target distance {cost.expected_edge_pct}% = {cost.edge_multiple}x breakeven "
+                "(earned only if the target is hit; not an expected edge)")
+    return line
+
+
 def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -> CatalogMessage:
     """Render a §3.6 :class:`~engine.core.contracts.Recommendation` (plan Q1.5 card).
 
@@ -1191,8 +1207,7 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
 
     tail = [
         *_gate_lines(rec),
-        f"cost: breakeven {rec.cost.breakeven_pct}% · total ₹{rec.cost.total_cost} · "
-        f"edge {rec.cost.edge_multiple}x",
+        _cost_line(rec),
         "checklist (yours to place — the platform places no orders in RECOMMEND, B7):",
         *(f"  • {item}" for item in rec.manual_checklist),
         # WO-29: the last line is the reply the owner types back — the message teaches its own capture.

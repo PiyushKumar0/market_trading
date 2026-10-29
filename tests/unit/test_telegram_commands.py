@@ -1267,7 +1267,7 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
         "BUY RELIANCE", "intraday/MIS", "qty 5", "₹12250.00",
         "entry 2449.00-2451.00", "stop ₹2400.00 = 2.0% below entry", "targets 2550.00 / 2600.00",
         "gate: shrunk 10→5",
-        "breakeven 0.15%", "edge 3.0x",
+        "breakeven 0.15%", "= 3.0x breakeven",
         "after entry fills place SL-M at 2400.00", "square off by 10:30",
     ):
         assert fragment in text, fragment
@@ -1437,6 +1437,27 @@ def test_card_lines_follow_the_plan_order(clock):
     assert at == sorted(at)
     assert "₹241 at risk to the stop · sell by the close on 2026-11-03 (session 20)" in lines[1]
     assert "confidence" not in "\n".join(lines)
+
+
+def _cost_line_of(rec: Recommendation) -> str:
+    return next(ln for ln in catalog.recommendation_message(rec).render().splitlines() if ln.startswith("cost:"))
+
+
+def test_cost_line_registered_edge(clock):
+    assert _cost_line_of(_card(clock)) == "cost: breakeven 0.15% · total ₹18.20 · edge 3.0x breakeven"
+
+
+def test_cost_line_target_priced(clock):
+    assert _cost_line_of(_recommendation(clock)) == (
+        "cost: breakeven 0.15% · total ₹18.20 · target distance 0.45% = 3.0x breakeven "
+        "(earned only if the target is hit; not an expected edge)"
+    )
+
+
+@pytest.mark.parametrize("kind", ["exit", "adjust"])
+def test_cost_line_exit_has_no_edge_clause(clock, kind):
+    rec = _card(clock, kind=kind, side="SELL", exit_kind=None, registered_edge_pct=None)
+    assert _cost_line_of(rec) == "cost: breakeven 0.15% · total ₹18.20"
 
 
 def test_card_prints_only_the_data_it_has(clock):
