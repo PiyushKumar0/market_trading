@@ -518,7 +518,8 @@ response to them.
 .venv\Scripts\python.exe scripts\forward_verdicts.py --rule ins
 .venv\Scripts\python.exe scripts\forward_verdicts.py --rule analyst
 # optional: --as-of YYYY-MM-DD (default today IST), --db <state.db> (default data\state.db), --json <path> (also writes the reading)
-# the VERDICT line prints first; UNREGISTERED until REGISTERED_FROM is set at the deploy; UNAVAILABLE on a DB error;
+# the VERDICT line prints first; populations start at R = REGISTERED_FROM (2026-11-02), so INSUFFICIENT until a look
+# forms (UNREGISTERED only with REGISTERED_FROM = None); UNAVAILABLE on a DB error;
 # exit 0 always; the rows holding an unformed look are listed
 ```
 

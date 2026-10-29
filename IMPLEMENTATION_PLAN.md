@@ -75,8 +75,9 @@ and the other removed design and research documents are in git at commit `417da7
 - **Fee schedule:** `costs.yaml` says `verified_on: 2026-06-11`; the rule is to re-scrape before each release
   (`scripts/rescrape_costs.py`).
 
-**Pre-registered 2026-10-29 (review actions).** R = `<R>`, the first trading day after the deploy
-(`engine.learning.forward_verdicts.REGISTERED_FROM`). Each rule has a `registered` row in `config/research_trials.yaml`.
+**Pre-registered 2026-10-29 (review actions).** R = 2026-11-02, the first session that opens after the deploy
+(`engine.learning.forward_verdicts.REGISTERED_FROM`). A deploy after 09:15 IST on 2026-11-02 moves R to the first
+session after it, here and in the constant. Each rule has a `registered` row in `config/research_trials.yaml`.
 
 **Amendment 2026-10-30, before R, for the three forward rules below.**
 - A signal's symbol is followed through NSE renames (`symbol_renames`).

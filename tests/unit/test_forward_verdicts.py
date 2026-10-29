@@ -332,7 +332,8 @@ def test_cli_prints_look_progress(cli, conn, db_path, capsys):
     assert "\nlook 1: 0 of 30 final, interim, decides nothing;" in capsys.readouterr().out
 
 
-def test_cli_names_a_filled_row_holding_the_look(cli, conn, db_path, capsys):
+def test_cli_names_a_filled_row_holding_the_look(cli, conn, db_path, capsys, monkeypatch):
+    monkeypatch.setattr(fv, "REGISTERED_FROM", None)
     _slot(conn, D0, "HOLE")
     _outcome(conn, D0, "HOLE", "rule", "open", fill_d=D0)
     _main(cli, "ins", db_path)
@@ -345,7 +346,8 @@ def test_cli_reports_an_unreadable_store_and_exits_0(cli, tmp_path, capsys):
     assert capsys.readouterr().out.startswith("VERDICT ins: UNAVAILABLE (")
 
 
-def test_cli_writes_the_reading_as_json(cli, conn, db_path, tmp_path, capsys):
+def test_cli_writes_the_reading_as_json(cli, conn, db_path, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(fv, "REGISTERED_FROM", None)
     _main(cli, "ins", db_path, "--json", str(tmp_path / "r.json"))
     doc = json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))
     assert (doc["verdict"], doc["as_of"], doc["looks"][0]["size"]) == (fv.UNREGISTERED, "2026-07-31", 20)

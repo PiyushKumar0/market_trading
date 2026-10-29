@@ -19,8 +19,8 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import cast
 
-#: First session of the registered populations; None until registered. Only a caller's default.
-REGISTERED_FROM: date | None = None
+#: R, the first session of the registered populations (IMPLEMENTATION_PLAN section 3). Only a caller's default.
+REGISTERED_FROM: date | None = date(2026, 11, 2)
 
 KILL_RULES = ("brk20", "ins")
 ANALYST_STRATEGIES = ("brk20", "hi52", "ins")
