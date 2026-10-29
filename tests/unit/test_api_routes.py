@@ -11,6 +11,7 @@ import json
 import re
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -570,8 +571,22 @@ def test_post_config_params_bounds_accept_reject_and_audit(conn, clock, store) -
     assert conn.execute("SELECT COUNT(*) AS n FROM config_audit WHERE name='envelope_state'").fetchone()["n"] == 1
 
 
+def _limits_with_floor(limits_engine, floor):
+    table = limits_engine.table().model_copy(update={"analyst_confidence_min": floor})
+    return SimpleNamespace(table=lambda: table)
+
+
+def test_params_omit_absent_floor(conn, clock, store, limits_engine) -> None:
+    client = _client(conn=conn, clock=clock, store=store, limits_engine=_limits_with_floor(limits_engine, None))
+    assert "analyst_confidence_min" not in client.get("/config/params", headers=AUTH).json()["params"]
+    protected = client.post("/config/params", headers=AUTH, json={"name": "analyst_confidence_min", "value": 0.6})
+    assert protected.status_code == 409
+
+
 def test_get_config_params_wired_with_bounds_and_suggestions(conn, clock, store, limits_engine) -> None:
-    client = _client(conn=conn, clock=clock, store=store, limits_engine=limits_engine)
+    client = _client(
+        conn=conn, clock=clock, store=store, limits_engine=_limits_with_floor(limits_engine, 0.55)
+    )
     client.post("/config/params", headers=AUTH, json={"name": "edge_multiple_min", "value": 2.5})
     _insert_nightly_review(
         conn, "2026-06-16",

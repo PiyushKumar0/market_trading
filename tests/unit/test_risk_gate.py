@@ -72,7 +72,8 @@ class _StubLimits:
 
 @pytest.fixture(scope="module")
 def limit_table() -> LimitTable:
-    return LimitTable.model_validate(yaml.safe_load(LIMITS_YAML.read_text(encoding="utf-8")))
+    table = LimitTable.model_validate(yaml.safe_load(LIMITS_YAML.read_text(encoding="utf-8")))
+    return table.model_copy(update={"analyst_confidence_min": 0.55})
 
 
 @pytest.fixture(scope="module")
@@ -531,6 +532,22 @@ def test_every_documented_rule_has_a_case() -> None:
             missing.append(f"{rule_id}: missing {sorted(required - have)}")
     assert not missing, "rule_ids without full case coverage: " + "; ".join(missing)
     assert set(kinds) <= set(DOCUMENTED_ENTER_RULES), "case table references an unknown rule_id"
+
+
+def test_confidence_rule_passes_na_without_floor(
+    limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock
+) -> None:
+    table = limit_table.model_copy(update={"analyst_confidence_min": None})
+    verdict = RiskGate(_StubLimits(table), cost_model, gate_clock).evaluate(
+        make_action(confidence=0.01), make_ctx()
+    )
+    check = check_of(verdict, "analyst_confidence_min")
+    assert (check.value, check.limit, check.passed) == ("n/a", "no floor configured (review §9 #3)", True)
+
+
+def test_floor_still_binds_when_set(gate: RiskGate) -> None:
+    verdict = gate.evaluate(make_action(confidence=0.54), make_ctx())
+    assert check_of(verdict, "analyst_confidence_min").passed is False
 
 
 def test_phase2_na_rules_are_marked_na(gate: RiskGate) -> None:

@@ -1,0 +1,18 @@
+diff --git a/config/limits.yaml b/config/limits.yaml
+index 4ed6384..e8497bf 100644
+--- a/config/limits.yaml
++++ b/config/limits.yaml
+@@ -7,7 +7,6 @@
+ #
+ # Every value here is [tunable] by the OWNER ONLY, with exactly one exception: `edge_multiple_min`
+ # is read from `envelope_state` at gate time (learner-movable STRICTLY inside its §6.3 bounds).
+-# `analyst_confidence_min` is owner-only (dashboard-suggested-then-owner-approved, §6.3/§5.5).
+ # Everything else is non-learnable (R4).
+ #
+ # "MTM basis" = realized + open mark-to-market. Platform equity = capital_base_inr + Σ platform-attributed
+@@ -180,5 +179,3 @@ limits:
+     edge_multiple_min_default: 2.0
+     on_breach: reject
+ 
+-# Owner-only analyst gate (no longer learner-movable — §7.1/§6.3):
+-analyst_confidence_min: 0.55   # below this, an LLM proposal is dropped to no_action (owner-tuned to hit-rate)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import time
 from decimal import Decimal
 
@@ -105,7 +106,6 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.margin_buffer.min_ratio == 1.1
     assert table.limits.min_viable_size.edge_multiple_min_default == 2.0
 
-    assert table.analyst_confidence_min == 0.55
 
 
 def test_floor_limits_from_threads_the_signed_table(registered_store):
@@ -167,12 +167,25 @@ def test_table_accessor_matches_load(registered_store):
 
 
 # --------------------------------------------------------------------------- analyst_confidence_min (§6.3)
-def test_analyst_confidence_min_is_top_level_and_owner_only(registered_store):
-    engine = LimitsEngine(registered_store)
-    table = engine.load()
+def _register_with_floor(store, tmp_path, floor: str | None) -> None:
+    text = re.sub(r"(?m)^analyst_confidence_min:.*\r?\n", "", REAL_LIMITS_PATH.read_text(encoding="utf-8"))
+    if floor is not None:
+        text += f"analyst_confidence_min: {floor}\n"
+    (tmp_path / "config" / "limits.yaml").write_text(text, encoding="utf-8")
+    store.register_initial("limits.yaml", OWNER_OK)
+
+
+def test_analyst_confidence_min_is_top_level_and_owner_only(store, tmp_path):
+    _register_with_floor(store, tmp_path, "0.55")
+    table = LimitsEngine(store).load()
     assert table.analyst_confidence_min == 0.55
     # Outside the `limits:` map (§6.3) — LimitsBlock has no such field.
     assert not hasattr(table.limits, "analyst_confidence_min")
+
+
+def test_table_without_analyst_confidence_min_loads(store, tmp_path):
+    _register_with_floor(store, tmp_path, None)
+    assert LimitsEngine(store).load().analyst_confidence_min is None
 
 
 # --------------------------------------------------------------------------- catalyst_guard() accessor

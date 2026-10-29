@@ -781,9 +781,10 @@ def create_app(
                 "updated_at": row["updated_at"] if row is not None else None,
             }
         limits_engine = app.state.limits_engine
-        if limits_engine is not None:
+        floor = limits_engine.table().analyst_confidence_min if limits_engine is not None else None
+        if floor is not None:
             params["analyst_confidence_min"] = {
-                "value": limits_engine.table().analyst_confidence_min,
+                "value": floor,
                 "min": None,
                 "max": None,
                 "default": None,

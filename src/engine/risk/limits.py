@@ -256,7 +256,7 @@ class LimitTable(BaseModel):
     schema_version: int
     capital_base_inr: Decimal
     limits: LimitsBlock
-    analyst_confidence_min: float
+    analyst_confidence_min: float | None = None
 
 
 # --------------------------------------------------------------------------- engine

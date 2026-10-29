@@ -618,7 +618,10 @@ class RiskGate:
 
     def _rule_analyst_confidence(self, led: _Ledger, action: EnterAction, table: LimitTable) -> None:
         floor = table.analyst_confidence_min
-        ok = action.confidence >= floor
+        if floor is None:
+            led.add("analyst_confidence_min", True, "n/a", "no floor configured (review §9 #3)", "n/a")
+            return
+        ok =action.confidence >= floor
         led.add(
             "analyst_confidence_min", ok,
             f"confidence={action.confidence}",
