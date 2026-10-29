@@ -550,10 +550,12 @@ A SUPPORTED result goes to the owner and wires nothing.
 $env:PYTHONPATH = '<worktree>\src'
 .venv\Scripts\python.exe -c "import engine; print(engine.__file__)"   # must print a path under the worktree
 $tr = "$HOME\.claude\projects\C--Users-piyush-kumar-atari-projects-personal-market-trading"
-# a worktree's data\ holds no pinned CLI: point --cli-path at the live tree's data\run\claude-cli\<version>\claude.exe
-$cli = "C:\Users\piyush.kumar_atari\projects\personal\market_trading\data\run\claude-cli\<version>\claude.exe"
+# a worktree's data\ holds no pinned CLI (--cli-path overrides only the candidate): junction the live one in,
+# and rmdir the junction before removing the worktree
+New-Item -ItemType Directory -Force data\run | Out-Null
+cmd /c mklink /J data\run\claude-cli C:\Users\piyush.kumar_atari\projects\personal\market_trading\data\run\claude-cli
 .venv\Scripts\python.exe scripts\replay_agents.py sample --intraday 3 --preopen 2 --transcripts-dir $tr   # prints the samples file
-.venv\Scripts\python.exe scripts\replay_agents.py run --samples <samples file> --baseline --transcripts-dir $tr --cli-path $cli
+.venv\Scripts\python.exe scripts\replay_agents.py run --samples <samples file> --baseline --transcripts-dir $tr
 # run refuses in market hours on a trading day (--force overrides; do not); results in data\reports\replays\<run>\
 ```
 
