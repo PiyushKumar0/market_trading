@@ -48,6 +48,7 @@ _UPSERT = (
 _FILL_CLOSE = time(15, 30)
 _HUNDRED = Decimal("100")
 _PCT_Q = Decimal("0.000001")                # exit_sim's gross-percent quantum
+_NO_TOUCH = Decimal("Infinity")             # a halt session's low: no touch fills on it (no stop is simulated)
 #: Regular sessions in a row on which the store holds a NIFTY 50 bar but none for the row's symbol (after its
 #: fill, or its anchor if unfilled) before the row is final: delisted, merged or suspended. Pre-registered.
 STALE_SESSIONS = 5
@@ -78,6 +79,22 @@ class _Signal:
 
 class _Unscorable(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class _Gaps:
+    """What a missing bar may be judged against: the sessions with a NIFTY 50 bar, and the oldest failed,
+    unrepaired ``daily_bars`` day (no missing bar on or after it is judged)."""
+
+    index_days: frozenset[date]
+    failed_from: date | None
+
+    def judged(self, s: date) -> bool:
+        return self.failed_from is None or s < self.failed_from
+
+    def symbol_missing(self, s: date) -> bool:
+        """``s`` may count against a symbol without a bar: the market traded and the day is not failed."""
+        return s in self.index_days and self.judged(s)
 
 
 class SignalOutcomesJob:
@@ -121,7 +138,11 @@ class SignalOutcomesJob:
                 todo[s.symbol].append(s)
         ew = {date.fromisoformat(r[0]): r[1] for r in self._conn.execute("SELECT d, ret FROM universe_ew_returns")}
         sizing = _sizing(self._limits.load())
-        index_days = await self._index_days(min((s.d for v in todo.values() for s in v), default=d), d)
+        failed = self._conn.execute(          # CatchUpRunner.first_failed_date: the oldest unrepaired day
+            "SELECT min(run_for_date) FROM job_runs WHERE job_id=? AND status='failed'", (JOB_DAILY_BARS,),
+        ).fetchone()[0]
+        gaps = _Gaps(await self._index_days(min((s.d for v in todo.values() for s in v), default=d), d),
+                     None if failed is None else date.fromisoformat(failed))
         now = self._clock.now().isoformat()
         rows = []
         for symbol, signals in todo.items():
@@ -133,7 +154,7 @@ class SignalOutcomesJob:
             for s in signals:
                 prev = stored.get(s.key)
                 try:
-                    row = self._score(s, prev, bars, ex, d, ew, sizing, index_days)
+                    row = self._score(s, prev, bars, ex, d, ew, sizing, gaps)
                 except Exception as exc:  # noqa: BLE001 - one bad row never costs the others
                     _log.warning("signal_outcome_failed", key=list(s.key), error=repr(exc))
                     continue
@@ -219,7 +240,7 @@ class SignalOutcomesJob:
     # ------------------------------------------------------------------ one row
     def _score(
         self, s: _Signal, prev: dict[str, Any] | None, bars: Sequence[SimBar], ex: Sequence[date], d: date,
-        ew: Mapping[date, float | None], sizing: Callable[[Decimal], Decimal], index_days: frozenset[date],
+        ew: Mapping[date, float | None], sizing: Callable[[Decimal], Decimal], gaps: _Gaps,
     ) -> dict[str, Any]:
         row = dict(prev) if prev is not None else {
             **dict.fromkeys(_COLUMNS), **dict(zip(_KEY, s.key, strict=True)), "status": "open"}
@@ -253,8 +274,9 @@ class SignalOutcomesJob:
         except ValueError:                      # the calendar horizon: re-scored once it is extended
             return {**row, "status": "open"}
 
-        walk, missing = self._walk(bars, first)
-        if isinstance(start, Pending) and missing == first and self._anchor_lost(bars, first):
+        seed = next((b for b in bars if b.d == start.at.date()), None) if isinstance(start, Held) else None
+        walk, missing = self._walk(bars, first, seed, d, gaps)
+        if isinstance(start, Pending) and missing == first and gaps.judged(first) and self._anchor_lost(bars, first):
             _log.warning("signal_outcome_unscorable", key=list(s.key), reason=f"no bar on {first}")
             return {**row, "status": "unscorable"}
         cost = Decimal(str(row["cost_pct"]))
@@ -271,7 +293,7 @@ class SignalOutcomesJob:
         exit_d = t20.exit_d if status == "closed" else None
         stale_net = None
         base = walk[-1].d if walk else (fill_d or first)
-        if status == "open" and self._stale(bars, base, d, index_days):
+        if status == "open" and self._stale(bars, base, d, gaps):
             last = bars[-1] if bars else None
             fill_px = t20.fill_px
             if fill_d is None or fill_px is None:
@@ -311,29 +333,56 @@ class SignalOutcomesJob:
         stop_pct = (entry - Decimal(s.levels[1])) / entry * _HUNDRED
         return (None if s.construct == "next_open" else entry), stop_pct
 
-    def _walk(self, bars: Sequence[SimBar], first: date) -> tuple[list[SimBar], date | None]:
+    def _walk(
+        self, bars: Sequence[SimBar], first: date, seed: SimBar | None, d: date, gaps: _Gaps,
+    ) -> tuple[list[SimBar], date | None]:
         """``(bars on consecutive regular sessions from first, the first missing session that a later
         bar proves missing)``. ``add_sessions`` never counts a muhurat session, so its bar is never
-        walked; a missing session or the calendar horizon ends the walk (the row stays ``open``)
-        instead of the next bar standing in for that session."""
+        walked; the calendar horizon ends the walk. A missing session that a later bar proves missing is a
+        halt once :meth:`_halt` judges it: it walks as a session at the last earlier close (the previous
+        walked bar, else ``seed``, the fill session's bar), which no touch can fill. Until then it ends the
+        walk (the row stays ``open``) instead of the next bar standing in for that session. The anchor
+        (``first`` with no ``seed``) is never a halt: the anchor rule judges it."""
         out: list[SimBar] = []
         want = first
-        for b in bars:
-            if b.d < want:
-                continue
-            if b.d > want:
-                return out, want
-            out.append(b)
-            try:
+        try:
+            for b in bars:
+                while b.d > want:
+                    prior = out[-1] if out else seed
+                    if prior is None or not self._halt(want, d, gaps):
+                        return out, want
+                    out.append(SimBar(want, prior.close, prior.close, _NO_TOUCH, prior.close))
+                    want = self._calendar.add_sessions(want, 1)
+                if b.d < want:
+                    continue
+                out.append(b)
                 want = self._calendar.add_sessions(want, 1)
-            except ValueError:
-                break
+        except ValueError:
+            pass
         return out, None
 
-    def _stale(self, bars: Sequence[SimBar], base: date, d: date, index_days: frozenset[date]) -> bool:
+    def _halt(self, s: date, d: date, gaps: _Gaps) -> bool:
+        """``s`` (no bar, a later bar for the symbol) is a halt: NIFTY 50 has a bar on it, its day is not failed,
+        and it is :data:`STALE_SESSIONS` sessions old (that many NIFTY 50 sessions in ``s..d``)."""
+        if not gaps.symbol_missing(s):
+            return False
+        n, x = 0, s
+        while True:
+            n += x in gaps.index_days
+            if n >= STALE_SESSIONS:
+                return True
+            try:
+                x = self._calendar.add_sessions(x, 1)
+            except ValueError:
+                return False
+            if x > d:
+                return False
+
+    def _stale(self, bars: Sequence[SimBar], base: date, d: date, gaps: _Gaps) -> bool:
         """No bar after ``base`` (the last walked bar, else the fill or the anchor) and :data:`STALE_SESSIONS`
-        consecutive regular sessions after it, through ``d``, each with a NIFTY 50 bar. A later bar is a hole,
-        left to the bar-missing rules; a session without an index bar (a market-wide gap) restarts the count."""
+        consecutive regular sessions after it, through ``d``, each with a NIFTY 50 bar and none on or after a
+        failed ``daily_bars`` day. A later bar is a hole, left to :meth:`_walk`'s halt rule; a session without
+        an index bar (a market-wide gap) restarts the count."""
         if any(b.d > base for b in bars):
             return False
         run, s = 0, base
@@ -344,7 +393,7 @@ class SignalOutcomesJob:
                 return False
             if s > d:
                 return False
-            run = run + 1 if s in index_days else 0
+            run = run + 1 if gaps.symbol_missing(s) else 0
         return True
 
     def _anchor_lost(self, bars: Sequence[SimBar], first: date) -> bool:

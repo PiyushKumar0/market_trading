@@ -524,13 +524,58 @@ async def test_a_bar_after_four_stale_sessions_keeps_the_row_open(conn, store, c
     _bars(store, "NIFTY 50", sess)
     await job.run(sess[11])
     _bars(store, "LATE", sess, skip=set(range(30)) - {12})        # one later bar: a hole, not a delisting
-    await job.run(sess[20])
+    await job.run(sess[15])                                       # 8..11 are halts now; 13..15 only 3 stale
     assert _statuses(conn, "LATE") == {"rule": "open", "next_open": "open"}
-    _bars(store, "LATE", sess)                                    # the hole backfilled
+    _bars(store, "LATE", sess)                                    # the rest arrives
     await job.run(sess[24])
     row = _row(conn, sess[0], "rule", "LATE")
     assert (row["status"], row["exit_d"], row["net_t20"]) == (
         "closed", sess[19].isoformat(), pytest.approx(19.5 - _cost(cost_model, "6000")))
+
+
+async def test_a_halt_mid_hold_walks_at_a_zero_return(conn, store, cost_model, job, sess):
+    _slot(conn, sess[0], "HALT")
+    _bars(store, "HALT", sess, skip={4, 5})                       # halted on T+5 and T+6, trading resumes
+    _bars(store, "NIFTY 50", sess)
+    await job.run(sess[24])
+    cost = _cost(cost_model, "6000")
+    row = _row(conn, sess[0], "rule", "HALT")
+    assert (row["status"], row["exit_d"], row["net_t5"], row["net_t20"]) == (
+        "closed", sess[19].isoformat(), pytest.approx(3.5 - cost), pytest.approx(19.5 - cost))
+
+
+async def test_a_gap_younger_than_five_sessions_waits(conn, store, job, sess, caplog):
+    _slot(conn, sess[0], "HALT")
+    _bars(store, "HALT", sess, skip={4, 5})
+    _bars(store, "NIFTY 50", sess)
+    with caplog.at_level(logging.WARNING, logger="engine.ops.signal_outcomes"):
+        await job.run(sess[7])                                    # sess[4] is 4 sessions old
+    row = _row(conn, sess[0], "rule", "HALT")
+    assert (row["status"], row["net_t5"]) == ("open", None)
+    assert {(r.key[3], r.session) for r in log_events(caplog, "signal_outcome_bar_missing")} == {
+        ("rule", sess[4].isoformat()), ("next_open", sess[4].isoformat())}
+    await job.run(sess[8])
+    assert _row(conn, sess[0], "rule", "HALT")["net_t5"] is not None
+
+
+@pytest.mark.parametrize(
+    ("bars", "expected"),
+    [({"skip": {4, 5}}, "closed"), ({"skip": set(range(8, 30))}, "closed"), ({"skip": {0}}, "unscorable")],
+    ids=["halt", "stale", "anchor"],
+)
+async def test_a_failed_daily_bars_day_blocks_gap_judgement_until_repaired(
+    conn, store, clk, cal, job, sess, bars, expected
+):
+    _slot(conn, sess[0], "GAP")
+    _bars(store, "GAP", sess, **bars)
+    _bars(store, "NIFTY 50", sess)
+    runs = CatchUpRunner(conn, clk, cal, JobRegistry())
+    runs.record_run(JOB_DAILY_BARS, sess[0], "failed")
+    await job.run(sess[24])
+    assert _row(conn, sess[0], "rule", "GAP")["status"] == "open"
+    runs.record_run(JOB_DAILY_BARS, sess[0])                      # repaired
+    await job.run(sess[24])
+    assert _row(conn, sess[0], "rule", "GAP")["status"] == expected
 
 
 async def test_one_symbols_read_failure_costs_only_its_rows(conn, store, job, sess, monkeypatch, caplog):
