@@ -428,4 +428,4 @@ def test_no_decision_path_reads_signal_outcomes():
     paths = [*(SRC / p for p in ("strategy", "risk", "intelligence")), SRC / "ops" / "pipeline.py"]
     files = [f for p in paths for f in (p.rglob("*.py") if p.is_dir() else [p])]
     assert len(files) > 20
-    assert [f for f in files if re.search("signal_outcomes", f.read_text(encoding="utf-8"))] == []
+    assert [f for f in files if re.search("signal_outcomes|forward_verdicts", f.read_text(encoding="utf-8"))] == []

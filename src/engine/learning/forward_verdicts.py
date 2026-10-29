@@ -2,9 +2,9 @@
 §9 #2/#5). The rules' text is quoted in ``scripts/forward_verdicts.py``.
 
 HINDSIGHT: reads ``signal_outcomes``; only owner surfaces, verdict code and research may import this
-module. ``load_rows`` is the only function that touches SQLite; the rest is pure and never reads the
-clock. Looks are cut from a fixed cohort and form only when every member is final, so a formed look
-never moves.
+module. ``load_rows`` holds the only SQL (the readings reach SQLite through it); the rest is pure and
+never reads the clock. Looks are cut from a fixed cohort and form only when every member is final, so a
+formed look never moves.
 """
 
 from __future__ import annotations
@@ -12,14 +12,17 @@ from __future__ import annotations
 import bisect
 import sqlite3
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
+from typing import cast
 
 #: First session of the registered populations; None until registered. Only a caller's default.
 REGISTERED_FROM: date | None = None
 
+KILL_RULES = ("brk20", "ins")
+ANALYST_STRATEGIES = ("brk20", "hi52", "ins")
 KILL_SIZES = (20, 40)
 ANALYST_SIZES = (30, 60)
 
@@ -77,6 +80,10 @@ class SignalRow:
 
 @dataclass(frozen=True)
 class Look:
+    """A kill look over rows read as of a day. ``formed``, the counts and the net T+20 figures reconstruct
+    exactly what that day knew; ``median_excess_t20`` is a diagnostic and may include benchmark scoring
+    done after it."""
+
     size: int
     formed: bool
     n_closed: int
@@ -122,6 +129,67 @@ class C2Arms:
     neither: int           # blocked for an undefined regime or a missing index bar: in no C2 cohort
 
 
+@dataclass(frozen=True)
+class Bucket:
+    label: str
+    decision: str
+    stats: Stats
+
+
+@dataclass(frozen=True)
+class ExcludedKey:
+    strategy_id: str
+    prompt_version: str | None
+    model: str | None
+    n: int
+
+
+@dataclass(frozen=True)
+class KillReading:
+    """One kill rule as of ``as_of``: the verdict, the looks, the rows holding the first unformed look
+    and the diagnostics (running figures over every row; decide nothing)."""
+
+    rule: str
+    registered_from: date | None
+    as_of: date
+    verdict: str
+    reason: str
+    looks: tuple[Look, ...]
+    holding_look: int | None
+    holders: tuple[SignalRow, ...]
+    n_rows: int
+    n_filled: int
+    statuses: dict[str, int]
+    net_t5: Stats
+    net_t10: Stats
+    net_t20: Stats
+    excess_t20: Stats
+    c2: C2Arms | None      # brk20 only
+
+
+@dataclass(frozen=True)
+class AnalystReading:
+    """The analyst-value verdict as of ``as_of``, with the rows holding the first unformed look and the
+    diagnostics (decide nothing)."""
+
+    registered_from: date | None
+    as_of: date
+    verdict: str
+    reason: str
+    looks: tuple[CellLook, ...]
+    holding_look: int | None
+    holders: tuple[SignalRow, ...]
+    keys: dict[str, tuple[str, str]]
+    excluded: tuple[ExcludedKey, ...]
+    n_kept: int
+    statuses: dict[str, int]
+    unvalued: tuple[Cell, ...]         # final cells with an arm lacking a closed outcome
+    diff_t5: Stats
+    diff_t10: Stats
+    per_strategy: dict[str, Stats]
+    confidence: tuple[Bucket, ...]
+
+
 # ------------------------------------------------------------------ loader
 def load_rows(
     conn: sqlite3.Connection, *, strategies: Sequence[str], construct: str, start: date, as_of: date,
@@ -160,20 +228,74 @@ def _known_on(row: SignalRow, as_of: date) -> SignalRow:
     return row
 
 
+# ------------------------------------------------------------------ readings
+def kill_reading(
+    conn: sqlite3.Connection, rule: str, *, as_of: date, registered_from: date | None,
+) -> KillReading:
+    """The ``rule`` (brk20 or ins) kill verdict over the population from ``registered_from`` (every row
+    when None, read UNREGISTERED)."""
+    if rule not in KILL_RULES:
+        raise ValueError(f"unknown kill rule {rule!r}")
+    start = registered_from or date.min
+    rows = load_rows(conn, strategies=(rule,), construct="rule", start=start, as_of=as_of)
+    looks = kill_looks(rows)
+    verdict, reason = kill_verdict(looks, registered_from=registered_from)
+    holding = next((i for i, lk in enumerate(looks, 1) if not lk.formed), None)
+    c2 = None
+    if rule == "brk20":
+        c2 = c2_arms(rows, load_rows(conn, strategies=(rule,), construct="rule_blocked", start=start,
+                                     as_of=as_of))
+    return KillReading(
+        rule, registered_from, as_of, verdict, reason, tuple(looks), holding,
+        tuple(look_holders(rows, looks[holding - 1].size)) if holding else (), len(rows),
+        sum(1 for r in rows if r.fill_d is not None), dict(Counter(r.status for r in rows)),
+        stats(_nets(rows, 5)), stats(_nets(rows, 10)), stats(_nets(rows, 20)),
+        stats([r.excess_t20 for r in rows if r.excess_t20 is not None]), c2,
+    )
+
+
+def analyst_reading(conn: sqlite3.Connection, *, as_of: date, registered_from: date | None) -> AnalystReading:
+    """The analyst-value verdict over the population from ``registered_from`` (every row when None, read
+    UNREGISTERED)."""
+    rows = load_rows(conn, strategies=ANALYST_STRATEGIES, construct="next_open",
+                     start=registered_from or date.min, as_of=as_of)
+    keys = registered_keys(rows)
+    kept, excluded = split_by_key(rows, keys)
+    cells = analyst_cells(kept)
+    looks = analyst_looks(cells)
+    verdict, reason = analyst_verdict(looks, registered_from=registered_from)
+    holding = next((i for i, lk in enumerate(looks, 1) if not lk.formed), None)
+    counts = Counter((r.strategy_id, r.prompt_version, r.model) for r in excluded)
+    return AnalystReading(
+        registered_from, as_of, verdict, reason, tuple(looks), holding,
+        tuple(cell_holders(kept, cells, looks[holding - 1].size)) if holding else (), keys,
+        tuple(ExcludedKey(*k, n) for k, n in sorted(counts.items(), key=lambda kv: tuple(map(str, kv[0])))),
+        len(kept), dict(Counter(r.status for r in kept)),
+        tuple(c for c in cells if c.final and c.diff is None),
+        stats(_diffs(analyst_cells(kept, horizon=5))), stats(_diffs(analyst_cells(kept, horizon=10))),
+        {s: stats(_diffs(c for c in cells if c.strategy_id == s)) for s in ANALYST_STRATEGIES},
+        tuple(confidence_buckets(kept)),
+    )
+
+
 # ------------------------------------------------------------------ kill rules
 def _cohort(rows: Iterable[SignalRow]) -> list[SignalRow]:
     return sorted((r for r in rows if r.fill_d is not None), key=lambda r: (r.fill_d, r.symbol, r.d))
+
+
+def _holders(rows: Iterable[SignalRow], members: Sequence[SignalRow], size: int) -> list[SignalRow]:
+    held = [r for r in members if not r.final]
+    if len(members) == size:
+        cutoff = cast(date, members[-1].fill_d)
+        held += [r for r in rows if r.fill_d is None and not r.final and r.d <= cutoff]
+    return held
 
 
 def look_holders(rows: Sequence[SignalRow], size: int) -> list[SignalRow]:
     """What keeps the ``size`` look from forming: its non-final members and, once ``size`` rows filled,
     every unfilled ``open`` row dated on or before the last member's fill (it could still fill ahead of
     it — a missing bar holds a fill back)."""
-    members = _cohort(rows)[:size]
-    held = [r for r in members if not r.final]
-    if len(members) == size and (cutoff := members[-1].fill_d) is not None:
-        held += [r for r in rows if r.fill_d is None and not r.final and r.d <= cutoff]
-    return held
+    return _holders(rows, _cohort(rows)[:size], size)
 
 
 def kill_looks(rows: Sequence[SignalRow], sizes: Sequence[int] = KILL_SIZES) -> list[Look]:
@@ -183,12 +305,12 @@ def kill_looks(rows: Sequence[SignalRow], sizes: Sequence[int] = KILL_SIZES) -> 
     out = []
     for size in sizes:
         members = cohort[:size]
-        nets = _nets((r for r in members if r.status == "closed"), 20)
-        s = stats(nets)
+        closed = [r for r in members if r.status == "closed"]
+        s = stats(_nets(closed, 20))
         out.append(Look(
-            size, len(members) == size and not look_holders(rows, size), len(nets),
-            sum(1 for r in members if r.final and r.status != "closed"), s.median, s.hit_rate, s.mean,
-            stats([r.excess_t20 for r in members if r.status == "closed" and r.excess_t20 is not None]).median,
+            size, len(members) == size and not _holders(rows, members, size), len(closed),
+            sum(1 for r in members if r.final) - len(closed), s.median, s.hit_rate, s.mean,
+            stats([r.excess_t20 for r in closed if r.excess_t20 is not None]).median,
         ))
     return out
 
@@ -224,17 +346,28 @@ def registered_keys(rows: Iterable[SignalRow]) -> dict[str, tuple[str, str]]:
 def split_by_key(
     rows: Iterable[SignalRow], keys: dict[str, tuple[str, str]],
 ) -> tuple[list[SignalRow], list[SignalRow]]:
-    """(decided rows carrying their strategy's registered key, decided rows excluded for another key)."""
+    """(kept, excluded) decided rows. The population freezes on a strategy's first day F with a decision
+    under another key: rows after F are excluded even if the key reverts; rows on F carrying the
+    registered key were decided before the change and stay."""
+    decided = [r for r in rows if r.analyst_decision]
+    frozen: dict[str, date] = {}
+    for r in decided:
+        if keys.get(r.strategy_id) != (r.prompt_version, r.model):
+            frozen[r.strategy_id] = min(r.d, frozen.get(r.strategy_id, r.d))
     kept: list[SignalRow] = []
     excluded: list[SignalRow] = []
-    for r in rows:
-        if r.analyst_decision:
-            (kept if keys.get(r.strategy_id) == (r.prompt_version, r.model) else excluded).append(r)
+    for r in decided:
+        ok = keys.get(r.strategy_id) == (r.prompt_version, r.model) and r.d <= frozen.get(r.strategy_id, r.d)
+        (kept if ok else excluded).append(r)
     return kept, excluded
 
 
 def _nets(rows: Iterable[SignalRow], horizon: int) -> list[float]:
     return [v for r in rows if (v := getattr(r, f"net_t{horizon}")) is not None]
+
+
+def _diffs(cells: Iterable[Cell]) -> list[float]:
+    return [c.diff for c in cells if c.diff is not None]
 
 
 def analyst_cells(rows: Iterable[SignalRow], horizon: int = 20) -> list[Cell]:
@@ -269,7 +402,7 @@ def analyst_looks(cells: Sequence[Cell], sizes: Sequence[int] = ANALYST_SIZES) -
     out = []
     for size in sizes:
         first = cells[:size]
-        valued = [c.diff for c in first if c.diff is not None]
+        valued = _diffs(first)
         out.append(CellLook(size, len(first) == size and all(c.final for c in first), len(first),
                             sum(c.final for c in first), len(valued), stats(valued).mean))
     return out
@@ -301,16 +434,16 @@ def stats(values: Sequence[float]) -> Stats:
                  sum(1 for v in values if v > 0) / len(values))
 
 
-def confidence_buckets(rows: Iterable[SignalRow]) -> dict[tuple[str, str], Stats]:
+def confidence_buckets(rows: Iterable[SignalRow]) -> list[Bucket]:
     """Closed net T+20 per (confidence bucket, decision) over the decided rows."""
     groups: dict[tuple[str, str], list[SignalRow]] = defaultdict(list)
     for r in rows:
         if r.analyst_decision in _DECISIONS:
             c = r.analyst_confidence
-            bucket = _BUCKETS[-1] if c is None else _BUCKETS[bisect.bisect_right(_CONFIDENCE_EDGES, c)]
-            groups[(bucket, r.analyst_decision)].append(r)
+            label = _BUCKETS[-1] if c is None else _BUCKETS[bisect.bisect_right(_CONFIDENCE_EDGES, c)]
+            groups[(label, r.analyst_decision)].append(r)
     order = sorted(groups, key=lambda k: (_BUCKETS.index(k[0]), k[1]))
-    return {k: stats(_nets(groups[k], 20)) for k in order}
+    return [Bucket(*k, stats(_nets(groups[k], 20))) for k in order]
 
 
 def c2_arms(rule_rows: Iterable[SignalRow], blocked_rows: Sequence[SignalRow]) -> C2Arms:
