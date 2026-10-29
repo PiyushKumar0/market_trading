@@ -79,7 +79,7 @@ def symbol_history_line(conn: sqlite3.Connection, symbol: str, *, limit: int = 3
 
 def _status_text(status: str | None, net: float | None, reason: str | None) -> str:
     if status != "closed":
-        return _STATUS_WORDS.get(status, "not scored")
+        return _STATUS_WORDS.get(status or "", "not scored")
     text = "closed" if net is None else f"closed {net:+.2f}%"
     return f"{text} ({reason})" if reason else text
 
