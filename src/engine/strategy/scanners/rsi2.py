@@ -117,7 +117,7 @@ class Rsi2Scanner(Scanner):
         self._regime_logged_on = session
         _log.info(
             "rsi2_regime_blocked", d=session.isoformat(),
-            index_close=round(r.close, 2), sma50=round(r.sma, 2), rising=r.sma > r.sma_then,
+            index_close=round(r.close, 2), sma50=round(r.sma, 2), rising=r.rising,
             # First failing leg in the condition's own evaluation order; `rising` still discloses the
             # second when both are shut.
             blocked_leg=r.blocked_leg,

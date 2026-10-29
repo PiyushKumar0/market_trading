@@ -131,13 +131,12 @@ def test_the_window_is_counted_in_TRADING_sessions_not_calendar_days(book, conn,
     assert EXPIRES_D != SIGNAL_D + timedelta(days=DEFAULT_RETEST_SESSIONS - 1)
 
 
-def test_expiry_is_n_minus_1_sessions_after_signal_d(conn, rcalendar, rclock) -> None:
+def test_expiry_is_n_minus_1_sessions_after_signal_d(book, conn, rcalendar, rclock) -> None:
     """V2-5 rests the level on y+1..y+5 and ``signal_d`` is y+1, so re-offers fall on y+2..y+5."""
     monday = date(2026, 6, 22)                            # a weekend and the 06-26 holiday follow
-    assert RestingLevelBook(conn, rcalendar, rclock)._expiry(monday) == date(2026, 6, 29)
+    assert book._expiry(monday) == date(2026, 6, 29)
     assert RestingLevelBook(conn, rcalendar, rclock, sessions=1)._expiry(monday) == monday
 
-    book = RestingLevelBook(conn, rcalendar, rclock)
     book.record(_cand("AAA"))                             # signal_d 06-17 = y+1, crossing y = 06-16
     offered, d = [], SIGNAL_D
     while d <= date(2026, 6, 30):

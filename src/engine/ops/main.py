@@ -233,7 +233,7 @@ _log = get_logger("engine.ops.main")
 
 #: Canonical bars_1d symbols the backfill job persists NIFTY 50 / India VIX under; the WarmupGate and
 #: FeatureEngine defaults MUST match these (§7.1 ``regime_data_ready``).
-INDEX_SYMBOL = "NIFTY 50"
+INDEX_SYMBOL = regime.INDEX_SYMBOL
 VIX_SYMBOL = "INDIA VIX"
 
 #: Fallback tick size when an instrument is not in today's dump (NSE minimum, A10) — mirrors
@@ -2156,7 +2156,7 @@ async def compose(
                 try:
                     regime_keep, idx_regime, regime_reason = _brk20_regime_gate(
                         store.get_bars_1d_frame(regime.INDEX_SYMBOL, today - timedelta(days=150), yesterday),
-                        calendar.previous_trading_day(today),
+                        calendar, today,
                     )
                 except Exception:  # noqa: BLE001 - an unreadable regime costs brk20 alone, never the sweep
                     _log.exception("brk20_regime_unreadable", d=today.isoformat())
@@ -2181,7 +2181,7 @@ async def compose(
                     "brk20_regime_blocked", d=today.isoformat(), reason=regime_reason,
                     close=None if idx_regime is None else round(idx_regime.close, 2),
                     sma50=None if idx_regime is None else round(idx_regime.sma, 2),
-                    rising=None if idx_regime is None else idx_regime.sma > idx_regime.sma_then,
+                    rising=None if idx_regime is None else idx_regime.rising,
                     blocked_leg=None if idx_regime is None else idx_regime.blocked_leg,
                     blocked=len(brk20_raw),
                 )
@@ -3705,17 +3705,13 @@ def _consume_ins_pending(
 
 # --------------------------------------------------------------------------- C2 brk20 regime gate
 def _brk20_regime_gate(
-    frame: pd.DataFrame, expected_last: date
+    frame: pd.DataFrame, calendar: NSECalendar, today: date
 ) -> tuple[bool, regime.IndexRegime | None, str | None]:
-    """(keep, regime, reason) for today's brk20 crossings, judged at the crossing session y.
-
-    ``frame`` is the index's ``get_bars_1d_frame``; its last bar must be dated ``expected_last`` (y), as
-    C2 counts "no index bar dated y" undefined (``backtest_regime_filter.closes_through``)."""
-    if not len(frame) or frame.index[-1].date() != expected_last:
-        return False, None, "index_bar_missing"
-    idx = regime.index_regime(frame["close"].tolist(), expected_last)
+    """(keep, regime, reason) for today's brk20 crossings, judged at the crossing session
+    (:func:`regime.session_regime`); reason ``"down"`` when the regime is defined and not up."""
+    idx, reason = regime.session_regime(frame, calendar, today)
     if idx is None:
-        return False, None, "undefined"
+        return False, None, reason
     return (True, idx, None) if idx.up else (False, idx, "down")
 
 

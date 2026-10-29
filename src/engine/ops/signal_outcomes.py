@@ -131,7 +131,7 @@ class SignalOutcomesJob:
 
     # ------------------------------------------------------------------ population
     def _signals(self, d: date) -> list[_Signal]:
-        """hi52/ins: ``rule`` + ``next_open``. brk20 on its crossing session: ``rule`` + ``next_open``;
+        """hi52/ins: ``rule`` + ``next_open``. brk20 on its publication session ``signal_d``: ``rule`` + ``next_open``;
         a re-offer: ``next_open`` costed from the latest resting row covering it. Blocked crossings:
         ``rule_blocked``."""
         resting: dict[str, list[tuple[date, date, str, str | None]]] = defaultdict(list)

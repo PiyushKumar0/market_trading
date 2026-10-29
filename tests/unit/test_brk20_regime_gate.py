@@ -9,7 +9,9 @@ from datetime import date, datetime
 import pandas as pd
 import pytest
 
+from engine.core.calendar import NSECalendar
 from engine.core.clock import IST
+from engine.core.config import config_dir
 from engine.marketdata.store import MarketStore
 from engine.ops import main as opsmain
 from engine.strategy import regime
@@ -30,15 +32,15 @@ def _blocked(conn) -> list[dict]:
     return [dict(r) for r in conn.execute("SELECT * FROM brk20_regime_blocked ORDER BY symbol")]
 
 
-@pytest.mark.parametrize("closes, last, keep, reason", [
-    (RISING, Y, True, None),
-    (FALLING, Y, False, "down"),
-    (RISING[:69], Y, False, "undefined"),
-    (RISING, date(2026, 6, 15), False, "index_bar_missing"),
-    ([], Y, False, "index_bar_missing"),
+@pytest.mark.parametrize("closes, keep, reason", [
+    (RISING, True, None),
+    (FALLING, False, "down"),
+    (RISING[:69], False, "undefined"),
+    ([], False, "index_bar_missing"),          # staleness itself: tests/unit/test_regime.py
 ])
-def test_gate_blocks_when_down_undefined_or_index_bar_stale(closes, last, keep, reason):
-    kept, idx, why = opsmain._brk20_regime_gate(_frame(closes, last), Y)
+def test_gate_blocks_when_down_undefined_or_index_bar_stale(clock, closes, keep, reason):
+    cal = NSECalendar(config_dir() / "calendar", clock, strict=True, include_special=False)
+    kept, idx, why = opsmain._brk20_regime_gate(_frame(closes, Y), cal, FIXED_NOW.date())
     assert (kept, why) == (keep, reason)
     assert (idx is None) == (reason in ("undefined", "index_bar_missing"))
 
