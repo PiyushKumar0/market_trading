@@ -407,7 +407,9 @@ strategy:
                                  # prescreen_strategy_disabled line a day, and no arm levels in the
                                  # sweep verdict (a parked strategy can never arm).
       rsi2: 16
-      trend: 10
+      trend: 0                   # parked 2026-11 (review §9 #7); 34 forwards since August; no validated
+                                 # edge; re-enable only behind a pre-registered hypothesis, on the orb
+                                 # park's terms.
       mom: 8
       brk20: 12
       ins: 8                     # §6.1 `ins` (2026-08-17): a rare, EOD-batch event — ~13-18 fresh
