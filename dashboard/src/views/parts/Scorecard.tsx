@@ -31,7 +31,7 @@ function tone(v: number | null, digits = 2): string {
 }
 
 /** A column header whose word is its own explanation (dotted underline): no ⓘ eating the width. */
-function Th({ children, hint, term }: { children: string; hint: string; term?: string }) {
+export function Th({ children, hint, term }: { children: string; hint: string; term?: string }) {
   return (
     <th scope="col" className="perf-colhead">
       <Hint label={children} term={term} asTerm>

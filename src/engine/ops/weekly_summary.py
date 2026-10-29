@@ -1,6 +1,7 @@
 """Weekly owner summary of recommendation outcomes (plan Q2.6).
 
-HINDSIGHT: every figure is read from ``rec_outcomes``; the owner sees it, no decision code reads it.
+HINDSIGHT: every figure is read from ``rec_outcomes`` and ``signal_outcomes``; the owner sees it, no
+decision code reads it.
 """
 
 from __future__ import annotations
@@ -10,12 +11,14 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from engine.core.clock import IST
 from engine.core.log import get_logger
+from engine.learning.forward_verdicts import UNREGISTERED
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
-from engine.ops.jobs import JOB_REC_OUTCOMES
+from engine.ops.jobs import JOB_REC_OUTCOMES, JOB_SIGNAL_OUTCOMES
 from engine.ops.scorecard import scorecard
 
 _log = get_logger("engine.ops.weekly_summary")
@@ -34,6 +37,25 @@ _SKIPPED_CLOSED = (
 )
 
 
+def analyst_line(signals: dict[str, Any]) -> str | None:
+    """The analyst-value verdict of the binding (largest formed) look, else look 1's interim progress;
+    None before registration."""
+    if "error" in signals:
+        return f"Analyst reading unavailable: {signals['error']}."
+    analyst = signals["analyst"]
+    if analyst["verdict"] == UNREGISTERED:
+        return None
+    formed = [(i, lk) for i, lk in enumerate(analyst["looks"], 1) if lk["formed"]]
+    if not formed:
+        lk = analyst["looks"][0]
+        return (f"Analyst (pre-registered {signals['window']}): look 1 formed {lk['n_cells']} of {lk['size']} "
+                "cells — interim, decides nothing.")
+    i, lk = formed[-1]
+    diff = "n/a" if lk["mean_diff"] is None else f"{lk['mean_diff']:+.1f} pp"
+    return (f"Analyst verdict (look {i}, {lk['size']} cells): {analyst['verdict']} — mean approved − declined "
+            f"at T+20 {diff}.")
+
+
 @dataclass(frozen=True)
 class WeeklySummaryResult:
     d: date
@@ -50,8 +72,9 @@ class WeeklySummaryJob:
         self._was_run = was_run
 
     async def run(self, d: date) -> WeeklySummaryResult:
-        """``unfinished`` (replayed later) only while ``rec_outcomes`` for ``d`` is unrecorded or failed."""
-        if not self._was_run(JOB_REC_OUTCOMES, d):
+        """``unfinished`` (replayed later) while ``rec_outcomes`` or ``signal_outcomes`` for ``d`` is
+        unrecorded or failed. The analyst reading is as known on ``d``, also on a replay."""
+        if not (self._was_run(JOB_REC_OUTCOMES, d) and self._was_run(JOB_SIGNAL_OUTCOMES, d)):
             return WeeklySummaryResult(d, unfinished=True)
         start = d - timedelta(days=d.weekday())
         # The SQL bound is a day looser than the IST week: delivered_at carries any offset.
@@ -62,20 +85,21 @@ class WeeklySummaryJob:
         skipped = Counter(r[2] for r in week if r[2])
         n_closed, rupees = self._conn.execute(_SKIPPED_CLOSED).fetchone()
         try:
-            card = scorecard(self._conn)["strategies"]
-            paper = [s["paper"] for s in card.values()]
+            sc = scorecard(self._conn, as_of=d)
+            paper = [s["paper"] for s in sc["strategies"].values()]
         except Exception:
             _log.exception("weekly_summary_paper_failed")
-            card = scorecard(self._conn, with_paper=False)["strategies"]
+            sc = scorecard(self._conn, as_of=d, with_paper=False)
             paper = []
         strategies = [
             (sid, s["recs"]["closed"], s["recs"]["mean_net"], s["recs"]["mean_excess"])
-            for sid, s in card.items() if s["recs"]["closed"]
+            for sid, s in sc["strategies"].items() if s["recs"]["closed"]
         ]
         message = catalog.weekly_summary(
             d=d, delivered=len(week), taken=sum(r[1] in ("taken", "closed") for r in week),
             skipped=dict(skipped), expired=sum(r[1] == "expired" and not r[2] for r in week),
             skipped_closed=n_closed, skipped_rupees=rupees, strategies=strategies,
+            analyst_line=analyst_line(sc["signals"]),
         )
         closed, open_n = sum(p["closed"] for p in paper), sum(p["open"] for p in paper)
         if closed or open_n:

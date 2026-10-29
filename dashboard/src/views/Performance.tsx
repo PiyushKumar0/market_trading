@@ -1,12 +1,14 @@
 /**
  * Performance tab: the per-strategy scorecard (`GET /scorecard`). Recommendation columns are hindsight
- * outcomes on official prices, never real profits; paper columns are simulated trades.
+ * outcomes on official prices, never real profits; paper columns are simulated trades. The second card
+ * scores every published signal and carries the pre-registered verdicts.
  */
 import './performance.css'
 import type { ScorecardState } from '../hooks'
 import { Card, EmptyState } from '../ui/Card'
 import { Hint } from '../ui/Hint'
 import { Scorecard } from './parts/Scorecard'
+import { SignalScorecard } from './parts/SignalScorecard'
 
 export function Performance({ data, error, unauthorized }: ScorecardState) {
   const count = data ? Object.keys(data.strategies).length : 0
@@ -46,6 +48,18 @@ export function Performance({ data, error, unauthorized }: ScorecardState) {
           </>
         )}
       </Card>
+      {data?.signals && !unauthorized ? (
+        <Card
+          title="Signals and the analyst, scored in hindsight"
+          meta={'window' in data.signals ? data.signals.window : undefined}
+        >
+          <p className="perf-note">
+            Every published signal is scored whatever the analyst or you decided. Interim numbers decide nothing; the
+            verdicts are pre-registered.
+          </p>
+          <SignalScorecard signals={data.signals} />
+        </Card>
+      ) : null}
     </>
   )
 }

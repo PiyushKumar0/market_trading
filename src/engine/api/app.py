@@ -389,11 +389,11 @@ def create_app(
 
     @app.get("/scorecard")
     async def scorecard_route(_: Owner) -> dict[str, Any]:
-        """Per-strategy hindsight outcomes of delivered entry recs (plan Q2.4)."""
-        conn = app.state.conn
-        if conn is None:
+        """Per-strategy hindsight outcomes of delivered entry recs (plan Q2.4) and of published signals."""
+        conn, clock = app.state.conn, app.state.clock
+        if conn is None or clock is None:
             return {"label": LABEL, "bench": {}, "strategies": {}}
-        return scorecard(conn)
+        return scorecard(conn, as_of=clock.today())
 
     @app.get("/paper")
     async def paper(_: Owner) -> dict[str, Any]:

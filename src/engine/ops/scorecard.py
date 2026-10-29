@@ -1,4 +1,5 @@
-"""Per-strategy hindsight scorecard over ``rec_outcomes`` joined to ``recommendations`` (plan Q2.4).
+"""Per-strategy hindsight scorecard over ``rec_outcomes`` joined to ``recommendations`` (plan Q2.4), and
+the published signals scored in ``signal_outcomes`` with their pre-registered verdicts (review A1).
 
 HINDSIGHT: read by the owner surfaces only, never by scanner, threshold or promotion code.
 """
@@ -7,15 +8,20 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter, defaultdict
-from datetime import datetime
+from dataclasses import asdict
+from datetime import date, datetime
 from decimal import Decimal
 from statistics import mean, median
 from typing import Any
 
 from engine.core.clock import IST
+from engine.core.log import get_logger
 from engine.core.money import pct_of
 from engine.core.scope import HELD_STATES_SQL, scope_sql
+from engine.learning import forward_verdicts as fv
 from engine.learning.benchmark import BENCH_INTRASESSION, BENCH_TIME
+
+_log = get_logger("engine.ops.scorecard")
 
 LABEL = "hindsight on official bars — not platform equity"
 UNATTRIBUTED = "unattributed"
@@ -79,7 +85,8 @@ def _mean(xs: list[float]) -> float | None:
     return mean(xs) if xs else None
 
 
-def scorecard(conn: sqlite3.Connection, *, with_paper: bool = True) -> dict[str, Any]:
+def scorecard(conn: sqlite3.Connection, *, as_of: date, with_paper: bool = True) -> dict[str, Any]:
+    """``as_of`` is the caller's IST day; it bounds only the ``signals`` block."""
     by_strategy: dict[str, list[tuple]] = defaultdict(list)
     for row in conn.execute(_SQL):
         by_strategy[row[0] or UNATTRIBUTED].append(tuple(row))
@@ -91,7 +98,59 @@ def scorecard(conn: sqlite3.Connection, *, with_paper: bool = True) -> dict[str,
             sid: _strategy(by_strategy.get(sid, []), paper.get(sid, _paper_stats([], 0)))
             for sid in sorted(by_strategy.keys() | paper.keys())
         },
+        "signals": signals_block(conn, as_of=as_of),
     }
+
+
+def signals_block(conn: sqlite3.Connection, *, as_of: date) -> dict[str, Any]:
+    """Every published brk20/hi52/ins signal scored in hindsight with the kill and analyst readings, over
+    the population from ``forward_verdicts.REGISTERED_FROM`` (read per call), as known on ``as_of``.
+    hi52's rule row is a diagnostic: its costing differs from ``scripts/hi52_forward_verdict.py``, whose
+    verdict stays authoritative. Never raises: an error reads ``{"error": ...}``."""
+    try:
+        return _signals(conn, as_of, fv.REGISTERED_FROM)
+    except Exception as exc:  # noqa: BLE001 - an owner surface degrades, never fails its caller
+        _log.exception("signals_block_failed")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _signals(conn: sqlite3.Connection, as_of: date, registered_from: date | None) -> dict[str, Any]:
+    sids, start = fv.ANALYST_STRATEGIES, registered_from or date.min
+    published = fv.load_rows(conn, strategies=sids, construct="next_open", start=start, as_of=as_of)
+    rule = fv.load_rows(conn, strategies=sids, construct="rule", start=start, as_of=as_of)
+    kept, _ = fv.split_by_key(published, fv.registered_keys(published))
+    cells = Counter(c.strategy_id for c in fv.analyst_cells(kept))
+    analyst = fv.analyst_reading(conn, as_of=as_of, registered_from=registered_from)
+    kills = {r: fv.kill_reading(conn, r, as_of=as_of, registered_from=registered_from) for r in fv.KILL_RULES}
+
+    def strategy(sid: str) -> dict[str, Any]:
+        rows = [r for r in rule if r.strategy_id == sid]
+        net = fv.stats([r.net_t20 for r in rows if r.net_t20 is not None])
+        decided = Counter(r.analyst_decision for r in kept if r.strategy_id == sid)
+        kill = kills.get(sid)
+        c2 = kill.c2 if kill else None
+        return {
+            "published": sum(r.strategy_id == sid for r in published),
+            "rule": {
+                "diagnostic": sid not in fv.KILL_RULES, "closed": sum(r.status == "closed" for r in rows),
+                "median_net_t20": net.median, "hit_rate": net.hit_rate,
+                "median_excess_t20": fv.stats([r.excess_t20 for r in rows if r.excess_t20 is not None]).median,
+            },
+            "blocked": {**asdict(c2.blocked), "neither": c2.neither} if c2 else None,
+            "kill_rule": _verdict(kill) if kill else None,
+            "analyst": {"enter": decided["enter"], "decline": decided["no_action"], "cells": cells[sid],
+                        "mean_diff": analyst.per_strategy[sid].mean},
+        }
+
+    return {
+        "window": f"from {registered_from.isoformat()}" if registered_from else "pre-registration history",
+        "analyst": _verdict(analyst),
+        "strategies": {sid: strategy(sid) for sid in sids},
+    }
+
+
+def _verdict(reading: fv.KillReading | fv.AnalystReading) -> dict[str, Any]:
+    return {"verdict": reading.verdict, "reason": reading.reason, "looks": [asdict(lk) for lk in reading.looks]}
 
 
 def _paper_stats(nets: list[Decimal], open_n: int, basis: Decimal | None = None) -> dict[str, Any]:

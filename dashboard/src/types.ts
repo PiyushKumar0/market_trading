@@ -196,10 +196,64 @@ export interface ScorecardPaper {
   open: number
 }
 
+/** A kill-rule look (forward_verdicts.Look): the first `size` filled signals, formed when all are final. */
+export interface SignalKillLook {
+  size: number
+  formed: boolean
+  n_closed: number
+  n_void: number
+  median_net_t20: number | null
+  hit_rate: number | null
+  mean_net_t20: number | null
+  median_excess_t20: number | null
+}
+
+/** An analyst look (forward_verdicts.CellLook): the first `size` cells, formed when all are final. */
+export interface SignalCellLook {
+  size: number
+  formed: boolean
+  n_cells: number
+  n_final: number
+  n_valued: number
+  mean_diff: number | null
+}
+
+export interface SignalVerdict<L> {
+  verdict: string // DEMOTE | HOLD | ADVISORY | KEEP | INSUFFICIENT | UNREGISTERED
+  reason: string
+  looks: L[]
+}
+
+/** One strategy's signals from the registered start, percent figures net of costs. */
+export interface SignalStrategy {
+  published: number
+  /** At the rule's own entry; `diagnostic` = no kill rule here (hi52: its forward test decides). */
+  rule: {
+    diagnostic: boolean
+    closed: number
+    median_net_t20: number | null
+    hit_rate: number | null
+    median_excess_t20: number | null
+  }
+  /** brk20 only: crossings the regime filter (C2) blocked; `neither` = blocked for another reason. */
+  blocked: { n: number; median: number | null; mean: number | null; hit_rate: number | null; neither: number } | null
+  kill_rule: SignalVerdict<SignalKillLook> | null
+  /** At the next open after the analyst's call; `mean_diff` = approved minus declined, percentage points. */
+  analyst: { enter: number; decline: number; cells: number; mean_diff: number | null }
+}
+
+export interface SignalsBlock {
+  window: string
+  analyst: SignalVerdict<SignalCellLook>
+  strategies: Record<string, SignalStrategy>
+}
+
 export interface ScorecardResponse {
   label: string
   bench: Record<string, string>
   strategies: Record<string, { recs: ScorecardRecs; paper: ScorecardPaper }>
+  /** Absent when the engine is unwired or older; `error` when the engine could not compute it. */
+  signals?: SignalsBlock | { error: string }
 }
 
 // --------------------------------------------------------------------------- GET /paper

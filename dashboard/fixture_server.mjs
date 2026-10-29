@@ -327,6 +327,56 @@ const scorecardFixture = {
       paper: { closed: 0, hit_rate: null, net: null, net_pct: null, open: 0 },
     },
   },
+  // ops/scorecard.signals_block after registration: brk20's look 1 still forming, ins's formed (HOLD),
+  // the analyst's look 1 formed ADVISORY.
+  signals: {
+    window: 'from 2026-11-02',
+    analyst: {
+      verdict: 'ADVISORY',
+      reason: 'look 1 (first 30 cells from 2026-11-02): mean enter - no_action net T+20 -0.84pp over 28 valued cells',
+      looks: [
+        { size: 30, formed: true, n_cells: 30, n_final: 30, n_valued: 28, mean_diff: -0.84 },
+        { size: 60, formed: false, n_cells: 41, n_final: 33, n_valued: 31, mean_diff: -0.52 },
+      ],
+    },
+    strategies: {
+      brk20: {
+        published: 34,
+        rule: { diagnostic: false, closed: 11, median_net_t20: 1.2, hit_rate: 0.55, median_excess_t20: 0.4 },
+        blocked: { n: 6, median: -0.9, mean: -1.4, hit_rate: 0.33, neither: 2 },
+        kill_rule: {
+          verdict: 'INSUFFICIENT',
+          reason: 'look 1 not formed: 11 of its 20 members final',
+          looks: [
+            { size: 20, formed: false, n_closed: 11, n_void: 0, median_net_t20: 1.2, hit_rate: 0.55, mean_net_t20: 1.5, median_excess_t20: 0.4 },
+            { size: 40, formed: false, n_closed: 11, n_void: 0, median_net_t20: 1.2, hit_rate: 0.55, mean_net_t20: 1.5, median_excess_t20: 0.4 },
+          ],
+        },
+        analyst: { enter: 9, decline: 21, cells: 8, mean_diff: -1.1 },
+      },
+      hi52: {
+        published: 52,
+        rule: { diagnostic: true, closed: 30, median_net_t20: 0.7, hit_rate: 0.53, median_excess_t20: -0.2 },
+        blocked: null,
+        kill_rule: null,
+        analyst: { enter: 14, decline: 33, cells: 19, mean_diff: -0.6 },
+      },
+      ins: {
+        published: 47,
+        rule: { diagnostic: false, closed: 25, median_net_t20: 1.6, hit_rate: 0.6, median_excess_t20: 0.9 },
+        blocked: null,
+        kill_rule: {
+          verdict: 'HOLD',
+          reason: 'look 1 (first 20 fills from 2026-11-02): median net T+20 +1.41% over 19 closed',
+          looks: [
+            { size: 20, formed: true, n_closed: 19, n_void: 1, median_net_t20: 1.41, hit_rate: 0.63, mean_net_t20: 1.8, median_excess_t20: 0.7 },
+            { size: 40, formed: false, n_closed: 25, n_void: 1, median_net_t20: 1.6, hit_rate: 0.6, mean_net_t20: 1.9, median_excess_t20: 0.9 },
+          ],
+        },
+        analyst: { enter: 12, decline: 30, cells: 14, mean_diff: null },
+      },
+    },
+  },
 }
 
 // GET /paper (plan "Response contract"). Six sessions on consecutive weekdays ending today; the epoch

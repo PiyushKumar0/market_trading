@@ -837,6 +837,7 @@ def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
     assert body["strategies"]["hi52"]["paper"] == {
         "closed": 0, "hit_rate": None, "net": None, "net_pct": None, "open": 0}
     assert body["strategies"]["hi52"]["recs"]["n"] == 1
+    assert set(body["signals"]) == {"window", "analyst", "strategies"}
 
     seed_paper(conn)
     paper = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()["strategies"]["hi52"]["paper"]

@@ -54,7 +54,8 @@ the engine's 15 s `ping` keepalive is filtered out.
 - *Paper trading* — status in words, paper limits in force, four figures, the equity-by-session chart
   (crosshair, ←/→, table view), open positions, waiting orders, closed trades, health counters.
   Everything here is simulated and says so once; paper cards carry a dashed violet border.
-- *Performance* — the per-strategy scorecard: hindsight-scored recommendations and paper trades.
+- *Performance* — the per-strategy scorecard: hindsight-scored recommendations and paper trades; then
+  every published signal scored in hindsight, with the pre-registered kill-rule and analyst verdicts.
 - *Activity* — risk checks (the decision log, day-folded, real and paper verdicts side by side),
   Telegram messages (above News — owner-directed 2026-09-08 — chronological, pinned to the newest,
   with delivery truth), the news watchlist, live updates in sentences (raw payload one click away).

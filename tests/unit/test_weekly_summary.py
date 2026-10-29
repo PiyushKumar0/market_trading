@@ -10,13 +10,25 @@ import pytest
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import config_dir, load_settings
+from engine.learning import forward_verdicts as fv
 from engine.ops import main as opsmain
-from engine.ops.jobs import JOB_REC_OUTCOMES, JOB_WEEKLY_SUMMARY, CatchUpRunner, CatchUpScope
-from engine.ops.weekly_summary import WeeklySummaryJob
+from engine.ops.jobs import (
+    JOB_REC_OUTCOMES,
+    JOB_SIGNAL_OUTCOMES,
+    JOB_WEEKLY_SUMMARY,
+    CatchUpRunner,
+    CatchUpScope,
+)
+from engine.ops.weekly_summary import WeeklySummaryJob, analyst_line
 from tests.unit.test_ops_main_wiring import _all_noop_fns
 from tests.unit.test_scorecard import seed_paper
 
 FRI = date(2026, 10, 9)
+
+
+@pytest.fixture(autouse=True)
+def _unregistered(monkeypatch) -> None:
+    monkeypatch.setattr(fv, "REGISTERED_FROM", None)
 
 
 class _Now:
@@ -128,11 +140,43 @@ async def test_no_recs_still_sends_with_zeros(conn) -> None:
     ]
 
 
-@pytest.mark.parametrize(("status", "sends"), [(None, False), ("failed", False), ("success", True), ("skipped", True)])
-async def test_unfinished_only_while_rec_outcomes_is_unrecorded_or_failed(conn, cal, clk, status, sends) -> None:
+async def test_the_analyst_line_follows_the_hindsight_lines_once_registered(conn, monkeypatch) -> None:
+    monkeypatch.setattr(fv, "REGISTERED_FROM", date(2026, 10, 5))
+    sent: list = []
+    await _job(conn, sent).run(FRI)
+    assert sent[0].body.splitlines()[3] == (
+        "Analyst (pre-registered from 2026-10-05): look 1 formed 0 of 30 cells — interim, decides nothing.")
+
+
+def _signals(verdict, *, formed=(False, False), mean=None):
+    looks = [{"size": size, "formed": f, "n_cells": 12, "n_final": 0, "n_valued": 0, "mean_diff": mean}
+             for size, f in zip((30, 60), formed, strict=True)]
+    return {"window": "from 2026-11-02", "analyst": {"verdict": verdict, "reason": "", "looks": looks}}
+
+
+@pytest.mark.parametrize(("signals", "line"), [
+    (_signals(fv.INSUFFICIENT),
+     "Analyst (pre-registered from 2026-11-02): look 1 formed 12 of 30 cells — interim, decides nothing."),
+    (_signals(fv.ADVISORY, formed=(True, False), mean=-0.84),
+     "Analyst verdict (look 1, 30 cells): ADVISORY — mean approved − declined at T+20 -0.8 pp."),
+    (_signals(fv.KEEP, formed=(True, True), mean=1.3),
+     "Analyst verdict (look 2, 60 cells): KEEP — mean approved − declined at T+20 +1.3 pp."),
+    (_signals(fv.UNREGISTERED), None),
+    ({"error": "RuntimeError: boom"}, "Analyst reading unavailable: RuntimeError: boom."),
+])
+def test_analyst_line(signals, line) -> None:
+    assert analyst_line(signals) == line
+
+
+@pytest.mark.parametrize(("rec", "sig", "sends"), [
+    (None, "success", False), ("failed", "success", False), ("success", None, False), ("success", "failed", False),
+    ("success", "success", True), ("skipped", "skipped", True),
+])
+async def test_unfinished_while_rec_or_signal_outcomes_is_unrecorded_or_failed(conn, cal, clk, rec, sig, sends) -> None:
     runner = CatchUpRunner(conn, clk, cal)
-    if status:
-        runner.record_run(JOB_REC_OUTCOMES, FRI, status=status)
+    for job_id, status in ((JOB_REC_OUTCOMES, rec), (JOB_SIGNAL_OUTCOMES, sig)):
+        if status:
+            runner.record_run(job_id, FRI, status=status)
     sent: list = []
     result = await _job(conn, sent, was_run=runner.was_run).run(FRI)
     assert (result.unfinished, len(sent)) == (not sends, int(sends))

@@ -24,6 +24,15 @@
   text-align: right;
 }
 
+/* The signals table's one text column is the 7th. */
+.perf-table.sig-table th.perf-colhead:nth-child(7) {
+  text-align: left;
+}
+
+.perf-table.sig-table th.perf-colhead:nth-child(10) {
+  text-align: right;
+}
+
 .perf-actions {
   min-width: 18ch;
 }

@@ -525,10 +525,11 @@ def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
 def weekly_summary(
     *, d: date, delivered: int, taken: int, skipped: dict[str, int], expired: int,
     skipped_closed: int, skipped_rupees: float, strategies: list[tuple[str, int, float | None, float | None]],
+    analyst_line: str | None,
 ) -> CatalogMessage:
     """Three lines: the week's recs by owner decision, the hindsight value of skipped recs, and the
-    cumulative per-strategy ``(id, closed, mean net %, mean excess %)``. The job appends a fourth
-    paper line (all epochs, simulated) when paper has activity."""
+    cumulative per-strategy ``(id, closed, mean net %, mean excess %)``; then ``analyst_line`` when
+    given. The job appends a paper line (all epochs, simulated) when paper has activity."""
     def pct(x: float | None) -> str:
         return "n/a" if x is None else f"{x:+.2f}%"
 
@@ -542,6 +543,7 @@ def weekly_summary(
         "Closed recs to date, hindsight, mean per rec: "
         + ("; ".join(f"{sid} n={n} net {pct(net)} excess {pct(exc)}" for sid, n, net, exc in strategies)
            if strategies else "none yet."),
+        *([analyst_line] if analyst_line else []),
     ]
     return CatalogMessage(
         kind=MessageKind.WEEKLY_SUMMARY,
