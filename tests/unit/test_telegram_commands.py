@@ -1457,8 +1457,10 @@ def test_cost_line_target_priced(clock):
 def test_cost_line_rounds_an_unrounded_target_distance(clock):
     rec = _recommendation(clock)
     rec = rec.model_copy(update={"cost": rec.cost.model_copy(
-        update={"expected_edge_pct": Decimal(100) * 100 / 2450})})
-    assert "target distance 4.08% = " in _cost_line_of(rec)
+        update={"expected_edge_pct": Decimal(100) * 100 / 2450,
+                "breakeven_pct": Decimal("0.368421"), "edge_multiple": Decimal("11.0714")})})
+    assert _cost_line_of(rec).startswith(
+        "cost: breakeven 0.37% · total ₹18.20 · target distance 4.08% = 11.1x breakeven (")
 
 
 @pytest.mark.parametrize("kind", ["exit", "adjust"])
