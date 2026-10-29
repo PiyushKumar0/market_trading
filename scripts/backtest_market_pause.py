@@ -23,6 +23,9 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 
 rf = rc._load_script("backtest_regime_filter")
 
+#: The registration date (IMPLEMENTATION_PLAN §3), set by the commit that registers the rule; until then
+#: every run is refused.
+REGISTERED: date | None = None
 STRATEGIES = ("hi52", "ins")
 FAMILY_N = 2
 ALPHA = registration_alpha(FAMILY_N)
@@ -73,9 +76,13 @@ def study(pop: rc.Population, ew20: dict[date, float], cost_model: CostModel) ->
 
 
 def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None, strategies=STRATEGIES) -> dict[str, Any]:
+    if REGISTERED is None:
+        raise rc.Refusal("the market-pause rule is not registered (REGISTERED is None); "
+                         "no run before IMPLEMENTATION_PLAN 3 commits it")
     cost_model = CostModel.from_config()
     daily, source = rc.core_ew(conn, db, end)
-    m = rf.meta("scripts/backtest_market_pause.py", "market-wide pause, IMPLEMENTATION_PLAN 3, pre-registered",
+    m = rf.meta("scripts/backtest_market_pause.py",
+                f"market-wide pause, IMPLEMENTATION_PLAN 3, pre-registered {REGISTERED}",
                 db, end, symbols, max_symbols, FAMILY_N, cost_model)
     m |= {"rule": RULE, "alpha": ALPHA, "ew": {"rule": EW_RULE, "source": source, "label": rc.SURVIVORSHIP_LABEL,
                                                "sessions": len(daily)}}

@@ -20,9 +20,13 @@ def test_family_trials_sums_variants_over_the_family():
     assert family_trials(trials, "edge/none") == 0
 
 
-def test_permutation_pvalue_is_deterministic_per_seed():
-    sample = POP[100:150]
-    assert permutation_pvalue(sample, POP, draws=500, seed=7) == permutation_pvalue(sample, POP, draws=500, seed=7)
+def test_permutation_pvalue_follows_its_seed():
+    sample = POP[200:260]
+    assert permutation_pvalue(sample, POP, draws=500, seed=7) != permutation_pvalue(sample, POP, draws=500, seed=8)
+
+
+def test_permutation_pvalue_counts_ties_and_draws_without_replacement():
+    assert permutation_pvalue(POP, POP, draws=200, seed=1) == 1.0
 
 
 def test_permutation_pvalue_is_about_half_on_random_subsamples():

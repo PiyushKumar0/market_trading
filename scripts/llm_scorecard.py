@@ -41,6 +41,8 @@ if _REPO_SRC not in sys.path:  # pragma: no cover - loose-script shim
     sys.path.insert(0, _REPO_SRC)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import duckdb  # noqa: E402
+
 import research_common as rc  # noqa: E402
 from engine.core.clock import IST  # noqa: E402
 from engine.core.config import repo_root  # noqa: E402
@@ -257,8 +259,9 @@ def main(argv: list[str] | None = None) -> int:
                 sconn.close()
         finally:
             mconn.close()
-    except rc.Refusal as exc:
-        print(f"llm_scorecard: REFUSED: {rc.ascii_text(str(exc))}", file=sys.stderr)
+    except (rc.Refusal, sqlite3.Error, duckdb.Error) as exc:
+        why = str(exc) if isinstance(exc, rc.Refusal) else f"{type(exc).__name__}: {exc}"
+        print(f"llm_scorecard: REFUSED: {rc.ascii_text(why)}", file=sys.stderr)
         return 2
     out = args.out or repo_root() / "data" / "reports" / f"llm_scorecard_{as_of}.json"
     text = render(doc)

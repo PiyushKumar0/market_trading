@@ -44,7 +44,7 @@ def _closes(store, d, closes):
 def test_excludes_split_and_outlier_and_averages_rest(store, cal, clock):
     _universe(store, WED, ["A", "B", "SPLIT", "JUMP", "NOBAR"])
     _closes(store, TUE, {"A": "100", "B": "100", "SPLIT": "100", "JUMP": "100"})
-    _closes(store, WED, {"A": "102", "B": "100", "SPLIT": "50", "JUMP": "130"})
+    _closes(store, WED, {"A": "102", "B": "100", "SPLIT": "80", "JUMP": "130"})  # SPLIT under 25%: skip pinned
     store.upsert_corp_actions([{"symbol": "SPLIT", "ex_date": WED, "kind": "split", "ratio": None,
                                 "amount": None, "source": "test", "recorded_at": clock.now()}])
     ret, n = compute_ew_return(store, cal, WED)

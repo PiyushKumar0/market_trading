@@ -14,10 +14,10 @@ from pathlib import Path
 import duckdb
 
 # bars_1d carries the "NIFTY 50" / "INDIA VIX" index rows. symbol_isin and sector_map are the mapping
-# tables the insider and sector helpers join against.
+# tables the insider and sector helpers join against. catalyst_watchlist feeds scripts/llm_scorecard.py.
 TABLES = (
     "bars_1d", "corp_actions", "universe_daily", "insider_trades", "earnings_calendar",
-    "results_filings", "shp_quarterly", "symbol_isin", "sector_map",
+    "results_filings", "shp_quarterly", "symbol_isin", "sector_map", "catalyst_watchlist",
 )
 
 

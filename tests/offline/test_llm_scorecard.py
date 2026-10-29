@@ -18,6 +18,7 @@ sc = importlib.util.module_from_spec(_spec)
 sys.modules["mt_llm_scorecard"] = sc
 _spec.loader.exec_module(sc)
 rc = sc.rc
+rs = rc._load_script("research_snapshot")
 
 from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
 
@@ -97,20 +98,24 @@ def test_reliability_is_by_agent_fail_reason_and_ist_week():
 
 
 def _snapshot(tmp_path: Path, clock, *, seeded: bool = False) -> Path:
-    db = tmp_path / "research" / "market_2026-10-29.duckdb"
-    store = MarketStore(db, tmp_path / "parquet", clock).open()
+    src = tmp_path / "live" / "src.duckdb"
+    store = MarketStore(src, tmp_path / "parquet", clock).open()
     if seeded:
         store.upsert_bars_1d([DailyBar(symbol="AAA", d=d, open=Decimal(100), high=Decimal(100), low=Decimal(100),
                                        close=Decimal(100), volume=1000, src="bhavcopy") for d in D])
         store.replace_catalyst_watchlist(D[0], [{"symbol": "AAA", "grade": "originating", "direction": "long",
                                                  "materiality": 0.8}])
     store.close()
+    db = tmp_path / "research" / "market_2026-10-29.duckdb"
+    rs.snapshot(src, db)                                  # the real snapshot's tables, not MarketStore's
     (tmp_path / "universe").mkdir()
     (tmp_path / "universe" / "core_index_cached.csv").write_text("Symbol\nAAA\n", encoding="utf-8")
     return db
 
 
-def test_empty_inputs_render_none(tmp_path, clock, conn, db_path, capsys):
+def test_empty_inputs_render_none(tmp_path, clock, conn, db_path, capsys, monkeypatch):
+    uris, connect = [], sc.sqlite3.connect
+    monkeypatch.setattr(sc.sqlite3, "connect", lambda db, **kw: uris.append(db) or connect(db, **kw))
     out = tmp_path / "reports" / "s.json"
     argv = ["--state-db", db_path, "--market-db", str(_snapshot(tmp_path, clock)), "--as-of", "2026-10-29",
             "--out", str(out)]
@@ -120,6 +125,7 @@ def test_empty_inputs_render_none(tmp_path, clock, conn, db_path, capsys):
     text = capsys.readouterr().out
     assert text.isascii() and text.count("\n  none") == 3 and text.count(sc.LABEL) == 5
     assert doc["analyst"]["verdict"] in text and out.with_suffix(".md").exists()
+    assert len(uris) == 1 and uris[0].startswith("file:") and uris[0].endswith("?mode=ro")
 
 
 def test_snapshot_and_state_rows_reach_their_sections(tmp_path, clock, conn, db_path):
@@ -140,3 +146,9 @@ def test_snapshot_and_state_rows_reach_their_sections(tmp_path, clock, conn, db_
 def test_refuses_the_live_store(tmp_path, db_path, capsys):
     assert sc.main(["--state-db", db_path, "--market-db", str(tmp_path / "market.duckdb")]) == 2
     assert "live store" in capsys.readouterr().err
+
+
+def test_a_store_error_is_a_one_line_refusal(tmp_path, clock, capsys):
+    argv = ["--state-db", str(tmp_path / "absent.db"), "--market-db", str(_snapshot(tmp_path, clock))]
+    assert sc.main(argv) == 2
+    assert capsys.readouterr().err.startswith("llm_scorecard: REFUSED: OperationalError")

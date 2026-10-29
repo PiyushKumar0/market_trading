@@ -325,18 +325,19 @@ def held_out(trades: list[Trade]) -> list[Trade]:
 
 
 # ----------------------------------------------------------------------------- equal-weight core series
-def ew_daily(series: dict[str, Any], structural: dict[str, list[date]]) -> dict[date, float | None]:
-    """Daily equal-weight return on the union session grid of ``series``, ascending: the mean of
-    ``benchmark.member_return`` (the engine benchmark's exclusions), each name against its close on the previous
-    grid session. ``None`` on a session with no usable return, the first one always."""
-    grid = sorted({d for s in series.values() for d in s.dates})
+def ew_daily(series: dict[str, Any], structural: dict[str, list[date]],
+             special: frozenset[date] = frozenset()) -> dict[date, float | None]:
+    """Daily equal-weight return on the union session grid of ``series`` less the ``special`` sessions, ascending:
+    the mean of ``benchmark.member_return`` (the engine benchmark's exclusions), each name against its close on
+    the previous grid session. ``None`` on a session with no usable return, the first one always."""
+    grid = sorted({d for s in series.values() for d in s.dates} - special)
     prev = dict(zip(grid[1:], grid[:-1], strict=True))
     acc: dict[date, list[float]] = {d: [] for d in grid}
     for sym, s in series.items():
         ex = set(structural.get(sym, ()))
         closes = dict(zip(s.dates, s.close.tolist(), strict=True))
         for d, c in closes.items():
-            r = member_return(c, closes.get(prev.get(d)), d in ex)
+            r = None if d in special else member_return(c, closes.get(prev.get(d)), d in ex)
             if r is not None:
                 acc[d].append(r)
     return {d: sum(v) / len(v) if v else None for d, v in acc.items()}
@@ -355,11 +356,16 @@ def compound(daily: dict[date, float | None], sessions) -> float | None:
 
 def core_ew(conn, db: Path, end: date) -> tuple[dict[date, float | None], str]:
     """``ew_daily`` over the current core list applied backwards, resolved as ``hi52_population`` resolves it
-    (a survivorship-tainted proxy), and the list's provenance."""
+    (a survivorship-tainted proxy), and the list's provenance. Special sessions (muhurat, DR drills) are not
+    sessions of the series, as in ``benchmark.compute_ew_return``."""
     members, source = bh.load_index_members(Path(db).resolve().parent)
     if not members:
         raise Refusal("no index membership list (EW series)")
-    return ew_daily(_series(conn, members, end, None), bb.load_structural_ex_dates(conn)), source
+    series = _series(conn, members, end, None)
+    cal = NSECalendar(config_dir() / "calendar", Clock())
+    special = frozenset(d for d in {d for s in series.values() for d in s.dates}
+                        if (sess := cal.session(d)) is not None and sess.is_muhurat)
+    return ew_daily(series, bb.load_structural_ex_dates(conn), special), source
 
 
 # ----------------------------------------------------------------------------- reports

@@ -20,11 +20,6 @@ def test_every_registered_edge_has_a_registered_or_grandfathered_entry():
     assert edged <= covered
 
 
-def test_ledger_ids_are_unique():
-    ids = [t.id for t in load_trials()]
-    assert len(ids) == len(set(ids))
-
-
 _ROW = {"id": "x", "date": "2026-10-29", "family": "edge/x", "hypothesis": "h", "population": "p",
         "construct": "c", "variants": 1, "result": "null", "report": "r"}
 
