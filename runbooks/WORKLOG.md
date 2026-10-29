@@ -2,6 +2,30 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-29 15:40 — Implementation plan for the review's recommendations: plan only, nothing built or deployed (owner: "Based on the recommended changes of the report, Plan the entire change process …")
+
+- **Plan:** `runbooks/plan-2026-10-29-review-actions.md`. 21 tasks (T1–T20 plus T5b) in six phases.
+  - It covers four migrations (0018–0021), one nightly hindsight job (`signal_outcomes`), pre-registered verdicts
+    and kill rules, the C2 brk20 filter, the heartbeat's retirement, absent-vs-empty markers, one-tap skip
+    reasons, a dashboard card, a trial ledger, and two research scripts.
+  - Every change to the analyst's prompt or to a verdict population lands before one registration date R.
+- **Read from the code; this changes the report's recommendations:**
+  - The exit-rec noise in §9 #9 was already fixed by WO-D2 (2026-09-12). One gap remains: `time_exit_check` lacks
+    the sold-outside screen (T14).
+  - The live brk20 retest window offers y+1..y+6, one session more than the registered V2-5's y+1..y+5
+    (`retest.py:182-183`, `:474-483`). T5b aligns it.
+  - Owner-facing wording problems, none fixed yet:
+    - catalyst, earnings and breakout prompt sections print "none" when their job never ran (T7);
+    - exit and adjust cards print "edge 0x" (T11);
+    - re-tapping a reason on an expired rec overwrites it (T13).
+  - The `reply_keyboard` seam was never wired (T13).
+- **Review:** one read-only Opus builder check (owner: "Run it now", asked at 14:13 during market hours). It
+  returned 21 findings, one of them a blocker: the analyst verdict had no fixed cohort. All were folded in except
+  merging T12 into T15. The plan's "Review record" lists each.
+- **Owner:** the plan's "Calls this plan makes" table, D-A to D-M. Nothing is implemented until the owner approves
+  the plan.
+- **Not touched:** mt-engine (running), `src/`, `config/` and both protected stores.
+
 ## 2026-10-27 13:10 — TradingAgents review and system check: report only, nothing deployed (owner: "Review the provided trading agent branch … Check where we can improve our system or what we are currently doing wrong")
 
 - **Report:** `runbooks/tradingagents-review-2026-10-27.md`. Evidence scripts are in
