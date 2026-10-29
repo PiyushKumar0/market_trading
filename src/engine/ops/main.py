@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 import httpx
+import pandas as pd
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -209,6 +210,7 @@ from engine.risk.gate import TERMINAL_ORDER_STATES_SQL, GateContextBuilder, Risk
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine, floor_limits_from
 from engine.risk.mode import ModeManager
+from engine.strategy import regime
 from engine.strategy.cost_model import CostModel
 from engine.strategy.hi52_edge import StrategyEdges
 from engine.strategy.prescreen import SignalPreScreen
@@ -2147,6 +2149,18 @@ async def compose(
                 histories, today=today, ex_dates_by_symbol=ex_map,
                 unadjusted_symbols=brk20_unadjusted, veto_counts=brk20_vetoes,
             )
+            # C2 (plan D-A): judged once, at origination. Admitted levels rest their window and the
+            # retest tick is never re-gated, because C2 measured the regime at the crossing session.
+            regime_keep, idx_regime, regime_reason = True, None, None
+            if settings.brk20.regime_filter:
+                try:
+                    regime_keep, idx_regime, regime_reason = _brk20_regime_gate(
+                        store.get_bars_1d_frame(regime.INDEX_SYMBOL, today - timedelta(days=150), yesterday),
+                        calendar.previous_trading_day(today),
+                    )
+                except Exception:  # noqa: BLE001 - an unreadable regime costs brk20 alone, never the sweep
+                    _log.exception("brk20_regime_unreadable", d=today.isoformat())
+                    regime_keep, idx_regime, regime_reason = False, None, "undefined"
             # WO-19 veto visibility (the `cat` line's discipline, §6.1): the stop-geometry floor
             # refuses candidates that used to ship, so a run where it eats everything must be
             # readable as a floor decision rather than as an empty tape. Counts are ORIGINATION-
@@ -2159,7 +2173,19 @@ async def compose(
                 gap_floor_vetoes=brk20_vetoes.get(brk20.VETO_GAP_FLOOR, 0),
                 floor_unavailable=brk20_vetoes.get(brk20.VETO_FLOOR_UNAVAILABLE, 0),
                 unadjusted_vetoes=brk20_vetoes.get(brk20.VETO_UNADJUSTED_HISTORY, 0),
+                regime_up=None if idx_regime is None else idx_regime.up,
             )
+            brk20_blocked: list[SignalCandidate] = []
+            if not regime_keep:
+                _log.info(
+                    "brk20_regime_blocked", d=today.isoformat(), reason=regime_reason,
+                    close=None if idx_regime is None else round(idx_regime.close, 2),
+                    sma50=None if idx_regime is None else round(idx_regime.sma, 2),
+                    rising=None if idx_regime is None else idx_regime.sma > idx_regime.sma_then,
+                    blocked_leg=None if idx_regime is None else idx_regime.blocked_leg,
+                    blocked=len(brk20_raw),
+                )
+                brk20_blocked, brk20_raw = brk20_raw, []
 
             # --- `ins` daily leg (§6.1 addendum, owner-directed 2026-08-17): the crossings last
             #     night's ins_crossings job journalled into ins_pending. Same batch shape as brk20 —
@@ -2325,9 +2351,10 @@ async def compose(
                 [c.symbol for c in batch] + retest_book.resting_symbols(today),
                 [c.symbol for c in ins_pending],
                 retest_ctx,
+                (brk20_blocked, idx_regime, regime_reason),
             )
 
-        accepted, pendings, batch_symbols, ins_read, retest_ctx = await asyncio.to_thread(
+        accepted, pendings, batch_symbols, ins_read, retest_ctx, regime_blocked = await asyncio.to_thread(
             _collect_and_scan
         )
         # Point the feed at today's batch admissions BEFORE publishing them (2026-09-11): the §7.1
@@ -2375,6 +2402,9 @@ async def compose(
         for _cand in accepted:
             if _cand.strategy_id == brk20.STRATEGY_ID:
                 retest_book.record(_cand)
+        # C2's blocked arm, on the same thread; in-window only, as only an in-window sweep admits.
+        if batch_in_window and regime_blocked[0]:
+            _journal_regime_blocked(conn, *regime_blocked, today, now=clock.now())
         # …and the retest tick is armed for today only by an IN-WINDOW sweep — the one that can
         # actually admit a fresh crossing. Pre-open `/scan_now` admits nothing (in_window False), so
         # arming on it would let the minute pulse publish a days-old level into the pre-screen's
@@ -3671,6 +3701,44 @@ def _consume_ins_pending(
         )
     except Exception as exc:  # noqa: BLE001 - journalling is bookkeeping; it never kills the sweep
         _log.warning("ins_pending_consume_failed", d=today.isoformat(), error=str(exc))
+
+
+# --------------------------------------------------------------------------- C2 brk20 regime gate
+def _brk20_regime_gate(
+    frame: pd.DataFrame, expected_last: date
+) -> tuple[bool, regime.IndexRegime | None, str | None]:
+    """(keep, regime, reason) for today's brk20 crossings, judged at the crossing session y.
+
+    ``frame`` is the index's ``get_bars_1d_frame``; its last bar must be dated ``expected_last`` (y), as
+    C2 counts "no index bar dated y" undefined (``backtest_regime_filter.closes_through``)."""
+    if not len(frame) or frame.index[-1].date() != expected_last:
+        return False, None, "index_bar_missing"
+    idx = regime.index_regime(frame["close"].tolist(), expected_last)
+    if idx is None:
+        return False, None, "undefined"
+    return (True, idx, None) if idx.up else (False, idx, "down")
+
+
+def _journal_regime_blocked(
+    conn: sqlite3.Connection, blocked: Sequence[SignalCandidate], idx: regime.IndexRegime | None,
+    reason: str, signal_d: date, *, now: datetime,
+) -> None:
+    """INSERT OR IGNORE the crossings C2 blocked into ``brk20_regime_blocked`` (the ``rule_blocked`` arm).
+
+    Loop thread only, for the reason ``RestingLevelBook.record`` is; money as TEXT in its format."""
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO brk20_regime_blocked (symbol, signal_d, entry, stop, target, score, "
+            "index_close, sma50, sma50_then, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(c.symbol, signal_d.isoformat(), str(c.raw_levels.entry),
+              None if c.raw_levels.stop is None else str(c.raw_levels.stop),
+              None if c.raw_levels.target is None else str(c.raw_levels.target), float(c.score),
+              None if idx is None else idx.close, None if idx is None else idx.sma,
+              None if idx is None else idx.sma_then, reason, now.isoformat())
+             for c in blocked],
+        )
+    except Exception as exc:  # noqa: BLE001 - journalling is bookkeeping; it never kills the sweep
+        _log.warning("brk20_regime_blocked_journal_failed", d=signal_d.isoformat(), error=str(exc))
 
 
 # --------------------------------------------------------------------------- §2.7 `cat` watchlist read

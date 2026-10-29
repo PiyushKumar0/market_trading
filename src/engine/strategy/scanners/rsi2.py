@@ -32,6 +32,7 @@ from decimal import Decimal
 
 from engine.core.log import get_logger
 from engine.core.types import Bar
+from engine.strategy import regime
 from engine.strategy.indicators import sma, wilder_rsi
 from engine.strategy.scanners.base import Scanner, register
 from engine.strategy.types import PendingSetup, ScanContext, SignalCandidate, round_to_tick
@@ -40,8 +41,9 @@ _log = get_logger("engine.strategy.scanners.rsi2")
 
 _RSI_PERIOD = 2        # §6.1: RSI(2)
 _STOCK_DMA = 200       # §6.1: stock above 200-DMA
-_INDEX_DMA = 50        # task-pinned uptrend definition
-_RISING_LOOKBACK = 20  # 50-DMA rising over 20 sessions
+# Imported by scripts/backtest_regime_filter.py (a completed study, kept byte-identical).
+_INDEX_DMA = regime.INDEX_SMA
+_RISING_LOOKBACK = regime.RISING_LOOKBACK
 
 
 @register
@@ -69,16 +71,11 @@ class Rsi2Scanner(Scanner):
         p = self.params
 
         # ---- index regime filter (completed sessions only).
-        idx = ctx.index_daily_closes
-        if len(idx) < _INDEX_DMA + _RISING_LOOKBACK:
+        r = regime.index_regime(ctx.index_daily_closes, None)
+        if r is None:
             return []
-        sma50 = sma(idx, _INDEX_DMA)
-        now50, then50 = float(sma50.iloc[-1]), float(sma50.iloc[-1 - _RISING_LOOKBACK])
-        if math.isnan(now50) or math.isnan(then50):
-            return []
-        index_close = float(idx[-1])
-        if not (index_close > now50 and now50 > then50):
-            self._log_regime_blocked(bar, index_close, now50, then50)
+        if not r.up:
+            self._log_regime_blocked(bar, r)
             return []
 
         # ---- stock series: completed dailies + today's provisional close.
@@ -104,7 +101,7 @@ class Rsi2Scanner(Scanner):
             )
         ]
 
-    def _log_regime_blocked(self, bar: Bar, index_close: float, now50: float, then50: float) -> None:
+    def _log_regime_blocked(self, bar: Bar, r: regime.IndexRegime) -> None:
         """One INFO per SESSION naming why the index regime leg refused (2026-09-12).
 
         NIFTY 50 has been under its 50-DMA every session since 08-27 and rsi2 has produced nothing
@@ -120,10 +117,10 @@ class Rsi2Scanner(Scanner):
         self._regime_logged_on = session
         _log.info(
             "rsi2_regime_blocked", d=session.isoformat(),
-            index_close=round(index_close, 2), sma50=round(now50, 2), rising=now50 > then50,
+            index_close=round(r.close, 2), sma50=round(r.sma, 2), rising=r.sma > r.sma_then,
             # First failing leg in the condition's own evaluation order; `rising` still discloses the
             # second when both are shut.
-            blocked_leg="close_below_sma50" if not index_close > now50 else "sma50_not_rising",
+            blocked_leg=r.blocked_leg,
             reason="index regime filter shut — rsi2 originates nothing today (§6.1 uptrend leg)",
         )
 
@@ -137,14 +134,8 @@ class Rsi2Scanner(Scanner):
         """
         p = self.params
 
-        idx = ctx.index_daily_closes
-        if len(idx) < _INDEX_DMA + _RISING_LOOKBACK:
-            return []
-        sma50 = sma(idx, _INDEX_DMA)
-        now50, then50 = float(sma50.iloc[-1]), float(sma50.iloc[-1 - _RISING_LOOKBACK])
-        if math.isnan(now50) or math.isnan(then50):
-            return []
-        if not (float(idx[-1]) > now50 and now50 > then50):
+        r = regime.index_regime(ctx.index_daily_closes, None)
+        if r is None or not r.up:
             return []
 
         completed = [float(d.close) for d in ctx.daily_bars]

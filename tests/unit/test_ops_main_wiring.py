@@ -1314,6 +1314,21 @@ def _seed_world_market(store) -> None:
                  close=Decimal("100"), volume=1000)
         for s in (_WATCH, _CORE, _WIDE)
     ])
+    _seed_index(store, [1000.0 + i for i in range(80)])     # an up regime: the brk20 gate admits
+
+
+def _seed_index(store, closes: list[float]) -> None:
+    """NIFTY 50 daily closes on weekdays ending at the session before FIXED_NOW (the brk20 regime gate)."""
+    days, d = [], FIXED_NOW.date() - timedelta(days=1)
+    while len(days) < len(closes):
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    store.upsert_bars_1d([
+        DailyBar(symbol=opsmain.INDEX_SYMBOL, d=day, open=Decimal(str(c)), high=Decimal(str(c)),
+                 low=Decimal(str(c)), close=Decimal(str(c)), volume=0)
+        for day, c in zip(reversed(days), closes, strict=True)
+    ])
 
 
 @asynccontextmanager

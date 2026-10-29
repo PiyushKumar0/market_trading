@@ -330,8 +330,8 @@ hi52:
 # §6.1 `brk20` — the ENTRY MECHANISM, not the rule. The rule's own parameters live in
 # brk20.DEFAULT_PARAMS (frozen code defaults: envelope.yaml has no brk20 rows today; plan §6.1
 # lists them as future §6.3 rows) and the WO-19 stop-geometry floor in
-# brk20.FLOOR_PARAMS (owner-only by construction); this block holds only how long the broken level
-# is offered for.
+# brk20.FLOOR_PARAMS (owner-only by construction); this block holds how long the broken level is
+# offered for and the C2 regime gate on origination.
 brk20:
   retest_sessions: 5           # TRADING sessions after the crossing session during which the broken
                                # level may be RE-PUBLISHED when the live price comes back inside the
@@ -351,6 +351,12 @@ brk20:
                                # rule, on a survivorship-tainted eligible-universe proxy), no new
                                # entry price, no widened band and no new admission capacity — every
                                # re-publication faces the same prescreen caps and the same §7.1 gate.
+  regime_filter: true        # C2 (pre-registered, run 2026-10-07) came out `supported` for brk20; the
+                               # 2026 held-out slice contradicts it. A crossing originates only when
+                               # NIFTY 50 close > SMA50 > SMA50 20 sessions earlier, at the crossing
+                               # session — where C2 measured it, so the sweep applies it at origination
+                               # and resting levels are not re-judged (plan D-A). Blocked crossings are
+                               # journalled in brk20_regime_blocked. `false` + restart rolls it back.
 
 # §3.2.5 pre-screen candidate-origination throttles (owner-tunable). Scanner PARAMETERS live in the
 # learner-writable envelope_state (R4), never here — these are coarse per-day caps only.

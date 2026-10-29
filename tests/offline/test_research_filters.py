@@ -23,6 +23,7 @@ c2, rc = c3.rf, c3.rc
 from engine.core.clock import IST  # noqa: E402
 from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
+from engine.strategy.regime import index_regime  # noqa: E402
 
 
 def _weekdays(start: date, n: int) -> list[date]:
@@ -53,6 +54,15 @@ SAWTOOTH = [100.0 + (i % 20) for i in range(80)]   # SMA50 identical 20 sessions
 ])
 def test_regime_predicate(closes, on):
     assert c2.regime_on(closes) is on
+
+
+def test_live_predicate_agrees_with_c2_regime_on_non_nan_series():
+    rng = np.random.default_rng(7)
+    series = [np.arange(1000.0, 1070.0), np.arange(1000.0, 1069.0), np.full(70, 1000.0), np.array(SAWTOOTH)]
+    series += [1000.0 + np.cumsum(rng.normal(0.0, 10.0, n)) for n in rng.integers(60, 130, 200)]
+    for closes in series:
+        live = index_regime(closes.tolist(), date(2026, 6, 16))
+        assert c2.regime_on(closes) is (None if live is None else live.up)
 
 
 def test_index_closes_are_point_in_time():

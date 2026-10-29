@@ -433,7 +433,7 @@ class Brk20Cfg(BaseModel):
     plan §6.1 lists them as future §6.3 rows) and the WO-19 stop-geometry floor lives in
     ``brk20.FLOOR_PARAMS`` (owner-only by construction). This block holds neither: it holds the ENTRY
     MECHANISM the 2026-09-12 pre-registered backtest selected, which is a property of how the level
-    is OFFERED rather than of how it is derived.
+    is OFFERED rather than of how it is derived, and the C2 regime gate on origination.
 
     Modelled here rather than left to pydantic's default extra-ignore for the reason ``FilingsCfg``
     states: an unmodelled ``brk20:`` block in settings.yaml is silently dropped, and the owner would
@@ -447,6 +447,9 @@ class Brk20Cfg(BaseModel):
     #: learner moving it would be selecting an entry mechanism no study measured. 0 or less is
     #: clamped to 1 by the book (a disabled mechanism is a code change, not a silent config value).
     retest_sessions: int = 5
+    #: C2 regime gate on brk20 ORIGINATION (``ops.main._brk20_regime_gate``). ``False`` plus a restart is
+    #: the rollback: crossings originate in any regime and none is journalled as blocked.
+    regime_filter: bool = False
 
 
 class PrescreenCfg(BaseModel):
