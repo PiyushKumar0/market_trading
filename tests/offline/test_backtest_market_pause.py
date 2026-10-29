@@ -146,7 +146,7 @@ def test_permutation_compares_trade_with_full_at_the_registered_seed():
 
 def test_cli_refuses_until_registered(tmp_path, clock, monkeypatch, capsys):
     monkeypatch.setattr(rc, "market_hours_refusal", lambda: None)
-    assert mp.REGISTERED is None
+    monkeypatch.setattr(mp, "REGISTERED", None)
     assert mp.main(["--db", str(_snapshot(tmp_path, clock)), "--end", str(D[2])]) == 2
     assert "not registered" in capsys.readouterr().err
 

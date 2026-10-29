@@ -32,13 +32,20 @@ and the other removed design and research documents are in git at commit `417da7
   `engine.broker`, so the platform stays an unregistered retail algo (B2/B3).
 - **C9, success is not profit before Phase 4:** process quality, capital preservation and a measured record of what
   works. Profit is tracked in Phase 4 and targeted only in Phase 5.
+- **Research registration bar (review §9 #8):** a new `expected_edge_pct`, or a promotion out of shadow, must cite an
+  entry in `config/research_trials.yaml`, pass CPCV at `fold_pass_min(N_family)`, and have a permutation
+  p < `registration_alpha(N_family)` (`engine.learning.multiplicity`) against same-size random subsamples of its
+  matched population.
 
 ## 3. Pending verdicts and owner decisions
 
 - **hi52 forward test.** Mechanical verdict: `scripts/hi52_forward_verdict.py` (kill rule and pins in the script and
   `settings.yaml` `hi52`).
 - **D14 paper no-stop test** (hi52, ins, brk20 paper positions carry no stop and exit at session 20). Verdict at the
-  pinned looks 20 and 40: `scripts/no_stop_verdict.py`; operation and rollback in RUNBOOK "No-stop exit test".
+  pinned looks 20 and 40: `scripts/no_stop_verdict.py`; operation and rollback in RUNBOOK "No-stop exit test". From R,
+  brk20 recs are regime-ON only and use the 5-session retest window; from the owner's patch date
+  (`runbooks/patches/limits-drop-analyst-confidence-min.patch`) there is no confidence floor. The paired D stays valid;
+  read the slices split at R and at the patch date by hand. `scripts/no_stop_verdict.py` is untouched.
 - **`cat` v2 shadow verdict — not yet run.** Mechanical verdict: `scripts/cat_shadow_verdict.py` (conventions in the
   script; COMMANDS "cat v2 shadow verdict"). Pre-registered: at ≥30 sessions and ≥20 admitted signals, measure T+10 and
   T+20 net drift at spread-inclusive CNC costs with the WO-3 margin floor. Net ≤ the cost floor at both horizons ⇒
@@ -56,8 +63,10 @@ and the other removed design and research documents are in git at commit `417da7
 - **C1 exit geometry (run 2026-10-07):** every shipped stop turned its strategy's measured edge negative. Owner work:
   hi52's switch to a 2.5×ATR14 catastrophe stop (its +0.22% median net would not clear the cost check once the edge is
   re-derived). brk20 and ins came out `neither`: no change.
-- **C2 regime filter (run 2026-10-07):** brk20 `supported`, so a reject-only regime gate in `limits.yaml` is owner work
-  (reseed); the 2026 held-out slice contradicts it. hi52 not supported; ins insufficient.
+- **C2 regime filter (run 2026-10-07):** brk20 `supported`; the 2026 held-out slice contradicts it. From R it applies
+  at brk20 origination in the batch sweep (`settings.yaml` `brk20.regime_filter`; `false` plus a restart rolls it back),
+  and resting levels are not re-judged. Blocked crossings are journalled in `brk20_regime_blocked` and scored as the
+  `rule_blocked` arm, a diagnostic only. hi52 not supported; ins insufficient.
 - **C3 selection filters (run 2026-10-07):** not evidence. A filter gate needs a new pre-registration with a
   permutation test against same-size random subsamples.
 - **Spread re-measure:** `costs.yaml spread_pct: 0.02` was measured on 2026-08-13 on the NIFTY 200 tick corpus.
@@ -65,6 +74,104 @@ and the other removed design and research documents are in git at commit `417da7
   universe moved to NIFTY Total Market on 2026-10-08 (O18).
 - **Fee schedule:** `costs.yaml` says `verified_on: 2026-06-11`; the rule is to re-scrape before each release
   (`scripts/rescrape_costs.py`).
+
+**Pre-registered 2026-10-29 (review actions).** R = `<R>`, the first trading day after the deploy
+(`engine.learning.forward_verdicts.REGISTERED_FROM`). Each rule has a `registered` row in `config/research_trials.yaml`.
+
+**Analyst-value verdict (registered 2026-10-29, population from R).**
+- **Population:** `prescreen_day_slots` rows of brk20, hi52 and ins with `d >= R` and a recorded first
+  `analyst_decision`, whose call carries the strategy's registered key `(prompt_version, model)`. The registered
+  key is the one on that strategy's first decision on or after R. Rows with another key are excluded and counted.
+  A change to the analyst prompt, a population contract or the model after R therefore stops the population from
+  growing. Accrual resumes only through an owner-approved re-registration with a new R.
+- **Outcome:** `signal_outcomes` `next_open`:
+  - entry at the open of the first regular session after d;
+  - exit at the close of the 20th regular session, counting the entry session;
+  - net of one CNC round trip at the §7.1 notional at the floor-rung equity, fixed at the row's first scoring.
+- **Cells:** a (d, strategy) cell exists once at least one enter and at least one no_action were decided. Cells are
+  ordered by (d, strategy_id). A cell is final when all its decided rows are final. Its value is the mean net of
+  its closed enters minus the mean net of its closed no_actions. A cell with an arm and no closed outcome is
+  reported and not averaged.
+- **Looks:** look 1 is the first 30 cells, formed when all 30 are final. Look 2 is the first 60 and supersedes it.
+- **Decision:** a formed look's mean ≤ 0 ⇒ **ADVISORY**; > 0 ⇒ **KEEP**. Below that, INSUFFICIENT.
+- **Tool:** `scripts/forward_verdicts.py --rule analyst`. Interim readings decide nothing.
+- **Diagnostics:** T+5/T+10, per-strategy cells, and confidence buckets.
+- **Duration:** at least three months, since brk20 originates only in regime-ON sessions.
+
+**brk20 kill rule (registered 2026-10-29, population from R).**
+- **Population:** the brk20 crossings admitted on or after R (`brk20_resting_levels` rows), under C2.
+- **Construct** (`signal_outcomes` `rule`):
+  - entry: a limit resting at the broken level on `signal_d` (y+1, the session after the crossing session y)
+    through `signal_d` + 4 sessions (V2-5);
+  - fill: on the first regular daily bar whose low touches the level, at min(open, level). Touch fills are
+    optimistic, as in C2;
+  - exit: at the close of the 20th regular session, counting the fill session (C2's arm (ii); V2-5 itself
+    measured close(fill+20)). No stop, no target;
+  - voids: a structural ex-date between `signal_d` and the exit voids the crossing;
+  - cost: one CNC round trip at the §7.1 notional implied by the signal's own stop at the floor-rung equity,
+    fixed at the row's first scoring.
+- **Looks:** look 1 is the first 20 filled crossings by (fill date, symbol), formed when all 20 are final. Look 2
+  is the first 40 and supersedes it.
+- **Verdict:** DEMOTE iff the look's median net over its closed members ≤ 0.
+- **Scope:** this rule judges the signal's drift. The card's stop and target are D14/C5's question.
+- **Demotion:** add brk20 to `ops.main.NO_EDGE_SHADOW_STRATEGIES` in an owner-visible commit.
+- **Diagnostic only:** the C2 blocked arm (`rule_blocked`) against the admitted arm.
+- **Tool:** `scripts/forward_verdicts.py --rule brk20`.
+
+**ins kill rule (registered 2026-10-29, population from R).**
+- **Looks and verdict:** as brk20.
+- **Construct:** entry at the open of the publication session d, which is the validated next-session open after
+  the disclosure. Exit at the close of the 20th regular session. No stop. Cost at the §7.1 notional for the 5%
+  stop, fixed at first scoring.
+- **Demotion:** add ins to `NO_EDGE_SHADOW_STRATEGIES`, which wins over its registered edge (`gate.py:1046-1049`).
+- **Tool:** `scripts/forward_verdicts.py --rule ins`.
+
+**Market-wide pause study (registered 2026-10-29, run before any wiring).**
+- **Strategies:** hi52 and ins.
+- **Rule:** at signal session y, PAUSE if the core equal-weight return compounded over the 20 sessions ending at y
+  is < 0; otherwise TRADE.
+- **Population and construct:** C2's populations, construct and cost (`scripts/backtest_regime_filter.py`), on a
+  research snapshot.
+- **EW series:** the daily mean of close/prev_close − 1 over the current core-eligible list (a
+  survivorship-tainted proxy). |r| > 25% and structural corporate-action days are excluded.
+- **Family:** per strategy, the regime-filter family is C2 plus this rule, so N = 2.
+- **Decision:** SUPPORTED iff all hold:
+  - TRADE and PAUSE each have n ≥ 30;
+  - TRADE is CPCV-promotable at `fold_pass_min(2)`;
+  - TRADE median net > max(0, FULL median);
+  - PAUSE median net ≤ 0;
+  - the permutation p < 0.025, where p is the share of 10,000 same-size random subsamples of FULL (seed
+    20261029) whose median ≥ TRADE's median.
+
+  INSUFFICIENT if a cohort has n < 30; NOT SUPPORTED otherwise. SUPPORTED goes to the owner.
+- **Tool:** `scripts/backtest_market_pause.py` on a fresh research snapshot (its `REGISTERED` holds this date).
+
+**Conditional specs (build only on their trigger).**
+- **ADVISORY build** (trigger: the analyst verdict reads ADVISORY).
+  - For hi52 and ins, an analyst no_action or a failed call no longer ends the candidate.
+  - The pipeline builds the proposal deterministically and the gate judges it unchanged. The proposal:
+    - enters at MARKET;
+    - takes the rule's stop re-anchored at the live mark (`_reanchored_stop`, D3);
+    - has no target;
+    - sizes at `max_qty_by_risk`;
+    - carries `agent_id = PLATFORM_AGENT_ID`, with the analyst's reason as advice in the thesis.
+  - brk20 is unaffected (no registered edge). The build gets its own plan.
+- **#4 measured-edge pricing** (trigger: C5 look 1, a POOLED label over hi52, ins and brk20,
+  `no_stop_verdict.py:8-19`).
+  - A brk20-specific change needs its own pre-registered rule, entered in the trial ledger as a new trial. The §2
+    registration bar applies; brk20 is not grandfathered.
+  - If that rule supports time-only brk20:
+    - brk20 ships time-only T+20;
+    - its registered edge is re-measured on the shipped construct (20 sessions counting the fill, not V2-5's
+      close(fill+20)) minus the floor-rung cost floor;
+    - the stop becomes a disaster stop used for sizing only.
+  - rsi2 and trend have no measured edge for their shipped constructs. They are parked or shadowed, never priced
+    from an analyst target.
+- **B1 study** (trigger: the analyst verdict reads KEEP).
+  1. Classify the no_action reasons via `analyst_call_id`.
+  2. Pre-register deterministic screens for the mechanical classes ("last price below the broken level", "a buy
+     limit there would be marketable").
+  3. Ship a screen only if its cohort did worse than same-day approved neighbours.
 
 ## 4. Known defects and test gaps
 
@@ -154,7 +261,9 @@ prompt-injection surface); paid news APIs; sub-minute news-reaction trading (O12
 **Deferred:** VPS/cloud migration (O7, after G5); the pay-as-you-go API-key swap for the LLM (the `agents.yaml` seam
 exists); MIS shorts (Phase-5 owner gate); leverage above 3×; BSE data cross-checks; an MIS same-day variant of `cat`
 (a challenger only after the swing variant's live gate passes); `GET /why`; the C4 late-session study; the B2 ops
-digest and the Telegram channel split.
+digest and the Telegram channel split; A4, a known-at column on `earnings_calendar` (two finished studies read it
+without one: the event-study PEAD legs and the hvol earnings split, which stand with that caveat; a column only covers
+rows ingested after it ships). Trigger: the next study whose result depends on when an earnings date became known.
 
 **VPS migration path (O7):**
 1. Copy as is: repo, `config/`, DuckDB/Parquet, SQLite state, dashboard build.

@@ -25,7 +25,7 @@ rf = rc._load_script("backtest_regime_filter")
 
 #: The registration date (IMPLEMENTATION_PLAN §3), set by the commit that registers the rule; until then
 #: every run is refused.
-REGISTERED: date | None = None
+REGISTERED: date | None = date(2026, 10, 29)
 STRATEGIES = ("hi52", "ins")
 FAMILY_N = 2
 ALPHA = registration_alpha(FAMILY_N)
