@@ -208,6 +208,10 @@ Start-Service mt-engine                                          # boot must sho
 git add -u; git commit -m "<directive> applied (owner): patch + reseed"
 ```
 
+Owner step for `runbooks\patches\limits-drop-analyst-confidence-min.patch` (removes the `analyst_confidence_min`
+key): apply it only after the deploy that tolerates the missing key. Same flow: `git apply --check <patch>`, then
+`git apply <patch>`, then the reseed above. It never touches the capital lines.
+
 ## Capital change from the dashboard (O19, 2026-10-16)
 
 The dashboard's "Change capital" button (System tab, Risk limits card) rewrites three `config/limits.yaml`
@@ -500,24 +504,59 @@ response to them.
   restarts only (P).
 - **Exit status:** always exits 0. It reads `rec_outcomes` as stored; `--as-of` bounds only the (P) walk.
 
-## LLM analyst scorecard (hindsight, 2026-10-27) — read-only, safe with the engine running
+## Forward verdicts (brk20, ins, analyst) — read-only, safe with the engine running
 
 ```powershell
-# forward returns come from the newest nightly export; the live market.duckdb is locked while the engine runs
-$exp = "data/backups/" + (Get-ChildItem data\backups -Directory -Filter 'market-*' | Sort-Object Name -Descending | Select-Object -First 1).Name
-$sc = "data\reports\tradingagents_review_2026-10-27"
-.venv\Scripts\python.exe -I "$sc\llm_filter_value.py" data/state.db $exp    # analyst enter vs decline, per strategy and within-day
-.venv\Scripts\python.exe -I "$sc\confidence_value.py" data/state.db $exp    # enter proposals split at the 0.55 confidence floor
-.venv\Scripts\python.exe -I "$sc\evidence.py" data/state.db                 # LLM usage, recs, rec_outcomes, ledger, funnel, gate
+.venv\Scripts\python.exe scripts\forward_verdicts.py --rule brk20
+.venv\Scripts\python.exe scripts\forward_verdicts.py --rule ins
+.venv\Scripts\python.exe scripts\forward_verdicts.py --rule analyst
+# optional: --as-of YYYY-MM-DD (default today IST), --db <state.db> (default data\state.db), --json <path> (also writes the reading)
+# the VERDICT line prints first; UNREGISTERED until REGISTERED_FROM is set at the deploy; UNAVAILABLE on a DB error;
+# exit 0 always; the rows holding an unformed look are listed
 ```
 
-- **What it measures:** each scanner candidate the intraday analyst judged, at its first evaluation, parsed from the
-  `candidate: {...}` line of `agent_calls.context_gz`. Both arms use the same rule: entry at the next session's open,
-  exit at the close h sessions after the decision, and windows that contain a corporate action are dropped. The
-  within-day paired line is the robust read; the bootstrap CIs ignore same-day correlation.
-- **Interim, decides nothing:** it becomes a verdict only once a rule is pre-registered
-  (`runbooks/tradingagents-review-2026-10-27.md` §9 #2). The scripts live under the gitignored `data/`; copy them
-  into `scripts/` with tests before relying on them.
+## Signal outcomes row count — read-only, safe with the engine running
+
+```powershell
+.venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('file:data/state.db?mode=ro', uri=True); print(c.execute('select construct, status, count(*) from signal_outcomes group by construct, status order by construct, status').fetchall())"
+```
+
+## LLM scorecard — read-only
+
+```powershell
+# market data: a research snapshot that includes catalyst_watchlist, made with the engine stopped
+# ("Deploy a reviewed tip" step 2; scripts\research_snapshot.py)
+.venv\Scripts\python.exe scripts\llm_scorecard.py
+# optional: --state-db <state.db> (default data\state.db), --market-db <snapshot> (default the newest data\research\market_*.duckdb),
+#           --as-of YYYY-MM-DD (default today IST), --out <json path>
+# writes data\reports\llm_scorecard_<as-of>.json and the .md beside it; every section reads "interim, decides nothing"
+```
+
+## Market-wide pause study (registered 2026-10-29) — read-only on a snapshot, outside 09:15–15:30
+
+```powershell
+$snap = (Get-ChildItem data\research\market_*.duckdb | Sort-Object Name -Descending | Select-Object -First 1).FullName
+.venv\Scripts\python.exe scripts\backtest_market_pause.py --db $snap
+# optional: --end YYYY-MM-DD, --out <json path>; --symbols / --max-symbols are smoke runs only
+# refuses (exit 2) while REGISTERED is None, and during market hours on a trading day
+```
+
+A SUPPORTED result goes to the owner and wires nothing.
+
+## Replay smoke after a prompt change — outside market hours (it spends quota)
+
+```powershell
+# from the worktree that holds the change; the venv imports the LIVE tree unless PYTHONPATH points here
+$env:PYTHONPATH = '<worktree>\src'
+python -c "import engine; print(engine.__file__)"          # must print a path under the worktree
+$tr = "$HOME\.claude\projects\C--Users-piyush-kumar-atari-projects-personal-market-trading"
+python scripts\replay_agents.py sample --intraday 3 --preopen 2 --transcripts-dir $tr    # prints the samples file
+python scripts\replay_agents.py run --samples <samples file> --baseline --transcripts-dir $tr
+# run refuses in market hours on a trading day (--force overrides; do not); results in data\reports\replays\<run>\
+```
+
+Judge the run on `schema_invalid` in the REPLAYED outputs. Old live answers that carry `regime_note` show as
+live-column parser rejections; that is expected.
 
 ## cat v2 shadow verdict (WO-18, clock restarted 2026-08-28) — engine OFF
 

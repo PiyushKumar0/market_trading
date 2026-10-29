@@ -266,6 +266,7 @@ uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); ti
 | 18:30 | `rec_outcomes` | date-keyed | hindsight scoring of every delivered entry rec on official bars (fill, exit, net, T+5/10/20, excess over the equal-weight universe) into `rec_outcomes`; waits for that day's `daily_bars`; no scanner, threshold or promotion reads it |
 | 18:35 | `filings_pit` | date-keyed | insider trades (NSE PIT, historical; §2.8) |
 | 18:40 | `isin_map` | run-latest | symbol → ISIN → BSE scrip code (§2.8); before `filings_shp` |
+| 18:40 | `signal_outcomes` | date-keyed | hindsight scoring of every published brk20/hi52/ins signal into `signal_outcomes`, for owner surfaces and verdicts only. While a bar is missing it logs `signal_outcome_bar_missing` nightly and the row stays open |
 | 18:45 | `filings_results` | date-keyed | results + board-meeting dates (§2.8) |
 | 18:50 | `filings_shp` | run-latest | shareholding pattern + pledge (§2.8) |
 | 19:00 | `filings_pit_fresh` | date-keyed | BSE same-day fresh insider trades (§2.8) |
@@ -378,11 +379,12 @@ An entry card, top to bottom (BHEL 10-06 as it now reads). A line is omitted whe
 ```
 BUY BHEL · swing/CNC · qty 9 (notional ₹4005.00) · level 445.00 (limit-at-level) · ₹241 at risk to the stop · sell by the close on 2026-11-03 (session 20)
 stop ₹418.30 = 6.0% below entry · 2.1× daily ATR · rule 6.0% re-anchored from ₹427.90 to ₹445.00
+evidence: same-ticker history (hindsight): 2026-09-14 hi52 closed +1.20% (time exit); …
 evidence: backtest (fixed T+20 hold, no stop): n …, hit …, median net …
 edge 1.53% net ≈ ₹61 (the risk check's figure) — not a forecast
 thesis: …
 gate: shrunk 14→9 (bound by per_trade_risk)
-cost: …
+cost: breakeven 0.90% · total ₹… · edge 1.7x breakeven
 checklist (yours to place …)
 record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|away|other>
 ```
@@ -394,9 +396,41 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
   shows the scanner's entry it moved from.
 - **Expected ₹:** shown only for a strategy with an edge on record, as notional × the edge the risk check uses: the
   registered research edge, which for hi52 is capped by what costs allow at the current capital (O19). It is not a forecast.
+- **Cost line:** two forms. `edge Nx breakeven` for a strategy with a registered edge. `target distance D% = Nx
+  breakeven (earned only if the target is hit; not an expected edge)` for a target-priced rec: a distance with no
+  probability behind it. An exit or adjust carries neither.
+- **First evidence line:** `same-ticker history (hindsight): ...` lists up to 3 earlier delivered entry recs on the
+  ticker with their scored outcome, or says there is none. Hindsight context, not a forecast.
 - **Gate:** "shrunk A→B" means approved at the smaller size, the named rule bounding it. `(FAILED)` marks any other failed rule.
 - **Footer:** always last. `/veto` takes one reason code.
 - Confidence is not on the card (it stays in the payload and the gate).
+
+## One-tap skip buttons
+
+- **Where:** an entry card carries six `skip: <reason>` buttons (market, price, size, trust, away, other); the
+  decision reminder carries per-rec rows.
+- **One reason:** a tap records the reason once; a second reason on the same rec is refused.
+- **Window:** reasons are accepted while the rec is live, and for an expired rec with no reason until
+  `veto_window_sessions` (3, `recommend` in `config/settings.yaml`) sessions after its `valid_until` date.
+- **Engine down:** a tap made while the engine is down is dropped at the next start
+  (`drop_pending_updates=True`). Re-tap, or type `/veto <rec_id> <reason>`.
+
+## brk20 C2 regime gate
+
+- **Rule:** a brk20 crossing originates only when NIFTY 50 close > SMA50 > SMA50 twenty sessions earlier, judged at
+  the crossing session. Resting levels are not re-judged.
+- **Blocked crossings:** logged as `brk20_regime_blocked` and journalled in the `brk20_regime_blocked` table. The
+  `reason` column:
+  - `down`: the regime is off.
+  - `undefined`: fewer than 70 index closes, or a gap in them.
+  - `index_bar_missing`: yesterday's NIFTY 50 bar has not landed; check the EOD bars job (`daily_bars`).
+- **Journal:** `brk20_sweep` carries `regime_up`.
+- **Rollback:** `brk20.regime_filter: false` in `config/settings.yaml`, then an engine restart.
+
+## The analyst heartbeat is retired
+
+There are no periodic analyst check-ins and no `analyst_heartbeat_tick` job. The regime context is a deterministic,
+dated line in the analyst and planner prompts. The `agents.yaml` triggers are `signal_candidate` and `position_event`.
 
 ## Changing the trading capital (O19, 2026-10-16)
 
