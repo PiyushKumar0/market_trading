@@ -281,7 +281,8 @@ def analyst_reading(conn: sqlite3.Connection, *, as_of: date, registered_from: d
         {s: stats(_diffs(c for c in cells if c.strategy_id == s)) for s in ANALYST_STRATEGIES},
         tuple(confidence_buckets(kept)),
         {s: sum(r.strategy_id == s for r in rows) for s in ANALYST_STRATEGIES},
-        {s: dict(Counter(r.analyst_decision for r in kept if r.strategy_id == s)) for s in ANALYST_STRATEGIES},
+        {s: dict(Counter(cast(str, r.analyst_decision) for r in kept if r.strategy_id == s))
+         for s in ANALYST_STRATEGIES},
         {s: sum(c.strategy_id == s for c in cells) for s in ANALYST_STRATEGIES},
     )
 

@@ -270,7 +270,7 @@ uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); ti
 | 18:45 | `filings_results` | date-keyed | results + board-meeting dates (§2.8) |
 | 18:50 | `filings_shp` | run-latest | shareholding pattern + pledge (§2.8) |
 | 19:00 | `filings_pit_fresh` | date-keyed | BSE same-day fresh insider trades (§2.8) |
-| 19:00 | `weekly_summary` | date-keyed | owner digest on each week's last regular session (a missed one replays): recs delivered/taken/skipped/expired, hindsight value of skipped recs, cumulative net and excess per strategy, and once registered the analyst-value line; waits for that day's `rec_outcomes` and `signal_outcomes` |
+| 19:00 | `weekly_summary` | date-keyed | owner digest on each week's last regular session (a missed one replays): recs delivered/taken/skipped/expired, hindsight value of skipped recs, cumulative net and excess per strategy, and once registered the analyst-value line; waits for that day's `rec_outcomes`, and once registered for a `signal_outcomes` run still due (a failed, given-up or never-scanned day sends "Analyst reading unavailable") |
 | 19:15 | `ins_crossings` | date-keyed | EOD insider net-buy crossing detection; must run after `filings_pit_fresh` |
 | 19:30 | `results_line_items` | run-latest | quarterly revenue/PAT from XBRL (§2.8.4) |
 | 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |

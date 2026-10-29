@@ -244,7 +244,8 @@ export interface SignalStrategy {
 
 export interface SignalsBlock {
   window: string
-  analyst: SignalVerdict<SignalCellLook>
+  /** `excluded`: decided rows under another prompt or model than the registered key, left out. */
+  analyst: SignalVerdict<SignalCellLook> & { excluded: number }
   strategies: Record<string, SignalStrategy>
 }
 

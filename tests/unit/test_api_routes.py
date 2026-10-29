@@ -31,7 +31,7 @@ from engine.risk.exposure import ExposureTracker
 from engine.risk.kill import KillSwitch
 from engine.risk.limits import LimitsEngine
 from engine.risk.mode import ModeManager
-from tests.unit.test_scorecard import seed_paper
+from tests.unit.test_scorecard import seed_paper, spy_as_of
 
 _TOKEN = "s3cret-dash-token"
 AUTH = {"Authorization": f"Bearer {_TOKEN}"}
@@ -819,7 +819,8 @@ def test_recommendations_shape_is_unchanged_by_the_q1_payload_fields(conn, clock
 
 
 # --------------------------------------------------------------------------- POST /db/query (§3.2.11)
-def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
+def test_scorecard_route_unwired_and_wired_shapes(conn, clock, monkeypatch) -> None:
+    seen = spy_as_of(monkeypatch)
     unwired = _client().get("/scorecard", headers=AUTH).json()
     assert unwired == {"label": LABEL, "bench": {}, "strategies": {}}
     assert _client().get("/scorecard").status_code in (401, 403)
@@ -838,6 +839,7 @@ def test_scorecard_route_unwired_and_wired_shapes(conn, clock) -> None:
         "closed": 0, "hit_rate": None, "net": None, "net_pct": None, "open": 0}
     assert body["strategies"]["hi52"]["recs"]["n"] == 1
     assert set(body["signals"]) == {"window", "analyst", "strategies"}
+    assert seen == [clock.today()]
 
     seed_paper(conn)
     paper = _client(conn=conn, clock=clock).get("/scorecard", headers=AUTH).json()["strategies"]["hi52"]["paper"]

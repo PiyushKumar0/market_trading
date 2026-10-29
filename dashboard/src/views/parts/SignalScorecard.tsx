@@ -8,7 +8,7 @@ import { DASH, pctOrDash, ppOrDash, progressText, rateOrDash, verdictTone } from
 import type { SignalCellLook, SignalKillLook, SignalsBlock, SignalVerdict } from '../../types'
 import { Labelled } from '../../ui/Hint'
 import { Pill } from '../../ui/Pill'
-import { Th } from './Scorecard'
+import { Th, tone } from './Scorecard'
 
 function Verdict({ v }: { v: SignalVerdict<SignalKillLook | SignalCellLook> }) {
   return (
@@ -21,9 +21,10 @@ function Verdict({ v }: { v: SignalVerdict<SignalKillLook | SignalCellLook> }) {
   )
 }
 
-function Num({ label, children }: { label: string; children: string | number }) {
+/** `ret`: a return, coloured by its sign as in Scorecard. */
+function Num({ label, ret, children }: { label: string; ret?: number | null; children: string | number }) {
   return (
-    <td data-label={label} className="right num">
+    <td data-label={label} className={`right num${tone(ret ?? null)}`}>
       {children}
     </td>
   )
@@ -37,6 +38,9 @@ export function SignalScorecard({ signals }: { signals: SignalsBlock | { error: 
     <>
       <p className="perf-note">
         Analyst verdict: <Verdict v={signals.analyst} />
+        {signals.analyst.excluded ? (
+          <span className="cell-sub">{signals.analyst.excluded} excluded: another prompt or model</span>
+        ) : null}
       </p>
       <div className="table-scroll" role="region" aria-label="Signals and the analyst" tabIndex={0}>
         <table className="dt perf-table sig-table">
@@ -59,7 +63,9 @@ export function SignalScorecard({ signals }: { signals: SignalsBlock | { error: 
               <Th hint="Held to the close of the 20th session, after costs.">Closed</Th>
               <Th hint="Share of closed ones with a positive net return.">Win rate</Th>
               <Th hint="The middle net return of the closed ones, after costs.">Median return</Th>
-              <Th hint="The middle net return minus an equal-weight basket over the same days.">vs market</Th>
+              <Th hint="The middle of each closed signal's net return minus an equal-weight basket over the days it was held.">
+                vs market
+              </Th>
               <Th hint="The pre-registered rule that demotes the strategy. Its first look is the first 20 filled signals.">
                 Kill rule
               </Th>
@@ -86,13 +92,19 @@ export function SignalScorecard({ signals }: { signals: SignalsBlock | { error: 
                   <Num label="Published">{s.published}</Num>
                   <Num label="Closed at T+20">{s.rule.closed}</Num>
                   <Num label="Win rate">{rateOrDash(s.rule.hit_rate)}</Num>
-                  <Num label="Median return">{pctOrDash(s.rule.median_net_t20)}</Num>
-                  <Num label="vs market basket">{pctOrDash(s.rule.median_excess_t20)}</Num>
+                  <Num label="Median return" ret={s.rule.median_net_t20}>
+                    {pctOrDash(s.rule.median_net_t20)}
+                  </Num>
+                  <Num label="vs market basket" ret={s.rule.median_excess_t20}>
+                    {pctOrDash(s.rule.median_excess_t20)}
+                  </Num>
                   <td data-label="Kill rule">{s.kill_rule ? <Verdict v={s.kill_rule} /> : DASH}</td>
                   <Num label="Analyst approved">{s.analyst.enter}</Num>
                   <Num label="Analyst declined">{s.analyst.decline}</Num>
                   <Num label="Cells">{s.analyst.cells}</Num>
-                  <Num label="Approved − declined">{ppOrDash(s.analyst.mean_diff)}</Num>
+                  <Num label="Approved − declined" ret={s.analyst.mean_diff}>
+                    {ppOrDash(s.analyst.mean_diff)}
+                  </Num>
                 </tr>,
               ]
               const b = s.blocked
@@ -108,7 +120,9 @@ export function SignalScorecard({ signals }: { signals: SignalsBlock | { error: 
                     <Num label="Published">{DASH}</Num>
                     <Num label="Closed at T+20">{b.n}</Num>
                     <Num label="Win rate">{rateOrDash(b.hit_rate)}</Num>
-                    <Num label="Median return">{pctOrDash(b.median)}</Num>
+                    <Num label="Median return" ret={b.median}>
+                      {pctOrDash(b.median)}
+                    </Num>
                     <Num label="vs market basket">{DASH}</Num>
                     <td data-label="Kill rule">{DASH}</td>
                     <Num label="Analyst approved">{DASH}</Num>

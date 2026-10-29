@@ -6,13 +6,16 @@ HINDSIGHT: read by the owner surfaces only, never by scanner, threshold or promo
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from statistics import mean, median
 from typing import Any
+from urllib.parse import quote
 
 from engine.core.clock import IST
 from engine.core.log import get_logger
@@ -114,38 +117,53 @@ def signals_block(conn: sqlite3.Connection, *, as_of: date) -> dict[str, Any]:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+async def scorecard_ro(conn: sqlite3.Connection, *, as_of: date, with_paper: bool = True) -> dict[str, Any]:
+    """:func:`scorecard` in a worker thread on its own read-only connection to ``conn``'s file: the
+    signal readings take seconds over a long history, so they never run on the event loop."""
+    path = next(r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main")
+    if not path:
+        raise ValueError("the state db is not file-backed")
+    uri = f"file:{quote(Path(path).as_posix(), safe='/:')}?mode=ro"
+
+    def run() -> dict[str, Any]:
+        ro = sqlite3.connect(uri, uri=True)
+        try:
+            return scorecard(ro, as_of=as_of, with_paper=with_paper)
+        finally:
+            ro.close()
+
+    return await asyncio.to_thread(run)
+
+
 def _signals(conn: sqlite3.Connection, as_of: date, registered_from: date | None) -> dict[str, Any]:
-    sids, start = fv.ANALYST_STRATEGIES, registered_from or date.min
-    published = fv.load_rows(conn, strategies=sids, construct="next_open", start=start, as_of=as_of)
-    rule = fv.load_rows(conn, strategies=sids, construct="rule", start=start, as_of=as_of)
-    kept, _ = fv.split_by_key(published, fv.registered_keys(published))
-    cells = Counter(c.strategy_id for c in fv.analyst_cells(kept))
     analyst = fv.analyst_reading(conn, as_of=as_of, registered_from=registered_from)
     kills = {r: fv.kill_reading(conn, r, as_of=as_of, registered_from=registered_from) for r in fv.KILL_RULES}
+    hi52 = fv.load_rows(conn, strategies=("hi52",), construct="rule", start=registered_from or date.min,
+                        as_of=as_of)
 
     def strategy(sid: str) -> dict[str, Any]:
-        rows = [r for r in rule if r.strategy_id == sid]
-        net = fv.stats([r.net_t20 for r in rows if r.net_t20 is not None])
-        decided = Counter(r.analyst_decision for r in kept if r.strategy_id == sid)
         kill = kills.get(sid)
-        c2 = kill.c2 if kill else None
+        if kill:
+            closed, net, excess = kill.statuses.get("closed", 0), kill.net_t20, kill.excess_t20
+        else:
+            closed = sum(r.status == "closed" for r in hi52)
+            net = fv.stats([r.net_t20 for r in hi52 if r.net_t20 is not None])
+            excess = fv.stats([r.excess_t20 for r in hi52 if r.excess_t20 is not None])
+        decided = analyst.decided[sid]
         return {
-            "published": sum(r.strategy_id == sid for r in published),
-            "rule": {
-                "diagnostic": sid not in fv.KILL_RULES, "closed": sum(r.status == "closed" for r in rows),
-                "median_net_t20": net.median, "hit_rate": net.hit_rate,
-                "median_excess_t20": fv.stats([r.excess_t20 for r in rows if r.excess_t20 is not None]).median,
-            },
-            "blocked": {**asdict(c2.blocked), "neither": c2.neither} if c2 else None,
+            "published": analyst.published[sid],
+            "rule": {"diagnostic": kill is None, "closed": closed, "median_net_t20": net.median,
+                     "hit_rate": net.hit_rate, "median_excess_t20": excess.median},
+            "blocked": {**asdict(kill.c2.blocked), "neither": kill.c2.neither} if kill and kill.c2 else None,
             "kill_rule": _verdict(kill) if kill else None,
-            "analyst": {"enter": decided["enter"], "decline": decided["no_action"], "cells": cells[sid],
-                        "mean_diff": analyst.per_strategy[sid].mean},
+            "analyst": {"enter": decided.get("enter", 0), "decline": decided.get("no_action", 0),
+                        "cells": analyst.n_cells[sid], "mean_diff": analyst.per_strategy[sid].mean},
         }
 
     return {
         "window": f"from {registered_from.isoformat()}" if registered_from else "pre-registration history",
-        "analyst": _verdict(analyst),
-        "strategies": {sid: strategy(sid) for sid in sids},
+        "analyst": {**_verdict(analyst), "excluded": sum(e.n for e in analyst.excluded)},
+        "strategies": {sid: strategy(sid) for sid in fv.ANALYST_STRATEGIES},
     }
 
 

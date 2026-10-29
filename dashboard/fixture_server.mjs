@@ -338,6 +338,7 @@ const scorecardFixture = {
         { size: 30, formed: true, n_cells: 30, n_final: 30, n_valued: 28, mean_diff: -0.84 },
         { size: 60, formed: false, n_cells: 41, n_final: 33, n_valued: 31, mean_diff: -0.52 },
       ],
+      excluded: 3,
     },
     strategies: {
       brk20: {

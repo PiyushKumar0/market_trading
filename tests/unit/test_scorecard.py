@@ -8,7 +8,7 @@ from datetime import timedelta
 import pytest
 
 from engine.learning import forward_verdicts as fv
-from engine.ops.scorecard import LABEL, scorecard, signals_block, symbol_history_line
+from engine.ops.scorecard import LABEL, scorecard, scorecard_ro, signals_block, symbol_history_line
 from tests.unit.test_forward_verdicts import D0, _blocked, _call, _outcome, _slot
 
 AS_OF = D0 + timedelta(days=9)
@@ -187,34 +187,68 @@ def test_paper_net_pct_is_net_over_the_summed_cost_basis_never_a_partial_one(con
     assert scorecard(conn, as_of=AS_OF)["strategies"]["hi52"]["paper"]["net_pct"] is None
 
 
+# ins: symbol, day, decision, call, rule outcome (status, net, exit day), next_open net. E is decided under
+# another prompt (excluded) and exits after AS_OF (reads open); F is unscored.
+_SIGNALS = [
+    ("A", 0, "enter", "c1", ("closed", 2.0, 0), 3.0),
+    ("B", 0, "no_action", "c1", ("closed", -1.0, 0), 1.0),
+    ("C", 0, "no_action", "c1", ("closed", 4.0, 0), 0.0),
+    ("D", 1, "enter", "c1", ("open", None, None), None),
+    ("E", 1, "enter", "c2", ("closed", 5.0, 10), None),
+    ("F", 1, "enter", "c1", None, None),
+]
+
+
+def spy_as_of(monkeypatch) -> list:
+    """The ``as_of`` each analyst reading is taken at."""
+    seen: list = []
+    real = fv.analyst_reading
+    monkeypatch.setattr(fv, "analyst_reading", lambda conn, **kw: seen.append(kw["as_of"]) or real(conn, **kw))
+    return seen
+
+
 def _seed_signals(conn) -> None:
     _call(conn, "c1", "v1", "m")
-    for symbol, decision, rule_net, next_open_net in (("A", "enter", 2.0, 3.0), ("B", "no_action", -1.0, 1.0)):
-        _slot(conn, D0, symbol, decision=decision, call_id="c1")
-        _outcome(conn, D0, symbol, "rule", "closed", fill_d=D0, exit_d=D0, net=rule_net)
-        _outcome(conn, D0, symbol, "next_open", "closed", fill_d=D0, exit_d=D0, net=next_open_net)
-    _slot(conn, D0, "C", "hi52")
-    _outcome(conn, D0, "C", "rule", "closed", strategy_id="hi52", fill_d=D0, exit_d=D0, net=4.0)
+    _call(conn, "c2", "v2", "m")
+    for symbol, day, decision, call_id, rule, next_open in _SIGNALS:
+        d = D0 + timedelta(days=day)
+        _slot(conn, d, symbol, decision=decision, call_id=call_id)
+        if rule:
+            status, net, exit_day = rule
+            _outcome(conn, d, symbol, "rule", status, fill_d=d, net=net,
+                     exit_d=None if exit_day is None else D0 + timedelta(days=exit_day))
+        if next_open is not None:
+            _outcome(conn, d, symbol, "next_open", "closed", fill_d=d, exit_d=d, net=next_open)
+    conn.execute("UPDATE signal_outcomes SET excess_t20 = 1.5 WHERE symbol = 'A' AND construct = 'rule'")
+    conn.execute("INSERT INTO brk20_resting_levels (symbol, signal_d, entry, stop, score, expires_d, created_at, "
+                 "updated_at) VALUES ('A', ?, '90', '85', 1.0, ?, 't', 't')",
+                 (D0.isoformat(), (D0 + timedelta(days=6)).isoformat()))
+    _slot(conn, D0, "A", "brk20")
+    _slot(conn, D0 + timedelta(days=2), "A", "brk20")                       # a re-offer
     _blocked(conn, D0)
     _outcome(conn, D0, "A", "rule_blocked", "closed", strategy_id="brk20", fill_d=D0, exit_d=D0, net=-2.0)
+    _slot(conn, D0, "G", "hi52")
+    _outcome(conn, D0, "G", "rule", "closed", strategy_id="hi52", fill_d=D0, exit_d=D0, net=4.0)
 
 
-def test_signals_block_scores_every_published_signal(conn, monkeypatch) -> None:
+async def test_signals_block_scores_every_published_signal(conn, monkeypatch) -> None:
     monkeypatch.setattr(fv, "REGISTERED_FROM", D0)
     _seed_signals(conn)
-    out = scorecard(conn, as_of=AS_OF)["signals"]
+    out = (await scorecard_ro(conn, as_of=AS_OF))["signals"]
     assert out["window"] == "from 2026-06-01"
     ins, hi52, brk20 = (out["strategies"][s] for s in ("ins", "hi52", "brk20"))
-    assert ins["published"] == 2
-    assert ins["rule"] == {"diagnostic": False, "closed": 2, "median_net_t20": 0.5, "hit_rate": 0.5,
-                           "median_excess_t20": None}
-    assert ins["analyst"] == {"enter": 1, "decline": 1, "cells": 1, "mean_diff": 2.0}
-    assert (ins["kill_rule"]["verdict"], ins["kill_rule"]["looks"][0]["n_closed"]) == (fv.INSUFFICIENT, 2)
+    assert ins["published"] == 6
+    assert ins["rule"] == {"diagnostic": False, "closed": 3, "median_net_t20": 2.0, "hit_rate": 2 / 3,
+                           "median_excess_t20": 1.5}
+    assert ins["analyst"] == {"enter": 3, "decline": 2, "cells": 1, "mean_diff": 2.5}
+    assert (ins["kill_rule"]["verdict"], ins["kill_rule"]["looks"][0]["n_closed"]) == (fv.INSUFFICIENT, 3)
     assert (hi52["published"], hi52["rule"]["diagnostic"], hi52["rule"]["closed"], hi52["kill_rule"]) == (
         1, True, 1, None)
+    assert (brk20["published"], brk20["rule"]["closed"]) == (2, 0)
     assert brk20["blocked"] == {"n": 1, "median": -2.0, "mean": -2.0, "hit_rate": 0.0, "neither": 0}
     assert ins["blocked"] is None
-    assert (out["analyst"]["verdict"], out["analyst"]["looks"][0]["n_cells"]) == (fv.INSUFFICIENT, 1)
+    analyst = out["analyst"]
+    assert (analyst["verdict"], analyst["excluded"], analyst["looks"][0]["n_cells"]) == (fv.INSUFFICIENT, 1, 1)
 
 
 def test_signals_block_before_registration_reads_unregistered(conn, monkeypatch) -> None:

@@ -24,7 +24,7 @@ function skipText(reasons: Record<string, number>): string | null {
 }
 
 /** pos / neg class from a rounded display value; zero and missing stay uncoloured. */
-function tone(v: number | null, digits = 2): string {
+export function tone(v: number | null, digits = 2): string {
   if (v === null || !Number.isFinite(v)) return ''
   const s = signOf(v.toFixed(digits))
   return s === 1 ? ' pos' : s === -1 ? ' neg' : ''

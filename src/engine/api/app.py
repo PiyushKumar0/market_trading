@@ -49,7 +49,7 @@ from engine.core.secrets import DASHBOARD_TOKEN, Secrets
 from engine.intelligence.events import TOPIC_BUDGET_STATE
 from engine.ops.capital import CapitalRefused
 from engine.ops.paper_summary import paper_summary
-from engine.ops.scorecard import LABEL, scorecard
+from engine.ops.scorecard import LABEL, scorecard_ro
 from engine.risk.events import TOPIC_KILL_STATE, TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_TRADE_WINDOW
 from engine.risk.limits import floor_limits_from
 
@@ -393,7 +393,7 @@ def create_app(
         conn, clock = app.state.conn, app.state.clock
         if conn is None or clock is None:
             return {"label": LABEL, "bench": {}, "strategies": {}}
-        return scorecard(conn, as_of=clock.today())
+        return await scorecard_ro(conn, as_of=clock.today())
 
     @app.get("/paper")
     async def paper(_: Owner) -> dict[str, Any]:

@@ -11,14 +11,13 @@ export function verdictTone(verdict: string): 'good' | 'warn' | 'crit' | 'neutra
   return 'neutral'
 }
 
-/** The first look still forming, or the last one once every look formed. */
+/** The first look still forming, in the words of scripts/forward_verdicts.py, or the last one once every
+ *  look formed. */
 export function progressText(looks: (SignalKillLook | SignalCellLook)[]): string {
   const i = looks.findIndex((lk) => !lk.formed)
   if (i < 0) return `Look ${looks.length} formed`
   const lk = looks[i]
-  return 'n_cells' in lk
-    ? `Look ${i + 1}: ${lk.n_cells} of ${lk.size} cells formed, ${lk.n_final} final`
-    : `Look ${i + 1}: ${lk.n_closed + lk.n_void} of ${lk.size} final`
+  return `Look ${i + 1}: ${'n_cells' in lk ? lk.n_final : lk.n_closed + lk.n_void} of ${lk.size} final`
 }
 
 export const pctOrDash = (v: number | null) => pct(v) ?? DASH

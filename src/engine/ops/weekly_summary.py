@@ -15,11 +15,11 @@ from typing import Any
 
 from engine.core.clock import IST
 from engine.core.log import get_logger
-from engine.learning.forward_verdicts import UNREGISTERED
+from engine.learning import forward_verdicts as fv
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
 from engine.ops.jobs import JOB_REC_OUTCOMES, JOB_SIGNAL_OUTCOMES
-from engine.ops.scorecard import scorecard
+from engine.ops.scorecard import scorecard_ro
 
 _log = get_logger("engine.ops.weekly_summary")
 
@@ -35,6 +35,10 @@ _SKIPPED_CLOSED = (
     f"WHERE r.skip_reason IS NOT NULL AND o.status = 'closed' AND o.net_pct IS NOT NULL AND {_ENTRY} "
     "AND json_extract(r.payload, '$.notional') IS NOT NULL"
 )
+_LATEST_SCORING = (
+    "SELECT run_for_date, status FROM job_runs WHERE job_id = ? AND run_for_date <= ? "
+    "ORDER BY run_for_date DESC LIMIT 1"
+)
 
 
 def analyst_line(signals: dict[str, Any]) -> str | None:
@@ -43,12 +47,12 @@ def analyst_line(signals: dict[str, Any]) -> str | None:
     if "error" in signals:
         return f"Analyst reading unavailable: {signals['error']}."
     analyst = signals["analyst"]
-    if analyst["verdict"] == UNREGISTERED:
+    if analyst["verdict"] == fv.UNREGISTERED:
         return None
     formed = [(i, lk) for i, lk in enumerate(analyst["looks"], 1) if lk["formed"]]
     if not formed:
         lk = analyst["looks"][0]
-        return (f"Analyst (pre-registered {signals['window']}): look 1 formed {lk['n_cells']} of {lk['size']} "
+        return (f"Analyst (pre-registered {signals['window']}): look 1 formed {lk['n_final']} of {lk['size']} "
                 "cells — interim, decides nothing.")
     i, lk = formed[-1]
     diff = "n/a" if lk["mean_diff"] is None else f"{lk['mean_diff']:+.1f} pp"
@@ -72,9 +76,13 @@ class WeeklySummaryJob:
         self._was_run = was_run
 
     async def run(self, d: date) -> WeeklySummaryResult:
-        """``unfinished`` (replayed later) while ``rec_outcomes`` or ``signal_outcomes`` for ``d`` is
-        unrecorded or failed. The analyst reading is as known on ``d``, also on a replay."""
-        if not (self._was_run(JOB_REC_OUTCOMES, d) and self._was_run(JOB_SIGNAL_OUTCOMES, d)):
+        """``unfinished`` (replayed later) while ``rec_outcomes`` for ``d`` is unrecorded or failed, or,
+        once registered, while ``signal_outcomes`` for ``d`` is still due. The analyst reading is as known
+        on ``d``, also on a replay."""
+        if not self._was_run(JOB_REC_OUTCOMES, d):
+            return WeeklySummaryResult(d, unfinished=True)
+        scored = True if fv.REGISTERED_FROM is None else self._signals_scored(d)
+        if scored is None:
             return WeeklySummaryResult(d, unfinished=True)
         start = d - timedelta(days=d.weekday())
         # The SQL bound is a day looser than the IST week: delivered_at carries any offset.
@@ -85,11 +93,11 @@ class WeeklySummaryJob:
         skipped = Counter(r[2] for r in week if r[2])
         n_closed, rupees = self._conn.execute(_SKIPPED_CLOSED).fetchone()
         try:
-            sc = scorecard(self._conn, as_of=d)
+            sc = await scorecard_ro(self._conn, as_of=d)
             paper = [s["paper"] for s in sc["strategies"].values()]
         except Exception:
             _log.exception("weekly_summary_paper_failed")
-            sc = scorecard(self._conn, as_of=d, with_paper=False)
+            sc = await scorecard_ro(self._conn, as_of=d, with_paper=False)
             paper = []
         strategies = [
             (sid, s["recs"]["closed"], s["recs"]["mean_net"], s["recs"]["mean_excess"])
@@ -99,7 +107,8 @@ class WeeklySummaryJob:
             d=d, delivered=len(week), taken=sum(r[1] in ("taken", "closed") for r in week),
             skipped=dict(skipped), expired=sum(r[1] == "expired" and not r[2] for r in week),
             skipped_closed=n_closed, skipped_rupees=rupees, strategies=strategies,
-            analyst_line=analyst_line(sc["signals"]),
+            analyst_line=analyst_line(sc["signals"]) if scored
+            else f"Analyst reading unavailable: signal scoring did not complete for {d.isoformat()}.",
         )
         closed, open_n = sum(p["closed"] for p in paper), sum(p["open"] for p in paper)
         if closed or open_n:
@@ -114,3 +123,14 @@ class WeeklySummaryJob:
             })
         await self._notify(message)
         return WeeklySummaryResult(d)
+
+    def _signals_scored(self, d: date) -> bool | None:
+        """True once ``signal_outcomes`` succeeded for ``d``; None (wait) while its run for ``d`` is
+        unrecorded and it has run for an earlier day; False when it failed or gave up on ``d``, or never
+        scanned ``d`` (deployed after it), so the digest never waits on a run that may not come."""
+        row = self._conn.execute(_LATEST_SCORING, (JOB_SIGNAL_OUTCOMES, d.isoformat())).fetchone()
+        if row is None:
+            return False
+        if row[0] != d.isoformat():
+            return None
+        return row[1] == "success"

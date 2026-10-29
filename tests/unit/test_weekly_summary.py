@@ -21,7 +21,7 @@ from engine.ops.jobs import (
 )
 from engine.ops.weekly_summary import WeeklySummaryJob, analyst_line
 from tests.unit.test_ops_main_wiring import _all_noop_fns
-from tests.unit.test_scorecard import seed_paper
+from tests.unit.test_scorecard import seed_paper, spy_as_of
 
 FRI = date(2026, 10, 9)
 
@@ -140,16 +140,56 @@ async def test_no_recs_still_sends_with_zeros(conn) -> None:
     ]
 
 
-async def test_the_analyst_line_follows_the_hindsight_lines_once_registered(conn, monkeypatch) -> None:
+_INTERIM = "Analyst (pre-registered from 2026-10-05): look 1 formed 0 of 30 cells — interim, decides nothing."
+_UNAVAILABLE = "Analyst reading unavailable: signal scoring did not complete for 2026-10-09."
+
+
+@pytest.mark.parametrize(("runs", "line"), [
+    ({FRI: "success"}, _INTERIM),
+    ({FRI: "skipped"}, _UNAVAILABLE),
+    ({date(2026, 10, 8): "success"}, None),           # FRI's 18:40 scoring still due: wait
+])
+async def test_a_registered_digest_waits_only_while_signal_scoring_is_due(conn, cal, clk, monkeypatch, runs, line):
     monkeypatch.setattr(fv, "REGISTERED_FROM", date(2026, 10, 5))
+    seen = spy_as_of(monkeypatch)
+    runner = CatchUpRunner(conn, clk, cal)
+    for d, status in runs.items():
+        runner.record_run(JOB_SIGNAL_OUTCOMES, d, status=status)
     sent: list = []
-    await _job(conn, sent).run(FRI)
-    assert sent[0].body.splitlines()[3] == (
-        "Analyst (pre-registered from 2026-10-05): look 1 formed 0 of 30 cells — interim, decides nothing.")
+    result = await _job(conn, sent).run(FRI)
+    assert result.unfinished is (line is None)
+    assert [m.body.splitlines()[3] for m in sent] == ([line] if line else [])
+    assert seen == ([FRI] if line else [])
+
+
+@pytest.mark.parametrize(("at", "scored_before"), [
+    (datetime(2026, 10, 9, 19, 5, tzinfo=IST), True),   # FRI's scoring raises
+    (datetime(2026, 10, 12, 10, 0, tzinfo=IST), False),  # deployed after FRI: never scanned
+])
+async def test_catch_up_sends_the_digest_when_signal_scoring_cannot_complete(
+    conn, cal, clk, now, monkeypatch, at, scored_before,
+) -> None:
+    monkeypatch.setattr(fv, "REGISTERED_FROM", date(2026, 10, 5))
+
+    async def boom(d):
+        raise RuntimeError("boom")
+
+    sent: list = []
+    registry = opsmain.build_job_registry(
+        load_settings(), {**_all_noop_fns(), JOB_SIGNAL_OUTCOMES: boom, JOB_WEEKLY_SUMMARY: _job(conn, sent).run},
+        calendar=cal,
+    ).select(lambda s: s.job_id in (JOB_SIGNAL_OUTCOMES, JOB_WEEKLY_SUMMARY))
+    now.at = at
+    runner = CatchUpRunner(conn, clk, cal, registry, deferred=opsmain.POST_ARM_JOB_IDS)
+    runner.record_run(JOB_WEEKLY_SUMMARY, date(2026, 10, 1))
+    if scored_before:
+        runner.record_run(JOB_SIGNAL_OUTCOMES, date(2026, 10, 8))
+    await runner.catch_up(scope=CatchUpScope.DEFERRED)
+    assert [(m.dedupe_key, m.body.splitlines()[3]) for m in sent] == [("weekly_summary:2026-10-09", _UNAVAILABLE)]
 
 
 def _signals(verdict, *, formed=(False, False), mean=None):
-    looks = [{"size": size, "formed": f, "n_cells": 12, "n_final": 0, "n_valued": 0, "mean_diff": mean}
+    looks = [{"size": size, "formed": f, "n_cells": 20, "n_final": 12, "n_valued": 0, "mean_diff": mean}
              for size, f in zip((30, 60), formed, strict=True)]
     return {"window": "from 2026-11-02", "analyst": {"verdict": verdict, "reason": "", "looks": looks}}
 
@@ -168,15 +208,11 @@ def test_analyst_line(signals, line) -> None:
     assert analyst_line(signals) == line
 
 
-@pytest.mark.parametrize(("rec", "sig", "sends"), [
-    (None, "success", False), ("failed", "success", False), ("success", None, False), ("success", "failed", False),
-    ("success", "success", True), ("skipped", "skipped", True),
-])
-async def test_unfinished_while_rec_or_signal_outcomes_is_unrecorded_or_failed(conn, cal, clk, rec, sig, sends) -> None:
+@pytest.mark.parametrize(("status", "sends"), [(None, False), ("failed", False), ("success", True), ("skipped", True)])
+async def test_unfinished_only_while_rec_outcomes_is_unrecorded_or_failed(conn, cal, clk, status, sends) -> None:
     runner = CatchUpRunner(conn, clk, cal)
-    for job_id, status in ((JOB_REC_OUTCOMES, rec), (JOB_SIGNAL_OUTCOMES, sig)):
-        if status:
-            runner.record_run(job_id, FRI, status=status)
+    if status:
+        runner.record_run(JOB_REC_OUTCOMES, FRI, status=status)
     sent: list = []
     result = await _job(conn, sent, was_run=runner.was_run).run(FRI)
     assert (result.unfinished, len(sent)) == (not sends, int(sends))
