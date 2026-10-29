@@ -906,7 +906,7 @@ class NightlyReviewJob:
             _log.error("nightly_review_no_agent_def", agent=nightly.AGENT_ID, d=d.isoformat())
             return AdvisoryOutcome.FAILED   # roster gap = harness failure: retryable (WO-14 c)
 
-        decision = self._governor.can_invoke(nightly.AGENT_ID, CALL_CLASS)
+        decision = self._governor.can_invoke(nightly.AGENT_ID)
         if not decision.allowed:
             # Checked BEFORE assembly so a blocked night costs no queries; the harness re-checks and
             # would persist its own governor_blocked audit row if we called anyway (R8).

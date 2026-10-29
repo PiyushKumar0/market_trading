@@ -215,7 +215,7 @@ class NewsScoringJob:
             if not clusters:
                 return ScoringResult()  # empty queue: no governor decision, no SDK call, nothing to say
 
-            decision = self._governor.can_invoke(news_analyst.AGENT_ID, CALL_CLASS)
+            decision = self._governor.can_invoke(news_analyst.AGENT_ID)
             if not decision.allowed:
                 # Fail to ZERO (§2.7): the clusters stay unscored, so the digest excludes them and
                 # `cat` originates nothing. No alert here — CATALYST_* belongs to the digest.

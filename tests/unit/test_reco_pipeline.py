@@ -1,4 +1,4 @@
-﻿"""RECOMMEND pipeline (Â§3.6 / Â§5.2 / Â§7.1 ``max_holding``) â€” book + trigger handlers.
+"""RECOMMEND pipeline (Â§3.6 / Â§5.2 / Â§7.1 ``max_holding``) â€” book + trigger handlers.
 
 The seams are faked exactly where a fake is the point (the Claude harness, the context assembler, the
 governor) and REAL everywhere the behaviour under test depends on real policy:
@@ -161,8 +161,8 @@ class FakeGovernor:
         self.allowed = allowed
         self.calls: list[tuple[str, str]] = []
 
-    def can_invoke(self, agent_id: str, call_class: str = "schedule") -> Decision:
-        self.calls.append((agent_id, call_class))
+    def can_invoke(self, agent_id: str) -> Decision:
+        self.calls.append(agent_id)
         return Decision(self.allowed, None if self.allowed else "DG4_zero_sdk_calls")
 
 
@@ -2279,7 +2279,7 @@ def _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model):
 def test_a_position_sold_outside_the_ledger_leaves_the_open_positions_line(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """The §5.2 analyst and the heartbeat see the book the OWNER holds, not the platform's fiction.
+    """The §5.2 analyst sees the book the OWNER holds, not the platform's fiction.
 
     The position-event screen already refuses to spend a call on a position the §3.6 journal reads
     empty on two sessions, but this line still counted it as open — which is how two 08-26 positions

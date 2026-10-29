@@ -1,4 +1,4 @@
-﻿"""The RECOMMEND pipeline (§3.6, §5.2, §7.1 ``max_holding``) — signal ⇒ analyst ⇒ gate ⇒ owner.
+"""The RECOMMEND pipeline (§3.6, §5.2, §7.1 ``max_holding``) — signal ⇒ analyst ⇒ gate ⇒ owner.
 
 Lives in ``engine.ops`` because it is the only package allowed to import everything (§3.2.12): it
 wires Tier-1 (``intelligence``), Tier-2 (``risk``), the store, the notifier and the state DB into one
@@ -1954,7 +1954,7 @@ class RecommendationPipeline:
         if now < window[0]:
             return False                 # not open YET: the queue is still live, leave it alone
         self._roll_forward_day(d)
-        decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
+        decision = self._governor.can_invoke(INTRADAY_AGENT_ID)
         if not decision.allowed:
             # Unlike the arrival path (where a block DROPS the candidate to keep a blocked window
             # from building a backlog), a block here simply skips this tick: the queue is already
@@ -2218,7 +2218,7 @@ class RecommendationPipeline:
         # ``in_flight``: _journal_slot above already wrote THIS pair as evaluated=1/forwarded=0, so
         # without the exclusion the boot orphan sweep would re-arm the candidate it is admitting.
         self._roll_forward_day(d, in_flight=(candidate.symbol, candidate.strategy_id))
-        decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "signal")
+        decision = self._governor.can_invoke(INTRADAY_AGENT_ID)
         if not decision.allowed:
             # A budget block is deliberate policy, not a missed slot: the candidate is neither
             # re-armed nor queued (queueing it would let a blocked window build a backlog that
@@ -2982,7 +2982,7 @@ class RecommendationPipeline:
         # nor a §5.6 budget decision.
         if self._skip_position_event(position):
             return
-        decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "position_event")
+        decision = self._governor.can_invoke(INTRADAY_AGENT_ID)
         if not decision.allowed:
             _log.warning("position_event_governor_blocked", position_id=position["position_id"],
                          reason=getattr(decision, "reason", None))

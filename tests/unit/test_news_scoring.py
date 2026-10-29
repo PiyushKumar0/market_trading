@@ -109,10 +109,10 @@ class FakeGovernor:
     def __init__(self, *, allowed: bool = True, cadence_min: int = 30) -> None:
         self.allowed = allowed
         self.cadence_min = cadence_min
-        self.decisions: list[tuple[str, str]] = []
+        self.decisions: list[str] = []
 
-    def can_invoke(self, agent_id: str, call_class: str = "schedule") -> InvokeDecision:
-        self.decisions.append((agent_id, call_class))
+    def can_invoke(self, agent_id: str) -> InvokeDecision:
+        self.decisions.append(agent_id)
         return InvokeDecision(
             allowed=self.allowed,
             tier=DegradeTier.DG0 if self.allowed else DegradeTier.DG3,
@@ -497,7 +497,7 @@ async def test_governor_block_makes_no_call_and_leaves_the_queue_unscored(store,
     assert result.scored == 0
     assert harness.calls == []                       # zero SDK calls (§2.7 fail-safe: `cat` -> zero)
     assert all(r["scored_at"] is None for r in rows_by_id(store).values())
-    assert governor.decisions == [("news_analyst", "batch")]
+    assert governor.decisions == ["news_analyst"]
 
 
 async def test_a_failed_chunk_keeps_the_earlier_chunks_and_leaves_the_rest_queued(

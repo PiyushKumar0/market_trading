@@ -409,8 +409,8 @@ class BudgetGovernor:
         return self.agent_spend(agent_id) > self._dg1_agent * alloc
 
     # ----------------------------------------------------------------- call admission
-    def can_invoke(self, agent_id: str, call_class: str = "schedule") -> InvokeDecision:
-        """Whether ``agent_id`` may make a ``call_class`` call now (§5.6).
+    def can_invoke(self, agent_id: str) -> InvokeDecision:
+        """Whether ``agent_id`` may make a call now (§5.6).
 
         The per-agent allocation is a hard window-long stop independent of the ladder: one runaway agent
         must not be able to spend the other agents' week. The reserve is owner-assignable via ``/budget``

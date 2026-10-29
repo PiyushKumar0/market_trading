@@ -142,7 +142,7 @@ class _Governor:
     def __init__(self) -> None:
         self.recorded: list[str] = []
 
-    def can_invoke(self, agent_id: str, call_class: str = "schedule") -> Any:
+    def can_invoke(self, agent_id: str) -> Any:
         return SimpleNamespace(allowed=True, reason=None)
 
     def price(self, model: str, usage: TokenUsage) -> Decimal:

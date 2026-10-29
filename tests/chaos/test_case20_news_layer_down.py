@@ -434,8 +434,8 @@ class NewsWorld:
 
     def assert_other_agents_admitted(self) -> None:
         """"agents unaffected": the intraday analyst and the planner are still admitted by the governor."""
-        assert self.governor.can_invoke("intraday_analyst", "signal").allowed
-        assert self.governor.can_invoke("preopen_planner", "schedule").allowed
+        assert self.governor.can_invoke("intraday_analyst").allowed
+        assert self.governor.can_invoke("preopen_planner").allowed
 
     async def close(self) -> None:
         await self.http.aclose()

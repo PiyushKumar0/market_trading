@@ -823,7 +823,7 @@ class AgentHarness:
         budget: _RunBudget | None,
     ) -> AgentResult:
         prompt_version = _prompt_version(system_prompt, template)
-        decision = self._governor.can_invoke(agent_def.agent_id, trigger)
+        decision = self._governor.can_invoke(agent_def.agent_id)
         if not decision.allowed:
             # NO SDK call — but the audit trail still records that the agent was asked and refused (R8).
             call_id = self._persist(

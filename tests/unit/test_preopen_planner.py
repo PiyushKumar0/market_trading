@@ -25,7 +25,7 @@ from engine.intelligence.harness import AgentResult, load_agent_defs
 from engine.intelligence.schemas import DayPlan, DayPlanFocus
 from engine.marketdata.store import DailyBar, MarketStore
 from engine.ops.jobs import AdvisoryOutcome
-from engine.ops.preopen_planner import _SOLD_OUTSIDE_HEADING, CALL_CLASS, PreopenPlannerJob
+from engine.ops.preopen_planner import _SOLD_OUTSIDE_HEADING, PreopenPlannerJob
 
 # conftest's frozen clock: Wed 2026-06-17 10:05 IST — a real trading day.
 TODAY = date(2026, 6, 17)
@@ -76,10 +76,10 @@ class FakeGovernor:
     def __init__(self, allowed: bool = True, reason: str | None = None) -> None:
         self.allowed = allowed
         self.reason = reason
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[str] = []
 
-    def can_invoke(self, agent_id: str, call_class: str = "schedule") -> InvokeDecision:
-        self.calls.append((agent_id, call_class))
+    def can_invoke(self, agent_id: str) -> InvokeDecision:
+        self.calls.append(agent_id)
         tier = DegradeTier.DG0 if self.allowed else DegradeTier.DG4
         return InvokeDecision(allowed=self.allowed, tier=tier, reason=self.reason)
 
@@ -161,7 +161,7 @@ async def test_governor_blocked_skips_harness_and_persists_nothing(store, conn, 
 
     assert ok is AdvisoryOutcome.BLOCKED          # WO-14 (c): a correct outcome, not a failure
     assert harness.calls == []                                        # planner death never calls the SDK
-    assert governor.calls == [(preopen.AGENT_ID, CALL_CLASS)]
+    assert governor.calls == [preopen.AGENT_ID]
     row = conn.execute("SELECT 1 FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchone()
     assert row is None
 

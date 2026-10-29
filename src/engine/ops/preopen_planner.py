@@ -197,7 +197,7 @@ class PreopenPlannerJob:
         deliberately saying no — while ``FAILED`` (harness failure) is retryable, and its retry is
         governor-gated by the very check above. The composition-root wrapper translates.
         """
-        decision = self._governor.can_invoke(preopen.AGENT_ID, CALL_CLASS)
+        decision = self._governor.can_invoke(preopen.AGENT_ID)
         if not decision.allowed:
             _log.warning(
                 "preopen_planner_blocked", d=d.isoformat(), tier=decision.tier.value, reason=decision.reason
