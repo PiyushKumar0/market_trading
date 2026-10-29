@@ -107,11 +107,12 @@ def scorecard(conn: sqlite3.Connection, *, as_of: date, with_paper: bool = True)
 
 def signals_block(conn: sqlite3.Connection, *, as_of: date) -> dict[str, Any]:
     """Every published brk20/hi52/ins signal scored in hindsight with the kill and analyst readings, over
-    the population from ``forward_verdicts.REGISTERED_FROM`` (read per call), as known on ``as_of``.
+    the population from ``forward_verdicts.REGISTERED_FROM`` through ``KILL_POPULATION_UNTIL`` (both read per
+    call), as known on ``as_of``.
     hi52's rule row is a diagnostic: its costing differs from ``scripts/hi52_forward_verdict.py``, whose
     verdict stays authoritative. Never raises: an error reads ``{"error": ...}``."""
     try:
-        return _signals(conn, as_of, fv.REGISTERED_FROM)
+        return _signals(conn, as_of, fv.REGISTERED_FROM, dict(fv.KILL_POPULATION_UNTIL))
     except Exception as exc:  # noqa: BLE001 - an owner surface degrades, never fails its caller
         _log.exception("signals_block_failed")
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -135,9 +136,12 @@ async def scorecard_ro(conn: sqlite3.Connection, *, as_of: date, with_paper: boo
     return await asyncio.to_thread(run)
 
 
-def _signals(conn: sqlite3.Connection, as_of: date, registered_from: date | None) -> dict[str, Any]:
+def _signals(
+    conn: sqlite3.Connection, as_of: date, registered_from: date | None, until: dict[str, date | None],
+) -> dict[str, Any]:
     analyst = fv.analyst_reading(conn, as_of=as_of, registered_from=registered_from)
-    kills = {r: fv.kill_reading(conn, r, as_of=as_of, registered_from=registered_from) for r in fv.KILL_RULES}
+    kills = {r: fv.kill_reading(conn, r, as_of=as_of, registered_from=registered_from, until=until[r])
+             for r in fv.KILL_RULES}
     hi52 = fv.load_rows(conn, strategies=("hi52",), construct="rule", start=registered_from or date.min,
                         as_of=as_of)
 

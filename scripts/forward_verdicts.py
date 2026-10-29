@@ -5,7 +5,23 @@ be read prints ``UNAVAILABLE`` as the verdict.
 
 THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 
-**Analyst-value verdict (registered <T19 date>, population from R).**
+**Amendment 2026-10-30, before R, for the three forward rules below.**
+- A signal's symbol is followed through NSE renames (`symbol_renames`).
+- A symbol with no daily bar on 5 consecutive regular sessions on which NIFTY 50 has one is finalised on the
+  5th. A filled row closes at its last available close, and every unreached horizon takes that return, net of
+  the fixed cost. An unfilled row is unscorable.
+- A session on which NIFTY 50 has a bar and the symbol has none, with later bars for the symbol, takes the
+  symbol's last earlier close once it is 5 sessions old (a halt is a zero-return session). Until then the row
+  waits.
+- While a `daily_bars` day is failed and not yet repaired, no missing bar on or after it is judged.
+- A brk20 row scored as `rule` is a first publication, whatever its resting row's symbol.
+- `prompt_version` in the registered key covers the system prompt, the context template, the response schema and
+  the effort.
+- Rolling back the C2 filter after R (`brk20.regime_filter: false`) ends the brk20 kill population: the rollback
+  commit sets `forward_verdicts.KILL_POPULATION_UNTIL["brk20"]` to the last session the filter ran. Resuming it
+  needs an owner-approved re-registration with a new R.
+
+**Analyst-value verdict (registered 2026-10-29, population from R).**
 - **Population:** `prescreen_day_slots` rows of brk20, hi52 and ins with `d >= R` and a recorded first
   `analyst_decision`, whose call carries the strategy's registered key `(prompt_version, model)`. The registered
   key is the one on that strategy's first decision on or after R. Rows with another key are excluded and counted.
@@ -25,7 +41,7 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Diagnostics:** T+5/T+10, per-strategy cells, and confidence buckets.
 - **Duration:** at least three months, since brk20 originates only in regime-ON sessions.
 
-**brk20 kill rule (registered <date>, population from R).**
+**brk20 kill rule (registered 2026-10-29, population from R).**
 - **Population:** the brk20 crossings admitted on or after R (`brk20_resting_levels` rows), under C2.
 - **Construct** (`signal_outcomes` `rule`):
   - entry: a limit resting at the broken level on `signal_d` (y+1, the session after the crossing session y)
@@ -45,7 +61,7 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Diagnostic only:** the C2 blocked arm (`rule_blocked`) against the admitted arm.
 - **Tool:** `scripts/forward_verdicts.py --rule brk20`.
 
-**ins kill rule (registered <date>, population from R).**
+**ins kill rule (registered 2026-10-29, population from R).**
 - **Looks and verdict:** as brk20.
 - **Construct:** entry at the open of the publication session d, which is the validated next-session open after
   the disclosure. Exit at the close of the 20th regular session. No stop. Cost at the §7.1 notional for the 5%
@@ -54,7 +70,8 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Tool:** `scripts/forward_verdicts.py --rule ins`.
 
 R is ``forward_verdicts.REGISTERED_FROM``; while it is None every row is read and the verdict is
-UNREGISTERED. Rows holding an unformed look are named.
+UNREGISTERED. A kill population ends at ``forward_verdicts.KILL_POPULATION_UNTIL[rule]`` when set. Rows holding
+an unformed look are named.
 
 Usage:
     python scripts/forward_verdicts.py --rule brk20|ins|analyst [--db PATH] [--as-of YYYY-MM-DD] [--json PATH]
@@ -132,7 +149,8 @@ def _statuses(counts: dict[str, int]) -> str:
 
 
 def render_kill(rd: fv.KillReading, cal: NSECalendar) -> list[str]:
-    out = [*_head(rd.rule, rd), f"population: {rd.n_rows} rows{_statuses(rd.statuses)}"]
+    out = [*_head(rd.rule, rd), f"population: {rd.n_rows} rows{_statuses(rd.statuses)}"
+           + (f"; ended {rd.until} (journal rows through that session)" if rd.until else "")]
     for i, lk in enumerate(rd.looks, 1):
         out.append(f"look {i}: {lk.n_closed + lk.n_void} of {lk.size} final, {'FORMED' if lk.formed else _INTERIM}; "
                    f"closed {lk.n_closed}, void {lk.n_void}; median net T+20 {_f(lk.median_net_t20, '%')} "
@@ -191,7 +209,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.rule == "analyst":
                 reading = fv.analyst_reading(conn, as_of=as_of, registered_from=r_from)
             else:
-                reading = fv.kill_reading(conn, args.rule, as_of=as_of, registered_from=r_from)
+                reading = fv.kill_reading(conn, args.rule, as_of=as_of, registered_from=r_from,
+                                          until=fv.KILL_POPULATION_UNTIL[args.rule])
         finally:
             conn.close()
     except sqlite3.Error as exc:

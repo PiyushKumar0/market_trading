@@ -812,11 +812,14 @@ def test_signal_context_carries_its_contract_as_template(assembler):
     assert assembler.for_signal(hi52, **SIGNAL_KW).template != template
 
 
-def test_for_signal_fixed_text_matches_golden(assembler, store, conn):
+def test_for_signal_fixed_text_matches_golden(assembler, store, conn, calendar):
     """Any change to the assembler's wording fails here until the golden file AND
-    ``PROMPT_TEMPLATE_VERSION`` (its first line) are updated together."""
+    ``PROMPT_TEMPLATE_VERSION`` (its first line) are updated together. The index and EW rows render the
+    regime line's measured form, not its unavailable one."""
     seed_daily_bars(store, symbol=UNWATCHED)
     seed_day_plan(conn)
+    seed_index(store, calendar, UP)
+    seed_ew(conn, calendar, EW_OK)
     store.insert_feature_snapshot(
         "fs-golden", UNWATCHED, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
         '{"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12}',

@@ -22,6 +22,10 @@ from typing import cast
 #: R, the first session of the registered populations (IMPLEMENTATION_PLAN section 3). Only a caller's default.
 REGISTERED_FROM: date | None = date(2026, 11, 2)
 
+#: Last journal session of each kill population; None while it accrues. Rolling back C2 sets brk20's to the
+#: last session the filter ran (IMPLEMENTATION_PLAN section 3, amendment 2026-10-30). Only a caller's default.
+KILL_POPULATION_UNTIL: dict[str, date | None] = {"brk20": None, "ins": None}
+
 KILL_RULES = ("brk20", "ins")
 ANALYST_STRATEGIES = ("brk20", "hi52", "ins")
 KILL_SIZES = (20, 40)
@@ -42,9 +46,11 @@ _JOURNAL_SQL = (
     "AND o.construct = ? LEFT JOIN agent_calls a ON a.call_id = p.analyst_call_id "
     "WHERE p.strategy_id IN ({ph}) AND p.d >= ? AND p.d <= ?{first} ORDER BY p.d, p.symbol, p.strategy_id"
 )
-# brk20's `rule` is scored for first publications only (signal_outcomes._signals).
+# brk20's `rule` is scored for first publications only (signal_outcomes._signals). A scored `rule` row is
+# one whatever its resting row's symbol (rekey_symbol moves resting rows to the new name; the journal keeps
+# the old); an unscored row is one while a resting row under its own symbol exists.
 _FIRST_PUBLICATION = (
-    " AND (p.strategy_id <> 'brk20' OR EXISTS (SELECT 1 FROM brk20_resting_levels r "
+    " AND (p.strategy_id <> 'brk20' OR o.d IS NOT NULL OR EXISTS (SELECT 1 FROM brk20_resting_levels r "
     "WHERE r.symbol = p.symbol AND r.signal_d = p.d))"
 )
 _BLOCKED_SQL = (
@@ -153,6 +159,7 @@ class KillReading:
 
     rule: str
     registered_from: date | None
+    until: date | None
     as_of: date
     verdict: str
     reason: str
@@ -235,23 +242,25 @@ def _known_on(row: SignalRow, as_of: date) -> SignalRow:
 
 # ------------------------------------------------------------------ readings
 def kill_reading(
-    conn: sqlite3.Connection, rule: str, *, as_of: date, registered_from: date | None,
+    conn: sqlite3.Connection, rule: str, *, as_of: date, registered_from: date | None, until: date | None,
 ) -> KillReading:
     """The ``rule`` (brk20 or ins) kill verdict over the population from ``registered_from`` (every row
-    when None, read UNREGISTERED)."""
+    when None, read UNREGISTERED) through ``until`` (open-ended when None); outcomes as known on ``as_of``."""
     if rule not in KILL_RULES:
         raise ValueError(f"unknown kill rule {rule!r}")
     start = registered_from or date.min
-    rows = load_rows(conn, strategies=(rule,), construct="rule", start=start, as_of=as_of)
+
+    def population(construct: str) -> list[SignalRow]:
+        rows = load_rows(conn, strategies=(rule,), construct=construct, start=start, as_of=as_of)
+        return [r for r in rows if until is None or r.d <= until]
+
+    rows = population("rule")
     looks = kill_looks(rows)
     verdict, reason = kill_verdict(looks, registered_from=registered_from)
     holding = next((i for i, lk in enumerate(looks, 1) if not lk.formed), None)
-    c2 = None
-    if rule == "brk20":
-        c2 = c2_arms(rows, load_rows(conn, strategies=(rule,), construct="rule_blocked", start=start,
-                                     as_of=as_of))
+    c2 = c2_arms(rows, population("rule_blocked")) if rule == "brk20" else None
     return KillReading(
-        rule, registered_from, as_of, verdict, reason, tuple(looks), holding,
+        rule, registered_from, until, as_of, verdict, reason, tuple(looks), holding,
         tuple(look_holders(rows, looks[holding - 1].size)) if holding else (), len(rows),
         sum(1 for r in rows if r.fill_d is not None), dict(Counter(r.status for r in rows)),
         stats(_nets(rows, 5)), stats(_nets(rows, 10)), stats(_nets(rows, 20)),

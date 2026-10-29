@@ -2,7 +2,7 @@
 == DAY CONTEXT (stable) ==
 trading date: 2026-06-17 (Wednesday)
 day plan: {"no_trade_today":false,"regime":"trending up"}
-index regime: unavailable (no NIFTY 50 bar for 2026-06-16); core equal-weight 20-session return: unavailable (no return for 2026-06-16)
+index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 close 25100.00 above SMA50 24500.00; SMA50 rising over 20 sessions; core equal-weight return over the 20 sessions through 2026-06-16: -3.42%
 
 == MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-golden","raw_levels":{"entry":"564.00","stop":"530.00","target":null},"score":0.93,"side":"BUY","signal_id":"sig-brk20-1","strategy_id":"brk20","style":"swing","symbol":"LGEINDIA"}

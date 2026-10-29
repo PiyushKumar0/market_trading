@@ -229,9 +229,15 @@ def _load(conn, construct="rule", as_of=None, strategies=("ins",)):
     return fv.load_rows(conn, strategies=strategies, construct=construct, start=D0, as_of=as_of or _day(9))
 
 
-def _blocked(conn, d):
+def _blocked(conn, d, *, symbol="A", reason="down"):
     conn.execute("INSERT INTO brk20_regime_blocked (symbol, signal_d, entry, stop, score, reason, created_at) "
-                 "VALUES ('A', ?, '90', '85', 1.0, 'down', 't')", (d.isoformat(),))
+                 "VALUES (?, ?, '90', '85', 1.0, ?, 't')", (symbol, d.isoformat(), reason))
+
+
+def _resting(conn, symbol, d):
+    conn.execute("INSERT INTO brk20_resting_levels (symbol, signal_d, entry, stop, score, expires_d, created_at, "
+                 "updated_at) VALUES (?, ?, '90', '85', 1.0, ?, 't', 't')",
+                 (symbol, d.isoformat(), (d + timedelta(days=6)).isoformat()))
 
 
 def test_load_rows_joins_the_outcome_and_the_call(conn):
@@ -272,12 +278,18 @@ def test_as_of_is_inclusive(conn):
 
 
 def test_load_rows_rule_takes_brk20_first_publications_only(conn):
-    conn.execute("INSERT INTO brk20_resting_levels (symbol, signal_d, entry, stop, score, expires_d, created_at, "
-                 "updated_at) VALUES ('A', ?, '90', '85', 1.0, ?, 't', 't')", (_day(0).isoformat(), _day(6).isoformat()))
+    _resting(conn, "A", _day(0))
     _slot(conn, _day(0), "A", "brk20")
     _slot(conn, _day(2), "A", "brk20")
     assert [r.d for r in _load(conn, strategies=("brk20",))] == [_day(0)]
     assert [r.d for r in _load(conn, "next_open", strategies=("brk20",))] == [_day(0), _day(2)]
+
+
+def test_a_scored_brk20_rule_row_stays_a_first_publication_after_a_rename(conn):
+    _resting(conn, "NEW", _day(0))
+    _slot(conn, _day(0), "OLD", "brk20")
+    _outcome(conn, _day(0), "OLD", "rule", "open", strategy_id="brk20", fill_d=_day(0))
+    assert [r.symbol for r in _load(conn, strategies=("brk20",))] == ["OLD"]
 
 
 def test_load_rows_rule_blocked_reads_the_blocked_table(conn):
@@ -293,9 +305,19 @@ def test_a_reading_loads_its_population_from_registered_from(conn):
     _call(conn, "c1", "v1", "m")
     _slot(conn, _day(-1), "A", decision="enter", call_id="c1")
     _slot(conn, _day(0), "B", decision="enter", call_id="c1")
-    assert fv.kill_reading(conn, "ins", as_of=_day(9), registered_from=R).n_rows == 1
-    assert fv.kill_reading(conn, "ins", as_of=_day(9), registered_from=None).n_rows == 2
+    assert fv.kill_reading(conn, "ins", as_of=_day(9), registered_from=R, until=None).n_rows == 1
+    assert fv.kill_reading(conn, "ins", as_of=_day(9), registered_from=None, until=None).n_rows == 2
     assert fv.analyst_reading(conn, as_of=_day(9), registered_from=R).n_kept == 1
+
+
+def test_a_kill_population_ends_at_until_while_outcomes_read_as_of(conn):
+    for symbol, i in (("A", 0), ("B", 2)):
+        _resting(conn, symbol, _day(i))
+        _slot(conn, _day(i), symbol, "brk20")
+        _blocked(conn, _day(i), symbol=symbol, reason="undefined")
+    _outcome(conn, _day(0), "A", "rule", "closed", strategy_id="brk20", fill_d=_day(0), exit_d=_day(5), net=1.0)
+    reading = fv.kill_reading(conn, "brk20", as_of=_day(9), registered_from=R, until=_day(1))
+    assert (reading.n_rows, reading.statuses, reading.c2.neither) == (1, {"closed": 1}, 1)
 
 
 def test_other_prompt_or_model_excluded_and_counted(conn):
