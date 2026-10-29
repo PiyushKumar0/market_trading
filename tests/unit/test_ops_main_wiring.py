@@ -2887,6 +2887,30 @@ async def test_governor_block_green_stamps_the_watermark_and_is_never_retried(
     assert planner.governor_calls == 1
 
 
+async def test_absence_markers_read_the_live_success_watermark(
+    tmp_path, monkeypatch, migrated_db_template
+) -> None:
+    """T7: the assembler's digest-ran seam and the planner's last-success seam read the catch-up
+    watermark at call time, and only a SUCCESS counts: a terminal give-up is no digest."""
+    built: dict[str, list] = {}
+    spy(monkeypatch, "ContextAssembler", built)
+    spy(monkeypatch, "PreopenPlannerJob", built)
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        ((_, asm_kw, _),) = built["ContextAssembler"]
+        ((_, job_kw, _),) = built["PreopenPlannerJob"]
+        ran, last = asm_kw["digest_ran_fn"], job_kw["last_success"]
+        catch_up, today = c.engine.catch_up, c.engine.clock.today()
+        prior = today - timedelta(days=1)
+
+        catch_up.record_run(opsmain.JOB_CATALYST_DIGEST, today, status="skipped")
+        catch_up.record_run(opsmain.JOB_EARNINGS, prior, status="failed")
+        assert (ran(today), last(opsmain.JOB_EARNINGS)) == (False, None)
+
+        catch_up.record_run(opsmain.JOB_CATALYST_DIGEST, today)
+        catch_up.record_run(opsmain.JOB_EARNINGS, prior)
+        assert (ran(today), last(opsmain.JOB_EARNINGS)) == (True, prior)
+
+
 @pytest.mark.asyncio
 async def test_harness_failure_sinks_the_watermark_and_the_sweep_retry_is_governor_gated(
     conn, clock, calendar

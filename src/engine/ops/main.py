@@ -1019,7 +1019,12 @@ async def compose(
         # `no_trade_windows` is inert until Phase 3 wires index membership (WORKLOG'd).
     )
 
-    assembler = ContextAssembler(store, conn, clock, calendar)
+    # Late-bound: ``catch_up`` is bound further down, before any job or candidate can run. Success
+    # only, never ``was_run``: a terminal give-up (``skipped``) is no digest.
+    assembler = ContextAssembler(
+        store, conn, clock, calendar,
+        digest_ran_fn=lambda d: (catch_up.last_success_date(JOB_CATALYST_DIGEST) or date.min) >= d,
+    )
     # WO-V re-review (2026-09-13): the /taken drift check judges a swing/position fill against the
     # SAME overnight_gap_mult the gate sized it on, read from the hash-verified limits at call time.
     book = RecommendationBook(
@@ -1213,7 +1218,9 @@ async def compose(
     )
     planner_job = (
         PreopenPlannerJob(store, conn, assembler, harness, agent_defs, governor, clock, calendar,
-                          notify=alert)
+                          notify=alert,
+                          # Late-bound like ``digest_ran_fn`` above.
+                          last_success=lambda job_id: catch_up.last_success_date(job_id))
         if harness is not None and "preopen_planner" in agent_defs else None
     )
     nightly_job = (

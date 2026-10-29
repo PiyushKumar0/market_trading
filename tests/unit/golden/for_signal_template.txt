@@ -1,4 +1,4 @@
-2026-10-29.2
+2026-10-29.3
 == DAY CONTEXT (stable) ==
 trading date: 2026-06-17 (Wednesday)
 day plan: {"no_trade_today":false,"regime":"trending up"}
@@ -13,7 +13,7 @@ strategy contract (brk20):
 features: {"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12} (as of 10:04)
   note: rel_volume_tod = cumulative session volume / the 20d MEDIAN cumulative volume at the SAME elapsed time — time-of-day adjusted, so 1.0 = a typical participation pace for this point of the session (read this one; null = too little 1m history to judge pace)
   note: rel_volume = cumulative session volume / 20d median FULL-DAY volume — NOT time-of-day adjusted; structurally small early in the session (~0.02-0.05 in the first minutes, ~0.2-0.4 by mid-morning on an average day)
-bars_1m last 30 (time o h l c vol, oldest first): unavailable
+bars_1m last 30 (time o h l c vol, oldest first): unavailable (no completed 1m bars this session)
   NOTE - STRUCTURAL ABSENCE, NOT A DATA FAILURE: LGEINDIA is outside the intraday tick
   watchlist, so it has no 1m bars this session and never will. The full-universe batch
   rules (brk20, hi52, ins, cat, cat_reversal) deliberately originate for eligible symbols,
@@ -41,10 +41,10 @@ bars_1d last 20 (date o h l c vol, oldest first; completed sessions through 2026
   2026-06-14 557.00 567.00 547.00 562.00 100057
   2026-06-15 558.00 568.00 548.00 563.00 100058
   2026-06-16 559.00 569.00 549.00 564.00 100059
-session: unavailable (no bars this session yet), 50m elapsed
+session: unavailable (no completed 1m bars this session), 50m elapsed
 catalyst:
   watchlist entry: none for this symbol today
-  sentiment unavailable
+  sentiment: unavailable (no sentiment digest has run)
 positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)
 sector exposure: Energy 12% of 25% cap
 cost and breakeven: notional 19600, total cost 41.20, breakeven 0.21%, edge multiple 3.1
@@ -53,5 +53,5 @@ max_qty_by_risk: 14
 risk headroom (informational - the gate re-checks everything):
   - per_trade_risk: 0.6% of 1.0%
   - daily_loss: -0.2% of -3.0%
-last price: unavailable (as of 2026-06-17T10:05:00+05:30)
+last price: unavailable (no completed 1m bars this session; context assembled at 2026-06-17T10:05:00+05:30)
 day plan age: authored 08:50 IST, 1.2h ago

@@ -272,8 +272,9 @@ async def test_a_railed_market_digest_reaches_the_planner_with_its_measure(
 
 
 # --------------------------------------------------------------------------- fail-to-zero rendering
-async def test_empty_tables_render_unavailable_without_raising(store, conn, assembler, agent_defs, clock, calendar):
-    """D7: every deterministic input on a completely empty store/conn degrades to text, never raises."""
+async def test_empty_tables_render_without_raising(store, conn, assembler, agent_defs, clock, calendar):
+    """D7: every deterministic input on a completely empty store/conn degrades to text, never raises.
+    The per-section absent/empty/present renderings are tests/unit/test_prompt_integrity.py's table."""
     harness = FakeHarness(AgentResult.Ok(call_id="c5", payload=_plan()))
     governor = FakeGovernor(allowed=True)
     job = _job(store, conn, assembler, harness, agent_defs, governor, clock, calendar)
@@ -282,15 +283,6 @@ async def test_empty_tables_render_unavailable_without_raising(store, conn, asse
 
     assert ok is AdvisoryOutcome.RAN
     volatile = harness.calls[0]["context"].volatile_block
-    # Foundational-data gaps (never even ran) => explicit "unavailable".
-    assert "overnight movers (bhavcopy):\n  - unavailable" in volatile
-    assert "catalyst digest:\n  - unavailable" in volatile
-    assert "surveillance changes:\n  - unavailable" in volatile
-    # Real, legitimate zeros (ran, found nothing) => "none", not "unavailable".
-    assert "catalyst watchlist (binding levels are the scanner's): none" in volatile
-    assert "earnings today: none" in volatile
-    assert "open positions and overnight risk: none" in volatile
-    assert "prior session's post-mortem (HISTORY, may describe already-fixed issues): none" in volatile
     # The health line renders even on an empty store (never-run is honest, not an outage claim).
     assert "platform health (current, authoritative): LLM self-test never-run" in volatile
     # The A14 gap-scan decision: never silently "none".

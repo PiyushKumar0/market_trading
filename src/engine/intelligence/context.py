@@ -18,9 +18,12 @@ Two conventions are load-bearing:
   ``Clock``/``NSECalendar`` and rendered as text. The model is never asked to compute "now", an age,
   or a TTL.
 * **Fail to zero, never fail closed (D7).** Absent data renders as an explicit "unavailable" line —
-  a missing feature snapshot, a missing day plan or an un-run sentiment digest must never raise and
-  never block a call. What the model does with a thinner context is its problem; a crash here would
-  be ours.
+  a missing feature snapshot, a missing day plan, an un-run sentiment digest or a failed read must
+  never raise and never block a call. What the model does with a thinner context is its problem; a
+  crash here would be ours.
+* **Absent is not empty (A2).** A source that is missing renders ``unavailable (<reason>)``; a source
+  that ran and found nothing renders an explicit ``none``. Rule 14 reads absent news as neutral, so
+  the two must never share wording.
 
 ``inputs_digest`` is the sha256 of the three blocks and is what gets stamped onto every proposal and
 persisted with the gzipped context (R8): the same digest means the same prompt bytes, so a decision
@@ -33,7 +36,7 @@ import hashlib
 import json
 import math
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -75,11 +78,17 @@ _WATCHLIST_KEYS = (
 )
 
 _UNAVAILABLE = "unavailable"
+_NO_HEADLINES = "none (no scored headlines in the latest digest)"
 
 
 def _json(obj: Any) -> str:
     """Compact, key-sorted JSON — same object in, same bytes out (the digest depends on it)."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _no_bars_reason(bars: Sequence[Bar] | None) -> str:
+    """Why the 1m series is empty: ``None`` is a failed read, ``[]`` a read that found nothing."""
+    return "1m bar read failed" if bars is None else "no completed 1m bars this session"
 
 
 def sentiment_rail_note(row: Mapping[str, Any]) -> str:
@@ -114,7 +123,7 @@ def sentiment_rail_note(row: Mapping[str, Any]) -> str:
 
 #: Identity of the assembler's fixed prompt wording (stable-block text, absence notes, legends, the
 #: contract framing). Bump it with any such change; tests/unit/golden/for_signal_template.txt pins it.
-PROMPT_TEMPLATE_VERSION = "2026-10-29.2"
+PROMPT_TEMPLATE_VERSION = "2026-10-29.3"
 
 
 def _digest(system_prompt: str, stable_block: str, volatile_block: str) -> str:
@@ -165,13 +174,20 @@ class ContextAssembler:
         The SQLite state connection — ``day_plans`` (§5.3) lives here, not in DuckDB.
     clock / calendar:
         The only sources of "now" and of session/trading-day facts (§3.2 no-naive-datetime).
+    digest_ran_fn:
+        Whether day ``d``'s catalyst digest has succeeded — the line between an empty watchlist
+        ("none") and an absent one ("unavailable"). ``None`` keeps "none" (tests, replay).
     """
 
-    def __init__(self, store: MarketStore, conn: sqlite3.Connection, clock: Clock, calendar: NSECalendar) -> None:
+    def __init__(
+        self, store: MarketStore, conn: sqlite3.Connection, clock: Clock, calendar: NSECalendar,
+        *, digest_ran_fn: Callable[[date], bool] | None = None,
+    ) -> None:
         self._store = store
         self._conn = conn
         self._clock = clock
         self._calendar = calendar
+        self._digest_ran_fn = digest_ran_fn
         self._regime_cache: tuple[tuple[Any, ...], str] | None = None
         self._warned_on: dict[str, date] = {}
 
@@ -206,7 +222,7 @@ class ContextAssembler:
         parts.append(f"equity: {equity}")
         parts.append(f"max_qty_by_risk: {max_qty_by_risk}")
         parts.append("risk headroom (informational - the gate re-checks everything):")
-        parts.extend(f"  - {line}" for line in headroom_lines)
+        parts.extend(f"  - {line}" for line in headroom_lines or ["none"])
         parts.append(self._ltp_line(bars))
         parts.append(self._day_plan_age_text(d))
         return AssembledContext.build(
@@ -435,19 +451,19 @@ class ContextAssembler:
         return f"trading date: {d.isoformat()} ({d.strftime('%A')})"
 
     def _day_plan_text(self, d: date) -> str:
-        """Today's ``DayPlan`` JSON from the state DB, or ``no day plan`` (§5.3; absent is normal)."""
+        """Today's ``DayPlan`` JSON from the state DB, or why it is unavailable (§5.3; absent is normal)."""
         try:
             row = self._conn.execute("SELECT payload FROM day_plans WHERE d = ?", (d.isoformat(),)).fetchone()
-        except sqlite3.OperationalError:          # table absent (pre-migration) - never blocks a call
+        except sqlite3.Error:                     # e.g. table absent (pre-migration) - never blocks a call
             _log.warning("day_plans_unavailable", d=d.isoformat())
-            return "no day plan"
+            return f"{_UNAVAILABLE} (day plan read failed)"
         if row is None or not row[0]:
-            return "no day plan"
+            return f"{_UNAVAILABLE} (no day plan for {d.isoformat()})"
         try:
             return _json(json.loads(row[0]))      # normalize whitespace: same plan, same bytes
         except json.JSONDecodeError:
             _log.warning("day_plan_unparseable", d=d.isoformat())
-            return "no day plan"
+            return f"{_UNAVAILABLE} (day plan unreadable)"
 
     # ------------------------------------------------- WO-20a: the per-strategy evaluation contract
     def _strategy_contract_text(self, strategy_id: str) -> str:
@@ -492,14 +508,20 @@ class ContextAssembler:
         without enough 1m history, and the legacy key is what remains).
         """
         if not snapshot_id:
-            return _UNAVAILABLE
-        row = self._store.get_feature_snapshot(snapshot_id)
+            return f"{_UNAVAILABLE} (no feature snapshot for this candidate)"
+        try:
+            row = self._store.get_feature_snapshot(snapshot_id)
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            self._warn_once("feature_snapshot_unavailable", self._clock.today(), exc)
+            return f"{_UNAVAILABLE} (feature read failed)"
         if row is None:
-            return _UNAVAILABLE
+            return f"{_UNAVAILABLE} (feature snapshot {snapshot_id} not found)"
         try:
             features = json.loads(row["features"])
         except (KeyError, TypeError, json.JSONDecodeError):
-            return _UNAVAILABLE
+            return f"{_UNAVAILABLE} (feature snapshot unreadable)"
+        if not features:
+            return "none (the snapshot carries no features)"
         as_of = row.get("ts")
         suffix = f" (as of {as_of.strftime('%H:%M')})" if isinstance(as_of, datetime) else ""
         note = ""
@@ -512,18 +534,23 @@ class ContextAssembler:
             )
         return f"{_json(features)}{suffix}{note}"
 
-    def _bars(self, symbol: str, d: date) -> list[Bar]:
-        """Today's completed 1m bars up to "now" (the end bound is exclusive in the store)."""
-        return self._store.get_bars_1m(
-            symbol, self._session_start(d), self._clock.now() + timedelta(minutes=1)
-        )
+    def _bars(self, symbol: str, d: date) -> list[Bar] | None:
+        """Today's completed 1m bars up to "now" (the end bound is exclusive in the store); ``None``
+        when the read fails (D7)."""
+        try:
+            return self._store.get_bars_1m(
+                symbol, self._session_start(d), self._clock.now() + timedelta(minutes=1)
+            )
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            self._warn_once("bars_1m_unavailable", d, exc)
+            return None
 
-    def _bars_text(self, bars: Sequence[Bar]) -> str:
+    def _bars_text(self, bars: Sequence[Bar] | None) -> str:
         """Trailing 1m bars, oldest first, one compact line each (§5.2 "last 30 bars summary")."""
-        tail = bars[-BAR_TAIL:]
         header = f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first):"
-        if not tail:
-            return f"{header} {_UNAVAILABLE}"
+        if not bars:
+            return f"{header} {_UNAVAILABLE} ({_no_bars_reason(bars)})"
+        tail = bars[-BAR_TAIL:]
         lines = [
             f"  {b.ts_minute.strftime('%H:%M')} {b.open} {b.high} {b.low} {b.close} {b.volume}"
             for b in tail
@@ -531,7 +558,7 @@ class ContextAssembler:
         return "\n".join([header, *lines])
 
     # ------------------------------------------------- swing daily evidence (2026-08-17 finding)
-    def _swing_daily_evidence_text(self, symbol: str, d: date, bars: Sequence[Bar]) -> str:
+    def _swing_daily_evidence_text(self, symbol: str, d: date, bars: Sequence[Bar] | None) -> str:
         """Daily-bar evidence for a ``style="swing"`` candidate — the history its rule actually fired on.
 
         WHY (2026-08-17, live): the analyst declined a 0.93-score brk20 candidate (LGEINDIA) for
@@ -554,7 +581,7 @@ class ContextAssembler:
         job is to be exactly what the scanner saw.
         """
         lines: list[str] = []
-        if not bars:
+        if bars is not None and not bars:            # a FAILED read is not the structural absence
             lines.extend(self._structural_absence_lines(symbol))
         lines.append(self._daily_bars_text(symbol, d))
         return "\n".join(lines)
@@ -606,36 +633,56 @@ class ContextAssembler:
     def _catalyst_text(self, symbol: str, d: date) -> str:
         """Watchlist entry for the symbol (if any) + symbol/sector/market sentiment (§2.7/§5.2).
 
-        Present for every `cat` candidate and for any candidate whose symbol has an entry today. An
-        un-run or empty digest is marked ``sentiment unavailable`` (D7) — never an error, never a
-        zero standing in for "no signal". The header carries the block's as-of stamp (WO-6 ii): the
-        sentiment digest's last run time, the only genuinely-timestamped input this block has.
+        Present for every `cat` candidate and for any candidate whose symbol has an entry today. A
+        digest that never ran, or a failed read, is ``unavailable`` (D7); a digest that ran without
+        this symbol is ``none`` (A2) — never an error, never a zero standing in for "no signal". The
+        header carries the block's as-of stamp (WO-6 ii): the sentiment digest's last run time, the
+        only genuinely-timestamped input this block has.
         """
-        as_of = self._store.latest_sentiment_as_of()
+        as_of, sentiment = self._sentiment_lines(symbol, d)
         header = "catalyst:" if as_of is None else f"catalyst (sentiment as of {as_of.strftime('%H:%M')}):"
-        lines = [header]
-        entries = [e for e in self._store.get_catalyst_watchlist(d) if e.get("symbol") == symbol]
-        if entries:
-            for entry in entries:
-                shown = {k: entry.get(k) for k in _WATCHLIST_KEYS if entry.get(k) is not None}
-                lines.append(f"  watchlist entry: {_json(shown)}")
-        else:
-            lines.append("  watchlist entry: none for this symbol today")
+        return "\n".join([header, *self._watchlist_lines(symbol, d), *sentiment])
 
-        if as_of is None:
-            lines.append(f"  sentiment {_UNAVAILABLE}")
-            return "\n".join(lines)
-        # The FULL row, not just ``value``: the rail line renders raw_sum/n_clusters when the digest
-        # measured them (WO-22).
-        agg = {(r["scope"], r["scope_key"]): r for r in self._store.get_sentiment_agg(as_of)}
-        sector = self._sector_of(symbol, d)
-        lines.append(self._sentiment_line(f"symbol {symbol}", agg.get(("symbol", symbol))))
+    def _watchlist_lines(self, symbol: str, d: date) -> list[str]:
+        """The symbol's watchlist entries; with none, ``none`` only once today's digest has run (a
+        watchlist row for any symbol proves it did)."""
+        try:
+            rows = self._store.get_catalyst_watchlist(d)
+            entries = [e for e in rows if e.get("symbol") == symbol]
+            if entries:
+                return [
+                    "  watchlist entry: "
+                    + _json({k: e.get(k) for k in _WATCHLIST_KEYS if e.get(k) is not None})
+                    for e in entries
+                ]
+            ran = bool(rows) or self._digest_ran_fn is None or self._digest_ran_fn(d)
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            self._warn_once("catalyst_watchlist_unavailable", d, exc)
+            return [f"  watchlist entry: {_UNAVAILABLE} (watchlist read failed)"]
+        if not ran:
+            return [f"  watchlist entry: {_UNAVAILABLE} (today's catalyst digest has not run)"]
+        return ["  watchlist entry: none for this symbol today"]
+
+    def _sentiment_lines(self, symbol: str, d: date) -> tuple[datetime | None, list[str]]:
+        """``(latest digest run time, the symbol/sector/market lines)``."""
+        try:
+            as_of = self._store.latest_sentiment_as_of()
+            if as_of is None:
+                return None, [f"  sentiment: {_UNAVAILABLE} (no sentiment digest has run)"]
+            # The FULL row, not just ``value``: the rail line renders raw_sum/n_clusters when the
+            # digest measured them (WO-22).
+            agg = {(r["scope"], r["scope_key"]): r for r in self._store.get_sentiment_agg(as_of)}
+            sector = self._sector_of(symbol, d)
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            self._warn_once("sentiment_unavailable", d, exc)
+            return None, [f"  sentiment: {_UNAVAILABLE} (sentiment read failed)"]
+        lines = [self._sentiment_line(f"symbol {symbol}", agg.get(("symbol", symbol)))]
         if sector is None:
             lines.append(f"  sentiment sector: {_UNAVAILABLE} (sector unknown for this symbol)")
         else:
             lines.append(self._sentiment_line(f"sector {sector}", agg.get(("sector", sector))))
         lines.append(self._sentiment_line("market", agg.get(("market", "market"))))
-        return "\n".join(lines)
+        return as_of, lines
 
     def _sentiment_line(self, label: str, row: Mapping[str, Any] | None) -> str:
         """One sentiment scope's line, with the RAIL labelled for what it is (WO-20c, 2026-08-20).
@@ -656,15 +703,20 @@ class ContextAssembler:
         The note itself is :func:`sentiment_rail_note` (2026-09-04) — shared with the pre-open
         planner's digest lines, which until then rendered the bare value and read the rail as a
         regime.
+
+        No row means the digest ran and scored no headline for this scope: ``none``, not absence.
         """
         if row is None or row.get("value") is None:
-            return f"  sentiment {label}: {_UNAVAILABLE}"
+            return f"  sentiment {label}: {_NO_HEADLINES}"
         return f"  sentiment {label}: {float(row['value']):+.3f}{sentiment_rail_note(row)}"
 
-    def _ltp_line(self, bars: Sequence[Bar]) -> str:
+    def _ltp_line(self, bars: Sequence[Bar] | None) -> str:
         """Precomputed as-of text: engine "now" plus the last completed bar (§3.2 — never the model's)."""
         if not bars:
-            return f"last price: {_UNAVAILABLE} (as of {self._clock.now().isoformat()})"
+            return (
+                f"last price: {_UNAVAILABLE} ({_no_bars_reason(bars)}; context assembled at "
+                f"{self._clock.now().isoformat()})"
+            )
         last = bars[-1]
         return (
             f"last price: {last.close} at {last.ts_minute.strftime('%H:%M')} (last completed 1m bar; "
@@ -672,7 +724,7 @@ class ContextAssembler:
         )
 
     # ------------------------------------------------------------------ WO-6: session-scale + staleness
-    def _session_aggregates_text(self, d: date, bars: Sequence[Bar]) -> str:
+    def _session_aggregates_text(self, d: date, bars: Sequence[Bar] | None) -> str:
         """Day H/L, %-from-open, %-from-VWAP, session elapsed minutes (WO-6 i) — VOLATILE only.
 
         Computed over EVERY bar of the session fetched so far (``bars``, not the display-capped
@@ -686,7 +738,7 @@ class ContextAssembler:
         """
         elapsed_min = max(int((self._clock.now() - self._session_start(d)).total_seconds() // 60), 0)
         if not bars:
-            return f"session: {_UNAVAILABLE} (no bars this session yet), {elapsed_min}m elapsed"
+            return f"session: {_UNAVAILABLE} ({_no_bars_reason(bars)}), {elapsed_min}m elapsed"
         highs = [float(b.high) for b in bars]
         lows = [float(b.low) for b in bars]
         closes = [float(b.close) for b in bars]
@@ -714,7 +766,7 @@ class ContextAssembler:
             row = self._conn.execute(
                 "SELECT created_at FROM day_plans WHERE d = ?", (d.isoformat(),)
             ).fetchone()
-        except sqlite3.OperationalError:          # table absent (pre-migration) - never blocks a call
+        except sqlite3.Error:                     # e.g. table absent (pre-migration) - never blocks a call
             return "day plan age: unavailable (no day plan)"
         if row is None or not row[0]:
             return "day plan age: unavailable (no day plan)"

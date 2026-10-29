@@ -8,12 +8,14 @@ or a trade; deterministic scanners and the risk gate keep doing that (§5.3 cata
 **Planner death never blocks anything (§2.7).** The scanner path is planner-independent: a blocked
 governor, a harness failure, or thin/empty upstream tables all resolve to a non-``RAN``
 :class:`~engine.ops.jobs.AdvisoryOutcome` and no ``day_plans`` row — never an exception. The
-intraday context assembler already renders an absent plan as ``"no day plan"``
+intraday context assembler already renders an absent plan as ``unavailable``
 (``ContextAssembler._day_plan_text``), so a missing plan degrades the day's intraday prompts, not
 the engine. WO-14 (c) is why the return is a tri-state rather than the original ``bool``: the
 watermark must retry a harness failure and must NOT retry a governor block.
 
-Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-zero):
+Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-zero). Absent is
+not empty (A2): a missing source renders ``unavailable (<reason>)``, a source that ran and found
+nothing renders ``none``, and a failed read renders ``unavailable`` without raising.
 
 - **movers** — top 10 by ``|1-day return|`` across the PRIOR trading day's included universe, from
   ``bars_1d`` (prior trading day vs the one before it — never ``d`` itself, which has not opened
@@ -22,10 +24,10 @@ Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-
 - **digest_lines** — market + top-5 sector sentiment rows from the latest ``sentiment_agg`` run.
   ``unavailable`` only when the digest has NEVER run (``latest_sentiment_as_of() is None``) — the
   same convention :meth:`ContextAssembler._catalyst_text` already uses for the per-symbol block.
-- **watchlist_lines** / **earnings_today** — rendered rows for ``d``. An empty result here is a
-  real, common zero (no catalysts graded today / no results today), so it renders as "none" via
-  ``ContextAssembler._section``, never "unavailable" — mirrors the existing per-symbol watchlist
-  convention ("none for this symbol today") rather than treating every empty query as an outage.
+- **watchlist_lines** / **earnings_today** — rendered rows for ``d``. Empty is a real, common zero
+  ("none") only when the producing job has succeeded per the catch-up watermark (``last_success``):
+  the catalyst digest for ``d``, the earnings calendar within :data:`EARNINGS_FRESH_SESSIONS`
+  sessions. Otherwise the section is ``unavailable``. Unwired (``None``) keeps "none".
 - **surveillance_changes** — today's ``universe_daily`` rows with ``exclusion_reasons``.
   ``unavailable`` only when the universe build never ran for ``d`` (zero rows at all); an empty
   EXCLUSION set with rows present is a real "no changes today" zero.
@@ -34,8 +36,8 @@ Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-
   §3.6 holdings journal has seen UNHELD on two consecutive observation days is excluded from this
   line and rendered in its own "SOLD OUTSIDE THE LEDGER" block instead — the plan must not reason
   about the overnight risk of a position the owner already sold (eleven plans did, 08-26 → 09-11).
-- **yesterday_review_summary** — latest ``nightly_reviews.payload["summary"]``, else "none" ("none"
-  only when no review has been recorded yet: a fresh DB, or every prior review failed or was governor-blocked).
+- **yesterday_review_summary** — latest ``nightly_reviews.payload["summary"]``; ``unavailable`` when
+  no review has been recorded yet (a fresh DB, or every prior review failed or was governor-blocked).
 
 **No pre-open gap-scan (decision).** The plan row (§5.3) still lists "gap scan vs prior close" as a
 context input and :meth:`ContextAssembler.for_planner` still accepts a ``gap_lines`` parameter, but
@@ -71,7 +73,7 @@ from engine.ops.holdings_reconcile import (
     entry_rec_id,
     positions_missing_from_holdings,
 )
-from engine.ops.jobs import AdvisoryOutcome
+from engine.ops.jobs import JOB_CATALYST_DIGEST, JOB_EARNINGS, AdvisoryOutcome
 from engine.strategy.scanners import brk20
 
 _log = get_logger("engine.ops.preopen_planner")
@@ -81,8 +83,13 @@ _log = get_logger("engine.ops.preopen_planner")
 CALL_CLASS = "schedule"
 
 _UNAVAILABLE = "unavailable"
+_NO_PRIOR_SESSION = f"{_UNAVAILABLE} (no prior trading day in the calendar)"
 MOVERS_TOP_N = 10
 SECTOR_TOP_N = 5
+
+#: Sessions an earnings-calendar refresh stays current: an empty day reads "none" only while the
+#: last successful refresh is no older than the 3rd session before ``d``.
+EARNINGS_FRESH_SESSIONS = 3
 
 #: Heading for the WO-D2 "sold outside the ledger" block. The whole positions summary is rendered as
 #: ONE prompt item by the assembler, so this line is the only thing separating the two groups inside
@@ -115,6 +122,10 @@ _GAP_SCAN_LINE = (
 AlertCallback = Callable[[str, str], Awaitable[None]]
 
 
+def _read_failed(section: str) -> str:
+    return f"{_UNAVAILABLE} ({section} read failed)"
+
+
 class PreopenPlannerJob:
     """§5.3: assemble the pre-open context, call the planner agent, persist one ``day_plans`` row.
 
@@ -132,6 +143,9 @@ class PreopenPlannerJob:
     notify:
         Optional owner-alert callback for a failed run (§5.3 step 3). The scanner path never waits
         on it — a `None` notify simply means the failure is logged, not additionally alerted.
+    last_success:
+        ``job_id -> last successful run_for date`` (the catch-up watermark): decides whether an
+        empty watchlist or earnings section is "none" or "unavailable". ``None`` keeps "none".
     """
 
     def __init__(
@@ -146,6 +160,7 @@ class PreopenPlannerJob:
         calendar: NSECalendar,
         *,
         notify: AlertCallback | None = None,
+        last_success: Callable[[str], date | None] | None = None,
     ) -> None:
         agent_def = agent_defs.get(preopen.AGENT_ID)
         if agent_def is None:
@@ -162,6 +177,7 @@ class PreopenPlannerJob:
         self._clock = clock
         self._calendar = calendar
         self._notify = notify
+        self._last_success = last_success
 
     # ------------------------------------------------------------------ run (§5.3)
     async def run(self, d: date) -> AdvisoryOutcome:
@@ -183,16 +199,16 @@ class PreopenPlannerJob:
 
         actx = self._assembler.for_planner(
             d,
-            movers_lines=self._movers_lines(d),
-            breakout_lines=self._breakout_lines(d),
+            movers_lines=self._guarded(lambda: self._movers_lines(d), [_read_failed("movers")]),
+            breakout_lines=self._guarded(lambda: self._breakout_lines(d), [_read_failed("breakouts")]),
             gap_lines=[_GAP_SCAN_LINE],
-            digest_lines=self._digest_lines(),
-            watchlist_lines=self._watchlist_lines(d),
-            earnings_today=self._earnings_lines(d),
-            surveillance_changes=self._surveillance_lines(d),
-            open_positions_summary=self._positions_summary(d),
-            yesterday_review_summary=self._yesterday_review_summary(),
-            platform_health=self._platform_health_line(d),
+            digest_lines=self._guarded(self._digest_lines, [_read_failed("digest")]),
+            watchlist_lines=self._guarded(lambda: self._watchlist_lines(d), [_read_failed("watchlist")]),
+            earnings_today=self._guarded(lambda: self._earnings_lines(d), [_read_failed("earnings calendar")]),
+            surveillance_changes=self._guarded(lambda: self._surveillance_lines(d), [_read_failed("surveillance")]),
+            open_positions_summary=self._guarded(lambda: self._positions_summary(d), _read_failed("positions")),
+            yesterday_review_summary=self._guarded(self._yesterday_review_summary, _read_failed("nightly review")),
+            platform_health=self._guarded(lambda: self._platform_health_line(d), _read_failed("platform health")),
         )
         result = await self._harness.run_single_shot(
             self._def,
@@ -219,16 +235,25 @@ class PreopenPlannerJob:
         _log.info("preopen_planner_ran", d=d.isoformat(), call_id=result.call_id, focus=len(plan.focus))
         return AdvisoryOutcome.RAN
 
+    def _guarded[T](self, build: Callable[[], T], failed: T) -> T:
+        """D7: a failed read renders ``failed`` and never raises into the prompt build."""
+        try:
+            return build()
+        except Exception as exc:                         # noqa: BLE001 - one input's failure never blocks the plan
+            _log.warning("preopen_input_unavailable", fallback=str(failed),
+                         error=f"{type(exc).__name__}: {str(exc)[:200]}")
+            return failed
+
     # ------------------------------------------------------------------ movers (§5.3 "overnight movers")
     def _movers_lines(self, d: date) -> list[str]:
         """Top-|return| movers, prior trading day vs the one before it — never ``d`` (unopened)."""
         d1 = self._prior_trading_day(d)
         d2 = self._prior_trading_day(d1) if d1 is not None else None
         if d1 is None or d2 is None:
-            return [_UNAVAILABLE]
+            return [_NO_PRIOR_SESSION]
         universe = {row["symbol"] for row in self._store.get_universe_daily(d1, included_only=True)}
         if not universe:
-            return [_UNAVAILABLE]
+            return [f"{_UNAVAILABLE} (no universe for {d1.isoformat()})"]
         bars_d1 = {b.symbol: b for b in self._store.get_bars_1d_for_day(d1) if b.symbol in universe}
         bars_d2 = {b.symbol: b for b in self._store.get_bars_1d_for_day(d2)}
         movers: list[tuple[str, Decimal]] = []
@@ -238,7 +263,7 @@ class PreopenPlannerJob:
                 continue
             movers.append((symbol, (bar1.close - bar2.close) / bar2.close))
         if not movers:
-            return [_UNAVAILABLE]
+            return [f"{_UNAVAILABLE} (no symbol has daily bars for both {d2.isoformat()} and {d1.isoformat()})"]
         movers.sort(key=lambda item: abs(item[1]), reverse=True)
         return [f"{symbol} {ret:+.2%}" for symbol, ret in movers[:MOVERS_TOP_N]]
 
@@ -269,18 +294,25 @@ class PreopenPlannerJob:
         included = {r["symbol"] for r in rows if r["included"]}
         eligible = self._store.get_batch_universe_symbols(d)
         if not eligible:
-            return [_UNAVAILABLE]
+            return [f"{_UNAVAILABLE} (no batch universe for {d.isoformat()})"]
+        d1 = self._prior_trading_day(d)
+        if d1 is None:
+            return [_NO_PRIOR_SESSION]
         yesterday = d - timedelta(days=1)
         histories: dict[str, list[brk20.DailyRow]] = {}
+        last_days: set[date] = set()
         for sym in eligible:
             frame = self._store.get_bars_1d_frame(sym, d - timedelta(days=70), yesterday)
             if len(frame):
+                last_days.add(frame.index[-1].date())
                 histories[sym] = [
                     brk20.DailyRow(high=float(h), close=float(c), volume=float(v), open=float(o))
                     for h, c, v, o in zip(
                         frame["high"], frame["close"], frame["volume"], frame["open"]
                     )
                 ]
+        if d1 not in last_days:             # the prior session's bars are missing, not breakout-free
+            return [f"{_UNAVAILABLE} (no completed daily bars for {d1.isoformat()})"]
         ex_map: dict[str, list[date]] = {}
         for row in self._store.get_corp_actions(
             ex_from=d, ex_to=d + timedelta(days=int(brk20.DEFAULT_PARAMS["ex_skip_days"]))
@@ -311,7 +343,7 @@ class PreopenPlannerJob:
         risk-off frame — from raw −9.48 across 759 clusters, i.e. neutral flow."""
         as_of = self._store.latest_sentiment_as_of()
         if as_of is None:
-            return [_UNAVAILABLE]
+            return [f"{_UNAVAILABLE} (no sentiment digest has run)"]
         rows = self._store.get_sentiment_agg(as_of)
         lines: list[str] = []
         market = next((r for r in rows if r.get("scope") == "market"), None)
@@ -326,22 +358,40 @@ class PreopenPlannerJob:
             f"sector {r['scope_key']}: {r['value']:+.3f}{sentiment_rail_note(r)}"
             for r in sectors[:SECTOR_TOP_N]
         )
-        return lines or [_UNAVAILABLE]
+        return lines or ["none (the latest digest scored no market or sector headlines)"]
 
     # ------------------------------------------------------------------ watchlist (§2.7 step 5(ii))
     def _watchlist_lines(self, d: date) -> list[str]:
         """Graded watchlist rows for ``d``: symbol, grade, event_type (no price levels: the v1 cat
-        levels are retired). An empty watchlist is a real "no catalysts today" zero, not an outage —
-        renders "none" via ``ContextAssembler._section``."""
-        return [
+        levels are retired). Empty renders "none" via ``ContextAssembler._section`` only once ``d``'s
+        digest has succeeded; before that the watchlist is absent, not empty."""
+        rows = [
             f"{row.get('symbol')} {row.get('grade')} {row.get('event_type')}"
             for row in self._store.get_catalyst_watchlist(d)
         ]
+        if rows or self._last_success is None:
+            return rows
+        last = self._last_success(JOB_CATALYST_DIGEST)
+        if last is not None and last >= d:
+            return []
+        return [f"{_UNAVAILABLE} (catalyst digest has not run for {d.isoformat()})"]
 
     # ------------------------------------------------------------------ earnings today
     def _earnings_lines(self, d: date) -> list[str]:
-        """Earnings-calendar rows for ``d``. No earnings today is a real zero, not an outage."""
-        return [f"{row['symbol']} ({row.get('kind', 'results')})" for row in self._store.get_earnings_calendar(d, d)]
+        """Earnings-calendar rows for ``d``. Empty is "none" only while the calendar's last
+        successful refresh is within :data:`EARNINGS_FRESH_SESSIONS` sessions of ``d``."""
+        rows = [
+            f"{row['symbol']} ({row.get('kind', 'results')})" for row in self._store.get_earnings_calendar(d, d)
+        ]
+        if rows or self._last_success is None:
+            return rows
+        last = self._last_success(JOB_EARNINGS)
+        floor: date | None = d
+        for _ in range(EARNINGS_FRESH_SESSIONS):
+            floor = self._prior_trading_day(floor) if floor is not None else None
+        if last is not None and floor is not None and last >= floor:
+            return []
+        return [f"{_UNAVAILABLE} (earnings calendar not refreshed since {last.isoformat() if last else 'never'})"]
 
     # ------------------------------------------------------------------ surveillance changes (A8)
     def _surveillance_lines(self, d: date) -> list[str]:
@@ -355,7 +405,7 @@ class PreopenPlannerJob:
         """
         rows = self._store.get_universe_daily(d)
         if not rows:
-            return [_UNAVAILABLE]
+            return [f"{_UNAVAILABLE} (universe build has not run for {d.isoformat()})"]
         lines: list[str] = []
         for row in rows:
             reasons = [r for r in (row.get("exclusion_reasons") or []) if str(r).startswith("surveillance_")]
@@ -442,21 +492,25 @@ class PreopenPlannerJob:
 
     # ------------------------------------------------------------------ yesterday's review (§5.5)
     def _yesterday_review_summary(self) -> str:
-        """Latest ``nightly_reviews.payload["summary"]`` prefixed with ITS session date; "none" when
-        absent. The date label matters (2026-07-30): an unlabeled post-mortem of an already-fixed
-        incident was escalated by the planner into a present-tense platform outage."""
+        """Latest ``nightly_reviews.payload["summary"]`` prefixed with ITS session date. No review
+        recorded yet (a fresh DB, or every prior review failed or was governor-blocked) is
+        ``unavailable``; a review without a summary is ``none``. The date label matters
+        (2026-07-30): an unlabeled post-mortem of an already-fixed incident was escalated by the
+        planner into a present-tense platform outage."""
         row = self._conn.execute(
             "SELECT d, payload FROM nightly_reviews ORDER BY d DESC LIMIT 1"
         ).fetchone()
         if row is None:
-            return "none"
+            return f"{_UNAVAILABLE} (no nightly review recorded)"
         try:
             payload: Any = json.loads(row["payload"])
         except (TypeError, json.JSONDecodeError):
-            return "none"
-        summary = payload.get("summary") if isinstance(payload, dict) else None
+            payload = None
+        if not isinstance(payload, dict):
+            return f"{_UNAVAILABLE} (the {row['d']} review is unreadable)"
+        summary = payload.get("summary")
         if not (isinstance(summary, str) and summary.strip()):
-            return "none"
+            return f"none (the {row['d']} review has no summary)"
         return f"[review of the {row['d']} session] {summary}"
 
     def _platform_health_line(self, d: date) -> str:

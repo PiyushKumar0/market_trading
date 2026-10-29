@@ -284,11 +284,6 @@ def test_day_plan_is_read_into_the_stable_block(assembler, conn):
     assert "trading date: 2026-06-17 (Wednesday)" in ctx.stable_block
 
 
-def test_absent_day_plan_renders_as_text_not_an_error(assembler):
-    ctx = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
-    assert "day plan: no day plan" in ctx.stable_block
-
-
 def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
     """WO-6 hard constraint: the day-plan-age line renders in VOLATILE only. Pins the exact literal
     STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
@@ -429,19 +424,6 @@ def test_bar_tail_is_capped_and_ordered_oldest_first(assembler, store):
     assert "last price: 1449.50 at 10:04" in v            # precomputed, never the model's arithmetic
 
 
-def test_missing_features_and_bars_render_unavailable(assembler, store):
-    """D7 fail-to-zero: a thin context is still a legal call; a raising assembler is not."""
-    bare = CANDIDATE.model_copy(update={"features_snapshot_id": None, "symbol": "NOBARS"})
-    v = assembler.for_signal(bare, **SIGNAL_KW).volatile_block
-
-    assert "features: unavailable" in v
-    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in v
-    assert "last price: unavailable" in v
-    # WO-6 (i): no bars -> session stats unavailable, never fabricated; elapsed minutes still render
-    # (it needs only Clock/NSECalendar, not bars, so D7 fail-to-zero applies to the price stats alone).
-    assert "session: unavailable (no bars this session yet), 50m elapsed" in v
-
-
 def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     seed_bars(store)
     seed_catalyst(store)
@@ -457,15 +439,6 @@ def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     # WO-6 (ii): the catalyst block's as-of stamp is the sentiment digest's last run time (08:35,
     # seed_catalyst) — the only genuinely-timestamped input this block has.
     assert "catalyst (sentiment as of 08:35):" in v
-
-
-def test_sentiment_unavailable_when_the_digest_has_not_run(assembler, store):
-    """§5.4 failure mode: analyst down ⇒ no scores ⇒ the context says so (never a 0.0 standing in)."""
-    seed_bars(store)
-    v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
-
-    assert "sentiment unavailable" in v
-    assert "watchlist entry: none for this symbol today" in v
 
 
 # --------------------------------------------------------------------------- WO-6: session + staleness
@@ -585,15 +558,6 @@ def test_planner_context_uses_the_preopen_prompt_and_carries_its_inputs(assemble
     assert "binding levels are the scanner's" in ctx.volatile_block
 
 
-def test_planner_empty_sections_render_as_none(assembler):
-    ctx = assembler.for_planner(
-        TODAY, movers_lines=[], gap_lines=[], digest_lines=[], watchlist_lines=[],
-        earnings_today=[], surveillance_changes=[], open_positions_summary="none",
-        yesterday_review_summary="none",
-    )
-    assert "earnings today: none" in ctx.volatile_block
-
-
 # --------------------------------------------------------------------------- news batch (§5.4)
 def _clusters(n: int) -> list[dict]:
     return [
@@ -664,7 +628,10 @@ def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_ta
     lines = v.splitlines()
 
     # The 1m tail still says unavailable — but is no longer bare.
-    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in lines
+    assert (
+        f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable "
+        "(no completed 1m bars this session)"
+    ) in lines
     assert f"  NOTE - {STRUCTURAL_MARKER}: {UNWATCHED} is outside the intraday tick" in lines
     assert "  watchlist, so it has no 1m bars this session and never will. The full-universe batch" in lines
     assert "  rules (brk20, hi52, ins, cat, cat_reversal) deliberately originate for eligible symbols," in lines
@@ -695,27 +662,13 @@ def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_ta
     assert bars_1m_at < note_at < head < session_at
 
 
-def test_swing_candidate_without_daily_history_renders_text_not_an_error(assembler, store):
-    """(b) D7 fail-to-zero: no 1m bars AND no daily bars is a thin call, never a raised one."""
-    v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
-
-    assert f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable" in v
-    assert STRUCTURAL_MARKER in v
-    assert (
-        "bars_1d last 20 (date o h l c vol, oldest first; completed sessions through 2026-06-16): "
-        "unavailable (no completed daily bars in the last 45 calendar days)"
-    ) in v
+# (b) no daily history / a failed daily read: tests/unit/test_prompt_integrity.py's swing_daily rows.
 
 
-def test_swing_daily_read_failure_renders_unavailable_and_never_raises(assembler, store, monkeypatch):
-    """D7: the daily read is wrapped — a store blow-up costs the call its daily tail, not the call."""
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("duckdb is having a day")
-
-    monkeypatch.setattr(store, "get_bars_1d", boom)
-    v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
-
-    assert f"{DAILY_HEADER} unavailable (daily-bar read failed)" in v
+def test_a_failed_1m_read_is_not_labelled_a_structural_absence(assembler, store, monkeypatch):
+    """The note asserts "not a data failure"; after a failed read that would be false."""
+    monkeypatch.setattr(store, "get_bars_1m", _boom)
+    assert STRUCTURAL_MARKER not in assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
 
 
 def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(assembler, store):
@@ -954,7 +907,9 @@ def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
     absent makes no difference off the rail."""
     assert assembler._sentiment_line("market", {"value": 0.5}) == "  sentiment market: +0.500"
     assert assembler._sentiment_line("market", {"value": -0.998}) == "  sentiment market: -0.998"
-    assert assembler._sentiment_line("market", None) == "  sentiment market: unavailable"
+    assert assembler._sentiment_line("market", None) == (
+        "  sentiment market: none (no scored headlines in the latest digest)"
+    )
     measured = {"value": 0.5, "raw_sum": 0.5, "n_clusters": 3}
     assert assembler._sentiment_line("market", measured) == "  sentiment market: +0.500"
 
