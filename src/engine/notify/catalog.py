@@ -11,10 +11,9 @@ warning, daily/weekly summary, startup/recovery report, trade-window changed, lo
 feed-stale, REC_FILL_SUSPECTED.
 
 Plan citations per kind are documented on the :class:`MessageKind` members and on each helper.
-Load-bearing detail captured here (so the bot layer stays dumb): the ``reply_keyboard`` one-tap
-confirm hint for the §3.6 ``REC_FILL_SUSPECTED`` prompt is pre-filled with the exact ``/taken``
-command (``/taken`` is also the action behind that one-tap confirm — §3.2.11/§3.6), and ``data``
-carries the structured fields the bot/audit log persists alongside the rendered text (R8).
+Load-bearing detail captured here (so the bot layer stays dumb): ``buttons`` carry the exact owner
+command each tap runs (an entry card's six ``/veto <rec_id> <reason>`` skips), and ``data`` carries
+the structured fields the bot/audit log persists alongside the rendered text (R8).
 """
 
 from __future__ import annotations
@@ -240,10 +239,10 @@ class CatalogMessage(BaseModel):
 
     ``title``/``body`` are presentation text; ``data`` carries the structured fields persisted to the
     notification/audit log (R8) and used by tests, so callers must not bury load-bearing values
-    (ids, prices, rule names) in the prose only. ``reply_keyboard`` is an optional one-tap-confirm
-    hint: a list of button rows, each button a ``{"text": <label>, "command": <bot command>}`` dict
-    the bot layer turns into its reply-keyboard widget (e.g. the §3.6 ``REC_FILL_SUSPECTED`` /taken
-    button). Pure data — no Telegram types leak in here.
+    (ids, prices, rule names) in the prose only. ``buttons`` are optional inline button rows, each
+    button a ``{"text": <label>, "command": <bot command>}`` dict; the command is the button's
+    callback data, so it must fit Telegram's 64 bytes, and the bot runs it on tap only when its verb
+    is allow-listed. Pure data — no Telegram types leak in here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -253,7 +252,7 @@ class CatalogMessage(BaseModel):
     body: str = Field(min_length=1)
     severity: Severity = "info"
     data: dict[str, Any] = Field(default_factory=dict)
-    reply_keyboard: list[list[dict[str, str]]] | None = None
+    buttons: list[list[dict[str, str]]] | None = None
     dedupe_key: str | None = None
     """Journal-level idempotency key: a second send with the same key is dropped, not delivered."""
 
@@ -261,8 +260,8 @@ class CatalogMessage(BaseModel):
         """Owner-facing plain-text rendering consumed by ``TelegramBot.send`` (§3.2.11).
 
         Presentation only: a severity-glyphed ``title`` line followed by ``body``. The structured
-        ``data`` / ``reply_keyboard`` are transport & audit concerns and are deliberately NOT dumped
-        into the owner's message — leaking the raw model (``kind=… data={…} reply_keyboard=None``) is
+        ``data`` / ``buttons`` are transport & audit concerns and are deliberately NOT dumped
+        into the owner's message — leaking the raw model (``kind=… data={…} buttons=None``) is
         exactly the bug this method exists to prevent (``send`` used to fall back to ``str(model)``).
         """
         glyph = _SEVERITY_GLYPH.get(self.severity, "")
@@ -459,7 +458,8 @@ def rec_fill_suspected(
         severity="warning",
         data={"rec_id": rec_id, "symbol": symbol, "qty": qty, "price": price_s},
         # One-tap confirm: the button command is the literal /taken the bot will execute (§3.6).
-        reply_keyboard=[
+        # Not tappable yet: ``taken`` joins the bot's button allow-list when this gets a caller.
+        buttons=[
             [{"text": f"✓ /taken {symbol} {qty}@{price_s}", "command": f"/taken {rec_id} {qty} {price_s}"}],
             # /veto is the rec-dismiss command (§3.6); /reject resolves owner_approvals rows.
             [{"text": "✗ No action", "command": f"/veto {rec_id}"}],
@@ -467,8 +467,21 @@ def rec_fill_suspected(
     )
 
 
+#: Recs on the reminder that get skip buttons; the rest keep only their typed ``/veto`` line.
+REMINDER_BUTTON_RECS = 4
+
+
+def _veto_buttons(rec_id: str, label: str) -> list[list[dict[str, str]]]:
+    """Two rows of three one-tap skips, one per ``/veto`` reason."""
+    from engine.notify.telegram import VETO_REASONS  # telegram imports this module
+
+    buttons = [{"text": f"{label}: {r}", "command": f"/veto {rec_id} {r}"} for r in VETO_REASONS]
+    return [buttons[:3], buttons[3:]]
+
+
 def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
-    """Expired recommendations still undecided: one ``/veto`` line each, with no default reason."""
+    """Expired recommendations still undecided: one ``/veto`` line each, with no default reason, and
+    skip buttons labelled by symbol for the first :data:`REMINDER_BUTTON_RECS`."""
     from engine.notify.telegram import VETO_REASONS  # telegram imports this module
 
     codes = "|".join(VETO_REASONS)
@@ -486,6 +499,8 @@ def rec_decision_reminder(rows: list[dict[str, Any]]) -> CatalogMessage:
         title="Expired recommendations awaiting your reason",
         body="\n".join(lines),
         data={"rec_ids": [r["rec_id"] for r in rows]},
+        buttons=[row for r in rows[:REMINDER_BUTTON_RECS]
+                 for row in _veto_buttons(r["rec_id"], r["instrument"])] or None,
     )
 
 
@@ -540,7 +555,7 @@ def position_not_in_holdings(
     ``position_id`` instead — an un-actionable-but-explicit page beats silence, which is the
     eleven-session limbo this check was built to end.
 
-    No ``reply_keyboard``: unlike ``REC_FILL_SUSPECTED``, the platform does not know the exit price —
+    No ``buttons``: unlike ``REC_FILL_SUSPECTED``, the platform does not know the exit price —
     it is the owner's fact (§6.5) — so a one-tap button would have to invent one.
     """
     reply = (
@@ -1254,12 +1269,8 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
             "breakeven_pct": str(rec.cost.breakeven_pct),
             "valid_until": rec.valid_until.isoformat(),
         },
-        # One-tap outcome capture (§3.6): the owner confirms the fill with the observed qty/price.
-        # Keyed on the INSTRUMENT since WO-29, so this hint and the rendered footer prefill the same
-        # command — a keyboard that still handed back a rec_id would reintroduce the exact defect the
-        # footer exists to close, on the day someone finally wires the widget.
-        reply_keyboard=[[{"text": f"✓ /taken {rec.instrument}",
-                          "command": f"/taken {rec.instrument} {rec.qty} "}]],
+        # A fill needs the owner's price, so /taken stays typed; a skip is one tap.
+        buttons=_veto_buttons(rec.rec_id, "skip") if rec.kind == "entry" else None,
     )
 
 

@@ -159,7 +159,7 @@ class _Transport:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
         self.sent.append(text)
 
 

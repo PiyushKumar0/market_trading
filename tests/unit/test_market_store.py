@@ -924,7 +924,7 @@ def test_new_catalog_messages_shapes():
     for msg, kind, severity in cases:
         assert msg.kind == kind and msg.severity == severity
         rendered = msg.render()
-        for leak in ("kind=", "data={", "reply_keyboard=", "MessageKind."):
+        for leak in ("kind=", "data={", "buttons=", "MessageKind."):
             assert leak not in rendered                     # no raw-model leak into owner prose (R8)
         assert msg.data                                     # structured fields preserved for audit
 

@@ -16,6 +16,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,7 +31,7 @@ from engine.intelligence.events import TOPIC_BUDGET_STATE, BudgetStateChanged
 from engine.intelligence.governor import BudgetGovernor
 from engine.notify import catalog
 from engine.notify.catalog import MessageKind
-from engine.notify.telegram import _USAGE_VETO, VETO_REASONS, TelegramBot, _owner_only
+from engine.notify.telegram import _USAGE_VETO, VETO_REASONS, TelegramBot, _inline_markup, _owner_only
 from engine.ops.paper_control import PaperControl
 from engine.ops.pipeline import RecommendationBook
 from engine.risk.causes import CAUSE_OWNER_PAUSE, CAUSE_REJECTION_STORM, RiskStateLatch
@@ -160,7 +161,7 @@ class _SendBot:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
         self.sent.append((chat_id, text))
 
 
@@ -570,6 +571,90 @@ async def test_a_decided_expired_rec_is_not_vetoable_by_symbol(clock, conn, msg)
     book = _FakeBook()
     await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "size"))
     assert book.calls == [] and "no open recommendation for HDFCAMC" in msg.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_typed_veto_refuses_a_second_reason(clock, conn, msg):
+    _insert_rec(conn, REC_A, valid_until=DEAD_UNTIL, human_action="expired")
+    conn.execute("UPDATE recommendations SET skip_reason='market' WHERE rec_id=?", (REC_A,))
+    book = RecommendationBook(conn, clock, None)
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)
+    await bot._cmd_veto(_Update(msg), _Ctx(REC_A, "price"))
+    assert msg.sent == ["reason already recorded: market"]
+
+
+# ------------------------------------------------------------------- one-tap skip buttons (T13)
+class _Query:
+    def __init__(self, data: str | None, markup=None, *, edit_fails: bool = False) -> None:
+        self.data = data
+        self.message = SimpleNamespace(reply_markup=markup)
+        self.answers: list[tuple] = []
+        self.edits: list = []
+        self._edit_fails = edit_fails
+
+    async def answer(self, text=None, show_alert=None) -> None:
+        self.answers.append((text, show_alert))
+
+    async def edit_message_reply_markup(self, reply_markup=None) -> None:
+        if self._edit_fails:
+            raise RuntimeError("Message is not modified")
+        self.edits.append(reply_markup)
+
+
+async def _tap(clock, book, query, chat_id: int = OWNER_CHAT) -> None:
+    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)
+    update = SimpleNamespace(effective_chat=_Chat(chat_id), callback_query=query, effective_message=None)
+    await _owner_only(bot, bot._on_button)(update, _Ctx())
+
+
+def _reminder_markup():
+    return _inline_markup(catalog.rec_decision_reminder(_reminder_rows(2)).buttons)
+
+
+@pytest.mark.asyncio
+async def test_owner_tap_vetoes_once_and_removes_only_that_recs_row(clock):
+    book, query = _FakeBook(), _Query(f"/veto {REC_A} market", _reminder_markup())
+    await _tap(clock, book, query)
+    assert book.calls == [("veto", REC_A, "market")]
+    assert [[b.callback_data.split()[1] for b in row] for row in query.edits[0].inline_keyboard] == [
+        [REC_B] * 3, [REC_B] * 3]
+    assert query.answers == [(f"recorded: vetoed {REC_A}", None)]
+
+
+@pytest.mark.asyncio
+async def test_refused_tap_answers_with_alert_and_keeps_markup(clock):
+    book = _FakeBook(raises=ValueError("reason already recorded: market"))
+    query = _Query(f"/veto {REC_A} price", _reminder_markup())
+    await _tap(clock, book, query)
+    assert query.answers == [("reason already recorded: market", True)] and query.edits == []
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_still_answers(clock):
+    book, query = _FakeBook(), _Query(f"/veto {REC_A} market", _reminder_markup(), edit_fails=True)
+    await _tap(clock, book, query)
+    assert book.calls == [("veto", REC_A, "market")] and len(query.answers) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_owner_tap_ignored_and_logged(clock, caplog):
+    book, query = _FakeBook(), _Query(f"/veto {REC_A} market")
+    with caplog.at_level(logging.WARNING, logger="engine.notify.telegram"):
+        await _tap(clock, book, query, chat_id=FOREIGN_CHAT)
+    assert book.calls == [] and query.answers == []
+    assert [r.command for r in caplog.records if r.getMessage() == "telegram_rejected_non_owner"] == [
+        f"/veto {REC_A} market"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [
+    f"/taken {REC_A} 5 100", f"/veto {REC_A} nope", f"/veto {REC_A}", "/veto HDFCAMC market",
+    f"veto {REC_A} market", f"/veto {REC_A} market x", "", None,
+])
+async def test_unlisted_or_malformed_command_refused(clock, data):
+    book, query = _FakeBook(), _Query(data)
+    await _tap(clock, book, query)
+    assert book.calls == [] and len(query.answers) == 1 and query.answers[0][1] is True
 
 
 @pytest.mark.asyncio
@@ -1280,7 +1365,7 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     # R8: structured payload lives in data, never leaks into the owner's prose.
     assert message.data["rec_id"] == "rec-1" and message.data["verdict"] == "shrink"
     assert "confidence" not in text and message.data["confidence"] == 0.72
-    for leak in ("CheckResult(", "rule_id=", "MessageKind.", "data={", "reply_keyboard="):
+    for leak in ("CheckResult(", "rule_id=", "MessageKind.", "data={", "buttons="):
         assert leak not in text, leak
     # A genuine ZONE (low != high) is not a level, and an unsupplied quote is stated as unknown
     # rather than invented — the pre-WO-4 prose is byte-identical in that case.
@@ -1405,6 +1490,35 @@ def test_adjust_recommendation_footer_offers_only_the_decline(clock):
     text = catalog.recommendation_message(rec).render()
     assert text.splitlines()[-1] == "decline: /veto RELIANCE"
     assert "/taken" not in text and "/closed" not in text
+
+
+def test_entry_card_has_six_veto_buttons_by_rec_id(clock):
+    rec = _recommendation(clock).model_copy(update={"rec_id": REC_A})
+    buttons = catalog.recommendation_message(rec).buttons
+    flat = [b for row in buttons for b in row]
+    assert [len(row) for row in buttons] == [3, 3]
+    assert [b["text"] for b in flat] == [f"skip: {r}" for r in VETO_REASONS]
+    assert [b["command"] for b in flat] == [f"/veto {REC_A} {r}" for r in VETO_REASONS]
+    assert all(len(b["command"].encode()) <= 64 for b in flat)
+
+
+@pytest.mark.parametrize("kind", ["exit", "adjust"])
+def test_exit_card_has_no_buttons(clock, kind):
+    rec = _recommendation(clock).model_copy(update={"kind": kind})
+    assert catalog.recommendation_message(rec).buttons is None
+
+
+def _reminder_rows(n: int) -> list[dict]:
+    return [{"rec_id": f"01M0H8ZXM3PYNAVXF54A5TDGV{i}", "instrument": f"SYM{i}", "side": "BUY", "qty": 1,
+             "valid_until": DEAD_UNTIL} for i in range(n)]
+
+
+def test_reminder_rows_label_the_symbol_and_cap_at_4_recs():
+    buttons = catalog.rec_decision_reminder(_reminder_rows(5)).buttons
+    assert len(buttons) == 8
+    assert buttons[0][0] == {"text": "SYM0: market", "command": f"/veto {REC_A} market"}
+    assert {b["command"].split()[1] for row in buttons for b in row} == {
+        f"01M0H8ZXM3PYNAVXF54A5TDGV{i}" for i in range(4)}
 
 
 def _card(clock, *, bound: bool = True, failed: tuple[str, ...] = (), **update) -> Recommendation:
@@ -1601,7 +1715,7 @@ def test_catalog_helpers_render_clean_owner_text(message, kind, severity, fragme
     assert message.kind == kind and message.severity == severity
     for fragment in fragments:
         assert fragment in text, fragment
-    for leak in ("kind=", "data={", "reply_keyboard=", "MessageKind.", "Decimal("):
+    for leak in ("kind=", "data={", "buttons=", "MessageKind.", "Decimal("):
         assert leak not in text, leak
     assert message.data                                        # structured payload preserved (R8)
 
@@ -1760,7 +1874,7 @@ async def test_a_hanging_send_is_bounded_and_dropped(clock, monkeypatch):
     from engine.notify import telegram as tg_mod
 
     class _HangingBot:
-        async def send_message(self, chat_id, text):
+        async def send_message(self, chat_id, text, reply_markup=None):
             await asyncio.sleep(3600)
 
     monkeypatch.setattr(tg_mod, "_SEND_TIMEOUT_S", 0.05)
@@ -1856,7 +1970,7 @@ async def test_a_send_failure_never_breaks_the_publisher(clock, bus):
     """R8: alerting must never take down the risk publisher that raised the event."""
 
     class _ExplodingBot:
-        async def send_message(self, chat_id, text):
+        async def send_message(self, chat_id, text, reply_markup=None):
             raise RuntimeError("telegram.error.TimedOut")
 
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)

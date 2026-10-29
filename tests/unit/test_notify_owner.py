@@ -19,11 +19,11 @@ from engine.notify.telegram import (
 # --------------------------------------------------------------------------- rendering (regression)
 def test_catalog_message_renders_clean_owner_text() -> None:
     """Regression: ``send`` must render a title+body message, never leak the raw Pydantic model
-    (``kind=<…> title=… data={…} reply_keyboard=None``) to the owner — the old ``str(model)`` fallback."""
+    (``kind=<…> title=… data={…} buttons=None``) to the owner — the old ``str(model)`` fallback."""
     msg = engine_started(mode="OFF", version="0.0.0")
     rendered = msg.render()
     assert "Engine started" in rendered and msg.body in rendered
-    for leak in ("kind=", "data={", "reply_keyboard=", "MessageKind."):
+    for leak in ("kind=", "data={", "buttons=", "MessageKind."):
         assert leak not in rendered
     # The bot's transport render path must pick up render(), not fall back to str(model).
     assert TelegramBot._render(msg) == rendered
@@ -126,17 +126,17 @@ def test_live_command_specs_have_handlers(clock) -> None:
     assert "help" in live_specs                                # /help itself is wired
 
 
-def test_register_handlers_registers_every_command(clock) -> None:
+def test_register_handlers_registers_every_command_and_the_button_handler(clock) -> None:
     """Registration is spec-driven and must not raise (no live spec missing a handler)."""
     bot = TelegramBot("dummy-token", owner_chat_id=1, clock=clock)
     registered: list[str] = []
 
     class _RecordingApp:
         def add_handler(self, handler) -> None:               # noqa: ANN001 - test double
-            registered.extend(handler.commands)
+            registered.extend(getattr(handler, "commands", [type(handler).__name__]))
 
     bot._register_handlers(_RecordingApp())
-    assert sorted(registered) == sorted(c.name for c in _COMMANDS)
+    assert sorted(registered) == sorted([*(c.name for c in _COMMANDS), "CallbackQueryHandler"])
 
 
 def test_help_text_lists_every_command() -> None:

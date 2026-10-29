@@ -646,10 +646,12 @@ class RecommendationBook:
         """``/veto <rec_id> [reason]`` — the owner declines. A live rec is recorded as ``dismissed`` + a
         ``no_action`` label: a decline and a silent non-fill are different facts, both training signal
         (§6.5). An expired entry rec keeps ``expired`` and gains only the reason (its ledger row is
-        already ``no_action``)."""
+        already ``no_action``); a second reason is refused, never overwrites the first."""
         row = self._rec_row(rec_id)
         now = self._clock.now()
         if self._expired(row, now) and reason is not None and self._kind(row) == "entry":
+            if row["skip_reason"]:
+                raise ValueError(f"reason already recorded: {row['skip_reason']}")
             with transaction(self._conn):
                 self._conn.execute(
                     "UPDATE recommendations SET skip_reason=?, skip_reason_at=? WHERE rec_id=?",
@@ -811,7 +813,8 @@ class RecommendationBook:
 
     def _rec_row(self, rec_id: str) -> sqlite3.Row:
         row = self._conn.execute(
-            "SELECT rec_id, payload, human_action FROM recommendations WHERE rec_id=?", (rec_id,)
+            "SELECT rec_id, payload, human_action, skip_reason FROM recommendations WHERE rec_id=?",
+            (rec_id,)
         ).fetchone()
         if row is None:
             raise ValueError(f"unknown recommendation {rec_id}")

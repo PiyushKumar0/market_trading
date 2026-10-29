@@ -1542,6 +1542,14 @@ async def test_veto_on_an_expired_rec_keeps_it_expired_and_taken_clears_the_reas
     assert (row["human_action"], row["skip_reason"], row["skip_reason_at"]) == ("taken", None, None)
 
 
+async def test_veto_refuses_a_second_reason(conn, veto_book, cost_model):
+    rec = _expired_rec(conn, veto_book, cost_model)
+    await veto_book.veto(rec.rec_id, "market")
+    with pytest.raises(ValueError, match="^reason already recorded: market$"):
+        await veto_book.veto(rec.rec_id, "price")
+    assert tuple(_row(conn, rec.rec_id))[:2] == ("expired", "market")
+
+
 async def test_a_lapsed_rec_the_sweep_has_not_reached_vetoes_as_expired(conn, veto_book, cost_model):
     rec = make_rec(cost_model, valid_until=NOW - timedelta(minutes=1))
     veto_book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))

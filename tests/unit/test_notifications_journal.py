@@ -19,6 +19,7 @@ The properties pinned here are the ones whose breakage would put the loss back:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import sqlite3
@@ -77,15 +78,17 @@ class _ScriptedBot:
 
     def __init__(self, *, failures: int = 0, fail_forever: bool = False) -> None:
         self.sent: list[str] = []
+        self.markups: list = []
         self.attempts = 0
         self._failures = failures
         self._fail_forever = fail_forever
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
         self.attempts += 1
         if self._fail_forever or self.attempts <= self._failures:
             raise ConnectionError("httpx.ConnectTimeout: telegram.org timed out")
         self.sent.append(text)
+        self.markups.append(reply_markup)
 
 
 class _App:
@@ -252,6 +255,38 @@ async def test_split_message_is_one_notification_not_five(conn, clock):
     row = _one(conn)
     assert row["status"] == "delivered" and row["attempts"] == 1
     assert row["body"] == body                         # journalled whole, never the truncated wire form
+
+
+_BUTTONS = [[{"text": "skip: market", "command": "/veto 01M0H8ZXM3PYNAVXF54A5TDGV0 market"}]]
+
+
+def _with_buttons(body: str = "B") -> CatalogMessage:
+    return CatalogMessage(kind=MessageKind.RECOMMENDATION, title="T", body=body, buttons=_BUTTONS)
+
+
+def _callbacks(markup) -> list[list[str]]:
+    return [[b.callback_data for b in row] for row in markup.inline_keyboard]
+
+
+@pytest.mark.asyncio
+async def test_send_journals_buttons_and_attaches_markup_to_last_part_only(conn, clock):
+    bot, sender = _bot(conn, clock)
+    await bot.send(_with_buttons("X" * 9000))
+
+    assert json.loads(_one(conn)["buttons"]) == _BUTTONS
+    assert len(sender.markups) > 1 and set(sender.markups[:-1]) == {None}
+    assert _callbacks(sender.markups[-1]) == [["/veto 01M0H8ZXM3PYNAVXF54A5TDGV0 market"]]
+
+
+@pytest.mark.asyncio
+async def test_drainer_retry_reattaches_buttons(conn, moving):
+    bot, sender = _bot(conn, moving.clock, _ScriptedBot(failures=1))
+    await bot.send(_with_buttons())
+    moving.advance(seconds=31)
+    await bot._drain_outbox_once()
+
+    assert _one(conn)["status"] == "delivered"
+    assert _callbacks(sender.markups[0]) == [["/veto 01M0H8ZXM3PYNAVXF54A5TDGV0 market"]]
 
 
 @pytest.mark.asyncio

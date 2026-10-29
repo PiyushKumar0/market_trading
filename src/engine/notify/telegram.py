@@ -53,8 +53,14 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Protocol
 
-from telegram import BotCommand, Update
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
 from telegram.request import HTTPXRequest
 from ulid import ULID
 
@@ -238,6 +244,13 @@ _USAGE_VETO = f"/veto <symbol|rec_id> <{'|'.join(VETO_REASONS)}>"
 _USAGE_WHY = "/why <symbol>"
 _USAGE_PAPER = "/paper <on|off|status|reset>"
 _USAGE_PROTECTED ="/protected <symbol|rec_id>"
+
+#: The only verbs an inline-button tap may run. A button's command is its callback data, which
+#: Telegram caps at 64 bytes; a tap on anything else is refused, never dispatched.
+_BUTTON_COMMANDS = frozenset({"veto"})
+_CALLBACK_DATA_MAX_BYTES = 64
+#: Telegram's cap on a callback-query answer.
+_ANSWER_MAX_CHARS = 200
 
 #: Rows a resolution reply may list before it summarises the rest. ``_reply`` writes straight to
 #: ``reply_text`` — it does NOT pass through ``send()``'s splitter — so an unbounded list would
@@ -666,9 +679,11 @@ class TelegramBot:
         except _Deduped:
             _log.info("notification_deduped", dedupe_key=msg.dedupe_key)
             return
-        await self._deliver(text, notification_id)
+        await self._deliver(text, notification_id, getattr(msg, "buttons", None))
 
-    async def _deliver(self, text: str, notification_id: str | None) -> bool:
+    async def _deliver(
+        self, text: str, notification_id: str | None, buttons: list[list[dict[str, str]]] | None = None,
+    ) -> bool:
         """Put one already-journalled message on the wire and stamp its row with the verdict.
 
         Returns True when every part reached Telegram. The part loop STOPS at the first failure: the
@@ -676,6 +691,7 @@ class TelegramBot:
         duplicate them later — and a partial message is worse reading than a whole one that arrives
         late. A ``None`` transport (bot disabled / not started yet) is a first-class failure here,
         not a silent drop: the row stays ``pending`` and the drainer picks it up once polling is up.
+        ``buttons`` ride on the last part only, under the text they act on.
         """
         app = self._app
         if app is None:
@@ -687,9 +703,10 @@ class TelegramBot:
         else:
             parts = _split_message(text)
             _log.info("telegram_message_split", parts=len(parts), total_chars=len(text))
+        markup = _inline_markup(buttons)
         error: str | None = None
-        for part in parts:
-            error = await self._send_text(app, part)
+        for i, part in enumerate(parts, start=1):
+            error = await self._send_text(app, part, markup if i == len(parts) else None)
             if error is not None:
                 break
         if error is not None:
@@ -701,7 +718,9 @@ class TelegramBot:
         self._outage_logged = False
         return True
 
-    async def _send_text(self, app: Application, text: str) -> str | None:
+    async def _send_text(
+        self, app: Application, text: str, reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> str | None:
         """Put one already-bounded string on the wire (the choke point every outbound send/part
         passes through). Best-effort: a hang or failure is logged, never raised (R8).
 
@@ -713,7 +732,7 @@ class TelegramBot:
             # BOUNDED (2026-08-07): a hanging send wedged the boot between catch_up_complete and
             # scheduler start. Alerts are best-effort — a bounded drop beats an unbounded wait.
             await asyncio.wait_for(
-                app.bot.send_message(chat_id=self._owner_chat_id, text=text),
+                app.bot.send_message(chat_id=self._owner_chat_id, text=text, reply_markup=reply_markup),
                 timeout=_SEND_TIMEOUT_S,
             )
         except TimeoutError:
@@ -738,13 +757,16 @@ class TelegramBot:
             return None
         try:
             kind, severity, title, body = _journal_fields(msg, text)
+            buttons = getattr(msg, "buttons", None)
             notification_id = str(ULID())
             now = self._clock.now().isoformat()
             with transaction(conn):
                 conn.execute(
                     "INSERT INTO notifications (notification_id, created_at, kind, severity, title, "
-                    "body, status, attempts, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
-                    (notification_id, now, kind, severity, title, body, getattr(msg, "dedupe_key", None)),
+                    "body, status, attempts, dedupe_key, buttons) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)",
+                    (notification_id, now, kind, severity, title, body, getattr(msg, "dedupe_key", None),
+                     json.dumps(buttons) if buttons else None),
                 )
             return notification_id
         except sqlite3.IntegrityError as exc:
@@ -853,13 +875,13 @@ class TelegramBot:
         now = self._clock.now()
         rows = conn.execute(
             "SELECT notification_id, created_at, kind, severity, title, body, attempts, "
-            "last_attempt_at FROM notifications WHERE status='pending' "
+            "last_attempt_at, buttons FROM notifications WHERE status='pending' "
             "ORDER BY created_at ASC LIMIT ?",
             (_DRAIN_SCAN,),
         ).fetchall()
         for row in self._due_rows(rows, now):
             text = _wire_text(row["severity"], row["title"], row["body"])
-            delivered = await self._deliver(text, row["notification_id"])
+            delivered = await self._deliver(text, row["notification_id"], _loads_buttons(row["buttons"]))
             if delivered:
                 _log.info(
                     "notification_retry_delivered",
@@ -1001,6 +1023,40 @@ class TelegramBot:
         for spec in _COMMANDS:
             handler = live[spec.name] if spec.live else self._stub(spec.name)
             app.add_handler(CommandHandler(spec.name, _owner_only(self, handler)))
+        app.add_handler(CallbackQueryHandler(_owner_only(self, self._on_button)))
+
+    async def _on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """One inline-button tap: an allow-listed ``/veto <rec_id> <reason>`` goes to the book, and on
+        success the tapped rec's buttons leave the message. The query is always answered, because
+        Telegram spins the button until it is; a refusal is an alert the owner must dismiss."""
+        query = update.callback_query
+        parsed = _button_veto(query.data)
+        if parsed is None:
+            _log.warning("telegram_button_refused", command=query.data)
+            await query.answer("this button is not allowed", show_alert=True)
+            return
+        if self._reco_book is None:
+            await query.answer("recommendation book not wired", show_alert=True)
+            return
+        rec_id, reason = parsed
+        _log.warning("telegram_button_veto", rec_id=rec_id, reason=reason)
+        try:
+            text = await self._reco_book.veto(rec_id, reason)
+        except ValueError as exc:
+            _log.warning("telegram_reco_book_rejected", error=str(exc))
+            await query.answer(str(exc)[:_ANSWER_MAX_CHARS], show_alert=True)
+            return
+        except Exception as exc:  # noqa: BLE001 - the tap is answered whatever the book does (R8)
+            _log.exception("telegram_reco_book_failed")
+            await query.answer(f"failed: {exc}"[:_ANSWER_MAX_CHARS], show_alert=True)
+            return
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=_markup_without(query.message.reply_markup, rec_id)
+            )
+        except Exception:  # noqa: BLE001 - the veto is recorded; stale buttons refuse a second tap
+            _log.exception("telegram_button_edit_failed", rec_id=rec_id)
+        await query.answer(text[:_ANSWER_MAX_CHARS])
 
     def _stub(self, name: str) -> Callable[..., Awaitable[None]]:
         """A Phase-0 handler that logs the command and replies that it is not yet implemented."""
@@ -1889,7 +1945,8 @@ def _owner_only(
             _log.warning(
                 "telegram_rejected_non_owner",
                 from_chat_id=getattr(chat, "id", None),
-                command=getattr(getattr(update, "message", None), "text", None),
+                command=getattr(getattr(update, "message", None), "text", None)
+                or getattr(getattr(update, "callback_query", None), "data", None),
             )
             return
         try:
@@ -1900,6 +1957,51 @@ def _owner_only(
                 await _reply(update, f"command failed: {type(exc).__name__}: {exc}"[:400])
 
     return _guarded
+
+
+def _inline_markup(buttons: list[list[dict[str, str]]] | None) -> InlineKeyboardMarkup | None:
+    """Catalog button rows as Telegram inline buttons, the command as the callback data. A malformed
+    or oversized set ships the text without buttons: Telegram would reject the whole message, and a
+    critical row would then retry forever."""
+    if not buttons:
+        return None
+    try:
+        rows = [
+            [InlineKeyboardButton(b["text"], callback_data=b["command"]) for b in row] for row in buttons
+        ]
+        if any(len(b.callback_data.encode()) > _CALLBACK_DATA_MAX_BYTES for row in rows for b in row):
+            raise ValueError(f"callback data over {_CALLBACK_DATA_MAX_BYTES} bytes")
+        return InlineKeyboardMarkup(rows)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        _log.warning("telegram_buttons_dropped", error=_error_label(exc))
+        return None
+
+
+def _loads_buttons(raw: str | None) -> list[list[dict[str, str]]] | None:
+    """A journalled ``buttons`` value; None when absent or unreadable (the text still ships)."""
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def _button_veto(data: str | None) -> tuple[str, str] | None:
+    """``(rec_id, reason)`` of an allow-listed ``/veto <rec_id> <reason>`` tap, else None."""
+    parts = (data or "").split()
+    if len(parts) != 3 or not parts[0].startswith("/") or parts[0][1:] not in _BUTTON_COMMANDS:
+        return None
+    rec_id, reason = parts[1:]
+    return (rec_id, reason) if _is_ulid(rec_id) and reason in VETO_REASONS else None
+
+
+def _markup_without(markup: InlineKeyboardMarkup | None, rec_id: str) -> InlineKeyboardMarkup | None:
+    """``markup`` minus every button acting on ``rec_id``; None once nothing is left."""
+    rows = [
+        [b for b in row if str(b.callback_data or "").split()[1:2] != [rec_id]]
+        for row in (markup.inline_keyboard if markup is not None else ())
+    ]
+    rows = [row for row in rows if row]
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 async def _reply(update: Update, text: str) -> None:
