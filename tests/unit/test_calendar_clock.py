@@ -192,7 +192,7 @@ def test_retest_expiry_matches_add_sessions_over_2026(cal, clock, conn):
     book = RestingLevelBook(conn, cal, clock)
     sessions = [d for i in range(365) if cal.is_trading_day(d := date(2026, 1, 1) + timedelta(days=i))]
     for d in sessions[:-DEFAULT_RETEST_SESSIONS - 1]:   # tail runs past the calendar horizon
-        assert book._expiry(d) == cal.add_sessions(d, DEFAULT_RETEST_SESSIONS, count_special=True)
+        assert book._expiry(d) == cal.add_sessions(d, DEFAULT_RETEST_SESSIONS - 1, count_special=True)
 
 
 def test_trade_window_seed_clamped_to_session(clock):

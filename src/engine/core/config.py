@@ -440,7 +440,8 @@ class Brk20Cfg(BaseModel):
     be reading a knob that governs nothing.
     """
 
-    #: Retest window in TRADING sessions after the crossing session (``retest.RestingLevelBook``).
+    #: Retest window in TRADING sessions counting ``signal_d``, the session after the crossing: the
+    #: level is offered on y+1..y+N (``retest.RestingLevelBook``).
     #: 5 = the backtest's ``V2_limit_at_H20_N5``, the variant its pre-registered decision rule
     #: returned. NEVER learnable: this number IS the registered mechanism — N=1 (what shipped before
     #: WO-R) and N=3 were both measured and both lost, and every other N was never run at all, so a

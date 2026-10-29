@@ -2388,7 +2388,7 @@ async def compose(
             now=now,
         )
         # WO-R (2026-09-12): every ADMITTED brk20 level starts RESTING here, so the next
-        # `retest_sessions` sessions can re-offer it when the price comes back to it — the
+        # `retest_sessions` − 1 sessions can re-offer it when the price comes back to it — the
         # `V2_limit_at_H20_N5` mechanism the pre-registered entry backtest selected. ADMITTED, never
         # raw: the pre-screen has already decided which levels are worth judgement, and resting a
         # capped-out fire would re-offer tomorrow what the caps refused today (`accepted` is the

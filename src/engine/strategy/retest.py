@@ -9,16 +9,17 @@ geometry-viable at T+10 (median net +0.0513% against a 0.3192% round trip) and C
 (fold pass 73.3%) and at T+20 (+0.9168%, 80.0%).
 
 The rule as SHIPPED does not implement it. ``brk20`` publishes the level exactly ONCE, on the
-crossing session, under the pre-screen's same-day ``(symbol, strategy)`` dedupe — the N=1 variant,
-which was not among the registered variants, has no measured return, and whose fill rate reads 31.4%
+session after the crossing, under the pre-screen's same-day ``(symbol, strategy)`` dedupe — the N=1
+variant, which was not among the registered variants, has no measured return, and whose fill rate reads 31.4%
 off the registered delay histogram against V2-5's 59.1%. The live cost of that gap is measured: of 15
 ``brk20`` proposals on 2026-09-11, SIX died on the §7.1 ``entry_sanity_band`` with the level already
 >2% below LTP at sweep time, the band being the SOLE reject cause for three of them — and those three
 are the day's top three ``brk20`` scores, because the score is monotone in breakout margin and a wide
 margin is precisely what puts the rested level far below the live price.
 
-So: every ADMITTED ``brk20`` candidate's level is journalled here on its crossing session and stays
-DUE for the next N trading sessions. On each of those sessions, while the market is open and inside
+So: every ADMITTED ``brk20`` candidate's level is journalled here on its publication session
+``signal_d`` (y+1, the session after the crossing y) and stays DUE for the next N−1 trading sessions,
+so the level is offered on y+1..y+N. On each re-offer session, while the market is open and inside
 the owner trade window, the level is re-offered for judgement on the FIRST minute the live price is
 back inside the §7.1 ``entry_sanity_band`` — the same band, read from the same hash-verified limits
 table, that rejects it when it is not.
@@ -98,8 +99,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime seam is duck-ty
 
 _log = get_logger("engine.strategy.retest")
 
-#: Default retest window, in TRADING sessions after the crossing session. 5 = the backtest's V2-5,
-#: the variant its pre-registered decision rule selected. Owner-only and deliberately NOT learnable:
+#: Default retest window, in TRADING sessions counting ``signal_d`` (y+1..y+N). 5 = the backtest's
+#: V2-5, the variant its pre-registered decision rule selected. Owner-only and deliberately NOT learnable:
 #: the number IS the registered mechanism, so a learner allowed to move it would be selecting an
 #: entry mechanism the study never measured (N=1 and N=3 were both measured and both lost; every
 #: other N was never run at all).
@@ -119,7 +120,7 @@ class RestingLevelBook:
 
     Four operations, each total (never raises):
 
-    * :meth:`record` — journal one ADMITTED ``brk20`` candidate's level on its crossing session.
+    * :meth:`record` — journal one ADMITTED ``brk20`` candidate's level on its publication session.
       Idempotent per ``(symbol, signal_d)``.
     * :meth:`expire` — mark rows past their window ``expired``. Housekeeping only; :meth:`due`
       does not depend on it having run (its own predicate is ``expires_d >= today``).
@@ -144,9 +145,8 @@ class RestingLevelBook:
         self._calendar = calendar
         self._clock = clock
         # A window of 0 sessions is not a configuration, it is a disabled mechanism expressed as one:
-        # clamp to >=1 so the invariant "expires_d is a session strictly after signal_d" holds for
-        # every row ever written, and a mis-set knob degrades to the shortest real retest rather than
-        # to rows that are born expired.
+        # clamp to >=1, so a mis-set knob degrades to N=1: offered on signal_d only (expires_d ==
+        # signal_d, no re-offer). Every row's expires_d is on or after its signal_d.
         self._sessions = max(1, int(sessions))
         # Per-DAY re-offer bound, keyed by SYMBOL and held in process memory on purpose
         # (see :meth:`due` for both choices).
@@ -167,7 +167,7 @@ class RestingLevelBook:
 
         Idempotent per ``(symbol, signal_d)`` via ``ON CONFLICT DO NOTHING``: a second sweep the same
         day (an owner ``/scan_now``, a freeze-lift re-sweep) re-admits nothing anyway, and if it ever
-        did, the FIRST row's ``created_at`` and expiry are the ones the crossing session earned.
+        did, the FIRST row's ``created_at`` and expiry are the ones the publication session earned.
 
         A non-``brk20`` candidate is refused and logged rather than silently stored: this book's
         whole semantics — a level, a retest, a 5-session window — are ``brk20``'s, and a row from
@@ -285,10 +285,10 @@ class RestingLevelBook:
     ) -> list[SignalCandidate]:
         """The resting levels whose live price is back inside the band today, as fresh candidates.
 
-        Window: ``signal_d < today <= expires_d``. STRICTLY after the crossing session at the near
-        end — the level was already published that day and the pre-screen's same-day dedupe owns
-        that — and INCLUSIVE at the far end, so a 5-session window really offers five retest
-        sessions.
+        Window: ``signal_d < today <= expires_d``. STRICTLY after ``signal_d`` at the near end — the
+        level was already published that day and the pre-screen's same-day dedupe owns that — and
+        INCLUSIVE at the far end, so a 5-session window offers ``signal_d`` plus four re-offer
+        sessions (y+2..y+5).
 
         Band: ``abs(entry - ltp) / ltp * 100 <= band_pct``, the §7.1 ``entry_sanity_band`` formula
         and its ``<=`` edge verbatim (equality passes, as in the gate). ``ltp_fn`` returning None —
@@ -472,13 +472,14 @@ class RestingLevelBook:
         return cand
 
     def _expiry(self, signal_d: date) -> date:
-        """The ``sessions``-th TRADING session after ``signal_d`` (weekends/holidays are not days).
+        """The (``sessions`` − 1)-th TRADING session after ``signal_d`` (weekends/holidays are not
+        days): ``signal_d`` is y+1, so the level is offered on y+1..y+N, V2-5's window for N=5.
 
         Raises only what the calendar raises past its verified horizon; every caller is inside a
         ``try`` that turns that into "no row written" rather than a dead sweep.
         """
         d = signal_d
-        for _ in range(self._sessions):
+        for _ in range(self._sessions - 1):
             d = self._calendar.next_trading_day(d)
         return d
 

@@ -333,15 +333,16 @@ hi52:
 # brk20.FLOOR_PARAMS (owner-only by construction); this block holds how long the broken level is
 # offered for and the C2 regime gate on origination.
 brk20:
-  retest_sessions: 5           # TRADING sessions after the crossing session during which the broken
-                               # level may be RE-PUBLISHED when the live price comes back inside the
-                               # §7.1 entry_sanity_band (src/engine/strategy/retest.py, migration
-                               # 0014). 5 = `V2_limit_at_H20_N5`, the variant the 2026-09-12
+  retest_sessions: 5           # TRADING sessions the broken level is offered on, counting signal_d (y+1,
+                               # the session after the crossing y): it may be RE-PUBLISHED on y+2..y+N
+                               # when the live price comes back inside the §7.1 entry_sanity_band
+                               # (src/engine/strategy/retest.py, migration 0014).
+                               # 5 = `V2_limit_at_H20_N5`, the variant the 2026-09-12
                                # pre-registered entry-mechanism backtest returned under its own
                                # decision rule (median net +0.0513% at T+10 — the only variant
                                # geometry-viable there — and +0.9168% at T+20; CPCV fold pass
                                # 73.3%/80.0%; fill rate 59.1%). What SHIPPED before WO-R was N=1:
-                               # the level published once, on the crossing session, fill rate 31.4%
+                               # the level published once, on y+1, fill rate 31.4%
                                # off the registered delay histogram and no measured return at all.
                                # OWNER-ONLY and NEVER learnable: this number IS the registered
                                # mechanism — N=1 and N=3 were both measured and both lost, and every
@@ -351,7 +352,7 @@ brk20:
                                # rule, on a survivorship-tainted eligible-universe proxy), no new
                                # entry price, no widened band and no new admission capacity — every
                                # re-publication faces the same prescreen caps and the same §7.1 gate.
-  regime_filter: true        # C2 (pre-registered, run 2026-10-07) came out `supported` for brk20; the
+  regime_filter: true          # C2 (pre-registered, run 2026-10-07) came out `supported` for brk20; the
                                # 2026 held-out slice contradicts it. A crossing originates only when
                                # NIFTY 50 close > SMA50 > SMA50 20 sessions earlier, at the crossing
                                # session — where C2 measured it, so the sweep applies it at origination

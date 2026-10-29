@@ -2,13 +2,13 @@
 
 The 2026-09-12 pre-registered entry-mechanism backtest selected ``V2_limit_at_H20_N5`` (a limit
 resting at the broken level for five sessions) and the live rule shipped N=1 — the level published
-once, on the crossing session. These tests pin the mechanism that closes that gap AND, just as
-load-bearing, the four ways it must stay narrow: it re-offers the SAME levels, only inside the
+once, on the session after the crossing. These tests pin the mechanism that closes that gap AND, just
+as load-bearing, the four ways it must stay narrow: it re-offers the SAME levels, only inside the
 §7.1 ``entry_sanity_band``, only inside the ``(signal_d, expires_d]`` window, and at most once a day.
 
 The window arithmetic is asserted against the REAL NSE calendar rather than a stub, because the one
-thing a calendar-blind ``+5 days`` gets wrong is exactly the case that matters: 2026-06-17 + 5
-sessions is 06-24 (a weekend intervenes), and 2026-06-22 + 5 sessions is 06-30 (a weekend AND the
+thing a calendar-blind ``+4 days`` gets wrong is exactly the case that matters: 2026-06-17 + 4
+sessions is 06-23 (a weekend intervenes), and 2026-06-22 + 4 sessions is 06-29 (a weekend AND the
 06-26 holiday intervene) — both materially later than a naive date add.
 """
 
@@ -36,13 +36,13 @@ from engine.strategy.types import RawLevels, SignalCandidate
 
 LOGGER = "engine.strategy.retest"
 
-#: Wed 2026-06-17 — the crossing session. The five trading sessions that follow are 18, 19 (Fri),
-#: 22 (Mon), 23, 24; a calendar-blind "+5 days" would say 06-22.
+#: Wed 2026-06-17 — signal_d, the publication session y+1 (the crossing y is 06-16). The four
+#: re-offer sessions are 18, 19 (Fri), 22 (Mon), 23; a calendar-blind "+4 days" would say 06-21.
 SIGNAL_D = date(2026, 6, 17)
-EXPIRES_D = date(2026, 6, 24)
-#: The first retest session (the day after the crossing) and the first day past the window.
+EXPIRES_D = date(2026, 6, 23)
+#: The first re-offer session and the first day past the window.
 FIRST_RETEST_D = date(2026, 6, 18)
-AFTER_EXPIRY_D = date(2026, 6, 25)
+AFTER_EXPIRY_D = date(2026, 6, 24)
 
 BAND = Decimal("2.0")          # the shipped limits.yaml `entry_sanity_band.cnc_pct`
 
@@ -101,8 +101,8 @@ def _rows(conn) -> list[dict]:
 # --------------------------------------------------------------------------- record
 def test_record_is_idempotent_per_symbol_and_signal_day(book, conn, caplog) -> None:
     """A second sweep the same day (an owner /scan_now, a freeze-lift re-sweep) must not re-write the
-    row: the FIRST admission's levels, score, expiry and created_at are the ones the crossing session
-    earned, and a later write would silently extend the window or move the level."""
+    row: the FIRST admission's levels, score, expiry and created_at are the ones the publication
+    session earned, and a later write would silently extend the window or move the level."""
     assert book.record(_cand(entry="100.00", score=0.60)) is True
     first = _rows(conn)[0]
 
@@ -128,25 +128,34 @@ def test_the_window_is_counted_in_TRADING_sessions_not_calendar_days(book, conn,
     away and come back."""
     book.record(_cand("AAA"))
     assert _rows(conn)[0]["expires_d"] == EXPIRES_D.isoformat()
-    assert EXPIRES_D != SIGNAL_D + timedelta(days=DEFAULT_RETEST_SESSIONS)
+    assert EXPIRES_D != SIGNAL_D + timedelta(days=DEFAULT_RETEST_SESSIONS - 1)
 
-    # Mon 2026-06-22: a weekend AND the 06-26 holiday fall inside the five sessions ⇒ 06-30.
-    rclock.day = date(2026, 6, 22)
-    book.record(_cand("BBB"))
-    bbb = next(r for r in _rows(conn) if r["symbol"] == "BBB")
-    assert bbb["signal_d"] == "2026-06-22"
-    assert bbb["expires_d"] == "2026-06-30"
+
+def test_expiry_is_n_minus_1_sessions_after_signal_d(conn, rcalendar, rclock) -> None:
+    """V2-5 rests the level on y+1..y+5 and ``signal_d`` is y+1, so re-offers fall on y+2..y+5."""
+    monday = date(2026, 6, 22)                            # a weekend and the 06-26 holiday follow
+    assert RestingLevelBook(conn, rcalendar, rclock)._expiry(monday) == date(2026, 6, 29)
+    assert RestingLevelBook(conn, rcalendar, rclock, sessions=1)._expiry(monday) == monday
+
+    book = RestingLevelBook(conn, rcalendar, rclock)
+    book.record(_cand("AAA"))                             # signal_d 06-17 = y+1, crossing y = 06-16
+    offered, d = [], SIGNAL_D
+    while d <= date(2026, 6, 30):
+        rclock.day = d
+        offered += [d for _ in book.due(_ltp(AAA="100.00"), BAND, d)]
+        d = rcalendar.next_trading_day(d)
+    assert offered == [date(2026, 6, 18), date(2026, 6, 19), date(2026, 6, 22), date(2026, 6, 23)]
 
 
 def test_a_zero_or_negative_sessions_knob_still_writes_a_window_that_exists(conn, rcalendar,
                                                                            rclock) -> None:
     """A window of 0 sessions is a disabled mechanism expressed as a config value; the book clamps to
-    the shortest REAL retest instead of writing rows that are born expired."""
+    N=1, the level offered on signal_d alone, never a window that ends before signal_d."""
     for bad in (0, -3):
         conn.execute("DELETE FROM brk20_resting_levels")
         RestingLevelBook(conn, rcalendar, rclock, sessions=bad).record(_cand("AAA"))
         row = _rows(conn)[0]
-        assert row["expires_d"] == FIRST_RETEST_D.isoformat() > row["signal_d"]
+        assert row["expires_d"] == row["signal_d"] == SIGNAL_D.isoformat()
 
 
 def test_stop_and_target_survive_a_none(book, conn, rclock) -> None:
@@ -160,14 +169,14 @@ def test_stop_and_target_survive_a_none(book, conn, rclock) -> None:
 
 # --------------------------------------------------------------------------- due(): the window
 def test_due_is_open_at_the_near_end_and_closed_at_the_far_end(book, rclock) -> None:
-    """``signal_d < today <= expires_d``. Strictly after the crossing session (the level was already
+    """``signal_d < today <= expires_d``. Strictly after ``signal_d`` (the level was already
     published that day — the pre-screen's same-day dedupe owns it) and INCLUSIVE at expiry, or a
-    5-session window would only offer four retest sessions."""
+    5-session window would only offer three re-offer sessions."""
     book.record(_cand("AAA", entry="100.00"))
     ltp = _ltp(AAA="100.00")                      # dead-on the level all week
 
-    assert book.due(ltp, BAND, SIGNAL_D) == []               # the crossing session itself: no
-    for d in (FIRST_RETEST_D, date(2026, 6, 19), date(2026, 6, 22), date(2026, 6, 23), EXPIRES_D):
+    assert book.due(ltp, BAND, SIGNAL_D) == []               # the publication session itself: no
+    for d in (FIRST_RETEST_D, date(2026, 6, 19), date(2026, 6, 22), EXPIRES_D):
         rclock.day = d
         assert [c.symbol for c in book.due(ltp, BAND, d)] == ["AAA"], d
     rclock.day = AFTER_EXPIRY_D
@@ -435,7 +444,7 @@ def test_resting_symbols_is_todays_window_so_the_feed_can_follow_a_level(book, r
     assert book.resting_symbols(date(2026, 6, 19)) == ["AAA", "BBB"]
 
     rclock.day = AFTER_EXPIRY_D                          # past the window: the feed may let go
-    assert book.resting_symbols(AFTER_EXPIRY_D) == ["AAA"]   # …AAA's 06-18 row still runs to 06-25
+    assert book.resting_symbols(AFTER_EXPIRY_D) == ["AAA"]   # …AAA's 06-18 row still runs to 06-24
     assert book.resting_symbols(date(2026, 7, 1)) == []
 
 
