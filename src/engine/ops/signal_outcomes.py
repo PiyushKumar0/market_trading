@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from engine.core.calendar import NSECalendar
@@ -22,10 +22,11 @@ from engine.core.db import transaction
 from engine.core.log import get_logger
 from engine.learning.benchmark import bench_pct
 from engine.learning.exit_sim import Held, Pending, SimBar, simulate
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import MarketStore, SymbolRename
 from engine.ops.jobs import JOB_DAILY_BARS, JOB_SIGNAL_OUTCOMES
 from engine.ops.rec_outcomes import EW_BACKFILL_FROM, FIXED_HORIZONS, WasRunFn
 from engine.risk.limits import LimitsEngine, LimitTable
+from engine.strategy import regime
 from engine.strategy.cost_model import CostModel
 from engine.strategy.hi52_edge import PRODUCT, STOP_PCT, sizing_notional
 from engine.strategy.scanners import brk20, hi52, ins
@@ -46,6 +47,13 @@ _UPSERT = (
 )
 _FILL_CLOSE = time(15, 30)
 _HUNDRED = Decimal("100")
+_PCT_Q = Decimal("0.000001")                # exit_sim's gross-percent quantum
+#: Regular sessions in a row on which the store holds a NIFTY 50 bar but none for the row's symbol (after its
+#: fill, or its anchor if unfilled) before the row is final: delisted, merged or suspended. Pre-registered.
+STALE_SESSIONS = 5
+#: get_symbol_renames window: every stored snapshot (rekey_symbol's pair check uses the same), so a rename
+#: stays followed for as long as a row can stay open.
+_RENAME_LOOKBACK_DAYS = 3650
 
 
 @dataclass(frozen=True)
@@ -103,20 +111,29 @@ class SignalOutcomesJob:
         cur = self._conn.execute("SELECT * FROM signal_outcomes")
         cols = [c[0] for c in cur.description]
         stored = {r[:4]: dict(zip(cols, r, strict=True)) for r in map(tuple, cur)}
+        # Where each company's rows live NOW (rekey_symbol moves them), not where they lived on d. A failed
+        # read fails the night: without it a renamed row would read as stale.
+        names = _aliases(await self._store.arun(
+            self._store.get_symbol_renames, max(d, self._clock.today()), lookback_days=_RENAME_LOOKBACK_DAYS))
         todo: dict[str, list[_Signal]] = defaultdict(list)
-        for s in self._signals(d):
+        for s in self._signals(d, names):
             if not _final(stored.get(s.key)):
                 todo[s.symbol].append(s)
         ew = {date.fromisoformat(r[0]): r[1] for r in self._conn.execute("SELECT d, ret FROM universe_ew_returns")}
         sizing = _sizing(self._limits.load())
+        index_days = await self._index_days(min((s.d for v in todo.values() for s in v), default=d), d)
         now = self._clock.now().isoformat()
         rows = []
         for symbol, signals in todo.items():
-            bars, ex = await self._store.arun(self._load, symbol, min(s.d for s in signals), d)
+            try:
+                bars, ex = await self._store.arun(self._load, names(symbol), min(s.d for s in signals), d)
+            except Exception as exc:  # noqa: BLE001 - one symbol's read never costs the others; retried next night
+                _log.warning("signal_outcome_read_failed", symbol=symbol, error=repr(exc))
+                continue
             for s in signals:
                 prev = stored.get(s.key)
                 try:
-                    row = self._score(s, prev, bars, ex, d, ew, sizing)
+                    row = self._score(s, prev, bars, ex, d, ew, sizing, index_days)
                 except Exception as exc:  # noqa: BLE001 - one bad row never costs the others
                     _log.warning("signal_outcome_failed", key=list(s.key), error=repr(exc))
                     continue
@@ -130,15 +147,25 @@ class SignalOutcomesJob:
         return SignalOutcomesResult(d, scored=len(rows))
 
     # ------------------------------------------------------------------ population
-    def _signals(self, d: date) -> list[_Signal]:
+    def _signals(self, d: date, names: Callable[[str], tuple[str, ...]]) -> list[_Signal]:
         """hi52/ins: ``rule`` + ``next_open``. brk20 on its publication session ``signal_d``: ``rule`` + ``next_open``;
         a re-offer: ``next_open`` costed from the latest resting row covering it. Blocked crossings:
-        ``rule_blocked``."""
-        resting: dict[str, list[tuple[date, date, str, str | None]]] = defaultdict(list)
+        ``rule_blocked``. A journal symbol's resting rows are read through ``names`` (rekey_symbol moves them to
+        the new symbol; the journal keeps the old one)."""
+        stored: dict[str, list[tuple[date, date, str, str | None]]] = defaultdict(list)
         for symbol, signal_d, expires_d, entry, stop in self._conn.execute(
             "SELECT symbol, signal_d, expires_d, entry, stop FROM brk20_resting_levels ORDER BY signal_d"
         ):
-            resting[symbol].append((date.fromisoformat(signal_d), date.fromisoformat(expires_d), entry, stop))
+            stored[symbol].append((date.fromisoformat(signal_d), date.fromisoformat(expires_d), entry, stop))
+
+        def resting_of(symbol: str) -> list[tuple[date, date, str, str | None]]:
+            by_day: dict[date, tuple[date, date, str, str | None]] = {}
+            for name in names(symbol):                 # current symbol first: its row wins, as in rekey
+                for r in stored.get(name, ()):
+                    by_day.setdefault(r[0], r)
+            return [by_day[k] for k in sorted(by_day)]
+
+        resting: dict[str, list[tuple[date, date, str, str | None]]] = {}
         out = []
         for day_s, symbol, sid in self._conn.execute(
             f"SELECT d, symbol, strategy_id FROM prescreen_day_slots WHERE strategy_id IN "
@@ -149,7 +176,9 @@ class SignalOutcomesJob:
             constructs: tuple[str, ...] = ("rule", "next_open")
             levels = None
             if sid == brk20.STRATEGY_ID:
-                rows = resting.get(symbol, [])
+                if symbol not in resting:
+                    resting[symbol] = resting_of(symbol)
+                rows = resting[symbol]
                 first = [r for r in rows if r[0] == day]
                 covering = [r for r in rows if r[0] < day <= r[1]]
                 if first:
@@ -166,16 +195,31 @@ class SignalOutcomesJob:
         ]
         return out
 
-    def _load(self, symbol: str, start: date, d: date) -> tuple[list[SimBar], list[date]]:
-        daily = self._store.get_bars_1d(symbol, start, d)
-        corp = self._store.get_corp_actions(symbol=symbol, ex_from=start)
-        return ([SimBar(b.d, b.open, b.high, b.low, b.close) for b in daily],
-                [r["ex_date"] for r in corp if r["kind"] in UNADJUSTED_KINDS])
+    def _load(self, names: Sequence[str], start: date, d: date) -> tuple[list[SimBar], list[date]]:
+        """One company's bars and unadjusted-kind ex-dates under every name in ``names`` (current first: its
+        same-day bar wins, as in rekey_symbol)."""
+        by_day: dict[date, SimBar] = {}
+        ex: set[date] = set()
+        for name in names:
+            for b in self._store.get_bars_1d(name, start, d):
+                by_day.setdefault(b.d, SimBar(b.d, b.open, b.high, b.low, b.close))
+            ex.update(r["ex_date"] for r in self._store.get_corp_actions(symbol=name, ex_from=start)
+                      if r["kind"] in UNADJUSTED_KINDS)
+        return [by_day[k] for k in sorted(by_day)], sorted(ex)
+
+    async def _index_days(self, start: date, d: date) -> frozenset[date]:
+        """Sessions the store holds a NIFTY 50 bar for. A failed read yields none: no row reads as stale."""
+        try:
+            bars = await self._store.arun(self._store.get_bars_1d, regime.INDEX_SYMBOL, start, d)
+        except Exception as exc:  # noqa: BLE001 - the stale rule waits a night; scoring goes on
+            _log.warning("signal_outcome_index_read_failed", error=repr(exc))
+            return frozenset()
+        return frozenset(b.d for b in bars)
 
     # ------------------------------------------------------------------ one row
     def _score(
         self, s: _Signal, prev: dict[str, Any] | None, bars: Sequence[SimBar], ex: Sequence[date], d: date,
-        ew: Mapping[date, float | None], sizing: Callable[[Decimal], Decimal],
+        ew: Mapping[date, float | None], sizing: Callable[[Decimal], Decimal], index_days: frozenset[date],
     ) -> dict[str, Any]:
         row = dict(prev) if prev is not None else {
             **dict.fromkeys(_COLUMNS), **dict(zip(_KEY, s.key, strict=True)), "status": "open"}
@@ -186,6 +230,9 @@ class SignalOutcomesJob:
             if row["cost_pct"] is None:
                 row["cost_pct"] = float(self._costs.breakeven_pct(sizing(stop_pct), PRODUCT))
         except (_Unscorable, ArithmeticError, ValueError) as exc:
+            if row["cost_pct"] is not None:     # scored before: its levels went missing (a rename not followed)
+                _log.warning("signal_outcome_levels_lost", key=list(s.key), reason=str(exc))
+                return row
             _log.warning("signal_outcome_unscorable", key=list(s.key), reason=str(exc))
             return {**row, "status": "unscorable"}
         try:
@@ -222,6 +269,21 @@ class SignalOutcomesJob:
         status = {"exit": "closed", "void_ca": "void_ca", "open": "open",
                   "unfilled": "unscorable" if level is None else "unfilled"}[t20.status]
         exit_d = t20.exit_d if status == "closed" else None
+        stale_net = None
+        base = walk[-1].d if walk else (fill_d or first)
+        if status == "open" and self._stale(bars, base, d, index_days):
+            last = bars[-1] if bars else None
+            fill_px = t20.fill_px
+            if fill_d is None or fill_px is None:
+                status = "unscorable"
+            elif last is not None and last.d >= fill_d:
+                status, exit_d = "closed", last.d
+                gross = ((last.close - fill_px) / fill_px * _HUNDRED).quantize(_PCT_Q, ROUND_HALF_UP)
+                stale_net = gross - cost
+            if status != "open":
+                _log.warning("signal_outcome_stale_closed", symbol=s.symbol, d=s.d.isoformat(),
+                             strategy_id=s.strategy_id, construct=s.construct, status=status,
+                             last_bar=None if last is None else last.d.isoformat())
         if status == "void_ca" and fill_d is not None:
             exit_d = min(x for x in ex if x > fill_d)
         # brk20's level is a pre-ex price: an ex-date after the signal and before the fill (or inside
@@ -231,8 +293,9 @@ class SignalOutcomesJob:
         if pre_fill:
             status, exit_d = "void_ca", min(pre_fill)
         for k, o in outs.items():
-            if row[f"net_t{k}"] is None and not pre_fill and o.net_pct is not None:
-                row[f"net_t{k}"] = float(o.net_pct)
+            net = o.net_pct if o.net_pct is not None else stale_net    # an unreached horizon: the last close
+            if row[f"net_t{k}"] is None and not pre_fill and net is not None:
+                row[f"net_t{k}"] = float(net)
         row.update(status=status, exit_d=None if exit_d is None else exit_d.isoformat())
         return self._with_bench(row, ew) if status == "closed" else row
 
@@ -267,6 +330,23 @@ class SignalOutcomesJob:
                 break
         return out, None
 
+    def _stale(self, bars: Sequence[SimBar], base: date, d: date, index_days: frozenset[date]) -> bool:
+        """No bar after ``base`` (the last walked bar, else the fill or the anchor) and :data:`STALE_SESSIONS`
+        consecutive regular sessions after it, through ``d``, each with a NIFTY 50 bar. A later bar is a hole,
+        left to the bar-missing rules; a session without an index bar (a market-wide gap) restarts the count."""
+        if any(b.d > base for b in bars):
+            return False
+        run, s = 0, base
+        while run < STALE_SESSIONS:
+            try:
+                s = self._calendar.add_sessions(s, 1)
+            except ValueError:
+                return False
+            if s > d:
+                return False
+            run = run + 1 if s in index_days else 0
+        return True
+
     def _anchor_lost(self, bars: Sequence[SimBar], first: date) -> bool:
         """A bar beyond ``first`` + 2 sessions: a hole the next boot's daily-gap backfill did not repair."""
         try:
@@ -299,6 +379,22 @@ def _sizing(table: LimitTable) -> Callable[[Decimal], Decimal]:
                          f"gap_mult={gap_mult} caps={caps}")
     return lambda stop_pct: min(
         sizing_notional(floor, position_pct=position_pct, gap_mult=gap_mult, stop_pct=stop_pct), *caps)
+
+
+def _aliases(renames: Sequence[SymbolRename]) -> Callable[[str], tuple[str, ...]]:
+    """``journal symbol -> every name its company's rows may sit under``: the current symbol first, then the
+    journal's, then the token's other retired symbols. rekey_symbol moves bars, corporate actions and resting
+    levels to the current symbol but may not have run (or been refused), so every name is read."""
+    current = {r.old_symbol: r.new_symbol for r in renames}
+    retired: dict[str, list[str]] = defaultdict(list)
+    for r in renames:
+        retired[r.new_symbol].append(r.old_symbol)
+
+    def names(symbol: str) -> tuple[str, ...]:
+        now = current.get(symbol, symbol)
+        return tuple(dict.fromkeys((now, symbol, *retired.get(now, ()))))
+
+    return names
 
 
 def _final(row: Mapping[str, Any] | None) -> bool:

@@ -426,6 +426,132 @@ async def test_only_signal_strategies_are_scored(conn, store, job, sess):
     assert _rows(conn) == {}
 
 
+def _statuses(conn, symbol) -> dict[str, str]:
+    return {k[3]: v["status"] for k, v in _rows(conn).items() if k[1] == symbol}
+
+
+async def test_a_rename_mid_hold_is_followed_and_a_closed_row_never_moves(conn, store, cost_model, job, sess):
+    """2026-10-23 shape: the journal keeps OLD; rekey_symbol moves the bars and the resting row to NEW."""
+    _slot(conn, sess[0], "OLD")                                   # hi52: closed before the rename
+    _resting(conn, sess[3], sess[8], symbol="OLD")
+    _slot(conn, sess[3], "OLD", "brk20")                          # filled on sess[3], open at the rename
+    _bars(store, "OLD", sess[:22], low={3: "89"})
+    await job.run(sess[21])
+    before = _rows(conn)
+    assert {k[3]: v["status"] for k, v in before.items() if k[2] == "hi52"} == {"rule": "closed", "next_open": "closed"}
+    brk = before[(sess[3].isoformat(), "OLD", "brk20", "rule")]
+    assert (brk["status"], brk["fill_d"], brk["fill_px"]) == ("open", sess[3].isoformat(), "90")
+
+    eq = {"exchange": "NSE", "segment": "NSE", "instrument_type": "EQ"}
+    store.upsert_instruments_daily([{"d": sess[21], "instrument_token": 7, "tradingsymbol": "OLD", **eq},
+                                    {"d": sess[22], "instrument_token": 7, "tradingsymbol": "NEW", **eq}])
+    store.rekey_symbol("OLD", "NEW", apply=True)
+    conn.execute("UPDATE brk20_resting_levels SET symbol = 'NEW' WHERE symbol = 'OLD'")
+    _bars(store, "NEW", sess, skip=set(range(22)))
+    await job.run(sess[24])
+    rows = _rows(conn)
+    assert {k: v for k, v in rows.items() if k[2] == "hi52"} == {k: v for k, v in before.items() if k[2] == "hi52"}
+    row = rows[(sess[3].isoformat(), "OLD", "brk20", "rule")]
+    assert {k: row[k] for k in ("fill_d", "fill_px", "cost_pct")} == {k: brk[k] for k in ("fill_d", "fill_px", "cost_pct")}
+    assert (row["status"], row["exit_d"], row["net_t20"]) == (
+        "closed", sess[22].isoformat(), pytest.approx((122.5 / 90 - 1) * 100 - _cost(cost_model, "6000")))
+    assert rows[(sess[3].isoformat(), "OLD", "brk20", "next_open")]["exit_d"] == sess[23].isoformat()
+    assert not any(k[1] == "NEW" for k in rows)
+
+
+async def test_a_scored_row_whose_levels_vanish_is_left_as_it_was(conn, store, job, sess, caplog):
+    """A rename the mapping cannot follow (dropped as ambiguous): its fill and cost stay frozen."""
+    _resting(conn, sess[0], sess[5])
+    _slot(conn, sess[0], strategy_id="brk20")
+    _bars(store, "RELIANCE", sess[:10], low={0: "89"})
+    await job.run(sess[9])
+    before = _rows(conn)
+    conn.execute("DELETE FROM brk20_resting_levels")
+    with caplog.at_level(logging.WARNING, logger="engine.ops.signal_outcomes"):
+        await job.run(sess[24])
+    assert _rows(conn) == before
+    assert {r.key[3] for r in log_events(caplog, "signal_outcome_levels_lost")} == {"rule", "next_open"}
+
+
+async def test_stale_filled_row_closes_at_its_last_bar(conn, store, cost_model, job, sess, caplog):
+    _slot(conn, sess[0], "GONE")
+    _bars(store, "GONE", sess[:8])                                # delisted after sess[7]
+    _bars(store, "NIFTY 50", sess)
+    await job.run(sess[11])                                       # 4 stale sessions
+    assert _statuses(conn, "GONE") == {"rule": "open", "next_open": "open"}
+    with caplog.at_level(logging.WARNING, logger="engine.ops.signal_outcomes"):
+        await job.run(sess[12])                                   # the 5th
+        await job.run(sess[13])
+    cost = _cost(cost_model, "6000")
+    rule, nxt = _row(conn, sess[0], "rule", "GONE"), _row(conn, sess[0], "next_open", "GONE")
+    assert (rule["status"], rule["exit_d"], rule["net_t5"], rule["net_t10"], rule["net_t20"]) == (
+        "closed", sess[7].isoformat(), pytest.approx(4.5 - cost), pytest.approx(7.5 - cost), pytest.approx(7.5 - cost))
+    last = (107.5 / 101 - 1) * 100 - cost
+    assert (nxt["status"], nxt["exit_d"], nxt["net_t5"], nxt["net_t10"], nxt["net_t20"]) == (
+        "closed", sess[7].isoformat(), pytest.approx((105.5 / 101 - 1) * 100 - cost, abs=1e-5),
+        pytest.approx(last, abs=1e-5), pytest.approx(last, abs=1e-5))
+    events = sorted((r.construct, r.last_bar) for r in log_events(caplog, "signal_outcome_stale_closed"))
+    assert events == [("next_open", sess[7].isoformat()), ("rule", sess[7].isoformat())]
+
+
+async def test_stale_unfilled_row_is_unscorable(conn, store, job, sess):
+    _resting(conn, sess[0], sess[5], symbol="GONE")
+    _slot(conn, sess[0], "GONE", "brk20")
+    _bars(store, "GONE", sess[:2])                                # never touches 90
+    _bars(store, "NIFTY 50", sess)
+    await job.run(sess[24])
+    row = _row(conn, sess[0], "rule", "GONE", "brk20")
+    assert (row["status"], row["fill_d"], row["net_t20"]) == ("unscorable", None, None)
+
+
+async def test_a_market_wide_gap_is_never_stale(conn, store, job, sess):
+    _slot(conn, sess[0], "GONE")
+    _bars(store, "GONE", sess[:8])
+    _bars(store, "NIFTY 50", sess[:8])                            # no index bar after sess[7] either
+    await job.run(sess[24])
+    assert _statuses(conn, "GONE") == {"rule": "open", "next_open": "open"}
+
+    _bars(store, "NIFTY 50", sess, skip={*range(8), 10})          # stale 8, 9; gap 10 restarts; 11..15
+    await job.run(sess[14])
+    assert _statuses(conn, "GONE") == {"rule": "open", "next_open": "open"}
+    await job.run(sess[15])
+    assert _statuses(conn, "GONE") == {"rule": "closed", "next_open": "closed"}
+
+
+async def test_a_bar_after_four_stale_sessions_keeps_the_row_open(conn, store, cost_model, job, sess):
+    _slot(conn, sess[0], "LATE")
+    _bars(store, "LATE", sess[:8])
+    _bars(store, "NIFTY 50", sess)
+    await job.run(sess[11])
+    _bars(store, "LATE", sess, skip=set(range(30)) - {12})        # one later bar: a hole, not a delisting
+    await job.run(sess[20])
+    assert _statuses(conn, "LATE") == {"rule": "open", "next_open": "open"}
+    _bars(store, "LATE", sess)                                    # the hole backfilled
+    await job.run(sess[24])
+    row = _row(conn, sess[0], "rule", "LATE")
+    assert (row["status"], row["exit_d"], row["net_t20"]) == (
+        "closed", sess[19].isoformat(), pytest.approx(19.5 - _cost(cost_model, "6000")))
+
+
+async def test_one_symbols_read_failure_costs_only_its_rows(conn, store, job, sess, monkeypatch, caplog):
+    get_bars_1d = store.get_bars_1d
+
+    def flaky(symbol, start, end):
+        if symbol == "BAD":
+            raise OSError("duckdb read failed")
+        return get_bars_1d(symbol, start, end)
+
+    monkeypatch.setattr(store, "get_bars_1d", flaky)
+    for symbol in ("BAD", "RELIANCE"):
+        _slot(conn, sess[0], symbol)
+        _bars(store, symbol, sess)
+    with caplog.at_level(logging.WARNING, logger="engine.ops.signal_outcomes"):
+        await job.run(sess[24])
+    assert {k[1] for k in _rows(conn)} == {"RELIANCE"}
+    assert _statuses(conn, "RELIANCE") == {"rule": "closed", "next_open": "closed"}
+    assert [r.symbol for r in log_events(caplog, "signal_outcome_read_failed")] == ["BAD"]
+
+
 def test_no_decision_path_reads_hindsight():
     """The one exception is the card's same-ticker line, an owner-facing extra in ``_fill_extras``."""
     paths = [*(SRC / p for p in ("strategy", "risk", "intelligence")), SRC / "ops" / "pipeline.py"]
