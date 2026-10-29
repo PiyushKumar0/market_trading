@@ -220,9 +220,7 @@ def test_intraday_output_schema_is_a_discriminated_union():
 
 def test_agent_output_schemas_are_exported():
     day_plan = preopen.output_json_schema()
-    assert set(day_plan["properties"]) == {
-        "regime", "focus", "catalyst_focus", "warnings", "no_trade_today"
-    }
+    assert set(day_plan["properties"]) == {"regime", "focus", "catalyst_focus", "warnings"}
     assert news_analyst.output_json_schema() == ClusterScoreBatch.model_json_schema()
 
 
@@ -275,7 +273,6 @@ def test_day_plan_round_trips_with_catalyst_focus():
             "advisory_levels": "watch the 1405 confirm", "drift_note": "day 2 of the story",
         }],
         "warnings": ["expiry Thursday"],
-        "no_trade_today": False,
     })
     assert plan.focus[0].bias == "long"
     assert plan.catalyst_focus[0].direction == "long"
@@ -284,7 +281,6 @@ def test_day_plan_round_trips_with_catalyst_focus():
 def test_day_plan_defaults_and_caps():
     plan = DayPlan.model_validate({"regime": "quiet"})
     assert plan.focus == [] and plan.catalyst_focus == [] and plan.warnings == []
-    assert plan.no_trade_today is False
 
     nine = [{"symbol": f"S{i}", "bias": "long", "levels": "x", "why": "y"} for i in range(9)]
     with pytest.raises(ValidationError):
@@ -292,6 +288,10 @@ def test_day_plan_defaults_and_caps():
     with pytest.raises(ValidationError):
         DayPlan.model_validate({"regime": "x", "focus": [{"symbol": "S", "bias": "sideways",
                                                          "levels": "x", "why": "y"}]})
+
+
+def test_dayplan_has_no_no_trade_today():
+    assert "no_trade_today" not in DayPlan.model_json_schema()["properties"]
 
 
 # --------------------------------------------------------------------------- ClusterScore (§5.4/D7)

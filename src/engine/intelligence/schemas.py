@@ -444,7 +444,6 @@ class DayPlan(BaseModel):
     focus: list[DayPlanFocus] = Field(default_factory=list, max_length=8)     # §5.3: 3–8 symbols
     catalyst_focus: list[DayPlanCatalystFocus] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    no_trade_today: bool = False
 
 
 # =========================================================================== News Analyst (§5.4)

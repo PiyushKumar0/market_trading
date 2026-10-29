@@ -283,7 +283,7 @@ class ContextAssembler:
         The planner's STABLE block is the trading-date line and the regime line: the day plan it is
         about to write does not exist yet. ``platform_health`` is the deterministic CURRENT harness
         state (2026-07-30: without it the planner escalated yesterday's post-mortem into a
-        present-tense outage and declared no_trade_today).
+        present-tense outage and declared a no-trade day).
         """
         stable = "\n".join(["== DAY CONTEXT (stable) ==", self._date_line(d), self._regime_text(d)])
         parts: list[str] = ["== PRE-OPEN STATE (volatile) =="]

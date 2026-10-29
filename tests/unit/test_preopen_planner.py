@@ -101,9 +101,7 @@ class FakeHarness:
 
 # --------------------------------------------------------------------------- helpers
 def _plan(**overrides: Any) -> DayPlan:
-    base: dict[str, Any] = dict(
-        regime="trending up, breadth positive", focus=[], catalyst_focus=[], warnings=[], no_trade_today=False
-    )
+    base: dict[str, Any] = dict(regime="trending up, breadth positive", focus=[], catalyst_focus=[], warnings=[])
     base.update(overrides)
     return DayPlan(**base)
 
