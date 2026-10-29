@@ -100,14 +100,16 @@ class FakeHarness:
     def __init__(self, *results: Any) -> None:
         self.queued = list(results)
         self.calls: list[Any] = []
+        self.results: list[AgentResult] = []
 
     async def run_single_shot(self, agent_def, context, validate, *, json_schema=None, call_class=None):
         self.calls.append(context)
         assert self.queued, "fake harness called more times than it has canned results"
         item = self.queued.pop(0)
-        if isinstance(item, AgentResult):
-            return item
-        return AgentResult.Ok(call_id=str(ULID()), payload=validate(json.dumps(item)))
+        if not isinstance(item, AgentResult):
+            item = AgentResult.Ok(call_id=str(ULID()), payload=validate(json.dumps(item)))
+        self.results.append(item)
+        return item
 
 
 class FakeAssembler:
@@ -1083,6 +1085,96 @@ async def test_no_action_records_the_regime_note_and_no_proposal(
         (cand.symbol, cand.strategy_id),
     ).fetchone()
     assert row["evaluated"] == 1
+
+
+class TimedOutCtxBuilder:
+    async def build(self, *args):
+        raise TimeoutError
+
+
+def decision_row(conn) -> tuple:
+    return tuple(conn.execute(
+        "SELECT analyst_decision, analyst_confidence, analyst_call_id, proposal_id FROM prescreen_day_slots"
+    ).fetchone())
+
+
+def decision_pipeline(conn, pclock, calendar, book, limit_table, harness, verdict="approve", **kwargs):
+    return make_pipeline(
+        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
+        gate=StubGate(verdict_of(verdict, kwargs.pop("cost_model"))), ctx=passing_ctx(),
+        limits=StubLimits(limit_table), governor=TunableGovernor(12), **kwargs,
+    )[0]
+
+
+async def test_no_action_decision_is_journalled(conn, pclock, calendar, book, limit_table, cost_model):
+    harness = FakeHarness(dict(NO_ACTION_JSON))
+    pipeline = decision_pipeline(conn, pclock, calendar, book, limit_table, harness, cost_model=cost_model)
+    await publish_candidate(pipeline, candidate())
+
+    assert decision_row(conn) == ("no_action", None, harness.results[0].call_id, None)
+
+
+@pytest.mark.parametrize("timed_out", [False, True], ids=["gate_rejects", "context_times_out"])
+async def test_enter_decision_is_journalled_before_the_gate(
+    conn, pclock, calendar, book, limit_table, cost_model, timed_out
+):
+    harness = FakeHarness({**ENTER_JSON, "confidence": 0.6})
+    pipeline = decision_pipeline(
+        conn, pclock, calendar, book, limit_table, harness, "reject", cost_model=cost_model)
+    if timed_out:
+        pipeline._ctx_builder = TimedOutCtxBuilder()
+    await publish_candidate(pipeline, candidate())
+
+    proposal_id = conn.execute("SELECT proposal_id FROM proposals").fetchone()[0]
+    assert decision_row(conn) == ("enter", 0.6, harness.results[0].call_id, proposal_id)
+
+
+async def test_first_decision_stands(conn, pclock, calendar, book, limit_table, cost_model):
+    """The WO-20d guard re-queues the row after an exception that lands AFTER the journal write."""
+    harness = FakeHarness({**NO_ACTION_JSON, "confidence": 0.2}, {**NO_ACTION_JSON, "confidence": 0.9})
+    declines: list[str] = []
+
+    def decline(symbol, strategy_id):
+        declines.append(symbol)
+        if len(declines) == 1:
+            raise RuntimeError("blew up after the journal write")
+        return True
+
+    pipeline = decision_pipeline(
+        conn, pclock, calendar, book, limit_table, harness, cost_model=cost_model, decline=decline)
+    await publish_candidate(pipeline, candidate())
+    await pipeline._drain_one_forward()
+
+    assert len(harness.results) == 2
+    assert decision_row(conn) == ("no_action", 0.2, harness.results[0].call_id, None)
+
+
+async def test_failure_then_success_writes_once(conn, pclock, calendar, book, limit_table, cost_model):
+    harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"), dict(NO_ACTION_JSON))
+    pipeline = decision_pipeline(
+        conn, pclock, calendar, book, limit_table, harness, cost_model=cost_model, rearm=lambda sym, sid: True)
+    await publish_candidate(pipeline, candidate())
+    assert decision_row(conn) == (None, None, None, None)
+
+    await publish_candidate(pipeline, candidate(signal_id="02SIGNAL"))
+    assert decision_row(conn) == ("no_action", None, harness.results[1].call_id, None)
+
+
+@pytest.mark.parametrize(
+    ("answer", "unclassified"),
+    [(lambda: dict(ENTER_JSON, tradingsymbol="SUZLON"), 0), (lambda: _exit_json("01POSITION"), 1)],
+    ids=["identity_mismatch", "exit_answered_to_candidate"],
+)
+async def test_unjournalled_outputs(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog, answer, unclassified
+):
+    pipeline = decision_pipeline(
+        conn, pclock, calendar, book, limit_table, FakeHarness(answer()), cost_model=cost_model)
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, candidate())
+
+    assert decision_row(conn) == (None, None, None, None)
+    assert len(log_events(caplog, "analyst_decision_unclassified")) == unclassified
 
 
 async def test_shrink_verdict_resizes_the_recommendation(

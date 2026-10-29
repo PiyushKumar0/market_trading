@@ -1164,6 +1164,32 @@ class RecommendationPipeline:
             _log.warning("day_slot_journal_failed", op="forward", symbol=candidate.symbol,
                          strategy_id=candidate.strategy_id, error=str(exc))
 
+    def _journal_decision(
+        self, candidate: SignalCandidate, d: date, decision: str, confidence: float | None,
+        call_id: str | None, proposal_id: str | None,
+    ) -> None:
+        """Record the analyst's FIRST successful verdict on the day slot (review §9 #2).
+
+        Write-once: a WO-20d re-queue or a re-arm evaluates the same row again, and the later answer
+        must not replace the one the verdict study counts. Journal failure never blocks the call.
+        """
+        key = (d.isoformat(), candidate.symbol, candidate.strategy_id)
+        try:
+            cur = self._conn.execute(
+                "UPDATE prescreen_day_slots SET analyst_decision = ?, analyst_confidence = ?, "
+                "analyst_call_id = ?, proposal_id = ? "
+                "WHERE d = ? AND symbol = ? AND strategy_id = ? AND analyst_decision IS NULL",
+                (decision, confidence, call_id, proposal_id, *key),
+            )
+            if cur.rowcount == 0 and self._conn.execute(
+                "SELECT 1 FROM prescreen_day_slots WHERE d = ? AND symbol = ? AND strategy_id = ?", key,
+            ).fetchone() is None:
+                _log.warning("day_slot_journal_failed", op="decision", reason="no_row",
+                             symbol=candidate.symbol, strategy_id=candidate.strategy_id)
+        except Exception as exc:  # noqa: BLE001 - journaling is resilience bookkeeping, never a gate
+            _log.warning("day_slot_journal_failed", op="decision", symbol=candidate.symbol,
+                         strategy_id=candidate.strategy_id, error=str(exc))
+
     def _journal_unsizeable_qty_zero(self, candidate: SignalCandidate, d: date) -> None:
         """Flip the day slot's ``unsizeable`` marker after :meth:`_max_qty_by_risk` computes 0 for a
         candidate that DOES carry a stop (2026-08-14 extension of the stopless case below).
@@ -2288,6 +2314,7 @@ class RecommendationPipeline:
                 self._assembler.set_regime_note(payload.regime_note)
             _log.info("signal_candidate_no_action", signal_id=candidate.signal_id,
                       reason=payload.reason)
+            self._journal_decision(candidate, d, "no_action", payload.confidence, result.call_id, None)
             # A declined evaluation holds no position and so holds no slot: hand the pair back to
             # cap displacement (2026-09-04 — five no_action verdicts locked every orb slot on 09-03).
             # The journal row stays evaluated=1: the analyst ran, this is not the 07-29 re-arm.
@@ -2332,6 +2359,11 @@ class RecommendationPipeline:
                           "mismatches": {k: [str(g), str(w)] for k, (g, w) in mismatches.items()}},
                 ))
                 return
+            self._journal_decision(
+                candidate, d, "enter", payload.confidence, result.call_id, payload.proposal_id)
+        else:
+            _log.warning("analyst_decision_unclassified", signal_id=candidate.signal_id,
+                         action=payload.action)
 
         # 2026-09-21: sonnet-5 analyst LIMIT proposals have arrived with entry_price null since
         # 2026-09-16 (7/13), and the gate rejected each one unpriced though the scanner's own level
