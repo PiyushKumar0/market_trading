@@ -548,10 +548,10 @@ A SUPPORTED result goes to the owner and wires nothing.
 ```powershell
 # from the worktree that holds the change; the venv imports the LIVE tree unless PYTHONPATH points here
 $env:PYTHONPATH = '<worktree>\src'
-python -c "import engine; print(engine.__file__)"          # must print a path under the worktree
+.venv\Scripts\python.exe -c "import engine; print(engine.__file__)"   # must print a path under the worktree
 $tr = "$HOME\.claude\projects\C--Users-piyush-kumar-atari-projects-personal-market-trading"
-python scripts\replay_agents.py sample --intraday 3 --preopen 2 --transcripts-dir $tr    # prints the samples file
-python scripts\replay_agents.py run --samples <samples file> --baseline --transcripts-dir $tr
+.venv\Scripts\python.exe scripts\replay_agents.py sample --intraday 3 --preopen 2 --transcripts-dir $tr   # prints the samples file
+.venv\Scripts\python.exe scripts\replay_agents.py run --samples <samples file> --baseline --transcripts-dir $tr
 # run refuses in market hours on a trading day (--force overrides; do not); results in data\reports\replays\<run>\
 ```
 
