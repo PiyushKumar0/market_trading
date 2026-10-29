@@ -2,6 +2,66 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-30 01:50 — Review actions built and validated on `wip/review-actions`: not merged, not deployed (owner: "Implement and validate the planned changes … You can start implementation right now, without waiting for market closure. Trade window has been closed.")
+
+- **Branch:** `wip/review-actions` in the worktree `..\mt_review`, on phase3 `aab0133` (a fast-forward). It covers all 21
+  tasks of `runbooks/plan-2026-10-29-review-actions.md`.
+- **How it was built:**
+  - Ten file-locality packages. Each was built by an implementer agent and checked by a separate reviewer, with one
+    or two fix rounds.
+  - P4–P6 ran in a second worktree and were cherry-picked in with no conflicts.
+  - A whole-branch review from three angles followed: line-by-line, removed behaviour, and a cross-file tracer. Its
+    findings are fixed or listed under "Left open".
+- **What changed:**
+  - Migrations: 0018 (analyst decision journal), 0019 (prompt_version), 0020 (`signal_outcomes`,
+    `brk20_regime_blocked`) and 0021 (notification buttons).
+  - The nightly `signal_outcomes` job runs at 18:40.
+  - The pre-registered verdicts: `engine.learning.forward_verdicts` and `scripts/forward_verdicts.py`.
+  - One NIFTY 50 regime predicate. C2 applies at brk20 origination (`brk20.regime_filter: true`). The retest window
+    is now y+1..y+5.
+  - The heartbeat is retired in favour of a deterministic regime line, and `no_trade_today` is dropped.
+  - Prompts now say "unavailable (<reason>)" when a source is absent.
+  - trend is parked.
+  - `analyst_confidence_min` is optional. The owner patch is prepared, not applied.
+  - The card gains a cost line and a same-ticker history line.
+  - Time exits skip positions sold outside the ledger.
+  - One-tap skip buttons, with a 3-session reason window.
+  - The scorecard gains a signals block, the dashboard a Performance card, and the weekly summary an analyst line
+    (soft dependency).
+  - A research trial ledger with the registration bar.
+  - Scripts: the market-pause study (registered, not run) and the LLM scorecard.
+- **Registered:**
+  - IMPLEMENTATION_PLAN §3 holds the analyst-value verdict, the brk20 and ins kill rules and the market-pause study,
+    registered 2026-10-29.
+  - They were amended on 2026-10-30, before R. The amendment covers renames, terminal rules for delisted and halted
+    names, a failed-data guard, the scope of the prompt key, and the C2 rollback.
+  - R = 2026-11-02 (`forward_verdicts.REGISTERED_FROM`). A deploy after 09:15 IST on 11-02 moves it.
+- **Validation at the tip:**
+  - Full gate: 4213 passed, 19 skipped. Offline tier: 430 passed, 1 skipped. Dashboard `npm test`: 95/95.
+  - Replay smoke: 10/10 valid, 0 schema_invalid, intraday actions match live 3/3 (`mt_review\data\reports\replays\20261030T000235`).
+  - The Performance card at 390 px on the fixture server; dom-checks clean.
+- **Found during the build:**
+  - A build agent wrote an empty untracked `tests/unit/test_prompt_integrity.py` into the LIVE tree at 23:09. It
+    would have aborted the deploy's ff-merge. It is removed; live `git status` shows only `graphify-out/`.
+  - A worktree replay needs the pinned CLI junctioned in. COMMANDS is updated.
+  - The host sat in Modern Standby 17:48–21:21 with the keep-awake helper running (lid or power button), and the
+    agents stalled.
+- **Owner:**
+  - Approve the merge and deploy per COMMANDS "Deploy a reviewed tip":
+    - `git status` is clean;
+    - back up `pre_0018.db`;
+    - ff-merge;
+    - rebuild the dashboard;
+    - the boot log shows 0018–0021 and `engine_ready`.
+  - Then, optionally, apply `runbooks/patches/limits-drop-analyst-confidence-min.patch` (COMMANDS "Protected config").
+- **Left open:**
+  - The C2 labels on the planner and `/why` previews.
+  - The regime line's store read on the event loop in position events.
+  - A double-crossing brk20 re-offer is costed from the latest resting row.
+  - The market-pause study run. It needs a fresh research snapshot, taken with the engine stopped.
+- **Not touched:** mt-engine (running throughout) and both protected stores. The live tree was touched only to remove
+  the stray file.
+
 ## 2026-10-29 15:40 — Implementation plan for the review's recommendations: plan only, nothing built or deployed (owner: "Based on the recommended changes of the report, Plan the entire change process …")
 
 - **Plan:** `runbooks/plan-2026-10-29-review-actions.md`. 21 tasks (T1–T20 plus T5b) in six phases.
