@@ -347,12 +347,13 @@ def split_by_key(
     rows: Iterable[SignalRow], keys: dict[str, tuple[str, str]],
 ) -> tuple[list[SignalRow], list[SignalRow]]:
     """(kept, excluded) decided rows. The population freezes on a strategy's first day F with a decision
-    under another key: rows after F are excluded even if the key reverts; rows on F carrying the
-    registered key were decided before the change and stay."""
+    under another non-null key: rows after F are excluded even if the key reverts; rows on F carrying the
+    registered key were decided before the change and stay. A row missing its key is a data gap, not a
+    change: excluded, never freezing."""
     decided = [r for r in rows if r.analyst_decision]
     frozen: dict[str, date] = {}
     for r in decided:
-        if keys.get(r.strategy_id) != (r.prompt_version, r.model):
+        if r.prompt_version and r.model and keys.get(r.strategy_id) != (r.prompt_version, r.model):
             frozen[r.strategy_id] = min(r.d, frozen.get(r.strategy_id, r.d))
     kept: list[SignalRow] = []
     excluded: list[SignalRow] = []

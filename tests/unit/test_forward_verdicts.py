@@ -165,6 +165,11 @@ def test_the_population_freezes_on_the_first_other_key():
     assert fv.split_by_key(rows, {"ins": ("v1", "m")}) == ([rows[0]], rows[1:])
 
 
+def test_a_row_missing_its_key_is_excluded_without_freezing():
+    rows = [_r(0, decision="enter", key=(None, "m")), _r(1, decision="enter")]
+    assert fv.split_by_key(rows, {"ins": ("v1", "m")}) == ([rows[1]], [rows[0]])
+
+
 def test_cell_holders_are_the_open_decided_rows_of_the_first_cells():
     rows = [_r(0, decision="enter", status="open"), _r(0, symbol="B", decision="no_action"),
             _r(1, decision="enter", status="open"), _r(1, symbol="B", decision="no_action")]
