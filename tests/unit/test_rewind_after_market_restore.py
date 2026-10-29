@@ -58,6 +58,7 @@ _JOB_ROWS = [
     ("tick_compact", "2026-10-13", "success", "2026-10-13T22:31:00+05:30"),
     ("nightly_review", "2026-10-13", "success", "2026-10-13T21:01:00+05:30"),
     ("rec_outcomes", "2026-10-13", "success", "2026-10-13T18:20:00+05:30"),
+    ("signal_outcomes", "2026-10-13", "success", "2026-10-13T18:41:00+05:30"),
     ("universe_build", "2026-10-14", "success", "2026-10-14T08:31:00+05:30"),
 ]
 
@@ -250,6 +251,7 @@ def test_apply_deletes_exactly_the_replayable_job_rows(env):
         ("tick_compact", "2026-10-13"),        # parquet output, outside market.duckdb
         ("nightly_review", "2026-10-13"),      # LLM; state.db output
         ("rec_outcomes", "2026-10-13"),        # state.db output
+        ("signal_outcomes", "2026-10-13"),     # state.db output
         ("universe_build", "2026-10-14"),      # run-latest: not a per-day replay
     }
 

@@ -77,6 +77,16 @@ def test_unmeasurable_excess_is_none(daily, ex_dates, k):
     assert sc.excess_pct(_series(110.0), D[3], k, daily, list(daily), ex_dates) is None
 
 
+def test_a_muhurat_bar_is_not_a_session_of_the_horizon(monkeypatch):
+    dates = [date(2025, 10, 20), date(2025, 10, 21), date(2025, 10, 23)]      # 10-21 is the muhurat session
+    px = np.array([100.0, 100.0, 110.0])
+    series = rc.bb.Series("SYM", dates, px, px, px, px, np.full(3, 1000.0), [])
+    monkeypatch.setattr(rc.bb, "load_series", lambda *a, **k: {"SYM": series})
+    daily = dict.fromkeys(dates, 0.0)
+    m = sc.measurer(None, dates[-1], daily, {})
+    assert m("SYM", dates[0], 2) == pytest.approx(10.0)                       # exit 10-23, not the muhurat bar
+
+
 def test_planner_bias_buckets_enter_at_the_first_open_after_the_plan():
     plans = [(D[2], json.dumps({"focus": [{"symbol": "A", "bias": "long"}, {"symbol": "B", "bias": "avoid"}]}),
               f"{D[2]}T08:50:00+05:30"),

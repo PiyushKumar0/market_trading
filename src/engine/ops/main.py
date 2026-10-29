@@ -3707,13 +3707,17 @@ def _journal_regime_blocked(
     conn: sqlite3.Connection, blocked: Sequence[SignalCandidate], idx: regime.IndexRegime | None,
     reason: str, signal_d: date, *, now: datetime,
 ) -> None:
-    """INSERT OR IGNORE the crossings C2 blocked into ``brk20_regime_blocked`` (the ``rule_blocked`` arm).
+    """Upsert the crossings C2 blocked into ``brk20_regime_blocked`` (the ``rule_blocked`` arm); a later
+    sweep refreshes the reason and index figures unless the stored reason is already ``down``.
 
     Loop thread only, for the reason ``RestingLevelBook.record`` is; money as TEXT in its format."""
     try:
         conn.executemany(
-            "INSERT OR IGNORE INTO brk20_regime_blocked (symbol, signal_d, entry, stop, target, score, "
-            "index_close, sma50, sma50_then, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO brk20_regime_blocked (symbol, signal_d, entry, stop, target, score, "
+            "index_close, sma50, sma50_then, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (symbol, signal_d) DO UPDATE SET reason = excluded.reason, "
+            "index_close = excluded.index_close, sma50 = excluded.sma50, sma50_then = excluded.sma50_then "
+            "WHERE brk20_regime_blocked.reason != 'down'",
             [(c.symbol, signal_d.isoformat(), str(c.raw_levels.entry),
               None if c.raw_levels.stop is None else str(c.raw_levels.stop),
               None if c.raw_levels.target is None else str(c.raw_levels.target), float(c.score),

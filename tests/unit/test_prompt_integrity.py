@@ -22,7 +22,7 @@ from engine.core.config import config_dir
 from engine.datafeeds.news_pipeline import CatalystDigestJob
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.harness import AgentResult, load_agent_defs
-from engine.marketdata.store import MarketStore
+from engine.marketdata.store import DailyBar, MarketStore
 from engine.ops.jobs import JOB_CATALYST_DIGEST, JOB_EARNINGS
 from engine.ops.preopen_planner import PreopenPlannerJob
 from engine.strategy.scanners import brk20
@@ -152,6 +152,9 @@ SIGNAL_CASES = {
     "swing_daily/read_failed": (
         _both(_SWING, _fails("get_bars_1d")), (f"{DAILY_HEADER} unavailable (daily-bar read failed)",),
     ),
+    "swing_daily/stale_tail": (_both(_SWING, lambda w: w.store.upsert_bars_1d([DailyBar(
+        symbol=UNWATCHED, d=date(2026, 6, 15), open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+        close=Decimal("1"), volume=1)])), (f"{DAILY_HEADER} unavailable (no completed daily bars for 2026-06-16)",)),
     "swing_daily/present": (_both(_SWING, lambda w: seed_daily_bars(w.store, symbol=UNWATCHED)), (DAILY_LAST_ROW,)),
     "watchlist/digest_not_run": (
         _set(ran=lambda d: False),

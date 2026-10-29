@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -99,3 +100,22 @@ async def test_blocked_crossings_written_on_loop_thread_in_window_only(tmp_path,
     idx = regime.index_regime(FALLING, Y)
     assert (rows[0]["index_close"], rows[0]["sma50"], rows[0]["sma50_then"]) == (idx.close, idx.sma, idx.sma_then)
     assert resting == 0 and brk20.STRATEGY_ID not in {sid for sid, _ in w.published}
+
+
+def _journal(conn, idx, reason):
+    cand = SimpleNamespace(symbol="AAA", score=0.5, raw_levels=SimpleNamespace(entry=100, stop=94, target=None))
+    opsmain._journal_regime_blocked(conn, [cand], idx, reason, date(2026, 6, 17), now=FIXED_NOW)
+
+
+def test_journal_upgrades_a_missing_bar_reason_to_down(conn):
+    _journal(conn, None, "index_bar_missing")
+    _journal(conn, regime.index_regime(FALLING, Y), "down")
+    row = _blocked(conn)[0]
+    assert (row["reason"], row["index_close"]) == ("down", FALLING[-1])
+
+
+def test_journal_never_downgrades_down(conn):
+    _journal(conn, regime.index_regime(FALLING, Y), "down")
+    _journal(conn, None, "index_bar_missing")
+    row = _blocked(conn)[0]
+    assert (row["reason"], row["index_close"]) == ("down", FALLING[-1])

@@ -62,7 +62,8 @@ drop its give-up streak clock and, for a job with no success before S, the retry
 export would fail on the missing universe rows (ins_crossings.py:164) and give up after
 ``GIVE_UP_AFTER_DAYS``. ``tick_compact`` compacts parquet files under ``paths.parquet_dir``, outside
 market.duckdb (engine/ops/main.py:1530-1531). ``rec_outcomes`` writes ``rec_outcomes`` in state.db
-(engine/ops/rec_outcomes.py:45). ``weekly_summary`` would re-send the owner digest. ``nightly_review``
+(engine/ops/rec_outcomes.py:45). ``signal_outcomes`` writes ``signal_outcomes`` in state.db.
+``weekly_summary`` would re-send the owner digest. ``nightly_review``
 is an LLM job writing state.db (engine/ops/main.py:1409-1415). Run-latest and safety-critical jobs are
 not per-day replays: ``universe_build`` and ``instruments`` only ever build TODAY (main.py:1249, 1225),
 so their rows for days before today stay (nothing can rebuild a past day's snapshot).
@@ -131,6 +132,7 @@ from engine.ops.jobs import (  # noqa: E402
     JOB_NIGHTLY_REVIEW,
     JOB_REC_OUTCOMES,
     JOB_RECONCILE,
+    JOB_SIGNAL_OUTCOMES,
     JOB_TICK_COMPACT,
     JOB_UNIVERSE,
     JOB_WEEKLY_SUMMARY,
@@ -156,6 +158,7 @@ NOT_REWOUND: dict[str, str] = {
     JOB_REC_OUTCOMES: "writes rec_outcomes in state.db",
     JOB_WEEKLY_SUMMARY: "a replay would re-send the owner digest",
     JOB_NIGHTLY_REVIEW: "LLM review into state.db; a replay spends quota",
+    JOB_SIGNAL_OUTCOMES: "writes signal_outcomes in state.db, which the restore did not touch",
 }
 
 #: ``CatchUpRunner(max_lookback_days=30)`` default; engine.ops.main passes none (pinned by a test).

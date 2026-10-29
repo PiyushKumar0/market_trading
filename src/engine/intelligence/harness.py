@@ -656,10 +656,14 @@ async def _closing(stream: Any) -> Any:
 _AUTH_FAILED_RE = re.compile(r"not logged in|please run /login|\b401\b|oauth|revoked|authenticat")
 
 
-def _prompt_version(system_prompt: str, template: str) -> str:
-    """Template identity of a call, unlike the per-call ``inputs_digest``: the system prompt plus the
-    assembler's fixed text (``AssembledContext.template``)."""
-    return hashlib.sha256(f"{system_prompt}\x00{template}".encode()).hexdigest()[:16]
+def _prompt_version(
+    system_prompt: str, template: str, json_schema: dict[str, Any] | None = None, effort: str | None = None,
+) -> str:
+    """Template identity of a call, unlike the per-call ``inputs_digest``: the system prompt, the
+    assembler's fixed text (``AssembledContext.template``), the output schema and the effort knob."""
+    schema = "" if json_schema is None else json.dumps(json_schema, sort_keys=True)
+    return hashlib.sha256(
+        f"{system_prompt}\x00{template}\x00{schema}\x00{effort or ''}".encode()).hexdigest()[:16]
 
 
 def _classify(exc: BaseException) -> tuple[FailReason, str]:
@@ -822,7 +826,7 @@ class AgentHarness:
         timeout_s: float,
         budget: _RunBudget | None,
     ) -> AgentResult:
-        prompt_version = _prompt_version(system_prompt, template)
+        prompt_version = _prompt_version(system_prompt, template, json_schema, agent_def.effort)
         decision = self._governor.can_invoke(agent_def.agent_id)
         if not decision.allowed:
             # NO SDK call — but the audit trail still records that the agent was asked and refused (R8).

@@ -31,7 +31,7 @@ import sys
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -44,8 +44,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import duckdb  # noqa: E402
 
 import research_common as rc  # noqa: E402
-from engine.core.clock import IST  # noqa: E402
-from engine.core.config import repo_root  # noqa: E402
+from engine.core.calendar import NSECalendar  # noqa: E402
+from engine.core.clock import IST, Clock  # noqa: E402
+from engine.core.config import config_dir, repo_root  # noqa: E402
 from engine.learning import forward_verdicts as fv  # noqa: E402
 
 LABEL = "interim, decides nothing"
@@ -73,15 +74,27 @@ def excess_pct(s, entry: date, k: int, daily: dict[date, float | None], grid: li
     return None if ew is None else (float(s.close[j] / s.open[i]) - 1 - ew) * 100
 
 
+def regular_sessions(s, cal: NSECalendar):
+    """``s`` without special-session (muhurat) bars, which ``research_common.core_ew`` does not count either."""
+    keep = [(sess := cal.session(d)) is None or not sess.is_muhurat for d in s.dates]
+    if all(keep):
+        return s
+    return replace(s, dates=[x for x, k in zip(s.dates, keep, strict=True) if k], open=s.open[keep],
+                   high=s.high[keep], low=s.low[keep], close=s.close[keep], volume=s.volume[keep],
+                   rows=[x for x, k in zip(s.rows, keep, strict=False) if k])
+
+
 def measurer(conn, as_of: date, daily: dict[date, float | None], structural: dict[str, list[date]]) -> Measure:
     grid, cache = list(daily), {}
+    cal = NSECalendar(config_dir() / "calendar", Clock())
 
     def m(symbol: str, entry: date, k: int) -> float | None:
         if not symbol:
             return None
         if symbol not in cache:
             found = rc.bb.load_series(conn, rc.FULL_HISTORY_START, as_of, symbols=[symbol])
-            cache[symbol] = next(iter(found.values()), None)
+            s = next(iter(found.values()), None)
+            cache[symbol] = None if s is None else regular_sessions(s, cal)
         s = cache[symbol]
         return None if s is None else excess_pct(s, entry, k, daily, grid, structural.get(s.symbol, ()))
     return m

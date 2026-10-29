@@ -993,6 +993,13 @@ def test_prompt_version_ignores_the_digest_and_moves_with_system_prompt_or_templ
                 _prompt_version("sys", "v1\x00other")}) == 4
 
 
+def test_prompt_version_moves_with_the_schema_or_the_effort_alone() -> None:
+    base = _prompt_version("sys", "t", {"a": 1}, "high")
+    assert base == _prompt_version("sys", "t", {"a": 1}, "high")
+    assert len({base, _prompt_version("sys", "t", {"a": 2}, "high"), _prompt_version("sys", "t", {"a": 1}, "low"),
+                _prompt_version("sys", "t", None, "high")}) == 4
+
+
 async def test_every_persisted_call_has_a_prompt_version(defs, gov, clock, conn) -> None:
     agentic = json.dumps({"summary": "flat day", "param_suggestions": []})
     fake = FakeQuery(
@@ -1010,8 +1017,9 @@ async def test_every_persisted_call_has_a_prompt_version(defs, gov, clock, conn)
     versions = [r["prompt_version"] for r in rows(conn)]
     assert [r["fail_reason"] for r in rows(conn)] == [None, None, "governor_blocked"]
     assert versions == [
-        _prompt_version(ctx.system_prompt, ctx.template), _prompt_version("nightly", ""),
-        _prompt_version(ctx.system_prompt, ctx.template),
+        _prompt_version(ctx.system_prompt, ctx.template, None, defs["intraday_analyst"].effort),
+        _prompt_version("nightly", "", None, defs["nightly_reviewer"].effort),
+        _prompt_version(ctx.system_prompt, ctx.template, None, defs["intraday_analyst"].effort),
     ]
 
 

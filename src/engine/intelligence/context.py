@@ -622,10 +622,13 @@ class ContextAssembler:
         """
         end = d - timedelta(days=1)                      # completed sessions only (never today)
         start = d - timedelta(days=DAILY_LOOKBACK_DAYS)
-        header = (
-            f"bars_1d last {DAILY_BAR_TAIL} (date o h l c vol, oldest first; completed sessions "
-            f"through {end.isoformat()}):"
-        )
+        def head(through: date) -> str:
+            return (
+                f"bars_1d last {DAILY_BAR_TAIL} (date o h l c vol, oldest first; completed sessions "
+                f"through {through.isoformat()}):"
+            )
+
+        header = head(end)
         try:
             daily = self._store.get_bars_1d(symbol, start, end)
         except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
@@ -637,6 +640,10 @@ class ContextAssembler:
                 f"{header} {_UNAVAILABLE} (no completed daily bars in the last "
                 f"{DAILY_LOOKBACK_DAYS} calendar days)"
             )
+        prev = self._calendar.previous_trading_day(d)
+        if tail[-1].d < prev:                            # regime.session_regime's staleness rule
+            return f"{header} {_UNAVAILABLE} (no completed daily bars for {prev.isoformat()})"
+        header = head(tail[-1].d)
         lines = [
             f"  {b.d.isoformat()} {b.open} {b.high} {b.low} {b.close} {b.volume}" for b in tail
         ]
