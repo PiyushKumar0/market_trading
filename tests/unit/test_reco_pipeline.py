@@ -2171,8 +2171,7 @@ async def test_a_sold_outside_the_ledger_position_ages_out_of_the_O16_window(
     delivers NO exit recommendation at all, so three calendar days after the last one the position
     stops reading as "exiting" and starts counting against the §7.1 ``max_open_positions`` /
     ``per_sector_exposure`` caps again - capacity the owner no longer really has, until the ``/closed``
-    reply lands or the D2 time exit starts issuing its daily deterministic exit (which
-    re-enters the window: ``test_the_time_exit_is_not_gated_by_the_position_event_screens``).
+    reply lands (the D2 time exit skips such a position too: review §9 #9).
 
     It is a CAPACITY cost, never a risk one - the caps get tighter, not looser - and the alternative
     inside WO-D2's file scope was worse: teaching the gate this predicate would relax a §7.1 limit on
@@ -2210,19 +2209,37 @@ async def test_a_sold_outside_the_ledger_position_ages_out_of_the_O16_window(
     assert _exiting() == frozenset()      # ⇒ it occupies a §7.1 position/sector slot again
 
 
-async def test_the_time_exit_is_not_gated_by_the_position_event_screens(
-    conn, pclock, calendar, book, limit_table, cost_model
-):
-    """The D2 time exit is a DETERMINISTIC platform decision, not a position event: it spends no
-    analyst call and it is the backstop that keeps a stale position from living forever — so it
-    alerts even when the holdings journal shows zero shares. The WO-D2 screens sit on the analyst
-    path only and must not reach it."""
-    opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)
-    position_id = _open_position(conn, pclock, style="swing", opened_at=opened, stop="95")
-    _observe_holding(conn, position_id, TODAY - timedelta(days=1))
-    _observe_holding(conn, position_id, TODAY)
+def _due_swing_pipeline(conn, pclock, calendar, book, limit_table, cost_model, **held):
+    position_id = _open_position(
+        conn, pclock, style="swing", opened_at=datetime(2026, 3, 2, 10, 0, tzinfo=IST), stop="95"
+    )
+    _observe_holding(conn, position_id, TODAY - timedelta(days=1), **held)
+    _observe_holding(conn, position_id, TODAY, **held)
     pipeline, _ = _exit_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, FakeHarness(), position_id
+    )
+    return pipeline, position_id
+
+
+async def test_time_exit_skips_a_position_sold_outside_the_ledger(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog
+):
+    pipeline, position_id = _due_swing_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
+
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        assert await pipeline.time_exit_check(TODAY) == 0
+        assert await pipeline.time_exit_check(TODAY) == 0
+
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
+    skipped = log_events(caplog, "time_exit_skipped_sold_outside_ledger")
+    assert [r.position_id for r in skipped] == [position_id]
+
+
+async def test_time_exit_still_fires_on_a_partial_holding(
+    conn, pclock, calendar, book, limit_table, cost_model
+):
+    pipeline, _ = _due_swing_pipeline(
+        conn, pclock, calendar, book, limit_table, cost_model, tracked=10, held=3
     )
 
     assert await pipeline.time_exit_check(TODAY) == 1

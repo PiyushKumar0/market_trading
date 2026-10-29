@@ -1025,6 +1025,9 @@ class RecommendationPipeline:
         #: deduped, so twelve hourly ticks leave one line per position instead of twelve. In-process
         #: like every other memo here — a restart logs it once more, which is the harmless side.
         self._sold_outside_logged: dict[str, date] = {}
+        #: The same dedupe for the time-exit skip; a separate memo, because the position-event path
+        #: logging a position must not silence the time exit's line (or the reverse).
+        self._time_exit_skip_logged: dict[str, date] = {}
         #: Owner-alert cadence for "Intraday analyst unavailable", per ``(agent, reason)`` (WO-25b).
         #: One alert per failure meant one alert per heartbeat for as long as the SDK stayed down —
         #: those repeats were a large share of the 203-deep notification backlog on 2026-08-24. The
@@ -3033,6 +3036,10 @@ class RecommendationPipeline:
         DETERMINISTIC (R1): the harness is never called. Returns how many exit recommendations were
         issued. A ``GateContextTimeout`` on one position is alerted and the loop continues; it is
         re-raised after the loop so the job records a failure and the catch-up retries.
+
+        A position the broker holds NONE of on every observed day (:meth:`_sold_outside_ledger`) is
+        skipped: an exit order for shares that are gone is not a recommendation (review §9 #9). A
+        partial holding still exits, and the owner's ``/closed`` is what ends the skip.
         """
         table = self._limits.load()
         caps = {
@@ -3042,6 +3049,7 @@ class RecommendationPipeline:
         rows = self._conn.execute(
             "SELECT * FROM positions WHERE state='OPEN' AND origin='recommended'"
         ).fetchall()
+        sold_outside = self._sold_outside_ledger(d)
         issued = 0
         timed_out: GateContextTimeout | None = None
         for position in rows:
@@ -3051,6 +3059,13 @@ class RecommendationPipeline:
                 continue
             due = self._exit_due(position, style, cap)
             if due is None or due > d:
+                continue
+            position_id = str(position["position_id"])
+            if position_id in sold_outside:
+                if self._time_exit_skip_logged.get(position_id) != d:
+                    self._time_exit_skip_logged[position_id] = d
+                    _log.warning("time_exit_skipped_sold_outside_ledger", position_id=position_id,
+                                 symbol=str(position["symbol"] or ""), exit_session=due.isoformat())
                 continue
             action = ExitAction(
                 action="exit",
