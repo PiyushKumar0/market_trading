@@ -290,14 +290,10 @@ def test_no_action_with_enter_only_extras_parses() -> None:
 
 
 def test_enter_with_no_action_extras_parses_and_is_stamped() -> None:
-    """The 2026-08-20 gating failure: a valid ``enter`` carrying ``reason``/``regime_note``."""
+    """The 2026-08-20 gating failure: a valid ``enter`` carrying no_action's ``reason``."""
     from engine.intelligence.schemas import parse_intraday
 
-    raw = {
-        **RAW_BY_ACTION["enter"],
-        "reason": "breakout confirmed on the 20-day high",
-        "regime_note": "trend day, breadth positive",
-    }
+    raw = {**RAW_BY_ACTION["enter"], "reason": "breakout confirmed on the 20-day high"}
     model = parse_intraday(raw, **STAMP)
     assert isinstance(model, EnterAction)
     assert model.tradingsymbol == "RELIANCE"
@@ -344,11 +340,7 @@ def test_sanitizer_handles_the_json_string_input_path() -> None:
     """The harness hands parse_output the raw JSON TEXT, so the string path must sanitize too."""
     from engine.intelligence.schemas import parse_intraday
 
-    text = json.dumps({
-        **RAW_BY_ACTION["enter"],
-        "reason": "breakout confirmed",
-        "regime_note": "trend day",
-    })
+    text = json.dumps({**RAW_BY_ACTION["enter"], "reason": "breakout confirmed"})
     model = parse_intraday(text, **STAMP)
     assert isinstance(model, EnterAction)
     _enter_no_action_stamp(model)
@@ -373,12 +365,12 @@ def test_sanitizer_logs_one_line_naming_what_it_dropped(caplog) -> None:
 
     with caplog.at_level(logging.INFO, logger="engine.intelligence.schemas"):
         parse_intraday(
-            {**RAW_BY_ACTION["enter"], "reason": "breakout", "regime_note": "trend"}, **STAMP
+            {**RAW_BY_ACTION["enter"], "reason": "breakout", "exit_type": "MARKET"}, **STAMP
         )
     records = [r for r in caplog.records if r.getMessage() == "guidance_extras_dropped"]
     assert len(records) == 1
     assert records[0].action == "enter"
-    assert records[0].dropped == ["reason", "regime_note"]
+    assert records[0].dropped == ["exit_type", "reason"]
 
 
 def test_clean_payloads_log_nothing(caplog) -> None:
@@ -460,7 +452,14 @@ def test_guidance_schema_does_not_advertise_a_thesis_cap() -> None:
 
     props = intraday_guidance_json_schema()["properties"]
     assert "maxLength" not in props["thesis"]
-    assert "maxLength" not in props["reason"] and "maxLength" not in props["regime_note"]
+    assert "maxLength" not in props["reason"]
+
+
+def test_guidance_schema_has_no_regime_note() -> None:
+    from engine.intelligence.schemas import NoActionOutput, intraday_guidance_json_schema
+
+    assert "regime_note" not in intraday_guidance_json_schema()["properties"]
+    assert "regime_note" not in NoActionOutput.model_fields
 
 
 # ------------------------------------------------- exit-reason enum (2026-09-11, WO-B)
@@ -469,8 +468,8 @@ def test_guidance_schema_does_not_advertise_a_thesis_cap() -> None:
 # 2026-09-03, 85 rows from 08-27, 10 lost terminally before the retry started echoing the pydantic
 # error. The codes now travel under their own advertised key and the sanitizer renames it.
 
-#: The real 2026-09-10 failing payload: prose ``reason`` beside a thesis, plus the entry-identity and
-#: regime extras the flat schema advertises for every action.
+#: The real 2026-09-10 failing payload: prose ``reason`` beside a thesis, plus the entry-identity
+#: extras the flat schema advertises for every action.
 EXIT_2026_09_10 = {
     "action": "exit",
     "thesis": (
@@ -486,7 +485,6 @@ EXIT_2026_09_10 = {
     "side": "SELL",
     "quantity": 3,
     "style": "swing",
-    "regime_note": "breadth negative, NIFTY below its 50-DMA",
 }
 
 

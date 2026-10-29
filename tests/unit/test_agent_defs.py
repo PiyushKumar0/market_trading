@@ -243,14 +243,13 @@ def test_parse_intraday_accepts_no_action():
         {"action": "no_action", "reason": "Candidate conflicts with the day plan's avoid list."}, **STAMP
     )
     assert isinstance(out, NoActionOutput)
-    assert out.regime_note == ""                               # optional; default empty
     assert not hasattr(out, "proposal_id")                     # nothing to stamp: it cannot trade
 
 
 def test_parse_intraday_accepts_a_json_string():
-    out = parse_intraday('{"action":"no_action","reason":"range too tight","regime_note":"chop"}', **STAMP)
+    out = parse_intraday('{"action":"no_action","reason":"range too tight"}', **STAMP)
     assert isinstance(out, NoActionOutput)
-    assert out.regime_note == "chop"
+    assert out.reason == "range too tight"
 
 
 def test_no_action_requires_a_real_reason():

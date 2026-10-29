@@ -39,11 +39,20 @@ from typing import Any
 
 from ulid import ULID
 
-from engine.core.calendar import NSECalendar
-from engine.core.clock import Clock
-from engine.core.config import config_dir, load_yaml, repo_root
-from engine.intelligence.agents import intraday, news_analyst, nightly, preopen
-from engine.intelligence.harness import MODEL_API_IDS, AgentHarness, load_agent_roster, resolve_cli_path
+_REPO_SRC = str(Path(__file__).resolve().parents[1] / "src")
+if _REPO_SRC not in sys.path:  # pragma: no cover - loose-script shim
+    sys.path.insert(0, _REPO_SRC)
+
+from engine.core.calendar import NSECalendar  # noqa: E402
+from engine.core.clock import Clock  # noqa: E402
+from engine.core.config import config_dir, load_yaml, repo_root  # noqa: E402
+from engine.intelligence.agents import intraday, news_analyst, nightly, preopen  # noqa: E402
+from engine.intelligence.harness import (  # noqa: E402
+    MODEL_API_IDS,
+    AgentHarness,
+    load_agent_roster,
+    resolve_cli_path,
+)
 
 AGENTS: dict[str, tuple[str, Any]] = {             # short name -> (agents.yaml id, agent module)
     "news": ("news_analyst", news_analyst),
@@ -101,6 +110,8 @@ def cmd_sample(args: argparse.Namespace) -> None:
     for path in transcripts_dir().glob("*.jsonl"):
         entrypoint, prompt, output, model = read_call(path)
         agent = classify(output) if entrypoint == "sdk-py" and prompt else None
+        if agent == "intraday" and "candidate: {" not in (prompt or ""):
+            agent = None        # heartbeat and position-event answers also carry an ``action``
         mtime = path.stat().st_mtime
         if agent in want and (prompt not in originals or mtime < originals[prompt][0]):
             originals[prompt] = (mtime, agent, {"file": path.name, "live_model": model, "action": output.get("action")})

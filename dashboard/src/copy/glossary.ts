@@ -94,15 +94,15 @@ const TIER: Table = {
   DG1: {
     label: 'Pacing',
     hint:
-      'AI spending is ahead of the weekly pace: check-ins slow to every 45 minutes and about a third fewer scanner ' +
-      'candidates reach the AI each day. Each one is still analysed the same way.',
+      'AI spending is ahead of the weekly pace: about a third fewer scanner candidates reach the AI each day. ' +
+      'Each one is still analysed the same way.',
   },
-  // governor.py: heartbeats stop from DG2; the forward cap is cut at every level above DG0.
+  // governor.py: news batches slow to hourly from DG2; the forward cap is cut at every level above DG0.
   DG2: {
     label: 'Saving',
     hint:
-      'Background AI check-ins are off and about a third fewer scanner candidates reach the AI each day, to stay ' +
-      'within the weekly budget. Each one is still analysed the same way.',
+      'News is scored hourly instead of every 30 minutes and about a third fewer scanner candidates reach the AI ' +
+      'each day, to stay within the weekly budget. Each one is still analysed the same way.',
   },
   DG3: {
     label: 'Minimal',

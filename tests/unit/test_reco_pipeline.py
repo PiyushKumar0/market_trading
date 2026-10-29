@@ -119,11 +119,6 @@ class FakeAssembler:
         self.signal_kwargs: list[dict[str, Any]] = []
         self.position_events: list[tuple[dict[str, Any], str, str]] = []
         self.contexts: list[AssembledContext] = []
-        self.heartbeats = 0
-        self.regime_notes: list[str] = []
-
-    def set_regime_note(self, note: str) -> None:
-        self.regime_notes.append(note)
 
     def for_signal(self, candidate, **kwargs):
         self.signal_kwargs.append(kwargs)
@@ -132,10 +127,6 @@ class FakeAssembler:
     def for_position_event(self, position_row, event_kind, detail, *, ltp_line):
         self.position_events.append((dict(position_row), event_kind, detail))
         return self._record(self._ctx("position_event", str(position_row.get("position_id"))))
-
-    def for_heartbeat(self, *, regime_lines, open_positions_summary):
-        self.heartbeats += 1
-        return self._record(self._ctx("heartbeat", "hb"))
 
     def _record(self, ctx: AssembledContext) -> AssembledContext:
         self.contexts.append(ctx)
@@ -335,7 +326,6 @@ ENTER_JSON: dict[str, Any] = {
 NO_ACTION_JSON: dict[str, Any] = {
     "action": "no_action",
     "reason": "chop â€” the range has not resolved",
-    "regime_note": "NIFTY balancing inside the opening range; breakouts failing.",
 }
 
 
@@ -1059,7 +1049,7 @@ async def test_sizeable_candidate_is_unaffected_by_the_qty_zero_check(
     assert row["unsizeable"] == 0
 
 
-async def test_no_action_records_the_regime_note_and_no_proposal(
+async def test_no_action_records_no_proposal(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
     harness = FakeHarness(dict(NO_ACTION_JSON))
@@ -1075,7 +1065,6 @@ async def test_no_action_records_the_regime_note_and_no_proposal(
 
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
-    assert parts["assembler"].regime_notes == [NO_ACTION_JSON["regime_note"]]
     assert parts["notify"].messages == []
     # 2026-09-04: a no_action verdict hands the slot back to displacement (the analyst RAN, so the
     # day slot itself stays spent — this is not the 2026-07-29 infrastructure re-arm).
@@ -2383,36 +2372,6 @@ def test_an_unreadable_holdings_journal_leaves_the_plain_counts(
     assert len(log_events(caplog, "sold_outside_ledger_read_failed")) == 1
 
 
-# =========================================================================== trigger (c) â€” heartbeat
-async def test_heartbeat_only_updates_the_regime_note(
-    conn, pclock, calendar, book, limit_table, cost_model
-):
-    harness = FakeHarness(dict(NO_ACTION_JSON))
-    pipeline, parts = make_pipeline(
-        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
-        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
-        limits=StubLimits(limit_table),
-    )
-    await pipeline.heartbeat()
-
-    assert parts["assembler"].heartbeats == 1
-    assert parts["assembler"].regime_notes == [NO_ACTION_JSON["regime_note"]]
-    assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
-    assert parts["governor"].calls == [("intraday_analyst", "heartbeat")]
-
-
-async def test_heartbeat_is_window_gated(conn, ticker, pclock, calendar, book, limit_table, cost_model):
-    ticker.at = datetime(2026, 6, 17, 14, 0, tzinfo=IST)
-    harness = FakeHarness()
-    pipeline, parts = make_pipeline(
-        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
-        gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
-        limits=StubLimits(limit_table),
-    )
-    await pipeline.heartbeat()
-    assert harness.calls == [] and parts["assembler"].heartbeats == 0
-
-
 # --------------------------------------------------------------------------- structural coherence (R1)
 async def test_identity_mismatch_drops_payload_before_the_gate(
     conn, pclock, calendar, book, limit_table, cost_model
@@ -2549,28 +2508,6 @@ async def test_forward_count_survives_a_mid_day_restart(
     assert restarted._forwarded_count == 3                      # 2 hydrated + 1, not 1
     assert len(harness2.calls) == 1                             # the 3-call day cap held across it
     assert sum(forward_journal(conn).values()) == 3
-
-
-async def test_heartbeat_never_consumes_a_forward_slot(
-    conn, pclock, calendar, book, limit_table, cost_model
-):
-    """5.2(c) is regime context only and is metered by the governor, never by the 5.2(a) forward
-    cap - a chatty heartbeat must not eat the day's candidate evaluations."""
-    gov = TunableGovernor(1)
-    harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
-    pipeline, _ = make_pipeline(
-        conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
-        gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
-        limits=StubLimits(limit_table), governor=gov,
-    )
-    await pipeline.heartbeat()
-    await pipeline.heartbeat()
-    assert len(harness.calls) == 2
-    assert pipeline._forwarded_count == 0
-    assert forward_journal(conn) == {}                          # no day slot touched either
-    await publish_candidate(pipeline, candidate(symbol="TCS", strategy_id="orb", score=0.9))
-    assert len(harness.calls) == 3                              # the one slot was still there
-    assert pipeline._forwarded_count == 1
 
 
 async def test_forward_mode_arrival_is_the_rollback_to_fifo(

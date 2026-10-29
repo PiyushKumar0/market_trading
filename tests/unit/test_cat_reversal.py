@@ -467,8 +467,7 @@ async def test_signals_are_journalled_under_their_own_strategy_id(
 
     Journalling must happen even though the candidate is destined for a gate reject: the reject IS the
     shadow, and a population that only recorded approvals would record nothing at all."""
-    harness = FakeHarness({"action": "no_action", "reason": "reversal quality is unconvincing",
-                           "regime_note": "index balancing"})
+    harness = FakeHarness({"action": "no_action", "reason": "reversal quality is unconvincing"})
     gate = RiskGate(
         StubLimits(limit_table), cost_model, pclock,
         no_edge_shadow_strategies=ops_main.NO_EDGE_SHADOW_STRATEGIES,

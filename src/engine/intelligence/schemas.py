@@ -156,16 +156,15 @@ def parse_and_stamp(
 class NoActionOutput(BaseModel):
     """The Intraday Analyst's second legal output: an explicit refusal to act (§5.2 output schema).
 
-    ``no_action`` is a first-class answer, not a failure — a heartbeat call (§5.2 trigger (c)) may
-    emit NOTHING else. It carries no platform-stamped fields: nothing downstream of it can trade, so
-    there is no proposal identity, TTL or audit digest to stamp.
+    ``no_action`` is a first-class answer, not a failure. It carries no platform-stamped fields:
+    nothing downstream of it can trade, so there is no proposal identity, TTL or audit digest to
+    stamp.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["no_action"]
     reason: str = Field(min_length=5)
-    regime_note: str = ""       # optional regime read; feeds the NEXT context's stable block (§5.2)
     # Guidance-schema compatibility (2026-08-12): the FLAT structured-output schema (§8.1 — the CLI
     # degrades to text on unions, pinned 2026-07-29) advertises ``thesis``/``confidence`` for EVERY
     # action, so the model legitimately attaches them when declining — 9 schema_invalid failures on
@@ -233,7 +232,6 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
             "thesis": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "reason": {"type": "string"},        # no_action free text; an exit's code is exit_reason
-            "regime_note": {"type": "string"},
             # EnterAction
             "tradingsymbol": {"type": "string"},
             "exchange": {"type": "string", "enum": ["NSE"]},
@@ -279,7 +277,7 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
 
     The wire schema (:func:`intraday_guidance_json_schema`) is a FLAT merge — it must be, or the CLI
     degrades to text mode (pinned 2026-07-29) — so it advertises every action's fields for every
-    action. The model therefore legitimately attaches ``reason``/``regime_note`` to an ``enter``, or
+    action. The model therefore legitimately attaches ``reason`` to an ``enter``, or
     ``tradingsymbol``/``signal_id``/``strategy_id`` to a ``no_action``, and the authoritative
     discriminated union (``extra="forbid"`` everywhere) rejects it as ``extra_forbidden``. On
     2026-08-20 that killed both first-ever ``enter`` outputs plus 8 of 13 intraday calls: retries

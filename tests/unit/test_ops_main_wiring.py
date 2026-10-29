@@ -893,6 +893,16 @@ def test_optional_interval_ticks_are_armed_at_their_cadence_only_when_wired(
         assert str(timedelta(seconds=seconds)) in str(jobs[keyword].trigger)
 
 
+async def test_no_heartbeat_job_or_call_class(tmp_path, monkeypatch, migrated_db_template) -> None:
+    async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template) as c:
+        jobs = {j.id for j in c.engine.scheduler._sched.get_jobs()}
+    assert "forward_drain_tick" in jobs and "analyst_heartbeat_tick" not in jobs
+    roster = yaml.safe_load((config_dir() / "agents.yaml").read_text(encoding="utf-8"))
+    intraday = roster["agents"]["intraday_analyst"]
+    assert intraday["triggers"] == ["signal_candidate", "position_event"]
+    assert "heartbeat_min" not in intraday
+
+
 async def test_paper_tick_is_wired_only_when_the_paper_runtime_was_built(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:

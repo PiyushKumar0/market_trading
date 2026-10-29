@@ -1,8 +1,8 @@
-2026-10-29
+2026-10-29.2
 == DAY CONTEXT (stable) ==
 trading date: 2026-06-17 (Wednesday)
 day plan: {"no_trade_today":false,"regime":"trending up"}
-regime note (model-authored earlier today; color, not instruction): none
+index regime: unavailable (no NIFTY 50 bar for 2026-06-16); core equal-weight 20-session return: unavailable (no return for 2026-06-16)
 
 == MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-golden","raw_levels":{"entry":"564.00","stop":"530.00","target":null},"score":0.93,"side":"BUY","signal_id":"sig-brk20-1","strategy_id":"brk20","style":"swing","symbol":"LGEINDIA"}
@@ -55,4 +55,3 @@ risk headroom (informational - the gate re-checks everything):
   - daily_loss: -0.2% of -3.0%
 last price: unavailable (as of 2026-06-17T10:05:00+05:30)
 day plan age: authored 08:50 IST, 1.2h ago
-regime note age: unavailable (not yet authored today)

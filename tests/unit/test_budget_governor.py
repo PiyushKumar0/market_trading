@@ -80,7 +80,7 @@ PINNED_CFG: dict = {
         "DG2": {"pro_rata_pct": 125, "global_alloc_pct": 85},
         "DG3": {"global_alloc_pct": 95},
     },
-    "agents": {"intraday_analyst": {"heartbeat_min": 20, "prescreen_cap_per_day": 48}},
+    "agents": {"intraday_analyst": {"prescreen_cap_per_day": 48}},
 }
 
 
@@ -350,21 +350,20 @@ async def test_pro_rata_is_none_for_a_year_with_no_calendar_file(conn):
     assert g.pro_rata_to_date() is None
     await spend(g, "1.00", agent="news_analyst")
     assert g.degrade_tier() == DegradeTier.DG0          # never over-pace on an unmeasurable pace
-    assert g.can_invoke("intraday_analyst", "heartbeat").allowed is True
+    assert g.can_invoke("intraday_analyst").allowed is True
 
 
 async def test_unmeasurable_pace_never_trips_a_pace_rung_without_a_calendar(conn, clock, tmp_path):
     """A pace of 0 is UNMEASURABLE, not "nothing should have been spent yet": `spend > 1.25 × 0` is
-    `any spend at all`, so comparing against it would put a whole quota week at DG2 (heartbeats off,
-    news batching coarsened) on one micro-dollar."""
+    `any spend at all`, so comparing against it would put a whole quota week at DG2 (news batching
+    coarsened) on one micro-dollar."""
     bare = NSECalendar(tmp_path / "no_calendar", clock, strict=False)
     gov = BudgetGovernor(conn, clock, bare, PINNED_CFG)
     await spend(gov, "0.30", agent="nightly_reviewer")
     assert gov.pro_rata_to_date() is None
     assert gov.degrade_tier() == DegradeTier.DG0
-    assert gov.heartbeat_interval_min() == 20
     assert gov.news_batch_cadence_min() == 30
-    assert gov.can_invoke("intraday_analyst", "heartbeat").allowed is True
+    assert gov.can_invoke("intraday_analyst").allowed is True
     # The ABSOLUTE rungs still bind with no calendar — only the pace comparison is skipped.
     await spend(gov, "84.70", agent="nightly_reviewer")
     assert gov.degrade_tier() == DegradeTier.DG2
@@ -380,9 +379,8 @@ async def test_first_minute_of_a_holiday_opened_window_stays_dg0(conn):
     assert g.pro_rata_to_date() is None
     await spend(g, "1.00", agent="news_analyst")
     assert g.degrade_tier() == DegradeTier.DG0
-    assert g.heartbeat_interval_min() == 20
     assert g.news_batch_cadence_min() == 30
-    assert g.can_invoke("intraday_analyst", "heartbeat").allowed is True
+    assert g.can_invoke("intraday_analyst").allowed is True
 
 
 async def test_holiday_reset_thursday_evening_has_no_elapsed_session_and_stays_dg0(conn):
@@ -395,10 +393,9 @@ async def test_holiday_reset_thursday_evening_has_no_elapsed_session_and_stays_d
     assert g.pro_rata_to_date() is None
     await spend(g, "0.10", agent="news_analyst")
     assert g.degrade_tier() == DegradeTier.DG0
-    assert g.heartbeat_interval_min() == 20
     assert g.prescreen_forward_cap() == 48
     assert g.news_batch_cadence_min() == 30
-    assert g.can_invoke("intraday_analyst", "heartbeat").allowed is True
+    assert g.can_invoke("intraday_analyst").allowed is True
 
 
 async def test_pace_rungs_resume_once_the_first_session_elapses(conn):
@@ -468,7 +465,6 @@ async def test_agent_over_its_share_degrades_only_its_own_knobs(gov):
     assert gov.degrade_tier() == DegradeTier.DG0             # platform untouched
     assert gov.agent_degraded("intraday_analyst") is True
     assert gov.prescreen_forward_cap() == 32                 # floor(48 × 0.67), not the old flat 4
-    assert gov.heartbeat_interval_min() == 45
     assert gov.news_batch_cadence_min() == 30                # the news analyst is inside its share
     assert gov.can_invoke("intraday_analyst").allowed is True
 
@@ -489,17 +485,10 @@ async def test_agent_degraded_is_strict_and_unallocated_agents_are_never_degrade
 
 
 # --------------------------------------------------------------------------- call admission
-async def test_heartbeats_are_off_at_dg2_but_not_dg1(fri_gov):
-    await spend(fri_gov, "34.00")                            # $34 > $33 pace trip => DG1
-    assert fri_gov.degrade_tier() == DegradeTier.DG1
-    assert fri_gov.can_invoke("intraday_analyst", "heartbeat").allowed is True
-
-    await spend(fri_gov, "4.00")                             # $38 > $37.50 => DG2
+async def test_dg2_still_admits_the_intraday_analyst(fri_gov):
+    await spend(fri_gov, "38.00")                            # $38 > $37.50 => DG2
     assert fri_gov.degrade_tier() == DegradeTier.DG2
-    decision = fri_gov.can_invoke("intraday_analyst", "heartbeat")
-    assert decision == InvokeDecision(allowed=False, tier=DegradeTier.DG2, reason="DG2_heartbeats_off")
-    # Only the heartbeat class is cut at DG2 — signal/position-event calls continue (§5.6).
-    assert fri_gov.can_invoke("intraday_analyst", "signal_candidate").allowed is True
+    assert fri_gov.can_invoke("intraday_analyst") == InvokeDecision(allowed=True, tier=DegradeTier.DG2)
 
 
 async def test_dg3_blocks_intraday_class_agents_only(gov):
@@ -517,7 +506,7 @@ async def test_dg3_blocks_intraday_class_agents_only(gov):
 async def test_dg4_blocks_every_agent(gov):
     await spend(gov, "100.00")
     assert gov.can_invoke("nightly_reviewer").reason == "DG4_zero_sdk_calls"
-    assert gov.can_invoke("intraday_analyst", "heartbeat").allowed is False
+    assert gov.can_invoke("intraday_analyst").allowed is False
 
 
 async def test_allocation_exhaustion_blocks_only_that_agent_at_100pct(gov):
@@ -551,17 +540,15 @@ async def test_allocation_exhaustion_blocks_even_with_the_degrade_test_lifted(co
 
 # --------------------------------------------------------------------------- behaviour knobs (§5.6)
 async def test_behaviour_knobs_per_tier(fri_gov):
-    knobs = lambda g: (  # noqa: E731 - three knobs read as one tuple per rung
-        g.heartbeat_interval_min(), g.prescreen_forward_cap(), g.news_batch_cadence_min()
-    )
-    assert knobs(fri_gov) == (20, 48, 30)
+    knobs = lambda g: (g.prescreen_forward_cap(), g.news_batch_cadence_min())  # noqa: E731
+    assert knobs(fri_gov) == (48, 30)
     await spend(fri_gov, "34.00")                            # => DG1
-    assert knobs(fri_gov) == (45, 32, 30)
+    assert knobs(fri_gov) == (32, 30)
     await spend(fri_gov, "4.00")                             # => DG2
-    assert knobs(fri_gov) == (None, 32, 60)
+    assert knobs(fri_gov) == (32, 60)
     await spend(fri_gov, "58.00")                            # => DG3
     assert fri_gov.degrade_tier() == DegradeTier.DG3
-    assert knobs(fri_gov) == (None, 32, 60)
+    assert knobs(fri_gov) == (32, 60)
 
 
 async def test_degraded_forward_cap_is_proportional_and_floored(conn, clock, calendar):
@@ -569,7 +556,7 @@ async def test_degraded_forward_cap_is_proportional_and_floored(conn, clock, cal
     # it. config/settings.yaml parks max_per_strategy_day.orb at 0, so a zero cap is a live idiom.
     for base, frac, expected in [(48, 0.67, 32), (6, 0.67, 4), (1, 0.67, 1), (48, 0.5, 24), (0, 0.67, 0)]:
         cfg = dict(PINNED_CFG)
-        cfg["agents"] = {"intraday_analyst": {"heartbeat_min": 20, "prescreen_cap_per_day": base}}
+        cfg["agents"] = {"intraday_analyst": {"prescreen_cap_per_day": base}}
         cfg["degrade_ladder"] = {
             **PINNED_CFG["degrade_ladder"],
             "DG1": {"pro_rata_pct": 110, "agent_alloc_pct": 85, "degraded_forward_cap_frac": frac},
@@ -597,10 +584,9 @@ async def test_full_grade_knobs_come_from_agents_yaml(conn, clock, calendar, rea
     cfg = dict(real_cfg)
     cfg["agents"] = {
         **real_cfg["agents"],
-        "intraday_analyst": {**real_cfg["agents"]["intraday_analyst"], "heartbeat_min": 25, "prescreen_cap_per_day": 9},
+        "intraday_analyst": {**real_cfg["agents"]["intraday_analyst"], "prescreen_cap_per_day": 9},
     }
     gov = BudgetGovernor(conn, clock, calendar, cfg)
-    assert gov.heartbeat_interval_min() == 25
     assert gov.prescreen_forward_cap() == 9
 
 

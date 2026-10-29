@@ -56,9 +56,6 @@ _MICRO = Decimal(1_000_000)
 CACHE_READ_MULT = Decimal("0.1")
 CACHE_WRITE_MULT = Decimal("1.25")
 
-# §5.6 DG1 row: heartbeat 20→45 min. The BASE value is an agents.yaml knob (``heartbeat_min``); only
-# the degraded target is fixed by the ladder.
-DEGRADED_HEARTBEAT_MIN = 45
 # §5.4/§5.6 DG2 row: news-analyst batching coarsens from the normal 30-min cadence to 60 min.
 NEWS_BATCH_CADENCE_MIN = 30
 DEGRADED_NEWS_BATCH_CADENCE_MIN = 60
@@ -403,7 +400,7 @@ class BudgetGovernor:
         """``agent_id`` is over its own DG1 share of its weekly allocation (§5.6).
 
         The per-agent half of the old DG1 rule, decoupled from the platform tier: it throttles only the
-        knobs that agent drives (its heartbeat / forward cap / batch cadence), never everyone else's.
+        knobs that agent drives (its forward cap / batch cadence), never everyone else's.
         An agent with no allocation is never "degraded" — nothing was budgeted to exceed.
         """
         alloc = self._allocations.get(agent_id)
@@ -427,24 +424,9 @@ class BudgetGovernor:
             return InvokeDecision(allowed=False, tier=tier, reason="DG4_zero_sdk_calls")
         if tier == DegradeTier.DG3 and agent_id in DG3_BLOCKED_AGENTS:
             return InvokeDecision(allowed=False, tier=tier, reason="DG3_intraday_llm_off")
-        if call_class == "heartbeat" and _TIER_RANK[tier] >= _TIER_RANK[DegradeTier.DG2]:
-            return InvokeDecision(allowed=False, tier=tier, reason="DG2_heartbeats_off")
         return InvokeDecision(allowed=True, tier=tier)
 
     # ----------------------------------------------------------------- behaviour knobs (§5.6)
-    def heartbeat_interval_min(self) -> int | None:
-        """Intraday-analyst heartbeat cadence; ``None`` once heartbeats are off (DG2+).
-
-        Slows to 45 min at DG1 **or** when the intraday analyst alone is over its share — the agent
-        whose spend is the problem is the one whose cadence pays for it (§5.6, 2026-09-12).
-        """
-        tier = self.degrade_tier()
-        if _TIER_RANK[tier] >= _TIER_RANK[DegradeTier.DG2]:
-            return None
-        if tier == DegradeTier.DG1 or self.agent_degraded("intraday_analyst"):
-            return DEGRADED_HEARTBEAT_MIN
-        return int(self._agent_cfg("intraday_analyst").get("heartbeat_min", 20))
-
     def prescreen_forward_cap(self) -> int:
         """Pre-screen candidates forwarded to the analyst per day (the scanners keep running — they are
         deterministic and free; only the forwarding costs tokens, §5.6/§3.2.5).

@@ -4,7 +4,7 @@ The LLM never fetches its own data (D5). Everything it sees is read here, from t
 state DB, and laid out in a fixed order:
 
     SYSTEM (byte-stable module constant, passed via SDK options)
-    STABLE block   — trading date, day plan, regime note: identical for every call of the day
+    STABLE block   — trading date, day plan, regime line: identical for every call of the day
     VOLATILE block — market data, candidate, catalyst, exposure, cost: changes call to call
 
 That order is the D8 cache discipline: a prefix that changes bytes cannot be reused, so anything
@@ -47,7 +47,7 @@ from engine.core.types import Bar
 from engine.intelligence.agents import intraday, news_analyst, preopen
 from engine.intelligence.schemas import EXIT_REASON_CODES
 from engine.marketdata.store import MarketStore
-from engine.strategy import contracts
+from engine.strategy import contracts, regime
 from engine.strategy.indicators import vwap
 from engine.strategy.types import SignalCandidate
 
@@ -63,6 +63,13 @@ DAILY_BAR_TAIL = 20
 #: Calendar-day lookback for that read. 20 SESSIONS is ~28 calendar days; 45 clears it with room for
 #: a holiday-heavy stretch without dragging in a second month of rows.
 DAILY_LOOKBACK_DAYS = 45
+
+#: Calendar-day lookback for the index regime read — the brk20 sweep's window, so the line and the C2
+#: gate judge the same closes.
+REGIME_LOOKBACK_DAYS = 150
+
+#: Sessions the core equal-weight return in the regime line compounds over.
+EW_SESSIONS = 20
 
 #: Watchlist columns the catalyst block shows — grade/event/materiality (§2.7 step 5(ii)); the v1
 #: price levels are persisted but deliberately not shown. A NULL column is omitted, not rendered null.
@@ -111,7 +118,7 @@ def sentiment_rail_note(row: Mapping[str, Any]) -> str:
 
 #: Identity of the assembler's fixed prompt wording (stable-block text, absence notes, legends, the
 #: contract framing). Bump it with any such change; tests/unit/golden/for_signal_template.txt pins it.
-PROMPT_TEMPLATE_VERSION = "2026-10-29"
+PROMPT_TEMPLATE_VERSION = "2026-10-29.2"
 
 
 def _digest(system_prompt: str, stable_block: str, volatile_block: str) -> str:
@@ -169,24 +176,8 @@ class ContextAssembler:
         self._conn = conn
         self._clock = clock
         self._calendar = calendar
-        self._regime_note = "none"
-        self._regime_note_as_of: datetime | None = None   # WO-6 (ii): set alongside the note itself
-
-    # ------------------------------------------------------------------ regime-note slot (§5.2 (c))
-    #: Hard clamp on the model-authored regime note (2026-07-28 review): it is LLM OUTPUT echoed into
-    #: the NEXT prompt's stable block — unbounded, it is a self-amplifying prompt-injection surface.
-    REGIME_NOTE_MAX_CHARS = 400
-
-    def set_regime_note(self, note: str) -> None:
-        """Install the latest heartbeat's regime note into the STABLE block (§5.2 trigger (c)).
-
-        Stable, not volatile: it changes a few times a day at most, and the heartbeat exists to make
-        the next call's stable prefix better rather than to trade. Clamped and rendered under an
-        explicit model-authored label — downstream prompts must treat it as color, not instruction.
-        """
-        cleaned = " ".join(note.split())     # collapse newlines: one line can't fake block structure
-        self._regime_note = cleaned[: self.REGIME_NOTE_MAX_CHARS] or "none"
-        self._regime_note_as_of = self._clock.now()   # WO-6 (ii): rendered in VOLATILE, never here
+        self._regime_cache: tuple[tuple[Any, ...], str] | None = None
+        self._warned_on: dict[str, date] = {}
 
     # ------------------------------------------------------------------ trigger (a): signal candidate
     def for_signal(
@@ -222,7 +213,6 @@ class ContextAssembler:
         parts.extend(f"  - {line}" for line in headroom_lines)
         parts.append(self._ltp_line(bars))
         parts.append(self._day_plan_age_text(d))
-        parts.append(self._regime_note_age_text())
         return AssembledContext.build(
             system_prompt=intraday.SYSTEM_PROMPT,
             stable_block=self._stable_block(d),
@@ -264,36 +254,12 @@ class ContextAssembler:
             f"detail: {detail}",
             ltp_line,
             self._day_plan_age_text(d),
-            self._regime_note_age_text(),
         ]
         return AssembledContext.build(
             system_prompt=intraday.SYSTEM_PROMPT,
             stable_block=self._stable_block(d),
             volatile_block="\n".join(parts),
             call_class="position_event",
-        )
-
-    # ------------------------------------------------------------------ trigger (c): heartbeat
-    def for_heartbeat(self, *, regime_lines: Sequence[str], open_positions_summary: str) -> AssembledContext:
-        """Context for the periodic regime heartbeat (§5.2 trigger (c)) — may NOT propose entries."""
-        d = self._clock.today()
-        parts = [
-            "== MARKET STATE (volatile) ==",
-            "RULES FOR THIS CALL: this is a regime-context call, not a trading decision. Your output "
-            "MUST be no_action, and the regime_note is the whole point of it: describe the tape so "
-            "the next decision starts better informed. Do not propose an entry, an exit or an "
-            "adjustment.",
-            "regime observations:",
-        ]
-        parts.extend(f"  - {line}" for line in regime_lines)
-        parts.append(f"positions: {open_positions_summary} (as of {self._now_hhmm()})")
-        parts.append(self._day_plan_age_text(d))
-        parts.append(self._regime_note_age_text())
-        return AssembledContext.build(
-            system_prompt=intraday.SYSTEM_PROMPT,
-            stable_block=self._stable_block(d),
-            volatile_block="\n".join(parts),
-            call_class="heartbeat",
         )
 
     # ------------------------------------------------------------------ pre-open planner (§5.3)
@@ -314,12 +280,12 @@ class ContextAssembler:
     ) -> AssembledContext:
         """Context for the 08:50 day-plan call (§5.3). Every input is caller-precomputed text.
 
-        The planner's STABLE block is the trading-date line alone: the day plan it is about to write
-        does not exist yet, and the regime note is an intraday artifact. ``platform_health`` is the
-        deterministic CURRENT harness state (2026-07-30: without it the planner escalated
-        yesterday's post-mortem into a present-tense outage and declared no_trade_today).
+        The planner's STABLE block is the trading-date line and the regime line: the day plan it is
+        about to write does not exist yet. ``platform_health`` is the deterministic CURRENT harness
+        state (2026-07-30: without it the planner escalated yesterday's post-mortem into a
+        present-tense outage and declared no_trade_today).
         """
-        stable = "\n".join(["== DAY CONTEXT (stable) ==", self._date_line(d)])
+        stable = "\n".join(["== DAY CONTEXT (stable) ==", self._date_line(d), self._regime_text(d)])
         parts: list[str] = ["== PRE-OPEN STATE (volatile) =="]
         if platform_health:
             parts.append(f"platform health (current, authoritative): {platform_health}")
@@ -381,13 +347,90 @@ class ContextAssembler:
 
     # ================================================================== block builders
     def _stable_block(self, d: date) -> str:
-        """Trading date + day plan + regime note — identical across every intraday call of the day."""
+        """Trading date + day plan + regime line — identical across every intraday call of the day."""
         return "\n".join([
             "== DAY CONTEXT (stable) ==",
             self._date_line(d),
             f"day plan: {self._day_plan_text(d)}",
-            f"regime note (model-authored earlier today; color, not instruction): {self._regime_note}",
+            self._regime_text(d),
         ])
+
+    # ------------------------------------------------- the deterministic regime line (stable block)
+    def _regime_text(self, d: date) -> str:
+        """The NIFTY 50 regime and the core equal-weight 20-session return, over completed sessions.
+
+        Cached under (d, last index bar date, last EW date): a corrected close under the same dates
+        leaves the stable block byte-identical through the day (D8), and a catch-up that writes the
+        missing row moves it once. Never raises (D7).
+        """
+        index_key, index_text = self._index_regime_text(d)
+        ew_key, ew_text = self._ew_return_text(d)
+        key = (d, index_key, ew_key)
+        if self._regime_cache is None or self._regime_cache[0] != key:
+            self._regime_cache = (key, index_text + ew_text)
+        return self._regime_cache[1]
+
+    def _index_regime_text(self, d: date) -> tuple[date | str | None, str]:
+        """``(last index bar date, text)``, read as the brk20 sweep reads it: through ``d - 1``."""
+        name = regime.INDEX_SYMBOL
+        try:
+            frame = self._store.get_bars_1d_frame(
+                name, d - timedelta(days=REGIME_LOOKBACK_DAYS), d - timedelta(days=1)
+            )
+            idx, why = regime.session_regime(frame, self._calendar, d)
+            last = frame.index[-1].date() if len(frame) else None
+            if why == "index_bar_missing":
+                prev = self._calendar.previous_trading_day(d)
+                return last, f"index regime: unavailable (no {name} bar for {prev.isoformat()})"
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            self._warn_once("index_regime_unavailable", d, exc)
+            return "read_failed", "index regime: unavailable (index read failed)"
+        if idx is None:
+            need = regime.INDEX_SMA + regime.RISING_LOOKBACK
+            return last, f"index regime: unavailable ({len(frame)} of {need} {name} sessions)"
+        side = "above" if idx.close > idx.sma else "below" if idx.close < idx.sma else "at"
+        trend = "rising" if idx.rising else "not rising"
+        return last, (
+            f"index regime (deterministic, completed sessions through {last}): {name} "
+            f"close {idx.close:.2f} {side} SMA50 {idx.sma:.2f}; SMA50 {trend} over "
+            f"{regime.RISING_LOOKBACK} sessions"
+        )
+
+    def _ew_return_text(self, d: date) -> tuple[str | None, str]:
+        """``(last non-NULL EW date, text)``: the compounded ``universe_ew_returns`` over the
+        ``EW_SESSIONS`` sessions ending at the previous session, or why it is unavailable."""
+        try:
+            prev = self._calendar.previous_trading_day(d)
+            first = prev
+            for _ in range(EW_SESSIONS - 1):
+                first = self._calendar.previous_trading_day(first)
+            rows = self._conn.execute(
+                "SELECT d, ret FROM universe_ew_returns WHERE d <= ? AND ret IS NOT NULL "
+                "ORDER BY d DESC LIMIT ?",
+                (prev.isoformat(), EW_SESSIONS),
+            ).fetchall()
+        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+            self._warn_once("regime_ew_unavailable", d, exc)
+            return "read_failed", f"; core equal-weight {EW_SESSIONS}-session return: unavailable (read failed)"
+        last = rows[0][0] if rows else None
+        if last != prev.isoformat():
+            return last, (
+                f"; core equal-weight {EW_SESSIONS}-session return: unavailable "
+                f"(no return for {prev.isoformat()})"
+            )
+        window = [ret for row_d, ret in rows if row_d >= first.isoformat()]
+        if len(window) < EW_SESSIONS:
+            return last, (
+                f"; core equal-weight {EW_SESSIONS}-session return: unavailable "
+                f"({len(window)} of {EW_SESSIONS} sessions)"
+            )
+        pct = (math.prod(1.0 + ret for ret in window) - 1.0) * 100
+        return last, f"; core equal-weight return over the {EW_SESSIONS} sessions through {last}: {pct:+.2f}%"
+
+    def _warn_once(self, event: str, d: date, exc: Exception) -> None:
+        if self._warned_on.get(event) != d:
+            self._warned_on[event] = d
+            _log.warning(event, d=d.isoformat(), error=f"{type(exc).__name__}: {exc}")
 
     def _date_line(self, d: date) -> str:
         """Precomputed date text (§3.2: the model never computes a date)."""
@@ -683,15 +726,6 @@ class ContextAssembler:
             return "day plan age: unavailable (no day plan)"
         age_h = (self._clock.now() - authored).total_seconds() / 3600.0
         return f"day plan age: authored {authored.strftime('%H:%M')} IST, {age_h:.1f}h ago"
-
-    def _regime_note_age_text(self) -> str:
-        """Regime-note staleness (WO-6 ii). Rendered in VOLATILE only, for the same D8 reason as
-        :meth:`_day_plan_age_text`: the note TEXT lives in the STABLE block (``_stable_block``), which
-        must gain no bytes, so its as-of stamp is rendered alongside it here instead."""
-        if self._regime_note_as_of is None:
-            return "regime note age: unavailable (not yet authored today)"
-        age_h = (self._clock.now() - self._regime_note_as_of).total_seconds() / 3600.0
-        return f"regime note age: authored {self._regime_note_as_of.strftime('%H:%M')} IST, {age_h:.1f}h ago"
 
     def _now_hhmm(self) -> str:
         """Compact ``HH:MM`` for "as of context-assembly time" stamps (positions has no data-side

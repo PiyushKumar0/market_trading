@@ -250,15 +250,11 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
     assert [c for c in rig.job_calls if c[0] in llm_jobs] == []
     rig.now.at = BOOT_AT
 
-    # (3) Intraday analyst: the pipeline's heartbeat trigger reads the calendar's trade window
-    #     (pipeline._window) and returns before the governor, the assembler or the harness.
+    # (3) Intraday analyst: every entry-seeking trigger gates on the pipeline's trade-window seam,
+    #     which has no window on a holiday.
     pipeline = RecommendationPipeline.__new__(RecommendationPipeline)
-    pipeline._clock, pipeline._calendar = rig.clock, rig.calendar
-    pipeline._governor = _Tripwire("governor", hits)
-    pipeline._assembler = _Tripwire("assembler", hits)
-    pipeline._harness = _Tripwire("harness", hits)
-    await pipeline.heartbeat()
-    assert hits == []
+    pipeline._calendar = rig.calendar
+    assert pipeline._window(HOLIDAY) is None
 
     # (4) News analyst: the §5.4 market-hours scoring leg requires a trading day (R6).
     scorer = NewsScoringJob(
@@ -277,9 +273,7 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
 
     # CONTROLS on a trading day (same objects, clock moved): each guard really is the thing that
     # stopped the call — past it, the tripwire is hit.
-    rig.now.at = TRADING_CONTROL_AT.replace(hour=10, minute=5)   # inside the seeded 10:00–10:30 window
-    with pytest.raises(_Tripped):
-        await pipeline.heartbeat()
+    assert pipeline._window(TRADING_CONTROL_AT.date()) is not None
     rig.now.at = TRADING_CONTROL_AT
     with pytest.raises(_Tripped):
         await scorer.run_batch()

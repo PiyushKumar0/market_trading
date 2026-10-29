@@ -1914,27 +1914,10 @@ async def compose(
     async def scoring_tick() -> None:
         await score_news()
 
-    # --- §5.2(c) heartbeat pulse: cadence owned by the governor (20 min at DG0, 45 at DG1, off at
-    #     DG2+); pipeline.heartbeat() itself enforces in-window + admission, this loop the spacing. ---
-    hb_holder: dict[str, Any] = {"last": None}
-
-    async def heartbeat_tick() -> None:
-        if pipeline is None:
-            return
-        interval_min = governor.heartbeat_interval_min()
-        if interval_min is None:
-            return
-        now = clock.now()
-        last = hb_holder["last"]
-        if last is not None and (now - last).total_seconds() < interval_min * 60:
-            return
-        hb_holder["last"] = now
-        await pipeline.heartbeat()
-
     # --- §5.2(a) paced forward drain (2026-08-14): one-minute pulse; pipeline.drain_forward_queue()
     #     owns BOTH the FORWARD_PACING_MIN cadence and the in-window/mode/kill/governor/cap
-    #     admission, exactly as heartbeat() owns its own. This loop only provides the pulse, so the
-    #     `immediate` rollback needs no scheduler change — the drain self-disables in that mode. ---
+    #     admission. This loop only provides the pulse, so the `immediate` rollback needs no
+    #     scheduler change — the drain self-disables in that mode. ---
     async def forward_drain_tick() -> None:
         if pipeline is None:
             return
@@ -2548,7 +2531,7 @@ async def compose(
         )
     _arm_live_jobs(scheduler, settings, bar_builder, health, news_ingest, resolve_news,
                    ticker=ticker, calendar=calendar, clock=clock, equity_tick=equity_tick,
-                   scoring_tick=scoring_tick, heartbeat_tick=heartbeat_tick,
+                   scoring_tick=scoring_tick,
                    warmup_refresh=warmup_refresh, catchup_sweep=catchup_sweep,
                    window_sweep_tick=window_sweep_tick, forward_drain_tick=forward_drain_tick,
                    holdings_reconcile_tick=(
@@ -2972,7 +2955,7 @@ def _arm_live_jobs(
     scheduler: Scheduler, settings, bar_builder: BarBuilder, health: HealthMonitor,
     news_ingest: NewsIngest, resolve_news,
     *, ticker: TickerSupervisor, calendar: NSECalendar, clock: Clock, equity_tick=None,
-    scoring_tick=None, heartbeat_tick=None, warmup_refresh=None, catchup_sweep=None,
+    scoring_tick=None, warmup_refresh=None, catchup_sweep=None,
     window_sweep_tick=None, forward_drain_tick=None, holdings_reconcile_tick=None,
     protection_reminder_tick=None, paper_tick=None,
 ) -> None:
@@ -3038,10 +3021,6 @@ def _arm_live_jobs(
         # §5.4 cadence pulse — run_batch() self-gates (windows, batch trigger, governor).
         scheduler.add_job(scoring_tick, trigger=IntervalTrigger(seconds=300),
                           job_id="news_scoring_tick", guard=False)
-    if heartbeat_tick is not None:
-        # §5.2(c) — one-minute pulse; the governor-owned interval gates the actual call.
-        scheduler.add_job(heartbeat_tick, trigger=IntervalTrigger(seconds=60),
-                          job_id="analyst_heartbeat_tick", guard=False)
     if warmup_refresh is not None:
         # Gate readiness snapshot (§7.1 warmup_ready/regime_data_ready) — fail-closed until first run.
         scheduler.add_job(warmup_refresh, trigger=IntervalTrigger(seconds=60),

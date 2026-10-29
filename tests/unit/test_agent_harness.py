@@ -1015,26 +1015,18 @@ async def test_every_persisted_call_has_a_prompt_version(defs, gov, clock, conn)
     ]
 
 
-async def test_call_class_drives_admission(defs, gov, clock, conn, real_cfg, calendar) -> None:
-    # A heartbeat is refused from DG2 up while a signal call is still allowed (§5.6).
-    async def spend(usd: str) -> None:
-        await gov.record("weekly_researcher", "haiku-4.5", TokenUsage(in_tokens=int(Decimal(usd) * 10**6), out_tokens=0))
-
-    await spend("86")                                  # > 85% of the $100 credit => DG2
-    assert gov.degrade_tier() == DegradeTier.DG2
+async def test_dg2_admits_every_intraday_call_class(defs, gov, clock, conn) -> None:
+    await gov.record("weekly_researcher", "haiku-4.5", TokenUsage(in_tokens=86 * 10**6, out_tokens=0))
+    assert gov.degrade_tier() == DegradeTier.DG2       # > 85% of the $100 credit
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake)
 
-    blocked = await harness.run_single_shot(
-        defs["intraday_analyst"], FakeContext(call_class="heartbeat"), enter_validator(clock)
-    )
-    assert blocked.reason == "governor_blocked" and blocked.detail == "DG2_heartbeats_off"
-    assert fake.calls == []
-
-    allowed = await harness.run_single_shot(
-        defs["intraday_analyst"], FakeContext(call_class="signal_candidate"), enter_validator(clock)
-    )
-    assert allowed.ok and len(fake.calls) == 1
+    for call_class in ("signal_candidate", "position_event"):
+        result = await harness.run_single_shot(
+            defs["intraday_analyst"], FakeContext(call_class=call_class), enter_validator(clock)
+        )
+        assert result.ok, call_class
+    assert len(fake.calls) == 2
 
 
 class FakeErrorResultMessage(FakeResultMessage):

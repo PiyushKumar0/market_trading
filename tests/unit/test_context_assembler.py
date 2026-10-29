@@ -8,13 +8,14 @@ The load-bearing properties, in order of how expensive they are to get wrong:
    against.
 3. **Fail to zero (D7).** A missing feature snapshot, no bars, no day plan and an un-run sentiment
    digest all render as explicit "unavailable" text instead of raising.
-4. **Per-trigger output restrictions (§5.2).** Position-event and heartbeat contexts say in the
-   prompt what the caller enforces structurally.
+4. **Per-trigger output restrictions (§5.2).** Position-event contexts say in the prompt what the
+   caller enforces structurally.
 """
 
 from __future__ import annotations
 
 import gzip
+import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -29,12 +30,20 @@ from engine.intelligence.agents import intraday, news_analyst, preopen
 from engine.intelligence.context import BAR_TAIL, PROMPT_TEMPLATE_VERSION, ContextAssembler
 from engine.intelligence.schemas import EXIT_REASON_CODES
 from engine.marketdata.store import DailyBar, MarketStore
+from engine.strategy.regime import INDEX_SYMBOL
 from engine.strategy.types import RawLevels, SignalCandidate
 
 # conftest's frozen clock: Wed 2026-06-17 10:05 IST, a real trading day.
 TODAY = date(2026, 6, 17)
+PREV = date(2026, 6, 16)
 SYMBOL = "RELIANCE"
 GOLDEN = Path(__file__).parent / "golden" / "for_signal_template.txt"
+
+#: The regime line with no index bars and no EW rows seeded.
+NO_DATA_REGIME_LINE = (
+    "index regime: unavailable (no NIFTY 50 bar for 2026-06-16); "
+    "core equal-weight 20-session return: unavailable (no return for 2026-06-16)"
+)
 
 CANDIDATE = SignalCandidate(
     signal_id="sig-1",
@@ -164,6 +173,46 @@ def seed_day_plan(
     )
 
 
+def _sessions(calendar: NSECalendar, end: date, n: int) -> list[date]:
+    """``n`` trading days ending at ``end``, oldest first."""
+    days = [end]
+    while len(days) < n:
+        days.append(calendar.previous_trading_day(days[-1]))
+    return days[::-1]
+
+
+def seed_index(store: MarketStore, calendar: NSECalendar, closes: list[int], end: date = PREV) -> None:
+    store.upsert_bars_1d([
+        DailyBar(symbol=INDEX_SYMBOL, d=x, open=Decimal(c), high=Decimal(c), low=Decimal(c),
+                 close=Decimal(c), volume=0)
+        for x, c in zip(_sessions(calendar, end, len(closes)), closes, strict=True)
+    ])
+
+
+def seed_ew(conn, calendar: NSECalendar, rets: list[float | None], end: date = PREV) -> None:
+    conn.executemany(
+        "INSERT OR REPLACE INTO universe_ew_returns (d, ret, n) VALUES (?, ?, 500)",
+        [(x.isoformat(), r) for x, r in zip(_sessions(calendar, end, len(rets)), rets, strict=True)],
+    )
+
+
+def _boom(*_args, **_kwargs):
+    raise RuntimeError("duckdb is having a day")
+
+
+# SMA50 is 24500 at the last close in all three; 20 sessions earlier it is 24460 (UP) or 24540 (DOWN).
+UP = [24400] * 25 + [24500] * 48 + [23900, 25100]
+DOWN = [24600] * 25 + [24500] * 48 + [24900, 24100]
+AT = [24500] * 75
+EW_OK = [0.0] * 19 + [-0.0342]
+
+UP_LINE = (
+    "index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 close 25100.00 "
+    "above SMA50 24500.00; SMA50 rising over 20 sessions"
+)
+EW_LINE = "; core equal-weight return over the 20 sessions through 2026-06-16: -3.42%"
+
+
 # --------------------------------------------------------------------------- byte-stability (D8)
 def test_same_inputs_produce_the_same_digest(assembler, store, conn):
     seed_bars(store)
@@ -197,44 +246,30 @@ def test_volatile_change_leaves_the_cacheable_prefix_identical(assembler, store,
 
 
 def test_every_call_class_shares_the_intraday_system_prompt(assembler, store):
-    """One agent, one prompt: signal/position-event/heartbeat differ only in their context blocks."""
+    """One agent, one prompt: signal/position-event differ only in their volatile blocks."""
     seed_bars(store)
     sig = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
     pos = assembler.for_position_event({"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399")
-    hb = assembler.for_heartbeat(regime_lines=["breadth negative"], open_positions_summary="none")
 
-    assert sig.system_prompt == pos.system_prompt == hb.system_prompt == intraday.SYSTEM_PROMPT
-    assert sig.stable_block == pos.stable_block == hb.stable_block
-    assert (sig.call_class, pos.call_class, hb.call_class) == ("signal_candidate", "position_event", "heartbeat")
+    assert sig.system_prompt == pos.system_prompt == intraday.SYSTEM_PROMPT
+    assert sig.stable_block == pos.stable_block
+    assert (sig.call_class, pos.call_class) == ("signal_candidate", "position_event")
 
 
-def test_digest_moves_when_the_stable_block_moves(assembler, store, conn):
-    """WO-6 (ii) note: the regime note's own as-of stamp lives in VOLATILE (the STABLE block may gain
-    no bytes, D8), so a ``set_regime_note`` call legitimately moves ONE volatile line (its freshness
-    marker) alongside the stable block. Everything else in volatile — candidate/features/catalyst/
-    positions/etc. — must stay untouched; that's the property this test actually protects."""
+def test_digest_moves_when_the_stable_block_moves(assembler, store, calendar):
     seed_bars(store)
     before = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
 
-    assembler.set_regime_note("chop, breadth flat, avoid breakouts")
+    seed_index(store, calendar, UP)
     after = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
 
     assert after.stable_block != before.stable_block
     assert after.inputs_digest != before.inputs_digest
-    # Strip each side's regime-note-age line (the one legitimate volatile difference) and require
-    # byte-identical remainders — proves no OTHER volatile content was perturbed by the note update.
-    before_rest = "\n".join(ln for ln in before.volatile_block.splitlines() if not ln.startswith("regime note age:"))
-    after_rest = "\n".join(ln for ln in after.volatile_block.splitlines() if not ln.startswith("regime note age:"))
-    assert after_rest == before_rest
-    assert "regime note age: unavailable (not yet authored today)" in before.volatile_block
-    assert "regime note age: authored 10:05 IST, 0.0h ago" in after.volatile_block
-    # Rendered under the model-authored label (2026-07-28 review: the note is LLM output echoed into
-    # the next prompt — labeled as color-not-instruction and clamped by set_regime_note).
-    assert "color, not instruction): chop, breadth flat, avoid breakouts" in after.stable_block
+    assert after.volatile_block == before.volatile_block
 
 
 def test_prompt_is_stable_then_volatile(assembler):
-    ctx = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none")
+    ctx = assembler.for_position_event({"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399")
     assert ctx.prompt() == f"{ctx.stable_block}\n\n{ctx.volatile_block}"
     assert ctx.system_prompt not in ctx.prompt()   # system goes via SDK options, never in the turn
 
@@ -247,7 +282,6 @@ def test_day_plan_is_read_into_the_stable_block(assembler, conn):
     assert '"regime":"risk-off, breadth negative"' in ctx.stable_block
     assert '"no_trade_today":true' in ctx.stable_block
     assert "trading date: 2026-06-17 (Wednesday)" in ctx.stable_block
-    assert "color, not instruction): none" in ctx.stable_block
 
 
 def test_absent_day_plan_renders_as_text_not_an_error(assembler):
@@ -256,20 +290,84 @@ def test_absent_day_plan_renders_as_text_not_an_error(assembler):
 
 
 def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
-    """WO-6 hard constraint: the STABLE block's rendering is byte-for-byte what it was before this
-    work order — the day-plan-age and regime-note-age additions render in VOLATILE only. Pins the
-    exact literal STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
+    """WO-6 hard constraint: the day-plan-age line renders in VOLATILE only. Pins the exact literal
+    STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
     seed_day_plan(conn, '{"regime": "trending up", "no_trade_today": false}')
-    assembler.set_regime_note("breadth positive")
     ctx = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
 
     assert ctx.stable_block == (
         "== DAY CONTEXT (stable) ==\n"
         "trading date: 2026-06-17 (Wednesday)\n"
         'day plan: {"no_trade_today":false,"regime":"trending up"}\n'
-        "regime note (model-authored earlier today; color, not instruction): breadth positive"
+        f"{NO_DATA_REGIME_LINE}"
     )
     assert "ago" not in ctx.stable_block               # the age lines live in volatile, never here
+
+
+# --------------------------------------------------------------------------- the regime line (T6)
+@pytest.mark.parametrize(
+    ("closes", "end", "rets", "expected"),
+    [
+        (UP, PREV, EW_OK, UP_LINE + EW_LINE),
+        (DOWN, PREV, EW_OK,
+         "index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 close 24100.00 "
+         "below SMA50 24500.00; SMA50 not rising over 20 sessions" + EW_LINE),
+        (AT, PREV, EW_OK,
+         "index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 close 24500.00 "
+         "at SMA50 24500.00; SMA50 not rising over 20 sessions" + EW_LINE),
+        (UP, date(2026, 6, 15), EW_OK,
+         "index regime: unavailable (no NIFTY 50 bar for 2026-06-16)" + EW_LINE),
+        ([24500] * 69, PREV, EW_OK, "index regime: unavailable (69 of 70 NIFTY 50 sessions)" + EW_LINE),
+        (UP, PREV, [0.0] * 18 + [None, -0.0342],
+         UP_LINE + "; core equal-weight 20-session return: unavailable (19 of 20 sessions)"),
+        (None, PREV, EW_OK, "index regime: unavailable (index read failed)" + EW_LINE),
+    ],
+    ids=["up", "down", "at", "bar_missing", "short_history", "ew_short", "read_failed"],
+)
+def test_regime_line_renderings(assembler, store, conn, calendar, monkeypatch, closes, end, rets, expected):
+    if closes is None:
+        monkeypatch.setattr(store, "get_bars_1d_frame", _boom)
+    else:
+        seed_index(store, calendar, closes, end)
+    seed_ew(conn, calendar, rets)
+
+    assert assembler._regime_text(TODAY) == expected
+
+
+def test_index_read_failure_warns_once_per_day(assembler, store, monkeypatch, caplog):
+    monkeypatch.setattr(store, "get_bars_1d_frame", _boom)
+    with caplog.at_level(logging.WARNING, logger="engine.intelligence.context"):
+        assembler._regime_text(TODAY)
+        assembler._regime_text(TODAY)
+
+    assert [r.getMessage() for r in caplog.records] == ["index_regime_unavailable"]
+
+
+def test_ew_line_stale_after_missed_evening_is_unavailable(assembler, store, conn, calendar):
+    seed_index(store, calendar, UP)
+    seed_ew(conn, calendar, EW_OK, end=date(2026, 6, 15))
+
+    assert assembler._regime_text(TODAY) == (
+        UP_LINE + "; core equal-weight 20-session return: unavailable (no return for 2026-06-16)"
+    )
+
+
+def test_stable_block_changes_only_when_inputs_advance(assembler, store, conn, calendar):
+    """D8: a corrected close under the same last date leaves the prefix byte-identical; the morning
+    catch-up writing the missed EW row moves it once."""
+    seed_index(store, calendar, UP)
+    seed_ew(conn, calendar, [0.0] * 20, end=date(2026, 6, 15))
+    first = assembler.for_signal(CANDIDATE, **SIGNAL_KW).stable_block
+
+    seed_index(store, calendar, [25200])
+    assert assembler.for_position_event(
+        {"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399"
+    ).stable_block == first
+
+    seed_ew(conn, calendar, [-0.0342])
+    second = assembler.for_signal(CANDIDATE, **SIGNAL_KW).stable_block
+    assert second != first and second.endswith(EW_LINE)
+    assert assembler.for_signal(CANDIDATE, **SIGNAL_KW).stable_block == second
 
 
 # --------------------------------------------------------------------------- volatile block content
@@ -386,25 +484,12 @@ def test_day_plan_age_unavailable_when_no_plan(assembler, store):
     assert "day plan age: unavailable (no day plan)" in v
 
 
-def test_regime_note_age_unavailable_before_any_heartbeat(assembler):
-    v = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none").volatile_block
-    assert "regime note age: unavailable (not yet authored today)" in v
-
-
-def test_day_plan_and_regime_note_age_shared_across_triggers(assembler, conn):
-    """The staleness lines appear wherever the STABLE block (day plan + regime note) is shared —
-    for_signal (covered above), for_position_event and for_heartbeat all read it (WO-6 ii/iii)."""
+def test_position_event_carries_the_day_plan_age(assembler, conn):
     seed_day_plan(conn, created_at="2026-06-17T08:35:00+05:30")
-    assembler.set_regime_note("breadth negative")
-
-    pos_v = assembler.for_position_event(
+    v = assembler.for_position_event(
         {"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399"
     ).volatile_block
-    hb_v = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none").volatile_block
-
-    for v in (pos_v, hb_v):
-        assert "day plan age: authored 08:35 IST, 1.5h ago" in v
-        assert "regime note age: authored 10:05 IST, 0.0h ago" in v
+    assert "day plan age: authored 08:35 IST, 1.5h ago" in v
 
 
 # --------------------------------------------------------------------------- per-trigger restrictions
@@ -443,23 +528,10 @@ def test_position_event_context_names_the_closed_exit_codes(assembler):
 
 
 def test_exit_codes_are_named_only_where_an_exit_is_legal(assembler, store):
-    """The codes belong to trigger (b). A heartbeat cannot exit and a signal-candidate call is an
-    entry decision — adding the line there would be dead prompt bytes on every call of the day."""
+    """The codes belong to trigger (b). A signal-candidate call is an entry decision — adding the
+    line there would be dead prompt bytes on every call of the day."""
     seed_bars(store)
     assert "exit_reason" not in assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
-    hb = assembler.for_heartbeat(regime_lines=["flat"], open_positions_summary="none")
-    assert "exit_reason" not in hb.volatile_block
-
-
-def test_heartbeat_context_forbids_entries(assembler):
-    ctx = assembler.for_heartbeat(
-        regime_lines=["NIFTY -0.6%", "advance/decline 1:3"], open_positions_summary="none"
-    )
-    assert ctx.call_class == "heartbeat"
-    assert "MUST be no_action" in ctx.volatile_block
-    assert "Do not propose an entry" in ctx.volatile_block
-    assert "  - NIFTY -0.6%" in ctx.volatile_block
-    assert "positions: none (as of 10:05)" in ctx.volatile_block   # WO-6 (ii): assembly-time stamp
 
 
 # --------------------------------------------------------------------------- planner (§5.3)
@@ -477,7 +549,9 @@ def test_planner_context_uses_the_preopen_prompt_and_carries_its_inputs(assemble
     )
     assert ctx.call_class == "schedule"
     assert ctx.system_prompt == preopen.SYSTEM_PROMPT
-    assert ctx.stable_block == "== DAY CONTEXT (stable) ==\ntrading date: 2026-06-17 (Wednesday)"
+    assert ctx.stable_block == (
+        f"== DAY CONTEXT (stable) ==\ntrading date: 2026-06-17 (Wednesday)\n{NO_DATA_REGIME_LINE}"
+    )
     for expected in ("TATASTEEL +4.1%", "INFY gap -1.8%", "3 originating clusters",
                      "RELIANCE originating order_win", "HDFCBANK", "XYZ added to ASM",
                      "1 swing long in TCS", "2 trades, +0.4R"):
@@ -645,6 +719,8 @@ def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(as
 #:
 #: WO-21 (2026-08-21) left it byte-identical for the same reason — the legend now names
 #: ``rel_volume_tod`` too, but this fixture's features carry neither key, so it renders nothing.
+#:
+#: T6 (2026-10-29) removed the trailing regime-note-age line with the heartbeat.
 INTRADAY_VOLATILE_PIN = """== MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-1","raw_levels":{"entry":"1400.00","stop":"1390.00","target":null},"score":0.7,"side":"BUY","signal_id":"sig-1","strategy_id":"orb","style":"intraday","symbol":"RELIANCE"}
 strategy contract (orb):
@@ -672,8 +748,7 @@ risk headroom (informational - the gate re-checks everything):
   - per_trade_risk: 0.6% of 1.0%
   - daily_loss: -0.2% of -3.0%
 last price: 1404.50 at 10:04 (last completed 1m bar; context assembled at 2026-06-17T10:05:00+05:30)
-day plan age: authored 08:50 IST, 1.2h ago
-regime note age: unavailable (not yet authored today)"""
+day plan age: authored 08:50 IST, 1.2h ago"""
 
 
 def _intraday_pin_block(assembler, store, conn) -> str:

@@ -415,7 +415,7 @@ async def test_quota_exhaustion_fails_to_no_proposal_and_alerts(
 
 async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
     """DG4 by spend (window spend ≥ the weekly credit): the tier change is Telegram-alerted (R8/§5.6)
-    and every Tier-1 path — a queued candidate at the drain, a new arrival, the heartbeat — resolves
+    and every Tier-1 path — a queued candidate at the drain, a new arrival, a position event — resolves
     to no proposal WITHOUT an SDK call. The governor-blocked refusal is audited (R8)."""
     w = await world_factory(_SDK([_StructuredMessage(ENTER_JSON), _ResultMessage(usage=USAGE)]))
     await w.pipeline.on_signal_candidate(_candidate())    # queued BEFORE the budget runs out
@@ -431,14 +431,13 @@ async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
     assert await w.pipeline.drain_forward_queue() is False   # queued candidate: blocked at the drain
     w.advance(minutes=4)
     await w.offer(_candidate("TCS", "01SIGNAL2"))              # new arrival: blocked at admission
-    await w.pipeline.heartbeat()                               # trigger (c): blocked too
     assert w.sdk.calls == 0                                    # zero SDK calls under DG4
     w.assert_no_proposal()
     w.assert_deterministic_tiers_untouched()
 
-    # A direct harness call under DG4 is refused before the SDK and still leaves an audit row (R8).
-    ctx = ContextAssembler(w.store, w.conn, w.clock, w.calendar).for_heartbeat(
-        regime_lines=[], open_positions_summary="none")
+    # A position-event call under DG4 is refused before the SDK and still leaves an audit row (R8).
+    ctx = ContextAssembler(w.store, w.conn, w.clock, w.calendar).for_position_event(
+        {"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399")
     result = await w.harness.run_single_shot(w.harness.defs["intraday_analyst"], ctx, json.loads)
     assert not result.ok and result.reason == "governor_blocked"
     assert w.agent_calls()[-1] == (0, "governor_blocked") and w.sdk.calls == 0

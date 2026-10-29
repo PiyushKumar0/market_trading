@@ -17,8 +17,7 @@ Two objects:
   happened to take (§3.6/§6.5).
 * :class:`RecommendationPipeline` — the trigger handlers. ``on_signal_candidate`` (§5.2 trigger a) is
   the entry path and is **window-gated**; ``on_bar`` (trigger b) and ``time_exit_check`` (the D2
-  time exit) are risk-reducing and therefore **never** window-gated (R3); ``heartbeat``
-  (trigger c) is window-gated and can only refresh the regime note.
+  time exit) are risk-reducing and therefore **never** window-gated (R3).
 
 Conventions that are load-bearing here:
 
@@ -1040,7 +1039,7 @@ class RecommendationPipeline:
         #: logging a position must not silence the time exit's line (or the reverse).
         self._time_exit_skip_logged: dict[str, date] = {}
         #: Owner-alert cadence for "Intraday analyst unavailable", per ``(agent, reason)`` (WO-25b).
-        #: One alert per failure meant one alert per heartbeat for as long as the SDK stayed down —
+        #: One alert per failure meant one alert per analyst trigger for as long as the SDK was down —
         #: those repeats were a large share of the 203-deep notification backlog on 2026-08-24. The
         #: D7 behaviour is unchanged (a Tier-1 failure is still no-proposal, still logged every time);
         #: only how often the owner is told the same thing changes. A successful analyst call closes
@@ -1867,8 +1866,7 @@ class RecommendationPipeline:
         """Spend at most one analyst slot, at most once per ``FORWARD_PACING_MIN`` minutes.
 
         Pulsed every 60 s from the composition root (``forward_drain_tick``); THIS method owns the
-        cadence, exactly as :meth:`heartbeat` owns its own admission while ``heartbeat_tick`` owns
-        only the pulse. Returns True when a candidate reached the analyst.
+        cadence; the tick owns only the pulse. Returns True when a candidate reached the analyst.
 
         Why the drain had to leave the arrival path (live 2026-08-14, the first day under WO-1): an
         arriving candidate was enqueued and then immediately drained, so the queue held exactly one
@@ -2324,8 +2322,6 @@ class RecommendationPipeline:
         self._note_agent_ok()
         payload = result.payload
         if isinstance(payload, NoActionOutput):
-            if payload.regime_note:
-                self._assembler.set_regime_note(payload.regime_note)
             _log.info("signal_candidate_no_action", signal_id=candidate.signal_id,
                       reason=payload.reason)
             self._journal_decision(candidate, d, "no_action", payload.confidence, result.call_id, None)
@@ -3165,39 +3161,6 @@ class RecommendationPipeline:
         inside = before_close and session is not None and session.open <= now
         return head + f"overdue since {due.isoformat()}: sell {'now' if inside else 'at the next open'}"
 
-    # ================================================================== trigger (c): heartbeat
-    async def heartbeat(self) -> None:
-        """§5.2 trigger (c) — regime context only, in-window only, may never propose."""
-        d = self._clock.today()
-        window = self._window(d)
-        if window is None or not (window[0] <= self._clock.now() <= window[1]):
-            return
-        decision = self._governor.can_invoke(INTRADAY_AGENT_ID, "heartbeat")
-        if not decision.allowed:
-            return
-        actx = self._assembler.for_heartbeat(
-            regime_lines=self._headroom_lines(d),
-            open_positions_summary=self._positions_summary(),
-        )
-        proposal_id = str(ULID())
-        valid_until = self._ttl("intraday")
-        result = await self._harness.run_single_shot(
-            self._agent_def(),
-            actx,
-            lambda raw: parse_intraday(
-                raw, proposal_id=proposal_id, agent_id=INTRADAY_AGENT_ID,
-                valid_until=valid_until, inputs_digest=actx.inputs_digest,
-            ),
-            json_schema=intraday_guidance_json_schema(),
-        )
-        if not result.ok:
-            await self._alert_agent_failed("heartbeat", result)
-            return
-        self._note_agent_ok()
-        payload = result.payload
-        if isinstance(payload, NoActionOutput) and payload.regime_note:
-            self._assembler.set_regime_note(payload.regime_note)
-
     # ================================================================== shared machinery
     async def _gate_and_persist(
         self, action: Any, symbol: str, side: str, style: str, d: date
@@ -3627,7 +3590,7 @@ class RecommendationPipeline:
         ]
 
     def _positions_summary(self) -> str:
-        """Open-position line for the §5.2 signal and heartbeat contexts, MINUS the positions the
+        """Open-position line for the §5.2 signal context, MINUS the positions the
         broker no longer holds (WO-D2 residue, 2026-09-12).
 
         The position-event screen already stops spending analyst calls on a position the §3.6 journal
@@ -3745,8 +3708,8 @@ class RecommendationPipeline:
         same ``(agent, reason)`` inside :data:`~engine.notify.episodes.REPEAT_AFTER` are logged as
         suppressed instead of buzzing the owner again — a dead SDK produced one "Intraday analyst
         unavailable" per trigger for hours, which is queue-building noise, not new information. The
-        key deliberately excludes ``trigger``: a heartbeat and a candidate failing on the same reason
-        are one outage, and the alert body already says the analyst is unavailable.
+        key deliberately excludes ``trigger``: a position event and a candidate failing on the same
+        reason are one outage, and the alert body already says the analyst is unavailable.
         """
         _log.warning("intraday_agent_failed", trigger=trigger, reason=getattr(result, "reason", None),
                      detail=getattr(result, "detail", None), call_id=getattr(result, "call_id", None))

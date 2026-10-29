@@ -111,8 +111,7 @@ agents:
     timeout_s: 180             # 120→180 at the 08-18 opus switch; KEPT on the way back down — a call
                                # that completes is billed anyway, so headroom costs nothing and a
                                # cut-off one wastes the spend (same reasoning as the news_analyst key)
-    triggers: [signal_candidate, position_event, heartbeat]   # (a)+(c) window-gated; (b) whenever up (§5.2)
-    heartbeat_min: 20          # [tunable]; window-bounded (§5.6)
+    triggers: [signal_candidate, position_event]   # (a) window-gated; (b) whenever up (§5.2)
     prescreen_cap_per_day: 48  # [tunable] 6→12 (owner 2026-08-11: the cap, not signal quality, was
                                # binding — 66 candidates by 10:13 vs 6 evaluations); 12→48 (owner
                                # 2026-08-18: bandwidth ~5x — cap sized to clear a 66-candidate morning

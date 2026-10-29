@@ -588,7 +588,7 @@ def _candidate_from_context(blob: Any) -> dict[str, Any]:
     """The ``SignalCandidate`` dict out of an archived prompt (``agent_calls.context_gz``).
 
     Needed because ``agent_calls`` has no identity columns and a DECLINE's payload has none either:
-    ``NoActionOutput`` is ``{action, reason, regime_note, confidence?, thesis?}`` with
+    ``NoActionOutput`` is ``{action, reason, confidence?, thesis?}`` with
     ``extra="forbid"``, so an ``ok=1`` no_action row cannot legally carry a tradingsymbol. The
     prompt is where the subject lives — ``for_signal`` writes the whole candidate as one
     ``candidate: {...}`` line — and the prompt is archived verbatim for replay (R8). Unreadable or
