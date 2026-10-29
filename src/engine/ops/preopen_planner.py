@@ -55,7 +55,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypeVar
 
 from engine.core.calendar import NSECalendar
 from engine.core.clock import Clock
@@ -63,7 +63,12 @@ from engine.core.db import transaction
 from engine.core.log import get_logger
 from engine.core.scope import scope_sql
 from engine.intelligence.agents import preopen
-from engine.intelligence.context import ContextAssembler, sentiment_rail_note
+from engine.intelligence.context import (
+    ContextAssembler,
+    has_scored_headlines,
+    sentiment_as_of_text,
+    sentiment_rail_note,
+)
 from engine.intelligence.governor import BudgetGovernor
 from engine.intelligence.harness import ACCOUNT_FAIL_REASONS, AgentDef, AgentHarness
 from engine.intelligence.schemas import DayPlan
@@ -77,6 +82,8 @@ from engine.ops.jobs import JOB_CATALYST_DIGEST, JOB_EARNINGS, AdvisoryOutcome
 from engine.strategy.scanners import brk20
 
 _log = get_logger("engine.ops.preopen_planner")
+
+T = TypeVar("T")
 
 #: agents.yaml / governor admission key — must agree with config/agents.yaml's preopen_planner
 #: trigger and with the "schedule" call_class ContextAssembler.for_planner stamps on its context.
@@ -202,7 +209,7 @@ class PreopenPlannerJob:
             movers_lines=self._guarded(lambda: self._movers_lines(d), [_read_failed("movers")]),
             breakout_lines=self._guarded(lambda: self._breakout_lines(d), [_read_failed("breakouts")]),
             gap_lines=[_GAP_SCAN_LINE],
-            digest_lines=self._guarded(self._digest_lines, [_read_failed("digest")]),
+            digest_lines=self._guarded(lambda: self._digest_lines(d), [_read_failed("digest")]),
             watchlist_lines=self._guarded(lambda: self._watchlist_lines(d), [_read_failed("watchlist")]),
             earnings_today=self._guarded(lambda: self._earnings_lines(d), [_read_failed("earnings calendar")]),
             surveillance_changes=self._guarded(lambda: self._surveillance_lines(d), [_read_failed("surveillance")]),
@@ -235,7 +242,7 @@ class PreopenPlannerJob:
         _log.info("preopen_planner_ran", d=d.isoformat(), call_id=result.call_id, focus=len(plan.focus))
         return AdvisoryOutcome.RAN
 
-    def _guarded[T](self, build: Callable[[], T], failed: T) -> T:
+    def _guarded(self, build: Callable[[], T], failed: T) -> T:
         """D7: a failed read renders ``failed`` and never raises into the prompt build."""
         try:
             return build()
@@ -300,18 +307,20 @@ class PreopenPlannerJob:
             return [_NO_PRIOR_SESSION]
         yesterday = d - timedelta(days=1)
         histories: dict[str, list[brk20.DailyRow]] = {}
-        last_days: set[date] = set()
+        latest: date | None = None
         for sym in eligible:
             frame = self._store.get_bars_1d_frame(sym, d - timedelta(days=70), yesterday)
             if len(frame):
-                last_days.add(frame.index[-1].date())
+                latest = max(latest or date.min, frame.index[-1].date())
                 histories[sym] = [
                     brk20.DailyRow(high=float(h), close=float(c), volume=float(v), open=float(o))
                     for h, c, v, o in zip(
                         frame["high"], frame["close"], frame["volume"], frame["open"]
                     )
                 ]
-        if d1 not in last_days:             # the prior session's bars are missing, not breakout-free
+        # regime.session_regime's staleness rule: a bar dated after d1 but before d is a completed
+        # special session (muhurat) the live calendar treats as closed, and the brk20 sweep reads it.
+        if latest is None or latest < d1:
             return [f"{_UNAVAILABLE} (no completed daily bars for {d1.isoformat()})"]
         ex_map: dict[str, list[date]] = {}
         for row in self._store.get_corp_actions(
@@ -333,9 +342,11 @@ class PreopenPlannerJob:
         ] or ["none"]
 
     # ------------------------------------------------------------------ catalyst digest (§2.7 step 5)
-    def _digest_lines(self) -> list[str]:
-        """Market + top-5 sector sentiment rows from the latest digest run; ``unavailable`` only when
-        the digest has never run (mirrors ``ContextAssembler._catalyst_text``'s convention).
+    def _digest_lines(self, d: date) -> list[str]:
+        """The digest's as-of stamp, then market + top-5 sector sentiment rows from the latest digest
+        run; ``unavailable`` only when the digest has never run (mirrors
+        ``ContextAssembler._catalyst_text``'s convention). The market row the digest writes on every
+        run as its ran-marker is skipped when it scored no cluster.
 
         A railed row carries the same measured note the analyst context renders
         (:func:`sentiment_rail_note`, 2026-09-04): this job used to print the bare ``-1.000``, the
@@ -347,7 +358,7 @@ class PreopenPlannerJob:
         rows = self._store.get_sentiment_agg(as_of)
         lines: list[str] = []
         market = next((r for r in rows if r.get("scope") == "market"), None)
-        if market is not None:
+        if market is not None and has_scored_headlines(market):
             lines.append(f"market: {market['value']:+.3f}{sentiment_rail_note(market)}")
         sectors = sorted(
             (r for r in rows if r.get("scope") == "sector"),
@@ -358,7 +369,10 @@ class PreopenPlannerJob:
             f"sector {r['scope_key']}: {r['value']:+.3f}{sentiment_rail_note(r)}"
             for r in sectors[:SECTOR_TOP_N]
         )
-        return lines or ["none (the latest digest scored no market or sector headlines)"]
+        return [
+            f"sentiment as of {sentiment_as_of_text(as_of, d)}",
+            *(lines or ["none (the latest digest scored no market or sector headlines)"]),
+        ]
 
     # ------------------------------------------------------------------ watchlist (§2.7 step 5(ii))
     def _watchlist_lines(self, d: date) -> list[str]:

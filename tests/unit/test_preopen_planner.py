@@ -273,8 +273,7 @@ async def test_a_railed_market_digest_reaches_the_planner_with_its_measure(
 
 # --------------------------------------------------------------------------- fail-to-zero rendering
 async def test_empty_tables_render_without_raising(store, conn, assembler, agent_defs, clock, calendar):
-    """D7: every deterministic input on a completely empty store/conn degrades to text, never raises.
-    The per-section absent/empty/present renderings are tests/unit/test_prompt_integrity.py's table."""
+    """D7: every deterministic input on a completely empty store/conn degrades to text, never raises."""
     harness = FakeHarness(AgentResult.Ok(call_id="c5", payload=_plan()))
     governor = FakeGovernor(allowed=True)
     job = _job(store, conn, assembler, harness, agent_defs, governor, clock, calendar)

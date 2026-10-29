@@ -91,6 +91,18 @@ def _no_bars_reason(bars: Sequence[Bar] | None) -> str:
     return "1m bar read failed" if bars is None else "no completed 1m bars this session"
 
 
+def has_scored_headlines(row: Mapping[str, Any]) -> bool:
+    """False for a row that scored no cluster — the digest's every-run market marker (value 0.0,
+    ``n_clusters`` 0) is "none", not a neutral reading. A pre-WO-22 row (NULL count) has a value."""
+    return row.get("value") is not None and row.get("n_clusters") != 0
+
+
+def sentiment_as_of_text(as_of: datetime, d: date) -> str:
+    """``HH:MM`` for a digest run on ``d``, else dated: yesterday's rows must not read as today's."""
+    local = as_of.astimezone(IST)
+    return local.strftime("%H:%M") if local.date() == d else local.strftime("%Y-%m-%d %H:%M")
+
+
 def sentiment_rail_note(row: Mapping[str, Any]) -> str:
     """The rail annotation for one ``sentiment_agg`` row — ``""`` off the rail (WO-20c / WO-22).
 
@@ -454,8 +466,8 @@ class ContextAssembler:
         """Today's ``DayPlan`` JSON from the state DB, or why it is unavailable (§5.3; absent is normal)."""
         try:
             row = self._conn.execute("SELECT payload FROM day_plans WHERE d = ?", (d.isoformat(),)).fetchone()
-        except sqlite3.Error:                     # e.g. table absent (pre-migration) - never blocks a call
-            _log.warning("day_plans_unavailable", d=d.isoformat())
+        except sqlite3.Error as exc:              # e.g. table absent (pre-migration) - never blocks a call
+            self._warn_once("day_plans_unavailable", d, exc)
             return f"{_UNAVAILABLE} (day plan read failed)"
         if row is None or not row[0]:
             return f"{_UNAVAILABLE} (no day plan for {d.isoformat()})"
@@ -640,7 +652,7 @@ class ContextAssembler:
         only genuinely-timestamped input this block has.
         """
         as_of, sentiment = self._sentiment_lines(symbol, d)
-        header = "catalyst:" if as_of is None else f"catalyst (sentiment as of {as_of.strftime('%H:%M')}):"
+        header = "catalyst:" if as_of is None else f"catalyst (sentiment as of {sentiment_as_of_text(as_of, d)}):"
         return "\n".join([header, *self._watchlist_lines(symbol, d), *sentiment])
 
     def _watchlist_lines(self, symbol: str, d: date) -> list[str]:
@@ -706,7 +718,7 @@ class ContextAssembler:
 
         No row means the digest ran and scored no headline for this scope: ``none``, not absence.
         """
-        if row is None or row.get("value") is None:
+        if row is None or not has_scored_headlines(row):
             return f"  sentiment {label}: {_NO_HEADLINES}"
         return f"  sentiment {label}: {float(row['value']):+.3f}{sentiment_rail_note(row)}"
 
@@ -767,7 +779,7 @@ class ContextAssembler:
                 "SELECT created_at FROM day_plans WHERE d = ?", (d.isoformat(),)
             ).fetchone()
         except sqlite3.Error:                     # e.g. table absent (pre-migration) - never blocks a call
-            return "day plan age: unavailable (no day plan)"
+            return "day plan age: unavailable (day plan read failed)"
         if row is None or not row[0]:
             return "day plan age: unavailable (no day plan)"
         try:

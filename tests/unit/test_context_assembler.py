@@ -401,16 +401,12 @@ def test_signal_volatile_block_carries_every_pinned_input(assembler, store, conn
     assert '"signal_id":"sig-1"' in v
     assert '"entry":"1400.00"' in v                       # Decimal levels as STRINGS (§8.1)
     assert '"features_snapshot_id":"fs-1"' in v
-    assert '"atr14":12.5' in v
     assert "max_qty_by_risk: 14" in v
     assert "cost and breakeven: notional 19600" in v
     assert "sector exposure: Energy 12% of 25% cap" in v
-    assert "per_trade_risk: 0.6% of 1.0%" in v
-    assert "positions: 1 open: TCS 5 @ 3900 (MIS)" in v
     assert "equity: 500000.00" in v
-    # WO-6 (ii): as-of stamps on blocks that previously had none.
-    assert '"rvol":1.8} (as of 10:04)' in v                # features snapshot's own ts (seed_features)
-    assert "positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)" in v   # assembly-time stamp (Clock)
+    # WO-6 (ii): an assembly-time as-of stamp (Clock) on a block that has none of its own.
+    assert "positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)" in v
 
 
 def test_bar_tail_is_capped_and_ordered_oldest_first(assembler, store):
@@ -433,9 +429,6 @@ def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     assert '"event_type":"order_win"' in v
     assert '"materiality":0.72' in v
     assert "confirm_trigger" not in v and "invalidation" not in v   # retired v1 levels stay out of prompts
-    assert "sentiment symbol RELIANCE: +0.420" in v
-    assert "sentiment sector Energy: +0.150" in v
-    assert "sentiment market: -0.110" in v
     # WO-6 (ii): the catalyst block's as-of stamp is the sentiment digest's last run time (08:35,
     # seed_catalyst) — the only genuinely-timestamped input this block has.
     assert "catalyst (sentiment as of 08:35):" in v
@@ -660,9 +653,6 @@ def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_ta
     note_at = next(i for i, ln in enumerate(lines) if STRUCTURAL_MARKER in ln)
     session_at = next(i for i, ln in enumerate(lines) if ln.startswith("session:"))
     assert bars_1m_at < note_at < head < session_at
-
-
-# (b) no daily history / a failed daily read: tests/unit/test_prompt_integrity.py's swing_daily rows.
 
 
 def test_a_failed_1m_read_is_not_labelled_a_structural_absence(assembler, store, monkeypatch):

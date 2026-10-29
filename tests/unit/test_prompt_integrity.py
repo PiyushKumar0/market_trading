@@ -1,9 +1,10 @@
-﻿"""Prompt integrity (A2): absent is not empty.
+"""Prompt integrity (A2): absent is not empty.
 
 Every prompt section renders one of three states and never confuses them: the source is absent
 (``unavailable (<reason>)``), present but empty (an explicit ``none``), or present (the value). Rule 14
 tells the analyst absent news is neutral, which only works if absence is labelled. Sections with no
-empty state (1m bars, the day plan, the regime line, movers) carry only the other two.
+empty state (1m bars, the day plan, movers) carry only the other two; the regime line's renderings
+are tests/unit/test_context_assembler.py's T6 table.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import pytest
 from engine.core.calendar import NSECalendar
 from engine.core.clock import IST
 from engine.core.config import config_dir
+from engine.datafeeds.news_pipeline import CatalystDigestJob
 from engine.intelligence.context import ContextAssembler
 from engine.intelligence.harness import AgentResult, load_agent_defs
 from engine.marketdata.store import MarketStore
@@ -29,20 +31,16 @@ from tests.unit.test_context_assembler import (
     CANDIDATE,
     DAILY_HEADER,
     DAILY_LAST_ROW,
-    NO_DATA_REGIME_LINE,
     SIGNAL_KW,
     SWING_CANDIDATE,
     SYMBOL,
     TODAY,
     UNWATCHED,
-    UP,
-    UP_LINE,
     seed_bars,
     seed_catalyst,
     seed_daily_bars,
     seed_day_plan,
     seed_features,
-    seed_index,
 )
 from tests.unit.test_preopen_planner import (
     AGENTS_CFG,
@@ -57,6 +55,7 @@ from tests.unit.test_preopen_planner import (
 )
 
 AS_OF = datetime(2026, 6, 17, 8, 35, tzinfo=IST)
+YESTERDAY_AS_OF = datetime(2026, 6, 16, 18, 0, tzinfo=IST)
 NOW = "2026-06-17T10:05:00+05:30"
 BARS = f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first):"
 HEADROOM = "risk headroom (informational - the gate re-checks everything):"
@@ -103,10 +102,16 @@ def _assert_lines(prompt: str, chunks: tuple[str, ...]) -> None:
     assert [c for c in chunks if f"\n{c}\n" not in padded] == []
 
 
-def _sentiment(*rows: tuple[str, str, float]):
+def _sentiment(*rows: tuple[str, str, float], as_of: datetime = AS_OF):
     return lambda w: w.store.upsert_sentiment_agg(
-        [{"scope": s, "scope_key": k, "as_of": AS_OF, "value": v} for s, k, v in rows]
+        [{"scope": s, "scope_key": k, "as_of": as_of, "value": v} for s, k, v in rows]
     )
+
+
+def _digest_ran_empty(w) -> None:
+    """A digest run that scored no cluster, in production's own row shape (the market marker)."""
+    job = CatalystDigestJob(w.store, w.clock, w.calendar, None)
+    w.store.upsert_sentiment_agg(job._sentiment_rows([], AS_OF, {}, {}, set()))
 
 
 def _sector(w) -> None:
@@ -170,7 +175,7 @@ SIGNAL_CASES = {
         _both(_sentiment(("market", "market", 0.1)), _fails("get_sentiment_agg")),
         ("catalyst:", "  sentiment: unavailable (sentiment read failed)"),
     ),
-    "sentiment/empty": (_both(_sector, _sentiment(("symbol", "OTHER", 0.3))), (
+    "sentiment/empty": (_both(_sector, _digest_ran_empty), (
         "catalyst (sentiment as of 08:35):",
         f"  sentiment symbol {SYMBOL}: {NO_HEADLINES}",
         f"  sentiment sector Energy: {NO_HEADLINES}",
@@ -179,6 +184,10 @@ SIGNAL_CASES = {
     "sentiment/sector_unknown": (
         _sentiment(("market", "market", 0.1)),
         ("  sentiment sector: unavailable (sector unknown for this symbol)",),
+    ),
+    "sentiment/yesterday": (
+        _sentiment(("market", "market", 0.1), as_of=YESTERDAY_AS_OF),
+        ("catalyst (sentiment as of 2026-06-16 18:00):",),
     ),
     "sentiment/present": (lambda w: seed_catalyst(w.store), (
         f"  sentiment symbol {SYMBOL}: +0.420",
@@ -190,7 +199,7 @@ SIGNAL_CASES = {
     "day_plan/absent": (lambda w: None, ("day plan: unavailable (no day plan for 2026-06-17)",)),
     "day_plan/read_failed": (
         lambda w: w.conn.execute("DROP TABLE day_plans"),
-        ("day plan: unavailable (day plan read failed)", "day plan age: unavailable (no day plan)"),
+        ("day plan: unavailable (day plan read failed)", "day plan age: unavailable (day plan read failed)"),
     ),
     "day_plan/unreadable": (
         lambda w: seed_day_plan(w.conn, payload="{not json"), ("day plan: unavailable (day plan unreadable)",),
@@ -198,10 +207,6 @@ SIGNAL_CASES = {
     "day_plan/present": (
         lambda w: seed_day_plan(w.conn, payload='{"regime": "chop"}'), ('day plan: {"regime":"chop"}',),
     ),
-    "index_regime/absent": (lambda w: None, (NO_DATA_REGIME_LINE,)),
-    "index_regime/present": (lambda w: seed_index(w.store, w.calendar, UP), (
-        UP_LINE + "; core equal-weight 20-session return: unavailable (no return for 2026-06-16)",
-    )),
 }
 
 
@@ -213,14 +218,14 @@ def test_for_signal_sections(w, arrange, expected):
 
 
 # --------------------------------------------------------------------------- the pre-open planner
-async def _planner_prompt(w) -> str:
+async def _planner_prompt(w, d: date = TODAY) -> str:
     harness = FakeHarness(AgentResult.Ok(call_id="c1", payload=_plan()))
     job = PreopenPlannerJob(
         w.store, w.conn, ContextAssembler(w.store, w.conn, w.clock, w.calendar), harness,
         load_agent_defs(AGENTS_CFG), FakeGovernor(), w.clock, w.calendar,
         last_success=None if w.last is None else w.last.get,
     )
-    await job.run(TODAY)
+    await job.run(d)
     return harness.calls[0]["context"].prompt()
 
 
@@ -242,7 +247,7 @@ def _aaa_prior_bar(w) -> None:
     _seed_bars(w.store, PRIOR, {"AAA": "104.10"})
 
 
-def _review(payload: dict):
+def _review(payload: object):
     return lambda w: w.conn.execute(
         "INSERT INTO nightly_reviews (d, payload, created_at) "
         "VALUES ('2026-06-16', ?, '2026-06-16T21:00:00+05:30')",
@@ -256,6 +261,10 @@ _BREAKOUT = SimpleNamespace(
 
 PLANNER_CASES = {
     "movers/absent": (lambda w: None, (f"{MOVERS}\n  - unavailable (no universe for 2026-06-16)",)),
+    "movers/no_bars": (
+        lambda w: _seed_universe(w.store, PRIOR, ["AAA"]),
+        (f"{MOVERS}\n  - unavailable (no symbol has daily bars for both 2026-06-15 and 2026-06-16)",),
+    ),
     "movers/present": (_both(
         lambda w: _seed_universe(w.store, PRIOR, ["AAA"]),
         lambda w: _seed_bars(w.store, PRIOR2, {"AAA": "100.00"}), _aaa_prior_bar,
@@ -270,10 +279,16 @@ PLANNER_CASES = {
     ), (f"{BREAKOUTS}\n  - AAA closed 102 above its 20d high 100 (score 0.90; watchlisted: yes)",)),
     "digest/absent": (lambda w: None, (f"{DIGEST}\n  - unavailable (no sentiment digest has run)",)),
     "digest/empty": (
-        _sentiment(("symbol", "AAA", 0.3)),
-        (f"{DIGEST}\n  - none (the latest digest scored no market or sector headlines)",),
+        _digest_ran_empty,
+        (f"{DIGEST}\n  - sentiment as of 08:35\n  - none (the latest digest scored no market or sector headlines)",),
     ),
-    "digest/present": (_sentiment(("market", "market", -0.11)), (f"{DIGEST}\n  - market: -0.110",)),
+    "digest/yesterday": (
+        _sentiment(("market", "market", -0.11), as_of=YESTERDAY_AS_OF),
+        (f"{DIGEST}\n  - sentiment as of 2026-06-16 18:00\n  - market: -0.110",),
+    ),
+    "digest/present": (
+        _sentiment(("market", "market", -0.11)), (f"{DIGEST}\n  - sentiment as of 08:35\n  - market: -0.110",),
+    ),
     "watchlist/absent": (
         _set(last={JOB_CATALYST_DIGEST: PRIOR}),
         (f"{WATCHLIST}:\n  - unavailable (catalyst digest has not run for 2026-06-17)",),
@@ -311,6 +326,7 @@ PLANNER_CASES = {
         (f"{POSITIONS} {SYMBOL} BUY 3 @ 100 (CNC, stop 90)",),
     ),
     "review/absent": (lambda w: None, (f"{REVIEW} unavailable (no nightly review recorded)",)),
+    "review/unreadable": (_review(["not", "a", "dict"]), (f"{REVIEW} unavailable (the 2026-06-16 review is unreadable)",)),
     "review/empty": (_review({"summary": " "}), (f"{REVIEW} none (the 2026-06-16 review has no summary)",)),
     "review/present": (
         _review({"summary": "all quiet"}), (f"{REVIEW} [review of the 2026-06-16 session] all quiet",),
@@ -322,6 +338,17 @@ PLANNER_CASES = {
 async def test_for_planner_sections(w, arrange, expected):
     arrange(w)
     _assert_lines(await _planner_prompt(w), expected)
+
+
+async def test_breakouts_count_a_muhurat_bar_after_the_prior_session(w):
+    """Live calendar (muhurat closed): on Mon 2026-11-09 the prior session is Fri 11-06, and the
+    Sunday 11-08 muhurat bar the brk20 sweep reads is a completed session, not a missing 11-06."""
+    monday = date(2026, 11, 9)
+    w.calendar = NSECalendar(config_dir() / "calendar", w.clock, strict=True, include_special=False)
+    _seed_universe(w.store, monday, ["AAA"])
+    _seed_bars(w.store, date(2026, 11, 8), {"AAA": "100.00"})
+
+    _assert_lines(await _planner_prompt(w, monday), (f"{BREAKOUTS}\n  - none",))
 
 
 # --------------------------------------------------------------------------- the guard
