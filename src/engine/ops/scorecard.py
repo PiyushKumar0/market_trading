@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter, defaultdict
+from datetime import datetime
 from decimal import Decimal
 from statistics import mean, median
 from typing import Any
 
+from engine.core.clock import IST
 from engine.core.money import pct_of
 from engine.core.scope import HELD_STATES_SQL, scope_sql
 from engine.learning.benchmark import BENCH_INTRASESSION, BENCH_TIME
@@ -39,6 +41,38 @@ _PAPER_OPEN_SQL = (
     f"SELECT strategy_id FROM positions WHERE {HELD_STATES_SQL['paper']} "
     f"AND {scope_sql('paper', has_origin=True)}"
 )
+
+
+_HISTORY_SQL = (
+    "SELECT r.delivered_at, COALESCE(o.strategy_id, json_extract(r.payload, '$.strategy_id'), "
+    "l.strategy_id), o.status, o.net_pct, o.exit_reason "
+    "FROM recommendations r LEFT JOIN learning_ledger l ON l.rec_id = r.rec_id "
+    "LEFT JOIN rec_outcomes o ON o.rec_id = r.rec_id "
+    "WHERE r.delivered_at IS NOT NULL AND json_extract(r.payload, '$.instrument') = ? "
+    "AND COALESCE(json_extract(r.payload, '$.kind'), 'entry') = 'entry' "
+    "ORDER BY r.delivered_at DESC LIMIT ?"
+)
+_STATUS_WORDS = {"open": "open", "unfilled": "did not fill", "void_ca": "voided (corporate action)"}
+
+
+def symbol_history_line(conn: sqlite3.Connection, symbol: str, *, limit: int = 3) -> str:
+    """The card's same-ticker line: up to ``limit`` delivered entry recs on ``symbol``, newest first.
+    Called before the new rec is delivered, so every row is an earlier one."""
+    rows = conn.execute(_HISTORY_SQL, (symbol, limit)).fetchall()
+    if not rows:
+        return f"same-ticker history: no earlier recommendation on {symbol}"
+    return "same-ticker history (hindsight): " + "; ".join(
+        f"{datetime.fromisoformat(at).astimezone(IST).date()} {sid or UNATTRIBUTED} "
+        f"{_status_text(status, net, reason)}"
+        for at, sid, status, net, reason in rows
+    )
+
+
+def _status_text(status: str | None, net: float | None, reason: str | None) -> str:
+    if status != "closed":
+        return _STATUS_WORDS.get(status, "not scored")
+    text = "closed" if net is None else f"closed {net:+.2f}%"
+    return f"{text} ({reason})" if reason else text
 
 
 def _mean(xs: list[float]) -> float | None:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
-from engine.ops.scorecard import LABEL, scorecard
+import pytest
+
+from engine.ops.scorecard import LABEL, scorecard, symbol_history_line
 
 # rec_id, kind, human_action, skip_reason, strategy, status, fill_basis, net, net_t20, excess
 _ROWS = [
@@ -120,6 +122,47 @@ def test_paper_half_keeps_pre_epoch_paper_trades_and_excludes_voids(conn) -> Non
         "closed": 0, "hit_rate": None, "net": None, "net_pct": None, "open": 1}
     assert strategies["paperonly"]["recs"]["n"] == 0
     assert strategies["hi52"]["recs"]["n"] == 5          # paper rows never reach the recs half
+
+
+def _rec(conn, rec_id, day, *, symbol="BHEL", kind="entry", strategy="hi52", status=None, **outcome):
+    conn.execute(
+        "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?, ?, ?)",
+        (rec_id, json.dumps({"kind": kind, "instrument": symbol}), f"{day}T10:00:00+05:30"),
+    )
+    conn.execute("INSERT INTO learning_ledger (entry_id, rec_id, strategy_id) VALUES (?, ?, ?)",
+                 (f"e-{rec_id}", rec_id, strategy))
+    if status:
+        conn.execute("INSERT INTO rec_outcomes (rec_id, status, net_pct, exit_reason, updated_at) "
+                     "VALUES (?, ?, ?, ?, 'x')", (rec_id, status, outcome.get("net"), outcome.get("reason")))
+
+
+def test_history_line_lists_earlier_entry_recs_newest_first(conn) -> None:
+    _rec(conn, "a", "2026-08-27", status="open")
+    _rec(conn, "b", "2026-09-10", strategy="brk20", status="closed", net=-4.1234, reason="stop")
+    _rec(conn, "x", "2026-09-11", kind="exit", status="closed", net=9.0, reason="time")
+    _rec(conn, "o", "2026-09-12", symbol="TCS", status="open")
+    assert symbol_history_line(conn, "BHEL") == (
+        "same-ticker history (hindsight): 2026-09-10 brk20 closed -4.12% (stop); 2026-08-27 hi52 open")
+
+
+def test_history_line_caps_at_the_limit(conn) -> None:
+    for i in range(1, 5):
+        _rec(conn, f"r{i}", f"2026-09-0{i}", status="open")
+    assert symbol_history_line(conn, "BHEL").count("hi52 open") == 3
+    assert "2026-09-01" not in symbol_history_line(conn, "BHEL")
+
+
+@pytest.mark.parametrize(("status", "word"), [
+    ("unfilled", "did not fill"), ("void_ca", "voided (corporate action)"),
+    ("unscorable", "not scored"), (None, "not scored"),
+])
+def test_history_line_status_words(conn, status, word) -> None:
+    _rec(conn, "a", "2026-09-10", status=status)
+    assert symbol_history_line(conn, "BHEL").endswith(f"2026-09-10 hi52 {word}")
+
+
+def test_history_line_without_earlier_recs(conn) -> None:
+    assert symbol_history_line(conn, "BHEL") == "same-ticker history: no earlier recommendation on BHEL"
 
 
 def test_paper_net_pct_is_net_over_the_summed_cost_basis_never_a_partial_one(conn) -> None:

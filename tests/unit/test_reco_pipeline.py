@@ -4513,7 +4513,7 @@ async def test_an_extras_timeout_still_delivers_the_card(
     payload = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
     assert payload["stop_atr_mult"] is None
     assert [line.split(":")[0] for line in payload["evidence"]] == [
-        "backtest (fixed T+20 hold, no stop)"
+        "same-ticker history", "backtest (fixed T+20 hold, no stop)"
     ]
     assert len(log_events(caplog, "rec_extras_timeout")) == 1
     assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
@@ -4542,8 +4542,25 @@ async def test_extras_carry_the_atr_multiple_and_the_hi52_forward_line(
     )
     assert extras == RecExtras(       # |445.00 − 418.30| / ATR 10 = 2.67
         stop_atr_mult=Decimal("2.7"),
-        evidence=["forward test: 1 of 20 matured (2 signals since 2026-09-12)"],
+        evidence=[f"same-ticker history: no earlier recommendation on {SYMBOL}",
+                  "forward test: 1 of 20 matured (2 signals since 2026-09-12)"],
     )
+
+
+async def test_a_history_read_failure_is_logged_and_the_card_still_ships(
+    conn, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
+):
+    def _broken(*_a, **_k):
+        raise RuntimeError("locked")
+
+    monkeypatch.setattr(pipeline_module, "symbol_history_line", _broken)
+    pipeline, parts = q1_pipeline(conn, pclock, calendar, book, limit_table, cost_model,
+                                  harness=FakeHarness(hi52_enter(quantity=14)))
+    with caplog.at_level(logging.WARNING, logger="engine.ops.pipeline"):
+        await publish_candidate(pipeline, hi52_candidate())
+
+    assert "history" in [r.part for r in log_events(caplog, "rec_extras_failed")]
+    assert parts["notify"].messages[-1].kind == MessageKind.RECOMMENDATION
 
 
 def test_round_tick_falls_back_to_the_nse_tick_for_an_unknown_symbol(caplog):

@@ -108,6 +108,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 from engine.notify.episodes import AlertEpisodes
 from engine.ops.holdings_reconcile import MissingHolding, positions_missing_from_holdings
 from engine.ops.holds import HoldFn, exit_session, is_time_exit
+from engine.ops.scorecard import symbol_history_line
 from engine.ops.warmup import CLASS_INTRADAY, blocker_symbol
 from engine.strategy.cost_model import CostModel
 from engine.strategy.indicators import _true_range, wilder_atr
@@ -2733,6 +2734,10 @@ class RecommendationPipeline:
         self, extras: RecExtras, action: EnterAction, reference: Decimal, d: date
     ) -> None:
         symbol = action.tradingsymbol
+        try:
+            extras.evidence.append(symbol_history_line(self._conn, symbol))
+        except Exception as exc:  # noqa: BLE001 - an extra never blocks the card
+            _log.warning("rec_extras_failed", part="history", symbol=symbol, error=repr(exc))
         try:
             line = (evidence_line(action.strategy_id, self._reports_dir)
                     if self._reports_dir is not None else None)
