@@ -30,6 +30,7 @@ import yaml  # noqa: E402
 from engine.core.calendar import NSECalendar  # noqa: E402
 from engine.core.clock import IST, Clock  # noqa: E402
 from engine.core.config import config_dir, load_settings  # noqa: E402
+from engine.learning.benchmark import member_return  # noqa: E402
 from engine.learning.exit_sim import Held, Outcome, SimBar, simulate  # noqa: E402
 from engine.learning.validate import margin_floor_pct_per_day  # noqa: E402
 from engine.marketdata.store import MarketStore  # noqa: E402
@@ -321,6 +322,44 @@ def cpcv(trades: list[Trade], n_trials: int, cost: float) -> dict[str, Any]:
 
 def held_out(trades: list[Trade]) -> list[Trade]:
     return [t for t in trades if t.signal_date >= HELD_OUT_FROM]
+
+
+# ----------------------------------------------------------------------------- equal-weight core series
+def ew_daily(series: dict[str, Any], structural: dict[str, list[date]]) -> dict[date, float | None]:
+    """Daily equal-weight return on the union session grid of ``series``, ascending: the mean of
+    ``benchmark.member_return`` (the engine benchmark's exclusions), each name against its close on the previous
+    grid session. ``None`` on a session with no usable return, the first one always."""
+    grid = sorted({d for s in series.values() for d in s.dates})
+    prev = dict(zip(grid[1:], grid[:-1], strict=True))
+    acc: dict[date, list[float]] = {d: [] for d in grid}
+    for sym, s in series.items():
+        ex = set(structural.get(sym, ()))
+        closes = dict(zip(s.dates, s.close.tolist(), strict=True))
+        for d, c in closes.items():
+            r = member_return(c, closes.get(prev.get(d)), d in ex)
+            if r is not None:
+                acc[d].append(r)
+    return {d: sum(v) / len(v) if v else None for d, v in acc.items()}
+
+
+def compound(daily: dict[date, float | None], sessions) -> float | None:
+    """``prod(1 + r) - 1`` over ``sessions``; ``None`` when any session is missing or ``None``."""
+    g = 1.0
+    for d in sessions:
+        r = daily.get(d)
+        if r is None:
+            return None
+        g *= 1 + r
+    return g - 1
+
+
+def core_ew(conn, db: Path, end: date) -> tuple[dict[date, float | None], str]:
+    """``ew_daily`` over the current core list applied backwards, resolved as ``hi52_population`` resolves it
+    (a survivorship-tainted proxy), and the list's provenance."""
+    members, source = bh.load_index_members(Path(db).resolve().parent)
+    if not members:
+        raise Refusal("no index membership list (EW series)")
+    return ew_daily(_series(conn, members, end, None), bb.load_structural_ex_dates(conn)), source
 
 
 # ----------------------------------------------------------------------------- reports

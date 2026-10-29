@@ -18,6 +18,15 @@ _ROW_LOOKBACK_SESSIONS = 5
 _PCT_Q = Decimal("0.000001")
 
 
+def member_return(close, prev_close, structural: bool) -> float | None:
+    """One name's ``close/prev_close - 1`` in the EW mean; ``None`` when it is left out: a missing close, no
+    prior close, a structural corporate-action day, or ``|r| > _MAX_ABS_RET``."""
+    if close is None or not prev_close or structural:
+        return None
+    r = float(close / prev_close - 1)
+    return r if abs(r) <= _MAX_ABS_RET else None
+
+
 def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tuple[float, int] | None:
     """Mean ``close(d)/close(prev session) - 1`` over the CORE (NIFTY 500) eligible symbols of the
     latest ``universe_daily`` row on or before ``d`` (O18), and the number of names averaged.
@@ -45,11 +54,8 @@ def compute_ew_return(store: MarketStore, calendar: NSECalendar, d: date) -> tup
     structural = unadjusted_history(store.get_corp_actions(ex_from=d, ex_to=d))
     rets = []
     for s in symbols:
-        c, p = closes_d.get(s), closes_prev.get(s)
-        if c is None or not p or s in structural:
-            continue
-        r = float(c / p - 1)
-        if abs(r) <= _MAX_ABS_RET:
+        r = member_return(closes_d.get(s), closes_prev.get(s), s in structural)
+        if r is not None:
             rets.append(r)
     if not rets:
         raise ValueError(f"no usable returns for {d} over {len(symbols)} core-eligible symbols")
