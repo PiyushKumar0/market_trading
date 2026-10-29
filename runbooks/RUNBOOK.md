@@ -257,7 +257,7 @@ uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); ti
 | 08:35 | `catalyst_digest` | run-latest | pre-open catalyst digest (§2.7 step 5) |
 | 08:40 | `token_check` | not a registry job | pre-open token probe: pages the owner if the Kite token is rejected; no watermark, not catch-up-replayed |
 | 08:50 | `preopen_planner` | run-latest | §5.3 pre-open planner |
-| 09:30 | `time_exit_check` | run-latest | D2 time exit: an exit rec for every open recommended position at or past its exit session, every session until `/closed`; regular sessions only (never muhurat) |
+| 09:30 | `time_exit_check` | run-latest | D2 time exit: an exit rec for every open recommended position at or past its exit session, every session until `/closed`, except one the holdings journal shows sold outside the ledger (logged `time_exit_skipped_sold_outside_ledger`; the pre-open plan lists it for `/closed`); regular sessions only (never muhurat) |
 | 15:45 | `reco_expire` | run-latest | expired-unconfirmed recommendations → no_action (§3.6) |
 | 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift (A13); one run per missed day |
 | 18:00 | `bhavcopy` | date-keyed | UDiFF cross-check/fill of `bars_1d` |

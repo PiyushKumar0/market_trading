@@ -1,8 +1,9 @@
 """Pre-registered forward verdicts: the brk20 and ins kill rules and the analyst-value verdict (review
 §9 #2/#5). The rules' text is quoted in ``scripts/forward_verdicts.py``.
 
-HINDSIGHT: reads ``signal_outcomes``; only owner surfaces, verdict code and research may import this
-module. ``load_rows`` holds the only SQL (the readings reach SQLite through it); the rest is pure and
+HINDSIGHT: reads ``signal_outcomes``; only owner surfaces, verdict code and research call this module (the
+pipeline imports it transitively through ``ops.scorecard`` for the card's history line, its one pinned
+use). ``load_rows`` holds the only SQL (the readings reach SQLite through it); the rest is pure and
 never reads the clock. Looks are cut from a fixed cohort and form only when every member is final, so a
 formed look never moves.
 """
@@ -189,6 +190,9 @@ class AnalystReading:
     diff_t10: Stats
     per_strategy: dict[str, Stats]
     confidence: tuple[Bucket, ...]
+    published: dict[str, int]              # journal rows from R, decided or not
+    decided: dict[str, dict[str, int]]     # kept rows by decision
+    n_cells: dict[str, int]                # T+20 cells, in a look or not
 
 
 # ------------------------------------------------------------------ loader
@@ -276,6 +280,9 @@ def analyst_reading(conn: sqlite3.Connection, *, as_of: date, registered_from: d
         stats(_diffs(analyst_cells(kept, horizon=5))), stats(_diffs(analyst_cells(kept, horizon=10))),
         {s: stats(_diffs(c for c in cells if c.strategy_id == s)) for s in ANALYST_STRATEGIES},
         tuple(confidence_buckets(kept)),
+        {s: sum(r.strategy_id == s for r in rows) for s in ANALYST_STRATEGIES},
+        {s: dict(Counter(r.analyst_decision for r in kept if r.strategy_id == s)) for s in ANALYST_STRATEGIES},
+        {s: sum(c.strategy_id == s for c in cells) for s in ANALYST_STRATEGIES},
     )
 
 

@@ -78,6 +78,16 @@ and the other removed design and research documents are in git at commit `417da7
 **Pre-registered 2026-10-29 (review actions).** R = `<R>`, the first trading day after the deploy
 (`engine.learning.forward_verdicts.REGISTERED_FROM`). Each rule has a `registered` row in `config/research_trials.yaml`.
 
+**Amendment 2026-10-30, before R, for the three forward rules below.**
+- A signal's symbol is followed through NSE renames (`symbol_renames`).
+- A symbol with no daily bar on 5 consecutive regular sessions on which NIFTY 50 has one is finalised on the
+  5th. A filled row closes at its last available close, and every unreached horizon takes that return, net of
+  the fixed cost. An unfilled row is unscorable.
+- `prompt_version` in the registered key covers the system prompt, the context template, the response schema and
+  the effort.
+- Rolling back the C2 filter after R (`brk20.regime_filter: false`) ends the brk20 kill population. Resuming it
+  needs an owner-approved re-registration with a new R.
+
 **Analyst-value verdict (registered 2026-10-29, population from R).**
 - **Population:** `prescreen_day_slots` rows of brk20, hi52 and ins with `d >= R` and a recorded first
   `analyst_decision`, whose call carries the strategy's registered key `(prompt_version, model)`. The registered

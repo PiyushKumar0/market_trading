@@ -31,15 +31,19 @@ holder pid, never delete the file).
 
 ```powershell
 Get-Date; Get-Content data\logs\engine.log -Tail 20          # no in-flight EOD job / compaction
+git status --short       # an untracked file the tip adds aborts the ff-merge: remove strays first
 Stop-Service mt-engine
 # 1. Backup before the first boot on a new migration (online backup API, as _snapshot_backup does);
 #    replace <NNNN> with the next migration number (check `Get-ChildItem data/backups -Filter pre*`).
 #    An existing file of the same name is OVERWRITTEN:
 .venv\Scripts\python.exe -c "import sqlite3; s=sqlite3.connect('data/state.db'); d=sqlite3.connect('data/backups/pre_<NNNN>.db'); s.backup(d); d.close(); s.close()"
-# 2. Optional, same stop: a research snapshot (copies the study tables READ_ONLY, prints row counts, exit 0 = all match)
-.venv\Scripts\python.exe scripts\research_snapshot.py
-# 3. Fast-forward the live tree to the reviewed tip:
+# 2. Fast-forward the live tree to the reviewed tip (stop here if it aborts; the engine stays down):
 git merge --ff-only <reviewed tip>
+# 3. Optional, same stop: a research snapshot with the new tip's table list (copies the study tables READ_ONLY,
+#    prints row counts, exit 0 = all match)
+.venv\Scripts\python.exe scripts\research_snapshot.py
+# 4. Rebuild the dashboard when the tip touches dashboard\src (dist is not in git; served from disk, no restart):
+cd dashboard; npm run build; cd ..
 Start-Service mt-engine
 Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|migration_failed|engine_ready|FROZEN' | Select-Object -Last 5
 ```
@@ -54,6 +58,9 @@ Rollback (in this order; the restart comes last):
      (`git commit -m "..." -- config/limits.yaml`). Skip this and the boot FREEZES, or KILLS with a real
      position open (see "Capital change from the dashboard").
    - This keeps the capital as signed. To take the capital back too, reseed after the restart ("Protected config").
+   - Below the review-actions tip (2026-10-29) with `runbooks\patches\limits-drop-analyst-confidence-min.patch`
+     applied, older code requires `analyst_confidence_min` and fails at boot: `git apply -R` the patch and have
+     the owner reseed before the restart.
 5. Restart.
 
 A failed migration is recovered from `data\backups\pre_00NN.db`. Below the paper autopilot (M3) only while no `is_paper=1` row exists
