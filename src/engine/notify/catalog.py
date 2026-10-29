@@ -1159,13 +1159,14 @@ def _cost_line(rec: Recommendation) -> str:
     analyst's target over breakeven — earned only on a hit, with no probability behind it; an exit or
     adjust carries no edge, so no clause."""
     cost = rec.cost
-    line = f"cost: breakeven {cost.breakeven_pct}% · total ₹{cost.total_cost}"
+    line = f"cost: breakeven {Decimal(cost.breakeven_pct):.2f}% · total ₹{cost.total_cost}"
+    multiple = f"{Decimal(cost.edge_multiple):.1f}x"
     if rec.kind != "entry":
         return line
     if rec.registered_edge_pct is not None:
-        return f"{line} · edge {cost.edge_multiple}x breakeven"
+        return f"{line} · edge {multiple} breakeven"
     if rec.targets:
-        return (f"{line} · target distance {Decimal(cost.expected_edge_pct):.2f}% = {cost.edge_multiple}x breakeven "
+        return (f"{line} · target distance {Decimal(cost.expected_edge_pct):.2f}% = {multiple} breakeven "
                 "(earned only if the target is hit; not an expected edge)")
     return line
 
