@@ -1637,7 +1637,7 @@ async def compose(
                                   was_run=lambda job_id, d: catch_up.was_run(job_id, d))
     signal_outcomes = SignalOutcomesJob(conn, store, calendar, cost_model, limits_engine, settings, clock,
                                         was_run=lambda job_id, d: catch_up.was_run(job_id, d))
-    weekly_summary =WeeklySummaryJob(conn, notify, lambda job_id, d: catch_up.was_run(job_id, d))
+    weekly_summary = WeeklySummaryJob(conn, notify, lambda job_id, d: catch_up.was_run(job_id, d))
 
     registry = build_job_registry(settings, {
         JOB_INSTRUMENTS: job_instruments,

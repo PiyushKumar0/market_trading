@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -108,7 +108,7 @@ class SignalOutcomesJob:
             if not _final(stored.get(s.key)):
                 todo[s.symbol].append(s)
         ew = {date.fromisoformat(r[0]): r[1] for r in self._conn.execute("SELECT d, ret FROM universe_ew_returns")}
-        table = self._limits.load()
+        sizing = _sizing(self._limits.load())
         now = self._clock.now().isoformat()
         rows = []
         for symbol, signals in todo.items():
@@ -116,7 +116,7 @@ class SignalOutcomesJob:
             for s in signals:
                 prev = stored.get(s.key)
                 try:
-                    row = self._score(s, prev, bars, ex, d, ew, table)
+                    row = self._score(s, prev, bars, ex, d, ew, sizing)
                 except Exception as exc:  # noqa: BLE001 - one bad row never costs the others
                     _log.warning("signal_outcome_failed", key=list(s.key), error=repr(exc))
                     continue
@@ -175,7 +175,7 @@ class SignalOutcomesJob:
     # ------------------------------------------------------------------ one row
     def _score(
         self, s: _Signal, prev: dict[str, Any] | None, bars: Sequence[SimBar], ex: Sequence[date], d: date,
-        ew: Mapping[date, float | None], table: LimitTable,
+        ew: Mapping[date, float | None], sizing: Callable[[Decimal], Decimal],
     ) -> dict[str, Any]:
         row = dict(prev) if prev is not None else {
             **dict.fromkeys(_COLUMNS), **dict(zip(_KEY, s.key, strict=True)), "status": "open"}
@@ -184,7 +184,7 @@ class SignalOutcomesJob:
         try:
             level, stop_pct = self._geometry(s)
             if row["cost_pct"] is None:
-                row["cost_pct"] = float(self._cost(stop_pct, table))
+                row["cost_pct"] = float(self._costs.breakeven_pct(sizing(stop_pct), PRODUCT))
         except (_Unscorable, ArithmeticError, ValueError) as exc:
             _log.warning("signal_outcome_unscorable", key=list(s.key), reason=str(exc))
             return {**row, "status": "unscorable"}
@@ -206,14 +206,16 @@ class SignalOutcomesJob:
         except ValueError:                      # the calendar horizon: re-scored once it is extended
             return {**row, "status": "open"}
 
-        walk = self._walk(bars, first, s)
-        if isinstance(start, Pending) and not walk and any(b.d > first for b in bars):
+        walk, missing = self._walk(bars, first)
+        if isinstance(start, Pending) and missing == first and self._anchor_lost(bars, first):
             _log.warning("signal_outcome_unscorable", key=list(s.key), reason=f"no bar on {first}")
             return {**row, "status": "unscorable"}
         cost = Decimal(str(row["cost_pct"]))
         outs = {k: simulate(walk, start, stop=None, target=None, horizon=k - 1, end=d, cost_pct=cost,
                             ex_dates=ex) for k in FIXED_HORIZONS}
         t20 = outs[20]
+        if t20.status == "open" and missing is not None:
+            _log.warning("signal_outcome_bar_missing", key=list(s.key), session=missing.isoformat())
         fill_d = t20.fill_d
         if row["fill_d"] is None and fill_d is not None:
             row.update(fill_d=fill_d.isoformat(), fill_px=str(t20.fill_px))
@@ -246,37 +248,32 @@ class SignalOutcomesJob:
         stop_pct = (entry - Decimal(s.levels[1])) / entry * _HUNDRED
         return (None if s.construct == "next_open" else entry), stop_pct
 
-    def _cost(self, stop_pct: Decimal, table: LimitTable) -> Decimal:
-        """One CNC round trip at the §7.1-sized notional at the ``equity_floor_rung``, capped by the
-        per-stock and deployed-capital caps."""
-        lim = table.limits
-        floor = table.capital_base_inr * (1 + Decimal(str(lim.equity_floor_rung.equity_pct_of_base)) / _HUNDRED)
-        notional = min(
-            sizing_notional(floor, position_pct=Decimal(str(lim.per_trade_risk.swing_position_pct)),
-                            gap_mult=Decimal(str(lim.per_trade_risk.overnight_gap_mult)), stop_pct=stop_pct),
-            lim.per_stock_exposure.cnc_notional_inr, lim.capital_cap.max_deployed_capital_inr,
-        )
-        return self._costs.breakeven_pct(notional, PRODUCT)
-
-    def _walk(self, bars: Sequence[SimBar], first: date, s: _Signal) -> list[SimBar]:
-        """``bars`` on consecutive regular sessions from ``first``. ``add_sessions`` never counts a
-        muhurat session, so its bar is never walked; a missing session or the calendar horizon ends
-        the walk (the row stays ``open``) instead of the next bar standing in for that session."""
+    def _walk(self, bars: Sequence[SimBar], first: date) -> tuple[list[SimBar], date | None]:
+        """``(bars on consecutive regular sessions from first, the first missing session that a later
+        bar proves missing)``. ``add_sessions`` never counts a muhurat session, so its bar is never
+        walked; a missing session or the calendar horizon ends the walk (the row stays ``open``)
+        instead of the next bar standing in for that session."""
         out: list[SimBar] = []
         want = first
         for b in bars:
             if b.d < want:
                 continue
             if b.d > want:
-                if out:
-                    _log.warning("signal_outcome_bar_missing", key=list(s.key), session=want.isoformat())
-                break
+                return out, want
             out.append(b)
             try:
                 want = self._calendar.add_sessions(want, 1)
             except ValueError:
                 break
-        return out
+        return out, None
+
+    def _anchor_lost(self, bars: Sequence[SimBar], first: date) -> bool:
+        """A bar beyond ``first`` + 2 sessions: a hole the next boot's daily-gap backfill did not repair."""
+        try:
+            grace = self._calendar.add_sessions(first, 2)
+        except ValueError:
+            return False
+        return any(b.d > grace for b in bars)
 
     def _with_bench(self, row: dict[str, Any], ew: Mapping[date, float | None]) -> dict[str, Any]:
         if row["bench_t20"] is not None:
@@ -286,6 +283,22 @@ class SignalOutcomesJob:
         if bench is None:
             return row
         return {**row, "bench_t20": float(bench), "excess_t20": row["net_t20"] - float(bench)}
+
+
+def _sizing(table: LimitTable) -> Callable[[Decimal], Decimal]:
+    """``stop % -> notional``: the §7.1 swing size at the ``equity_floor_rung``, capped by the per-stock
+    and deployed-capital caps. Raises ``ValueError`` on a table that can size no row, so the job fails
+    rather than marking the night's rows unscorable."""
+    lim = table.limits
+    floor = table.capital_base_inr * (1 + Decimal(str(lim.equity_floor_rung.equity_pct_of_base)) / _HUNDRED)
+    position_pct = Decimal(str(lim.per_trade_risk.swing_position_pct))
+    gap_mult = Decimal(str(lim.per_trade_risk.overnight_gap_mult))
+    caps = (lim.per_stock_exposure.cnc_notional_inr, lim.capital_cap.max_deployed_capital_inr)
+    if min(floor, position_pct, gap_mult, *caps) <= 0:
+        raise ValueError(f"limits cannot size a signal: floor={floor} position_pct={position_pct} "
+                         f"gap_mult={gap_mult} caps={caps}")
+    return lambda stop_pct: min(
+        sizing_notional(floor, position_pct=position_pct, gap_mult=gap_mult, stop_pct=stop_pct), *caps)
 
 
 def _final(row: Mapping[str, Any] | None) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from decimal import Decimal
@@ -19,6 +20,7 @@ from engine.ops.signal_outcomes import SignalOutcomesJob
 from engine.risk.limits import LimitTable
 from engine.strategy.cost_model import CostModel
 from engine.strategy.hi52_edge import sizing_notional
+from tests.unit.test_reco_pipeline import log_events
 
 S = date(2026, 9, 1)
 SRC = Path(__file__).resolve().parents[2] / "src" / "engine"
@@ -167,11 +169,18 @@ async def test_hi52_rule_fills_at_the_open_of_d_and_next_open_after_d(conn, stor
     assert (_rows(conn), again.scored) == (rows, 0)
 
 
-@pytest.mark.parametrize(("touch", "expected"), [(4, ("closed", 4, "90")), (5, ("unfilled", None, None))])
-async def test_brk20_rule_touch_fill_inside_v2_5_window(conn, store, job, sess, touch, expected):
+@pytest.mark.parametrize(
+    ("touch", "open_", "expected"),
+    [(0, "100", ("closed", 0, "90")), (0, "85", ("closed", 0, "85.00")), (4, "104", ("closed", 4, "90")),
+     (5, "105", ("unfilled", None, None))],
+    ids=["on_signal_d", "gap_down_on_signal_d", "signal_d_plus_4", "signal_d_plus_5"],
+)
+async def test_brk20_rule_touch_fill_inside_v2_5_window(conn, store, job, sess, touch, open_, expected):
     _resting(conn, sess[0], sess[5])
     _slot(conn, sess[0], strategy_id="brk20")
-    _bars(store, "RELIANCE", sess, low={touch: "89"})
+    _bars(store, "RELIANCE", sess)
+    store.upsert_bars_1d([DailyBar(symbol="RELIANCE", d=sess[touch], open=Decimal(open_), high=Decimal(open_) + 2,
+                                   low=Decimal(open_) - 16, close=Decimal(open_) + 1, volume=1)])
     await job.run(sess[24])
     row = _row(conn, sess[0], "rule", strategy_id="brk20")
     status, fill_i, px = expected
@@ -313,31 +322,63 @@ async def test_corporate_actions_void(conn, store, job, sess, strategy_id, low, 
         assert row["net_t5"] is not None                       # T+5 exited before the ex-date
 
 
-async def test_missing_anchor_bar_is_unscorable(conn, store, job, sess):
+async def test_missing_anchor_bar_is_unscorable_after_a_two_session_grace(conn, store, job, sess):
     _slot(conn, sess[0])
     _slot(conn, sess[0], "TCS")
     _bars(store, "RELIANCE", sess, skip={0})
     _bars(store, "TCS", sess, skip={1})
+
+    def statuses() -> dict:
+        return {(k[1], k[3]): v["status"] for k, v in _rows(conn).items()}
+
+    await job.run(sess[2])
+    assert statuses()[("RELIANCE", "rule")] == statuses()[("TCS", "next_open")] == "open"
     await job.run(sess[24])
-    statuses = {(k[1], k[3]): v["status"] for k, v in _rows(conn).items()}
-    assert statuses == {("RELIANCE", "rule"): "unscorable", ("RELIANCE", "next_open"): "closed",
-                        ("TCS", "rule"): "open", ("TCS", "next_open"): "unscorable"}
+    assert statuses() == {("RELIANCE", "rule"): "unscorable", ("RELIANCE", "next_open"): "closed",
+                          ("TCS", "rule"): "open", ("TCS", "next_open"): "unscorable"}
 
 
-async def test_calendar_horizon_leaves_row_open(conn, store, cost_model, job, cal):
-    end = date(2026, 12, 31)
-    days = [cal.add_sessions(date(2026, 11, 20), i) for i in range(28)]
-    assert days[-1] == end
-    _slot(conn, end, "A")
-    _slot(conn, days[0], "B")
-    _bars(store, "A", days)
-    _bars(store, "B", days)
-    await job.run(end)
+async def test_bar_missing_alarm_fires_every_night_only_while_t20_is_open(conn, store, job, sess, caplog):
+    _slot(conn, sess[0])
+    _slot(conn, sess[0], "TCS")
+    _bars(store, "RELIANCE", sess, skip={1})                  # the hole right after the fill
+    _bars(store, "TCS", sess, skip={22})                      # a hole after both T+20 exits
+    with caplog.at_level(logging.WARNING, logger="engine.ops.signal_outcomes"):
+        await job.run(sess[24])
+        await job.run(sess[24])
+    alarms = [(r.key[1], r.key[3], r.session) for r in log_events(caplog, "signal_outcome_bar_missing")]
+    assert alarms == [("RELIANCE", "rule", sess[1].isoformat())] * 2
+
+
+async def test_calendar_horizon_leaves_row_open(conn, store, cost_model, job, cal, sess, monkeypatch):
+    add_sessions = cal.add_sessions
+
+    def bounded(d, n, **kw):
+        out = add_sessions(d, n, **kw)
+        if out > sess[20]:
+            raise ValueError("calendar horizon")
+        return out
+
+    monkeypatch.setattr(cal, "add_sessions", bounded)
+    _slot(conn, sess[20], "A")
+    _slot(conn, sess[0], "B")
+    _bars(store, "A", sess)
+    _bars(store, "B", sess)
+    await job.run(sess[24])
     rows = _rows(conn)
-    a = rows[(end.isoformat(), "A", "hi52", "next_open")]
+    a = rows[(sess[20].isoformat(), "A", "hi52", "next_open")]
     assert (a["status"], a["fill_d"], a["cost_pct"]) == ("open", None, pytest.approx(_cost(cost_model, "6000")))
-    assert rows[(end.isoformat(), "A", "hi52", "rule")]["status"] == "open"
-    assert rows[(days[0].isoformat(), "B", "hi52", "rule")]["status"] == "closed"
+    assert rows[(sess[20].isoformat(), "A", "hi52", "rule")]["status"] == "open"
+    assert rows[(sess[0].isoformat(), "B", "hi52", "rule")]["status"] == "closed"
+
+
+async def test_a_table_that_cannot_size_fails_the_job_and_marks_nothing(conn, store, limits, job, sess):
+    limits.set("per_trade_risk", "swing_position_pct", 0.0)
+    _slot(conn, sess[0])
+    _bars(store, "RELIANCE", sess)
+    with pytest.raises(ValueError, match="cannot size"):
+        await job.run(sess[24])
+    assert _rows(conn) == {}
 
 
 async def test_unfinished_until_daily_bars_ran_and_a_replay_after_a_later_day_skips(
