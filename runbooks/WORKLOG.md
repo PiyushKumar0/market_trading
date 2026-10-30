@@ -2,6 +2,35 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-30 09:09 — Review actions merged and deployed (owner: "Merge and deploy"; asked about timing at 08:57, the owner chose "Now, before 09:15")
+
+- **Deploy:**
+  - The engine stopped at 09:06:27, and `data\backups\pre_0018.db` was written.
+  - `phase3` fast-forwarded from `aab0133` to `1ca2dc7`.
+  - The engine started at 09:07:42, so it was down for 75 s. The research snapshot was skipped to keep the stop
+    short.
+- **Boot:**
+  - `migrations_applied_on_boot` lists 0018–0021.
+  - Self-test ok: not killed, no login needed, nothing frozen.
+  - Catch-up had no failures. `startup_report` reads RECOMMEND / NORMAL with integrity ok.
+  - `engine_ready` at 09:07:33.
+  - The ticker reconnected with 303 tokens, and the feed was HEALTHY at 09:07:34.
+  - Since boot there is no `analyst_heartbeat` line and no ERROR.
+- **Checks:**
+  - `scripts\forward_verdicts.py --rule analyst` reads INSUFFICIENT, 0 of 30 cells, registered from 2026-11-02. R
+    holds, because the deploy came before the 2026-11-02 open.
+  - The dashboard was rebuilt (`npm run build`), and the bundle carries the new Performance card.
+- **Still to see:**
+  - The first window-open `brk20_sweep` line with `regime_up`. If the regime is down, `brk20_regime_blocked` rows
+    should also appear.
+  - Tonight's 18:40 `signal_outcomes_scored`.
+  - The next weekly summary's analyst line.
+  - The Performance card on the live dashboard.
+- **Not done:**
+  - The confidence-floor patch: optional, and the owner's to apply (COMMANDS "Protected config").
+  - The market-pause study run, which needs a research snapshot at a later engine stop.
+  - No `git push`.
+
 ## 2026-10-30 01:50 — Review actions built and validated on `wip/review-actions`: not merged, not deployed (owner: "Implement and validate the planned changes … You can start implementation right now, without waiting for market closure. Trade window has been closed.")
 
 - **Branch:** `wip/review-actions` in the worktree `..\mt_review`, on phase3 `aab0133` (a fast-forward). It covers all 21
