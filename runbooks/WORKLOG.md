@@ -2,6 +2,37 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-10-30 16:58 — Confidence floor dropped from limits.yaml and re-signed; engine restarted and validated (owner: "Trade window has ended. You can run the script now and validate")
+
+- **Before the stop:**
+  - At 16:13 the compaction lane was mid-pass. It ended at 16:18:48 with the backlog `tick_compact` runs 10-26 to
+    10-29 degraded, as at 10-29 22:04; they retry on their own.
+  - The 16:12 catch-up had failed `bar_reconcile:2026-10-30` on a Kite connection drop after a standby gap.
+  - Pre-sign check on a scratch copy: the patched YAML and `LimitTable` equal the signed file's apart from the key.
+- **Apply:**
+  - The engine stopped at 16:19:27 (`exit_clean`, no open positions, `state-20261030T161912.db` written).
+  - `git apply` of the patch: 3 deletions. The file is LF, 9017 bytes, sha256 `18c063f2…`, the bytes the scratch
+    check passed.
+  - The reseed signed `limits.yaml` as `18c063f2…`; `envelope.yaml` is unchanged. `protected_config_status.py`
+    exits 0.
+  - The engine's own reader on a read-only state.db: both files verify, `analyst_confidence_min` is None, capital
+    is 70000.
+  - Committed alone as `f1a9e42`.
+- **Boot:**
+  - Started at 16:20:21. Self-test at 16:20:59: `protected_store:limits.yaml` and `:envelope.yaml` PASS, nothing
+    frozen.
+  - The boot catch-up re-ran `bar_reconcile:2026-10-30`, which passed this time. It took most of the 277 s boot.
+  - `startup_report` reads RECOMMEND / NORMAL with integrity ok. `engine_ready` at 16:25:25, and no ERROR.
+- **Checks:**
+  - `GET /config/params` on the live engine: HTTP 200, 21 envelope parameters, no `analyst_confidence_min`.
+  - The full gate on the live tree, whose conftest copies `config/`, so it ran on the key-less file: 4213 passed,
+    19 skipped.
+  - The next live session is 2026-11-02, so R is also the first session without the floor.
+- **Docs:** the applied patch is deleted; `f1a9e42` is the record. COMMANDS loses the owner step, and its rollback
+  note now reverts `f1a9e42`. IMPLEMENTATION_PLAN §3 needs one D14 split, at R.
+- **Still to see:** the first gate line `analyst_confidence_min` n/a, at the 2026-11-02 session.
+- **Not done:** no `git push`.
+
 ## 2026-10-30 09:09 — Review actions merged and deployed (owner: "Merge and deploy"; asked about timing at 08:57, the owner chose "Now, before 09:15")
 
 - **Deploy:**

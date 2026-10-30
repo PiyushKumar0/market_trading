@@ -43,9 +43,9 @@ and the other removed design and research documents are in git at commit `417da7
   `settings.yaml` `hi52`).
 - **D14 paper no-stop test** (hi52, ins, brk20 paper positions carry no stop and exit at session 20). Verdict at the
   pinned looks 20 and 40: `scripts/no_stop_verdict.py`; operation and rollback in RUNBOOK "No-stop exit test". From R,
-  brk20 recs are regime-ON only and use the 5-session retest window; from the owner's patch date
-  (`runbooks/patches/limits-drop-analyst-confidence-min.patch`) there is no confidence floor. The paired D stays valid;
-  read the slices split at R and at the patch date by hand. `scripts/no_stop_verdict.py` is untouched.
+  brk20 recs are regime-ON only and use the 5-session retest window, and there is no confidence floor (removed
+  2026-10-30 after the close, so R is its first session too). The paired D stays valid; read the slices split at R by
+  hand. `scripts/no_stop_verdict.py` is untouched.
 - **`cat` v2 shadow verdict — not yet run.** Mechanical verdict: `scripts/cat_shadow_verdict.py` (conventions in the
   script; COMMANDS "cat v2 shadow verdict"). Pre-registered: at ≥30 sessions and ≥20 admitted signals, measure T+10 and
   T+20 net drift at spread-inclusive CNC costs with the WO-3 margin floor. Net ≤ the cost floor at both horizons ⇒

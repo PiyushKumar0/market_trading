@@ -58,9 +58,9 @@ Rollback (in this order; the restart comes last):
      (`git commit -m "..." -- config/limits.yaml`). Skip this and the boot FREEZES, or KILLS with a real
      position open (see "Capital change from the dashboard").
    - This keeps the capital as signed. To take the capital back too, reseed after the restart ("Protected config").
-   - Below the review-actions tip (2026-10-29) with `runbooks\patches\limits-drop-analyst-confidence-min.patch`
-     applied, older code requires `analyst_confidence_min` and fails at boot: `git apply -R` the patch and have
-     the owner reseed before the restart.
+   - Below the review-actions tip (2026-10-29), older code requires `analyst_confidence_min`, which `f1a9e42`
+     removed, and fails at boot without it. After the commit above, `git revert --no-commit f1a9e42` puts the key
+     back on top of the signed bytes; have the owner reseed before the restart.
 5. Restart.
 
 A failed migration is recovered from `data\backups\pre_00NN.db`. Below the paper autopilot (M3) only while no `is_paper=1` row exists
@@ -214,10 +214,6 @@ git apply <patch>
 Start-Service mt-engine                                          # boot must show selftest protected_store:<file> PASS
 git add -u; git commit -m "<directive> applied (owner): patch + reseed"
 ```
-
-Owner step for `runbooks\patches\limits-drop-analyst-confidence-min.patch` (removes the `analyst_confidence_min`
-key): apply it only after the deploy that tolerates the missing key. Same flow: `git apply --check <patch>`, then
-`git apply <patch>`, then the reseed above. It never touches the capital lines.
 
 ## Capital change from the dashboard (O19, 2026-10-16)
 
