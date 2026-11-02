@@ -18,14 +18,6 @@ Pinned behaviors (the plan is law):
   per-tick log). Rationale: a post-close minute bar has NO official candle to be compared against —
   it sits outside the nightly reconcile's window forever, so nothing can ever heal it. Raw
   persistence is unaffected, exactly as in the pre-open case.
-* **Previous-day echoes are ignored outright (2026-11-02):** a tick stamped on an earlier day than
-  the clock's is a snapshot echo, not a print — every ticker (re)connect re-sends each instrument's
-  last state with its last-session stamp (by the weekend with volume, average price and depth
-  zeroed). It is counted (``ticks_dropped['previous_day']``) and nothing else: no bar, no raw
-  persistence, no day rollover. Persisted, it landed in a date partition ``tick_compact`` had
-  already closed, as rows the compacted file lacks: every compaction run from 2026-10-26 to 11-02
-  failed (601 symbol-days of 10-23 and 10-30). Fed to the bar rules, one arriving mid-session would
-  roll the symbol's day BACK, force-finalizing today's open bar and dropping its cumulative baseline.
 * **Volume = Δ(cumulative day volume) (A13):** ``Tick.volume_traded`` is the broker's cumulative
   day volume; per-bar volume is the delta against the previous cumulative value.
     - *Day rollover:* per-symbol state (cumulative baseline, auction open, finalized watermark)
@@ -267,9 +259,9 @@ class BarBuilder:
     grace_s:
         Finalize grace after minute close (plan-pinned ~5 s; constructor param for tests only).
     persist_raw_ticks:
-        Buffer every tick (incl. pre-open; never a previous-day echo) into the §4.3 tick Parquet
-        dataset via ``store.stage_tick`` (flushed off-loop by ``aflush_ticks``). Disable only where
-        another component owns raw persistence.
+        Buffer every tick (incl. pre-open) into the §4.3 tick Parquet dataset via
+        ``store.stage_tick`` (flushed off-loop by ``aflush_ticks``). Disable only where another
+        component owns raw persistence.
     notify:
         Injected async owner-alert sink (``CatalogMessage`` consumer, e.g. ``TelegramBot.send``);
         ``None`` leaves the WO-25a lag watchdog log-only. Dispatched from :meth:`on_tick_event` (the
@@ -345,12 +337,6 @@ class BarBuilder:
         # argument so the three cannot disagree and the read is not repeated.
         now = self._clock.now()
         self._watch_lag(now, ts)
-        if ts.date() < now.date():
-            # Previous-day snapshot echo (module docstring): no bar, no raw persistence — its date
-            # partition may already be compacted — and no day rollover.
-            self._drop("previous_day")
-            self._advance(now)
-            return
         self._roll_day(symbol, ts.date())
 
         if self._persist_raw_ticks:
@@ -538,9 +524,9 @@ class BarBuilder:
 
         ``bars_finalized`` counts minute bars closed (minute+grace or force-flush); ``bars_written`` is
         the batch-upsert count. They differ only transiently within a write batch. ``ticks_dropped``
-        maps bar-exclusion reason → count (``post_close``, ``previous_day``), mirroring
-        ``TickerSupervisor``'s ``frames_dropped``. Reset-on-read gives the composition-root emitter
-        clean per-interval deltas without a second clock."""
+        maps bar-exclusion reason → count (``post_close``), mirroring ``TickerSupervisor``'s
+        ``frames_dropped``. Reset-on-read gives the composition-root emitter clean per-interval deltas
+        without a second clock."""
         snap: dict[str, Any] = {
             "bars_finalized": self._bars_finalized,
             "bars_written": self._bars_written,

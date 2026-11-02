@@ -7,25 +7,29 @@ per file, audit F9). Readers glob ``ticks/date=…/symbol=…/*.parquet``, so fr
 file are *equivalent* to every reader — the pathology is pure read amplification and inode count,
 never correctness. This module collapses each symbol-day to ONE file:
 
-    write ``.<name>.tmp`` (invisible to the readers' ``*.parquet`` glob)
+    write ``.<name>.tmp`` (invisible to the readers' ``*.parquet`` glob) and fsync it
       → ``os.replace`` it onto its final name (atomic within the partition dir)
       → unlink the exact fragment list that was compacted
 
 Ordering is deliberate. A crash after the swap leaves compacted+fragments (readers see duplicate
-rows until the next run repairs it — recoverable); the reverse order would lose rows outright.
+rows until the next run repairs it — recoverable); the reverse order would lose rows outright. The
+fsync (2026-11-02) keeps a power loss from leaving the swapped-in name on data the OS never wrote
+while the fragments it replaced are already gone.
 
-Fragments beside a compacted file are reconciled, never left to fail the day (2026-11-02). Their
-rows the compacted file does not already hold — a multiset difference, ``EXCEPT ALL``
-(:func:`_missing_rows`) — are merged in by the same write-then-swap, then the fragments are
-unlinked. An interrupted unlink's leftovers are already inside, so they are simply deleted; a crash
-between a merge's swap and its unlink resolves the same way on the next run. Rows can arrive AFTER
-a compaction because this job closes a date at midnight while the feed does not: until 2026-11-02
-the live path persisted every reconnect's snapshot echo — the last session's stamp, by the weekend
-with volume and depth zeroed, so not a duplicate (``BarBuilder`` now drops them) — and a flush can
-still outrun ``job_tick_compact``'s pre-flush. Refusing them as "unverifiable" failed every run
-from 2026-10-26 to 11-02 (601 symbol-days of 10-23 and 10-30), holding the watermark failed and
-retention off. Two ``compact-`` files are still refused: not this job's output, so which one holds
-the symbol-day is unknowable.
+Fragments beside a compacted file are reconciled, never left to fail the day (2026-11-02). Rows do
+arrive after a compaction, because this job closes a date at midnight and the writer does not: every
+ticker (re)connect re-sends each instrument's last state stamped with its last session — by the
+weekend with volume, average price and depth zeroed, so no copy of a stored row — a processing
+backlog can carry a session's ticks past midnight, and a flush can outrun ``job_tick_compact``'s
+pre-flush. Refusing such rows as "unverifiable" failed every run from 2026-10-26 to 11-02 (601
+symbol-days of 10-23 and 10-30), holding the watermark failed and retention off. Now the rows
+:data:`_LATE_ROWS` finds are merged in by the same write-then-swap and the fragments unlinked; when
+it finds none, the fragments are only unlinked. A row on both sides is kept as many times as the
+side holding more copies holds it, never the sum: an interrupted unlink's leftovers are already
+inside and are not doubled — nor is a late copy of a stored row, which the 12 stored columns cannot
+tell from a genuine repeat. A crash between a merge's swap and its unlink resolves to that delete on
+the next run. Two ``compact-`` files are still refused: this job writes one deterministic name, so
+which one holds the symbol-day is unknowable.
 
 Idempotence is per symbol-day: one file (or none) ⇒ nothing to do. That makes a re-run, a sweep
 retry and a date-keyed catch-up replay all no-ops on days already compacted, and makes a partial
@@ -125,12 +129,13 @@ class TickCompactionResult:
     ``ok=False`` (a symbol-day that failed, or holds two compacted files) records a FAILED watermark,
     and the next sweep retries: the symbol-days that DID compact are no-ops on the retry.
     ``symbol_days_compacted`` and ``rows_written`` count a merge of late rows (module docstring) as
-    one symbol-day and the rows of the file it rewrote.
+    one symbol-day and the rows of the file it rewrote; ``symbol_days_merged`` counts those alone.
     """
 
     ok: bool = True
     dates: list[str] = field(default_factory=list)          # date partitions examined
     symbol_days_compacted: int = 0
+    symbol_days_merged: int = 0                             # 2026-11-02: of those, late-row merges
     fragments_removed: int = 0
     rows_written: int = 0
     skipped_current_date: str | None = None                 # the date left alone (writer still live)
@@ -249,7 +254,7 @@ def _compact_ticks_locked(
 def _done(result: TickCompactionResult) -> TickCompactionResult:
     _log.info(
         "tick_compaction_done", dates=result.dates, symbol_days=result.symbol_days_compacted,
-        fragments_removed=result.fragments_removed, rows=result.rows_written,
+        merged=result.symbol_days_merged, fragments_removed=result.fragments_removed, rows=result.rows_written,
         skipped_current_date=result.skipped_current_date, failures=result.failures,
         budget_exhausted=result.budget_exhausted, stopped=result.stopped, ok=result.ok,
     )
@@ -303,7 +308,7 @@ def _compact_symbol_day(
 
         tmp.unlink(missing_ok=True)
         rows = _write_compacted(con, fragments, tmp)
-        os.replace(tmp, sym_dir / COMPACT_NAME)   # atomic within the partition dir
+        _swap_in(tmp, sym_dir / COMPACT_NAME)
         for f in fragments:                       # exactly the files that were read into it
             f.unlink()
         result.symbol_days_compacted += 1
@@ -353,7 +358,7 @@ def _reconcile_late_fragments(
     if added:
         tmp.unlink(missing_ok=True)
         rows = _write_merged(con, compacted, fragments, tmp)
-        os.replace(tmp, compacted)                # atomic within the partition dir
+        _swap_in(tmp, compacted)
     for f in fragments:                           # every row of each is now in ``compacted``
         f.unlink()
     result.fragments_removed += len(fragments)
@@ -361,20 +366,29 @@ def _reconcile_late_fragments(
         _log.info("tick_compaction_recovered", partition=label, fragments=len(fragments))
         return
     result.symbol_days_compacted += 1
+    result.symbol_days_merged += 1
     result.rows_written += rows
-    _log.warning("tick_compaction_late_rows_merged", partition=label, fragments=len(fragments),
-                 rows_added=added)
+    _log.info("tick_compaction_late_rows_merged", partition=label, fragments=len(fragments),
+              rows_added=added)
 
 
-#: The fragment rows a compacted file does not already hold, as a multiset: ``EXCEPT ALL`` keeps a
-#: row the fragments carry twice and the compacted file once, where plain ``EXCEPT`` would drop it.
+def _swap_in(tmp: Path, dest: Path) -> None:
+    """``os.replace`` ``tmp`` onto ``dest`` once its bytes are on disk: the caller unlinks fragments
+    next, and they must not go while the only copy of their rows is still in the OS cache."""
+    with tmp.open("r+b") as fh:                   # FlushFileBuffers needs a writable handle on Windows
+        os.fsync(fh.fileno())
+    os.replace(tmp, dest)                         # atomic within the partition dir
+
+
+#: The fragment rows a compacted file does not already hold, as a multiset (``EXCEPT ALL``): a row
+#: the fragments hold n times and the compacted file m times yields max(n - m, 0) copies, so a merge
+#: keeps max(n, m) — never n + m, which would double an interrupted unlink's leftovers.
 _LATE_ROWS = "SELECT * FROM read_parquet($frags) EXCEPT ALL SELECT * FROM read_parquet($compacted)"
 
 
 def _missing_rows(con: duckdb.DuckDBPyConnection, fragments: list[Path], compacted: Path) -> int:
-    """How many fragment rows ``compacted`` does not hold (:data:`_LATE_ROWS`): 0 for an interrupted
-    unlink's leftovers — what makes deleting them safe rather than hopeful — and exactly the rows a
-    merge must add for a late write."""
+    """How many rows :data:`_LATE_ROWS` finds: 0 for an interrupted unlink's leftovers, which is what
+    makes deleting them safe rather than hopeful."""
     return int(con.execute(
         f"SELECT count(*) FROM ({_LATE_ROWS})",
         {"frags": [p.as_posix() for p in fragments], "compacted": [compacted.as_posix()]},

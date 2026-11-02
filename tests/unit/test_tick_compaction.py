@@ -11,6 +11,7 @@ trading date is never touched (the writer is still appending to it).
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 from datetime import date, datetime, timedelta
@@ -213,8 +214,8 @@ def test_late_rows_beside_a_compacted_file_are_merged_in(store, tmp_path):
     """2026-10-26..11-02, the live shape: a ticker reconnect's snapshot echo (the session's last
     stamp, volume zeroed by the weekend) written into a partition AFTER its compaction. Reported
     "unverifiable" and left alone, it failed the symbol-day on every run — 601 of them, the watermark
-    never cleared and retention stopped. Rows the compacted file lacks are merged in: every reader
-    sees exactly the rows it saw before, now from one file."""
+    never cleared and retention stopped. The row the compacted file lacks is merged in, and nothing
+    it already holds is doubled."""
     _write_fragments(store, YESTERDAY, n=3)
     compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
     last = store.get_ticks("RELIANCE", YESTERDAY)[-1]
@@ -228,7 +229,7 @@ def test_late_rows_beside_a_compacted_file_are_merged_in(store, tmp_path):
     assert result.ok is True and result.failures == []
     assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
     assert _rows(store, YESTERDAY) == before
-    assert (result.symbol_days_compacted, result.fragments_removed, result.rows_written) == (1, 1, 4)
+    assert (result.symbol_days_merged, result.fragments_removed, result.rows_written) == (1, 1, 4)
 
 
 def test_a_merge_interrupted_before_its_unlink_is_repaired_not_duplicated(store, tmp_path):
@@ -249,7 +250,74 @@ def test_a_merge_interrupted_before_its_unlink_is_repaired_not_duplicated(store,
     assert result.ok is True
     assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
     assert _rows(store, YESTERDAY) == merged and len(merged) == 4    # no duplicated rows
-    assert (result.symbol_days_compacted, result.fragments_removed) == (0, 1)
+    assert (result.symbol_days_merged, result.fragments_removed) == (0, 1)
+
+
+def test_leftovers_and_late_rows_in_one_run_are_merged_without_doubling_the_leftovers(store, tmp_path):
+    """Both kinds of fragment beside one compacted file at once: an interrupted first compaction's
+    leftovers (already inside it) and a late write (not). Only the late row is added."""
+    _write_fragments(store, YESTERDAY, n=3)
+    leftovers = {f: f.read_bytes() for f in _files(store, YESTERDAY)}
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    for path, blob in leftovers.items():                      # replay the interrupted unlink
+        path.write_bytes(blob)
+    _write_fragments(store, YESTERDAY, n=1, start=10)         # and a late, genuinely new row
+    assert len(_files(store, YESTERDAY)) == 5
+
+    result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+
+    assert result.ok is True
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert [t.volume_traded for t in _rows(store, YESTERDAY)] == [1, 2, 3, 11]
+    assert (result.symbol_days_merged, result.fragments_removed) == (1, 4)
+
+
+def test_a_row_on_both_sides_is_kept_as_often_as_the_side_with_more_copies(store, tmp_path):
+    """Multiset, not set: a late fragment holding a stored row twice leaves it twice — plain EXCEPT
+    would find nothing to add and drop the second copy — and never three times, which appending the
+    whole fragment would."""
+    _write_fragments(store, YESTERDAY, n=3)
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    last = store.get_ticks("RELIANCE", YESTERDAY)[-1]
+    store.buffer_tick(last)
+    store.buffer_tick(last)
+    store.flush_ticks()                                       # one fragment: the stored row, twice
+
+    result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+
+    assert result.ok is True
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert [t.volume_traded for t in _rows(store, YESTERDAY)] == [1, 2, 3, 3]
+    assert (result.symbol_days_merged, result.rows_written) == (1, 4)
+
+
+def test_a_failed_swap_loses_nothing_and_the_retry_converges(store, tmp_path, monkeypatch):
+    """On Windows ``os.replace`` onto a file another process holds open fails (scripts/replay_day.py
+    reads compacted files): the symbol-day reports not-ok with the compacted file and the late
+    fragment both intact, and the next run completes the merge."""
+    _write_fragments(store, YESTERDAY, n=3)
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    _write_fragments(store, YESTERDAY, n=1, start=10)
+    before = _rows(store, YESTERDAY)
+    real_replace = os.replace
+    calls: list[object] = []
+
+    def held_open_once(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError(13, "The process cannot access the file because it is being used")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(tick_compact_module.os, "replace", held_open_once)
+
+    first = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    assert first.ok is False and "PermissionError" in first.failures[0]
+    assert len(_files(store, YESTERDAY)) == 2 and _rows(store, YESTERDAY) == before
+
+    second = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    assert second.ok is True and second.symbol_days_merged == 1
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert _rows(store, YESTERDAY) == before
 
 
 def test_two_compacted_files_are_left_alone_and_reported(store, tmp_path):
@@ -270,11 +338,11 @@ def test_two_compacted_files_are_left_alone_and_reported(store, tmp_path):
     assert [f.name for f in _files(store, YESTERDAY)] == names    # untouched
 
 
-def test_a_previous_day_echo_never_reaches_a_compacted_partition(tmp_path):
+def test_a_reconnect_echo_written_after_compaction_is_merged_by_the_next_run(tmp_path):
     """The seam that failed live, through the REAL live write path (BarBuilder → MarketStore): a
     session's partition compacted after midnight (the host slept through 22:30), then a reconnect
-    re-sends the last state, still stamped with that session. Nothing may land in the closed
-    partition, so the next run finds nothing to merge or refuse."""
+    re-sends the last state, still stamped with that session and its volume zeroed. The writer
+    persists it beside the compacted file, and the next run must merge it and finish clean."""
     wall = {"now": datetime(2026, 6, 16, 15, 29, 50, tzinfo=IST)}
     clock = Clock(time_source=lambda: wall["now"])
     s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
@@ -291,11 +359,13 @@ def test_a_previous_day_echo_never_reaches_a_compacted_partition(tmp_path):
         wall["now"] = datetime(2026, 6, 17, 2, 22, tzinfo=IST)
         bb.on_tick(_tick(datetime(2026, 6, 16, 17, 34, 39, tzinfo=IST), vol=0))
         s.flush_ticks()
+        assert len(_files(s, YESTERDAY)) == 2                 # the echo landed after the compaction
 
-        assert [f.name for f in _files(s, YESTERDAY)] == [COMPACT_NAME]
         again = compact_ticks(tmp_path / "parquet", upto=YESTERDAY, today=TODAY)
-        assert again.ok is True
-        assert (again.symbol_days_compacted, again.fragments_removed) == (0, 0)
+        assert again.ok is True and again.failures == []
+        assert (again.symbol_days_merged, again.fragments_removed) == (1, 1)
+        assert [f.name for f in _files(s, YESTERDAY)] == [COMPACT_NAME]
+        assert [t.volume_traded for t in _rows(s, YESTERDAY)] == [100, 101, 102, 0]
     finally:
         s.close()
 
