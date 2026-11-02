@@ -80,6 +80,19 @@ scripts\nssm_install.ps1 -Action status                # service config incl. Ob
 NSSM's stop grace is `AppStopMethodConsole 30000` (its 1.5 s default killed the engine mid-shutdown, so every stop
 recorded as a crash); check it with `nssm get mt-engine AppStopMethodConsole` after any service reinstall.
 
+## Tick compaction status (2026-11-02)
+
+A `tick_compact` day that keeps failing is degraded, not retrying its way out: compare its `failures` across runs
+before assuming the next sweep fixes it (10-26 to 11-02 failed the same 601 symbol-days on every run).
+
+```powershell
+# Last runs: ok, symbol_days (merged = late rows merged into a compacted file), failures; the dates list is cut
+Select-String -Path data\logs\engine.log -Pattern '"event": "tick_compaction_done"' | Select-Object -Last 5 |
+    ForEach-Object { $_.Line -replace '"dates": \[[^\]]*\], ', '' }
+# Watermarks, read-only: status failed with an old first_failed_at = the same failure every 30 min
+.venv\Scripts\python.exe -c "import sqlite3; c=sqlite3.connect('file:data/state.db?mode=ro', uri=True); print(*c.execute('SELECT run_for_date, status, last_attempt_at, first_failed_at FROM job_runs WHERE job_id=? ORDER BY run_for_date DESC LIMIT 7', ('tick_compact',)), sep='\n')"
+```
+
 ## Re-login of the engine's Claude CLI (2026-10-11) — after an `auth_failed` alert or a `claude_login` WARN
 
 Run as the service user `piyush.kumar_atari` (the engine uses the pinned CLI's stored claude.ai login,

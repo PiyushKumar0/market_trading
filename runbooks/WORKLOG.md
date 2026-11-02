@@ -2,6 +2,65 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-02 17:09 — Tick compaction, failing since 10-26: diagnosed, fixed, deployed and validated (owner: "Tick compaction has been failing for more than 4 days now. Check, review, validate and fix.")
+
+- **What failed:**
+  - Every `tick_compact` run from 10-26 22:45 ended ok=False: 300 `tick_compaction_ambiguous` symbol-days of
+    2026-10-23, and from 11-01 also 301 of 2026-10-30. The watermarks for 10-26 to 10-30 stayed failed.
+  - The 30-min sweeps re-ran every failed day each pass, up to 46 runs a day (13,879 warning lines on 10-29).
+  - Retention is gated on a clean run, so it stopped; tick partitions back to 09-24 stayed on disk.
+  - The 10-30 entry's "they retry on their own" was wrong: the same 300 symbol-days failed identically on every run.
+- **Cause:**
+  - The host slept through the 10-23 22:30 slot (the log stops at 19:31). The 10-24 01:04 catch-up ran with
+    today=10-24, so it compacted the 10-23 partition itself.
+  - Every ticker reconnect re-sends each instrument's last state, still stamped with its last session (17:13–17:34).
+    BarBuilder persists it into that date's partition. 3,032 one-row fragments landed after the compaction
+    (ULIDs 10-24 02:22 to 10-26 04:17).
+  - The 10-24 ones were exact copies, which the repair path absorbs. From Sunday 22:26 they carry volume, average
+    price and bid/ask 0, so they were not inside the compacted file and `_absorbed` refused them.
+  - 10-30 repeated it: a retry compacted it at 10-31 00:30, then 776 echo fragments arrived 11-01 23:27 to 11-02 00:17.
+    The failing watermark's round-the-clock retries make every next Friday compact early.
+  - The echoes are old: normally compacted Fridays hold them (10-09: 296 rows, 10-16: 1,500), merged at a compaction
+    that ran after them. None was ever written in session: 0 late fragments created 09:00–15:30, and 0 backward
+    day rollovers among 556 in 91 logs.
+- **Fix** (`40c7475` + review fixes `9fe13e1`, branch `wip/tick-echo`):
+  - Fragments beside a compacted file are reconciled by multiset difference (EXCEPT ALL).
+    - Rows the file lacks are merged in by the same write-then-swap. A row on both sides keeps the larger count,
+      never the sum. Leftovers of an interrupted unlink are deleted as before.
+    - Only two `compact-` files are still refused.
+  - The staged file is fsynced before every swap.
+  - `tick_compaction_done` carries `merged`.
+  - A compacted file left with only zero-byte fragments now resolves clean. It failed on `read_parquet([])` before.
+  - `40c7475` also made BarBuilder drop previous-day ticks. The independent review showed that it judged by processing
+    time, so a backlog past midnight (the 08-24 lag hit nine hours) would drop real ticks for good. `9fe13e1` removed it.
+- **Checks before deploy:**
+  - 8 new tests, each watched failing; 2 mutation checks caught (plain EXCEPT; appending whole fragments).
+  - Full gate in the worktree: 4220 passed, 19 skipped.
+  - The new `compact_ticks` on copies of 50 real stuck symbol-days: ok, every distinct row kept, 0 mismatches.
+  - One independent review (opus): 6 minor findings, 5 fixed, 1 moot after the guard's removal.
+- **Deploy:**
+  - `phase3` fast-forwarded `faaddcd` to `9fe13e1` at 16:58, before the stop: both changed modules are imported at
+    boot, and a refused merge would not have stranded the engine down.
+  - Stopped 16:58:36–16:58:50, started 16:59:50. Self-test ok (protected stores PASS, nothing frozen).
+  - `startup_report` RECOMMEND, `engine_ready` 17:01:13.
+- **Validation (post-arm lane pass, 17:01–17:08):**
+  - `tick_compact` 10-26..10-30 caught up, `failed: []`. Run 10-26 merged all 300 symbol-days of 10-23 (3,032 fragments);
+    run 10-30 merged all 301 of 10-30 (776 fragments).
+  - No `ambiguous`, no `symbol_day_failed`, and no ERROR since boot.
+  - Retention ran for the first time since 10-26: 6 tick partitions (09-24..10-01), 15,072 `corrections_log` rows.
+    The oldest partition is now 10-05.
+  - `job_runs` 10-26..10-30: success, `first_failed_at` cleared.
+  - 10-23 and 10-30 are one file per symbol (318 and 312). 360ONE 10-23 holds 10,837 rows: 10,826 plus 11
+    zero-volume echo copies, the duplicate of its last print kept once.
+- **Host:** Modern Standby 15:32–16:24 froze the first gate run and the review agent (Kernel-Power 506/507). Both
+  resumed. `keep_awake.ps1 -Hours 2` held 16:26–17:1x.
+- **Docs:** COMMANDS gains "Tick compaction status".
+- **Still to see:**
+  - Tonight's 22:30 `tick_compact` (11-02) with ok=True.
+  - The first Saturday-after-an-early-compaction run logs `merged` > 0 and stays ok.
+- **Not done:** no `git push`. Echoes are still persisted (harmless: calibration reads 09:15–15:30 with `ask > bid > 0`).
+  A previous-day echo arriving mid-session would roll BarBuilder's day back; never observed, left for the owner.
+
 ## 2026-10-30 16:58 — Confidence floor dropped from limits.yaml and re-signed; engine restarted and validated (owner: "Trade window has ended. You can run the script now and validate")
 
 - **Before the stop:**
