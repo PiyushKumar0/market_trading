@@ -390,6 +390,44 @@ def test_raw_ticks_buffered_including_preopen(store, mclock, now):
     assert [t.exchange_ts for t in persisted] == [pre.exchange_ts, live.exchange_ts]
 
 
+def test_previous_day_snapshot_echo_is_neither_persisted_nor_built(store, mclock, now):
+    """2026-10-23 / 10-30: every ticker (re)connect re-sends each instrument's last state, still
+    stamped with its last session (by the weekend with volume, average price and depth zeroed).
+    Persisted, it landed in a date partition tick_compact had already closed, as a fragment the
+    compacted file does not contain, and every compaction run from 10-26 failed (601 symbol-days).
+    A previous-day stamp is a snapshot echo (the lag watchdog's guard i): counted, never staged."""
+    bb = BarBuilder(store, mclock)
+    feed(bb, now, tick("R", at(15, 29, 50), "100.00", 1000))           # the session's last print
+    now.set(at(2, 22, 10, day=D + dt.timedelta(days=1)))
+    bb.on_tick(tick("R", at(17, 34, 39), "100.00", 0, avg_price=Decimal("0")))
+
+    store.flush_ticks()
+    assert [t.exchange_ts for t in store.get_ticks("R", D)] == [at(15, 29, 50)]
+    assert store.pending_tick_count == 0
+    assert bb.stats_snapshot()["ticks_dropped"] == {"previous_day": 1}
+
+
+def test_previous_day_echo_mid_session_leaves_todays_bar_alone(store, mclock, now):
+    """An echo can also arrive in session (a reconnect re-sending an instrument with no print yet
+    today). Fed to the bar rules it rolled the symbol's day BACK — today's open bar force-finalized
+    off one tick, the cumulative baseline dropped — and its in-session stamp built a bar for the
+    closed day. Ignored, today's 09:15 bar is exactly what it would have been without it."""
+    d2 = D + dt.timedelta(days=1)
+    bb = BarBuilder(store, mclock)
+    feed(bb, now, tick("R", at(9, 15, 10, day=d2), "105.00", 400))
+    now.set(at(9, 15, 20, day=d2))
+    bb.on_tick(tick("R", at(15, 29, 59), "100.00", 0))                  # yesterday's last stamp
+    feed(bb, now, tick("R", at(9, 15, 40, day=d2), "106.00", 600))
+    now.set(at(9, 16, 5, day=d2))
+
+    (bar,) = bb.advance()
+    assert bar.ts_minute == at(9, 15, day=d2)
+    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (
+        Decimal("105.00"), Decimal("106.00"), Decimal("105.00"), Decimal("106.00"), 600
+    )
+    assert store.get_bars_1m("R", at(15, 29), at(15, 30)) == []         # nothing for the closed day
+
+
 # ==================================================================== WO-25a: the late-tick cost
 # 2026-08-24: once processing slipped past the finalize grace EVERY tick took the late path
 # (amend CAS + corrections INSERT + one INFO line), throughput fell below real time and the lag grew

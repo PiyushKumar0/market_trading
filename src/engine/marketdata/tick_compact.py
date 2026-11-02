@@ -12,11 +12,20 @@ never correctness. This module collapses each symbol-day to ONE file:
       → unlink the exact fragment list that was compacted
 
 Ordering is deliberate. A crash after the swap leaves compacted+fragments (readers see duplicate
-rows until the next run repairs it — recoverable); the reverse order would lose rows outright. The
-repair path is explicit: fragments coexisting with a compacted file can only be leftovers of an
-interrupted unlink (the writer never appends to a PAST date, and this job never touches the current
-one), which :func:`_absorbed` verifies by row-set containment before deleting them. A symbol-day
-that cannot be verified is left ALONE and reported not-ok — never merged on a guess.
+rows until the next run repairs it — recoverable); the reverse order would lose rows outright.
+
+Fragments beside a compacted file are reconciled, never left to fail the day (2026-11-02). Their
+rows the compacted file does not already hold — a multiset difference, ``EXCEPT ALL``
+(:func:`_missing_rows`) — are merged in by the same write-then-swap, then the fragments are
+unlinked. An interrupted unlink's leftovers are already inside, so they are simply deleted; a crash
+between a merge's swap and its unlink resolves the same way on the next run. Rows can arrive AFTER
+a compaction because this job closes a date at midnight while the feed does not: until 2026-11-02
+the live path persisted every reconnect's snapshot echo — the last session's stamp, by the weekend
+with volume and depth zeroed, so not a duplicate (``BarBuilder`` now drops them) — and a flush can
+still outrun ``job_tick_compact``'s pre-flush. Refusing them as "unverifiable" failed every run
+from 2026-10-26 to 11-02 (601 symbol-days of 10-23 and 10-30), holding the watermark failed and
+retention off. Two ``compact-`` files are still refused: not this job's output, so which one holds
+the symbol-day is unknowable.
 
 Idempotence is per symbol-day: one file (or none) ⇒ nothing to do. That makes a re-run, a sweep
 retry and a date-keyed catch-up replay all no-ops on days already compacted, and makes a partial
@@ -113,8 +122,10 @@ def _open_connection(ticks_root: Path) -> duckdb.DuckDBPyConnection:
 class TickCompactionResult:
     """One run's outcome — ok-bearing so the §2.6 watermark verdict sees a degraded run (E5).
 
-    ``ok=False`` (a symbol-day that failed or could not be verified) records a FAILED watermark, and
-    the next sweep retries: the symbol-days that DID compact are no-ops on the retry.
+    ``ok=False`` (a symbol-day that failed, or holds two compacted files) records a FAILED watermark,
+    and the next sweep retries: the symbol-days that DID compact are no-ops on the retry.
+    ``symbol_days_compacted`` and ``rows_written`` count a merge of late rows (module docstring) as
+    one symbol-day and the rows of the file it rewrote.
     """
 
     ok: bool = True
@@ -277,25 +288,19 @@ def _compact_symbol_day(
             _log.warning("tick_compaction_fragments_quarantined", partition=label,
                          files=[p.name for p in corrupt], quarantine=str(qdir))
             fragments = [p for p in fragments if p not in corrupt]
-            if not fragments and not existing:
-                return                        # nothing readable left — partition resolves empty
+        if len(existing) > 1:
+            result.ok = False
+            result.failures.append(f"{label}: more than one compacted file, left alone")
+            _log.warning("tick_compaction_ambiguous", partition=label,
+                         compacted=len(existing), fragments=len(fragments))
+            return
+        if not fragments:
+            return                            # nothing readable left beside the compacted file, if any
+        tmp = sym_dir / _TMP_NAME
         if existing:
-            # Interrupted unlink (the only way this state is reachable: a past date's fragments can
-            # no longer grow). Delete the leftovers ONLY if their rows are provably already inside
-            # the compacted file — otherwise leave the partition untouched and report.
-            if len(existing) > 1 or not _absorbed(con, fragments, existing[0]):
-                result.ok = False
-                result.failures.append(f"{label}: unverifiable compacted+fragment mix, left alone")
-                _log.warning("tick_compaction_ambiguous", partition=label,
-                             compacted=len(existing), fragments=len(fragments))
-                return
-            for f in fragments:
-                f.unlink()
-            result.fragments_removed += len(fragments)
-            _log.info("tick_compaction_recovered", partition=label, fragments=len(fragments))
+            _reconcile_late_fragments(con, label, existing[0], fragments, tmp, result)
             return
 
-        tmp = sym_dir / _TMP_NAME
         tmp.unlink(missing_ok=True)
         rows = _write_compacted(con, fragments, tmp)
         os.replace(tmp, sym_dir / COMPACT_NAME)   # atomic within the partition dir
@@ -328,7 +333,7 @@ def _write_compacted(con: duckdb.DuckDBPyConnection, fragments: list[Path], out:
     """Write ``fragments`` (an explicit file list, never a glob — the glob would also pick up files
     this run is not going to delete) into ``out``, ordered by ``exchange_ts``. Returns the row count."""
     paths = [p.as_posix() for p in fragments]
-    rows = con.execute("SELECT count(*) FROM read_parquet($files)", {"files": paths}).fetchone()[0]
+    rows = con.execute("SELECT count(*) FROM read_parquet($files)", {"files": paths}).fetchall()[0][0]
     con.execute(
         f"COPY (SELECT * FROM read_parquet($files) ORDER BY exchange_ts) TO '{out.as_posix()}' "
         "(FORMAT PARQUET)",
@@ -337,23 +342,58 @@ def _write_compacted(con: duckdb.DuckDBPyConnection, fragments: list[Path], out:
     return int(rows)
 
 
-def _absorbed(con: duckdb.DuckDBPyConnection, fragments: list[Path], compacted: Path) -> bool:
-    """True when every fragment row is already present in ``compacted`` (and it is no smaller) —
-    the containment check that makes deleting an interrupted run's leftovers safe rather than
-    hopeful."""
-    paths = [p.as_posix() for p in fragments]
-    missing = con.execute(
-        "SELECT count(*) FROM (SELECT * FROM read_parquet($frags) "
-        "EXCEPT SELECT * FROM read_parquet($compacted))",
-        {"frags": paths, "compacted": [compacted.as_posix()]},
-    ).fetchone()[0]
-    if missing:
-        return False
-    n_frag = con.execute("SELECT count(*) FROM read_parquet($frags)", {"frags": paths}).fetchone()[0]
-    n_comp = con.execute(
-        "SELECT count(*) FROM read_parquet($compacted)", {"compacted": [compacted.as_posix()]}
-    ).fetchone()[0]
-    return int(n_comp) >= int(n_frag)
+def _reconcile_late_fragments(
+    con: duckdb.DuckDBPyConnection, label: str, compacted: Path, fragments: list[Path], tmp: Path,
+    result: TickCompactionResult,
+) -> None:
+    """Fragments beside the symbol-day's compacted file (module docstring): merge in the rows it
+    lacks — none, for an interrupted unlink's leftovers — then unlink the fragments."""
+    added = _missing_rows(con, fragments, compacted)
+    rows = 0
+    if added:
+        tmp.unlink(missing_ok=True)
+        rows = _write_merged(con, compacted, fragments, tmp)
+        os.replace(tmp, compacted)                # atomic within the partition dir
+    for f in fragments:                           # every row of each is now in ``compacted``
+        f.unlink()
+    result.fragments_removed += len(fragments)
+    if not added:
+        _log.info("tick_compaction_recovered", partition=label, fragments=len(fragments))
+        return
+    result.symbol_days_compacted += 1
+    result.rows_written += rows
+    _log.warning("tick_compaction_late_rows_merged", partition=label, fragments=len(fragments),
+                 rows_added=added)
+
+
+#: The fragment rows a compacted file does not already hold, as a multiset: ``EXCEPT ALL`` keeps a
+#: row the fragments carry twice and the compacted file once, where plain ``EXCEPT`` would drop it.
+_LATE_ROWS = "SELECT * FROM read_parquet($frags) EXCEPT ALL SELECT * FROM read_parquet($compacted)"
+
+
+def _missing_rows(con: duckdb.DuckDBPyConnection, fragments: list[Path], compacted: Path) -> int:
+    """How many fragment rows ``compacted`` does not hold (:data:`_LATE_ROWS`): 0 for an interrupted
+    unlink's leftovers — what makes deleting them safe rather than hopeful — and exactly the rows a
+    merge must add for a late write."""
+    return int(con.execute(
+        f"SELECT count(*) FROM ({_LATE_ROWS})",
+        {"frags": [p.as_posix() for p in fragments], "compacted": [compacted.as_posix()]},
+    ).fetchall()[0][0])
+
+
+def _write_merged(
+    con: duckdb.DuckDBPyConnection, compacted: Path, fragments: list[Path], out: Path
+) -> int:
+    """Write ``compacted`` plus the fragment rows it lacks (:data:`_LATE_ROWS`) into ``out``, ordered
+    by ``exchange_ts``. Returns the row count."""
+    params = {"frags": [p.as_posix() for p in fragments], "compacted": [compacted.as_posix()]}
+    merged = f"SELECT * FROM read_parquet($compacted) UNION ALL SELECT * FROM ({_LATE_ROWS})"
+    rows = con.execute(f"SELECT count(*) FROM ({merged})", params).fetchall()[0][0]
+    con.execute(
+        f"COPY (SELECT * FROM ({merged}) ORDER BY exchange_ts) TO '{out.as_posix()}' (FORMAT PARQUET)",
+        params,
+    )
+    return int(rows)
 
 
 def _cleanup_stale_tmp(sym_dir: Path) -> None:

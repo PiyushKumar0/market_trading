@@ -11,6 +11,7 @@ trading date is never touched (the writer is still appending to it).
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -18,11 +19,17 @@ from decimal import Decimal
 import duckdb
 import pytest
 
-from engine.core.clock import IST
+from engine.core.clock import IST, Clock
 from engine.core.types import Tick
 from engine.marketdata import tick_compact as tick_compact_module
+from engine.marketdata.bar_builder import BarBuilder
 from engine.marketdata.store import MarketStore
-from engine.marketdata.tick_compact import COMPACT_NAME, TickCompactionResult, compact_ticks
+from engine.marketdata.tick_compact import (
+    COMPACT_NAME,
+    COMPACT_PREFIX,
+    TickCompactionResult,
+    compact_ticks,
+)
 
 TODAY = date(2026, 6, 17)          # conftest's frozen clock day
 YESTERDAY = date(2026, 6, 16)
@@ -58,6 +65,12 @@ def _write_fragments(
 def _files(store: MarketStore, d: date, symbol: str = "RELIANCE") -> list:
     part = store._parquet_root / "ticks" / f"date={d.isoformat()}" / f"symbol={symbol}"
     return sorted(part.glob("*.parquet"))
+
+
+def _rows(store: MarketStore, d: date, symbol: str = "RELIANCE") -> list[Tick]:
+    """The symbol-day through the real reader, in an order that does not depend on how rows that
+    share an ``exchange_ts`` happen to come back (an echo shares its stamp with the last print)."""
+    return sorted(store.get_ticks(symbol, d), key=lambda t: (t.exchange_ts, t.volume_traded))
 
 
 def test_fragments_collapse_to_one_file_with_identical_rows(store, tmp_path):
@@ -97,6 +110,25 @@ def test_a_zero_byte_fragment_is_quarantined_and_the_survivors_still_compact(sto
         f"{YESTERDAY.isoformat()}_RELIANCE_{corrupt.name}"
     ]
     assert quarantined[0].stat().st_size == 0
+    assert not corrupt.exists()
+
+
+def test_a_zero_byte_fragment_beside_a_compacted_file_is_quarantined_and_the_day_stays_ok(
+    store, tmp_path
+):
+    """Quarantine can leave the compacted file with no fragment beside it: nothing is left to
+    reconcile, so the symbol-day resolves clean."""
+    _write_fragments(store, YESTERDAY, n=3)
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    rows = _rows(store, YESTERDAY)
+    corrupt = _files(store, YESTERDAY)[0].parent / "01ZZZZZZZZZZZZZZZZZZZZZZZZ.parquet"
+    corrupt.write_bytes(b"")
+
+    result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+
+    assert result.ok is True and result.failures == []
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert _rows(store, YESTERDAY) == rows
     assert not corrupt.exists()
 
 
@@ -177,21 +209,95 @@ def test_interrupted_unlink_is_repaired_not_duplicated(store, tmp_path):
     assert result.fragments_removed == 3
 
 
-def test_unverifiable_mix_is_left_alone_and_reported(store, tmp_path):
-    """A fragment carrying rows the compacted file does NOT have is unreachable by design (the
-    writer never appends to a past date). If it happens anyway, the partition is left untouched and
-    the run reports not-ok — a failed watermark and a human, never a guessed merge."""
+def test_late_rows_beside_a_compacted_file_are_merged_in(store, tmp_path):
+    """2026-10-26..11-02, the live shape: a ticker reconnect's snapshot echo (the session's last
+    stamp, volume zeroed by the weekend) written into a partition AFTER its compaction. Reported
+    "unverifiable" and left alone, it failed the symbol-day on every run — 601 of them, the watermark
+    never cleared and retention stopped. Rows the compacted file lacks are merged in: every reader
+    sees exactly the rows it saw before, now from one file."""
     _write_fragments(store, YESTERDAY, n=3)
     compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
-    _write_fragments(store, YESTERDAY, n=1, start=10)         # a NEW, unabsorbed fragment
-    before = store.get_ticks("RELIANCE", YESTERDAY)
+    last = store.get_ticks("RELIANCE", YESTERDAY)[-1]
+    store.buffer_tick(_tick(last.exchange_ts, vol=0))          # the echo: same stamp, not a duplicate
+    store.flush_ticks()
+    before = _rows(store, YESTERDAY)
+    assert len(_files(store, YESTERDAY)) == 2 and len(before) == 4
+
+    result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+
+    assert result.ok is True and result.failures == []
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert _rows(store, YESTERDAY) == before
+    assert (result.symbol_days_compacted, result.fragments_removed, result.rows_written) == (1, 1, 4)
+
+
+def test_a_merge_interrupted_before_its_unlink_is_repaired_not_duplicated(store, tmp_path):
+    """A merge swaps first and unlinks second, like a first compaction, so it has the same crash
+    window: the late fragment left beside the merged file is now inside it, and the next run
+    deletes it instead of merging it a second time."""
+    _write_fragments(store, YESTERDAY, n=3)
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    _write_fragments(store, YESTERDAY, n=1, start=10)         # late, genuinely new rows
+    (late,) = [f for f in _files(store, YESTERDAY) if f.name != COMPACT_NAME]
+    blob = late.read_bytes()
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    merged = _rows(store, YESTERDAY)
+    late.write_bytes(blob)                                    # replay the interrupted unlink
+
+    result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+
+    assert result.ok is True
+    assert [f.name for f in _files(store, YESTERDAY)] == [COMPACT_NAME]
+    assert _rows(store, YESTERDAY) == merged and len(merged) == 4    # no duplicated rows
+    assert (result.symbol_days_compacted, result.fragments_removed) == (0, 1)
+
+
+def test_two_compacted_files_are_left_alone_and_reported(store, tmp_path):
+    """The one shape still refused: this job writes a single deterministic name, so two
+    ``compact-`` files are not its output and which one holds the symbol-day is unknowable — the
+    partition is left untouched and the run reports not-ok."""
+    _write_fragments(store, YESTERDAY, n=3)
+    compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
+    part = _files(store, YESTERDAY)[0].parent
+    shutil.copyfile(part / COMPACT_NAME, part / f"{COMPACT_PREFIX}copy.parquet")
+    _write_fragments(store, YESTERDAY, n=1, start=10)
+    names = [f.name for f in _files(store, YESTERDAY)]
 
     result = compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
 
     assert result.ok is False
-    assert result.failures and "unverifiable" in result.failures[0]
-    assert len(_files(store, YESTERDAY)) == 2                 # untouched: nothing deleted, nothing merged
-    assert store.get_ticks("RELIANCE", YESTERDAY) == before
+    assert result.failures and "more than one compacted file" in result.failures[0]
+    assert [f.name for f in _files(store, YESTERDAY)] == names    # untouched
+
+
+def test_a_previous_day_echo_never_reaches_a_compacted_partition(tmp_path):
+    """The seam that failed live, through the REAL live write path (BarBuilder → MarketStore): a
+    session's partition compacted after midnight (the host slept through 22:30), then a reconnect
+    re-sends the last state, still stamped with that session. Nothing may land in the closed
+    partition, so the next run finds nothing to merge or refuse."""
+    wall = {"now": datetime(2026, 6, 16, 15, 29, 50, tzinfo=IST)}
+    clock = Clock(time_source=lambda: wall["now"])
+    s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
+    s.open()
+    try:
+        bb = BarBuilder(s, clock)
+        for i in range(3):
+            wall["now"] = datetime(2026, 6, 16, 15, 29, 50 + i, tzinfo=IST)
+            bb.on_tick(_tick(wall["now"], vol=100 + i))
+            s.flush_ticks()
+        wall["now"] = datetime(2026, 6, 17, 0, 30, tzinfo=IST)
+        assert compact_ticks(tmp_path / "parquet", upto=YESTERDAY, today=TODAY).symbol_days_compacted == 1
+
+        wall["now"] = datetime(2026, 6, 17, 2, 22, tzinfo=IST)
+        bb.on_tick(_tick(datetime(2026, 6, 16, 17, 34, 39, tzinfo=IST), vol=0))
+        s.flush_ticks()
+
+        assert [f.name for f in _files(s, YESTERDAY)] == [COMPACT_NAME]
+        again = compact_ticks(tmp_path / "parquet", upto=YESTERDAY, today=TODAY)
+        assert again.ok is True
+        assert (again.symbol_days_compacted, again.fragments_removed) == (0, 0)
+    finally:
+        s.close()
 
 
 def test_missing_tick_root_is_a_clean_no_op(tmp_path):

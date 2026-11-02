@@ -1621,8 +1621,8 @@ async def compose(
         # the run at the WO-21 window or on a stop signal (compact_ticks docstring). Buffered ticks
         # are written first (waiting out an in-flight flush, as close() does): the tail of a session
         # the engine stayed up through is otherwise written by the next morning's first flush,
-        # beside a date a post-midnight run already compacted — a fragment compaction refuses to
-        # merge, so every later run would fail on it.
+        # beside a date a post-midnight run already compacted, and costs a later run a merge
+        # rewrite of that symbol-day (compact_ticks module docstring).
         await asyncio.to_thread(store.flush_ticks, wait_s=15.0)
         result = await asyncio.to_thread(
             compact_ticks, settings.parquet_dir(), upto=d, today=clock.today(),
