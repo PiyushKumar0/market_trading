@@ -6,7 +6,9 @@ open questions. Built work is described by the code. When an item here ships, de
 The full original plan of record (all phases, rationale, the A–E fact sheet, the O owner decisions and R requirements)
 and the other removed design and research documents are in git at commit `417da77`, for example
 `git show 417da77:IMPLEMENTATION_PLAN.md`. Code comments cite that plan's section numbers (`§2.6`) and plan v5's IDs
-(`Q4.7`, `D8`: `git show 417da77:runbooks/plan-2026-10-06-measure-card-paper-research.md`).
+(`Q4.7`, `D8`: `git show 417da77:runbooks/plan-2026-10-06-measure-card-paper-research.md`). The TradingAgents review
+(`review §9 #n`) and the review-actions plan that commit messages cite as `T1`–`T20` are at
+`git show 8158a9a:runbooks/tradingagents-review-2026-10-27.md` and `…:runbooks/plan-2026-10-29-review-actions.md`.
 
 ## 1. Where things stand (2026-10-19)
 
@@ -45,7 +47,9 @@ and the other removed design and research documents are in git at commit `417da7
   pinned looks 20 and 40: `scripts/no_stop_verdict.py`; operation and rollback in RUNBOOK "No-stop exit test". From R,
   brk20 recs are regime-ON only and use the 5-session retest window, and there is no confidence floor (removed
   2026-10-30 after the close, so R is its first session too). The paired D stays valid; read the slices split at R by
-  hand. `scripts/no_stop_verdict.py` is untouched.
+  hand. `scripts/no_stop_verdict.py` is untouched. **Look 1 formed by 2026-11-03: STOP NOT THE PROBLEM** (E −1.34 pp,
+  D −2.02 pp, median net T+20 −6.8% over the first 20 fills). Owner (2026-11-03): the test runs on to look 2, which
+  supersedes it.
 - **`cat` v2 shadow verdict — not yet run.** Mechanical verdict: `scripts/cat_shadow_verdict.py` (conventions in the
   script; COMMANDS "cat v2 shadow verdict"). Pre-registered: at ≥30 sessions and ≥20 admitted signals, measure T+10 and
   T+20 net drift at spread-inclusive CNC costs with the WO-3 margin floor. Net ≤ the cost floor at both horizons ⇒
@@ -174,7 +178,8 @@ session after it, here and in the constant. Each rule has a `registered` row in 
     - carries `agent_id = PLATFORM_AGENT_ID`, with the analyst's reason as advice in the thesis.
   - brk20 is unaffected (no registered edge). The build gets its own plan.
 - **#4 measured-edge pricing** (trigger: C5 look 1, a POOLED label over hi52, ins and brk20,
-  `no_stop_verdict.py:8-19`).
+  `no_stop_verdict.py:8-19`). Look 1 read STOP NOT THE PROBLEM, which gives no basis for a time-only change; this
+  waits for look 2.
   - A brk20-specific change needs its own pre-registered rule, entered in the trial ledger as a new trial. The §2
     registration bar applies; brk20 is not grandfathered.
   - If that rule supports time-only brk20:
@@ -200,6 +205,10 @@ session after it, here and in the constant. Each rule has a `registered` row in 
 - `cat` scanner: a story first seen on d before d's digest originates at age 0 on d and again at age 1 on d+1
   (prescreen dedupes per day only), which `cat.py` itself calls a double count. The verdict script drops the repeat;
   fixing the scanner changes the shadow population mid-window, so it is an owner decision.
+- Review actions, left open (2026-10-30): the pre-open planner and `/why` preview brk20 levels without saying the
+  C2 regime filter blocks a crossing in a regime-down session; the deterministic regime line reads the store on the
+  event loop when a position event renders it; a brk20 re-offer row of a symbol that crossed twice is costed from the
+  latest resting row covering its day, which need not be the crossing it re-offers.
 - Per-cluster news-score drops are counted in the scoring log but leave no audit row.
 - The headline clusterer can merge different companies' PRs that share a template into one cluster (the
   boilerplate list covers earnings templates only).

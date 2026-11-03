@@ -60,6 +60,9 @@ desktop.ini
 .claude/worktrees/
 .claude/settings.local.json
 
+# --- graphify knowledge-graph output (owner tool, regenerated on demand) ---
+graphify-out/
+
 # uv lockfile IS committed (reproducible builds) — do not ignore uv.lock
 
 node_modules/

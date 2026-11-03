@@ -2,7 +2,7 @@
 
 **Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer that supplements this file. Where the two conflict, `FABLE_HANDOFF.md` wins.
 
-**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet. Documents removed once their work shipped (the original plan that code comments cite as `§x.y`, plan v5 with its `Q`/`D` IDs, `IMPROVEMENT_SPEC.md` with its `WO-`/`F` IDs, the runbooks' designs, briefs and reviews) are in git: `git show 417da77:<path>`.
+**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet. Documents removed once their work shipped (the original plan that code comments cite as `§x.y`, plan v5 with its `Q`/`D` IDs, `IMPROVEMENT_SPEC.md` with its `WO-`/`F` IDs, the runbooks' designs, briefs and reviews) are in git: `git show 417da77:<path>`; the 2026-10-27 TradingAgents review and the 2026-10-29 review-actions plan (`T1`–`T20`) at `git show 8158a9a:<path>`.
 
 ## Model policy — Fable is the manager, not the workhorse
 
