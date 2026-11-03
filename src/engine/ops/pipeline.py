@@ -682,14 +682,18 @@ class RecommendationBook:
         _log.warning("recommendation_vetoed", rec_id=rec_id, reason=reason)
         return f"recommendation {rec_id} dismissed — recorded as a no_action outcome (§6.5)."
 
-    def decision_candidates(self, symbol: str | None, now: datetime) -> list[dict[str, Any]]:
+    def decision_candidates(
+        self, symbol: str | None, now: datetime, *, include_skipped: bool = False
+    ) -> list[dict[str, Any]]:
         """Undecided ENTRY recs (optionally for one symbol), oldest first: live, or ``expired`` with no
-        ``skip_reason`` and ``valid_until`` inside the last ``veto_window_sessions`` sessions. Without a
-        calendar no expired rec qualifies."""
+        ``skip_reason`` and ``valid_until`` inside the last ``veto_window_sessions`` sessions.
+        ``include_skipped`` also admits an expired rec that has a ``skip_reason`` (``take`` clears it).
+        Without a calendar no expired rec qualifies."""
         rows = self._conn.execute(
             "SELECT rec_id, payload, delivered_at, human_action FROM recommendations "
-            "WHERE delivered_at IS NOT NULL AND (human_action IS NULL "
-            "OR (human_action='expired' AND skip_reason IS NULL)) ORDER BY delivered_at"
+            "WHERE delivered_at IS NOT NULL AND (human_action IS NULL OR (human_action='expired'"
+            + ("" if include_skipped else " AND skip_reason IS NULL")
+            + ")) ORDER BY delivered_at"
         ).fetchall()
         wanted = None if symbol is None else symbol.strip().upper()
         out: list[dict[str, Any]] = []

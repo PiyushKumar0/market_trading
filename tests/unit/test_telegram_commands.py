@@ -112,8 +112,10 @@ class _FakeBook:
         calendar = NSECalendar(config_dir() / "calendar", clock, strict=False)
         self._real = RecommendationBook(conn, clock, None, calendar=calendar, veto_window_sessions=3)
 
-    def decision_candidates(self, symbol, now) -> list[dict]:
-        return [] if self._real is None else self._real.decision_candidates(symbol, now)
+    def decision_candidates(self, symbol, now, *, include_skipped=False) -> list[dict]:
+        if self._real is None:
+            return []
+        return self._real.decision_candidates(symbol, now, include_skipped=include_skipped)
 
     async def take(self, rec_id: str, qty: int, price: Decimal) -> str:
         self.calls.append(("take", rec_id, qty, price))
@@ -511,6 +513,18 @@ def _capture_bot(clock, conn, book) -> TelegramBot:
     return TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)
 
 
+# The two commands that resolve a ticker among the open recommendations, as (handler, args).
+_OPEN_SET_COMMANDS = {
+    "veto": ("_cmd_veto", ("HDFCAMC", "price")),
+    "taken": ("_cmd_taken", ("HDFCAMC", "12", "4210")),
+}
+
+
+async def _run_open_set_command(bot, msg, command) -> None:
+    handler, args = _OPEN_SET_COMMANDS[command]
+    await getattr(bot, handler)(_Update(msg), _Ctx(*args))
+
+
 @pytest.mark.asyncio
 async def test_taken_resolves_a_symbol_to_the_real_rec_id(clock, conn, msg):
     """The whole point of WO-29: the owner types the ticker they were shown, and the book receives the
@@ -554,16 +568,21 @@ async def test_an_entry_veto_without_a_valid_reason_records_nothing(clock, conn,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("command", _OPEN_SET_COMMANDS)
 @pytest.mark.parametrize(("valid_until", "found"), [
     (DEAD_UNTIL, True),                        # expired today
     ("2026-06-12T15:30:00+05:30", True),       # Fri: 3rd session after is today (Wed 06-17)
     ("2026-06-11T15:30:00+05:30", False),      # Thu: 3rd session after was Tue 06-16
 ])
-async def test_an_expired_rec_is_vetoable_only_inside_the_window(clock, conn, msg, valid_until, found):
+async def test_an_expired_rec_resolves_only_inside_the_window(
+    clock, conn, msg, command, valid_until, found
+):
     _insert_rec(conn, REC_A, valid_until=valid_until, human_action="expired")
     book = _FakeBook()
-    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
-    assert book.calls == ([("veto", REC_A, "price")] if found else [])
+    await _run_open_set_command(_capture_bot(clock, conn, book), msg, command)
+    assert [call[1] for call in book.calls] == ([REC_A] if found else [])
+    if not found:
+        assert REC_A not in msg.sent[0]
 
 
 @pytest.mark.asyncio
@@ -694,12 +713,13 @@ async def test_a_listed_verb_runs_only_its_own_action(clock, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_live_rec_wins_over_an_expired_one_for_the_same_symbol(clock, conn, msg):
+@pytest.mark.parametrize("command", _OPEN_SET_COMMANDS)
+async def test_a_live_rec_wins_over_an_expired_one_for_the_same_symbol(clock, conn, msg, command):
     _insert_rec(conn, REC_A, valid_until=DEAD_UNTIL, human_action="expired")
     _insert_rec(conn, REC_B, delivered_at="2026-06-17T09:58:00+05:30")
     book = _FakeBook()
-    await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("HDFCAMC", "price"))
-    assert book.calls == [("veto", REC_B, "price")]
+    await _run_open_set_command(_capture_bot(clock, conn, book), msg, command)
+    assert [call[1] for call in book.calls] == [REC_B]
 
 
 @pytest.mark.asyncio
@@ -796,6 +816,22 @@ async def test_a_listed_row_that_outlives_its_day_carries_both_dates(clock, conn
 
 
 @pytest.mark.asyncio
+async def test_a_listed_row_from_an_earlier_day_carries_its_date(clock, conn, msg):
+    """A bare HH:MM reads as today: an earlier day's rec listed with one passed for a same-day twin of
+    today's (2026-11-03, JINDALSTEL)."""
+    _insert_rec(conn, REC_A, delivered_at="2026-06-12T10:27:00+05:30",
+                valid_until="2026-06-12T15:30:00+05:30", human_action="expired")
+    book = _FakeBook()
+
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("tcs", "5", "3100"))
+
+    assert (
+        f"HDFCAMC BUY x12 · delivered Fri 12 Jun 10:27 · valid till Fri 12 Jun 15:30 · id {REC_A}"
+        in msg.sent[0]
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_symbol_with_an_empty_book_says_none_open(clock, conn, msg):
     book = _FakeBook()
     await _capture_bot(clock, conn, book)._cmd_veto(_Update(msg), _Ctx("TCS"))
@@ -819,8 +855,8 @@ async def test_a_ulid_argument_keeps_the_original_id_path(clock, conn, msg):
 
 @pytest.mark.asyncio
 async def test_a_lapsed_unswept_rec_is_reachable_by_ticker_and_by_id(clock, conn, msg):
-    """Past valid_until but not yet swept: inside the veto window, so the ticker resolves it (and a
-    bare /veto asks for the reason); the id path still reaches the book directly."""
+    """Past valid_until but not yet swept: inside the veto window, so the ticker resolves it (a bare
+    /veto asks for the reason, /taken records the fill); the id path still reaches the book directly."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=DEAD_UNTIL)
     book = _FakeBook()
     bot = _capture_bot(clock, conn, book)
@@ -829,26 +865,28 @@ async def test_a_lapsed_unswept_rec_is_reachable_by_ticker_and_by_id(clock, conn
     assert book.calls == [] and msg.sent[0].startswith("usage: /veto")
 
     await bot._cmd_veto(_Update(msg), _Ctx(REC_A, "away"))
-    assert book.calls == [("veto", REC_A, "away")]
+    await bot._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
+    assert book.calls == [("veto", REC_A, "away"), ("take", REC_A, 12, Decimal("4210"))]
 
 
 @pytest.mark.asyncio
 async def test_expiry_is_recomputed_inline_not_read_off_human_action(clock, conn, msg):
     """The honest "open" predicate. ``reco_expire`` only runs at 15:45, so between ``valid_until``
     passing and that sweep a DEAD row still reads ``human_action IS NULL``. Resolution must apply the
-    same rule ``RecommendationBook.expire_stale`` does, or it would hand the owner a stale trade."""
-    _insert_rec(conn, REC_A, instrument="HDFCAMC", valid_until=DEAD_UNTIL)   # dead, unswept
-    _insert_rec(conn, REC_B, instrument="TCS", valid_until=LIVE_UNTIL)       # live
+    same rule ``RecommendationBook.expire_stale`` does, or it would hand the owner a stale exit (a
+    lapsed ENTRY stays reachable inside the veto window, as a swept one does)."""
+    _insert_rec(conn, REC_A, instrument="HDFCAMC", kind="exit", valid_until=DEAD_UNTIL)  # dead, unswept
+    _insert_rec(conn, REC_B, instrument="TCS", kind="exit", valid_until=LIVE_UNTIL)      # live
     book = _FakeBook()
     bot = _capture_bot(clock, conn, book)
 
-    await bot._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
+    await bot._cmd_veto(_Update(msg), _Ctx("HDFCAMC"))
     assert book.calls == []
     assert "no open recommendation for HDFCAMC." in msg.sent[0]
     assert REC_A not in msg.sent[0] and REC_B in msg.sent[0]     # only the live one is listed
 
-    await bot._cmd_taken(_Update(msg), _Ctx("TCS", "12", "3100"))
-    assert book.calls == [("take", REC_B, 12, Decimal("3100"))]
+    await bot._cmd_veto(_Update(msg), _Ctx("TCS"))
+    assert book.calls == [("veto", REC_B, None)]
 
 
 @pytest.mark.asyncio
@@ -1715,8 +1753,7 @@ async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, m
     assert decline == "decline: /veto RELIANCE <market|price|size|trust|away|other>"
 
     book = _FakeBook()
-    bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book, conn=conn)
-    await bot._cmd_taken(_Update(msg), _Ctx(symbol, qty, "2450.75"))
+    await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx(symbol, qty, "2450.75"))
 
     assert book.calls == [("take", REC_A, 5, Decimal("2450.75"))]
 

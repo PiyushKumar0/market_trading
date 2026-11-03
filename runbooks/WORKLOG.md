@@ -2,6 +2,30 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-03 11:10 — `/taken JINDALSTEL` refused as ambiguous: fixed and validated, not yet deployed (owner: "Fix the issue, review and validate.")
+
+- **What happened:** at ~10:30 `/taken jindalstel 12 1102.80` replied "2 recommendations match JINDALSTEL — nothing done".
+  The second match was `01M1ZP2K8JS6W1F8A1HW6EN0A6`, delivered and expired 2026-09-08, listed as a bare "10:27".
+  The owner then recorded today's rec by its full id.
+- **Cause:**
+  - `/taken` resolved a ticker against the open recs plus EVERY expired rec, with no age bound.
+  - `/veto`'s rule that a single live rec wins over expired ones did not apply to `/taken`.
+  - `_rec_line` added the day only when delivery and expiry fell on different days.
+- **Fix:**
+  - `/taken` now resolves against `/veto`'s set: `decision_candidates`, live or expired inside the 3-session veto window.
+    The new `include_skipped` flag keeps expired recs that already carry a skip reason, because `take` clears it.
+    The single-live rule now applies to `/taken` too. The `decision` and `include_expired` flags are gone.
+  - Side effect, intended: a lapsed entry the 15:45 sweep has not labelled yet is now `/taken`-able by ticker.
+    Before, it became resolvable only after the sweep.
+  - A listed row carries its day unless both its stamps are today.
+- **Validated:**
+  - Unit suite: 4113 passed. ruff is clean. mypy shows no new errors in the touched lines.
+  - The new `/taken` tests failed before the fix: an out-of-window rec resolved, live plus expired gave the ambiguous list,
+    and an earlier day's rec rendered a bare "10:27".
+  - Replayed the real resolver and book over a snapshot of `state.db`, with today's row reopened in the snapshot only:
+    `jindalstel` resolves to `01M6FWB6VEVQ4N9HPED5VPBFX1`, and `tipsmusic` (Mon expired plus today live) resolves to today's rec.
+- **Deploy:** live on the next `mt-engine` start. No mid-session restart.
+
 ## 2026-11-02 17:09 — Tick compaction, failing since 10-26: diagnosed, fixed, deployed and validated (owner: "Tick compaction has been failing for more than 4 days now. Check, review, validate and fix.")
 
 - **What failed:**

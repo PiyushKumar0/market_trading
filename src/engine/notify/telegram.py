@@ -282,7 +282,9 @@ class RecoBook(Protocol):
 
     async def protect(self, symbol_or_rec: str) -> str: ...
 
-    def decision_candidates(self, symbol: str | None, now: datetime) -> list[dict[str, Any]]: ...
+    def decision_candidates(
+        self, symbol: str | None, now: datetime, *, include_skipped: bool = False
+    ) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -1399,7 +1401,7 @@ class TelegramBot:
 
         ``human_action`` carries the whole lifecycle in a single column — NULL (open) → ``taken`` →
         ``closed``, or ``dismissed`` / ``expired`` — so the two states the capture commands care about
-        are exactly ``None`` (open: what ``/taken`` and ``/veto`` may act on) and ``'taken'`` (taken and
+        are exactly ``None`` (open; see :meth:`_open_recs`) and ``'taken'`` (taken and
         not yet closed: what ``/closed`` may act on; a closed row has already moved to ``'closed'``, so
         no second predicate is needed). ``delivered_at IS NOT NULL`` is the "the owner has actually
         seen it" half of open — a row is written by ``RecommendationBook.deliver`` with its stamp, so
@@ -1444,16 +1446,20 @@ class TelegramBot:
             )
         return recs
 
-    def _veto_recs(self) -> list[_LedgerRec]:
-        """What ``/veto`` may act on: the book's entry candidates (live, or expired inside the veto
-        window) plus the live exit/adjust recs, which keep the bare veto."""
+    def _open_recs(self, *, include_skipped: bool) -> list[_LedgerRec]:
+        """What ``/veto`` and ``/taken`` may act on: the book's entry candidates (live, or expired
+        inside the veto window) plus the live exit/adjust recs, which keep the bare veto. ``/taken``
+        also sees an expired rec already given a skip reason (the owner executed it while live, and
+        recording the fill clears the reason, 2026-08-26)."""
         entries = [
             _LedgerRec(
                 rec_id=str(c["rec_id"]), instrument=str(c["instrument"]), side=str(c["side"]),
                 qty=int(c["qty"]), kind=str(c["kind"]), delivered_at=c["delivered_at"],
                 valid_until=c["valid_until"],
             )
-            for c in self._reco_book.decision_candidates(None, self._clock.now())
+            for c in self._reco_book.decision_candidates(
+                None, self._clock.now(), include_skipped=include_skipped
+            )
         ]
         others = [rec for rec in self._ledger_recs(None) if rec.kind != "entry"]
         return sorted(entries + others, key=lambda rec: rec.delivered_at or "")
@@ -1472,8 +1478,7 @@ class TelegramBot:
         return None if row is None else str(_payload_dict(row["payload"]).get("kind") or "entry")
 
     async def _resolve_rec_arg(
-        self, update: Update, arg: str, *, human_action: str | None,
-        include_expired: bool = False, decision: bool = False,
+        self, update: Update, arg: str, *, human_action: str | None, include_skipped: bool = False,
     ) -> str | None:
         """Resolve a capture command's first argument to a real ``rec_id`` — or reply and return None.
 
@@ -1497,13 +1502,10 @@ class TelegramBot:
         if self._conn is None:
             return arg
         try:
-            recs = self._veto_recs() if decision else self._ledger_recs(human_action)
-            if include_expired:
-                # /taken only (2026-08-26, the first live fill): the owner executed intraday and
-                # recorded in the evening — the 15:45 sweep had already labelled the row expired,
-                # and the symbol form found nothing. Expired rows are /taken-able (the book now
-                # accepts expired→taken), so the resolver must see them too.
-                recs = recs + self._ledger_recs("expired")
+            recs = (
+                self._open_recs(include_skipped=include_skipped)
+                if human_action is None else self._ledger_recs(human_action)
+            )
         except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane (R8)
             _log.exception("telegram_rec_lookup_failed", arg=arg)
             if _is_ulid(arg):
@@ -1519,8 +1521,8 @@ class TelegramBot:
         # ticker keeps such a row out of the MATCH set (it stays reachable by id, which is correct)
         # and stops an empty argument from resolving to it.
         matches = [rec for rec in recs if rec.instrument and rec.instrument.strip().upper() == wanted]
-        if decision and len(matches) > 1:
-            now = self._clock.now()
+        now = self._clock.now()
+        if human_action is None and len(matches) > 1:
             live = [rec for rec in matches if not recommendation_expired(rec.valid_until, now)]
             matches = live if len(live) == 1 else matches   # a yesterday's expired rec must not shadow today's
         if len(matches) == 1:
@@ -1531,14 +1533,14 @@ class TelegramBot:
             return matches[0].rec_id
         if matches:
             _log.warning("telegram_rec_ambiguous", symbol=wanted, count=len(matches))
-            await _reply(update, _ambiguous_reply(wanted, matches))
+            await _reply(update, _ambiguous_reply(wanted, matches, now.date()))
             return None
         if _is_ulid(arg):
             return arg
         _log.info(
             "telegram_rec_unresolved", arg=wanted, state=human_action or "open", candidates=len(recs)
         )
-        await _reply(update, _no_match_reply(wanted, recs, human_action))
+        await _reply(update, _no_match_reply(wanted, recs, human_action, now.date()))
         return None
 
     # ------------------------------------------------------------------ RECOMMEND outcome capture (§3.6)
@@ -1558,9 +1560,7 @@ class TelegramBot:
         if qty is None or qty <= 0 or price is None or price <= 0:
             await _reply(update, f"invalid qty/price; usage: {_USAGE_TAKEN}")
             return
-        rec_id = await self._resolve_rec_arg(
-            update, args[0], human_action=None, include_expired=True,
-        )
+        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None, include_skipped=True)
         if rec_id is None:
             return                              # unresolvable: _resolve_rec_arg already replied
         _log.warning("telegram_cmd_taken", arg=args[0], rec_id=rec_id, qty=qty, price=str(price))
@@ -1602,7 +1602,7 @@ class TelegramBot:
         if len(args) not in (1, 2) or (reason is not None and reason not in VETO_REASONS):
             await _reply(update, f"usage: {_USAGE_VETO}")
             return
-        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None, decision=True)
+        rec_id = await self._resolve_rec_arg(update, args[0], human_action=None)
         if rec_id is None:
             return
         if reason is None and self._rec_kind(rec_id) == "entry":
@@ -2110,19 +2110,18 @@ def _payload_dict(raw: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _rec_line(rec: _LedgerRec) -> str:
+def _rec_line(rec: _LedgerRec, today: date) -> str:
     """One ledger row as owner prose, carrying the FULL ``rec_id``.
 
     The id is the tiebreak handle the owner types back when the ticker is ambiguous, and a truncated
     id is not a handle — this is the one place the internal id is deliberately shown.
 
     A bare ``HH:MM`` is unambiguous only for a row delivered TODAY; a listed row can be from an
-    earlier day (an entry expired inside the veto window, or a taken position). The date-aware
-    rendering is kept generic after WO-V's next-session entry TTL was withdrawn (2026-09-23). When the
-    delivery and the expiry fall on different IST days both stamps carry their day, so a Friday rec
-    read on Monday says so; a same-day row renders exactly as before."""
+    earlier day (an entry expired inside the veto window, or a taken position). Unless both the
+    delivery and the expiry fall on ``today`` (IST), both stamps carry their day, so a Friday rec
+    read on Monday says so."""
     delivered, valid = _parse_iso(rec.delivered_at), _parse_iso(rec.valid_until)
-    if delivered is not None and valid is not None and delivered.date() != valid.date():
+    if delivered is not None and valid is not None and {delivered.date(), valid.date()} != {today}:
         when = f"delivered {_day_hhmm(delivered)} · valid till {_day_hhmm(valid)}"
     else:
         when = f"delivered {_hhmm(rec.delivered_at)}"
@@ -2140,27 +2139,29 @@ def _day_hhmm(stamp: datetime) -> str:
     return stamp.strftime("%a %d %b %H:%M")
 
 
-def _rec_lines(recs: list[_LedgerRec]) -> list[str]:
+def _rec_lines(recs: list[_LedgerRec], today: date) -> list[str]:
     """At most :data:`_MAX_LIST_ROWS` ledger lines, with the overflow ACCOUNTED FOR rather than
     dropped — a silently short list would misinform the owner about what is live."""
     if len(recs) <= _MAX_LIST_ROWS:
-        return [_rec_line(rec) for rec in recs]
+        return [_rec_line(rec, today) for rec in recs]
     shown = recs[:_MAX_LIST_ROWS]
-    return [*(_rec_line(rec) for rec in shown), f"  … and {len(recs) - _MAX_LIST_ROWS} more"]
+    return [*(_rec_line(rec, today) for rec in shown), f"  … and {len(recs) - _MAX_LIST_ROWS} more"]
 
 
-def _ambiguous_reply(symbol: str, matches: list[_LedgerRec]) -> str:
+def _ambiguous_reply(symbol: str, matches: list[_LedgerRec], today: date) -> str:
     """Several live recommendations share a ticker: list them and act on NONE (WO-29)."""
     return "\n".join(
         [
             f"{len(matches)} recommendations match {symbol} — nothing done. "
             "Re-send with the full rec_id:",
-            *_rec_lines(matches),
+            *_rec_lines(matches, today),
         ]
     )
 
 
-def _no_match_reply(symbol: str, recs: list[_LedgerRec], human_action: str | None) -> str:
+def _no_match_reply(
+    symbol: str, recs: list[_LedgerRec], human_action: str | None, today: date
+) -> str:
     """No recommendation answers to this argument: say so, then show what the owner CAN act on.
 
     A bare "unknown" would leave the owner guessing at a handle they have never been shown — the whole
@@ -2169,7 +2170,7 @@ def _no_match_reply(symbol: str, recs: list[_LedgerRec], human_action: str | Non
     head = f"no {label} recommendation for {symbol}."
     if not recs:
         return f"{head} none {label} right now."
-    return "\n".join([head, f"{label} now:", *_rec_lines(recs)])
+    return "\n".join([head, f"{label} now:", *_rec_lines(recs, today)])
 
 
 def _render_payload(raw: str | None) -> str:
