@@ -2,6 +2,36 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-03 20:50 — Silent connected feed: respawn fix built, reviewed and deployed (autonomy directive; diagnosis in the 16:20 entry)
+
+- **Change (`4d822db`, built on `wip/feed-respawn`, fast-forwarded onto phase3):**
+  - In session, a DEGRADED feed silent past `ticker.tick_silence_respawn_s` (300 s) respawns the child. Silence is
+    timed from the latest of the last tick, the last HEALTHY entry and the session open.
+  - At most `ticker.max_tick_silence_respawns` (3) respawns per episode. A tick, or a new session date, starts a new
+    episode.
+  - `feed_degraded` is one-shot per episode. `feed_silent_unrecovered` (warning) fires once when the cap is spent.
+  - These respawns publish no STALE, so they freeze nothing and page no risk change (`feed_health_to_latch`
+    freezes only on STALE).
+  - The DEGRADED and respawn lines log the child's `ws_connected` and its own `last_tick_age_s`.
+  - A silence now costs about 5 min before the first fresh connection; on 11-03 it lasted 104 min.
+- **The brief was wrong on one point:** `_last_tick_at` IS reset on every respawn (`_reset_spawn_stamps`), so the
+  escalation's "since" is kept in episode state.
+- **Validation:**
+  - 14 new supervisor tests, each failing on the base tree.
+  - Unit suite: 4,127 passed (7:16, with the engine's evening catch-up running).
+  - Chaos cases 03/13/15/22: 12 passed, 3 designed skips.
+  - ruff clean. mypy: no new errors on the touched lines.
+  - The builder's own full run took 3 h 51 min across a 16:34–20:16 host sleep and had 2 timing failures
+    (`test_native_preload`, `test_why`). Both pass alone and in the clean run.
+- **Deploy:**
+  - 20:42: the evening catch-up had finished at 20:31:20 with nothing failed (the host slept 16:34–20:16, so the
+    18:00–20:30 jobs ran from 20:16); the 21:00 jobs had not started; the editable install pointed at the live tree.
+  - Stopped 20:42:36 (31 s), started. Selftest ok; load-bearing catch-up ran `features_daily`, nothing failed or
+    froze; `startup_report` NORMAL, integrity ok; the ticker connected (303 tokens); `engine_ready` 20:45:43;
+    `boot_contract_ok` 148.2 s.
+  - Worktree removed (junction unlinked first); branch deleted.
+- **First live check:** the next session. A silence episode logs `ticker_tick_silence_respawn attempt=n/3`.
+
 ## 2026-11-03 16:20 — `/taken` fix deployed; market-pause study: hi52 NOT SUPPORTED, ins INSUFFICIENT; today's in-session feed losses diagnosed (owner: "Re-check the status of the system …"; chose "Cleanup, Deploy /taken fix, Market-pause study")
 
 - **Cleanup:** `738a8d4` (committed before the session) removed the shipped review-actions plan and the
