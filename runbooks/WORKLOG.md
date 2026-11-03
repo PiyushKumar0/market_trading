@@ -2,6 +2,54 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-03 16:20 — `/taken` fix deployed; market-pause study: hi52 NOT SUPPORTED, ins INSUFFICIENT; today's in-session feed losses diagnosed (owner: "Re-check the status of the system …"; chose "Cleanup, Deploy /taken fix, Market-pause study")
+
+- **Cleanup:** `738a8d4` (committed before the session) removed the shipped review-actions plan and the
+  TradingAgents report; both are at `git show 8158a9a:<path>`.
+- **Deploy (`8158a9a` + `738a8d4`):**
+  - 15:53:29 checks: the 15:50 reconcile had logged `reconcile_done` ok at 15:51:56; the next job was bhavcopy at
+    18:00 and `tick_compact` at 22:30; neither commit carries a migration or a dashboard change.
+  - Stopped 15:53:47 (17 s), started. Selftest ok; catch-up caught up, failed and froze nothing;
+    `startup_report` NORMAL, integrity ok; `engine_ready` 15:56:11; `boot_contract_ok` 125.2 s.
+- **Market-pause study** (registered 2026-10-29, run as registered):
+  - Snapshot built from the 11-02 nightly export with the engine running
+    (`..\mt_build_notes\section3\snapshot_from_export.py`; `bars_1d` 2,194,052 rows).
+  - Command: `scripts\backtest_market_pause.py --db data\research\market_2026-11-02.duckdb --end 2026-11-02`.
+    Report: `data\reports\market_pause_2026-11-02.{json,md}`.
+  - hi52 NOT SUPPORTED. TRADE n 1,456: median net +2.06%, CPCV 86.7%, p 0.0007, against FULL +1.67%. But PAUSE
+    (n 383) has median net +0.20%, and the rule needs ≤ 0. The 2026 diagnostic split runs the other way: FULL n 306
+    −0.79%, TRADE −0.95%, PAUSE +0.11%.
+  - ins INSUFFICIENT: PAUSE n 13 < 30; TRADE (n 30) not CPCV-promotable; p 0.46.
+  - Nothing is wired. The registration text left the plan with this commit (`git show 738a8d4:IMPLEMENTATION_PLAN.md`);
+    the rule stays in the script's docstring.
+- **Feed loss today: 167 of 375 session minutes had no live ticks.**
+  - 09:15–10:17 was host sleep. Kernel-Power 506/507: lid closed on battery at 07:36, asleep until 10:17:33.
+    Keep-awake cannot help with a lid close. The same morning sleep cost 21–99 session minutes on 11 sessions since
+    10-01.
+  - 13:46–15:30 was a silent connected feed. The ticker child heartbeated every second, its WebSocket stayed
+    connected (no reconnect, error or close), REST calls succeeded and the token was valid, but no tick arrived.
+    - The supervisor went DEGRADED at 13:48:09, sent one "Feed degraded" warning, and never reconnected (by design:
+      only heartbeat silence respawns). The 15:53 restart ended it.
+    - The same state occurred 11-02 14:51–15:22 (it ended when Kite dropped the TCP connection; the child reconnected
+      and ticks resumed within 1 s), 10-07 13:24–14:25 and 09-30 13:23–13:55. Every tick silence since 09-15 ended
+      with a fresh connection.
+    - Fix specified in IMPLEMENTATION_PLAN §4 "Silent connected feed".
+  - The 15:51 reconcile refilled most minute bars (`offline_bars` 49,155 of 65,827 compared; orb coverage 272 → 360
+    of 375) and sent `reconcile_drift` (91 flagged). The boot's "INTRADAY coverage short" warning is the same gap, on
+    orb, which is parked.
+  - The 15:43 `store_stalled` came from host sleep after the session (keep-awake released at 15:30:01, sleep phase
+    from 15:30:10), not a store fault.
+  - Paper: none of the four open positions exits before 11-27, and JINDALSTEL (ins) filled at 10:28 while the feed was
+    live.
+- **Correction to the 11-03 status report:**
+  - Counting every 506 → 507 span as downtime overstated in-session standby. The engine runs through the screen-off
+    phase; only the sleep phase (`SleepEntered`, the last `SleepDurationInUs` of a span) suspends it
+    (`..\mt_build_notes\section3\session_sleep.ps1`).
+  - With keep-awake engaged and the laptop on AC (battery flat across the span), lid-open idle sleep still happened:
+    11-02 13:04–14:07, 10-30 11:48–12:14 and 10-26 15:06–15:30. Today the same request held until its 15:30:01
+    release. So `ES_SYSTEM_REQUIRED` alone is unreliable on this host, and no request override is set
+    (`powercfg /requestsoverride` is empty). The host-power choice stays with the owner.
+
 ## 2026-11-03 11:10 — `/taken JINDALSTEL` refused as ambiguous: fixed and validated, not yet deployed (owner: "Fix the issue, review and validate.")
 
 - **What happened:** at ~10:30 `/taken jindalstel 12 1102.80` replied "2 recommendations match JINDALSTEL — nothing done".

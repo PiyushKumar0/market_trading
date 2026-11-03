@@ -147,26 +147,6 @@ session after it, here and in the constant. Each rule has a `registered` row in 
 - **Demotion:** add ins to `NO_EDGE_SHADOW_STRATEGIES`, which wins over its registered edge (`gate.py:1046-1049`).
 - **Tool:** `scripts/forward_verdicts.py --rule ins`.
 
-**Market-wide pause study (registered 2026-10-29, run before any wiring).**
-- **Strategies:** hi52 and ins.
-- **Rule:** at signal session y, PAUSE if the core equal-weight return compounded over the 20 sessions ending at y
-  is < 0; otherwise TRADE.
-- **Population and construct:** C2's populations, construct and cost (`scripts/backtest_regime_filter.py`), on a
-  research snapshot.
-- **EW series:** the daily mean of close/prev_close − 1 over the current core-eligible list (a
-  survivorship-tainted proxy). |r| > 25% and structural corporate-action days are excluded.
-- **Family:** per strategy, the regime-filter family is C2 plus this rule, so N = 2.
-- **Decision:** SUPPORTED iff all hold:
-  - TRADE and PAUSE each have n ≥ 30;
-  - TRADE is CPCV-promotable at `fold_pass_min(2)`;
-  - TRADE median net > max(0, FULL median);
-  - PAUSE median net ≤ 0;
-  - the permutation p < 0.025, where p is the share of 10,000 same-size random subsamples of FULL (seed
-    20261029) whose median ≥ TRADE's median.
-
-  INSUFFICIENT if a cohort has n < 30; NOT SUPPORTED otherwise. SUPPORTED goes to the owner.
-- **Tool:** `scripts/backtest_market_pause.py` on a fresh research snapshot (its `REGISTERED` holds this date).
-
 **Conditional specs (build only on their trigger).**
 - **ADVISORY build** (trigger: the analyst verdict reads ADVISORY).
   - For hi52 and ins, an analyst no_action or a failed call no longer ends the candidate.
@@ -197,6 +177,21 @@ session after it, here and in the constant. Each rule has a `registered` row in 
 
 ## 4. Known defects and test gaps
 
+- **Silent connected feed (2026-11-03, building).**
+  - **Defect:** in session the Kite WebSocket can stay connected and deliver no ticks, while the child heartbeats
+    every second and Kite answers its pings. Seen 11-03 13:46–15:30, 11-02 14:51–15:22, 10-07 13:24–14:25 and
+    09-30 13:23–13:55.
+  - **Current behaviour:** the supervisor goes DEGRADED, alerts once, and respawns only on heartbeat silence. Every
+    silence since 09-15 ended with a fresh connection.
+  - **Fix:**
+    - In session, a DEGRADED feed silent past `ticker.tick_silence_respawn_s` (300 s) respawns the child
+      (`reason="tick_silence"`). Silence is measured from the later of the last tick and the last HEALTHY entry, so
+      each fresh connection gets the full budget.
+    - At most `ticker.max_tick_silence_respawns` (3) respawns per silence episode. A tick, or a new session date,
+      starts a new episode.
+    - The DEGRADED alert stays one-shot per episode, and one escalation alert fires when the cap is spent.
+    - DEGRADED entry logs the child's `ws_connected` and its own `last_tick_age_s`. These separate a Kite-side stall
+      from a forwarding fault.
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
 - The 08:40 `token_check` sends a "token invalid, re-login" page when a login lands while its probe is in flight;
   the mid-day breaker ignores such a superseded token, this job does not.
