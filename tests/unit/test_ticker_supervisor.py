@@ -29,6 +29,8 @@ class _FakeTickerCfg:
     heartbeat_silence_kill_s = 10
     max_instruments_per_conn = 3000
     tick_silence_degrade_s = 120
+    tick_silence_respawn_s = 300
+    max_tick_silence_respawns = 3
     feed_stats_interval_s = 300
     warming_timeout_s = 60
     warming_backoff_cap_s = 300
@@ -1358,3 +1360,340 @@ async def test_a_long_wedge_streak_backs_off_at_the_cap_without_overflow(clock, 
 
     monkeypatch.setattr(sup, "_respawn", fake_respawn)
     assert await sup._check_warming_timeout(60.0, 300.0, 5) is False   # 299 s is inside the 300 s cap
+
+
+# ================================================================== silent connected feed (2026-11-03)
+# Kite held the WebSocket open and answered pings while delivering no ticks (11-03 13:46–15:30, 11-02
+# 14:51–15:22, 10-07, 09-30). The child heartbeats throughout, so only tick silence can see it, and
+# every such silence since 09-15 ended with a fresh connection. DEGRADED past 300 s in session now
+# respawns, at most 3 times per episode, then escalates once.
+class _DayCalendar:
+    """NSECalendar stand-in with a 09:15–15:30 session on EVERY date (the rollover test needs two)."""
+
+    def session(self, d: dt.date):  # noqa: ANN001 - test double
+        return _FakeSession(dt.datetime(d.year, d.month, d.day, 9, 15, tzinfo=IST),
+                            dt.datetime(d.year, d.month, d.day, 15, 30, tzinfo=IST))
+
+
+def _silent_feed_rig(monkeypatch, start: dt.datetime, *, calendar=None, spawn=None, notify=None):
+    """A HEALTHY in-session supervisor whose last tick is ``start``; heartbeats keep coming, ticks don't.
+
+    The REAL ``_respawn`` runs; only the OS edges are faked: terminate drops the proc, and spawn does to
+    supervisor state exactly what ``_spawn_child`` does (per-spawn stamps reset, WARMING). ``spawn`` is an
+    optional hook run first, so a test can make the spawn raise."""
+    import engine.broker.ticker_supervisor as mod
+
+    rec = _LogRec()
+    monkeypatch.setattr(mod, "_log", rec)
+    now = _Now(start)
+    clock = Clock(time_source=now)
+    notify = notify if notify is not None else _NotifyRec()
+    sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), calendar=calendar or _DayCalendar(),
+                           notify=notify, symbol_for_token=lambda t: "R")
+    sup._access_token = "tok"
+    sup._state = "HEALTHY"
+    sup._healthy_since = start - dt.timedelta(hours=1)
+    sup._last_tick_at = start
+    spawns: list[dt.datetime] = []
+
+    async def fake_spawn():
+        spawns.append(clock.now())
+        if spawn is not None:
+            await spawn()
+        sup._reset_spawn_stamps()
+        sup._set_state("WARMING")
+
+    async def fake_terminate():
+        sup._proc = None
+
+    monkeypatch.setattr(sup, "_spawn_child", fake_spawn)
+    monkeypatch.setattr(sup, "_terminate_child", fake_terminate)
+    return sup, now, notify, rec, spawns
+
+
+async def _drive(sup, now: _Now, seconds: int, *, beat: dict | None = None) -> None:
+    """``seconds`` one-second monitor cycles of the tick-silence path: a heartbeat lands each second (it
+    promotes a respawned child out of WARMING, as the real first heartbeat does), and no tick ever does."""
+    frame = beat or _hb(True, connect_seq=1)
+    for _ in range(seconds):
+        now.set(now.value + dt.timedelta(seconds=1))
+        await sup._handle_frame(frame)
+        await sup._check_tick_silence(120.0)
+        await sup._check_tick_silence_respawn(300.0, 3)
+
+
+def _events(rec: _LogRec, name: str) -> list[tuple[str, dict]]:
+    return [(lvl, kw) for (lvl, ev, kw) in rec.calls if ev == name]
+
+
+def _kinds(notify: _NotifyRec) -> list[MessageKind]:
+    return [m.kind for m in notify.msgs]
+
+
+@pytest.mark.asyncio
+async def test_silent_connected_feed_respawns_once_past_300s_through_the_real_monitor(monkeypatch):
+    """(a) The REAL monitor loop: DEGRADED at 121 s, no respawn at 299 s or 300 s, exactly one
+    ``tick_silence`` respawn at 301 s, and the loop returns after it (a fresh monitor takes over)."""
+    now = _Now(_at(10, 0, 0))
+    clock = Clock(time_source=now)
+    notify = _NotifyRec()
+    sup = _monitor_sup(clock, calendar=_DayCalendar(), notify=notify)
+    sup._last_tick_at = clock.now()
+
+    respawns: list[str] = []
+
+    async def fake_respawn(*, reason):
+        respawns.append(reason)
+
+    monkeypatch.setattr(sup, "_respawn", fake_respawn)
+
+    async def cycle(_i):
+        now.set(now.value + dt.timedelta(seconds=1))
+        await sup._handle_frame(_hb(True, connect_seq=1))      # the child heartbeats; Kite sends nothing
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=299)
+    assert sup.health().state == "DEGRADED"
+    assert respawns == []                                       # 299 s: inside the budget
+    assert _kinds(notify) == [MessageKind.FEED_DEGRADED]
+
+    await _run_monitor(sup, monkeypatch, cycle, cycles=10)
+    assert respawns == ["tick_silence"]                         # 301 s: once, and the loop returned
+    assert now.value == _at(10, 5, 1)
+
+
+@pytest.mark.asyncio
+async def test_tick_silence_never_respawns_outside_market_hours(monkeypatch):
+    """(b) DEGRADED left over after the 15:30 close, or on a holiday, never respawns."""
+    sup, now, notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(15, 0, 0))
+    sup._state = "DEGRADED"
+    now.set(_at(15, 31, 0))                                     # 31 min of silence, but the session is shut
+    await _drive(sup, now, 600)
+    assert spawns == [] and sup.health().state == "DEGRADED"
+
+    holiday, hnow, _n, _r, hspawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0), calendar=_FakeCalendar(None))
+    holiday._state = "DEGRADED"
+    await _drive(holiday, hnow, 900)
+    assert hspawns == [] and holiday.health().state == "DEGRADED"
+    assert notify.msgs == []
+
+
+@pytest.mark.asyncio
+async def test_each_fresh_connection_gets_the_full_budget_from_its_healthy_entry(monkeypatch):
+    """(c) After a tick-silence respawn the fresh child goes HEALTHY on its first heartbeat and re-enters
+    DEGRADED 120 s later; its own respawn waits a full 300 s from that HEALTHY entry."""
+    sup, now, notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+
+    await _drive(sup, now, 301)
+    assert spawns == [_at(10, 5, 1)]                            # first connection: 301 s after the last tick
+    await _drive(sup, now, 1)
+    assert sup.health().state == "HEALTHY" and sup._healthy_since == _at(10, 5, 2)
+
+    await _drive(sup, now, 150)
+    assert sup.health().state == "DEGRADED"                     # the re-entry ...
+    assert _kinds(notify) == [MessageKind.FEED_DEGRADED]        # ... does not page again
+
+    await _drive(sup, now, 150)                                 # 10:10:02: 300 s after the HEALTHY entry
+    assert len(spawns) == 1
+    await _drive(sup, now, 1)
+    assert spawns[1] == _at(10, 10, 3)                          # 301 s after it, not 301 s after the old tick
+    assert [kw["attempt"] for _lvl, kw in _events(rec, "ticker_tick_silence_respawn")] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_tick_silence_respawn_times_from_the_later_of_last_tick_and_healthy_entry(monkeypatch):
+    """(c) The respawn clock is the LATER of the last tick and the HEALTHY entry, not
+    ``_effective_tick_silence_s`` (last tick first): a feed that recovered from STALE at 10:04 with a 10:00
+    tick on file has had 120 s of silence at 10:06, not 360 s."""
+    sup, now, _notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+    sup._state = "DEGRADED"
+    sup._healthy_since = _at(10, 4, 0)
+    now.set(_at(10, 6, 0))
+
+    assert await sup._check_tick_silence_respawn(300.0, 3) is False
+    now.set(_at(10, 9, 0))
+    assert await sup._check_tick_silence_respawn(300.0, 3) is False
+    now.set(_at(10, 9, 1))
+    assert await sup._check_tick_silence_respawn(300.0, 3) is True
+    assert spawns == [_at(10, 9, 1)]
+
+
+@pytest.mark.asyncio
+async def test_three_respawns_then_one_escalation_and_one_degraded_alert(monkeypatch):
+    """(d) The cap: 3 respawns, then none; one ERROR and one ``feed_silent_unrecovered`` notify; and the
+    ``feed_degraded`` notify fired once over the episode despite four DEGRADED entries."""
+    sup, now, notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+
+    await _drive(sup, now, 1500)
+    assert len(spawns) == 3
+    assert [kw["attempt"] for _lvl, kw in _events(rec, "ticker_tick_silence_respawn")] == [1, 2, 3]
+    assert all(kw["max_respawns"] == 3 for _lvl, kw in _events(rec, "ticker_tick_silence_respawn"))
+    assert len(_events(rec, "feed_tick_silence_degraded")) == 4   # every entry still logs ...
+    assert _kinds(notify) == [MessageKind.FEED_DEGRADED, MessageKind.FEED_SILENT_UNRECOVERED]  # ... pages don't
+
+    exhausted = _events(rec, "ticker_tick_silence_respawns_exhausted")
+    assert [lvl for lvl, _kw in exhausted] == ["error"]
+    assert exhausted[0][1]["respawns"] == 3
+    assert exhausted[0][1]["since"] == _at(10, 0, 0).isoformat()    # the episode's last real tick
+    msg = notify.msgs[1]
+    assert msg.severity == "warning" and msg.data["respawns"] == 3
+    assert "since 10:00 IST" in msg.body and "3 fresh" in msg.body
+    assert msg.dedupe_key == f"feed_silent_unrecovered:{_at(10, 0, 0).isoformat()}"
+
+    await _drive(sup, now, 1800)                                    # cap spent: DEGRADED, quiet, no respawns
+    assert len(spawns) == 3 and len(notify.msgs) == 2
+    assert len(_events(rec, "ticker_tick_silence_respawns_exhausted")) == 1
+    assert sup.health().state == "DEGRADED"
+
+
+@pytest.mark.asyncio
+async def test_a_tick_after_respawns_starts_a_new_episode_with_a_full_cap(monkeypatch):
+    """(e) A tick after two respawns (DEGRADED → HEALTHY via the tick) ends the episode: a later silence
+    gets a fresh ``feed_degraded`` page and three more respawns before it escalates."""
+    sup, now, notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+
+    await _drive(sup, now, 800)                                     # third child DEGRADED since t=725
+    assert len(spawns) == 2 and sup.health().state == "DEGRADED"
+    await sup._handle_frame(_tick_frame(token=1, ts=now.value))     # Kite delivers again
+    assert sup.health().state == "HEALTHY"
+    assert (sup._silence_respawns, sup._silence_notified, sup._silence_episode_date) == (0, False, None)
+
+    await _drive(sup, now, 2000)
+    assert len(spawns) == 5                                         # 2 + a full cap of 3
+    assert _kinds(notify) == [MessageKind.FEED_DEGRADED, MessageKind.FEED_DEGRADED,
+                              MessageKind.FEED_SILENT_UNRECOVERED]
+    attempts = [kw["attempt"] for _lvl, kw in _events(rec, "ticker_tick_silence_respawn")]
+    assert attempts == [1, 2, 1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_tick_on_a_heartbeat_promoted_child_also_ends_the_episode(monkeypatch):
+    """(e) The fresh child is HEALTHY (heartbeat-promoted) when its first tick lands, not DEGRADED; that
+    tick must end the episode too, and the HEALTHY promotion itself must not."""
+    sup, now, _notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+
+    await _drive(sup, now, 302)
+    assert len(spawns) == 1 and sup.health().state == "HEALTHY"
+    assert sup._silence_respawns == 1                               # the promotion kept the episode
+    await sup._handle_frame(_tick_frame(token=1, ts=now.value))
+    assert sup._silence_respawns == 0 and sup._silence_episode_date is None
+
+
+@pytest.mark.asyncio
+async def test_a_new_session_date_resets_a_spent_cap(monkeypatch):
+    """(f) Capped and escalated yesterday, still DEGRADED at today's open: today's session gets a full
+    cap, timed from today's 09:15 open (not yesterday's silence), and its own ``feed_degraded`` page."""
+    sup, now, notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(14, 0, 0))
+    await _drive(sup, now, 1500)
+    assert len(spawns) == 3 and sup._silence_escalated and sup.health().state == "DEGRADED"
+
+    now.set(dt.datetime(2026, 6, 18, 9, 0, 0, tzinfo=IST))         # next morning, pre-open
+    await _drive(sup, now, 15 * 60 + 300)                           # to 09:20:00
+    assert len(spawns) == 3
+    await _drive(sup, now, 1)
+    assert spawns[3] == dt.datetime(2026, 6, 18, 9, 20, 1, tzinfo=IST)
+    assert sup._silence_respawns == 1 and not sup._silence_escalated
+
+    await _drive(sup, now, 200)                                     # the fresh child re-enters DEGRADED
+    assert _kinds(notify) == [MessageKind.FEED_DEGRADED, MessageKind.FEED_SILENT_UNRECOVERED,
+                              MessageKind.FEED_DEGRADED]
+
+
+@pytest.mark.asyncio
+async def test_a_tick_silence_respawn_whose_spawn_raises_keeps_supervising_and_counts(monkeypatch):
+    """(h) A spawn that raises takes the existing ``_spawn_failed`` path (STALE + a retry task standing in
+    for the monitor) and still spends an attempt."""
+    import engine.broker.ticker_supervisor as mod
+
+    async def denied():
+        raise PermissionError(13, "Access is denied")
+
+    async def parked(_seconds: float) -> None:
+        await asyncio.Event().wait()
+
+    sup, now, _notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0), spawn=denied)
+    monkeypatch.setattr(mod, "_monitor_sleep", parked)
+    sup._state = "DEGRADED"
+    now.set(_at(10, 5, 1))
+
+    assert await sup._check_tick_silence_respawn(300.0, 3) is True   # must not raise
+    retry = sup._monitor_task
+    assert len(spawns) == 1 and sup._silence_respawns == 1
+    assert sup.health().state == "STALE" and sup._spawn_failures == 1
+    assert retry is not None and retry.get_name() == "ticker-spawn-retry" and not retry.done()
+    await sup.stop()
+    assert retry.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_tick_silence_respawn_without_a_token_stops_and_counts(monkeypatch):
+    """(h) No access token: the existing STOPPED path, no spawn, and the attempt is still spent."""
+    sup, now, _notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+    sup._access_token = None
+    sup._state = "DEGRADED"
+    now.set(_at(10, 5, 1))
+
+    assert await sup._check_tick_silence_respawn(300.0, 3) is True
+    assert spawns == [] and sup._silence_respawns == 1
+    assert sup.health().state == "STOPPED"
+    assert _events(rec, "ticker_respawn_no_access_token")
+
+
+@pytest.mark.asyncio
+async def test_tick_silence_logs_carry_the_childs_own_link_state(monkeypatch):
+    """The DEGRADED and respawn WARNINGs carry the child's ``ws_connected`` and its OWN
+    ``last_tick_age_s``: a small child-side age while the supervisor sees silence is a forwarding fault."""
+    sup, now, _notify, rec, _spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
+    beat = {"type": "heartbeat", "seq": 1, "ws_connected": True, "last_tick_age_s": 1234.5, "connect_seq": 1}
+
+    await _drive(sup, now, 301, beat=beat)
+    (_lvl, degraded), = _events(rec, "feed_tick_silence_degraded")
+    assert (degraded["ws_connected"], degraded["child_last_tick_age_s"], degraded["silence_respawns"]) == (
+        True, 1234.5, 0)
+    (lvl, respawn), = _events(rec, "ticker_tick_silence_respawn")
+    assert lvl == "warning"
+    assert (respawn["ws_connected"], respawn["child_last_tick_age_s"]) == (True, 1234.5)
+    assert respawn["tick_silence_s"] > 300
+    assert sup._child_tick_age_s is None                            # per-spawn: the fresh child reported nothing
+
+    await sup._handle_frame({"type": "heartbeat", "last_tick_age_s": None})   # "no tick yet" is kept as None
+    assert sup._child_tick_age_s is None
+    await sup._handle_frame({"type": "heartbeat", "last_tick_age_s": 2.5})
+    await sup._handle_frame({"type": "heartbeat"})                  # absent: leaves the value alone
+    assert sup._child_tick_age_s == 2.5
+
+
+@pytest.mark.asyncio
+async def test_a_failing_escalation_notify_never_crashes_the_monitor(monkeypatch):
+    """The owner sink raising (Telegram down) is logged; the escalation is still marked once."""
+
+    class _Boom:
+        async def __call__(self, _msg) -> None:
+            raise RuntimeError("telegram down")
+
+    sup, now, _notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0), notify=_Boom())
+    await _drive(sup, now, 1500)                                    # must not raise
+    assert len(spawns) == 3 and sup._silence_escalated
+    assert len(_events(rec, "feed_silent_unrecovered_notify_failed")) == 1
+
+
+def test_feed_silent_unrecovered_dedupe_key_is_per_episode():
+    """The next session's (or a later episode's) escalation must not be swallowed by today's key."""
+    from engine.notify.catalog import feed_silent_unrecovered
+
+    today = feed_silent_unrecovered(respawns=3, since=_at(13, 46, 0), silence_s=1200.0)
+    later = feed_silent_unrecovered(respawns=3, since=_at(14, 51, 0), silence_s=1200.0)
+    tomorrow = feed_silent_unrecovered(
+        respawns=3, since=dt.datetime(2026, 6, 18, 9, 15, tzinfo=IST), silence_s=1200.0)
+    assert len({today.dedupe_key, later.dedupe_key, tomorrow.dedupe_key}) == 3
+    assert today.kind == MessageKind.FEED_SILENT_UNRECOVERED and today.severity == "warning"
+    for phrase in ("since 13:46 IST", "3 fresh Kite connections", "Intraday detection and live marks are blind",
+                   "Kite-side outage", "exchange halt", "network"):
+        assert phrase in today.body
+
+
+def test_tick_silence_respawn_keys_load_from_settings_yaml():
+    """The real config/settings.yaml through the real loader: the new knobs carry the seeded values."""
+    from engine.core.config import load_settings
+
+    s = load_settings()
+    assert (s.ticker.tick_silence_respawn_s, s.ticker.max_tick_silence_respawns) == (300, 3)

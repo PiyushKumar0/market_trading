@@ -27,6 +27,9 @@ ticker:
   heartbeat_silence_kill_s: 10            # silence > 10 s => kill+respawn+stale-data guard (R2/A4)
   max_instruments_per_conn: 3000          # A3
   tick_silence_degrade_s: 120             # in-session tick silence (heartbeats OK) => DEGRADED + alert
+  tick_silence_respawn_s: 300             # in-session DEGRADED silence > this => respawn (silent connected feed,
+                                          #   2026-11-03; timed from the later of last tick / HEALTHY entry)
+  max_tick_silence_respawns: 3            # tick-silence respawns per silence episode, then escalate ONCE (warning)
   feed_stats_interval_s: 300              # periodic in-session feed_stats INFO line cadence
   warming_timeout_s: 60                   # WARMING with no heartbeat > this => kill+respawn (2026-07-23
                                           #   sleep/resume wedge; also the generic system-resume recovery)

@@ -69,6 +69,14 @@ class TickerCfg(BaseModel):
     # market hours, tick silence beyond this budget (heartbeats still fine) ⇒ a visible DEGRADED state
     # + owner alert. Off-hours keeps heartbeat-only semantics (no false night alarms).
     tick_silence_degrade_s: int = 120
+    # Silent connected feed (2026-11-03): Kite can hold a WebSocket open, answer pings and deliver no
+    # ticks for an hour; only a fresh connection has ever ended one. In session, DEGRADED silence past
+    # this (measured from the later of the last tick and the last HEALTHY entry, so each fresh
+    # connection gets the full budget) ⇒ kill + respawn the child.
+    tick_silence_respawn_s: int = 300
+    # Tick-silence respawns per silence episode (a tick or a new session date starts a new one); once
+    # spent, the feed stays DEGRADED and the owner is escalated to ONCE.
+    max_tick_silence_respawns: int = 3
     # Cadence of the periodic in-session ``feed_stats`` INFO line (ticks/drops/bars since last stat).
     feed_stats_interval_s: int = 300
     # WARMING-wedge guard (2026-07-23 13:41 sleep/resume incident): the HEALTHY-path heartbeat-silence

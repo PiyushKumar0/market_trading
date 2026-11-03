@@ -95,8 +95,8 @@ WAIT_BOUND_S = 5.0
 #: incident alerts", case 22 (a) "no false alarm across the idle gap").
 INCIDENT_KINDS = frozenset({
     MessageKind.FEED_STALE, MessageKind.FEED_DEGRADED, MessageKind.FEED_WEDGED,
-    MessageKind.ENGINE_CRASHLOOP, MessageKind.DATA_FRESHNESS_FROZEN, MessageKind.KILL,
-    MessageKind.LIMIT_BREACH,
+    MessageKind.FEED_SILENT_UNRECOVERED, MessageKind.ENGINE_CRASHLOOP, MessageKind.DATA_FRESHNESS_FROZEN,
+    MessageKind.KILL, MessageKind.LIMIT_BREACH,
 })
 
 

@@ -177,21 +177,6 @@ session after it, here and in the constant. Each rule has a `registered` row in 
 
 ## 4. Known defects and test gaps
 
-- **Silent connected feed (2026-11-03, building).**
-  - **Defect:** in session the Kite WebSocket can stay connected and deliver no ticks, while the child heartbeats
-    every second and Kite answers its pings. Seen 11-03 13:46–15:30, 11-02 14:51–15:22, 10-07 13:24–14:25 and
-    09-30 13:23–13:55.
-  - **Current behaviour:** the supervisor goes DEGRADED, alerts once, and respawns only on heartbeat silence. Every
-    silence since 09-15 ended with a fresh connection.
-  - **Fix:**
-    - In session, a DEGRADED feed silent past `ticker.tick_silence_respawn_s` (300 s) respawns the child
-      (`reason="tick_silence"`). Silence is measured from the later of the last tick and the last HEALTHY entry, so
-      each fresh connection gets the full budget.
-    - At most `ticker.max_tick_silence_respawns` (3) respawns per silence episode. A tick, or a new session date,
-      starts a new episode.
-    - The DEGRADED alert stays one-shot per episode, and one escalation alert fires when the cap is spent.
-    - DEGRADED entry logs the child's `ws_connected` and its own `last_tick_age_s`. These separate a Kite-side stall
-      from a forwarding fault.
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
 - The 08:40 `token_check` sends a "token invalid, re-login" page when a login lands while its probe is in flight;
   the mid-day breaker ignores such a superseded token, this job does not.

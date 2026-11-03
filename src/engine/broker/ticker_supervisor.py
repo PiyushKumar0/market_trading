@@ -79,7 +79,7 @@ import secrets as _secrets
 import struct
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -98,8 +98,8 @@ from engine.core.config import Settings
 from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
-from engine.core.types import Tick
-from engine.notify.catalog import CatalogMessage, feed_degraded, feed_wedged
+from engine.core.types import Session, Tick
+from engine.notify.catalog import CatalogMessage, feed_degraded, feed_silent_unrecovered, feed_wedged
 
 #: Owner-notification sink type (§3.2.11): async, consumes a typed :class:`CatalogMessage`.
 NotifyFn = Callable[[CatalogMessage], Awaitable[None]]
@@ -290,7 +290,8 @@ class TickerSupervisor:
         NSE calendar for the in-session tick-silence guard (§7.1): the guard only fires during market
         hours. ``None`` disables the guard (bare harness) — the feed then keeps heartbeat-only health.
     notify:
-        Async owner-notification sink (§3.2.11) for the one-shot HEALTHY→DEGRADED alert. Best-effort;
+        Async owner-notification sink (§3.2.11) for the once-per-episode HEALTHY→DEGRADED alert and the
+        tick-silence respawn escalation. Best-effort;
         ``None`` skips the owner notify (the WARNING log + ``feed.health`` transition still fire).
     """
 
@@ -349,6 +350,9 @@ class TickerSupervisor:
         # spawn; both are cleared per spawn by :meth:`_reset_spawn_stamps`.
         self._last_connect_seq: int | None = None
         self._last_ws_connected: bool | None = None
+        # The child's OWN age since its last Kite tick, off the heartbeat. Diagnostic only, never a
+        # decision input: small while the supervisor sees silence names a forwarding fault, not Kite.
+        self._child_tick_age_s: float | None = None
         self._started_at = None  # type: ignore[var-annotated]
         self._healthy_since = None  # type: ignore[var-annotated]  # entry into HEALTHY (tick-silence ref)
 
@@ -363,6 +367,16 @@ class TickerSupervisor:
         self._wedge_escalated = False
         #: Consecutive respawns whose spawn raised (2026-10-12); reset by a spawn that returns.
         self._spawn_failures = 0
+
+        # --- tick-silence episode (2026-11-03 silent connected feed). NOT per-spawn state: the cap
+        #     counts the respawns this episode makes, so a respawn must not clear it. A tick clears it
+        #     (_handle_frame); a new session date replaces it (_open_silence_episode). ``None`` date =
+        #     no episode open. ---
+        self._silence_episode_date: date | None = None
+        self._silence_episode_since: datetime | None = None  # last tick / HEALTHY entry, ≥ session open
+        self._silence_respawns = 0
+        self._silence_escalated = False
+        self._silence_notified = False                       # feed_degraded sent for this episode
 
         # --- feed_stats counters (R8 observability): zero-cost increments, drained by stats_snapshot() ---
         self._ticks_received = 0
@@ -563,6 +577,7 @@ class TickerSupervisor:
         self._last_frame_at = None
         self._last_connect_seq = None
         self._last_ws_connected = None
+        self._child_tick_age_s = None
         self._healthy_since = None
 
     async def _send_startup_handshake(self) -> None:
@@ -872,6 +887,10 @@ class TickerSupervisor:
             ws_reconnect = ws_connected is True and self._last_ws_connected is False
             if ws_connected is not None:
                 self._last_ws_connected = bool(ws_connected)
+            if "last_tick_age_s" in frame:
+                # Present-but-None is the child's own "no tick yet on this connection": kept as None.
+                child_age = frame["last_tick_age_s"]
+                self._child_tick_age_s = float(child_age) if isinstance(child_age, int | float) else None
             if self._state == "WARMING":
                 # First heartbeat proves the link + child are live: promote WARMING → HEALTHY (§2.6).
                 # The §7.1 warm-up ENTRY gate (ops.warmup) is separate — this is feed health only.
@@ -891,6 +910,10 @@ class TickerSupervisor:
         elif ftype == "tick":
             self._ticks_received += 1
             self._last_tick_at = self._clock.now()
+            if self._silence_episode_date is not None:
+                # A tick ends the silence episode, whatever the state: after a tick-silence respawn the
+                # fresh child is usually HEALTHY (heartbeat-promoted) when its first tick lands.
+                self._reset_silence_episode()
             if self._state == "WARMING":
                 # Same principle as the liveness stamp (WO-26b): a TICK is at least as good a proof
                 # of life as a heartbeat, so it promotes out of warm-up too. Otherwise a child whose
@@ -991,6 +1014,8 @@ class TickerSupervisor:
         warming_timeout = float(self._settings.ticker.warming_timeout_s)
         warming_cap = float(self._settings.ticker.warming_backoff_cap_s)
         max_wedge = int(self._settings.ticker.max_wedge_respawns)
+        tick_silence_respawn = float(self._settings.ticker.tick_silence_respawn_s)
+        max_silence_respawns = int(self._settings.ticker.max_tick_silence_respawns)
         #: Wall instant of the previous cycle + starvation accrued since liveness was last refreshed.
         last_cycle_at = self._clock.now()
         last_frame_seen = self._last_frame_at
@@ -1069,6 +1094,10 @@ class TickerSupervisor:
                 # 1 s regardless of ticks, so a tickless feed used to read HEALTHY all session (the
                 # 2026-07-22 defect). During market hours, tick silence past the budget ⇒ DEGRADED.
                 await self._check_tick_silence(tick_silence_budget)
+                # A connected-but-silent feed heartbeats fine, so the kill above never fires for it, and
+                # only a fresh connection has ever ended one (2026-11-03). A respawn returns, as above.
+                if await self._check_tick_silence_respawn(tick_silence_respawn, max_silence_respawns):
+                    return
         except asyncio.CancelledError:  # pragma: no cover - normal on stop
             raise
 
@@ -1077,19 +1106,121 @@ class TickerSupervisor:
 
         HEALTHY + inside market hours + effective tick age past ``budget_s`` ⇒ transition to the visible
         DEGRADED state (a tickless feed must NEVER present HEALTHY through a session again), emit a
-        WARNING, publish the ``feed.health`` transition, and fire the one-shot owner notify. Off-hours or
-        any non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
+        WARNING, publish the ``feed.health`` transition, and fire the owner notify. Off-hours or any
+        non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
         HEALTHY happens on the next tick in :meth:`_handle_frame`.
+
+        The notify is one-shot per silence EPISODE, not per entry: each tick-silence respawn's fresh
+        child goes HEALTHY on its first heartbeat and re-enters DEGRADED here 120 s later, and that
+        re-entry must not page again. The WARNING and the publish still fire on every entry.
         """
-        if self._state != "HEALTHY" or not self.in_market_hours():
+        if self._state != "HEALTHY":
+            return
+        now = self._clock.now()
+        session = self._open_session(now)
+        if session is None:
             return
         silence = self._effective_tick_silence_s()
         if silence is None or silence <= budget_s:
             return
+        self._open_silence_episode(session, now)
         self._set_state("DEGRADED")
-        _log.warning("feed_tick_silence_degraded", tick_silence_s=round(silence, 1), budget_s=budget_s)
+        _log.warning(
+            "feed_tick_silence_degraded",
+            tick_silence_s=round(silence, 1),
+            budget_s=budget_s,
+            silence_respawns=self._silence_respawns,
+            ws_connected=self._last_ws_connected,
+            child_last_tick_age_s=self._child_tick_age_s,
+        )
         await self._publish_health()
-        await self._notify_degraded(silence, budget_s)
+        if not self._silence_notified:
+            self._silence_notified = True
+            await self._notify_degraded(silence, budget_s)
+
+    async def _check_tick_silence_respawn(self, respawn_after_s: float, max_respawns: int) -> bool:
+        """Silent-connected-feed respawn (2026-11-03) — called each monitor tick after the DEGRADED guard.
+
+        In session, DEGRADED silence past ``respawn_after_s`` ⇒ kill + respawn the child, at most
+        ``max_respawns`` times per episode; then escalate ONCE and stay DEGRADED. Returns ``True`` when a
+        respawn ran so the monitor loop returns (``_spawn_child`` installs a fresh monitor task).
+
+        Silence runs from the LATEST of the last tick, the last HEALTHY entry and the session open —
+        not :meth:`_effective_tick_silence_s`, which prefers an old tick over a newer HEALTHY entry. Each
+        fresh connection therefore gets the full budget, and a feed left DEGRADED overnight gets it from
+        today's open rather than respawning at 09:15:01 on yesterday's silence.
+        """
+        if self._state != "DEGRADED":
+            return False
+        now = self._clock.now()
+        session = self._open_session(now)
+        if session is None:
+            return False
+        self._open_silence_episode(session, now)
+        ref: datetime = session.open
+        for stamp in (self._last_tick_at, self._healthy_since):
+            if stamp is not None and stamp > ref:
+                ref = stamp
+        silence = (now - ref).total_seconds()
+        if silence <= respawn_after_s:
+            return False
+        if self._silence_respawns < max_respawns:
+            # Counted before the respawn runs: one that raises (or finds no token) still spends an attempt.
+            self._silence_respawns += 1
+            _log.warning(
+                "ticker_tick_silence_respawn",
+                attempt=self._silence_respawns,
+                max_respawns=max_respawns,
+                tick_silence_s=round(silence, 1),
+                ws_connected=self._last_ws_connected,
+                child_last_tick_age_s=self._child_tick_age_s,
+            )
+            await self._respawn(reason="tick_silence")
+            return True
+        if not self._silence_escalated:
+            self._silence_escalated = True
+            since = self._silence_episode_since or session.open
+            episode_silence = (now - since).total_seconds()
+            _log.error(
+                "ticker_tick_silence_respawns_exhausted",
+                tick_silence_s=round(episode_silence, 1),
+                since=since.isoformat(),
+                respawns=self._silence_respawns,
+            )
+            await self._notify_silent_unrecovered(self._silence_respawns, since, episode_silence)
+        return False
+
+    def _open_silence_episode(self, session: Session, now: datetime) -> None:
+        """Open the silence episode for ``now``'s session unless one is already open for it.
+
+        An episode left over from an earlier session date is replaced, not continued: a feed capped
+        at yesterday's close and still silent at today's open gets a full cap and a fresh alert.
+        ``since`` is the tick-silence reference clamped to the session open, so the escalation never
+        reports yesterday's last tick as today's silence."""
+        today = now.date()
+        if self._silence_episode_date == today:
+            return
+        self._reset_silence_episode()
+        self._silence_episode_date = today
+        ref = self._last_tick_at or self._healthy_since
+        self._silence_episode_since = ref if ref is not None and ref > session.open else session.open
+
+    def _reset_silence_episode(self) -> None:
+        """Close the silence episode (a tick arrived, or a new session date replaces it)."""
+        self._silence_episode_date = None
+        self._silence_episode_since = None
+        self._silence_respawns = 0
+        self._silence_escalated = False
+        self._silence_notified = False
+
+    async def _notify_silent_unrecovered(self, respawns: int, since: datetime, silence_s: float) -> None:
+        """One-shot owner escalation once the episode's respawns are spent (best-effort, §3.2.11)."""
+        if self._notify is None:
+            return
+        try:
+            await self._notify(feed_silent_unrecovered(respawns=respawns, since=since, silence_s=silence_s))
+        except Exception:  # noqa: BLE001 - a failed notify must never crash the monitor loop
+            _log.exception("feed_silent_unrecovered_notify_failed")
 
     async def _check_warming_timeout(
         self, timeout_s: float, cap_s: float, max_respawns: int
@@ -1140,13 +1271,16 @@ class TickerSupervisor:
     def in_market_hours(self, now: datetime | None = None) -> bool:
         """True iff ``now`` is inside today's NSE continuous session (calendar+clock). Without a
         calendar (bare harness) the feed cannot know it is in-session ⇒ False (guard disabled)."""
+        return self._open_session(now or self._clock.now()) is not None
+
+    def _open_session(self, now: datetime) -> Session | None:
+        """Today's NSE session if ``now`` is inside it, else ``None`` (see :meth:`in_market_hours`)."""
         if self._calendar is None:
-            return False
-        now = now or self._clock.now()
+            return None
         session = self._calendar.session(now.date())
         if session is None:  # holiday / weekend / unverified horizon (R6)
-            return False
-        return session.open <= now <= session.close
+            return None
+        return session if session.open <= now <= session.close else None
 
     def _effective_tick_silence_s(self) -> float | None:
         """Seconds since the last tick — or, if NO tick has EVER been seen, since we entered HEALTHY.

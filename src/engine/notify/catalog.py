@@ -127,6 +127,13 @@ class MessageKind(StrEnum):
     ONCE per wedge episode (``warning``, not a per-respawn page); recovers automatically the moment a
     respawn finally heartbeats."""
 
+    FEED_SILENT_UNRECOVERED = "feed_silent_unrecovered"
+    """The live tick feed stayed silent in session through ``ticker.max_tick_silence_respawns`` fresh
+    connections (2026-11-03 silent connected feed): the child heartbeats and Kite answers pings, but no
+    tick arrives. Escalated ONCE per silence episode (``warning``); the supervisor stays DEGRADED and
+    stops respawning until a tick arrives or the next session opens. Distinct from FEED_DEGRADED (the
+    first, one-shot notice of the same episode) and FEED_WEDGED (the child never heartbeats)."""
+
     REC_FILL_SUSPECTED = "rec_fill_suspected"
     """The reconciler matched a broker position to an open RECOMMEND rec (R5/§3.6): exactly one
     one-tap confirm prompt, pre-filled with the observed qty/price, BEFORE any ``positions`` row or
@@ -434,6 +441,30 @@ def feed_wedged(*, respawns: int, age_s: float) -> CatalogMessage:
         ),
         severity="warning",
         data={"respawns": respawns, "age_s": age_s},
+    )
+
+
+def feed_silent_unrecovered(*, respawns: int, since: datetime, silence_s: float) -> CatalogMessage:
+    """In-session tick silence survived ``respawns`` fresh connections (2026-11-03 silent connected feed).
+
+    ``since`` is the episode's last tick (or HEALTHY entry when there was none), never earlier than the
+    session's open. Escalated ONCE per silence episode; the supervisor then stays DEGRADED without
+    further respawns. The dedupe key is the episode's own ``since`` instant, so neither a later episode
+    in the same session nor the next session's can be swallowed by it.
+    """
+    since_ist = since.astimezone(IST)
+    return CatalogMessage(
+        kind=MessageKind.FEED_SILENT_UNRECOVERED,
+        title="Feed silent — fresh connections not recovering",
+        body=(
+            f"No live ticks have arrived since {since_ist:%H:%M} IST, through {respawns} fresh Kite "
+            "connections. Intraday detection and live marks are blind until ticks resume. Likely "
+            "causes: a Kite-side outage, an exchange halt, or the host's network. No more respawns "
+            "this episode; the feed recovers on its own the moment a tick arrives."
+        ),
+        severity="warning",
+        data={"respawns": respawns, "since": since_ist.isoformat(), "silence_s": silence_s},
+        dedupe_key=f"feed_silent_unrecovered:{since_ist.isoformat()}",
     )
 
 
