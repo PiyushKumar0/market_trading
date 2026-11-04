@@ -560,6 +560,16 @@ $snap = (Get-ChildItem data\research\market_*.duckdb | Sort-Object Name -Descend
 
 A SUPPORTED result goes to the owner and wires nothing.
 
+## Fibonacci retracement study (registered 2026-11-04) — read-only on a snapshot, outside 09:15–15:30
+
+```powershell
+.venv\Scripts\python.exe scripts\backtest_fib.py --db data\research\market_2026-11-02.duckdb --end 2026-11-02   # the registered run; about 2.5 min
+# optional: --out <json path>; --symbols / --max-symbols are smoke runs only; --end defaults to today
+# writes data\reports\fib_retracement_<snapshot date>.{json,md}; refuses (exit 2) during market hours on a trading day
+```
+
+A SUPPORTED result goes to the owner and wires nothing.
+
 ## Replay smoke after a prompt change — outside market hours (it spends quota)
 
 ```powershell

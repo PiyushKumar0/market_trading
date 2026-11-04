@@ -73,6 +73,11 @@ and the other removed design and research documents are in git at commit `417da7
   `rule_blocked` arm, a diagnostic only. hi52 not supported; ins insufficient.
 - **C3 selection filters (run 2026-10-07):** not evidence. A filter gate needs a new pre-registration with a
   permutation test against same-size random subsamples.
+- **Fibonacci study (run 2026-11-04, `scripts/backtest_fib.py`):** F1 null, F2 supported, F3 brk20 refuted (hi52 and
+  ins insufficient), F4 supported (the brk20 limit at 61.8% of the breakout leg: median net +1.53% against V2-5's
+  +0.61%). Post-hoc, F4 is a depth effect, not a Fibonacci one (67.8% did better); it fills 12% of signals against
+  59%, and in 2026 every depth lost about 2%. Owner decision: whether a deeper brk20 entry gets its own registration
+  once the brk20 kill rule reads. Nothing is wired.
 - **Spread re-measure:** `costs.yaml spread_pct: 0.02` was measured on 2026-08-13 on the NIFTY 200 tick corpus.
   Provisional rule: re-measure (never tune) when the universe changes materially or quarterly, whichever is sooner. The
   universe moved to NIFTY Total Market on 2026-10-08 (O18).
@@ -146,61 +151,6 @@ session after it, here and in the constant. Each rule has a `registered` row in 
   stop, fixed at first scoring.
 - **Demotion:** add ins to `NO_EDGE_SHADOW_STRATEGIES`, which wins over its registered edge (`gate.py:1046-1049`).
 - **Tool:** `scripts/forward_verdicts.py --rule ins`.
-
-**Fibonacci retracement study (registered 2026-11-04, owner-requested, swing; evidence only, wires nothing).**
-- **Data:** `data/research/market_2026-11-02.duckdb`. F1, F2 and F4 run on brk20's registered universe (the
-  `universe_daily` eligible set as of 2026-09-11, applied backwards: a survivorship-tainted proxy); F3 on C2's
-  populations.
-- **Leg as of session y** (bars through y only):
-  - h = the earliest session in y−59..y with the highest high, H = high(h), with 60 sessions of history before h;
-    L = the lowest low in h−59..h−1.
-  - The leg qualifies iff (H − L)/L ≥ 15%, every bar from L's session on is usable, and no structural ex-date falls
-    after L's session up to and including the session whose price is compared with a level.
-  - The level at depth d is H − d·(H − L), rounded to the tick.
-- **Construct (F1, F3, F4):** fill at min(open, level) on the first session whose low touches the level (touch
-  fills are optimistic, as in C2); exit at the close of the 20th session counting the fill session; no stop; a
-  structural ex-date in the hold voids; one CNC round trip at ₹20,000.
-- **F1, Fibonacci pullback entry** (family `edge/fib_pullback`, N = 3: d = 38.2%, 50%, 61.8%).
-  - On session t a limit rests at the depth-d level of the leg as of t−1 while t − h ≤ 20 and no low in
-    h+1..t−1 reached it. One fill per (symbol, h, d).
-  - Controls, never promotable: d = 32.2%, 44%, 56%, 67.8%. Each Fibonacci depth's neighbours: 38.2% → 32.2/44%,
-    50% → 44/56%, 61.8% → 56/67.8%.
-  - Descriptive only: d = 23.6% and 78.6%; the classic geometry (stop at L, target H, same 20-session cap) at the
-    three Fibonacci depths; any pullback day (entry at open(y+1) for every y with 0 ≤ y − h ≤ 19 and no low below L
-    since h).
-  - Benchmark: per trade, the equal-weight mean of close(exit)/open(fill) − 1 over the universe names with bars on
-    both sessions and no structural ex-date between them; excess = gross − benchmark; CI from a bootstrap
-    clustered on fill dates (2,000 reps).
-  - **SUPPORTED** per depth iff n ≥ 30, CPCV-promotable at `fold_pass_min(3)`, median net > 0, the excess CI lower
-    bound > 0, and permutation p < 0.05/3 against 10,000 same-size subsamples of its two neighbours' pooled trades
-    (no p when the pool is smaller than the sample). INSUFFICIENT if n < 30; NOT SUPPORTED otherwise.
-- **F2, do pullbacks stop at Fibonacci levels?** (family `price_structure/fib`, N = 1)
-  - A leg starts at each h whose high strictly exceeds every high in h−59..h−1 and whose leg qualifies as of h. It
-    completes at the first c ≤ h + 60 with high(c) > H; a low below L in h+1..c−1 fails it first.
-    r = (H − the lowest low in h+1..c−1)/(H − L). A leg with c = h+1 has no pullback and is skipped. Failed,
-    incomplete and skipped legs are counted.
-  - Windows ±1 pp around 38.2/50/61.8%, shoulders 1–3 pp on each side; expected = shoulder count / 2; the ratio
-    observed/expected is pooled over the three. Placebo centres 32.2/44/56/67.8% on the same geometry.
-  - **SUPPORTED** iff the pooled ratio ≥ 1.10, its 95% bootstrap CI lower bound (clusters: h dates, 2,000 reps)
-    > 1, and it exceeds the pooled placebo ratio. INSUFFICIENT if the three windows hold < 100 legs.
-- **F3, Fibonacci confluence on our swing signals** (families `selection_filter/brk20` and `selection_filter/hi52`,
-  N = 6 with C3's five; `selection_filter/ins`, N = 1).
-  - C2's populations and arm (ii). A signal is in confluence iff the leg as of the session before its fill
-    qualifies and the fill price is within 1% of that leg's 38.2%, 50% or 61.8% level.
-  - **SUPPORTED** iff confluence n ≥ 30, CPCV-promotable at `fold_pass_min(N)`, median net > max(0, FULL median),
-    and permutation p < 0.05/N against 10,000 same-size subsamples of FULL. INSUFFICIENT if n < 30.
-- **F4, brk20 limit at a Fibonacci level** (family `entry_mechanism/brk20`, N = 6 with the 2026-09-12 three).
-  - brk20's registered signals and admission. On t in y+1..y+5 the limit rests at H_t − d·(H_t − L20), with
-    H_t = the highest high over y..t−1, L20 = the lowest low of the 20 sessions before y, d = 38.2/50/61.8%.
-  - Baseline: V2-5 on the same construct.
-  - **SUPPORTED** iff n ≥ 30, CPCV-promotable at `fold_pass_min(6)`, and median net > max(0, V2-5's median net);
-    among supported depths the highest median wins. The Fibonacci fills against V2-5 on the same signals are
-    reported, descriptive.
-- **All parts:** geometry first; held-out slice from 2026-01-01, diagnostic; seed 20261104 for every draw.
-  SUPPORTED goes to the owner.
-- **Tool:** `scripts/backtest_fib.py` (its `REGISTERED` holds this date); report
-  `data/reports/fib_retracement_2026-11-02.{json,md}`. Each family has a `registered` row in
-  `config/research_trials.yaml`.
 
 **Conditional specs (build only on their trigger).**
 - **ADVISORY build** (trigger: the analyst verdict reads ADVISORY).

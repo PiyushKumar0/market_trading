@@ -296,8 +296,8 @@ trials:
     population: "brk20 registered universe (universe_daily eligible set as of 2026-09-11), survivorship-tainted; snapshot market_2026-11-02"
     construct: "touch fill at min(open, level) within 20 sessions of the leg high; T+20 close exit counting the fill, no stop; CNC at Rs 20k"
     variants: 3
-    result: "registered"
-    report: "IMPLEMENTATION_PLAN.md section 3"
+    result: "null"
+    report: "data/reports/fib_retracement_2026-11-02.json"
   - id: "price_structure-fib-20261104"
     date: "2026-11-04"
     family: "price_structure/fib"
@@ -305,8 +305,8 @@ trials:
     population: "as edge-fib_pullback-20261104"
     construct: "retracement ratio of legs completed by a new high within 60 sessions; +-1pp windows against 1-3pp shoulders; h-date-clustered bootstrap"
     variants: 1
-    result: "registered"
-    report: "IMPLEMENTATION_PLAN.md section 3"
+    result: "supported"
+    report: "data/reports/fib_retracement_2026-11-02.json"
   - id: "selection_filter-brk20-20261104"
     date: "2026-11-04"
     family: "selection_filter/brk20"
@@ -314,8 +314,8 @@ trials:
     population: "C2's brk20 population (V2-N5 fills)"
     construct: "arm (ii); confluence cohort against FULL; permutation at alpha 0.05/6"
     variants: 1
-    result: "registered"
-    report: "IMPLEMENTATION_PLAN.md section 3"
+    result: "refuted"
+    report: "data/reports/fib_retracement_2026-11-02.json"
   - id: "selection_filter-hi52-20261104"
     date: "2026-11-04"
     family: "selection_filter/hi52"
@@ -323,8 +323,8 @@ trials:
     population: "C2's hi52 population"
     construct: "arm (ii); confluence cohort against FULL; permutation at alpha 0.05/6"
     variants: 1
-    result: "registered"
-    report: "IMPLEMENTATION_PLAN.md section 3"
+    result: "insufficient"
+    report: "data/reports/fib_retracement_2026-11-02.json"
   - id: "selection_filter-ins-20261104"
     date: "2026-11-04"
     family: "selection_filter/ins"
@@ -332,8 +332,8 @@ trials:
     population: "C2's ins population"
     construct: "arm (ii); confluence cohort against FULL; permutation at alpha 0.05"
     variants: 1
-    result: "registered"
-    report: "IMPLEMENTATION_PLAN.md section 3"
+    result: "insufficient"
+    report: "data/reports/fib_retracement_2026-11-02.json"
   - id: "entry_mechanism-brk20-20261104"
     date: "2026-11-04"
     family: "entry_mechanism/brk20"
@@ -341,5 +341,5 @@ trials:
     population: "brk20 registered signals over the eligible set as of 2026-09-11, survivorship-tainted"
     construct: "limit on y+1..y+5, touch fill; T+20 close exit counting the fill, no stop; baseline V2-5 on the same construct"
     variants: 3
-    result: "registered"
-    report: "IMPLEMENTATION_PLAN.md section 3"
+    result: "supported"
+    report: "data/reports/fib_retracement_2026-11-02.json"
