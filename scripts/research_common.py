@@ -180,8 +180,11 @@ def px(x: float) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.01"))
 
 
-def brk20_population(conn, end: date, *, symbols=None, max_symbols=None) -> Population:
-    """brk20 V2-N5 fills: ``backtest_brk20.signals_for`` + ``fill_for`` (touch, 5 sessions)."""
+def brk20_population(conn, end: date, *, symbols=None, max_symbols=None, fill=None) -> Population:
+    """brk20 V2-N5 fills: ``backtest_brk20.signals_for`` + ``fill_for`` (touch, 5 sessions).
+
+    ``fill``: ``(series, signal) -> (fill_idx, fill_px) | None`` replacing the V2-N5 fill on the same admitted
+    signals; ``None`` is V2-N5."""
     eligible = store_reader(conn).get_universe_eligible_symbols(BRK20_UNIVERSE_AS_OF)
     if not eligible:
         raise Refusal(f"universe_daily has no rows on {BRK20_UNIVERSE_AS_OF} (the brk20 registration's day)")
@@ -198,13 +201,13 @@ def brk20_population(conn, end: date, *, symbols=None, max_symbols=None) -> Popu
             brk20._bump(counts, "signals")
             if not _admitted(s, sig.idx, SPAN["brk20"], atr, counts):
                 continue
-            fill = bb.fill_for(s, sig, bb.VARIANT_V2_N5)
-            if fill is None:
+            got = bb.fill_for(s, sig, bb.VARIANT_V2_N5) if fill is None else fill(s, sig)
+            if got is None:
                 brk20._bump(counts, "unfilled")
                 continue
             cand = brk20.scan_daily(sym, bb._window(s, sig.idx, width), today=s.dates[sig.idx + 1],
                                     upcoming_ex_dates=ex.get(sym, []), params=params)
-            events.append(Event(sym, s, sig.idx, fill[0], px(fill[1]), float(atr[sig.idx]), cand.raw_levels))
+            events.append(Event(sym, s, sig.idx, got[0], px(got[1]), float(atr[sig.idx]), cand.raw_levels))
     source = f"universe_daily eligible set as of {BRK20_UNIVERSE_AS_OF}"
     return Population("brk20", source, len(series), events, counts, structural)
 
