@@ -2,6 +2,36 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-05 08:58 — Paper voids: session-prep fix, caps 30/2/28, all 7 voided paper trades restored (owner: "Make the fix and restore the trades"; "Raise max cap to 30 and restore the trades"; "Do it now")
+
+- **Finding:** all 7 paper voids to date were D14 time-only positions (no stop, no target, exit session 11-17 or later),
+  which no bar of the gap could close; prep voided them only because their bars could not be fetched.
+  - 10-28 RAIN, NYKAA and 10-30 BHARTIARTL: `downtime_uncovered`.
+  - 11-04 SYNGENE, TVSMOTOR, AUROPHARMA, JINDALSTEL: `prep_incomplete`. The host slept through the morning and resumed
+    at 10:29; prep started at once, before the network was back (Telegram sends failing until 10:30:31). The first Kite
+    historical call took 93 s (10:29:36–10:31:09), the 120 s deadline cancelled the second, and `catch_up` and
+    `corp_actions` both failed (`engine.log` 2090/2172). The window began 11-03 13:46: the silent connected feed that
+    4d822db fixed.
+  - The C5 verdict reads `rec_outcomes`, not the paper book, so no verdict sample was lost.
+- **Fix** `3381137`: catch-up skips a position no walk can close (`paper_prep_walk_skipped`); the ex-date rule still
+  runs first. 4 new tests, each failing on the base tree; default gate 4243 passed, 19 skipped. It went live with the
+  owner's 08:49 dashboard restart (the working tree), before the commit.
+- **Owner capital change** (dashboard 08:49): 70000 → 120000, committed alone as `dd144c8`.
+- **Caps** `2b16551`: `max_open_positions` 6/2/4 → 30/2/28 (total = MIS + CNC, the O16 convention). The parsed YAML
+  differs from HEAD only in those two keys. Reseeded with the engine stopped; `protected_config_status` exit 0. Tests
+  `f78a8b1`. The caps bind real recommendations as well as paper.
+- **Restore:** engine stopped 08:57:59. Backup `data\backups\manual\state-20261105-0858-pre-restore.db` (SQLite backup
+  API, integrity ok). One transaction with row-count checks: 7 positions back to `OPEN` with `close_reason`,
+  `close_basis`, `closed_at`, `realized_pnl` and `costs` NULL, as an open paper row carries them; their 7 `void`
+  `learning_ledger` rows deleted. None of the 7 symbols was held. They had no GTTs and no exit orders, so nothing else
+  changed. `paper_equity_snapshots` stay as history.
+- **Boot** 08:59:25 (104 s down): `integrity_ok`, risk NORMAL, frozen [], `needs_login` false. Paper book 9 open (₹1.04
+  lakh notional against the ₹1.2 lakh cap), 0 voids.
+- **Prep verified** 09:15:00–09:15:01: `paper_prep_walk_skipped` names all 9 positions, `paper_prep_complete failed []`,
+  no void, no late corporate action, no risk change by 09:15:25.
+- **Rollback:** with the engine stopped, copy the backup over `data\state.db`; `git revert 2b16551` plus a reseed for
+  the caps.
+
 ## 2026-11-05 01:40 — Fibonacci retracement study run: F2 and F4 supported, F1 null, F3 brk20 refuted; nothing wired (owner: "Do test with the retracement logic as well included with the analysis, especially for swing trades")
 
 - **Question:** stock picking uses Fibonacci retracement nowhere (no scanner, rule or prompt). The analyst cited a
