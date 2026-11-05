@@ -2,6 +2,42 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-05 20:05 — Keep-awake lapse check: per-pulse check and re-arm, deployed (owner: "Make the required changes, review and validate")
+
+- **Trigger:** the owner asked why the PC sleeps on AC while the engine's keep-awake is engaged. On 11-05 one process
+  engaged it 09:15:30 and released it 15:30:30, yet the host idle-slept 5 times 10:08–13:39 (lid open, AC, 96 min),
+  each about 15 min after the screen went off; two lid closes added 38 min.
+- **Evidence** (`..\mt_build_notes\section3\engaged_spans.ps1 -Since 2026-10-01`): every lid-open AC idle sleep while
+  engaged (10-26, 10-28, 10-30, 11-02, 11-05) followed an earlier in-session sleep in the same process. Before any
+  such sleep, idle spans without audio held 23–99 min on 14 days. Kernel-Power 566 `Reason=12` marks these as idle-timer
+  sleeps, the same transition the 11-03 15:30:01 release set off. Unexplained: 10-26 held 57 min after a 6 s lid sleep,
+  and the idle sleep fires 5–20 min after screen-off although AC "Sleep after" is 60 min. Ruled out: the calling thread
+  (event loop), restarts, MDM or GP power policy, audio.
+- **Change** `448cbaf`: each engaged pulse reads this thread's flags (`SetThreadExecutionState(0)`, measured to be a
+  pure query) and the system-wide state (`CallNtPowerInformation(SystemExecutionState)`, no admin). A missing
+  `ES_SYSTEM_REQUIRED` is re-asserted, then cleared and set if that did not take. New lines: `keep_awake_lapsed`
+  (WARNING, once per episode), `keep_awake_restored`, `keep_awake_state` every 5 pulses, `keep_awake_probe_blind`; the
+  engage line carries `system_state_before`, `system_state`, `own_visible`. The health pulse now guards the call.
+- **Review** (code-review, high): 10 findings. Fixed 6: the two DLLs resolve separately, a failed read never triggers
+  the clear, re-register unless the read is proven blind, `own_visible` recorded, a stale `process_memory` reference,
+  one episode-close path. Declined 2: the real-Win32 tests stay (no CI; `test_process_memory` precedent), and
+  `PowerCreateRequest` waits for the verdict, since its status is no more readable without admin. Documented 1: a lost
+  registration stays invisible while another process holds the bit.
+- **Validation:** 21 keep-awake tests; the 10 first written all failed against the HEAD module. A real-Win32 run
+  showed `own_visible: true` and caught a simulated lapse (thread flags cleared), which the same-flags re-assert
+  repaired. Full gate 4260 passed, 19 skipped. ruff and mypy clean on the changed modules; the `health.py:389` mypy
+  error predates this (`e9e13762`).
+- **Deploy:** engine idle (20:01 sweep caught up nothing). Restart 20:05:01, boot 20:05:24, `startup_complete` 20:07:24
+  (`integrity_ok`, frozen []), scheduler 20:07:30, health `problems: []`. The one ERROR is the old process's
+  `warmup_refresh` CancelledError at stop, as at the 08:49 and 19:00 stops.
+- **Verify next session (11-06):**
+  - The 09:15 `keep_awake_engaged` line must show `own_visible: true` (`0x00000000` → `0x00000001`): the first proof
+    that the read sees the service's request. `false` with `keep_awake_probe_blind` leaves only thread checks.
+  - For each in-session sleep, run `engaged_spans.ps1 -Since 2026-11-06`. A `keep_awake_lapsed` after a resume means
+    Windows drops the request; the re-arm is then the fix, and no idle sleep should follow it. `keep_awake_state` lines
+    with the bit present before an idle sleep mean Windows ignores it; the next options (AC sleep Never, display on,
+    a periodic idle-timer reset) are the owner's.
+
 ## 2026-11-05 18:40 — Co-movement cap same-sector only (owner: "Same-sector only", after "This correlation limit in its current form is not useful")
 
 - **Trigger:** paper rejected TIPSMUSIC (brk20) at 09:53 on `co_movement_cap` alone: 20d return corr 0.7051 with SYNGENE,

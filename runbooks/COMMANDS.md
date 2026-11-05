@@ -80,6 +80,20 @@ scripts\nssm_install.ps1 -Action status                # service config incl. Ob
 NSSM's stop grace is `AppStopMethodConsole 30000` (its 1.5 s default killed the engine mid-shutdown, so every stop
 recorded as a crash); check it with `nssm get mt-engine AppStopMethodConsole` after any service reinstall.
 
+## Host sleep vs the engine keep-awake (2026-11-05) — read-only, safe with the engine running
+
+A Kernel-Power 506→507 span is screen-off first; only its last `SleepDurationInUs` suspends the engine. Audio playback
+holds the host awake on its own (`audio=` column), so a span with long audio proves nothing about the keep-awake.
+
+```powershell
+# Every standby span inside each keep-awake engaged interval (from engine.log), with reason, lid, AC, audio:
+..\mt_build_notes\section3\engaged_spans.ps1 -Since 2026-11-06
+# In-session minutes asleep per weekday:
+..\mt_build_notes\section3\session_sleep.ps1 -Since 2026-11-06
+# The engine's own view: engage/release, lapses and their repair, the state every ~5 min
+Select-String -Path data\logs\engine.log -Pattern '"event": "keep_awake_' | ForEach-Object { $_.Line }
+```
+
 ## Tick compaction status (2026-11-02)
 
 A `tick_compact` day that keeps failing is degraded, not retrying its way out: compare its `failures` across runs
