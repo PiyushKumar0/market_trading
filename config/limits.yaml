@@ -84,7 +84,9 @@ limits:
     on_breach: reject_entry
 
   co_movement_cap:
-    corr_max: 0.7               # reject a new entry whose 20d return corr with an open position exceeds this (R1)
+    # Same sector only (owner-directed 2026-11-05): a candidate is compared with the open positions and pending recs
+    # of its own sector (sector_map), and with all of them when either sector is unknown (gate.py `_co_movement_peers`).
+    corr_max: 0.7               # reject a new entry whose 20d return corr with such a position exceeds this (R1)
     on_breach: reject_entry
 
   max_leverage:
