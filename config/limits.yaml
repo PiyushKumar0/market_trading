@@ -11,7 +11,8 @@
 #
 # "MTM basis" = realized + open mark-to-market. Platform equity = capital_base_inr + Σ platform-attributed
 # realized net P&L − costs + open platform-position MTM (§7.1 preamble). Base ₹20,000 → ₹40,000 and
-# max_open_positions 3/2/2 → 6/2/4: owner-directed 2026-09-07 (O16), re-signed with the engine stopped.
+# max_open_positions 3/2/2 → 6/2/4: owner-directed 2026-09-07 (O16), re-signed with the engine stopped;
+# 6/2/4 → 30/2/28 owner-directed 2026-11-05, likewise.
 # Every ₹ figure the rungs below act on is a percent of capital_base_inr (or of equity, for per-trade risk),
 # so these comments stay true when the base changes (O19; each change is in config_audit).
 
@@ -66,9 +67,10 @@ limits:
     # O16 (owner-directed 2026-09-07): 3/2/2 → 6/2/4 ("raise the cap to 4"; total = MIS + CNC so each
     # leg's cap is usable). Positions with an exit recommendation delivered within 3 days are EXITING
     # and do not count here or in per_sector_exposure (gate.py `_exiting_symbols`; plan §7.1 row).
-    total: 6
+    # Owner-directed 2026-11-05: 6/2/4 → 30/2/28 ("raise max cap to 30"), with the paper voids restored.
+    total: 30
     max_mis: 2
-    max_cnc: 4
+    max_cnc: 28
     on_breach: reject_entry
 
   per_stock_exposure:
