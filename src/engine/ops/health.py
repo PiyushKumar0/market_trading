@@ -254,10 +254,14 @@ class HealthMonitor:
             _log.exception("feed_stopped_watch_failed")
 
         # --- in-session OS keep-awake (2026-07-23 sleep/resume wedge): while a trading session is open,
-        #     keep the OS awake so it does not auto-sleep mid-session and freeze the tick feed; release
-        #     at session close. No-op off-Windows / when disabled / without a calendar. ---
+        #     keep the OS awake so it does not auto-sleep mid-session and freeze the tick feed, re-checking
+        #     each pulse that the request is still in force; release at session close. No-op off-Windows /
+        #     when disabled / without a calendar. ---
         if self._keep_awake is not None:
-            self._keep_awake.update(self._session_open())
+            try:
+                self._keep_awake.update(self._session_open())
+            except Exception:  # noqa: BLE001 - keep-awake must never break the pulse it rides
+                _log.exception("keep_awake_update_failed")
 
         # --- process-memory telemetry (2026-08-17 crisis: no time series existed to diagnose the leak)
         #     Pure telemetry, not a check: a read failure (already logged DEBUG inside the reader) or any

@@ -82,7 +82,7 @@ def _read_via_win32() -> ProcessMemory:
 
     Imports ``ctypes``/``ctypes.wintypes`` locally so this module stays importable (and its ``read()``
     no-op path exercisable) on non-Windows platforms — same discipline as
-    :meth:`engine.ops.keep_awake.KeepAwake._resolve`.
+    :func:`engine.ops.keep_awake._win32_set_execution_state`.
     """
     import ctypes
     from ctypes import wintypes
