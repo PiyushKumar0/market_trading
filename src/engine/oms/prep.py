@@ -2,9 +2,11 @@
 applied before the bridge forwards a tick.
 
 1. Catch-up, PENDING_EXIT included. An unadjusted ex-date after the window start voids without a walk:
-   Kite candles come corporate-action adjusted (A11) and the stops are not. Otherwise the backfilled 1m
-   bars are walked through ``exit_sim``; an exit closes by bookkeeping, and a symbol whose fetch failed
-   voids. A minute without a candle inside a successful fetch had no trades.
+   Kite candles come corporate-action adjusted (A11) and the stops are not. A position no bar of the
+   window can close (no stop, no target, no exit session by the window's end: D14 time-only) is not
+   walked, so needs no fetch. Otherwise the backfilled 1m bars are walked through ``exit_sim``; an exit
+   closes by bookkeeping, and a symbol whose fetch failed voids. A minute without a candle inside a
+   successful fetch had no trades.
 2. Corporate-action check: an ex-date today voids a position held across it.
 3. Survivors still PENDING_EXIT re-enter the exit routine.
 
@@ -88,6 +90,18 @@ def _dec(value: Any) -> Decimal | None:
     return None if value is None or value == "" else Decimal(str(value))
 
 
+def _closable_by(row: sqlite3.Row, last: date) -> bool:
+    """Whether a walk ending on session ``last`` could close the position: ``exit_sim`` exits only at a
+    stop, a target or the exit session's close. An unreadable row counts as closable: its walk fails
+    alone and voids only that position."""
+    try:
+        exit_session = None if row["exit_session"] is None else date.fromisoformat(row["exit_session"])
+        return (_dec(row["stop"]) is not None or _dec(row["target"]) is not None
+                or (exit_session is not None and exit_session <= last))
+    except (ValueError, ArithmeticError):
+        return True
+
+
 class SessionPrep:
     """:meth:`run` is the PaperRuntime's prep coroutine."""
 
@@ -157,6 +171,11 @@ class SessionPrep:
                 del todo[pid]
 
         end = until - WALK_LAG
+        unwalked = sorted(pid for pid, row in todo.items() if not _closable_by(row, end.astimezone(IST).date()))
+        for pid in unwalked:
+            del todo[pid]
+        if unwalked:
+            _log.info("paper_prep_walk_skipped", position_ids=unwalked, why="no stop, target or exit session in window")
         frm = min((observed[pid].replace(second=0, microsecond=0) for pid in todo), default=end)
         symbols = sorted({row["symbol"] for row in todo.values()})
         bars = await self._bars_fn(symbols, frm, end) if frm < end else {s: () for s in symbols}

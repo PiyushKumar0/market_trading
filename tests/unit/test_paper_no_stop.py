@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from decimal import Decimal
 
 import pytest
 
+from engine.oms import prep as prep_mod
 from engine.oms.state import CloseReason
-from tests.unit.test_protection_manager import SYM, Rig, at, orders, position
-from tests.unit.test_session_prep import bar, closed, flat, gross, stacks
+from tests.unit.test_protection_manager import NEXT, SYM, Rig, at, orders, position
+from tests.unit.test_session_prep import bar, closed, corp, flat, gross, stacks
 
 R = CloseReason
 EXIT_DAY = dt.date(2026, 6, 23)            # session 5 of a hold entered Wed 2026-06-17 (weekdays calendar)
@@ -126,6 +128,41 @@ async def test_catch_up_ignores_the_shipped_stop_and_closes_on_the_exit_session(
     pos = position(conn, pid)
     assert closed(conn, pid) == ("CLOSED", "time_stop", "downtime_replay")
     assert (Decimal(pos["realized_pnl"]), pos["closed_at"]) == (gross(conn, pid, "100"), at(15, 30, d=EXIT_DAY).isoformat())
+
+
+@pytest.mark.parametrize("failure", ["no-bars", "raises", "times-out"])
+async def test_catch_up_fetches_nothing_for_a_position_no_bar_in_the_window_can_close(
+    conn, make_stack, monkeypatch, failure
+) -> None:
+    stack = make_stack(no_stop={"hi52"})
+    pid = await stack.enter()
+    monkeypatch.setattr(prep_mod, "PREP_DEADLINE_S", 0.05)
+    calls: list[tuple] = []
+
+    async def bars_fn(*args) -> dict:
+        calls.append(args)
+        if failure == "raises":
+            raise RuntimeError("kite down")
+        if failure == "times-out":
+            await asyncio.Event().wait()
+        return {}
+
+    stack.prep._bars_fn = bars_fn
+    await stack.prep.run(at(10, 0, 1), at(9, 30, d=EXIT_DAY - dt.timedelta(days=1)))
+
+    assert closed(conn, pid) == ("OPEN", None, None) and calls == []
+    assert (stack.prep.counters.failed_steps, stack.prep.counters.voids) == (0, 0)
+
+
+async def test_an_ex_date_in_the_window_still_voids_a_position_that_needs_no_walk(conn, make_stack) -> None:
+    stack = make_stack(no_stop={"hi52"})
+    pid = await stack.enter()
+    stack.corp.append(corp(SYM, NEXT))
+    stack.pre_ex[SYM] = Decimal("100.50")
+
+    await stack.prep.run(at(15, 29), at(9, 30, d=NEXT))
+
+    assert closed(conn, pid) == ("CLOSED", "void", "corp_action") and stack.fetches == []
 
 
 async def test_a_no_stop_position_sells_near_the_close_of_its_exit_session(conn, make_stack) -> None:
