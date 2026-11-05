@@ -2,6 +2,33 @@
 
 Entries before 2026-09-01 are in git: `git show 417da77:runbooks/WORKLOG.md`.
 
+## 2026-11-05 18:40 — Co-movement cap same-sector only (owner: "Same-sector only", after "This correlation limit in its current form is not useful")
+
+- **Trigger:** paper rejected TIPSMUSIC (brk20) at 09:53 on `co_movement_cap` alone: 20d return corr 0.7051 with SYNGENE,
+  reopened at 08:59 (entry above). The same pair also blocked paper TIPSMUSIC on 11-02 and 11-03, and real SYNGENE
+  recs on 11-02 and 11-03 (the TIPSMUSIC rec was pending).
+- **Premise checked, and my earlier guess was wrong:** the market did not cause the match. On 10-12 and 10-28 both rose
+  7-12% while NIFTY 50 fell (−0.70%, −0.22%). The residual correlation is 0.65-0.71 against NIFTY 50, MONIFTY500 and the
+  EW universe, and 0 of 300 universe stocks correlate above 0.7 with TIPSMUSIC.
+- **Evidence for the change** (backup `market-20261105T015123`, current universe, 46 non-overlapping 20-session windows
+  2023-02 to 2026-10, 1.75M pair-windows): cross-sector pairs above 0.7 had a median of 0.38 in the next window, with 10%
+  still above 0.7 (unflagged pairs 0.22 and 2.3%). Same-sector pairs above 0.7 had 0.53 and 24% (unflagged 0.29 and 5.2%).
+  NIFTY-residual flags do no better across sectors (0.36, 9%).
+- **History:** 12 rejects over 5 pairs. Four pairs were cross-sector (TIPSMUSIC-SYNGENE ×7, JSWINFRA-MEESHO, HAL-MOTILALOFS,
+  BSOFT-BHARTIARTL); only JSWSTEEL-JINDALSTEL (METAL) was same-sector. Each partner was confirmed by recomputing the logged
+  correlation exactly.
+- **Change** `9cbd83e`: `_co_movement_peers` keeps the held and pending symbols of the candidate's sector, plus every pair
+  where either sector is unknown. Limit 0.7 and the 20d window are unchanged. On the live paper book, TIPSMUSIC is
+  compared with nothing, JSWSTEEL with JINDALSTEL, SYNGENE with AUROPHARMA. 2 new tests (the classified case failed on
+  the base tree); full gate 4245 passed, 19 skipped.
+- **Gives up:** group companies in different sectors (JSWINFRA SERVICES, JSWSTEEL METAL).
+- **Deploy:** waited for the post-session tick compaction (it hit its budget at 19:00:00 and resumes on the next run)
+  and the 19:00 filings ingest. Engine stopped 19:01:09. The `limits.yaml` `co_movement_cap` comment now names the
+  scope: comment only, parsed YAML identical to HEAD, reseeded (sha256 2430682d...), status exit 0. Boot 19:01:50 →
+  `boot_contract_ok` 19:04:13: `integrity_ok`, risk NORMAL, frozen [], no failed jobs, 70 s down.
+- **Verify next session:** the first co-movement verdicts must name the sector scope in the ledger text, and a
+  cross-sector candidate must no longer fail `co_movement_cap`.
+
 ## 2026-11-05 08:58 — Paper voids: session-prep fix, caps 30/2/28, all 7 voided paper trades restored (owner: "Make the fix and restore the trades"; "Raise max cap to 30 and restore the trades"; "Do it now")
 
 - **Finding:** all 7 paper voids to date were D14 time-only positions (no stop, no target, exit session 11-17 or later),
