@@ -361,10 +361,11 @@ CASES: tuple[Case, ...] = (
     # ---- open exposure -----------------------------------------------------------------
     # O16 2026-09-07: base 40000 / caps 6-2-4 — max_open_positions.total 3 -> 6 (max_mis unchanged
     # at 2), so both the "reached" and "last slot" counts move to sit on the new total cap.
+    # 2026-11-05 (owner): caps 6-2-4 -> 30-2-28; the counts move with the total again.
     Case("max_open_positions", "book empty", "pass", True),
-    Case("max_open_positions", "total cap reached", "fail", False, ctx={"open_total": 6}),
+    Case("max_open_positions", "total cap reached", "fail", False, ctx={"open_total": 30}),
     Case("max_open_positions", "last total slot", "boundary", True,
-         ctx={"open_total": 5, "open_mis": 1}),
+         ctx={"open_total": 29, "open_mis": 1}),
     Case("max_open_positions", "MIS leg full", "fail", False,
          ctx={"open_total": 2, "open_mis": 2}),
     Case("max_open_positions", "pending recs occupy slots", "fail", False,

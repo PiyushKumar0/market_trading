@@ -62,10 +62,10 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.cumulative_floor.equity_pct_of_base == -15.0
     assert table.limits.consecutive_losses.max_per_session == 3
     assert table.limits.max_new_trades_day.count == 5
-    # O16 2026-09-07: base 40000 / caps 6-2-4
-    assert table.limits.max_open_positions.total == 6
+    # O16 2026-09-07: base 40000 / caps 6-2-4; owner 2026-11-05: caps 30-2-28
+    assert table.limits.max_open_positions.total == 30
     assert table.limits.max_open_positions.max_mis == 2
-    assert table.limits.max_open_positions.max_cnc == 4
+    assert table.limits.max_open_positions.max_cnc == 28
     assert table.limits.per_stock_exposure.max_positions_per_symbol == 1
     assert table.limits.per_stock_exposure.cnc_notional_inr == Decimal("12000")   # O17
     assert table.limits.per_sector_exposure.max_positions_per_sector == 2
