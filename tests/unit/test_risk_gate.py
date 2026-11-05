@@ -1490,6 +1490,37 @@ async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
     assert (await builder.build(SYMBOL, "BUY", "intraday", NOW.date())).warmup_ready is True
     assert (await builder.build(SYMBOL, "BUY", "swing", NOW.date())).warmup_ready is False
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate, peers", [
+    ("TIPSMUSIC", {"PVRINOX", "UNCL", "NEWCO"}),
+    ("NEWLIST", {"SYNGENE", "PVRINOX", "UNCL", "NEWCO"}),
+], ids=["classified-candidate", "unclassified-candidate"])
+async def test_build_correlates_the_candidate_only_with_its_own_sector_and_unknown_sectors(
+    limit_table: LimitTable, gate_clock: Clock, candidate: str, peers: set[str]
+) -> None:
+    """Owner 2026-11-05: across 2023-2026 a 20d correlation above 0.7 between two sectors mostly did not
+    last (next 20 sessions: median 0.38, 10% still above 0.7; same sector 0.53 and 24%), so held and
+    pending symbols of another sector are not correlated against. Either sector unknown keeps the pair:
+    unclassified is not evidence of being unrelated."""
+    from engine.ops.warmup import WarmupStatus
+
+    builder = _stub_context_builder(limit_table, gate_clock, lambda: WarmupStatus(ready=True, blockers=[]))
+    builder._open_positions = lambda: [{"position_id": f"P-{s}", "symbol": s, "product": "CNC", "state": "OPEN",
+                                        "side": "BUY", "stop": None, "target": None}
+                                       for s in ("SYNGENE", "PVRINOX", "UNCL")]
+    builder._pending_entry_rec_symbols = lambda _now: frozenset({"NEWCO"})      # not in the sector map
+    builder._sector_map = lambda _d: {"TIPSMUSIC": "MEDIA_ENTERTAINMENT_PUBLICATION", "SYNGENE": "PHARMA",
+                                      "PVRINOX": "MEDIA_ENTERTAINMENT_PUBLICATION", "UNCL": "UNCLASSIFIED"}
+    compared: list[frozenset[str]] = []
+
+    async def max_corr(_symbol: str, others: frozenset[str], _d) -> None:
+        compared.append(frozenset(others))
+
+    builder._max_corr = max_corr
+    await builder.build(candidate, "BUY", "swing", NOW.date())
+    assert compared == [frozenset(peers)]
+
     other_daily = WarmupStatus(ready=False, blockers=["rsi2/trend/mom:COROMANDEL daily bars 3/200"])
     builder = _stub_context_builder(limit_table, gate_clock, lambda: other_daily)
     assert (await builder.build(SYMBOL, "BUY", "swing", NOW.date())).warmup_ready is True

@@ -312,8 +312,9 @@ class GateContext(BaseModel):
     per_symbol_cnc_notional: Mapping[str, Decimal] = Field(default_factory=dict)
     sector_of: Mapping[str, str] = Field(default_factory=dict)
     open_sector_counts: Mapping[str, int] = Field(default_factory=dict)
-    #: Max 20d daily-return Pearson correlation of the candidate vs each OPEN position. ``None`` =
-    #: no open positions OR insufficient history — the rule then PASSES with an explicit note:
+    #: Max 20d daily-return Pearson correlation of the candidate vs each OPEN position (and pending
+    #: rec) of its own sector, or of any sector when either is unknown (``_co_movement_peers``). ``None`` =
+    #: no such position OR insufficient history — the rule then PASSES with an explicit note:
     #: absence of data must never silently reject (R1 determinism over guesswork).
     max_corr_with_open: Decimal | None = None
     deployed_capital: Decimal = Decimal(0)
@@ -890,12 +891,14 @@ class RiskGate:
         corr = ctx.max_corr_with_open
         ok = corr is None or corr <= corr_max
         value = (
-            "n/a (no open positions or insufficient 20d history — absence of data never rejects)"
+            "n/a (no open position in its sector or unclassified, or insufficient 20d history — absence "
+            "of data never rejects)"
             if corr is None else f"max 20d return corr {_q(corr, '0.0001')}"
         )
         led.add(
-            "co_movement_cap", ok, value, f"<= {corr_max} (R1 concentration guard)",
-            "clear" if ok else "correlated with an open position",
+            "co_movement_cap", ok, value,
+            f"<= {corr_max} vs same-sector or unclassified positions (R1 concentration guard)",
+            "clear" if ok else "correlated with an open position in its sector",
         )
 
     def _rule_max_leverage(
@@ -1306,6 +1309,22 @@ def _active_counts(
     return max(0, total), max(0, mis), max(0, cnc), sectors
 
 
+def _co_movement_peers(symbol: str, held: frozenset[str], sector_of: Mapping[str, str]) -> frozenset[str]:
+    """The held and pending symbols the co-movement cap correlates ``symbol`` against: those of its own
+    sector, and every one when either sector is unknown (owner 2026-11-05).
+
+    Across 2023-2026 a 20d correlation above 0.7 between two sectors mostly did not last (next 20
+    sessions: median 0.38, 10% still above 0.7; within a sector 0.53 and 24%), and the market did not
+    explain the pairs it blocked (TIPSMUSIC-SYNGENE kept 0.65-0.71 with the index taken out). An
+    unclassified symbol is not evidence of an unrelated one, so it keeps the pair.
+    """
+    own = sector_of.get(symbol, _UNCLASSIFIED)
+    return frozenset(
+        s for s in held
+        if own == _UNCLASSIFIED or sector_of.get(s, _UNCLASSIFIED) in (own, _UNCLASSIFIED)
+    )
+
+
 #: The §3.2.4 focus-cap marker, duplicated from ``engine.universe.builder.EXCL_CAP`` for the same
 #: layering reason ``engine.marketdata.store`` duplicates it: the gate must not import the universe
 #: builder. A row excluded for the cap ALONE is eligible; any other reason, or the extended-leg
@@ -1523,7 +1542,8 @@ class GateContextBuilder:
             per_symbol_cnc_notional={symbol: self._exposure.cnc_notional(symbol)},
             sector_of=sector_of,
             open_sector_counts=sector_counts,
-            max_corr_with_open=await self._max_corr(symbol, open_symbols | pending, d),
+            max_corr_with_open=await self._max_corr(
+                symbol, _co_movement_peers(symbol, open_symbols | pending, sector_of), d),
             deployed_capital=self._exposure.deployed_capital() + (
                 Decimal(0) if real else self._paper_committed_capital()),
             ltp=self._ltp_fn(symbol) if self._ltp_fn else None,
