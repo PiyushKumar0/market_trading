@@ -220,7 +220,7 @@ class DealsJob:
             body=(
                 f"Deals source(s) failed for {d.isoformat()}: {', '.join(failed)} ({reason}). "
                 "Existing flags remain; volume-breakout suppression may miss today's deals until "
-                "the date-keyed catch-up re-runs (E5)."
+                "the date-keyed catch-up re-runs."
             ),
             severity="warning",
             data={"job_id": "deals", "d": d.isoformat(), "failed_sources": failed, "reason": reason},

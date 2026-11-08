@@ -76,7 +76,7 @@ from engine.risk.causes import RiskStateLatch
 from engine.risk.events import TOPIC_KILL_STATE
 from engine.risk.kill import KillSwitch, KillSwitchEngaged
 from engine.risk.mode import ModeManager
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import LIVE_ORDER_PATH_GATED
 
 #: Wed 2026-06-17 10:05 IST — inside the seeded 10:00–10:30 trade window (NSECalendar default seed).
 START = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
@@ -396,7 +396,7 @@ async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
     "(KiteClient._order_call's except/re-raise) and no caller retries or backs off; the OMS order "
     "executor that would own the policy is WO-P3-5. The pacing half of the clause (every attempt inside the rate budget, no "
     "amplification) IS asserted by test_429_storm_every_attempt_is_paced_and_never_amplified. "
-    + PHASE3_GATED
+    + LIVE_ORDER_PATH_GATED
 ))
 async def test_429_retry_backoff_policy() -> None:
     """A2: on a 429 the order path retries with backoff — each retry drawing from the rate budget."""

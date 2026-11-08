@@ -320,7 +320,7 @@ def engine_stopped(*, reason: str, open_positions: int, next_start: str | None =
         title="Engine stopped",
         body=(
             f"Clean shutdown (reason={reason}). Open positions: {open_positions} "
-            f"(broker-protected, R3).{nxt}"
+            f"(broker-protected).{nxt}"
         ),
         severity="info",
         data={"reason": reason, "open_positions": open_positions, "next_start": next_start},
@@ -703,7 +703,7 @@ def backfill_report(
         title=f"Backfill {interval} complete" + (" (with failures)" if failures else ""),
         body=(
             f"{bars_written} bars across {symbols} symbol(s) for [{frm} .. {to}] "
-            f"in {duration_s:.1f}s (≤3 req/s, A2).{fail}"
+            f"in {duration_s:.1f}s (≤3 req/s).{fail}"
         ),
         severity="warning" if failures else "info",
         data={
@@ -780,7 +780,7 @@ def engine_crashloop(*, restarts: int, window_s: int) -> CatalogMessage:
         title="Engine crash-looping",
         body=(
             f"{restarts} restarts within {window_s}s — holding down for investigation. "
-            "Open positions remain broker-protected (R3); check logs before restarting."
+            "Open positions remain broker-protected; check logs before restarting."
         ),
         severity="critical",
         data={"restarts": restarts, "window_s": window_s},
@@ -864,7 +864,7 @@ def risk_state_change(old: str, new: str, cause: str) -> CatalogMessage:
         title=f"Risk state {old} → {new}",
         body=(
             f"Risk state changed {old} → {new} (cause: {cause}).\n"
-            "Risk-reducing exits/protection continue in every state (R3)."
+            "Risk-reducing exits/protection continue in every state."
         ),
         severity="warning",
         data={"old": old, "new": new, "cause": cause},
@@ -895,7 +895,7 @@ def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -
         title=f"Trade window {start}-{end}",
         body=(
             f"Entries are now confined to {start}-{end} IST (MIS square-off buffer {buffer_min}m), "
-            f"set by {actor}. Exits/protection are never gated by the window (R3)."
+            f"set by {actor}. Exits/protection are never gated by the window."
         ),
         severity="info",
         data={"start": start, "end": end, "buffer_min": buffer_min, "actor": actor},
@@ -977,7 +977,7 @@ def budget_tier(old: str, new: str, window_spend: Decimal, window_key: str) -> C
         body=(
             f"LLM/API degrade ladder moved {old} → {new} (window spend ${window_spend}, "
             f"week from {window_key} 14:00 IST). "
-            "Capabilities change per the §5.6 ladder; /budget shows the per-agent split."
+            "Capabilities change per the degrade ladder; /budget shows the per-agent split."
         ),
         severity="warning",
         data={
@@ -1097,7 +1097,7 @@ def catalyst_watchlist(n_originating: int, n_context: int) -> CatalogMessage:
         title="Catalyst watchlist built",
         body=(
             f"originating: {n_originating}\ncontext-only: {n_context}\n"
-            "Context-only symbols can veto or size a trade, never originate one (O11)."
+            "Context-only symbols can veto or size a trade, never originate one."
         ),
         severity="info",
         data={"n_originating": n_originating, "n_context": n_context},
@@ -1262,7 +1262,7 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
         )
     head.append(f"valid until {rec.valid_until.isoformat(timespec='minutes')}")
     if rec.short_flag_higher_tail_risk:
-        head.append("SHORT — higher tail risk (C8 shorting policy).")
+        head.append("SHORT — higher tail risk (shorting policy).")
     edge = []
     if rec.registered_edge_pct is not None:
         expected = (rec.notional * rec.registered_edge_pct / 100).quantize(Decimal(1), ROUND_HALF_UP)
@@ -1272,7 +1272,7 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
     tail = [
         *_gate_lines(rec),
         _cost_line(rec),
-        "checklist (yours to place — the platform places no orders in RECOMMEND, B7):",
+        "checklist (yours to place — the platform places no orders in RECOMMEND):",
         *(f"  • {item}" for item in rec.manual_checklist),
         # The last line is the reply the owner types back — the message teaches its own capture.
         _capture_footer(rec),
@@ -1471,7 +1471,7 @@ def data_freshness_frozen(*, job_id: str, last_success: str | None, reason: str)
         body=(
             f"Safety-critical job '{job_id}' could not run/verify before entries open "
             f"(last success: {last}). Reason: {reason}\n"
-            "Entries FROZEN until fresh; exits/protection unaffected (R3)."
+            "Entries FROZEN until fresh; exits/protection unaffected."
         ),
         severity="critical",
         data={"job_id": job_id, "last_success": last_success, "reason": reason},

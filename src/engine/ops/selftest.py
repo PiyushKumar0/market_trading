@@ -283,11 +283,11 @@ class SelfTest:
             pass
         if present and not overflow:
             return SelfTestCheck(name="anthropic_key_absent", status=CheckStatus.FAIL,
-                                 detail="ANTHROPIC_API_KEY set but overflow disabled — it outranks OAuth (D2)",
+                                 detail="ANTHROPIC_API_KEY set but overflow disabled — it outranks OAuth",
                                  implies=Implies.FROZEN)
         if present and overflow:
             return SelfTestCheck(name="anthropic_key_absent", status=CheckStatus.WARN,
-                                 detail="ANTHROPIC_API_KEY present; overflow enabled by owner (D6)")
+                                 detail="ANTHROPIC_API_KEY present; overflow enabled by owner")
         return SelfTestCheck(name="anthropic_key_absent", status=CheckStatus.PASS)
 
     def _check_protected_store(self) -> list[SelfTestCheck]:
@@ -300,7 +300,7 @@ class SelfTest:
                 name=f"protected_store:{name}",
                 status=CheckStatus.PASS if ok else CheckStatus.FAIL,
                 detail="" if ok else (
-                    "hash mismatch or unregistered (R4) — run scripts/protected_config_status.py "
+                    "hash mismatch or unregistered — run scripts/protected_config_status.py "
                     "(a reverted dashboard change: --restore limits.yaml); "
                     "reseed only after an owner-reviewed edit"
                 ),
@@ -311,7 +311,7 @@ class SelfTest:
     def _check_kill_state(self) -> SelfTestCheck:
         if self._kill.is_killed():
             return SelfTestCheck(name="kill_state", status=CheckStatus.FAIL,
-                                 detail=f"kill switch engaged: {self._kill.reason()!r} (R10)", implies=Implies.KILL)
+                                 detail=f"kill switch engaged: {self._kill.reason()!r}", implies=Implies.KILL)
         return SelfTestCheck(name="kill_state", status=CheckStatus.PASS)
 
     async def _check_clock_skew(self, check_skew: bool) -> SelfTestCheck:
@@ -326,14 +326,14 @@ class SelfTest:
                                  detail=f"NTP unavailable: {exc}; entries stay conservative", implies=Implies.FROZEN)
         if skew.total_seconds() > max_skew:
             return SelfTestCheck(name="clock_skew", status=CheckStatus.FAIL,
-                                 detail=f"skew {skew.total_seconds():.2f}s > {max_skew}s (R6)", implies=Implies.FROZEN)
+                                 detail=f"skew {skew.total_seconds():.2f}s > {max_skew}s", implies=Implies.FROZEN)
         return SelfTestCheck(name="clock_skew", status=CheckStatus.PASS, detail=f"skew {skew.total_seconds():.2f}s")
 
     def _check_trade_window(self) -> SelfTestCheck:
         window = self._mode.get_trade_window()
         if window is None:
             return SelfTestCheck(name="trade_window", status=CheckStatus.FAIL,
-                                 detail="no trade window set (§7.1)", implies=Implies.FROZEN)
+                                 detail="no trade window set", implies=Implies.FROZEN)
         err = self._mode.validate_window(window)
         if err is not None:
             return SelfTestCheck(name="trade_window", status=CheckStatus.FAIL,
@@ -348,7 +348,7 @@ class SelfTest:
             return SelfTestCheck(name="token_valid", status=CheckStatus.PASS)
         # Non-fatal: owner may start before the daily login; entries stay FROZEN until re-login.
         return SelfTestCheck(name="token_valid", status=CheckStatus.WARN,
-                             detail="daily token not valid — login required (R6)", implies=Implies.LOGIN_PROMPT)
+                             detail="daily token not valid — login required", implies=Implies.LOGIN_PROMPT)
 
     # ----------------------------------------------------------------- data freshness
     async def data_freshness_checks(self) -> list[SelfTestCheck]:
@@ -367,7 +367,7 @@ class SelfTest:
         if self._catch_up is None or not getattr(self._catch_up, "has_registry", False):
             return self._stub(
                 "data_freshness",
-                "no CatchUpRunner/job registry wired — Phase-1 jobs registered by the integrator (§2.6)",
+                "no CatchUpRunner/job registry wired — jobs registered by the integrator",
             )
         stale = self._catch_up.stale_safety_jobs()
         if stale:
@@ -382,7 +382,7 @@ class SelfTest:
             return SelfTestCheck(
                 name="data_freshness",
                 status=CheckStatus.FAIL,
-                detail=f"safety-critical jobs not fresh after catch-up: {stale} (§2.6 step 5)",
+                detail=f"safety-critical jobs not fresh after catch-up: {stale}",
                 implies=Implies.FROZEN,
             )
         return SelfTestCheck(name="data_freshness", status=CheckStatus.PASS,
@@ -401,7 +401,7 @@ class SelfTest:
         today's FAIL+FROZEN (the flat fallback is never looser than the per-class answer)."""
         if self._warmup_gate is None:
             return self._stub(
-                "warmup_ready", "no WarmupGate wired — integrator passes engine.ops.warmup.WarmupGate (§2.6)"
+                "warmup_ready", "no WarmupGate wired — integrator passes engine.ops.warmup.WarmupGate"
             )
         try:
             status = await self._warmup_gate.status()
@@ -412,7 +412,7 @@ class SelfTest:
                                  implies=Implies.FROZEN)
         if status.ready:
             return SelfTestCheck(name="warmup_ready", status=CheckStatus.PASS,
-                                 detail="contiguous coverage satisfies every strategy lookback (§7.1)")
+                                 detail="contiguous coverage satisfies every strategy lookback")
         ready_for = getattr(status, "ready_for", None)
         if ready_for is None:
             return SelfTestCheck(

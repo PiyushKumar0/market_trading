@@ -263,16 +263,16 @@ class WinnerStability(BaseModel):
         """One-line rendering for ``ValidationReport.notes`` (so it lands in the md artifact)."""
         if self.stable is None:
             return (
-                "Winner stability (WO-3): NOT ASSESSED — no adjacent-grid-density winner was "
+                "Winner stability: NOT ASSESSED — no adjacent-grid-density winner was "
                 "supplied for comparison. Flag only; it never affects the promotion verdict."
             )
         if self.stable:
             return (
-                f"Winner stability (WO-3): STABLE — the {self.adjacent_density!r} grid density "
+                f"Winner stability: STABLE — the {self.adjacent_density!r} grid density "
                 f"selected the same winning config as {self.grid_density!r}."
             )
         return (
-            f"Winner stability (WO-3): UNSTABLE — the {self.adjacent_density!r} grid density "
+            f"Winner stability: UNSTABLE — the {self.adjacent_density!r} grid density "
             f"selected a DIFFERENT winner (differs on: {', '.join(self.differing_params)}). "
             "Flag only, not an auto-fail: it says the ranking surface is flat around the optimum, "
             "so treat the specific parameter values as weakly identified."
@@ -532,7 +532,7 @@ def promotion_decision(
     reasons: list[str] = []
     if n is None:
         reasons.append(
-            "trial count N is ABSENT — a report with no cited N is not promotable (E2/§6.4 step 2)"
+            "trial count N is ABSENT — a report with no cited N is not promotable"
         )
     if fold_pass_fraction is None:
         reasons.append("CPCV produced no folds (insufficient observations) — not validated out-of-sample")
@@ -546,7 +546,7 @@ def promotion_decision(
     floor = margin_floor_pct_per_day(cost_floor_pct, margin_floor_days=margin_floor_days)
     if floor is None:
         reasons.append(
-            "margin floor NOT EVALUATED — no per-trade cost floor supplied (WO-3). A margin floor "
+            "margin floor NOT EVALUATED — no per-trade cost floor supplied. A margin floor "
             "that silently skips is no floor; fail closed."
         )
     elif median_passing_expectancy_pct is None:
@@ -558,7 +558,7 @@ def promotion_decision(
         reasons.append(
             f"median passing-split expectancy {median_passing_expectancy_pct:.5f}%/day < margin "
             f"floor {floor:.5f}%/day (= round-trip cost floor {cost_floor_pct:.4f}% / "
-            f"{margin_floor_days} sessions, WO-3): the edge is positive but not economically "
+            f"{margin_floor_days} sessions): the edge is positive but not economically "
             "distinguishable from zero at these costs"
         )
     if champion_max_dd_pct is not None and max_dd_pct is not None:
@@ -566,7 +566,7 @@ def promotion_decision(
         if max_dd_pct > cap:
             reasons.append(
                 f"max drawdown {max_dd_pct:.2f}% > {CHAMPION_MAX_DD_MULT}x champion's "
-                f"({champion_max_dd_pct:.2f}%) = {cap:.2f}% (§6.4 step 2)"
+                f"({champion_max_dd_pct:.2f}%) = {cap:.2f}%"
             )
     return (not reasons, reasons)
 
@@ -751,7 +751,7 @@ class ValidationPipeline:
         notes = [stability.note()]
         if floor is not None:
             notes.append(
-                f"Margin floor (WO-3): median passing-split expectancy must be >= {floor:.5f}%/day "
+                f"Margin floor: median passing-split expectancy must be >= {floor:.5f}%/day "
                 f"(= round-trip friction {cost_floor:.4f}% at the ₹{_DEFAULT_REFERENCE_NOTIONAL} "
                 f"sweep sizing, incl. the measured spread, spread over {self._margin_floor_days} "
                 f"sessions). Observed: "
@@ -767,14 +767,14 @@ class ValidationPipeline:
             notes.append(
                 "PARAMS ARE NOT A GRID WINNER: the sweep ranked NO configuration (every config "
                 "closed no round trip inside the window, or its open/closed split was unreadable), "
-                "so these params are the §6.3 envelope DEFAULTS substituted by the caller. The "
+                "so these params are the parameter-envelope DEFAULTS substituted by the caller. The "
                 "cited trial count N, the sweep context and the winner-stability flag below all "
                 "describe a grid that selected nothing — read this verdict as a validation of the "
                 "DEFAULT config at this window, never as a swept result."
             )
         if params.population_is_survivorship_tainted_proxy:
             notes.append(
-                "SURVIVORSHIP (R2, 2026-09-12): the population behind these returns is a "
+                "SURVIVORSHIP (2026-09-12): the population behind these returns is a "
                 "survivorship-tainted proxy — a present-day symbol list applied BACKWARDS, because "
                 "this platform stores no point-in-time index membership. Every LEVEL quoted here "
                 "(expectancy, total return, the sweep's per-trade figures) is biased HIGH by an "
@@ -836,10 +836,10 @@ class ValidationPipeline:
                 for c in cells
             )
             notes.append(
-                "Margin floor at the MEASURED holding period (R2, 2026-09-12) — REPORTING ONLY: the "
+                "Margin floor at the MEASURED holding period (2026-09-12) — REPORTING ONLY: the "
                 f"verdict above is decided at the registered {self._margin_floor_days}-session "
                 "denominator and nothing here moves it. A denominator is a HORIZON, and 20 (swing) "
-                "and 120 (positional) are §7.1 CAPS, so a floor quoted at a cap is the loosest bar "
+                "and 120 (positional) are risk-limit CAPS, so a floor quoted at a cap is the loosest bar "
                 f"the horizon can justify. Re-based on this run's own trades: {rebased}."
             )
         if hold.n_trades:
@@ -854,7 +854,7 @@ class ValidationPipeline:
             notes.append(
                 f"Per-trade expectancy, open/closed split: {hold.n_trades} trades = "
                 f"{hold.n_closed} closed + {hold.n_open} still OPEN at the window edge. Mean net "
-                f"return per trade over CLOSED round trips {closed_txt} — since WO-M "
+                f"return per trade over CLOSED round trips {closed_txt} — since the sweep-mechanics fix "
                 "(2026-09-13) that is the sweep headline AND the statistic the grid winner was "
                 f"ranked on — vs {all_txt} over ALL trades, reported beside it. An open trade "
                 "contributes unrealized mark-to-market and has not paid an exit leg, so where the "

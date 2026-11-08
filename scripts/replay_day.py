@@ -78,7 +78,7 @@ def _print_report(report: ReplayReport) -> None:
     print(f"ticks read        : {report.ticks_read:,}")
     print(f"  delivered       : {report.ticks_delivered:,}  (in-session)")
     print(f"  pre-open        : {report.pre_open_excluded:,}  (A14: no bar, carries the auction open)")
-    print(f"  post-close      : {report.post_close_dropped:,}  (WO-5: no bar)")
+    print(f"  post-close      : {report.post_close_dropped:,}  (no bar)")
     for day, count in report.bars_built.items():
         print(f"bars built {day}: {count:,}")
     # Zero across the board until a broker is attached (v1 has no order origination) - the counts are

@@ -172,7 +172,7 @@ class PreopenPlannerJob:
         agent_def = agent_defs.get(preopen.AGENT_ID)
         if agent_def is None:
             raise KeyError(
-                f"agents.yaml has no enabled {preopen.AGENT_ID!r} definition — the §5.3 planner "
+                f"agents.yaml has no enabled {preopen.AGENT_ID!r} definition — the pre-open planner "
                 "job cannot be wired to a parked agent"
             )
         self._store = store

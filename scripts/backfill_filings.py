@@ -87,7 +87,7 @@ def _parse_date(s: str) -> date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="§2.8 corporate-filings history seed (stage 1 — ingest + backfill only)."
+        description="Corporate-filings history seed (stage 1 — ingest + backfill only)."
     )
     parser.add_argument("mode", choices=("seed",))
     parser.add_argument(

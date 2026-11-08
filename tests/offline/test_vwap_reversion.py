@@ -624,7 +624,7 @@ def test_full_round_trip_is_charged_on_every_trade() -> None:
         assert tr.net_return_pct == pytest.approx(tr.gross_return_pct - _COST)
 
 
-def test_cost_floor_is_the_wo2_surface_including_spread_at_20k_mis() -> None:
+def test_cost_floor_is_the_corrected_surface_including_spread_at_20k_mis() -> None:
     """Requirement 4: ``breakeven_pct`` (fees + spread), NOT the spread-excluded fee anchor."""
     from engine.strategy.cost_model import CostModel
 
@@ -918,7 +918,7 @@ def test_overnight_gap_never_enters_the_stop_unit() -> None:
     assert day2.atr_10m_final == pytest.approx(0.5)
 
 
-def test_day_one_is_fail_closed_no_prior_atr_means_wo10_warmup() -> None:
+def test_day_one_is_fail_closed_no_prior_atr_means_unseeded_warmup() -> None:
     """A symbol's FIRST session has no prior ATR, so it keeps the unseeded 140-minute warm-up even in
     seeded mode — 'no trades until its own warm-up completes' (pre-registered)."""
     frame = _two_session_frame()
@@ -960,7 +960,7 @@ def test_seeded_mode_opens_the_registered_1000_window_from_day_two() -> None:
     assert unseeded[_CFG_1PCT] == []                          # the unseeded mode could never reach 10:00
 
 
-def test_default_off_is_byte_identical_to_wo10() -> None:
+def test_default_off_is_byte_identical_to_the_unseeded_run() -> None:
     """PUNCH-LIST: run the existing fixture BOTH ways; with the flag off every number is unchanged."""
     closes, volumes = _dip_session(signal_pos=_SIGNAL_POS, dip_close=98.5, hold_until=340)
     days = pd.bdate_range("2026-01-05", periods=6).strftime("%Y-%m-%d").tolist()

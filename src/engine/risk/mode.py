@@ -107,7 +107,7 @@ class ModeManager:
     def check_allowed(self, to: Mode, routing: Routing | None = None) -> None:
         """Raise :class:`ModeRefused` for AUTO or ``Routing.LIVE`` while ``paper_only``."""
         if self._paper_only and (to == Mode.AUTO or routing == Routing.LIVE):
-            raise ModeRefused("AUTO and live routing are refused while feature_flags.paper_only is set (D8)")
+            raise ModeRefused("AUTO and live routing are refused while feature_flags.paper_only is set")
 
     async def request_transition(
         self,
@@ -118,11 +118,11 @@ class ModeManager:
     ) -> bool:
         """Owner-initiated mode change. →AUTO requires a two-step owner confirmation."""
         if who != Actor.OWNER:
-            raise PermissionError("mode transitions are owner-only (R10)")
+            raise PermissionError("mode transitions are owner-only")
         self.check_allowed(to, routing)
         if to == Mode.AUTO:
             if confirmation is None or not confirmation.confirmed or confirmation.actor != Actor.OWNER:
-                raise PermissionError("→AUTO requires an authenticated OWNER two-step confirmation (R10)")
+                raise PermissionError("→AUTO requires an authenticated OWNER two-step confirmation")
             routing = routing or Routing.PAPER  # default safe routing; live gated elsewhere
         else:
             routing = None  # routing is valid ONLY with AUTO
@@ -241,7 +241,7 @@ class ModeManager:
         apply. If the new ``end`` is at-or-before now, fire ``on_shrink_squareoff`` (risk-reducing,
         not wired yet). Not learnable, never Tier-1-callable."""
         if who != Actor.OWNER:
-            raise PermissionError("trade-window changes are owner-only (R10)")
+            raise PermissionError("trade-window changes are owner-only")
         existing = self.get_trade_window()
         buffer = squareoff_buffer_min if squareoff_buffer_min is not None else (
             existing.squareoff_buffer_min if existing else 5

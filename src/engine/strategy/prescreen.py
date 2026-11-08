@@ -1105,7 +1105,7 @@ class SignalPreScreen:
                 _log.info(
                     "prescreen_out_of_window", symbol=cand.symbol, strategy_id=cand.strategy_id,
                     score=cand.score,
-                    reason="outside owner trade window — not charging a day slot (§7.1)",
+                    reason="outside owner trade window — not charging a day slot",
                 )
             return False
         if key in self._seen:

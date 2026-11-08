@@ -218,7 +218,7 @@ def test_a_full_measured_cohort_retires_end_to_end_on_pure_inputs(cal):
     rule = next(line for line in text.splitlines() if line.startswith("RULE"))
     assert "20 non-void, non-duplicate" in rule
     for line in text.splitlines():
-        if line.startswith(("running", "pre-O15", "O15 +", "Sonnet-5.5", "excess vs EW")):
+        if line.startswith(("running", "pre-NIFTY500", "NIFTY500 +", "Sonnet-5.5", "excess vs EW")):
             assert "decides nothing" in line
 
 
@@ -239,11 +239,11 @@ def test_signals_admitted_08_18_through_08_28_are_excluded_whatever_from_says(ca
 # ============================================================ 6. segments
 def test_segment_assignment_at_both_boundaries():
     s = date(2026, 10, 6)
-    assert cv.segment_of(date(2026, 9, 6), scorer_switch=s) == "pre_o15"
-    assert cv.segment_of(date(2026, 9, 7), scorer_switch=s) == "o15_sonnet5"
-    assert cv.segment_of(date(2026, 10, 5), scorer_switch=s) == "o15_sonnet5"
+    assert cv.segment_of(date(2026, 9, 6), scorer_switch=s) == "pre_nifty500"
+    assert cv.segment_of(date(2026, 9, 7), scorer_switch=s) == "nifty500_sonnet5"
+    assert cv.segment_of(date(2026, 10, 5), scorer_switch=s) == "nifty500_sonnet5"
     assert cv.segment_of(s, scorer_switch=s) == "sonnet55"
-    assert cv.O15_FIRST_SESSION == date(2026, 9, 7) and "WORKLOG 2026-09-04" in cv.O15_PROVENANCE
+    assert cv.NIFTY500_FIRST_SESSION == date(2026, 9, 7) and "2026-09-04" in cv.NIFTY500_PROVENANCE
 
 
 def _clusters(rows: list[tuple[str, datetime | None]]):
@@ -320,7 +320,7 @@ def test_an_unadjusted_ex_date_inside_the_hold_voids_and_the_21st_signal_enters_
     # Excluded from every cell: all 20 remaining nets are +3% - cost, so the void's -50% is absent.
     run = doc["diagnostics"]["running"]
     assert run["20"]["n"] == 20 and run["20"]["mean_net"] == pytest.approx(3.0 - COST, abs=1e-4)
-    assert doc["diagnostics"]["segments"]["pre_o15"]["signals"] == 20
+    assert doc["diagnostics"]["segments"]["pre_nifty500"]["signals"] == 20
     assert doc["diagnostics"]["excess_vs_ew"]["20"]["omitted_missing_ew_day"] == 20   # no EW given
     text = cv.render(doc)
     assert "VOID" in text and f"bonus ex-date {sessions[5]}" in text and "void 1" in text
@@ -542,7 +542,7 @@ def test_as_of_bounds_both_stores_end_to_end(tmp_path, cal, clock, capsys):
     sb = doc2["meta"]["segment_bounds"]
     assert sb["scorer_switch_session"] == "2026-10-06" and "FALLBACK" not in sb["scorer_switch_provenance"]
     assert doc2["diagnostics"]["excess_vs_ew"]["20"]["n"] == 20
-    assert doc2["diagnostics"]["segments"]["pre_o15"]["signals"] == 20
+    assert doc2["diagnostics"]["segments"]["pre_nifty500"]["signals"] == 20
     assert doc2["diagnostics"]["segments"]["sonnet55"]["signals"] == 1      # LATE
     assert doc2["meta"]["sizing"]["equity_inr"] == "38000"
 

@@ -1391,7 +1391,7 @@ async def test_take_close_veto_and_the_worked_pnl(conn, ticker, pclock, book, co
     # -- /taken -------------------------------------------------------------------------
     summary = await book.take(rec.rec_id, 10, Decimal("100.00"))
     position = conn.execute("SELECT * FROM positions").fetchone()
-    assert position["position_id"] in summary and "B7" in summary   # owner sees the id + who protects
+    assert position["position_id"] in summary and "places none in RECOMMEND" in summary   # owner sees the id + who protects
     assert position["origin"] == "recommended" and position["state"] == "OPEN"
     assert position["protection_state"] is None and position["is_paper"] == 0
     assert position["symbol"] == SYMBOL and position["product"] == "MIS" and position["qty"] == 10

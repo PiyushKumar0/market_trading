@@ -72,7 +72,7 @@ def session_regime(
     """The regime from the index's ``get_bars_1d_frame`` read through the day before ``today``, and
     why it is None.
 
-    The last bar must be no older than ``calendar.previous_trading_day(today)`` (C2: no bar dated y is
+    The last bar must be no older than ``calendar.previous_trading_day(today)`` (no bar dated y is
     undefined); a later bar before today, a session the live calendar treats as closed (muhurat), is a
     completed session and counts. Reason: None | ``"index_bar_missing"`` | ``"undefined"``."""
     if not len(frame) or frame.index[-1].date() < calendar.previous_trading_day(today):

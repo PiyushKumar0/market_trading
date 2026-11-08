@@ -137,10 +137,10 @@ class ProtectedStore:
         actual = sha256_bytes(raw)
         recorded = self._signature(name)
         if recorded is None:
-            raise IntegrityError(f"{name} is not registered in protected_config (unregistered, §2.4)")
+            raise IntegrityError(f"{name} is not registered in protected_config (unregistered)")
         if actual != recorded:
             raise IntegrityError(
-                f"{name} hash mismatch: on-disk {actual[:12]}… != recorded {recorded[:12]}… (R4)"
+                f"{name} hash mismatch: on-disk {actual[:12]}… != recorded {recorded[:12]}…"
             )
         return raw, actual
 
@@ -174,7 +174,7 @@ class ProtectedStore:
         """
         if not confirmation.confirmed or confirmation.actor != Actor.OWNER:
             raise UnauthorizedUpdate(
-                "protected-config update requires an authenticated OWNER confirmation (R4/R10)"
+                "protected-config update requires an authenticated OWNER confirmation"
             )
         path = self._path(name)
         # Validate it parses as YAML before committing the change.
@@ -185,7 +185,7 @@ class ProtectedStore:
         if expected_sha256 is not None and prev != expected_sha256:
             raise IntegrityError(
                 f"{name} signature changed since it was read: recorded "
-                f"{prev[:12] + '…' if prev else 'none'} != expected {expected_sha256[:12]}… (R4)"
+                f"{prev[:12] + '…' if prev else 'none'} != expected {expected_sha256[:12]}…"
             )
         try:
             old_bytes: bytes | None = path.read_bytes()
@@ -195,7 +195,7 @@ class ProtectedStore:
             # The signature still matches the read, but the file does not: an unsigned edit landed in
             # between. Overwriting it would silently discard that edit.
             raise IntegrityError(
-                f"{name} on-disk bytes changed since it was read (unsigned edit); not overwriting (R4)"
+                f"{name} on-disk bytes changed since it was read (unsigned edit); not overwriting"
             )
         now = self._clock.now().isoformat()
         tmp = _tmp_path(path)
@@ -228,7 +228,7 @@ class ProtectedStore:
                     if cur.rowcount != 1:
                         raise IntegrityError(
                             f"{name} signature changed since it was read: compare-and-swap on "
-                            f"{expected_sha256[:12]}… matched {cur.rowcount} rows (R4)"
+                            f"{expected_sha256[:12]}… matched {cur.rowcount} rows"
                         )
                 self._conn.execute(
                     "INSERT INTO config_audit (name, diff, actor, at) VALUES (?, ?, ?, ?)",

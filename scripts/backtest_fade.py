@@ -307,11 +307,11 @@ RULES: dict[str, RuleSpec] = {
     ),
     "F1_T1200": RuleSpec(
         "F1_T1200", "F1", KIND_FAILED_BREAKOUT, "12:00", EXIT_OR_HIGH, STOP_SESSION_HIGH,
-        TRIGGER_CLOSE, False, "REPORTING ONLY (plan): F1 with the decision bar at 12:00",
+        TRIGGER_CLOSE, False, "REPORTING ONLY: F1 with the decision bar at 12:00",
     ),
     "F2_1515_only": RuleSpec(
         "F2_1515_only", "F2", KIND_GAP, "10:00", None, None, TRIGGER_CLOSE, False,
-        "REPORTING ONLY (plan): F2 held to the 15:15 squareoff, no failure exit and no stop",
+        "REPORTING ONLY: F2 held to the 15:15 squareoff, no failure exit and no stop",
     ),
     "F1_stop_on_1m_high": RuleSpec(
         "F1_stop_on_1m_high", "F1", KIND_FAILED_BREAKOUT, "11:00", EXIT_OR_HIGH,
@@ -1059,9 +1059,9 @@ def run_study(
         "REFUTATION and changes nothing."
     )
     notes.append(
-        "SHORTS ARE GATED FOR AUTO BY §1.4.9 WHATEVER THIS SAYS. This study wires nothing; a "
+        "SHORTS ARE GATED FOR AUTO WHATEVER THIS SAYS. This study wires nothing; a "
         "promotable cell would be evidence for a separately pre-registered origination proposal and "
-        "an owner decision (§8.6), never a deployment."
+        "an owner decision, never a deployment."
     )
     notes.append(
         "SHORTABILITY IS ASSUMED, NOT PROVEN: a T2T/GSM/ASM bucket, a broker MIS block or an F&O "
@@ -1106,7 +1106,7 @@ def run_study(
         "measured against the real index."
     )
     notes.append(
-        "ATR TERCILE = R3's statistic verbatim: Wilder ATR(14) over the 14 completed DAILY sessions "
+        "ATR TERCILE = the pre-registered statistic verbatim: Wilder ATR(14) over the 14 completed DAILY sessions "
         "STRICTLY BEFORE the signal day (engine.strategy.indicators.wilder_atr), over the close of "
         "the last of them, in percent; a symbol-day with fewer than 14 prior daily sessions is "
         f"labelled '{ATR_UNCLASSIFIED}' and KEPT, so the four cells sum to the pooled cell exactly. "
@@ -1122,7 +1122,7 @@ def run_study(
     notes.append(
         f"EX-DATE VETO (universal): any corp_actions ex-date in the {base['exdate_veto_window_days']} "
         "calendar days ending at d vetoes the symbol-day for BOTH rules. Kite minute candles are "
-        "adjusted at fetch time (§14 Q10), so a stitched series can hold two unit systems, and a "
+        "adjusted at fetch time, so a stitched series can hold two unit systems, and a "
         "split multiplies the 20-session volume denominator either way."
     )
     if years_without_calendar:
@@ -1355,8 +1355,8 @@ def render_text(doc: dict[str, Any]) -> str:
     out: list[str] = []
     add = out.append
     add("=" * 122)
-    add("fade PRE-REGISTERED BACKTEST - the SHORT/fade side of intraday (R4)")
-    add("(IMPLEMENTATION_PLAN.md `fade` pre-registration, 2026-09-12)")
+    add("fade PRE-REGISTERED BACKTEST - the SHORT/fade side of intraday")
+    add("(`fade` pre-registration, 2026-09-12)")
     add("=" * 122)
     add(f"generated        : {m['generated_at']}")
     add(f"window           : {m['window']['start']} -> {m['window']['end']}  "
@@ -1443,7 +1443,7 @@ def render_text(doc: dict[str, Any]) -> str:
     add("")
 
     add("-" * 122)
-    add("STEP 5 - VERDICT (the plan's boolean, verbatim; no other claim is made)")
+    add("STEP 5 - VERDICT (the pre-registered boolean, verbatim; no other claim is made)")
     add("-" * 122)
     v = doc["verdict"]
     add(f"  outcome: {v['outcome']}")
@@ -1479,14 +1479,14 @@ def render_markdown(doc: dict[str, Any]) -> str:
     v = doc["verdict"]
     out: list[str] = []
     add = out.append
-    add("# fade backtest - the short/fade side of intraday (R4, pre-registered 2026-09-12)")
+    add("# fade backtest - the short/fade side of intraday (pre-registered 2026-09-12)")
     add("")
     add(f"*Generated {m['generated_at']} - window {m['window']['start']} -> {m['window']['end']}, "
         f"{m['n_sessions']} sessions, {m['n_symbols_measured']} of {m['n_eligible_symbols']} "
         f"eligible symbols with 1m bars. Trial count N={m['trial_count_n']} "
         f"({', '.join(m['pre_registered_rules'])}). Round trip {m['cost_round_trip_pct']:.4f}% "
         f"{m['product']} at Rs {m['reference_notional_inr']} + 1 tick/side. SHORT side; "
-        "§1.4.9 gates shorts for AUTO whatever this says, and this study wires nothing.*")
+        "Shorts are gated for AUTO whatever this says, and this study wires nothing.*")
     add("")
     add(f"## Outcome: **{v['outcome']}**")
     add("")
@@ -1552,7 +1552,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="backtest_fade",
         description=(
-            "fade pre-registered backtest, R4 - the short side of intraday (one PARAMS dict, one "
+            "fade pre-registered backtest - the short side of intraday (one PARAMS dict, one "
             "fixed RULES dict, no sweep and no selection). Read-only against bars_1m/bars_1d; "
             "refuses to run if the DuckDB file is missing or locked by the engine."
         ),

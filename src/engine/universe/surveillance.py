@@ -403,7 +403,7 @@ class SurveillanceIngest:
             title="Surveillance lists degraded — reusing yesterday",
             body=(
                 f"Source(s) failed: {', '.join(degraded)}. Yesterday's lists reused; "
-                f"{unconfirmed} symbol(s) unconfirmed — gate refuses NEW entries there (A8/E5)."
+                f"{unconfirmed} symbol(s) unconfirmed — gate refuses NEW entries there."
             ),
             severity="critical",
             data={"job_id": "surveillance", "degraded_sources": degraded, "unconfirmed": unconfirmed},

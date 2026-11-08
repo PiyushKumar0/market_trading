@@ -4,7 +4,7 @@
  * called the same everywhere. Pure and DOM-free (`node --test` runs it).
  *
  * Sources, read 2026-10-08: risk/mode.py (modes, risk states, trade window), core/types.py
- * (TradeWindow), plan §5.6 + intelligence/governor.py (degrade ladder), risk/gate.py (verdicts, rule
+ * (TradeWindow), intelligence/governor.py (degrade ladder), risk/gate.py (verdicts, rule
  * IDs), ops/paper_risk.py + RUNBOOK paper halt table (halts), ops/scorecard.py (scorecard),
  * notify/telegram.py (`/resume_entries`), notify/catalog.py (message kinds), strategy/scanners/*.py
  * (strategy names). Unknown values fall back to the humanised raw value — never an exception.
@@ -133,7 +133,7 @@ export function verdictTerm(v: string | null | undefined): Term {
   return lookup(VERDICT, v)
 }
 
-/** Appendix A of the design spec: a reason is only cited when its rule FAILED, so each reads as the problem. */
+/** A reason is only cited when its rule FAILED, so each reads as the problem. */
 const RULE: Table = {
   mode_risk_state: { label: "Engine mode or risk state doesn't allow new trades" },
   kill_state: { label: 'Kill switch is on' },
@@ -582,7 +582,7 @@ export const COPY = {
       : stillBreached.length
         ? { tone: 'crit', text: 'Not re-armed: the account is still below the line.' }
         : { tone: 'note', text: 'Nothing to re-arm: no floor stop is set.' },
-  // "Change capital" (O19): the engine refuses inside market hours, in Auto, and when a stop would trip.
+  // "Change capital": the engine refuses inside market hours, in Auto, and when a stop would trip.
   capitalButton: 'Change capital',
   capitalTitle: 'Change starting capital',
   capitalIntro:

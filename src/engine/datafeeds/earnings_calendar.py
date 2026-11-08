@@ -213,7 +213,7 @@ class EarningsCalendarJob:
             title="Earnings-calendar feed degraded",
             body=(
                 f"NSE event-calendar fetch failed on {d.isoformat()}: {reason}. Existing "
-                "earnings_calendar rows remain in force; catch-up retries (R2/E5)."
+                "earnings_calendar rows remain in force; catch-up retries."
             ),
             severity="critical",
             data={"job_id": "earnings_calendar", "d": d.isoformat(), "reason": reason},

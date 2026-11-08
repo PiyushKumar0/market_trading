@@ -1,7 +1,7 @@
 /**
  * The three owner controls the dashboard is allowed (README "Owner writes"): engine mode Off /
  * Recommend, the paper autopilot ON / OFF, and the trading hours. AUTO, kill reset and paper reset
- * stay Telegram two-step (R10) — there is no path to them here. Every control waits for the engine's
+ * stay Telegram two-step — there is no path to them here. Every control waits for the engine's
  * answer: the value shown always comes from the next poll, never from an optimistic guess.
  */
 import { useEffect, useRef, useState } from 'react'
@@ -39,7 +39,7 @@ export function ModeControl({
   const auto = current === 'AUTO'
 
   // From Auto, Off and Recommend stay available: leaving Auto is the dashboard's brake on auto-trading
-  // (single-step, as the engine accepts it). Going INTO Auto stays Telegram two-step (R10).
+  // (single-step, as the engine accepts it). Going INTO Auto stays Telegram two-step.
   async function pick(v: 'OFF' | 'RECOMMEND') {
     const ask = auto ? (v === 'OFF' ? COPY.autoOff : COPY.autoToRecommend) : v === 'OFF' ? COPY.modeOff : null
     if (ask && !(await confirm(ask))) return

@@ -125,7 +125,7 @@ DIAGNOSTICS (each one decides nothing)
   ``> 0``), each horizon on its own event set.
 * **Segments** (owner directive: split at the first NIFTY 500 universe build, and at the news
   scorer's switch to sonnet-5.5), by journal day ``d``: pre-NIFTY-500 [``--from``,
-  :data:`O15_FIRST_SESSION` - 1], NIFTY 500 + Sonnet-5 scorer [:data:`O15_FIRST_SESSION`, S - 1],
+  :data:`NIFTY500_FIRST_SESSION` - 1], NIFTY 500 + Sonnet-5 scorer [:data:`NIFTY500_FIRST_SESSION`, S - 1],
   Sonnet-5.5 scorer [S, ``as_of``]. S = the first trading session strictly after the IST date of the
   earliest ``news_clusters.scored_at`` with ``scorer_model = 'sonnet-5.5'`` (bounded by ``as_of``);
   when that cannot be read, or no such row exists, S = :data:`SCORER_SWITCH_FALLBACK`, stated. Both
@@ -232,9 +232,9 @@ SESSION_OPEN_IST = time(9, 15)
 DUPLICATE_LOOKBACK_DAYS = 10
 
 #: Segment boundary 1 (owner directive): the first session on the NIFTY 500 universe (owner decision).
-O15_FIRST_SESSION = date(2026, 9, 7)
-O15_PROVENANCE = (
-    "WORKLOG 2026-09-04: O15 implemented after the session; first sweep on the NIFTY 500 universe "
+NIFTY500_FIRST_SESSION = date(2026, 9, 7)
+NIFTY500_PROVENANCE = (
+    "2026-09-04: the NIFTY 500 widening was implemented after that session; first sweep on the NIFTY 500 universe "
     "= the next session"
 )
 
@@ -243,10 +243,10 @@ SCORER_SWITCH_MODEL = "sonnet-5.5"
 #: Used, and stated, when ``news_clusters.scored_at`` cannot be read or holds no such row.
 SCORER_SWITCH_FALLBACK = date(2026, 10, 5)
 
-SEGMENTS: tuple[str, ...] = ("pre_o15", "o15_sonnet5", "sonnet55")
+SEGMENTS: tuple[str, ...] = ("pre_nifty500", "nifty500_sonnet5", "sonnet55")
 SEGMENT_LABELS = {
-    "pre_o15": "pre-O15",
-    "o15_sonnet5": "O15 + Sonnet-5 scorer",
+    "pre_nifty500": "pre-NIFTY500",
+    "nifty500_sonnet5": "NIFTY500 + Sonnet-5 scorer",
     "sonnet55": "Sonnet-5.5 scorer",
 }
 
@@ -502,10 +502,10 @@ def verdict(
 
 # =============================================================================== diagnostics
 def segment_of(d: date, *, scorer_switch: date) -> str:
-    if d < O15_FIRST_SESSION:
-        return "pre_o15"
+    if d < NIFTY500_FIRST_SESSION:
+        return "pre_nifty500"
     if d < scorer_switch:
-        return "o15_sonnet5"
+        return "nifty500_sonnet5"
     return "sonnet55"
 
 
@@ -880,7 +880,7 @@ def build_report(
             "sizing": dict(sizing or {"derivation": "not supplied (pure call)", "override": False}),
             "thresholds_pct": {str(k): round(t, 4) for k, t in thr.items()},
             "threshold_derivation": (
-                f"WO-3: net expectancy >= cost floor / {MARGIN_FLOOR_DAYS} per day => threshold(H) "
+                f"Margin floor: net expectancy >= cost floor / {MARGIN_FLOOR_DAYS} per day => threshold(H) "
                 f"= {cost_pct:.4f}% x H / {MARGIN_FLOOR_DAYS}: T+10 {thr[10]:.4f}%, "
                 f"T+20 {thr[20]:.4f}%"
             ),
@@ -893,8 +893,8 @@ def build_report(
             "exit_convention": "CLOSE of the k-th session of the hold, entry session first: "
                                "close(entry + k-1 sessions) / open(entry) - 1",
             "segment_bounds": {
-                "o15_first_session": O15_FIRST_SESSION.isoformat(),
-                "o15_provenance": O15_PROVENANCE,
+                "nifty500_first_session": NIFTY500_FIRST_SESSION.isoformat(),
+                "nifty500_provenance": NIFTY500_PROVENANCE,
                 "scorer_switch_session": switch_day.isoformat(),
                 "scorer_switch_provenance": switch_src,
                 "note": "both boundaries are +-1-session approximations",
@@ -955,7 +955,7 @@ def render(doc: Mapping[str, Any]) -> str:
     bar = "=" * 96
     lines = [
         bar,
-        "cat v2 SHADOW VERDICT (pre-registered 2026-08-18, WO-18; clock restarted 2026-08-28)",
+        "cat v2 SHADOW VERDICT (pre-registered 2026-08-18; clock restarted 2026-08-28)",
         bar,
         f"window          : {m['window']['start']} -> {m['window']['as_of']}   "
         f"(excluded always: {m['excluded_span'][0]} .. {m['excluded_span'][1]})"
@@ -1014,7 +1014,7 @@ def render(doc: Mapping[str, Any]) -> str:
         lines.append("  => the pre-registered rule retires cat origination; this report changes "
                      "nothing (retiring is an owner-visible change citing it)")
     elif doc["verdict"] == VERDICT_OWNER_REVIEW:
-        lines.append("  => §8.6 owner review (R4) before any live wiring; this result wires nothing.")
+        lines.append("  => owner review before any live wiring; this result wires nothing.")
     lines += [
         "-" * 96,
         "DIAGNOSTICS — each one decides nothing",
@@ -1032,7 +1032,7 @@ def render(doc: Mapping[str, Any]) -> str:
     for seg in SEGMENTS:
         s = dg["segments"][seg]
         _cells(f"{SEGMENT_LABELS[seg]} ({s['signals']} sig)", s["horizons"])
-    lines.append(f"  segments      : O15 from {sb['o15_first_session']} ({sb['o15_provenance']}); "
+    lines.append(f"  segments      : NIFTY 500 from {sb['nifty500_first_session']} ({sb['nifty500_provenance']}); "
                  f"scorer switch S = {sb['scorer_switch_session']} ({sb['scorer_switch_provenance']}); "
                  f"{sb['note']}")
     for k in m["horizons_sessions"]:
@@ -1050,7 +1050,7 @@ def render(doc: Mapping[str, Any]) -> str:
 # =============================================================================== CLI
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description="cat v2 shadow verdict (§2.7 2026-08-18 amendment, WO-18). "
+        description="cat v2 shadow verdict (2026-08-18). "
                     "Read-only against state.db + market.duckdb; always exits 0.",
     )
     ap.add_argument("--state-db", type=Path, default=repo_root() / "data" / "state.db",
@@ -1067,12 +1067,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--json", dest="json_path", type=Path, default=None,
                     help="also write the raw numbers to this JSON path")
     ap.add_argument("--limits", type=Path, default=repo_root() / "config" / "limits.yaml",
-                    help="path to limits.yaml (§7.1 per_trade_risk — the notional derivation)")
+                    help="path to limits.yaml (per_trade_risk — the notional derivation)")
     ap.add_argument("--equity", type=h52v._positive, default=None, metavar="INR",
                     help="size the cost floor at this equity instead of the smallest snapshot in "
                          "the window (a what-if; the derivation is printed either way)")
     ap.add_argument("--notional", type=h52v._positive, default=None, metavar="INR",
-                    help="charge the round trip at this notional and SKIP the §7.1 derivation "
+                    help="charge the round trip at this notional and SKIP the per_trade_risk derivation "
                          "(a what-if; the report says OVERRIDE)")
     return ap
 

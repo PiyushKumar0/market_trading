@@ -871,7 +871,7 @@ def test_no_registry_is_pure_watermark_store(conn, clock, calendar):
 DEFERRED = ("news_chain",)
 
 
-def _wo15_registry(calls: list) -> JobRegistry:
+def _deferred_registry(calls: list) -> JobRegistry:
     """universe_build (load-bearing) + news_chain (deferred) + bhavcopy (load-bearing, date-keyed)."""
     reg = JobRegistry()
     reg.register(_spec_recorder(calls, "universe_build", JobClass.RUN_LATEST, time(8, 45), order=10))
@@ -883,7 +883,7 @@ def _wo15_registry(calls: list) -> JobRegistry:
 @pytest.mark.asyncio
 async def test_boot_pass_runs_load_bearing_only_and_the_post_arm_pass_runs_the_deferred(conn, clock, calendar):
     calls: list = []
-    runner = CatchUpRunner(conn, clock, calendar, _wo15_registry(calls), deferred=DEFERRED)
+    runner = CatchUpRunner(conn, clock, calendar, _deferred_registry(calls), deferred=DEFERRED)
 
     boot = await runner.catch_up(off_since=OFF_SINCE)          # the lifecycle's call — default scope
 
@@ -968,11 +968,11 @@ async def test_sweep_during_an_in_flight_pass_is_a_logged_no_op(conn, clock, cal
 
 
 @pytest.mark.asyncio
-async def test_no_deferred_set_is_the_pre_wo15_behavior(conn, clock, calendar):
+async def test_no_deferred_set_keeps_the_undeferred_behavior(conn, clock, calendar):
     """The rollback path (``DEFER_POST_ARM_JOBS = False`` ⇒ ``deferred=()``): every scope is the whole
     registry again, and the post-arm one-shot has nothing to do."""
     calls: list = []
-    runner = CatchUpRunner(conn, clock, calendar, _wo15_registry(calls))     # deferred defaults to ()
+    runner = CatchUpRunner(conn, clock, calendar, _deferred_registry(calls))     # deferred defaults to ()
 
     await runner.catch_up(off_since=OFF_SINCE)
     assert "news_chain" in [j for j, _ in calls]           # ran INSIDE the boot pass, as before

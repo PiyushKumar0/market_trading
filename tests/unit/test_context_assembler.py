@@ -284,7 +284,7 @@ def test_day_plan_is_read_into_the_stable_block(assembler, conn):
     assert "trading date: 2026-06-17 (Wednesday)" in ctx.stable_block
 
 
-def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
+def test_stable_block_gains_no_bytes_from_the_plan_age_line(assembler, store, conn):
     """Hard constraint: the day-plan-age line renders in VOLATILE only. Pins the exact literal
     STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
     seed_day_plan(conn, '{"regime": "trending up", "no_trade_today": false}')
@@ -461,7 +461,7 @@ def test_session_aggregates_line(assembler, store):
 
 def test_day_plan_age_line_in_volatile(assembler, store, conn):
     """Explicit day-plan age line, VOLATILE only (STABLE stays byte-identical — see
-    ``test_stable_block_gains_no_bytes_from_wo6``). 90 minutes authored-to-now = a clean 1.5h with no
+    ``test_stable_block_gains_no_bytes_from_the_plan_age_line``). 90 minutes authored-to-now = a clean 1.5h with no
     banker's-rounding ambiguity (unlike the fixture default 08:50, which is 75min -> 1.25h)."""
     seed_bars(store)
     seed_day_plan(conn, created_at="2026-06-17T08:35:00+05:30")
@@ -936,7 +936,7 @@ def test_a_railed_sum_over_a_large_corpus_reports_its_near_zero_mean(assembler):
     assert "raw -9.48 across 759 clusters, mean -0.012 per cluster" in line
 
 
-def test_a_half_measured_rail_falls_back_to_the_wo20_prose(assembler):
+def test_a_half_measured_rail_falls_back_to_the_plain_prose(assembler):
     """Either measure missing ⇒ no measurement: an unmeasured rail must never borrow the credibility
     of a measured one by printing half of it."""
     for partial in ({"value": -1.0, "raw_sum": -2.31}, {"value": -1.0, "n_clusters": 9}):

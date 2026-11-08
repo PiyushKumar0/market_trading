@@ -298,7 +298,7 @@ class NewsCluster(BaseModel):
         if v is None:
             return None
         if v.tzinfo is None:
-            raise ValueError("cluster timestamps must be tz-aware (naive datetimes are a bug, §3.2)")
+            raise ValueError("cluster timestamps must be tz-aware (naive datetimes are a bug)")
         return v.astimezone(IST)
 
     def to_row(self) -> dict[str, Any]:
@@ -1263,7 +1263,7 @@ class CatalystDigestJob:
         limits = self._protected.load_verified("limits.yaml")
         guard = (limits.get("limits") or {}).get("catalyst_guard")
         if not isinstance(guard, Mapping):
-            raise ValueError("limits.yaml has no `limits.catalyst_guard` block (§7.1 owner-only surface)")
+            raise ValueError("limits.yaml has no `limits.catalyst_guard` block (owner-only surface)")
         return dict(guard)
 
     # ------------------------------------------------------------------ run

@@ -22,5 +22,5 @@ _KEPT = {
 
 
 @pytest.mark.parametrize("case", sorted(_KEPT))
-def test_phase3_gated_case(case: str) -> None:
+def test_live_order_path_gated_case(case: str) -> None:
     pytest.skip(f"case {case}: {_KEPT[case]}")

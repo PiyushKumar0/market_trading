@@ -230,21 +230,21 @@ PRE_REGISTRATION_INTERPRETATIONS: tuple[str, ...] = (
     "SWEEP'S OWN orb builder, imported and called, never re-derived here. orb admits at most ONE "
     "entry per (symbol, session) (its builder breaks on the first qualifying breakout), so 'one "
     "position per symbol at a time' holds by construction and the entry set is IDENTICAL across all "
-    "10 configurations: the geometry changes the EXIT, never the entry. orb parameters = the SS6.3 "
+    "10 configurations: the geometry changes the EXIT, never the entry. orb parameters = the "
     "envelope DEFAULTS read from config/envelope.yaml (orb_minutes 30, vol_mult 1.5, stop_range_frac "
-    "1.0, rr_target 1.5) - WO-17 says 'the orb entry-signal stream', not 'the best orb grid point', "
+    "1.0, rr_target 1.5) - the pre-registration says 'the orb entry-signal stream', not 'the best orb grid point', "
     "and the default is the champion baseline every sweep unions in.",
     "'ORB'S OWN 1.5R TARGET' UNDER NO-STOP -- THE ONE FLAGGED AMBIGUITY. Ladder (a) pairs a target "
     "with a NO-STOP width, where 'R' has no stop to be measured against. Reading (i): R = ORB'S own "
     "risk unit, stop_range_frac x (signal close - opening-range low), which orb's builder already "
-    "stamps as its tp_stop fraction (rr_target x risk/price, rr_target = 1.5 by SS6.3 default). "
-    "Reading (ii): R = the WO-17 stop width under test. THIS MODULE IMPLEMENTS (i) (TARGET_SOURCE = "
-    "'orb_rr_target'): the WO says orb's OWN 1.5R target; reading (ii) is UNDEFINED for the NO-STOP "
+    "stamps as its tp_stop fraction (rr_target x risk/price, rr_target = 1.5 by envelope default). "
+    "Reading (ii): R = the stop width under test. THIS MODULE IMPLEMENTS (i) (TARGET_SOURCE = "
+    "'orb_rr_target'): the pre-registration says orb's OWN 1.5R target; reading (ii) is UNDEFINED for the NO-STOP "
     "row and so cannot produce the pre-registered 10 configs at all; and reading (ii) would move the "
     "TARGET every time the STOP moves, confounding the exact comparison the owner asked for. Under "
     "(i) the target is one fixed level per entry and the stop axis varies alone. The target level is "
     "entry_fill x (1 + tp_frac), anchored at the FILL per the house stop_entry_price='fillprice' "
-    "convention WO-2 pinned.",
+    "convention the next-open fill correction pinned.",
     "'WOULD HAVE ENDED POSITIVE BY SESSION END' is measured on the REFERENCE PATH: the same entry "
     "held with NO stop and NO target to the session-end square-off - exactly the (NO-STOP, no-target) "
     "configuration, so the diagnostic and the config table are the same simulation. 'Positive' is "
@@ -259,17 +259,17 @@ PRE_REGISTRATION_INTERPRETATIONS: tuple[str, ...] = (
     "SIMULTANEOUS STOP AND TARGET inside one 1m bar: 1m bars carry no intrabar path, so the ADVERSE "
     "event is assumed first - the stop wins the tie. The house convention (vwap_reversion, sweep).",
     "SESSION-END SQUARE-OFF at the session's LAST bar's OPEN (MIS obligation), matching "
-    "vwap_reversion's 'session_end' exit. WO-17's ladders carry no timeout rung, so every unstopped, "
+    "vwap_reversion's 'session_end' exit. The study's ladders carry no timeout rung, so every unstopped, "
     "un-targeted trade ends here.",
     "ENTRIES WITH NO DEFINED ATR_10m ARE DROPPED FOR EVERY CONFIG, INCLUDING NO-STOP. The stop unit "
     "is also the reporting unit (MAE in ATR multiples) and, decisively, an entry admitted to NO-STOP "
     "but not to the stopped configs would break the common-population requirement that makes the 10 "
-    "rows comparable. WO-10b's prior-session seeding is what makes this cheap: seeded, the ATR exists "
+    "rows comparable. The prior-session seeding is what makes this cheap: seeded, the ATR exists "
     "from 09:25, so ordinary orb morning breakouts are stoppable; only a symbol's FIRST session in "
     "the window falls back to the unseeded 140-minute warm-up and loses its entry (fail-closed).",
-    "STOP UNIT = WO-10's ATR_10m, PRIOR-SESSION-SEEDED per WO-10b, IMPORTED from "
+    "STOP UNIT = the vwap_reversion ATR_10m, PRIOR-SESSION-SEEDED, IMPORTED from "
     "engine.learning.vwap_reversion (session_atr_10m via compute_session_features(atr_seed=...)) - "
-    "not copied, so the 'shared unit' claim WO-17 makes is true by construction. Wilder ATR(14) on "
+    "not copied, so the 'shared unit' claim the study makes is true by construction. Wilder ATR(14) on "
     "session-local 10-MINUTE buckets, published with a one-bucket availability lag (no lookahead); "
     "the seeded recursion continues from the prior session's final bucket value with the first "
     "bucket's true range computed high-low only (no overnight gap in the stop unit).",
@@ -278,9 +278,9 @@ PRE_REGISTRATION_INTERPRETATIONS: tuple[str, ...] = (
     "one of the pre-registered 10, is excluded from the 10-config table, and is removed entirely by "
     "INCLUDE_STATUS_QUO_REFERENCE = False.",
     "PROMOTION: NOT SOUGHT. ValidationPipeline is never constructed or called; no CPCV, no "
-    "fold_pass_min, no WO-3 margin floor, no param_sets row, no validation artifact. WO-17: 'the "
+    "fold_pass_min, no margin floor, no param_sets row, no validation artifact. Pre-registration: 'the "
     "deliverable is the stop-policy evidence table; any live stop-guidance change that follows is a "
-    "separate owner-approved change (analyst prompt / plan SS6.1), never automatic.'",
+    "separate owner-approved change (analyst prompt / strategy rules), never automatic.'",
 )
 
 
@@ -366,7 +366,7 @@ def orb_default_params(envelope: Mapping[str, dict[str, Any]] | None = None) -> 
     prefix = "orb."
     rows = {k[len(prefix):]: v for k, v in env.items() if k.startswith(prefix)}
     if not rows:
-        raise ValueError("no §6.3 envelope parameters for strategy 'orb'")
+        raise ValueError("no envelope parameters for strategy 'orb'")
     return {name: float(spec["default"]) for name, spec in sorted(rows.items())}
 
 
@@ -861,41 +861,41 @@ def modelling_notes(cost_floor_pct: float, *, spread_pct: float | None = None) -
     """Every pre-registered choice, in the report (design requirement 5). Pure; no I/O."""
     widths = ", ".join(f"{m:g}" for m in STOP_ATR_MULTIPLES)
     notes = [
-        f"PRE-REGISTRATION: IMPROVEMENT_SPEC.md WO-17. Stop axis = {{{widths}}} x ATR_10m PLUS "
+        f"PRE-REGISTRATION: the stop-geometry study. Stop axis = {{{widths}}} x ATR_10m PLUS "
         f"NO-STOP; exit ladders = (a) orb's own 1.5R target + the stop, (b) no target (session-end "
         f"square-off or the stop). {len(STOP_AXIS)} widths x {len(LADDERS)} ladders = {N_CONFIGS} "
         "configurations, FIXED, never swept - that plus the no-promotion rule is what contains the "
         "multiplicity.",
         f"POPULATION: the orb entry-signal stream over the full available 1m window, entries at the "
-        f"NEXT 1m bar's OPEN (WO-2). orb's entry window is {ORB_ENTRY_START:%H:%M}-"
+        f"NEXT 1m bar's OPEN. orb's entry window is {ORB_ENTRY_START:%H:%M}-"
         f"{ORB_ENTRY_END:%H:%M} and its builder takes at most ONE breakout per symbol-session, so "
         "every configuration is evaluated on the SAME entries - the geometry changes only the exit.",
         f"STOP UNIT: Wilder ATR({ATR_PERIOD}) on session-local {ATR_RESAMPLE_MINUTES}-MINUTE buckets "
-        "(WO-10's unit, manager ruling 2026-08-13), PRIOR-SESSION-SEEDED per WO-10b so morning "
+        "(the vwap_reversion unit, manager ruling 2026-08-13), PRIOR-SESSION-SEEDED so morning "
         f"entries are stoppable: seeded, the ATR exists one bucket in ({ATR_RESAMPLE_MINUTES} min) "
         f"instead of after the unseeded {ATR_WARMUP_MINUTES}-minute warm-up. IMPORTED from "
-        "engine.learning.vwap_reversion, not copied - WO-17 calls it a shared unit and this keeps "
+        "engine.learning.vwap_reversion, not copied - the study calls it a shared unit and this keeps "
         f"that true. seed_atr_prior_session = {SEED_ATR_PRIOR_SESSION}.",
-        f"COSTS (WO-2 corrected surface, INCLUDING the measured spread): product {PRODUCT}, per-trade "
+        f"COSTS (corrected cost surface, INCLUDING the measured spread): product {PRODUCT}, per-trade "
         f"notional Rs{REFERENCE_NOTIONAL}, full round-trip friction {cost_floor_pct:.4f}% = "
         f"CostModel.breakeven_pct(Rs{REFERENCE_NOTIONAL}, '{PRODUCT}'). Charged IN FULL on EVERY "
-        "simulated trade, stop-outs included - WO-17: 'each stop-out realizes the full round-trip "
+        "simulated trade, stop-outs included - the study: 'each stop-out realizes the full round-trip "
         "cost floor'. net = gross - the floor.",
         "FILLS: NEXT-1m-BAR OPEN, never the signal bar. The breakout is read from bar t's COMPLETED "
         "close and the entry fills at bar t+1's OPEN; a stop or target observed on bar i fills at bar "
         "i+1's OPEN. A signal on a session's LAST usable bar is dropped, never carried into the next "
         "session. The session-end square-off is the session's LAST bar's OPEN (MIS obligation).",
-        "PROMOTION IS NOT SOUGHT (WO-17, verbatim): 'the deliverable is the stop-policy evidence "
+        "PROMOTION IS NOT SOUGHT (verbatim): 'the deliverable is the stop-policy evidence "
         "table; any live stop-guidance change that follows is a separate owner-approved change "
-        "(analyst prompt / plan SS6.1), never automatic.' ValidationPipeline is never called - no "
-        "CPCV, no fold_pass_min, no WO-3 margin floor, no param_sets row, no validation artifact.",
-        "SCOPE: C-category diagnostic. No live wiring; STOPS FOR OWNER REVIEW. A null result (all "
-        "geometries equal) is a valid, reportable deliverable (C9) and is reported as measured.",
+        "(analyst prompt / strategy rules), never automatic.' ValidationPipeline is never called - no "
+        "CPCV, no fold_pass_min, no margin floor, no param_sets row, no validation artifact.",
+        "SCOPE: diagnostic. No live wiring; STOPS FOR OWNER REVIEW. A null result (all "
+        "geometries equal) is a valid, reportable deliverable and is reported as measured.",
     ]
     if spread_pct is not None:
         notes.append(
             f"Spread provenance: config/costs.yaml spread_pct = {spread_pct:.4f}% (full quoted "
-            "spread; NIFTY200 median over 48 symbol-days - IMPROVEMENT_SPEC.md Part III). A round "
+            "spread; NIFTY200 median over 48 symbol-days). A round "
             "trip pays it once."
         )
     notes.append("--- INTERPRETATIONS where the WO text was under-determined (auditable, not implicit) ---")
@@ -981,8 +981,8 @@ def plain_language_answer(
         "is large relative to the cost floor is evidence for the owner's hypothesis."
     )
     lines.append(
-        "SCOPE: this is a diagnostic. It does NOT authorise a live stop change; WO-17 requires that "
-        "to be a separate owner-approved change to the analyst prompt / plan SS6.1."
+        "SCOPE: this is a diagnostic. It does NOT authorise a live stop change; the study requires that "
+        "to be a separate owner-approved change to the analyst prompt / strategy rules."
     )
     return lines
 
@@ -1190,11 +1190,11 @@ def render_markdown(report: StopGeometryReport) -> str:
     """Render the evidence table — banner, null hypothesis, table, diagnostics, answer."""
     r = report
     lines: list[str] = []
-    lines.append(f"# WO-17 diagnostic — stop geometry / adverse-excursion recovery (`{r.experiment_id}`)")
+    lines.append(f"# Stop-geometry diagnostic — adverse-excursion recovery (`{r.experiment_id}`)")
     lines.append("")
     lines.append(f"> **{r.banner}**")
     lines.append("")
-    lines.append(f"_Generated {r.generated_at.isoformat()} · pre-registered in IMPROVEMENT_SPEC.md WO-17_")
+    lines.append(f"_Generated {r.generated_at.isoformat()} · pre-registered_")
     lines.append("")
 
     lines.append("## The pre-registered NULL HYPOTHESIS (stated before any number)")
@@ -1233,13 +1233,13 @@ def render_markdown(report: StopGeometryReport) -> str:
     )
     lines.append(
         f"- Costs: {r.product}, ₹{r.reference_notional}/trade, full round-trip friction "
-        f"**{r.cost_floor_pct:.4f}%** (fees **+ spread**, WO-2) charged on EVERY trade, stop-outs "
+        f"**{r.cost_floor_pct:.4f}%** (fees **+ spread**) charged on EVERY trade, stop-outs "
         "included"
     )
     lines.append(f"- Fills: `{r.fill_mechanics}` (never the signal bar)  ·  configs: {r.n_configs}")
     lines.append(
         f"- Stop unit: Wilder ATR({ATR_PERIOD}) on session-local {ATR_RESAMPLE_MINUTES}-minute "
-        f"buckets, prior-session-seeded (WO-10b) = `{r.seed_atr_prior_session}`"
+        f"buckets, prior-session-seeded = `{r.seed_atr_prior_session}`"
     )
     if r.reference_win_rate is not None:
         lines.append(
@@ -1312,7 +1312,7 @@ def render_markdown(report: StopGeometryReport) -> str:
     lines.append(
         "_Maximum adverse excursion measured over the bars a stop could have triggered on (the fill "
         "bar through the bar before the session-end exit fill), so \"MAE ≥ w × ATR_10m\" and "
-        "\"stopped at width w\" are the same event. The first row is WO-17's pre-registered slice._"
+        "\"stopped at width w\" are the same event. The first row is the pre-registered slice._"
     )
     lines.append("")
     lines.append("| slice | n | mean % | p25 | p50 | p75 | p90 | p25 ATR | p50 ATR | p75 ATR | p90 ATR |")

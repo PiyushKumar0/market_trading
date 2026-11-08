@@ -163,7 +163,7 @@ class PaperSettings(BaseModel, extra="forbid"):
 
 
 class DataCfg(BaseModel):
-    minute_candles_adjusted: bool | None = None   # minute-candles-adjusted check result; None until scripts/a11_check.py runs
+    minute_candles_adjusted: bool | None = None   # minute-candles-adjusted check result; None until scripts/kite_candle_adjustment_check.py runs
     universe_max_watchlist: int = 50
     min_median_traded_value_inr: int = 50_000_000
     backfill_daily_years: int = 2

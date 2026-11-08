@@ -246,7 +246,7 @@ class BhavcopyJob:
             title="Bhavcopy ingest degraded",
             body=(
                 f"Bhavcopy for {d.isoformat()} failed: {reason}. bars_1d keeps prior data; the "
-                "§2.6 date-keyed catch-up will retry (E5)."
+                "date-keyed catch-up will retry."
             ),
             severity="warning",
             data={"job_id": "bhavcopy", "d": d.isoformat(), "reason": reason},

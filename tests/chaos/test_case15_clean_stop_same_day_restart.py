@@ -60,7 +60,7 @@ from tests.chaos._lifecycle_rig import (
     RigEnv,
     run_session,
 )
-from tests.chaos.conftest import PHASE4_LIFECYCLE_HOOKS
+from tests.chaos.conftest import LIVE_AUTO_LIFECYCLE_HOOKS
 
 TUE, WED = date(2026, 6, 16), date(2026, 6, 17)
 A_BOOT, STOP_AT, B_BOOT = time(8, 0), time(8, 28), time(9, 5)
@@ -209,4 +209,4 @@ async def test_case15_nssm_stop_with_repeat_signals_then_same_day_restart(tmp_pa
 def test_case15_restart_reconcile_vs_broker() -> None:
     """'restart runs reconcile' — startup reconcile vs broker = truth; ``SessionLifecycle``
     carries it as an unwired ``reconcile_hook``."""
-    pytest.skip(f"case 15 reconcile clause: {PHASE4_LIFECYCLE_HOOKS}")
+    pytest.skip(f"case 15 reconcile clause: {LIVE_AUTO_LIFECYCLE_HOOKS}")

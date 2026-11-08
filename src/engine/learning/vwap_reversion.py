@@ -278,12 +278,12 @@ PRE_REGISTRATION_INTERPRETATIONS: tuple[str, ...] = (
     f"{ATR_RESAMPLE_MINUTES}-MINUTE bars: the 1m frame is aggregated to {ATR_RESAMPLE_MINUTES}-minute "
     "OHLC within the session, ATR(14) runs on that series, and the value is carried onto the 1m grid "
     f"for the stop at entry. Stop level = entry FILL price - {STOP_ATR_MULT} x ATR_10m at the SIGNAL "
-    "bar (anchored at the fill, matching the house stop_entry_price='fillprice' convention WO-2 "
-    "pinned). MANAGER RULING 2026-08-13, a PRE-REGISTRATION decision made BEFORE any real data run. "
+    "bar (anchored at the fill, matching the house stop_entry_price='fillprice' convention "
+    "pinned by the fill correction). MANAGER RULING 2026-08-13, a PRE-REGISTRATION decision made BEFORE any real data run. "
     "REASON (verbatim): ATR(10) on 1m bars measures 1-minute noise scale - median ~0.07% per the "
     "audit's measurement - putting the stop at ~0.10%, BELOW the 0.126% cost floor; a stop smaller "
-    "than the round-trip cost is the exact ORB death geometry (IMPROVEMENT_SPEC F-series / plan "
-    "§6.1 orb history), so that reading would pre-doom the experiment by construction. The "
+    "than the round-trip cost is the exact ORB death geometry (the orb "
+    "history), so that reading would pre-doom the experiment by construction. The "
     "10-minute-timescale reading yields a stop proportionate to the 15-60-min holding horizon and "
     "above the floor. SESSION-LOCAL: buckets are anchored at the session's own first bar and never "
     "carry across sessions, so no overnight gap enters the true range.",
@@ -301,8 +301,8 @@ PRE_REGISTRATION_INTERPRETATIONS: tuple[str, ...] = (
     f"{ENTRY_WINDOW_START:%H:%M} <= t <= {ENTRY_WINDOW_END:%H:%M} (inclusive). Signal bars therefore "
     "run 09:59-13:59.",
     f"'REVERT ... BY MORE THAN {HYPOTHESIS_EDGE_MULTIPLE:g}x THE FULL COST FLOOR' is the hypothesis' "
-    "effect-size claim, not a gate: WO-10 names the promotion bar separately (house CPCV + "
-    "fold_pass_min + the WO-3 margin floor). The multiple is REPORTED per grid point "
+    "effect-size claim, not a gate: the pre-registration names the promotion bar separately (house CPCV + "
+    "fold_pass_min + the margin floor). The multiple is REPORTED per grid point "
     "(clears_2x_cost_floor) and never enforced.",
     "OVERLAP: one position per symbol at a time. A signal firing while a position is open is ignored; "
     "the next entry can fill no earlier than the bar AFTER the exit fill. Without this, an "
@@ -950,17 +950,17 @@ def modelling_notes(
     notes = [
         f"VARIANT: {variant}. "
         + (
-            "WO-10b (owner-directed 2026-08-14, pre-registered in IMPROVEMENT_SPEC.md after WO-10's "
+            "Prior-session-seeded variant (owner-directed 2026-08-14, pre-registered after the unseeded run's "
             "abort): PRIOR-SESSION ATR SEEDING is ON. Everything else — hypothesis, grid, costs, "
-            "fills, exits, entry window, two-stage structure and abort criterion — is WO-10 "
-            "unchanged; this run measures the 10:00-11:35 morning window WO-10's ATR warm-up could "
+            "fills, exits, entry window, two-stage structure and abort criterion — is the unseeded run "
+            "unchanged; this run measures the 10:00-11:35 morning window the unseeded run's ATR warm-up could "
             "never reach."
             if seed_atr_prior_session
-            else "WO-10 as originally pre-registered: the 10m ATR warms up from scratch each session "
+            else "The unseeded run as originally pre-registered: the 10m ATR warms up from scratch each session "
             "(no prior-session seeding), so the EFFECTIVE entry window is 11:36-14:00. Byte-identical "
-            "to the shipped WO-10 harness; --seed-atr-prior-session was NOT passed."
+            "to the shipped unseeded harness; --seed-atr-prior-session was NOT passed."
         ),
-        f"PRE-REGISTRATION: IMPROVEMENT_SPEC.md WO-10. Grid = the STRETCH axis only "
+        f"PRE-REGISTRATION: Grid = the STRETCH axis only "
         f"{{{', '.join(f'{x:g}' for x in STRETCH_GRID)}}}% ⇒ trial count N = {len(STRETCH_GRID)}. "
         f"rel_vol < {REL_VOL_MAX:g}x, entries "
         f"{ENTRY_WINDOW_START:%H:%M}-{ENTRY_WINDOW_END:%H:%M}, long-only, and the exit ladder "
@@ -972,17 +972,17 @@ def modelling_notes(
         f"{ATR_RESAMPLE_MINUTES}-MINUTE bars aggregated from the 1m frame, carried onto the 1m grid "
         "with a one-bucket availability lag (no lookahead). NOT ATR(10) on 1m bars: that measures "
         "1-minute noise scale (~0.07% median measured), putting the stop at ~0.10% — below the "
-        f"{cost_floor_pct:.4f}% cost floor, which is the ORB death geometry (IMPROVEMENT_SPEC "
-        "F-series / §6.1 orb history) and would pre-doom the experiment by construction. WARM-UP "
+        f"{cost_floor_pct:.4f}% cost floor, which is the ORB death geometry (the orb "
+        "history) and would pre-doom the experiment by construction. WARM-UP "
         f"CONSEQUENCE: the first bar with a defined ATR is {ATR_WARMUP_MINUTES} min after the "
         "session's first bar (11:35 on a 09:15 session; first possible FILL 11:36), and earlier bars "
         "produce NO TRADE rather than an unstopped one — so the EFFECTIVE entry window is 11:36-"
         f"{ENTRY_WINDOW_END:%H:%M}, not {ENTRY_WINDOW_START:%H:%M}-{ENTRY_WINDOW_END:%H:%M}.",
-        "TWO-STAGE (WO-10 abort criterion): stage 1 measures the UNCONDITIONED base rate after costs "
+        "TWO-STAGE (abort criterion): stage 1 measures the UNCONDITIONED base rate after costs "
         "over the full window (stretch threshold 0.0%, relative-volume filter OFF, everything else "
         "identical). If it is <= 0 the run STOPS and stage 2 is never computed — 'do not tune the "
         "condition until something clears zero'.",
-        f"FILLS: NEXT-1m-BAR OPEN (WO-2), never the signal bar. The condition is read from bar t's "
+        f"FILLS: NEXT-1m-BAR OPEN, never the signal bar. The condition is read from bar t's "
         "COMPLETED values and the entry fills at bar t+1's OPEN; a VWAP-touch or stop trigger observed "
         "on bar i fills at bar i+1's OPEN. A signal on a session's LAST usable bar is dropped, never "
         f"carried into the next session. The {TIMEOUT_MINUTES}-min timeout is a TIMESTAMP exit — the "
@@ -997,7 +997,7 @@ def modelling_notes(
         "bar, typical price = (H+L+C)/3 — engine.strategy.indicators.vwap REUSED UNCHANGED (it is "
         "already cumulative-from-first-bar and delegates session slicing to the caller). No divergence "
         "from the house indicator to declare.",
-        f"COSTS (WO-2 corrected surface, INCLUDING the measured spread): product {PRODUCT}, per-trade "
+        f"COSTS (corrected cost surface, INCLUDING the measured spread): product {PRODUCT}, per-trade "
         f"notional ₹{REFERENCE_NOTIONAL}, full round-trip friction "
         f"{cost_floor_pct:.4f}% = CostModel.breakeven_pct(₹{REFERENCE_NOTIONAL}, '{PRODUCT}') — fees "
         "PLUS spread, not the spread-excluded fee_breakeven_pct the vectorbt sweeps use. The FULL "
@@ -1006,14 +1006,14 @@ def modelling_notes(
         "PROMOTION: the house rule applied UNCHANGED — each grid point's cost-adjusted DAILY net "
         "return series (per symbol-session compounded, then the cross-sectional MEAN over the symbols "
         "that had bars that session, 0 for a flat name — SweepRunner._daily_returns' convention) is "
-        f"fed to ValidationPipeline: skfolio CPCV + fold_pass_min(N={len(STRETCH_GRID)}) + the WO-3 "
+        f"fed to ValidationPipeline: skfolio CPCV + fold_pass_min(N={len(STRETCH_GRID)}) + the "
         "margin floor, with cost_floor_pct passed explicitly as the MIS round trip so the floor cannot "
         "fall back to the CNC default.",
-        "LONG-ONLY (WO-10 'long side only'; the §1.4.9 shorts gate is shut). Per-symbol equal weight; "
-        "no §7.1 portfolio limits, position caps or sizing are modelled — those are the gate/paper "
-        "layer's job (Phase 2/3), deliberately outside a raw-edge experiment.",
+        "LONG-ONLY ('long side only'; the shorts gate is shut). Per-symbol equal weight; "
+        "no portfolio limits, position caps or sizing are modelled — those are the gate/paper "
+        "layer's job, deliberately outside a raw-edge experiment.",
         "SCOPE: this is a C-category experiment. It has NO live wiring, writes NO param_sets row, and "
-        "STOPS FOR OWNER REVIEW. A negative or aborted result is a valid deliverable (C9) and is "
+        "STOPS FOR OWNER REVIEW. A negative or aborted result is a valid deliverable and is "
         "reported as measured, never massaged.",
     ]
     if seed_atr_prior_session:
@@ -1033,10 +1033,10 @@ def modelling_notes(
         )
         notes.insert(
             3,
-            f"WINDOW SPLITS (WO-10b reporting): the stage-1 base rate is reported OVERALL and cut by "
+            f"WINDOW SPLITS (reporting): the stage-1 base rate is reported OVERALL and cut by "
             f"ENTRY-FILL time into {ENTRY_WINDOW_START:%H:%M}-{MORNING_SPLIT_END:%H:%M} (the morning "
-            f"increment, unreachable under WO-10) and 11:36-{ENTRY_WINDOW_END:%H:%M} (exactly what "
-            "WO-10 measured), so the increment reads directly against WO-10's answer. THE ABORT "
+            f"increment, unreachable in the unseeded run) and 11:36-{ENTRY_WINDOW_END:%H:%M} (exactly what "
+            "the unseeded run measured), so the increment reads directly against the unseeded run's answer. THE ABORT "
             "CRITERION IS THE OVERALL NUMBER, as pre-registered — the splits are REPORTING, never "
             "gates, and no decision in this run reads them.",
         )
@@ -1044,7 +1044,7 @@ def modelling_notes(
         notes.append(
             f"Spread provenance: config/costs.yaml spread_pct = {spread_pct:.4f}% (full quoted "
             "spread; NIFTY200 median over 48 symbol-days, per-tier 0.0135/0.0180/0.0219%, p75 "
-            "0.0303% — IMPROVEMENT_SPEC.md Part III). A round trip pays it once."
+            "0.0303%). A round trip pays it once."
         )
     notes.append("--- INTERPRETATIONS where the WO text was under-determined (auditable, not implicit) ---")
     notes.extend(PRE_REGISTRATION_INTERPRETATIONS)
@@ -1199,12 +1199,12 @@ class VwapReversionExperiment:
         if n_trades == 0 or base_rate is None:
             return (
                 "ABORTED: the unconditioned pass produced ZERO trades over the full window, so there "
-                "is no reversion base rate to clear zero with. Fail closed (WO-10 abort criterion)."
+                "is no reversion base rate to clear zero with. Fail closed (abort criterion)."
             )
         if base_rate <= 0.0:
             return (
                 f"ABORTED: the UNCONDITIONED 15-{TIMEOUT_MINUTES}-min reversion base rate after costs "
-                f"is {base_rate:+.5f}% per trade (<= 0). WO-10: 'stop — do not tune the condition "
+                f"is {base_rate:+.5f}% per trade (<= 0). Pre-registered: 'stop — do not tune the condition "
                 "until something clears zero.' The stretch grid was NOT evaluated."
             )
         return None
@@ -1348,7 +1348,7 @@ def render_markdown(report: VwapReversionReport) -> str:
     lines.append(f"> **{r.banner}**")
     lines.append("")
     lines.append(
-        f"_Generated {r.generated_at.isoformat()} · pre-registered in IMPROVEMENT_SPEC.md "
+        f"_Generated {r.generated_at.isoformat()} · pre-registered "
         f"{r.experiment_variant}_"
     )
     lines.append("")
@@ -1358,7 +1358,7 @@ def render_markdown(report: VwapReversionReport) -> str:
         lines.append("## STATUS: ABORTED AT STAGE 1 — the pre-registered abort criterion tripped")
         lines.append("")
         lines.append(
-            "The stretch grid was **NOT evaluated**. WO-10: _\"if the UNCONDITIONED 15-60-min "
+            "The stretch grid was **NOT evaluated**. Pre-registered: _\"if the UNCONDITIONED 15-60-min "
             "reversion base rate after costs is <= 0 in the first full-window pass, stop — do not "
             "tune the condition until something clears zero.\"_"
         )
@@ -1378,7 +1378,7 @@ def render_markdown(report: VwapReversionReport) -> str:
     lines.append(f"- Symbols with bars: {r.n_symbols}  ·  sessions: {r.n_sessions}")
     lines.append(
         f"- Costs: {r.product}, ₹{r.reference_notional}/trade, full round-trip friction "
-        f"**{r.cost_floor_pct:.4f}%** (fees **+ spread**, WO-2) charged on EVERY trade"
+        f"**{r.cost_floor_pct:.4f}%** (fees **+ spread**) charged on EVERY trade"
     )
     lines.append(f"- Fills: `{r.fill_mechanics}` (never the signal bar)  ·  trial count N = {r.trial_count_n}")
     if r.seed_atr_prior_session:
@@ -1393,7 +1393,7 @@ def render_markdown(report: VwapReversionReport) -> str:
     else:
         lines.append(
             f"- Stop unit: {STOP_ATR_MULT:g} x Wilder ATR({ATR_PERIOD}) on session-local "
-            f"{ATR_RESAMPLE_MINUTES}-minute bars (manager ruling 2026-08-13), **unseeded (WO-10)**. "
+            f"{ATR_RESAMPLE_MINUTES}-minute bars (manager ruling 2026-08-13), **unseeded**. "
             f"Its {ATR_WARMUP_MINUTES}-min warm-up dominates the pre-registered "
             f"{ENTRY_WINDOW_START:%H:%M} opening, so the **effective entry window is "
             f"11:36–{ENTRY_WINDOW_END:%H:%M}** — earlier bars produce NO trade rather than an "
@@ -1433,15 +1433,15 @@ def render_markdown(report: VwapReversionReport) -> str:
             lines.append("")
             lines.append(
                 "The abort criterion above is the OVERALL number, exactly as pre-registered. This cut "
-                "exists so the **morning increment** WO-10's ATR warm-up could not reach reads "
-                "directly against the midday window WO-10 actually measured."
+                "exists so the **morning increment** the unseeded run's ATR warm-up could not reach reads "
+                "directly against the midday window the unseeded run actually measured."
             )
             lines.append("")
             lines.append("| entry window | trades | win% | net expectancy/trade | gross/trade |")
             lines.append("|:-------------|-------:|-----:|---------------------:|------------:|")
             for sp in s.window_splits:
                 win = "—" if sp.win_rate is None else f"{sp.win_rate:.1%}"
-                note = " _(unreachable under WO-10)_" if sp.split == SPLIT_MORNING else " _(= WO-10's window)_"
+                note = " _(unreachable under WO-10)_" if sp.split == SPLIT_MORNING else " _(= the unseeded run's window)_"
                 lines.append(
                     f"| {sp.label}{note} | {sp.n_trades} | {win} | "
                     f"{_pct(sp.net_expectancy_pct, 5)} | {_pct(sp.gross_expectancy_pct, 5)} |"
@@ -1476,7 +1476,7 @@ def render_markdown(report: VwapReversionReport) -> str:
         lines.append("")
 
         # ---- promotion verdicts -------------------------------------------------------------
-        lines.append("## Promotion — house CPCV + fold_pass_min + the WO-3 margin floor (unmodified)")
+        lines.append("## Promotion — house CPCV + fold_pass_min + the margin floor (unmodified)")
         lines.append("")
         for g in r.grid:
             v = g.validation
@@ -1503,7 +1503,7 @@ def render_markdown(report: VwapReversionReport) -> str:
                 f"{'—' if v.max_drawdown_pct is None else f'{v.max_drawdown_pct:.2f}%'}"
             )
             lines.append(f"- CPCV fold-pass: **{frac}** vs required **{bar}** ({len(v.cpcv)} splits)")
-            lines.append(f"- WO-3 margin floor: {floor}  ·  median passing split: {med}")
+            lines.append(f"- Margin floor: {floor}  ·  median passing split: {med}")
             if v.cpcv:
                 lines.append("")
                 lines.append("| split | test obs | expectancy | pass (>0 after costs) |")

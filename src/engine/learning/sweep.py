@@ -197,7 +197,7 @@ EXPECTANCY_BASIS = "closed_trades_only"
 MECHANICS_STAMP = (
     f"stops={STOP_EVALUATION} · stop_exit_price={STOP_EXIT_PRICE} (half-spread charged on stop "
     f"exits) · expectancy={EXPECTANCY_BASIS} (all-trades figure reported beside it) · "
-    f"fills={FILL_MECHANICS} — WO-M 2026-09-13"
+    f"fills={FILL_MECHANICS} — the sweep-mechanics fix 2026-09-13"
 )
 
 
@@ -335,7 +335,7 @@ def build_param_grid(
     prefix = strategy_id + "."
     rows = {k[len(prefix):]: v for k, v in env.items() if k.startswith(prefix)}
     if not rows:
-        raise ValueError(f"no §6.3 envelope parameters for strategy {strategy_id!r}")
+        raise ValueError(f"no envelope parameters for strategy {strategy_id!r}")
     names = sorted(rows)
     axes = [_param_points(rows[n], points) for n in names]
     return [dict(zip(names, combo, strict=True)) for combo in itertools.product(*axes)]
@@ -511,7 +511,7 @@ class SweepRunner:
             notes.append(
                 f"{unrankable} of {len(stats)} configs scored trades but NO closed round trip (or "
                 "an unreadable open/closed split), so they carry no closed-trade expectancy and "
-                "were excluded from the winner ranking (WO-M item (iii)) — never ranked on their "
+                "were excluded from the winner ranking (sweep-mechanics item (iii)) — never ranked on their "
                 "unrealized marks instead."
             )
 
@@ -686,12 +686,12 @@ class SweepRunner:
     def _modelling_notes(self, strategy_id: str, frames: _Frames) -> list[str]:
         bar = "1m bar" if frames.intraday else "session"
         notes = [
-            f"MECHANICS (WO-M, 2026-09-13): {MECHANICS_STAMP}. The three settings named there are "
-            "the plan §6.4 sweep-mechanics work order's items (i)-(iii); before 2026-09-13 they "
+            f"MECHANICS (sweep-mechanics fix, 2026-09-13): {MECHANICS_STAMP}. The three settings named there are "
+            "the sweep-mechanics fix's items (i)-(iii); before 2026-09-13 they "
             "were close-evaluated stops, a stop exit that paid no spread, and a per-trade "
             "expectancy that averaged still-open positions — all three biased the strategy's way, "
             "so a number from a pre-fix report is not comparable term-by-term with one here.",
-            f"FILLS: NEXT-{bar.upper()} OPEN (WO-2, 2026-08-13). Signals are computed on {bar} t's "
+            f"FILLS: NEXT-{bar.upper()} OPEN (2026-08-13). Signals are computed on {bar} t's "
             f"completed values; entries AND exits are shifted one {bar} forward and filled at "
             f"{bar} t+1's OPEN (vectorbt price=open frame, signals shifted +1). The prior mechanics "
             "left price=None, which vectorbt resolves to the SAME bar's close — a fill at the very "
@@ -703,27 +703,27 @@ class SweepRunner:
             f"(= ½ × round-trip STATUTORY-fee breakeven at ₹{self._reference_notional} "
             f"{_PRODUCT[strategy_id]}), charged on both legs — an approximation (fixed DP/brokerage "
             "components do not scale linearly; exact only near the reference notional).",
-            f"Costs — spread (WO-2): vectorbt slippage {self._slippage_per_leg() * 100:.4f}% per leg "
+            f"Costs — spread: vectorbt slippage {self._slippage_per_leg() * 100:.4f}% per leg "
             f"= half the measured quoted spread {float(self._cost_model.spread_pct):.3f}% "
             "(config/costs.yaml spread_pct), so a round trip pays the full spread ON TOP of the "
-            "fees — INCLUDING a STOP- or TARGET-driven exit since WO-M (2026-09-13): "
+            "fees — INCLUDING a STOP- or TARGET-driven exit since the sweep-mechanics fix (2026-09-13): "
             f"stop_exit_price='{STOP_EXIT_PRICE}' fills at the sl_stop/tp_stop LEVEL and applies "
             "the same per-leg slippage, where vectorbt's 'stoplimit' default returned that level "
             "with slippage ZEROED and such a round trip paid ~1 bp less than the floor quoted here "
-            "(item (ii) of the plan §6.4 sweep-mechanics work order; it biased results in the "
+            "(item (ii) of the sweep-mechanics fix; it biased results in the "
             "STRATEGY's favour). The setting is one knob for both legs — `orb`'s `rr_target` exits "
             "are charged the half-spread by the same change, which only ever tightens costs. "
             "Provenance: NIFTY200 median quoted spread 0.0180% over 48 symbol-days (24 symbols "
-            "× sessions 2026-08-11/12), per-tier 0.0135/0.0180/0.0219%, p75 0.0303% — "
-            "IMPROVEMENT_SPEC.md Part III. The prior sweeps charged ZERO spread and zero slippage. "
+            "× sessions 2026-08-11/12), per-tier 0.0135/0.0180/0.0219%, p75 0.0303%. "
+            "The prior sweeps charged ZERO spread and zero slippage. "
             f"Full round-trip friction at the reference notional: "
             f"{self._cost_floor_pct(strategy_id):.4f}%.",
-            f"Sizing (WO-2): per-symbol init_cash = ₹{self._init_cash:,.0f} = the "
+            f"Sizing: per-symbol init_cash = ₹{self._init_cash:,.0f} = the "
             f"reference_notional ₹{self._reference_notional:,.0f} the fee constant is calibrated at (the "
             "live per-trade notional) — previously ₹100,000 against a fee calibrated at ₹20,000. "
             "Each symbol runs one all-in position; equity compounds within a symbol, so later "
             "positions drift from the reference size.",
-            "SURVIVORSHIP (R2, 2026-09-12) — REAL, UNCORRECTED, OPTIMISTIC, and it applies to every "
+            "SURVIVORSHIP (2026-09-12) — REAL, UNCORRECTED, OPTIMISTIC, and it applies to every "
             "LEVEL in this report. The universe is whatever symbol list the caller passed, and this "
             "platform stores NO point-in-time index membership anywhere, so the list can only be a "
             "PRESENT-DAY snapshot applied BACKWARDS: a name that entered the index after a big run "
@@ -732,7 +732,7 @@ class SweepRunner:
             "this platform cannot measure. What survives intact is the COMPARISON between runs that "
             "share the same list (same taint, same direction). The JSON carries the same warning as "
             "`population_is_survivorship_tainted_proxy: true`.",
-            "EXPECTANCY BASIS: CLOSED ROUND TRIPS ONLY (WO-M item (iii), 2026-09-13). "
+            "EXPECTANCY BASIS: CLOSED ROUND TRIPS ONLY (sweep-mechanics item (iii), 2026-09-13). "
             "`expectancy_pct` — the headline AND the statistic the grid winner is ranked on — is "
             "the mean net return over trades that actually closed inside the window; a config that "
             "closed none is not rankable. `expectancy_all_pct` is the same mean over ALL trades, "
@@ -742,17 +742,17 @@ class SweepRunner:
             "ALL-trades meaning and `win_rate_closed` is reported beside it on the SAME population "
             "as `expectancy_pct`, so the two per-trade figures a promotion packet quotes together "
             "never mix bases; neither win rate is a promotion input.",
-            "HOLDING PERIOD + OPEN TRADES (R2, 2026-09-12, reporting only). Each row's "
+            "HOLDING PERIOD + OPEN TRADES (2026-09-12, reporting only). Each row's "
             "`hold_bars_*` fields are the realized holding distribution in "
             f"{'1-minute bars' if frames.intraday else 'SESSIONS'} (mean/median/p90, all trades and "
             "closed-only), and `n_open`/`n_closed` split the trade count. An OPEN trade contributes "
             "its AGE at the window edge, not a realized hold, which is why the closed-only figures "
             "are reported beside them.",
-            "Long-only (Phase-1 §1.4.9 shorts gate); per-symbol equal-weight, no §7.1 portfolio "
-            "limits (gate/paper layer, Phase 2/3).",
+            "Long-only (shorts gate); per-symbol equal-weight, no portfolio "
+            "limits (gate/paper layer).",
         ]
         notes.append(
-            "STOPS ARE EVALUATED INTRABAR (WO-M item (i), 2026-09-13): the bar's OWN `open`, `high` "
+            "STOPS ARE EVALUATED INTRABAR (sweep-mechanics item (i), 2026-09-13): the bar's OWN `open`, `high` "
             f"and `low` are passed to vectorbt for these {bar} frames, so a stop/target fires on an "
             "intrabar breach of the level, a trailing stop ratchets on HIGHS (AFTER the bar has been "
             "checked against the PRIOR bar's high-water — a same-bar new-high-then-reversal beyond "
@@ -770,11 +770,11 @@ class SweepRunner:
             "at that close rather than at the target (optimistic).",
         )
         notes += [
-            "Vectorbt-vectorized only (§8.2); the event-driven ReplayHarness re-validates in Phase 3.",
+            "Vectorbt-vectorized only; the event-driven ReplayHarness re-validates in paper AUTO.",
         ]
         if strategy_id == "orb":
             notes.append(
-                "orb fills (WO-2): the same next-bar-open rule, session-aware — a breakout signalled "
+                "orb fills: the same next-bar-open rule, session-aware — a breakout signalled "
                 "on the 1m bar that closed above the range fills at the NEXT 1m bar's open, and a "
                 "signal on a session's last bar is dropped rather than carried into the next "
                 "session. EXCEPTION: the forced MIS session-end square-off is deliberately NOT "
@@ -784,8 +784,8 @@ class SweepRunner:
             notes.append(
                 "orb v2 (2026-07-12): stop anchored at the OPPOSITE opening-range edge — risk = "
                 "stop_range_frac × (entry − range low) — replacing the sub-cost-floor ATR(14,1m) "
-                "unit; breakouts with risk < 2× round-trip breakeven are skipped (C3 — live this "
-                "suppression is the §7.1 cost gate). Intrabar stops via high/low + forced "
+                "unit; breakouts with risk < 2× round-trip breakeven are skipped (live this "
+                "suppression is the cost gate). Intrabar stops via high/low + forced "
                 "session-end square-off; flagged_instrument_days suppression is live-only."
             )
         if strategy_id == "rsi2":
@@ -801,7 +801,7 @@ class SweepRunner:
                 "rsi2 max_hold_days is MODELLED (2026-07-12) as a time-exit scheduled max_hold_days "
                 "sessions after each entry signal (previously omitted — the swept axis was a no-op). "
                 "Approximation: a schedule left by an in-position entry signal can clip a subsequent "
-                "re-entry early by ≤ max_hold_days sessions (rare; true semantics are the Phase-3 "
+                "re-entry early by ≤ max_hold_days sessions (rare; true semantics are the paper-AUTO "
                 "position manager's)."
             )
         if strategy_id == "trend":
@@ -809,15 +809,15 @@ class SweepRunner:
         if strategy_id == "mom":
             notes.append(
                 "mom: cross-sectional top_n by 4-week momentum, rebalanced every rebalance_days "
-                "sessions; A12 ex-date skip is live-only (bars are corp-action-adjusted, A11)."
+                "sessions; the ex-date skip is live-only (bars are corp-action-adjusted)."
             )
             notes.append(
-                "mom ranking EXCLUDES the traded session (WO-2 (iv)): under next-session-open fills "
+                "mom ranking EXCLUDES the traded session: under next-session-open fills "
                 "a rebalance decided from closes through session t executes at session t+1's open, "
                 "so in fill-row terms the ranking input is momentum.shift(1) — closes through t−1 "
                 "relative to the session traded. That is exactly the live window: ScanContext builds "
                 "momentum_by_symbol from daily bars through d−1 and the MomentumScanner trades on d. "
-                "The pre-WO-2 defect was the same-bar-CLOSE fill, which ranked on close(t) and then "
+                "The pre-correction defect was the same-bar-CLOSE fill, which ranked on close(t) and then "
                 "traded at close(t) — the ranking included the traded bar itself."
             )
         return notes

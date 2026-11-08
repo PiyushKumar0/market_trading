@@ -101,7 +101,7 @@ class RiskStateLatch:
         """
         if state not in LATCHING_STATES:
             raise ValueError(
-                f"{state.value} is not a latching state — clear the cause instead (§3.5.3)"
+                f"{state.value} is not a latching state — clear the cause instead"
             )
         now = self._clock.now().isoformat()
         with transaction(self._conn):

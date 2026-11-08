@@ -371,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     from engine.core.log import configure_logging
 
     configure_logging()
-    parser = argparse.ArgumentParser(description="§6.1 ins — EOD insider net-buy crossing detection.")
+    parser = argparse.ArgumentParser(description="ins — EOD insider net-buy crossing detection.")
     parser.add_argument("--once", action="store_true", help="run one detection pass against the live store")
     parser.add_argument(
         "--date", default=None, type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),

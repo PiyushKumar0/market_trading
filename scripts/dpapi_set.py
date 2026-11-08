@@ -44,7 +44,7 @@ SEEDABLE: dict[str, str] = {
     KITE_API_SECRET: "Zerodha Kite Connect API secret",
     TELEGRAM_BOT_TOKEN: "Telegram bot token (BotFather)",
     DASHBOARD_TOKEN: "Local dashboard bearer token (or use --generate-dashboard-token)",
-    CLAUDE_CODE_OAUTH_TOKEN: "Claude Code SDK OAuth token (D2; stored only, not injected: the pinned CLI uses its own login)",
+    CLAUDE_CODE_OAUTH_TOKEN: "Claude Code SDK OAuth token (stored only, not injected: the pinned CLI uses its own login)",
 }
 
 # Length, in URL-safe bytes, of an auto-generated dashboard token (~43 chars of entropy).
@@ -61,7 +61,7 @@ def _validate_key(key: str) -> str:
         return key
     if key == KITE_ACCESS_TOKEN:
         _die(
-            f"'{KITE_ACCESS_TOKEN}' is minted daily by the Kite login flow (A5) and is not seeded here."
+            f"'{KITE_ACCESS_TOKEN}' is minted daily by the Kite login flow and is not seeded here."
         )
     known = ", ".join(sorted(SEEDABLE))
     _die(f"unknown secret key '{key}'. Seedable keys: {known}")
@@ -92,7 +92,7 @@ def _list_present(store: Secrets) -> None:
         print(f"  [{mark:>7}] {key}")
     # The daily Kite access token is informational: shown but flagged as login-flow managed.
     mark = "present" if store.has(KITE_ACCESS_TOKEN) else "absent"
-    print(f"  [{mark:>7}] {KITE_ACCESS_TOKEN}  (minted daily by login flow, A5; not seeded here)")
+    print(f"  [{mark:>7}] {KITE_ACCESS_TOKEN}  (minted daily by login flow; not seeded here)")
 
 
 def _generate_dashboard_token(store: Secrets) -> None:
@@ -113,7 +113,7 @@ def _interactive_menu(store: Secrets) -> None:
     """Drive a simple numbered menu to set any seedable key or list presence."""
     keys = sorted(SEEDABLE)
     while True:
-        print("\nSeed a secret into the Windows Credential Manager (R10, §2.4):")
+        print("\nSeed a secret into the Windows Credential Manager:")
         for i, key in enumerate(keys, start=1):
             mark = "set" if store.has(key) else "   "
             print(f"  {i}. [{mark}] {key} -- {SEEDABLE[key]}")
@@ -144,7 +144,7 @@ def _die(message: str) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dpapi_set.py",
-        description="Seed secrets into the Windows Credential Manager (R10, §2.4). "
+        description="Seed secrets into the Windows Credential Manager. "
         "Secret values are read without echo and are never logged or printed.",
     )
     parser.add_argument(

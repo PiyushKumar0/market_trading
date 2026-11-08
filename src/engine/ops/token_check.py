@@ -97,7 +97,7 @@ class TokenCheckJob:
             _log.critical(
                 "token_check_failed", date=today.isoformat(), error=str(exc),
                 error_type=type(exc).__name__,
-                hint="daily Kite token is invalid — re-login before the open (R6/A5)",
+                hint="daily Kite token is invalid — re-login before the open",
             )
             await self._send(self._invalid_message(str(exc)))
             return
@@ -128,7 +128,7 @@ class TokenCheckJob:
         # owner action here; the title/body carry the pre-open framing the generic prompt lacks.
         return CatalogMessage(
             kind=MessageKind.LOGIN_PROMPT,
-            title="Kite token invalid — re-login before open (R6)",
+            title="Kite token invalid — re-login before open",
             body=(
                 "The pre-open token check was REJECTED by the broker — today's access token is dead "
                 "(it expires ~06:00 IST). Entries will be FROZEN at the open until you re-login.\n"
@@ -141,7 +141,7 @@ class TokenCheckJob:
     def _inconclusive_message(self, exc: BaseException) -> CatalogMessage:
         return CatalogMessage(
             kind=MessageKind.LOGIN_PROMPT,
-            title="Kite token check inconclusive — verify before open (R6)",
+            title="Kite token check inconclusive — verify before open",
             body=(
                 "The pre-open token check could not reach the broker "
                 f"({type(exc).__name__}: {str(exc)[:120]}). The token is UNVERIFIED, not known bad. "

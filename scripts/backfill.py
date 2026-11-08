@@ -98,7 +98,7 @@ def _parse_date(s: str) -> date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="G1 initial-history-seed CLI — drives BackfillJob (§3.1/§4.4 job 3/A2)."
+        description="Initial-history-seed CLI — drives BackfillJob."
     )
     parser.add_argument("mode", choices=("seed", "run", "status"))
     parser.add_argument(
@@ -447,7 +447,7 @@ async def _execute(settings, clock: Clock, plans: list[IntervalPlan], source: st
     if not secrets.has(KITE_API_KEY) or not secrets.has(KITE_ACCESS_TOKEN):
         print(
             "backfill: kite_api_key / kite_access_token missing from DPAPI secrets — run offline "
-            "AFTER the daily Kite login so a token exists (§10.2)",
+            "AFTER the daily Kite login so a token exists",
             file=sys.stderr,
         )
         return 2

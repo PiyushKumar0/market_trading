@@ -190,10 +190,10 @@ def check_python_version() -> str:
     """
     major, minor = sys.version_info[:2]
     assert (major, minor) == (3, 12), (
-        f"interpreter is {major}.{minor}.x; A4 pins Python 3.12.x (.python-version / pyproject). "
+        f"interpreter is {major}.{minor}.x; the project pins Python 3.12.x (.python-version / pyproject). "
         "Run via `uv run` so the pinned venv interpreter is used."
     )
-    return f"Python {sys.version.split()[0]} (3.12.x as pinned, A4)"
+    return f"Python {sys.version.split()[0]} (3.12.x as pinned)"
 
 
 def check_pykiteconnect() -> str:
@@ -207,7 +207,7 @@ def check_pykiteconnect() -> str:
         import kiteconnect
         from kiteconnect import KiteConnect, KiteTicker  # noqa: F401 — import is the test
         version = _ver(kiteconnect)
-        assert version.startswith("5.2"), f"pykiteconnect version {version!r} does not start with 5.2 (A4)"
+        assert version.startswith("5.2"), f"pykiteconnect version {version!r} does not start with 5.2"
         print(f"v{version} (KiteConnect + KiteTicker importable)")
         """
     )
@@ -230,7 +230,7 @@ def check_kiteticker_reactor() -> str:
         assert kws is not None
         reactor.callLater(0, reactor.stop)                        # stop from within, proving start/stop
         reactor.run()                                             # returns after the scheduled stop
-        print("KiteTicker constructed + Twisted reactor start/stop OK (subprocess, A4)")
+        print("KiteTicker constructed + Twisted reactor start/stop OK (subprocess)")
         """
     )
 
@@ -262,7 +262,7 @@ def _resolve_engine_cli() -> Path:
         return path if path.is_absolute() else root / path
     spec = importlib.util.find_spec("claude_agent_sdk")
     if spec is None or spec.origin is None:
-        raise RuntimeError("claude-agent-sdk is not installed and agents.yaml sets no llm.cli_path (D1)")
+        raise RuntimeError("claude-agent-sdk is not installed and agents.yaml sets no llm.cli_path")
     return Path(spec.origin).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
 
 
@@ -279,7 +279,7 @@ def check_engine_cli() -> str:
     if not cli.is_file():
         raise RuntimeError(
             f"engine Claude Code CLI missing at {cli} (agents.yaml llm.cli_path, else the SDK's "
-            "_bundled CLI) — the harness refuses to call without it (D1)."
+            "_bundled CLI) — the harness refuses to call without it."
         )
     proc = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
@@ -315,12 +315,12 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
                 break
 
         has_query = "query" in exported
-        assert has_query, "claude_agent_sdk.query() not found — single-shot agent invocation (D5) unavailable"
+        assert has_query, "claude_agent_sdk.query() not found — single-shot agent invocation unavailable"
 
         if options_cls is None:
             # Importable + query present, but no recognizable options class. Don't fail the import
             # check on that alone — record what we saw so the owner can verify the knobs manually.
-            return f"v{version} (query present; options class NOT found — verify D9 knobs manually)"
+            return f"v{version} (query present; options class NOT found — verify knobs manually)"
 
         # Knobs the harness probes: explicit model, turn cap, effort, the tool allowlist,
         # setting_sources (prevents loading stray CLAUDE.md/settings), cli_path/env (pinned CLI,
@@ -355,10 +355,10 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
         assert not absent, f"{options_cls.__name__} exposes no {', '.join(absent)} knob — the harness refuses to call"
         detail = f"v{version} ({options_cls.__name__}); knobs found: {', '.join(found) or 'none'}"
         if missing:
-            detail += f"; NOT introspectable: {', '.join(missing)} (verify D9 manually)"
+            detail += f"; NOT introspectable: {', '.join(missing)} (verify manually)"
         return detail
 
-    results.check("claude_agent_sdk import + options surface (D9)", _import_and_introspect)
+    results.check("claude_agent_sdk import + options surface", _import_and_introspect)
 
     # The actual paid Haiku round-trip — separate owner step, opt-in only.
     if live_llm:
@@ -501,11 +501,11 @@ def check_anthropic_api_key_absent(allow_api_key: bool) -> str:
     if allow_api_key:
         return "ANTHROPIC_API_KEY present" if present else "absent (allow-api-key set; either is OK)"
     assert not present, (
-        "ANTHROPIC_API_KEY is set in the environment (D2/T7): it would silently bill pay-as-you-go "
+        "ANTHROPIC_API_KEY is set in the environment: it would silently bill pay-as-you-go "
         "alongside the Max-plan OAuth credit. Unset it, or pass --allow-api-key if using the metered "
         "fallback deliberately."
     )
-    return "absent (as required by D2)"
+    return "absent (as required)"
 
 
 # Simple importable deps: (display name, module name). Version printed; import is the test.
@@ -539,7 +539,7 @@ def _make_import_check(module_name: str):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="smoke_test",
-        description="Phase-0 install smoke test (A4, §8.1): import + minimally run every heavy dep.",
+        description="Install smoke test: import + minimally run every heavy dep.",
     )
     parser.add_argument(
         "--live-llm",
@@ -550,13 +550,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-api-key",
         action="store_true",
-        help="Do not fail when ANTHROPIC_API_KEY is present (metered-key fallback config; §5.6/§13). "
-        "Default OFF — a stray key fails the D2/T7 trap.",
+        help="Do not fail when ANTHROPIC_API_KEY is present (metered-key fallback config). "
+        "Default OFF — a stray key fails the check.",
     )
     args = parser.parse_args(argv)
 
     print("=" * 72, flush=True)
-    print("Phase-0 install smoke test (A4, §8.1)", flush=True)
+    print("Install smoke test", flush=True)
     print(f"interpreter: {sys.version.split()[0]}  ({sys.executable})", flush=True)
     print(f"flags: live_llm={args.live_llm} allow_api_key={args.allow_api_key}", flush=True)
     print("=" * 72, flush=True)
@@ -564,38 +564,38 @@ def main(argv: list[str] | None = None) -> int:
     results = Results()
 
     # Pinned interpreter — the install-tier gate must run on Python 3.12.x, asserted not just printed.
-    results.check("python 3.12.x pinned interpreter (A4)", check_python_version)
+    results.check("python 3.12.x pinned interpreter", check_python_version)
 
     # Broker / market data — the load-bearing dep; version pin is asserted.
-    results.check("pykiteconnect import + version (A4)", check_pykiteconnect)
+    results.check("pykiteconnect import + version", check_pykiteconnect)
 
     # KiteTicker Twisted-reactor-in-a-subprocess pattern — offline construct + reactor start/stop.
-    results.check("KiteTicker + Twisted reactor subprocess (A4)", check_kiteticker_reactor)
+    results.check("KiteTicker + Twisted reactor subprocess", check_kiteticker_reactor)
 
     # Engine Claude Code CLI (llm.cli_path pin) invocable under this account — `--version` exits 0.
-    results.check("engine Claude Code CLI --version (D1)", check_engine_cli)
+    results.check("engine Claude Code CLI --version", check_engine_cli)
 
     # Time discipline — tzdata presence on Windows is mandatory for core.Clock/IST.
-    results.check("zoneinfo Asia/Kolkata (tzdata present, R6)", check_zoneinfo_ist)
+    results.check("zoneinfo Asia/Kolkata (tzdata present)", check_zoneinfo_ist)
 
     # Simple importable deps (version printed; import is the check).
     for display, module_name in _SIMPLE_IMPORTS:
         results.check(f"{display} import", _make_import_check(module_name))
 
     # Minimal-run deps (A4: actually execute, not just import).
-    results.check("duckdb import + trivial query (A4 run)", check_duckdb_run)
-    results.check("river import + incremental learn step (A4 run)", check_river_run)
+    results.check("duckdb import + trivial query", check_duckdb_run)
+    results.check("river import + incremental learn step", check_river_run)
 
     # Native OpenMP load-order landmine: vectorbt + skfolio in one process segfault unless scikit-learn
     # is imported first (engine._preload enforces this engine-side). Isolated subprocess; see the check.
-    results.check("vectorbt+skfolio coexistence (native order, G0)", check_vectorbt_skfolio_coexistence)
+    results.check("vectorbt+skfolio coexistence (native order)", check_vectorbt_skfolio_coexistence)
 
     # LLM SDK — import + knob introspection; live call guarded by --live-llm.
     check_claude_agent_sdk(results, live_llm=args.live_llm)
 
     # API-key trap — stray pay-as-you-go key.
     results.check(
-        "ANTHROPIC_API_KEY absent (D2 trap)",
+        "ANTHROPIC_API_KEY absent",
         lambda: check_anthropic_api_key_absent(allow_api_key=args.allow_api_key),
     )
 

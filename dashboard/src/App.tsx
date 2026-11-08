@@ -1,15 +1,15 @@
 /**
- * Dashboard v2 (§3.2.11, O8/R8; redesign spec runbooks/design-2026-10-08-dashboard-redesign.md) — a
+ * Dashboard v2 — a
  * tabbed LAN console over the engine's read routes plus the four owner writes the dashboard is
  * allowed to make: `POST /mode` (OFF / RECOMMEND only), `POST /config/trade_window`, `POST /paper`
- * (paper autopilot ON / OFF, D13) and `POST /risk/rearm` (floor stops the account is back above).
+ * (paper autopilot ON / OFF) and `POST /risk/rearm` (floor stops the account is back above).
  *
  * A fifth, `POST /config/capital` (System tab, Risk limits: "Change capital"), is the owner's starting
- * capital edit; the engine refuses it in market hours, in Auto, and when a stop would trip (O19).
+ * capital edit; the engine refuses it in market hours, in Auto, and when a stop would trip.
  *
  * Deliberately ABSENT from this surface, and not an oversight:
  *  - →AUTO and kill-switch RESET are owner TWO-STEP transitions with no dashboard path (Telegram
- *    `/mode AUTO` + `/confirm`, `/kill_reset` + `/confirm`); the engine answers 409 for both (R10).
+ *    `/mode AUTO` + `/confirm`, `/kill_reset` + `/confirm`); the engine answers 409 for both.
  *  - Paper reset stays Telegram two-step (`/paper reset` + `/confirm`).
  *  - Recommendation outcomes (`/taken`, `/closed`) are Telegram-only — this console reads the
  *    recommendation ledger, it never writes to it.
@@ -124,7 +124,7 @@ export default function App() {
       push('good', `Trading hours saved: ${body.start}–${body.end}`)
       return null
     } catch (e) {
-      // 422 = rejected by ModeManager validation; the stored window is UNCHANGED (§3.2.7).
+      // 422 = rejected by ModeManager validation; the stored window is UNCHANGED.
       if (e instanceof ApiError && e.status === 422) return COPY.hoursRejected
       return e instanceof NoAnswerError ? COPY.noAnswer('trading hours') : `Not saved: ${reason(e)}`
     } finally {

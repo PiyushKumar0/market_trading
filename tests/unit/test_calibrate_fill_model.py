@@ -325,7 +325,7 @@ def test_yaml_round_trips_through_the_strict_model(result, tmp_path):
 
     # The header carries the unit of median_half_spread_pct and the k-floor policy, next to the
     # numbers - a reader of the config alone must not have to find the report to learn either.
-    assert "percent" in text.lower() and "G4" in text and "only tighten" in text.lower()
+    assert "percent" in text.lower() and "live-ramp gate" in text and "only tighten" in text.lower()
     assert loaded["version"] == 1
     assert loaded["latency_ms"] == 700
     assert set(loaded) == {
@@ -713,7 +713,7 @@ def test_report_md_renders_the_coverage_table(tmp_path):
     # The k table carries the basis, and the report states why the floor exists + that the fitted
     # quantiles are kept for the first live-ramp gate's live-vs-paper recalibration.
     assert "| basis |" in text
-    assert "G4" in text and "only tighten" in text.lower()
+    assert "live-ramp gate" in text and "only tighten" in text.lower()
 
 
 def test_cli_wires_the_bounding_flags(corpus, tmp_path):

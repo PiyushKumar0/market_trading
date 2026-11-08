@@ -144,7 +144,7 @@ from engine.strategy.scanners.hi52 import STRATEGY_ID  # noqa: E402
 #: pass ``--from`` explicitly whenever it differs.
 PROMOTION_DATE_PROVENANCE = (
     "ASSUMED = first session after the 2026-09-12 promotion commit; confirm against the deploy date "
-    "and pass --from if the tranche shipped later"
+    "and pass --from if the promotion shipped later"
 )
 
 #: Everything else is labelled "diagnostic" in the report, so no one can quote it as an outcome.
@@ -530,7 +530,7 @@ def _positive(s: str) -> Decimal:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description="hi52 forward-test verdict (IMPLEMENTATION_PLAN.md 8.6 addendum). "
+        description="hi52 forward-test verdict. "
                     "Read-only against state.db + market.duckdb; always exits 0.",
     )
     ap.add_argument("--state-db", type=Path, default=repo_root() / "data" / "state.db",
@@ -546,12 +546,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--json", dest="json_path", type=Path, default=None,
                     help="also write the raw numbers to this JSON path")
     ap.add_argument("--limits", type=Path, default=repo_root() / "config" / "limits.yaml",
-                    help="path to limits.yaml (§7.1 per_trade_risk — the notional derivation)")
+                    help="path to limits.yaml (per_trade_risk — the notional derivation)")
     ap.add_argument("--equity", type=_positive, default=None, metavar="INR",
                     help="size the cost floor at this equity instead of the smallest snapshot in "
                          "the window (a what-if; the derivation is printed either way)")
     ap.add_argument("--notional", type=_positive, default=None, metavar="INR",
-                    help="charge the round trip at this notional and SKIP the §7.1 derivation "
+                    help="charge the round trip at this notional and SKIP the per_trade_risk derivation "
                          "entirely (a what-if; the report says OVERRIDE and the verdict it prints "
                          "is not the kill criterion's)")
     return ap
@@ -597,7 +597,7 @@ def resolve_cost_floor(
             "limits_source": limits_src,
             "override": True,
             "derivation": (
-                f"OVERRIDE (--notional Rs {round(notional_override, 2)}): the §7.1 sizing "
+                f"OVERRIDE (--notional Rs {round(notional_override, 2)}): the per-trade risk sizing "
                 f"derivation was NOT used — this is a what-if, not the kill criterion's floor"
             ),
         }
@@ -634,7 +634,7 @@ def resolve_cost_floor(
         "limits_source": limits_src,
         "override": False,
         "derivation": (
-            f"§7.1 per_trade_risk cap: equity Rs {equity} x {position_pct}% / "
+            f"per_trade_risk cap: equity Rs {equity} x {position_pct}% / "
             f"({gap_mult}x {stop_pct}% stop) = Rs {round(notional, 2)}  "
             f"[equity: {equity_src}; limits: {limits_src}] — integer-qty rounding lands the real "
             f"notional at or below this, so the floor is a lower bound"

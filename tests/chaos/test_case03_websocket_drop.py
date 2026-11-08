@@ -61,7 +61,7 @@ from engine.risk.events import TOPIC_RISK_STATE
 from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 from tests.chaos._entry_gate_rig import INDEX_SYMBOL, LIMITS_YAML, build_entry_gate, entry_checks
-from tests.chaos.conftest import BROKER_RESIDENT_R3
+from tests.chaos.conftest import BROKER_RESIDENT_PROTECTION
 
 SYMBOL = "RELIANCE"
 TOKENS = {738561: SYMBOL, 256265: INDEX_SYMBOL}
@@ -448,6 +448,6 @@ async def test_a_slow_owner_page_never_stalls_the_feed(feed_rig):
 
 
 # ------------------------------------------------------------------------------- kept skipped
-@pytest.mark.skip(reason=f"'positions remain broker-protected' — {BROKER_RESIDENT_R3}")
+@pytest.mark.skip(reason=f"'positions remain broker-protected' — {BROKER_RESIDENT_PROTECTION}")
 async def test_positions_remain_broker_protected():
     raise AssertionError("unreachable — skipped")

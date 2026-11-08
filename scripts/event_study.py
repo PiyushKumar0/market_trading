@@ -449,7 +449,7 @@ def _render_leg(lines: list[str], title: str, leg: dict, empty_note: str) -> Non
     if means and max(means) <= 0:
         lines.append(
             "> **No positive net drift at any horizon for this leg** — the mechanical edge does "
-            "not survive costs here (C9, reported not massaged)."
+            "not survive costs here (reported not massaged)."
         )
         lines.append("")
 
@@ -457,7 +457,7 @@ def _render_leg(lines: list[str], title: str, leg: dict, empty_note: str) -> Non
 def render_markdown(agg: dict, meta: dict) -> str:
     filings_on = not meta.get("skip_filings")
     lines: list[str] = []
-    lines.append("# Event-study proxy backtest (§2.7 `cat` prerequisite + §2.8.4 filings legs)")
+    lines.append("# Event-study proxy backtest (`cat` prerequisite + filings legs)")
     lines.append("")
     lines.append(f"_Generated {meta['generated_at']}_")
     lines.append("")
@@ -467,7 +467,7 @@ def render_markdown(agg: dict, meta: dict) -> str:
     )
     fees_pct, spread_pct = meta.get("cost_fees_pct"), meta.get("cost_spread_pct")
     split = (
-        f" = {fees_pct:.4f}% statutory fees + {spread_pct:.4f}% measured bid-ask SPREAD (WO-2)"
+        f" = {fees_pct:.4f}% statutory fees + {spread_pct:.4f}% measured bid-ask SPREAD"
         if fees_pct is not None and spread_pct is not None
         else ""
     )
@@ -479,13 +479,13 @@ def render_markdown(agg: dict, meta: dict) -> str:
     )
     entry_fill = meta.get("entry_fill", ENTRY_FILL_CLOSE_T)
     lines.append(
-        "- Entry fill (WO-16): **"
+        "- Entry fill: **"
         + (
             "next session's OPEN** — every drift is measured from `open_(T+1)`, the first price "
             "reachable by an order placed after the signal was knowable at `close_T`."
             if entry_fill == ENTRY_FILL_NEXT_OPEN
-            else "`close_T`** (SUPERSEDED pre-WO-16 convention) — books the T→T+1 overnight gap no "
-            "post-close order can capture; for the reaction-sign legs it is same-bar (WO-2 class)."
+            else "`close_T`** (SUPERSEDED convention) — books the T→T+1 overnight gap no "
+            "post-close order can capture; for the reaction-sign legs it is same-bar."
         )
     )
     lines.append(
@@ -504,7 +504,7 @@ def render_markdown(agg: dict, meta: dict) -> str:
     )
     if filings_on:
         lines.append(
-            f"- §2.8.4 insider-buy leg: trailing-{INSIDER_TRAILING_SESSIONS}-session open-market "
+            f"- insider-buy leg: trailing-{INSIDER_TRAILING_SESSIONS}-session open-market "
             f"insider BUY value ≥ ₹{meta['insider_min_value_inr']} (re-arm below); directional long "
             "drift. Event session T = the first close at which the DISCLOSURE was public — keyed on "
             "the exchange broadcast timestamp (`insider_trades.broadcast_dt`), NEVER the "
@@ -512,61 +512,61 @@ def render_markdown(agg: dict, meta: dict) -> str:
             "time) ⇒ next session."
         )
         lines.append(
-            f"- §2.8.4 pledge-delta leg: promoter pledged-% QoQ change ≥ "
+            f"- pledge-delta leg: promoter pledged-% QoQ change ≥ "
             f"{meta['pledge_delta_min_pct']:g} pts; increase = negative-catalyst cohort, decrease = "
             "positive; entry keyed off the quarter row's broadcast_dt (NOT quarter end)."
         )
         lines.append(
-            "- §2.8.4 results-filing leg: reaction-sign PEAD on results_filings broadcast dates "
+            "- results-filing leg: reaction-sign PEAD on results_filings broadcast dates "
             "(fallback: historical earnings_calendar rows) — replaces the n=0 earnings leg."
         )
     lines.append("")
     if agg["n_events"] == 0:
         lines.append("> **NO EVENTS DETECTED** for the requested symbols/window — no evidence either "
-                     "way. Reported honestly (C9); backfill more history or widen the window.")
+                     "way. Reported honestly; backfill more history or widen the window.")
         lines.append("")
         return "\n".join(lines)
 
     _render_leg(lines, "PEAD leg — all events (drift conditioned on T-day reaction sign)",
-                agg["legs"]["pead_all"], "no reaction-sign events measured — honest n=0 (C9).")
+                agg["legs"]["pead_all"], "no reaction-sign events measured — honest n=0.")
     _render_leg(lines, "PEAD leg — earnings events only",
-                agg["legs"]["pead_earnings"], "no earnings-calendar events in window — honest n=0 (C9).")
+                agg["legs"]["pead_earnings"], "no earnings-calendar events in window — honest n=0.")
     _render_leg(lines, "PEAD leg — gap/volume events only",
-                agg["legs"]["pead_gap_volume"], "no gap/volume events measured — honest n=0 (C9).")
+                agg["legs"]["pead_gap_volume"], "no gap/volume events measured — honest n=0.")
     _render_leg(lines, "Confirmation leg — cat-style price/volume filter (entry at T+1)",
-                agg["legs"]["confirmation"], "no events passed the cat-style confirmation filter — honest n=0 (C9).")
+                agg["legs"]["confirmation"], "no events passed the cat-style confirmation filter — honest n=0.")
 
     if filings_on:
         _render_leg(
-            lines, "§2.8.4 Results-filing leg — reaction-sign PEAD on typed broadcast dates",
+            lines, "Results-filing leg — reaction-sign PEAD on typed broadcast dates",
             agg["legs"]["results_filing"],
-            "results_filings empty and no historical earnings_calendar fallback rows — honest n=0 (C9).",
+            "results_filings empty and no historical earnings_calendar fallback rows — honest n=0.",
         )
         _render_leg(
-            lines, "§2.8.4 Results-filing confirmation sub-leg (entry at T+1)",
+            lines, "Results-filing confirmation sub-leg (entry at T+1)",
             agg["legs"]["results_confirmation"],
-            "no results events passed the cat-style confirmation filter — honest n=0 (C9).",
+            "no results events passed the cat-style confirmation filter — honest n=0.",
         )
         _render_leg(
-            lines, "§2.8.4 Insider-buy leg — trailing-10-session open-market buy crossings (long drift)",
+            lines, "Insider-buy leg — trailing-10-session open-market buy crossings (long drift)",
             agg["legs"]["insider_buy"],
-            "insider_trades empty (or no trailing-10-session crossing reached the ₹ threshold) — honest n=0 (C9).",
+            "insider_trades empty (or no trailing-10-session crossing reached the ₹ threshold) — honest n=0.",
         )
         lines.append(
-            "_Pledge cohorts report RAW long forward drift; signs are not flipped (C9). A working "
+            "_Pledge cohorts report RAW long forward drift; signs are not flipped. A working "
             "negative catalyst (pledge INCREASE) shows NEGATIVE net drift; a working positive catalyst "
             "(pledge DECREASE) shows POSITIVE net drift._"
         )
         lines.append("")
         _render_leg(
-            lines, "§2.8.4 Pledge-delta leg — promoter pledge INCREASE cohort (negative catalyst)",
+            lines, "Pledge-delta leg — promoter pledge INCREASE cohort (negative catalyst)",
             agg["legs"]["pledge_increase"],
-            "shp_quarterly empty (or no QoQ promoter-pledge increase reached the threshold) — honest n=0 (C9).",
+            "shp_quarterly empty (or no QoQ promoter-pledge increase reached the threshold) — honest n=0.",
         )
         _render_leg(
-            lines, "§2.8.4 Pledge-delta leg — promoter pledge DECREASE cohort (positive catalyst)",
+            lines, "Pledge-delta leg — promoter pledge DECREASE cohort (positive catalyst)",
             agg["legs"]["pledge_decrease"],
-            "shp_quarterly empty (or no QoQ promoter-pledge decrease reached the threshold) — honest n=0 (C9).",
+            "shp_quarterly empty (or no QoQ promoter-pledge decrease reached the threshold) — honest n=0.",
         )
     return "\n".join(lines)
 
@@ -705,20 +705,20 @@ def _write(agg: dict, meta: dict, reports_dir: Path) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
-    parser = argparse.ArgumentParser(description="§2.7 event-study proxy backtest + §2.8.4 filings legs.")
+    parser = argparse.ArgumentParser(description="Event-study proxy backtest + filings legs.")
     parser.add_argument("--from", dest="start", type=lambda s: datetime.strptime(s, "%Y-%m-%d").date())
     parser.add_argument("--to", dest="end", type=lambda s: datetime.strptime(s, "%Y-%m-%d").date())
     parser.add_argument("--symbols", default=None, help="comma-separated override of the universe")
     parser.add_argument("--reports-dir", default=None)
     parser.add_argument(
         "--skip-filings-legs", dest="skip_filings", action="store_true",
-        help="run only the original PEAD + confirmation legs (no §2.8.4 filings legs)",
+        help="run only the original PEAD + confirmation legs (no filings legs)",
     )
     parser.add_argument(
         "--entry-fill", dest="entry_fill", default=DEFAULT_ENTRY_FILL, choices=list(ENTRY_FILLS),
         help=(
-            "WO-16 fill convention: 'next_open' (default) fills at open_(T+1); 'close_t' is the "
-            "superseded pre-WO-16 close_T fill, kept for old-vs-new comparison"
+            "Fill convention: 'next_open' (default) fills at open_(T+1); 'close_t' is the "
+            "superseded close_T fill, kept for old-vs-new comparison"
         ),
     )
     args = parser.parse_args(argv)

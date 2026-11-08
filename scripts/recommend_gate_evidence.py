@@ -31,10 +31,10 @@ SOURCES (stated again in the printed output, per criterion):
 
 Usage::
 
-    .venv\\Scripts\\python.exe scripts\\g2_evidence.py
-    .venv\\Scripts\\python.exe scripts\\g2_evidence.py --from 2026-07-29 --to 2026-08-13
-    .venv\\Scripts\\python.exe scripts\\g2_evidence.py --window 2026-09-03   # an earlier quota week
-    .venv\\Scripts\\python.exe scripts\\g2_evidence.py --json data/reports/g2_evidence.json
+    .venv\\Scripts\\python.exe scripts\\recommend_gate_evidence.py
+    .venv\\Scripts\\python.exe scripts\\recommend_gate_evidence.py --from 2026-07-29 --to 2026-08-13
+    .venv\\Scripts\\python.exe scripts\\recommend_gate_evidence.py --window 2026-09-03   # an earlier quota week
+    .venv\\Scripts\\python.exe scripts\\recommend_gate_evidence.py --json data/reports/recommend_gate_evidence.json
 """
 
 from __future__ import annotations
@@ -435,7 +435,7 @@ def render(res: dict[str, Any]) -> str:
     rec, orders, bud = res["recommendations"], res["orders"], res["budget"]
 
     L.append("=" * 100)
-    L.append("Gate G2 evidence - IMPLEMENTATION_PLAN.md 8.3 (Phase 2, RECOMMEND live)")
+    L.append("RECOMMEND gate evidence")
     L.append("=" * 100)
     L.append(f"Range        : {meta['from']} .. {meta['to']}  ({meta['sessions']} trading sessions)")
     L.append(f"State DB     : {meta['db']}")
@@ -475,7 +475,7 @@ def render(res: dict[str, Any]) -> str:
          f"events={orders['order_events']}",
          "0 rows; broker book owner-audited",
          MET if orders["live_order_rows"] == 0 else NOT_MET],
-        ["7", f"Budget: quota week from {bud['window']} (D6, weekly 2026-09-12)",
+        ["7", f"Budget: quota week from {bud['window']} (weekly 2026-09-12)",
          f"total ${bud['total_usd']:.2f} vs weekly alloc ${bud['alloc_sum_usd'] or 0:.0f}",
          "ledger arithmetic + within self-imposed alloc",
          MET if bud["alloc_sum_usd"] and bud["total_usd"] <= bud["alloc_sum_usd"] else NA],
@@ -486,7 +486,7 @@ def render(res: dict[str, Any]) -> str:
          else f"[owner-manual] - sample from {rec['total_rows_all_time']} rows",
          "every payload", NA],
     ]
-    L.append(table(["#", "G2 CRITERION", "MEASURED", "BAR", "VERDICT"], rows))
+    L.append(table(["#", "RECOMMEND GATE CRITERION", "MEASURED", "BAR", "VERDICT"], rows))
     L.append("")
 
     L.append("-" * 100)
@@ -520,7 +520,7 @@ def render(res: dict[str, Any]) -> str:
                               int(round((bud["alloc_sum_usd"] or 0) * 1e6))))])
     L.append(table(["AGENT", "BILLED CALLS", "SPEND USD", "ALLOC USD", "% OF ALLOC"], brows))
     L.append("")
-    L.append("  >> D6 RE-SCOPED (owner clarification 2026-08-13): SDK usage bills against the Claude")
+    L.append("  >> RE-SCOPED (owner clarification 2026-08-13): SDK usage bills against the Claude")
     L.append("     subscription's WEEKLY usage limits, not a monthly credit (Anthropic's June-15 notice")
     L.append("     paused the credit change) - there is NO console dollar figure to reconcile against.")
     L.append("     The dollar ledger above is the platform's SELF-IMPOSED budget (DG ladder input);")
@@ -581,7 +581,7 @@ def render(res: dict[str, Any]) -> str:
     L.append("C5/C7 budget    : budget_ledger(at) over ONE quota window vs config/agents.yaml")
     L.append("                  budget_allocations_usd, which are WEEKLY dollars since 2026-09-12.")
     L.append("                  Allocations include a 'reserve' line that no agent spends against.")
-    L.append("                  D6 re-scoped 2026-08-13: SDK usage bills against subscription weekly")
+    L.append("                  Re-scoped 2026-08-13: SDK usage bills against subscription weekly")
     L.append("                  usage limits, not a monthly credit - no console dollar reconciliation")
     L.append("                  exists; the bar is ledger arithmetic + self-imposed allocation adherence.")
     L.append("                  The window is the governor's own (Thu 14:00 IST reset, wall-clock): use")
@@ -601,7 +601,7 @@ def _hhmm(v: str | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     today = datetime.now(IST).date()
     ap = argparse.ArgumentParser(
-        description="Gate G2 evidence (IMPLEMENTATION_PLAN.md 8.3). Read-only against state.db.")
+        description="RECOMMEND gate evidence. Read-only against state.db.")
     ap.add_argument("--from", dest="date_from", default="2026-07-29",
                     help="range start, YYYY-MM-DD (default 2026-07-29, first RECOMMEND session)")
     ap.add_argument("--to", dest="date_to", default=today.isoformat(),

@@ -194,7 +194,7 @@ def _parse_date(s: str) -> date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Rewind state.db watermarks/checkpoints after a market.duckdb restore (§10.5)."
+        description="Rewind state.db watermarks/checkpoints after a market.duckdb restore."
     )
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--export", default=None,
@@ -412,7 +412,7 @@ def _print_outlook(plan: Plan, today: date) -> None:
         if plan.since <= yesterday else "(none to refetch: S is today)"
     )
     print(f"""
-After --apply, the next boot recovers by itself (§2.6 catch-up, one run per trading day from {s}):
+After --apply, the next boot recovers by itself (catch-up, one run per trading day from {s}):
   - bars_1d: bhavcopy (every EQ symbol) and daily_bars (watchlist + {INDEX_SYMBOL} + {VIX_SYMBOL});
     the boot regime fill and the post-login re-trigger refetch {INDEX_SYMBOL} / {VIX_SYMBOL} from {s}
   - flagged_instrument_days (deals), insider_trades (filings_pit, filings_pit_fresh),

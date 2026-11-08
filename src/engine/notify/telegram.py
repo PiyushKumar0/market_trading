@@ -219,7 +219,7 @@ CRITICAL_KINDS: frozenset[str] = frozenset(
 _CHALLENGE_TTL = timedelta(minutes=2)
 
 # Reply text for a command registered from the catalog but whose downstream is not yet wired.
-_PHASE0_STUB = "not yet implemented in Phase 0"
+_STUB_REPLY = "not yet implemented"
 
 # ------------------------------------------------------------------- ticker → rec_id
 #: 2026-08-26, the evening of the FIRST executed recommendation. ``rec_id`` is a 26-char ULID that no
@@ -293,7 +293,7 @@ class _CommandSpec:
 
     Single source of truth for handler registration, ``/help``, and the Telegram ``/`` autocomplete
     menu (``setMyCommands``) — so all three can never drift. ``live`` is True for a command with a real
-    handler and False for one registered as a logged stub replying ``_PHASE0_STUB``. Every
+    handler and False for one registered as a logged stub replying ``_STUB_REPLY``. Every
     command is live: a live command whose OPTIONAL dependency is unwired replies
     "… not wired", which is a handler's honest answer, not a stub.
     """
@@ -348,7 +348,7 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Confirm you placed the protective stop order for a taken position; stops the "
                  "protection reminders.", True),
     _CommandSpec("close", "/close <position_id>",
-                 "Guidance for exiting a position — in RECOMMEND the exit is yours to place (B7).",
+                 "Guidance for exiting a position — in RECOMMEND the exit is yours to place.",
                  True),
     # --- read-only reports ---
     _CommandSpec("positions", "/positions",
@@ -363,7 +363,7 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
                  "Approve a pending owner-approval request (e.g. a stop-widen).", True),
     _CommandSpec("reject", "/reject <approval_id>", "Reject a pending owner-approval request.", True),
     _CommandSpec("token", "/token <request_token>",
-                 "Complete the daily Kite login with the request token (§10.2 fallback).", True),
+                 "Complete the daily Kite login with the request token (fallback).", True),
     _CommandSpec("scan_now", "/scan_now",
                  "Sweep the scanners on demand: live candidates enter the pipeline; otherwise "
                  "the reply lists the price levels at which today's setups would arm.", True),
@@ -390,7 +390,7 @@ def _help_text() -> str:
         lines.append(c.usage)
         lines.append(f"    {c.summary}")
     if later:
-        lines += ["", "Not yet available (Phase 2+):"]
+        lines += ["", "Not yet available:"]
         lines += [f"/{c.name} — {c.summary}" for c in later]
     return "\n".join(lines)
 
@@ -1069,7 +1069,7 @@ class TelegramBot:
 
         async def _handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _log.info("telegram_cmd_stub", command=name, args=_args(context))
-            await _reply(update, f"/{name}: {_PHASE0_STUB}.")
+            await _reply(update, f"/{name}: {_STUB_REPLY}.")
 
         _handler.__qualname__ = f"TelegramBot._stub.{name}"
         return _handler
@@ -1360,7 +1360,7 @@ class TelegramBot:
         _log.warning("telegram_cmd_pause_entries", risk_state=state.value)
         await _reply(
             update,
-            f"entries PAUSED — risk_state {state.value}. Risk-reducing exits/protection continue (R3). "
+            f"entries PAUSED — risk_state {state.value}. Risk-reducing exits/protection continue. "
             "Send /resume_entries to re-arm.",
         )
 
@@ -1635,9 +1635,9 @@ class TelegramBot:
         await _reply(
             update,
             f"/close {target}: nothing was sent to the broker. In RECOMMEND the exit decision AND the "
-            "order are yours — the platform places zero API orders (B7). Square off in your terminal, "
-            f"then send {_USAGE_CLOSED} so the outcome is recorded (§3.6). Platform-placed "
-            "exits arrive with AUTO in Phase 3.",
+            "order are yours — the platform places zero API orders. Square off in your terminal, "
+            f"then send {_USAGE_CLOSED} so the outcome is recorded. Platform-placed "
+            "exits arrive with AUTO.",
         )
 
     # ------------------------------------------------------------------ read-only reports
@@ -1704,7 +1704,7 @@ class TelegramBot:
             return
         exp = self._exposure
         today = self._clock.today()
-        lines = [f"P&L {today.isoformat()} (platform only; external excluded, O5)"]
+        lines = [f"P&L {today.isoformat()} (platform only; external excluded)"]
         base = exp.capital_base
 
         def money(x: Any) -> str:
@@ -1742,8 +1742,8 @@ class TelegramBot:
             f"window: {start:%Y-%m-%d %H:%M} → {end:%Y-%m-%d %H:%M} IST",
             f"window spend: {_usd(gov.window_spend(window))}"
             + (f" / {_usd(credit)} credit" if credit else ""),
-            f"pro-rata to date: {_usd(pace)} (trading sessions, R6)" if pace is not None
-            else "pro-rata to date: unmeasurable — no trading session elapsed yet (pace rungs off, R6)",
+            f"pro-rata to date: {_usd(pace)} (trading sessions)" if pace is not None
+            else "pro-rata to date: unmeasurable — no trading session elapsed yet (pace rungs off)",
             f"tier: {gov.degrade_tier(window).value} · forward cap: {gov.prescreen_forward_cap()}",
         ]
         # Union of allocated agents and the ones that actually billed: an agent with spend but no

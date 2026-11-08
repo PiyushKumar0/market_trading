@@ -56,7 +56,7 @@ def test_mutating_kite_methods_are_called_only_in_the_broker_facade_paper_and_om
 @pytest.mark.parametrize(
     ("callee", "sites"),
     [
-        ("KiteConnect", {"src/engine/broker/session.py", "scripts/a11_check.py", "scripts/q15_candle_latency.py"}),
+        ("KiteConnect", {"src/engine/broker/session.py", "scripts/kite_candle_adjustment_check.py", "scripts/kite_candle_latency_probe.py"}),
         ("kite_connect", {"src/engine/ops/main.py", "scripts/backfill.py"}),
     ],
 )
@@ -109,7 +109,7 @@ async def test_telegram_mode_auto_is_refused_before_any_challenge(conn, clock, p
 
     if paper_only:
         assert bot._pending is None
-        assert message.sent == ["AUTO and live routing are refused while feature_flags.paper_only is set (D8)"]
+        assert message.sent == ["AUTO and live routing are refused while feature_flags.paper_only is set"]
     else:
         assert bot._pending.action == "mode->AUTO"
 

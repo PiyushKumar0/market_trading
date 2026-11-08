@@ -216,7 +216,7 @@ class AgentDef(BaseModel):
         if v not in MODEL_API_IDS:
             raise ValueError(
                 f"unknown model name {v!r} in agents.yaml; known: {sorted(MODEL_API_IDS)} "
-                "(an unmapped model would reach the SDK as its DEFAULT — Opus on Max plans, D4)"
+                "(an unmapped model would reach the SDK as its DEFAULT — Opus on Max plans)"
             )
         return v
 
@@ -225,23 +225,23 @@ class AgentDef(BaseModel):
         if self.shape == "single_shot":
             if self.allowed_tools:
                 raise ValueError(
-                    f"{self.agent_id}: single-shot agents run with NO tools (D5); "
+                    f"{self.agent_id}: single-shot agents run with NO tools; "
                     f"allowed_tools must be empty, got {self.allowed_tools}"
                 )
         else:
             if self.max_turns is None:
-                raise ValueError(f"{self.agent_id}: agentic agents require an explicit max_turns (D5)")
+                raise ValueError(f"{self.agent_id}: agentic agents require an explicit max_turns")
             if self.run_budget_tokens is None:
                 raise ValueError(
-                    f"{self.agent_id}: agentic agents require run_budget_tokens (§5.5 cumulative cap)"
+                    f"{self.agent_id}: agentic agents require run_budget_tokens (cumulative cap)"
                 )
         if self.tools_enabled and not self.allowed_tools:
             raise ValueError(
                 f"{self.agent_id}: tools_enabled with an empty allowed_tools list is meaningless — "
-                "'tools_enabled: true' never means SDK defaults (D5/D10)"
+                "'tools_enabled: true' never means SDK defaults"
             )
         if self.effort is not None and self.model == "haiku-4.5":   # Haiku 5.5 takes effort
-            raise ValueError(f"{self.agent_id}: effort is not supported on {self.model} (D9)")
+            raise ValueError(f"{self.agent_id}: effort is not supported on {self.model}")
         return self
 
     @property
@@ -274,7 +274,7 @@ def load_agent_defs(cfg: dict[str, Any]) -> dict[str, AgentDef]:
         elif tools_enabled:
             raise ValueError(
                 f"agents.{agent_id}: tools_enabled: true with NO allowed_tools list — the harness "
-                "refuses to run an agent definition lacking an explicit allowlist (D5/D10, §5.1)"
+                "refuses to run an agent definition lacking an explicit allowlist"
             )
         else:
             allowed_tools = []
@@ -747,7 +747,7 @@ class AgentHarness:
         never derives a time or an id from model output.
         """
         if agent_def.shape != "single_shot":
-            raise ValueError(f"{agent_def.agent_id}: run_single_shot called on a {agent_def.shape} def (D5)")
+            raise ValueError(f"{agent_def.agent_id}: run_single_shot called on a {agent_def.shape} def")
         trigger = call_class or getattr(context, "call_class", None) or "schedule"
         return await self._run(
             agent_def,
@@ -778,7 +778,7 @@ class AgentHarness:
         """Multi-turn run for the nightly/weekly agents only, under ``max_turns`` + a cumulative
         billed-token run budget that is checked mid-stream and carried across retries."""
         if agent_def.shape != "agentic":
-            raise ValueError(f"{agent_def.agent_id}: run_agentic called on a {agent_def.shape} def (D5)")
+            raise ValueError(f"{agent_def.agent_id}: run_agentic called on a {agent_def.shape} def")
         effective = self._effective_caps(agent_def, caps)
         return await self._run(
             agent_def,
@@ -1052,7 +1052,7 @@ class AgentHarness:
         if cls is None:
             raise RuntimeError(
                 "claude_agent_sdk exposes no ClaudeAgentOptions/ClaudeCodeOptions — cannot set model, "
-                "setting_sources or the tool allowlist (D5/D10); refusing to call"
+                "setting_sources or the tool allowlist; refusing to call"
             )
         # The isolation knobs are probed-and-skipped for injected test classes, but the REAL SDK
         # must carry them: a release that dropped one would silently reopen the memory/connector leak.
@@ -1060,7 +1060,7 @@ class AgentHarness:
         if "env" not in fields or not fields & {"strict_mcp_config", "extra_args"}:
             raise RuntimeError(
                 f"{cls.__name__} exposes no env or strict-MCP knob — cannot isolate the CLI from the "
-                "owner's auto-memory and claude.ai connectors (D10); refusing to call"
+                "owner's auto-memory and claude.ai connectors; refusing to call"
             )
         self._options_cls = cls
         return cls
@@ -1085,7 +1085,7 @@ class AgentHarness:
         if "setting_sources" not in fields:
             raise RuntimeError(
                 f"{cls.__name__} exposes no setting_sources knob — the service must not inherit stray "
-                "CLAUDE.md/settings from the filesystem (D10); refusing to call"
+                "CLAUDE.md/settings from the filesystem; refusing to call"
             )
 
         # Isolation on every call, pinned CLI or bundled (the real SDK surface is required to take
@@ -1136,7 +1136,7 @@ class AgentHarness:
         else:
             raise RuntimeError(
                 f"{cls.__name__} exposes no allowed-tools knob — cannot pin {agent_def.agent_id}'s "
-                "explicit allowlist (empty for single-shot); refusing to call (D5/D10, §5.1)"
+                "explicit allowlist (empty for single-shot); refusing to call"
             )
         # `allowed_tools` only auto-approves; `tools` is the CLI's built-in base set, and [] removes
         # every built-in (`--tools ""`). Without it the pinned CLI offered single-shot agents Skill,
@@ -1284,7 +1284,7 @@ class AgentHarness:
                 agent=agent_def.agent_id,
                 reason=reason,
                 call_id=call_id,
-                note="repeat inside the episode window; logged, not alerted (WO-25b)",
+                note="repeat inside the episode window; logged, not alerted",
             )
             return result
         message = f"agent {agent_def.agent_id} failed: {reason} ({detail[:200]}) call_id={call_id}"

@@ -148,7 +148,7 @@ class EarlyHydration:
         except TimeoutError:  # asyncio.wait_for raises the builtin on 3.11+
             _log.warning(
                 "early_hydration_arm_timeout", timeout_s=EARLY_HYDRATION_ARM_TIMEOUT_S,
-                note="scheduler never armed — the chain must not run ahead of it (WO-15)",
+                note="scheduler never armed — the chain must not run ahead of it",
             )
             return
         if self._recovery_done is not None:

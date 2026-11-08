@@ -178,7 +178,7 @@ class KiteClient:
         six (place_order, modify_order, cancel_order, place_gtt, modify_gtt, delete_gtt).
         """
         if not self._orders_enabled:
-            raise OrderSurfaceViolation(f"{op} refused: KiteClient built without orders_enabled (D8)")
+            raise OrderSurfaceViolation(f"{op} refused: KiteClient built without orders_enabled")
         if self._order_guard is not None:
             self._order_guard(intent)  # raises OrderSurfaceViolation to block; None return = allowed
         await self._rl.acquire(endpoint_class="orders", intent=intent)

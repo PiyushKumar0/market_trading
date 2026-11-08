@@ -232,7 +232,7 @@ class FillModelConfig(BaseModel):
         fallback = Decimal(self.half_spread_fallback_ticks) * tick_size
         assert fallback > 0, (
             f"half-spread fallback must be > 0 (ticks={self.half_spread_fallback_ticks}, "
-            f"tick_size={tick_size}) — a zero half-spread breaks R9 conservatism"
+            f"tick_size={tick_size}) — a zero half-spread breaks the fill model's conservatism"
         )
         return fallback, True
 

@@ -37,7 +37,7 @@ import pytest
 from engine.core.clock import IST
 from engine.notify.catalog import MessageKind
 from tests.chaos._lifecycle_rig import INCIDENT_KINDS, EngineProcess, RigEnv, run_session
-from tests.chaos.conftest import BROKER_RESIDENT_R3
+from tests.chaos.conftest import BROKER_RESIDENT_PROTECTION
 
 TUE, WED, THU = date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18)
 SILENT = {"down_reason": None, "engine_down_sent": False, "killed_pid": None, "missed_start_sent": []}
@@ -211,4 +211,4 @@ def test_case22_capital_protection_unaffected() -> None:
     """'positions broker-protected' / 'capital protection unaffected' across (a)/(b)/(c),
     including a kill -9: real positions have no resting SL-M/GTT in RECOMMEND, and paper protection
     across process death is the in-process GTT book plus the paper session-prep catch-up (case 03 skips the same)."""
-    pytest.skip(f"case 22 capital-protection clause: {BROKER_RESIDENT_R3}")
+    pytest.skip(f"case 22 capital-protection clause: {BROKER_RESIDENT_PROTECTION}")

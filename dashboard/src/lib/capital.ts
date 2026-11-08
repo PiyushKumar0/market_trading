@@ -12,7 +12,7 @@ export interface CapitalRow {
 
 const DASH = '—'
 
-// Fixed order; the key is the engine's. Labels follow the dashboard's wording (redesign spec §15).
+// Fixed order; the key is the engine's. Labels follow the dashboard's wording.
 const ROWS: { key: keyof CapitalFigures; label: string; pct?: boolean }[] = [
   { key: 'capital_inr', label: 'Starting capital' },
   { key: 'max_deployed_capital_inr', label: 'Most capital in use at once' },

@@ -38,7 +38,7 @@ from engine.core.clock import Clock
 from engine.core.types import Tick
 from engine.marketdata.store import _STORE_EXECUTOR_WORKERS, MarketStore
 from engine.ops.health import _STORE_REPROBE_EVERY
-from tests.unit.test_health_wo24 import (
+from tests.unit.test_store_stall_watchdog import (
     NOW,
     StuckThenFreshStore,
     Ticker,
@@ -372,7 +372,7 @@ def test_partition_dirs_are_created_once_per_day_not_once_per_flush(store, clock
 
 
 # ------------------------------------------------------------------ 6: the watchdog re-probe
-# (StuckThenFreshStore + drain_all live in test_health_wo24 with the other watchdog fixtures.)
+# (StuckThenFreshStore + drain_all live in test_store_stall_watchdog with the other watchdog fixtures.)
 async def test_a_pending_probe_no_longer_blocks_fresh_evidence(caplog):
     """264 consecutive pulses of the same 09:15 observation must be unreachable.
 

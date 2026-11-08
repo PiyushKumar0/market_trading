@@ -284,7 +284,7 @@ JobRunFn = Callable[..., Awaitable[None]]
 
 #: Every job id the composition root registers (watermark identities — never rename).
 #: The single source of truth ``build_job_registry`` and the CatchUpRunner/Scheduler arming iterate.
-PHASE1_JOB_IDS: tuple[str, ...] = (
+CORE_JOB_IDS: tuple[str, ...] = (
     JOB_INSTRUMENTS, JOB_SURVEILLANCE, JOB_EARNINGS,          # safety/deadline-critical
     JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CORP_ACTIONS, JOB_SECTOR_MAP, JOB_BACKUP,  # run-latest
     JOB_ISIN_MAP, JOB_FILINGS_SHP, JOB_RESULTS_LINE_ITEMS,                       # run-latest
@@ -300,7 +300,7 @@ PHASE1_JOB_IDS: tuple[str, ...] = (
 #: rec-expiry labels stale unconfirmed recommendations post-window; the nightly reviewer is date-keyed
 #: (one review per missed trading day). build_job_registry skips a None fn (tests); the
 #: composition root always passes a wrapper.
-PHASE2_JOB_IDS: tuple[str, ...] = (
+DECISION_JOB_IDS: tuple[str, ...] = (
     JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER, JOB_RECO_EXPIRE,   # run-latest
     JOB_TIME_EXIT_CHECK,                                         # run-latest (regular sessions)
     JOB_REC_OUTCOMES, JOB_SIGNAL_OUTCOMES, JOB_WEEKLY_SUMMARY,   # date-keyed
@@ -442,7 +442,7 @@ def build_job_registry(
     """Populate the ``JobRegistry`` — the single inventory driving BOTH the live
     :class:`~engine.ops.scheduler.Scheduler` and the startup :class:`~engine.ops.jobs.CatchUpRunner`.
 
-    ``fns`` maps each :data:`PHASE1_JOB_IDS` entry to its async runner; ``calendar`` is required when
+    ``fns`` maps each :data:`CORE_JOB_IDS` entry to its async runner; ``calendar`` is required when
     ``fns`` carries ``time_exit_check`` (its ``fire_day``). Job classes/fire-times/dependency
     ``order`` encode the catch-up semantics: safety-critical (run/verify-before-entries), idempotent
     run-latest (single catch-up over the gap), date-keyed (one run per missed trading day). Extracted to
@@ -550,7 +550,7 @@ def make_order_guard(
         if not mode.opening_orders_allowed(in_window):
             raise OrderSurfaceViolation(
                 f"opening order blocked: mode={mode.mode().value} "
-                f"risk_state={mode.risk_state().value} in_window={in_window} (B7/§3.5.3)"
+                f"risk_state={mode.risk_state().value} in_window={in_window}"
             )
 
     return order_guard
@@ -574,7 +574,7 @@ async def run() -> int:
     if not instance_lock.acquire():
         _log.critical(
             "single_instance_refused_lock", lock=str(lock_path), holder_pid=instance_lock.holder_pid(),
-            hint="another engine instance owns the single-writer stores (§2.6 step 0); this one exits",
+            hint="another engine instance owns the single-writer stores; this one exits",
         )
         return 3
 
@@ -1305,7 +1305,7 @@ async def compose(
     # =========================================================================================
     def _require_kite() -> KiteClient:
         if kite is None:
-            raise RuntimeError("Kite client unavailable (login required) — safety job cannot run (§2.6)")
+            raise RuntimeError("Kite client unavailable (login required) — safety job cannot run")
         return kite
 
     async def job_instruments() -> None:
@@ -1414,7 +1414,7 @@ async def compose(
             on_timeout=(lambda: alert(
                 "warning",
                 f"news resolve timed out after {_NEWS_RESOLVE_TIMEOUT_S:.0f}s — chain skipped; "
-                "unclustered headlines re-sweep on the next run (E5, never entry-blocking)",
+                "unclustered headlines re-sweep on the next run (never entry-blocking)",
             )) if alert_on_timeout else None,
         )
 
@@ -1711,7 +1711,7 @@ async def compose(
         await freeze_entries("kite_token_rejected")
         await alert(
             "critical",
-            "Kite token rejected by broker — entries FROZEN; re-login via the login link or /token (R6)",
+            "Kite token rejected by broker — entries FROZEN; re-login via the login link or /token",
         )
         # A tappable link, not just a notice: this path also covers the probe-'inconclusive'-then-dead
         # boot (network flake at probe time), where NO login prompt was sent at startup. The hook only
@@ -3165,10 +3165,10 @@ def _freezing_classes_ready(status) -> bool:
 _CLASS_NOTICE_SHORT = {
     CLASS_INTRADAY: ("warm-up: INTRADAY coverage short{detail} — intraday candidates are "
                      "refused one by one; entries are NOT frozen by warm-up and the daily-bar legs "
-                     "are unaffected (§2.6 step-6 addendum)"),
+                     "are unaffected"),
     CLASS_DAILY: ("warm-up: DAILY coverage short for {n} symbol(s){detail} — swing/position "
                   "candidates for those symbols are refused one by one; entries are NOT frozen by "
-                  "warm-up (§2.6 step-6 addendum, per-symbol since 2026-09-17)"),
+                  "warm-up (per-symbol since 2026-09-17)"),
 }
 _CLASS_NOTICE_RESTORED = {
     CLASS_INTRADAY: "warm-up: INTRADAY coverage restored — intraday candidates are accepted again",
@@ -3363,7 +3363,7 @@ async def seed_boot_snapshots(
     elapsed = time_module.monotonic() - started
     _log.critical(
         "boot_seed_timeout", timeout_s=timeout_s, elapsed_s=round(elapsed, 1),
-        hint="warm-up/health seeding did not return (2026-08-24 WO-25c); arming the scheduler anyway "
+        hint="warm-up/health seeding did not return (2026-08-24); arming the scheduler anyway "
              "— the gate stays fail-closed until the 60s refresh jobs re-seed it",
     )
     task.cancel()   # fire-and-forget: awaiting it is exactly what we refuse to do
@@ -3471,7 +3471,7 @@ async def boot_contract_watchdog(
             ):
                 last_logged = now
                 if phase == "arming":
-                    hint = ("the boot never finished arming (2026-08-24 WO-25c): no scheduled job can "
+                    hint = ("the boot never finished arming (2026-08-24): no scheduled job can "
                             "fire in this state — restart the engine")
                     text = (f"BOOT INCOMPLETE after {elapsed:.0f}s — missing: {', '.join(missing)}. "
                             "No scheduled job (forward drains, health pulses, EOD jobs) can fire. "
@@ -4594,11 +4594,11 @@ def _retest_skip_reasons(
     out: dict[str, str] = {}
     for sym in symbols:
         if sym in held:
-            out[sym] = "already held — §7.1 per_stock_exposure is a HARD reject"
+            out[sym] = "already held — per_stock_exposure is a HARD reject"
         elif sym in pending:
             out[sym] = "an unexpired, unactioned entry recommendation is already pending"
         elif sym in ex_skip:
-            out[sym] = "a known ex-date inside brk20's A12 horizon (the stored level is pre-ex)"
+            out[sym] = "a known ex-date inside brk20's horizon (the stored level is pre-ex)"
         elif sym in unadjusted:
             out[sym] = "a structural ex-date inside the 35-day lookback (stored history is in two units)"
         elif sym not in eligible:

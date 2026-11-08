@@ -217,12 +217,12 @@ class ExposureTracker:
 
     def _writable(self) -> None:
         if self._what_if:
-            raise RuntimeError("a what-if ExposureTracker never writes (O19 §3.2)")
+            raise RuntimeError("a what-if ExposureTracker never writes")
 
     def _real_only(self) -> None:
         self._writable()
         if self.scope != "real":
-            raise RuntimeError("the paper ExposureTracker never applies a halt (plan §1.5)")
+            raise RuntimeError("the paper ExposureTracker never applies a halt")
 
     # ----------------------------------------------------------------- platform equity
     def realized_net(self) -> Decimal:
@@ -557,16 +557,16 @@ class ExposureTracker:
         then). Day-scoped: :meth:`RiskStateLatch.clear_stale_daily` re-arms them next session."""
         self._real_only()
         if "daily_loss_hard" in rungs:
-            reason = "daily_loss_hard: day MTM at/below the -7% hard line (§7.1)"
+            reason = "daily_loss_hard: day MTM at/below the -7% hard line"
             await latch.set_cause("daily_loss_hard", RiskState.CLOSE_ONLY, reason, Actor.RISK_GATE)
             await mode_manager.force_downgrade(Mode.RECOMMEND, "daily_loss_hard")
             if flatten is not None:
                 await flatten()
             if alert is not None:
                 await alert(f"DAILY LOSS HARD: {reason} — flatten MIS "
-                            f"{'triggered' if flatten else 'is MANUAL until the Phase-3 OMS'}")
+                            f"{'triggered' if flatten else 'is MANUAL until the live order path'}")
         elif "daily_loss_soft" in rungs:
-            reason = "daily_loss_soft: day MTM at/below the -5% soft line (§7.1)"
+            reason = "daily_loss_soft: day MTM at/below the -5% soft line"
             await latch.set_cause("daily_loss_soft", RiskState.FROZEN, reason, Actor.RISK_GATE)
             if alert is not None:
                 await alert(f"DAILY LOSS SOFT: {reason} — entries FROZEN for the rest of the day")

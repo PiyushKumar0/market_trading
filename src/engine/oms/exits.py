@@ -106,7 +106,7 @@ class ExitManager:
         settings: PaperSettings,
     ) -> None:
         if not isinstance(broker, PaperBroker):
-            raise TypeError(f"ExitManager takes a PaperBroker only, got {type(broker).__name__} (D8)")
+            raise TypeError(f"ExitManager takes a PaperBroker only, got {type(broker).__name__}")
         self._conn = conn
         self._clock = clock
         self._broker = broker

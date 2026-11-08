@@ -104,7 +104,7 @@ class Tick(BaseModel):
     @classmethod
     def _tz_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("exchange_ts must be tz-aware IST (naive datetimes are a bug, §3.2)")
+            raise ValueError("exchange_ts must be tz-aware IST (naive datetimes are a bug)")
         return v
 
 
@@ -133,7 +133,7 @@ class Bar(BaseModel):
     @classmethod
     def _tz_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("ts_minute must be tz-aware IST (naive datetimes are a bug, §3.2)")
+            raise ValueError("ts_minute must be tz-aware IST (naive datetimes are a bug)")
         return v
 
 

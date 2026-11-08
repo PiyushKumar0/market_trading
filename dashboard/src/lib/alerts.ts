@@ -1,5 +1,5 @@
 /**
- * What needs the owner's attention, derived from the data already polled (design spec §5). Pure and
+ * What needs the owner's attention, derived from the data already polled. Pure and
  * DOM-free (`node --test`). The navbar health pill, the Overview "Needs attention" card and the tab
  * badges all read from here, so they can never disagree.
  *

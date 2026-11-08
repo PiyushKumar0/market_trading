@@ -36,7 +36,7 @@ Clauses asserted (ENTRY side):
 
 Skipped: the EXIT side (held symbol, news-triggered risk-reducing exit) — no news-triggered exit path
 exists in RECOMMEND mode (the only trigger is stop-proximity) and platform-held positions are
-live order-path work (not built) — PHASE3_GATED.
+live order-path work (not built) — LIVE_ORDER_PATH_GATED.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ import pytest
 
 from engine.core.enums import Actor, Mode
 from engine.strategy.scanners import cat
-from tests.chaos.conftest import PHASE3_GATED
+from tests.chaos.conftest import LIVE_ORDER_PATH_GATED
 from tests.chaos.test_case20_news_layer_down import (
     ET_FEED,
     MINT_FEED,
@@ -313,7 +313,7 @@ async def test_foreign_entity_strings_from_the_model_cannot_touch_other_symbols(
     "EXIT side: an injected 'fraud alleged' cluster on a HELD symbol → at most one gate-approved "
     "risk-reducing exit, ledger-attributed to the news trigger. Phase-2 RECOMMEND has no news-triggered "
     "exit path (the §5.2(b) trigger is stop-proximity only, pipeline.on_bar), so there is nothing to "
-    "assert. " + PHASE3_GATED
+    "assert. " + LIVE_ORDER_PATH_GATED
 ))
 async def test_exit_side_fraud_headline_on_held_symbol_at_most_one_risk_reducing_exit() -> None:
     """News-exit guards: at most one gate-approved risk-reducing exit, never a re-entry or stop-widen."""

@@ -610,7 +610,7 @@ class PaperBroker:
                 eligible_at=now,
                 placed_at=now,
                 status="REJECTED",
-                status_message="paper: injected rejection (seeded rng, §3.2.9)",
+                status_message="paper: injected rejection (seeded rng)",
                 **fields,
             )
             self._orders[rejected.order_id] = rejected      # rejected orders stay in the orderbook
@@ -653,7 +653,7 @@ class PaperBroker:
             if new_qty < order.filled_qty:
                 raise PaperOrderError(
                     f"cannot modify {order_id} to quantity {new_qty}: {order.filled_qty} already "
-                    "filled (§3.5.1 preserves filled_qty)"
+                    "filled (preserves filled_qty)"
                 )
             order.quantity = new_qty
         if "price" in params and params["price"] is not None:
@@ -697,7 +697,7 @@ class PaperBroker:
         if order.order_type == "SL-M" and order.triggered:
             raise PaperOrderError(
                 f"order {order_id} is already triggered and cannot be cancelled "
-                "(SL-M past its trigger is on its way to market, §3.2.8)"
+                "(SL-M past its trigger is on its way to market)"
             )
         self._terminate(order, "CANCELLED", "paper: cancelled by client")
         self._postback(order, self._clock.now())

@@ -473,8 +473,8 @@ BOOLEAN_ONLY_RULES: frozenset[str] = frozenset({
 })
 
 #: Rules that CANNOT fail in RECOMMEND mode because their data source lands later. They must never claim a
-#: verified pass — :func:`test_phase2_na_rules_are_marked_na` asserts the honest n/a marker.
-PHASE2_NA_RULES: frozenset[str] = frozenset({
+#: verified pass — :func:`test_recommend_mode_na_rules_are_marked_na` asserts the honest n/a marker.
+RECOMMEND_NA_RULES: frozenset[str] = frozenset({
     "circuit_proximity", "order_rate", "order_modifications",
 })
 
@@ -524,7 +524,7 @@ def test_every_documented_rule_has_a_case() -> None:
     missing: list[str] = []
     for rule_id in DOCUMENTED_ENTER_RULES:
         have = kinds.get(rule_id, set())
-        if rule_id in PHASE2_NA_RULES:
+        if rule_id in RECOMMEND_NA_RULES:
             required = {"na"}
         elif rule_id in BOOLEAN_ONLY_RULES:
             required = {"pass", "fail"}
@@ -544,7 +544,7 @@ def test_confidence_rule_passes_na_without_floor(
         make_action(confidence=0.01), make_ctx()
     )
     check = check_of(verdict, "analyst_confidence_min")
-    assert (check.value, check.limit, check.passed) == ("n/a", "no floor configured (review §9 #3)", True)
+    assert (check.value, check.limit, check.passed) == ("n/a", "no floor configured", True)
 
 
 def test_floor_still_binds_when_set(gate: RiskGate) -> None:
@@ -552,15 +552,15 @@ def test_floor_still_binds_when_set(gate: RiskGate) -> None:
     assert check_of(verdict, "analyst_confidence_min").passed is False
 
 
-def test_phase2_na_rules_are_marked_na(gate: RiskGate) -> None:
+def test_recommend_mode_na_rules_are_marked_na(gate: RiskGate) -> None:
     """A rule whose data source is not wired yet must SAY so — never a silent pass claim."""
     verdict = gate.evaluate(make_action(), make_ctx())
-    for rule_id in PHASE2_NA_RULES:
+    for rule_id in RECOMMEND_NA_RULES:
         check = check_of(verdict, rule_id)
         assert check.passed is True
         assert "n/a" in check.value, f"{rule_id} must be marked n/a, got {check.value!r}"
     band = check_of(verdict, "circuit_proximity")
-    assert "Phase 3" in band.value and "NOT a verified pass" in band.headroom
+    assert "not built" in band.value and "NOT a verified pass" in band.headroom
 
 
 # --------------------------------------------------------------------------- registry completeness

@@ -1,9 +1,9 @@
 /**
  * A recommendation as a trade ticket: the plain instruction is the headline ("Buy 3 shares at
  * ₹2,445.00"), the levels sit right under it, then the reasoning and your steps. Everything the old
- * card showed is still here (spec §10); the secondary facts sit under "Details".
+ * card showed is still here; the secondary facts sit under "Details".
  *
- * Gate reasons come from the recommendation's own embedded verdict (§3.6 `gate`) — never from
+ * Gate reasons come from the recommendation's own embedded verdict (`gate`) — never from
  * `/decisions`: another proposal's verdict is never this card's provenance.
  */
 import { useState } from 'react'

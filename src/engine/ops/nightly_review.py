@@ -1029,7 +1029,7 @@ class NightlyReviewJob:
                 f"process errors {len(review.process_errors)} · "
                 f"parameter suggestions {len(review.param_suggestions)} (dropped {dropped})\n"
                 + (f"{paper}\n" if paper else "")
-                + "Suggestions are suggestions: the owner sets parameters via /config/params (R4)."
+                + "Suggestions are suggestions: the owner sets parameters via /config/params."
             ),
             severity="info",
             data={

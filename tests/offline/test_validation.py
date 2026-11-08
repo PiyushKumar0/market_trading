@@ -346,7 +346,7 @@ def test_pipeline_margin_floor_blocks_a_near_zero_margin_pass(clock):
     assert report.promotable is False
     assert any("margin floor" in r for r in report.reasons)
     assert not any("fold_pass_min" in r for r in report.reasons)
-    assert any("Margin floor (WO-3)" in note for note in report.notes)
+    assert any("Margin floor:" in note for note in report.notes)
 
 
 def test_pipeline_derives_the_cost_floor_when_the_caller_supplies_none(clock):
@@ -379,7 +379,7 @@ def test_pipeline_persists_param_set_and_artifacts(clock, conn, tmp_path):
     assert md.exists() and js.exists()
 
 
-def test_report_artifacts_carry_the_wo3_flag_and_margin_floor(clock, tmp_path):
+def test_report_artifacts_carry_the_stability_flag_and_margin_floor(clock, tmp_path):
     """Acceptance: the re-issued reports SHOW the winner-stability flag and the margin floor —
     as prose in the md (via notes) and as structured fields in the json."""
     pipe = _pipeline(clock, reports_dir=tmp_path)
@@ -390,8 +390,8 @@ def test_report_artifacts_carry_the_wo3_flag_and_margin_floor(clock, tmp_path):
     )
     report = pipe.validate_sync("rsi2", ps)
     md_text = (tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.md").read_text(encoding="utf-8")
-    assert "Winner stability (WO-3): UNSTABLE" in md_text
-    assert "Margin floor (WO-3)" in md_text and "0.01596%/day" in md_text
+    assert "Winner stability: UNSTABLE" in md_text
+    assert "**Margin floor**" in md_text and "0.01596%/day" in md_text
 
     data = json.loads((tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.json").read_text(encoding="utf-8"))
     assert data["winner_stability"]["stable"] is False

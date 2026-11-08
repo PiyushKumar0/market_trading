@@ -134,7 +134,7 @@ def token_rig(conn, clock, tmp_path):
         await freeze_entries("kite_token_rejected")
         await alert(
             "critical",
-            "Kite token rejected by broker — entries FROZEN; re-login via the login link or /token (R6)",
+            "Kite token rejected by broker — entries FROZEN; re-login via the login link or /token",
         )
         await notify(login_prompt(session.login_url()))
     session.set_invalidation_hook(_on_session_invalidated)

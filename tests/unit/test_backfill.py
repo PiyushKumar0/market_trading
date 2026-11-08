@@ -96,7 +96,7 @@ async def test_minute_backfill_chunks_at_60_days(store, clock, conn):
     assert _checkpoint(conn, "RELIANCE", "minute") == end.isoformat()
 
     # Bars landed src='kite_official' (canonical official rows), prices Decimal-exact, NO
-    # re-adjustment applied (A11: Kite candles are already corp-action adjusted).
+    # re-adjustment applied (Kite candles are already corp-action adjusted).
     bars = store.get_bars_1m(
         "RELIANCE",
         clock.combine(dt.date(2026, 1, 1), dt.time(0, 0)),

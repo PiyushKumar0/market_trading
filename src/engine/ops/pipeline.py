@@ -172,7 +172,7 @@ _HOT_PATH_TIMERS = ("atr_store_read_ms", "atr_incremental_ms", "sector_store_rea
 #: with the LLM dead, so nothing on this path may be generated.
 TIME_STOP_THESIS = (
     "Deterministic time exit: this position has reached the end of its hold. "
-    "No model was consulted — exits and stops never depend on an LLM response (R1)."
+    "No model was consulted — exits and stops never depend on an LLM response."
 )
 
 #: Forward-selection modes (2026-08-13). ``ranked`` = the priority queue below;
@@ -528,7 +528,7 @@ class RecommendationBook:
         summary = (
             f"recorded {data.get('side')} {data.get('instrument')} x{qty} @ {price} "
             f"(position {position_id}). The protective orders are yours to place — the platform "
-            "places none in RECOMMEND (B7)."
+            "places none in RECOMMEND."
         )
         if data.get("gtt_instruction"):
             summary += (
@@ -553,7 +553,7 @@ class RecommendationBook:
                 "protective order before anything else. Nothing re-gated at capture."
             )
         allowance = (
-            f"{gap}x the {_money(planned)} zone-edge-to-stop distance, the §7.1 overnight-gap allowance"
+            f"{gap}x the {_money(planned)} zone-edge-to-stop distance, the overnight-gap allowance"
             if gap is not None else f"the {_money(planned)} zone-edge-to-stop distance"
         )
         return summary + (
@@ -678,7 +678,7 @@ class RecommendationBook:
                 (now.isoformat(), rec_id),
             )
         _log.warning("recommendation_vetoed", rec_id=rec_id, reason=reason)
-        return f"recommendation {rec_id} dismissed — recorded as a no_action outcome (§6.5)."
+        return f"recommendation {rec_id} dismissed — recorded as a no_action outcome."
 
     def decision_candidates(
         self, symbol: str | None, now: datetime, *, include_skipped: bool = False
@@ -1548,7 +1548,7 @@ class RecommendationPipeline:
                               symbol=entry.candidate.symbol,
                               strategy_id=entry.candidate.strategy_id,
                               score=entry.candidate.score, queued_at=entry.fired_at.isoformat(),
-                              reason="admission slot reassigned to a better candidate (§3.2.5)")
+                              reason="admission slot reassigned to a better candidate")
                     continue
                 retained.add(key)
             live.append(entry)
@@ -1613,7 +1613,7 @@ class RecommendationPipeline:
                     _log.info("forward_slot_displaced", signal_id=entry.candidate.signal_id,
                               symbol=entry.candidate.symbol,
                               strategy_id=entry.candidate.strategy_id, score=entry.candidate.score,
-                              reason="admission slot was reassigned to a better candidate (§3.2.5)")
+                              reason="admission slot was reassigned to a better candidate")
                     self._rearm_slot(entry.candidate)
                     continue
                 self._forwarded_count += 1
@@ -1827,7 +1827,7 @@ class RecommendationPipeline:
                     f"{'?' if age_min is None else age_min} minutes with no verdict row. The gate "
                     "never finished judging it, so nothing was recommended and nothing was "
                     "decided — the proposal is evidence of a funnel stall, not of a rejection "
-                    "(WO-24c, after the 2026-08-21 gate-context freeze). No verdict is invented "
+                    "(after the 2026-08-21 gate-context freeze). No verdict is invented "
                     "for it; check the log around its created_at."
                 ),
                 severity="warning",
@@ -2137,8 +2137,8 @@ class RecommendationPipeline:
             _log.info("signal_candidate_intraday_warmup", signal_id=candidate.signal_id,
                       symbol=candidate.symbol, strategy_id=candidate.strategy_id, at=at,
                       blockers=mine or lines[:4],
-                      note="intraday coverage short for this symbol — no analyst call (§2.6 step "
-                           "6); re-armed at arrival, left queued at the forward slot")
+                      note="intraday coverage short for this symbol — no analyst call"
+                           "; re-armed at arrival, left queued at the forward slot")
         return True
 
     # ================================================================== trigger (a): entries
@@ -2362,8 +2362,8 @@ class RecommendationPipeline:
                     body=(
                         f"The intraday analyst answered candidate {candidate.signal_id} "
                         f"({candidate.symbol}) with different identity fields "
-                        f"({', '.join(sorted(mismatches))}) — dropped like schema-invalid output "
-                        "(D7); nothing was recommended."
+                        f"({', '.join(sorted(mismatches))}) — dropped like schema-invalid output"
+                        "; nothing was recommended."
                     ),
                     severity="warning",
                     data={"signal_id": candidate.signal_id,
@@ -2495,11 +2495,11 @@ class RecommendationPipeline:
             body=(
                 f"The gate context for {candidate.symbol} did not build within "
                 f"{_GATE_CONTEXT_DEADLINE_S:.0f}s, so candidate {candidate.signal_id} was never "
-                f"judged and nothing was recommended (D7). Proposal {exc.proposal_id} is persisted "
-                "with no verdict — the market store is the suspect (WO-24a, 2026-08-21). The "
+                f"judged and nothing was recommended. Proposal {exc.proposal_id} is persisted "
+                "with no verdict — the market store is the suspect (2026-08-21). The "
                 f"({candidate.symbol}, {candidate.strategy_id}) day slot has been handed back so "
                 "the setup can re-publish; deterministic exits, stops and square-offs are "
-                "unaffected (R1)."
+                "unaffected."
             ),
             severity="critical",
             data={
@@ -2547,9 +2547,9 @@ class RecommendationPipeline:
                 f"The gate context for {symbol} did not build within "
                 f"{_GATE_CONTEXT_DEADLINE_S:.0f}s, so the {action.action} recommendation for "
                 f"position {position_id} was never judged and nothing was recommended. Proposal "
-                f"{exc.proposal_id} is persisted with no verdict — the market store is the suspect "
-                f"(WO-24a). Next: {next_step}. Any stop the owner already placed on this position "
-                "stands regardless (R3)."
+                f"{exc.proposal_id} is persisted with no verdict — the market store is the suspect"
+                f". Next: {next_step}. Any stop the owner already placed on this position "
+                "stands regardless."
             ),
             severity="critical",
             data={
@@ -2874,7 +2874,7 @@ class RecommendationPipeline:
                     position_id=position_id, symbol=str(position["symbol"] or ""),
                     effect="no analyst call and no exit recommendation while the broker holds none "
                            "of it; reply /closed to settle the ledger. The gate already leaves it "
-                           "out of the O16 position/sector counts.",
+                           "out of the position/sector counts.",
                 )
             return True
         repeated = self._delivered_exit_today(position, today)
@@ -3722,7 +3722,7 @@ class RecommendationPipeline:
             (INTRADAY_AGENT_ID, reason), self._clock.now()
         ):
             _log.info("intraday_agent_alert_throttled", trigger=trigger, reason=reason,
-                      note="repeat inside the episode window; logged, not alerted (WO-25b)")
+                      note="repeat inside the episode window; logged, not alerted")
             return
         await self._send(CatalogMessage(
             kind=MessageKind.LIMIT_BREACH,
@@ -3730,13 +3730,13 @@ class RecommendationPipeline:
             body=(
                 f"{trigger}: the analyst call failed ({getattr(result, 'reason', 'unknown')}). "
                 "No proposal was produced and nothing was recommended (D7). Deterministic exits, "
-                "stops and square-offs are unaffected (R1)."
+                "stops and square-offs are unaffected."
             ),
             severity="warning",
             data={
                 "rule_id": "agent_failed", "trigger": trigger,
                 "value": str(getattr(result, "reason", "unknown")),
-                "limit": "a Tier-1 failure resolves to no-proposal + alert (D7)",
+                "limit": "a Tier-1 failure resolves to no-proposal + alert",
                 "call_id": str(getattr(result, "call_id", "")),
             },
         ))

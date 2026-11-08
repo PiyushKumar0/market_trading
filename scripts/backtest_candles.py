@@ -1580,7 +1580,7 @@ def run_study(
         "the index or delisted are absent, which biases every cell optimistically."
     )
     notes.append(
-        "ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12) IS DESCRIPTIVE, NOT TRADEABLE: "
+        "ATR% TERCILE SPLIT (pre-registered 2026-09-12) IS DESCRIPTIVE, NOT TRADEABLE: "
         + ATR_SPLIT_DEFINITION
         + ". It SPLITS the registered result and adds nothing to it - no threshold moved, no rule or "
         "exit was added, no trade was added or removed and no cell is selected, so it is not a new "
@@ -1820,7 +1820,7 @@ def render_text(doc: dict[str, Any]) -> str:
 
     ab = cov["atr_pct_tercile_split"]
     add("-" * 132)
-    add("STEP 2B - ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12; DESCRIPTIVE, full-sample cuts)")
+    add("STEP 2B - ATR% TERCILE SPLIT (pre-registered 2026-09-12; DESCRIPTIVE, full-sample cuts)")
     add("-" * 132)
     add(f"  definition : {ab['definition']}")
     add(f"  cuts       : {ab['cuts']}   population: {ab['n_symbol_days']} measured symbol-days, "

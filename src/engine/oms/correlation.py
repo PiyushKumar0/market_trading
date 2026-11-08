@@ -49,7 +49,7 @@ class BufferedUpdate(BaseModel):
     @classmethod
     def _tz_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("BufferedUpdate.at must be tz-aware IST (§3.2)")
+            raise ValueError("BufferedUpdate.at must be tz-aware IST")
         return v
 
 

@@ -63,7 +63,7 @@ class KillSwitch:
         """Block ANY order while killed. The kill sequence's own flatten/cancel bypasses this by not
         going through it (no self-deadlock)."""
         if self.is_killed():
-            raise KillSwitchEngaged(f"kill switch engaged: {self.reason()!r} (R10)")
+            raise KillSwitchEngaged(f"kill switch engaged: {self.reason()!r}")
 
     # ----------------------------------------------------------------- trigger (single-step)
     async def trigger(self, reason: str, *, actor: Actor = Actor.OWNER, flatten: bool = True) -> None:
@@ -99,7 +99,7 @@ class KillSwitch:
     async def owner_reset(self, confirmation: OwnerConfirmation) -> None:
         """Clear the kill switch — owner-only, two-step authenticated flow."""
         if not confirmation.confirmed or confirmation.actor != Actor.OWNER:
-            raise PermissionError("kill reset requires an authenticated OWNER two-step confirmation (R10)")
+            raise PermissionError("kill reset requires an authenticated OWNER two-step confirmation")
         now = self._clock.now().isoformat()
         with transaction(self._conn):
             self._conn.execute(

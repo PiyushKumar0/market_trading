@@ -93,7 +93,7 @@ def build_kite_callback_router(session_manager, clock) -> APIRouter:
     async def kite_callback(
         request_token: str | None = Query(
             default=None,
-            description="Single-use Kite login token appended by the provider redirect (R6).",
+            description="Single-use Kite login token appended by the provider redirect.",
         ),
         status: str | None = Query(
             default=None,

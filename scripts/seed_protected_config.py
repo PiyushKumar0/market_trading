@@ -55,7 +55,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="seed_protected_config",
         description=(
             "Register the initial SHA-256 of config/limits.yaml + config/envelope.yaml into the "
-            "protected_config table (R4, §2.4). Run once after reviewing the shipped starter files."
+            "protected_config table. Run once after reviewing the shipped starter files."
         ),
     )
     parser.add_argument(
@@ -77,14 +77,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--note",
         default=None,
-        help="Free-text audit note recorded with the owner confirmation (config_audit, R8).",
+        help="Free-text audit note recorded with the owner confirmation (config_audit).",
     )
     return parser.parse_args(argv)
 
 
 def _confirm_review(names: tuple[str, ...], directory: Path) -> bool:
     """Interactive 'yes, I reviewed these files' gate (returns True iff the owner typed ``yes``)."""
-    print("About to register the SHA-256 of these protected config files as TRUSTED (R4):")
+    print("About to register the SHA-256 of these protected config files as TRUSTED:")
     for name in names:
         path = directory / name
         try:
@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         confirmation = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note=note)
 
-        print("\nRegistered signatures (R4):")
+        print("\nRegistered signatures:")
         for name in todo:
             store.register_initial(name, confirmation)
             # Read back the now-recorded hash to confirm the write landed and matches disk.

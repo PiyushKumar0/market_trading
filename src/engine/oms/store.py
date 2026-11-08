@@ -99,7 +99,7 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
     ts = datetime.fromisoformat(value)
     if ts.tzinfo is None:
-        raise ValueError(f"naive timestamp {value!r} in state.db (§3.2 requires tz-aware IST)")
+        raise ValueError(f"naive timestamp {value!r} in state.db (tz-aware IST is required)")
     return ts
 
 
@@ -177,7 +177,7 @@ class OrderStore:
             if persisted in TERMINAL_ORDER_STATES:
                 raise TerminalOrderWrite(
                     f"order {order_before.order_id} is persisted {persisted}; refusing further records "
-                    f"(§3.5.1 terminal is final)"
+                    f"(terminal is final)"
                 )
             if persisted is not order_before.state:
                 raise StaleOrderWrite(

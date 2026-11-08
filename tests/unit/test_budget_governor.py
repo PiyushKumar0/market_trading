@@ -152,7 +152,7 @@ async def test_price_uses_per_model_rates(gov):
 
 async def test_unpriced_model_fails_loud(gov):
     # A model missing from the pricing table would otherwise bill as $0 and blind the ladder all window.
-    with pytest.raises(ValueError, match="no D4 pricing"):
+    with pytest.raises(ValueError, match="no pricing for model"):
         gov.price("sonnet-9.9", TokenUsage(in_tokens=1, out_tokens=1))
 
 

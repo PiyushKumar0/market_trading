@@ -146,7 +146,7 @@ def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None, strategies
     return {
         "meta": {
             "script": "scripts/backtest_exit_geometry.py",
-            "registration": "C1 exit geometry, IMPLEMENTATION_PLAN 6.1, pre-registered 2026-10-07",
+            "registration": "exit geometry, pre-registered 2026-10-07",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "db": str(db), "window_end": str(end),
             "population_override": {"symbols": symbols, "max_symbols": max_symbols},
@@ -181,12 +181,12 @@ def _num(v: Any, fmt: str = "+.4f") -> str:
 
 def render_text(doc: dict[str, Any]) -> str:
     m = doc["meta"]
-    out = [f"C1 EXIT-GEOMETRY STUDY ({m['registration']})", f"db {m['db']}  end {m['window_end']}  "
+    out = [f"EXIT-GEOMETRY STUDY ({m['registration']})", f"db {m['db']}  end {m['window_end']}  "
            f"N={m['family_n']} fold_pass_min={m['fold_pass_min']:.0%}  purge/embargo {m['purge']}/{m['embargo']}",
            f"round trip {m['cost_round_trip_pct']:.4f}% {m['product']} at Rs {m['notional_inr']}", ""]
     if not m["registered_population"]:
         out += ["POPULATION OVERRIDDEN (--symbols/--max-symbols): smoke run, NOT the registered study", ""]
-    out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (WO-3 margin floor per session)")
+    out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (margin floor per session)")
     for s, b in doc["strategies"].items():
         for a, g in b["geometry"].items():
             out.append(f"  {s:<6} {a:<26} n={g['n']:<6} median gross {_num(g['median_gross_pct'])}%  "
@@ -222,7 +222,7 @@ def render_text(doc: dict[str, Any]) -> str:
 
 
 def render_markdown(doc: dict[str, Any]) -> str:
-    return f"# C1 exit-geometry study\n\n```\n{render_text(doc)}\n```\n"
+    return f"# Exit-geometry study\n\n```\n{render_text(doc)}\n```\n"
 
 
 # ----------------------------------------------------------------------------- CLI

@@ -1,7 +1,7 @@
 /**
  * Display formatting for the dashboard. Pure and DOM-free: `node --test` runs it directly.
  *
- * Money arrives as decimal STRINGS (§8.1) and is never parsed to a float for printing — grouping and
+ * Money arrives as decimal STRINGS and is never parsed to a float for printing — grouping and
  * sign are string operations on the engine's own digits. The one exception is the USD budget, which
  * is rounded to cents for display; callers keep the exact string for a hint.
  *

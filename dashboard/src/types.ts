@@ -1,8 +1,8 @@
 /**
- * Wire types for the engine's dashboard API (`src/engine/api/app.py`, §3.2.11 / O8 / R8).
+ * Wire types for the engine's dashboard API (`src/engine/api/app.py`).
  *
  * These mirror the ACTUAL route return shapes, not the Python domain models. Two conventions matter:
- *  - every money / price / level value crosses as a STRING (§8.1 decimal-as-string) — never do
+ *  - every money / price / level value crosses as a STRING (decimal-as-string) — never do
  *    arithmetic on them here, the dashboard is a read-only view;
  *  - every route degrades to a stub shape when its collaborator is unwired, so the optional/empty
  *    variants below are normal operating states, not errors.
@@ -119,7 +119,7 @@ export interface GatePayload {
   degrade_tier?: string
 }
 
-/** The delivered `Recommendation` (§3.6) as stored in `recommendations.payload`. */
+/** The delivered `Recommendation` as stored in `recommendations.payload`. */
 export interface RecommendationPayload {
   rec_id?: string
   created_at?: string
@@ -139,7 +139,7 @@ export interface RecommendationPayload {
   short_flag_higher_tail_risk?: boolean
   gate?: GatePayload
   manual_checklist?: string[]
-  // Entry recs only (plan Q1.1); absent on older stored payloads.
+  // Entry recs only; absent on older stored payloads.
   strategy_id?: string | null
   entry_type?: string | null
   reference_entry?: string | null
@@ -235,7 +235,7 @@ export interface SignalStrategy {
     hit_rate: number | null
     median_excess_t20: number | null
   }
-  /** brk20 only: crossings the regime filter (C2) blocked; `neither` = blocked for another reason. */
+  /** brk20 only: crossings the regime filter blocked; `neither` = blocked for another reason. */
   blocked: { n: number; median: number | null; mean: number | null; hit_rate: number | null; neither: number } | null
   kill_rule: SignalVerdict<SignalKillLook> | null
   /** At the next open after the analyst's call; `mean_diff` = approved minus declined, percentage points. */
@@ -268,7 +268,7 @@ export interface PaperHalt {
 
 /**
  * The latest equity snapshot of the epoch; `pnl` comes from the same row.
- * `capital_base` is the live starting capital when the engine's limits are verified (O19 §7), else the row's own base.
+ * `capital_base` is the live starting capital when the engine's limits are verified, else the row's own base.
  * The `*_pct` fields are the engine's 2-dp percent strings of `capital_base`, with the same base rule; absent on older engines.
  */
 export interface PaperEquity {
@@ -352,7 +352,7 @@ export interface PaperTotals {
   wins: number
   voids: number
   void_net: string | null
-  /** 2-dp percent of `capital_base`: the live starting capital when the engine's limits are verified (O19 §7), else the row's own base. */
+  /** 2-dp percent of `capital_base`: the live starting capital when the engine's limits are verified, else the row's own base. */
   void_net_pct?: string | null
 }
 
@@ -369,7 +369,7 @@ export interface PaperSummary {
   /** null = an entry would pass the paper order guard; "not built" when not built. */
   entry_guard: string | null
   unmarked: string[]
-  /** Strategies whose new paper trades carry no stop or target (D14); absent on older engines. */
+  /** Strategies whose new paper trades carry no stop or target; absent on older engines. */
   no_stop_strategies?: string[]
   halts: PaperHalt[]
   equity: PaperEquity | null
@@ -398,7 +398,7 @@ export interface HeadroomCaps {
 export interface Headroom {
   equity?: string
   day_mtm?: string
-  /** 2-dp percent of the capital base the limits use (§7.1); absent on older engines. */
+  /** 2-dp percent of the capital base the limits use; absent on older engines. */
   day_mtm_pct?: string
   open_positions?: { total: number; mis: number; cnc: number }
   consecutive_losses?: number
@@ -448,7 +448,7 @@ export interface CapitalChanged {
 
 // --------------------------------------------------------------------------- GET /budget
 /**
- * `{}` when `governor` is unwired. Spend/allocation are USD strings (§5.6). The period is the
+ * `{}` when `governor` is unwired. Spend/allocation are USD strings. The period is the
  * subscription's quota WEEK (Thu 14:00 IST → Thu 14:00 IST), keyed by its start Thursday.
  */
 export interface BudgetBody {
@@ -479,7 +479,7 @@ export interface TradeWindowResponse {
 }
 
 // --------------------------------------------------------------------------- GET /news/watchlist
-/** One `catalyst_watchlist` row (§2.7 step 5(ii)); retired v1 cat levels: persisted, not displayed. */
+/** One `catalyst_watchlist` row; retired v1 cat levels: persisted, not displayed. */
 export interface WatchlistRow {
   entry_id: string
   d: string

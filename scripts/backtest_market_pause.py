@@ -78,11 +78,11 @@ def study(pop: rc.Population, ew20: dict[date, float], cost_model: CostModel) ->
 def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None, strategies=STRATEGIES) -> dict[str, Any]:
     if REGISTERED is None:
         raise rc.Refusal("the market-pause rule is not registered (REGISTERED is None); "
-                         "no run before IMPLEMENTATION_PLAN 3 commits it")
+                         "no run before the registration is committed")
     cost_model = CostModel.from_config()
     daily, source = rc.core_ew(conn, db, end)
     m = rf.meta("scripts/backtest_market_pause.py",
-                f"market-wide pause, IMPLEMENTATION_PLAN 3, pre-registered {REGISTERED}",
+                f"market-wide pause, pre-registered {REGISTERED}",
                 db, end, symbols, max_symbols, FAMILY_N, cost_model)
     m |= {"rule": RULE, "alpha": ALPHA, "ew": {"rule": EW_RULE, "source": source, "label": rc.SURVIVORSHIP_LABEL,
                                                "sessions": len(daily)}}

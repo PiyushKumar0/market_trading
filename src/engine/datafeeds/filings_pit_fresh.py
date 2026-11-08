@@ -660,8 +660,8 @@ class FilingsPitFreshJob:
             body=(
                 f"filings_pit_fresh could not rebuild its scrip->symbol map on {d.isoformat()}: "
                 f"{detail}. The feed has fallen back to the {smap.stored_codes} stored symbol_isin "
-                "codes, which is the coverage that starved §6.1 `ins` to 22 of 480 issuers before "
-                "2026-09-12 (plan §2.8.5). Rows keep ingesting and nothing is entry-blocking. One "
+                "codes, which is the coverage that starved `ins` to 22 of 480 issuers before "
+                "2026-09-12. Rows keep ingesting and nothing is entry-blocking. One "
                 "alert per degradation streak — a healthy map re-arms it."
             ),
             severity="warning",
@@ -819,7 +819,7 @@ class FilingsPitFreshJob:
             body=(
                 f"BSE fresh-insider fetch degraded on {d.isoformat()}: "
                 f"failed={failed or 'none'} ({'; '.join(reasons)}). Existing insider_trades rows remain "
-                "in force; the date-keyed catch-up retries the missed day (§2.8/E5). Not entry-blocking."
+                "in force; the date-keyed catch-up retries the missed day. Not entry-blocking."
             ),
             severity="warning",
             data={"job_id": "filings_pit_fresh", "d": d.isoformat(), "failed_sources": failed},
@@ -855,7 +855,7 @@ def main(argv: list[str] | None = None) -> int:
     from engine.core.log import configure_logging
 
     configure_logging()
-    parser = argparse.ArgumentParser(description="§2.8 BSE fresh-insider feed -> insider_trades.")
+    parser = argparse.ArgumentParser(description="BSE fresh-insider feed -> insider_trades.")
     parser.add_argument("--once", action="store_true", help="run one ingest now against the live store")
     parser.add_argument(
         "--date", default=None, type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),

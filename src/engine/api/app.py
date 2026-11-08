@@ -488,7 +488,7 @@ def create_app(
         if exposure is None or limits_engine is None or latch is None:
             return JSONResponse(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                content={"ok": False, "note": "phase-0 stub — exposure, limits or risk latch not wired"},
+                content={"ok": False, "note": "stub — exposure, limits or risk latch not wired"},
             )
         cleared, still = await exposure.rearm_floors(floor_limits_from(limits_engine.table()), latch, Actor.OWNER)
         return {"ok": True, "cleared": cleared, "still_breached": still, "risk_state": latch.resolved_state().value}
@@ -811,7 +811,7 @@ def create_app(
                     "ok": False,
                     "note": (
                         "analyst_confidence_min is owner-only via the protected limits.yaml flow "
-                        "(ProtectedStore.owner_update / Telegram two-step) — not this route (§6.3)"
+                        "(ProtectedStore.owner_update / Telegram two-step) — not this route"
                     ),
                 },
             )
@@ -819,7 +819,7 @@ def create_app(
         store = app.state.store
         if conn is None or store is None:
             _log.warning("param_set_via_api", name=body.name)
-            return {"ok": True, "applied": False, "note": "phase-0 stub — param store lands later"}
+            return {"ok": True, "applied": False, "note": "stub — param store lands later"}
         bounds = (store.load_verified(ENVELOPE_FILE).get("parameters") or {}).get(body.name)
         if bounds is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"unknown envelope parameter {body.name!r}")
@@ -875,7 +875,7 @@ def create_app(
         if mm is None:
             return JSONResponse(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                content={"ok": False, "note": "phase-0 stub — mode manager not wired"},
+                content={"ok": False, "note": "stub — mode manager not wired"},
             )
         ok = await mm.request_transition(target, Actor.OWNER)
         return {"ok": ok, "mode": target.value}
@@ -890,7 +890,7 @@ def create_app(
         if ks is None:
             return JSONResponse(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                content={"ok": False, "note": "phase-0 stub — kill switch not wired"},
+                content={"ok": False, "note": "stub — kill switch not wired"},
             )
         reason = body.reason or "owner_triggered_via_dashboard"
         await ks.trigger(reason, actor=Actor.OWNER)
@@ -904,7 +904,7 @@ def create_app(
             status_code=status.HTTP_409_CONFLICT,
             content={
                 "ok": False,
-                "note": "two-step via Telegram /kill_reset + /confirm (no dashboard two-step in Phase 2)",
+                "note": "two-step via Telegram /kill_reset + /confirm (no dashboard two-step)",
             },
         )
 
@@ -917,7 +917,7 @@ def create_app(
         if control is None:
             return JSONResponse(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                content={"ok": False, "note": "phase-0 stub — paper control not wired"},
+                content={"ok": False, "note": "stub — paper control not wired"},
             )
         if body.enabled and app.state.paper_view is None:
             return JSONResponse(

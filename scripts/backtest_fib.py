@@ -584,13 +584,13 @@ def universe(conn, end: date, symbols, max_symbols) -> tuple[dict[str, Any], str
 def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None) -> dict[str, Any]:
     if REGISTERED is None:
         raise rc.Refusal("the Fibonacci retracement study is not registered (REGISTERED is None); "
-                         "no run before IMPLEMENTATION_PLAN 3 commits it")
+                         "no run before the registration is committed")
     cost_model = CostModel.from_config()
     cost = rc.cost_pct(cost_model)
     series, source = universe(conn, end, symbols, max_symbols)
     structural = bb.load_structural_ex_dates(conn)
     legs = {sym: legs_for(s, structural.get(sym, [])) for sym, s in series.items()}
-    m = rf.meta("scripts/backtest_fib.py", f"Fibonacci retracement, IMPLEMENTATION_PLAN 3, pre-registered {REGISTERED}",
+    m = rf.meta("scripts/backtest_fib.py", f"Fibonacci retracement, pre-registered {REGISTERED}",
                 db, end, symbols, max_symbols, F1_N, cost_model)
     m |= {"family_n": FAMILIES, "fold_pass_min": {f: fold_pass_min(n) for f, n in FAMILIES.items()},
           "alpha": {f: registration_alpha(n) for f, n in FAMILIES.items()},
@@ -676,7 +676,7 @@ def _f2_lines(b: dict[str, Any]) -> list[str]:
 
 
 def _f3_lines(f3: dict[str, Any]) -> list[str]:
-    out = ["", "F3 FIBONACCI CONFLUENCE ON THE SWING SIGNALS (C2's populations, arm (ii))"]
+    out = ["", "F3 FIBONACCI CONFLUENCE ON THE SWING SIGNALS (the regime-filter study's populations, arm (ii))"]
     for s, b in f3.items():
         p, q = b["population"], b["permutation"]
         out += [f" [{s}] {b['family']} N={b['family_n']} alpha {b['alpha']:.4f}  {p['source']}  [{p['label']}]",
@@ -713,7 +713,7 @@ def render(doc: dict[str, Any]) -> str:
            f"leg: {m['leg_rule']}", ""]
     if not m["registered_population"]:
         out += ["POPULATION OVERRIDDEN (--symbols/--max-symbols): smoke run, NOT the registered study", ""]
-    out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (WO-3 margin floor per session)")
+    out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (margin floor per session)")
     blocks = [("F1", doc["f1"])] + [(f"F3 {s}", b) for s, b in doc["f3"].items()] + [("F4", doc["f4"])]
     for label, b in blocks:
         for k, g in b["geometry"].items():

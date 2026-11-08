@@ -463,7 +463,7 @@ class FilingsShpJob:
             title="Shareholding-pattern (SHP) feed degraded",
             body=(
                 f"SHP ingest degraded: {reason}. Existing shp_quarterly rows remain; the run-latest "
-                "catch-up retries (§2.8/E5). Not entry-blocking."
+                "catch-up retries. Not entry-blocking."
             ),
             severity="warning",
             data={"job_id": "filings_shp", "reason": reason},

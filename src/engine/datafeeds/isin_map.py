@@ -291,7 +291,7 @@ class IsinMapJob:
             title="ISIN map build degraded",
             body=(
                 f"symbol_isin build degraded: {reason}. Existing mappings remain; filings_shp skips "
-                "symbols without a BSE scrip code (§2.8/E5). Not entry-blocking."
+                "symbols without a BSE scrip code. Not entry-blocking."
             ),
             severity="warning",
             data={"job_id": "isin_map", "reason": reason},

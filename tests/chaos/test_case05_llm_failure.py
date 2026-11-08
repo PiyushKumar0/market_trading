@@ -302,7 +302,7 @@ class _World:
         msgs = self.owner_messages()
         unavailable = [m for m in msgs if m[1] == "Intraday analyst unavailable"]
         assert unavailable and reason in unavailable[0][2], msgs
-        assert "Deterministic exits, stops and square-offs are unaffected (R1)" in unavailable[0][2]
+        assert "Deterministic exits, stops and square-offs are unaffected" in unavailable[0][2]
         assert any(m[1] == "alert" and f"failed: {reason}" in m[2] for m in msgs), msgs
         assert any("Intraday analyst unavailable" in t for t in self.phone.sent)
 
@@ -478,7 +478,7 @@ async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, co
 
 
 @pytest.mark.skip(reason=(
-    "square-offs unaffected (R1): the window-end MIS square-off / 15:05-15:10 backstop is the "
+    "square-offs unaffected: the window-end MIS square-off / 15:05-15:10 backstop is the "
     "SquareOffScheduler. " + MIS_OUT_OF_PAPER_SCOPE
 ))
 async def test_square_off_unaffected_with_the_llm_dead() -> None:

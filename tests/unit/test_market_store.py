@@ -433,10 +433,10 @@ def test_slow_statement_reports_a_statement_that_raises(store, monkeypatch, capl
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
     with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
         with pytest.raises(duckdb.Error):
-            store._execute("SELECT * FROM no_such_table_wo24b")
+            store._execute("SELECT * FROM no_such_table_probe")
     events = _slow_events(caplog)
     assert len(events) == 1, [r.label for r in events]
-    assert events[0].label.startswith("SELECT * FROM no_such_table_wo24b")
+    assert events[0].label.startswith("SELECT * FROM no_such_table_probe")
     assert events[0].failed is True
 
 
@@ -849,7 +849,7 @@ async def test_async_wrappers_offload_sync_core(store, clock):
 
 
 # --------------------------------------------------------------------------- settings (additive keys)
-def test_settings_load_with_new_phase1_keys():
+def test_settings_load_with_the_added_keys():
     s = load_settings()
     # Per-feed RSS cadences; gdelt_poll_s 1800→3600 and request_timeout_s 10→30 on
     # 2026-08-04 (persistent 429s at 30-min; 121 ConnectTimeouts at the old 10 s timeout).

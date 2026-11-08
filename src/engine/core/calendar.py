@@ -60,7 +60,7 @@ class _YearCalendar:
             dates = ", ".join(sorted(d.isoformat() for d in overlap))
             raise ValueError(
                 f"calendar {self.year}: {dates} listed in BOTH holidays and special_sessions — a muhurat "
-                "day belongs only in special_sessions (never holidays), else its session is lost (R6)."
+                "day belongs only in special_sessions (never holidays), else its session is lost."
             )
 
     @staticmethod
@@ -161,7 +161,7 @@ class NSECalendar:
             if self.is_trading_day(probe):
                 return probe
             probe += timedelta(days=1)
-        raise ValueError(f"no trading day found within ~1y after {d} (calendar horizon, R6)")
+        raise ValueError(f"no trading day found within ~1y after {d} (calendar horizon)")
 
     def add_sessions(self, d: date, n: int, *, count_special: bool = False) -> date:
         """The ``n``-th counted session after ``d``; ``n=0`` is the first counted session on/after ``d``.
@@ -196,7 +196,7 @@ class NSECalendar:
             if self.is_trading_day(probe):
                 return probe
             probe -= timedelta(days=1)
-        raise ValueError(f"no trading day found within ~1y before {d} (calendar horizon, R6)")
+        raise ValueError(f"no trading day found within ~1y before {d} (calendar horizon)")
 
     def verified_horizon(self) -> date | None:
         """The furthest date the loaded calendars are verified through (None if none verified)."""
@@ -208,7 +208,7 @@ class NSECalendar:
         """Corporate actions for ``symbol`` within ``within_days``. No caller today; raises
         rather than return a silent ``[]`` the planned GTT ex-date scan would read as "none due"."""
         raise NotImplementedError(
-            "use MarketStore.get_corp_actions; implement before GTTManager.catch_up_ex_dates (T12)"
+            "use MarketStore.get_corp_actions; implement before GTTManager.catch_up_ex_dates"
         )
 
     # ----------------------------------------------------------------- trade window

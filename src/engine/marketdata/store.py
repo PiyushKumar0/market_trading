@@ -344,7 +344,7 @@ _SCHEMA: tuple[str, ...] = (
         mis_candidate       BOOLEAN NOT NULL DEFAULT FALSE,
         exclusion_reasons   TEXT[],
         median_traded_value DECIMAL(18,2),
-        core_index          BOOLEAN,            -- O18: member of the CORE (evidence) index; NULL = pre-O18 row
+        core_index          BOOLEAN,            -- owner decision 2026-10-08: member of the CORE (evidence) index; NULL = row before it
         PRIMARY KEY (d, symbol)
     )
     """,
@@ -479,7 +479,7 @@ _SCHEMA: tuple[str, ...] = (
         target_band_low     DECIMAL(12,2),
         target_band_high    DECIMAL(12,2),
         expires_at          DATE,
-        -- §2.7 `cat_reversal` (2026-08-27): cluster_id of the EARLIER opposite-direction (short)
+        -- `cat_reversal` (2026-08-27): cluster_id of the EARLIER opposite-direction (short)
         -- cluster of this same (symbol, event_type) story that the row's winning cluster reverses;
         -- NULL on every ordinary row. Nullable and LAST so a fresh DB and a DB widened by
         -- _migrate_watchlist_reversal share one column order.

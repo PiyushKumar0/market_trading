@@ -155,7 +155,7 @@ def test_spread_is_half_per_leg(model):
 
 
 def test_spread_flows_from_yaml_not_code(raw_yaml):
-    """Doubling spread_pct doubles the spread component and nothing else (C2: zero hardcoded rates)."""
+    """Doubling spread_pct doubles the spread component and nothing else (no hardcoded rates)."""
     base = CostModel(CostRates.from_dict(raw_yaml)).round_trip(Decimal("20000"), "CNC")
     mutated = copy.deepcopy(raw_yaml)
     mutated["spread_pct"] = 2 * float(raw_yaml["spread_pct"])
@@ -174,7 +174,7 @@ def test_missing_spread_pct_is_a_hard_error(raw_yaml):
         CostRates.from_dict(mutated)
 
 
-def test_zero_spread_reproduces_the_pre_wo2_surface(raw_yaml):
+def test_zero_spread_reproduces_the_spreadless_surface(raw_yaml):
     """spread_pct: 0 collapses round_trip back onto the fees-only numbers — proof the spread leg is
     the ONLY thing the spread change added to the cost surface."""
     mutated = copy.deepcopy(raw_yaml)
@@ -188,7 +188,7 @@ def test_zero_spread_reproduces_the_pre_wo2_surface(raw_yaml):
 
 
 def test_c3_reference_roundtrips_parameterized_from_yaml(model, raw_yaml):
-    """The yaml's own reference_roundtrips block (C3: ~21 / ~60 / ~83) reproduces from the model.
+    """The yaml's own reference_roundtrips block (~21 / ~60 / ~83) reproduces from the model.
 
     The block is FEES-ONLY by construction (see its costs.yaml comment) — it is asserted against
     ``fee_breakeven_pct`` / total minus the spread component, so a spread re-measurement can never
@@ -223,7 +223,7 @@ def test_breakeven_non_increasing_in_notional(model):
 
 # ------------------------------------------------------------------ multi-scrip DP + brokerage cap
 def test_dp_charged_per_scrip_per_sell_day(model):
-    """C4: splitting a small delivery book across scrips multiplies the flat DP charge."""
+    """Splitting a small delivery book across scrips multiplies the flat DP charge."""
     one = model.round_trip(Decimal("20000"), "CNC", n_scrips_sell_day=1)
     two = model.round_trip(Decimal("20000"), "CNC", n_scrips_sell_day=2)
     assert one.components["dp"] == Decimal("15.34")

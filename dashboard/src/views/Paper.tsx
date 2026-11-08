@@ -1,7 +1,7 @@
 /**
  * Paper trading — the simulated autopilot (`GET /paper`): its state in words, halts, the account in
  * four figures, equity by session, then the book. Everything here is SIMULATED; the page says so once,
- * and every card carries the dashed "simulated" border. The ON/OFF switch lives in the top bar (D13).
+ * and every card carries the dashed "simulated" border. The ON/OFF switch lives in the top bar.
  * Money arrives as strings and is printed as sent.
  */
 import { COPY, haltTerm, rungTerm, strategyName } from '../copy/glossary.ts'

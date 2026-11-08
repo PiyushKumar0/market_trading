@@ -134,7 +134,7 @@ class CostRates(BaseModel):
             # Never default silently: a missing spread measurement would quietly restore the
             # zero-spread cost surface the spread correction removed and re-loosen the live viability check.
             raise ValueError(
-                "costs.yaml is missing spread_pct — the measured bid-ask spread (WO-2). Add it "
+                "costs.yaml is missing spread_pct — the measured bid-ask spread. Add it "
                 "with its measurement provenance; it is NOT defaulted."
             )
         spread = _dec(raw["spread_pct"])
@@ -318,7 +318,7 @@ class CostModel:
         without an :class:`InstrumentStore`.
         """
         if self._instruments is None:
-            raise RuntimeError("min_viable_qty requires an InstrumentStore (tick rounding, A10)")
+            raise RuntimeError("min_viable_qty requires an InstrumentStore (tick rounding)")
         product = self._validate_product(product)
         entry = self._instruments.round_to_tick(symbol, entry)
         stop = self._instruments.round_to_tick(symbol, stop)
@@ -382,7 +382,7 @@ class CostModel:
     @staticmethod
     def _validate_notional(notional: Decimal) -> Decimal:
         if isinstance(notional, float):
-            raise TypeError("notional must be Decimal, never float (§3.2 money convention)")
+            raise TypeError("notional must be Decimal, never float (money convention)")
         if isinstance(notional, int):
             notional = Decimal(notional)
         if not isinstance(notional, Decimal):

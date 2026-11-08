@@ -100,7 +100,7 @@ class PaperRisk:
         flatten: FlattenFn,
     ) -> None:
         if not isinstance(broker, PaperBroker):
-            raise TypeError(f"PaperRisk takes a PaperBroker only, got {type(broker).__name__} (D8)")
+            raise TypeError(f"PaperRisk takes a PaperBroker only, got {type(broker).__name__}")
         self.tracker = ExposureTracker(conn, clock, capital_base, mark_price, scope="paper")
         self._conn = conn
         self._clock = clock

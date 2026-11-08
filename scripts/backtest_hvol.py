@@ -185,11 +185,11 @@ DEFAULT_DB_REL = Path("data") / "research" / "market_2026-10-07.duckdb"
 NIFTY500_SEED_REL = Path("config") / "universe" / "nifty500_seed.csv"
 NIFTY500_CORE_CACHE_REL = Path("data") / "universe" / "core_index_cached.csv"     # A1: preferred over the seed
 TOTAL_MARKET_SEED_REL = Path("config") / "universe" / "niftytotalmarket_seed.csv"
-AMENDMENT_A1 = "Amendment A1, 2026-10-09"
+ETF_AMENDMENT = "amendment 2026-10-09"
 DEFAULT_ETF_LIST_REL = Path("data") / "research" / "nse_etf_list_2026-10-09.csv"
 ETF_PATTERN = re.compile(r"(BEES|ETF|IETF)$")
 
-VERDICT_PROMOTABLE = "PROMOTABLE (candidate only, §8.6 applies)"
+VERDICT_PROMOTABLE = "PROMOTABLE (candidate only, the owner promotion gate applies)"
 VERDICT_REFUTED = "REFUTED"
 
 _SE_EPS = 1e-12
@@ -664,9 +664,9 @@ def load_etf_list(path: Path) -> EtfList:
         symbols = frozenset(parse_index_constituents_csv(raw.decode("utf-8-sig")))
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise rc.Refusal(f"ETF list unreadable: {p} ({type(exc).__name__}: {exc}); "
-                         f"{AMENDMENT_A1} requires it - no silent 'no exclusion'") from exc
+                         f"{ETF_AMENDMENT} requires it - no silent 'no exclusion'") from exc
     if not symbols:
-        raise rc.Refusal(f"ETF list has no symbols: {p}; {AMENDMENT_A1} requires it")
+        raise rc.Refusal(f"ETF list has no symbols: {p}; {ETF_AMENDMENT} requires it")
     return EtfList(str(p), symbols, hashlib.sha256(raw).hexdigest())
 
 
@@ -821,7 +821,7 @@ def run_study(conn, *, db_path: Path, etf: EtfList, notional: Decimal = REFERENC
         "eligibility and surveillance history are not stored, so the population is wider than the live "
         "eligible rule; the structural veto reads ex-dates up to session y+21 (forward ex-veto, possibly not "
         "public at the close; applied to the benchmark identically).",
-        f"ETFs excluded ({AMENDMENT_A1}) from the signal population AND the benchmark / market-wide / tercile "
+        f"ETFs excluded ({ETF_AMENDMENT}) from the signal population AND the benchmark / market-wide / tercile "
         "cross-sections: NSE ETF list plus symbols matching " + ETF_PATTERN.pattern + ".",
         f"Earnings split reads earnings_calendar kind='{EARNINGS_KIND}' covering {earnings.first} -> "
         f"{earnings.last}; a window with no event outside that span is 'unknown'.",
@@ -835,7 +835,7 @@ def run_study(conn, *, db_path: Path, etf: EtfList, notional: Decimal = REFERENC
     return {
         "meta": {
             "script": "scripts/backtest_hvol.py",
-            "registration": f"hvol, IMPLEMENTATION_PLAN.md, pre-registered {REGISTERED_ON}",
+            "registration": f"hvol, pre-registered {REGISTERED_ON}",
             "generated_at": datetime.now(IST).isoformat(timespec="seconds"),
             "db": str(db_path),
             "window": {"start": str(cs.dates[0]), "end": str(cs.dates[-1])},
@@ -843,7 +843,7 @@ def run_study(conn, *, db_path: Path, etf: EtfList, notional: Decimal = REFERENC
             "population_override": {"symbols": list(symbols) if symbols else None, "max_symbols": max_symbols},
             "registered_population": registered,
             "index_rows_excluded": list(INDEX_ROWS),
-            "etf_exclusion": {"amendment": AMENDMENT_A1, "list_path": etf.path, "sha256": etf.sha256,
+            "etf_exclusion": {"amendment": ETF_AMENDMENT, "list_path": etf.path, "sha256": etf.sha256,
                               "list_size": len(etf.symbols), "pattern": ETF_PATTERN.pattern, **etf_counts},
             "trial_count_n": TRIAL_COUNT_N, "fold_pass_min": fold_pass_min(TRIAL_COUNT_N),
             "parameter_sweep_run": False,
@@ -1030,7 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-symbols", type=int, default=None, help="cap the symbol count (smoke runs only)")
     ap.add_argument("--out-dir", type=Path, default=repo_root() / "data" / "reports", help="report directory")
     ap.add_argument("--etf-list", type=Path, default=repo_root() / DEFAULT_ETF_LIST_REL,
-                    help="NSE ETF list CSV (Amendment A1); missing or unparseable refuses")
+                    help="NSE ETF list CSV (the 2026-10-09 amendment); missing or unparseable refuses")
     return ap
 
 

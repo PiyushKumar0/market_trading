@@ -177,7 +177,7 @@ def _events_for(store: MarketStore, symbols: list[str], start: date, end: date, 
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
-    parser = argparse.ArgumentParser(description="§6.4 validation for the pinned insider_net_buy rule (N=1).")
+    parser = argparse.ArgumentParser(description="Research validation for the pinned insider_net_buy rule (N=1).")
     parser.add_argument("--from", dest="start", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--symbols", default=None, help="comma-separated override of the universe")
@@ -185,8 +185,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--entry-fill", dest="entry_fill", default=DEFAULT_ENTRY_FILL, choices=list(ENTRY_FILLS),
         help=(
-            "WO-16 fill convention: 'next_open' (default) buys at open_(T+1); 'close_t' is the "
-            "superseded pre-WO-16 close_T fill, kept for old-vs-new comparison"
+            "Fill convention: 'next_open' (default) buys at open_(T+1); 'close_t' is the "
+            "superseded close_T fill, kept for old-vs-new comparison"
         ),
     )
     args = parser.parse_args(argv)

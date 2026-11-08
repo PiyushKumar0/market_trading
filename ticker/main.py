@@ -144,7 +144,7 @@ def pack_frame(obj: dict[str, Any]) -> bytes:
 
 
 def _price_str(value: Any) -> str | None:
-    """A broker price → decimal string for the wire (msgpack has no Decimal; §"tick" schema above).
+    """A broker price → decimal string for the wire (msgpack has no Decimal; the "tick" schema above).
 
     ``str(float)`` is the shortest round-trip repr, so 2338.55 crosses as ``"2338.55"`` and the
     engine re-wraps ``Decimal("2338.55")`` exactly. ``None`` passes through (field absent/blank).
@@ -654,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
     # Authentication is enforced engine-side: the supervisor drops any hello whose secret is not this
     # spawn's token (ticker_supervisor._handle_child_connection).
     if not cfg["shared_secret"]:
-        _log("config.warning", msg="empty shared_secret; link is unauthenticated (Phase-0 only)")
+        _log("config.warning", msg="empty shared_secret; link is unauthenticated")
 
     _log(
         "ticker.start",

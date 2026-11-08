@@ -304,7 +304,7 @@ class SessionLifecycle:
             _log.error("single_instance_refused", prior_state=prior_state, prior_pid=prior_pid)
             raise SingleInstanceError(
                 f"engine_lifecycle state={prior_state!r} with pid {prior_pid} still ALIVE — another "
-                "instance owns the single-writer stores; refusing to start (§2.6 step 0, O7/E4)"
+                "instance owns the single-writer stores; refusing to start"
             )
         crash_recovered = prior_state in ("RUNNING", "STOPPING")
         off_since = self._off_since(prior, crash_recovered)
@@ -431,8 +431,8 @@ class SessionLifecycle:
         open_count = self._open_positions_count()
         if open_count and not owner_override:
             _log.warning("shutdown_guard_open_positions", count=open_count,
-                         note="Phase 4 (real orders) flattens MIS / verifies CNC GTTs before exit "
-                              "(§10.8); paper has no shutdown guard")
+                         note="Live AUTO (real orders) flattens MIS / verifies CNC GTTs before exit"
+                              "; paper has no shutdown guard")
 
         guard_steps: tuple[tuple[str, Hook | None], ...] = (
             ("cancel_entry_orders", self._cancel_entries),      # TODO(live AUTO)
@@ -453,7 +453,7 @@ class SessionLifecycle:
                 if not owner_override:
                     self._mark_running_again()   # stop blocked — still the live instance
                     raise ShutdownBlockedError(
-                        f"shutdown guard step {name!r} failed and no owner override was given (§10.8)"
+                        f"shutdown guard step {name!r} failed and no owner override was given"
                     ) from None
         _log.info("shutdown", owner_override=owner_override, open_positions=open_count, reason=reason)
 

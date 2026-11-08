@@ -60,10 +60,10 @@ from engine.ops.jobs import JOB_MARKET_BACKUP, CatchUpResult, CatchUpRunner
 from engine.ops.lifecycle import SessionLifecycle, StartupReport
 from engine.ops.main import (
     _SHUTDOWN_BUS_DRAIN_S,
+    CORE_JOB_IDS,
+    DECISION_JOB_IDS,
     DEFER_POST_ARM_JOBS,
     LANE_JOB_IDS,
-    PHASE1_JOB_IDS,
-    PHASE2_JOB_IDS,
     POST_ARM_JOB_IDS,
     CompactionLane,
     MarketBackupResult,
@@ -291,7 +291,7 @@ class RigEnv:
 
             return run
 
-        fns = {job_id: recorder(job_id) for job_id in (*PHASE1_JOB_IDS, *PHASE2_JOB_IDS)}
+        fns = {job_id: recorder(job_id) for job_id in (*CORE_JOB_IDS, *DECISION_JOB_IDS)}
         fns[JOB_MARKET_BACKUP] = self._market_backup_fn()
         return fns
 

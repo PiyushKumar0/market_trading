@@ -1,6 +1,6 @@
-/* Design tokens — design spec §6. Every text/status pair here was measured (WCAG 2.x) on 2026-10-08;
+/* Design tokens. Every text/status pair here was measured (WCAG 2.x) on 2026-10-08;
    change a value and re-measure. Dark only. System fonts only: the LAN page makes zero external
-   requests (R10). */
+   requests. */
 
 :root {
   color-scheme: dark;

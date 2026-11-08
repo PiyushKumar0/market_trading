@@ -83,7 +83,7 @@ def _positive_days(s: str) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Phase-1 sweep + validate + report (§8.2).")
+    parser = argparse.ArgumentParser(description="Sweep + validate + report.")
     parser.add_argument("strategy", choices=(*PRICE_BASELINES, "all"))
     parser.add_argument("--from", dest="start", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, type=_parse_date, help="YYYY-MM-DD")
@@ -103,8 +103,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_days,
         default=MARGIN_FLOOR_DAYS,
         help=(
-            "sessions the WO-3 margin floor spreads ONE round trip over: the bar is "
-            f"cost_floor/<days> per day (default: {MARGIN_FLOOR_DAYS}, the 7.1 swing holding cap). "
+            "sessions the margin floor spreads ONE round trip over: the bar is "
+            f"cost_floor/<days> per day (default: {MARGIN_FLOOR_DAYS}, the swing holding cap). "
             "Set it to the leg's real holding cap -- e.g. 120 for the positional trend leg "
             "(limits.yaml max_holding.position_trading_days) -- or the floor overstates what the "
             "strategy must earn per day. The value used is printed in the validation report"
@@ -113,7 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-adjacent", action="store_true",
         help=(
-            "skip the WO-3 adjacent-grid-density winner-stability sweep for daily strategies "
+            "skip the adjacent-grid-density winner-stability sweep for daily strategies "
             "(rsi2/trend/mom); orb never runs one regardless of this flag"
         ),
     )

@@ -104,8 +104,8 @@ def test_end_to_end_on_a_synthetic_snapshot(tmp_path, clock, capsys):
     etf_meta = doc["meta"]["etf_exclusion"]
     assert (etf_meta["via_list"], etf_meta["via_pattern_only"]) == (1, 1)
     assert etf_meta["sha256"] == hashlib.sha256(etf_csv.read_bytes()).hexdigest()
-    assert "ETFs excluded (Amendment A1, 2026-10-09): 1 via list + 1 via pattern" in md
-    assert etf_meta["sha256"] in md and "ETFs excluded (Amendment A1, 2026-10-09)" in hv.__doc__
+    assert "ETFs excluded (amendment 2026-10-09): 1 via list + 1 via pattern" in md
+    assert etf_meta["sha256"] in md and "ETFs excluded (2026-10-09)" in hv.__doc__
     assert "NIFTY 500 list" in md
     assert doc["meta"]["trial_count_n"] == 1 and doc["meta"]["registered_population"] is True
     prim = doc["primary"]["horizons"]["20"]
@@ -123,5 +123,5 @@ def test_end_to_end_on_a_synthetic_snapshot(tmp_path, clock, capsys):
     assert doc["primary"]["funnel"]["no_structural_ex"] == 1        # SPL's spike vetoed by its split
     assert doc["promotion"]["verdict"] == hv.VERDICT_REFUTED   # n = 1 < 200
     assert md.index("GEOMETRY:") < md.index("PRIMARY CELL") < md.index("PROMOTION")
-    assert "VERDICT: REFUTED" in md and "§8.6" in doc["meta"]["verdict_promotable_text"]
+    assert "VERDICT: REFUTED" in md and "owner promotion gate" in doc["meta"]["verdict_promotable_text"]
     assert capsys.readouterr().out.isascii()

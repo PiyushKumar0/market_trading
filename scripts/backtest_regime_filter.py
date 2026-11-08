@@ -153,7 +153,7 @@ def study(pop: rc.Population, index, cost_model: CostModel) -> dict[str, Any]:
 def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None, strategies=STRATEGIES) -> dict[str, Any]:
     cost_model = CostModel.from_config()
     index = index_series(conn, end)
-    m = meta("scripts/backtest_regime_filter.py", "C2 regime filter, IMPLEMENTATION_PLAN 6.1, pre-registered 2026-10-07",
+    m = meta("scripts/backtest_regime_filter.py", "regime filter, pre-registered 2026-10-07",
              db, end, symbols, max_symbols, FAMILY_N, cost_model)
     m |= {"rule": RULE, "down_leg": [str(d) for d in DOWN_LEG]}
     return {"meta": m, "strategies": {
@@ -174,7 +174,7 @@ def render_text(doc: dict[str, Any], title: str, extra: Callable[[dict[str, Any]
            f"round trip {m['cost_round_trip_pct']:.4f}% {m['product']} at Rs {m['notional_inr']}", ""]
     if not m["registered_population"]:
         out += ["POPULATION OVERRIDDEN (--symbols/--max-symbols): smoke run, NOT the registered study", ""]
-    out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (WO-3 margin floor per session)")
+    out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (margin floor per session)")
     for s, b in doc["strategies"].items():
         for k, g in b["geometry"].items():
             out.append(f"  {s:<6} {k:<16} n={g['n']:<6} median gross {num(g['median_gross_pct'])}%  "
@@ -240,7 +240,7 @@ def cli(argv: list[str] | None, *, prog: str, title: str, run_fn: Callable[..., 
     return 0
 
 
-TITLE = "C2 REGIME-FILTER STUDY"
+TITLE = "REGIME-FILTER STUDY"
 
 
 def main(argv: list[str] | None = None) -> int:

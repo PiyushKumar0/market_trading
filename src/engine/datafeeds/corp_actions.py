@@ -231,7 +231,7 @@ class CorpActionsJob:
             title="Corporate-actions feed degraded",
             body=(
                 f"NSE corporate-actions fetch failed on {d.isoformat()}: {reason}. Existing "
-                "corp_actions rows remain in force; catch-up retries (A12/E5)."
+                "corp_actions rows remain in force; catch-up retries."
             ),
             severity="critical",
             data={"job_id": "corp_actions", "d": d.isoformat(), "reason": reason},

@@ -71,8 +71,8 @@ from engine.ops.main import (
     _FULL_SWEEP_TRIGGERS,
     _PUBLICATION_LEG_ORDER,
     _SWEEP_IN_FLIGHT_REPLY,
+    CORE_JOB_IDS,
     NO_EDGE_SHADOW_STRATEGIES,
-    PHASE1_JOB_IDS,
     POST_ARM_JOB_IDS,
     CompactionLane,
     _arm_live_jobs,
@@ -121,7 +121,7 @@ async def _noop_dated(_d: date) -> None:
 
 
 def _all_noop_fns() -> dict:
-    """A runner for every PHASE1_JOB_IDS id (DATE_KEYED ids need the dated signature)."""
+    """A runner for every CORE_JOB_IDS id (DATE_KEYED ids need the dated signature)."""
     date_keyed = {
         opsmain.JOB_RECONCILE, opsmain.JOB_BHAVCOPY, opsmain.JOB_DAILY_BARS,
         opsmain.JOB_DEALS, opsmain.JOB_FEATURES,
@@ -129,7 +129,7 @@ def _all_noop_fns() -> dict:
         opsmain.JOB_FILINGS_PIT_FRESH, opsmain.JOB_INS_CROSSINGS,
         opsmain.JOB_TICK_COMPACT,                               # tick-compaction date-keyed
     }
-    return {jid: (_noop_dated if jid in date_keyed else _noop) for jid in PHASE1_JOB_IDS}
+    return {jid: (_noop_dated if jid in date_keyed else _noop) for jid in CORE_JOB_IDS}
 
 
 @pytest.fixture
@@ -263,11 +263,11 @@ async def test_startup_skips_when_store_already_populated(market_store, clock):
 # --------------------------------------------------------------------------- registry structure
 
 
-def test_registry_covers_every_phase1_job() -> None:
-    # PHASE1_JOB_IDS fns only ⇒ the later specs (fns.get returns None) are skipped, not half-registered.
+def test_registry_covers_every_core_job() -> None:
+    # CORE_JOB_IDS fns only ⇒ the later specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
-    assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 24   # +4 filings, +1 tick compaction,
+    assert {s.job_id for s in reg.specs()} == set(CORE_JOB_IDS)
+    assert len(reg) == len(CORE_JOB_IDS) == 24   # +4 filings, +1 tick compaction,
                                                    # +1 ins_crossings (2026-08-17),
                                                    # +1 results_line_items, +1 isin_map,
                                                    # +1 feed_freshness (2026-09-24),
@@ -275,7 +275,7 @@ def test_registry_covers_every_phase1_job() -> None:
                                                    # +1 market_backup (2026-10-11)
 
 
-def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
+def test_registry_decision_jobs_register_when_their_fns_exist(calendar) -> None:
     """Wiring: digest 08:35 → planner 08:50 (run-latest, after the news chain in catch-up
     order), time exit 09:30 run-latest ahead of the post-arm news chain, reco-expiry 15:45
     run-latest, rec outcomes 18:30 date-keyed after daily_bars, nightly review 21:00 date-keyed
@@ -290,7 +290,7 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
     fns[opsmain.JOB_WEEKLY_SUMMARY] = _noop_dated
     fns[opsmain.JOB_NIGHTLY_REVIEW] = _noop_dated
     by_id = {s.job_id: s for s in build_job_registry(load_settings(), fns, calendar=calendar).specs()}
-    assert set(by_id) == set(PHASE1_JOB_IDS) | set(opsmain.PHASE2_JOB_IDS)
+    assert set(by_id) == set(CORE_JOB_IDS) | set(opsmain.DECISION_JOB_IDS)
 
     expected = {
         opsmain.JOB_CATALYST_DIGEST: (JobClass.RUN_LATEST, time(8, 35), 25),
@@ -364,7 +364,7 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
     for jid, (cls, at) in expected.items():
         assert by_id[jid].job_class == cls, jid
         assert by_id[jid].at == at, jid
-    assert opsmain.JOB_MARKET_BACKUP in PHASE1_JOB_IDS
+    assert opsmain.JOB_MARKET_BACKUP in CORE_JOB_IDS
     assert opsmain.JOB_MARKET_BACKUP not in POST_ARM_JOB_IDS
 
     # Write→read dependencies as RELATIONS, not just literals — the 2026-07-24 reschedule moved
@@ -773,7 +773,7 @@ async def test_scheduled_fire_runs_even_when_today_is_already_watermarked(
 
 def test_same_registry_arms_every_job_on_the_live_scheduler(conn, clock, calendar) -> None:
     """The live Scheduler and the CatchUpRunner are fed the SAME JobRegistry — arming must
-    register every PHASE1_JOB_IDS id on APScheduler (the sector map as a weekly Sunday cron, the rest as
+    register every CORE_JOB_IDS id on APScheduler (the sector map as a weekly Sunday cron, the rest as
     calendar-guarded trading-day jobs)."""
     settings = load_settings()
     reg = build_job_registry(settings, _all_noop_fns())
@@ -783,7 +783,7 @@ def test_same_registry_arms_every_job_on_the_live_scheduler(conn, clock, calenda
     _arm_registry_jobs(sched, reg, catch_up, clock)
 
     armed = {j.id for j in sched._sched.get_jobs()}
-    assert set(PHASE1_JOB_IDS) <= armed
+    assert set(CORE_JOB_IDS) <= armed
     # The weekly sector-map job carries a day-of-week cron; the daily ones do not.
     sector_trigger = str(next(j for j in sched._sched.get_jobs() if j.id == JOB_SECTOR_MAP).trigger)
     assert "day_of_week='sun'" in sector_trigger
@@ -804,7 +804,7 @@ def test_pre_open_token_check_is_armed_at_0840(clock, calendar) -> None:
     assert "token_check" in armed
     trigger = str(next(j for j in sched._sched.get_jobs() if j.id == "token_check").trigger)
     assert "hour='8'" in trigger and "minute='40'" in trigger
-    assert "token_check" not in set(PHASE1_JOB_IDS) | set(POST_ARM_JOB_IDS)
+    assert "token_check" not in set(CORE_JOB_IDS) | set(POST_ARM_JOB_IDS)
 
 
 def test_live_interval_jobs_are_armed(clock, calendar) -> None:
@@ -2650,7 +2650,7 @@ async def test_a_failing_post_arm_chain_records_a_failed_watermark_and_never_rai
 
 
 @pytest.mark.asyncio
-async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, calendar, monkeypatch) -> None:
+async def test_rollback_flag_restores_the_undeferred_firing_point(conn, clock, calendar, monkeypatch) -> None:
     """Risk note: flipping ``DEFER_POST_ARM_JOBS`` off restores the old boot exactly — the
     deferred set empties (so the boot pass runs the chain again) and no one-shot is fired."""
     monkeypatch.setattr(opsmain, "DEFER_POST_ARM_JOBS", False)

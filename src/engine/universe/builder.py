@@ -312,7 +312,7 @@ class UniverseBuilder:
                 title=f"{self._settings.universe.core_index_name} core list unavailable",
                 body="The core-index list failed from download, cache and seed. Every row is "
                 "stamped non-core: hi52, ins, cat and cat_reversal originate nothing today "
-                "(fail closed); brk20 and the risk gate use the full eligible set as usual (O18).",
+                "(fail closed); brk20 and the risk gate use the full eligible set as usual (owner decision).",
                 severity="critical",
                 data={"job_id": "universe_build", "d": d.isoformat()},
             )
@@ -575,7 +575,7 @@ class UniverseBuilder:
                         await self._alert(
                             title=f"{index_name} download failed — using fallback",
                             body=f"NSE constituents download failed; using the {source} copy "
-                            f"({len(symbols)} symbols). Membership may be stale (E5).",
+                            f"({len(symbols)} symbols). Membership may be stale.",
                             severity="warning",
                             data={"job_id": "universe_build", "fallback": source},
                         )

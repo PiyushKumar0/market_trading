@@ -7,7 +7,7 @@ window-open minus one minute cannot warm ORB features from official data and mus
 
 Run DURING A LIVE SESSION (needs a valid daily access token):
 
-    .venv\\Scripts\\python.exe scripts/q15_candle_latency.py --minutes 20
+    .venv\\Scripts\\python.exe scripts/kite_candle_latency_probe.py --minutes 20
 
 Method: for each observed minute boundary, poll ``historical_data`` for the just-closed minute on a
 few liquid symbols every ``--poll-s`` seconds until that minute's candle appears (or ``--timeout-s``
@@ -16,7 +16,7 @@ gives up); the sample is the delay from the minute close to first availability. 
 request rate stays ≤1.5 req/s, inside the ≤3 req/s historical budget — this script must not be
 run concurrently with an engine that is backfilling.
 
-Standalone owner tool (like scripts/a11_check.py): talks to pykiteconnect directly and reads the
+Standalone owner tool (like scripts/kite_candle_adjustment_check.py): talks to pykiteconnect directly and reads the
 API key + access token from DPAPI secrets; it never touches the engine's stores.
 """
 
@@ -104,10 +104,10 @@ def percentiles(samples: list[float]) -> dict[str, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="measure intraday official-candle availability latency (§14 Q15)")
+    parser = argparse.ArgumentParser(description="measure intraday official-candle availability latency")
     parser.add_argument("--minutes", type=int, default=15, help="number of minute boundaries to sample")
     parser.add_argument("--symbols", nargs="*", default=DEFAULT_SYMBOLS)
-    parser.add_argument("--poll-s", type=float, default=2.0, help="poll interval per symbol (A2 budget)")
+    parser.add_argument("--poll-s", type=float, default=2.0, help="poll interval per symbol")
     parser.add_argument("--timeout-s", type=float, default=180.0, help="give up on a minute after this")
     parser.add_argument("--out", default=str(_REPO_ROOT / "data" / "reports" / "q15_latency.json"))
     args = parser.parse_args(argv)
@@ -118,21 +118,21 @@ def main(argv: list[str] | None = None) -> int:
     api_key = secrets.get_optional(KITE_API_KEY)
     access_token = secrets.get_optional(KITE_ACCESS_TOKEN)
     if not api_key or not access_token:
-        print("q15: kite_api_key / kite_access_token missing from DPAPI secrets — run during a "
-              "live session after the daily login (§10.2)", file=sys.stderr)
+        print("latency probe:kite_api_key / kite_access_token missing from DPAPI secrets — run during a "
+              "live session after the daily login", file=sys.stderr)
         return 2
     kc = KiteConnect(api_key=api_key)
     kc.set_access_token(access_token)
 
-    print(f"q15: resolving instrument tokens for {args.symbols} …")
+    print(f"latency probe:resolving instrument tokens for {args.symbols} …")
     instruments = kc.instruments("NSE")
     by_symbol = {i["tradingsymbol"]: int(i["instrument_token"]) for i in instruments}
     tokens = {s: by_symbol[s] for s in args.symbols if s in by_symbol}
     missing = [s for s in args.symbols if s not in by_symbol]
     if missing:
-        print(f"q15: symbols not found in the NSE dump, skipped: {missing}", file=sys.stderr)
+        print(f"latency probe:symbols not found in the NSE dump, skipped: {missing}", file=sys.stderr)
     if not tokens:
-        print("q15: no resolvable symbols", file=sys.stderr)
+        print("latency probe:no resolvable symbols", file=sys.stderr)
         return 2
 
     def fetch(token: int, frm: datetime, to: datetime) -> list:
@@ -170,17 +170,17 @@ def main(argv: list[str] | None = None) -> int:
         "poll_s": args.poll_s,
         "minutes_sampled": args.minutes,
         "per_minute": per_minute,
-        "question": "§14 Q15 — intraday official-candle availability latency (bounds §2.6 cold-start warm-up)",
+        "question": "Intraday official-candle availability latency (bounds the cold-start warm-up)",
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     agg = report["aggregate"]
     if agg:
-        print(f"q15: aggregate p50={agg['p50_s']:.1f}s p90={agg['p90_s']:.1f}s "
+        print(f"latency probe:aggregate p50={agg['p50_s']:.1f}s p90={agg['p90_s']:.1f}s "
               f"p99={agg['p99_s']:.1f}s over {agg['n']} samples → {out}")
     else:
-        print(f"q15: no samples collected (all timeouts?) → {out}")
+        print(f"latency probe:no samples collected (all timeouts?) → {out}")
     return 0
 
 

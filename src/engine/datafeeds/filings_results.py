@@ -422,7 +422,7 @@ class FilingsResultsJob:
             title="Results-filings feed degraded",
             body=(
                 f"Results-filings problem(s) for {d.isoformat()}: {', '.join(failed)} ({reason}). "
-                "Existing rows remain; a failed leg is retried by the date-keyed catch-up (§2.8/E5), "
+                "Existing rows remain; a failed leg is retried by the date-keyed catch-up, "
                 "a stale feed is not — its source needs a look. Not entry-blocking."
             ),
             severity="warning",

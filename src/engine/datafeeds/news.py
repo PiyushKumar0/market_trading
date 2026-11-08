@@ -166,7 +166,7 @@ class Headline(BaseModel):
     @classmethod
     def _tz_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("published_at must be tz-aware (naive datetimes are a bug, §3.2)")
+            raise ValueError("published_at must be tz-aware (naive datetimes are a bug)")
         return v.astimezone(IST)
 
 

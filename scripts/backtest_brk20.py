@@ -149,7 +149,7 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
 DATA ACCESS
 ===============================================================================================
 Read-only, always. ``MarketStore.open()`` runs its schema DDL and is therefore a WRITER, so this
-script does what ``scripts/backtest_hi52.py`` and ``scripts/g1_entity_sample.py`` do: attaches DuckDB
+script does what ``scripts/backtest_hi52.py`` and ``scripts/entity_resolution_sample.py`` do: attaches DuckDB
 directly with ``read_only=True`` and issues its own SELECTs against ``bars_1d`` / ``corp_actions`` /
 ``universe_daily``. DuckDB still takes a file lock, so the engine service must be idle/stopped; if the
 file is missing, locked or otherwise unopenable the script REFUSES with an explicit message and exit
@@ -277,7 +277,7 @@ DECISION_TIE = "neither (exact tie on the decision metric)"
 #: A tightening of how a cell is LABELLED — it can only withhold a "promotable", never grant one — so
 #: it changes no registered selection and adds no trial.
 REPORTING_RULE_AMENDMENT = (
-    "REPORTING RULE (2026-09-12 amendment to the R1 registration; a TIGHTENING of how a result is "
+    "REPORTING RULE (2026-09-12 amendment to the registration; a TIGHTENING of how a result is "
     "reported, NOT a new selection and NOT a new trial): a variant x horizon is reported PROMOTABLE "
     "only if the CPCV/deflation rule passes AND the geometry is viable at that horizon (median NET > "
     "0, i.e. the TYPICAL trade clears one full round trip). Rationale: the CPCV fold series is a "
@@ -1250,7 +1250,7 @@ def run_study(
         f"{coverage['structural_ex_date_max']} (all kinds: {coverage['rows']} rows): an empty or "
         "short span silently disables it and the measured population then exceeds the one the live "
         "sweep can originate.",
-        "EX-DATE VETO IS NOT STRICTLY-BEFORE: the A12 upcoming-ex skip is handed the complete "
+        "EX-DATE VETO IS NOT STRICTLY-BEFORE: the upcoming-ex skip is handed the complete "
         "historical corp_actions table per symbol, so a signal in 2022 is tested against ex-dates "
         "that may have been DECLARED after it. The declaration date is not stored, so this cannot be "
         "corrected here. It can only REMOVE signals, so the measured population is a subset of what "
@@ -1273,7 +1273,7 @@ def run_study(
         "meta": {
             "script": "scripts/backtest_brk20.py",
             "strategy_id": STRATEGY_ID,
-            "registration": "brk20 entry-mechanism R1 (IMPLEMENTATION_PLAN, pre-registered 2026-09-12)",
+            "registration": "brk20 entry-mechanism (pre-registered 2026-09-12)",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "window": {"start": str(start), "end": str(end)},
             "n_eligible_symbols": len(eligible),
@@ -1414,7 +1414,7 @@ def render_text(doc: dict[str, Any]) -> str:
     out: list[str] = []
     add = out.append
     add("=" * 100)
-    add("brk20 ENTRY-MECHANISM BACKTEST (IMPLEMENTATION_PLAN brk20 entry-mechanism addendum, R1)")
+    add("brk20 ENTRY-MECHANISM BACKTEST")
     add("=" * 100)
     add(f"generated       : {m['generated_at']}")
     add(f"registration    : {m['registration']}")
@@ -1468,7 +1468,7 @@ def render_text(doc: dict[str, Any]) -> str:
     for variant, geo in doc["geometry"].items():
         add(f"[{variant}]  cost floor = {geo['cost_floor_pct']:.4f}%")
         if all(h["n"] == 0 for h in geo["horizons"].values()):
-            add("  no measured trades - GEOMETRY: unknown at every horizon (honest n=0, C9).")
+            add("  no measured trades - GEOMETRY: unknown at every horizon (honest n=0).")
             add("")
             continue
         add("  horizon |     n | median gross % | cost floor % |   margin % | verdict")
@@ -1511,7 +1511,7 @@ def render_text(doc: dict[str, Any]) -> str:
         block = doc["variants"][variant]
         add(f"[{variant}]  measured trades: {block['n_filled']}")
         if not block["n_filled"]:
-            add("  no measured trades - every split cell is empty (honest n=0, C9).")
+            add("  no measured trades - every split cell is empty (honest n=0).")
             add("")
             continue
         add("  cell                      | hor | sig n |     n |  fill% | hit% net | mean gross | med gross |  mean net |   med net")
@@ -1740,7 +1740,7 @@ def render_markdown(doc: dict[str, Any]) -> str:
     d = doc["decision"]
     out: list[str] = []
     add = out.append
-    add("# brk20 entry-mechanism backtest (R1, pre-registered 2026-09-12)")
+    add("# brk20 entry-mechanism backtest (pre-registered 2026-09-12)")
     add("")
     add(f"*Generated {m['generated_at']} — window {m['window']['start']} → {m['window']['end']}, "
         f"{m['n_symbols_with_bars']} of {m['n_eligible_symbols']} eligible symbols, "

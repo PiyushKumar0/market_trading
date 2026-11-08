@@ -229,7 +229,7 @@ def parse_postback(data: dict[str, Any]) -> BrokerUpdate:
     """
     broker_order_id = data.get("order_id")
     if broker_order_id is None or str(broker_order_id).strip() == "":
-        raise ValueError("broker postback without order_id is uncorrelatable (A3, §3.5.1)")
+        raise ValueError("broker postback without order_id is uncorrelatable")
 
     status = " ".join(str(data.get("status", "")).upper().split())
     qty = _int(data.get("quantity"))
@@ -340,7 +340,7 @@ def apply_update(
     if order.broker_order_id is None or upd.broker_order_id != order.broker_order_id:
         raise CorrelationMismatch(
             f"update for broker order {upd.broker_order_id} routed to {order.order_id} "
-            f"(broker_order_id={order.broker_order_id}) — correlate() first, or buffer it (A3)"
+            f"(broker_order_id={order.broker_order_id}) — correlate() first, or buffer it"
         )
     current = order
     payload = dict(upd.raw)

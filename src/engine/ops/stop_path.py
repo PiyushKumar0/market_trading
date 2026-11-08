@@ -74,7 +74,7 @@ def make_stop_handler(
             "stop_forced",
             count=state["count"], signum=signum, since_first_s=round(since_first, 3),
             hint="repeat signal past the grace window — engine exits hard; state stays RUNNING so the "
-            "next boot runs crash recovery (R3 protection is broker-resident)",
+            "next boot runs crash recovery (protection is broker-resident)",
         )
         try:
             logging.shutdown()

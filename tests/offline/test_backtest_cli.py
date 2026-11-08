@@ -201,7 +201,7 @@ def test_no_adjacent_cli_flag_defaults_false_and_parses():
 # ValidationPipeline that runs the promotion rule — a flag parsed but not threaded is the whole risk.
 
 
-def test_margin_floor_days_defaults_to_the_wo3_constant():
+def test_margin_floor_days_defaults_to_the_margin_floor_constant():
     args = bt._build_parser().parse_args(_BASE_ARGV)
     assert args.margin_floor_days == MARGIN_FLOOR_DAYS == 20
 

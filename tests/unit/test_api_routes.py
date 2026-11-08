@@ -185,7 +185,7 @@ def test_unwired_routes_return_stub_shapes() -> None:
 
     params_post = client.post("/config/params", headers=AUTH, json={"name": "orb.vol_mult", "value": 1.5})
     assert params_post.status_code == 200
-    assert params_post.json() == {"ok": True, "applied": False, "note": "phase-0 stub — param store lands later"}
+    assert params_post.json() == {"ok": True, "applied": False, "note": "stub — param store lands later"}
 
     mode_post = client.post("/mode", headers=AUTH, json={"mode": "RECOMMEND"})
     assert mode_post.status_code == 501

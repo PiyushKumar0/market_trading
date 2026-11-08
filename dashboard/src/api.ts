@@ -1,5 +1,5 @@
 /**
- * Bearer-authenticated client for the engine API (R10).
+ * Bearer-authenticated client for the engine API.
  *
  * The page is served BY the engine, so the API base is `window.location.origin`. `mt_api_base` in
  * localStorage overrides it for `npm run dev` (the Vite dev server is on another port). The token
@@ -87,7 +87,7 @@ export function apiPost<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, { method: 'POST', body: JSON.stringify(body) }, WRITE_TIMEOUT_MS)
 }
 
-/** `/ws/live` URL with the bearer token as a query param (R10: header auth is impossible on a WS
+/** `/ws/live` URL with the bearer token as a query param (header auth is impossible on a WS
  *  handshake; the engine's `_ws_authorized` accepts either). */
 export function liveSocketUrl(): string {
   const base = apiBase().replace(/^http/, 'ws')

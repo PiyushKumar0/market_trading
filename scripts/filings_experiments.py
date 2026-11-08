@@ -630,7 +630,7 @@ def render_e1(res: dict) -> str:
     L.append("")
     if res["n_trades_total"] == 0:
         L.append("> NO ORB TRADES for the requested symbols/window -- no evidence either way. "
-                 "Reported honestly (C9); check intraday coverage or widen the window.")
+                 "Reported honestly; check intraday coverage or widen the window.")
         L.append("")
     L.append("## Cohort stats (gross AND net per trade)")
     L.append("")
@@ -642,7 +642,7 @@ def render_e1(res: dict) -> str:
     for label, key in (("A", "A_insider_buy_cluster"), ("B", "B_results_t1_t2"),
                        ("C", "C_unconditioned")):
         if res["cohorts"][key]["n"] == 0:
-            L.append(f"> cohort {label}: honest n=0 -- no ORB trades carried this flag in the window (C9).")
+            L.append(f"> cohort {label}: honest n=0 -- no ORB trades carried this flag in the window.")
     L.append("")
     a = res["cohorts"]["A_insider_buy_cluster"]["mean_gross"]
     b = res["cohorts"]["B_results_t1_t2"]["mean_gross"]
@@ -653,7 +653,7 @@ def render_e1(res: dict) -> str:
     L.append(f"- unconditioned cohort C mean GROSS: {_fmt_pct(c)}%  ;  "
              f"pre-registered unconditioned fade base: {UNCONDITIONED_ORB_BASE_GROSS_PCT:+.4f}%/trade")
     L.append("- Read: a conditioned cohort supports H only if its mean GROSS clears BOTH the empirical "
-             "cohort-C base and the pinned -0.02% base by a margin; reported as found, not massaged (C9).")
+             "cohort-C base and the pinned -0.02% base by a margin; reported as found, not massaged.")
     L.append("")
     return "\n".join(L)
 
@@ -675,7 +675,7 @@ def render_e2(res: dict) -> str:
              "broadcast within 90 calendar days; FAVORABLE = insider-buy cluster; NEUTRAL = neither.")
     L.append("")
     if res["n_trades_total"] == 0:
-        L.append("> NO RSI2 TRADES for the requested symbols/window -- no evidence either way (C9).")
+        L.append("> NO RSI2 TRADES for the requested symbols/window -- no evidence either way.")
         L.append("")
     L.append("## Cohort stats (gross AND net per trade)")
     L.append("")
@@ -686,7 +686,7 @@ def render_e2(res: dict) -> str:
     L.append("")
     for label in ("ADVERSE", "FAVORABLE", "NEUTRAL"):
         if res["cohorts"][label]["n"] == 0:
-            L.append(f"> cohort {label}: honest n=0 -- no RSI2 trades carried this flag in the window (C9).")
+            L.append(f"> cohort {label}: honest n=0 -- no RSI2 trades carried this flag in the window.")
     L.append("")
     adv = res["cohorts"]["ADVERSE"]["hit_rate_net"]
     fav = res["cohorts"]["FAVORABLE"]["hit_rate_net"]
@@ -696,7 +696,7 @@ def render_e2(res: dict) -> str:
     L.append(f"- ADVERSE win rate (net): {_fmt_rate(adv)}  vs  the {RSI2_WIN_BASE * 100:.0f}% champion base")
     L.append(f"- FAVORABLE win rate (net): {_fmt_rate(fav)}  ;  NEUTRAL win rate (net): {_fmt_rate(neu)}")
     L.append("- Read: H holds only if the ADVERSE cohort's win rate sits materially BELOW the 70% base "
-             "(the losing tail concentrating in adverse context); reported as found (C9).")
+             "(the losing tail concentrating in adverse context); reported as found.")
     L.append("")
     return "\n".join(L)
 
@@ -724,7 +724,7 @@ def _render_e3_family(L: list[str], title: str, family: str, buckets: dict) -> N
     L.append(f"## {title}")
     L.append("")
     if not buckets:
-        L.append("> honest n=0 -- no insider_net_buy crossings measured in the window (C9).")
+        L.append("> honest n=0 -- no insider_net_buy crossings measured in the window.")
         L.append("")
         return
     order = _e3_bucket_order(family, buckets)
@@ -760,7 +760,7 @@ def render_e3(res: dict) -> str:
     L.append("")
     if res["n_events"] == 0:
         L.append("> NO insider_net_buy crossings for the requested symbols/window -- no evidence "
-                 "either way. Reported honestly (C9); backfill more history or widen the window.")
+                 "either way. Reported honestly; backfill more history or widen the window.")
         L.append("")
     _render_e3_family(L, "Slice (a) -- by calendar year of entry", "by_year", res["slices"]["by_year"])
     _render_e3_family(L, "Slice (b) -- by dominant person_category (value share)", "by_category",
@@ -791,7 +791,7 @@ def _e3_discriminator_lines(res: dict) -> list[str]:
     lines.append("- T+20 NET mean by liquidity tercile:")
     lines += _t20_net(res["slices"]["by_liquidity"], "by_liquidity")
     lines.append("- Read: the edge is ROBUST only if T+20 net stays positive across every year and "
-                 "category slice; a positive that lives in one year or one category is FRAGILE (C9).")
+                 "category slice; a positive that lives in one year or one category is FRAGILE.")
     return lines
 
 
@@ -823,7 +823,7 @@ def _parse_date(s: str) -> date:
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
-    parser = argparse.ArgumentParser(description="Pre-registered filings experiments E1-E3 (WORKLOG 2026-07-17).")
+    parser = argparse.ArgumentParser(description="Pre-registered filings experiments E1-E3.")
     parser.add_argument("experiment", choices=("e1", "e2", "e3"))
     parser.add_argument("--from", dest="start", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, type=_parse_date, help="YYYY-MM-DD")

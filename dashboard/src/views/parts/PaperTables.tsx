@@ -34,7 +34,7 @@ function Strategy({ id }: { id: string | null }) {
   return id ? <Labelled t={strategyName(id)} /> : <span className="muted">—</span>
 }
 
-// A time-only (D14 exit test) position has no stop or target by design; say so instead of a bare dash.
+// A time-only (paper no-stop exit test) position has no stop or target by design; say so instead of a bare dash.
 const noLevel = (r: PaperPosition) => (r.exit_policy === 'time_only' ? <span className="muted">None (test)</span> : '—')
 
 const POSITION_COLUMNS: Column<PaperPosition>[] = [

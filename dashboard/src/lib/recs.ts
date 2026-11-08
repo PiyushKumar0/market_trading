@@ -24,7 +24,7 @@ export function actionState(row: RecommendationRow, nowMs: number): ActionState 
 }
 
 /** A pending row whose `valid_until` is still ahead: actionable NOW, whichever day delivered it
- *  (normally today: entries expire at today's close since WO-V's withdrawal on 2026-09-23; kept
+ *  (normally today: entries expire at today's close since the next-session entry TTL was withdrawn on 2026-09-23; kept
  *  date-agnostic on purpose). */
 export function isLive(row: RecommendationRow, nowMs: number): boolean {
   const until = row.recommendation?.valid_until

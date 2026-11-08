@@ -50,7 +50,7 @@ def _parse_date(s: str) -> date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="WO-17 pre-registered stop-geometry diagnostic (C-category; owner review only)."
+        description="Pre-registered stop-geometry diagnostic (owner review only)."
     )
     parser.add_argument("--from", dest="start", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, type=_parse_date, help="YYYY-MM-DD")

@@ -203,7 +203,7 @@ class MisLeverageIngest:
             # telegram.CRITICAL_KINDS, so this alert never expires in the outbox.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="MIS leverage file degraded",
-            body=f"{reason}. Universe MIS-eligibility fails closed until refreshed (A8/E5).",
+            body=f"{reason}. Universe MIS-eligibility fails closed until refreshed.",
             severity="warning",
             data={"job_id": "mis_margins", "reason": reason},
         )

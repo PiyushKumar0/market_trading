@@ -12,7 +12,7 @@ import { EmptyState } from '../../ui/Card'
 import { DataTable } from '../../ui/DataTable'
 
 // The engine plots each point as today's starting capital plus that point's P&L, so a capital change
-// leaves no cliff in the curve (design 2026-10-16 §7).
+// leaves no cliff in the curve.
 const EQUITY_COL = "Paper equity at today's starting capital"
 
 const H = 220

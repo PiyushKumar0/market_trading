@@ -375,7 +375,7 @@ def build_portfolio(
 ) -> dict[str, Any]:
     if not _has_column(conn, "positions", "exit_policy"):
         positions: list[dict[str, Any]] = []
-        note = "positions.exit_policy column absent (engine not yet on the C5 schema): no time-only positions"
+        note = "positions.exit_policy column absent (engine not yet on the no-stop schema): no time-only positions"
     else:
         cur = conn.execute(
             "SELECT position_id, symbol, qty, avg_entry, state, close_reason, opened_at, closed_at, "
@@ -571,7 +571,7 @@ def render(doc: dict[str, Any]) -> str:
         p1 = s["look_progress"]["look1"]
         decision = (f"DECISION        : {LABEL_INSUFFICIENT}   "
                     f"(look 1: {p1['eligible']} of the first {p1['of']} fills eligible)")
-    L = [bar, "C5 NO-STOP FORWARD-TEST VERDICT (owner D14: no stop + 20-session time exit)", bar,
+    L = [bar, "NO-STOP FORWARD-TEST VERDICT (owner decision: no stop + 20-session time exit)", bar,
          decision]
     if look1 and look2:
         L.append(f"look 1          : {look1['label']}   (first 20: E={_f(look1['E'])} pp, "
@@ -648,7 +648,7 @@ def render(doc: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="C5 no-stop forward-test verdict (read-only).")
+    ap = argparse.ArgumentParser(description="No-stop forward-test verdict (read-only).")
     ap.add_argument("--state-db", type=Path, default=repo_root() / "data" / "state.db")
     ap.add_argument("--market-db", type=Path, default=None,
                     help="DuckDB snapshot for the counterfactual (never defaults to the live file)")

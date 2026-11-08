@@ -137,12 +137,12 @@ DOCUMENTED_ENTER_RULES: tuple[str, ...] = (
 #: risk-limit ids the gate emits — so a NEW block in ``limits.yaml`` fails until it is either gate-checked or
 #: consciously listed here.
 NOT_GATE_ENFORCED_LIMITS: Mapping[str, str] = {
-    "daily_loss_hard": "ExposureTracker floor ladder + ModeManager.force_downgrade (§7.1/§3.5.3)",
-    "weekly_drawdown": "ExposureTracker.evaluate_floors (§7.1 halt ladder)",
-    "equity_floor_rung": "ExposureTracker.evaluate_floors (§7.1 halt ladder)",
-    "cumulative_floor": "ExposureTracker.evaluate_floors -> KillSwitch (§7.2)",
-    "catalyst_guard": "digest/pre-screen (§3.2.4/§3.2.5) — NEVER in the gate (§2.4 item 4/§9.1)",
-    "max_holding": "OMS square-off scheduler + startup age catch-up (§3.2.8/§2.6)",
+    "daily_loss_hard": "ExposureTracker floor ladder + ModeManager.force_downgrade",
+    "weekly_drawdown": "ExposureTracker.evaluate_floors (halt ladder)",
+    "equity_floor_rung": "ExposureTracker.evaluate_floors (halt ladder)",
+    "cumulative_floor": "ExposureTracker.evaluate_floors -> KillSwitch",
+    "catalyst_guard": "digest/pre-screen — NEVER in the gate",
+    "max_holding": "OMS square-off scheduler + startup age catch-up",
 }
 
 #: Rules whose breach may be cured by SHRINKING the quantity rather than rejecting (the limit's
@@ -161,7 +161,7 @@ SHRINKABLE_RULES: frozenset[str] = frozenset(
 #: unverifiable and the trade cannot be shown to clear costs — UNLESS the strategy carries a
 #: pre-registered measured edge (see :data:`_NO_TARGET_MEASURED_EDGE` and ``RiskGate``'s
 #: ``strategy_expected_edge_pct``).
-_NO_TARGET = "no target_price — expected edge unverifiable (C3)"
+_NO_TARGET = "no target_price — expected edge unverifiable"
 
 #: The narrow, deliberate exception to :data:`_NO_TARGET`, added 2026-08-17 for the ``ins`` leg.
 #:
@@ -180,7 +180,7 @@ _NO_TARGET = "no target_price — expected edge unverifiable (C3)"
 #:   * It does not weaken the check: ``edge_multiple = edge / breakeven >= edge_multiple_min`` is
 #:     evaluated exactly as before, at the post-shrink size, against the same shipped cost surface.
 #:   * A strategy with NO registered edge and no target still hard-fails, unchanged.
-_NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registered measured edge (C3)"
+_NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registered measured edge"
 
 #: Sentinel for the SHADOW reject (cost gate): the strategy is registered in ``no_edge_shadow_strategies``,
 #: so the cost gate refuses it unconditionally — whatever ``target_price`` the proposal carries.
@@ -200,7 +200,7 @@ _NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registe
 #: path to approval), and no prompt, model output or upstream layer can bypass it. Promoting a
 #: strategy out of the shadow means removing it from this set at the owner promotion gate — a deliberate,
 #: reviewable edit, which is exactly the ceremony the promotion deserves.
-_SHADOW_NO_EDGE = "shadow strategy — no validated edge exists; C3 cannot be satisfied at any target"
+_SHADOW_NO_EDGE = "shadow strategy — no validated edge exists; the cost gate cannot be satisfied at any target"
 
 _HUNDRED = Decimal(100)
 _UNCLASSIFIED = "UNCLASSIFIED"
@@ -570,14 +570,14 @@ class RiskGate:
             "mode_risk_state", ok,
             f"mode={ctx.mode.value} risk_state={ctx.risk_state.value}",
             "mode in (AUTO, RECOMMEND) and risk_state == NORMAL",
-            "entries permitted" if ok else "entries blocked by the mode/risk-state machine (§3.5.3)",
+            "entries permitted" if ok else "entries blocked by the mode/risk-state machine",
         )
 
     def _rule_kill_state(self, led: _Ledger, ctx: GateContext) -> None:
         led.add(
             "kill_state", not ctx.killed,
             "KILLED" if ctx.killed else "not killed",
-            "kill switch not engaged (R10)",
+            "kill switch not engaged",
             "owner two-step reset required" if ctx.killed else "clear",
         )
 
@@ -619,13 +619,13 @@ class RiskGate:
     def _rule_analyst_confidence(self, led: _Ledger, action: EnterAction, table: LimitTable) -> None:
         floor = table.analyst_confidence_min
         if floor is None:
-            led.add("analyst_confidence_min", True, "n/a", "no floor configured (review §9 #3)", "n/a")
+            led.add("analyst_confidence_min", True, "n/a", "no floor configured", "n/a")
             return
         ok = action.confidence >= floor
         led.add(
             "analyst_confidence_min", ok,
             f"confidence={action.confidence}",
-            f">= {floor} (owner-only, §6.3)",
+            f">= {floor} (owner-only)",
             f"{action.confidence - floor:+.3f}",
         )
 
@@ -660,7 +660,7 @@ class RiskGate:
         notes: list[str] = [f"now={now_t}"]
         if nt.no_entry_on_results_day and ctx.results_day_today:
             ok = False
-            notes.append("results day T (T+1 remains legal, O13)")
+            notes.append("results day T (T+1 remains legal, owner decision)")
         expiry_cut = nt.nifty50_no_new_mis_after_on_expiry
         if ctx.expiry_day and ctx.is_nifty50 and intraday and now_t > expiry_cut:
             ok = False
@@ -702,8 +702,8 @@ class RiskGate:
             ok = ok and ctx.mis_candidate and ctx.is_fno
         led.add(
             "instrument_eligible", ok, " ".join(parts),
-            "in today's universe; MIS also requires mis_candidate + F&O list (C7 dynamic band)",
-            "eligible" if ok else "ineligible instrument (A8/C7)",
+            "in today's universe; MIS also requires mis_candidate + F&O list (dynamic band)",
+            "eligible" if ok else "ineligible instrument",
         )
 
     def _rule_surveillance(self, led: _Ledger, ctx: GateContext) -> None:
@@ -711,7 +711,7 @@ class RiskGate:
         ok = not flag
         led.add(
             "surveillance", ok, flag or "none",
-            "no GSM/ASM/T2T/ESM flag (A8)",
+            "no GSM/ASM/T2T/ESM flag",
             "clear" if ok else f"flagged: {flag}",
         )
 
@@ -737,13 +737,13 @@ class RiskGate:
         ok = ctx.deployed_capital + new_deployed <= cap
         basis = (
             f"@ {_q(per_unit)} " + ("notional (CNC cash)" if product == "CNC" else (
-                "FULL notional — per-stock MIS margin accounting lands with the Phase-3 OMS"
+                "FULL notional — per-stock MIS margin accounting lands with the live order path"
             ))
         )
         led.add(
             "capital_cap", ok,
             f"deployed {_q(ctx.deployed_capital)} + new {_q(new_deployed)} [{basis}]",
-            f"<= {_q(cap)} (O1)",
+            f"<= {_q(cap)}",
             f"{_q(headroom)} INR ⇒ max qty {qty_max}",
             shrinkable=True,
         )
@@ -769,7 +769,7 @@ class RiskGate:
             gap = _dec(ptr.overnight_gap_mult)
             unit = gap * unit_risk
             basis = (f"{gap}x stop distance from {_q(risk_ref)} "
-                     "(daily-band leg unavailable in Phase 2 — gap mult only)")
+                     "(daily-band leg unavailable in RECOMMEND — gap mult only)")
         qty_max = _floor_div(budget, unit)
         led.cap("per_trade_risk", qty_max)
         at_risk = Decimal(qty) * unit
@@ -806,7 +806,7 @@ class RiskGate:
             "max_new_trades_day", ok, str(ctx.entry_recs_today),
             # RECOMMEND-mode semantics: in RECOMMEND no position is opened, so the churn cap counts ENTRY
             # RECOMMENDATIONS issued today rather than positions opened.
-            f"< {cap} entry recommendations/day (C3 churn protection)",
+            f"< {cap} entry recommendations/day (churn protection)",
             f"{cap - ctx.entry_recs_today} left",
         )
 
@@ -828,7 +828,7 @@ class RiskGate:
             "max_open_positions", ok,
             f"total {ctx.open_total}+{pending} pending+1 = {total_after}; "
             f"{'MIS' if intraday else 'CNC'} {leg_open}+{pending}+1 = {leg_after}"
-            + (f"; {exiting} exiting excluded (O16)" if exiting else ""),
+            + (f"; {exiting} exiting excluded (owner decision)" if exiting else ""),
             f"total <= {mop.total}; MIS <= {mop.max_mis}; CNC <= {mop.max_cnc}",
             f"{mop.total - total_after} total / {leg_cap - leg_after} leg",
         )
@@ -863,7 +863,7 @@ class RiskGate:
             led.hard_reasons.append(f"per_stock_exposure: {sym} already held or pending")
         led.checks["per_stock_exposure"] = CheckResult(
             rule_id="per_stock_exposure", passed=ok, value="; ".join(notes),
-            limit=f"{pse.max_positions_per_symbol} position/symbol; CNC notional <= {_q(cap)} (C4)",
+            limit=f"{pse.max_positions_per_symbol} position/symbol; CNC notional <= {_q(cap)}",
             headroom="clear" if ok else "per-symbol exposure breached",
         )
         if not ok and not held:
@@ -881,7 +881,7 @@ class RiskGate:
         ok = count < cap
         led.add(
             "per_sector_exposure", ok, f"{sector}: {count} open",
-            f"< {cap} ({_UNCLASSIFIED} cap {pse.unclassified_cap}; sector_map, §4.4)",
+            f"< {cap} ({_UNCLASSIFIED} cap {pse.unclassified_cap}; sector_map)",
             f"{cap - count} slot(s)",
         )
 
@@ -896,7 +896,7 @@ class RiskGate:
         )
         led.add(
             "co_movement_cap", ok, value,
-            f"<= {corr_max} vs same-sector or unclassified positions (R1 concentration guard)",
+            f"<= {corr_max} vs same-sector or unclassified positions (concentration guard)",
             "clear" if ok else "correlated with an open position in its sector",
         )
 
@@ -935,7 +935,7 @@ class RiskGate:
             f"symbol {sym_age if sym_age is not None else 'no feed'}s / "
             f"index {idx_age if idx_age is not None else 'no feed'}s",
             f"both <= {mx}s (entry-time, per symbol + index)",
-            "fresh" if ok else "no feed / stale feed ⇒ no entry (never blocks exits, R3)",
+            "fresh" if ok else "no feed / stale feed ⇒ no entry (never blocks exits)",
         )
 
     def _rule_readiness(self, led: _Ledger, ctx: GateContext, intraday: bool) -> None:
@@ -948,7 +948,7 @@ class RiskGate:
         warm = ctx.warmup_ready and matched
         led.add("warmup_ready", warm,
                 f"{ctx.warmup_ready} ({ctx.warmup_class or 'unclassified'} class)",
-                f"contiguous bars cover the {want}-class feature lookbacks (§2.6)",
+                f"contiguous bars cover the {want}-class feature lookbacks",
                 "warm" if warm
                 else (f"{want} coverage short ⇒ no {want} entry" if matched
                       else f"context judged the {ctx.warmup_class} class — no {want} answer"))
@@ -956,7 +956,7 @@ class RiskGate:
                 "NIFTY 50 + India VIX history present for the regime lookbacks",
                 "ready" if ctx.regime_ready else "regime-dependent entries FROZEN")
         led.add("clock_skew", ctx.clock_skew_ok, str(ctx.clock_skew_ok),
-                "NTP skew within the limit (R6); unverifiable ⇒ not ok",
+                "NTP skew within the limit; unverifiable ⇒ not ok",
                 "in sync" if ctx.clock_skew_ok else "no entries until resync")
 
     def _rule_entry_sanity_band(
@@ -990,17 +990,17 @@ class RiskGate:
         # needs the exchange band feed, which is not built yet — reported as an explicit n/a so the
         # audit never reads as a verified pass.
         led.add(
-            "circuit_proximity", True, "n/a (band data Phase 3)",
+            "circuit_proximity", True, "n/a (band data not built)",
             f"LTP outside {cp.band_proximity_pct}% of the band edge; "
             f"MIS requires F&O (checked by instrument_eligible)",
             "band feed unavailable — NOT a verified pass",
         )
 
     def _rule_order_surface(self, led: _Ledger) -> None:
-        na = "n/a (no API orders in RECOMMEND — OMS Phase 3)"
+        na = "n/a (no API orders in RECOMMEND — OMS not built)"
         led.add("order_rate", True, na, "1 order-API call/s sustained, burst 2; 70 entry calls/day",
                 "not applicable in this phase")
-        led.add("order_modifications", True, na, "<= 20 modifications per order (A2)",
+        led.add("order_modifications", True, na, "<= 20 modifications per order",
                 "not applicable in this phase")
 
     def _rule_margin_buffer(
@@ -1010,7 +1010,7 @@ class RiskGate:
         ratio = _dec(lim.margin_buffer.min_ratio)
         if ctx.available_margin is None:
             led.add("margin_buffer", True, "n/a (RECOMMEND: no API order)",
-                    f"available >= {ratio} x requirement (C6)", "not applicable in this phase")
+                    f"available >= {ratio} x requirement", "not applicable in this phase")
             return
         if notional_ref is None or approved <= 0:
             led.add("margin_buffer", False, "unpriceable / nothing approvable",
@@ -1030,7 +1030,7 @@ class RiskGate:
         led.add(
             "margin_buffer", ok,
             f"available {_q(ctx.available_margin)} vs required {_q(required)} @ qty {approved}",
-            f">= {ratio} x requirement = {_q(need)} (C6)",
+            f">= {ratio} x requirement = {_q(need)}",
             f"{_q(ctx.available_margin - need)} INR",
         )
 
@@ -1044,7 +1044,7 @@ class RiskGate:
         Priced on the sizing-reference risk basis — the edge that survives at the price the order can actually
         be filled at, not the one the stated entry advertises."""
         need = self._costs.edge_multiple_min
-        limit = f"expected edge >= {need} x breakeven (C2/C3)"
+        limit = f"expected edge >= {need} x breakeven"
         # SHADOW strategies are refused FIRST and unconditionally — before target_price is read at
         # all, so an analyst-supplied target cannot buy one an edge basis (:data:`_SHADOW_NO_EDGE`).
         # This is the property that keeps a shadow's signals a measurement and never a recommendation.
@@ -1093,7 +1093,7 @@ class RiskGate:
             rule_id="position_known", passed=known,
             value=f"position_id={action.position_id}",
             limit="must reference a known open position",
-            headroom="exits are risk-reducing — NEVER rejected for a §7.1 limit (R3)",
+            headroom="exits are risk-reducing — NEVER rejected for a risk limit",
         )]
         verdict: Verdict = "approve" if known else "reject"
         reasons = [] if known else [f"unknown position {action.position_id}"]
@@ -1118,7 +1118,7 @@ class RiskGate:
         checks.append(CheckResult(
             rule_id="stop_direction", passed=bool(tightens),
             value=f"{side}: {current if current is not None else 'unknown'} -> {action.new_stop}",
-            limit="tighten (toward entry) is auto-approved; widen needs the owner (R1)",
+            limit="tighten (toward entry) is auto-approved; widen needs the owner",
             headroom="tightening" if tightens else "widening / unverifiable ⇒ owner approval",
         ))
         reasons = [] if tightens else ["stop widens or current stop unknown — owner approval required"]
@@ -1144,7 +1144,7 @@ class RiskGate:
             rule_id="target_direction", passed=tightens,
             value=f"{side}: {current if current is not None else 'none'} -> "
                   f"{action.new_target if action.new_target is not None else 'removed'}",
-            limit="tighten/remove is auto-approved; extend needs the owner (R1)",
+            limit="tighten/remove is auto-approved; extend needs the owner",
             headroom="tightening/removal" if tightens else "extension ⇒ owner approval",
         ))
         reasons = [] if tightens else ["target extends — owner approval required"]
@@ -1158,7 +1158,7 @@ class RiskGate:
             CheckResult(
                 rule_id="order_not_protective", passed=not protective,
                 value=f"order_id={action.order_id} protective={protective}",
-                limit="protective orders are NEVER cancellable by proposal (R1/R3)",
+                limit="protective orders are NEVER cancellable by proposal",
                 headroom="stops move via modify-stop; only Tier 3 may cancel-and-replace them",
             ),
             CheckResult(

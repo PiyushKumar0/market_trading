@@ -1,4 +1,4 @@
-/** Inline SVG icons drawn for this dashboard (no icon font, no CDN — R10). Decorative: the text beside
+/** Inline SVG icons drawn for this dashboard (no icon font, no CDN). Decorative: the text beside
  *  an icon always carries the meaning, so every icon is `aria-hidden`. */
 import type { ReactNode } from 'react'
 

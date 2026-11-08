@@ -238,7 +238,7 @@ class R3:
 
 
 class Bridge:
-    """The harness's broker seam: each print reaches the real feed first, then the paper bridge, then R3."""
+    """The harness's broker seam: each print reaches the real feed first, then the paper bridge, then the protection and exit managers."""
 
     def __init__(self, feed: Feed, runtime: PaperRuntime | None, r3: R3) -> None:
         self._feed = feed
@@ -262,7 +262,7 @@ class Bridge:
 
 
 class TapBus(EventBus):
-    """The engine bus, handing every publish to the harness collector and R3 first."""
+    """The engine bus, handing every publish to the harness collector and the protection and exit managers first."""
 
     def __init__(self, *taps: Callable[[str, Any], None]) -> None:
         super().__init__()

@@ -217,7 +217,7 @@ class PlatformOrder(BaseModel):
     @classmethod
     def _tz_aware(cls, v: datetime | None) -> datetime | None:
         if v is not None and v.tzinfo is None:
-            raise ValueError("order timestamps must be tz-aware IST (naive datetimes are a bug, §3.2)")
+            raise ValueError("order timestamps must be tz-aware IST (naive datetimes are a bug)")
         return v
 
 
@@ -245,7 +245,7 @@ class OrderEvent(BaseModel):
     @classmethod
     def _tz_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("OrderEvent.at must be tz-aware IST (§3.2)")
+            raise ValueError("OrderEvent.at must be tz-aware IST")
         return v
 
 
@@ -348,9 +348,9 @@ def _apply_edge(
     """
     frm = order.state
     if frm in TERMINAL_ORDER_STATES:
-        raise IllegalTransition(f"{order.order_id}: {frm} is terminal; refused move to {to_state} (§3.5.1)")
+        raise IllegalTransition(f"{order.order_id}: {frm} is terminal; refused move to {to_state}")
     if to_state not in table.get(frm, frozenset()):
-        raise IllegalTransition(f"{order.order_id}: {frm} -> {to_state} is not a §3.5.1 edge")
+        raise IllegalTransition(f"{order.order_id}: {frm} -> {to_state} is not an order-state-machine edge")
 
     new_fields = dict(fields or {})
     unknown = set(new_fields) - AMENDABLE_FIELDS
@@ -371,7 +371,7 @@ def _apply_edge(
         new_filled = eff_qty
     if new_filled < order.filled_qty:
         raise FillQuantityError(
-            f"{order.order_id}: filled_qty {order.filled_qty} -> {new_filled} regresses (§9.2)"
+            f"{order.order_id}: filled_qty {order.filled_qty} -> {new_filled} regresses"
         )
     if to_state is OrderState.PARTIALLY_FILLED and new_filled <= 0:
         raise FillQuantityError(
@@ -387,12 +387,12 @@ def _apply_edge(
     )
 
     if modifications_delta < 0:
-        raise ValueError("modifications_delta must be >= 0 (the A2 counter never decreases)")
+        raise ValueError("modifications_delta must be >= 0 (the modification counter never decreases)")
     mods = order.modifications + modifications_delta
     if mods > MODIFICATION_CAP:
         raise ModificationCapExceeded(
             f"{order.order_id}: modification {mods} exceeds the self-cap {MODIFICATION_CAP} "
-            f"(A2; cancel-and-replace past {MODIFY_REPLACE_THRESHOLD}, §3.2.8)"
+            f"(cancel-and-replace past {MODIFY_REPLACE_THRESHOLD})"
         )
 
     updates: dict[str, Any] = {
@@ -546,7 +546,7 @@ def amend(
             raise ValueError(f"{order.order_id}: amend qty must be positive, got {qty}")
         if qty < order.filled_qty:
             raise FillQuantityError(
-                f"{order.order_id}: amend qty {qty} is below filled_qty {order.filled_qty} (§9.2)"
+                f"{order.order_id}: amend qty {qty} is below filled_qty {order.filled_qty}"
             )
         fields["qty"] = qty
     if price is not None:
@@ -556,7 +556,7 @@ def amend(
     if not fields:
         raise ValueError(
             f"{order.order_id}: amend needs at least one of qty/price/trigger_price "
-            f"(a no-change modify still spends the A2 budget)"
+            f"(a no-change modify still spends the modification budget)"
         )
     # The frozen row keeps only the NEW values, so the pre-amend ones are recorded on the amend's own
     # audit row (2026-09-10 round-3 review). That is where :func:`modify_rejected` reads them back
@@ -641,13 +641,13 @@ def correlate(order: PlatformOrder, broker_order_id: str) -> PlatformOrder:
         # the frame itself still belongs in record_noop, which IS allowed on a terminal row.
         raise IllegalTransition(
             f"{order.order_id}: refusing to correlate broker order {bid} onto a {order.state} order "
-            f"— a terminal row is never written again (§3.5.1)"
+            f"— a terminal row is never written again"
         )
     if order.broker_order_id is None:
         return order.model_copy(update={"broker_order_id": bid})
     if order.broker_order_id != bid:
         raise CorrelationMismatch(
             f"{order.order_id}: already correlated to broker order {order.broker_order_id}; "
-            f"refusing to re-point it at {bid} (A3)"
+            f"refusing to re-point it at {bid}"
         )
     return order

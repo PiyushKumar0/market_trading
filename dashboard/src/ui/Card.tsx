@@ -1,5 +1,5 @@
 /**
- * The page's one container, in three tiers (design spec §6):
+ * The page's one container, in three tiers:
  *  - primary: raised surface, border, shadow — things you act on or watch;
  *  - secondary: flat, quieter — reference material;
  *  - simulated: paper money — dashed violet border and a "Simulated" tag, so it is never mistaken

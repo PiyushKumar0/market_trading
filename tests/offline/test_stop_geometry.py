@@ -650,7 +650,7 @@ def test_report_carries_the_banner_the_verbatim_null_hypothesis_and_the_owner_an
     assert report.fill_mechanics == "next_bar_open"
 
     md = render_markdown(report)
-    assert md.startswith("# WO-17 diagnostic")
+    assert md.startswith("# Stop-geometry diagnostic")
     assert BANNER in md
     assert NULL_HYPOTHESIS in md
     assert "DODGED-WINNER FRACTION" in md

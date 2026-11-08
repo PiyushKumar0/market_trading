@@ -175,7 +175,7 @@ class OrderManager:
         on_reject: OnReject | None = None,
     ) -> None:
         if not isinstance(broker, PaperBroker):
-            raise TypeError(f"OrderManager takes a PaperBroker only, got {type(broker).__name__} (D8)")
+            raise TypeError(f"OrderManager takes a PaperBroker only, got {type(broker).__name__}")
         if broker.topic != PAPER_ORDER_UPDATE_TOPIC:
             raise ValueError(f"the paper broker publishes on {broker.topic!r}, not {PAPER_ORDER_UPDATE_TOPIC!r}")
         self._conn = conn
@@ -305,7 +305,7 @@ class OrderManager:
         if not isinstance(proposal, EnterAction):
             raise SubmitRefused(f"paper submits entries only, got {type(proposal).__name__}")
         if proposal.style == "intraday":
-            raise SubmitRefused("MIS is out of paper scope (plan §1.3)")
+            raise SubmitRefused("MIS is out of paper scope")
         if proposal.side != "BUY":
             raise SubmitRefused("paper CNC entries are BUY only")
         if proposal.entry_type == "LIMIT" and (proposal.entry_price is None or proposal.entry_price <= 0):

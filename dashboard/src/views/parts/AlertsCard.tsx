@@ -1,4 +1,4 @@
-/** "Needs attention": every active alert as icon + plain title + what to do, worst first (spec §5). */
+/** "Needs attention": every active alert as icon + plain title + what to do, worst first. */
 import type { Alert, Level, TabId } from '../../lib/alerts.ts'
 import { Hint } from '../../ui/Hint'
 import { Icon } from '../../ui/Icon'

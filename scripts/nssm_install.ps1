@@ -164,7 +164,7 @@ function Resolve-Nssm {
         return $cmd.Source
     }
 
-    throw "nssm.exe not found. Pass -NssmPath C:\path\to\nssm.exe or add NSSM to PATH. (E7: install NSSM first.)"
+    throw "nssm.exe not found. Pass -NssmPath C:\path\to\nssm.exe or add NSSM to PATH. (Install NSSM first.)"
 }
 
 function Test-ServiceExists {
@@ -193,7 +193,7 @@ function Invoke-Nssm {
 function Install-Service {
     param([string]$Nssm)
 
-    Write-Host "== install '$ServiceName' (E7/D11; §2.2/§2.6/§10.7) =="
+    Write-Host "== install '$ServiceName' =="
     Write-Host "    RepoRoot      : $RepoRoot"
     Write-Host "    Application   : $PythonExe"
     Write-Host "    AppParameters : $AppParameters"
@@ -234,7 +234,7 @@ function Install-Service {
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppParameters', $AppParameters)
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppDirectory',  $RepoRoot)
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'DisplayName',   'MT Engine (AI trading platform)')
-    Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'Description',   'Single-user AI trading engine (NSE/Kite). Manual/demand start per §2.6; secrets via DPAPI per D11.')
+    Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'Description',   'Single-user AI trading engine (NSE/Kite). Manual/demand start; secrets via DPAPI.')
 
     # (1) MANUAL / DEMAND start -- never auto.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'Start', 'SERVICE_DEMAND_START')
@@ -276,7 +276,7 @@ function Install-Service {
         $plain = $null
     } else {
         Write-Warning ("-ServiceUser not given: service stays on LocalSystem, which CANNOT decrypt " +
-                       "the owner's DPAPI secrets (D11). Pass -ServiceUser '.\<owner-account>' or run: " +
+                       "the owner's DPAPI secrets. Pass -ServiceUser '.\<owner-account>' or run: " +
                        "nssm set $ServiceName ObjectName '.\<owner-account>' <password>")
     }
 
@@ -300,9 +300,9 @@ function Install-Service {
     # ----------------------------------------------------------------------------------------------
 
     Write-Host ""
-    Write-Host "Installed/updated '$ServiceName'. It will NOT auto-start (manual/demand, §2.6)."
+    Write-Host "Installed/updated '$ServiceName'. It will NOT auto-start (manual/demand)."
     Write-Host "Start an active period with:  .\nssm_install.ps1 -Action start"
-    Write-Host "or let scripts/schedule_tasks.ps1 wake the PC + start it for each active period (§10.7)."
+    Write-Host "or let scripts/schedule_tasks.ps1 wake the PC + start it for each active period."
 }
 
 function Remove-Service {
@@ -329,18 +329,18 @@ function Remove-Service {
 function Start-Engine {
     param([string]$Nssm)
 
-    Write-Host "== start '$ServiceName' (begin an active period, §2.6) =="
+    Write-Host "== start '$ServiceName' (begin an active period) =="
     if (-not (Test-ServiceExists -Name $ServiceName)) {
         throw "Service '$ServiceName' is not installed. Run: .\nssm_install.ps1 -Action install -Confirm"
     }
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('start', $ServiceName)
-    Write-Host "Started. The engine runs the §2.6 every-startup reconcile + catch-up and sends a STARTUP_REPORT."
+    Write-Host "Started. The engine runs the every-startup reconcile + catch-up and sends a STARTUP_REPORT."
 }
 
 function Stop-Engine {
     param([string]$Nssm)
 
-    Write-Host "== stop '$ServiceName' (planned clean stop, §10.8) =="
+    Write-Host "== stop '$ServiceName' (planned clean stop) =="
     if (-not (Test-ServiceExists -Name $ServiceName)) {
         Write-Host "    Service '$ServiceName' is not installed. Nothing to stop."
         return
@@ -348,7 +348,7 @@ function Stop-Engine {
     # A clean `nssm stop` lets the engine run its shutdown guard (flatten/verify protection,
     # snapshot backup if due) and exit 0 -> AppExit 0 Exit -> NOT auto-restarted.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('stop', $ServiceName)
-    Write-Host "Stopped cleanly. Being off between active periods is NORMAL -- no auto-restart (§2.6)."
+    Write-Host "Stopped cleanly. Being off between active periods is NORMAL -- no auto-restart."
 }
 
 function Show-Status {
@@ -362,7 +362,7 @@ function Show-Status {
 
     $svc = Get-Service -Name $ServiceName
     Write-Host ("    State        : {0}" -f $svc.Status)
-    Write-Host ("    StartType    : {0}  (expected: Manual / Demand per §2.6)" -f $svc.StartType)
+    Write-Host ("    StartType    : {0}  (expected: Manual / Demand)" -f $svc.StartType)
 
     # NSSM's own view of the key program settings (read-only `get`).
     foreach ($key in @('Application', 'AppParameters', 'AppDirectory', 'Start', 'AppExit', 'AppThrottle', 'AppRestartDelay', 'AppStopMethodConsole', 'AppStdout', 'AppStderr')) {

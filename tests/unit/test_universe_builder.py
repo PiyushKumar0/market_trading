@@ -164,7 +164,7 @@ async def test_universe_rule_every_exclusion_reason(tmp_path, store, clock):
 
     assert universe.symbols == ("RELIANCE", "TCS")
     assert universe.eligible == ("RELIANCE", "TCS")
-    assert universe.mis_candidates == ("RELIANCE",)    # C7: TCS is not F&O-listed
+    assert universe.mis_candidates == ("RELIANCE",)    # TCS is not F&O-listed
     assert universe.index_source == "download"
     assert universe.degraded is False
     assert universe.exclusions == {

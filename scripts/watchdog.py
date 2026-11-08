@@ -290,7 +290,7 @@ def _engine_down_text(decision: Decision, now: datetime) -> str:
     return (
         f"🚨 ENGINE_DOWN(reason={decision.down_reason}) — engine last alive {since} "
         f"(~{downtime_min} min ago). Open positions remain broker-protected (SL-M/GTT rest at the "
-        f"exchange, R3).{remediation} Runbook: §10.4 case 1/2."
+        f"exchange).{remediation}"
     )
 
 
@@ -299,7 +299,7 @@ def _missed_start_text(start_dt: datetime, cfg: WatchdogConfig, now: datetime) -
         f"⚠️ SCHEDULED_START_MISSED — expected active-period start {start_dt.strftime('%H:%M')} on "
         f"{start_dt.date().isoformat()} did not occur within {int(cfg.start_grace_s)}s "
         f"(now {now.strftime('%H:%M')}). Check the Scheduled Task / PC power state; an open MIS "
-        f"rides to the broker 15:25 backstop (§10.4 case 19)."
+        f"rides to the broker 15:25 backstop."
     )
 
 
@@ -417,7 +417,7 @@ def make_telegram_sender(token: str, chat_id: int, timeout_s: float = 10.0) -> S
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="mt-engine out-of-band watchdog (§2.2) — one tick per run")
+    parser = argparse.ArgumentParser(description="mt-engine out-of-band watchdog — one tick per run")
     parser.add_argument("--config-dir", default=None, help="config dir override (default: repo config/)")
     parser.add_argument("--dry-run", action="store_true", help="decide + print, but never send or kill")
     args = parser.parse_args(argv)

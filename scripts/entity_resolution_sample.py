@@ -9,8 +9,8 @@ MUST run while the engine is OFF — the market store is single-writer (COMMANDS
 script opens it read-only, which still conflicts with a live writer.
 
 Usage (engine stopped):
-    uv run python scripts/g1_entity_sample.py            # writes data/reports/g1_entity_sample_<ts>.md
-    uv run python scripts/g1_entity_sample.py --seed 7   # a different (still reproducible) draw
+    uv run python scripts/entity_resolution_sample.py            # writes data/reports/entity_resolution_sample_<ts>.md
+    uv run python scripts/entity_resolution_sample.py --seed 7   # a different (still reproducible) draw
 """
 
 from __future__ import annotations
@@ -99,13 +99,13 @@ def main() -> int:
     total = len(resolved_s) + len(no_match_s) + len(unresolved_s)
 
     ts = clock.now().strftime("%Y%m%dT%H%M%S")
-    out_path = Path("data/reports") / f"g1_entity_sample_{ts}.md"
+    out_path = Path("data/reports") / f"entity_resolution_sample_{ts}.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines = [
-        f"# G1 entity-resolution precision sample — {clock.now():%Y-%m-%d} (seed {args.seed}, n={total})",
+        f"# Entity-resolution precision sample — {clock.now():%Y-%m-%d} (seed {args.seed}, n={total})",
         "",
-        "§8.2 gate check: mark any row whose resolver verdict is WRONG. Pass bar: ≥95% correct",
+        "Gate check: mark any row whose resolver verdict is WRONG. Pass bar: ≥95% correct",
         "(resolved symbols genuinely the company in the headline; ambiguous names correctly UNmatched).",
         "Reply with the row numbers that are wrong (or 'all correct').",
         "",

@@ -160,14 +160,14 @@ def main(argv: list[str] | None = None) -> int:
             raw = resp.text
         except httpx.HTTPError as exc:
             print(f"ERROR: fetch failed for {args.url}: {type(exc).__name__}: {exc}")
-            print("Best-effort scrape aborted -- verify https://zerodha.com/charges by hand (C2).")
+            print("Best-effort scrape aborted -- verify https://zerodha.com/charges by hand.")
             return 1
         source = args.url
 
     found, evidence = scrape_rates(_strip_html(raw))
     if not found:
         print(f"ERROR: no charge classes recognized on {source} -- page structure changed.")
-        print("Update scripts/rescrape_costs.py patterns and verify the page by hand (C2).")
+        print("Update scripts/rescrape_costs.py patterns and verify the page by hand.")
         return 2
 
     print(f"# costs.yaml diff proposal -- scraped from {source}")

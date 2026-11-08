@@ -1,7 +1,7 @@
 /**
  * Recommendations — the full ledger (latest 100 deliveries), split by the IST day it was delivered on
  * (owner directive 2026-09-08): today's day starts open, earlier days start folded — EXCEPT a day still
- * holding a LIVE recommendation, which starts open too (normally today's, since WO-V's next-session
+ * holding a LIVE recommendation, which starts open too (normally today's, since the next-session
  * entry TTL was withdrawn 2026-09-23; kept generic so an actionable earlier-day row still opens).
  */
 import { istDay, todayIst } from '../lib/format.ts'

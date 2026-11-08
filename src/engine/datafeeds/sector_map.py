@@ -355,7 +355,7 @@ class SectorMapJob:
                 await self._alert(
                     title="Sector-map job failed",
                     body=f"Weekly sector_map/theme_map refresh failed: {reason}. Previous snapshot "
-                    "remains the latest (per_sector_exposure keeps last week's map, R1/E5).",
+                    "remains the latest (per_sector_exposure keeps last week's map).",
                     severity="critical",
                     data={"job_id": "sector_map", "d": d.isoformat(), "reason": reason},
                 )
@@ -397,7 +397,7 @@ class SectorMapJob:
                 await self._alert(
                     title="Sector map has NO data — snapshot skipped",
                     body="Every sectoral-index source failed and no frozen fallback exists. The "
-                    "previous sector_map snapshot remains the latest (R1/E5).",
+                    "previous sector_map snapshot remains the latest.",
                     severity="critical",
                     data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
                 )
@@ -441,7 +441,7 @@ class SectorMapJob:
                 await self._alert(
                     title="Sector map degraded — frozen copies reused",
                     body=f"Sectoral-index source(s) failed: {', '.join(degraded)}. Cached constituent "
-                    "lists reused where available; membership may be stale (E5).",
+                    "lists reused where available; membership may be stale.",
                     severity="warning",
                     data={"job_id": "sector_map", "d": d.isoformat(), "degraded_sources": degraded},
                 )
@@ -480,7 +480,7 @@ class SectorMapJob:
             await self._alert(
                 title="Theme-map seed unreadable",
                 body=f"config/themes.yaml could not be loaded ({reason}). Existing theme_map rows "
-                "remain in force (E5).",
+                "remain in force.",
                 severity="warning",
                 data={"job_id": "sector_map", "reason": reason},
             )
@@ -511,7 +511,7 @@ class SectorMapJob:
             await self._alert(
                 title="Sector overrides file unreadable",
                 body=f"config/sector_overrides.yaml could not be loaded ({reason}). Proceeding with "
-                "index-scrape classification only this run — overrides are never load-bearing (E5).",
+                "index-scrape classification only this run — overrides are never load-bearing.",
                 severity="warning",
                 data={"job_id": "sector_map", "reason": reason},
             )
@@ -525,7 +525,7 @@ class SectorMapJob:
             title="Sector overrides reference unknown sector name(s)",
             body=f"config/sector_overrides.yaml names sector(s) not in SECTOR_SOURCES: "
             f"{', '.join(unknown)}. Those entries are skipped this run — affected symbols stay "
-            "UNCLASSIFIED (conservative) rather than form an uncapped phantom bucket (E5). Other "
+            "UNCLASSIFIED (conservative) rather than form an uncapped phantom bucket. Other "
             "entries in the file still apply.",
             severity="warning",
             data={"job_id": "sector_map", "unknown_sectors": unknown},

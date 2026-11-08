@@ -100,7 +100,7 @@ def render_markdown(report: ValidationReport) -> str:
         lines.append(
             "> **THESE PARAMS ARE NOT A GRID WINNER.** The sweep ranked no configuration (none "
             "closed a round trip inside the window, or the open/closed split was unreadable), so "
-            "the §6.3 envelope DEFAULTS were validated instead. The trial count, sweep context and "
+            "the envelope DEFAULTS were validated instead. The trial count, sweep context and "
             "winner-stability flag below describe a grid that selected nothing."
         )
         lines.append("")
@@ -109,24 +109,24 @@ def render_markdown(report: ValidationReport) -> str:
     if report.expectancy_pct is not None and report.expectancy_pct < 0.0:
         lines.append(
             f"> **NEGATIVE COST-ADJUSTED EXPECTANCY: {report.expectancy_pct:+.4f}% / day.** "
-            "Reported honestly (C9) — a negative result is a valid deliverable, not massaged away."
+            "Reported honestly — a negative result is a valid deliverable, not massaged away."
         )
         lines.append("")
 
     # ---- multiple-testing header ------------------------------------------------------------
-    n_txt = "ABSENT (⇒ not promotable, E2)" if report.trial_count_n is None else str(report.trial_count_n)
+    n_txt = "ABSENT (⇒ not promotable)" if report.trial_count_n is None else str(report.trial_count_n)
     bar_txt = "n/a" if report.fold_pass_min is None else f"{report.fold_pass_min:.0%}"
     frac_txt = (
         "n/a"
         if report.cpcv_fold_pass_fraction is None
         else f"{report.cpcv_fold_pass_fraction:.1%}"
     )
-    lines.append("## Multiple-testing discipline (§6.4)")
+    lines.append("## Multiple-testing discipline")
     lines.append("")
     lines.append(f"- **Cited trial count N**: {n_txt}")
     lines.append(f"- **Required CPCV fold-pass (`fold_pass_min(N)`)**: {bar_txt}")
     lines.append(f"- **Observed CPCV fold-pass fraction**: {frac_txt}")
-    lines.append(f"- **Margin floor (WO-3)**: {_margin_floor_txt(report)}")
+    lines.append(f"- **Margin floor**: {_margin_floor_txt(report)}")
     lines.append(
         "- **Observed median passing-split expectancy**: "
         + (
@@ -142,7 +142,7 @@ def render_markdown(report: ValidationReport) -> str:
     # round-trip floor on the horizon this run was actually held for, so "passes the floor" can
     # never be read as comfortable without the reader seeing at what horizon.
     if report.realized_hold_cells:
-        lines.append("### Margin floor at the MEASURED holding period (reporting only, R2)")
+        lines.append("### Margin floor at the MEASURED holding period (reporting only)")
         lines.append("")
         lines.append(
             f"Not part of the promotion rule — the verdict above stands on the registered "
@@ -161,7 +161,7 @@ def render_markdown(report: ValidationReport) -> str:
         lines.append("")
     if report.realized_hold is not None and report.realized_hold.n_trades:
         h = report.realized_hold
-        lines.append("### Holding period + open-trade split (reporting only, R2)")
+        lines.append("### Holding period + open-trade split (reporting only)")
         lines.append("")
         lines.append(
             f"- Trades: {h.n_trades}  ·  closed: {h.n_closed}  ·  **still open at the window "
@@ -169,7 +169,7 @@ def render_markdown(report: ValidationReport) -> str:
         )
         lines.append(
             f"- Per-trade net return — CLOSED round trips only (the sweep headline and ranking "
-            f"statistic since WO-M): {_pct(h.expectancy_per_trade_closed_pct, 4)}  ·  ALL trades "
+            f"statistic since the sweep-mechanics fix): {_pct(h.expectancy_per_trade_closed_pct, 4)}  ·  ALL trades "
             f"incl. open marks (reporting only): {_pct(h.expectancy_per_trade_pct, 4)}"
         )
         lines.append(
@@ -285,7 +285,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
     lines.append(f"## Trial count N = {report.trial_count_n}")
     lines.append("")
     lines.append(
-        "This is the §6.4-step-1 multiple-testing input: **every configuration evaluated** "
+        "This is the multiple-testing input: **every configuration evaluated** "
         "(grid cardinality), not the count of surfaced candidates. The ValidationReport cites it."
     )
     lines.append("")
@@ -317,7 +317,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
     )
     if best_stat is not None and best_stat.n_trades:
         unit = report.bar_unit
-        lines.append("## Winning config — holding period + open-trade split (R2, reporting only)")
+        lines.append("## Winning config — holding period + open-trade split (reporting only)")
         lines.append("")
         lines.append(
             f"- Trades: {best_stat.n_trades}  ·  closed: {best_stat.n_closed}  ·  **still open at "
@@ -325,7 +325,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
         )
         lines.append(
             f"- Per-trade net return — CLOSED round trips only (the headline, and the statistic "
-            f"this winner was ranked on, WO-M): {_pct(best_stat.expectancy_pct, 4)}  ·  ALL trades "
+            f"this winner was ranked on, since the sweep-mechanics fix): {_pct(best_stat.expectancy_pct, 4)}  ·  ALL trades "
             f"incl. open marks (reporting only): {_pct(best_stat.expectancy_all_pct, 4)}"
         )
         win_c = "—" if best_stat.win_rate_closed is None else f"{best_stat.win_rate_closed:.1%}"

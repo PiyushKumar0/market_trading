@@ -124,7 +124,7 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
 DATA ACCESS
 ===============================================================================================
 Read-only, always. ``MarketStore.open()`` runs its schema DDL and is therefore a WRITER, so this
-script does what ``scripts/g1_entity_sample.py`` does: attaches DuckDB directly with
+script does what ``scripts/entity_resolution_sample.py`` does: attaches DuckDB directly with
 ``read_only=True`` and issues its own SELECTs against ``bars_1d`` / ``corp_actions``. DuckDB still
 takes a file lock, so the engine service must be idle/stopped; if the file is missing, locked or
 otherwise unopenable the script REFUSES with an explicit message and exit code 2 rather than
@@ -263,7 +263,7 @@ V2_VETO_REASONS: tuple[str, ...] = (V2_VETO_SMOOTH, V2_VETO_GAP, V2_VETO_NOT_IND
 
 #: The pre-registration stamp every v2 report carries, verbatim.
 V2_PREREGISTRATION_NOTE = (
-    "v2 thresholds fixed 2026-09-09 from the 09-03 full-sample medians (plan section 6.1 addendum); "
+    "v2 thresholds fixed 2026-09-09 from the 09-03 full-sample medians; "
     "pre-registered before this run"
 )
 
@@ -1233,7 +1233,7 @@ def render_text(doc: dict[str, Any]) -> str:
     out: list[str] = []
     add = out.append
     add("=" * 96)
-    add("hi52 PRE-REGISTERED BACKTEST (IMPLEMENTATION_PLAN hi52 addendum, 2026-09-01)")
+    add("hi52 PRE-REGISTERED BACKTEST (2026-09-01)")
     add("=" * 96)
     add(f"generated       : {m['generated_at']}")
     add(f"window          : {m['window']['start']} -> {m['window']['end']}  "
@@ -1286,7 +1286,7 @@ def render_text(doc: dict[str, Any]) -> str:
     for construct, geo in doc["geometry"].items():
         add(f"[{construct}]  cost floor = {geo['cost_floor_pct']:.4f}%")
         if all(h["n"] == 0 for h in geo["horizons"].values()):
-            add("  no measured trades - GEOMETRY: unknown at every horizon (honest n=0, C9).")
+            add("  no measured trades - GEOMETRY: unknown at every horizon (honest n=0).")
             add("")
             continue
         add("  horizon |     n | median gross % | cost floor % |   margin % | verdict")
@@ -1307,7 +1307,7 @@ def render_text(doc: dict[str, Any]) -> str:
     for construct, block in doc["constructs"].items():
         add(f"[{construct}]  measured trades: {block['n_measured_trades']}")
         if not block["n_measured_trades"]:
-            add("  no measured trades - every split cell is empty (honest n=0, C9).")
+            add("  no measured trades - every split cell is empty (honest n=0).")
             add("")
             continue
         cut = block["smoothness_cut"]

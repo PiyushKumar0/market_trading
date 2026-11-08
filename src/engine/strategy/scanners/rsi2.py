@@ -121,7 +121,7 @@ class Rsi2Scanner(Scanner):
             # First failing leg in the condition's own evaluation order; `rising` still discloses the
             # second when both are shut.
             blocked_leg=r.blocked_leg,
-            reason="index regime filter shut — rsi2 originates nothing today (§6.1 uptrend leg)",
+            reason="index regime filter shut — rsi2 originates nothing today (uptrend leg)",
         )
 
     def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:

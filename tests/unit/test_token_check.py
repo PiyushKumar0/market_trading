@@ -106,7 +106,6 @@ async def test_rejected_token_alerts_the_owner_critically(caplog) -> None:
     assert msg.severity == "critical"
     assert msg.kind is MessageKind.LOGIN_PROMPT
     assert "re-login before open" in msg.title.lower()
-    assert "(R6)" in msg.title
     # The owner needs the two things that let them ACT from the phone: the link and the command.
     assert LOGIN_URL in msg.body
     assert "/token" in msg.body

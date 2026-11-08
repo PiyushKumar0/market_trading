@@ -55,7 +55,7 @@ from engine.core.secrets import (  # noqa: E402
 )
 
 IST = ZoneInfo("Asia/Kolkata")
-_log = get_logger("scripts.a11_check")
+_log = get_logger("scripts.kite_candle_adjustment_check")
 
 # Exit codes (so a wrapping smoke harness can branch).
 EXIT_OK = 0
@@ -76,16 +76,16 @@ def _login_help(secrets: Secrets) -> str:
     have_key = secrets.has(KITE_API_KEY)
     have_tok = secrets.has(KITE_ACCESS_TOKEN)
     lines = [
-        "No usable Kite session. The A11 check needs a valid daily access token (A5).",
+        "No usable Kite session. The candle-adjustment check needs a valid daily access token.",
         f"  kite_api_key present:      {have_key}",
         f"  kite_access_token present: {have_tok}",
         "",
         "To fix:",
         "  1. Seed kite_api_key / kite_api_secret once via:  python scripts/dpapi_set.py",
-        "  2. Complete today's login (the token rotates ~06:00 IST, A5):",
+        "  2. Complete today's login (the token rotates ~06:00 IST):",
         "       run the engine and tap the Telegram login URL, OR use the manual paste fallback",
         "       (SessionManager.complete_login) — both store kite_access_token via DPAPI.",
-        "  3. Re-run:  python scripts/a11_check.py --symbol <SYM> --ex-date YYYY-MM-DD",
+        "  3. Re-run:  python scripts/kite_candle_adjustment_check.py --symbol <SYM> --ex-date YYYY-MM-DD",
         "",
         "You can also pass an explicit token for a one-off run:  --token <instrument_token>",
         "and override the access token via the KITE_ACCESS_TOKEN env var if needed.",
@@ -285,7 +285,7 @@ def _decide(
         # ex-date, or daily candles are NOT adjusted as assumed. Don't claim a minute verdict.
         notes.append(
             "WARNING: the DAILY (assumed-adjusted) series ALSO shows a large gap across the ex-date — "
-            "the A11 daily-adjusted baseline may not hold for this symbol/date (re-verify the ex-date, "
+            "the daily-adjusted baseline may not hold for this symbol/date (re-verify the ex-date, "
             "or that the action is a clean split/bonus). Minute verdict withheld."
         )
         return Verdict(
@@ -330,7 +330,7 @@ def _decide(
 def _print_report(symbol: str, ex_date: date, token: int, v: Verdict) -> None:
     sep = "=" * 78
     print(sep)
-    print("A11 CHECK — are Kite MINUTE candles corp-action adjusted?  (§4.4 job 11, §14 Q10)")
+    print("CANDLE ADJUSTMENT CHECK — are Kite MINUTE candles corp-action adjusted?")
     print(sep)
     print(f"symbol={symbol}  instrument_token={token}  ex_date={ex_date.isoformat()}")
     print("")
@@ -358,13 +358,13 @@ def _print_report(symbol: str, ex_date: date, token: int, v: Verdict) -> None:
         print("  1. Set in config/settings.yaml:")
         print("         data:")
         print(f"           minute_candles_adjusted: {val}")
-        print("  2. Record the answer in IMPLEMENTATION_PLAN.md §14 Q10 (A11).")
-        print("  3. Configure the bar-stitching / backfill job accordingly (A11): if minute candles are")
+        print("  2. Record the answer.")
+        print("  3. Configure the bar-stitching / backfill job accordingly: if minute candles are")
         if v.minute_candles_adjusted:
             print("     ADJUSTED, no re-adjustment is needed when stitching minute history across ex-dates.")
         else:
             print("     UNADJUSTED, the backfill job must corp-action-adjust minute bars across ex-dates")
-            print("     (using CorpActionsJob ex-dates, A12) before they are comparable to daily/adjusted bars.")
+            print("     (using CorpActionsJob ex-dates) before they are comparable to daily/adjusted bars.")
     print(sep)
 
 
@@ -378,9 +378,9 @@ def _parse_date(s: str) -> date:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="a11_check",
-        description="A11: empirically determine whether Kite MINUTE candles are corp-action adjusted "
-        "(§4.4 job 11, §8.1, §14 Q10). One-off Phase-0/1 task.",
+        prog="kite_candle_adjustment_check",
+        description="Empirically determine whether Kite MINUTE candles are corp-action adjusted. "
+        "One-off task.",
     )
     p.add_argument("--symbol", required=True, help="NSE tradingsymbol, e.g. TATAMOTORS")
     p.add_argument(
@@ -441,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     to = datetime.combine(args.ex_date + pad, time(15, 30), tzinfo=IST)
 
     _log.info(
-        "a11_fetch_window",
+        "candle_adjustment_fetch_window",
         symbol=args.symbol,
         token=token,
         ex_date=args.ex_date.isoformat(),
@@ -452,13 +452,13 @@ def main(argv: list[str] | None = None) -> int:
     daily = _fetch_candles(kite, token, frm, to, "day")
     minute = _fetch_candles(kite, token, frm, to, "minute")
 
-    _log.info("a11_fetched", daily_candles=len(daily), minute_candles=len(minute))
+    _log.info("candle_adjustment_fetched", daily_candles=len(daily), minute_candles=len(minute))
 
     verdict = _decide(daily, minute, args.ex_date)
     _print_report(args.symbol, args.ex_date, token, verdict)
 
     _log.info(
-        "a11_verdict",
+        "candle_adjustment_verdict",
         symbol=args.symbol,
         ex_date=args.ex_date.isoformat(),
         minute_candles_adjusted=verdict.minute_candles_adjusted,

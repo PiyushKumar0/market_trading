@@ -3,8 +3,8 @@ name = "market-trading"
 version = "0.0.0"
 description = "Personal single-user AI trading platform for Indian equities (NSE / Zerodha Kite Connect). See IMPLEMENTATION_PLAN.md."
 readme = "README.md"
-requires-python = ">=3.12"          # A4: pin ONE tested interpreter. River needs >=3.11; plan pins 3.12.x.
-license = { text = "Proprietary - single-user, not for distribution (B5)" }
+requires-python = ">=3.12"          # pin ONE tested interpreter. River needs >=3.11; 3.12.x is pinned.
+license = { text = "Proprietary - single-user, not for distribution" }
 authors = [{ name = "Owner" }]
 
 # Runtime dependencies. Versions are pinned here.
@@ -75,7 +75,7 @@ asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "needs_heavy_deps: requires pykiteconnect/claude-agent-sdk/vectorbt/skfolio/river (smoke-test tier)",
-    "chaos: plan §9.4 chaos suite (tests/chaos) — run weekly and before every phase gate: pytest -m chaos",
+    "chaos: chaos suite (tests/chaos) — run weekly and before every gate: pytest -m chaos",
 ]
 
 [tool.ruff]

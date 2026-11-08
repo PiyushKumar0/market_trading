@@ -734,7 +734,7 @@ class ReplayHarness:
                 f"broker's orderbook grew from {baseline} to {size} order(s) during the replay but "
                 f"the harness collected zero {self._topic!r} frames — construct it with "
                 "publish=harness.publish; a bars-only digest would silently stop asserting anything "
-                "about orders (§8.4)"
+                "about orders"
             )
 
     # ------------------------------------------------------------------ data path (streamed)

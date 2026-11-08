@@ -50,7 +50,7 @@ class Scanner(abc.ABC):
             unknown = sorted(set(params) - set(merged))
             if unknown:
                 raise ValueError(
-                    f"{self.strategy_id}: unknown param(s) {unknown} — only §6.3 envelope keys "
+                    f"{self.strategy_id}: unknown param(s) {unknown} — only parameter-envelope keys "
                     f"{sorted(merged)} are injectable"
                 )
             merged.update({k: float(v) for k, v in params.items()})

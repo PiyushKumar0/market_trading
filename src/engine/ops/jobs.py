@@ -478,7 +478,7 @@ class CatchUpRunner:
         if self._pass_lock.locked():
             _log.info(
                 "catch_up_skipped_in_flight", scope=str(scope),
-                note="single-flight (§2.6/WO-15): a catch-up pass is already running",
+                note="single-flight: a catch-up pass is already running",
             )
             return CatchUpResult(skipped_in_flight=True)
         async with self._pass_lock:
@@ -535,7 +535,7 @@ class CatchUpRunner:
         if date_keyed:
             raise ValueError(
                 f"hydrate_ahead cannot run DATE_KEYED jobs {date_keyed} — they replay one run per "
-                "missed trading day (§2.6 step 5); early hydration is today's pre-open chain only"
+                "missed trading day; early hydration is today's pre-open chain only"
             )
         unknown = sorted(wanted - set(by_id))
         if unknown:
@@ -601,7 +601,7 @@ class CatchUpRunner:
             off_duration_s=max(0.0, (now - off_since).total_seconds()) if off_since else 0.0
         )
         if not self.has_registry:
-            _log.info("catch_up_no_registry", note="Phase-1 jobs registered by the integrator (§2.6)")
+            _log.info("catch_up_no_registry", note="jobs registered by the integrator")
             return result
 
         for spec in self._in_scope(JobClass.SAFETY_CRITICAL, scope):
@@ -726,7 +726,7 @@ class CatchUpRunner:
             await self._notify(catalog.data_freshness_frozen(
                 job_id=spec.job_id,
                 last_success=self.last_success_at(spec.job_id),
-                reason="safety-critical catch-up run failed (§2.6 step 5)",
+                reason="safety-critical catch-up run failed",
             ))
             # Only a DELIVERED alert suppresses the next one (mirrors ``_last_failed_alert``): a
             # send that raised must still reach the owner on the following pass.

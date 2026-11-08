@@ -328,7 +328,7 @@ def test_same_bar_same_decision_modulo_signal_id():
 
 
 # ---------------------------------------------------------------------------- registry seam
-def test_registry_contains_exactly_the_phase1_price_baselines():
+def test_registry_contains_exactly_the_price_baselines():
     assert set(SCANNER_REGISTRY) == {"mom", "orb", "rsi2", "trend"}
     # Batch rules (brk20/ins/hi52/cat/cat_reversal) are deliberately NOT registered: they enter via prescreen.admit.
     assert "cat" not in SCANNER_REGISTRY
@@ -430,7 +430,7 @@ def test_burst_ties_keep_arrival_order_and_admission_stays_deterministic():
     assert [c.symbol for c in ps.on_bar(_bar(symbol="DRIVER"))] == ["C", "A"]
 
 
-def test_admission_mode_arrival_is_the_rollback_to_pre_wo1_order():
+def test_admission_mode_arrival_is_the_rollback_to_arrival_order():
     """The rollback is a config flag, not a revert. ``arrival`` restores the exact
     pre-ranking behaviour — first emitted, first admitted, score ignored."""
     burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95}

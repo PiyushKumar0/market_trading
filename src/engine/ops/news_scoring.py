@@ -157,7 +157,7 @@ class NewsScoringJob:
         agent_def = agent_defs.get(news_analyst.AGENT_ID)
         if agent_def is None:
             raise KeyError(
-                f"agents.yaml has no enabled {news_analyst.AGENT_ID!r} definition — the §5.4 scoring "
+                f"agents.yaml has no enabled {news_analyst.AGENT_ID!r} definition — the news scoring "
                 "job cannot be wired to a parked agent"
             )
         self._store = store

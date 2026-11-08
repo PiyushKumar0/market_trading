@@ -222,7 +222,7 @@ class RateLimiter:
                 )
                 raise EntryBudgetExhausted(
                     f"entry order budget exhausted: {self._entry_calls}/"
-                    f"{self._entry_calls_per_day} per day (§7.1 order_rate)"
+                    f"{self._entry_calls_per_day} per day (order_rate)"
                 )
 
         # --- Pace behind the endpoint-class bucket. Sleep, re-check; tokens may have been taken by a

@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  MT Notifications — the owner-facing view of the WO-24d notification journal (owner-directed
+  MT Notifications — the owner-facing view of the notification journal (owner-directed
   2026-08-21: "a dashboard section listing all of a day's Telegram notifications chronologically").
 
   DELIBERATELY DEPENDENCY-FREE. One file, inline CSS + JS, ZERO external resources: no CDN, no
@@ -11,7 +11,7 @@
 
   It is served UNAUTHENTICATED (a browser cannot attach a bearer header to a navigation) and so it
   ships EMPTY: it holds no data, prompts for the dashboard token itself, keeps it in localStorage,
-  and every row it shows comes from bearer-authed GET /notifications (R10).
+  and every row it shows comes from bearer-authed GET /notifications.
 -->
 <html lang="en">
 <head>

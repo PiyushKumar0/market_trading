@@ -552,7 +552,7 @@ class FilingsPitJob:
             title="Insider-trades (PIT) feed degraded",
             body=(
                 f"NSE PIT fetch failed on {d.isoformat()}: {reason}. Existing insider_trades rows "
-                "remain in force; the date-keyed catch-up retries (§2.8/E5). Not entry-blocking."
+                "remain in force; the date-keyed catch-up retries. Not entry-blocking."
             ),
             severity="warning",
             data={"job_id": "filings_pit", "d": d.isoformat(), "reason": reason},

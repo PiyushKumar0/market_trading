@@ -189,7 +189,7 @@ class BudgetGovernor:
         rates = self._pricing.get(model)
         if rates is None:
             # Fail loud: an unpriced model would bill as $0 and blind the ladder for the whole window.
-            raise ValueError(f"no D4 pricing for model {model!r} in agents.yaml model_pricing_usd_per_mtok")
+            raise ValueError(f"no pricing for model {model!r} in agents.yaml model_pricing_usd_per_mtok")
         rate_in = Decimal(str(rates["input"]))
         rate_out = Decimal(str(rates["output"]))
         micro = (
@@ -562,7 +562,7 @@ def _window_bounds(window: str, anchor: WindowAnchor) -> tuple[datetime, datetim
 def _month_key(at: datetime) -> str:
     """``budget_ledger.month`` — HISTORY ONLY since 2026-09-12: still written on every row so the
     pre-weekly ledger keeps one consistent column. No reader is left — the ladder ranges on ``at``,
-    ``ops/nightly_review.py`` slices ``at`` by day, and ``scripts/g2_evidence.py`` moved its budget block
+    ``ops/nightly_review.py`` slices ``at`` by day, and ``scripts/recommend_gate_evidence.py`` moved its budget block
     onto the quota window on 2026-09-12 — so the column and ``idx_budget_month`` stay only as history;
     check those three before assuming a new query may key on it."""
     return at.strftime("%Y-%m")

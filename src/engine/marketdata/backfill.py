@@ -10,7 +10,7 @@ multi-evening job).
 
 **RESOLVED — NO re-adjustment:** Kite minute (and daily) candles are ALREADY corp-action
 adjusted (``settings data.minute_candles_adjusted=true``; verified 2026-07-05 against the BSE 2:1
-bonus via ``scripts/a11_check.py``). Candles are therefore written EXACTLY as fetched — this job
+bonus via ``scripts/kite_candle_adjustment_check.py``). Candles are therefore written EXACTLY as fetched — this job
 must never apply split/bonus factors across ex-dates.
 
 Provenance (``bars_1m.src``):

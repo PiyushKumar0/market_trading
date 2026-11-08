@@ -81,8 +81,8 @@ function rec(id, day, hms, inst, side, kind, action, extra = {}) {
 }
 
 let recommendations = [
-  // Synthetic edge case: valid_until on the next day (the engine stamps today's close since WO-V's
-  // 2026-09-23 withdrawal), so this exit stays live at any hour of the day.
+  // Synthetic edge case: valid_until on the next day (the engine stamps today's close since the
+  // 2026-09-23 withdrawal of the next-session entry TTL), so this exit stays live at any hour of the day.
   rec('r-t1', today, '10:15:03', 'HDFCAMC', 'SELL', 'exit', null, { valid_until: `${shift(today, 1)}T15:30:00+05:30` }),
   // An adjust places NO order and keeps the held side (pipeline.py _manage_recommendation): the card
   // must read as a stop-loss move, never as "Buy 10 shares".
@@ -115,7 +115,7 @@ let recommendations = [
   rec('r-y1', d1, '13:00:19', 'HDFCAMC', 'SELL', 'exit', 'expired'),
   rec('r-y2', d1, '13:00:12', 'HINDZINC', 'SELL', 'exit', 'expired'),
   rec('r-y3', d1, '10:02:00', 'CEIGALL', 'BUY', 'enter', 'dismissed'),
-  // Synthetic edge case (WO-V's next-session entry TTL was withdrawn 2026-09-23, so the engine no
+  // Synthetic edge case (the next-session entry TTL was withdrawn 2026-09-23, so the engine no
   // longer stamps this): an ENTRY delivered YESTERDAY, still pending, valid to TOMORROW's close —
   // yesterday's fold must start open and the `valid till` chip must carry the date.
   rec('r-live', d1, '14:47:00', 'JINDALSTEL', 'BUY', 'entry', null, {
@@ -125,7 +125,7 @@ let recommendations = [
       verdict: 'shrink',
       reasons: [
         'per_trade_risk: 10 x 162.40 = 1624.00 [1.5x stop distance from 2445.00 (daily-band leg unavailable in ' +
-          'Phase 2 — gap mult only)] (limit <= 1.5% of equity 40000.00 = 600.00)',
+          'RECOMMEND — gap mult only)] (limit <= 1.5% of equity 40000.00 = 600.00)',
         'shrink: qty 10 -> 3 (bound by per_trade_risk)',
       ],
       original_qty: 10,
@@ -167,7 +167,7 @@ let decisions = [
   // rejects when nothing is approvable (gate.py "shrink floor").
   dec('p-t2', today, '09:41:01', 'swing_analyst', 'enter', 'TATASTEEL', 'reject', [
     'per_trade_risk: 10 x 812.40 = 8124.00 [1.5x stop distance from 2445.00 (daily-band leg unavailable in ' +
-      'Phase 2 — gap mult only)] (limit <= 1.5% of equity 40000.00 = 600.00)',
+      'RECOMMEND — gap mult only)] (limit <= 1.5% of equity 40000.00 = 600.00)',
     'shrink floor: implied max qty 0 — nothing approvable',
   ], ['approve', []]),
   // Paper verdicts come from the same gate, so their reasons are the same rule sentences.
@@ -208,7 +208,7 @@ if (NO_TODAY) {
   decisions = decisions.filter((d) => dayOf(d.created_at) !== today)
 }
 
-// The governor's quota week (§5.6): Thursday 14:00 IST → Thursday 14:00 IST, keyed by its START
+// The governor's quota week:Thursday 14:00 IST → Thursday 14:00 IST, keyed by its START
 // Thursday. Mirrors engine.intelligence.governor._window_key — wall-clock and calendar-blind, and the
 // reset-day MORNING still belongs to the window that ends. Computed live so the BudgetPanel chips show
 // a plausible current week on any dev box rather than a frozen date.
@@ -767,7 +767,7 @@ function rearm(req, res) {
   json(res, 200, { ok: true, cleared, still_breached: still, risk_state: routes['/mode'].risk_state })
 }
 
-// GET / POST /config/capital (O19). The engine computes every figure; the fixture scales its own numbers
+// GET / POST /config/capital. The engine computes every figure; the fixture scales its own numbers
 // from the 40,000 base. Scenarios: a proposal from 20,000 to 23,999 is refused (would trip the equity floor);
 // a POST for 77,777 answers 409 as if the capital changed under an open dialog; a POST whose
 // expected_current_inr is not the served capital does the same; a POST for 55,555 answers 503 (reload failed). Anything outside half..double is 422.

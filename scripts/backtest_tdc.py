@@ -127,7 +127,7 @@ DATA ACCESS
 ===============================================================================================
 Read-only, always (``duckdb.connect(..., read_only=True)``): ``MarketStore.open()`` runs schema DDL
 and is a WRITER, so it is deliberately not used, exactly as ``scripts/backtest_hi52.py`` and
-``scripts/g1_entity_sample.py`` do it. DuckDB takes a file lock even for a read-only attach, so the
+``scripts/entity_resolution_sample.py`` do it. DuckDB takes a file lock even for a read-only attach, so the
 engine service must be stopped; if the file is missing or locked this script REFUSES with exit code 2
 rather than degrading. Nothing here ever writes to the store.
 
@@ -1219,7 +1219,7 @@ def run_study(
     notes.append(
         "NO PARAMETER SWEEP was run and no variant was selected: PARAMS is one dict, VARIANTS is a "
         f"fixed list of {len(var_defs)} REPORTED cells, and the pre-registered hypothesis is "
-        f"{PRE_REGISTERED_HYPOTHESIS}. 'promotable' is the plan's boolean (mean net > 0, t > 2, "
+        f"{PRE_REGISTERED_HYPOTHESIS}. 'promotable' is the pre-registered boolean (mean net > 0, t > 2, "
         "n >= 200, CPCV positive share >= 0.60) and carries no other meaning."
     )
     notes.append(
@@ -1247,7 +1247,7 @@ def run_study(
         "the index or delisted are absent, which biases every cell optimistically."
     )
     notes.append(
-        "ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12) IS DESCRIPTIVE, NOT TRADEABLE: "
+        "ATR% TERCILE SPLIT (pre-registered 2026-09-12) IS DESCRIPTIVE, NOT TRADEABLE: "
         + ATR_SPLIT_DEFINITION
         + ". It SPLITS the registered result and adds nothing to it - no parameter moved, no variant "
         "was added, no trade was added or removed and no cell is selected, so it is not a new trial. "
@@ -1415,7 +1415,7 @@ def render_text(doc: dict[str, Any]) -> str:
     add = out.append
     add("=" * 118)
     add("tdc PRE-REGISTERED BACKTEST - trend-day continuation, intraday")
-    add("(IMPLEMENTATION_PLAN.md `tdc` pre-registration, 2026-09-04)")
+    add("(`tdc` pre-registration, 2026-09-04)")
     add("=" * 118)
     add(f"generated        : {m['generated_at']}")
     add(f"window           : {m['window']['start']} -> {m['window']['end']}  "
@@ -1483,7 +1483,7 @@ def render_text(doc: dict[str, Any]) -> str:
 
     ab = doc["coverage"]["atr_pct_tercile_split"]
     add("-" * 118)
-    add("STEP 2B - ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12; DESCRIPTIVE, full-sample cuts)")
+    add("STEP 2B - ATR% TERCILE SPLIT (pre-registered 2026-09-12; DESCRIPTIVE, full-sample cuts)")
     add("-" * 118)
     add(f"  definition : {ab['definition']}")
     add(f"  cuts       : {ab['cuts']}   population: {ab['n_symbol_days']} measured symbol-days, "
@@ -1510,7 +1510,7 @@ def render_text(doc: dict[str, Any]) -> str:
     add("")
 
     add("-" * 118)
-    add("STEP 3 - PROMOTABLE CELLS (the plan's boolean, verbatim; no other claim is made)")
+    add("STEP 3 - PROMOTABLE CELLS (the pre-registered boolean, verbatim; no other claim is made)")
     add("-" * 118)
     hits = [
         (n, c) for n, b in doc["results"].items()

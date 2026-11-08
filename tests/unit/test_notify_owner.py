@@ -8,7 +8,7 @@ import pytest
 from engine.notify.catalog import MessageKind, engine_started, engine_stopped, startup_report
 from engine.notify.telegram import (
     _COMMANDS,
-    _PHASE0_STUB,
+    _STUB_REPLY,
     TelegramBot,
     _help_text,
     _menu_commands,
@@ -150,7 +150,7 @@ def test_help_text_lists_every_command() -> None:
         else:
             assert f"/{c.name} — {c.summary}" in lines         # exact stub line, no prefix collision
     if any(not c.live for c in _COMMANDS):                     # every command is live in RECOMMEND mode
-        assert "Not yet available (Phase 2+):" in lines        # any stub stays clearly separated
+        assert "Not yet available:" in lines        # any stub stays clearly separated
     assert len(text) <= 4096                                   # fits a single Telegram message
 
 
@@ -179,7 +179,7 @@ async def test_stub_handler_replies_not_implemented(clock) -> None:
     bot = TelegramBot("dummy-token", owner_chat_id=1, clock=clock)
     msg = _CapturingMessage()
     await bot._stub("positions")(_MsgUpdate(msg), _FakeContext())
-    assert msg.sent == [f"/positions: {_PHASE0_STUB}."]
+    assert msg.sent == [f"/positions: {_STUB_REPLY}."]
 
 
 @pytest.mark.asyncio

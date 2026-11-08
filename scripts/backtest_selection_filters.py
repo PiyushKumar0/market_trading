@@ -133,7 +133,7 @@ def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None, strategies
     cost_model = CostModel.from_config()
     index = rf.index_series(conn, end)
     m = rf.meta("scripts/backtest_selection_filters.py",
-                "C3 selection filters, IMPLEMENTATION_PLAN 6.1, pre-registered 2026-10-07",
+                "selection filters, pre-registered 2026-10-07",
                 db, end, symbols, max_symbols, FAMILY_N, cost_model)
     m["filters"] = {n: " ".join(f.__doc__.split()) for n, f in FILTERS.items()}
     return {"meta": m, "strategies": {
@@ -148,7 +148,7 @@ def _extra(b: dict[str, Any]) -> list[str]:
         f"net > unfiltered; insufficient when pass n < {rf.MIN_N}"]
 
 
-TITLE = "C3 SELECTION-FILTER STUDY"
+TITLE = "SELECTION-FILTER STUDY"
 
 
 def main(argv: list[str] | None = None) -> int:
