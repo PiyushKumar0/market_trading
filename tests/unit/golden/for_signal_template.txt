@@ -1,4 +1,4 @@
-2026-10-29.3
+2026-11-09.1
 == DAY CONTEXT (stable) ==
 trading date: 2026-06-17 (Wednesday)
 day plan: {"no_trade_today":false,"regime":"trending up"}
@@ -8,7 +8,7 @@ index regime (deterministic, completed sessions through 2026-06-16): NIFTY 50 cl
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-golden","raw_levels":{"entry":"564.00","stop":"530.00","target":null},"score":0.93,"side":"BUY","signal_id":"sig-brk20-1","strategy_id":"brk20","style":"swing","symbol":"LGEINDIA"}
 strategy contract (brk20):
   class: swing (CNC). Entry is LIMIT-AT-LEVEL: the broken 20d-high level itself, BELOW the current price by design — a retest fill, not a chase and not 'bidding into weakness'. Stop geometry is pre-vetted upstream (overnight-gap floor). Judge breakout validity on the DAILY series (fresh cross, volume confirmation, margin), with the intraday tape as context.
-  retest re-arm (2026-09-12): this candidate may be a RE-PUBLICATION of a level broken up to 5 sessions earlier, re-offered the moment the price came back to it — that multi-session resting limit IS the designed entry (the pre-registered entry-mechanism backtest's winning variant, V2-5), so an older breakout date is the mechanism working, never a stale signal, and the levels/score are the crossing session's own, unchanged.
+  retest re-arm (2026-09-12): this candidate may be a RE-PUBLICATION of a level broken up to 5 sessions earlier, re-offered the moment the price came back to it — that multi-session resting limit IS the designed entry (the pre-registered entry-mechanism backtest's winning variant, the five-session limit), so an older breakout date is the mechanism working, never a stale signal, and the levels/score are the crossing session's own, unchanged.
   evidence status: exploratory — no expectancy presumption; originates for judgement.
 features: {"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12} (as of 10:04)
   note: rel_volume_tod = cumulative session volume / the 20d MEDIAN cumulative volume at the SAME elapsed time — time-of-day adjusted, so 1.0 = a typical participation pace for this point of the session (read this one; null = too little 1m history to judge pace)

@@ -51,10 +51,12 @@ open questions. Built work is described by the code. When an item here ships, de
   conditions under "Live AUTO"). Thresholds (`cat.materiality_min` and the rest) stay frozen for the whole window; moving
   one restarts the clock. The clock restarted on 2026-08-28 (signals 2026-08-18..28 excluded). Split the sample at the
   first NIFTY 500 universe build (2026-09-04) and at the news scorer's switch to `sonnet-5.5`
-  (`news_clusters.scorer_model`).
+  (`news_clusters.scorer_model`). On 2026-11-09 the owner accepted a wording-only change inside the window: the News
+  Analyst's schema descriptions lost their retired-plan citations (no field, enum or rubric changed).
 - **`cat_reversal` shadow verdict.** Pre-registered: at ≥60 sessions and ≥15 admitted signals, T+5 and T+10 net at
   next-open fills, spread-inclusive CNC costs and the margin floor; net ≤ the cost floor at both ⇒ retired; clears ⇒
   owner review. Fewer than 1 admitted signal per 20 sessions across the first 60 triggers an early owner check-in.
+  The same 2026-11-09 wording-only News Analyst change applies here.
 - **Waiting on the `cat` v2 verdict (owner, 2026-09-24):** wiring the results line items (`revenue`, `pat`) into the
   News Analyst and the three resolver alias fixes (`engineers`, `dalmia bharat`, `pfizer`) land together right after
   it. Switching the clusterer's `cat.max_event_age_days` from calendar days to sessions is also decided after it.
@@ -82,6 +84,10 @@ open questions. Built work is described by the code. When an item here ships, de
 **Forward rules pre-registered 2026-10-29.** The registration date is 2026-11-02, the first session that opened after
 the deploy (`engine.learning.forward_verdicts.REGISTERED_FROM`). A deploy after 09:15 IST on 2026-11-02 moves it to the
 first session after it, here and in the constant. Each rule has a `registered` row in `config/research_trials.yaml`.
+The owner re-registered the analyst-value verdict on 2026-11-09: cleaning retired-plan citations out of the analyst
+prompts moved every strategy's `prompt_version`, so its registration date is 2026-11-09
+(`forward_verdicts.ANALYST_REGISTERED_FROM`); the rows accrued since 2026-11-02 under the old keys no longer count. A
+deploy after 09:15 IST on 2026-11-09 moves it to 2026-11-11 (11-10 is a holiday). The kill rules keep 2026-11-02.
 
 **Clarifications added 2026-10-30, before the registration date, for the three forward rules below.**
 - A signal's symbol is followed through NSE renames (`symbol_renames`).
@@ -99,7 +105,7 @@ first session after it, here and in the constant. Each rule has a `registered` r
   population: the rollback commit sets `forward_verdicts.KILL_POPULATION_UNTIL["brk20"]` to the last session the
   filter ran. Resuming it needs an owner-approved re-registration with a new registration date.
 
-**Analyst-value verdict (registered 2026-10-29, population from the registration date).**
+**Analyst-value verdict (registered 2026-10-29, re-registered 2026-11-09; population from its registration date).**
 - **Population:** `prescreen_day_slots` rows of brk20, hi52 and ins with `d` on or after the registration date and a
   recorded first `analyst_decision`, whose call carries the strategy's registered key `(prompt_version, model)`. The
   registered key is the one on that strategy's first decision on or after the registration date. Rows with another key

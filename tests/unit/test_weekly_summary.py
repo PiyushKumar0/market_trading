@@ -29,6 +29,7 @@ FRI = date(2026, 10, 9)
 @pytest.fixture(autouse=True)
 def _unregistered(monkeypatch) -> None:
     monkeypatch.setattr(fv, "REGISTERED_FROM", None)
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", None)
 
 
 class _Now:
@@ -151,6 +152,7 @@ _UNAVAILABLE = "Analyst reading unavailable: signal scoring did not complete for
 ])
 async def test_a_registered_digest_waits_only_while_signal_scoring_is_due(conn, cal, clk, monkeypatch, runs, line):
     monkeypatch.setattr(fv, "REGISTERED_FROM", date(2026, 10, 5))
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", date(2026, 10, 5))
     seen = spy_as_of(monkeypatch)
     runner = CatchUpRunner(conn, clk, cal)
     for d, status in runs.items():
@@ -170,6 +172,7 @@ async def test_catch_up_sends_the_digest_when_signal_scoring_cannot_complete(
     conn, cal, clk, now, monkeypatch, at, scored_before,
 ) -> None:
     monkeypatch.setattr(fv, "REGISTERED_FROM", date(2026, 10, 5))
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", date(2026, 10, 5))
 
     async def boom(d):
         raise RuntimeError("boom")
@@ -191,7 +194,8 @@ async def test_catch_up_sends_the_digest_when_signal_scoring_cannot_complete(
 def _signals(verdict, *, formed=(False, False), mean=None):
     looks = [{"size": size, "formed": f, "n_cells": 20, "n_final": 12, "n_valued": 0, "mean_diff": mean}
              for size, f in zip((30, 60), formed, strict=True)]
-    return {"window": "from 2026-11-02", "analyst": {"verdict": verdict, "reason": "", "looks": looks}}
+    return {"window": "from 2026-11-02", "analyst": {"verdict": verdict, "reason": "", "looks": looks,
+                                                     "window": "from 2026-11-02"}}
 
 
 @pytest.mark.parametrize(("signals", "line"), [

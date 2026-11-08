@@ -107,12 +107,12 @@ def scorecard(conn: sqlite3.Connection, *, as_of: date, with_paper: bool = True)
 
 def signals_block(conn: sqlite3.Connection, *, as_of: date) -> dict[str, Any]:
     """Every published brk20/hi52/ins signal scored in hindsight with the kill and analyst readings, over
-    the population from ``forward_verdicts.REGISTERED_FROM`` through ``KILL_POPULATION_UNTIL`` (both read per
-    call), as known on ``as_of``.
+    the population from ``forward_verdicts.REGISTERED_FROM`` through ``KILL_POPULATION_UNTIL`` — the analyst
+    reading from its own ``ANALYST_REGISTERED_FROM`` (all read per call) — as known on ``as_of``.
     hi52's rule row is a diagnostic: its costing differs from ``scripts/hi52_forward_verdict.py``, whose
     verdict stays authoritative. Never raises: an error reads ``{"error": ...}``."""
     try:
-        return _signals(conn, as_of, fv.REGISTERED_FROM, dict(fv.KILL_POPULATION_UNTIL))
+        return _signals(conn, as_of, fv.REGISTERED_FROM, dict(fv.KILL_POPULATION_UNTIL), fv.ANALYST_REGISTERED_FROM)
     except Exception as exc:  # noqa: BLE001 - an owner surface degrades, never fails its caller
         _log.exception("signals_block_failed")
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -138,8 +138,9 @@ async def scorecard_ro(conn: sqlite3.Connection, *, as_of: date, with_paper: boo
 
 def _signals(
     conn: sqlite3.Connection, as_of: date, registered_from: date | None, until: dict[str, date | None],
+    analyst_from: date | None,
 ) -> dict[str, Any]:
-    analyst = fv.analyst_reading(conn, as_of=as_of, registered_from=registered_from)
+    analyst = fv.analyst_reading(conn, as_of=as_of, registered_from=analyst_from)
     kills = {r: fv.kill_reading(conn, r, as_of=as_of, registered_from=registered_from, until=until[r])
              for r in fv.KILL_RULES}
     hi52 = fv.load_rows(conn, strategies=("hi52",), construct="rule", start=registered_from or date.min,
@@ -164,9 +165,13 @@ def _signals(
                         "cells": analyst.n_cells[sid], "mean_diff": analyst.per_strategy[sid].mean},
         }
 
+    def window(start: date | None) -> str:
+        return f"from {start.isoformat()}" if start else "pre-registration history"
+
     return {
-        "window": f"from {registered_from.isoformat()}" if registered_from else "pre-registration history",
-        "analyst": {**_verdict(analyst), "excluded": sum(e.n for e in analyst.excluded)},
+        "window": window(registered_from) + (
+            f"; analyst verdict {window(analyst_from)}" if analyst_from != registered_from else ""),
+        "analyst": {**_verdict(analyst), "excluded": sum(e.n for e in analyst.excluded), "window": window(analyst_from)},
         "strategies": {sid: strategy(sid) for sid in fv.ANALYST_STRATEGIES},
     }
 

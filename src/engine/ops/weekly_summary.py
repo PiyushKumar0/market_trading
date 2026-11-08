@@ -52,7 +52,7 @@ def analyst_line(signals: dict[str, Any]) -> str | None:
     formed = [(i, lk) for i, lk in enumerate(analyst["looks"], 1) if lk["formed"]]
     if not formed:
         lk = analyst["looks"][0]
-        return (f"Analyst (pre-registered {signals['window']}): look 1 formed {lk['n_final']} of {lk['size']} "
+        return (f"Analyst (pre-registered {analyst['window']}): look 1 formed {lk['n_final']} of {lk['size']} "
                 "cells — interim, decides nothing.")
     i, lk = formed[-1]
     diff = "n/a" if lk["mean_diff"] is None else f"{lk['mean_diff']:+.1f} pp"

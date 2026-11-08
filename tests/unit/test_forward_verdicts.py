@@ -345,8 +345,18 @@ def _main(cli, rule, db, *extra):
 @pytest.mark.parametrize("rule", ["brk20", "ins", "analyst"])
 def test_cli_prints_the_verdict_line_first(cli, conn, db_path, capsys, monkeypatch, rule):
     monkeypatch.setattr(fv, "REGISTERED_FROM", R)
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", R)
     assert _main(cli, rule, db_path) == 0
     assert capsys.readouterr().out.startswith(f"VERDICT {rule}: {fv.INSUFFICIENT}")
+
+
+def test_cli_reads_the_analyst_verdict_from_its_own_registration_date(cli, conn, db_path, capsys, monkeypatch):
+    monkeypatch.setattr(fv, "REGISTERED_FROM", None)
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", R)
+    assert _main(cli, "analyst", db_path) == 0
+    assert capsys.readouterr().out.startswith(f"VERDICT analyst: {fv.INSUFFICIENT}")
+    assert _main(cli, "ins", db_path) == 0
+    assert capsys.readouterr().out.startswith(f"VERDICT ins: {fv.UNREGISTERED}")
 
 
 def test_cli_prints_look_progress(cli, conn, db_path, capsys):

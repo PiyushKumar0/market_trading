@@ -248,7 +248,7 @@ trials:
     date: "2026-10-29"
     family: "selection_filter/analyst"
     hypothesis: "Analyst-entered signals beat analyst-declined signals of the same day and strategy at T+20"
-    population: "brk20, hi52 and ins decisions from the registration date under each strategy's registered (prompt_version, model) key"
+    population: "brk20, hi52 and ins decisions from 2026-11-09 (re-registered after the prompt-text cleanup) under each strategy's registered (prompt_version, model) key"
     construct: "next-open entry, T+20 close exit, net of a CNC round trip; (d, strategy) cells, looks 30/60"
     variants: 1
     result: "registered"

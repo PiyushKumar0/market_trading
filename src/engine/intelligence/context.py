@@ -135,7 +135,7 @@ def sentiment_rail_note(row: Mapping[str, Any]) -> str:
 
 #: Identity of the assembler's fixed prompt wording (stable-block text, absence notes, legends, the
 #: contract framing). Bump it with any such change; tests/unit/golden/for_signal_template.txt pins it.
-PROMPT_TEMPLATE_VERSION = "2026-10-29.3"
+PROMPT_TEMPLATE_VERSION = "2026-11-09.1"
 
 
 def _digest(system_prompt: str, stable_block: str, volatile_block: str) -> str:

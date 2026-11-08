@@ -20,7 +20,8 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
   commit sets `forward_verdicts.KILL_POPULATION_UNTIL["brk20"]` to the last session the filter ran. Resuming it
   needs an owner-approved re-registration with a new R.
 
-**Analyst-value verdict (registered 2026-10-29, population from R).**
+**Analyst-value verdict (registered 2026-10-29; re-registered by the owner on 2026-11-09, when the analyst prompts
+lost their retired-plan citations, so its R is 2026-11-09).**
 - **Population:** `prescreen_day_slots` rows of brk20, hi52 and ins with `d >= R` and a recorded first
   `analyst_decision`, whose call carries the strategy's registered key `(prompt_version, model)`. The registered
   key is the one on that strategy's first decision on or after R. Rows with another key are excluded and counted.
@@ -68,8 +69,8 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Demotion:** add ins to `NO_EDGE_SHADOW_STRATEGIES`, which wins over its registered edge (`gate.py:1046-1049`).
 - **Tool:** `scripts/forward_verdicts.py --rule ins`.
 
-R is ``forward_verdicts.REGISTERED_FROM``; while it is None every row is read and the verdict is
-UNREGISTERED. A kill population ends at ``forward_verdicts.KILL_POPULATION_UNTIL[rule]`` when set. Rows holding
+R is ``forward_verdicts.REGISTERED_FROM`` for the kill rules and ``forward_verdicts.ANALYST_REGISTERED_FROM`` for
+the analyst verdict; while it is None every row is read and the verdict is UNREGISTERED. A kill population ends at ``forward_verdicts.KILL_POPULATION_UNTIL[rule]`` when set. Rows holding
 an unformed look are named.
 
 Usage:
@@ -206,7 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         conn = sqlite3.connect(f"file:{args.db.resolve().as_posix()}?mode=ro", uri=True, timeout=5.0)
         try:
             if args.rule == "analyst":
-                reading = fv.analyst_reading(conn, as_of=as_of, registered_from=r_from)
+                reading = fv.analyst_reading(conn, as_of=as_of, registered_from=fv.ANALYST_REGISTERED_FROM)
             else:
                 reading = fv.kill_reading(conn, args.rule, as_of=as_of, registered_from=r_from,
                                           until=fv.KILL_POPULATION_UNTIL[args.rule])

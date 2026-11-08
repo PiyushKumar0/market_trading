@@ -233,6 +233,7 @@ def _seed_signals(conn) -> None:
 
 async def test_signals_block_scores_every_published_signal(conn, monkeypatch) -> None:
     monkeypatch.setattr(fv, "REGISTERED_FROM", D0)
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", D0)
     _seed_signals(conn)
     out = (await scorecard_ro(conn, as_of=AS_OF))["signals"]
     assert out["window"] == "from 2026-06-01"
@@ -253,10 +254,33 @@ async def test_signals_block_scores_every_published_signal(conn, monkeypatch) ->
 
 def test_signals_block_before_registration_reads_unregistered(conn, monkeypatch) -> None:
     monkeypatch.setattr(fv, "REGISTERED_FROM", None)
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", None)
     out = signals_block(conn, as_of=AS_OF)
     assert out["window"] == "pre-registration history"
     assert {out["analyst"]["verdict"], *(s["kill_rule"]["verdict"] for s in out["strategies"].values()
                                          if s["kill_rule"])} == {fv.UNREGISTERED}
+
+
+def test_the_analyst_verdict_reads_from_its_own_registration_date(conn, monkeypatch) -> None:
+    """The analyst-value verdict was re-registered on its own date when its prompts changed; the kill rules
+    keep theirs, and the window names both."""
+    monkeypatch.setattr(fv, "REGISTERED_FROM", D0)
+    monkeypatch.setattr(fv, "ANALYST_REGISTERED_FROM", D0 + timedelta(days=1))
+    seen: dict = {}
+
+    def spy(name, real):
+        def wrapped(conn, *args, **kwargs):
+            seen.setdefault(name, set()).add(kwargs["registered_from"])
+            return real(conn, *args, **kwargs)
+        return wrapped
+
+    monkeypatch.setattr(fv, "analyst_reading", spy("analyst", fv.analyst_reading))
+    monkeypatch.setattr(fv, "kill_reading", spy("kill", fv.kill_reading))
+    _seed_signals(conn)
+    out = signals_block(conn, as_of=AS_OF)
+    assert seen == {"analyst": {D0 + timedelta(days=1)}, "kill": {D0}}
+    assert out["window"] == "from 2026-06-01; analyst verdict from 2026-06-02"
+    assert out["analyst"]["window"] == "from 2026-06-02"
 
 
 def test_signals_block_never_raises(conn, monkeypatch) -> None:

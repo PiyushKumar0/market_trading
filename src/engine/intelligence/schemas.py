@@ -154,7 +154,7 @@ def parse_and_stamp(
 
 # =========================================================================== Intraday Analyst
 class NoActionOutput(BaseModel):
-    """The Intraday Analyst's second legal output: an explicit refusal to act (§5.2 output schema).
+    """The Intraday Analyst's second legal output: an explicit refusal to act.
 
     ``no_action`` is a first-class answer, not a failure. It carries no platform-stamped fields:
     nothing downstream of it can trade, so there is no proposal identity, TTL or audit digest to
@@ -471,11 +471,11 @@ CLUSTER_EVENT_TYPES: tuple[str, ...] = (
 
 
 class ClusterScore(BaseModel):
-    """One scored headline CLUSTER (§5.4 / §2.7 step 4) — one score per cluster, never per headline.
+    """One scored headline CLUSTER — one score per cluster, never per headline.
 
     ``entities`` are VERBATIM strings as they appear in the news; only the deterministic
-    EntityResolver maps them to tradingsymbols (§2.7 step 3), never the LLM. Every score is
-    UNTRUSTED evidence (§2.4).
+    EntityResolver maps them to tradingsymbols, never the LLM. Every score is
+    UNTRUSTED evidence.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -511,7 +511,7 @@ class ClusterScore(BaseModel):
 
 
 class ClusterScoreBatch(BaseModel):
-    """The News Analyst's batched output — up to 30 cluster scores per call (§5.4)."""
+    """The News Analyst's batched output — up to 30 cluster scores per call."""
 
     model_config = ConfigDict(extra="forbid")
 

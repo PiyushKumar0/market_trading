@@ -18,8 +18,14 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import cast
 
-#: R, the first session of the registered populations. Only a caller's default.
+#: R, the first session of the registered kill-rule populations (and of the hi52 diagnostic rows). Only a
+#: caller's default.
 REGISTERED_FROM: date | None = date(2026, 11, 2)
+
+#: The analyst-value verdict's own R. The owner re-registered it on 2026-11-09, when cleaning retired-plan
+#: citations out of the analyst prompts moved every strategy's ``prompt_version``; the registered key is the one on
+#: each strategy's first decision on or after it. Only a caller's default.
+ANALYST_REGISTERED_FROM: date | None = date(2026, 11, 9)
 
 #: Last journal session of each kill population; None while it accrues. Rolling back the regime gate sets brk20's to the
 #: last session the filter ran (amended 2026-10-30). Only a caller's default.

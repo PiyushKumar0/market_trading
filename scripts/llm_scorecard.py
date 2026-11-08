@@ -196,7 +196,7 @@ def run(sconn: sqlite3.Connection, mconn, db: Path, as_of: date) -> dict[str, An
     plans = [(date.fromisoformat(d), p, c) for d, p, c in sconn.execute(
         "SELECT d, payload, created_at FROM day_plans WHERE d <= ? ORDER BY d", (as_of.isoformat(),))]
     calls = sconn.execute("SELECT agent_id, ok, fail_reason, at FROM agent_calls").fetchall()
-    reading = fv.analyst_reading(sconn, as_of=as_of, registered_from=fv.REGISTERED_FROM)
+    reading = fv.analyst_reading(sconn, as_of=as_of, registered_from=fv.ANALYST_REGISTERED_FROM)
     return {
         "meta": {"script": "scripts/llm_scorecard.py", "label": LABEL, "as_of": str(as_of), "market_db": str(db),
                  "excess": EXCESS, "ew": {"source": source, "label": rc.SURVIVORSHIP_LABEL, "sessions": len(daily)}},
