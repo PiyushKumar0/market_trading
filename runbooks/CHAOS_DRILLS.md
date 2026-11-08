@@ -1,8 +1,8 @@
 # Chaos drills
 
 This file holds the chaos suite's run command, the live drills run against the real engine with the soak schedule,
-and the evidence log of every live drill. The stop/start set (cases 15–19) is G3 gate evidence
-(IMPLEMENTATION_PLAN.md, "Gate G3").
+and the evidence log of every live drill. The stop/start set (cases 15–19) is paper-to-live gate evidence
+(IMPLEMENTATION_PLAN.md, "Paper-to-live gate").
 
 ## 1. Automated suite
 
@@ -15,8 +15,8 @@ case number is in each file name. The flags list skip reasons (`-rs`) and pinned
 
 - **Passing tests** compose the real components the way `engine/ops/main.py` wires them, over a temp database and
   a movable clock. Only the external edge is faked: Kite, the Claude SDK, feed HTTP, Telegram and NTP.
-- **Skips** name what they wait for, with one of the reasons in `tests/chaos/conftest.py` (`PHASE3_GATED`,
-  `MIS_OUT_OF_PAPER_SCOPE`, `REAL_BROKER_ONLY`, `BROKER_RESIDENT_R3`, `REAL_SIDE_ONLY`, `PHASE4_LIFECYCLE_HOOKS`).
+- **Skips** name what they wait for, with one of the reasons in `tests/chaos/conftest.py` (`LIVE_ORDER_PATH_GATED`,
+  `MIS_OUT_OF_PAPER_SCOPE`, `REAL_BROKER_ONLY`, `BROKER_RESIDENT_PROTECTION`, `REAL_SIDE_ONLY`, `LIVE_AUTO_LIFECYCLE_HOOKS`).
 - **`xfail(strict=True)`** pins a real defect: the test asserts the intended behaviour, so fixing the defect makes it
   XPASS, which fails the run until the marker is removed.
 
@@ -52,7 +52,7 @@ ENGINE_DOWN half needs the watchdog scheduled task from `scripts/schedule_tasks.
 - case 3: Wi-Fi off for about 30 s;
 - case 4: let the daily token expire before login.
 
-### Soak schedule (30-session paper-AUTO soak, G3)
+### Soak schedule (30-session paper-AUTO soak, paper-to-live gate)
 
 | Soak week | Cases |
 |---|---|
@@ -61,8 +61,8 @@ ENGINE_DOWN half needs the watchdog scheduled task from `scripts/schedule_tasks.
 | 3 | 5, 6 |
 | 4 | 11, 12 |
 | 5 | 13, 14 |
-| 6 | 15, 16, 17, 18, 19 (stop/start set, G3-blocking) + the dead-platform drill (RUNBOOK "Dead-platform manual fallback") |
-| Quarterly after G3 | dead-platform drill + cases 1, 3, 11, 15, 17 |
+| 6 | 15, 16, 17, 18, 19 (stop/start set, blocks the paper-to-live gate) + the dead-platform drill (RUNBOOK "Dead-platform manual fallback") |
+| Quarterly after the paper-to-live gate | dead-platform drill + cases 1, 3, 11, 15, 17 |
 
 ## 3. Evidence log
 

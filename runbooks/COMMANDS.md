@@ -49,7 +49,7 @@ Select-String -Path data\logs\engine.log -Pattern 'migrations_applied_on_boot|mi
 ```
 
 Rollback (in this order; the restart comes last):
-1. Commit an uncommitted `config/limits.yaml` first: it is a dashboard capital change (O19), signed in state.db.
+1. Commit an uncommitted `config/limits.yaml` first: it is a dashboard capital change, signed in state.db.
 2. Note the tip you are leaving: `$from = git rev-parse HEAD`.
 3. `git reset --hard <previous tip>`. Do NOT restart yet. Migrations are additive; never drop columns.
 4. Check whether `config/limits.yaml` differs between the two tips:
@@ -58,12 +58,12 @@ Rollback (in this order; the restart comes last):
      (`git commit -m "..." -- config/limits.yaml`). Skip this and the boot FREEZES, or KILLS with a real
      position open (see "Capital change from the dashboard").
    - This keeps the capital as signed. To take the capital back too, reseed after the restart ("Protected config").
-   - Below the review-actions tip (2026-10-29), older code requires `analyst_confidence_min`, which `f1a9e42`
+   - Below the 2026-10-29 tip, older code requires `analyst_confidence_min`, which `f1a9e42`
      removed, and fails at boot without it. After the commit above, `git revert --no-commit f1a9e42` puts the key
      back on top of the signed bytes; have the owner reseed before the restart.
 5. Restart.
 
-A failed migration is recovered from `data\backups\pre_00NN.db`. Below the paper autopilot (M3) only while no `is_paper=1` row exists
+A failed migration is recovered from `data\backups\pre_00NN.db`. Below the paper autopilot only while no `is_paper=1` row exists
 in orders, positions, verdicts, gtts or learning_ledger (older code counts paper rows as real money; query in
 RUNBOOK "Rollback floor"); otherwise paper OFF or `paper.subsystem_enabled: false` and a restart.
 
@@ -111,7 +111,7 @@ Select-String -Path data\logs\engine.log -Pattern '"event": "tick_compaction_don
 
 Run as the service user `piyush.kumar_atari` (the engine uses the pinned CLI's stored claude.ai login,
 shared with the owner's interactive Claude Code). `claude_login_check` (08:10 IST)
-warns from 7 days before `refreshTokenExpiresAt`; next hard expiry 2026-11-08 05:03 IST.
+warns from 7 days before `refreshTokenExpiresAt`.
 
 ```powershell
 & "C:\Users\piyush.kumar_atari\projects\personal\market_trading\data\run\claude-cli\2.1.288\claude.exe" auth login --claudeai
@@ -146,19 +146,19 @@ $syms = ((Get-Content data\reports\orb_sweep_20260712T033313.json | ConvertFrom-
 uv run python scripts\backtest.py all --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
 # one strategy, finer grid:
 uv run python scripts\backtest.py rsi2 --grid-density medium --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms
-# positional leg measured against ITS holding cap (R2, 2026-09-12) — WO-3 floor = cost_floor/120:
+# positional leg measured against ITS holding cap (2026-09-12) — margin floor = cost_floor/120:
 uv run python scripts\backtest.py trend --from 2024-01-01 --to 2025-12-31 --index-symbol "NIFTY 50" --symbols $syms --margin-floor-days 120
 ```
 Reports → `data/reports/<strat>_<ts>.md` (+ sweep). ORB leg ≈ 90 min on the full 498-session window.
-`--margin-floor-days` defaults to 20 (the §7.1 swing cap); set it per-leg, never on an `all` run — the
+`--margin-floor-days` defaults to 20 (the swing holding cap); set it per-leg, never on an `all` run — the
 value used is printed in the validation report's "Multiple-testing discipline" block.
-Since 2026-09-12 (R2) both reports also carry the leg's MEASURED holding period — mean/median/p90
+Since 2026-09-12 both reports also carry the leg's MEASURED holding period — mean/median/p90
 sessions, closed-only beside all-trades, the open-trade count, and the same round-trip floor re-based
 on each of those horizons with its headroom multiple. Read the verdict against those rows: the
-registered denominator is a §7.1 CAP, so the floor at the cap is the loosest bar the horizon allows.
+registered denominator is a holding CAP, so the floor at the cap is the loosest bar the horizon allows.
 Reporting only — the promotion rule is unchanged.
 
-**Sweep mechanics (WO-M, 2026-09-13).** Every sweep artifact now carries a one-line `Mechanics:`
+**Sweep mechanics (2026-09-13).** Every sweep artifact now carries a one-line `Mechanics:`
 stamp — `stops=intrabar_ohlc · stop_exit_price=stopmarket · expectancy=closed_trades_only ·
 fills=next_bar_open` — and a validation artifact carries the same stamp **when its returns came out
 of the sweep**. Read the absence of a stamp differently on the two:
@@ -176,7 +176,7 @@ of the sweep**. Read the absence of a stamp differently on the two:
   whether a `*_sweep_*` artifact of the same run exists before concluding anything.
 
 A verdict whose params the grid never ranked carries a **THESE PARAMS ARE NOT A GRID WINNER** banner
-(and `params_are_grid_winner: false` in the JSON) — that is the §6.3 envelope DEFAULTS being
+(and `params_are_grid_winner: false` in the JSON) — that is the parameter-envelope DEFAULTS being
 validated because no config closed a round trip; it is not a swept result. The `expectancy (CLOSED)`
 column is the ranked/promotion statistic; `expectancy (all)` is the pre-fix headline, kept beside it,
 and `win% (CLOSED)` is over the same round trips as `expectancy (CLOSED)`. In the persisted
@@ -191,7 +191,7 @@ carry `sweep_expectancy_closed_pct` / `sweep_expectancy_all_pct` / `win_rate_clo
 uv run python scripts\event_study.py --from 2023-08-01 --to 2026-07-16 --symbols $syms
 ```
 → `data/reports/event_study.{md,json}`. Without `--symbols` it uses TODAY'S live universe_daily
-(correct for live, wrong for history). `--skip-filings-legs` = pre-§2.8.4 behavior.
+(correct for live, wrong for history). `--skip-filings-legs` = behavior from before the XBRL results line-items leg.
 
 ## Backfills
 
@@ -226,7 +226,7 @@ This flow is not for a mismatch you did not cause. If the boot's `protected_stor
 checkout, restore or rollback reverted a dashboard capital change, a reseed would sign the old bytes and silently
 undo the change. Use the restore recipe under "Capital change from the dashboard" below.
 
-The flow is owner-only by design (R4): the platform PREPARES the edit and hands it over, and runs the reseed only
+The flow is owner-only by design: the platform PREPARES the edit and hands it over, and runs the reseed only
 on the owner's explicit instruction. If a reseed errors, do NOT start the engine: `git checkout --
 config/envelope.yaml` and re-run it. A later clean boot clears a `protected_store_integrity` freeze by itself
 (lifecycle step 1c), but an unsigned file still FREEZES the boot it is found on. A prepared change follows this
@@ -242,7 +242,7 @@ Start-Service mt-engine                                          # boot must sho
 git add -u; git commit -m "<directive> applied (owner): patch + reseed"
 ```
 
-## Capital change from the dashboard (O19, 2026-10-16)
+## Capital change from the dashboard (2026-10-16)
 
 The dashboard's "Change capital" button (System tab, Risk limits card) rewrites three `config/limits.yaml`
 lines and re-signs the file in one step. The lines are `capital_base_inr`, `max_deployed_capital_inr` and
@@ -251,7 +251,7 @@ lines and re-signs the file in one step. The lines are `capital_base_inr`, `max_
 
 ```powershell
 git diff --stat -- config/limits.yaml                            # expect: 1 file, 3 lines changed
-git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)" -- config/limits.yaml   # commits this file only
+git commit -m "Capital <old> -> <new> via the dashboard (owner)" -- config/limits.yaml   # commits this file only
 ```
 
 Never `git stash`, `git checkout -- config/limits.yaml`, `git restore`, `git reset --hard` or an editor's
@@ -271,7 +271,7 @@ Stop-Service mt-engine
 .venv\Scripts\python.exe scripts\protected_config_status.py --restore limits.yaml    # the signed bytes go back on disk
 Start-Service mt-engine                                          # boot must show selftest protected_store:limits.yaml PASS
 # A boot that KILLED (protected_store_integrity_live_book) stays killed after the restore: /kill_reset, then /confirm.
-git commit -m "Capital <old> -> <new> via the dashboard (O19, owner)" -- config/limits.yaml   # the restored change is uncommitted again
+git commit -m "Capital <old> -> <new> via the dashboard (owner)" -- config/limits.yaml   # the restored change is uncommitted again
 ```
 
 The reseed flow above needs a clean `git status`. After a dashboard capital change, commit `limits.yaml`
@@ -394,7 +394,7 @@ Select-String -Path data\logs\engine.log -Pattern '"news_polled"' | ForEach-Obje
 
 # Corpus corroboration health (needs engine OFF, or run against a data\backups\*.duckdb copy):
 # distribution of distinct source domains per scored cluster — if ~all are 1, min_source_domains:2
-# can never pass and n_originating is structurally 0 (see memory: news-feed-starvation-zero-origination):
+# can never pass and n_originating is structurally 0 (see memory: news-feed-coverage):
 uv run python -c "import duckdb, collections; con = duckdb.connect(r'data\market.duckdb', read_only=True); rows = con.execute(\"select source_domains from news_clusters where sentiment is not null\").fetchall(); print(collections.Counter(len(r[0] or []) for r in rows))"
 
 # RSS liveness probe (a feed whose newest pubDate is days old is frozen upstream — retire it):
@@ -431,7 +431,7 @@ while OLD has a BSE insider row younger than 3 days (the message gives the re-ru
 
 Engine must be OFF (single DuckDB writer); ~1-2 s per session, checkpointed per date in
 `filings_backfill_checkpoints` (feed `bhavcopy_archive`; `corp_actions_archive` per ≤35-day window), so
-it is safe to interrupt and resume across evenings. Kite-official rows are never overwritten (A11).
+it is safe to interrupt and resume across evenings. Kite-official rows are never overwritten.
 
 ```powershell
 .venv\Scripts\python.exe scripts\backfill_bhavcopy.py --status          # read-only progress; safe with the engine live
@@ -439,8 +439,8 @@ it is safe to interrupt and resume across evenings. Kite-official rows are never
 ```
 
 **Muhurat session 2026-11-08 (Sunday) — run after the day, any evening from 2026-11-08 night, engine OFF**
-(the live engine treats special sessions as closed, so its own jobs skip the day; plan NSECalendar
-special-sessions amendment):
+(the live engine treats special sessions as closed, so its own jobs skip the day; see the NSECalendar
+special-sessions handling):
 
 ```powershell
 .venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2026-11-08 --to 2026-11-08 --skip-corp-actions
@@ -464,8 +464,8 @@ so they are safe beside the live engine (I/O-modest; prefer compacted days).
 .venv\Scripts\python.exe scripts\replay_day.py --day 2026-09-09 --symbols RELIANCE [--out report.json]
 # Recalibrate config\fill_model.yaml (bounded, compacted sessions only; exit 3 = nothing read, file untouched):
 .venv\Scripts\python.exe scripts\calibrate_fill_model.py --parquet-root data\parquet --out config\fill_model.yaml --report data\reports\fill_model_calibration_<date> --compacted-only [--days N --symbols-per-day N]
-# Phase-3 test tiers:
-.venv\Scripts\python.exe -m pytest tests\unit\test_oms_state.py tests\unit\test_oms_store.py tests\property -q   # OMS core + 9.2 properties
+# Paper-autopilot / OMS test tiers:
+.venv\Scripts\python.exe -m pytest tests\unit\test_oms_state.py tests\unit\test_oms_store.py tests\property -q   # OMS core + properties
 .venv\Scripts\python.exe -m pytest tests\unit\test_paper_broker.py tests\unit\test_fill_model.py tests\unit\test_broker_surface.py -q
 .venv\Scripts\python.exe -m pytest tests\replay -q                                                              # ~2 min, golden day
 ```
@@ -494,25 +494,25 @@ every published `hi52` signal from 2026-09-14; entry = the OPEN of the journal d
 backtest's anchor: the journal day is the session after the trigger, so this measures the same
 quantity the registered edge was measured as — the live fill lands later that morning, so realized
 results trail the metric by that intraday drift), exit = the close of the k-th SESSION of the hold
-(entry session first), net of one CNC round trip at the §7.1-SIZED notional
-(`swing_position_pct` / (`overnight_gap_mult` × the 6% stop) = equity/6 since O17 (2.0×; equity/7.5 at 2.5× before 2026-09-24), taken at the
+(entry session first), net of one CNC round trip at the risk-SIZED notional
+(`swing_position_pct` / (`overnight_gap_mult` × the 6% stop) = equity/6 since the owner decision applied 2026-09-24 (2.0×; equity/7.5 at 2.5× before), taken at the
 SMALLEST `equity_snapshots` reading in the window — ≈₹6,543 at the 2026-09-11 equity (₹39,256.65 / 6), and a
 drawn-down snapshot anywhere in the window gives a smaller notional and a HIGHER floor, which can
 only make DEMOTE easier; `--equity` overrides the equity and `--notional` skips the derivation
 outright and prints OVERRIDE, and the derivation prints with the verdict either way, so check which
 notional and floor it used before quoting a number). T+5 and T+10 print as DIAGNOSTICS and are
-labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.53 since O17; 1.47 before) comes
+labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.53 since 2026-09-24; 1.47 before) comes
 from the SAME derivation in this script (`registered_edge_pct()`, charged at the `equity_floor_rung`
 book) and a unit test pins the two together, so re-deriving by hand is never necessary.
 The 2026-09-14 boundary is an
-ASSUMPTION about the deploy date, printed as such — pass `--from` if the tranche shipped later. **Rule: DEMOTE if n ≥ 20 AND
+ASSUMPTION about the deploy date, printed as such — pass `--from` if the change shipped later. **Rule: DEMOTE if n ≥ 20 AND
 (median net at T+20 ≤ 0 OR hit rate at T+20 < 50%); HOLD otherwise; INSUFFICIENT below 20.** Run it
 at 20 and at 40 signals. A DEMOTE is two edits in one commit:
 re-add `hi52` to `NO_EDGE_SHADOW_STRATEGIES` **and** delete `hi52.expected_edge_pct` from
 `settings.yaml`. First-20-signal outcomes are validation, not income — nothing else moves in
 response to them.
 
-## C5 no-stop verdict (D14, 2026-10-15) — read-only, safe with the engine running
+## No-stop verdict (2026-10-15) — read-only, safe with the engine running
 
 ```powershell
 .venv\Scripts\python.exe scripts\no_stop_verdict.py                                    # as of today -> data\reports\no_stop_verdict_<date>.json
@@ -603,7 +603,7 @@ cmd /c mklink /J data\run\claude-cli C:\Users\piyush.kumar_atari\projects\person
 Judge the run on `schema_invalid` in the REPLAYED outputs. Old live answers that carry `regime_note` show as
 live-column parser rejections; that is expected.
 
-## cat v2 shadow verdict (WO-18, clock restarted 2026-08-28) — engine OFF
+## cat v2 shadow verdict (clock restarted 2026-08-28) — engine OFF
 
 ```powershell
 .venv\Scripts\python.exe scripts\cat_shadow_verdict.py                                   # as of today
@@ -617,19 +617,19 @@ convention are in the script's docstring.
   symbols follow NSE renames, whether or not `scripts\rekey_symbol.py` ran.
 - **Measure:** entry = open of the journal day when the story was first seen before 09:15 IST that day,
   else the next session's open; exit = close of the k-th session from the entry; net of one CNC round
-  trip at the §7.1-sized notional with `cat.stop_pct` (5%).
+  trip at the risk-sized notional with `cat.stop_pct` (5%).
 - **Verdict:** INSUFFICIENT until ≥30 sessions, ≥20 admitted signals and a fully measured cohort (the
   first 20 signals by day and symbol that are neither void nor duplicate; a store hole holds it). Then
-  **RETIRE** iff the cohort median net is ≤ cost × H / 20 at BOTH T+10 and T+20 (the WO-3 margin
+  **RETIRE** iff the cohort median net is ≤ cost × H / 20 at BOTH T+10 and T+20 (the margin
   floor), else **OWNER REVIEW**. The report changes nothing either way.
 - **Voids and duplicates:** a bonus/split/rights/demerger ex-date inside a signal's hold voids it (stored
   bars are never re-adjusted); a signal sharing a news cluster with an earlier signal of the same symbol is
   the same story twice. Both are listed and leave the cohort.
-- **Decide nothing:** the running cells, the O15 / sonnet-5.5 scorer segments, and the excess over the
+- **Decide nothing:** the running cells, the pre-NIFTY500 / NIFTY500 + Sonnet-5 scorer segments, and the excess over the
   equal-weight benchmark.
-- After a verdict, the held work in IMPLEMENTATION_PLAN §3 ("Waiting on the `cat` v2 verdict") is due.
+- After a verdict, the held work in IMPLEMENTATION_PLAN ("Waiting on the `cat` v2 verdict") is due.
 
-## brk20 entry-mechanism backtest (R1) — three registered entry variants, engine OFF
+## brk20 entry-mechanism backtest — three registered entry variants, engine OFF
 
 ```powershell
 .venv\Scripts\python.exe scripts\backtest_brk20.py --out data\reports\backtest_brk20_<date>.json --verify-window 25
@@ -656,7 +656,7 @@ How to read the artifacts:
 - **Every cell prints its own fill rate** (`n_signals_in_cell` / `fill_rate_in_cell`). An "in every
   margin tercile" claim is only readable off `v2_beats_matched_v1_in_every_margin_tercile`, never off
   the unmatched pooled rows.
-- **Reported promotability is CPCV AND geometry** (2026-09-12 amendment): a cell that passes the
+- **Reported promotability is CPCV AND geometry** (2026-09-12): a cell that passes the
   mean-based CPCV gate while its MEDIAN net is ≤ 0 prints `GATES DISAGREE` and reads NOT promotable.
   Both decision-rule outcomes are printed — the registered gate (`decision`) and the tightened one
   (`decision_under_tightened_reporting_rule`) — with an explicit "does the tightening change the

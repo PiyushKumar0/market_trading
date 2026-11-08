@@ -1,18 +1,17 @@
 # RUNBOOK — market_trading (operations)
 
-Specification: §10 of [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md). This is the operational
-companion. **Phase 0** content is below; later phases extend it (full daily checklists, per-chaos-case
+This is the operational runbook. It is extended (full daily checklists, per-chaos-case
 recovery, backup/restore) as those capabilities land.
 
-The platform is up **only during active periods** and may be deliberately stopped in between (§2.6).
+The platform is up **only during active periods** and may be deliberately stopped in between.
 Being off outside an active period is **NORMAL, not a fault**. Every startup is a full recovery —
-capital protection is broker-resident (R3), so an open position is protected with the engine and PC dead.
+capital protection is broker-resident (SL-M / GTT resting at the broker), so an open position is protected with the engine and PC dead.
 
-## Morning login flow (R6) — the one daily human touchpoint
+## Morning login flow — the one daily human touchpoint
 
-The Kite access token expires ~06:00 IST daily (A5). Each trading day:
+The Kite access token expires ~06:00 IST daily. Each trading day:
 
-1. Start the engine (manual/demand or the wake Scheduled Task — same code path, §2.6). The startup
+1. Start the engine (manual/demand or the wake Scheduled Task — same code path). The startup
    **live-probes the token against the broker** (2026-07-21 fix — a stale token can no longer
    masquerade as valid) and FREEZES entries while invalid (open positions stay broker-protected).
    The `/kite/callback` login port (:8400) is bound **before** the startup recovery, so the browser
@@ -36,7 +35,7 @@ method that fits how you log in:
 | Method | Where you open the login link | Register this redirect URL |
 |---|---|---|
 | **PC-based** (simplest; no networking setup) | a browser **on the PC** running the engine | `http://localhost:8400/kite/callback` |
-| **Phone-based** (the daily one-touch flow, §10.2) | the Telegram link **on your phone**, same Wi-Fi/LAN | `http://<PC-LAN-IP>:8400/kite/callback` |
+| **Phone-based** (the daily one-touch flow) | the Telegram link **on your phone**, same Wi-Fi/LAN | `http://<PC-LAN-IP>:8400/kite/callback` |
 
 `localhost` works for PC-based login because the browser and the engine are on the same machine — **no
 LAN IP and no static-lease needed**. Phone-based login needs the PC's LAN IP because `localhost` on the
@@ -45,7 +44,7 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
 
 ## Planned stop / start — the new normal
 
-- **Start:** `mt-engine` (NSSM) or `python -m engine.ops.main`. Runs the full §2.6 recovery + catch-up,
+- **Start:** `mt-engine` (NSSM) or `python -m engine.ops.main`. Runs the full recovery + catch-up,
   then idles in the sticky mode (OFF on a fresh install — safe).
 - **Only ONE instance can run** (2026-07-21 fix): startup takes an exclusive kernel lock on
   `data/engine.lock` before touching any store. A second start refuses with **exit code 3** and logs
@@ -55,19 +54,19 @@ app. The `/token` fallback (step 4) works regardless of which URL is registered.
 - **Stop:** stop the NSSM service (or Ctrl-C). **First Ctrl-C = graceful** (honoured at the next safe
   point, even mid-startup); **a second Ctrl-C more than 10 s after the first = forced hard exit**
   (2026-07-21 fix — state stays RUNNING so the next boot crash-recovers; positions stay broker-protected,
-  R3). Repeats inside those 10 s are logged `stop_signal_repeat_ignored` and ignored. **NSSM must give
+  broker-resident protection). Repeats inside those 10 s are logged `stop_signal_repeat_ignored` and ignored. **NSSM must give
   the engine time to stop:** `AppStopMethodConsole` = 30000 ms (set by `nssm_install.ps1`). At NSSM's
   1500 ms default it closes the console window after 1.5 s (a SIGBREAK repeat at +1.3 s) and Windows
   terminates the process mid-backup, so every stop 09-02..09-23 was recorded as a crash. A clean stop
   is confirmed by `engine_lifecycle.state = STOPPED` with `last_clean_stop_at` at the stop time, and no
   `stop_forced` line in `engine.log`. A wedged internal worker can
-  no longer leave a zombie process holding the lock. The shutdown guard (§2.6) will, from Phase 4 (real orders),
+  no longer leave a zombie process holding the lock. The shutdown guard will, once live AUTO exists (real orders),
   flatten an open MIS before window-end / verify CNC GTTs / cancel working entries — never leaving the
   PC dead with an unprotected position or a resting entry order.
 - A clean self-initiated stop exits 0 and is **not** auto-restarted. Restart-on-failure is the NSSM
   `AppExit` mapping (0 = Exit, Default = Restart after `AppRestartDelay` 15 s, throttled; see
   `scripts/nssm_install.ps1`). The engine's own intend-to-run record is `engine_lifecycle.state`. A host
-  reboot is not recovered either (the service is DEMAND start, §2.2).
+  reboot is not recovered either (the service is DEMAND start).
 
 ## Restore market.duckdb from backup (owner, engine stopped or crashed)
 
@@ -154,7 +153,7 @@ need a valid Kite session.
      sweep after login clears them. The post-login re-trigger still refetches NIFTY 50 and INDIA VIX
      from S, and `warmup_not_ready` then stops naming `regime:NIFTY 50`.
 
-What the engine recovers by itself after step 6 (the §2.6 catch-up runs once per trading day from S;
+What the engine recovers by itself after step 6 (the catch-up runs once per trading day from S;
 at most 30 days back):
 - `bars_1d`. `bhavcopy` writes every EQ symbol, and `daily_bars` writes the watchlist plus NIFTY 50
   and INDIA VIX. The boot regime fill and the post-login re-trigger refetch NIFTY 50 and INDIA VIX from S.
@@ -180,10 +179,10 @@ What is lost (nothing rebuilds it):
   on their next scheduled run, within that job's own window. For `corp_actions` that is the run day
   -7 to +35 days.
 
-## Dead-platform manual fallback (R10) — pre-stage BEFORE Phase 4
+## Dead-platform manual fallback — pre-stage BEFORE live AUTO
 
 If the platform and PC are dead with open positions, capital is still protected by the resting SL-M/GTT
-(R3). To intervene manually:
+(broker-resident protection). To intervene manually:
 
 1. **Kite app / web** — flatten positions manually.
 2. **Kite Console kill switch** — blocks the account's API + trading.
@@ -193,7 +192,7 @@ If the platform and PC are dead with open positions, capital is still protected 
 Zerodha Call & Trade: __________________   Client ID: __________   (print + keep offline)
 ```
 
-## Windows service setup (E7/D11)
+## Windows service setup
 
 - **Install the `mt-engine` service** — run every step from an **elevated (Administrator) PowerShell**
   (service create + `nssm set` require it):
@@ -206,7 +205,7 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
      e.g. `Copy-Item …\win64\nssm.exe C:\tools\nssm\nssm.exe` (optionally add `C:\tools\nssm` to PATH).
   3. **Create the venv first** (`uv sync`) — the service runs `.\.venv\Scripts\python.exe -m engine.ops.main`;
      install preflight fails without it.
-  4. **Apply** (idempotent — re-running reconfigures; startup = manual/demand, §2.2/§2.6):
+  4. **Apply** (idempotent — re-running reconfigures; startup = manual/demand):
      `scripts\nssm_install.ps1 -Action install -Confirm -NssmPath C:\tools\nssm\nssm.exe`.
      **`-Confirm` is mandatory** — without it the script only DRY-RUNS (prints the plan, changes nothing).
      Omit `-NssmPath` if `nssm.exe` is on PATH; preview safely by omitting `-Confirm` first.
@@ -214,7 +213,7 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
 - Sign in the engine's pinned Claude CLI (`llm.cli_path` in `config/agents.yaml`) as the service user:
   `& "<repo>\data\run\claude-cli\2.1.288\claude.exe" auth login --claudeai` (COMMANDS.md "Re-login of the
   engine's Claude CLI"). That stored login is what every engine LLM call uses. Ensure **no**
-  stray `ANTHROPIC_API_KEY` (it silently outranks the CLI login, D2 — the startup self-test asserts its absence).
+  stray `ANTHROPIC_API_KEY` (it silently outranks the CLI login — the startup self-test asserts its absence).
 - Power: disable Modern Standby network throttling; set Windows Update active hours; a wake-capable
   Scheduled Task wakes the PC for scheduled active periods incl. EOD jobs.
 
@@ -224,7 +223,7 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
 > modification; owner cross-check requested in the file header). Before the `CALENDAR_HORIZON` alert
 > fires (fewer than `clock.calendar_horizon_alert_sessions` = 40 verified sessions left), add
 > `config/calendar/2027.yaml` from the official NSE circular and set `verified: true` +
-> `verified_through` (R6, "no calendar, no trading").
+> `verified_through` ("no calendar, no trading").
 
 ---
 
@@ -233,7 +232,7 @@ Zerodha Call & Trade: __________________   Client ID: __________   (print + keep
 The **data plane**: the ticker→bar pipeline, the daily jobs, the news pipeline data side, the feature engine, the
 cost model and the cold-start/watchdog machinery. Everything is wired in the composition root `engine.ops.main`; the data
 jobs are **catch-up-eligible** (a missed fire-time is replayed on the next startup via the `job_runs`
-watermarks, §2.6). Broker-touching jobs (instruments dump, backfill, reconcile, ticker) run only once
+watermarks). Broker-touching jobs (instruments dump, backfill, reconcile, ticker) run only once
 Kite credentials exist — a fresh install stays runnable with entries FROZEN until login.
 
 ## Daily job schedule (IST, trading days per calendar)
@@ -249,38 +248,38 @@ uses). The table lists the `build_job_registry` specs (`engine/ops/main.py`); ti
 | Time | Job (`job_runs` id) | Class | Notes |
 |---|---|---|---|
 | 08:10 | `claude_login_check` | run-latest | reads the pinned CLI's stored claude.ai login; one warning when the refresh token is within 7 days of expiry, blank or missing (re-login: COMMANDS.md) |
-| 08:15 | `instruments` | safety-critical | Kite dump + tick sizes (A10); stale ⇒ FROZEN-for-entries |
-| 08:20 | `surveillance` | safety-critical | GSM/ASM/T2T/ESM (A8); reuse-yesterday on source failure. A "`<SYM>` is now on the NSE `<LIST>` list (you hold it)" alert means an open real position is under exchange surveillance: the platform does not touch the position, and new entries in it are refused. Check margin and settlement (T2T = no intraday netting) in Kite. Each (position, list) alerts once; a restart does not repeat it |
-| 08:25 | `news_chain` | run-latest | backfill → cluster → resolve (never entry-blocking, §2.7) |
-| 08:30 | `universe_build` | run-latest | index (`universe.index_name`, NIFTY Total Market since 2026-10-08, O18) ∩ MIS ∩ ¬surveillance ∩ ≥₹5cr (A8/C7); core subset = `universe.core_index_name` (NIFTY 500) |
+| 08:15 | `instruments` | safety-critical | Kite dump + tick sizes; stale ⇒ FROZEN-for-entries |
+| 08:20 | `surveillance` | safety-critical | GSM/ASM/T2T/ESM; reuse-yesterday on source failure. A "`<SYM>` is now on the NSE `<LIST>` list (you hold it)" alert means an open real position is under exchange surveillance: the platform does not touch the position, and new entries in it are refused. Check margin and settlement (T2T = no intraday netting) in Kite. Each (position, list) alerts once; a restart does not repeat it |
+| 08:25 | `news_chain` | run-latest | backfill → cluster → resolve (never entry-blocking) |
+| 08:30 | `universe_build` | run-latest | index (`universe.index_name`, NIFTY Total Market since 2026-10-08, owner decision) ∩ MIS ∩ ¬surveillance ∩ ≥₹5cr; core subset = `universe.core_index_name` (NIFTY 500) |
 | 08:30 Sun | `sector_map` | run-latest | weekly `sector_map`+`theme_map` (fires Sunday, not a trading day) |
-| 08:35 | `catalyst_digest` | run-latest | pre-open catalyst digest (§2.7 step 5) |
+| 08:35 | `catalyst_digest` | run-latest | pre-open catalyst digest |
 | 08:40 | `token_check` | not a registry job | pre-open token probe: pages the owner if the Kite token is rejected; no watermark, not catch-up-replayed |
-| 08:50 | `preopen_planner` | run-latest | §5.3 pre-open planner |
-| 09:30 | `time_exit_check` | run-latest | D2 time exit: an exit rec for every open recommended position at or past its exit session, every session until `/closed`, except one the holdings journal shows sold outside the ledger (logged `time_exit_skipped_sold_outside_ledger`; the pre-open plan lists it for `/closed`); regular sessions only (never muhurat) |
-| 15:45 | `reco_expire` | run-latest | expired-unconfirmed recommendations → no_action (§3.6) |
-| 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift (A13); one run per missed day |
+| 08:50 | `preopen_planner` | run-latest | pre-open planner |
+| 09:30 | `time_exit_check` | run-latest | time exit: an exit rec for every open recommended position at or past its exit session, every session until `/closed`, except one the holdings journal shows sold outside the ledger (logged `time_exit_skipped_sold_outside_ledger`; the pre-open plan lists it for `/closed`); regular sessions only (never muhurat) |
+| 15:45 | `reco_expire` | run-latest | expired-unconfirmed recommendations → no_action |
+| 15:50 | `bar_reconcile` | date-keyed | self-vs-official 1m drift; one run per missed day |
 | 18:00 | `bhavcopy` | date-keyed | UDiFF cross-check/fill of `bars_1d` |
 | 18:05 | `daily_bars` | date-keyed | nightly incremental official-candle backfill (watchlist + NIFTY 50 + India VIX) |
-| 18:30 | `earnings_calendar` | safety-critical | results/board-meeting dates (R2/O13) |
+| 18:30 | `earnings_calendar` | safety-critical | results/board-meeting dates |
 | 18:30 | `rec_outcomes` | date-keyed | hindsight scoring of every delivered entry rec on official bars (fill, exit, net, T+5/10/20, excess over the equal-weight universe) into `rec_outcomes`; waits for that day's `daily_bars`; no scanner, threshold or promotion reads it |
-| 18:35 | `filings_pit` | date-keyed | insider trades (NSE PIT, historical; §2.8) |
-| 18:40 | `isin_map` | run-latest | symbol → ISIN → BSE scrip code (§2.8); before `filings_shp` |
+| 18:35 | `filings_pit` | date-keyed | insider trades (NSE PIT, historical) |
+| 18:40 | `isin_map` | run-latest | symbol → ISIN → BSE scrip code; before `filings_shp` |
 | 18:40 | `signal_outcomes` | date-keyed | hindsight scoring of every published brk20/hi52/ins signal into `signal_outcomes`, for owner surfaces and verdicts only. While a bar is missing it logs `signal_outcome_bar_missing` nightly and the row stays open |
-| 18:45 | `filings_results` | date-keyed | results + board-meeting dates (§2.8) |
-| 18:50 | `filings_shp` | run-latest | shareholding pattern + pledge (§2.8) |
-| 19:00 | `filings_pit_fresh` | date-keyed | BSE same-day fresh insider trades (§2.8) |
+| 18:45 | `filings_results` | date-keyed | results + board-meeting dates |
+| 18:50 | `filings_shp` | run-latest | shareholding pattern + pledge |
+| 19:00 | `filings_pit_fresh` | date-keyed | BSE same-day fresh insider trades |
 | 19:00 | `weekly_summary` | date-keyed | owner digest on each week's last regular session (a missed one replays): recs delivered/taken/skipped/expired, hindsight value of skipped recs, cumulative net and excess per strategy, and once registered the analyst-value line; waits for that day's `rec_outcomes`, and once registered for a `signal_outcomes` run still due (a failed, given-up or never-scanned day sends "Analyst reading unavailable") |
 | 19:15 | `ins_crossings` | date-keyed | EOD insider net-buy crossing detection; must run after `filings_pit_fresh` |
-| 19:30 | `results_line_items` | run-latest | quarterly revenue/PAT from XBRL (§2.8.4) |
-| 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (A12 data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |
+| 19:30 | `results_line_items` | run-latest | quarterly revenue/PAT from XBRL |
+| 20:15 | `corp_actions` | run-latest | ex-dates/splits/bonuses (corp-action data; moved 18:15→20:15 2026-07-24, NSE evening 503s) |
 | 20:30 | `deals` | date-keyed | bulk/block deals → `flagged_instrument_days` (moved 18:45→20:30 2026-07-24) |
-| 20:45 | `features_daily` | date-keyed | §6.2 v1 feature snapshot for the day's universe (moved 18:50→20:45 2026-08-18 — MUST stay after `deals`/`corp_actions`, it reads both) |
-| 21:00 | `nightly_review` | date-keyed | nightly review (§5.5/§6.4) |
-| 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` (§10.5) |
+| 20:45 | `features_daily` | date-keyed | v1 feature snapshot for the day's universe (moved 18:50→20:45 2026-08-18 — MUST stay after `deals`/`corp_actions`, it reads both) |
+| 21:00 | `nightly_review` | date-keyed | nightly review |
+| 21:00 | `backup` | run-latest | SQLite `state.db` snapshot to `data/backups/` |
 | 21:30 | `feed_freshness` | run-latest | daily census of every feed's newest data |
-| 22:00 | `market_backup` | run-latest | `EXPORT DATABASE` of market.duckdb to `data/backups/market-<stamp>/` (§10.5); CompactionLane. Never starts 06:00–15:45 on a trading day, never in the boot catch-up pass or on the stop path; a missed export runs in the next lane pass outside that window (incl. the post-boot pass); after a failure it waits 6 h before retrying |
-| 22:30 | `tick_compact` | date-keyed | collapses each closed symbol-day's tick fragments into one file (§4.3); last in date-keyed order |
+| 22:00 | `market_backup` | run-latest | `EXPORT DATABASE` of market.duckdb to `data/backups/market-<stamp>/`; CompactionLane. Never starts 06:00–15:45 on a trading day, never in the boot catch-up pass or on the stop path; a missed export runs in the next lane pass outside that window (incl. the post-boot pass); after a failure it waits 6 h before retrying |
+| 22:30 | `tick_compact` | date-keyed | collapses each closed symbol-day's tick fragments into one file; last in date-keyed order |
 
 Live (interval, not calendar-gated, run whenever the engine is up): `bar_advance` (5 s bar
 finalization), `health_check` (`lifecycle.watchdog_poll_s`), and the news polls — one `news_poll_<name>`
@@ -291,7 +290,7 @@ job per `news.feeds.rss` entry at its own `poll_s` (2026-08-04 seed: `et` 300 s,
 
 - **`agent X failed: auth_failed (...) — fix: re-login ...`** — the stored claude.ai login of the CLI is
   dead or revoked. Every LLM caller fails until the re-login (`runbooks/COMMANDS.md` "Re-login of the
-  engine's Claude CLI"); the deterministic engine and the risk gate are unaffected (D7). The alert repeats
+  engine's Claude CLI"); the deterministic engine and the risk gate are unaffected (an LLM failure means no action plus an alert). The alert repeats
   per agent per episode window.
 - **`CATCHUP_REPORT` lists `bar_reconcile:<day>` as failed** — expected on a pre-login boot or while the
   Kite token is dead; it clears on the first sweep after login. After 7 days of failure the day becomes
@@ -303,7 +302,7 @@ job per `news.feeds.rss` entry at its own `poll_s` (2026-08-04 seed: `et` 300 s,
   The sweep retries it every 30 min (after login, for a token failure) and gives up after 7 days.
   `rec_outcomes` for that day waits on it. One symbol with no instrument token never fails the day.
 
-## Historical backfill procedure (A2, checkpointed & resumable)
+## Historical backfill procedure (checkpointed & resumable)
 
 The initial minute history is a multi-evening job — throttled to ≤3 req/s inside `KiteClient`, chunked
 per Kite's per-request caps, and **checkpointed per `(symbol, interval)`** in `state.db`
@@ -311,40 +310,40 @@ per Kite's per-request caps, and **checkpointed per `(symbol, interval)`** in `s
 
 - **Warm-up / gap fill on startup is automatic** — every startup computes its off-span and backfills
   the intraday minute gap (`src='gap_backfilled'`, excluded from reconcile drift) plus the NIFTY 50 /
-  India VIX daily history the regime features need (§2.6 step 4 / `regime_data_ready`).
+  India VIX daily history the regime features need (`regime_data_ready`).
 - **Seed the full history once** (offline, after login so a token exists). Drive `BackfillJob.run` for
   the universe: minute interval for intraday depth (`data.backfill_minute_years`, default 1y) and day
   interval for the daily baselines (`data.backfill_daily_years`, default 2y). Re-run freely — the
   checkpoint makes it idempotent. Watch the `backfill_run_done` / `backfill_chunk_failed` log events;
   a failed symbol stays behind its checkpoint and resumes next run.
-- **A11 (no re-adjustment):** Kite minute+daily candles are already corp-action adjusted
+- **No re-adjustment:** Kite minute+daily candles are already corp-action adjusted
   (`data.minute_candles_adjusted=true`) — candles are written exactly as fetched.
 - **Baselines / validation:** `scripts/backtest.py <orb|rsi2|trend|mom|all> --from YYYY-MM-DD --to
   YYYY-MM-DD [--index-symbol "NIFTY 50"] [--grid-density …] [--reports-dir …]` runs the vectorbt sweep
-  → skfolio CPCV/walk-forward → writes `param_sets` rows + a report (verdict + honest negatives, C9).
-  The §2.7 event-study proxy backtest is `scripts/event_study.py` (earnings + bhavcopy gap/volume
+  → skfolio CPCV/walk-forward → writes `param_sets` rows + a report (verdict + honest negatives).
+  The news/catalyst event-study proxy backtest is `scripts/event_study.py` (earnings + bhavcopy gap/volume
   events → `data/reports/event_study.{md,json}`). Both honor `MT_DATA_DIR`.
 
-## Pre-open start (tick coverage) (Q14)
+## Pre-open start (tick coverage)
 
 **Start the engine by 09:05 IST on trading days.** Raw tick capture — and therefore everything
 `data/parquet/ticks` carries (bid/ask, depth, cumulative volume) — begins only once the ticker
 subprocess is up; a late start loses the opening session **permanently**. Unlike `bars_1m`, which
-the §2.6 warm-up gap-fill can reconstruct OHLCV-only from Kite's historical MINUTE-CANDLE API
+the warm-up gap-fill can reconstruct OHLCV-only from Kite's historical MINUTE-CANDLE API
 (`src='gap_backfilled'`), raw ticks have **no backfill path** — Kite exposes no historical tick/quote
 API, so a tick the engine was not up to receive is gone for good, independent of any code fix. A late start
 leaves any opening-range strategy and any open-session spread measurement blind exactly there.
 
 This is a start-**time** requirement, not a missing capability — every start already runs the
-identical §2.6 recovery/catch-up path regardless of clock time; starting earlier only means the
+identical recovery/catch-up path regardless of clock time; starting earlier only means the
 ticker subscribes and writes before 09:15 instead of after.
 
 **Mitigation — pick one:**
 1. **Manual (default):** start the engine (service or `python -m engine.ops.main`) by 09:05 IST
    yourself, same discipline as the morning login flow above.
-2. **Scheduled (owner option, plan §14 Q14):** Q14 recorded manual-start-primary **deliberately** —
+2. **Scheduled (owner option):** manual-start-primary was recorded **deliberately** —
    this note documents the already-built option, it does not change that default. Register the
-   wake-capable engine-start Scheduled Task (§10.7 below): `.\scripts\schedule_tasks.ps1
+   wake-capable engine-start Scheduled Task (see "Out-of-band watchdog + Scheduled Tasks" below): `.\scripts\schedule_tasks.ps1
    -WithEngineStarts`, with a `lifecycle.active_period_starts` time at or before 09:05 IST. The
    watchdog (`scripts/watchdog.py`) already alerts (`SCHEDULED_START_MISSED`) if a scheduled start
    fails to fire, so a missed pre-open wake is caught the same day.
@@ -359,7 +358,7 @@ debounce in `data/watchdog_state.json`, and raises `SCHEDULED_START_MISSED` (an 
 `lifecycle.active_period_starts` start did not occur) or `ENGINE_DOWN` (`state != STOPPED` and the pid
 is dead, or wedged past `catchup_grace_s` — alert first, then force-kill so NSSM restarts it).
 `state == STOPPED` is **silent** (intentional off is normal). A total power loss takes the watchdog with
-it (§2.2 limitation).
+it (a known limitation).
 
 - Register both tasks (from the repo root, elevated PowerShell, **run-as the mt-engine service
   account** so the per-user DPAPI bot token decrypts):
@@ -395,7 +394,7 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
 - **Stop:** hi52/ins re-anchor the stop to the delivered entry at the rule's percentage; the "re-anchored" tail
   shows the scanner's entry it moved from.
 - **Expected ₹:** shown only for a strategy with an edge on record, as notional × the edge the risk check uses: the
-  registered research edge, which for hi52 is capped by what costs allow at the current capital (O19). It is not a forecast.
+  registered research edge, which for hi52 is capped by what costs allow at the current capital (the owner's dashboard capital change). It is not a forecast.
 - **Cost line:** two forms. `edge Nx breakeven` for a strategy with a registered edge. `target distance D% = Nx
   breakeven (earned only if the target is hit; not an expected edge)` for a target-priced rec: a distance with no
   probability behind it. An exit or adjust carries neither.
@@ -415,7 +414,7 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
 - **Engine down:** a tap made while the engine is down is dropped at the next start
   (`drop_pending_updates=True`). Re-tap, or type `/veto <rec_id> <reason>`.
 
-## brk20 C2 regime gate
+## brk20 regime gate
 
 - **Rule:** a brk20 crossing originates only when NIFTY 50 close > SMA50 > SMA50 twenty sessions earlier, judged at
   the crossing session. Resting levels are not re-judged.
@@ -427,14 +426,9 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
 - **Journal:** `brk20_sweep` carries `regime_up`.
 - **Rollback:** `brk20.regime_filter: false` in `config/settings.yaml`, then an engine restart. The same commit sets
   `KILL_POPULATION_UNTIL["brk20"]` in `src/engine/learning/forward_verdicts.py` to the last session the filter ran:
-  a rollback ends the registered brk20 kill population (IMPLEMENTATION_PLAN section 3).
+  a rollback ends the registered brk20 kill population (IMPLEMENTATION_PLAN "Pending verdicts").
 
-## The analyst heartbeat is retired
-
-There are no periodic analyst check-ins and no `analyst_heartbeat_tick` job. The regime context is a deterministic,
-dated line in the analyst and planner prompts. The `agents.yaml` triggers are `signal_candidate` and `position_event`.
-
-## Changing the trading capital (O19, 2026-10-16)
+## Changing the trading capital (dashboard, 2026-10-16)
 
 `capital_base_inr` in `config/limits.yaml` is the base every risk limit is a percent of. The real and
 paper books share it.
@@ -485,11 +479,11 @@ Confirm is offered only when the engine allows the exact amount.
 - hi52's registered edge is capped by its derivation at the new base (`min(registered 1.53, derived)`).
   - A cut lowers it automatically; raising the registered number stays an owner decision.
   - Rec cards show this capped figure as "the edge the risk check uses".
-- the paper floors move with the base. For the D14 no-stop positions these floors (−10% go flat, −15% kill)
+- the paper floors move with the base. For the no-stop test positions these floors (−10% go flat, −15% kill)
   are the only loss exit:
   - a raise widens the rupee drawdown the paper book may take before it is flattened;
   - a cut narrows it.
-  - The change dates are in `config_audit`; read them alongside the D14 verdict.
+  - The change dates are in `config_audit`; read them alongside the no-stop verdict.
 
 **Afterwards:** commit `config/limits.yaml` (COMMANDS "Capital change from the dashboard").
 
@@ -527,7 +521,7 @@ own GTT book. It never calls Kite. Real and paper rows share the tables, split b
 Paper has its own halts (`paper_halts`, rung stored as a `RiskState` value). They never write the real
 `mode_state`, `risk_state_causes` or `kill_state`. The paper entry state is the worse of the real risk state
 and the paper halts, so a real halt or kill blocks new paper entries; a real mode OFF or `/pause_entries`
-stops the pipeline before the analyst, so paper gets no proposals either (D9). None of these flattens paper.
+stops the pipeline before the analyst, so paper gets no proposals either. None of these flattens paper.
 
 | Cause (rung stored) | Paper action | Clears | Owner action |
 |---|---|---|---|
@@ -559,7 +553,7 @@ paper reject.
 While the engine is down or deaf (host sleep, restart, feed outage) no paper stop fires. On the next tick the
 catch-up applies what the 1-minute bars show, or voids the position.
 
-## No-stop exit test (D14, from 2026-10-15)
+## No-stop exit test (from 2026-10-15)
 
 Paper positions of the strategies in `paper.no_stop_strategies` (`[hi52, ins, brk20]`) opened from the
 2026-10-15 deploy carry **no stop and no target** and sell near the close of their exit session (the 20th, the
@@ -583,23 +577,23 @@ fill session counting as 1). Cards and real positions keep their stops.
   - or a research snapshot, which has daily bars only and is marked so.
 - **Ending it:** `paper.no_stop_strategies: []` and a restart; open test positions run to their exit session. That
   ends the paper part only: the signal-level verdict reads `rec_outcomes`, which scores every card both ways
-  regardless. Changing the list restarts the paper population (C5 clarification).
+  regardless. Changing the list restarts the paper population.
 
 ## Rollback floor
 
-Older code counts paper rows as real money and could latch real floors. Before rolling the tree below the M3
-tip, `SELECT (SELECT count(*) FROM orders WHERE is_paper=1)+(SELECT count(*) FROM positions WHERE is_paper=1)+(SELECT
+Older code counts paper rows as real money and could latch real floors. Before rolling the tree below the
+paper-autopilot tip, `SELECT (SELECT count(*) FROM orders WHERE is_paper=1)+(SELECT count(*) FROM positions WHERE is_paper=1)+(SELECT
 count(*) FROM verdicts WHERE is_paper=1)+(SELECT count(*) FROM gtts WHERE is_paper=1)+(SELECT count(*) FROM
 learning_ledger WHERE is_paper=1)` must be 0; otherwise stop paper with OFF or `paper.subsystem_enabled: false` and
 a restart instead.
 
-Below the D14 change (migration 0017), the old ProtectionManager reads a no-stop test position's NULL stop as a
+Below the no-stop change (migration 0017), the old ProtectionManager reads a no-stop test position's NULL stop as a
 protection failure: a PAPER_ALERT and a market exit for each, at the next tick. Check
 `SELECT count(*) FROM positions WHERE exit_policy = 'time_only' AND state IN ('OPEN','PENDING_EXIT')` first; if it
 is not 0, accept those exits or let the positions close before rolling back. Roll code and config back together
 (`git reset --hard <previous tip>`): the old `PaperSettings` forbids unknown keys, so old code under the new
 `settings.yaml` (`paper.no_stop_strategies`) does not boot at all.
 
-The one exception since O19 is `config/limits.yaml`. A dashboard capital change is signed in state.db, so
+The one exception, since the dashboard capital change, is `config/limits.yaml`. A dashboard capital change is signed in state.db, so
 commit it before any rollback. If the two tips differ there, keep the signed bytes across the rollback, before
 the restart (COMMANDS "Rollback", step 4); otherwise the boot FREEZES, or KILLS with a real position open.

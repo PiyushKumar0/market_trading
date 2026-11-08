@@ -1,6 +1,6 @@
-# dashboard/ — React + TypeScript + Vite (O8)
+# dashboard/ — React + TypeScript + Vite
 
-The owner's LAN web dashboard (§3.1, §3.2.11, O8/R8). The engine's FastAPI app (`engine.api.app`)
+The owner's LAN web dashboard. The engine's FastAPI app (`engine.api.app`)
 serves the built static output of this package and exposes the read APIs the front-end consumes.
 
 ## Build
@@ -22,7 +22,7 @@ service), then the legacy `web/dist` fallbacks. No build ⇒ the API just runs h
 
 A tabbed, plain-language console (redesign 2026-10-08). Dark only, system fonts, hand-rolled CSS on design
 tokens (`src/styles/tokens.css`, every colour pair contrast-measured), no UI framework, no webfont,
-**no CDN link of any kind**: the LAN page must render with zero external requests (R10).
+**no CDN link of any kind**: the LAN page must render with zero external requests.
 `vite.config.ts` sets `base: './'` so assets resolve under the engine's static mount.
 
 **Layout.** A navbar (health pill = the worst active alert, engine mode Off | Recommend, paper autopilot
@@ -70,7 +70,7 @@ in-page dialog with action-named buttons, and every result is a toast; the value
 from the next poll, never from an optimistic guess. Switching the engine Off asks first. Deliberately
 absent, and not an oversight: →AUTO, kill-switch reset and paper reset are owner TWO-STEP transitions
 with no dashboard path (Telegram `/mode AUTO`, `/kill_reset`, `/paper reset`, each + `/confirm`), and
-recommendation outcomes (`/taken`, `/closed`) are Telegram-only (§3.5.3/§7.2/R10).
+recommendation outcomes (`/taken`, `/closed`) are Telegram-only.
 
 ## Dev server
 

@@ -1,8 +1,8 @@
 # CLAUDE.md
 
-**Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer that supplements this file. Where the two conflict, `FABLE_HANDOFF.md` wins.
+**Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer that supplements this file. Where the two conflict, `FABLE_HANDOFF.md` wins, so change the two together.
 
-**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet. Documents removed once their work shipped (the original plan that code comments cite as `§x.y`, plan v5 with its `Q`/`D` IDs, `IMPROVEMENT_SPEC.md` with its `WO-`/`F` IDs, the runbooks' designs, briefs and reviews) are in git: `git show 417da77:<path>`; the 2026-10-27 TradingAgents review and the 2026-10-29 review-actions plan (`T1`–`T20`) at `git show 8158a9a:<path>`.
+**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet, and an item's text is deleted when it ships. Comments, docs, commit messages and memory state the reason in words and name things ("the cost gate", "the owner's 2026-10-17 capital-change decision"); never cite a retired document or an item number such as `§2.6`, `WO-21` or `D14`.
 
 ## Model policy — Fable is the manager, not the workhorse
 
