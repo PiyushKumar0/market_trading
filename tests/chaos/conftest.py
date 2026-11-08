@@ -21,8 +21,8 @@ BROKER_RESIDENT_PROTECTION = ("broker-resident protection: paper protection is t
                       "time is the catch-up's")
 REAL_SIDE_ONLY = ("real-side only: RECOMMEND places no broker-resident SL-M/GTT; the paper ProtectionManager "
                   "(oms/protection.py) protects paper positions, asserted in tests/replay/test_paper_e2e.py")
-LIVE_AUTO_LIFECYCLE_HOOKS =("lifecycle hooks reserved for Phase 4: the paper reconcile is its own pass, never a "
-                          "SessionLifecycle hook (plan §1.7, Q4.7)")
+LIVE_AUTO_LIFECYCLE_HOOKS = ("lifecycle hooks reserved for live AUTO: the paper reconcile is its own pass, never a "
+                             "SessionLifecycle hook")
 
 
 def pytest_collection_modifyitems(config, items):

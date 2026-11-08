@@ -422,7 +422,7 @@ async def test_out_of_envelope_and_out_of_bounds_suggestions_are_dropped(
 async def test_no_envelope_means_every_suggestion_is_dropped(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    store = FakeProtectedStore(error=RuntimeError("envelope.yaml hash mismatch (R4)"))
+    store = FakeProtectedStore(error=RuntimeError("envelope.yaml hash mismatch"))
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify, store=store)
 

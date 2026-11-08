@@ -450,7 +450,7 @@ def test_the_temp_names_carry_the_pid(store, tmp_path, monkeypatch):
 
 def test_seed_path_keeps_lf_bytes_and_leaves_no_tmp(store, tmp_path):
     path = _limits(tmp_path)
-    original = b"schema_version: 1\nlimits: {}  # O1 provenance\n"
+    original = b"schema_version: 1\nlimits: {}  # provenance note\n"
     path.write_bytes(original)
     store.register_initial("limits.yaml", OWNER_OK)
     assert path.read_bytes() == original

@@ -107,8 +107,8 @@ def test_tier_does_not_import_the_forbidden_packages(pkg: str, forbidden: tuple[
                 if imported == prefix or imported.startswith(prefix + "."):
                     offenders.append(f"{path.name} imports {imported}")
     assert not offenders, (
-        f"import-graph violation: engine.{pkg} must not import {list(forbidden)} "
-        f"(§2.3 / §3.2.9): " + "; ".join(offenders)
+        f"import-graph violation: engine.{pkg} must not import {list(forbidden)}: "
+        + "; ".join(offenders)
     )
 
 
@@ -164,7 +164,7 @@ def test_paper_module_imports_only_its_declared_engine_dependencies(
         and not any(_is_under(imported, prefix) for prefix in allowed)
     ]
     assert not offenders, (
-        f"engine.paper.{module} may import only {list(allowed)} from the engine (§3.2.9 / §8.4): "
+        f"engine.paper.{module} may import only {list(allowed)} from the engine: "
         + "; ".join(sorted(offenders))
     )
 

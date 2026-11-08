@@ -240,9 +240,9 @@ async def test_skew_freeze_holds_until_resync(skew_rig):
 
 # ----------------------------------------------------------------------- mid-session (RECOMMEND-mode gap)
 @pytest.mark.skip(reason=(
-    "Accepted Phase-2 gap, not built: skew is measured at BOOT only — main.py 'Clock-skew verdict is "
-    "boot-scoped (§3.2.12 self-test measures it; the health loop deliberately skips per-minute NTP). "
-    "A mid-day drift is caught at the next startup — accepted for Phase 2.' (skew_holder), and the "
+    "Accepted gap, not built: skew is measured at BOOT only — main.py: the clock-skew verdict is "
+    "boot-scoped (the startup self-test measures it; the health loop deliberately skips per-minute NTP), "
+    "and a mid-day drift is caught at the next startup (skew_holder); the "
     "always-on health pulse runs health.check(check_skew=False). So a drift that STARTS mid-session "
     "is never detected and an in-session resync cannot re-open entries (restart required)."
 ))

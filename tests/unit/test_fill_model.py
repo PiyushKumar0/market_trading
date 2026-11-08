@@ -292,7 +292,7 @@ def test_the_shipped_calibration_speaks_this_module_s_units() -> None:
     shipped = Path(__file__).resolve().parents[2] / "config" / FILL_MODEL_FILENAME
     if not shipped.exists():
         pytest.skip(
-            f"{shipped} is absent - it is written by scripts/calibrate_fill_model.py (WO-P3-4); "
+            f"{shipped} is absent - it is written by scripts/calibrate_fill_model.py; "
             "run the calibration to exercise this cross-contract check"
         )
 

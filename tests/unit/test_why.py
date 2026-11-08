@@ -98,7 +98,7 @@ def _seed_sqlite(conn, sym: str = "TCS", reasons: list[str] | None = None) -> No
     conn.execute(
         "INSERT INTO verdicts (verdict_id, proposal_id, verdict, payload, evaluated_at) "
         "VALUES ('V1', 'PR1', 'reject', ?, '2026-06-16T09:31:05+05:30')",
-        (json.dumps({"reasons": reasons or ["C3 edge below cost", "day cap"]}),),
+        (json.dumps({"reasons": reasons or ["edge below cost", "day cap"]}),),
     )
 
 
@@ -131,7 +131,7 @@ async def test_every_section_present(store, conn, clock):
         "pledge: quarter 2026-03-31 (filed 2026-06-10): Promoter 12.5%",
         "last rec: 2026-06-16 entry - expired - skip reason price - outcome closed net +1.50%",
         "positions: BUY 5 @ 100 stop 95 target 110 (recommended)",
-        "last verdict: reject on 2026-06-16 - reasons: C3 edge below cost; day cap",
+        "last verdict: reject on 2026-06-16 - reasons: edge below cost; day cap",
         "last paper verdict: approve on 2026-06-16 - reasons: paper cap ok",
     ):
         assert expected in out

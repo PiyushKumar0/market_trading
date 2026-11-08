@@ -186,6 +186,6 @@ def test_case16_champion_challenger_eval_single_snapshot() -> None:
     """'champ/chall eval … single run-latest snapshot' — nothing to catch up: no champion/challenger
     job exists (``JOB_CHAMP_CHALL`` is a reserved id; ``build_job_registry`` registers no runner)."""
     pytest.skip(
-        "case 16 champ/chall clause: §6.4 ChampionChallenger is unbuilt — JOB_CHAMP_CHALL "
+        "case 16 champ/chall clause: ChampionChallenger is unbuilt — JOB_CHAMP_CHALL "
         "(ops/jobs.py:132) is a reserved watermark id with no registered job"
     )

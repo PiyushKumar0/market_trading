@@ -195,7 +195,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         # ---- the platform-intent invariant (ratified 2026-09-10)
         if prev_state is OrderState.CANCEL_PENDING:
             assert new.state is not OrderState.ACKED, (
-                "a postback must never clear a cancel intent — the §3.2.8 square-off would then "
+                "a postback must never clear a cancel intent — the square-off would then "
                 "send a market exit alongside a protective order it believes is cancelled"
             )
             assert new.state is not OrderState.MODIFY_PENDING
@@ -215,8 +215,8 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
             ), "a modify intent is cleared only by a real fill or a frame that does not predate it"
 
         # ---- fill accounting, checked against the independent model
-        assert new.filled_qty >= prev_filled, "filled_qty must be monotone non-decreasing (§9.2)"
-        assert new.filled_qty <= qty, "filled_qty must never exceed the order's quantity (§9.2)"
+        assert new.filled_qty >= prev_filled, "filled_qty must be monotone non-decreasing"
+        assert new.filled_qty <= qty, "filled_qty must never exceed the order's quantity"
         assert new.filled_qty == stats["expected_filled"], (
             "the row's fill count must equal the high-water fill an applied postback reported"
         )
@@ -322,7 +322,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                         order, payload={"status": "REJECTED", "status_message": "modify failed"},
                         at=at, prior_fields=pending_prior,
                     )
-                    assert order.modifications == prev_mods, "a refused modify never refunds A2 budget"
+                    assert order.modifications == prev_mods, "a refused modify never refunds the modification budget"
                     if pending_prior is not None:
                         for name, value in pending_prior.items():
                             assert getattr(order, name) == value, (
@@ -351,10 +351,10 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                 stats["cancel_snapshot"] = order.filled_qty
 
         # ---- invariants, checked after EVERY step
-        assert order.modifications <= MODIFICATION_CAP, "self-cap 20 (A2)"
+        assert order.modifications <= MODIFICATION_CAP, "self-cap 20 modifications per order"
         assert order.modifications >= prev_mods
         if prev_state in TERMINAL_ORDER_STATES:
-            assert order is before, "no transition out of a terminal state (§9.2)"
+            assert order is before, "no transition out of a terminal state"
 
     # Exactly one event per applied transition, and no order mutation without one.
     assert stats["applied"] == stats["mutations"]

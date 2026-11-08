@@ -379,8 +379,8 @@ async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_
 
 
 @pytest.mark.skip(reason=(
-    "Real path, lands with the Phase-4 live OMS: real orders are structurally impossible today "
-    "(KiteClient refuses every order without orders_enabled=True, which production never passes; D8), "
+    "Real path, lands with the live AUTO OMS: real orders are structurally impossible today "
+    "(KiteClient refuses every order without orders_enabled=True, which production never passes), "
     "so CAUSE_REJECTION_STORM (engine.risk.causes) on the real RiskStateLatch, its owner /resume_entries "
     "clear, and the >=3-storms-per-session kill escalation have no order path to observe. The PAPER path "
     "is built and asserted by "
@@ -394,7 +394,7 @@ async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
 @pytest.mark.skip(reason=(
     "UNBUILT: retry/backoff policy — KiteClient re-raises every broker error including HTTP 429 "
     "(KiteClient._order_call's except/re-raise) and no caller retries or backs off; the OMS order "
-    "executor that would own the policy is WO-P3-5. The pacing half of the clause (every attempt inside the rate budget, no "
+    "executor that would own the policy is the unbuilt live AUTO routing. The pacing half of the clause (every attempt inside the rate budget, no "
     "amplification) IS asserted by test_429_storm_every_attempt_is_paced_and_never_amplified. "
     + LIVE_ORDER_PATH_GATED
 ))

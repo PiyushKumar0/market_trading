@@ -303,7 +303,7 @@ CASES: tuple[Case, ...] = (
     Case("instrument_eligible", "out of universe", "fail", False, ctx={"in_universe": False}),
     Case("instrument_eligible", "not an MIS candidate", "fail", False,
          ctx={"mis_candidate": False}),
-    Case("instrument_eligible", "not F&O listed (C7)", "fail", False, ctx={"is_fno": False}),
+    Case("instrument_eligible", "not F&O listed", "fail", False, ctx={"is_fno": False}),
     Case("instrument_eligible", "CNC needs neither MIS flag", "pass", True, act=CNC,
          ctx={"mis_candidate": False, "is_fno": False}),
     Case("surveillance", "unflagged", "pass", True),
@@ -427,7 +427,7 @@ CASES: tuple[Case, ...] = (
     Case("entry_sanity_band", "MARKET has no band to check", "pass", True,
          act={"entry_type": "MARKET", "entry_price": None}),
     Case("entry_sanity_band", "LIMIT with no LTP", "fail", False, ctx={"ltp": None}),
-    Case("circuit_proximity", "band feed lands Phase 3", "na", True),
+    Case("circuit_proximity", "band feed not built", "na", True),
     # ---- order surface / margin --------------------------------------------------------
     Case("margin_buffer", "no API order in RECOMMEND", "pass", True),
     Case("margin_buffer", "margin short of 1.1x", "fail", False, act=CNC,
@@ -438,7 +438,7 @@ CASES: tuple[Case, ...] = (
     Case("order_modifications", "no API orders in this phase", "na", True),
     # ---- edge vs cost ------------------------------------------------------------------
     Case("min_viable_size", "3% edge on a 0.106% breakeven", "pass", True),
-    Case("min_viable_size", "no target at all (C3)", "fail", False, act={"target_price": None}),
+    Case("min_viable_size", "no target at all", "fail", False, act={"target_price": None}),
     Case("min_viable_size", "0.1% edge is sub-viable", "fail", False,
          act={"target_price": Decimal("100.10")}),
     Case("min_viable_size", "edge exactly 2x breakeven", "boundary", True,
@@ -1268,7 +1268,7 @@ def test_gate_source_reads_no_origination_tables() -> None:
     ]
     assert not offenders, (
         f"engine/risk/gate.py must not reference the origination tables {offenders} "
-        "(§9.1 deterministic-context invariant)"
+        "(deterministic-context invariant)"
     )
 
 

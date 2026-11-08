@@ -311,8 +311,8 @@ async def test_foreign_entity_strings_from_the_model_cannot_touch_other_symbols(
 # =========================================================================== exit side
 @pytest.mark.skip(reason=(
     "EXIT side: an injected 'fraud alleged' cluster on a HELD symbol → at most one gate-approved "
-    "risk-reducing exit, ledger-attributed to the news trigger. Phase-2 RECOMMEND has no news-triggered "
-    "exit path (the §5.2(b) trigger is stop-proximity only, pipeline.on_bar), so there is nothing to "
+    "risk-reducing exit, ledger-attributed to the news trigger. RECOMMEND has no news-triggered "
+    "exit path (the position-event trigger is stop-proximity only, pipeline.on_bar), so there is nothing to "
     "assert. " + LIVE_ORDER_PATH_GATED
 ))
 async def test_exit_side_fraud_headline_on_held_symbol_at_most_one_risk_reducing_exit() -> None:

@@ -1463,7 +1463,7 @@ def test_recommendation_renders_a_targetless_ins_payload(clock):
         "style": "swing", "product": "CNC", "targets": [],
         "entry_zone": (Decimal("100.00"), Decimal("100.00")), "stop": Decimal("94.00"),
         "manual_checklist": ["after entry fills place SL-M at 94.00",
-                             "time exit: square off after 20 trading days (§7.1 max_holding)"],
+                             "time exit: square off after 20 trading days (max_holding)"],
     })
     message = catalog.recommendation_message(rec, ltp=Decimal("100.50"))
     text = message.render()

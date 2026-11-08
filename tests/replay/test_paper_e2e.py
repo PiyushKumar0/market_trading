@@ -85,7 +85,7 @@ class KiteDouble(KiteClient):
 
     def _refuse(self, name: str) -> None:
         self.calls.append(name)
-        raise AssertionError(f"KiteClient.{name} called from the replay (D8)")
+        raise AssertionError(f"KiteClient.{name} called from the replay")
 
     async def place_order(self, *a: Any, **k: Any) -> str: self._refuse("place_order")
     async def modify_order(self, *a: Any, **k: Any) -> str: self._refuse("modify_order")

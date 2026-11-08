@@ -2131,7 +2131,7 @@ async def test_exactly_one_exit_per_session_while_the_stop_stays_breached(
         if n > 1:
             # Yesterday's recommendation, one calendar day old and alone, still carries the exit-pending
             # relaxation into this morning. This is the assertion a lifetime-scoped screen fails.
-            assert _exiting() == frozenset({SYMBOL}), f"session {session}: O16 window lapsed"
+            assert _exiting() == frozenset({SYMBOL}), f"session {session}: exit-pending window lapsed"
 
         await pipeline.on_bar(_near_bar())
         assert len(harness.calls) == n, f"session {session}: expected one analyst call"
